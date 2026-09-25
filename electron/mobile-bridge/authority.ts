@@ -81,7 +81,7 @@ import {
 } from "../runtime/detect";
 import { listModelRoleMembers, setModelRoleMembers } from "../store/model-roles";
 import { listRuntimeCommands } from "../runtime/commands";
-import { listInstalledAgents } from "../mcp/registry";
+import { installPublicHubRelease, listInstalledAgents } from "../mcp/registry";
 import { addOneOrgMember, getOneOrgState, markOneOrgMemberRead, openOneOrgMember } from "../one/org";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
@@ -3287,9 +3287,22 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "hub.detail": {
         const params = guardedParams(request, ["slug"]);
         return asJsonValue(
-          { ...(await this.hubMarket.detail(requiredBoundedString(params, "slug", 160))), invokeSupported: true },
+          { ...(await this.hubMarket.detail(requiredBoundedString(params, "slug", 160))), invokeSupported: true, installSupported: true },
           request.method,
         );
+      }
+      case "hub.install": {
+        assertMobileOneDeviceAuthority(context);
+        if (!request.idempotencyKey) throw new TypeError("hub.install requires an idempotencyKey");
+        const params = guardedParams(request, ["slug", "entityKind", "release"]);
+        const slug = requiredBoundedString(params, "slug", 160);
+        const entityKind = requiredEnum(params, "entityKind", ["agent", "team"] as const);
+        const release = parseHubReleasePin(params.release);
+        await this.hubMarket.requireCurrentRelease(slug, entityKind, release);
+        const installed = await installPublicHubRelease({ slug, entityKind, release });
+        this.scheduleSnapshotUpdated();
+        return asJsonValue({ schemaVersion: 1, authoritativeHostRef: this.options.hostIdentity.hostId,
+          installedAgentId: installed.id, slug, entityKind, release, status: "installed" }, request.method);
       }
       case "hub.invoke": {
         assertMobileOneDeviceAuthority(context);

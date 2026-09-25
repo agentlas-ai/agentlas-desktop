@@ -127,6 +127,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "hub.search",
   "hub.detail",
   "hub.invoke",
+  "hub.install",
   "hub.leasePreview",
   "billing.credits",
   "hephaestus.engineToggles",
@@ -150,6 +151,7 @@ export type MobileBridgeMethod = (typeof MOBILE_BRIDGE_METHODS)[number];
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "device.revokeSelf",
   "hub.invoke",
+  "hub.install",
   "chats.rename",
   "chats.archive",
   "chats.unarchive",
@@ -1936,6 +1938,8 @@ export interface MobileBridgeHubMarketSearchDto {
 export interface MobileBridgeHubMarketDetailDto {
   /** Explicit protocol support; older hosts omit this and Mobile keeps the action hidden. */
   invokeSupported?: boolean;
+  installSupported?: boolean;
+  sourceInstallAvailable?: boolean;
   schemaVersion: 1;
   status: "ready" | "not-found" | "unavailable" | "identity-conflict";
   listing: MobileBridgeHubMarketListingDto | null;
@@ -3179,12 +3183,13 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             optionalInteger(params, "limit", 1, 30),
           )
         : "hub.search accepts only query and limit";
-    case "hub.invoke": {
-      if (!hasOnlyKeys(params, ["slug", "entityKind", "release", "userPrompt"])) return "hub.invoke contains unsupported fields";
+    case "hub.invoke":
+    case "hub.install": {
+      if (!hasOnlyKeys(params, method === "hub.invoke" ? ["slug", "entityKind", "release", "userPrompt"] : ["slug", "entityKind", "release"])) return `${method} contains unsupported fields`;
       const release = params.release;
-      if (!isRecord(release) || !hasOnlyKeys(release, ["agentDefinitionId", "agentReleaseId", "packageHash"])) return "hub.invoke requires an exact release";
+      if (!isRecord(release) || !hasOnlyKeys(release, ["agentDefinitionId", "agentReleaseId", "packageHash"])) return `${method} requires an exact release`;
       return firstError(requiredString(params, "slug", 160), validateEnum(params, "entityKind", ["agent", "team"], false),
-        requiredText(params, "userPrompt", 20_000), requiredString(release, "agentDefinitionId", 160),
+        method === "hub.invoke" ? requiredText(params, "userPrompt", 20_000) : null, requiredString(release, "agentDefinitionId", 160),
         requiredString(release, "agentReleaseId", 160),
         typeof release.packageHash === "string" && /^[a-f0-9]{64}$/.test(release.packageHash) ? null : "Invalid Hub package hash");
     }
