@@ -40,25 +40,30 @@ const element = {
   observation_id: { type: "string", minLength: 1, maxLength: 64 },
   element_index: { type: "integer", minimum: 0, maximum: 299 },
 };
+const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const tools = [
   {
     name: "computer_status",
     description: "Check Agentlas Computer Use driver and macOS Accessibility/Screen Recording readiness.",
+    annotations: READ_ONLY,
     inputSchema: exact({}, []),
   },
   {
     name: "list_apps",
     description: "List currently running foreground-capable macOS applications.",
+    annotations: READ_ONLY,
     inputSchema: exact({}, []),
   },
   {
     name: "get_screen",
     description: "Capture the current macOS display. Coordinates returned by this image are the coordinate space used by mouse tools. The capture is also saved to disk; the JSON metadata's savedPath is its absolute file path. To show the capture in your chat answer, embed exactly that path as a markdown image: ![screen](savedPath). Never invent a screenshot file path.",
+    annotations: READ_ONLY,
     inputSchema: exact({ source_id: point.source_id }, []),
   },
   {
     name: "get_app_state",
     description: "Read the app accessibility tree and observation-scoped element indices. Prefer element actions; reobserve after every mutation or stale reference. Set screenshot=true for visual fallback; screenshots use display coordinates.",
+    annotations: READ_ONLY,
     inputSchema: exact({ app: point.app, source_id: point.source_id, screenshot: { type: "boolean" }, maxDepth: { type: "integer", minimum: 1, maximum: 32 }, maxNodes: { type: "integer", minimum: 1, maximum: 300 } }, ["app"]),
   },
   {
