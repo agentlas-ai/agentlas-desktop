@@ -43,6 +43,8 @@
 .instructions summary>span { margin-left:8px; font-size:10px; color:var(--muted-deep); }
 .instructions .field { padding-top:6px; }
 .managedHeading { margin-bottom:20px; display:grid; gap:8px; }
+.goalField { margin-bottom:14px; }
+.goalField textarea { min-height:56px; }
 .footer { padding:17px 30px; border-top:1px solid var(--paper-edge); display:flex; align-items:center; gap:9px; flex-shrink:0; }
 .feedback { min-width:0; flex:1; font-size:11px; line-height:1.6; color:var(--muted-deep); }
 .error { color:var(--danger,#b44335); }

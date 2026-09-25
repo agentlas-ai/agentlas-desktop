@@ -19,12 +19,14 @@ import type {
   MarketplaceListing,
   ProjectAgentPoolMember,
 } from "@/lib/types";
+import { AutoTeamError, recommendAutoTeam, type AutoTeamPick, type AutoTeamRecommendation } from "@/lib/project-auto-team";
+import { PROJECT_TEAM_ROLE_NAMES, type ProjectTeamRole } from "@shared/project-team-recommendation";
 import { PixelCat } from "./PixelCat";
 import styles from "./ProjectAgentPicker.module.css";
 
 type CatalogState =
   | { status: "loading"; sections: null; failure: null }
-  | { status: "ready"; sections: ProjectRosterSection[]; failure: null; failedSources: Array<"cloud" | "hub"> }
+  | { status: "ready"; sections: ProjectRosterSection[]; failure: null; failedSources: Array<"cloud" | "hub">; hubBookmarks: HubAgentBookmark[] }
   | { status: "failed"; sections: null; failure: "bridge" | "request" };
 
 const INITIAL_OPEN_SOURCES: Record<ProjectRosterSource, boolean> = {
@@ -92,14 +94,27 @@ function candidateMatchesMember(candidate: ProjectRosterCandidate, member: Proje
     .some((alias) => alias.trim().toLowerCase() === target);
 }
 
+type AutoTeamState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "failed"; code: AutoTeamError["code"] | "unknown" }
+  | { status: "ready"; result: AutoTeamRecommendation; checked: Record<string, boolean> };
+
+function pickKey(pick: AutoTeamPick): string {
+  return `${pick.role}:${pick.candidate.key}`;
+}
+
 export function ProjectAgentPicker({
   value,
   onChange,
   disabled = false,
+  autoTeam,
 }: {
   value: ProjectAgentPoolMember[];
   onChange: (next: ProjectAgentPoolMember[]) => void;
   disabled?: boolean;
+  /** Work 자동 팀(PLAN §6) — 이름과 목표가 있어야 버튼이 켜진다. */
+  autoTeam?: { name: string; goal: string };
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -112,6 +127,9 @@ export function ProjectAgentPicker({
   const [openSources, setOpenSources] = useState<Record<ProjectRosterSource, boolean>>(INITIAL_OPEN_SOURCES);
   const [openFirms, setOpenFirms] = useState<Record<string, boolean>>({});
   const [feedback, setFeedback] = useState("");
+  const [autoState, setAutoState] = useState<AutoTeamState>({ status: "idle" });
+  const [autoApplying, setAutoApplying] = useState(false);
+  const autoRequestRef = useRef(0);
 
   const loadCatalog = useCallback(async () => {
     const requestId = ++requestRef.current;
@@ -153,6 +171,7 @@ export function ProjectAgentPicker({
         sections: buildProjectRosterSections(agents, firms, cloudListings, hubBookmarks, locale, exactBindings),
         failure: null,
         failedSources,
+        hubBookmarks,
       });
     } catch {
       if (requestRef.current === requestId) setCatalog({ status: "failed", sections: null, failure: "request" });
@@ -222,6 +241,177 @@ export function ProjectAgentPicker({
     });
   }
 
+  const autoName = autoTeam?.name.trim() ?? "";
+  const autoGoal = autoTeam?.goal.trim() ?? "";
+  const autoReady = Boolean(autoName && autoGoal) && catalog.status === "ready" && !disabled;
+
+  async function loadAutoTeam() {
+    if (!autoReady || catalog.status !== "ready") return;
+    const api = ipc();
+    if (!api) return;
+    const requestId = ++autoRequestRef.current;
+    setAutoState({ status: "loading" });
+    try {
+      const result = await recommendAutoTeam({
+        name: autoName,
+        goal: autoGoal,
+        sections: catalog.sections,
+        catalogFailedSources: catalog.failedSources,
+        searchHub: (query) => withCatalogTimeout(api.marketplace.search(query)),
+        hubBookmarks: catalog.hubBookmarks,
+        pool: value,
+        locale,
+      });
+      if (autoRequestRef.current !== requestId) return;
+      const checked: Record<string, boolean> = {};
+      for (const pick of result.picks) checked[pickKey(pick)] = !pick.alreadyInPool && !pick.duplicateOfRole;
+      setAutoState({ status: "ready", result, checked });
+    } catch (error) {
+      if (autoRequestRef.current !== requestId) return;
+      setAutoState({ status: "failed", code: error instanceof AutoTeamError ? error.code : "unknown" });
+    }
+  }
+
+  async function applyAutoTeam() {
+    if (autoState.status !== "ready" || autoApplying || disabled) return;
+    const api = ipc();
+    if (!api) return;
+    const chosen = autoState.result.picks.filter((pick) => autoState.checked[pickKey(pick)] && !pick.alreadyInPool);
+    if (chosen.length === 0) return;
+    setAutoApplying(true);
+    let members = value;
+    let added = 0;
+    let unverified = 0;
+    let bookmarkedAny = false;
+    const failedNames: string[] = [];
+    try {
+      for (const pick of chosen) {
+        // Hub 행은 다시 열었을 때 북마크로 풀린다 — 명시적 확인과 함께 북마크한다
+        // (프로젝트 상세의 Hub 추천 붙이기와 같은 규칙).
+        if (pick.candidate.source === "hub" && pick.listing && !pick.bookmarked) {
+          try {
+            await api.marketplace.bookmarkAdd(pick.listing);
+            bookmarkedAny = true;
+          } catch {
+            failedNames.push(pick.candidate.name);
+            continue;
+          }
+        }
+        const result = appendProjectPoolMember(members, pick.candidate);
+        if (result.status !== "added") continue;
+        members = result.members;
+        added += 1;
+        if (pick.runnable !== "ready") unverified += 1;
+      }
+    } finally {
+      setAutoApplying(false);
+    }
+    if (added > 0) onChange(members);
+    setAutoState({ status: "idle" });
+    // 새 북마크는 Hub 목록에 다시 읽어야 보인다 — 안 그러면 방금 담은 행이 "목록에 없음"으로 뜬다.
+    if (bookmarkedAny) void loadCatalog();
+    const parts: string[] = [];
+    if (added > 0) {
+      parts.push(ko
+        ? `${added}개를 담았습니다. 프로젝트를 저장할 때 한 번에 저장됩니다.`
+        : `Added ${added}. They are saved together when you save the project.`);
+    }
+    if (unverified > 0) {
+      parts.push(ko
+        ? `그중 ${unverified}개는 첫 실행 전에 설치·접근 확인이 필요해 아직 팀 완성이 아닙니다.`
+        : `${unverified} still need install or access confirmation before the first run, so the team is not complete yet.`);
+    }
+    if (failedNames.length > 0) {
+      parts.push(ko ? `Hub 북마크 실패로 빠짐: ${failedNames.join(", ")}` : `Skipped (Hub bookmark failed): ${failedNames.join(", ")}`);
+    }
+    setFeedback(parts.join(" "));
+  }
+
+  function roleName(role: ProjectTeamRole): string {
+    return PROJECT_TEAM_ROLE_NAMES[role][ko ? "ko" : "en"];
+  }
+
+  function runnableLabel(pick: AutoTeamPick): string {
+    if (pick.runnable === "ready") return ko ? "실행 가능" : "Ready";
+    // 실측(2026-09-25): Cloud 행은 실행 때 정확한 릴리스를 준비해야 하고 그 준비가 실패할 수 있다.
+    // "설치된다"고 약속하지 않고 준비가 남았다고만 말한다.
+    if (pick.runnable === "install_on_first_run") return ko ? "실행 전 준비 필요" : "Needs preparation to run";
+    return ko ? "접근 확인 필요" : "Access unverified";
+  }
+
+  function renderAutoTeam() {
+    if (!autoTeam) return null;
+    const failureCopy: Record<AutoTeamError["code"] | "unknown", string> = {
+      judgment_unavailable: ko ? "추천을 판단할 연결 모델이 응답하지 않았습니다. 모델 연결을 확인한 뒤 다시 시도하거나 아래에서 직접 고르세요." : "No connected model answered. Check the model connection and retry, or choose below.",
+      low_confidence: ko ? "목표에서 필요한 역할을 확실히 정하지 못했습니다. 목표를 조금 더 구체적으로 적어 주세요." : "Could not settle the roles this goal needs. Make the goal a little more specific.",
+      no_candidates: ko ? "로컬·내 Cloud·Hub에서 실행 가능한 후보를 찾지 못했습니다." : "No callable candidates were found in Local, My Cloud, or Hub.",
+      unknown: ko ? "추천을 불러오지 못했습니다. 다시 시도해 주세요." : "Could not load recommendations. Please retry.",
+    };
+    const sourceLabel = (pick: AutoTeamPick) => pick.candidate.source === "cloud" ? (ko ? "내 Cloud" : "My Cloud") : pick.candidate.source === "hub" ? "Hub" : (ko ? "로컬" : "Local");
+    const checkedCount = autoState.status === "ready"
+      ? autoState.result.picks.filter((pick) => autoState.checked[pickKey(pick)] && !pick.alreadyInPool).length
+      : 0;
+    return (
+      <section className={styles.autoTeam} data-project-auto-team={autoState.status} aria-label={ko ? "적합한 에이전트 자동 불러오기" : "Load matching agents"}>
+        <div className={styles.autoTeamHead}>
+          <div>
+            <strong>{ko ? "역할별 추천" : "Role-by-role picks"}</strong>
+            <small>{autoName && autoGoal
+              ? (ko ? "로컬·내 Cloud·Hub에서 찾고, 고른 것만 담습니다." : "Searches Local, My Cloud, and Hub. Only what you check is added.")
+              : (ko ? "프로젝트 이름과 목표를 적으면 켜져요." : "Fill in the project name and goal to enable.")}</small>
+          </div>
+          <button type="button" className={styles.autoTeamButton} data-project-auto-team-load disabled={!autoReady || autoState.status === "loading" || autoApplying} onClick={() => void loadAutoTeam()}>
+            {autoState.status === "loading" ? (ko ? "찾는 중…" : "Searching…") : (ko ? "적합한 에이전트 자동 불러오기" : "Load matching agents")}
+          </button>
+        </div>
+        {autoState.status === "loading" && <div className={styles.autoTeamState} role="status"><span className={styles.spinner} aria-hidden="true" />{ko ? "역할을 정하고 후보를 고르는 중입니다." : "Choosing roles and candidates."}</div>}
+        {autoState.status === "failed" && <div className={styles.autoTeamState} role="alert"><span>{failureCopy[autoState.code]}</span><button type="button" onClick={() => void loadAutoTeam()} disabled={!autoReady}>{ko ? "다시 시도" : "Retry"}</button></div>}
+        {autoState.status === "ready" && <>
+          {autoState.result.failedSources.length > 0 && <p className={styles.autoTeamNote} role="status">{ko
+            ? `불러오지 못한 출처: ${autoState.result.failedSources.map((source) => source === "cloud" ? "내 Cloud" : source === "hub" ? "Hub 북마크" : "Hub 검색").join(", ")} — 그 출처의 후보는 빠져 있을 수 있습니다.`
+            : `Unavailable sources: ${autoState.result.failedSources.join(", ")} — candidates from them may be missing.`}</p>}
+          <div className={styles.autoTeamRoles}>
+            {autoState.result.roles.map((role) => {
+              const picks = autoState.result.picks.filter((pick) => pick.role === role);
+              return (
+                <div key={role} className={styles.autoRole} data-project-auto-role={role}>
+                  <span className={styles.autoRoleName}>{roleName(role)}</span>
+                  {picks.length === 0 ? <small className={styles.autoRoleEmpty}>{ko ? "맞는 후보 없음" : "No matching candidate"}</small> : picks.map((pick) => {
+                    const key = pickKey(pick);
+                    return (
+                      <label key={key} className={styles.autoPick} data-project-auto-pick={pick.candidate.key} data-runnable={pick.runnable}>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(autoState.checked[key]) && !pick.alreadyInPool}
+                          disabled={pick.alreadyInPool || autoApplying}
+                          onChange={(event) => setAutoState((current) => current.status === "ready"
+                            ? { ...current, checked: { ...current.checked, [key]: event.target.checked } }
+                            : current)}
+                        />
+                        <span className={styles.autoPickCopy}>
+                          <strong>{pick.candidate.name}</strong>
+                          <small>{sourceLabel(pick)} · {pick.candidate.kind === "team" ? (ko ? "팀" : "Team") : (ko ? "에이전트" : "Agent")} · <em data-runnable={pick.runnable}>{runnableLabel(pick)}</em>
+                            {pick.alreadyInPool ? (ko ? " · 이미 연결됨" : " · Already connected") : pick.duplicateOfRole ? (ko ? ` · ${roleName(pick.duplicateOfRole)}와 중복` : ` · Duplicate of ${roleName(pick.duplicateOfRole)}`) : ""}</small>
+                          {pick.reason && <span className={styles.autoPickReason}>{pick.reason}</span>}
+                        </span>
+                      </label>
+                    );
+                  })}
+                </div>
+              );
+            })}
+          </div>
+          <div className={styles.autoTeamActions}>
+            <button type="button" onClick={() => setAutoState({ status: "idle" })} disabled={autoApplying}>{ko ? "닫기" : "Dismiss"}</button>
+            <button type="button" className={styles.autoTeamPrimary} data-project-auto-team-apply disabled={checkedCount === 0 || autoApplying || disabled} onClick={() => void applyAutoTeam()}>
+              {autoApplying ? (ko ? "담는 중…" : "Adding…") : (ko ? `선택한 ${checkedCount}개 담기` : `Add ${checkedCount} selected`)}
+            </button>
+          </div>
+        </>}
+      </section>
+    );
+  }
+
   function renderCandidate(candidate: ProjectRosterCandidate) {
     const selected = value.some((member) => candidateMatchesMember(candidate, member));
     const candidateDisabled = disabled || selected || !candidate.callable;
@@ -253,6 +443,8 @@ export function ProjectAgentPicker({
   }
 
   return (
+    <>
+    {renderAutoTeam()}
     <section className={styles.picker} aria-label={ko ? "프로젝트 팀과 에이전트 선택" : "Choose project teams and agents"}>
       <div className={styles.panel} data-empty={value.length === 0}>
         <div className={styles.panelHead}>
@@ -397,5 +589,6 @@ export function ProjectAgentPicker({
         <span className={styles.feedback} role="status" aria-live="polite">{feedback}</span>
       </aside>
     </section>
+    </>
   );
 }

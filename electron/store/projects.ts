@@ -223,6 +223,7 @@ export function getProject(id: string): Project | null {
 
 export function createProject(input: {
   name: string;
+  description?: string | null;
   systemPrompt?: string | null;
   agentPool?: ProjectAgentPoolMember[];
   sourceType: ProjectSourceType;
@@ -244,11 +245,12 @@ export function createProject(input: {
     getDb()
       .prepare(
         `INSERT INTO projects (id, name, description, system_prompt, agent_pool_json, source_type, source_ref, folder_path, created_at, updated_at)
-         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
         name,
+        input.description?.trim().slice(0, 1_200) || null,
         input.systemPrompt?.trim() || null,
         JSON.stringify(agentPool),
         sourceType,
@@ -272,7 +274,7 @@ export function createProject(input: {
 
 export function updateProject(
   id: string,
-  patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef" | "folderPath">>,
+  patch: Partial<Pick<Project, "name" | "description" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef" | "folderPath">>,
   options: ProjectMutationOptions = {},
 ): Project {
   const db = getDb();
@@ -311,10 +313,11 @@ export function updateProject(
   try {
     db.prepare(
       `UPDATE projects
-          SET name = ?, system_prompt = ?, agent_pool_json = ?, source_type = ?, source_ref = ?, folder_path = ?, updated_at = ?
+          SET name = ?, description = ?, system_prompt = ?, agent_pool_json = ?, source_type = ?, source_ref = ?, folder_path = ?, updated_at = ?
         WHERE id = ?`,
     ).run(
       patch.name ?? existing.name,
+      patch.description === undefined ? existing.description : (patch.description?.trim().slice(0, 1_200) || null),
       patch.systemPrompt === undefined ? existing.systemPrompt : patch.systemPrompt,
       // undefined preserves the pool; [] is an intentional full removal.
       JSON.stringify(agentPool),

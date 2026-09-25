@@ -7733,6 +7733,8 @@ export interface AgentlasIpc {
     }) => Promise<Project>;
     create: (input: {
       name: string;
+      /** Project goal (Work auto team, PLAN §6). */
+      description?: string | null;
       systemPrompt?: string | null;
       agentPool?: ProjectAgentPoolMember[];
       sourceType: ProjectSourceType;
@@ -7744,7 +7746,7 @@ export interface AgentlasIpc {
     timeline: (id: string, limit?: number) => Promise<ProjectTimelineSnapshot>;
     update: (
       id: string,
-      patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">> & {
+      patch: Partial<Pick<Project, "name" | "description" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">> & {
         /** Required only when changing to local/GitHub; empty allocates a Main-owned folder. */
         folderGrant?: FsPathGrant | null;
       },

@@ -44,6 +44,7 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [name, setName] = useState("");
   const [instructions, setInstructions] = useState("");
+  const [goal, setGoal] = useState("");
   const [agentPool, setAgentPool] = useState<ProjectAgentPoolMember[]>([]);
   const [folderPath, setFolderPath] = useState("");
   const [folderGrant, setFolderGrant] = useState<FsPathGrant | null>(null);
@@ -94,6 +95,7 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
       setSource(saved.sourceType);
       setName(saved.name);
       setInstructions(saved.systemPrompt ?? "");
+      setGoal(saved.description ?? "");
       setAgentPool(saved.agentPool ?? []);
       setFolderPath(saved.folderPath ?? "");
       setGithubUrl(saved.sourceType === "github" ? saved.sourceRef ?? "" : "");
@@ -189,7 +191,7 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
     try {
       const api = ipc();
       if (!api) throw new Error("bridge unavailable");
-      const common = { name: name.trim(), systemPrompt: instructions.trim() || null, agentPool };
+      const common = { name: name.trim(), description: goal.trim() || null, systemPrompt: instructions.trim() || null, agentPool };
       const saved = project
         ? await api.projects.update(project.id, { ...common, ...(folderGrant ? { folderGrant, ...(source === "github" ? { sourceRef: connectedGithub } : {}) } : {}) })
         : await api.projects.create({ ...common, sourceType: source, sourceRef: source === "github" ? connectedGithub : null, folderGrant: managed ? null : folderGrant });
@@ -210,6 +212,10 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
 
   const nameField = <label className={styles.field}><span>{ko ? "프로젝트 이름" : "Project name"}</span>
     <input value={name} maxLength={160} onChange={(event) => { nameEdited.current = true; setName(event.target.value); }} placeholder={ko ? "예: 고양이 왕국" : "e.g. Cat Kingdom"} disabled={Boolean(pending)} />
+  </label>;
+  // Work 자동 팀(PLAN §6)은 이름과 목표로 역할을 정한다. 목표는 project.description 에 저장된다.
+  const goalField = <label className={`${styles.field} ${styles.goalField}`}><span>{ko ? "프로젝트 목표" : "Project goal"}</span>
+    <textarea value={goal} rows={2} maxLength={1200} onChange={(event) => setGoal(event.target.value)} placeholder={ko ? "예: 쇼핑몰 홈페이지를 새로 만들고 SNS로 알리기" : "e.g. Rebuild my store homepage and promote it on social media"} disabled={Boolean(pending)} data-project-goal />
   </label>;
   const instructionField = <details className={styles.instructions}>
     <summary>{ko ? "프로젝트 지시" : "Project instructions"}<span>{ko ? "선택" : "Optional"}</span></summary>
@@ -262,7 +268,8 @@ export function ProjectSettingsModal({ request, onClose, onSaved, onBackgroundEr
                 {nameField}{instructionField}
               </div> : <>
                 {managed && <div className={styles.managedHeading}>{nameField}<p className={styles.hint}>{project?.folderPath || (ko ? "만들기를 누르면 ~/.agentlas/projects/에 전용 폴더를 준비합니다." : "Creating the project prepares its own folder in ~/.agentlas/projects/.")}</p></div>}
-                <ProjectAgentPicker value={agentPool} onChange={setAgentPool} disabled={Boolean(pending)} />
+                {goalField}
+                <ProjectAgentPicker value={agentPool} onChange={setAgentPool} disabled={Boolean(pending)} autoTeam={{ name, goal }} />
                 {managed && instructionField}
               </>}
             </>}

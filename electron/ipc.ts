@@ -498,6 +498,7 @@ import {
 } from "./one/judged-request-intent";
 import { judge, judgeSubset } from "./system-agents/judgment";
 import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "../shared/project-hub-recommendation";
+import { PROJECT_TEAM_ROLES_JUDGMENT, PROJECT_TEAM_ROLE_FILL_JUDGMENT } from "../shared/project-team-recommendation";
 import { prejudgeOneMemoryIntent } from "./one/memory-detector";
 import { withInvocationPreflightAccounting } from "./long-run/accounting-context";
 import { registerWorkStartIpc } from "./work-start";
@@ -1679,6 +1680,19 @@ export function registerIpcHandlers(): void {
       guidance: PROJECT_HUB_RECOMMENDATION_JUDGMENT.guidance,
       maxInputChars: PROJECT_HUB_RECOMMENDATION_JUDGMENT.maxInputChars,
       maxTimeoutMs: PROJECT_HUB_RECOMMENDATION_JUDGMENT.timeoutMs,
+    },
+    // Work 자동 팀(PLAN §6): 역할 정하기 → 역할마다 후보 고르기.
+    [PROJECT_TEAM_ROLES_JUDGMENT.kind]: {
+      question: PROJECT_TEAM_ROLES_JUDGMENT.question,
+      guidance: PROJECT_TEAM_ROLES_JUDGMENT.guidance,
+      maxInputChars: PROJECT_TEAM_ROLES_JUDGMENT.maxInputChars,
+      maxTimeoutMs: PROJECT_TEAM_ROLES_JUDGMENT.timeoutMs,
+    },
+    [PROJECT_TEAM_ROLE_FILL_JUDGMENT.kind]: {
+      question: PROJECT_TEAM_ROLE_FILL_JUDGMENT.question,
+      guidance: PROJECT_TEAM_ROLE_FILL_JUDGMENT.guidance,
+      maxInputChars: PROJECT_TEAM_ROLE_FILL_JUDGMENT.maxInputChars,
+      maxTimeoutMs: PROJECT_TEAM_ROLE_FILL_JUDGMENT.timeoutMs,
     },
   };
   const RENDERER_JUDGMENT_LABEL_RE = /^[a-z0-9가-힣][a-z0-9가-힣 :._-]{0,63}$/i;

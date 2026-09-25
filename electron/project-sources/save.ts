@@ -15,6 +15,7 @@ import {
 
 export interface ExplicitProjectCreateInput {
   name: string;
+  description?: string | null;
   systemPrompt?: string | null;
   agentPool?: ProjectAgentPoolMember[];
   sourceType: ProjectSourceType;
@@ -23,7 +24,7 @@ export interface ExplicitProjectCreateInput {
 }
 
 export type ExplicitProjectUpdatePatch =
-  Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">>
+  Partial<Pick<Project, "name" | "description" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef">>
   & { folderGrant?: FsPathGrant | null };
 
 interface ExplicitProjectSaveOptions {
@@ -77,6 +78,7 @@ export function createProjectFromExplicitSave(
   const agentPool = validatedAgentPool(rawInput.agentPool);
   return createProject({
     name: typeof rawInput.name === "string" ? rawInput.name : "",
+    description: typeof rawInput.description === "string" ? rawInput.description : null,
     systemPrompt: typeof rawInput.systemPrompt === "string" ? rawInput.systemPrompt : null,
     agentPool,
     sourceType,
@@ -111,8 +113,11 @@ export function updateProjectFromExplicitSave(
     folderPath = null;
   }
 
-  const patch: Partial<Pick<Project, "name" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef" | "folderPath">> = {};
+  const patch: Partial<Pick<Project, "name" | "description" | "systemPrompt" | "agentPool" | "sourceType" | "sourceRef" | "folderPath">> = {};
   if (owns(rawPatch, "name")) patch.name = typeof rawPatch.name === "string" ? rawPatch.name : existing.name;
+  if (owns(rawPatch, "description")) {
+    patch.description = typeof rawPatch.description === "string" ? rawPatch.description : null;
+  }
   if (owns(rawPatch, "systemPrompt")) {
     patch.systemPrompt = typeof rawPatch.systemPrompt === "string" ? rawPatch.systemPrompt : null;
   }
