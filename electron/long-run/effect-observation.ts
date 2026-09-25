@@ -26,7 +26,10 @@
 import { longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE } from "../store/long-runs";
 import { automaticGoalAtRetryCap } from "./auto-goal-retry-cap";
 import { createHash, randomUUID } from "node:crypto";
-import type { McpInvocationRequest } from "../../shared/types";
+import type { McpInvocationRequest, RuntimeSelection } from "../../shared/types";
+import type { LongRunRuntimeSelection } from "../../shared/long-run";
+import { restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
+import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
 import { EFFECT_OBSERVATION_MARKER, parseEffectObservationMarker, type ParsedEffectObservation } from "../../shared/effect-observation";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, isClaimedWaitRecoveryBlocker } from "../../shared/long-run";
 import { getDb } from "../store/db";
@@ -334,6 +337,29 @@ export function observationBrowserUnavailableCode(observationRunId: string): str
   }
 }
 
+/**
+ * The Goal's own exact runtime (the newest controller attempt's stored binding, restored the way
+ * continuation.ts does). Routed defect R3 (2026-09-25): the look carried no runtime choice and fell back to the
+ * global default, so a serving Goal was checked on claude-code (run 2ce4b354). Unrecoverable -> null (old behaviour).
+ */
+function goalObservationRuntime(longRunId: string, chatId: string): RuntimeSelection | null {
+  try {
+    const row = getDb().prepare(`SELECT a.id, a.invocation_run_id, a.runtime_selection_json FROM long_run_worker_attempts AS a
+      JOIN long_run_workers AS w ON w.id = a.worker_id AND w.run_id = a.run_id
+      WHERE a.run_id = ? AND w.role = 'controller' AND a.invocation_run_id IS NOT NULL ORDER BY a.rowid DESC LIMIT 1`)
+      .get(longRunId) as { id: string; invocation_run_id: string; runtime_selection_json: string } | undefined;
+    if (!row) return null;
+    const selection = restoreExactDesktopRuntimeSelection({
+      stored: JSON.parse(row.runtime_selection_json) as LongRunRuntimeSelection,
+      context: { invocationRunId: row.invocation_run_id, longRunId, attemptId: row.id, chatId },
+    });
+    resolveDesktopRuntimeAdapter(selection);
+    return selection;
+  } catch {
+    return null;
+  }
+}
+
 export type EffectObservationDispatchResult =
   | { status: "dispatched"; runId: string }
   | { status: "skipped"; reason: string };
@@ -388,8 +414,10 @@ export function maybeDispatchEffectObservation(
   const digest = effectObservationDigest(run.id, targetIds, epoch);
   if (alreadyObserved(run.id, digest)) return { status: "skipped", reason: "already_observed" };
   const observationRunId = randomUUID();
+  const goalRuntime = goalObservationRuntime(run.id, chatId);
   const request: McpInvocationRequest = {
     chatId, runId: observationRunId, promptOrigin: "system", taskIntent: "task", permissions: "read",
+    ...(goalRuntime ? { runtimeSelection: goalRuntime } : {}),
     ...(chat.originSurface === "one" ? { oneMode: true, onePermissionMode: "read" as const } : {}),
     userPrompt: buildEffectObservationPrompt({ objective: run.objective, attempts: targets }),
   };
