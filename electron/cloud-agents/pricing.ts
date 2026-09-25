@@ -91,85 +91,12 @@ export async function readAgentPrices(slug: string): Promise<{
   }
 }
 
-export async function setAgentPrices(input: {
+// Marketplace settlement and per-agent pricing were permanently retired.
+// Preserve the typed method so older Desktop/Mobile clients receive a refusal,
+// while the former rate mutation has no executable path.
+export async function setAgentPrices(_input: {
   slug: string;
   patch: AgentPricePatch;
 }): Promise<SetAgentPricesResult> {
-  const cookie = getSessionCookieHeader();
-  if (!cookie) {
-    return { ok: false, code: "signed_out", message: "Sign in to agentlas.cloud to set a price." };
-  }
-
-  // Only the kinds actually named travel. Resending every field would turn one
-  // edit into three and could revert a change made elsewhere a moment ago.
-  const patch: AgentPricePatch = {};
-  for (const kind of PRICE_KINDS) {
-    if (!(kind in input.patch)) continue;
-    const value = input.patch[kind];
-    if (value === null || value === undefined) {
-      patch[kind] = null;
-      continue;
-    }
-    const problem = checkPriceLocally(kind, value);
-    if (problem) {
-      const bounds = PRICE_KIND_BOUNDS[kind];
-      return {
-        ok: false,
-        code: "INVALID_PRICE",
-        kind,
-        message: `${kind} must be between ${bounds.min} and ${bounds.max ?? "∞"} credits.`,
-        ...(bounds.max !== null ? { maxCredits: bounds.max } : {}),
-        minCredits: bounds.min,
-      };
-    }
-    patch[kind] = value;
-  }
-  if (Object.keys(patch).length === 0) {
-    return { ok: true, prices: {}, changed: false };
-  }
-
-  try {
-    const base = webBase();
-    const response = await fetch(`${base}/api/account/rates`, {
-      method: "POST",
-      headers: { "content-type": "application/json", cookie, origin: base },
-      body: JSON.stringify({ slug: input.slug, prices: patch }),
-    });
-    const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
-    if (!response.ok || body.ok !== true) {
-      const rejection = (body.rejection ?? {}) as { maxCredits?: number; minCredits?: number };
-      return {
-        ok: false,
-        code: String(body.error ?? `http_${response.status}`),
-        // The bound travels with the refusal. "Could not save" alone sends
-        // someone to guess numbers until one is accepted.
-        message: describe(body, response.status),
-        ...(typeof body.kind === "string" ? { kind: body.kind } : {}),
-        ...(typeof rejection.maxCredits === "number" ? { maxCredits: rejection.maxCredits } : {}),
-        ...(typeof rejection.minCredits === "number" ? { minCredits: rejection.minCredits } : {}),
-      };
-    }
-    return {
-      ok: true,
-      prices: (body.prices ?? {}) as AgentPrices,
-      changed: body.changed === true,
-    };
-  } catch (error) {
-    return {
-      ok: false,
-      code: "network",
-      message: error instanceof Error ? error.message : "Could not reach agentlas.cloud.",
-    };
-  }
-}
-
-function describe(body: Record<string, unknown>, status: number): string {
-  const rejection = (body.rejection ?? {}) as { code?: string; maxCredits?: number; minCredits?: number };
-  if (rejection.code === "ABOVE_MAXIMUM") return `Up to ${rejection.maxCredits} credits.`;
-  if (rejection.code === "BELOW_MINIMUM") return `From ${rejection.minCredits} credits.`;
-  if (body.error === "NOT_OWNER") return "Not permitted.";
-  if (body.error === "not_found") return "That agent is not published under this account.";
-  if (body.error === "not_enabled") return "Pricing is not enabled yet.";
-  if (status === 401) return "Sign in to agentlas.cloud to set a price.";
-  return "Could not save the price.";
+  return { ok: false, code: "marketplace_pricing_retired", message: "Hub agent pricing is retired." };
 }

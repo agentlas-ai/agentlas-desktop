@@ -20,7 +20,6 @@ import type {
   UpdateOneOrgMemberInput,
   OneTeamAgentAvatarInput,
 } from "../../shared/one-org";
-import { getAgentLeaseQuote } from "../cloud-agents/leases";
 import { getAgentConcurrencyInfo } from "../store/concurrency";
 import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
@@ -456,9 +455,8 @@ function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSumm
     return { kind: "waiting", ko: template.ko.replace("{count}", String(count)), en: template.en.replace("{count}", String(count)) };
   }
   if (row.unread_count > 0) return { kind: "unconfirmed", ko: STATUS_TEMPLATES.unconfirmed.ko, en: STATUS_TEMPLATES.unconfirmed.en };
-  // A lease expiry is a hard host fact and must not be hidden by a stale
-  // completion timestamp. The row stays locked until the user renews it.
-  if (isExpired(row.lease_expires_at, now)) return { kind: "locked", ko: STATUS_TEMPLATES.expired.ko, en: STATUS_TEMPLATES.expired.en };
+  // Paid Hub leases were retired. Legacy expiries cannot lock free Hub staff.
+  if (row.source !== "hub" && isExpired(row.lease_expires_at, now)) return { kind: "locked", ko: STATUS_TEMPLATES.expired.ko, en: STATUS_TEMPLATES.expired.en };
   const residency = agentResidencySnapshot(now).agents.filter(
     (entry) => entry.agentId === row.installed_agent_id && entry.holdsSession,
   );
@@ -510,7 +508,8 @@ function toMember(row: Row, now = Date.now()): OneOrgMember {
     pendingKind: row.pending_kind ?? "approval",
     unreadCount: Math.max(0, Number(row.unread_count) || 0),
     unreadGeneration: Math.max(0, Number(row.unread_generation) || 0),
-    creditState: row.credit_state,
+    // Legacy seller-call credit state must not block or mark free Hub staff.
+    creditState: row.source === "hub" ? "unknown" : row.credit_state,
     completionSummary,
     autoSelectTools: row.auto_select_tools !== 0,
     collaborationStyle: COLLABORATION_STYLES.has(row.collaboration_style) ? row.collaboration_style : "default",
@@ -628,9 +627,9 @@ export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true)
     if (agent.sourceMissingSince || agent.visibility === "private" || agent.visibility === "background") throw new Error("one_group_member_unavailable");
     const prior = db.prepare("SELECT * FROM one_org_members WHERE installed_agent_id = ? ORDER BY archived_at IS NULL DESC LIMIT 1").get(id) as Row | undefined;
     if (prior) {
-      if (prior.archived_at || prior.status_kind === "failed" || prior.status_kind === "locked" || isExpired(prior.lease_expires_at)
-        || prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at))
-        || prior.source === "hub" && !prior.lease_expires_at) throw new Error("one_group_member_unavailable");
+      if (prior.archived_at || prior.status_kind === "failed" || (prior.status_kind === "locked" && prior.source !== "hub")
+        || (prior.source !== "hub" && isExpired(prior.lease_expires_at))
+        || (prior.source !== "hub" && prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at)))) throw new Error("one_group_member_unavailable");
       continue;
     }
     if (sourceFor(agent) !== "local") throw new Error("one_group_member_seating_required");
@@ -654,14 +653,10 @@ export function redactOneHandoverPaths(text: string): string {
 }
 
 async function verifiedStandingLease(agent: InstalledAgent): Promise<string | null> {
-  if (sourceFor(agent) !== "hub") return null;
-  const quote = await getAgentLeaseQuote(agent.slug);
-  if (!quote.ok) throw new Error("one_hub_lease_unavailable: Could not verify the Hub lease. Retry after reconnecting.");
-  if (!quote.active || !quote.leasedUntil || Date.parse(quote.leasedUntil) <= Date.now()
-    || !Number.isFinite(Date.parse(quote.leasedUntil))) {
-    throw new Error("one_hub_lease_required: Purchase a Hub lease before adding this agent to a standing seat.");
-  }
-  return quote.leasedUntil;
+  // Agent Hub is a free community library. Keep this method's call sites so
+  // existing seat validation continues, but no paid lease is required.
+  void agent;
+  return null;
 }
 
 export async function addOneOrgMember(input: AddOneOrgMemberInput): Promise<OneOrgState> {

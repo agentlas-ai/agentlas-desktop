@@ -5,7 +5,6 @@ import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { IconCheck, IconFileUp } from "@/components/Icon";
 import { ElapsedClock } from "@/components/ElapsedClock";
-import { HubPriceStep } from "@/components/HubPriceStep";
 import type {
   CloudAgentPublishStage,
   CloudAgentRegisteredUploadOption,
@@ -362,12 +361,8 @@ export default function CloudAgentPublishPage() {
               </button>
             )}
 
-            {/* Offered only after a public listing actually exists. The agent is
-                already live and free at this point, so this is an offer rather
-                than a step that can fail the publish. */}
-            {result.ok && result.visibility === "marketplace" && result.slug && (
-              <HubPriceStep slug={result.slug} />
-            )}
+            {/* Hub publication is a free community upload. The former
+                post-publish price editor was retired with marketplace settlement. */}
 
             <div style={{ marginTop: 4 }}>
               {result.issues.length === 0 ? (

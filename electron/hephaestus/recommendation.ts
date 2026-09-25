@@ -3,11 +3,8 @@
 // 엔진 결정 스키마는 느슨하다 — stormbreaker-supervisor.ts:summarizeRoute 와 동일하게
 // 다중 폴백으로 방어적으로 읽는다.
 //
-// 비용 모델(BYOC): 이 앱은 사용자의 구독/키로 LLM 을 직접 호출한다("앱 자체 무료"). 따라서
-//   · 로컬/내 클라우드 에이전트 → 별도 크레딧 없음(= 내 구독). estCredits=null.
-//   · Hub 에서 빌린 에이전트 → 실제 perCallCredits(원시 decision.hub.results[] 에 살아있음).
-// 라우터가 _selected_payload/_compact_hub_result 에서 cost_hints 를 떼므로 로컬 단가는
-// 애초에 없고, BYOC 라 0 이 맞다. Hub 단가만 실측으로 노출한다(추정·휴리스틱 숫자는 쓰지 않음).
+// Hub invocation fees were retired. Provider token usage remains with the
+// user's selected model provider; agent routing itself has no credit price.
 import type { JsonObject, OrchestrationTarget, Recommendation, RecAgent, RecStage } from "../../shared/types";
 
 function asObj(v: unknown): Record<string, unknown> {
@@ -47,50 +44,20 @@ function localTarget(id: string, type: string): OrchestrationTarget {
   return { source: "local", entityKind: "agent", agentId: id };
 }
 
-/** 원시 hub.results[] 에서 slug→perCallCredits 맵(compact 전이라 비용이 살아있다). */
-function hubCreditIndex(decision: Record<string, unknown>): Map<string, number> {
-  const idx = new Map<string, number>();
-  for (const it of asArr(asObj(decision.hub).results)) {
-    const o = asObj(it);
-    const slug = str(o.slug);
-    const credits = numOrNull(o.perCallCredits);
-    if (slug && credits != null) idx.set(slug, credits);
-  }
-  return idx;
-}
-
-/** Hub 에이전트 비용 합 — null(미정) 은 합산에서 제외한다. 단, 제외가 일어나면 그 합은
- *  총액이 아니라 하한이므로 partial 로 반드시 같이 알린다: 부분합을 총액으로 넘기면
- *  페이월이 "필요 Ncr" 라고 안심시킨 뒤 서버가 그보다 더 청구한다(고지액 < 실청구액).
- *  단가를 하나도 모를 때도 total=null·partial=true — "미상"은 "무료(0)" 가 아니다. */
-function sumHubCredits(agents: RecAgent[]): { total: number | null; partial: boolean } {
-  const hub = agents.filter((a) => a.source === "hub");
-  const known = hub.filter((a) => a.estCredits != null);
-  const partial = known.length < hub.length;
-  if (!known.length) return { total: null, partial };
-  return { total: known.reduce((s, a) => s + (a.estCredits ?? 0), 0), partial };
-}
-
 /**
  * 라우터 결정 JSON(action: route|pipeline|hub_candidates|clarify|propose_new|refuse|…)을
  * 렌더러가 그대로 그릴 수 있는 정규형으로 변환한다. 알 수 없는/실행 불가 결정은 mode:"none".
  *
- * opts.leasedSlugs — 활성 장기대여(일 단위 선불) 중인 Hub slug 집합. 대여 기간 중 호출은
- * 추가 크레딧이 들지 않으므로 그 행의 estCredits 는 0 으로 확정하고 leased 로 표시한다
- * (미상 null 이 아니라 실측 0 — partial 하한 계산에도 "알려진 0" 으로 들어간다).
+ * Legacy lease input is ignored because free Hub calls have no lease tier.
  */
 export function normalizeRecommendation(
   json: unknown,
   query: string,
-  opts?: { leasedSlugs?: ReadonlySet<string> },
+  _opts?: { leasedSlugs?: ReadonlySet<string> },
 ): Recommendation {
-  const leasedSlugs = opts?.leasedSlugs;
-  const isLeased = (slug: string | undefined): boolean =>
-    Boolean(slug && leasedSlugs?.has(slug.toLowerCase()));
   const decision = asObj(json);
   const action = str(decision.action) ?? str(decision.decision) ?? "none";
   const receiptId = str(decision.receipt_id) ?? str(decision.receiptId);
-  const hubCredits = hubCreditIndex(decision);
 
   // Router Agent escalation: the engine attaches this on low-confidence
   // (clarify/propose_new) decisions so the host can resolve them with an LLM
@@ -197,24 +164,19 @@ export function normalizeRecommendation(
       const source = remoteSource(decision, o);
       const entityKind = remoteEntityKind(o);
       if (!entityKind) continue;
-      const leased = isLeased(slug);
       agents.push({
         id: slug,
         name: str(o.name) ?? str(o.nameEn) ?? slug,
         source,
-        // 활성 장기대여 중이면 이 작업 호출은 무료다 — 미상(null)이 아니라 확정 0.
-        estCredits: leased ? 0 : source === "hub" ? hubCredits.get(slug) ?? null : null,
-        ...(leased ? { leased: true } : {}),
+        estCredits: 0,
         target: { source, entityKind, slug },
       });
     }
     if (!agents.length) return base({ mode: "none" });
-    const hubCost = sumHubCredits(agents);
     return base({
       mode: agents.length > 1 ? "network" : "single",
       agents,
-      totalEstCredits: hubCost.total,
-      ...(hubCost.partial ? { totalEstCreditsPartial: true } : {}),
+      totalEstCredits: 0,
     });
   }
 
@@ -235,28 +197,22 @@ export function normalizeRecommendation(
       const remoteKind = source === "local" ? null : remoteEntityKind(o);
       if (source !== "local" && !remoteKind) continue;
       const clarifySlug = source === "local" ? undefined : str(o.slug) ?? id;
-      const leased = source !== "local" && isLeased(clarifySlug);
       clarifyAgents.push({
         id,
         name: str(o.name_ko) ?? str(o.name) ?? str(o.nameEn) ?? id,
         source,
-        estCredits: leased ? 0 : numOrNull(o.perCallCredits ?? o.per_call_credits),
-        ...(leased ? { leased: true } : {}),
+        estCredits: 0,
         target: source === "local"
           ? localTarget(id, type)
           : { source, entityKind: remoteKind!, slug: clarifySlug ?? id },
       });
       if (clarifyAgents.length >= 5) break;
     }
-    // clarify 후보도 그대로 자동 고용 경로로 흘러간다(execAutoChoice). hub_candidates 와 똑같이
-    // 단가 미상이면 총액이 아님을 알려야 한다 — 안 그러면 null 이 "0cr = 무료" 로 소비된다.
-    const clarifyCost = sumHubCredits(clarifyAgents);
     return base({
       mode: "clarify",
       clarifyQuestion: str(decision.clarify_question),
       agents: clarifyAgents,
-      totalEstCredits: clarifyCost.total,
-      ...(clarifyCost.partial ? { totalEstCreditsPartial: true } : {}),
+      totalEstCredits: 0,
     });
   }
 
