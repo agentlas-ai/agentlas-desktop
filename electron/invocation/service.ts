@@ -3391,7 +3391,16 @@ export class InvocationService {
          * Automatic Goals too (1.2.43 E2E, serving One automatic goal run_2e5f7bbd): a turn that ended on a typed
          * agentlas-ask question has no completion claim (pendingQuestion suppresses it) and stayed running with no attempt.
          */
-        const turnEndGoalId = record.automaticGoalId ?? (goalControllerAttemptId ? goalLongRun?.goalId : undefined);
+        /*
+         * And every other turn of the Goal (1.2.43 E2E, explicit serving One goal run_3a5360e1): the checkpoint
+         * continuation after verification_inconclusive_retry ended on agentlas-ask and stayed running with no attempt.
+         * Which turn-end rule applied depended on how the turn was started (first explicit turn vs revision-bound
+         * continuation vs a turn whose controller attempt never bound). A turn that ran in the Goal's own chat while
+         * the chat was bound to it is a Goal turn — however it was started — and ends through the same rule.
+         */
+        const turnEndGoalId = record.automaticGoalId
+          ?? (goalControllerAttemptId || (goalLongRun?.rootChatId === chat.id && getChat(chat.id)?.goalId === goalLongRun.goalId)
+            ? goalLongRun?.goalId : undefined);
         if (!completionClaim?.claimed && turnEndGoalId && !controller.signal.aborted && !executionContext) {
           const turnGoalId = turnEndGoalId;
           const current = getLongRunByGoalId(turnGoalId);
