@@ -3531,7 +3531,12 @@ app.whenReady().then(async () => {
     assertScienceSender(event, input, "science:artifacts");
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
     const artifactVersion = record.artifactVersion === undefined ? undefined : Number(record.artifactVersion);
-    return scienceStore().listArtifactValidationReceipts(String(record.projectId ?? ""), String(record.artifactId ?? ""), artifactVersion);
+    const projectId = String(record.projectId ?? "");
+    const artifactId = String(record.artifactId ?? "");
+    const store = scienceStore();
+    return store.getArtifactForProject(projectId, artifactId)?.kind === "table"
+      ? store.listArtifactTableValidationReceipts(projectId, artifactId, artifactVersion)
+      : store.listArtifactValidationReceipts(projectId, artifactId, artifactVersion);
   });
   /*
    * 결과·그림 화면은 산출물마다 검증 기록을 따로 물었다. 62건짜리 프로젝트에서 그 화면을
@@ -3551,7 +3556,10 @@ app.whenReady().then(async () => {
       const artifactVersion = target.artifactVersion === undefined ? undefined : Number(target.artifactVersion);
       if (!artifactId) return { artifactId, receipts: [], error: "science-artifact-id-missing" };
       try {
-        return { artifactId, receipts: store.listArtifactValidationReceipts(projectId, artifactId, artifactVersion), error: "" };
+        const receipts = store.getArtifactForProject(projectId, artifactId)?.kind === "table"
+          ? store.listArtifactTableValidationReceipts(projectId, artifactId, artifactVersion)
+          : store.listArtifactValidationReceipts(projectId, artifactId, artifactVersion);
+        return { artifactId, receipts, error: "" };
       } catch (error) {
         // 한 건이 실패해도 나머지는 그대로 온다 — 예전 한 건씩 부르던 길과 같은 성질이다.
         return { artifactId, receipts: [], error: String((error as Error)?.message ?? error) };
@@ -3561,20 +3569,33 @@ app.whenReady().then(async () => {
   ipcMain.handle("science:artifactValidations:closure", (event, input: unknown) => {
     assertScienceSender(event, input, "science:artifacts");
     const record = input && typeof input === "object" ? input as Record<string, unknown> : {};
-    return scienceStore().getArtifactValidationRunArtifactBindingForProject(String(record.projectId ?? ""), String(record.receiptId ?? ""));
+    const projectId = String(record.projectId ?? "");
+    const receiptId = String(record.receiptId ?? "");
+    const store = scienceStore();
+    return store.getArtifactValidationRunArtifactBindingForProject(projectId, receiptId)
+      || store.getArtifactTableValidationRunArtifactBindingForProject(projectId, receiptId);
   });
   ipcMain.handle("science:artifactValidations:validate", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope, "science:artifacts");
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     if (!input || typeof input !== "object") throw new Error("science-publication-validation-input-invalid");
     const record = input as Record<string, unknown>;
+    const projectId = String(record.projectId ?? "");
+    const artifactId = String(record.artifactId ?? "");
+    const artifactVersion = Number(record.artifactVersion);
+    if (scienceStore().getArtifactForProject(projectId, artifactId)?.kind === "table") {
+      // Tables have exact rows and a digest, not pixels. Load their existing validator only when needed.
+      const { ScienceArtifactTablePublicationValidator } = require("agentlas-science/dist/artifact-publication-validator") as typeof import("agentlas-science/dist/artifact-publication-validator");
+      return new ScienceArtifactTablePublicationValidator(scienceStore()).validate({
+        requestId: record.requestId === undefined ? undefined : String(record.requestId),
+        projectId, artifactId, artifactVersion,
+      });
+    }
     // Vega 차트에 채택된 캡처가 없으면 화면 없이(Vega→SVG→PNG) 찍고 검증한다 — 결과·그림 화면의 "지금 검증".
     // 편집된 판(v2…)은 데이터가 같으면 실행 계보를 이어받는다(Science 0.1.28).
     return scienceArtifactPublicationValidator().validateWithCapture({
       requestId: record.requestId === undefined ? undefined : String(record.requestId),
-      projectId: String(record.projectId ?? ""),
-      artifactId: String(record.artifactId ?? ""),
-      artifactVersion: Number(record.artifactVersion),
+      projectId, artifactId, artifactVersion,
     });
   });
   registerSciencePublicationIpc({ ipc: ipcMain, assertScienceSender });
