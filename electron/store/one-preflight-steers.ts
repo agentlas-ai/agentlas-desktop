@@ -4,6 +4,8 @@ import type { OnePreflightSteerInput, OnePreflightSteerLookupInput, OnePreflight
 import { getChat, setChatRuntimeSelection } from "./chats";
 import { getChatGoalRevision } from "./chat-goals";
 import { getDb } from "./db";
+import { getLongRunByGoalId } from "./long-runs";
+import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { getInvocationAdmission } from "./invocation-admissions";
 
 type SubmissionRow = {
@@ -50,19 +52,28 @@ function liveRuntimeJson(chatId: string): string {
   return canonicalOnePreflightRuntime(chat.runtimeSelection);
 }
 /*
- * A chat with no runtime pin (a seat chat inheriting its runtime) is shown in One with the owner's last explicit One
- * model (localStorage fallback) and submits that selection, while Main compared it with the chat's pin `null` and
- * refused with one_preflight_runtime_changed — the first submit of seat chat e07d98a2 (1.2.43 E2E) was refused this way
- * while the picker showed Agentlas Light, and the refusal started a One recovery pass on another runtime.
- * The submit runs what the picker shows: an UNPINNED chat adopts the shown selection as its pin (the same write as
- * choosing it in the picker). A chat that already has a pin, or whose Goal is ongoing (runtime changes go through the
- * Goal handoff), is never rewritten here and still fails closed.
+ * The submit runs what the picker shows. The shown selection is written the same way the picker writes it — never a
+ * refusal — whenever the picker itself would write the pin directly, i.e. unless an ONGOING-lifecycle Goal of this chat
+ * is still live (its runtime changes go through the Goal handoff, and a submit there still fails closed).
+ *
+ * Measured (1.2.43 E2E):
+ * - unpinned seat chat e07d98a2: the picker showed the last One choice (Agentlas Light) while the pin was `null`
+ *   (ecfb42c6 adopted the shown selection for unpinned chats only);
+ * - PINNED One room f56bcc0d: the first submit after its Goal completed was refused one_preflight_runtime_changed and
+ *   the refusal launched a One recovery pass on another runtime. A refusal here has no owner-facing way out — the owner
+ *   pressed send on the model the composer showed.
+ * The previous pin is logged so a drift between what One shows and what the chat stores stays diagnosable.
  */
-function adoptShownRuntimeForUnpinnedChat(chatId: string, shown: RuntimeSelection | null | undefined): void {
+function adoptShownRuntime(chatId: string, shown: RuntimeSelection | null | undefined): void {
   const chat = getChat(chatId);
-  if (!chat || chat.archivedAt || chat.runtimeSelection || !shown) return;
-  if (chat.goalId && getChatGoalRevision(chat.goalId)?.lifecycle === "ongoing") return;
+  if (!chat || chat.archivedAt || !shown) return;
+  if (chat.goalId && getChatGoalRevision(chat.goalId)?.lifecycle === "ongoing") {
+    const run = getLongRunByGoalId(chat.goalId);
+    if (run && !LONG_RUN_TERMINAL_STATUSES.has(run.status)) return;
+  }
+  const before = canonicalOnePreflightRuntime(chat.runtimeSelection);
   setChatRuntimeSelection(chatId, { ...shown, role: "orchestrator", inherit: false });
+  console.info(`[one-preflight] chat ${chatId} runtime pin follows the shown selection (was ${before})`);
 }
 function submissionRow(id: string): SubmissionRow | undefined {
   return getDb().prepare("SELECT * FROM one_preflight_submissions WHERE submission_id = ?")
@@ -103,7 +114,7 @@ export function beginOnePreflightSubmission(
       }
       return submissionReceipt(old);
     }
-    if (liveRuntimeJson(input.chatId) !== runtimeJson) adoptShownRuntimeForUnpinnedChat(input.chatId, input.runtimeSelection);
+    if (liveRuntimeJson(input.chatId) !== runtimeJson) adoptShownRuntime(input.chatId, input.runtimeSelection);
     if (liveRuntimeJson(input.chatId) !== runtimeJson) throw new Error("one_preflight_runtime_changed");
     const open = getDb().prepare(
       "SELECT submission_id FROM one_preflight_submissions WHERE chat_id = ? AND state = 'open' LIMIT 1",
