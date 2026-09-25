@@ -39,6 +39,7 @@ import {
   appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, getLongRunAttemptReview, nextBlockedGoalRetrySlot,
   pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun,
   BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord,
+  longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE,
 } from "../store/long-runs";
 import { automaticGoalResumeRequest } from "../invocation/automatic-goal";
 import {
@@ -260,6 +261,8 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   budget: { dispatches: number }): BlockedGoalSweepResult | null {
   let run = input;
   const defer = (detail: string): BlockedGoalSweepResult => ({ runId: run.id, fromReason: run.blockedReason, action: "deferred", detail });
+  // An owner/user pause is a boundary: no observation, retry or resume until the owner resumes it.
+  if (longRunOwnerHold(run.id)) return defer(LONG_RUN_OWNER_HOLD_CODE);
 
   // 0. Deterministic end rules.
   const qa = staleQaGoalMarker(getChatGoalRevision(run.goalId)?.originalRequest.text ?? run.objective)
@@ -385,6 +388,7 @@ export function continueGoalForAlive(runId: string, expectedVersion: number, dis
   const run = getLongRun(runId);
   if (!run || run.version !== expectedVersion || (run.surface !== "one" && run.surface !== "work")
     || run.executionLocation !== "desktop-local" || run.hostOwnerKind !== "desktop") return deferred("alive_goal_state_changed", run?.blockedReason ?? null);
+  if (longRunOwnerHold(run.id)) return deferred(LONG_RUN_OWNER_HOLD_CODE, run.blockedReason);
   const budget = { dispatches: 0 };
   if (run.status === "blocked") return sweepOne(run, dispatcher, "alive", budget) ?? deferred("alive_goal_not_continuable", run.blockedReason);
   // A host-scheduled retry owns the next step and its spacing. Isolated live run 2026-09-24: letting the

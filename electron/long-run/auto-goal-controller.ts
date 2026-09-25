@@ -124,8 +124,8 @@ export function controlAutomaticGoal(input: {
       if (!longRunContinueDecision(run.goalId)?.continue) throw new Error("auto_goal_resume_not_ready");
     } else if (input.command === "cancel") {
       run = transitionLongRun({ runId: run.id, to: ["draft", "paused", "blocked"].includes(run.status) ? "cancelled" : "cancelling", actorKind: "user" });
-    } else if (!["paused", "blocked", "pausing", "cancelling"].includes(run.status)) {
-      run = transitionLongRun({ runId: run.id, to: ["draft", "queued"].includes(run.status) ? "paused" : "pausing", actorKind: "user", reason: "user" });
+    } else if (!["paused", "pausing", "cancelling"].includes(run.status)) {
+      run = transitionLongRun({ runId: run.id, to: ["draft", "queued", "blocked"].includes(run.status) ? "paused" : "pausing", actorKind: "user", reason: "user" });
     }
     const unsettled = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')")
       .get(run.id) as { n: number };
