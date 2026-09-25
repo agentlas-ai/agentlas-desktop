@@ -112,6 +112,11 @@ export class AliveOrganismHost {
         admission: () => this.planAccess !== "allowed"
           ? this.planAccess
           : aliveSelectionFromPool(deps.cachedModelOrder()) ? null : "model.order-exhausted",
+        actionAdmission: () => this.planAccess === "allowed" ? null : this.planAccess,
+        refreshActionAdmission: async () => {
+          const access = await this.refreshPlanAccess();
+          return access === "allowed" ? null : access;
+        },
         // Nothing changed: never every beat. 5m → 15m → 60m between unchanged reviews; a salience change wakes now.
         actionSpacingMs: deps.actionSpacingMs ?? ALIVE_ACTION_SPACING_MS,
         reviewFloorMs: (agent) => floors[Math.min(floors.length - 1, Math.max(0, Number(agent.state.unchangedReviews ?? 0)))] ?? 0,
