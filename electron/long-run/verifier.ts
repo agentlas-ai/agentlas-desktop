@@ -6,7 +6,7 @@ import { collectCurrentExecutionProofs } from "./execution-proof";
 import { ensureCriterionProofContracts, ensureNodeProofContracts, admissibleCriterionProofRefs, criterionProofRuntimeSelection, GOAL_VERIFICATION_MODEL_TIMEOUT_MS,
   type CriterionProofContract, type NodeProofContract } from "./criterion-proof";
 import { readGoalPlan } from "../store/goal-plans";
-import { hostFileObservationStillHolds, recordHostFileObservations } from "./host-file-observation";
+import { hostFileObservationStillHolds, namedFiles, recordHostFileObservations } from "./host-file-observation";
 import { decompositionLeaves, rollUpDecomposition, type DecompositionLeaf } from "../../shared/goal-rollup";
 import { withVerificationAccounting } from "./accounting-context";
 import { createVerificationSession } from "./verification-effects";
@@ -1169,7 +1169,7 @@ export async function verifyGoalCompletionClaim(input: {
     const OUTCOME_INDEX = 0;
     const allContracts: CriterionProofContract[] = [...proofContracts, ...nodeContracts];
     const fileProofInput = input.invocationRunId && verificationBoundary ? {goalId:input.goalId,invocationRunId:input.invocationRunId,goalRevision:verificationBoundary.goalRevision} : null;
-    const needsFileProof = allContracts.some(contract => contract.requiredProofKind === "file");
+    const needsFileProof = allContracts.some(contract => contract.requiredProofKind === "file" || contract.requiredProofKind === "unknown");
     const toolFileProofs = fileProofInput && allContracts.some(contract => contract.requiredProofKind === "file" && contract.requiredFileAction)
       ? currentBuiltinFileProofs(fileProofInput) : [];
     // The host reads the files the goal's own conditions name — proof no longer depends on which tool wrote them.
@@ -1186,14 +1186,24 @@ export async function verifyGoalCompletionClaim(input: {
       ? {...fileProofInput,boundaryDigest:verificationBoundary.digest} : null;
     const executionProofs = executionProofInput && allContracts.some(contract => contract.requiredProofKind === "execution")
       ? collectCurrentExecutionProofs(executionProofInput) : [];
-    const refsFor = (contract: CriterionProofContract | undefined): string[] => contract
-      ? admissibleCriterionProofRefs(contract,durableEvidence.refs,fileProofs,downloadProofs,fileProofInput??undefined,executionProofs).slice(-32) : [];
+    /*
+     * "unknown" is a classifier outcome, not a finding that nothing can prove the item. When the item's own text names
+     * files the host itself read inside the goal's roots, those observations are admissible for it (1.2.43 E2E: files
+     * correct, 9 host observations, every leaf "unknown" -> inconclusive forever).
+     */
+    const hostRefsNamedBy = (text: string): string[] => {
+      const named = new Set(namedFiles([text]));
+      return hostFileObservations.filter(observation => named.has(observation.namedAs)).map(observation => observation.ref);
+    };
+    const refsFor = (contract: CriterionProofContract | undefined, text = ""): string[] => contract
+      ? [...new Set([...admissibleCriterionProofRefs(contract,durableEvidence.refs,fileProofs,downloadProofs,fileProofInput??undefined,executionProofs),
+        ...(contract.requiredProofKind === "unknown" ? hostRefsNamedBy(text) : [])])].slice(-32) : [];
     const judgeItems: Array<{ id: string; criterion: string; contract: CriterionProofContract | undefined }> = [
       ...run.acceptanceCriteria.map((criterion, index) => ({ id: `criterion:${index}`, criterion, contract: proofContracts[index] }))
         .filter((_, index) => !(rollupActive && index === OUTCOME_INDEX)),
       ...(rollupActive ? leaves.map((leaf, index) => ({ id: `node:${leaf.nodeId}`, criterion: `[${leaf.label}] ${leaf.text}`, contract: nodeContracts[index] })) : []),
     ];
-    const evidenceRefsByItem = Object.fromEntries(judgeItems.map(item => [item.id, refsFor(item.contract)]));
+    const evidenceRefsByItem = Object.fromEntries(judgeItems.map(item => [item.id, refsFor(item.contract, item.criterion)]));
     const hasAdmissibleProof = Object.values(evidenceRefsByItem).some(refs=>refs.length>0);
     // All criteria share this host-owned revision and evidence snapshot. One
     // batch avoids repeating the packet and competing for local inference slots.

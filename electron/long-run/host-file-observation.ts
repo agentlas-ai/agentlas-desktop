@@ -41,6 +41,8 @@ export interface HostFileObservation {
   relativePath: string;
   root: "chat" | "project" | "agent";
   exists: true;
+  /** The name as the goal's condition wrote it. */
+  namedAs: string;
   bytes: number;
   sha256: string;
   mtime: string;
@@ -127,7 +129,7 @@ export function recordHostFileObservations(input: { longRunId: string; chatId: s
     const seq = appendLongRunEvent({ runId: input.longRunId, kind: "verification.host_file_observation", actorKind: "host",
       payload: { schemaVersion: "agentlas.host-file-observation.v1", verifierAttemptId: input.verifierAttemptId, namedAs: name,
         ...recorded, previewSha256: preview === null ? null : createHash("sha256").update(preview).digest("hex") } });
-    observations.push({ ref: `long-run-event:${input.longRunId}:${seq}`, exists: true, ...observed });
+    observations.push({ ref: `long-run-event:${input.longRunId}:${seq}`, exists: true, namedAs: name, ...observed });
   }
   return observations;
 }
