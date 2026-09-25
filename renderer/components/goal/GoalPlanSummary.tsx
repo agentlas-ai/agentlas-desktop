@@ -4,9 +4,9 @@ import type { GoalPlanView } from "../../../shared/goal-shape";
 import styles from "./GoalPlanSummary.module.css";
 
 const SHAPE_LABEL: Record<GoalPlanView["shape"], { ko: string; en: string }> = {
-  single_tactic: { ko: "단일 전술", en: "Single tactic" },
-  tactic_list: { ko: "전술 목록", en: "Tactic list" },
-  mission_tree: { ko: "대계·전략·전술", en: "Mission tree" },
+  single_tactic: { ko: "하위목표 1개", en: "Single sub-goal" },
+  tactic_list: { ko: "하위목표 목록", en: "Sub-goal list" },
+  mission_tree: { ko: "최종목표·전략목표·하위목표", en: "Final goal · strategic goals · sub-goals" },
 };
 
 /** Main 이 목표 문맥에 실어 보내는 계획 읽기 모델을 꺼낸다(없으면 null). */
@@ -18,7 +18,8 @@ export function goalPlanOf(context: unknown): GoalPlanView | null {
 const STATUS_MARK: Record<string, string> = { done: "✓", retired: "–", active: "•", proposed: "○" };
 
 /**
- * 골 구조 판단 결과 — 모양과 지금 전술을 한 줄로, 트리면 접힌 작은 트리.
+ * 골 구조 판단 결과 — 모양과 지금 하위목표를 한 줄로, 트리면 접힌 작은 트리.
+ * 화면 용어는 최종목표·전략목표·하위목표(오너 2026-09-25) — 대계·전략·전술은 쓰지 않는다.
  * Main 읽기 모델(GoalPlanView)만 그린다. 좁은 폭: 모든 글은 줄바꿈되고 가로로 넘치지 않는다.
  */
 export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
@@ -32,7 +33,7 @@ export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
   const shape = SHAPE_LABEL[plan.shape][ko ? "ko" : "en"];
   const current = plan.currentTactic
     ? `${plan.currentTactic.id} ${plan.currentTactic.description}`
-    : (ko ? "계획된 전술 완료 · 기준 확인 중" : "All planned tactics done · checking criteria");
+    : (ko ? "계획된 하위목표 완료 · 기준 확인 중" : "All planned sub-goals done · checking criteria");
   return <div className={variant === "composer-tab" ? `${styles.root} ${styles.composerTab}` : styles.root} data-goal-plan={plan.shape} data-goal-plan-fallback={plan.fallback ? "true" : "false"}>
     <p className={styles.line}>
       <span className={styles.shape}>{ko ? "구조" : "Plan"}: {shape}{plan.fallback ? (ko ? " (임시)" : " (provisional)") : ""}</span>
@@ -41,7 +42,7 @@ export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
     </p>
     {plan.shape === "mission_tree" && <details className={styles.tree}>
       <summary>{ko ? "트리 보기" : "Show tree"}</summary>
-      {plan.mission && <p className={styles.mission}>{plan.mission.objective}</p>}
+      {plan.mission && <p className={styles.mission}>{ko ? "최종목표" : "Final goal"}: {plan.mission.objective}</p>}
       {plan.mission?.keyResults.length ? <ul className={styles.krs}>
         {plan.mission.keyResults.map((kr) => <li key={kr.metric}>
           {kr.metric} → {kr.target.toLocaleString(ko ? "ko-KR" : "en-US")}{kr.unit ? ` ${kr.unit}` : ""}
