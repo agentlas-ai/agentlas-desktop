@@ -120,7 +120,7 @@ function projectScienceLoopLongRunInTransaction(input: ScienceLoopLongRunProject
     return applyScienceLongRunProjectionStatus({
       runId: run.id,
       to: "paused",
-      pauseReason: input.pauseReason ?? "user",
+      pauseReason: input.pauseReason ?? "agent_paused",
       sourceVersion: input.sourceVersion,
       sourceStateSha256: input.sourceStateSha256,
     });
