@@ -22,8 +22,12 @@
  *    (userData/agent-cwd — where the agent works when the owner declared no folder) is the agent's
  *    notebook; a write anywhere else (project folder, chat working folder, any declared path) is a
  *    deliverable.
+ *  - one-click social engagement (follow/like/repost/subscribe) counts only from the launcher's
+ *    post-click state receipt (browser_action_logs "social-engage" / "changed"), never from intent.
+ *  - shell: only a command that clearly sends outward — curl/wget/httpie with a write method or a
+ *    request body, to a non-loopback URL (shellSendsOutward). Other shell never counts.
  *  - host builtins that are read-only by construction (system time) and host preflight/supervisor
- *    notices never count; command/read/search/fetch/delegate never count on their own.
+ *    notices never count; read/search/fetch/delegate never count on their own.
  *  - anything else keeps the existing couldHaveChangedTheOutsideWorld answer (external MCP writes).
  *  - a call whose receipt failed did nothing.
  */
@@ -34,7 +38,7 @@ import { couldHaveChangedTheOutsideWorld, isHostPreflightTool, isHostSupervisorN
 import { BROWSER_APPROVAL_CLASSIFIER_SOURCE } from "./mcp-tools/browser-cdp-launcher";
 import { AGENTLAS_SYSTEM_TIME_CATALOG_ID, AGENTLAS_SYSTEM_TIME_TOOL_NAMES } from "./mcp-tools/system-time-server";
 
-export type OutwardEffectKind = "browser_commit" | "external_mutation" | "deliverable_file";
+export type OutwardEffectKind = "browser_commit" | "social_engage" | "external_mutation" | "shell_send" | "deliverable_file";
 
 export interface OutwardToolCall {
   name: string;
@@ -48,6 +52,8 @@ export interface OutwardEffectContext {
   scratchRoots: string[];
   /** Directory relative paths resolve against (the run cwd). Defaults to the first scratch root. */
   cwd?: string | null;
+  /** One-click engagements the browser launcher verified by a post-click state change during this run. */
+  verifiedSocialEngagements?: number;
 }
 
 export interface OutwardEffectSummary {
@@ -181,12 +187,47 @@ export function summarizeOutwardEffects(calls: OutwardToolCall[], ctx: OutwardEf
       else localWork += 1;
       continue;
     }
-    if (action === "command" || action === "read" || action === "search" || action === "fetch" || action === "delegate" || action === "browser") {
+    if (action === "command") {
+      const input = args && typeof args === "object" ? args as Record<string, unknown> : {};
+      const command = typeof input.command === "string" ? input.command
+        : Array.isArray(input.command) ? input.command.filter((part) => typeof part === "string").join(" ") : "";
+      if (shellSendsOutward(command)) count("shell_send");
+      else localWork += 1;
+      continue;
+    }
+    if (action === "read" || action === "search" || action === "fetch" || action === "delegate" || action === "browser") {
       localWork += 1;
       continue;
     }
     if (couldHaveChangedTheOutsideWorld(name)) count("external_mutation");
     else localWork += 1;
   }
+  for (let i = 0; i < Math.max(0, Math.min(500, ctx.verifiedSocialEngagements ?? 0)); i += 1) count("social_engage");
   return { outwardEffects, kinds: [...kinds], localWork };
+}
+
+const LOOPBACK_HOST = /^(?:localhost|127(?:\.\d{1,3}){3}|0\.0\.0\.0|\[?::1\]?|[^.]+\.local|[^.]+\.localhost|host\.docker\.internal)$/i;
+const HTTP_CLIENT = /(?:^|[\s;&|(/'"])(curl|wget|http|https|xh)(?=\s)/;
+const WRITE_METHOD = /(?:^|\s)(?:-X\s*|--request[=\s]+|--method[=\s]+)['"]?(POST|PUT|DELETE|PATCH)\b/i;
+const CURL_BODY = /(?:^|\s)(?:-d|--data(?:-raw|-binary|-urlencode|-ascii)?|-F|--form(?:-string)?|--json|-T|--upload-file)(?=[\s=]|$)|(?:^|\s)-d\S/;
+const WGET_BODY = /(?:^|\s)--(?:post-data|post-file|body-data|body-file)(?=[\s=])/;
+const HTTPIE_METHOD = /(?:^|[\s;&|(/'"])(?:http|https|xh)\s+(?:--?\S+\s+)*(POST|PUT|DELETE|PATCH)\s/i;
+
+/**
+ * Does this shell command clearly send something outward? Only an HTTP client (curl, wget, httpie,
+ * xh) with a write method or a request body, aimed at a non-loopback URL. Reads (a plain GET),
+ * loopback/dev servers, and every other command stay local work — "unknown" is not progress.
+ */
+export function shellSendsOutward(command: string): boolean {
+  if (!command || command.length > 20_000) return false;
+  const segments = command.split(/\n|&&|\|\||;|\|/);
+  return segments.some((segment) => {
+    const client = HTTP_CLIENT.exec(segment)?.[1];
+    if (!client) return false;
+    const urls = [...segment.matchAll(/https?:\/\/([^\s/'"?#:]+|\[[^\]]+\])/gi)].map((m) => m[1]);
+    if (urls.length === 0 || urls.every((host) => LOOPBACK_HOST.test(host))) return false;
+    if (client === "curl") return WRITE_METHOD.test(segment) || CURL_BODY.test(segment);
+    if (client === "wget") return WRITE_METHOD.test(segment) || WGET_BODY.test(segment);
+    return HTTPIE_METHOD.test(segment);
+  });
 }

@@ -8,8 +8,58 @@ import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { browserRequestApproval } from "./connect";
-import { browserApprovalInfoPath } from "./approval-channel";
+import { BROWSER_SOCIAL_ENGAGE_ACTION, browserApprovalInfoPath } from "./approval-channel";
 import { resolveBrowserApprovalAuthority } from "./approval-authority";
+import { logBrowserAction } from "../store/browser-vault";
+
+
+function boundedEngageState(value: unknown): Record<string, string | boolean | null> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const row = value as Record<string, unknown>;
+  const out: Record<string, string | boolean | null> = { found: row.found === true };
+  for (const key of ["pressed", "checked", "label", "inner", "text"]) {
+    const item = row[key];
+    out[key] = typeof item === "string" ? item.slice(0, 120) : null;
+  }
+  return out;
+}
+
+/**
+ * The launcher's post-click state check for a one-click engagement. Bound to the run's chat
+ * through the same opaque authority as approvals — a request without a live authority is refused,
+ * so a stray process cannot manufacture an outward effect for a run.
+ */
+function recordSocialEngage(body: string, res: http.ServerResponse): void {
+  let parsed: Record<string, unknown>;
+  try { parsed = JSON.parse(body) as Record<string, unknown>; } catch { res.writeHead(400).end("bad json"); return; }
+  const authority = parsed && typeof parsed === "object" ? resolveBrowserApprovalAuthority(parsed.authority) : null;
+  if (!authority) { res.writeHead(403).end(JSON.stringify({ ok: false, error: "browser_authority_unavailable" })); return; }
+  const intent = typeof parsed.intent === "string" ? parsed.intent.slice(0, 40) : "";
+  if (!intent) { res.writeHead(400).end(JSON.stringify({ ok: false, error: "intent_required" })); return; }
+  const verified = parsed.verified === true;
+  try {
+    logBrowserAction({
+      site: typeof parsed.site === "string" ? parsed.site : null,
+      action: BROWSER_SOCIAL_ENGAGE_ACTION,
+      target: intent,
+      result: verified ? "changed" : "unchanged",
+      approval: "host-verified",
+      meta: {
+        schemaVersion: "agentlas.browser-social-engage.v1",
+        chatId: authority.owner.chatId,
+        sessionKey: authority.owner.sessionKey,
+        surface: authority.owner.surface,
+        intent,
+        verified,
+        before: boundedEngageState(parsed.before),
+        after: boundedEngageState(parsed.after),
+      },
+    });
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ ok: true }));
+  } catch (error) {
+    res.writeHead(500, { "content-type": "application/json" }).end(JSON.stringify({ ok: false, error: String(error) }));
+  }
+}
 
 let server: http.Server | null = null;
 let boundPort = 0;
@@ -33,12 +83,17 @@ export function startBrowserApprovalServer(): Promise<number> {
   token = randomUUID();
   return new Promise((resolve) => {
     const srv = http.createServer((req, res) => {
-      if (req.method !== "POST" || !(req.url ?? "").startsWith("/approve")) {
+      const isEffect = req.method === "POST" && (req.url ?? "") === "/effect";
+      if (!isEffect && (req.method !== "POST" || !(req.url ?? "").startsWith("/approve"))) {
         res.writeHead(404).end("not found");
         return;
       }
       if ((req.headers["authorization"] ?? "") !== `Bearer ${token}`) {
         res.writeHead(401).end("unauthorized");
+        return;
+      }
+      if (isEffect) {
+        void readBody(req, 16 * 1024).then((body) => recordSocialEngage(body, res));
         return;
       }
       const controller = new AbortController();
