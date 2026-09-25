@@ -209,8 +209,13 @@ export async function loadMainToolInventory(
     const key = prepared.configKey;
     const server = prepared.server;
     // The identity comes from the Main-sealed binding, never a model tool name.
-    // Do not connect unrelated MCP servers in an explicit browser-only run.
-    if (browserOnly && server.catalogId !== "agentlas-browser") continue;
+    // A browser-only run connects exactly the servers Main sealed for it — the same
+    // set claude-code/codex receive in their MCP config. Main owns that decision; a
+    // second, stricter filter here left host-loop runtimes with the browser alone. Measured
+    // (parity QA 2026-09-25, a browser-mode automation asking for the Seoul time):
+    // codex and claude called agentlas-time.get_current_time; serving had 28 browser
+    // tools, answered "NEEDS-INPUT: get_current_time is not provided", three runs of
+    // three. Builtin file/shell tools stay off in browser-only runs (above), as for claude.
     let status;
     try {
       status = await testServerConnection(server, { timeoutMs: 8_000, signal, prepared });
