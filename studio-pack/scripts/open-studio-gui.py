@@ -200,100 +200,11 @@ def studio_state_dir(root: Path) -> Path:
     return d
 
 
-# --------------------------------------------------------------------------- #
-# Credits — ONE flat charge per SESSION on first GUI open. Within a session the   #
-# GUI is free no matter what you do (every stage Run, every Hub HQ call, re-runs, #
-# new ideas — all $0 more). A session = the agent session (CLAUDE_CODE_SESSION_ID #
-# / CODEX_THREAD_ID); end it and reopen → charged again. Balance lives GLOBALLY   #
-# (~/.agentlas) so it survives across sessions. Insufficient → guidance, no       #
-# charge, generation gated. Edge cases anticipated so the user need not list them:#
-#   • reopen / browser refresh in same session  -> reuse, no new charge           #
-#   • launcher restarted within the SAME session -> session_key already charged, free
-#   • exactly == cost -> charged, balance 0, works                                #
-#   • missing/corrupt store -> seed with STUDIO_CREDIT_START (default 100)         #
-#   • open fails after charge -> no refund (the fee is for opening the session)    #
-#   • disabled (STUDIO_CREDITS=off) or owner -> free, never charged               #
-# Tunables: STUDIO_CREDIT_COST (20), STUDIO_CREDIT_START (100), STUDIO_CREDITS=off #
-# --------------------------------------------------------------------------- #
-
-CREDIT_COST = int(os.environ.get("STUDIO_CREDIT_COST", "20") or "20")
-CREDITS_ENABLED = os.environ.get("STUDIO_CREDITS", "on").strip().lower() not in ("off", "0", "false", "no")
-CREDIT_STATE_NAME = ".credits.json"
-
-
-def _credits_store() -> Path:
-    d = Path.home() / ".agentlas"
-    try:
-        d.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return d / "studio-credits.json"
-
-
-def _session_key() -> str:
-    """Identity of the current agent session — the unit the 20-credit fee is
-    charged against, exactly once. New session (closed + reopened) → new key."""
-    for var in ("CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_COMPANION_SESSION_ID"):
-        v = os.environ.get(var)
-        if v:
-            return f"{var}:{v}"
-    return f"proc:{os.getpid()}"
-
-
-def charge_session(state_dir: Path) -> dict:
-    """Charge CREDIT_COST once for THIS session on GUI open; idempotent per
-    session key. Writes the result to .credits.json for the manifest + runner."""
-    state_file = state_dir / CREDIT_STATE_NAME
-    if not CREDITS_ENABLED:
-        s = {"enabled": False, "cost": 0, "balance": None, "charged": False, "sufficient": True}
-        _write_credit_state(state_file, s)
-        return s
-    store_path = _credits_store()
-    try:
-        store = json.loads(store_path.read_text("utf-8"))
-        if not isinstance(store, dict):
-            store = {}
-    except (OSError, json.JSONDecodeError):
-        store = {}
-    balance = store.get("balance")
-    if not isinstance(balance, (int, float)):
-        balance = int(os.environ.get("STUDIO_CREDIT_START", "100") or "100")
-    charged = store.get("charged_sessions")
-    if not isinstance(charged, list):
-        charged = []
-    skey = _session_key()
-
-    if skey in charged:
-        s = {"enabled": True, "cost": CREDIT_COST, "balance": balance, "charged": True, "sufficient": True, "session": skey, "reused": True}
-    elif balance >= CREDIT_COST:
-        balance -= CREDIT_COST
-        charged.append(skey)
-        store["balance"] = balance
-        store["charged_sessions"] = charged[-300:]  # cap history
-        try:
-            store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2), "utf-8")
-        except OSError:
-            pass
-        s = {"enabled": True, "cost": CREDIT_COST, "balance": balance, "charged": True, "sufficient": True, "session": skey}
-    else:
-        s = {"enabled": True, "cost": CREDIT_COST, "balance": balance, "charged": False, "sufficient": False, "session": skey}
-    _write_credit_state(state_file, s)
-    return s
-
-
-def _write_credit_state(state_file: Path, s: dict) -> None:
-    try:
-        state_file.write_text(json.dumps(s, ensure_ascii=False), "utf-8")
-    except OSError:
-        pass
-
-
-def credit_state(state_dir: Path) -> dict:
-    """The current session's credit state for the manifest/runner (read-only)."""
-    try:
-        return json.loads((state_dir / CREDIT_STATE_NAME).read_text("utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {"enabled": CREDITS_ENABLED, "cost": CREDIT_COST, "balance": None, "charged": False, "sufficient": True}
+# The old Studio session-credit charge is permanently retired with paid agent
+# access. Keep the response shape for bundled GUIs, but never read or rewrite
+# historical ~/.agentlas/studio-credits.json balances.
+def credit_state(_state_dir: Path) -> dict:
+    return {"enabled": False, "cost": 0, "balance": None, "charged": False, "sufficient": True}
 
 
 # --------------------------------------------------------------------------- #
@@ -1476,13 +1387,6 @@ class StudioRunner:
         return out
 
     def _fulfill(self, req: dict) -> None:
-        # Credits gate: the session fee is charged on GUI open. If the balance was
-        # insufficient there, generation is OFF (the GUI shows the notice). Within a
-        # paid session this is always sufficient — no per-request charge ever.
-        cs = credit_state(self.state_dir)
-        if cs.get("enabled") and not cs.get("sufficient", True):
-            self._log(f"credits insufficient (balance {cs.get('balance')}, need {cs.get('cost')}) — generation gated; skipped {req.get('kind')}")
-            return
         kind = req.get("kind") or ("run" if req.get("stage") else None)
         if kind == "init":
             idea = str(req.get("idea") or "").strip()
@@ -1950,7 +1854,7 @@ def make_bridge_handler(dist_dir: Path, state_dir: Path):
 def serve_dir(directory: Path, port: int, open_browser: bool) -> int:
     root = Path(__file__).resolve().parents[1]
     state_dir = studio_state_dir(root)
-    cs = charge_session(state_dir)  # ONE flat fee per session on GUI open (free within)
+    cs = credit_state(state_dir)
     StudioRunner(root, state_dir).start()  # bridge IS the runtime: queue -> CLI -> studio-data.json
     handler = make_bridge_handler(directory, state_dir)
     return _serve(handler, port, open_browser, {"dir": str(directory), "bridge": str(state_dir), "credits": cs})
@@ -1963,7 +1867,6 @@ def serve_embedded(port: int, open_browser: bool) -> int:
     # generates → render" flow — never a stale legacy page.
     root = Path(__file__).resolve().parents[1]
     state_dir = studio_state_dir(root)
-    charge_session(state_dir)  # ONE flat fee per session on GUI open (free within)
     StudioRunner(root, state_dir).start()  # bridge IS the runtime: queue -> CLI -> studio-data.json
     data_path = state_dir / "studio-data.json"
     req_path = state_dir / "requests.jsonl"
