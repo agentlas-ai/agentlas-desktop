@@ -5740,6 +5740,7 @@ ${effectiveUserPrompt}`;
       attempt: number;
     }>();
     let runnerEventGeneration = 0;
+    let aliveUsageAttemptOrdinal = 0;
     const runtimeAttemptKey = (runtime: RuntimeStatus): string => JSON.stringify([
       runtime.kind,
       runtime.backend,
@@ -5758,9 +5759,19 @@ ${effectiveUserPrompt}`;
     // A CLI can resolve its promise before a buffered stream callback arrives.
     // Seal each runner's callbacks to its own generation so a late callback
     // cannot mutate the next runtime's counters, artifacts, or transcript.
-    const createAttemptRunnerEvents = (): { events: RunnerEvents; settle: () => void } => {
+    const createAttemptRunnerEvents = (aliveUsageAttempt: number | null): { events: RunnerEvents; settle: () => void } => {
       const generation = ++runnerEventGeneration;
       let settled = false;
+      const recordTerminalUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
+        if (settled || generation !== runnerEventGeneration || aliveUsageAttempt === null || !req.runId
+          || !Number.isSafeInteger(usage.inputTokens) || usage.inputTokens < 0
+          || !Number.isSafeInteger(usage.outputTokens) || usage.outputTokens < 0
+          || usage.inputTokens + usage.outputTokens > Number.MAX_SAFE_INTEGER) return;
+        tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "alive_provider_usage_observed",
+          sourceEventId: `alive-provider-usage:${aliveUsageAttempt}`,
+          payload: { schemaVersion: "agentlas.alive-provider-usage.v1", attempt: aliveUsageAttempt,
+            observedInputTokens: usage.inputTokens, observedOutputTokens: usage.outputTokens } });
+      };
       const forward = <T extends unknown[]>(handler: (...args: T) => void) => (...args: T): void => {
         if (settled || generation !== runnerEventGeneration || signal?.aborted) return;
         handler(...args);
@@ -5771,6 +5782,10 @@ ${effectiveUserPrompt}`;
           onStatus: forward(runnerEvents.onStatus),
           onTool: forward(runnerEvents.onTool),
           onUsage: forward(runnerEvents.onUsage),
+          // A provider can send its terminal usage after cancellation. The
+          // display callbacks stop then, but this exact accounting fact may
+          // still settle the already-dispatched wake without replaying it.
+          onTerminalObservedUsage: recordTerminalUsage,
           onThinking: forward(runnerEvents.onThinking),
           onNotice: forward(runnerEvents.onNotice),
         },
@@ -5904,7 +5919,15 @@ ${effectiveUserPrompt}`;
         const goalBudget = activeGoalId ? getLongRunByGoalId(activeGoalId) : null;
         const monetaryRefusal = goalBudget && goalBudget.surface !== "science" ? longRunMonetaryRefusal(goalBudget) : null;
         if (monetaryRefusal) throw new Error(monetaryRefusal);
-        const attemptEvents = createAttemptRunnerEvents();
+        const aliveUsageAttempt = executionContext?.source === "alive" ? ++aliveUsageAttemptOrdinal : null;
+        if (aliveUsageAttempt !== null && req.runId) {
+          // Required coverage marker: a missing terminal pair for any provider
+          // attempt makes the bounded Alive wake's total unknown.
+          recordRunEvent({ runId: req.runId, chatId: chat.id, kind: "alive_provider_attempt_started",
+            sourceEventId: `alive-provider-attempt:${aliveUsageAttempt}`,
+            payload: { schemaVersion: "agentlas.alive-provider-usage.v1", attempt: aliveUsageAttempt } });
+        }
+        const attemptEvents = createAttemptRunnerEvents(aliveUsageAttempt);
         let result: Awaited<ReturnType<Runner>>;
         const usageSourceId = `${goalUsageInvocationId}:provider-result:${++goalResultOrdinal}`;
         const persistGoalUsage = (observedUsage?: LongRunUsageInput["observedUsage"]): void => {
