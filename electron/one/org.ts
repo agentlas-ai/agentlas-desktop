@@ -446,12 +446,9 @@ function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSumm
   // keeps an actionable failure from being hidden behind a stale pending or
   // residency hint.
   if (row.status_kind === "failed") {
-    // Free Hub staff can retain a paid-era credit failure in an existing row.
-    // Use the stored source and credit marker, not a guess from localized prose.
-    const legacyHubCreditFailure = row.source === "hub" && row.credit_state === "insufficient";
     return {
       kind: "failed",
-      ko: legacyHubCreditFailure ? STATUS_TEMPLATES.failed.ko : boundedLine(row.status_line, STATUS_TEMPLATES.failed.ko),
+      ko: STATUS_TEMPLATES.failed.ko,
       en: STATUS_TEMPLATES.failed.en,
     };
   }

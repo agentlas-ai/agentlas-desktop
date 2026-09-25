@@ -4301,17 +4301,14 @@ export class InvocationService {
       // 붙이지 않는다(코드는 영수증에 이미 있고, 화면에서는 뜻을 못 준다).
       const settleLocale = pickLocale(record.request);
       const statusLine = failed
-        ? creditBlocked
-          ? (settleLocale === "ko" ? "크레딧 부족" : "Out of credits")
-          : (settleLocale === "ko" ? "실패 · 확인 필요" : "Failed · review needed")
+        ? (settleLocale === "ko" ? "실패 · 확인 필요" : "Failed · review needed")
         : (settleLocale === "ko" ? "최근 작업 완료" : "Recently completed");
       setOneOrgMemberStatus({
         installedAgentId: record.actualAgentId,
         statusKind: failed ? "failed" : record.pendingQuestion ? "waiting" : "quiet",
         statusLine,
         unreadCount: failed ? 0 : 1,
-        // PRD §4.29 — 부족만 적고 성공 때 아무것도 안 보내면, 조직도가 옛 값을 그대로 유지해
-        // 충전 후에도 "크레딧 부족"이 영영 남았다. 성공 정산은 상태를 정상으로 되돌린다.
+        // Preserve the machine-readable balance marker for diagnostics, and clear it after success.
         creditState: creditBlocked ? ("insufficient" as const) : ("ok" as const),
         ...(record.pendingQuestion ? { pendingCount: 1, pendingKind: "input" as const } : { pendingCount: 0 }),
         lastActivityAt: receipt.finishedAt || receipt.updatedAt,

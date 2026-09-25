@@ -14,7 +14,6 @@ import {
   IconEdit,
   IconPlus,
   IconSearch,
-  IconShield,
   IconSparkles,
 } from "@/components/Icon";
 
@@ -34,7 +33,7 @@ function statusLine(member: OneOrgMember, locale: string): string {
 }
 
 function memberEntryAriaLabel(member: OneOrgMember, locale: string): string {
-  return `${member.displayName} · ${statusLine(member, locale)}${member.statusKind === "failed" ? ` · ${locale === "ko" ? "실행 실패" : "Run failed"}` : ""}${member.unreadCount > 0 ? ` · ${locale === "ko" ? `읽지 않은 결과 ${member.unreadCount}개` : `${member.unreadCount} unread result${member.unreadCount === 1 ? "" : "s"}`}` : ""}`;
+  return `${member.displayName} · ${statusLine(member, locale)}${member.unreadCount > 0 ? ` · ${locale === "ko" ? `읽지 않은 결과 ${member.unreadCount}개` : `${member.unreadCount} unread result${member.unreadCount === 1 ? "" : "s"}`}` : ""}`;
 }
 
 function shouldOpenOneOrgRowFromKeyboard(key: string, eventOriginatesOnRow: boolean): boolean {
@@ -113,7 +112,6 @@ export function OneOrgChart({
   onSetAutoSelect,
   onConnectTool,
   onBrowseSource,
-  onBrowseCredits,
   onOpenConcurrency,
   conversationResults = [],
   historyResults = [],
@@ -165,7 +163,6 @@ export function OneOrgChart({
   onSetAutoSelect?: (member: OneOrgMember, enabled: boolean) => Promise<void>;
   onConnectTool?: (member: OneOrgMember, serverId?: string) => void;
   onBrowseSource?: (source: "cloud" | "hub") => void;
-  onBrowseCredits?: () => void;
   onOpenConcurrency?: () => void;
   conversationResults?: OneOrgSearchItem[];
   historyResults?: OneOrgSearchItem[];
@@ -266,7 +263,6 @@ export function OneOrgChart({
   ];
   const active = state?.members.filter((member) => !member.archivedAt) || [];
   const archived = state?.members.filter((member) => Boolean(member.archivedAt)) || [];
-  const insufficientCredits = active.filter((member) => member.creditState === "insufficient");
   const usedIds = useMemo(() => new Set(active.map((member) => member.installedAgentId)), [active]);
   const usedSlugs = useMemo(() => new Set(active
     .map((member) => installedAgents.find((agent) => agent.id === member.installedAgentId)?.slug.toLocaleLowerCase())
@@ -559,7 +555,6 @@ export function OneOrgChart({
           onClick={(event) => { event.stopPropagation(); onEditOne(); }}
         ><IconEdit size={14} /></button>}
       </div>
-      {insufficientCredits.length > 0 && <div className={styles.creditWarning} role="status"><span><IconShield size={13} />{locale === "ko" ? `AI 사용 잔액 부족으로 ${insufficientCredits.length}명 멈춤` : `${insufficientCredits.length} staff paused for low AI usage balance`}</span>{onBrowseCredits && <button type="button" onClick={onBrowseCredits}>{locale === "ko" ? "구독 플랜 보기" : "View plans"}</button>}</div>}
       <div className={styles.sectionLabel}>{locale === "ko" ? "상주 스태프" : "Standing Staff"}</div>
       <div className={styles.rows}>
         {active.length === 0 && <>
@@ -584,7 +579,6 @@ export function OneOrgChart({
               <span className={styles.memberMeta}>{memberKind(member, installedAgents, locale)} · {sourceLabel(member.source, locale)}</span>
             </div>
             <span className={styles.source}>{activityTimeLabel(member, locale)}</span>
-            {member.creditState === "insufficient" && <span className={styles.creditBadge}><IconShield size={11} />{locale === "ko" ? "AI 사용 잔액 부족" : "Low AI usage balance"}</span>}
             {member.unreadCount > 0 && <span className={styles.unreadDot} aria-hidden="true" title={locale === "ko" ? `읽지 않은 결과 ${member.unreadCount}개` : `${member.unreadCount} unread result${member.unreadCount === 1 ? "" : "s"}`} />}
             {member.statusKind === "failed" && member.unreadCount === 0 && (
               /*
