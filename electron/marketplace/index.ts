@@ -214,6 +214,8 @@ type OwnerCloudShelfDiskCache = {
   workspaceId: string;
   updatedAt: number;
   agents: MarketplaceListing[];
+  /** 끝까지 받은 선반인가. 없거나 false 면(옛 파일 포함) 보여 주되 곧바로 다시 읽는다. */
+  complete?: boolean;
 };
 
 function ownerCloudShelfCachePath(): string {
@@ -241,7 +243,9 @@ function readOwnerCloudShelfCache(workspaceId: string): TimedCache<MarketplaceLi
     ) return null;
     return {
       value: publicListings(parsed.agents as MarketplaceListing[]),
-      at: Number(parsed.updatedAt),
+      // 완전하다고 적히지 않은 선반(이 필드 이전 파일 포함)은 신선도 0 으로 읽는다 —
+      // 화면은 즉시 그리되, 첫 요청에서 전체를 다시 걷는다.
+      at: parsed.complete === true ? Number(parsed.updatedAt) : 0,
     };
   } catch {
     return null;
@@ -259,6 +263,7 @@ function writeOwnerCloudShelfCache(workspaceId: string, agents: MarketplaceListi
       workspaceId,
       updatedAt: Date.now(),
       agents,
+      complete: true,
     } satisfies OwnerCloudShelfDiskCache)}\n`, { encoding: "utf8", mode: 0o600 });
     fs.renameSync(temporary, target);
     if (process.platform !== "win32") fs.chmodSync(target, 0o600);
@@ -360,9 +365,24 @@ function refreshMyAgentsShelf(
         getSessionCookieHeader() !== cookie
         || (workspaceId !== null && currentActor?.workspaceId !== workspaceId)
       ) return [];
+      const fetched = result.rows.filter((agent) => isPublicDesktopAgent(agent));
+      if (!result.complete) {
+        // 순회가 중간에 끊겼다. 받은 만큼은 보여 주되 이미 알던 뒤쪽 행을 지우지 않고,
+        // 지문·디스크·신선도에 "선반 전체"로 남기지 않는다 — 다음 요청이 다시 끝까지 걷는다.
+        // (예전에는 이 부분 결과가 디스크에 저장돼 재시작 뒤에도 100건만 보였고, 저장된
+        // 프로젝트 팀원이 "현재 목록에서 찾을 수 없음"이 됐다.)
+        const previous = _myAgentsCache?.value.cookie === cookie ? _myAgentsCache.value.agents : [];
+        const key = (agent: MarketplaceListing) => `${agent.entityKind ?? "agent"}:${agent.cloudId || agent.slug}`;
+        const seen = new Set(fetched.map(key));
+        const agents = [...fetched, ...previous.filter((agent) => !seen.has(key(agent)))];
+        _myAgentsShelfSnapshot = null;
+        _myAgentsShelfWalkedAt = 0;
+        _myAgentsCache = { value: { cookie, agents }, at: 0 };
+        return agents;
+      }
       _myAgentsShelfSnapshot = result.snapshot;
       if (!result.revalidatedOnly) _myAgentsShelfWalkedAt = Date.now();
-      const agents = result.rows.filter((agent) => isPublicDesktopAgent(agent));
+      const agents = fetched;
       _myAgentsCache = { value: { cookie, agents }, at: Date.now() };
       if (workspaceId) writeOwnerCloudShelfCache(workspaceId, agents);
       return agents;

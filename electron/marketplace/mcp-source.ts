@@ -89,6 +89,12 @@ export interface OwnerCloudShelfResult {
   snapshot: OwnerCloudShelfSnapshot;
   /** true면 첫 페이지만 부치고 끝났다는 뜻 — 나머지 페이지는 아예 요청하지 않았다. */
   revalidatedOnly: boolean;
+  /**
+   * 서버가 말한 total 까지 다 받았는가. false 인 결과는 선반의 일부일 뿐이라
+   * 캐시(메모리 지문·디스크)에 "선반 전체"로 남기면 안 된다 — 한 번의 일시 오류가
+   * 100건짜리 선반을 영구히 만든다(실측 2026-09-26 재현: 3쪽 오류 → 100건 → 지문 재검증이 100건 유지).
+   */
+  complete: boolean;
 }
 
 function ownerCloudPageFingerprint(rows: readonly MarketplaceListing[]): string {
@@ -1318,10 +1324,12 @@ export class McpSource implements MarketplaceSource {
       // `total` 과 첫 페이지의 (cloudId, revision) 지문이 있다. 둘 다 그대로면
       // 선반은 바뀌지 않았고, **나머지 5번은 부칠 이유가 없다**. 바뀐 경우에만
       // 끝까지 걷는다.
-      if (page === 0 && known && total !== null && known.total === total
-        && (!options.requireComplete || known.rows.length >= total)) {
+      // 지문 재검증은 알고 있던 선반이 **완전했을 때만** 쓴다. 예전에는 비엄격 호출이면
+      // 일부만 받은 선반도 첫 쪽 지문만 같으면 그대로 돌려줘, 한 번 끊긴 순회(100건)가
+      // 다음 전체 순회 때까지 선반 전체로 행세했다.
+      if (page === 0 && known && total !== null && known.total === total && known.rows.length >= total) {
         if (ownerCloudPageFingerprint(batch) === known.fingerprint) {
-          return { rows: known.rows, snapshot: known, revalidatedOnly: true };
+          return { rows: known.rows, snapshot: known, revalidatedOnly: true, complete: true };
         }
       }
       let added = 0;
@@ -1372,6 +1380,7 @@ export class McpSource implements MarketplaceSource {
         rows: normalized,
       },
       revalidatedOnly: false,
+      complete: complete || (total !== null && rows.length >= total),
     };
   }
 
