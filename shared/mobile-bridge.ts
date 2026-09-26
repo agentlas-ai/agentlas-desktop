@@ -2206,6 +2206,8 @@ export interface MobileBridgeMailDraftDto {
   bcc: string[];
   subject: string;
   text: string;
+  /** True only if the stored draft is larger than the bridge carries; the phone then must not save over it. */
+  textTruncated: boolean;
   updatedAt: string | null;
 }
 
@@ -2221,8 +2223,11 @@ export interface MobileBridgeMailThreadDto {
   schemaVersion: 1;
   ok: true;
   thread: MobileBridgeMailThreadSummaryDto;
+  /** Newest messages that fit the 2 MiB conversation budget, oldest first. */
   messages: MobileBridgeMailMessageDto[];
   drafts: MobileBridgeMailDraftDto[];
+  /** Older messages left out by the budget (read them on Desktop). */
+  olderOmitted: number;
 }
 
 export interface MobileBridgeMailDelegateDto {

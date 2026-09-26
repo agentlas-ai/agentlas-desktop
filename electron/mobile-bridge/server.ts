@@ -36,6 +36,7 @@ import {
   type MobileBridgeRequestReplayStore,
 } from "./replay";
 import { mobileBridgeJsonBytes } from "./sanitize";
+import { mobileBridgeMailReplayMayRerun } from "./mail-replay-policy";
 import {
   RELAY_PAIR_CODE_PLACEHOLDER,
   parseRelayPairRequestFrame,
@@ -1296,6 +1297,24 @@ export class AgentlasMobileBridgeServer {
     response: MobileBridgeReplayResponse,
   ): MobileBridgeReplayResponse {
     const result = response.ok ? response.result : null;
+    if (
+      result !== null &&
+      typeof result === "object" &&
+      !Array.isArray(result) &&
+      result.ok === false &&
+      typeof result.code === "string" &&
+      mobileBridgeMailReplayMayRerun(request.method, result.code)
+    ) {
+      // Undecided mail answer: never the command's final word (M1, M7).
+      if (!this.replayStore) return response;
+      try {
+        this.replayStore.release(deviceId, key, fingerprint);
+        return response;
+      } catch (error) {
+        this.onError(errorOf(error));
+        return this.completeReplay(deviceId, key, fingerprint, response, request.id);
+      }
+    }
     const acceptedNonReplayableBuild =
       request.method === "build.start" &&
       result !== null &&
