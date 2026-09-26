@@ -40,10 +40,22 @@ export interface AgentMailMailbox {
   aliases?: string[];
   addressChosen?: boolean;
   addressChosenAt?: string | null;
-  /** The server lets the owner pick the address now (once only). */
+  /** Legacy pick-once flag. PLAN-2 servers always send false. */
   canChooseAddress?: boolean;
   updatedAt?: string;
+  /** PLAN-2: native Agentlas address (permanent) or the owner's verified domain. */
+  identityKind?: AgentMailIdentityKind;
+  /** Native addresses are permanent (true). */
+  addressLocked?: boolean;
+  /** custom_domain: the Domain id the address lives on. */
+  domainId?: string | null;
+  /** Only a verified custom domain lets the address change (domains/:id/address). */
+  canChangeAddress?: boolean;
+  /** Save people this mailbox sends to as contacts (server default true). */
+  autoSaveContacts?: boolean;
 }
+
+export type AgentMailIdentityKind = "agentlas_native" | "custom_domain";
 
 /** Server constants carried in responses — never hardcoded on Desktop. */
 export interface AgentMailLimits {
@@ -59,6 +71,24 @@ export interface AgentMailLimits {
   signatureMaxChars?: number;
   displayNameMaxChars?: number;
   threadMaxMessages?: number;
+  suggestionsMax?: number;
+  a2aMaxAutonomousTurns?: number;
+  externalAutoSendsPerThreadPerHour?: number;
+  contactNoteMaxChars?: number;
+  contactOneNoteMaxChars?: number;
+  contactTagsMax?: number;
+  directoryPageMax?: number;
+  directoryQueryMinChars?: number;
+  card?: {
+    nameMaxChars?: number;
+    descriptionMaxChars?: number;
+    skillsMax?: number;
+    skillNameMaxChars?: number;
+    skillDescriptionMaxChars?: number;
+    skillTagsMax?: number;
+    languagesMax?: number;
+  };
+  domainsPerWorkspaceMax?: number;
 }
 
 export type AgentMailOrigin = "one" | "owner" | "automation";
@@ -104,6 +134,28 @@ export interface AgentMailMessageSummary {
   /** Auto-reply / bulk / list headers present (RFC 3834). Never auto-answered. */
   automated?: boolean;
   autoHeaders?: { autoSubmitted: string | null; precedence: string | null; listId: string | null };
+  automatedReason?: string | null;
+  /** PLAN-2: "internal" = delivered inside Agentlas (agent to agent). */
+  transport?: "ses" | "internal" | string;
+  /** Server-signed agent-to-agent envelope. Never present on mail that came over SMTP. */
+  a2a?: AgentMailA2AEnvelope | null;
+  /**
+   * Why the server would refuse an automatic answer to this inbound mail
+   * (null = allowed so far; the send is checked again).
+   */
+  autoReplyBlockedReason?: string | null;
+}
+
+/** P2.3 — filled by the server, never by a client or a model. */
+export interface AgentMailA2AEnvelope {
+  verified: boolean;
+  fromAddress: string;
+  conversationId: string;
+  turn: number;
+  autonomousTurns: number;
+  intent: "request" | "reply" | "final";
+  expectsReply: boolean;
+  cardVersion: number | null;
 }
 
 export interface AgentMailMessage extends AgentMailMessageSummary {
@@ -187,6 +239,10 @@ export interface AgentMailSendInput {
   idempotencyKey?: string;
   /** Files the owner attached in the compose sheet (bytes as base64; limits come from the server). */
   attachments?: AgentMailOutboundAttachment[];
+  /** A2A: the other agent should answer (server default: true for hand-written, false for auto replies). */
+  expectsReply?: boolean;
+  /** A2A: this closes the exchange (forces expectsReply false). */
+  final?: boolean;
 }
 
 export interface AgentMailOutboundAttachment {
@@ -202,6 +258,8 @@ export interface AgentMailSendReceipt {
   providerMessageId: string | null;
   errorCode: string | null;
   createdAt: string;
+  transport?: "ses" | "internal" | "mixed";
+  internalDeliveries?: Array<{ address: string; status: "delivered" | "rejected" }>;
 }
 
 export interface AgentMailSendResult {
@@ -234,8 +292,140 @@ export interface AgentMailMailboxPatch {
   signature?: string | null;
   inboundMode?: AgentMailInboundMode;
   senderRules?: AgentMailSenderRule[];
-  /** Pick-once address choice. */
-  localPart?: string;
+  autoSaveContacts?: boolean;
+}
+
+// ── PLAN-2: address, contacts, directory, custom domain (API.md "PLAN-2 API") ──
+
+export interface AgentMailAddressCheck {
+  localPart: string;
+  address: string;
+  available: boolean;
+  code: string | null;
+  reason?: string | null;
+  /** Deleted mailbox of this workspace: the only address that can come back. */
+  currentAddress?: string | null;
+}
+
+export interface AgentMailAddressSuggestion {
+  localPart: string;
+  address: string;
+}
+
+export type AgentMailContactKind = "person" | "agentlas_agent";
+
+export interface AgentMailAgentCardSkill {
+  id?: string;
+  name: string;
+  description?: string;
+  tags?: string[];
+}
+
+export interface AgentMailContact {
+  id: string;
+  address: string;
+  displayName: string | null;
+  kind: AgentMailContactKind;
+  /** Server-verified "Agentlas agent" badge. Never decided on Desktop. */
+  agentlasAgent: boolean;
+  source: "owner" | "one" | "interaction" | "directory" | string;
+  agent: null | {
+    listed: boolean;
+    cardVersion: number | null;
+    /** Written by the other party — plain text only. */
+    card: { name: string; description: string; skills: AgentMailAgentCardSkill[]; languages: string[] } | null;
+  };
+  ownerNote: string | null;
+  oneNote: string | null;
+  tags: string[];
+  lastInteractionAt: string | null;
+  interactionCount: number;
+  receivedCount?: number;
+  createdBy: "owner" | "one" | "system" | string;
+  updatedBy: "owner" | "one" | "system" | string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AgentMailContactsInput {
+  q?: string;
+  kind?: AgentMailContactKind;
+  cursor?: string | null;
+  limit?: number;
+}
+
+export interface AgentMailContactSaveInput {
+  /** Patch this contact (PATCH /contacts/:id). Without it: save by address (POST). */
+  id?: string | null;
+  address?: string;
+  displayName?: string | null;
+  ownerNote?: string | null;
+  tags?: string[];
+  expectedVersion?: number;
+  source?: "directory";
+}
+
+export interface AgentMailAgentCard {
+  address: string;
+  schema?: string;
+  name: string;
+  description: string;
+  skills: AgentMailAgentCardSkill[];
+  languages: string[];
+  acceptsUnsolicited: boolean;
+  version: number;
+  updatedAt: string;
+}
+
+export interface AgentMailAgentCardInput {
+  name: string;
+  description?: string;
+  skills?: AgentMailAgentCardSkill[];
+  languages?: string[];
+  acceptsUnsolicited?: boolean;
+}
+
+export interface AgentMailDirectoryEntry {
+  listed: boolean;
+  listedAt: string | null;
+  card: AgentMailAgentCard | null;
+}
+
+export interface AgentMailDirectoryLookup {
+  address: string;
+  verified: true;
+  listed: boolean;
+  card: AgentMailAgentCard | null;
+}
+
+export type AgentMailDomainStatus = "pending" | "verified" | "failed" | "unverified";
+
+export interface AgentMailDomainRecord {
+  type: "CNAME" | "MX" | "TXT" | string;
+  host: string;
+  value: string;
+  required: boolean;
+  purpose: "dkim" | "receive" | "mail_from" | "dmarc" | string;
+}
+
+export interface AgentMailDomain {
+  id: string;
+  domain: string;
+  status: AgentMailDomainStatus;
+  dkimStatus: string | null;
+  verifiedForSending: boolean;
+  mx: { expected: string; found: string[]; ok: boolean; checkedAt: string | null };
+  dmarcFound: boolean;
+  mailFrom: { domain: string | null; status: string | null };
+  records: AgentMailDomainRecord[];
+  warnings: string[];
+  createdAt: string;
+  verifiedAt: string | null;
+  nextCheckAt: string | null;
+  dkimDeadline: string | null;
+  /** Ask again after this long (null = nothing pending). */
+  pollAfterMs: number | null;
 }
 
 export interface AgentMailThreadsInput {
@@ -263,6 +453,10 @@ export interface AgentMailChangedEvent {
   changeSeq: number | null;
   /** Ids of newly received inbound messages in this batch (for notifications). */
   receivedMessageIds: string[];
+  /** PLAN-2: contacts were saved/removed in this batch (contacts view re-reads). */
+  contactsChanged?: boolean;
+  /** PLAN-2: a custom domain or the mail identity changed (settings re-read). */
+  identityChanged?: boolean;
 }
 
 /** "One에게 맡기기" — Main creates the One conversation and returns it. */
@@ -275,9 +469,26 @@ export interface AgentMailDelegateInput {
 
 export interface AgentMailIpc {
   status: () => Promise<AgentMailStatus>;
-  issue: (input?: { displayName?: string; localPart?: string }) => Promise<AgentMailResult<{ mailbox: AgentMailMailbox; created: boolean; entitlement: AgentMailEntitlement | null }>>;
+  /** New mailbox: localPart is required (native addresses are permanent). A deleted one comes back without it. */
+  issue: (input?: { displayName?: string; localPart?: string }) => Promise<AgentMailResult<{ mailbox: AgentMailMailbox; created: boolean; revived: boolean; entitlement: AgentMailEntitlement | null }>>;
   updateMailbox: (patch: AgentMailMailboxPatch) => Promise<AgentMailResult<{ mailbox: AgentMailMailbox; entitlement: AgentMailEntitlement | null }>>;
-  checkAddress: (localPart: string) => Promise<AgentMailResult<{ localPart: string; address: string; available: boolean; code: string | null }>>;
+  checkAddress: (localPart: string) => Promise<AgentMailResult<AgentMailAddressCheck>>;
+  suggestAddresses: (name: string) => Promise<AgentMailResult<{ base: string | null; suggestions: AgentMailAddressSuggestion[] }>>;
+  contacts: (input?: AgentMailContactsInput) => Promise<AgentMailResult<{ contacts: AgentMailContact[]; nextCursor: string | null }>>;
+  contact: (id: string) => Promise<AgentMailResult<{ contact: AgentMailContact }>>;
+  /** Owner saves by address (create / update / bring back) or patches by id. */
+  saveContact: (input: AgentMailContactSaveInput) => Promise<AgentMailResult<{ contact: AgentMailContact; created: boolean }>>;
+  removeContact: (id: string) => Promise<AgentMailResult<{ deleted: true }>>;
+  directoryMe: () => Promise<AgentMailResult<AgentMailDirectoryEntry>>;
+  saveDirectoryMe: (input: { listed?: boolean; card?: AgentMailAgentCardInput }) => Promise<AgentMailResult<AgentMailDirectoryEntry>>;
+  directorySearch: (input: { q?: string; skill?: string; lang?: string; cursor?: string | null }) => Promise<AgentMailResult<{ results: AgentMailAgentCard[]; nextCursor: string | null }>>;
+  directoryLookup: (address: string) => Promise<AgentMailResult<{ agentlas: AgentMailDirectoryLookup | null }>>;
+  domains: () => Promise<AgentMailResult<{ domains: AgentMailDomain[] }>>;
+  addDomain: (domain: string) => Promise<AgentMailResult<{ domain: AgentMailDomain; created: boolean }>>;
+  domain: (input: { id: string; check?: boolean }) => Promise<AgentMailResult<{ domain: AgentMailDomain }>>;
+  restartDomain: (id: string) => Promise<AgentMailResult<{ domain: AgentMailDomain }>>;
+  setDomainAddress: (input: { id: string; localPart: string; displayName?: string }) => Promise<AgentMailResult<{ mailbox: AgentMailMailbox; created: boolean; entitlement: AgentMailEntitlement | null }>>;
+  removeDomain: (id: string) => Promise<AgentMailResult<{ deleted: true }>>;
   list: (input?: { cursor?: string | null; limit?: number; direction?: "inbound" | "outbound" }) => Promise<AgentMailResult<{ messages: AgentMailMessageSummary[]; nextCursor: string | null }>>;
   get: (id: string) => Promise<AgentMailResult<{ message: AgentMailMessage }>>;
   send: (input: AgentMailSendInput) => Promise<AgentMailResult<AgentMailSendResult>>;
@@ -302,6 +513,21 @@ export const AGENT_MAIL_IPC_CHANNELS = {
   issue: "agentMail:issue",
   updateMailbox: "agentMail:updateMailbox",
   checkAddress: "agentMail:checkAddress",
+  suggestAddresses: "agentMail:suggestAddresses",
+  contacts: "agentMail:contacts",
+  contact: "agentMail:contact",
+  saveContact: "agentMail:saveContact",
+  removeContact: "agentMail:removeContact",
+  directoryMe: "agentMail:directoryMe",
+  saveDirectoryMe: "agentMail:saveDirectoryMe",
+  directorySearch: "agentMail:directorySearch",
+  directoryLookup: "agentMail:directoryLookup",
+  domains: "agentMail:domains",
+  addDomain: "agentMail:addDomain",
+  domain: "agentMail:domain",
+  restartDomain: "agentMail:restartDomain",
+  setDomainAddress: "agentMail:setDomainAddress",
+  removeDomain: "agentMail:removeDomain",
   list: "agentMail:list",
   get: "agentMail:get",
   send: "agentMail:send",

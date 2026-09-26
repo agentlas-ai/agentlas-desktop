@@ -197,6 +197,8 @@ export interface McpConfigBuildOptions {
   toolGate?: {
     /** Main-authored Plan ceiling, independent of per-tool approval grants. */
     planMode?: true;
+    /** Main-only: One's turn that reports a teammate result — no one-team tools (EDGE-CASES X4). */
+    oneTeamReport?: true;
     runtime: string;
     sessionKey: string;
     permission?: "read" | "write" | "full";
@@ -819,6 +821,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       continue;
     }
     if (s.catalogId === "one-team" && (!callerChatId || opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true
+      || opts?.toolGate?.oneTeamReport === true
       || !oneTeamDispatchAllowedFor(callerChatId) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
       // One's own conversation only (depth 1): a teammate chat, a session One
       // opened, Work chats and dry runs never see the team dispatch tools.

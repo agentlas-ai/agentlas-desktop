@@ -5,9 +5,10 @@
 // The account block is a slot: today it holds One's own Agentlas address; a
 // connected external account would be a second entry here.
 import type { ReactNode } from "react";
-import { IconArchive, IconClock, IconFileText, IconInbox, IconPlus, IconSend } from "@/components/Icon";
+import { IconArchive, IconClock, IconFileText, IconInbox, IconPlus, IconSend, IconUsers } from "@/components/Icon";
 import { tFor, type Locale } from "@/lib/i18n";
 import { ONE_MAIL_VIEWS, type OneMailState, type OneMailView } from "./useOneMail";
+import { mail2 } from "./mailCopy";
 import styles from "./OneMail.module.css";
 
 export const ONE_MAIL_VIEW_KEYS = {
@@ -53,7 +54,7 @@ export function OneMailRail({ mail, locale }: { mail: OneMailState; locale: Loca
     <nav className={styles.nav} aria-label={tFor(locale, "one.mail.nav_aria")} data-one-mail-rail>
       <div className={styles.account} aria-label={tFor(locale, "one.mail.account_aria")} data-one-mail-account="agentlas">
         <span className={styles.accountMark} aria-hidden="true">@</span>
-        <span className={styles.accountAddress} title={address ?? undefined}>{address ?? tFor(locale, "one.mail.tab_disabled_aria")}</span>
+        <span className={styles.accountAddress} title={address ?? undefined}>{address ?? mail2(locale).emptyNoAddress}</span>
       </div>
       {address && canSend && (
         <button type="button" className={styles.composeButton} onClick={() => mail.openCompose()} data-one-mail-compose-button>
@@ -64,7 +65,7 @@ export function OneMailRail({ mail, locale }: { mail: OneMailState; locale: Loca
         <ul className={styles.navList}>
           {views.map((view) => {
             const count = counts[view];
-            const active = mail.view === view && !mail.query.trim();
+            const active = mail.pane === "mail" && mail.view === view && !mail.query.trim();
             return (
               <li key={view}>
                 <button
@@ -82,6 +83,21 @@ export function OneMailRail({ mail, locale }: { mail: OneMailState; locale: Loca
               </li>
             );
           })}
+          {!mail.legacy && (
+            <li>
+              <button
+                type="button"
+                className={styles.navItem}
+                data-active={mail.pane === "contacts" ? "true" : "false"}
+                aria-current={mail.pane === "contacts" ? "page" : undefined}
+                data-one-mail-nav="contacts"
+                onClick={() => mail.openContacts()}
+              >
+                <span className={styles.navIcon} aria-hidden="true"><IconUsers size={15} /></span>
+                <span className={styles.navLabel}>{mail2(locale).contacts}</span>
+              </button>
+            </li>
+          )}
         </ul>
       )}
     </nav>

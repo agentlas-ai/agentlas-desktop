@@ -7456,12 +7456,9 @@ export function OneShell() {
                 type="button"
                 role="tab"
                 aria-selected={railMode === "mail"}
-                aria-label={!mail.available
-                  ? `${tFor(appLocale, "one.mail.tab")} · ${tFor(appLocale, "one.mail.tab_disabled_aria")}`
-                  : mail.unread && mail.unread.inbox > 0 ? tFor(appLocale, "one.mail.tab_unread_aria", { count: mail.unread.inbox }) : undefined}
+                aria-label={mail.available && mail.unread && mail.unread.inbox > 0 ? tFor(appLocale, "one.mail.tab_unread_aria", { count: mail.unread.inbox }) : undefined}
                 data-active={railMode === "mail" ? "true" : "false"}
-                data-disabled={mail.available ? undefined : "true"}
-                data-one-mail-tab
+                data-one-mail-tab={mail.available ? "active" : "setup"}
                 onClick={() => setRailMode("mail")}
               ><span className={styles.railTabLabel}>{tFor(appLocale, "one.mail.tab")}{mail.unread && mail.unread.inbox > 0 && <span className={styles.railTabCount} aria-hidden="true">{mail.unread.inbox > 99 ? "99+" : mail.unread.inbox}</span>}</span></button>}
             </div>

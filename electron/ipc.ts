@@ -1473,6 +1473,7 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     oneAttachmentRedactions: _oneAttachmentRedactions,
     preflightSubmissionId: _preflightSubmissionId,
     forceBrowserCredentialRefresh: _forceBrowserCredentialRefresh,
+    oneTeamReportTurn: _oneTeamReportTurn,
     ...rendererFields
   } = req as McpInvocationRequest & {
     oneTeamExecutionPolicy?: unknown;

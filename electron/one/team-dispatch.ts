@@ -405,6 +405,8 @@ function reportToOne(dispatch: OneDispatchRow): void {
     permissions: "read" as const,
     taskIntent: "conversation" as const,
     oneMode: true,
+    // X4: the report turn gets no one-team tools (it must not hand work on again).
+    oneTeamReportTurn: true as const,
   };
   try {
     // steer() starts right away when One is idle and queues after the current

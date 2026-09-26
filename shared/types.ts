@@ -4498,6 +4498,12 @@ export interface ToolFactoryMcpInstallResult {
 }
 
 export interface McpInvocationRequest {
+  /**
+   * Main-only (team-dispatch reportToOne): this One turn reports a teammate's
+   * result. It runs without the one-team tools so a report cannot hand work on
+   * again (EDGE-CASES T1/X4). Renderer input never carries it (ipc strips it).
+   */
+  oneTeamReportTurn?: true;
   /** 렌더러가 미리 생성한 실행 id — invoke.run 왕복 전에 이벤트 채널을 구독하기 위함
    *  (subscribe-before-trigger). 없으면 main이 randomUUID로 생성한다(하위호환). */
   runId?: string;

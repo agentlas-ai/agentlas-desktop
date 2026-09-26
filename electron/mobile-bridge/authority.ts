@@ -3919,23 +3919,83 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         return asJsonValue(await this.agentMail.removeDraft(requiredMailId(params, "draftId")), request.method);
       }
       case "mail.updateSettings": {
-        const params = guardedParams(request, ["displayName", "signature", "inboundMode", "localPart"]);
+        // PLAN-2: the address is permanent; it is chosen once through mail.create.
+        const params = guardedParams(request, ["displayName", "signature", "inboundMode", "autoSaveContacts"]);
         const displayName = optionalText(params, "displayName", MOBILE_BRIDGE_MAIL_LIMITS.displayName);
         const signature = optionalText(params, "signature", MOBILE_BRIDGE_MAIL_LIMITS.signature);
         const inboundMode = optionalEnum(params, "inboundMode", MOBILE_BRIDGE_MAIL_INBOUND_MODES);
-        const localPart = optionalIdentifier(params, "localPart", 64);
-        if (localPart !== undefined && !MOBILE_BRIDGE_MAIL_LOCAL_PART_RE.test(localPart)) {
-          throw new TypeError("localPart must be lowercase letters, digits, dots or hyphens");
-        }
-        if (displayName === undefined && signature === undefined && inboundMode === undefined && localPart === undefined) {
+        const autoSaveContacts = params.autoSaveContacts === undefined ? undefined : requiredBoolean(params, "autoSaveContacts");
+        if (displayName === undefined && signature === undefined && inboundMode === undefined && autoSaveContacts === undefined) {
           throw new TypeError("mail.updateSettings needs at least one field");
         }
         return asJsonValue(await this.agentMail.updateSettings({
           ...(displayName !== undefined ? { displayName: displayName.trim() } : {}),
           ...(signature !== undefined ? { signature } : {}),
           ...(inboundMode !== undefined ? { inboundMode } : {}),
-          ...(localPart !== undefined ? { localPart } : {}),
+          ...(autoSaveContacts !== undefined ? { autoSaveContacts } : {}),
         }), request.method);
+      }
+      case "mail.create": {
+        const params = guardedParams(request, ["localPart", "confirmLocalPart", "displayName"]);
+        const localPart = optionalIdentifier(params, "localPart", 64);
+        const confirm = optionalIdentifier(params, "confirmLocalPart", 64);
+        if (localPart !== undefined || confirm !== undefined) {
+          if (localPart === undefined || !MOBILE_BRIDGE_MAIL_LOCAL_PART_RE.test(localPart)) {
+            throw new TypeError("localPart must be lowercase letters, digits, dots or hyphens");
+          }
+          if (confirm !== localPart) throw new TypeError("confirmLocalPart must repeat localPart exactly");
+        }
+        const displayName = optionalText(params, "displayName", MOBILE_BRIDGE_MAIL_LIMITS.displayName)?.trim();
+        return asJsonValue(await this.agentMail.create({
+          ...(localPart ? { localPart } : {}),
+          ...(displayName ? { displayName } : {}),
+        }), request.method);
+      }
+      case "mail.contacts": {
+        const params = guardedParams(request, ["q", "kind", "cursor"]);
+        const q = optionalText(params, "q", MOBILE_BRIDGE_MAIL_LIMITS.query)?.trim();
+        const kind = optionalEnum(params, "kind", ["person", "agentlas_agent"] as const);
+        const cursor = optionalIdentifier(params, "cursor", 512);
+        return asJsonValue(await this.agentMail.contacts({
+          ...(q ? { q } : {}),
+          ...(kind ? { kind } : {}),
+          ...(cursor ? { cursor } : {}),
+        }), request.method);
+      }
+      case "mail.contact": {
+        const params = guardedParams(request, ["contactId"]);
+        return asJsonValue(await this.agentMail.contact(requiredMailId(params, "contactId")), request.method);
+      }
+      case "mail.contact.save": {
+        const params = guardedParams(request, ["contactId", "address", "displayName", "ownerNote", "expectedVersion"]);
+        const contactId = optionalMailId(params, "contactId");
+        const address = params.address === undefined ? undefined : mailAddresses({ address: [params.address] }, "address")[0];
+        if (!contactId && !address) throw new TypeError("mail.contact.save needs contactId or address");
+        const displayName = optionalText(params, "displayName", MOBILE_BRIDGE_MAIL_LIMITS.contactName);
+        const ownerNote = optionalText(params, "ownerNote", MOBILE_BRIDGE_MAIL_LIMITS.contactNote);
+        const expectedVersion = optionalInteger(params, "expectedVersion", 0, Number.MAX_SAFE_INTEGER);
+        return asJsonValue(await this.agentMail.saveContact({
+          ...(contactId ? { contactId } : {}),
+          ...(address ? { address } : {}),
+          ...(displayName !== undefined ? { displayName } : {}),
+          ...(ownerNote !== undefined ? { ownerNote } : {}),
+          ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+        }), request.method);
+      }
+      case "mail.contact.delete": {
+        const params = guardedParams(request, ["contactId"]);
+        return asJsonValue(await this.agentMail.removeContact(requiredMailId(params, "contactId")), request.method);
+      }
+      case "mail.directory.search": {
+        const params = guardedParams(request, ["q", "skill"]);
+        const q = optionalText(params, "q", MOBILE_BRIDGE_MAIL_LIMITS.query)?.trim() ?? "";
+        if (!q) throw new TypeError("q is required");
+        const skill = optionalText(params, "skill", 80)?.trim();
+        return asJsonValue(await this.agentMail.directorySearch({ q, ...(skill ? { skill } : {}) }), request.method);
+      }
+      case "mail.identity": {
+        noParams(request);
+        return asJsonValue(await this.agentMail.identity(), request.method);
       }
       case "mail.delegate": {
         const params = guardedParams(request, ["threadId", "instruction", "locale"]);

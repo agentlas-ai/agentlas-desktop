@@ -48,7 +48,7 @@ import {
   type FirstRunStep,
 } from "@/lib/first-run-state";
 import { setOnePersonaName } from "@/lib/one-persona-name";
-import { mailErrorText } from "@/components/one/mail/mailErrorText";
+import { OneMailIdentityPicker } from "@/components/one/mail/OneMailIdentityPicker";
 import styles from "./FirstRun.module.css";
 
 const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
@@ -200,8 +200,8 @@ function makeCopy(ko: boolean, name: string) {
     prefHint: "원칙은 적은 그대로만 지켜요. 언제든 프로필에서 고칠 수 있어요.",
     mailTitle: "에이전트에게 메일함을 줄까요?", mailSub: "에이전트만 쓰는 고유한 메일 주소예요.",
     mailName: "에이전트 전용 메일", mailSoon: "도입 예정", mailSoonBody: "Pro 이상 요금제 혜택으로 준비하고 있어요. 준비되면 설정에서 켤 수 있어요.",
-    mailIssued: "발급됨", mailPending: "주소 발급 전", mailPendingBody: "요금제에 포함돼 있어요. 주소를 만들면 여기에 보여요.",
-    mailCreate: "메일 주소 만들기", mailCreating: "만드는 중…", mailPreparing: "준비 중", mailPreparingBody: "주소를 준비하고 있어요. 준비가 끝나면 설정에서 쓸 수 있어요.",
+    mailIssued: "발급됨", mailPending: "주소 발급 전", mailPendingBody: "요금제에 포함돼 있어요. 아래에서 One 의 주소를 정해 주세요.",
+    mailPreparing: "준비 중", mailPreparingBody: "주소를 준비하고 있어요. 준비가 끝나면 설정에서 쓸 수 있어요.",
     mailPlanOnly: "Pro 이상 요금제에서 쓸 수 있어요.", mailSeePlans: "Free · Pro 보기",
     mailQuota: (left: string, limit: string) => `이번 달 보낼 수 있는 받는 사람 ${left}/${limit}명 (메일 1통을 3명에게 보내면 3명으로 셈)`,
     mailHint: "실제 주소는 서버에서 발급된 뒤에만 보여 드려요.",
@@ -253,8 +253,8 @@ function makeCopy(ko: boolean, name: string) {
     prefHint: "Principles are followed exactly as written. Edit them anytime in the profile.",
     mailTitle: "Give your agent a mailbox?", mailSub: "A unique email address only your agent uses.",
     mailName: "Agent mailbox", mailSoon: "Coming soon", mailSoonBody: "Planned as a Pro-and-above benefit. You'll be able to turn it on in Settings.",
-    mailIssued: "Issued", mailPending: "Not issued yet", mailPendingBody: "Included in your plan. Create the address and it appears here.",
-    mailCreate: "Create mail address", mailCreating: "Creating…", mailPreparing: "Preparing", mailPreparingBody: "The address is being prepared. Use it from Settings once it's ready.",
+    mailIssued: "Issued", mailPending: "Not issued yet", mailPendingBody: "Included in your plan. Choose One's address below.",
+    mailPreparing: "Preparing", mailPreparingBody: "The address is being prepared. Use it from Settings once it's ready.",
     mailPlanOnly: "Available on Pro and above.", mailSeePlans: "See Free · Pro",
     mailQuota: (left: string, limit: string) => `Recipients left this month: ${left}/${limit} (one email to 3 people counts as 3)`,
     mailHint: "An address is shown only after the server issues it.",
@@ -560,8 +560,6 @@ export function FirstRunOnboarding({
   // The server owns entitlement and address (agentMail.status). Nothing is decided here,
   // and "issued" is shown only after status() itself returns the address.
   const [mail, setMail] = useState<AgentMailStatus | null>(null);
-  const [mailBusy, setMailBusy] = useState(false);
-  const [mailError, setMailError] = useState<string | null>(null);
   const loadMail = useCallback(async () => {
     const next = await api?.agentMail?.status().catch(() => null);
     setMail(next ?? { ok: false, code: "unavailable", message: "", status: null });
@@ -573,19 +571,8 @@ export function FirstRunOnboarding({
   const mailbox = mailOk?.mailbox ?? null;
   const mailAddress = mailbox?.address ?? null;
   const mailActive = mailbox?.status === "active" && Boolean(mailAddress);
-  const createMail = async () => {
-    if (!api?.agentMail || mailBusy) return;
-    setMailBusy(true); setMailError(null);
-    try {
-      const res = await api.agentMail.issue({ displayName });
-      if (!res.ok) { setMailError(mailErrorText(ko ? "ko" : "en", res)); return; }
-      await loadMail();
-    } catch (err) {
-      setMailError(mailErrorText(ko ? "ko" : "en", { code: err instanceof Error && err.name === "AbortError" ? "timeout" : "network" }));
-    } finally {
-      setMailBusy(false);
-    }
-  };
+  // PLAN-2 4.1: the address is chosen here, once (OneMailIdentityPicker creates it
+  // with the chosen local part and says it is permanent). No random address.
 
   const finish = () => {
     const withMail = recordStep(recordRef.current, "mailbox", mailActive ? "done" : "skipped");
@@ -788,16 +775,19 @@ export function FirstRunOnboarding({
                   </span>
                 </div>
                 {mailAddress && <div className={styles.mailAddress}>{mailAddress}</div>}
-                {mailEntitlement && !mailbox && mailEntitlement.addressLimit > 0 && (
-                  <button type="button" className={`${styles.primary} ${styles.inlineAction}`} disabled={mailBusy} onClick={() => void createMail()}>
-                    {mailBusy ? copy.mailCreating : copy.mailCreate}
-                  </button>
+                {mailEntitlement && !mailActive && mailEntitlement.addressLimit > 0 && (
+                  <OneMailIdentityPicker
+                    locale={ko ? "ko" : "en"}
+                    oneName={displayName}
+                    limits={mailOk?.limits ?? null}
+                    onCreated={() => void loadMail()}
+                    compact
+                  />
                 )}
                 {mailEntitlement && !mailbox && mailEntitlement.addressLimit <= 0 && (
                   <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} onClick={() => setPlansOpen(true)}>{copy.mailSeePlans}</button>
                 )}
               </div>
-              {mailError && <p className={styles.error} role="alert">{mailError}</p>}
               <p className={styles.hint}>{copy.mailHint}</p>
             </>
           )}

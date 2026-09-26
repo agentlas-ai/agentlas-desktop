@@ -1,9 +1,24 @@
 import path from "node:path";
 import type { IpcMain } from "electron";
-import { AGENT_MAIL_IPC_CHANNELS as CH, type AgentMailDraftInput, type AgentMailMailboxPatch, type AgentMailSendInput, type AgentMailThreadsInput } from "../../shared/agent-mail";
+import { AGENT_MAIL_IPC_CHANNELS as CH, type AgentMailAgentCardInput, type AgentMailContactSaveInput, type AgentMailContactsInput, type AgentMailDraftInput, type AgentMailMailboxPatch, type AgentMailSendInput, type AgentMailThreadsInput } from "../../shared/agent-mail";
 import {
+  agentMailAddDomain,
   agentMailArchiveThread,
   agentMailCheckAddress,
+  agentMailContact,
+  agentMailContacts,
+  agentMailDirectoryLookup,
+  agentMailDirectoryMe,
+  agentMailDirectorySearch,
+  agentMailDomain,
+  agentMailDomains,
+  agentMailRemoveContact,
+  agentMailRemoveDomain,
+  agentMailRestartDomain,
+  agentMailSaveContact,
+  agentMailSaveDirectoryMe,
+  agentMailSetDomainAddress,
+  agentMailSuggestAddresses,
   agentMailDrafts,
   agentMailGet,
   agentMailIssue,
@@ -43,8 +58,38 @@ function afterChange<T extends { ok: boolean }>(result: T): T {
 export function registerAgentMailIpc(ipc: Pick<IpcMain, "handle">): void {
   ipc.handle(CH.status, () => agentMailStatus());
   ipc.handle(CH.issue, async (_e, input: unknown) => afterChange(await agentMailIssue(obj<{ displayName?: string; localPart?: string }>(input))));
-  ipc.handle(CH.updateMailbox, (_e, patch: unknown) => agentMailUpdateMailbox(obj<AgentMailMailboxPatch>(patch)));
+  ipc.handle(CH.updateMailbox, (_e, patch: unknown) => {
+    // The address is permanent (P2.2): an old renderer's localPart is not forwarded.
+    const { localPart: _localPart, ...rest } = obj<AgentMailMailboxPatch & { localPart?: unknown }>(patch);
+    return agentMailUpdateMailbox(rest);
+  });
   ipc.handle(CH.checkAddress, (_e, localPart: unknown) => agentMailCheckAddress(String(localPart ?? "")));
+  ipc.handle(CH.suggestAddresses, (_e, name: unknown) => agentMailSuggestAddresses(String(name ?? "")));
+  // Contacts: the owner's own edits (actor owner). One's edits come through the MCP control server.
+  ipc.handle(CH.contacts, (_e, input: unknown) => agentMailContacts(obj<AgentMailContactsInput>(input)));
+  ipc.handle(CH.contact, (_e, id: unknown) => agentMailContact(String(id ?? "")));
+  ipc.handle(CH.saveContact, async (_e, input: unknown) => {
+    // The renderer can never write One's note: only the owner fields pass.
+    const { oneNote: _oneNote, ...owner } = obj<AgentMailContactSaveInput & { oneNote?: unknown }>(input);
+    return afterChange(await agentMailSaveContact(owner, "owner"));
+  });
+  ipc.handle(CH.removeContact, async (_e, id: unknown) => afterChange(await agentMailRemoveContact(String(id ?? ""), "owner")));
+  ipc.handle(CH.directoryMe, () => agentMailDirectoryMe());
+  ipc.handle(CH.saveDirectoryMe, async (_e, input: unknown) => afterChange(await agentMailSaveDirectoryMe(obj<{ listed?: boolean; card?: AgentMailAgentCardInput }>(input))));
+  ipc.handle(CH.directorySearch, (_e, input: unknown) => agentMailDirectorySearch(obj<{ q?: string; skill?: string; lang?: string; cursor?: string | null }>(input)));
+  ipc.handle(CH.directoryLookup, (_e, address: unknown) => agentMailDirectoryLookup(String(address ?? "")));
+  ipc.handle(CH.domains, () => agentMailDomains());
+  ipc.handle(CH.addDomain, async (_e, domain: unknown) => afterChange(await agentMailAddDomain(String(domain ?? ""))));
+  ipc.handle(CH.domain, (_e, input: unknown) => {
+    const { id, check } = obj<{ id?: string; check?: boolean }>(input);
+    return agentMailDomain(String(id ?? ""), check === true);
+  });
+  ipc.handle(CH.restartDomain, async (_e, id: unknown) => afterChange(await agentMailRestartDomain(String(id ?? ""))));
+  ipc.handle(CH.setDomainAddress, async (_e, input: unknown) => {
+    const { id, localPart, displayName } = obj<{ id?: string; localPart?: string; displayName?: string }>(input);
+    return afterChange(await agentMailSetDomainAddress({ id: String(id ?? ""), localPart: String(localPart ?? ""), ...(typeof displayName === "string" ? { displayName } : {}) }));
+  });
+  ipc.handle(CH.removeDomain, async (_e, id: unknown) => afterChange(await agentMailRemoveDomain(String(id ?? ""))));
   ipc.handle(CH.list, (_e, input: unknown) => agentMailList(obj<Parameters<typeof agentMailList>[0]>(input)));
   ipc.handle(CH.get, (_e, id: unknown) => agentMailGet(String(id ?? "")));
   ipc.handle(CH.send, async (_e, input: unknown) => afterChange(await agentMailSend(obj<AgentMailSendInput>(input), { origin: "owner" })));

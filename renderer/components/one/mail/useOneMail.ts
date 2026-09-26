@@ -39,6 +39,9 @@ export interface OneMailComposeSeed {
 
 export type OneMailSelection = { kind: "thread"; id: string } | null;
 
+/** Centre of the mail tab: the mailbox or the contacts (address book) view. */
+export type OneMailPane = "mail" | "contacts";
+
 export interface OneMailCompose {
   seed: OneMailComposeSeed;
   /** One compose session = one idempotency key (two clicks on Send = one email). */
@@ -88,6 +91,12 @@ export interface OneMailState {
   archive: (threadId: string, archived: boolean) => Promise<AgentMailError | null>;
   removeThread: (threadId: string) => Promise<AgentMailError | null>;
   removeDraft: (draftId: string) => Promise<AgentMailError | null>;
+  pane: OneMailPane;
+  openContacts: () => void;
+  /** Bumped when Main says contacts changed (the contacts view re-reads). */
+  contactsNonce: number;
+  /** Addresses the server verified as Agentlas agents (from contacts) — for list badges. */
+  agentAddresses: ReadonlySet<string>;
   compose: OneMailCompose | null;
   openCompose: (seed?: Partial<OneMailComposeSeed>) => void;
   closeCompose: () => void;
@@ -192,6 +201,9 @@ export function useOneMail(): OneMailState {
   const [listError, setListError] = useState<{ code: string } | null>(null);
   const [selection, setSelection] = useState<OneMailSelection>(null);
   const [compose, setCompose] = useState<OneMailCompose | null>(null);
+  const [pane, setPane] = useState<OneMailPane>("mail");
+  const [contactsNonce, setContactsNonce] = useState(0);
+  const [agentAddresses, setAgentAddresses] = useState<ReadonlySet<string>>(new Set());
   const selectionRef = useRef<OneMailSelection>(null);
   selectionRef.current = selection;
   const [detail, setDetail] = useState<AgentMailThreadDetail | null>(null);
@@ -239,11 +251,14 @@ export function useOneMail(): OneMailState {
         setDetail(null);
         setCompose(null);
         setChecked(new Set());
+        setAgentAddresses(new Set());
+        setPane("mail");
         void refreshStatus();
         return;
       }
       if (event.unread) setUnread(event.unread);
-      if (event.reason === "mailbox") void refreshStatus();
+      if (event.reason === "mailbox" || event.identityChanged) void refreshStatus();
+      if (event.contactsChanged || event.receivedMessageIds.length) setContactsNonce((n) => n + 1);
       setListNonce((n) => n + 1);
       const current = selectionRef.current;
       if (current?.kind === "thread" && (event.threadIds.includes(current.id) || event.deletedThreadIds.includes(current.id))) {
@@ -309,6 +324,18 @@ export function useOneMail(): OneMailState {
       setNextCursor(flat.nextCursor);
     })();
   }, [api, available, view, query, listNonce, pageCursor]);
+
+  // Agentlas-agent badge in the list: the server decides kind=agentlas_agent on
+  // contacts; the list only matches addresses against that answer.
+  useEffect(() => {
+    if (!api?.contacts || !available) return;
+    let alive = true;
+    void api.contacts({ kind: "agentlas_agent", limit: limits?.pageSizeMax ?? undefined }).then((res) => {
+      if (!alive || !res.ok) return;
+      setAgentAddresses(new Set(res.contacts.filter((contact) => contact.agentlasAgent).map((contact) => contact.address.toLowerCase())));
+    }).catch(() => undefined);
+    return () => { alive = false; };
+  }, [api, available, contactsNonce, limits?.pageSizeMax]);
 
   // Drafts count for the nav (first page only; unknown when there are more pages).
   useEffect(() => {
@@ -503,10 +530,16 @@ export function useOneMail(): OneMailState {
     setDrafts([]);
     resetPages();
     setSelection(null);
+    setPane("mail");
     setViewState(next);
   }, [resetPages]);
+  const openContacts = useCallback(() => {
+    setSelection(null);
+    setPane("contacts");
+  }, []);
   const setQuery = useCallback((next: string) => {
     resetPages();
+    setPane("mail");
     setQueryState(next);
   }, [resetPages]);
 
@@ -523,6 +556,10 @@ export function useOneMail(): OneMailState {
     setView,
     query,
     setQuery,
+    pane,
+    openContacts,
+    contactsNonce,
+    agentAddresses,
     threads,
     drafts,
     listLoading,
@@ -538,7 +575,7 @@ export function useOneMail(): OneMailState {
     bulk,
     draftCount,
     selection,
-    select: setSelection,
+    select: (next: OneMailSelection) => { if (next) setPane("mail"); setSelection(next); },
     detail,
     detailLoading,
     detailError,

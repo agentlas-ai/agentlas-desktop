@@ -23,9 +23,11 @@ import {
   IconTrash,
 } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
+import { openPricing } from "@/components/UpgradeCta";
 import { mailErrorText } from "./mailErrorText";
 import { tFor, type Locale } from "@/lib/i18n";
 import {
+  agentMailBareAddress,
   agentMailDisplayName,
   type AgentMailDraft,
   type AgentMailError,
@@ -37,6 +39,8 @@ import { OneMailMenu, type OneMailMenuItem } from "./OneMailMenu";
 import { ONE_MAIL_VIEW_KEYS, oneMailTime } from "./OneMailRail";
 import { OneMailComposeSheet, uniqueNames } from "./OneMailCompose";
 import { OneMailSettings } from "./OneMailSettings";
+import { AgentBadge, OneMailContacts } from "./OneMailContacts";
+import { mail2 } from "./mailCopy";
 import type { OneMailState } from "./useOneMail";
 import styles from "./OneMail.module.css";
 
@@ -158,6 +162,8 @@ export function OneMailWorkspace({
       <div className={`${styles.dragStrip} titlebar-drag`} aria-hidden="true" />
       {!mail.available ? (
         <MailSetup mail={mail} locale={locale} oneName={oneName} />
+      ) : mail.pane === "contacts" ? (
+        <OneMailContacts mail={mail} locale={locale} />
       ) : threadId ? (
         <ReadingPane mail={mail} locale={locale} onOpenConversation={onOpenConversation} notice={notice} setNotice={setNotice} />
       ) : (
@@ -168,15 +174,28 @@ export function OneMailWorkspace({
   );
 }
 
-/** No address yet: one clear call to action, never an empty fake inbox. */
+/**
+ * No address yet: one clear call to action, never an empty fake inbox. Existing
+ * owners never pass first-run step 08, so this is where they choose the
+ * permanent address (same picker). A plan without addresses gets the same empty
+ * state with an upgrade link instead of the picker.
+ */
 function MailSetup({ mail, locale, oneName }: { mail: OneMailState; locale: Locale; oneName: string }) {
+  const copy = mail2(locale);
+  const entitled = Boolean(mail.entitlement && mail.entitlement.addressLimit > 0);
   return (
-    <div className={styles.setup} data-one-mail-setup>
+    <div className={styles.setup} data-one-mail-setup={entitled ? "choose" : "plan"}>
       <div className={styles.setupCard}>
         <span className={styles.setupIcon} aria-hidden="true"><IconMail size={22} /></span>
-        <h2>{tFor(locale, "one.mail.setup.title")}</h2>
-        <p>{tFor(locale, "one.mail.setup.desc")}</p>
-        <OneMailSettings locale={locale} oneName={oneName} onChanged={() => void mail.refreshStatus()} />
+        <h2>{copy.emptyTitle}</h2>
+        <p>{entitled ? copy.emptyDesc : copy.emptyPlan}</p>
+        {entitled || !mail.signedIn ? (
+          <OneMailSettings locale={locale} oneName={oneName} onChanged={() => void mail.refreshStatus()} />
+        ) : (
+          <div className={styles.formActions} style={{ marginLeft: 0 }}>
+            <button type="button" className={styles.primary} onClick={() => openPricing()} data-one-mail-upgrade>{copy.emptyUpgrade}</button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -294,6 +313,8 @@ function ThreadRow({ thread, mail, locale, onError }: {
     ? agentMailDisplayName(thread.lastFrom)
     : uniqueNames(thread.participants).join(", ") || agentMailDisplayName(thread.lastFrom);
   const origin = originLabel(thread.lastOrigin, locale);
+  // Server-verified agent contacts only (mail.agentAddresses) — never a name that says "Agentlas".
+  const agent = [thread.lastFrom, ...thread.participants].some((value) => mail.agentAddresses.has(agentMailBareAddress(value)));
   const problem = thread.sendProblem === "uncertain"
     ? tFor(locale, "one.mail.status.uncertain")
     : thread.sendProblem ? tFor(locale, "one.mail.status.bounced") : null;
@@ -331,6 +352,7 @@ function ThreadRow({ thread, mail, locale, onError }: {
         {thread.messageCount > 1 && <span className={styles.count}>{thread.messageCount}</span>}
       </span>
       <span className={styles.rowMain}>
+        {agent && <AgentBadge locale={locale} />}
         {origin && <span className={thread.lastOrigin === "owner" ? styles.chipOwner : styles.chipOne} data-one-mail-origin={thread.lastOrigin ?? undefined}>{origin}</span>}
         {problem && <span className={styles.chipProblem}>{problem}</span>}
         <span className={styles.rowSubject}>{thread.subject || tFor(locale, "one.mail.no_subject")}</span>
@@ -514,6 +536,7 @@ function ReadingPane({ mail, locale, onOpenConversation, notice, setNotice }: {
               })}
               onOpenConversation={onOpenConversation}
               onDownload={(index) => void download(message, index)}
+              maxAutonomousTurns={mail.limits?.a2aMaxAutonomousTurns ?? null}
             />
           ))}
           <div className={`${styles.replyBar} titlebar-nodrag`}>
@@ -545,14 +568,19 @@ function ReadingPane({ mail, locale, onOpenConversation, notice, setNotice }: {
   );
 }
 
-function MessageSection({ message, locale, open, onToggle, onOpenConversation, onDownload }: {
+function MessageSection({ message, locale, open, onToggle, onOpenConversation, onDownload, maxAutonomousTurns }: {
   message: AgentMailMessage;
   locale: Locale;
   open: boolean;
   onToggle: () => void;
   onOpenConversation: (chatId: string) => void;
   onDownload: (index: number) => void;
+  maxAutonomousTurns: number | null;
 }) {
+  const copy2 = mail2(locale);
+  // The server-signed envelope (never a header a stranger can write).
+  const a2a = message.a2a && message.a2a.verified === true ? message.a2a : null;
+  const blocked = message.direction === "inbound" && message.autoReplyBlockedReason ? copy2.autoBlocked[message.autoReplyBlockedReason] ?? null : null;
   const chatId = message.originRef?.chatId ?? null;
   const status = message.direction === "outbound" && message.sendStatus ? message.sendStatus : null;
   const badStatus = status === "bounced" || status === "complained" || status === "rejected" || status === "uncertain";
@@ -570,6 +598,15 @@ function MessageSection({ message, locale, open, onToggle, onOpenConversation, o
           ? <span className={styles.messageTo}>{tFor(locale, "one.mail.to_label", { names: uniqueNames([...message.to, ...message.cc]).join(", ") })}</span>
           : <span className={styles.messagePreview}>{message.preview}</span>}
       </button>
+      {a2a && (
+        <p className={styles.a2aLine} data-one-mail-a2a={a2a.intent}>
+          <AgentBadge locale={locale} />
+          <span>{copy2.a2aTurn(a2a.turn)}</span>
+          <span>· {copy2.a2aAuto(a2a.autonomousTurns, maxAutonomousTurns)}</span>
+          <span>· {a2a.intent === "final" ? copy2.a2aFinal : a2a.expectsReply ? copy2.a2aExpects : copy2.a2aNoReply}</span>
+        </p>
+      )}
+      {a2a && blocked && <p className={styles.a2aLine} data-one-mail-auto-blocked={message.autoReplyBlockedReason ?? undefined}>{blocked}</p>}
       {(message.origin || status) && (
         <div className={styles.messageMeta}>
           {message.origin === "one" && (

@@ -47,6 +47,11 @@ export const MOBILE_BRIDGE_RERUNNABLE_MAIL_WRITES: ReadonlySet<string> = new Set
   "mail.draft.save",
   "mail.draft.delete",
   "mail.updateSettings",
+  // PLAN-2: create is desired-state (same address → 200 created:false); contact
+  // save is keyed by address/version; delete is desired-state.
+  "mail.create",
+  "mail.contact.save",
+  "mail.contact.delete",
 ]);
 
 export function mobileBridgeMailReplayMayRerun(method: string, code: string): boolean {

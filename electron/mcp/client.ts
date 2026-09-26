@@ -3514,6 +3514,7 @@ ${effectiveUserPrompt}`;
           ...(executionContext ? { unattended: true } : {}),
           ...(antigravityBrowserResidentKey ? { residentKey: antigravityBrowserResidentKey } : {}),
           ...(readOnlyObservationRun ? { readOnlyObservation: true as const } : {}),
+          ...(req.oneTeamReportTurn === true ? { oneTeamReport: true as const } : {}),
         },
       });
       mcpConfigCleanup = cfg?.cleanup;

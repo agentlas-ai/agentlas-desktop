@@ -14,7 +14,14 @@ import * as agentMailClientModule from "../agent-mail/client";
 import * as agentMailSyncModule from "../agent-mail/sync";
 import {
   MOBILE_BRIDGE_MAIL_LIMITS,
+  type MobileBridgeMailA2ADto,
   type MobileBridgeMailAttachmentMetaDto,
+  type MobileBridgeMailContactDto,
+  type MobileBridgeMailContactResultDto,
+  type MobileBridgeMailContactsDto,
+  type MobileBridgeMailDirectoryCardDto,
+  type MobileBridgeMailDirectorySearchDto,
+  type MobileBridgeMailIdentityDto,
   type MobileBridgeMailDelegateDto,
   type MobileBridgeMailDraftDto,
   type MobileBridgeMailInboundMode,
@@ -54,6 +61,13 @@ export interface MobileBridgeAgentMailClient {
   agentMailRemoveDraft?: ClientFn;
   agentMailUpdateMailbox?: ClientFn;
   agentMailDelegate?: ClientFn;
+  agentMailIssue?: ClientFn;
+  agentMailContacts?: ClientFn;
+  agentMailContact?: ClientFn;
+  agentMailSaveContact?: ClientFn;
+  agentMailRemoveContact?: ClientFn;
+  agentMailDirectorySearch?: ClientFn;
+  agentMailDomains?: ClientFn;
   onAgentMailChanged?: (listener: (event: unknown) => void) => () => void;
   onAgentMailMailboxKnown?: (listener: (mailbox: unknown) => void) => () => void;
   agentMailSyncSnapshot?: () => { unread?: { inbox?: number } | null; changeSeq?: number | null } | null;
@@ -95,8 +109,16 @@ export interface MobileBridgeAgentMailService {
     displayName?: string;
     signature?: string;
     inboundMode?: MobileBridgeMailInboundMode;
-    localPart?: string;
+    autoSaveContacts?: boolean;
   }): Promise<MobileBridgeMailStatusDto | MobileBridgeMailRefusalDto>;
+  /** PLAN-2: create the mailbox with the permanent address (or bring back the deleted one). */
+  create(input: { localPart?: string; displayName?: string }): Promise<MobileBridgeMailStatusDto | (MobileBridgeMailRefusalDto & { address?: string })>;
+  contacts(input: { q?: string; kind?: "person" | "agentlas_agent"; cursor?: string }): Promise<MobileBridgeMailContactsDto | MobileBridgeMailRefusalDto>;
+  contact(contactId: string): Promise<MobileBridgeMailContactResultDto | MobileBridgeMailRefusalDto>;
+  saveContact(input: { contactId?: string; address?: string; displayName?: string; ownerNote?: string; expectedVersion?: number }): Promise<Loose>;
+  removeContact(contactId: string): Promise<Loose>;
+  directorySearch(input: { q: string; skill?: string }): Promise<MobileBridgeMailDirectorySearchDto | MobileBridgeMailRefusalDto>;
+  identity(): Promise<MobileBridgeMailIdentityDto | MobileBridgeMailRefusalDto>;
   delegate(input: { threadId: string; instruction?: string; locale?: "ko" | "en" }): Promise<MobileBridgeMailDelegateDto | MobileBridgeMailRefusalDto>;
   /** Live change notices, content-free. Returns an unsubscribe. */
   subscribe(listener: (event: MobileBridgeMailUpdatedEventDto) => void): () => void;
@@ -220,6 +242,68 @@ export function projectMobileBridgeMailMessage(
     originChatId: originRef && typeof originRef.chatId === "string" ? text(originRef.chatId, 200) : null,
     sendStatus: nullableText(value.sendStatus, 32),
     attachments: projectAttachments(value.attachments),
+    agentlas: projectA2A(value.a2a, direction === "inbound" ? value.autoReplyBlockedReason : null),
+  };
+}
+
+/** Only the server-signed envelope — never anything a sender could write. */
+function projectA2A(value: unknown, blocked: unknown): MobileBridgeMailA2ADto | null {
+  if (!isRecord(value) || value.verified !== true) return null;
+  const intent = value.intent === "request" || value.intent === "reply" || value.intent === "final" ? value.intent : "request";
+  return {
+    turn: count(value.turn),
+    autonomousTurns: count(value.autonomousTurns),
+    intent,
+    expectsReply: value.expectsReply === true,
+    autoReplyBlockedReason: nullableText(blocked, 64),
+  };
+}
+
+function projectCardSkills(value: unknown): Array<{ name: string; description: string }> {
+  if (!Array.isArray(value)) return [];
+  return value.slice(0, 30).flatMap((item) => (isRecord(item) && typeof item.name === "string"
+    ? [{ name: text(item.name, 400), description: text(item.description, 2_000) }]
+    : []));
+}
+
+function projectLanguages(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string").slice(0, 10).map((item) => text(item, 16)) : [];
+}
+
+export function projectMobileBridgeMailContact(value: unknown): MobileBridgeMailContactDto | null {
+  if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0 || value.id.length > MOBILE_BRIDGE_MAIL_LIMITS.id) return null;
+  if (typeof value.address !== "string" || !value.address.includes("@")) return null;
+  const agent = isRecord(value.agent) ? value.agent : null;
+  const card = agent && isRecord(agent.card) ? agent.card : null;
+  return {
+    id: value.id,
+    address: text(value.address, 400),
+    displayName: nullableText(value.displayName, 800),
+    agentlasAgent: value.agentlasAgent === true,
+    listed: agent?.listed === true,
+    source: nullableText(value.source, 32),
+    createdBy: nullableText(value.createdBy, 32),
+    updatedBy: nullableText(value.updatedBy, 32),
+    ownerNote: typeof value.ownerNote === "string" && value.ownerNote.length > 0 ? sanitizeMailText(value.ownerNote, 8_000) : null,
+    oneNote: typeof value.oneNote === "string" && value.oneNote.length > 0 ? sanitizeMailText(value.oneNote, 4_000) : null,
+    lastInteractionAt: nullableText(value.lastInteractionAt, 64),
+    interactionCount: count(value.interactionCount),
+    receivedCount: count(value.receivedCount),
+    version: nullableCount(value.version),
+    card: card
+      ? { name: text(card.name, 400), description: sanitizeMailText(typeof card.description === "string" ? card.description : "", 8_000), skills: projectCardSkills(card.skills), languages: projectLanguages(card.languages) }
+      : null,
+  };
+}
+
+function projectDirectoryCard(value: unknown): MobileBridgeMailDirectoryCardDto | null {
+  if (!isRecord(value) || typeof value.address !== "string" || !value.address.includes("@")) return null;
+  return {
+    address: text(value.address, 400),
+    name: text(value.name, 400),
+    description: sanitizeMailText(typeof value.description === "string" ? value.description : "", 8_000),
+    skills: projectCardSkills(value.skills),
+    languages: projectLanguages(value.languages),
   };
 }
 
@@ -283,6 +367,9 @@ export function projectMobileBridgeMailStatus(value: unknown, unreadOverride?: n
     mailboxStatus,
     addressChosen,
     canChooseAddress: !addressChosen && mailbox?.canChooseAddress === true,
+    addressLocked: mailbox ? mailbox.addressLocked !== false : false,
+    identityKind: mailbox?.identityKind === "custom_domain" ? "custom_domain" : mailbox ? "agentlas_native" : null,
+    autoSaveContacts: typeof mailbox?.autoSaveContacts === "boolean" ? mailbox.autoSaveContacts : null,
     displayName: nullableText(mailbox?.displayName, 400),
     signature: typeof mailbox?.signature === "string" && mailbox.signature.length > 0 ? sanitizeMailText(mailbox.signature, 8_000) : null,
     inboundMode: inbound === "notify" || inbound === "draft" || inbound === "reply" ? inbound : null,
@@ -322,7 +409,7 @@ function mailboxFingerprint(mailbox: unknown): string {
   if (!isRecord(mailbox)) return "none";
   return JSON.stringify([
     mailbox.address, mailbox.status, mailbox.displayName, mailbox.signature, mailbox.inboundMode,
-    mailbox.aliases, mailbox.addressChosen, mailbox.canChooseAddress,
+    mailbox.aliases, mailbox.addressChosen, mailbox.canChooseAddress, mailbox.identityKind, mailbox.autoSaveContacts,
   ]);
 }
 
@@ -582,6 +669,138 @@ export function createMobileBridgeAgentMailService(
       syncNow();
       // Re-read the whole status so the phone shows the server's value, not the request.
       return readStatus();
+    },
+
+    async create(input) {
+      const call = fn("agentMailIssue");
+      if (!call) return unavailable("create a mail address");
+      const result = await call({
+        ...(input.localPart ? { localPart: input.localPart } : {}),
+        ...(input.displayName ? { displayName: input.displayName } : {}),
+      });
+      const failure = failureOf(result);
+      if (failure) {
+        // P2.2 agent_mail_address_retired: say which address would come back.
+        const address = isRecord(result) && isRecord(result.detail) && typeof result.detail.address === "string" ? text(result.detail.address, 400) : null;
+        return address ? { ...failure, address } : failure;
+      }
+      syncNow();
+      return readStatus();
+    },
+
+    async contacts(input) {
+      const call = fn("agentMailContacts");
+      if (!call) return unavailable("list contacts");
+      const result = await call({
+        ...(input.q ? { q: input.q } : {}),
+        ...(input.kind ? { kind: input.kind } : {}),
+        ...(input.cursor ? { cursor: input.cursor } : {}),
+      });
+      const failure = failureOf(result);
+      if (failure) return failure;
+      const items = Array.isArray(result.contacts) ? result.contacts : [];
+      return {
+        schemaVersion: 1,
+        ok: true,
+        contacts: items.slice(0, 100).flatMap((item) => {
+          const contact = projectMobileBridgeMailContact(item);
+          return contact ? [contact] : [];
+        }),
+        nextCursor: nullableText(result.nextCursor, 512),
+      };
+    },
+
+    async contact(contactId) {
+      const call = fn("agentMailContact");
+      if (!call) return unavailable("open a contact");
+      const result = await call(contactId);
+      const failure = failureOf(result);
+      if (failure) return failure;
+      const contact = projectMobileBridgeMailContact(result.contact);
+      if (!contact) return refusal("mail_error", "Desktop returned a contact without an id.");
+      return { schemaVersion: 1, ok: true, contact };
+    },
+
+    async saveContact(input) {
+      const call = fn("agentMailSaveContact");
+      if (!call) return { ...unavailable("save contacts") };
+      // The phone is the owner: owner fields only (never One's note).
+      const result = await call({
+        ...(input.contactId ? { id: input.contactId } : {}),
+        ...(input.address ? { address: input.address } : {}),
+        ...(input.displayName !== undefined ? { displayName: input.displayName.trim() || null } : {}),
+        ...(input.ownerNote !== undefined ? { ownerNote: input.ownerNote.trim() || null } : {}),
+        ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
+      }, MOBILE_OWNER_ACTOR);
+      const failure = failureOf(result);
+      if (failure) {
+        // Version conflict: hand back the server's current contact so the phone can show it.
+        const current = isRecord(result) && isRecord(result.detail) ? projectMobileBridgeMailContact(result.detail.contact) : null;
+        return current ? { ...failure, contact: current } : { ...failure };
+      }
+      syncNow();
+      const contact = projectMobileBridgeMailContact(result.contact);
+      return { schemaVersion: 1, ok: true, contact, created: result.created === true };
+    },
+
+    async removeContact(contactId) {
+      const call = fn("agentMailRemoveContact");
+      if (!call) return { ...unavailable("delete contacts") };
+      const result = await call(contactId, MOBILE_OWNER_ACTOR);
+      const failure = failureOf(result);
+      if (failure) return { ...failure };
+      syncNow();
+      return { schemaVersion: 1, ok: true, deleted: true, contactId };
+    },
+
+    async directorySearch(input) {
+      const call = fn("agentMailDirectorySearch");
+      if (!call) return unavailable("search the Agentlas directory");
+      const result = await call({ q: input.q, ...(input.skill ? { skill: input.skill } : {}) });
+      const failure = failureOf(result);
+      if (failure) return failure;
+      const items = Array.isArray(result.results) ? result.results : [];
+      return {
+        schemaVersion: 1,
+        ok: true,
+        results: items.slice(0, 50).flatMap((item) => {
+          const card = projectDirectoryCard(item);
+          return card ? [card] : [];
+        }),
+        nextCursor: nullableText(result.nextCursor, 512),
+      };
+    },
+
+    async identity() {
+      const status = fn("agentMailStatus");
+      if (!status) return unavailable("read the mail identity");
+      const result = await status();
+      const failure = failureOf(result);
+      if (failure) return failure;
+      const mailbox = isRecord(result.mailbox) ? result.mailbox : null;
+      const domainsFn = fn("agentMailDomains");
+      let domains: MobileBridgeMailIdentityDto["domains"] = [];
+      if (domainsFn && result.signedIn === true) {
+        const listed = await domainsFn().catch(() => null);
+        if (listed && listed.ok === true && Array.isArray(listed.domains)) {
+          domains = listed.domains.slice(0, 10).flatMap((item) => (isRecord(item) && typeof item.id === "string" && typeof item.domain === "string"
+            ? [{
+              id: text(item.id, 128),
+              domain: text(item.domain, 253),
+              status: text(item.status, 32),
+              warnings: Array.isArray(item.warnings) ? item.warnings.filter((w): w is string => typeof w === "string").slice(0, 10).map((w) => text(w, 64)) : [],
+            }]
+            : []));
+        }
+      }
+      return {
+        schemaVersion: 1,
+        ok: true,
+        identityKind: mailbox?.identityKind === "custom_domain" ? "custom_domain" : mailbox ? "agentlas_native" : null,
+        address: nullableText(mailbox?.address, 400),
+        addressLocked: mailbox ? mailbox.addressLocked !== false : false,
+        domains,
+      };
     },
 
     async delegate(input) {

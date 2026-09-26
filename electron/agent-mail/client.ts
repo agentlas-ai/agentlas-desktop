@@ -5,7 +5,18 @@
 import { randomUUID } from "node:crypto";
 import { fetchWithHubSession, getSessionCookieHeader, webBaseUrl } from "../auth";
 import {
+  agentMailBareAddress,
   isAgentMailId,
+  type AgentMailAddressCheck,
+  type AgentMailAddressSuggestion,
+  type AgentMailAgentCard,
+  type AgentMailAgentCardInput,
+  type AgentMailContact,
+  type AgentMailContactSaveInput,
+  type AgentMailContactsInput,
+  type AgentMailDirectoryEntry,
+  type AgentMailDirectoryLookup,
+  type AgentMailDomain,
   type AgentMailDraft,
   type AgentMailDraftInput,
   type AgentMailEntitlement,
@@ -84,7 +95,7 @@ function err(code: string, message: string, status: number | null = null, detail
   return { ok: false, code, message, status, ...(detail ? { detail } : {}) };
 }
 
-type Method = "GET" | "POST" | "PATCH" | "DELETE";
+type Method = "GET" | "POST" | "PATCH" | "PUT" | "DELETE";
 
 async function send(
   method: Method,
@@ -184,9 +195,14 @@ function cleanLocalPart(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim().toLowerCase().slice(0, 64) : undefined;
 }
 
-export async function agentMailIssue(input: { displayName?: string; localPart?: string } = {}): Promise<AgentMailResult<{ mailbox: AgentMailMailbox; created: boolean; entitlement: AgentMailEntitlement | null }>> {
+/**
+ * PLAN-2 P2.2: a new native mailbox needs the local part the owner chose
+ * (the address is permanent). Without one the server either brings back this
+ * workspace's deleted address (revived) or answers agent_mail_address_required.
+ */
+export async function agentMailIssue(input: { displayName?: string; localPart?: string } = {}): Promise<AgentMailResult<{ mailbox: AgentMailMailbox; created: boolean; revived: boolean; entitlement: AgentMailEntitlement | null }>> {
   const localPart = cleanLocalPart(input.localPart);
-  const res = await call<{ mailbox: AgentMailMailbox; created: boolean; agentMail: AgentMailEntitlement; limits?: AgentMailLimits }>(
+  const res = await call<{ mailbox: AgentMailMailbox; created: boolean; revived?: boolean; agentMail: AgentMailEntitlement; limits?: AgentMailLimits }>(
     "POST",
     "/api/agent-mail/mailboxes",
     {
@@ -197,7 +213,7 @@ export async function agentMailIssue(input: { displayName?: string; localPart?: 
   );
   if (!res.ok) return res;
   rememberMailbox(res.json.mailbox, res.json.agentMail ?? null, res.json.limits);
-  return { ok: true, mailbox: res.json.mailbox, created: res.json.created === true, entitlement: res.json.agentMail ?? null };
+  return { ok: true, mailbox: res.json.mailbox, created: res.json.created === true, revived: res.json.revived === true, entitlement: res.json.agentMail ?? null };
 }
 
 /** Only the fields the caller gave are sent; the server validates everything. */
@@ -215,8 +231,9 @@ export async function agentMailUpdateMailbox(patch: AgentMailMailboxPatch): Prom
       .slice(0, 200)
       .map((rule) => ({ address: rule.address.trim().toLowerCase().slice(0, 320), mode: rule.mode }));
   }
-  const localPart = cleanLocalPart(patch?.localPart);
-  if (localPart) body.localPart = localPart;
+  // The address itself never changes here (P2.2: 409 agent_mail_address_locked);
+  // a custom domain address changes through agentMailSetDomainAddress only.
+  if (patch && typeof patch.autoSaveContacts === "boolean") body.autoSaveContacts = patch.autoSaveContacts;
   if (Object.keys(body).length === 0) return err("agent_mail_invalid_request", "Nothing to change.");
   const res = await call<{ mailbox: AgentMailMailbox; agentMail?: AgentMailEntitlement; limits?: AgentMailLimits }>("PATCH", "/api/agent-mail/mailboxes", body);
   if (!res.ok) return res;
@@ -224,15 +241,37 @@ export async function agentMailUpdateMailbox(patch: AgentMailMailboxPatch): Prom
   return { ok: true, mailbox: res.json.mailbox, entitlement: res.json.agentMail ?? lastKnown.entitlement };
 }
 
-export async function agentMailCheckAddress(localPart: string): Promise<AgentMailResult<{ localPart: string; address: string; available: boolean; code: string | null }>> {
+export async function agentMailCheckAddress(localPart: string): Promise<AgentMailResult<AgentMailAddressCheck>> {
   const clean = cleanLocalPart(localPart);
   if (!clean) return err("agent_mail_invalid_request", "Enter an address.", null, { field: "localPart" });
-  const res = await call<{ localPart: string; address: string; available: boolean; code: string | null }>(
+  const res = await call<AgentMailAddressCheck>(
     "GET",
     `/api/agent-mail/addresses/check?localPart=${encodeURIComponent(clean)}`,
   );
   if (!res.ok) return res;
-  return { ok: true, localPart: res.json.localPart, address: res.json.address, available: res.json.available === true, code: res.json.code ?? null };
+  return {
+    ok: true,
+    localPart: res.json.localPart,
+    address: res.json.address,
+    available: res.json.available === true,
+    code: res.json.code ?? null,
+    reason: res.json.reason ?? null,
+    currentAddress: typeof res.json.currentAddress === "string" ? res.json.currentAddress : null,
+  };
+}
+
+/** P2.2: available address ideas from One's name (server romanizes; nothing is reserved). */
+export async function agentMailSuggestAddresses(name: string): Promise<AgentMailResult<{ base: string | null; suggestions: AgentMailAddressSuggestion[] }>> {
+  const clean = typeof name === "string" ? name.trim().slice(0, 64) : "";
+  const res = await call<{ base?: string | null; suggestions?: AgentMailAddressSuggestion[] }>(
+    "GET",
+    `/api/agent-mail/addresses/suggest?name=${encodeURIComponent(clean)}`,
+  );
+  if (!res.ok) return res;
+  const suggestions = Array.isArray(res.json.suggestions)
+    ? res.json.suggestions.filter((item) => item && typeof item.localPart === "string" && typeof item.address === "string")
+    : [];
+  return { ok: true, base: typeof res.json.base === "string" ? res.json.base : null, suggestions };
 }
 
 export async function agentMailList(input: { cursor?: string | null; limit?: number; direction?: "inbound" | "outbound" } = {}): Promise<AgentMailResult<{ messages: AgentMailMessageSummary[]; nextCursor: string | null }>> {
@@ -283,6 +322,14 @@ export interface AgentMailSendAuthority {
   originRef?: AgentMailOriginRef | null;
   /** Auto-reply from inbound handling: Auto-Submitted: auto-replied (RFC 3834). */
   autoSubmitted?: boolean;
+}
+
+/** P2.3: only booleans the caller actually gave are sent (the server has defaults). */
+function a2aBody(input: { expectsReply?: unknown; final?: unknown } | null | undefined): Record<string, unknown> {
+  const body: Record<string, unknown> = {};
+  if (input?.final === true) body.final = true;
+  else if (typeof input?.expectsReply === "boolean") body.expectsReply = input.expectsReply;
+  return body;
 }
 
 const OWNER_AUTHORITY: AgentMailSendAuthority = { origin: "owner" };
@@ -373,6 +420,7 @@ export async function agentMailSend(
       ...(replyTo ? { replyToMessageId: replyTo } : typeof input?.inReplyTo === "string" ? { inReplyTo: input.inReplyTo } : {}),
       ...(basedOn ? { basedOnMessageId: basedOn } : {}),
       ...(attachments.list.length ? { attachments: attachments.list } : {}),
+      ...a2aBody(input),
       ...originBody(authority),
     },
     { timeoutMs: attachments.list.length ? ATTACHMENT_TIMEOUT_MS : SEND_TIMEOUT_MS, headers: { "Idempotency-Key": idempotencyKey } },
@@ -536,7 +584,7 @@ export async function agentMailRemoveDraft(id: string, actor: AgentMailActor = "
 }
 
 export async function agentMailSendDraft(
-  input: { id: string; expectedVersion?: number },
+  input: { id: string; expectedVersion?: number; expectsReply?: boolean; final?: boolean },
   authority: AgentMailSendAuthority = OWNER_AUTHORITY,
 ): Promise<AgentMailResult<AgentMailSendResult>> {
   if (!isAgentMailId(input?.id)) return err("invalid_draft_id", "Invalid draft id.");
@@ -545,6 +593,7 @@ export async function agentMailSendDraft(
     `/api/agent-mail/drafts/${encodeURIComponent(input.id)}/send`,
     {
       ...(Number.isSafeInteger(input.expectedVersion) ? { expectedVersion: input.expectedVersion } : {}),
+      ...a2aBody(input),
       ...originBody(authority),
     },
     { timeoutMs: SEND_TIMEOUT_MS },
@@ -580,4 +629,194 @@ export async function agentMailFetchAttachment(messageId: string, index: number)
   let filename: string | null = null;
   try { filename = star ? decodeURIComponent(star[1]) : plain ? plain[1] : null; } catch { filename = plain ? plain[1] : null; }
   return { ok: true, bytes, filename, contentType: res.headers.get("content-type") };
+}
+
+// ── PLAN-2: contacts (P2.4) ────────────────────────────────────────────────
+
+/** Control and direction characters never reach the server or the screen (Trojan Source). */
+const UNSAFE_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]/g;
+
+function cleanText(value: unknown, max: number): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string") return null;
+  const clean = value.replace(UNSAFE_TEXT, "").trim().slice(0, max);
+  return clean || null;
+}
+
+function cleanTags(value: unknown, max: number): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return [...new Set(value.map((tag) => cleanText(tag, 40)).filter((tag): tag is string => Boolean(tag)))].slice(0, max);
+}
+
+export async function agentMailContacts(input: AgentMailContactsInput = {}): Promise<AgentMailResult<{ contacts: AgentMailContact[]; nextCursor: string | null }>> {
+  const query = new URLSearchParams();
+  if (typeof input.q === "string" && input.q.trim()) query.set("q", input.q.trim().slice(0, 200));
+  if (input.kind === "person" || input.kind === "agentlas_agent") query.set("kind", input.kind);
+  if (input.cursor) query.set("cursor", String(input.cursor).slice(0, 512));
+  const max = lastKnown.limits?.pageSizeMax ?? 100;
+  if (input.limit !== undefined) query.set("limit", String(Math.min(Math.max(Number(input.limit) || 1, 1), max)));
+  const res = await call<{ contacts?: AgentMailContact[]; nextCursor?: string | null }>("GET", `/api/agent-mail/contacts${query.size ? `?${query.toString()}` : ""}`);
+  if (!res.ok) return res;
+  return { ok: true, contacts: Array.isArray(res.json.contacts) ? res.json.contacts : [], nextCursor: res.json.nextCursor ?? null };
+}
+
+export async function agentMailContact(id: string): Promise<AgentMailResult<{ contact: AgentMailContact }>> {
+  if (!isAgentMailId(id)) return err("invalid_contact_id", "Invalid contact id.");
+  const res = await call<{ contact: AgentMailContact }>("GET", `/api/agent-mail/contacts/${encodeURIComponent(id)}`);
+  if (!res.ok) return res;
+  return { ok: true, contact: res.json.contact };
+}
+
+/**
+ * Save a contact. `actor` is decided by Main (owner IPC / bridge = owner,
+ * One's MCP tool = one). One may write only its own note, name and tags —
+ * the server refuses ownerNote from "one" (403 agent_mail_contact_field_forbidden).
+ */
+export async function agentMailSaveContact(
+  input: AgentMailContactSaveInput & { oneNote?: string | null },
+  actor: AgentMailActor = "owner",
+): Promise<AgentMailResult<{ contact: AgentMailContact; created: boolean }>> {
+  const limits = lastKnown.limits;
+  const body: Record<string, unknown> = { actor };
+  if (input && "displayName" in input) body.displayName = input.displayName === null ? null : cleanText(input.displayName, limits?.displayNameMaxChars ?? 200);
+  if (actor === "owner" && input && "ownerNote" in input) body.ownerNote = input.ownerNote === null ? null : cleanText(input.ownerNote, limits?.contactNoteMaxChars ?? 1000);
+  if (actor !== "owner" && input && "oneNote" in input) body.oneNote = input.oneNote === null ? null : cleanText(input.oneNote, limits?.contactOneNoteMaxChars ?? 300);
+  const tags = cleanTags(input?.tags, limits?.contactTagsMax ?? 10);
+  if (tags) body.tags = tags;
+  if (Number.isSafeInteger(input?.expectedVersion)) body.expectedVersion = input.expectedVersion;
+  if (input?.id) {
+    if (!isAgentMailId(input.id)) return err("invalid_contact_id", "Invalid contact id.");
+    const res = await call<{ contact: AgentMailContact }>("PATCH", `/api/agent-mail/contacts/${encodeURIComponent(input.id)}`, body);
+    if (!res.ok) return res;
+    return { ok: true, contact: res.json.contact, created: false };
+  }
+  const address = typeof input?.address === "string" ? agentMailBareAddress(input.address).slice(0, 320) : "";
+  if (!address || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) return err("agent_mail_invalid_request", "Enter an email address.", null, { field: "address" });
+  body.address = address;
+  if (input.source === "directory") body.source = "directory";
+  const res = await call<{ contact: AgentMailContact; created?: boolean }>("POST", "/api/agent-mail/contacts", body);
+  if (!res.ok) return res;
+  return { ok: true, contact: res.json.contact, created: res.json.created === true };
+}
+
+export async function agentMailRemoveContact(id: string, actor: AgentMailActor = "owner"): Promise<AgentMailResult<{ deleted: true }>> {
+  if (!isAgentMailId(id)) return err("invalid_contact_id", "Invalid contact id.");
+  const res = await call<{ deleted: true }>("DELETE", `/api/agent-mail/contacts/${encodeURIComponent(id)}?actor=${actor}`);
+  if (!res.ok) return res;
+  return { ok: true, deleted: true };
+}
+
+// ── PLAN-2: directory (P2.5, opt-in) ───────────────────────────────────────
+
+function directoryEntry(json: Partial<AgentMailDirectoryEntry>): AgentMailDirectoryEntry {
+  return { listed: json.listed === true, listedAt: typeof json.listedAt === "string" ? json.listedAt : null, card: json.card ?? null };
+}
+
+export async function agentMailDirectoryMe(): Promise<AgentMailResult<AgentMailDirectoryEntry>> {
+  const res = await call<Partial<AgentMailDirectoryEntry>>("GET", "/api/agent-mail/directory/me");
+  if (!res.ok) return res;
+  return { ok: true, ...directoryEntry(res.json) };
+}
+
+export async function agentMailSaveDirectoryMe(input: { listed?: boolean; card?: AgentMailAgentCardInput }): Promise<AgentMailResult<AgentMailDirectoryEntry>> {
+  const body: Record<string, unknown> = {};
+  if (typeof input?.listed === "boolean") body.listed = input.listed;
+  if (input?.card && typeof input.card === "object") {
+    const card = input.card;
+    const limits = lastKnown.limits?.card;
+    const skills = Array.isArray(card.skills)
+      ? card.skills
+        .map((skill, index) => ({
+          ...(typeof skill?.id === "string" && /^[A-Za-z0-9._-]{1,64}$/.test(skill.id) ? { id: skill.id } : { id: `skill-${index + 1}` }),
+          name: cleanText(skill?.name, limits?.skillNameMaxChars ?? 80) ?? "",
+          description: cleanText(skill?.description, limits?.skillDescriptionMaxChars ?? 300) ?? "",
+          tags: cleanTags(skill?.tags, limits?.skillTagsMax ?? 10) ?? [],
+        }))
+        .filter((skill) => skill.name)
+        .slice(0, limits?.skillsMax ?? 20)
+      : undefined;
+    body.card = {
+      name: cleanText(card.name, limits?.nameMaxChars ?? 80) ?? "",
+      description: cleanText(card.description, limits?.descriptionMaxChars ?? 1000) ?? "",
+      ...(skills ? { skills } : {}),
+      ...(Array.isArray(card.languages) ? { languages: card.languages.filter((tag) => typeof tag === "string").slice(0, limits?.languagesMax ?? 10) } : {}),
+      ...(typeof card.acceptsUnsolicited === "boolean" ? { acceptsUnsolicited: card.acceptsUnsolicited } : {}),
+    };
+  }
+  const res = await call<Partial<AgentMailDirectoryEntry>>("PUT", "/api/agent-mail/directory/me", body);
+  if (!res.ok) return res;
+  return { ok: true, ...directoryEntry(res.json) };
+}
+
+export async function agentMailDirectorySearch(input: { q?: string; skill?: string; lang?: string; cursor?: string | null; limit?: number }): Promise<AgentMailResult<{ results: AgentMailAgentCard[]; nextCursor: string | null }>> {
+  const query = new URLSearchParams();
+  if (typeof input?.q === "string" && input.q.trim()) query.set("q", input.q.trim().slice(0, 200));
+  if (typeof input?.skill === "string" && input.skill.trim()) query.set("skill", input.skill.trim().slice(0, 80));
+  if (typeof input?.lang === "string" && /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})?$/.test(input.lang)) query.set("lang", input.lang);
+  if (input?.cursor) query.set("cursor", String(input.cursor).slice(0, 512));
+  if (input?.limit !== undefined) query.set("limit", String(Math.min(Math.max(Number(input.limit) || 1, 1), lastKnown.limits?.directoryPageMax ?? 20)));
+  const res = await call<{ results?: AgentMailAgentCard[]; nextCursor?: string | null }>("GET", `/api/agent-mail/directory/search?${query.toString()}`);
+  if (!res.ok) return res;
+  return { ok: true, results: Array.isArray(res.json.results) ? res.json.results : [], nextCursor: res.json.nextCursor ?? null };
+}
+
+export async function agentMailDirectoryLookup(address: string): Promise<AgentMailResult<{ agentlas: AgentMailDirectoryLookup | null }>> {
+  const bare = typeof address === "string" ? agentMailBareAddress(address).slice(0, 320) : "";
+  if (!bare.includes("@")) return err("agent_mail_invalid_request", "Enter an email address.", null, { field: "address" });
+  const res = await call<{ agentlas?: AgentMailDirectoryLookup | null }>("GET", `/api/agent-mail/directory/lookup?address=${encodeURIComponent(bare)}`);
+  if (!res.ok) return res;
+  return { ok: true, agentlas: res.json.agentlas ?? null };
+}
+
+// ── PLAN-2: custom domain (P2.6) ───────────────────────────────────────────
+
+export async function agentMailDomains(): Promise<AgentMailResult<{ domains: AgentMailDomain[] }>> {
+  const res = await call<{ domains?: AgentMailDomain[] }>("GET", "/api/agent-mail/domains");
+  if (!res.ok) return res;
+  return { ok: true, domains: Array.isArray(res.json.domains) ? res.json.domains : [] };
+}
+
+export async function agentMailAddDomain(domain: string): Promise<AgentMailResult<{ domain: AgentMailDomain; created: boolean }>> {
+  const clean = typeof domain === "string" ? domain.trim().toLowerCase().replace(/\.$/, "").slice(0, 253) : "";
+  if (!clean) return err("agent_mail_invalid_request", "Enter a domain.", null, { field: "domain" });
+  const res = await call<{ domain: AgentMailDomain; created?: boolean }>("POST", "/api/agent-mail/domains", { domain: clean }, { timeoutMs: 45_000 });
+  if (!res.ok) return res;
+  return { ok: true, domain: res.json.domain, created: res.json.created === true };
+}
+
+export async function agentMailDomain(id: string, check = false): Promise<AgentMailResult<{ domain: AgentMailDomain }>> {
+  if (!isAgentMailId(id)) return err("invalid_domain_id", "Invalid domain id.");
+  const res = await call<{ domain: AgentMailDomain }>("GET", `/api/agent-mail/domains/${encodeURIComponent(id)}${check ? "?check=1" : ""}`, undefined, { timeoutMs: 30_000 });
+  if (!res.ok) return res;
+  return { ok: true, domain: res.json.domain };
+}
+
+export async function agentMailRestartDomain(id: string): Promise<AgentMailResult<{ domain: AgentMailDomain }>> {
+  if (!isAgentMailId(id)) return err("invalid_domain_id", "Invalid domain id.");
+  const res = await call<{ domain: AgentMailDomain }>("POST", `/api/agent-mail/domains/${encodeURIComponent(id)}/restart`, {}, { timeoutMs: 45_000 });
+  if (!res.ok) return res;
+  return { ok: true, domain: res.json.domain };
+}
+
+/** Create the mailbox on a verified domain, or change its address (the old one keeps receiving). */
+export async function agentMailSetDomainAddress(input: { id: string; localPart: string; displayName?: string }): Promise<AgentMailResult<{ mailbox: AgentMailMailbox; created: boolean; entitlement: AgentMailEntitlement | null }>> {
+  if (!isAgentMailId(input?.id)) return err("invalid_domain_id", "Invalid domain id.");
+  const localPart = cleanLocalPart(input.localPart);
+  if (!localPart) return err("agent_mail_invalid_request", "Enter an address.", null, { field: "localPart" });
+  const res = await call<{ mailbox: AgentMailMailbox; created?: boolean; agentMail?: AgentMailEntitlement; limits?: AgentMailLimits }>(
+    "POST",
+    `/api/agent-mail/domains/${encodeURIComponent(input.id)}/address`,
+    { localPart, ...(typeof input.displayName === "string" ? { displayName: input.displayName.slice(0, 64) } : {}) },
+    { timeoutMs: 30_000 },
+  );
+  if (!res.ok) return res;
+  rememberMailbox(res.json.mailbox, res.json.agentMail ?? undefined, res.json.limits);
+  return { ok: true, mailbox: res.json.mailbox, created: res.json.created === true, entitlement: res.json.agentMail ?? lastKnown.entitlement };
+}
+
+export async function agentMailRemoveDomain(id: string): Promise<AgentMailResult<{ deleted: true }>> {
+  if (!isAgentMailId(id)) return err("invalid_domain_id", "Invalid domain id.");
+  const res = await call<Record<string, unknown>>("DELETE", `/api/agent-mail/domains/${encodeURIComponent(id)}`);
+  if (!res.ok) return res;
+  return { ok: true, deleted: true };
 }

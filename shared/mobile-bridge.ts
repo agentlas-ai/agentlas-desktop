@@ -60,6 +60,14 @@ export const MOBILE_BRIDGE_MAIL_METHODS = [
   "mail.draft.delete",
   "mail.updateSettings",
   "mail.delegate",
+  // PLAN-2 (2026-09-26): address chosen at creation (permanent), contacts, directory, identity.
+  "mail.create",
+  "mail.contacts",
+  "mail.contact",
+  "mail.contact.save",
+  "mail.contact.delete",
+  "mail.directory.search",
+  "mail.identity",
   "one.profile.get",
   "one.profile.update",
 ] as const;
@@ -74,6 +82,9 @@ export const MOBILE_BRIDGE_MAIL_WRITE_METHODS = [
   "mail.draft.delete",
   "mail.updateSettings",
   "mail.delegate",
+  "mail.create",
+  "mail.contact.save",
+  "mail.contact.delete",
   "one.profile.update",
 ] as const;
 
@@ -2110,6 +2121,10 @@ export const MOBILE_BRIDGE_MAIL_LIMITS = {
   displayName: 64,
   signature: 2_000,
   instruction: 4_000,
+  /** PLAN-2 contacts: owner note (the server's own cap may be lower; it stays the judge). */
+  contactNote: 1_000,
+  contactName: 200,
+  address: 320,
 } as const;
 
 export const MOBILE_BRIDGE_MAIL_VIEWS = ["inbox", "waiting", "sent", "drafts", "archived", "all"] as const;
@@ -2118,7 +2133,7 @@ export type MobileBridgeMailView = (typeof MOBILE_BRIDGE_MAIL_VIEWS)[number];
 export const MOBILE_BRIDGE_MAIL_INBOUND_MODES = ["notify", "draft", "reply"] as const;
 export type MobileBridgeMailInboundMode = (typeof MOBILE_BRIDGE_MAIL_INBOUND_MODES)[number];
 
-/** Same shape the web server enforces for a picked local part (PLAN 6.2); the server stays the authority. */
+/** Same shape the web server enforces for a local part (PLAN-2 2.1); the server stays the authority. */
 export const MOBILE_BRIDGE_MAIL_LOCAL_PART_RE = /^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
 
 export const MOBILE_BRIDGE_ONE_PRINCIPLE_MAX = 500;
@@ -2142,9 +2157,14 @@ export interface MobileBridgeMailStatusDto {
   address: string | null;
   aliases: string[];
   mailboxStatus: "none" | "provisioning" | "active" | "deleted";
-  /** Pick-once address (owner decision 2026-09-26): true once the owner has chosen it. */
+  /** Legacy pick-once flags. PLAN-2 servers: the address is permanent and canChooseAddress is always false. */
   addressChosen: boolean;
   canChooseAddress: boolean;
+  /** PLAN-2: native addresses are permanent (true); a custom domain changes only on Desktop. */
+  addressLocked: boolean;
+  identityKind: "agentlas_native" | "custom_domain" | null;
+  /** Save people this mailbox sends to as contacts (null = server does not report it). */
+  autoSaveContacts: boolean | null;
   displayName: string | null;
   signature: string | null;
   inboundMode: MobileBridgeMailInboundMode | null;
@@ -2194,6 +2214,77 @@ export interface MobileBridgeMailMessageDto {
   originChatId: string | null;
   sendStatus: string | null;
   attachments: MobileBridgeMailAttachmentMetaDto[];
+  /** PLAN-2: server-signed agent-to-agent envelope (null for ordinary mail). */
+  agentlas: MobileBridgeMailA2ADto | null;
+}
+
+export interface MobileBridgeMailA2ADto {
+  turn: number;
+  autonomousTurns: number;
+  intent: "request" | "reply" | "final";
+  expectsReply: boolean;
+  /** Why One will not answer this automatically (machine code), or null. */
+  autoReplyBlockedReason: string | null;
+}
+
+/** PLAN-2 P2.4 contact. `agentlasAgent` is decided by the server only. */
+export interface MobileBridgeMailContactDto {
+  id: string;
+  address: string;
+  displayName: string | null;
+  agentlasAgent: boolean;
+  listed: boolean;
+  source: string | null;
+  createdBy: string | null;
+  updatedBy: string | null;
+  ownerNote: string | null;
+  /** Written by One; the phone shows it apart and never writes it. */
+  oneNote: string | null;
+  lastInteractionAt: string | null;
+  interactionCount: number;
+  receivedCount: number;
+  version: number | null;
+  /** The other agent's own card — plain text. */
+  card: { name: string; description: string; skills: Array<{ name: string; description: string }>; languages: string[] } | null;
+}
+
+export interface MobileBridgeMailContactsDto {
+  schemaVersion: 1;
+  ok: true;
+  contacts: MobileBridgeMailContactDto[];
+  nextCursor: string | null;
+}
+
+export interface MobileBridgeMailContactResultDto {
+  schemaVersion: 1;
+  ok: true;
+  contact: MobileBridgeMailContactDto;
+  created?: boolean;
+}
+
+export interface MobileBridgeMailDirectoryCardDto {
+  address: string;
+  name: string;
+  description: string;
+  skills: Array<{ name: string; description: string }>;
+  languages: string[];
+}
+
+export interface MobileBridgeMailDirectorySearchDto {
+  schemaVersion: 1;
+  ok: true;
+  results: MobileBridgeMailDirectoryCardDto[];
+  nextCursor: string | null;
+}
+
+/** `mail.identity`: which kind of address One has and custom-domain state. Never secrets. */
+export interface MobileBridgeMailIdentityDto {
+  schemaVersion: 1;
+  ok: true;
+  identityKind: "agentlas_native" | "custom_domain" | null;
+  address: string | null;
+  addressLocked: boolean;
+  domains: Array<{ id: string; domain: string; status: string; warnings: string[] }>;
 }
 
 export interface MobileBridgeMailDraftDto {
@@ -2401,6 +2492,7 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "hephaestus.engineToggles",
   "ontology.projections.list",
   "mail.status",
+  "mail.identity",
   "one.profile.get",
   "device.revokeSelf",
 ]);
@@ -3538,21 +3630,78 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         ? requiredString(params, "draftId", MOBILE_BRIDGE_MAIL_LIMITS.id)
         : "mail.draft.delete accepts only draftId";
     case "mail.updateSettings": {
-      if (!hasOnlyKeys(params, ["displayName", "signature", "inboundMode", "localPart"])) {
-        return "mail.updateSettings accepts only displayName, signature, inboundMode and localPart";
+      // PLAN-2: the address is permanent — it is chosen once through mail.create.
+      if (!hasOnlyKeys(params, ["displayName", "signature", "inboundMode", "autoSaveContacts"])) {
+        return "mail.updateSettings accepts only displayName, signature, inboundMode and autoSaveContacts";
       }
       if (Object.keys(params).length === 0) return "mail.updateSettings needs at least one field";
       return firstError(
         optionalString(params, "displayName", MOBILE_BRIDGE_MAIL_LIMITS.displayName),
         optionalText(params, "signature", MOBILE_BRIDGE_MAIL_LIMITS.signature),
         validateEnum(params, "inboundMode", MOBILE_BRIDGE_MAIL_INBOUND_MODES),
-        params.localPart === undefined
+        params.autoSaveContacts === undefined || typeof params.autoSaveContacts === "boolean" ? null : "autoSaveContacts must be a boolean",
+      );
+    }
+    case "mail.create": {
+      // EDGE M3: on a phone a mistyped permanent address is easy, so the client
+      // sends the address twice (a contract field, not a dialog). Both absent =
+      // bring back this account's deleted address (the server decides).
+      if (!hasOnlyKeys(params, ["localPart", "confirmLocalPart", "displayName"])) {
+        return "mail.create accepts only localPart, confirmLocalPart and displayName";
+      }
+      const hasLocal = params.localPart !== undefined || params.confirmLocalPart !== undefined;
+      return firstError(
+        optionalString(params, "displayName", MOBILE_BRIDGE_MAIL_LIMITS.displayName),
+        !hasLocal
           ? null
           : typeof params.localPart === "string" && MOBILE_BRIDGE_MAIL_LOCAL_PART_RE.test(params.localPart)
-            ? null
+            ? params.confirmLocalPart === params.localPart
+              ? null
+              : "confirmLocalPart must repeat localPart exactly"
             : "localPart must be lowercase letters, digits, dots or hyphens (1-64)",
       );
     }
+    case "mail.contacts":
+      return hasOnlyKeys(params, ["q", "kind", "cursor"])
+        ? firstError(
+            optionalString(params, "q", MOBILE_BRIDGE_MAIL_LIMITS.query),
+            validateEnum(params, "kind", ["person", "agentlas_agent"]),
+            optionalString(params, "cursor", 512),
+          )
+        : "mail.contacts accepts only q, kind and cursor";
+    case "mail.contact":
+      return hasOnlyKeys(params, ["contactId"])
+        ? requiredString(params, "contactId", MOBILE_BRIDGE_MAIL_LIMITS.id)
+        : "mail.contact accepts only contactId";
+    case "mail.contact.save": {
+      if (!hasOnlyKeys(params, ["contactId", "address", "displayName", "ownerNote", "expectedVersion"])) {
+        return "mail.contact.save accepts only contactId, address, displayName, ownerNote and expectedVersion";
+      }
+      if (params.contactId === undefined && params.address === undefined) return "mail.contact.save needs contactId or address";
+      return firstError(
+        optionalString(params, "contactId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+        params.address === undefined
+          ? null
+          : typeof params.address === "string" && params.address.length >= 3 && params.address.length <= MOBILE_BRIDGE_MAIL_LIMITS.address
+            && params.address.includes("@") && !/[\u0000-\u001f\s,;<>]/.test(params.address)
+            ? null
+            : "address must be one email address",
+        optionalString(params, "displayName", MOBILE_BRIDGE_MAIL_LIMITS.contactName),
+        optionalText(params, "ownerNote", MOBILE_BRIDGE_MAIL_LIMITS.contactNote),
+        optionalInteger(params, "expectedVersion", 0, Number.MAX_SAFE_INTEGER),
+      );
+    }
+    case "mail.contact.delete":
+      return hasOnlyKeys(params, ["contactId"])
+        ? requiredString(params, "contactId", MOBILE_BRIDGE_MAIL_LIMITS.id)
+        : "mail.contact.delete accepts only contactId";
+    case "mail.directory.search":
+      return hasOnlyKeys(params, ["q", "skill"])
+        ? firstError(
+            requiredString(params, "q", MOBILE_BRIDGE_MAIL_LIMITS.query),
+            optionalString(params, "skill", 80),
+          )
+        : "mail.directory.search accepts only q and skill";
     case "mail.delegate":
       return hasOnlyKeys(params, ["threadId", "instruction", "locale"])
         ? firstError(
