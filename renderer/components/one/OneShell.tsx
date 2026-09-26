@@ -2000,6 +2000,8 @@ export function OneShell() {
    * 건너뛰어도 되는 경우는 오직 "화면이 이미 이 대화를 그리고 있을 때"뿐이다.
    */
   const shownThreadChatIdRef = useRef<string | null>(null);
+  /** 기록 읽기가 마지막으로 화면에 도착한 대화 — 도착 전 빈 화면을 "빈 대화"로 오보하지 않게. */
+  const [hydratedThreadChatId, setHydratedThreadChatId] = useState<string | null>(null);
   /**
    * 화면에 보이는 대화가 몇 번 바뀌었는가 — 늦게 온 옛 읽기가 새 것을 덮지 못하게 하는 번호표.
    *
@@ -3134,6 +3136,21 @@ export function OneShell() {
       return;
     }
     const chatId = activeThreadChatId;
+    /*
+     * ★좌석을 옮기면 **앞 좌석의 대화를 먼저 치운다** (오너 녹화 2026-09-26).
+     *   레일에서 Marketing → Bitvoin → Vibe coder 로 옮겨도 머리말만 바뀌고 본문은
+     *   Marketing 의 "Task Progress" 가 그대로 남았다. 새 대화의 기록이 비어 있으면
+     *   아래 "빈 스냅샷은 지금 화면을 지우지 않는다" 규칙이 **남의 대화**를 지켜 줬기
+     *   때문이다(격리 앱 실측: 빈 좌석 3초 동안 113/113 표본이 앞 좌석 본문).
+     *   그 규칙은 같은 대화의 낙관적 첫 턴을 위한 것이다 — 다른 대화로 옮긴 순간에는
+     *   화면 소유를 풀고 비운 뒤, 새 대화의 기록이 도착하면 그것으로 채운다.
+     */
+    if (shownThreadChatIdRef.current !== null && shownThreadChatIdRef.current !== chatId) {
+      oneTranscriptRevisionRef.current += 1;
+      shownThreadChatIdRef.current = null;
+      setMessages([]);
+      setCommittedAnswers([]);
+    }
     // Another conversation's settled blocks must never sit under this one's
     // messages while the ledger loads.
     if (threadRunsChatIdRef.current !== chatId) {
@@ -3218,6 +3235,8 @@ export function OneShell() {
           return mergeDurableChatCatchup(current, hydratedNext);
         });
       }
+      // 이 대화의 기록이 화면에 도착했다 — 그 전에는 "대화를 시작해 보세요"·추천을 띄우지 않는다.
+      setHydratedThreadChatId(chatId);
       // Every settled run of this conversation becomes its own turn block. The
       // live run (attachment) is drawn from live state and excluded at render.
       if (threadRunsChatIdRef.current === chatId) {
@@ -3542,17 +3561,26 @@ export function OneShell() {
   );
   // 활성 세션의 좌석 1급 조회(SEAT-SESSION-PLAN-v2) — 해체(T7) 여부가 읽기 전용
   // 아카이브 배너·전송 대체 CTA 를 결정한다. 좌석이 없거나 조회가 실패하면 평소대로.
-  const [activeSeat, setActiveSeat] = useState<OneSeatView | null>(null);
+  /*
+   * ★좌석 조회 결과는 **어느 대화의 것인지와 함께** 들고 있는다 (오너 녹화 2026-09-26).
+   *   예전에는 좌석만 담아 두어, 다른 좌석으로 옮긴 직후 새 조회가 오기 전까지 **앞 대화의
+   *   좌석**으로 새 대화를 판정했다. 새 대화의 담당(B)이 앞 좌석 점유자(A)에 없으니
+   *   "이 세션의 에이전트가 사라졌습니다" 빨간 띠와 "메시지를 입력할 수 없습니다"가
+   *   잠깐 떴다가 사라졌다(격리 앱 실측: 좌석 전환마다 띠 삽입 2회). 조회가 도착하기
+   *   전에는 좌석을 "모른다"로 두고, 모르는 것으로는 막지 않는다.
+   */
+  const [activeSeatRead, setActiveSeatRead] = useState<{ chatId: string; seat: OneSeatView | null } | null>(null);
   useEffect(() => {
     const chatId = activeThreadChatId;
     const api = ipc();
-    if (!chatId || !api?.seats?.forChat) { setActiveSeat(null); return; }
+    if (!chatId || !api?.seats?.forChat) { setActiveSeatRead(null); return; }
     let cancelled = false;
     void api.seats.forChat(chatId)
-      .then((seat) => { if (!cancelled) setActiveSeat(seat); })
-      .catch(() => { if (!cancelled) setActiveSeat(null); });
+      .then((seat) => { if (!cancelled) setActiveSeatRead({ chatId, seat }); })
+      .catch(() => { if (!cancelled) setActiveSeatRead({ chatId, seat: null }); });
     return () => { cancelled = true; };
   }, [activeThreadChatId, taskforces]);
+  const activeSeat = activeSeatRead && activeSeatRead.chatId === activeThreadChatId ? activeSeatRead.seat : null;
   const activeSeatDissolved = Boolean(activeSeat?.dissolvedAt);
   /*
    * 빈 자리(§4-2·T10). 담당 봇이 삭제되면 좌석은 남고 점유만 닫힌다 — 그때 화면이
@@ -6595,7 +6623,8 @@ export function OneShell() {
     hasConversation: Boolean(conversation),
     messageCount: messages.length,
     busy: workBusy,
-    preparing: Boolean(teamPreflight || preflightPrompt),
+    // 기록이 아직 안 온 대화는 "첫 요청 전"이 아니다 — 로딩 중 추천이 번쩍이지 않게.
+    preparing: Boolean(teamPreflight || preflightPrompt) || (Boolean(activeThreadChatId) && hydratedThreadChatId !== activeThreadChatId),
     isGroupRoom: Boolean(activeTaskforce),
     isOneSession: activeOneSelected,
     sessionUnavailable: activeDirectSessionUnavailable || activeSeatDissolved || activeSeatEmpty,
@@ -7876,7 +7905,7 @@ export function OneShell() {
                       workspacePath={workspacePath}
                     />
                   )}
-                  {messages.length === 0 && !busy && !teamPreflightBusy && !teamPreflight && !preflightPrompt && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
+                  {messages.length === 0 && !busy && !teamPreflightBusy && !teamPreflight && !preflightPrompt && hydratedThreadChatId === activeThreadChatId && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
                   {(firstRequestEntry === "session" || firstRequestEntry === "group") && (
                     <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} onInsert={insertFirstRequestPrompt} />
                   )}

@@ -911,7 +911,10 @@ export function appendChatMessage(
   const now = new Date().toISOString();
   const db = getDb();
   const hostNotice = normalizeChatHostNotice(role, options?.hostNotice);
-  const goalId = role === "assistant" ? getChat(chatId)?.goalId : null;
+  // 앱이 쓴 안내(hostNotice 를 요청한 줄)는 작업 보고가 아니다. assistant 역할이면 안내 칸은 저장되지
+  // 않지만, 여기서 "검증 전" 표를 달면 결속될 실행이 없어 영원히 대기로 남는다
+  // (오너 녹화 2026-09-26: 목표 대화의 안내 말풍선마다 "Verification pending").
+  const goalId = role === "assistant" && !options?.hostNotice ? getChat(chatId)?.goalId : null;
   const goalResult: GoalResultPresentation | undefined = goalId ? { goalId, runId: null, status: "pending" } : undefined;
   let persistedImageUrls: string[] | undefined;
   const write = db.transaction(() => {

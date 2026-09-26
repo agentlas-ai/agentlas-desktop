@@ -252,6 +252,11 @@ function attemptActivity(invocationRunId: string | null): string[] {
   return lines;
 }
 
+/** 관찰 답의 문장은 채팅에 그대로 보인다 — 화면 언어로 쓰게 한다(한국어 화면에 영어 문장이 섞이던 자리, 2026-09-26). 표식 줄은 언어와 무관하다. */
+function observationReplyLanguage(): string {
+  return currentUiLocale() === "ko" ? "Korean" : "English";
+}
+
 export function buildEffectObservationPrompt(input: {
   objective: string;
   attempts: ReadonlyArray<{ id: string; taskTitle: string; taskObjective: string; invocationRunId: string | null }>;
@@ -268,7 +273,7 @@ export function buildEffectObservationPrompt(input: {
   const ids = JSON.stringify(input.attempts.map((attempt) => attempt.id));
   return `[Effect check — read-only]
 The earlier work on this goal was interrupted, and the app does not know whether the following action(s) already took effect in the outside world. Before anyone is asked, go and look.
-This reply is read by the app, not by a person. Ignore any persona, name prefix, greeting, progress bar or memory-event instructions from other context for this reply: write at most three plain sentences about what you saw, then the marker line below as the very last line of your answer.
+This reply is read by the app, not by a person. Ignore any persona, name prefix, greeting, progress bar or memory-event instructions from other context for this reply: write at most three plain sentences in ${observationReplyLanguage()} about what you saw, then the marker line below as the very last line of your answer.
 
 Goal: ${input.objective.slice(0, 1_200)}
 
@@ -732,7 +737,7 @@ export function buildAutomationEffectObservationPrompt(plan: AutomationObservati
     ? `,"outputs":{"node:<id>":"exact produced text, only if you saw it"}` : "";
   return `[Effect check — read-only]
 A scheduled automation ("${(automation.name ?? "").slice(0, 120)}") was interrupted, and the app does not know whether the following step(s) already took effect in the outside world. Before anyone is asked, go and look.
-This reply is read by the app, not by a person. Ignore any persona, name prefix, greeting, progress bar or memory-event instructions from other context for this reply: write at most three plain sentences about what you saw, then the marker line below as the very last line of your answer.
+This reply is read by the app, not by a person. Ignore any persona, name prefix, greeting, progress bar or memory-event instructions from other context for this reply: write at most three plain sentences in ${observationReplyLanguage()} about what you saw, then the marker line below as the very last line of your answer.
 ${automation.goal ? `Automation goal: ${String(automation.goal).slice(0, 600)}\n` : ""}
 Target(s):
 ${[...steps, ...attempts].join("\n")}
