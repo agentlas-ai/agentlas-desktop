@@ -290,6 +290,7 @@ export function buildApprovedOwnerWorkPreferenceContext(
       ? enabled.map((item) => `- [${item.scope}${item.scopeRef ? `:${item.scopeRef}` : ""}] ${item.content}`).join("\n")
       : "- None approved.",
     "Do not present inferred preferences as approved operating principles.",
+    "Apply these silently: never announce, label, tag or quote them in the reply (no bracketed notes like [tone check]); just answer in that manner.",
   ].join("\n");
 }
 
@@ -309,5 +310,6 @@ export function buildApprovedOneProfileContext(
     "Approved operating principles:",
     principles,
     "Do not present inferred preferences as approved operating principles.",
+    "Apply these silently: never announce, label, tag or quote them in the reply (no bracketed notes like [tone check]); just answer in that manner.",
   ].join("\n");
 }
