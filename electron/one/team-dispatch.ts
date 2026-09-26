@@ -44,6 +44,18 @@ export interface OneDispatchRow {
 
 const MAX_BRIEF = 8_000;
 const MAX_RESULT = 12_000;
+/*
+ * Runaway brakes (pre-mortem 2026-09-26, EDGE-CASES.md). The depth rule stops a
+ * teammate from delegating, but One itself can still bounce: a report turn carries
+ * the teammate's text and One's tools, so that text can steer One into starting
+ * another session, whose report starts another… Bounded here, not by prompt text.
+ */
+/** Teammate sessions from one One conversation running at the same time. */
+const MAX_RUNNING_PER_PARENT = 3;
+/** Sessions one One conversation may start per rolling hour. */
+const MAX_STARTS_PER_PARENT_PER_HOUR = 8;
+/** The same brief to the same teammate is one session only while it runs or within this window. */
+const DUPLICATE_WINDOW_MS = 10 * 60_000;
 
 let tableReady = false;
 function ensureTable(): void {
@@ -96,8 +108,9 @@ function activeMembers(): OneOrgMember[] {
   return runtime().org.getOneOrgState().members.filter((member) => !member.archivedAt);
 }
 
+/** Every teammate ever on the roster, archived included: an archived teammate's own chat is still not One's. */
 function memberAgentIds(): Set<string> {
-  return new Set(activeMembers().map((member) => member.installedAgentId));
+  return new Set(runtime().org.getOneOrgState().members.map((member) => member.installedAgentId));
 }
 
 /** A teammate's own chat or a session One opened is never allowed to dispatch (depth 1). */
@@ -154,13 +167,50 @@ function rowForSession(sessionId: string, parentChatId: string): OneDispatchRow 
   return found;
 }
 
-function lastAssistantText(chatId: string): string | null {
+/**
+ * The teammate's last answer written for THIS dispatch — never an older answer in the
+ * same chat (new_session:false reuses a chat; a failed run writes nothing). `sinceIso`
+ * is when the dispatch was started or last reopened by a steer.
+ */
+function lastAssistantText(chatId: string, sinceIso: string): string | null {
+  const since = Date.parse(sinceIso);
   const messages = runtime().chats.listChatMessages(chatId, 40);
   for (let index = messages.length - 1; index >= 0; index -= 1) {
     const message = messages[index];
+    if (Number.isFinite(since) && Date.parse(message.createdAt) < since) break;
     if (message.role === "assistant" && message.text.trim()) return message.text.trim().slice(0, MAX_RESULT);
   }
   return null;
+}
+
+let recovered = false;
+/**
+ * After a restart nothing settles dispatch rows that were running when the app
+ * stopped (the settle listener is per process). Once per process: rows whose child
+ * chat is not running now become "interrupted" with whatever answer exists;
+ * rows whose child is running again get the listener back.
+ */
+export function recoverOneTeamDispatches(): void {
+  if (recovered) return;
+  recovered = true;
+  try {
+    ensureTable();
+    const running = getDb().prepare("SELECT * FROM one_team_dispatches WHERE status = 'running'").all() as OneDispatchRow[];
+    if (running.length === 0) return;
+    const active = new Set(runtime().invocationService.activeChatIds());
+    const now = new Date().toISOString();
+    for (const dispatch of running) {
+      if (active.has(dispatch.child_chat_id)) {
+        installSettleListener();
+        continue;
+      }
+      getDb().prepare(
+        "UPDATE one_team_dispatches SET status = 'interrupted', result_text = COALESCE(result_text, ?), updated_at = ? WHERE id = ? AND status = 'running'",
+      ).run(lastAssistantText(dispatch.child_chat_id, dispatch.updated_at), now, dispatch.id);
+    }
+  } catch (error) {
+    console.warn("[one-team] dispatch recovery skipped:", error instanceof Error ? error.message : error);
+  }
 }
 
 function view(dispatch: OneDispatchRow) {
@@ -220,14 +270,15 @@ function finalStatus(receiptStatus: string): OneDispatchStatus {
   if (receiptStatus === "completed" || receiptStatus === "succeeded" || receiptStatus === "success") return "completed";
   if (receiptStatus === "cancelled") return "cancelled";
   if (receiptStatus === "interrupted") return "interrupted";
-  return receiptStatus === "failed" ? "failed" : "completed";
+  // An unknown receipt status is not a success: say it did not finish cleanly.
+  return "failed";
 }
 
 function finalizeDispatch(id: string, receiptStatus: string, runId: string): void {
   const current = row(id);
   if (!current || current.status !== "running") return;
   const status = finalStatus(receiptStatus);
-  const result = lastAssistantText(current.child_chat_id);
+  const result = lastAssistantText(current.child_chat_id, current.updated_at);
   const now = new Date().toISOString();
   const changed = getDb().prepare(
     "UPDATE one_team_dispatches SET status = ?, result_text = ?, child_run_id = ?, updated_at = ? WHERE id = ? AND status = 'running'",
@@ -306,6 +357,7 @@ export interface OneTeamCaller {
 
 export function oneTeamList(caller: OneTeamCaller) {
   assertCaller(caller.chatId);
+  recoverOneTeamDispatches();
   const { invocationService } = runtime();
   const active = new Set(invocationService.activeChatIds());
   ensureTable();
@@ -334,18 +386,41 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const member = resolveOneTeamMember(typeof input.member === "string" ? input.member : "");
   const hash = briefHash(member.id, brief);
   ensureTable();
+  recoverOneTeamDispatches();
   const duplicate = getDb().prepare(
     "SELECT * FROM one_team_dispatches WHERE parent_chat_id = ? AND member_id = ? AND brief_hash = ? ORDER BY created_at DESC LIMIT 1",
   ).get(parentChatId, member.id, hash) as OneDispatchRow | undefined;
-  if (duplicate) {
+  // Retries and double calls reuse the session; the same brief tomorrow (a daily task) is new work.
+  if (duplicate && (duplicate.status === "running" || Date.now() - Date.parse(duplicate.created_at) < DUPLICATE_WINDOW_MS)) {
     return { ...view(duplicate), already_started: true, note: "This teammate already has a session for exactly this brief; not started twice." };
+  }
+  const runningNow = (getDb().prepare(
+    "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'running'",
+  ).get(parentChatId) as { n: number }).n;
+  if (runningNow >= MAX_RUNNING_PER_PARENT) {
+    throw new Error(ko()
+      ? `one-team-too-many-running: 이 대화에서 맡긴 일이 이미 ${runningNow}개 진행 중이에요. 하나가 끝난 뒤 맡기거나 one_team_steer 로 방향을 더하세요.`
+      : `one-team-too-many-running: ${runningNow} teammate sessions from this conversation are still running. Wait for one to finish or use one_team_steer.`);
+  }
+  const startedLastHour = (getDb().prepare(
+    "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND created_at >= ?",
+  ).get(parentChatId, new Date(Date.now() - 3_600_000).toISOString()) as { n: number }).n;
+  if (startedLastHour >= MAX_STARTS_PER_PARENT_PER_HOUR) {
+    throw new Error(ko()
+      ? `one-team-rate-limit: 이 대화에서 한 시간에 ${MAX_STARTS_PER_PARENT_PER_HOUR}개까지 맡길 수 있어요. 결과를 오너에게 먼저 보고하세요.`
+      : `one-team-rate-limit: at most ${MAX_STARTS_PER_PARENT_PER_HOUR} teammate sessions per hour from one conversation. Report the results to the owner first.`);
   }
   const { chats, invocationService } = runtime();
   const title = brief.split(/\r?\n/, 1)[0]!.slice(0, 120);
   const fresh = input.newSession !== false;
-  const chat = fresh
-    ? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation" })
-    : chats.getOrCreateOneMemberChat(member.installedAgentId, member.displayName);
+  // new_session:false continues the session One opened for this teammate before —
+  // never the owner's own private conversation with that teammate.
+  const previous = fresh ? undefined : getDb().prepare(
+    "SELECT child_chat_id FROM one_team_dispatches WHERE parent_chat_id = ? AND member_id = ? ORDER BY created_at DESC LIMIT 1",
+  ).get(parentChatId, member.id) as { child_chat_id: string } | undefined;
+  const reused = previous ? chats.getChat(previous.child_chat_id) : null;
+  const chat = reused ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation" });
+  const createdHere = !reused;
   if (!fresh && invocationService.activeChatIds().includes(chat.id)) {
     throw new Error("one-team-member-busy: that teammate's session is running now. Use one_team_steer on it, or start a new session.");
   }
@@ -373,7 +448,7 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
     }, undefined, undefined, undefined, "one-dispatch-brief");
   } catch (error) {
     getDb().prepare("DELETE FROM one_team_dispatches WHERE id = ?").run(id);
-    if (fresh) {
+    if (createdHere) {
       try { chats.removeChat(chat.id); } catch { /* keep the empty chat rather than fail twice */ }
     }
     throw new Error(`one-team-start-failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -392,6 +467,11 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   if (!message) throw new Error("one-team-message-required");
   if (message.length > MAX_BRIEF) throw new Error("one-team-message-too-long");
   const dispatch = rowForSession(typeof input.sessionId === "string" ? input.sessionId : "", parentChatId);
+  if (!memberAgentIds().has(dispatch.member_agent_id) || !activeMembers().some((member) => member.id === dispatch.member_id)) {
+    throw new Error(ko()
+      ? "one-team-member-gone: 그 팀원은 더 이상 팀에 없어요. one_team_list 로 지금 팀원을 확인하세요."
+      : "one-team-member-gone: that teammate is no longer on the team. Check one_team_list.");
+  }
   const { invocationService } = runtime();
   installSettleListener();
   const result = invocationService.steer({
@@ -413,6 +493,7 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
 
 export async function oneTeamSessionStatus(caller: OneTeamCaller, input: { sessionId?: unknown; waitSeconds?: unknown }) {
   const parentChatId = assertCaller(caller.chatId);
+  recoverOneTeamDispatches();
   const dispatch = rowForSession(typeof input.sessionId === "string" ? input.sessionId : "", parentChatId);
   const waitSeconds = Math.max(0, Math.min(180, Math.floor(Number(input.waitSeconds) || 0)));
   if (dispatch.status !== "running" || waitSeconds === 0) {
