@@ -7840,6 +7840,7 @@ export function OneShell() {
                         busy={false}
                         runStatus={block.status}
                         interruptionCause={block.interruptionCause}
+                        hostStopCause={block.hostStopCause}
                         startedAt={Date.parse(block.startedAt)}
                         locale={appLocale}
                         workspacePath={workspacePath}
@@ -8000,6 +8001,7 @@ export function OneShell() {
                               workspacePath={workspacePath}
                               runStatus={block.status}
                               interruptionCause={block.interruptionCause}
+                              hostStopCause={block.hostStopCause}
                               {...(message.role === "user" && message.text.trim()
                                 ? { onRetry: () => retryUnansweredTurn(message.text, block.state.model), retryDisabled: busy }
                                 : {})}

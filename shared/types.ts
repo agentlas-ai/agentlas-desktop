@@ -6557,7 +6557,12 @@ export interface InvocationRunReceipt {
   steeringRecovery?: InvocationSteerRecovery[];
   /** A deliberate direction change interrupted this run; it is not a failed run. */
   interruptionCause?: "steering";
+  /** Main itself stopped this run (app closing, owner paused/deleted the Goal); it is not a run error. */
+  hostStopCause?: InvocationHostStopCause;
 }
+
+/** Closed vocabulary of Main-owned abort markers (shared/invocation-host-stop.ts). */
+export type InvocationHostStopCause = "app_closed" | "goal_paused_by_user" | "goal_deleted_by_user";
 
 /** Content-free Main admission status; absent is not proof that an in-flight IPC request never started. */
 export type InvocationAdmissionReceipt =

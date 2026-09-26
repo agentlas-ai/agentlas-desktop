@@ -37,6 +37,7 @@ import {
 import styles from "./OneTurnWork.module.css";
 import { BoundImageArtifacts } from "../workspace/BoundImageArtifacts";
 import { toolFailureCopy } from "@shared/tool-failure";
+import { invocationHostStopCopy } from "@shared/invocation-host-stop";
 import { shellExecutionOutcome } from "@/lib/shell-execution-outcome";
 import { toolInvocationOriginLabel, type ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 
@@ -511,6 +512,7 @@ export function OneTurnWork({
   workspacePath,
   runStatus,
   interruptionCause,
+  hostStopCause,
   onRetry,
   retryDisabled = false,
   onInspectWorker,
@@ -536,6 +538,11 @@ export function OneTurnWork({
   runStatus?: InvocationRunReceipt["status"];
   /** Typed ledger cause; absent means an interrupted run remains an actual unanswered interruption. */
   interruptionCause?: OneThreadRunBlock["interruptionCause"];
+  /**
+   * Main 이 직접 끊은 실행(앱 종료·Goal 일시정지/삭제). 실행 오류가 아니므로 붉은 "실패" 대신
+   * 무엇 때문에 멈췄는지를 중립 톤으로 적는다(오너 2026-09-26 "붉은 칩 뭐지").
+   */
+  hostStopCause?: OneThreadRunBlock["hostStopCause"];
   /** 낸 오류에는 푸는 길이 있어야 한다 — 중단된 턴의 질문을 다시 보낸다. */
   onRetry?: () => void;
   retryDisabled?: boolean;
@@ -600,7 +607,8 @@ export function OneTurnWork({
   }
 
   const terminal = presentation.terminal;
-  const failed = !active && !steeringInterrupted && (terminal === "failed" || terminal === "cancelled");
+  const hostStop = !active && !steeringInterrupted && hostStopCause ? invocationHostStopCopy(hostStopCause, locale) : null;
+  const failed = !active && !steeringInterrupted && !hostStop && (terminal === "failed" || terminal === "cancelled");
   const workedFor = settledMs != null
     ? (ko ? `${formatWorkElapsed(settledMs)} 동안 작업` : `Worked for ${formatWorkElapsed(settledMs)}`)
     : (ko ? "작업" : "Work");
@@ -644,6 +652,7 @@ export function OneTurnWork({
           {steeringInterrupted && (
             <span className={styles.muted}>· {ko ? "방향 수정됨" : "direction updated"}</span>
           )}
+          {hostStop && <span className={styles.muted} data-host-stop={hostStopCause}>· {hostStop.short}</span>}
           {failed && (
             <span className={terminal === "cancelled" ? styles.muted : styles.headerTerminal}>
               · {terminal === "cancelled" ? (ko ? "중단됨" : "stopped") : (ko ? "실패" : "failed")}
@@ -668,7 +677,7 @@ export function OneTurnWork({
         </div>
       )}
       {/* Keep an actionable summary visible while diagnostic payloads stay in a disclosure. */}
-      {!steeringInterrupted && presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
+      {!steeringInterrupted && !hostStop && terminal === "failed" && presentation.terminalMessage && !presentation.cells.some((cell) => cell.kind === "notice" && cell.message === presentation.terminalMessage) && (
         <div className={styles.rows}>
           <details className={styles.row} data-kind="notice" data-status="failed" data-terminal-error={presentation.terminalErrorCode ?? "unknown"}>
             <summary className={styles.rowHead} style={{ cursor: "pointer", listStyle: "none" }}>
@@ -714,6 +723,16 @@ export function OneTurnWork({
               </button>
             </div>
           )}
+        </div>
+      )}
+      {hostStop && (
+        <div className={styles.rows} data-one-turn-host-stop={hostStopCause}>
+          <div className={styles.row} data-kind="notice" data-status="completed">
+            <span className={styles.rowHead}>
+              <span className={styles.rowMark} data-status="completed" aria-hidden="true" />
+              <span className={styles.rowText}><span className={styles.notice}>{hostStop.detail}</span></span>
+            </span>
+          </div>
         </div>
       )}
       {steeringInterrupted && (

@@ -1,4 +1,5 @@
 import { assertInvocationChatAvailable } from "./run-id";
+import { isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
 
 /**
  * Production invocation state boundary.
@@ -44,7 +45,10 @@ export function classifyMainOwnedTerminal(input: {
   if (
     input.signalAborted
     && input.abortReason instanceof Error
-    && input.abortReason.message === STOPPED_BY_USER
+    && (input.abortReason.message === STOPPED_BY_USER
+      // 오너가 목표를 멈추거나 지워서 끊은 턴도 사람의 중지다 — 실패로 적으면 붉은 "실패" 줄이
+      // 서고 One 자동 복구가 그 일을 다시 돌린다(설치본 2026-09-26, 삭제 1.4초 뒤 재실행).
+      || isOwnerGoalStopCause(input.abortReason.message))
   ) {
     return { errorCode: "cancelled", terminalKind: "invoke_cancelled" };
   }

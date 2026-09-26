@@ -1,4 +1,4 @@
-import type { InvocationRunReceipt, RunEventUi } from "@shared/types";
+import type { InvocationHostStopCause, InvocationRunReceipt, RunEventUi } from "@shared/types";
 import { isOneSteeringInterruption } from "@shared/one-auto-recovery";
 import { projectOneActivityFromLedger, type OneActivityState } from "./one-activity";
 
@@ -21,6 +21,8 @@ export interface OneThreadRunBlock {
   finishedAt?: string;
   status: InvocationRunReceipt["status"];
   interruptionCause?: "steering";
+  /** Main stopped this run itself (app closed, Goal paused/deleted) — not a run error. */
+  hostStopCause?: InvocationHostStopCause;
   state: OneActivityState;
 }
 
@@ -50,6 +52,7 @@ export function projectThreadRuns(
         ...(entry.receipt.finishedAt ? { finishedAt: entry.receipt.finishedAt } : {}),
         status: entry.receipt.status,
         ...(interruptionCause ? { interruptionCause } : {}),
+        ...(entry.receipt.hostStopCause ? { hostStopCause: entry.receipt.hostStopCause } : {}),
         state: projectOneActivityFromLedger(entry.events, entry.receipt),
       };
     })

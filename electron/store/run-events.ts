@@ -4,6 +4,7 @@ import { decodeRuntimeEvidence, runtimeEvidenceForRow, runtimeEvidencePhase, typ
 import { WORKER_REPORT_MAX_BYTES, isWorkerReportScope, parseWorkerReport, type WorkerReportScope, type WorkerReport } from "../../shared/worker-report";
 import { createHash, randomUUID } from "node:crypto";
 import { externalToolNames } from "../../shared/tool-activity";
+import { invocationHostStopCause, isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
 import { normalizeToolCall } from "../../shared/tool-call-detail";
 import { getDb } from "./db";
 import {
@@ -1992,6 +1993,11 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     steeringEvidence,
   ) ? "steering" as const : undefined;
   const terminalPayload = terminal ? parsePayload(terminal.payload_json) : {};
+  // Main 이 직접 끊은 실행(앱 종료·오너의 Goal 일시정지/삭제)은 표식으로 남는다. 닫힌 어휘의 정확한
+  // 일치만 본다. 오너의 Goal 중지는 사람의 [중지]와 같은 뜻이라, 예전에 실패로 적힌 기록도 중단으로 읽는다.
+  const hostStopCause = status !== "completed"
+    ? invocationHostStopCause(terminalPayload.hostStopCause) ?? invocationHostStopCause(terminalPayload.errorMessage) : null;
+  if (status === "failed" && isOwnerGoalStopCause(hostStopCause)) status = "cancelled";
   const runtimeFailure = boundedRuntimeFailure({
     kind: terminalPayload.runtimeFailureKind,
     source: terminalPayload.runtimeFailureSource,
@@ -2084,6 +2090,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
         : {}),
     ...(status === "failed" && runtimeFailure ? { runtimeFailure } : {}),
     ...(interruptionCause ? { interruptionCause } : {}),
+    ...(hostStopCause ? { hostStopCause } : {}),
   };
 }
 

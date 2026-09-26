@@ -12,6 +12,7 @@ import { ContinuityStatus } from "./ContinuityStatus";
 import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
 import type { ChatHostNotice, GoalResumeConfirmation, GoalResumeReview } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
+import { invocationHostStopCopy } from "../../shared/invocation-host-stop";
 // ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
 
 import { filePreviewEmptyMessage } from "@/lib/file-preview-reason";
@@ -226,8 +227,10 @@ function receiptRecoveryMessage(
   if (!receipt || receipt.status === "completed" || receipt.status === "running" || receipt.status === "cancelling") {
     return null;
   }
-  const isFailure = receipt.status === "failed" || receipt.status === "interrupted";
-  const baseText = receipt.status === "cancelled"
+  // Main 이 직접 끊은 실행(앱 종료·Goal 일시정지/삭제)은 실행 오류가 아니다 — 붉은 실패 줄 대신 이유를 적는다.
+  const hostStop = receipt.hostStopCause ? invocationHostStopCopy(receipt.hostStopCause, locale) : null;
+  const isFailure = !hostStop && (receipt.status === "failed" || receipt.status === "interrupted");
+  const baseText = hostStop ? hostStop.detail : receipt.status === "cancelled"
     ? (locale === "ko"
       ? "작업이 취소되었습니다."
       : "The task was cancelled.")

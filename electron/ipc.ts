@@ -7028,7 +7028,11 @@ export function registerIpcHandlers(): void {
       status: "rejected" as const,
       pendingAt: rejected.rejectedAt,
       updatedAt: rejected.rejectedAt,
-      rejectionReasonCode: rejected.rejectionReasonCode ?? "legacy_start_rejected_receipt",
+      // 거절 표식(prompt_bound)에는 사유가 없고 같은 run 의 입장 원장 행에 실제 사유가 있다
+      // (예: 목표 검증이 끝나기 전에 보낸 새 요청 → invocation_cleanup_pending). 원장 사유를 먼저 쓴다.
+      rejectionReasonCode: rejected.rejectionReasonCode
+        ?? (admission?.status === "rejected" && admission.chatId === rejected.chatId ? admission.rejectionReasonCode : null)
+        ?? "legacy_start_rejected_receipt",
       ...(rejected.goalId ? { goalId: rejected.goalId } : {}),
       promptMessageId: rejected.promptMessageId,
     } : null;

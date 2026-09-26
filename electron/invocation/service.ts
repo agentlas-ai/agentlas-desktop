@@ -32,6 +32,7 @@ import {
   registerDurableInvocationStart,
   STOPPED_BY_USER,
 } from "../runtime/invocation-lifecycle";
+import { invocationHostStopCause } from "../../shared/invocation-host-stop";
 import {
   appendLongRunEvent,
   bindCurrentGoalRevisionToLongRun,
@@ -3696,6 +3697,10 @@ export class InvocationService {
               resultFolder: record.resultFolder,
               ...(terminalDisposition.errorCode ? { errorCode: terminalDisposition.errorCode } : {}),
               errorMessage: "Runtime settled without a terminal event",
+              // 러너가 종료 이벤트 없이 끝나도, 끊은 쪽이 Main 이면 그 표식을 남긴다(앱 종료·Goal 중지/삭제).
+              ...(controller.signal.aborted && controller.signal.reason instanceof Error
+                && invocationHostStopCause(controller.signal.reason.message)
+                ? { hostStopCause: invocationHostStopCause(controller.signal.reason.message) } : {}),
             },
           });
           recordTaskTerminalEvidence({ task: canonicalTask, runId, terminalKind });
@@ -4380,7 +4385,10 @@ export class InvocationService {
       ...(record.workspaceBinding ? { workspaceBinding: record.workspaceBinding } : {}),
     };
     if (record.oneMode && record.actualAgentId) {
-      const failed = receipt.status === "failed" || receipt.status === "cancelled" || receipt.status === "interrupted";
+      // 사람이 멈춘 실행(중지·Goal 일시정지/삭제)과 방향 전환은 실패가 아니다 — 조직도에 붉은
+      // "실패 · 확인 필요"로 남기지 않는다(2026-09-26 실측: Goal 삭제 직후 좌석이 실패로 표시).
+      const stopped = receipt.status === "cancelled" || receipt.interruptionCause === "steering";
+      const failed = !stopped && (receipt.status === "failed" || receipt.status === "interrupted");
       const creditBlocked = receipt.errorCode === "insufficient_credits" || /insufficient[_ -]?credits/i.test(receipt.errorMessage || "");
       cacheOneOrgCompletionSummary({ installedAgentId: record.actualAgentId, runId });
       // PRD §3.5 — 사람이 읽는 문구는 로케일 표에서 가져온다. 내부 오류 코드는 사용자 문장에
@@ -4388,7 +4396,9 @@ export class InvocationService {
       const settleLocale = pickLocale(record.request);
       const statusLine = failed
         ? (settleLocale === "ko" ? "실패 · 확인 필요" : "Failed · review needed")
-        : (settleLocale === "ko" ? "최근 작업 완료" : "Recently completed");
+        : stopped
+          ? (settleLocale === "ko" ? "멈춤 · 실패 아님" : "Stopped · not a failure")
+          : (settleLocale === "ko" ? "최근 작업 완료" : "Recently completed");
       setOneOrgMemberStatus({
         installedAgentId: record.actualAgentId,
         statusKind: failed ? "failed" : record.pendingQuestion ? "waiting" : "quiet",
