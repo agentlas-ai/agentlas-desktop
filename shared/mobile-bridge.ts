@@ -47,6 +47,36 @@ export type MobileBridgeJsonValue =
   | { [key: string]: MobileBridgeJsonValue };
 export type MobileBridgeJsonObject = { [key: string]: MobileBridgeJsonValue };
 
+/** One mailbox + One profile mirror. Kept as one list so every allowlist copy can be checked against it. */
+export const MOBILE_BRIDGE_MAIL_METHODS = [
+  "mail.status",
+  "mail.threads",
+  "mail.thread",
+  "mail.markRead",
+  "mail.archive",
+  "mail.delete",
+  "mail.send",
+  "mail.draft.save",
+  "mail.draft.delete",
+  "mail.updateSettings",
+  "mail.delegate",
+  "one.profile.get",
+  "one.profile.update",
+] as const;
+
+/** State-changing subset of MOBILE_BRIDGE_MAIL_METHODS (durable replay ledger). */
+export const MOBILE_BRIDGE_MAIL_WRITE_METHODS = [
+  "mail.markRead",
+  "mail.archive",
+  "mail.delete",
+  "mail.send",
+  "mail.draft.save",
+  "mail.draft.delete",
+  "mail.updateSettings",
+  "mail.delegate",
+  "one.profile.update",
+] as const;
+
 export const MOBILE_BRIDGE_METHODS = [
   "snapshot.get",
   "host.status",
@@ -140,6 +170,11 @@ export const MOBILE_BRIDGE_METHODS = [
   "build.start",
   "build.status",
   "build.answer",
+  // One 메일함 미러(2026-09-26). 폰은 웹 메일 API 를 직접 부르지 않는다 — 데스크탑 Main 이
+  // 세션 쿠키로 대신 부르고, 여기 목록은 그 투영의 닫힌 입구다. 다섯 곳이 함께 움직인다:
+  // 이 목록·WRITE·EMPTY·validateParams / authority.ts / PROTOCOL·BRIDGE-WIRING / Flutter
+  // desktop_transport.dart / 웹 PIN 사본(src/one/shared/mobile-bridge.ts + 패치).
+  ...MOBILE_BRIDGE_MAIL_METHODS,
   "device.revokeSelf",
 ] as const;
 
@@ -199,6 +234,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "agents.cloudDelete",
   "build.start",
   "build.answer",
+  ...MOBILE_BRIDGE_MAIL_WRITE_METHODS,
 ]);
 
 export const MOBILE_BRIDGE_EVENT_NAMES = [
@@ -211,6 +247,8 @@ export const MOBILE_BRIDGE_EVENT_NAMES = [
   "automation.updated",
   "ontology.updated",
   "build.event",
+  // 내용 없이 "무엇이 바뀌었나"만 싣는다(changeSeq·대화 id·안읽음 수). 폰은 내용을 다시 묻는다.
+  "mail.updated",
 ] as const;
 
 export type MobileBridgeEventName = (typeof MOBILE_BRIDGE_EVENT_NAMES)[number];
@@ -2060,6 +2098,158 @@ export interface MobileBridgeOneProfileDto {
   omittedOperatingPrincipleCount: number;
 }
 
+/** One mailbox mirror — bounds shared by the validator and the Main projection. */
+export const MOBILE_BRIDGE_MAIL_LIMITS = {
+  id: 128,
+  query: 200,
+  page: 50,
+  recipients: 50,
+  subject: 998,
+  /** Plain text only. HTML never crosses the bridge (byte budget + remote-content safety). */
+  text: 100_000,
+  displayName: 64,
+  signature: 2_000,
+  instruction: 4_000,
+} as const;
+
+export const MOBILE_BRIDGE_MAIL_VIEWS = ["inbox", "waiting", "sent", "drafts", "archived", "all"] as const;
+export type MobileBridgeMailView = (typeof MOBILE_BRIDGE_MAIL_VIEWS)[number];
+
+export const MOBILE_BRIDGE_MAIL_INBOUND_MODES = ["notify", "draft", "reply"] as const;
+export type MobileBridgeMailInboundMode = (typeof MOBILE_BRIDGE_MAIL_INBOUND_MODES)[number];
+
+/** Same shape the web server enforces for a picked local part (PLAN 6.2); the server stays the authority. */
+export const MOBILE_BRIDGE_MAIL_LOCAL_PART_RE = /^[a-z0-9](?:[a-z0-9.-]{0,62}[a-z0-9])?$/;
+
+export const MOBILE_BRIDGE_ONE_PRINCIPLE_MAX = 500;
+
+export type MobileBridgeMailOrigin = "one" | "owner" | "automation" | "external";
+
+/** Machine-readable refusal returned as data (never thrown) so the phone can show the server's reason. */
+export interface MobileBridgeMailRefusalDto {
+  ok: false;
+  code: string;
+  message: string;
+}
+
+export interface MobileBridgeMailStatusDto {
+  schemaVersion: 1;
+  ok: true;
+  signedIn: boolean;
+  /** Plan allows a mailbox at all. */
+  available: boolean;
+  canSend: boolean;
+  address: string | null;
+  aliases: string[];
+  mailboxStatus: "none" | "provisioning" | "active" | "deleted";
+  /** Pick-once address (owner decision 2026-09-26): true once the owner has chosen it. */
+  addressChosen: boolean;
+  canChooseAddress: boolean;
+  displayName: string | null;
+  signature: string | null;
+  inboundMode: MobileBridgeMailInboundMode | null;
+  usage: { used: number; limit: number; remaining: number; periodEnd: string | null } | null;
+  unreadInbox: number | null;
+  /** Server change cursor at the moment of this answer; null when the server has none yet. */
+  changeSeq: number | null;
+}
+
+export interface MobileBridgeMailThreadSummaryDto {
+  id: string;
+  subject: string;
+  participants: string[];
+  snippet: string;
+  lastMessageAt: string | null;
+  messageCount: number;
+  unreadCount: number;
+  hasAttachments: boolean;
+  archived: boolean;
+  lastOrigin: MobileBridgeMailOrigin | null;
+  status: string | null;
+  /** "bounced" | "unknown" when a send in this thread did not land cleanly. */
+  sendIssue: "bounced" | "unknown" | null;
+}
+
+export interface MobileBridgeMailAttachmentMetaDto {
+  index: number;
+  filename: string | null;
+  contentType: string | null;
+  size: number;
+}
+
+export interface MobileBridgeMailMessageDto {
+  id: string;
+  threadId: string | null;
+  direction: "inbound" | "outbound";
+  from: string;
+  to: string[];
+  cc: string[];
+  subject: string;
+  text: string;
+  textTruncated: boolean;
+  receivedAt: string | null;
+  readAt: string | null;
+  origin: MobileBridgeMailOrigin | null;
+  /** One chat that produced this send, when origin is "one". Mobile may open it. */
+  originChatId: string | null;
+  sendStatus: string | null;
+  attachments: MobileBridgeMailAttachmentMetaDto[];
+}
+
+export interface MobileBridgeMailDraftDto {
+  id: string;
+  version: number | null;
+  threadId: string | null;
+  replyToMessageId: string | null;
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject: string;
+  text: string;
+  updatedAt: string | null;
+}
+
+export interface MobileBridgeMailThreadsDto {
+  schemaVersion: 1;
+  ok: true;
+  view: MobileBridgeMailView;
+  threads: MobileBridgeMailThreadSummaryDto[];
+  nextCursor: string | null;
+}
+
+export interface MobileBridgeMailThreadDto {
+  schemaVersion: 1;
+  ok: true;
+  thread: MobileBridgeMailThreadSummaryDto;
+  messages: MobileBridgeMailMessageDto[];
+  drafts: MobileBridgeMailDraftDto[];
+}
+
+export interface MobileBridgeMailDelegateDto {
+  schemaVersion: 1;
+  ok: true;
+  chatId: string;
+  runId: string | null;
+}
+
+/** `mail.updated` event payload: identities and counters only, never content. */
+export interface MobileBridgeMailUpdatedEventDto {
+  schemaVersion: 1;
+  changeSeq: number | null;
+  /** "resync" tells the phone to drop its view and re-fetch everything (server cursor expired or sign-in changed). */
+  reason: "changes" | "resync" | "mailbox" | "status" | "signed-out";
+  threadIds: string[];
+  deletedThreadIds: string[];
+  unreadInbox: number | null;
+}
+
+export interface MobileBridgeOneProfileMirrorDto {
+  schemaVersion: 1;
+  ok: true;
+  profile: MobileBridgeOneProfileDto;
+  mail: MobileBridgeMailStatusDto | MobileBridgeMailRefusalDto;
+}
+
 export interface MobileBridgeOneBriefingCandidateDto {
   contractVersion: typeof ONE_BRIEFING_CONTRACT_VERSION;
   candidateId: string;
@@ -2205,6 +2395,8 @@ const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "billing.credits",
   "hephaestus.engineToggles",
   "ontology.projections.list",
+  "mail.status",
+  "one.profile.get",
   "device.revokeSelf",
 ]);
 
@@ -3278,11 +3470,144 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["runId"])
         ? requiredString(params, "runId", 160)
         : "build.status accepts only runId";
+    case "mail.threads":
+      return hasOnlyKeys(params, ["view", "q", "cursor", "limit"])
+        ? firstError(
+            validateEnum(params, "view", MOBILE_BRIDGE_MAIL_VIEWS, false),
+            optionalString(params, "q", MOBILE_BRIDGE_MAIL_LIMITS.query),
+            optionalString(params, "cursor", 512),
+            optionalInteger(params, "limit", 1, MOBILE_BRIDGE_MAIL_LIMITS.page),
+          )
+        : "mail.threads accepts only view, q, cursor and limit";
+    case "mail.thread":
+      return hasOnlyKeys(params, ["threadId"])
+        ? requiredString(params, "threadId", MOBILE_BRIDGE_MAIL_LIMITS.id)
+        : "mail.thread accepts only threadId";
+    case "mail.markRead":
+      return hasOnlyKeys(params, ["threadId", "read"])
+        ? firstError(
+            requiredString(params, "threadId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+            typeof params.read === "boolean" ? null : "read must be a boolean",
+          )
+        : "mail.markRead accepts only threadId and read";
+    case "mail.archive":
+      return hasOnlyKeys(params, ["threadId", "archived"])
+        ? firstError(
+            requiredString(params, "threadId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+            typeof params.archived === "boolean" ? null : "archived must be a boolean",
+          )
+        : "mail.archive accepts only threadId and archived";
+    case "mail.delete":
+      return hasOnlyKeys(params, ["threadId"])
+        ? requiredString(params, "threadId", MOBILE_BRIDGE_MAIL_LIMITS.id)
+        : "mail.delete accepts only threadId";
+    case "mail.send":
+      return hasOnlyKeys(params, ["to", "cc", "bcc", "subject", "text", "replyToMessageId", "draftId", "basedOnMessageId"])
+        ? firstError(
+            mailAddressList(params, "to", true),
+            mailAddressList(params, "cc", false),
+            mailAddressList(params, "bcc", false),
+            optionalString(params, "subject", MOBILE_BRIDGE_MAIL_LIMITS.subject),
+            requiredText(params, "text", MOBILE_BRIDGE_MAIL_LIMITS.text),
+            optionalString(params, "replyToMessageId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+            optionalString(params, "draftId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+            optionalString(params, "basedOnMessageId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+          )
+        : "mail.send accepts only to, cc, bcc, subject, text, replyToMessageId, draftId and basedOnMessageId";
+    case "mail.draft.save":
+      return hasOnlyKeys(params, ["draftId", "threadId", "replyToMessageId", "to", "cc", "bcc", "subject", "text", "expectedVersion"])
+        ? firstError(
+            optionalString(params, "draftId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+            optionalString(params, "threadId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+            optionalString(params, "replyToMessageId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+            mailAddressList(params, "to", false),
+            mailAddressList(params, "cc", false),
+            mailAddressList(params, "bcc", false),
+            optionalString(params, "subject", MOBILE_BRIDGE_MAIL_LIMITS.subject),
+            optionalText(params, "text", MOBILE_BRIDGE_MAIL_LIMITS.text),
+            optionalInteger(params, "expectedVersion", 0, Number.MAX_SAFE_INTEGER),
+          )
+        : "mail.draft.save accepts only draftId, threadId, replyToMessageId, to, cc, bcc, subject, text and expectedVersion";
+    case "mail.draft.delete":
+      return hasOnlyKeys(params, ["draftId"])
+        ? requiredString(params, "draftId", MOBILE_BRIDGE_MAIL_LIMITS.id)
+        : "mail.draft.delete accepts only draftId";
+    case "mail.updateSettings": {
+      if (!hasOnlyKeys(params, ["displayName", "signature", "inboundMode", "localPart"])) {
+        return "mail.updateSettings accepts only displayName, signature, inboundMode and localPart";
+      }
+      if (Object.keys(params).length === 0) return "mail.updateSettings needs at least one field";
+      return firstError(
+        optionalString(params, "displayName", MOBILE_BRIDGE_MAIL_LIMITS.displayName),
+        optionalText(params, "signature", MOBILE_BRIDGE_MAIL_LIMITS.signature),
+        validateEnum(params, "inboundMode", MOBILE_BRIDGE_MAIL_INBOUND_MODES),
+        params.localPart === undefined
+          ? null
+          : typeof params.localPart === "string" && MOBILE_BRIDGE_MAIL_LOCAL_PART_RE.test(params.localPart)
+            ? null
+            : "localPart must be lowercase letters, digits, dots or hyphens (1-64)",
+      );
+    }
+    case "mail.delegate":
+      return hasOnlyKeys(params, ["threadId", "instruction", "locale"])
+        ? firstError(
+            requiredString(params, "threadId", MOBILE_BRIDGE_MAIL_LIMITS.id),
+            optionalText(params, "instruction", MOBILE_BRIDGE_MAIL_LIMITS.instruction),
+            validateEnum(params, "locale", ["ko", "en"]),
+          )
+        : "mail.delegate accepts only threadId, instruction and locale";
+    case "one.profile.update": {
+      if (!hasOnlyKeys(params, [
+        "expectedVersion",
+        "displayName",
+        "role",
+        "addPrinciple",
+        "updatePrinciple",
+        "removePrincipleId",
+      ])) {
+        return "one.profile.update contains unsupported fields";
+      }
+      const operations = ["addPrinciple", "updatePrinciple", "removePrincipleId"].filter((key) => params[key] !== undefined).length
+        + (params.displayName !== undefined || params.role !== undefined ? 1 : 0);
+      if (operations !== 1) return "one.profile.update changes exactly one thing per call";
+      const update = params.updatePrinciple;
+      return firstError(
+        Number.isSafeInteger(params.expectedVersion) && Number(params.expectedVersion) >= 1
+          ? null
+          : "expectedVersion is required",
+        optionalString(params, "displayName", 64),
+        optionalString(params, "role", 120),
+        optionalText(params, "addPrinciple", MOBILE_BRIDGE_ONE_PRINCIPLE_MAX),
+        update === undefined
+          ? null
+          : isRecord(update) && hasOnlyKeys(update, ["id", "content"])
+            ? firstError(requiredString(update, "id", 128), requiredText(update, "content", MOBILE_BRIDGE_ONE_PRINCIPLE_MAX))
+            : "updatePrinciple accepts only id and content",
+        optionalString(params, "removePrincipleId", 128),
+        params.displayName !== undefined && String(params.displayName).trim().length === 0 ? "displayName must not be blank" : null,
+        params.role !== undefined && String(params.role).trim().length === 0 ? "role must not be blank" : null,
+        params.addPrinciple !== undefined && String(params.addPrinciple).trim().length === 0 ? "addPrinciple must not be blank" : null,
+      );
+    }
     // Empty-parameter methods returned above. Keep this fail-closed fallback so
     // a future method cannot become callable before it receives a validator.
     default:
       return `unsupported method: ${method}`;
   }
+}
+
+function mailAddressList(params: Record<string, unknown>, key: string, required: boolean): string | null {
+  const value = params[key];
+  if (value === undefined && !required) return null;
+  if (!Array.isArray(value)) return `${key} must be a list of addresses`;
+  if (required && value.length === 0) return `${key} needs at least one address`;
+  if (value.length > MOBILE_BRIDGE_MAIL_LIMITS.recipients) return `${key} has too many addresses`;
+  for (const item of value) {
+    if (typeof item !== "string" || item.length < 3 || item.length > 320 || /[\u0000-\u001f\s,;<>]/.test(item) || !item.includes("@")) {
+      return `${key} contains an invalid address`;
+    }
+  }
+  return null;
 }
 
 export function isMobileBridgeMethod(value: unknown): value is MobileBridgeMethod {

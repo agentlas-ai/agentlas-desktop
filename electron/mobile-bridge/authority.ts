@@ -1,6 +1,6 @@
 import { parseHubReleasePin } from "../../shared/hub-release-pin";
 import { withInvocationPreflightAccounting } from "../long-run/accounting-context";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import {
@@ -201,6 +201,7 @@ import {
   projectMobileBridgeChat,
   projectMobileBridgeConfirmations,
   projectMobileBridgeHistory,
+  projectMobileBridgeOneProfile,
   projectMobileBridgeProject,
   projectMobileBridgeProjectAsync,
   projectMobileBridgeRuntimeRolePool,
@@ -210,6 +211,25 @@ import {
   projectMobileBridgeUsage,
 } from "./projector";
 import { MobileProjectFilePreviewRegistry } from "./project-file-preview";
+import {
+  createMobileBridgeAgentMailService,
+  type MobileBridgeAgentMailService,
+} from "./agent-mail";
+import {
+  addOneOperatingPrinciple,
+  deleteOneOperatingPrinciple,
+  getOneProfile,
+  updateOneOperatingPrinciple,
+  updateOneProfile,
+} from "../store/one-profile";
+import { projectOneProfileForDevice } from "../../shared/one-profile";
+import {
+  MOBILE_BRIDGE_MAIL_INBOUND_MODES,
+  MOBILE_BRIDGE_MAIL_LIMITS,
+  MOBILE_BRIDGE_MAIL_LOCAL_PART_RE,
+  MOBILE_BRIDGE_MAIL_VIEWS,
+  MOBILE_BRIDGE_ONE_PRINCIPLE_MAX,
+} from "../../shared/mobile-bridge";
 import {
   MOBILE_BRIDGE_DISPLAY_TEXT_BYTES,
   sanitizeMobileBridgeText,
@@ -307,6 +327,8 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   terminalControl?: MobileBridgeTerminalControl;
   /** Optional bounded producer for the Agentlas main-window visual session. */
   visualSessionControl?: MobileVisualSessionControl;
+  /** One mailbox mirror. Tests inject a fake; production reuses Main's web mail client. */
+  agentMail?: MobileBridgeAgentMailService;
 }
 
 /**
@@ -722,6 +744,43 @@ function projectRouteRecommendation(recommendation: Recommendation) {
         ? boundedRedactedText(recommendation.buildReason, 2_000)
         : null,
   };
+}
+
+const MAIL_ID_RE = /^[A-Za-z0-9_:.-]{1,128}$/;
+
+function requiredMailId(params: Record<string, unknown>, key: string): string {
+  return requiredIdentifier(params, key, MAIL_ID_RE);
+}
+
+function optionalMailId(params: Record<string, unknown>, key: string): string | undefined {
+  const value = params[key];
+  if (value === undefined || value === null) return undefined;
+  return requiredMailId(params, key);
+}
+
+function mailAddresses(params: Record<string, unknown>, key: string): string[] {
+  const value = params[key];
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > MOBILE_BRIDGE_MAIL_LIMITS.recipients) {
+    throw new TypeError(`${key} must be a bounded list of addresses`);
+  }
+  return value.map((item) => {
+    if (typeof item !== "string" || item.length < 3 || item.length > 320 || /[\u0000-\u001f\s,;<>]/.test(item) || !item.includes("@")) {
+      throw new TypeError(`${key} contains an invalid address`);
+    }
+    return item;
+  });
+}
+
+/**
+ * The bridge's durable replay key becomes the web send key. The web accepts
+ * [A-Za-z0-9._-]{8,128}; bridge keys are wider, so hash anything else into
+ * that alphabet deterministically (same bridge key → same web key).
+ */
+function mobileMailIdempotencyKey(bridgeKey: string): string {
+  const direct = `mob-${bridgeKey}`;
+  if (/^[A-Za-z0-9._-]{8,128}$/.test(direct)) return direct;
+  return `mob-${createHash("sha256").update(bridgeKey).digest("hex")}`;
 }
 
 function asJsonValue(value: unknown, label: string): MobileBridgeJsonValue {
@@ -1645,6 +1704,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly buildActions: MobileBridgeBuildActions;
   private readonly hubMarket: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview" | "requireCurrentRelease">;
   private readonly visualSessions: MobileVisualSessionManager;
+  private readonly agentMail: MobileBridgeAgentMailService;
   private readonly projectFilePreviews = new MobileProjectFilePreviewRegistry();
   /**
    * Mobile terminal ownership is kept in the Desktop authority, not in the
@@ -1698,6 +1758,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.buildActions = options.buildActions ?? createDesktopMobileBridgeBuildActions();
     this.hubMarket = options.hubMarket ?? createDesktopMobileHubMarketService();
     this.visualSessions = new MobileVisualSessionManager(options.visualSessionControl);
+    this.agentMail = options.agentMail ?? createMobileBridgeAgentMailService();
     queueMicrotask(() => {
       void resumeMobileOneAutoRecovery(invocationService).catch((error) => this.onError(errorOf(error)));
     });
@@ -3761,6 +3822,139 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         this.options.revokeDevice(context.deviceId, "device_requested");
         return { revoked: true };
       }
+      case "mail.status": {
+        noParams(request);
+        return asJsonValue(await this.agentMail.status(), request.method);
+      }
+      case "mail.threads": {
+        const params = guardedParams(request, ["view", "q", "cursor", "limit"]);
+        const view = optionalEnum(params, "view", MOBILE_BRIDGE_MAIL_VIEWS);
+        if (!view) throw new TypeError("view is required");
+        const q = optionalText(params, "q", MOBILE_BRIDGE_MAIL_LIMITS.query)?.trim();
+        const cursor = optionalIdentifier(params, "cursor", 512);
+        const limit = optionalInteger(params, "limit", 1, MOBILE_BRIDGE_MAIL_LIMITS.page);
+        return asJsonValue(await this.agentMail.threads({
+          view,
+          ...(q ? { q } : {}),
+          ...(cursor ? { cursor } : {}),
+          ...(limit ? { limit } : {}),
+        }), request.method);
+      }
+      case "mail.thread": {
+        const params = guardedParams(request, ["threadId"]);
+        return asJsonValue(await this.agentMail.thread(requiredMailId(params, "threadId")), request.method);
+      }
+      case "mail.markRead": {
+        const params = guardedParams(request, ["threadId", "read"]);
+        return asJsonValue(await this.agentMail.markRead({
+          threadId: requiredMailId(params, "threadId"),
+          read: requiredBoolean(params, "read"),
+        }), request.method);
+      }
+      case "mail.archive": {
+        const params = guardedParams(request, ["threadId", "archived"]);
+        return asJsonValue(await this.agentMail.archive({
+          threadId: requiredMailId(params, "threadId"),
+          archived: requiredBoolean(params, "archived"),
+        }), request.method);
+      }
+      case "mail.delete": {
+        const params = guardedParams(request, ["threadId"]);
+        return asJsonValue(await this.agentMail.removeThread(requiredMailId(params, "threadId")), request.method);
+      }
+      case "mail.send": {
+        const params = guardedParams(request, ["to", "cc", "bcc", "subject", "text", "replyToMessageId", "draftId", "basedOnMessageId"]);
+        if (!request.idempotencyKey) throw new TypeError("mail.send requires an idempotencyKey");
+        const to = mailAddresses(params, "to");
+        if (to.length === 0) throw new TypeError("to needs at least one address");
+        const replyToMessageId = optionalMailId(params, "replyToMessageId");
+        const draftId = optionalMailId(params, "draftId");
+        const basedOnMessageId = optionalMailId(params, "basedOnMessageId");
+        return asJsonValue(await this.agentMail.send({
+          to,
+          cc: mailAddresses(params, "cc"),
+          bcc: mailAddresses(params, "bcc"),
+          subject: optionalText(params, "subject", MOBILE_BRIDGE_MAIL_LIMITS.subject) ?? "",
+          text: requiredText(params, "text", MOBILE_BRIDGE_MAIL_LIMITS.text),
+          ...(replyToMessageId ? { replyToMessageId } : {}),
+          ...(draftId ? { draftId } : {}),
+          ...(basedOnMessageId ? { basedOnMessageId } : {}),
+          idempotencyKey: mobileMailIdempotencyKey(request.idempotencyKey),
+        }), request.method);
+      }
+      case "mail.draft.save": {
+        const params = guardedParams(request, ["draftId", "threadId", "replyToMessageId", "to", "cc", "bcc", "subject", "text", "expectedVersion"]);
+        const draftId = optionalMailId(params, "draftId");
+        const threadId = optionalMailId(params, "threadId");
+        const replyToMessageId = optionalMailId(params, "replyToMessageId");
+        const expectedVersion = optionalInteger(params, "expectedVersion", 0, Number.MAX_SAFE_INTEGER);
+        const subject = optionalText(params, "subject", MOBILE_BRIDGE_MAIL_LIMITS.subject);
+        const text = optionalText(params, "text", MOBILE_BRIDGE_MAIL_LIMITS.text);
+        return asJsonValue(await this.agentMail.saveDraft({
+          ...(draftId ? { draftId } : {}),
+          ...(threadId ? { threadId } : {}),
+          ...(replyToMessageId ? { replyToMessageId } : {}),
+          ...(expectedVersion !== undefined ? { expectedVersion } : {}),
+          ...(params.to !== undefined ? { to: mailAddresses(params, "to") } : {}),
+          ...(params.cc !== undefined ? { cc: mailAddresses(params, "cc") } : {}),
+          ...(params.bcc !== undefined ? { bcc: mailAddresses(params, "bcc") } : {}),
+          ...(subject !== undefined ? { subject } : {}),
+          ...(text !== undefined ? { text } : {}),
+        }), request.method);
+      }
+      case "mail.draft.delete": {
+        const params = guardedParams(request, ["draftId"]);
+        return asJsonValue(await this.agentMail.removeDraft(requiredMailId(params, "draftId")), request.method);
+      }
+      case "mail.updateSettings": {
+        const params = guardedParams(request, ["displayName", "signature", "inboundMode", "localPart"]);
+        const displayName = optionalText(params, "displayName", MOBILE_BRIDGE_MAIL_LIMITS.displayName);
+        const signature = optionalText(params, "signature", MOBILE_BRIDGE_MAIL_LIMITS.signature);
+        const inboundMode = optionalEnum(params, "inboundMode", MOBILE_BRIDGE_MAIL_INBOUND_MODES);
+        const localPart = optionalIdentifier(params, "localPart", 64);
+        if (localPart !== undefined && !MOBILE_BRIDGE_MAIL_LOCAL_PART_RE.test(localPart)) {
+          throw new TypeError("localPart must be lowercase letters, digits, dots or hyphens");
+        }
+        if (displayName === undefined && signature === undefined && inboundMode === undefined && localPart === undefined) {
+          throw new TypeError("mail.updateSettings needs at least one field");
+        }
+        return asJsonValue(await this.agentMail.updateSettings({
+          ...(displayName !== undefined ? { displayName: displayName.trim() } : {}),
+          ...(signature !== undefined ? { signature } : {}),
+          ...(inboundMode !== undefined ? { inboundMode } : {}),
+          ...(localPart !== undefined ? { localPart } : {}),
+        }), request.method);
+      }
+      case "mail.delegate": {
+        const params = guardedParams(request, ["threadId", "instruction", "locale"]);
+        const instruction = optionalText(params, "instruction", MOBILE_BRIDGE_MAIL_LIMITS.instruction)?.trim();
+        const locale = optionalEnum(params, "locale", ["ko", "en"] as const);
+        return asJsonValue(await this.agentMail.delegate({
+          threadId: requiredMailId(params, "threadId"),
+          ...(instruction ? { instruction } : {}),
+          ...(locale ? { locale } : {}),
+        }), request.method);
+      }
+      case "one.profile.get": {
+        noParams(request);
+        return asJsonValue({
+          schemaVersion: 1,
+          ok: true,
+          profile: projectMobileBridgeOneProfile(getOneProfile()),
+          mail: await this.agentMail.status(),
+        }, request.method);
+      }
+      case "one.profile.update": {
+        const params = guardedParams(request, [
+          "expectedVersion",
+          "displayName",
+          "role",
+          "addPrinciple",
+          "updatePrinciple",
+          "removePrincipleId",
+        ]);
+        return asJsonValue(this.updateOneProfileFromMobile(params), request.method);
+      }
       case "request.status":
         // The server handles this read-only ledger lookup before authority
         // dispatch so a missing receipt can never execute a command.
@@ -3770,6 +3964,75 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         throw new TypeError(`Unsupported Mobile Bridge method: ${String(unsupported)}`);
       }
     }
+  }
+
+  /**
+   * One profile edit from the phone. Exactly one change per call, guarded by
+   * the profile's own compare-and-swap version. A principle can be edited or
+   * removed only when the phone could see it (device projection); scoped
+   * principles stay Desktop-only. A rename goes through updateOneProfile, so
+   * Main's mail sync makes the sender name follow exactly as it does for a
+   * Desktop rename (API.md "One 프로필 이름 ↔ 메일 보내는 이름"); the phone
+   * sees it through the next mail status read.
+   */
+  private updateOneProfileFromMobile(params: Record<string, unknown>): Record<string, unknown> {
+    const expectedVersion = optionalInteger(params, "expectedVersion", 1, Number.MAX_SAFE_INTEGER);
+    if (expectedVersion === undefined) throw new TypeError("expectedVersion is required");
+    const current = getOneProfile();
+    if (current.version !== expectedVersion) {
+      return {
+        ok: false,
+        code: "stale_version",
+        message: "One's profile changed on another device. Reload and try again.",
+        profile: projectMobileBridgeOneProfile(current) as unknown as Record<string, unknown>,
+      };
+    }
+    const visible = new Set(projectOneProfileForDevice(current).operatingPrinciples.map((item) => item.id));
+    const displayName = optionalText(params, "displayName", 64)?.trim();
+    const role = optionalText(params, "role", 120)?.trim();
+    const addPrinciple = optionalText(params, "addPrinciple", MOBILE_BRIDGE_ONE_PRINCIPLE_MAX)?.trim();
+    const removePrincipleId = optionalIdentifier(params, "removePrincipleId", 128);
+    const update = params.updatePrinciple;
+    let next = current;
+    if (displayName !== undefined || role !== undefined) {
+      if (displayName === "" || role === "") throw new TypeError("name and role must not be blank");
+      next = updateOneProfile({
+        expectedVersion,
+        patch: {
+          ...(displayName !== undefined ? { displayName } : {}),
+          ...(role !== undefined ? { role } : {}),
+        },
+      });
+    } else if (addPrinciple !== undefined) {
+      if (!addPrinciple) throw new TypeError("addPrinciple must not be blank");
+      next = addOneOperatingPrinciple({
+        expectedVersion,
+        content: addPrinciple,
+        scope: "personal",
+        scopeRef: null,
+        // The owner typed and saved this on their own paired phone.
+        approvedByUser: true,
+      });
+    } else if (update !== undefined) {
+      if (!isRecord(update)) throw new TypeError("updatePrinciple must be an object");
+      assertOnlyKeys(update, ["id", "content"], "updatePrinciple");
+      const id = requiredBoundedString(update, "id", 128);
+      if (!visible.has(id)) throw new TypeError("That principle cannot be edited from this phone");
+      const content = requiredText(update, "content", MOBILE_BRIDGE_ONE_PRINCIPLE_MAX).trim();
+      if (!content) throw new TypeError("principle must not be blank");
+      next = updateOneOperatingPrinciple({ expectedVersion, principleId: id, content, approvedByUser: true });
+    } else if (removePrincipleId !== undefined) {
+      if (!visible.has(removePrincipleId)) throw new TypeError("That principle cannot be removed from this phone");
+      next = deleteOneOperatingPrinciple({ expectedVersion, principleId: removePrincipleId });
+    } else {
+      throw new TypeError("one.profile.update changes exactly one thing per call");
+    }
+
+    return {
+      schemaVersion: 1,
+      ok: true,
+      profile: projectMobileBridgeOneProfile(next) as unknown as Record<string, unknown>,
+    };
   }
 
   /** DESKTOP_MOBILE_BRIDGE: Live events originate only from Desktop services. */
@@ -4279,6 +4542,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }),
       onDesktopStoreChange((change) => {
         this.scheduleSnapshotUpdated(change.entity === "automation" ? change.id : undefined);
+      }),
+      // Content-free change notice from Main's mail sync loop. The phone
+      // re-reads what it shows; a "resync" reason makes it re-fetch everything.
+      this.agentMail.subscribe((event) => {
+        this.emit({ event: "mail.updated", payload: asJsonValue(event, "mail.updated") });
       }),
     ];
   }
