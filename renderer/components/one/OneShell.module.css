@@ -3597,7 +3597,9 @@
    잃지 않는다(2026-08-24 UX 연구 결론). */
 .railTabs {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  /* 조직 | 세션 (+ 메일 when the owner has a mailbox) */
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
   gap: 2px;
   margin: 0 10px 8px;
   padding: 2px;
@@ -3626,6 +3628,35 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+/* Mail tab before an address exists: visibly off; the centre shows the one setup card. */
+.railTabs button[data-disabled="true"] {
+  color: var(--muted-deep);
+  opacity: 0.55;
+}
+
+/* Mail tab: unread count in the alert dot's place — number only. */
+.railTabCount {
+  min-width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  margin-left: 5px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: var(--white);
+  font-size: 9.5px;
+  font-weight: 760;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  box-shadow: 0 0 0 1.5px var(--paper);
+}
+
+/* The mailbox covers the centre; hide what is under it from focus too. */
+.workspace[data-mail-view="true"] > :not([data-one-mail-view]) {
+  visibility: hidden;
 }
 
 .railTabAlertDot {

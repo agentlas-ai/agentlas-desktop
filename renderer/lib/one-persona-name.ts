@@ -93,6 +93,16 @@ export function personalizeOneText(text: string, name: string, locale: "ko" | "e
  * out on purpose (e.g. one.act.distinction, one.feat.mobile_confirm.body).
  */
 export const ONE_PERSONA_KEYS: ReadonlySet<string> = new Set([
+  "one.mail.sent_by_one",
+  "one.mail.setup.title",
+  "one.mail.setup.desc",
+  "one.mail.written_by_one",
+  "one.mail.action.delegate",
+  "one.mail.settings.desc",
+  "one.mail.settings.sender_hint",
+  "one.mail.settings.mode.notify_desc",
+  "one.mail.settings.mode.draft_desc",
+  "one.mail.settings.mode.reply_desc",
   "one.sug.auto.title",
   "one.act.body_concern",
   "one.feat.slide.briefing.title",

@@ -6,9 +6,8 @@ import {
   useState,
   type FormEvent,
 } from "react";
-import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
-import type { AgentMailStatus } from "@shared/agent-mail";
+import { OneMailSettings } from "./mail/OneMailSettings";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
 import type {
@@ -37,6 +36,8 @@ interface OneProfileSheetProps {
   locale: "ko" | "en";
   onClose: () => void;
   onProfileChange: (profile: OneProfile) => void;
+  /** Opens One's mailbox (rail Mail tab). */
+  onOpenMailbox?: () => void;
 }
 
 function scopeLabel(scope: OneOperatingPrincipleScope, locale: Locale): string {
@@ -64,6 +65,7 @@ export function OneProfileSheet({
   locale,
   onClose,
   onProfileChange,
+  onOpenMailbox,
 }: OneProfileSheetProps) {
   const hydratedVersionRef = useRef<number | null>(null);
   const [displayName, setDisplayName] = useState(profile?.displayName ?? "One");
@@ -93,39 +95,7 @@ export function OneProfileSheet({
     setError(null);
   }, [onClose, open]);
 
-  // One's own mail address lives on the server (agentMail.status); this sheet
-  // only shows it and links to the mailbox, so name and address sit together.
-  const router = useRouter();
-  const ko = locale === "ko";
-  const [mail, setMail] = useState<AgentMailStatus | null>(null);
-  const [mailBusy, setMailBusy] = useState(false);
-  const [mailNotice, setMailNotice] = useState<string | null>(null);
-  useEffect(() => {
-    if (!open) return;
-    let alive = true;
-    void ipc()?.agentMail?.status().then((next) => { if (alive) setMail(next); }).catch(() => undefined);
-    return () => { alive = false; };
-  }, [open]);
-
   if (!open) return null;
-
-  const mailOk = mail && mail.ok ? mail : null;
-  const mailAddress = mailOk?.mailbox?.status === "active" ? mailOk.mailbox.address : null;
-  const issueMail = async () => {
-    const api = ipc()?.agentMail;
-    if (!api || mailBusy) return;
-    setMailBusy(true);
-    setMailNotice(null);
-    try {
-      const res = await api.issue({ displayName: profile?.displayName });
-      if (!res.ok) setMailNotice(res.message || res.code);
-      setMail(await api.status());
-    } catch (cause) {
-      setMailNotice(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setMailBusy(false);
-    }
-  };
 
   const mutate = async (operation: () => Promise<OneProfile>, success: string) => {
     const api = ipc();
@@ -309,28 +279,15 @@ export function OneProfileSheet({
             <section className={styles.section} aria-labelledby="one-mail-title" data-one-profile-mail>
               <div className={styles.sectionHeading}>
                 <div>
-                  <h3 id="one-mail-title">{ko ? "메일 주소" : "Mail address"}</h3>
-                  <p>{ko ? "이 주소로 메일을 받고 보냅니다." : "Mail is received and sent from this address."}</p>
+                  <h3 id="one-mail-title">{tFor(locale, "one.mail.settings.title")}</h3>
+                  <p>{tFor(locale, "one.mail.settings.desc")}</p>
                 </div>
               </div>
-              {mailAddress ? (
-                <p className={styles.principleContent} data-one-profile-mail-address>{mailAddress}</p>
-              ) : mailOk && !mailOk.signedIn ? (
-                <p className={styles.empty}>{ko ? "Agentlas에 로그인하면 사용할 수 있습니다." : "Sign in to Agentlas to use agent mail."}</p>
-              ) : mailOk?.entitlement?.available ? (
-                <p className={styles.empty}>{ko ? "아직 주소가 없습니다." : "No address yet."}</p>
-              ) : mailOk ? (
-                <p className={styles.empty}>{ko ? "에이전트 메일은 Pro·Max·WoW 요금제에 포함됩니다." : "Agent mail is included with Pro, Max and WoW."}</p>
-              ) : null}
-              {mailNotice && <p className={styles.error} role="alert">{mailNotice}</p>}
-              <div className={styles.formActions}>
-                {mailAddress ? (
-                  <button type="button" className={styles.secondaryButton} onClick={() => void navigator.clipboard?.writeText(mailAddress)}>{ko ? "복사" : "Copy"}</button>
-                ) : mailOk?.entitlement?.available ? (
-                  <button type="button" className={styles.primaryButton} disabled={mailBusy} onClick={() => void issueMail()}>{mailBusy ? (ko ? "만드는 중…" : "Creating…") : ko ? "주소 받기" : "Get address"}</button>
-                ) : null}
-                <button type="button" className={styles.secondaryButton} onClick={() => { onClose(); router.push("/settings"); }}>{ko ? "메일함 열기" : "Open mailbox"}</button>
-              </div>
+              <OneMailSettings
+                locale={locale}
+                oneName={profile.displayName}
+                onOpenMailbox={onOpenMailbox ? () => { onClose(); onOpenMailbox(); } : undefined}
+              />
             </section>
 
             <section className={styles.section} aria-labelledby="one-principles-title">

@@ -173,3 +173,20 @@ export const IconNetwork = (p: Props) =>
     "M12 3a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM5.5 16a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM18.5 16a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM11 7.7 6.5 14.5M13 7.7l4.5 6.8",
     p,
   );
+
+// One mailbox (2026-09-26): list toolbar, row hover actions, mini-nav.
+export const IconArchive = (p: Props) =>
+  svg("M3 3h18a1 1 0 0 1 1 1v3a1 1 0 0 1-1 1H3a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8 M10 12h4", p);
+export const IconMail = (p: Props) =>
+  svg("M4 4h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2z M22 7l-10 6L2 7", p);
+export const IconMailOpen = (p: Props) =>
+  svg("M21.2 8.4c.5.38.8.97.8 1.6v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V10a2 2 0 0 1 .8-1.6l8-6a2 2 0 0 1 2.4 0l8 6z M22 10l-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 10", p);
+export const IconChevronLeft = (p: Props) => svg("M15 18l-6-6 6-6", p);
+export const IconInbox = (p: Props) =>
+  svg("M22 12h-6l-2 3h-4l-2-3H2 M5.45 5.11L2 12v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2v-6l-3.45-6.89A2 2 0 0 0 16.76 4H7.24a2 2 0 0 0-1.79 1.11z", p);
+export const IconSend = (p: Props) => svg("M22 2L11 13 M22 2l-7 20-4-9-9-4 20-7z", p);
+export const IconFileText = (p: Props) =>
+  svg("M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z M14 2v6h6 M16 13H8 M16 17H8 M10 9H8", p);
+export const IconClock = (p: Props) => svg("M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0z M12 6v6l4 2", p);
+export const IconReply = (p: Props) => svg("M9 17l-5-5 5-5 M20 18v-2a4 4 0 0 0-4-4H4", p);
+export const IconForward = (p: Props) => svg("M15 17l5-5-5-5 M4 18v-2a4 4 0 0 1 4-4h12", p);

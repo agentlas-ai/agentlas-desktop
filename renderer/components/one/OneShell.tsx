@@ -182,6 +182,9 @@ import { OneGrowthCard } from "./OneGrowthCard";
 import { TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "../workspace/TaskSidePanel";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
 import { OneAgentPortrait } from "./OneAgentPortrait";
+import { OneMailRail } from "./mail/OneMailRail";
+import { OneMailWorkspace } from "./mail/OneMailWorkspace";
+import { useOneMail } from "./mail/useOneMail";
 import { llmLogoSrc } from "@/lib/llm-logo";
 import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget, type OneEditSelfTarget } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
@@ -1109,7 +1112,7 @@ function writeBriefingDismissal(signature: string): number {
  */
 const LAST_ONE_CONVERSATION_KEY = "agentlas.one.lastConversationId";
 
-type OneRailMode = "organisation" | "sessions" | "settings";
+type OneRailMode = "organisation" | "sessions" | "settings" | "mail";
 
 /** 세션 목록의 한 줄. 대화가 주인이고, 작업은 그 줄에 붙는 상태다. */
 interface OneSessionRow {
@@ -1126,7 +1129,8 @@ const LAST_ONE_RAIL_MODE_KEY = "agentlas.one.railMode";
 function readLastRailMode(): OneRailMode {
   try {
     const value = window.localStorage.getItem(LAST_ONE_RAIL_MODE_KEY);
-    return value === "sessions" ? "sessions" : "organisation";
+    // "mail" is honoured only while the mailbox exists (OneShell leaves the tab otherwise).
+    return value === "sessions" || value === "mail" ? value : "organisation";
   } catch {
     return "organisation";
   }
@@ -7018,6 +7022,23 @@ export function OneShell() {
    * 고를 수 있게 만들어 놓고 화면이 옛 얼굴을 계속 그리면 그 기능은 없는 것과 같다.
    */
   const oneAvatarTone = oneProfile?.avatarIcon?.trim() || "character:orange-dino";
+  // One mailbox (rail third tab). Main owns every count and thread; this only mirrors it.
+  const mail = useOneMail();
+  // Shown whenever the plan offers agent mail; greyed until an address exists
+  // (then the centre shows one "create address" card, never an empty inbox).
+  const mailTabVisible = mail.signedIn && Boolean(mail.entitlement);
+  useEffect(() => {
+    const events = ipcEvents();
+    if (!events?.onAgentMailOpen) return;
+    return events.onAgentMailOpen(({ threadId }) => {
+      setRailMode("mail");
+      if (threadId) mail.select({ kind: "thread", id: threadId });
+    });
+  }, [mail.select, setRailMode]);
+  useEffect(() => {
+    // Signed out or the plan no longer offers mail: leave the Mail tab.
+    if (railMode === "mail" && mail.loaded && !mailTabVisible) setRailMode("sessions");
+  }, [railMode, mail.loaded, mailTabVisible, setRailMode]);
   // A direct room belongs to its seated agent; the general room and a taskforce
   // synthesis belong to One. Never borrow either identity for user messages.
   const assistantSpeaker = activeTaskforce
@@ -7390,8 +7411,22 @@ export function OneShell() {
                 data-active={railMode === "sessions" ? "true" : "false"}
                 onClick={() => setRailMode("sessions")}
               ><span className={styles.railTabLabel}>{appLocale === "ko" ? "세션" : "Sessions"}{hasOtherSessionAttention && <span className={styles.railTabAlertDot} aria-hidden="true" />}</span></button>
+              {mailTabVisible && <button
+                type="button"
+                role="tab"
+                aria-selected={railMode === "mail"}
+                aria-label={!mail.available
+                  ? `${tFor(appLocale, "one.mail.tab")} · ${tFor(appLocale, "one.mail.tab_disabled_aria")}`
+                  : mail.unread && mail.unread.inbox > 0 ? tFor(appLocale, "one.mail.tab_unread_aria", { count: mail.unread.inbox }) : undefined}
+                data-active={railMode === "mail" ? "true" : "false"}
+                data-disabled={mail.available ? undefined : "true"}
+                data-one-mail-tab
+                onClick={() => setRailMode("mail")}
+              ><span className={styles.railTabLabel}>{tFor(appLocale, "one.mail.tab")}{mail.unread && mail.unread.inbox > 0 && <span className={styles.railTabCount} aria-hidden="true">{mail.unread.inbox > 99 ? "99+" : mail.unread.inbox}</span>}</span></button>}
             </div>
-            {railMode === "organisation" ? <>
+            {railMode === "mail" ? (
+              <OneMailRail mail={mail} locale={appLocale} />
+            ) : railMode === "organisation" ? <>
             <OneTaskforceRail
               oneAvatarIcon={oneAvatarTone}
               taskforces={taskforces}
@@ -7549,11 +7584,22 @@ export function OneShell() {
           data-context-rail={(selected || conversation) && contextRailOpen ? "true" : "false"}
           data-context-rail-kind={oneOutputKind}
           data-split-active={splitPanes.length > 0 ? "true" : "false"}
+          data-mail-view={railMode === "mail" ? "true" : undefined}
           // 분할 폭 변수를 워크스페이스에도 실어야 툴바·컴포저 도크(무대 밖 형제)가
           // 메인 칸 폭을 알 수 있다 — 전체 폭 오버레이가 보조 칸을 덮으면 오른쪽
           // 칸이 조작 불능이 된다(D-5/D-6).
           style={splitPanes.length > 0 ? { ["--split-col" as string]: `${splitRatio.col}%` } : undefined}
         >
+          {(railMode === "mail" || mail.compose) && <OneMailWorkspace
+            mail={mail}
+            locale={appLocale}
+            oneName={oneDisplayName}
+            threadVisible={railMode === "mail"}
+            onOpenConversation={(chatId) => {
+              setRailMode("sessions");
+              openConversation(chatId);
+            }}
+          />}
           <div className={`${styles.windowBar} titlebar-drag`}>
             {selected || conversation ? (
               <div className={`${styles.taskToolbar} titlebar-nodrag`}>
@@ -9268,6 +9314,7 @@ export function OneShell() {
         locale={appLocale}
         onClose={closeProfile}
         onProfileChange={handleProfileChange}
+        onOpenMailbox={mail.available ? () => setRailMode("mail") : undefined}
       />
       <OneMemorySheet
         open={memoryOpen}
@@ -9312,6 +9359,7 @@ export function OneShell() {
           setEditOneTarget(null);
         }}
         onOpenPrinciples={() => { setEditOneTarget(null); setProfileOpen(true); }}
+        onOpenMailbox={mail.available ? () => setRailMode("mail") : undefined}
         onSavedOne={async () => {
           setEditOneTarget(null);
           await refreshAll();

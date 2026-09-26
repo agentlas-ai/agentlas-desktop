@@ -18,6 +18,8 @@ import { readStoredRuntimeSelection, runtimeSupportsAgentOverride, selectionForR
 import { runtimeUsesEngineModelSetting } from "@shared/models";
 import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { OneBottomSheet } from "./OneBottomSheet";
+import { OneMailSettings } from "./mail/OneMailSettings";
+import { tFor } from "@/lib/i18n";
 import styles from "./OneCreateAgentDialog.module.css";
 
 type AvatarMode = "original" | "sketch" | "generated" | "upload";
@@ -255,6 +257,7 @@ export function OneCreateAgentDialog({
   onReplaceMember,
   onArchiveMember,
   onOpenPrinciples,
+  onOpenMailbox,
   onSavedOne,
 }: {
   open: boolean;
@@ -273,6 +276,8 @@ export function OneCreateAgentDialog({
   onArchiveMember?: (memberId: string) => void | Promise<void>;
   /** One 모드에서만 — "One이 꼭 지킬 것" 목록 창을 연다. */
   onOpenPrinciples?: () => void;
+  /** Opens One's mailbox (rail Mail tab). */
+  onOpenMailbox?: () => void;
   onSavedOne?: () => void | Promise<void>;
 }) {
   const uploadRef = useRef<HTMLInputElement>(null);
@@ -865,6 +870,11 @@ export function OneCreateAgentDialog({
         {editOne && onOpenPrinciples && <div className={styles.editorExtras}>
           <button type="button" onClick={() => { onOpenPrinciples(); onClose(); }}>{ko ? "One이 꼭 지킬 것 관리" : "Manage what One must follow"}</button>
         </div>}
+        {/* One 의 메일(주소·보내는 이름·서명·받은 메일 처리)도 이 창에서 고친다 — 이름과 한곳. */}
+        {editOne && <section aria-label={tFor(ko ? "ko" : "en", "one.mail.settings.title")} data-one-edit-mail>
+          <strong>{tFor(ko ? "ko" : "en", "one.mail.settings.title")}</strong>
+          <OneMailSettings locale={ko ? "ko" : "en"} oneName={name.trim() || editOne.displayName} onOpenMailbox={onOpenMailbox ? () => { onOpenMailbox(); onClose(); } : undefined} />
+        </section>}
         {edit && (onOpenTools || onReplaceMember || onArchiveMember) && <div className={styles.editorExtras}>
           {onOpenTools && <button type="button" onClick={() => { onOpenTools(edit.memberId); onClose(); }}>{ko ? "도구 설정 열기" : "Open tool settings"}</button>}
           {onReplaceMember && <button type="button" onClick={() => { onReplaceMember(edit.memberId); onClose(); }}>{ko ? "담당 교체" : "Replace staff member"}</button>}
