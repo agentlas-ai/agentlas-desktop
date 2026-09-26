@@ -7,28 +7,17 @@ export const ALIVE_DECISION_OUTPUT_SCHEMA: Record<string, unknown> = {
     kind: { type: "string", enum: ["wait", "review", "act"] },
     reason: { type: "string" },
     nextWakeAtMs: { type: ["integer", "null"] },
-    // Structured-output runtimes require every property. The host accepts
-    // action=null only for wait/review; act still needs the exact typed binding.
+    // Structured-output runtimes require every property. The host accepts action=null only for wait/review. An act
+    // names the attachment only: Science fills the staleness guard (loop version, hashes) from what that wake showed,
+    // because a model re-typing 64-hex hashes changed a character and silently lost the decision (live 2026-09-26).
     action: {
       type: ["object", "null"],
       additionalProperties: false,
       properties: {
         kind: { type: "string", enum: ["science.continue_research"] },
         attachmentId: { type: "string" },
-        expected: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            loopSessionId: { type: "string" },
-            loopVersion: { type: "integer" },
-            loopStateSha256: { type: "string" },
-            conversationStopEpoch: { type: "integer" },
-            approvalPolicySha256: { type: "string" },
-          },
-          required: ["loopSessionId", "loopVersion", "loopStateSha256", "conversationStopEpoch", "approvalPolicySha256"],
-        },
       },
-      required: ["kind", "attachmentId", "expected"],
+      required: ["kind", "attachmentId"],
     },
   },
   required: ["schema", "kind", "reason", "nextWakeAtMs", "action"],
