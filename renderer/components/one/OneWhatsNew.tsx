@@ -29,16 +29,6 @@ import {
 } from "@/lib/whats-new";
 import styles from "./OneWhatsNew.module.css";
 
-/** Blob layouts: same family, different composition per slide. [left%, top%, size%] */
-const BLOB_LAYOUTS: ReadonlyArray<ReadonlyArray<readonly [number, number, number]>> = [
-  [[-6, -30, 70], [48, 10, 62], [18, 52, 48]],
-  [[40, -34, 74], [-10, 22, 58], [62, 50, 46]],
-  [[8, -20, 60], [56, -6, 56], [30, 46, 58]],
-  [[-12, 8, 66], [44, -28, 60], [58, 44, 50]],
-  [[24, -36, 72], [-8, 38, 52], [60, 18, 54]],
-  [[52, -24, 64], [2, -8, 58], [26, 50, 52]],
-];
-
 export function OneWhatsNew({
   locale,
   introState,
@@ -191,8 +181,6 @@ export function OneWhatsNew({
       setIndex((value) => value + 1);
     }
   };
-  const layout = BLOB_LAYOUTS[index % BLOB_LAYOUTS.length];
-
   return (
     <div
       className={`${styles.backdrop} titlebar-nodrag`}
@@ -223,19 +211,7 @@ export function OneWhatsNew({
           <IconClose size={16} />
         </button>
         <div className={styles.art} aria-hidden="true" key={slide.id}>
-          {layout.map(([left, top, size], blob) => (
-            <span
-              key={blob}
-              className={styles.blob}
-              style={{
-                left: `${left}%`,
-                top: `${top}%`,
-                width: `${size}%`,
-                background: `var(${slide.art[blob]})`,
-              }}
-            />
-          ))}
-          <span className={styles.grain} />
+          <img className={styles.artImage} src={slide.image} alt="" width={1104} height={500} />
         </div>
         <div className={styles.body}>
           <span className={styles.kicker}>{text(slide.kicker)}</span>

@@ -54,10 +54,9 @@
   background: var(--paper);
 }
 
-/* Token-drawn "painterly" artwork: soft blurred colour fields, no text. */
 .art {
   position: relative;
-  height: clamp(150px, 30dvh, 208px);
+  height: clamp(180px, 34dvh, 228px);
   overflow: hidden;
   border-radius: 15px 15px 0 0;
   background: var(--paper-3);
@@ -65,21 +64,11 @@
   animation: artIn 320ms ease-out both;
 }
 
-.blob {
-  position: absolute;
-  aspect-ratio: 1.25;
-  border-radius: 48% 52% 44% 56% / 55% 42% 58% 45%;
-  filter: blur(26px);
-  opacity: 0.9;
-}
-
-.grain {
-  position: absolute;
-  inset: 0;
-  background:
-    radial-gradient(circle at 20% 30%, color-mix(in srgb, var(--paper) 30%, transparent) 0 18%, transparent 40%),
-    radial-gradient(circle at 80% 75%, color-mix(in srgb, var(--paper) 22%, transparent) 0 14%, transparent 36%);
-  mix-blend-mode: soft-light;
+.artImage {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .body {

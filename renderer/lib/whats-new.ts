@@ -25,8 +25,8 @@ export interface WhatsNewSlide {
   body: { ko: string; en: string };
   /** Primary action label. Absent = the button just moves to the next slide. */
   cta?: { ko: string; en: string };
-  /** Palette for the token-drawn artwork (CSS variable names only). */
-  art: readonly [string, string, string];
+  /** Feature illustration in the packaged renderer assets. */
+  image: string;
 }
 
 export const WHATS_NEW_SLIDES: readonly WhatsNewSlide[] = [
@@ -39,7 +39,7 @@ export const WHATS_NEW_SLIDES: readonly WhatsNewSlide[] = [
       en: "Inbox, Sent, and Drafts work like Gmail. Once you pick the address, it stays yours.",
     },
     cta: { ko: "메일 주소 만들기", en: "Create an address" },
-    art: ["--peach", "--blue", "--accent"],
+    image: "/feature-updates/one-whats-new-mail.webp",
   },
   {
     id: "delegate",
@@ -49,7 +49,7 @@ export const WHATS_NEW_SLIDES: readonly WhatsNewSlide[] = [
       ko: "One이 팀원 세션을 열어 일을 맡기고, 끝나면 결과를 받아 와서 알려 줍니다.",
       en: "One opens a teammate's session, hands off the task, and brings the result back to you.",
     },
-    art: ["--green", "--amber", "--accent"],
+    image: "/feature-updates/one-whats-new-delegate.webp",
   },
   {
     id: "newSession",
@@ -60,7 +60,7 @@ export const WHATS_NEW_SLIDES: readonly WhatsNewSlide[] = [
       en: "Open a new session and the tasks worth doing now appear as cards. Tap one to start.",
     },
     cta: { ko: "새 세션 열기", en: "Open a new session" },
-    art: ["--blue", "--purple", "--amber"],
+    image: "/feature-updates/one-whats-new-new-session.webp",
   },
   {
     id: "addTeammate",
@@ -71,7 +71,7 @@ export const WHATS_NEW_SLIDES: readonly WhatsNewSlide[] = [
       en: "Seat an agent in the role you need, and One shares the work with it.",
     },
     cta: { ko: "팀원 추가하기", en: "Add a teammate" },
-    art: ["--purple", "--peach", "--green"],
+    image: "/feature-updates/one-whats-new-add-teammate.webp",
   },
   {
     id: "work",
@@ -82,7 +82,7 @@ export const WHATS_NEW_SLIDES: readonly WhatsNewSlide[] = [
       en: "Describe the goal and Work assembles the team. Work agents are free.",
     },
     cta: { ko: "Work 열기", en: "Open Work" },
-    art: ["--accent", "--blue", "--green"],
+    image: "/feature-updates/one-whats-new-work.webp",
   },
   {
     id: "mobile",
@@ -93,7 +93,7 @@ export const WHATS_NEW_SLIDES: readonly WhatsNewSlide[] = [
       en: "Check the mailbox and change One's name, tone, and other settings from your phone.",
     },
     cta: { ko: "모바일 연결하기", en: "Connect mobile" },
-    art: ["--amber", "--peach", "--purple"],
+    image: "/feature-updates/one-whats-new-mobile.webp",
   },
 ];
 
