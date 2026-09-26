@@ -4946,7 +4946,7 @@ ${effectiveUserPrompt}`;
           ? `${member.source}:${member.targetId}`
           : null;
         return remoteHandle
-          ? `- ${label} [${member.entityKind}; ${member.source}; call handle ${remoteHandle}; release ${member.releaseId ?? "latest"}]`
+          ? `- ${label} [${member.entityKind}; ${member.source}; call handle ${remoteHandle}; saved revision ${member.releaseId ?? "latest"}]`
           : `- ${label} [${member.entityKind}; ${member.source}; ${member.releaseId ?? "local"}]`;
       }).join("\n");
       if (pool) {
@@ -4954,6 +4954,10 @@ ${effectiveUserPrompt}`;
           `You are the task orchestrator for this project and own decomposition, staffing, execution, and verification. ` +
           `The saved rows are unordered reusable tools, not session owners or a mandatory chain. Use suitable project tools first. ` +
           `A row with a call handle is a remote Agentlas agent: call it directly with the Hephaestus call tool (hephaestus_call, agents set to that exact handle); do not search, recruit, or rename it to find it again. ` +
+          // 실측(2026-09-26): 호출은 저장된 Cloud 행과 같은 package_hash 로 정확히 돌았는데, 결과의
+          // agent_id "hub:<slug>" 와 agr_ 릴리스 id 가 저장 토큰(rev_…)과 모양이 달라 모델이
+          // "공개 Hub판이 대신 불렸고 릴리스가 다르다"고 사용자에게 거짓 보고했다. 이름공간 차이를 알려 준다.
+          `The saved revision is a catalog token, not a release id: a successful call may report agd_/agr_ ids and an agent_id of the form "hub:<slug>" even for your own Cloud agent. Those alone do not mean a public substitute or a different release ran; do not tell the user so unless the call itself reports an error or mismatch. ` +
           `When a WorkOrder has a genuine capability or tool gap, use the available Agentlas Workforce/Hephaestus tools ` +
           `to recruit the minimum suitable role from Network (Local + owner Cloud + public Hub). ` +
           `Any recruited worker is scoped to that WorkOrder and must not mutate the saved project team. ` +
