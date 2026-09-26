@@ -21,6 +21,13 @@ const MAX_TITLE = 80;
 const MAX_DESCRIPTION = 200;
 // eslint-disable-next-line no-control-regex
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u;
+/*
+ * Invisible and direction-changing characters (bidi overrides/isolates, zero-width,
+ * BOM). A third-party package could make a card title read differently from the
+ * prompt it fills in ("Trojan Source", CVE-2021-42574). Entries carrying them are
+ * dropped, like control characters — not silently rewritten.
+ */
+const INVISIBLE = /[\u200b\u200e\u200f\u202a-\u202e\u2060\u2066-\u2069\ufeff]/u; // ZWJ/ZWNJ stay (emoji, Persian)
 
 function readJson(file: string): Record<string, unknown> | null {
   try {
@@ -40,7 +47,7 @@ function record(value: unknown): Record<string, unknown> | null {
 function text(value: unknown, max: number): string {
   if (typeof value !== "string") return "";
   const trimmed = value.trim();
-  if (!trimmed || trimmed.length > max || CONTROL.test(trimmed)) return "";
+  if (!trimmed || trimmed.length > max || CONTROL.test(trimmed) || INVISIBLE.test(trimmed)) return "";
   return trimmed;
 }
 

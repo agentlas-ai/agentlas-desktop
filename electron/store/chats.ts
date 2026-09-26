@@ -645,9 +645,11 @@ export function getOrCreateOneMemberChat(agentId: string, title: string): Chat {
          AND kind = 'user'
          AND archived_at IS NULL
          AND agent_id = ?
-       ORDER BY updated_at DESC
+       ORDER BY (used_at IS NOT NULL) DESC, updated_at DESC
        LIMIT 1`,
     )
+    // A conversation that was actually used wins over a newer empty "새 세션" chat:
+    // clicking "new session" twice must not hide the real latest conversation (pre-mortem 2026-09-26).
     .get(agentId) as ChatRow | undefined;
   if (existing) return toChat(existing);
   return createChat({

@@ -52,6 +52,10 @@ import { mailErrorText } from "@/components/one/mail/mailErrorText";
 import styles from "./FirstRun.module.css";
 
 const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
+/** Same bounds as shared/one-profile.ts validation (profileContext ≤4000, principle ≤500, ≤128 principles). */
+const PROFILE_CONTEXT_MAX = 4_000;
+const PRINCIPLE_MAX = 500;
+const PRINCIPLES_MAX = 128;
 const PAID_PLANS = new Set(["pro", "max", "wow"]);
 const ANTIGRAVITY_URL = "https://antigravity.google";
 
@@ -104,6 +108,10 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
 
   useEffect(() => {
     let alive = true;
+    // Account switch: never show the previous account's record/step while the new one loads.
+    setChecked(false);
+    setRecord(null);
+    setOpen(false);
     void loadOrClassify(fingerprint)
       .then((next) => { if (!alive) return; setRecord(next); setOpen(shouldAutoOpen(next)); })
       .catch(() => undefined)
@@ -128,6 +136,7 @@ export function FirstRunGate({ session, children }: { session: AuthSession; chil
   if (open && record) {
     return (
       <FirstRunOnboarding
+        key={fingerprint ?? "anonymous"}
         fingerprint={fingerprint}
         record={record}
         onRecord={setRecord}
@@ -498,25 +507,30 @@ export function FirstRunOnboarding({
   /* ── 07 preferences ───────────────────────────── */
   const savePreferences = async () => {
     if (!api) return;
-    const context = prefText.trim();
-    const principles = principleText.split("\n").map((line) => line.trim()).filter(Boolean);
+    const context = prefText.trim().slice(0, PROFILE_CONTEXT_MAX).trim();
+    // One normal form for compare, save and re-read: a line over the 500-char cap (or
+    // one whose 500th char is a space) used to never match its saved copy, so every
+    // retry added a duplicate and still reported "save failed" (pre-mortem 2026-09-26).
+    const principles = [...new Set(principleText.split("\n").map((line) => line.trim().slice(0, PRINCIPLE_MAX).trim()).filter(Boolean))];
     let current = await api.oneProfile.get().catch(() => null);
     if (!current) { setError(copy.saveFailed); return; }
     if (!context && principles.length === 0 && !current.profileContext) {
       complete("preferences", "skipped");
       return;
     }
+    // Refuse before writing anything, so a list over the cap never saves half of itself.
+    const existing = new Set(current.operatingPrinciples.map((p) => p.content.trim()));
+    const toAdd = principles.filter((content) => !existing.has(content));
+    if (toAdd.length > Math.max(0, PRINCIPLES_MAX - current.operatingPrinciples.length)) { setError(copy.saveFailed); return; }
     setBusy(true); setError(null);
     try {
       if (current.profileContext !== context) {
         current = await api.oneProfile.update({ expectedVersion: current.version, patch: { profileContext: context } });
       }
-      const existing = new Set(current.operatingPrinciples.map((p) => p.content.trim()));
-      for (const content of principles) {
-        if (existing.has(content)) continue;
+      for (const content of toAdd) {
         current = await api.oneProfile.addPrinciple({
           expectedVersion: current.version,
-          content: content.slice(0, 500),
+          content,
           scope: "personal",
           scopeRef: null,
           // The person typed this into the field labelled "must-keep principles".
@@ -526,7 +540,7 @@ export function FirstRunOnboarding({
       }
       const reread = await reloadProfile();
       const contents = new Set(reread?.operatingPrinciples.map((p) => p.content.trim()));
-      if (!reread || reread.profileContext !== context || !principles.every((p) => contents.has(p.slice(0, 500)))) {
+      if (!reread || reread.profileContext !== context || !principles.every((p) => contents.has(p))) {
         throw new Error("not saved");
       }
       setPrincipleText("");
