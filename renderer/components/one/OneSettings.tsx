@@ -103,7 +103,7 @@ const SETTINGS_META: Record<OneSettingsKey, { titleKo: string; titleEn: string; 
   models: { titleKo: "모델", titleEn: "Models", descriptionKo: "CEO 오케스트레이터인 One의 기본 모델을 정합니다.", descriptionEn: "Choose the default model for One, the CEO orchestrator." },
   multimodal: { titleKo: "멀티모달", titleEn: "Multimodal", descriptionKo: "이미지·영상 작업에 사용할 엔진과 키를 연결합니다.", descriptionEn: "Connect engines and keys for image and video work." },
   media: { titleKo: "결과 미디어", titleEn: "Result media", descriptionKo: "사이드바 결과에서 사진·영상·음성을 표시할지 정합니다.", descriptionEn: "Choose which photos, videos, and audio appear in result sidebars." },
-  concurrency: { titleKo: "동시 실행", titleEn: "Concurrency", descriptionKo: "One과 터미널 에이전트가 동시에 사용할 수 있는 슬롯 수입니다.", descriptionEn: "Set how many slots One and terminal agents may use at once." },
+  concurrency: { titleKo: "동시 실행", titleEn: "Concurrency", descriptionKo: "One과 터미널 에이전트가 동시에 실행할 수 있는 수입니다.", descriptionEn: "Set how many runs One and terminal agents may do at once." },
   /* ko 라벨은 웹 "컴퓨터 사용 기록" 과 통일(A3) — 채널마다 같은 설정이 다른
      이름으로 불리면 안 된다. */
   history: { titleKo: "컴퓨터 사용 기록", titleEn: "Computer History", descriptionKo: "로컬 작업 요약과 에이전트 빌드 추천의 기록 범위를 관리합니다.", descriptionEn: "Manage local work summaries and agent-build recommendations." },
@@ -357,7 +357,7 @@ function ConcurrencySettings({ locale, active }: { locale: string; active: boole
       if (!next || next.current !== draft) throw new Error("concurrency_receipt_mismatch");
       setInfo(next);
       setDraft(next.current);
-      setNotice(locale === "ko" ? `${next.current}개 슬롯을 저장했습니다.` : `Saved ${next.current} slots.`);
+      setNotice(locale === "ko" ? `동시 실행 ${next.current}개를 저장했습니다.` : `Saved ${next.current} concurrent runs.`);
     } catch {
       setDraft(info.current);
       try {
@@ -365,29 +365,29 @@ function ConcurrencySettings({ locale, active }: { locale: string; active: boole
         setInfo(readback);
         setDraft(readback.current);
         if (readback.current === draft) {
-          setNotice(locale === "ko" ? `${readback.current}개 슬롯이 저장된 것을 다시 확인했습니다.` : `Verified that ${readback.current} slots were saved.`);
+          setNotice(locale === "ko" ? `동시 실행 ${readback.current}개가 저장된 것을 다시 확인했습니다.` : `Verified that ${readback.current} concurrent runs were saved.`);
         } else if (readback.current === info.current) {
-          setNotice(locale === "ko" ? "변경이 반영되지 않아 이전 슬롯 수를 유지합니다." : "The change was not applied, so the prior slot count remains active.");
+          setNotice(locale === "ko" ? "변경이 반영되지 않아 이전 동시 실행 수를 유지합니다." : "The change was not applied, so the prior concurrent-run count remains active.");
         } else {
-          setNotice(locale === "ko" ? `요청과 다른 실제 슬롯 수 ${readback.current}개를 다시 읽었습니다.` : `Read back ${readback.current} actual slots, which differs from the request.`);
+          setNotice(locale === "ko" ? `요청과 다른 실제 동시 실행 수 ${readback.current}개를 다시 읽었습니다.` : `Read back ${readback.current} actual concurrent runs, which differs from the request.`);
         }
       } catch {
         setNotice(locale === "ko"
-          ? "저장 요청 뒤 실제 슬롯 수를 확인하지 못했습니다. 화면은 이전 값으로 되돌렸습니다. 반복 저장하지 말고 이 패널을 다시 열어 주세요."
-          : "The actual slot count could not be read after the save request. This screen reverted to its prior value. Do not save again; reopen this panel.");
+          ? "저장 요청 뒤 실제 동시 실행 수를 확인하지 못했습니다. 화면은 이전 값으로 되돌렸습니다. 반복 저장하지 말고 이 패널을 다시 열어 주세요."
+          : "The actual concurrent-run count could not be read after the save request. This screen reverted to its prior value. Do not save again; reopen this panel.");
       }
     }
     finally { setBusy(false); }
   };
   return <div className={styles.concurrency}>
     <div className={styles.slotAdjust}>
-      <button type="button" aria-label={locale === "ko" ? "슬롯 1개 줄이기" : "Decrease slots"} disabled={draft <= 1} onClick={() => setDraft((value) => Math.max(1, value - 1))}><IconChevronDown size={15} /></button>
-      <div className={styles.slotNumber}><strong>{draft}</strong><span>{locale === "ko" ? "동시 슬롯" : "concurrent slots"}</span></div>
-      <button type="button" aria-label={locale === "ko" ? "슬롯 1개 늘리기" : "Increase slots"} disabled={draft >= info.hardMax} onClick={() => setDraft((value) => Math.min(info.hardMax, value + 1))}><IconChevronDown size={15} style={{ transform: "rotate(180deg)" }} /></button>
+      <button type="button" aria-label={locale === "ko" ? "동시 실행 1개 줄이기" : "Decrease concurrent runs"} disabled={draft <= 1} onClick={() => setDraft((value) => Math.max(1, value - 1))}><IconChevronDown size={15} /></button>
+      <div className={styles.slotNumber}><strong>{draft}</strong><span>{locale === "ko" ? "동시 실행" : "concurrent runs"}</span></div>
+      <button type="button" aria-label={locale === "ko" ? "동시 실행 1개 늘리기" : "Increase concurrent runs"} disabled={draft >= info.hardMax} onClick={() => setDraft((value) => Math.min(info.hardMax, value + 1))}><IconChevronDown size={15} style={{ transform: "rotate(180deg)" }} /></button>
     </div>
-    <input type="range" min={1} max={info.hardMax} value={draft} onChange={(event) => setDraft(Number(event.target.value))} aria-label={locale === "ko" ? "동시 실행 슬롯" : "Concurrent slots"} />
+    <input type="range" min={1} max={info.hardMax} value={draft} onChange={(event) => setDraft(Number(event.target.value))} aria-label={locale === "ko" ? "동시 실행 수" : "Concurrent runs"} />
     <div className={styles.slotScale}><span>1</span><span>{locale === "ko" ? `권장 ${info.recommended}` : `Recommended ${info.recommended}`}</span><span>{info.hardMax}</span></div>
-    <p>{locale === "ko" ? `${info.cores}코어 · ${info.totalMemGB}GB RAM 기준입니다. One도 슬롯 1개를 사용하며 각 직원은 별도 컴퓨터가 아니라 별도 터미널·데몬 세션을 사용합니다.` : `Based on ${info.cores} cores and ${info.totalMemGB}GB RAM. One uses one slot; each worker gets a terminal or daemon session, not a separate computer.`}</p>
+    <p>{locale === "ko" ? `${info.cores}코어 · ${info.totalMemGB}GB RAM 기준입니다. One도 1개를 사용하며 각 직원은 별도 컴퓨터가 아니라 별도 터미널·데몬 세션을 사용합니다.` : `Based on ${info.cores} cores and ${info.totalMemGB}GB RAM. One itself counts as one; each worker gets a terminal or daemon session, not a separate computer.`}</p>
     {notice && <p className={styles.notice} role="status">{notice}</p>}
     <div className={styles.actionRow}><button type="button" disabled={busy} onClick={() => setDraft(info.recommended)}>{locale === "ko" ? "권장값" : "Recommended"}</button><button type="button" className={styles.primary} disabled={busy || draft === info.current} onClick={() => void save()}>{locale === "ko" ? "적용" : "Apply"}</button></div>
   </div>;

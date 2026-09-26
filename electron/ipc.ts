@@ -3324,14 +3324,14 @@ export function registerIpcHandlers(): void {
   // T10 빈 좌석 배정 — 착석 + 세션에 시스템 줄 1개(누가 앉았는지 대화가 스스로 말한다).
   ipcMain.handle("seats:assign", (_e, input: { chatId: string; agentId: string; slot?: number }) => {
     const seat = getSeatForChat(input.chatId);
-    if (!seat) throw new Error("This conversation has no seat yet.");
+    if (!seat) throw new Error(currentUiLocale() === "ko" ? "이 대화에는 아직 팀원 정보가 없습니다." : "This conversation has no teammate yet.");
     const assigned = assignSeatOccupant(seat.id, input.agentId, input.slot ?? 0);
     const name = assigned.occupants.find((row) => row.agentId === input.agentId)?.displayName ?? "";
     if (name) {
       appendChatMessage(
         input.chatId,
         "system",
-        seatEventText(currentUiLocale() === "ko" ? `이 자리를 ${name}${koSubjectParticle(name)} 맡았습니다` : `${name} took this seat`),
+        seatEventText(currentUiLocale() === "ko" ? `${name}${koSubjectParticle(name)} 이 대화를 맡았습니다` : `${name} took over this conversation`),
       );
     }
     return assigned;
@@ -6877,8 +6877,8 @@ export function registerIpcHandlers(): void {
           if (departed || directAgentChanged) {
             throw new Error(
               currentUiLocale() === "ko"
-                ? "이 세션의 에이전트가 사라졌습니다. 세션을 새로 시작해주세요."
-                : "This session's agent is no longer available. Start a new session to continue.",
+                ? "이 세션의 팀원이 더 이상 없습니다. 새 세션을 시작해 주세요."
+                : "This session's teammate is no longer available. Start a new session to continue.",
             );
           }
         }

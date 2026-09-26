@@ -879,7 +879,7 @@ export function OneCreateAgentDialog({
               : (ko ? "자동 임시저장됨 · 창을 닫아도 이어집니다." : "Draft saved automatically · close and continue later.")}
         </p>}
         {error && <p className={styles.error} role="alert">{error}</p>}
-        {creating && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "One Team에 팀원을 만들고 있어요" : "Creating your One Team teammate"}</strong><small>{ko ? "로컬 정체성, 조직도 자리, 독립 채팅을 함께 저장합니다." : "Saving its local identity, organisation seat, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
+        {creating && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "One Team에 팀원을 만들고 있어요" : "Creating your One Team teammate"}</strong><small>{ko ? "로컬 정체성, 팀원 등록, 독립 채팅을 함께 저장합니다." : "Saving its local identity, teammate entry, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
         <div className={styles.actions}>
           <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{ko ? "취소" : "Cancel"}</button>
           <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void (editOne ? updateOne() : edit ? updateMember() : createAgent())}>{creating

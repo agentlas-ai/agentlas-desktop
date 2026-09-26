@@ -7593,10 +7593,10 @@ export function OneShell() {
                       className={styles.emptySeatPortrait}
                       data-one-empty-seat-portrait="true"
                       role="img"
-                      aria-label={appLocale === "ko" ? "빈 자리" : "Empty seat"}
+                      aria-label={appLocale === "ko" ? "팀원 없음" : "No teammate"}
                       title={previousOccupantName
-                        ? (appLocale === "ko" ? `빈 자리 · 이전 담당 ${previousOccupantName}` : `Empty seat · previously ${previousOccupantName}`)
-                        : (appLocale === "ko" ? "빈 자리" : "Empty seat")}
+                        ? (appLocale === "ko" ? `팀원 없음 · 이전 담당 ${previousOccupantName}` : `No teammate · previously ${previousOccupantName}`)
+                        : (appLocale === "ko" ? "팀원 없음" : "No teammate")}
                     />
                   ) : <OneAgentPortrait
                     status={busy ? "working" : visibleSelectedConfirmation ? "waiting" : activeOneMember?.statusKind ?? "quiet"}
@@ -7613,11 +7613,11 @@ export function OneShell() {
                       ?? activeOneMember?.displayName
                       ?? (activeSeatEmpty ? previousOccupantName : null)
                       ?? oneDisplayName}</strong>
-                    {activeDirectSessionUnavailable && <small data-one-session-unavailable="true">{appLocale === "ko" ? "에이전트 없음 · 기록만 열람 가능" : "Agent unavailable · history only"}</small>}
+                    {activeDirectSessionUnavailable && <small data-one-session-unavailable="true">{appLocale === "ko" ? "팀원 없음 · 기록만 열람 가능" : "Teammate unavailable · history only"}</small>}
                     {!activeDirectSessionUnavailable && activeSeatDissolved && <small data-one-dissolved-badge="true">{appLocale === "ko" ? "해체됨 · 기록 보존" : "Dissolved · records kept"}</small>}
                     {!activeDirectSessionUnavailable && !activeSeatDissolved && activeSeatEmpty && <small data-one-empty-seat-badge="true">{appLocale === "ko"
-                      ? (previousOccupantName ? `빈 자리 · 이전 담당 ${previousOccupantName}` : "빈 자리")
-                      : (previousOccupantName ? `Empty seat · previously ${previousOccupantName}` : "Empty seat")}</small>}
+                      ? (previousOccupantName ? `팀원 없음 · 이전 담당 ${previousOccupantName}` : "팀원 없음")
+                      : (previousOccupantName ? `No teammate · previously ${previousOccupantName}` : "No teammate")}</small>}
                     {/* 명단 길이가 아니라 지금 말할 수 있는 사람을 센다 — 나간 팀원은 아바타만
                         회색이 되고 머릿수는 그대로였다(UX-D-7). 아바타를 회색으로 칠하는
                         바로 그 판정으로 센다. */}
@@ -8695,8 +8695,8 @@ export function OneShell() {
             {activeDirectSessionUnavailable && <div className={styles.sessionUnavailableBanner} role="status" data-one-session-unavailable-banner="true">
               <IconAlertTriangle size={17} strokeWidth={2} />
               <strong>{appLocale === "ko"
-                ? "이 세션의 에이전트가 사라졌습니다. 세션을 새로 시작해주세요."
-                : "This session's agent is no longer available. Start a new session to continue."}</strong>
+                ? "이 세션의 팀원이 더 이상 없습니다. 새 세션을 시작해 주세요."
+                : "This session's teammate is no longer available. Start a new session to continue."}</strong>
               <button type="button" onClick={startReplacementSession}>{appLocale === "ko" ? "새 세션 시작" : "Start new session"}</button>
             </div>}
             {/* T7 읽기 전용 아카이브 — 해체된 단톡의 입력창은 "비활성"이 아니라 다음

@@ -579,8 +579,12 @@ function ensureSlot(): void {
     // 거절 문구는 실제로 할 수 있는 행동만 말한다 — 팀원이 0명인 사람에게 "보관하세요"는 길이 아니다.
     throw new Error(
       active === 0
-        ? `One Team slots are full at the current concurrency (${limit}). Increase concurrency in Settings to add a member.`
-        : `One Team slots are full (${active}/${limit}). Increase concurrency or archive a member first.`,
+        ? (currentUiLocale() === "ko"
+          ? `지금 동시 실행 수(${limit})로는 팀원을 더 추가할 수 없습니다. 설정에서 동시 실행 수를 늘려 주세요.`
+          : `You cannot add another teammate at the current concurrency (${limit}). Increase concurrency in Settings to add one.`)
+        : (currentUiLocale() === "ko"
+          ? `팀원이 가득 찼습니다(${active}/${limit}). 동시 실행 수를 늘리거나 팀원 한 명을 보관해 주세요.`
+          : `Teammates are full (${active}/${limit}). Increase concurrency or archive a teammate first.`),
     );
   }
 }
@@ -883,8 +887,8 @@ export async function replaceOneOrgMember(input: ReplaceOneOrgMemberInput): Prom
           const previousName = row.display_name || row.agent_slug;
           const nextName = agent.name || agent.slug;
           const line = seatEventText(currentUiLocale() === "ko"
-            ? `이 자리 담당이 ${previousName} → ${nextName}(으)로 바뀌었습니다`
-            : `This seat's occupant changed: ${previousName} → ${nextName}`);
+            ? `담당 팀원이 ${previousName} → ${nextName}(으)로 바뀌었습니다`
+            : `Teammate changed: ${previousName} → ${nextName}`);
           const openChats = db.prepare(
             "SELECT id FROM chats WHERE seat_id = ? AND archived_at IS NULL AND kind = 'user'",
           ).all(seatRow.seatId) as Array<{ id: string }>;

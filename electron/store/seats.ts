@@ -429,10 +429,10 @@ export function assignSeatOccupant(seatId: string, agentId: string, slot = 0): O
   const seat = db.prepare("SELECT dissolved_at AS dissolvedAt FROM one_seats WHERE id = ?").get(seatId) as
     | { dissolvedAt: string | null }
     | undefined;
-  if (!seat) throw new Error("Seat not found.");
-  if (seat.dissolvedAt) throw new Error("This seat was dissolved; its sessions are a read-only archive.");
+  if (!seat) throw new Error("This conversation's teammate record was not found.");
+  if (seat.dissolvedAt) throw new Error("This group chat was dissolved; its conversations are a read-only archive.");
   const taken = openOccupants(seatId).find((row) => row.slot === slot);
-  if (taken) throw new Error("That slot already has an occupant. Replace the occupant instead.");
+  if (taken) throw new Error("This conversation already has a teammate. Replace the teammate instead.");
   const now = new Date().toISOString();
   db.prepare(
     "INSERT OR IGNORE INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until) VALUES (?, ?, ?, ?, ?, NULL)",
