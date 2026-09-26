@@ -1,11 +1,20 @@
 export const ONE_FEATURE_INTRO_CONTRACT_VERSION = "1.0.0" as const;
-export const ONE_FEATURE_INTRO_CURRENT_VERSION = 1 as const;
+/**
+ * The one place the feature-intro version lives. 1 = "About One" (4 slides),
+ * 2 = What's New 2026-09 (One mailbox, delegation, sessions, teammates, Work, mobile).
+ * Bump it only when a new What's New deck ships; existing accounts then see that deck
+ * once, and accounts that just finished first-run setup record it as already covered.
+ */
+export const ONE_FEATURE_INTRO_CURRENT_VERSION = 2 as const;
 
 export const ONE_FEATURE_INTRO_RESOLUTIONS = [
   "skipped",
   "opened_one",
   "kept_work",
   "legacy_migrated",
+  // A brand-new account just walked through first-run setup (screens 02–08), which
+  // already shows these features. Recorded instead of shown so the deck never repeats it.
+  "covered_by_first_run",
 ] as const;
 
 export const ONE_FEATURE_INTRO_BLOCKING_STATE_CATEGORIES = [
@@ -146,6 +155,19 @@ export function resolveOneFeatureIntroBlocker(
   if (input.importFlowOpen) return "import_flow";
   if (!input.routeEligible) return "route_ineligible";
   return null;
+}
+
+/**
+ * States written by an older Desktop carry an older currentIntroVersion. Their
+ * receipts are still valid under the newer version (versions only grow), so lift
+ * the field instead of treating the row as corrupt. Anything else stays untouched
+ * and is judged by isOneFeatureIntroState.
+ */
+export function upgradeOneFeatureIntroState(value: unknown): unknown {
+  if (!isRecord(value)) return value;
+  const stored = value.currentIntroVersion;
+  if (!Number.isSafeInteger(stored) || Number(stored) <= 0 || Number(stored) >= ONE_FEATURE_INTRO_CURRENT_VERSION) return value;
+  return { ...value, currentIntroVersion: ONE_FEATURE_INTRO_CURRENT_VERSION };
 }
 
 function isAcknowledgement(value: unknown, currentVersion: number): value is OneFeatureIntroAcknowledgement {

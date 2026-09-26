@@ -5,6 +5,7 @@ import {
   isOneFeatureIntroBlockingStateCategory,
   isOneFeatureIntroResolution,
   isOneFeatureIntroState,
+  upgradeOneFeatureIntroState,
   type AcknowledgeOneFeatureIntroInput,
   type DeferOneFeatureIntroInput,
   type OneFeatureIntroAcknowledgement,
@@ -73,6 +74,8 @@ function parseState(raw: string): OneFeatureIntroState {
   } catch {
     throw new Error("Stored One Feature Intro state is corrupt; it was not overwritten");
   }
+  // An older Desktop wrote a smaller currentIntroVersion; its receipts still hold.
+  parsed = upgradeOneFeatureIntroState(parsed);
   if (!isOneFeatureIntroState(parsed)) {
     throw new Error("Stored One Feature Intro state violates its closed contract; it was not overwritten");
   }

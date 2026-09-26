@@ -1,0 +1,237 @@
+/* What's New card — same family as the Science promo (ScienceInstallExperience.module.css):
+   blurred backdrop, rounded card, artwork on top, black pill action. Surfaces and ink are
+   theme tokens so the card stays readable in dark mode; the pill uses invariant
+   --black/--white (a dark object keeps its own ink). */
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 430;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(20, 23, 27, 0.5);
+  backdrop-filter: blur(8px) saturate(0.85);
+  -webkit-backdrop-filter: blur(8px) saturate(0.85);
+  animation: backdropIn 160ms ease-out both;
+}
+
+.dialog {
+  position: relative;
+  width: min(460px, calc(100vw - 32px));
+  max-height: calc(100dvh - 32px);
+  overflow: auto;
+  border: 1px solid var(--paper-edge);
+  border-radius: 16px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: 0 30px 90px rgba(10, 14, 21, 0.26), 0 4px 14px rgba(10, 14, 21, 0.1);
+  outline: none;
+  animation: dialogIn 210ms cubic-bezier(0.2, 0.75, 0.25, 1) both;
+}
+
+.close {
+  position: absolute;
+  z-index: 3;
+  top: 12px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--paper) 72%, transparent);
+  color: var(--ink);
+  cursor: pointer;
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+.close:hover,
+.close:focus-visible {
+  background: var(--paper);
+}
+
+/* Token-drawn "painterly" artwork: soft blurred colour fields, no text. */
+.art {
+  position: relative;
+  height: clamp(150px, 30dvh, 208px);
+  overflow: hidden;
+  border-radius: 15px 15px 0 0;
+  background: var(--paper-3);
+  isolation: isolate;
+  animation: artIn 320ms ease-out both;
+}
+
+.blob {
+  position: absolute;
+  aspect-ratio: 1.25;
+  border-radius: 48% 52% 44% 56% / 55% 42% 58% 45%;
+  filter: blur(26px);
+  opacity: 0.9;
+}
+
+.grain {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 20% 30%, color-mix(in srgb, var(--paper) 30%, transparent) 0 18%, transparent 40%),
+    radial-gradient(circle at 80% 75%, color-mix(in srgb, var(--paper) 22%, transparent) 0 14%, transparent 36%);
+  mix-blend-mode: soft-light;
+}
+
+.body {
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  padding: 22px 30px 18px;
+  text-align: center;
+}
+
+.kicker {
+  color: var(--muted-deep);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.body h2 {
+  margin: 0;
+  color: var(--ink);
+  font-family: var(--font-head, inherit);
+  font-size: 21px;
+  font-weight: 760;
+  line-height: 1.28;
+  letter-spacing: -0.03em;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.body p {
+  margin: 0;
+  max-width: 380px;
+  color: var(--ink-soft);
+  font-size: 13.5px;
+  line-height: 1.6;
+  word-break: keep-all;
+  overflow-wrap: anywhere;
+}
+
+.primary {
+  min-width: 168px;
+  min-height: 42px;
+  margin-top: 8px;
+  padding: 0 22px;
+  border: 1px solid var(--black);
+  border-radius: 999px;
+  background: var(--black);
+  color: var(--white);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  box-shadow: 0 8px 20px rgba(15, 18, 22, 0.16);
+}
+
+.primary:hover {
+  background: var(--black-soft, var(--black));
+}
+
+.nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  margin-top: 4px;
+}
+
+.arrow {
+  width: 28px;
+  height: 28px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 0 2px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 19px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.arrow:hover:not(:disabled) {
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.arrow:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+.dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.dot {
+  width: 16px;
+  height: 16px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.dot::before {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--ink) 22%, transparent);
+  content: "";
+  transition: width 160ms ease, background 160ms ease;
+}
+
+.dot[data-active="true"]::before {
+  width: 14px;
+  background: var(--ink);
+}
+
+.close:focus-visible,
+.primary:focus-visible,
+.arrow:focus-visible,
+.dot:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+@keyframes backdropIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes dialogIn {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+  to { opacity: 1; transform: none; }
+}
+
+@keyframes artIn {
+  from { opacity: 0.4; }
+  to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backdrop,
+  .dialog,
+  .art {
+    animation: none;
+  }
+}

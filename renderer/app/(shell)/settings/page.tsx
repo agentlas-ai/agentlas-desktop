@@ -1,6 +1,7 @@
 // 설정 — BYOC 연결 관리. PRD 3.1 FRE 6단계 + 10번 리스크 "키 저장 위치 명시".
 "use client";
 import { FIRST_RUN_OPEN_EVENT } from "@/lib/first-run-state";
+import { requestWhatsNewReplay } from "@/lib/whats-new";
 import { updaterCanUseOfficialInstaller } from "@shared/types";
 import { useCallback, useEffect, useState, type CSSProperties , useMemo} from "react";
 import { ipc, ipcEvents, updaterEvents } from "@/lib/ipc";
@@ -555,6 +556,50 @@ export default function SettingsPage() {
             }}
           >
             {locale === "ko" ? "첫 설정 다시 열기" : "Run setup again"}
+          </button>
+        </div>
+        {/* 새 기능 다시 보기 — 업데이트 뒤 한 번 뜨는 What's New 카드(One 화면)를 다시 연다. */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            marginTop: 8,
+            padding: "12px 14px",
+            borderRadius: "var(--radius-md)",
+            background: "var(--paper)",
+            border: "1px solid var(--paper-edge)",
+            boxShadow: "var(--shadow-1)",
+            wordBreak: "keep-all",
+          }}
+        >
+          <span style={{ fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.5 }}>
+            {locale === "ko"
+              ? "이번 업데이트의 새 기능 안내를 One 화면에서 다시 봅니다."
+              : "See this update's feature tour again on the One screen."}
+          </span>
+          <button
+            type="button"
+            data-settings-whats-new
+            onClick={() => {
+              requestWhatsNewReplay();
+              navigate("/one");
+            }}
+            style={{
+              flex: "0 0 auto",
+              whiteSpace: "nowrap",
+              padding: "8px 14px",
+              borderRadius: "var(--radius-sm)",
+              fontSize: 12.5,
+              fontWeight: 600,
+              background: "var(--paper-3)",
+              color: "var(--ink)",
+              border: "1px solid var(--paper-edge)",
+              cursor: "pointer",
+            }}
+          >
+            {locale === "ko" ? "새 기능 다시 보기" : "See what's new"}
           </button>
         </div>
 

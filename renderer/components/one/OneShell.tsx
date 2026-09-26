@@ -172,6 +172,8 @@ import { OneBottomSheet } from "./OneBottomSheet";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
 import { OneAdaptiveResult, type OneAgentDraftSeed } from "./OneAdaptiveResult";
 import { OneFeatureIntro } from "./OneFeatureIntro";
+import { OneWhatsNew } from "./OneWhatsNew";
+import { openPricing } from "@/components/UpgradeCta";
 import { OneMemorySheet } from "./OneMemorySheet";
 import { OneMemoryMap } from "./OneMemoryMap";
 import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
@@ -1742,6 +1744,7 @@ export function OneShell() {
   }, [taskMenuOpen]);
   const [dismissedBriefing, setDismissedBriefing] = useState<{ signature: string; expiresAt: number } | null>(null);
   const [introReplayToken, setIntroReplayToken] = useState(0);
+  const [whatsNewReplayToken, setWhatsNewReplayToken] = useState(0);
   const [profileOpen, setProfileOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
   // The visible app language is the one language control a person can see and
@@ -7813,6 +7816,9 @@ export function OneShell() {
                     <strong>{oneDisplayName}</strong>
                     <small>{appLocale === "ko" ? "CEO 오케스트레이터" : "CEO orchestrator"}</small>
                   </div>
+                  <button type="button" style={{ marginLeft: "auto", marginRight: -12 }} data-one-whats-new-open onClick={() => setWhatsNewReplayToken((value) => value + 1)}>
+                    <span>{appLocale === "ko" ? "새 기능" : "What's new"}</span>
+                  </button>
                   <button type="button" data-active={homeMemoryMapOpen ? "true" : "false"} aria-pressed={homeMemoryMapOpen} onClick={() => setHomeMemoryMapOpen((value) => !value)}>
                     <IconSparkles size={14} />
                     <span>{appLocale === "ko" ? "기억 지도" : "Memory map"}</span>
@@ -9454,6 +9460,24 @@ export function OneShell() {
         onKeepWork={() => undefined}
         briefingAvailable={Boolean(briefingSnapshot?.candidate)}
         onConnectMobile={() => router.push("/settings")}
+      />
+      <OneWhatsNew
+        locale={appLocale}
+        introState={oneIntroState}
+        blocked={introBlockingCategory !== null}
+        replayToken={whatsNewReplayToken}
+        mailEntitled={Boolean(mail.signedIn && mail.entitlement && mail.entitlement.addressLimit > 0)}
+        onAcknowledge={acknowledgeOneIntro}
+        onAction={(action) => {
+          if (action === "mail") {
+            // Free plan (no address allowance) → plans; otherwise the Mail tab's create card.
+            if (mail.signedIn && mail.entitlement && mail.entitlement.addressLimit > 0) setRailMode("mail");
+            else openPricing();
+          } else if (action === "newSession") startNewConversation();
+          else if (action === "addTeammate") openCreateAgentDialog();
+          else if (action === "work") router.push("/work");
+          else if (action === "mobile") router.push("/settings");
+        }}
       />
     </div>
   );
