@@ -84,6 +84,16 @@ let syncNowQueued = false;
 let failureStreak = 0;
 /** What the last feed page said about the mailbox — only a real change re-reads the lists. */
 let lastMailboxFingerprint: string | null = null;
+/** A session cookie was present at some pass in this process (sign-out detection). */
+let sawSession = false;
+
+function forgetSignedOutMailbox(): void {
+  sawSession = false;
+  lastUnread = null;
+  resetAgentMailLastKnown();
+  try { resetForAnotherMailbox(null); } catch { /* state file unwritable: next pull resets by mailbox id */ }
+  emit({ reason: "signed-out", threadIds: [], deletedThreadIds: [], unread: null, changeSeq: null, receivedMessageIds: [] });
+}
 const listeners = new Set<(event: AgentMailChangedEvent) => void>();
 let disposers: Array<() => void> = [];
 
@@ -214,10 +224,16 @@ async function tick(): Promise<void> {
   let next = pollDelay(null);
   try {
     if (!getSessionCookieHeader()) {
-      if (lastUnread) emit({ reason: "signed-out", threadIds: [], deletedThreadIds: [], unread: null, changeSeq: null, receivedMessageIds: [] });
+      // The owner signed out in this process (auth:signOut does not raise the
+      // invalidation event): forget this mailbox's cursor and lists now, not only
+      // when the next account's feed disagrees. Before the first restore at
+      // startup there was no session yet, so nothing is dropped there.
+      if (sawSession) forgetSignedOutMailbox();
+      else if (lastUnread) emit({ reason: "signed-out", threadIds: [], deletedThreadIds: [], unread: null, changeSeq: null, receivedMessageIds: [] });
       lastUnread = null;
       return;
     }
+    sawSession = true;
     if (!agentMailToolsOffered()) {
       // Refresh what we know at most as often as we would poll.
       const status = await agentMailStatus();
@@ -645,12 +661,7 @@ export function startAgentMailSync(): void {
   }
   const { onAuthSessionRestored, onAuthSessionInvalidated } = require("../auth") as typeof import("../auth");
   disposers.push(onAuthSessionRestored(() => agentMailSyncNow()));
-  disposers.push(onAuthSessionInvalidated(() => {
-    lastUnread = null;
-    resetAgentMailLastKnown();
-    try { resetForAnotherMailbox(null); } catch { /* state file unwritable: next pull resets by mailbox id */ }
-    emit({ reason: "signed-out", threadIds: [], deletedThreadIds: [], unread: null, changeSeq: null, receivedMessageIds: [] });
-  }));
+  disposers.push(onAuthSessionInvalidated(() => forgetSignedOutMailbox()));
   disposers.push(onHostShutdown(stopAgentMailSync));
   schedule(5_000);
 }
