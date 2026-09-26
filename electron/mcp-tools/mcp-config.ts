@@ -40,7 +40,7 @@ import { createWorkspacePreviewCapability, removeWorkspacePreviewCapabilityForCo
 import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-server";
 import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-mail/mcp-server";
 import { createAgentMailCapability, removeAgentMailCapability } from "../agent-mail/control-server";
-import { agentMailToolsOffered } from "../agent-mail/client";
+import { agentMailToolsOfferedForRun } from "../agent-mail/client";
 import {
   isAuthenticComputerUseMcpLaunch,
   isCanonicalComputerUseMcpServer,
@@ -777,6 +777,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       }
     : null;
 
+  const agentMailOffered = Boolean(callerChatId) && serializedServers.some((s) => s.catalogId === "agent-mail")
+    ? await agentMailToolsOfferedForRun()
+    : false;
+
   try {
   for (const s of serializedServers) {
     let preparedRuntimeRoot: string | null = null;
@@ -796,7 +800,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // can see the tool. A worker's write permission alone cannot spawn a shell.
       continue;
     }
-    if (s.catalogId === "agent-mail" && (!callerChatId || !agentMailToolsOffered() || !isAuthenticAgentMailMcpLaunch(s.command, s.args ?? []))) {
+    if (s.catalogId === "agent-mail" && (!callerChatId || !agentMailOffered || !isAuthenticAgentMailMcpLaunch(s.command, s.args ?? []))) {
       // Agent mail is offered only to an owner-started chat run, only when the
       // signed-in owner has an active agent mail address (last server answer),
       // and only for the exact inline launch shipped by this build.

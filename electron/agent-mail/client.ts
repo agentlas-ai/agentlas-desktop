@@ -20,9 +20,25 @@ const SEND_TIMEOUT_MS = 45_000;
 
 /** Last server answer, so built-in One tools are offered only to owners who have a mailbox. */
 let lastKnown: { entitlement: AgentMailEntitlement | null; mailbox: AgentMailMailbox | null } = { entitlement: null, mailbox: null };
+/** When the server was last asked (0 = never in this process). */
+let lastAskedAt = 0;
+const KNOWN_TTL_MS = 5 * 60_000;
 
 export function agentMailToolsOffered(): boolean {
   return Boolean(lastKnown.entitlement?.available && lastKnown.mailbox?.status === "active");
+}
+
+/**
+ * The answer a run should use. lastKnown used to be filled only when the
+ * renderer opened Settings or onboarding, so after every app restart One ran
+ * without its mail tools until the owner happened to open Settings. Ask the
+ * server here when this process has never asked (or the answer is old).
+ */
+export async function agentMailToolsOfferedForRun(): Promise<boolean> {
+  if (Date.now() - lastAskedAt > KNOWN_TTL_MS && getSessionCookieHeader()) {
+    await agentMailStatus().catch(() => undefined);
+  }
+  return agentMailToolsOffered();
 }
 
 function err(code: string, message: string, status: number | null = null, detail?: Record<string, unknown>): AgentMailError {
@@ -82,6 +98,7 @@ export async function agentMailStatus(): Promise<AgentMailStatus> {
     lastKnown = { entitlement: null, mailbox: null };
     return { ok: true, signedIn: false, entitlement: null, mailbox: null };
   }
+  lastAskedAt = Date.now();
   const res = await call<{ mailbox: AgentMailMailbox | null; agentMail: AgentMailEntitlement }>("GET", "/api/agent-mail/mailboxes");
   if (!res.ok) {
     if (res.code === "agent_mail_not_available") {
