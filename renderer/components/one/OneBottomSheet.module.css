@@ -234,3 +234,18 @@
     animation: none;
   }
 }
+
+/* Optional fixed rows: toolbar (tabs) under the header and a real dialog footer. Only the body scrolls. */
+.toolbar {
+  flex: 0 0 auto;
+  padding-top: 12px;
+}
+
+.footer {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 0 16px;
+  border-top: 1px solid var(--one-sheet-line);
+}

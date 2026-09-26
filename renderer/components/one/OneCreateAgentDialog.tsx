@@ -760,6 +760,11 @@ export function OneCreateAgentDialog({
     closeOnBackdrop={!creating}
     closeOnEscape={!creating}
     size="wide"
+    toolbar={editOne ? <OneEditTabs locale={ko ? "ko" : "en"} value={oneTab} onChange={setOneTab} /> : undefined}
+    footer={editOne ? <div className={styles.footerActions}>
+      <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{oneTab === "profile" ? (ko ? "취소" : "Cancel") : (ko ? "닫기" : "Close")}</button>
+      {oneTab === "profile" && <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void updateOne()} data-one-edit-save>{creating ? (ko ? "저장 중…" : "Saving…") : (ko ? "저장" : "Save")}</button>}
+    </div> : undefined}
     panelClassName={styles.dialog}
     bodyClassName={styles.body}
     eyebrow={editOne ? "One" : "One Team"}
@@ -778,7 +783,6 @@ export function OneCreateAgentDialog({
         ? "독립 채팅과 기억을 가진 팀원을 One Team 안에서 바로 만듭니다. 창을 닫아도 작성 내용과 생성된 캐릭터는 임시저장됩니다."
         : "Create a teammate with its own chat and memory directly inside One Team. Your form and generated character stay saved if you close this window.")}
   >
-    {editOne && <OneEditTabs locale={ko ? "ko" : "en"} value={oneTab} onChange={setOneTab} />}
     {editOne && oneTab !== "profile" ? (
       <div className={styles.oneTabPanel} role="tabpanel" data-one-edit-panel={oneTab}>
         <OneMailSettings
@@ -900,12 +904,12 @@ export function OneCreateAgentDialog({
         </p>}
         {error && <p className={styles.error} role="alert">{error}</p>}
         {creating && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "One Team에 팀원을 만들고 있어요" : "Creating your One Team teammate"}</strong><small>{ko ? "로컬 정체성, 팀원 등록, 독립 채팅을 함께 저장합니다." : "Saving its local identity, teammate entry, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
-        <div className={styles.actions} data-stacked={editOne ? "true" : undefined}>
+        {!editOne && <div className={styles.actions}>
           <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{ko ? "취소" : "Cancel"}</button>
           <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void (editOne ? updateOne() : edit ? updateMember() : createAgent())}>{creating
             ? (editOne || edit ? (ko ? "저장 중…" : "Saving…") : (ko ? "만드는 중…" : "Creating…"))
             : (editOne || edit ? (ko ? "저장" : "Save") : (ko ? "만들고 채팅 열기" : "Create & open chat"))}</button>
-        </div>
+        </div>}
       </section>
     </div>
     )}

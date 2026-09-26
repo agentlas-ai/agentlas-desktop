@@ -1286,21 +1286,19 @@
 .panelHead strong { color: var(--ink); font-size: 15px; font-weight: 750; }
 .panelHead p { margin: 0; color: var(--muted-deep); font-size: 12px; line-height: 1.5; }
 
-/* Full-width black primary with an outlined secondary under it, kept in view at the bottom. */
+/* Tab actions: at the end of the tab content (never floating over it), secondary then primary. */
 .stickyActions {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  display: grid;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 8px;
-  padding: 12px 0 2px;
-  background: linear-gradient(to bottom, transparent, var(--paper) 14px);
+  padding-top: 4px;
 }
 
 .blockPrimary,
 .blockSecondary {
-  width: 100%;
-  min-height: 42px;
+  min-width: 140px;
+  min-height: 40px;
   padding: 0 16px;
   border-radius: 10px;
   font: inherit;
@@ -1309,6 +1307,7 @@
   cursor: pointer;
 }
 
+.stickyActions .blockPrimary { order: 2; }
 .blockPrimary { border: 1px solid var(--black); background: var(--black); color: var(--white); }
 .blockSecondary { border: 1px solid var(--paper-edge-strong, var(--paper-edge)); background: var(--paper); color: var(--ink); }
 .blockSecondary:hover:not(:disabled) { background: var(--paper-2); }
@@ -1379,3 +1378,4 @@
   cursor: pointer;
 }
 .copyButton:hover { background: var(--paper-3); }
+:global([data-one-bottom-sheet-toolbar]) .topTabs { margin-bottom: 0; }

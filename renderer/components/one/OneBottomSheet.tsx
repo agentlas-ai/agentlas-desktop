@@ -24,6 +24,10 @@ type OneBottomSheetProps = {
   description?: ReactNode;
   closeDisabled?: boolean;
   hideHeaderClose?: boolean;
+  /** Fixed row under the header (e.g. tabs); does not scroll with the body. */
+  toolbar?: ReactNode;
+  /** Fixed dialog footer (actions) outside the scrolling body. */
+  footer?: ReactNode;
   children: ReactNode;
 };
 
@@ -141,6 +145,8 @@ export function OneBottomSheet({
   closeDisabled = false,
   hideHeaderClose = false,
   children,
+  toolbar,
+  footer,
 }: OneBottomSheetProps) {
   const dialogRef = useRef<HTMLDivElement>(null);
   const onCloseRef = useRef(onClose);
@@ -290,12 +296,14 @@ export function OneBottomSheet({
             )}
           </header>
         )}
+        {toolbar !== undefined && <div className={styles.toolbar} data-one-bottom-sheet-toolbar="true">{toolbar}</div>}
         <div
           className={[styles.body, bodyClassName].filter(Boolean).join(" ")}
           data-one-bottom-sheet-body="true"
         >
           {children}
         </div>
+        {footer !== undefined && <footer className={styles.footer} data-one-bottom-sheet-footer="true">{footer}</footer>}
       </div>
     </div>,
     document.body,

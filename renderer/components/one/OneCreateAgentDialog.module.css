@@ -431,14 +431,23 @@
 .layout[data-blocks="true"] .fields input,
 .layout[data-blocks="true"] .fields textarea { border-color: var(--paper-edge); }
 
-/* Full-width black save with an outlined cancel below, kept at the bottom. */
-.actions[data-stacked="true"] {
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  grid-template-columns: 1fr;
-  justify-content: stretch;
-  padding-top: 10px;
-  background: linear-gradient(to bottom, transparent, var(--paper) 12px);
+/* One edit footer (lives in the dialog footer, outside the scrolling body). */
+.footerActions { display: flex; justify-content: flex-end; gap: 8px; width: 100%; }
+.footerActions button {
+  min-width: 120px;
+  min-height: 40px;
+  padding: 0 18px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 680;
+  cursor: pointer;
 }
-.actions[data-stacked="true"] .primaryButton { order: -1; }
+.footerActions button:hover:not(:disabled) { background: var(--paper-3); }
+.footerActions .primaryButton { border-color: var(--black); background: var(--black); color: var(--white); }
+.footerActions .primaryButton:hover:not(:disabled) { background: var(--black); }
+.footerActions button:disabled { cursor: not-allowed; opacity: .45; }
+.footerActions button:focus-visible { outline: 2px solid var(--black-soft); outline-offset: 2px; }
