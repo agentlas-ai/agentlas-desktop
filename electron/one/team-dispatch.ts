@@ -114,8 +114,7 @@ function memberAgentIds(): Set<string> {
 }
 
 /** A teammate's own chat or a session One opened is never allowed to dispatch (depth 1). */
-export function oneTeamDispatchAllowedFor(chatId: string | null | undefined): boolean {
-  if (!chatId) return false;
+function isOneOwnConversation(chatId: string): boolean {
   try {
     const chat = runtime().chats.getChat(chatId);
     if (!chat || chat.originSurface !== "one" || chat.kind !== "user") return false;
@@ -128,18 +127,95 @@ export function oneTeamDispatchAllowedFor(chatId: string | null | undefined): bo
   }
 }
 
+/*
+ * The One conversation a run acts for. A One goal is also continued outside its
+ * own chat: the goal's continuation automation runs in a hidden session
+ * (automation_sessions.ledger_chat_id). Without this link that run had no team
+ * tools, could not see the teammate session it had started, and told the owner
+ * it "could not confirm" the handoff — then re-ran the teammate by shell
+ * (live, 2026-09-26: chat 21ecef0c, goal auto-message:7d6a05e9). The link is
+ * structural (session → automation.goal_id → long_runs.root_chat_id), never
+ * read from prompt text.
+ */
+const AUTOMATION_SESSION_TITLE = "⟦automation⟧";
+
+function continuationOwnerChat(chatId: string): string | null {
+  try {
+    const db = getDb();
+    // The session table is the first-class link; older ledgers are found by the
+    // host-written title marker (store/automation-sessions.ts legacyMarker).
+    let automationId = (db.prepare("SELECT automation_id AS id FROM automation_sessions WHERE ledger_chat_id = ?")
+      .get(chatId) as { id: string } | undefined)?.id ?? null;
+    if (!automationId) {
+      const chat = db.prepare("SELECT kind, title FROM chats WHERE id = ?").get(chatId) as { kind: string; title: string | null } | undefined;
+      if (chat?.kind === "division" && chat.title?.startsWith(AUTOMATION_SESSION_TITLE)) {
+        automationId = chat.title.slice(AUTOMATION_SESSION_TITLE.length).split("::", 1)[0] || null;
+      }
+    }
+    if (!automationId) return null;
+    const found = db.prepare(`
+      SELECT l.root_chat_id AS rootChatId
+        FROM automations a
+        JOIN long_runs l ON l.goal_id = a.goal_id
+       WHERE a.id = ? AND l.surface = 'one' AND l.root_chat_id IS NOT NULL
+       LIMIT 1
+    `).get(automationId) as { rootChatId: string } | undefined;
+    return found && isOneOwnConversation(found.rootChatId) ? found.rootChatId : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The One conversation that owns dispatches made from this chat, or null (depth 1). */
+export function oneTeamDispatchOwnerChat(chatId: string | null | undefined): string | null {
+  if (!chatId) return null;
+  if (isOneOwnConversation(chatId)) return chatId;
+  return continuationOwnerChat(chatId);
+}
+
+export function oneTeamDispatchAllowedFor(chatId: string | null | undefined): boolean {
+  return oneTeamDispatchOwnerChat(chatId) !== null;
+}
+
 function assertCaller(chatId: string | null): string {
-  if (!chatId || !oneTeamDispatchAllowedFor(chatId)) {
+  const owner = oneTeamDispatchOwnerChat(chatId);
+  if (!owner) {
     throw new Error(ko()
       ? "one-team-depth-limit: 팀원 세션에서는 다른 팀원에게 다시 맡길 수 없습니다. One 대화에서만 맡길 수 있어요."
       : "one-team-depth-limit: a teammate session cannot hand work on again. Only One's own conversation can.");
   }
-  return chatId;
+  return owner;
+}
+
+/** A sentence One can pass to the owner as is, in the owner's screen language. */
+function ownerMessage(ko: string, en: string): string {
+  return currentUiLocale() === "ko" ? ko : en;
+}
+
+/*
+ * Why a start was refused, as a precise reason the owner can act on. Nothing was
+ * started in any of these cases (the row and a fresh chat are removed), so asking
+ * again cannot create a second session.
+ */
+function startRefusal(error: unknown): Error {
+  const raw = error instanceof Error ? error.message : String(error);
+  const code = /^[a-z][a-z0-9_]{2,80}$/.test(raw) ? raw : "start_failed";
+  const reason = /goal_(?:explicit_resume_required|stop_in_progress)|auto_goal_/.test(code)
+    ? ["그 팀원 세션에 멈춘 목표가 있어 이어 쓸 수 없어요. 새 세션으로 맡기면 됩니다.", "That teammate session holds a paused goal, so it cannot be continued. Hand it over in a new session."]
+    : code === "desktop_execution_admission_closed"
+      ? ["앱이 종료 중이라 시작하지 않았어요. 앱을 다시 연 뒤 맡기세요.", "The app is shutting down, so nothing was started. Hand it over after reopening the app."]
+      : code === "invocation_cleanup_pending" || code === "goal_verification_pending"
+        ? ["그 팀원 세션이 앞 작업을 정리하는 중이라 시작하지 않았어요. 잠시 뒤 다시 맡기세요.", "That teammate session is still wrapping up earlier work, so nothing was started. Try again shortly."]
+        : ["팀원 세션을 시작하지 못했어요.", "The teammate session could not be started."];
+  return new Error(`one-team-start-refused:${code}: ${ownerMessage(
+    `${reason[0]} 아무것도 시작되지 않았으니 다시 맡겨도 중복되지 않아요.`,
+    `${reason[1]} Nothing was started, so asking again will not create a duplicate.`,
+  )}`);
 }
 
 export function resolveOneTeamMember(query: string): OneOrgMember {
   const wanted = normalizeName(query ?? "");
-  if (!wanted) throw new Error("one-team-member-required: name the teammate (see one_team_list).");
+  if (!wanted) throw new Error(`one-team-member-required: ${ko() ? "맡길 팀원 이름을 적어 주세요(one_team_list 참고)." : "Name the teammate (see one_team_list)."}`);
   const members = activeMembers();
   const exact = members.filter((member) => [member.id, member.installedAgentId, member.agentSlug, member.displayName, member.nameEn]
     .some((value) => typeof value === "string" && normalizeName(value) === wanted));
@@ -148,9 +224,14 @@ export function resolveOneTeamMember(query: string): OneOrgMember {
   if (pool.length === 1) return pool[0];
   const names = members.map((member) => member.displayName).join(", ");
   if (pool.length === 0) {
-    throw new Error(`one-team-member-not-found: no teammate matches "${query}". Teammates: ${names || "(none)"}.`);
+    throw new Error(ko()
+      ? `one-team-member-not-found: "${query}"에 맞는 팀원이 없어요. 지금 팀원: ${names || "(없음)"}. 아무것도 시작되지 않았어요.`
+      : `one-team-member-not-found: no teammate matches "${query}". Teammates: ${names || "(none)"}. Nothing was started.`);
   }
-  throw new Error(`one-team-member-ambiguous: "${query}" matches ${pool.map((member) => member.displayName).join(", ")}. Use the exact name or member id.`);
+  const matches = pool.map((member) => member.displayName).join(", ");
+  throw new Error(ko()
+    ? `one-team-member-ambiguous: "${query}"에 맞는 팀원이 여럿이에요(${matches}). 정확한 이름이나 member_id 로 다시 맡기세요. 아무것도 시작되지 않았어요.`
+    : `one-team-member-ambiguous: "${query}" matches ${matches}. Use the exact name or member id. Nothing was started.`);
 }
 
 function row(id: string): OneDispatchRow | null {
@@ -380,6 +461,7 @@ export function oneTeamList(caller: OneTeamCaller) {
 
 export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unknown; brief?: unknown; newSession?: unknown }) {
   const parentChatId = assertCaller(caller.chatId);
+  const viaContinuation = parentChatId !== caller.chatId;
   const brief = typeof input.brief === "string" ? input.brief.trim() : "";
   if (!brief) throw new Error("one-team-brief-required: write the brief (what, why, what done looks like).");
   if (brief.length > MAX_BRIEF) throw new Error(`one-team-brief-too-long: keep the brief under ${MAX_BRIEF} characters.`);
@@ -391,8 +473,18 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
     "SELECT * FROM one_team_dispatches WHERE parent_chat_id = ? AND member_id = ? AND brief_hash = ? ORDER BY created_at DESC LIMIT 1",
   ).get(parentChatId, member.id, hash) as OneDispatchRow | undefined;
   // Retries and double calls reuse the session; the same brief tomorrow (a daily task) is new work.
-  if (duplicate && (duplicate.status === "running" || Date.now() - Date.parse(duplicate.created_at) < DUPLICATE_WINDOW_MS)) {
-    return { ...view(duplicate), already_started: true, note: "This teammate already has a session for exactly this brief; not started twice." };
+  // A goal continuation re-reading its own history is never new work: it always gets the existing session.
+  if (duplicate && (viaContinuation || duplicate.status === "running" || Date.now() - Date.parse(duplicate.created_at) < DUPLICATE_WINDOW_MS)) {
+    return {
+      ...view(duplicate),
+      confirmed: true,
+      already_started: true,
+      owner_message: ownerMessage(
+        `이미 팀원 ${duplicate.member_name}에게 같은 일을 맡긴 세션이 있어 새로 시작하지 않았어요.`,
+        `Teammate ${duplicate.member_name} already has a session for this exact work, so no new one was started.`,
+      ),
+      note: "Not started twice. Use this session's status/result; do not run the teammate's work yourself.",
+    };
   }
   const runningNow = (getDb().prepare(
     "SELECT COUNT(*) AS n FROM one_team_dispatches WHERE parent_chat_id = ? AND status = 'running'",
@@ -422,7 +514,10 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   const chat = reused ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation" });
   const createdHere = !reused;
   if (!fresh && invocationService.activeChatIds().includes(chat.id)) {
-    throw new Error("one-team-member-busy: that teammate's session is running now. Use one_team_steer on it, or start a new session.");
+    throw new Error(`one-team-member-busy: ${ownerMessage(
+      `팀원 ${member.displayName}의 그 세션은 지금 작업 중이라 시작하지 않았어요. one_team_steer 로 방향을 더하거나 새 세션으로 맡기세요.`,
+      `Teammate ${member.displayName}'s session is working right now, so nothing was started. Use one_team_steer on it, or start a new session.`,
+    )}`);
   }
   installSettleListener();
   const id = `dispatch-${randomUUID()}`;
@@ -451,12 +546,21 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
     if (createdHere) {
       try { chats.removeChat(chat.id); } catch { /* keep the empty chat rather than fail twice */ }
     }
-    throw new Error(`one-team-start-failed: ${error instanceof Error ? error.message : String(error)}`);
+    throw startRefusal(error);
   }
   const created = row(id)!;
   appendParentNotice(created, "link");
   return {
     ...view(created),
+    confirmed: true,
+    owner_message: ownerMessage(
+      createdHere
+        ? `팀원 ${created.member_name}에게 새 세션으로 맡겼어요. 끝나면 결과를 이 대화로 알려 드릴게요.`
+        : `팀원 ${created.member_name}의 이전 세션에 이어서 맡겼어요. 끝나면 결과를 이 대화로 알려 드릴게요.`,
+      createdHere
+        ? `Handed to teammate ${created.member_name} in a new session. The result will come back to this conversation when it is done.`
+        : `Handed to teammate ${created.member_name} in their earlier session. The result will come back to this conversation when it is done.`,
+    ),
     note: "Started in the teammate's own session; the owner already sees an 'Open session' link here, so never show session_id to them. Call one_team_session_status with wait_seconds to get the result; if you end your turn first, the result is reported back to this conversation automatically when it finishes.",
   };
 }

@@ -17,6 +17,7 @@ import type { LongRunRecord } from "../store/long-runs";
 import { buildAutomaticGoalCriteria } from "../../shared/automatic-goal-criteria";
 import { exactLegacyGoalLifecycleRuntimeSelection, prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { goalResumeRecoveryBlockerCode, isGoalResumeEffectBoundaryUncertainBlocker } from "../../shared/long-run";
+import { currentUiLocale } from "../ui-locale";
 
 /** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
  * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
@@ -257,6 +258,9 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   const authority = revision.authorityRefs.map((ref) => /^invocation:([^:]+):permission:(read|write|full)$/.exec(ref)).find(Boolean);
   if (!authority) throw new Error("auto_goal_resume_authority_missing");
   return { chatId, promptOrigin: "system", taskIntent: "task", permissions: authority[2] as "read" | "write" | "full",
+    // Without a locale the run fell back to "en" and One answered a Korean owner in
+    // English on every goal resume (run_events invoke_started locale:"en", 2026-09-26).
+    locale: currentUiLocale(),
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),

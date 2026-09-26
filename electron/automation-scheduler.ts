@@ -1304,6 +1304,8 @@ async function runOne(
             a.goalId,
           ),
           permissions: schedulerExecutionPermission(a),
+          // The owner's screen language; an absent locale fell back to "en" (goal continuations answered in English).
+          locale: currentUiLocale(),
           borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
           // Hub 자동화는 위 preflight에서 exact package pin을 강제한다.
           borrowVersions:
