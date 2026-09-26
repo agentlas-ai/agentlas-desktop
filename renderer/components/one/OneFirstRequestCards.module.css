@@ -198,3 +198,18 @@
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* A draft is already in the composer: ask once, inline (no dialog). */
+.draftChoice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  color: var(--ink-soft);
+  font-size: 11px;
+}
+
+.draftChoice .use {
+  margin-top: 0;
+}

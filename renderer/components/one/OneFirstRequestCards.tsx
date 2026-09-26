@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import type { Locale } from "@/lib/i18n";
 import { IconCircleDollar, IconMegaphone, IconPlus, IconShoppingBag, IconWand } from "../Icon";
 import styles from "./OneFirstRequestCards.module.css";
@@ -122,13 +123,18 @@ export function OneFirstRequestCards({
   entry,
   cards,
   onInsert,
+  hasDraft = false,
 }: {
   locale: Locale;
   entry: OneFirstRequestEntry;
   cards: readonly OneSuggestionCard[];
-  onInsert: (card: OneSuggestionCard) => void;
+  /** "replace" puts the prompt in an empty composer (or over the draft when chosen), "append" adds it after the draft. */
+  onInsert: (card: OneSuggestionCard, mode: "replace" | "append") => void;
+  /** The composer already holds text the owner typed: never overwrite it silently (EDGE-CASES U3). */
+  hasDraft?: boolean;
 }) {
   const ko = locale === "ko";
+  const [asking, setAsking] = useState<string | null>(null);
   if (cards.length === 0) return null;
   return (
     <section
@@ -153,11 +159,26 @@ export function OneFirstRequestCards({
                   className={styles.use}
                   title={card.prompt}
                   aria-label={ko ? `${card.title} — 이 프롬프트 사용` : `${card.title} — Use this prompt`}
-                  onClick={() => onInsert(card)}
+                  aria-expanded={hasDraft ? asking === card.id : undefined}
+                  onClick={() => {
+                    if (hasDraft) { setAsking((current) => (current === card.id ? null : card.id)); return; }
+                    onInsert(card, "replace");
+                  }}
                 >
                   <span>{ko ? "이 프롬프트 사용" : "Use this prompt"}</span>
                   <span aria-hidden="true">↗</span>
                 </button>
+                {hasDraft && asking === card.id && (
+                  <div className={styles.draftChoice} role="group" data-one-first-request-draft-choice={card.id} aria-label={ko ? "작성 중인 글이 있어요" : "You have text in the composer"}>
+                    <span>{ko ? "작성 중인 글이 있어요." : "You already typed something."}</span>
+                    <button type="button" className={styles.use} data-choice="append" onClick={() => { setAsking(null); onInsert(card, "append"); }}>
+                      {ko ? "뒤에 붙이기" : "Add after it"}
+                    </button>
+                    <button type="button" className={styles.use} data-choice="replace" onClick={() => { setAsking(null); onInsert(card, "replace"); }}>
+                      {ko ? "바꾸기" : "Replace it"}
+                    </button>
+                  </div>
+                )}
               </div>
             </li>
           );

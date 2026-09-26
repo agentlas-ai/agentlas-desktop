@@ -446,6 +446,7 @@ import {
   createOrReplayPromptChat,
   getChat,
   getOrCreateOneMemberChat,
+  getOrCreateEmptyOneMemberChat,
   getChatWorkingFolder,
   listArchivedChats,
   listChatMessages,
@@ -4349,8 +4350,10 @@ export function registerIpcHandlers(): void {
   );
   ipcMain.handle(
     "chats:openOneMember",
-    (_e, input: { agentId: string; title: string }) =>
-      getOrCreateOneMemberChat(input.agentId, input.title),
+    (_e, input: { agentId: string; title: string; fresh?: boolean }) =>
+      input?.fresh === true
+        ? getOrCreateEmptyOneMemberChat(input.agentId, input.title)
+        : getOrCreateOneMemberChat(input.agentId, input.title),
   );
   ipcMain.handle("chats:appendOneUserMessage", (_e, id: string, rawText: string) => {
     const chat = getChat(id);

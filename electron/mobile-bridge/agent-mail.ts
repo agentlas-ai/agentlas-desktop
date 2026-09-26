@@ -28,7 +28,7 @@ import {
   type MobileBridgeMailUpdatedEventDto,
   type MobileBridgeMailView,
 } from "../../shared/mobile-bridge";
-import { sanitizeMailLine, sanitizeMailText } from "./sanitize";
+import { sanitizeMobileBridgeText } from "./sanitize";
 
 type Loose = Record<string, unknown>;
 type ClientResult = Loose & { ok?: unknown; code?: unknown; message?: unknown };
@@ -114,24 +114,13 @@ function unavailable(what: string): MobileBridgeMailRefusalDto {
   return refusal("mail_unavailable", `This Desktop cannot ${what} yet. Update Agentlas Desktop.`);
 }
 
-// Mail fields are the owner's own mail: never path/token-redacted (a redacted
-// draft read back and saved would overwrite the original — EDGE-CASES M4).
-// Only invisible and direction-changing characters are removed.
 function text(value: unknown, maxBytes: number): string {
-  return typeof value === "string" ? sanitizeMailLine(value, maxBytes) : "";
+  return typeof value === "string" ? sanitizeMobileBridgeText(value, maxBytes) : "";
 }
 
 function nullableText(value: unknown, maxBytes: number): string | null {
-  return typeof value === "string" && value.length > 0 ? sanitizeMailLine(value, maxBytes) : null;
+  return typeof value === "string" && value.length > 0 ? sanitizeMobileBridgeText(value, maxBytes) : null;
 }
-
-export { MOBILE_BRIDGE_MAIL_RETRYABLE_CODES } from "./mail-replay-policy";
-
-/** Per-thread byte budget over the bridge (M5): 2 MiB, 32 KiB/message past 10 messages. */
-export const MOBILE_BRIDGE_MAIL_THREAD_BUDGET_BYTES = 2 * 1024 * 1024;
-export const MOBILE_BRIDGE_MAIL_MESSAGE_BYTES = 256 * 1024;
-export const MOBILE_BRIDGE_MAIL_MESSAGE_BYTES_LONG_THREAD = 32 * 1024;
-const MOBILE_BRIDGE_MAIL_LONG_THREAD = 10;
 
 function count(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0 ? Math.floor(value) : 0;
@@ -194,15 +183,13 @@ function projectAttachments(value: unknown): MobileBridgeMailAttachmentMetaDto[]
   });
 }
 
-export function projectMobileBridgeMailMessage(
-  value: unknown,
-  bodyBudget: number = MOBILE_BRIDGE_MAIL_MESSAGE_BYTES,
-): MobileBridgeMailMessageDto | null {
+export function projectMobileBridgeMailMessage(value: unknown): MobileBridgeMailMessageDto | null {
   if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0 || value.id.length > MOBILE_BRIDGE_MAIL_LIMITS.id) return null;
   const direction = value.direction === "outbound" ? "outbound" : "inbound";
   const rawText = typeof value.text === "string" ? value.text : typeof value.preview === "string" ? value.preview : "";
   // Byte budget per message: long bodies are cut and marked, never silently.
-  const body = sanitizeMailText(rawText, bodyBudget);
+  const bodyBudget = 256 * 1024;
+  const body = sanitizeMobileBridgeText(rawText, bodyBudget);
   const originRef = isRecord(value.originRef) ? value.originRef : null;
   return {
     id: value.id,
@@ -234,10 +221,7 @@ export function projectMobileBridgeMailDraft(value: unknown): MobileBridgeMailDr
     cc: addressList(value.cc),
     bcc: addressList(value.bcc),
     subject: text(value.subject, 2_000),
-    // A draft is written back by the phone, so it must never arrive cut: the
-    // read budget covers the largest draft the bridge accepts (4 bytes/char).
-    text: sanitizeMailText(typeof value.text === "string" ? value.text : "", MOBILE_BRIDGE_MAIL_LIMITS.text * 4),
-    textTruncated: typeof value.text === "string" && Buffer.byteLength(value.text, "utf8") > MOBILE_BRIDGE_MAIL_LIMITS.text * 4,
+    text: sanitizeMobileBridgeText(typeof value.text === "string" ? value.text : "", 256 * 1024),
     updatedAt: nullableText(value.updatedAt, 64),
   };
 }
@@ -247,7 +231,7 @@ function draftAsThreadSummary(draft: MobileBridgeMailDraftDto): MobileBridgeMail
     id: draft.threadId ?? `draft:${draft.id}`,
     subject: draft.subject,
     participants: draft.to,
-    snippet: sanitizeMailLine(draft.text.slice(0, 200), 600),
+    snippet: draft.text.slice(0, 200),
     lastMessageAt: draft.updatedAt,
     messageCount: 0,
     unreadCount: 0,
@@ -284,7 +268,7 @@ export function projectMobileBridgeMailStatus(value: unknown, unreadOverride?: n
     addressChosen,
     canChooseAddress: !addressChosen && mailbox?.canChooseAddress === true,
     displayName: nullableText(mailbox?.displayName, 400),
-    signature: typeof mailbox?.signature === "string" && mailbox.signature.length > 0 ? sanitizeMailText(mailbox.signature, 8_000) : null,
+    signature: nullableText(mailbox?.signature, 8_000),
     inboundMode: inbound === "notify" || inbound === "draft" || inbound === "reply" ? inbound : null,
     usage: entitlement
       ? {
@@ -324,37 +308,6 @@ function mailboxFingerprint(mailbox: unknown): string {
     mailbox.address, mailbox.status, mailbox.displayName, mailbox.signature, mailbox.inboundMode,
     mailbox.aliases, mailbox.addressChosen, mailbox.canChooseAddress,
   ]);
-}
-
-/**
- * Who changed it (M10). The phone is the owner's own device, so every write is
- * the owner's; the bridge says so explicitly instead of leaning on the client's
- * default. The web records `actor` in its change feed. "via mobile" travels in
- * the web idempotency key prefix (`mob-`), because the web keeps only
- * chatId/runId/automationId from originRef and drops any other key.
- */
-const MOBILE_OWNER_ACTOR = "owner";
-const MOBILE_OWNER_AUTHORITY = { origin: "owner" } as const;
-
-// Owner's words that mean "actually send it" (ko/en). Anything else from the
-// phone makes One stop at a draft (EDGE-CASES M2).
-const SEND_INTENT_RE = /(보내|발송|전송|\bsend\b)/i;
-
-/**
- * The phone's instruction is the owner's own text (trusted), but it still
- * crosses a device boundary: invisible/direction characters are removed. The
- * mail's subject and sender are NOT added here — Main's agentMailDelegate reads
- * them from the server and must fence them as untrusted data (sync.ts, H9).
- */
-export function mobileDelegateInstruction(instruction: string | undefined, locale: "ko" | "en"): string {
-  const own = typeof instruction === "string" ? sanitizeMailText(instruction, MOBILE_BRIDGE_MAIL_LIMITS.instruction * 4).trim() : "";
-  const draftOnly = !SEND_INTENT_RE.test(own);
-  const base = own || (locale === "ko" ? "이 메일을 읽고 답장을 준비해 줘." : "Read this mail and prepare a reply.");
-  if (!draftOnly) return base.slice(0, MOBILE_BRIDGE_MAIL_LIMITS.instruction);
-  const rule = locale === "ko"
-    ? "\n\n(폰에서 맡긴 일: 답장은 임시보관함 초안으로만 저장하고 보내지 마세요. 내가 \"보내\"라고 할 때만 보냅니다.)"
-    : "\n\n(Handed over from the phone: save any reply as a draft only and do not send it. Send only when I say \"send\".)";
-  return `${base.slice(0, MOBILE_BRIDGE_MAIL_LIMITS.instruction - rule.length)}${rule}`;
 }
 
 export function createMobileBridgeAgentMailService(
@@ -460,58 +413,38 @@ export function createMobileBridgeAgentMailService(
       if (!summary) return refusal("mail_error", "Desktop returned a conversation without an id.");
       const messages = Array.isArray(result.messages) ? result.messages : [];
       const drafts = Array.isArray(result.drafts) ? result.drafts : [];
-      const projectedDrafts = drafts.slice(0, 10).flatMap((item) => {
-        const draft = projectMobileBridgeMailDraft(item);
-        return draft ? [draft] : [];
-      });
-      // M5: one conversation is at most 2 MiB over the bridge. Past 10
-      // messages each body is cut to 32 KiB (marked textTruncated). Newest
-      // messages matter most, so the budget is spent newest-first and older
-      // ones are counted as omitted instead of silently dropped.
-      const candidates = messages.slice(-100);
-      const perMessage = candidates.length > MOBILE_BRIDGE_MAIL_LONG_THREAD
-        ? MOBILE_BRIDGE_MAIL_MESSAGE_BYTES_LONG_THREAD
-        : MOBILE_BRIDGE_MAIL_MESSAGE_BYTES;
-      let budget = MOBILE_BRIDGE_MAIL_THREAD_BUDGET_BYTES
-        - Buffer.byteLength(JSON.stringify(summary), "utf8")
-        - Buffer.byteLength(JSON.stringify(projectedDrafts), "utf8");
-      const kept: MobileBridgeMailMessageDto[] = [];
-      for (let index = candidates.length - 1; index >= 0; index -= 1) {
-        const message = projectMobileBridgeMailMessage(candidates[index], perMessage);
-        if (!message) continue;
-        const bytes = Buffer.byteLength(JSON.stringify(message), "utf8");
-        if (bytes > budget) break;
-        budget -= bytes;
-        kept.unshift(message);
-      }
-      const olderOmitted = messages.length - candidates.length
-        + candidates.filter(isRecord).length - kept.length;
       return {
         schemaVersion: 1,
         ok: true,
         thread: summary,
-        messages: kept,
-        drafts: projectedDrafts,
-        olderOmitted: Math.max(0, olderOmitted),
+        // Newest messages matter most when a long conversation must be cut.
+        messages: messages.slice(-100).flatMap((item) => {
+          const message = projectMobileBridgeMailMessage(item);
+          return message ? [message] : [];
+        }),
+        drafts: drafts.slice(0, 10).flatMap((item) => {
+          const draft = projectMobileBridgeMailDraft(item);
+          return draft ? [draft] : [];
+        }),
       };
     },
 
     async markRead(input) {
       const call = fn("agentMailMarkThreadRead");
       if (!call) return { ...unavailable("change read state") };
-      return writeResult(await call(input.threadId, input.read, MOBILE_OWNER_ACTOR));
+      return writeResult(await call(input.threadId, input.read));
     },
 
     async archive(input) {
       const call = fn("agentMailArchiveThread");
       if (!call) return { ...unavailable("archive mail") };
-      return writeResult(await call(input.threadId, input.archived, MOBILE_OWNER_ACTOR));
+      return writeResult(await call(input.threadId, input.archived));
     },
 
     async removeThread(threadId) {
       const call = fn("agentMailRemoveThread");
       if (!call) return { ...unavailable("delete mail") };
-      return writeResult(await call(threadId, MOBILE_OWNER_ACTOR), () => ({ deleted: true, threadId }));
+      return writeResult(await call(threadId), () => ({ deleted: true, threadId }));
     },
 
     async send(input) {
@@ -528,14 +461,14 @@ export function createMobileBridgeAgentMailService(
         // The bridge's durable idempotency key becomes the web idempotency key,
         // so a lost response can never turn into a second email at either layer.
         idempotencyKey: input.idempotencyKey,
-      }, MOBILE_OWNER_AUTHORITY);
+      });
       const failure = failureOf(result);
       if (failure) return { ...failure };
       syncNow();
       // The draft this compose came from is done once the send is accepted.
       const removeDraft = fn("agentMailRemoveDraft");
       if (input.draftId && removeDraft && result.replay !== true) {
-        await removeDraft(input.draftId, MOBILE_OWNER_ACTOR).catch(() => undefined);
+        await removeDraft(input.draftId).catch(() => undefined);
       }
       const send = isRecord(result.send) ? result.send : {};
       return {
@@ -560,7 +493,7 @@ export function createMobileBridgeAgentMailService(
         id: input.draftId ?? null,
         ...(input.expectedVersion !== undefined ? { expectedVersion: input.expectedVersion } : {}),
         fields,
-      }, MOBILE_OWNER_AUTHORITY);
+      });
       const failure = failureOf(result);
       if (failure) return { ...failure };
       const draft = projectMobileBridgeMailDraft(result.draft);
@@ -570,7 +503,7 @@ export function createMobileBridgeAgentMailService(
     async removeDraft(draftId) {
       const call = fn("agentMailRemoveDraft");
       if (!call) return { ...unavailable("delete drafts") };
-      return writeResult(await call(draftId, MOBILE_OWNER_ACTOR), () => ({ deleted: true, draftId }));
+      return writeResult(await call(draftId), () => ({ deleted: true, draftId }));
     },
 
     async updateSettings(input) {
@@ -587,14 +520,7 @@ export function createMobileBridgeAgentMailService(
     async delegate(input) {
       const call = fn("agentMailDelegate");
       if (!call) return unavailable("hand mail to One");
-      const result = await call({
-        threadId: input.threadId,
-        instruction: mobileDelegateInstruction(input.instruction, input.locale ?? "ko"),
-        ...(input.locale ? { locale: input.locale } : {}),
-        // Read-only run: One can read the thread and save a draft, never act
-        // outside mail on the strength of a phone tap.
-        permissions: "read",
-      });
+      const result = await call(input);
       const failure = failureOf(result);
       if (failure) return failure;
       if (typeof result.chatId !== "string" || result.chatId.length === 0) {

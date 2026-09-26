@@ -223,15 +223,6 @@ async function startBridgeInternal(
     displayName,
     appVersion: options.appVersion,
     revokeDevice: (deviceId, cause) => pairing.revokeDevice(deviceId, cause ?? "device_requested"),
-    // Mail/profile reads and writes are for the account the phone was paired
-    // under only (EDGE-CASES S8/M6).
-    mailAccountGuard: (deviceId) => {
-      if (!getSessionCookieHeader()) return "signed-out";
-      const active = getAuthSession().workspaceId ?? null;
-      const paired = pairing.deviceWorkspaceId(deviceId);
-      if (!active || !paired) return "unknown";
-      return active === paired ? "ok" : "mismatch";
-    },
     ontologyHubClient,
     terminalOntologyLoadoutFeedWriter: terminalLoadoutFeedWriter,
     terminalControl,

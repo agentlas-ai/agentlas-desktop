@@ -7813,7 +7813,8 @@ export interface AgentlasIpc {
     /** Persist a local conversation-first command such as `@graph` without starting an LLM turn. */
     appendOneUserMessage: (id: string, text: string) => Promise<ChatHistoryEntry>;
     /** Open the durable direct conversation owned by one standing One teammate. */
-    openOneMember: (input: { agentId: string; title: string }) => Promise<Chat>;
+    /** fresh: a new session — reuses this teammate's still-empty chat instead of stacking another. */
+    openOneMember: (input: { agentId: string; title: string; fresh?: boolean }) => Promise<Chat>;
     rename: (id: string, title: string) => Promise<Chat>;
     /** 보관 — 사이드바에서 숨김. 채팅·메시지는 그대로 유지 */
     archive: (id: string) => Promise<Chat>;

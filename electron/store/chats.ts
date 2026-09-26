@@ -660,6 +660,43 @@ export function getOrCreateOneMemberChat(agentId: string, title: string): Chat {
   });
 }
 
+/**
+ * "새 세션" for a teammate: reuse that teammate's still-empty One chat (never
+ * used, no messages, not a session One opened for a delegation) instead of
+ * making another. Clicking "new session" repeatedly used to stack empty chats
+ * that then hid the real conversation (EDGE-CASES U1 / X1).
+ */
+export function getOrCreateEmptyOneMemberChat(agentId: string, title: string): Chat {
+  const ko = currentUiLocale() === "ko";
+  if (!isOneOrgMemberAgentId(agentId)) {
+    throw new Error(ko ? "One 조직에 없는 에이전트입니다" : "This agent is not a member of the One organisation");
+  }
+  const db = getDb();
+  const dispatchTable = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'one_team_dispatches'").get());
+  const empty = db
+    .prepare(
+      `SELECT c.* FROM chats c
+       WHERE c.origin_surface = 'one'
+         AND c.kind = 'user'
+         AND c.archived_at IS NULL
+         AND c.agent_id = ?
+         AND c.used_at IS NULL
+         AND c.parent_chat_id IS NULL
+         AND NOT EXISTS (SELECT 1 FROM chat_messages m WHERE m.chat_id = c.id)
+         ${dispatchTable ? "AND NOT EXISTS (SELECT 1 FROM one_team_dispatches d WHERE d.child_chat_id = c.id)" : ""}
+       ORDER BY c.updated_at DESC
+       LIMIT 1`,
+    )
+    .get(agentId) as ChatRow | undefined;
+  if (empty) return toChat(empty);
+  return createChat({
+    agentId,
+    title: title.trim(),
+    originSurface: "one",
+    taskMode: "conversation",
+  });
+}
+
 /** 본부(division) 지속 세션을 찾거나 만든다 — 부모 firm 채팅에 종속된 숨김 sub-chat.
  *  히스토리·메모리가 턴 간 유지된다. divisionId는 ResolvedNode.id(안정 식별자).
  *  fkAgentId는 installed_agents에 존재하는 실 agent id여야 한다(FK) — 본부에 실에이전트가

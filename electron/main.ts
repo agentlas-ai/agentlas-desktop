@@ -3923,6 +3923,16 @@ app.whenReady().then(async () => {
   }, 3_000);
   startOneBriefingScheduler();
   startAgentMailSync();
+  // One→teammate dispatch rows left "running" by the previous process get settled
+  // (or their listener back) at startup, not only on the next one_team tool call —
+  // otherwise the owner saw "working" forever and One never reported (EDGE-CASES X5).
+  // Deferred so runs the app resumes on its own are already registered as active.
+  setTimeout(() => {
+    if (quitServicesStopPromise) return;
+    void import("./one/team-dispatch")
+      .then(({ recoverOneTeamDispatches }) => recoverOneTeamDispatches())
+      .catch((error) => console.warn("[one-team] startup recovery skipped:", error instanceof Error ? error.message : error));
+  }, 15_000).unref?.();
   startOneTeamNotificationBridge();
   startRunAlertBridge();
   /*

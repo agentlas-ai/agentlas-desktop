@@ -329,14 +329,6 @@ export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   visualSessionControl?: MobileVisualSessionControl;
   /** One mailbox mirror. Tests inject a fake; production reuses Main's web mail client. */
   agentMail?: MobileBridgeAgentMailService;
-  /**
-   * Which account a paired phone may read mail/profile for (EDGE-CASES S8/M6).
-   * Production compares the workspace the device was paired under with the
-   * workspace Desktop is signed in to right now; "unknown" (a record from
-   * before account binding) defers to the pairing layer, which already refuses
-   * such devices. Omitted in tests that do not exercise the guard.
-   */
-  mailAccountGuard?: (deviceId: string) => "ok" | "mismatch" | "signed-out" | "unknown";
 }
 
 /**
@@ -1713,7 +1705,6 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly hubMarket: Pick<MobileHubMarketService, "search" | "detail" | "leasePreview" | "requireCurrentRelease">;
   private readonly visualSessions: MobileVisualSessionManager;
   private readonly agentMail: MobileBridgeAgentMailService;
-  private readonly mailAccountVerdicts = new Map<string, "ok" | "mismatch" | "signed-out" | "unknown">();
   private readonly projectFilePreviews = new MobileProjectFilePreviewRegistry();
   /**
    * Mobile terminal ownership is kept in the Desktop authority, not in the
@@ -2173,9 +2164,6 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     ) {
       throw new TypeError("Invalid Mobile Bridge authority request envelope");
     }
-
-    const mailRefusal = this.mailAccountRefusal(request.method, context);
-    if (mailRefusal) return mailRefusal;
 
     switch (request.method) {
       case "visualSession.create": {
@@ -3976,38 +3964,6 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         throw new TypeError(`Unsupported Mobile Bridge method: ${String(unsupported)}`);
       }
     }
-  }
-
-  /**
-   * A phone paired to account A must never read or write account B's mailbox or
-   * One profile because Desktop is now signed in as B (EDGE-CASES S8/M6). The
-   * device layer revokes on a proven account change, but a socket opened just
-   * before the switch, or a reconcile that has not run yet, would otherwise
-   * keep serving B's mail. Checked on every mail/profile request, reads too.
-   */
-  private mailAccountRefusal(method: string, context: MobileBridgeConnectionContext): MobileBridgeJsonValue | null {
-    if (!(method.startsWith("mail.") || method.startsWith("one.profile."))) return null;
-    const guard = this.options.mailAccountGuard;
-    if (!guard || context.devBootstrap) return null;
-    let verdict: ReturnType<NonNullable<typeof guard>>;
-    try {
-      verdict = guard(context.deviceId);
-    } catch {
-      verdict = "mismatch";
-    }
-    const previous = this.mailAccountVerdicts.get(context.deviceId);
-    this.mailAccountVerdicts.set(context.deviceId, verdict);
-    if (verdict === "ok" || verdict === "unknown") return null;
-    // Tell the phone to drop what it shows — once per transition: the phone
-    // re-reads on this event and gets the refusal again, and re-announcing on
-    // every refusal would loop phone ↔ Desktop.
-    if (previous !== verdict) this.emit({
-      event: "mail.updated",
-      payload: { schemaVersion: 1, changeSeq: null, reason: "signed-out", threadIds: [], deletedThreadIds: [], unreadInbox: null },
-    });
-    return verdict === "signed-out"
-      ? { ok: false, code: "sign_in_required", message: "Desktop is not signed in to Agentlas." }
-      : { ok: false, code: "account_mismatch", message: "Desktop is signed in to a different Agentlas account than this phone was paired with." };
   }
 
   /**

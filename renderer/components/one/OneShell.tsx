@@ -2991,7 +2991,12 @@ export function OneShell() {
     unsubscribeRunRef.current?.();
     const chatId = runChatIdRef.current;
     if (!chatId || typeof api.invoke.replay !== "function") {
-      unsubscribeRunRef.current = events.on(api.invoke.eventChannel(runId), event => consumeRunEventRef.current(event, runId));
+      // Same ownership rule as the ordered path: after a seat switch this run's
+      // late events must not paint into the conversation now on screen.
+      unsubscribeRunRef.current = events.on(api.invoke.eventChannel(runId), event => {
+        if (runIdRef.current !== runId || runChatIdRef.current !== chatId) return;
+        consumeRunEventRef.current(event, runId);
+      });
       return;
     }
     const owns = () => runIdRef.current === runId && runChatIdRef.current === chatId;
@@ -6201,22 +6206,21 @@ export function OneShell() {
       : `Review ${member.displayName}'s failure record, then change the owner or tool and retry to completion. Failure marker: ${member.statusLine}`);
   }, [appLocale, router, startNewConversation]);
 
-  const openOneMember = useCallback((member: OneOrgMember, options?: { fresh?: boolean }) => {
+  const openOneMember = useCallback((member: OneOrgMember, options?: { fresh?: boolean }): Promise<void> => {
     const api = ipc();
     if (!api?.chats?.openOneMember) {
       requestOneOperationalRecovery("one-member-channel", new Error("Desktop bridge unavailable"));
-      return;
+      return Promise.resolve();
     }
-    void (async () => {
+    return (async () => {
       try {
         /*
          * 새 세션(오너 2026-09-26): 좌석을 누르면 늘 **마지막 대화**가 열려서, 좌석 에이전트와
          * 처음부터 다시 시작할 길이 없었다. fresh 는 같은 좌석으로 빈 대화를 새로 만든다 —
          * createChat 이 좌석을 붙이므로 담당·좌석 판정은 기존 대화와 같다.
          */
-        const chat = options?.fresh
-          ? await api.chats.create({ agentId: member.installedAgentId, title: member.displayName, originSurface: "one", taskMode: "conversation" })
-          : await api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName });
+        // fresh reuses this teammate's still-empty chat (Main) so repeated clicks never stack empty chats.
+        const chat = await api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName, ...(options?.fresh ? { fresh: true } : {}) });
         const paneCommit = onePaneCommitWaiterRef.current.wait(chat.id);
         onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
         setRailOpen(false);
@@ -6270,17 +6274,22 @@ export function OneShell() {
    * 새 세션 — One 은 빈 홈(첫 요청 전 One 세션), 좌석 에이전트는 같은 좌석의 빈 대화.
    * 이미 그 담당의 빈 대화를 보고 있으면 또 만들지 않고 작성창에 초점만 준다.
    */
+  const freshSessionPendingRef = useRef(false);
   const startFreshSession = useCallback((member: OneOrgMember | null) => {
-    const alreadyFresh = messages.length === 0 && !busy && (member
+    // messages.length is only trustworthy once the shown chat has been hydrated.
+    const alreadyFresh = messages.length === 0 && !busy && hydratedThreadChatId === activeThreadChatId && (member
       ? activeOneMember?.installedAgentId === member.installedAgentId
       : !selected && !conversation);
     if (alreadyFresh) {
       window.requestAnimationFrame(() => composerInputRef.current?.focus());
       return;
     }
-    if (member) openOneMember(member, { fresh: true });
-    else startNewConversation();
-  }, [activeOneMember?.installedAgentId, busy, conversation, messages.length, openOneMember, selected, startNewConversation]);
+    if (!member) { startNewConversation(); return; }
+    // Double-click guard: one "new session" at a time.
+    if (freshSessionPendingRef.current) return;
+    freshSessionPendingRef.current = true;
+    void openOneMember(member, { fresh: true }).finally(() => { freshSessionPendingRef.current = false; });
+  }, [activeOneMember?.installedAgentId, activeThreadChatId, busy, conversation, hydratedThreadChatId, messages.length, openOneMember, selected, startNewConversation]);
 
   const retryFocusedFailure = useCallback(() => {
     const focus = failureFocus;
@@ -6712,8 +6721,9 @@ export function OneShell() {
       }))
     : firstRequestEntry ? oneFirstRequestSuggestionCards(appLocale) : [];
   // 보내지 않는다 — 입력창에 채우고 초점만 옮긴다. 고쳐서 보내는 것은 사람이다.
-  const insertFirstRequestPrompt = (card: OneFirstRequestSuggestion) => {
-    setComposer(card.prompt);
+  const insertFirstRequestPrompt = (card: OneFirstRequestSuggestion, mode: "replace" | "append" = "replace") => {
+    // A draft is never overwritten without the owner choosing to (the card asks inline).
+    setComposer(current => mode === "append" && current.trim() ? `${current.replace(/\s+$/, "")}\n\n${card.prompt}` : card.prompt);
     window.requestAnimationFrame(() => {
       const input = composerInputRef.current;
       if (!input) return;
@@ -8779,7 +8789,7 @@ export function OneShell() {
             </div>}
             {/* 새 세션 추천 작업 — 작성창 바로 위(오너 2026-09-26, Codex 식). */}
             {firstRequestEntry && !activeSeatDissolved && (
-              <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} />
+              <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composer.trim().length > 0} />
             )}
             <form className={styles.composer} data-one-composer="true" data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
