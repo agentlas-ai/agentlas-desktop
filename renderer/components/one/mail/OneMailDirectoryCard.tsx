@@ -125,8 +125,8 @@ export function OneMailDirectoryCard({
             <span>{copy.cardDescription}</span>
             <textarea value={description} rows={2} maxLength={card?.descriptionMaxChars ?? 1000} onChange={(event) => setDescription(event.target.value)} />
           </label>
-          <fieldset className={styles.settingsRow} style={{ border: 0, margin: 0, padding: 0 }}>
-            <legend style={{ padding: 0, marginBottom: 6 }}>{copy.cardSkills}</legend>
+          <fieldset className={styles.settingsRow} style={{ border: 0, margin: 0 }}>
+            <legend style={{ float: "left", width: "100%", padding: 0, marginBottom: 6 }}>{copy.cardSkills}</legend>
             {skills.map((skill, index) => (
               <div key={skill.id ?? index} className={styles.skillRow}>
                 <input aria-label={copy.cardSkillName} placeholder={copy.cardSkillName} value={skill.name} maxLength={card?.skillNameMaxChars ?? 80} onChange={(event) => setSkill(index, { name: event.target.value })} />
@@ -140,8 +140,8 @@ export function OneMailDirectoryCard({
               </div>
             )}
           </fieldset>
-          <fieldset className={styles.settingsRow} style={{ border: 0, margin: 0, padding: 0 }}>
-            <legend style={{ padding: 0, marginBottom: 6 }}>{copy.cardLanguages}</legend>
+          <fieldset className={styles.settingsRow} style={{ border: 0, margin: 0 }}>
+            <legend style={{ float: "left", width: "100%", padding: 0, marginBottom: 6 }}>{copy.cardLanguages}</legend>
             <div className={styles.suggestions}>
               {LANGUAGE_CHOICES.map((tag) => (
                 <button
@@ -164,8 +164,8 @@ export function OneMailDirectoryCard({
               <small>{copy.cardUnsolicitedHint}</small>
             </span>
           </label>
-          <div className={styles.formActions}>
-            <button type="button" className={styles.primary} disabled={busy || !name.trim()} onClick={() => void save(listed)} data-one-mail-card-save>{copy.cardSave}</button>
+          <div className={styles.stickyActions}>
+            <button type="button" className={styles.blockPrimary} disabled={busy || !name.trim()} onClick={() => void save(listed)} data-one-mail-card-save>{copy.cardSave}</button>
           </div>
         </>
       )}

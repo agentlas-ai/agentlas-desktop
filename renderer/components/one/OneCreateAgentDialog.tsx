@@ -19,6 +19,7 @@ import { runtimeUsesEngineModelSetting } from "@shared/models";
 import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { OneMailSettings } from "./mail/OneMailSettings";
+import { OneEditTabs, type OneEditTab } from "./mail/OneMailTabs";
 import { tFor } from "@/lib/i18n";
 import styles from "./OneCreateAgentDialog.module.css";
 
@@ -286,6 +287,8 @@ export function OneCreateAgentDialog({
   const appliedSeedRef = useRef<number | null>(null);
   const skipNextDraftWriteRef = useRef(false);
   const [mode, setAvatarMode] = useState<AvatarMode>(EMPTY_DRAFT.mode);
+  // One edit: profile · mail · directory · domain as top tabs (owner design 2026-09-26 — no single long scroll).
+  const [oneTab, setOneTab] = useState<OneEditTab>("profile");
   const [characterId, setCharacterId] = useState<OneCharacterId>(EMPTY_DRAFT.characterId);
   const [name, setName] = useState(EMPTY_DRAFT.name);
   const [title, setTitle] = useState(EMPTY_DRAFT.title);
@@ -775,7 +778,18 @@ export function OneCreateAgentDialog({
         ? "독립 채팅과 기억을 가진 팀원을 One Team 안에서 바로 만듭니다. 창을 닫아도 작성 내용과 생성된 캐릭터는 임시저장됩니다."
         : "Create a teammate with its own chat and memory directly inside One Team. Your form and generated character stay saved if you close this window.")}
   >
-    <div className={styles.layout}>
+    {editOne && <OneEditTabs locale={ko ? "ko" : "en"} value={oneTab} onChange={setOneTab} />}
+    {editOne && oneTab !== "profile" ? (
+      <div className={styles.oneTabPanel} role="tabpanel" data-one-edit-panel={oneTab}>
+        <OneMailSettings
+          locale={ko ? "ko" : "en"}
+          oneName={name.trim() || editOne.displayName}
+          tab={oneTab}
+          onOpenMailbox={onOpenMailbox ? () => { onOpenMailbox(); onClose(); } : undefined}
+        />
+      </div>
+    ) : (
+    <div className={styles.layout} data-one-edit-panel={editOne ? "profile" : undefined} data-blocks={editOne ? "true" : undefined}>
       <section className={styles.avatarPanel}>
         <div className={styles.heroPreview} data-empty={!previewSrc && !generating ? "true" : "false"} aria-busy={generating || uploading ? "true" : "false"}>
           {generating
@@ -856,12 +870,12 @@ export function OneCreateAgentDialog({
             : "If this model is unavailable, One uses the worker runtime, then another connected working runtime."}</small>
         </label>}
 
-        <div className={styles.existingPicker}>
+        {!editOne && <div className={styles.existingPicker}>
           {!edit && <button type="button" className={styles.existingTrigger} onClick={addExisting}>
             <span className={styles.existingIcon} aria-hidden="true"><IconPlus size={15} /></span>
             <span><strong>{ko ? "기존 에이전트 추가" : "Add an existing agent"}</strong><small>{ko ? "에이전트 선택 창 열기" : "Open the agent picker"}</small></span>
           </button>}
-        </div>
+        </div>}
 
         {/*
           조직원 설정 창이 따로 갖고 있던 것들이다. 창을 하나로 합치는 이상 여기 없으면
@@ -870,11 +884,7 @@ export function OneCreateAgentDialog({
         {editOne && onOpenPrinciples && <div className={styles.editorExtras}>
           <button type="button" onClick={() => { onOpenPrinciples(); onClose(); }}>{ko ? "One이 꼭 지킬 것 관리" : "Manage what One must follow"}</button>
         </div>}
-        {/* One 의 메일(주소·보내는 이름·서명·받은 메일 처리)도 이 창에서 고친다 — 이름과 한곳. */}
-        {editOne && <section aria-label={tFor(ko ? "ko" : "en", "one.mail.settings.title")} data-one-edit-mail>
-          <strong>{tFor(ko ? "ko" : "en", "one.mail.settings.title")}</strong>
-          <OneMailSettings locale={ko ? "ko" : "en"} oneName={name.trim() || editOne.displayName} onOpenMailbox={onOpenMailbox ? () => { onOpenMailbox(); onClose(); } : undefined} />
-        </section>}
+        {/* One 의 메일·디렉터리·내 도메인은 위 탭에서 고친다(한 화면에 섞지 않는다). */}
         {edit && (onOpenTools || onReplaceMember || onArchiveMember) && <div className={styles.editorExtras}>
           {onOpenTools && <button type="button" onClick={() => { onOpenTools(edit.memberId); onClose(); }}>{ko ? "도구 설정 열기" : "Open tool settings"}</button>}
           {onReplaceMember && <button type="button" onClick={() => { onReplaceMember(edit.memberId); onClose(); }}>{ko ? "담당 교체" : "Replace staff member"}</button>}
@@ -890,7 +900,7 @@ export function OneCreateAgentDialog({
         </p>}
         {error && <p className={styles.error} role="alert">{error}</p>}
         {creating && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "One Team에 팀원을 만들고 있어요" : "Creating your One Team teammate"}</strong><small>{ko ? "로컬 정체성, 팀원 등록, 독립 채팅을 함께 저장합니다." : "Saving its local identity, teammate entry, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
-        <div className={styles.actions}>
+        <div className={styles.actions} data-stacked={editOne ? "true" : undefined}>
           <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{ko ? "취소" : "Cancel"}</button>
           <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void (editOne ? updateOne() : edit ? updateMember() : createAgent())}>{creating
             ? (editOne || edit ? (ko ? "저장 중…" : "Saving…") : (ko ? "만드는 중…" : "Creating…"))
@@ -898,5 +908,6 @@ export function OneCreateAgentDialog({
         </div>
       </section>
     </div>
+    )}
   </OneBottomSheet>;
 }

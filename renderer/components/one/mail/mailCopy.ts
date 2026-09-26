@@ -8,12 +8,12 @@ import { DEFAULT_ONE_NAME, getOnePersonaName, personalizeOneText } from "@/lib/o
 const ko = {
   // Mail tab without an address (existing users never see first-run 08)
   emptyTitle: "아직 메일 주소가 없어요",
-  emptyDesc: "One 의 메일 주소를 정하면 여기에서 받은 메일을 읽고, 답장하고, 다른 Agentlas 에이전트와 메일을 주고받을 수 있어요.",
+  emptyDesc: "One의 메일 주소를 정하면 여기에서 받은 메일을 읽고, 답장하고, 다른 Agentlas 에이전트와 메일을 주고받을 수 있어요.",
   emptyPlan: "에이전트 메일은 Pro 이상 요금제에 포함돼요.",
   emptyUpgrade: "요금제 보기",
   emptyNoAddress: "아직 주소 없음",
   // Permanent address (P2.2)
-  addressTitle: "One 의 메일 주소",
+  addressTitle: "One의 메일 주소",
   addressLabel: "원하는 주소",
   addressPermanent: "한 번 정하면 바꿀 수 없어요. 에이전트끼리 서로 찾는 주소가 됩니다.",
   addressCreate: "이 주소로 만들기 (변경 불가)",
@@ -33,7 +33,7 @@ const ko = {
   revivedBody: (address: string) => `이 계정에서 지운 메일함의 주소 ${address} 를 그대로 되살려요. 지운 주소는 되살리기만 할 수 있어요.`,
   revivedAction: "예전 주소 되살리기",
   lockedChip: "영구 주소",
-  lockedHint: "이 주소는 바꿀 수 없어요. 주소를 옮기려면 아래 '내 도메인'을 쓰세요.",
+  lockedHint: "이 주소는 바꿀 수 없어요. 주소를 옮기려면 '내 도메인'을 쓰세요.",
   domainAddressChip: "내 도메인 주소",
   domainAddressHint: "내 도메인 주소는 '내 도메인'에서만 바꿀 수 있어요. 예전 주소로 온 메일도 계속 받아요.",
   aliasesHint: (count: number) => `예전 주소 ${count}개로 온 메일도 계속 받아요.`,
@@ -54,13 +54,13 @@ const ko = {
   contactConflict: "다른 기기에서 먼저 바뀌어서 최신 내용으로 다시 불러왔어요. 확인 후 다시 저장해 주세요.",
   ownerNote: "내 메모",
   oneNote: "One 메모",
-  oneNoteHint: "One 이 쓴 메모예요. 여기서는 고칠 수 없어요.",
+  oneNoteHint: "One이 쓴 메모예요. 여기서는 고칠 수 없어요.",
   oneNoteEmpty: "아직 없어요.",
   theirCard: "상대가 적은 소개",
   theirCardHint: "상대 에이전트가 직접 쓴 글이에요.",
   skills: "할 수 있는 일",
-  addedByOne: "One 이 추가함",
-  editedByOne: "One 이 수정함",
+  addedByOne: "One이 추가함",
+  editedByOne: "One이 수정함",
   autoSaved: "보낸 메일로 자동 저장됨",
   fromDirectory: "디렉터리에서 추가함",
   lastInteraction: (when: string) => `마지막 대화 ${when}`,
@@ -78,7 +78,7 @@ const ko = {
   a2aFinal: "마무리한 메일",
   a2aNoReply: "답장 필요 없음",
   autoBlocked: {
-    a2a_reply_not_expected: "상대가 답장을 원하지 않아 One 이 자동으로 답하지 않아요.",
+    a2a_reply_not_expected: "상대가 답장을 원하지 않아 One이 자동으로 답하지 않아요.",
     a2a_turns_exhausted: "자동으로 주고받은 횟수가 한도에 닿았어요. 직접 한 번 답하면 다시 이어져요.",
     a2a_no_progress: "같은 내용이 반복되어 자동 답장을 멈췄어요.",
     a2a_unsolicited: "처음 연락한 에이전트라 알림만 했어요.",
@@ -148,7 +148,12 @@ const ko = {
   domainCurrent: "지금 쓰는 도메인",
   domainNoneYet: "아직 추가한 도메인이 없어요.",
   domainPlan: "Pro 이상 요금제에서 쓸 수 있어요.",
-  section: { directory: "Agentlas 디렉터리", domain: "내 도메인", contacts: "연락처" },
+  section: { mail: "메일", directory: "Agentlas 디렉터리", domain: "내 도메인", contacts: "연락처" },
+  mailDesc: "One의 주소, 보내는 이름과 서명, 받은 메일을 어떻게 처리할지 정해요.",
+  needAddressFirst: "먼저 메일 탭에서 One의 주소를 정해 주세요.",
+  directoryDesc: "다른 Agentlas 에이전트가 One을 찾을 수 있게 공개 소개 카드를 정해요.",
+  recordsShow: (count: number) => `레코드 보기 (${count})`,
+  recordsHide: "레코드 접기",
 };
 
 type Copy = typeof ko;
@@ -179,7 +184,7 @@ const en: Copy = {
   revivedBody: (address: string) => `This account deleted a mailbox at ${address}. It comes back with the same address; deleted addresses can only be brought back.`,
   revivedAction: "Bring back old address",
   lockedChip: "Permanent",
-  lockedHint: "This address can't be changed. To move to another address, use My domain below.",
+  lockedHint: "This address can't be changed. To move to another address, use My domain.",
   domainAddressChip: "My domain",
   domainAddressHint: "A domain address changes only under My domain. Mail to earlier addresses keeps arriving.",
   aliasesHint: (count: number) => `Mail to ${count} earlier address${count === 1 ? "" : "es"} keeps arriving.`,
@@ -290,13 +295,18 @@ const en: Copy = {
   domainCurrent: "In use",
   domainNoneYet: "No domains yet.",
   domainPlan: "Available on Pro and above.",
-  section: { directory: "Agentlas directory", domain: "My domain", contacts: "Contacts" },
+  section: { mail: "Mail", directory: "Agentlas directory", domain: "My domain", contacts: "Contacts" },
+  mailDesc: "One's address, sender name and signature, and how new mail is handled.",
+  needAddressFirst: "Choose One's address on the Mail tab first.",
+  directoryDesc: "A public card so other Agentlas agents can find One.",
+  recordsShow: (count: number) => `Show records (${count})`,
+  recordsHide: "Hide records",
 };
 
 export const MAIL2: Record<Locale, Copy> = { ko, en };
 
 /** Strings where "One" names the owner's agent (not the product) — shown with its name. */
-const PERSONA_FIELDS = ["emptyDesc", "addressTitle", "oneNote", "oneNoteHint", "addedByOne", "editedByOne"] as const;
+const PERSONA_FIELDS = ["emptyDesc", "addressTitle", "oneNote", "oneNoteHint", "addedByOne", "editedByOne", "mailDesc", "needAddressFirst", "directoryDesc"] as const;
 
 export function mail2(locale: Locale): Copy {
   const base = MAIL2[locale] ?? en;

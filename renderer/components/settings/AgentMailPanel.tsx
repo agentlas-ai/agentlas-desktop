@@ -9,7 +9,7 @@ import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { tFor, type Locale } from "@/lib/i18n";
 import type { AgentMailEntitlement, AgentMailMailbox } from "@shared/agent-mail";
-import { OneMailSettings } from "@/components/one/mail/OneMailSettings";
+import { OneMailSettingsTabs } from "@/components/one/mail/OneMailTabs";
 import { mailErrorText } from "@/components/one/mail/mailErrorText";
 import { useOnePersonaName } from "@/lib/one-persona-name";
 import styles from "./AgentMailPanel.module.css";
@@ -66,7 +66,7 @@ export function AgentMailPanel({ locale }: { locale: string }) {
           <p className={styles.muted}>{tFor(lang, "one.mail.settings.no_plan")}</p>
         ) : !mailbox ? (
           // No address yet: the same "create address" control as One's edit window.
-          <OneMailSettings locale={lang} oneName={oneName} />
+          <OneMailSettingsTabs locale={lang} oneName={oneName} />
         ) : (
           <>
             {mailbox && (

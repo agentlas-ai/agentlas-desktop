@@ -790,9 +790,13 @@
   gap: 12px;
 }
 
+/* Each field sits in its own soft grey block: label on top, white input inside (owner design 2026-09-26). */
 .settingsRow {
   display: grid;
   gap: 6px;
+  padding: 10px 12px 12px;
+  border-radius: 12px;
+  background: var(--paper-2);
   color: var(--ink-soft);
   font-size: 12px;
   font-weight: 620;
@@ -865,6 +869,7 @@
   padding: 8px 10px;
   border: 1px solid var(--paper-edge);
   border-radius: 9px;
+  background: var(--paper);
   color: var(--ink);
   font-size: 12.5px;
   font-weight: 600;
@@ -970,6 +975,9 @@
   grid-template-columns: 18px minmax(0, 1fr);
   gap: 8px;
   align-items: start;
+  padding: 11px 12px;
+  border-radius: 12px;
+  background: var(--paper-2);
   color: var(--ink);
   font-size: 12.5px;
   font-weight: 600;
@@ -1110,7 +1118,7 @@
   flex-wrap: wrap;
   align-items: center;
   gap: 4px 8px;
-  margin: 0 16px 6px;
+  margin: 2px 0 6px;
   color: var(--muted-deep);
   font-size: 11.5px;
 }
@@ -1234,3 +1242,140 @@
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* ── Settings tabs (owner design 2026-09-26) ────────────────────────── */
+
+.tabbed { display: grid; gap: 14px; }
+
+.topTabs {
+  display: flex;
+  gap: 22px;
+  margin-bottom: 14px;
+  border-bottom: 1px solid var(--paper-edge);
+  overflow-x: auto;
+}
+
+.topTabs button {
+  position: relative;
+  flex: 0 0 auto;
+  padding: 0 0 10px;
+  border: 0;
+  background: transparent;
+  color: var(--muted-deep);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 620;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.topTabs button[data-active="true"] { color: var(--ink); font-weight: 720; }
+.topTabs button[data-active="true"]::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--black);
+}
+.topTabs button:focus-visible { outline: 2px solid var(--black-soft, var(--ink-soft)); outline-offset: 2px; }
+
+.panelHead { display: grid; gap: 3px; margin-bottom: 2px; }
+.panelHead strong { color: var(--ink); font-size: 15px; font-weight: 750; }
+.panelHead p { margin: 0; color: var(--muted-deep); font-size: 12px; line-height: 1.5; }
+
+/* Full-width black primary with an outlined secondary under it, kept in view at the bottom. */
+.stickyActions {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: grid;
+  gap: 8px;
+  padding: 12px 0 2px;
+  background: linear-gradient(to bottom, transparent, var(--paper) 14px);
+}
+
+.blockPrimary,
+.blockSecondary {
+  width: 100%;
+  min-height: 42px;
+  padding: 0 16px;
+  border-radius: 10px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.blockPrimary { border: 1px solid var(--black); background: var(--black); color: var(--white); }
+.blockSecondary { border: 1px solid var(--paper-edge-strong, var(--paper-edge)); background: var(--paper); color: var(--ink); }
+.blockSecondary:hover:not(:disabled) { background: var(--paper-2); }
+.blockPrimary:disabled,
+.blockSecondary:disabled { cursor: not-allowed; opacity: 0.45; }
+
+/* DNS records: one compact card per record. */
+.recordList { margin: 0; padding: 0; list-style: none; display: grid; gap: 6px; }
+
+.recordCard {
+  display: grid;
+  gap: 5px;
+  padding: 9px 11px;
+  border: 1px solid var(--paper-3);
+  border-radius: 10px;
+  background: var(--paper-2);
+}
+
+.recordTop { display: flex; align-items: center; gap: 6px; min-width: 0; }
+.recordType {
+  padding: 1px 7px;
+  border-radius: 6px;
+  background: var(--black);
+  color: var(--white);
+  font-size: 10.5px;
+  font-weight: 750;
+  letter-spacing: 0.02em;
+}
+.recordPurpose { min-width: 0; color: var(--ink-soft); font-size: 11.5px; font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.recordTag { margin-left: auto; padding: 1px 7px; border-radius: 999px; background: var(--paper-3); color: var(--muted-deep); font-size: 10.5px; font-weight: 650; white-space: nowrap; }
+.recordTag[data-required="true"] { background: var(--info-soft); color: var(--info); }
+
+.recordField {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: 11px;
+}
+.recordField > span { color: var(--muted-deep); }
+.recordField code {
+  min-width: 0;
+  padding: 3px 7px;
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 11px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.copyButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 7px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 620;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.copyButton:hover { background: var(--paper-3); }

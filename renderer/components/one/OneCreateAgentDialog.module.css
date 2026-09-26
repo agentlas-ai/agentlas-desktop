@@ -418,3 +418,27 @@
 @media (max-width: 760px) {
   .styleOptions { grid-template-columns: 1fr; }
 }
+
+/* ── One edit: tabs (owner design 2026-09-26) ─────────────────────────── */
+.oneTabPanel { max-width: 640px; margin: 0 auto; width: 100%; }
+
+/* Profile tab: each field in its own soft grey block, label on top, white input inside. */
+.layout[data-blocks="true"] .fields label {
+  padding: 10px 12px 12px;
+  border-radius: 12px;
+  background: var(--paper-2);
+}
+.layout[data-blocks="true"] .fields input,
+.layout[data-blocks="true"] .fields textarea { border-color: var(--paper-edge); }
+
+/* Full-width black save with an outlined cancel below, kept at the bottom. */
+.actions[data-stacked="true"] {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  grid-template-columns: 1fr;
+  justify-content: stretch;
+  padding-top: 10px;
+  background: linear-gradient(to bottom, transparent, var(--paper) 12px);
+}
+.actions[data-stacked="true"] .primaryButton { order: -1; }

@@ -240,7 +240,7 @@ function ContactDetail({ id, locale, mail, onBack }: { id: string; locale: Local
               <span className={styles.contactAvatarLarge} aria-hidden="true">{initial(contact)}</span>
               <div>
                 <h2 className={styles.threadSubject}>{contact.displayName || contact.address}</h2>
-                <div className={styles.addressLine}><code>{contact.address}</code></div>
+                {contact.displayName && <div className={styles.addressLine}><code>{contact.address}</code></div>}
                 <div className={styles.contactBadges}>
                   {contact.agentlasAgent && <AgentBadge locale={locale} listed={contact.agent?.listed === true} />}
                   {source && <span className={contact.createdBy === "one" ? styles.chipOne : styles.chipOwner}>{source}</span>}

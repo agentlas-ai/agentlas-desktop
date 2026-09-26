@@ -42,9 +42,12 @@ export function OneMailSettings({
   oneName,
   onOpenMailbox,
   onChanged,
+  tab,
 }: {
   locale: Locale;
   oneName: string;
+  /** Which settings tab this renders (One edit / Settings page tabs). Default: mail. */
+  tab?: "mail" | "directory" | "domain";
   onOpenMailbox?: () => void;
   /** Told after the server accepted a change (address created, settings saved). */
   onChanged?: () => void;
@@ -141,8 +144,44 @@ export function OneMailSettings({
   const entitled = Boolean(entitlement && entitlement.addressLimit > 0);
   const aliasCount = mailbox?.aliases?.length ?? 0;
 
+  const notReady = !signedIn
+    ? <p className={styles.hint}>{tFor(locale, "one.mail.settings.no_sign_in")}</p>
+    : !entitled
+      ? <p className={styles.hint}>{tFor(locale, "one.mail.settings.no_plan")}</p>
+      : null;
+  const heading = (title: string, desc: string) => (
+    <header className={styles.panelHead}>
+      <strong>{title}</strong>
+      <p>{desc}</p>
+    </header>
+  );
+  const noticeLine = notice && <p className={notice.error ? styles.error : styles.hint} role={notice.error ? "alert" : "status"}>{notice.text}</p>;
+
+  if (tab === "directory") {
+    return (
+      <div className={styles.settings} data-one-mail-settings="directory">
+        {heading(copy.section.directory, copy.directoryDesc)}
+        {notReady ?? (active && mailbox
+          ? <OneMailDirectoryCard locale={locale} oneName={oneName} limits={limits} mailbox={mailbox} />
+          : <p className={styles.hint}>{copy.needAddressFirst}</p>)}
+        {noticeLine}
+      </div>
+    );
+  }
+
+  if (tab === "domain") {
+    return (
+      <div className={styles.settings} data-one-mail-settings="domain">
+        {heading(copy.section.domain, copy.domainIntro)}
+        {notReady ?? <OneMailDomainSettings locale={locale} oneName={oneName} limits={limits} mailbox={mailbox} onMailboxChanged={created} />}
+        {noticeLine}
+      </div>
+    );
+  }
+
   return (
-    <div className={styles.settings} data-one-mail-settings>
+    <div className={styles.settings} data-one-mail-settings="mail">
+      {tab && heading(copy.section.mail, copy.mailDesc)}
       {!signedIn ? (
         <p className={styles.hint}>{tFor(locale, "one.mail.settings.no_sign_in")}</p>
       ) : !entitled ? (
@@ -179,8 +218,8 @@ export function OneMailSettings({
             </label>
           )}
           {mailbox.inboundMode !== undefined && (
-            <fieldset className={styles.settingsRow} style={{ border: 0, margin: 0, padding: 0 }}>
-              <legend style={{ padding: 0, marginBottom: 6 }}>{tFor(locale, "one.mail.settings.inbound")}</legend>
+            <fieldset className={styles.settingsRow} style={{ border: 0, margin: 0 }}>
+              <legend style={{ float: "left", width: "100%", padding: 0, marginBottom: 6 }}>{tFor(locale, "one.mail.settings.inbound")}</legend>
               <div className={styles.modes} role="radiogroup">
                 {AGENT_MAIL_INBOUND_MODES.map((mode) => (
                   <label key={mode} className={styles.mode} data-selected={inboundMode === mode ? "true" : "false"}>
@@ -213,23 +252,13 @@ export function OneMailSettings({
             </label>
           )}
           {usage ? <p className={styles.hint}>{usage}</p> : <p className={styles.hint}>{tFor(locale, "one.mail.compose.no_send_plan")}</p>}
-          <div className={styles.formActions}>
-            {onOpenMailbox && <button type="button" className={styles.secondary} onClick={onOpenMailbox}>{tFor(locale, "one.mail.settings.open_mailbox")}</button>}
-            {hasSettings && <button type="button" className={styles.primary} disabled={busy || !dirty} onClick={save}>{tFor(locale, "one.mail.settings.save")}</button>}
+          <div className={styles.stickyActions}>
+            {hasSettings && <button type="button" className={styles.blockPrimary} disabled={busy || !dirty} onClick={save} data-one-mail-save>{tFor(locale, "one.mail.settings.save")}</button>}
+            {onOpenMailbox && <button type="button" className={styles.blockSecondary} onClick={onOpenMailbox}>{tFor(locale, "one.mail.settings.open_mailbox")}</button>}
           </div>
-          <details className={styles.section} data-one-mail-section="directory">
-            <summary>{copy.section.directory}</summary>
-            <OneMailDirectoryCard locale={locale} oneName={oneName} limits={limits} mailbox={mailbox} />
-          </details>
         </>
       )}
-      {signedIn && entitled && (
-        <details className={styles.section} data-one-mail-section="domain">
-          <summary>{copy.section.domain}</summary>
-          <OneMailDomainSettings locale={locale} oneName={oneName} limits={limits} mailbox={mailbox} onMailboxChanged={created} />
-        </details>
-      )}
-      {notice && <p className={notice.error ? styles.error : styles.hint} role={notice.error ? "alert" : "status"}>{notice.text}</p>}
+      {noticeLine}
     </div>
   );
 }

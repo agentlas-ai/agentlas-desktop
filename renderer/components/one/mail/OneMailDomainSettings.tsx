@@ -67,7 +67,6 @@ export function OneMailDomainSettings({
 
   return (
     <div className={styles.settings} data-one-mail-domains>
-      <p className={styles.hint}>{copy.domainIntro}</p>
       {domains.length === 0 && <p className={styles.hint}>{copy.domainNoneYet}</p>}
       {domains.map((domain) => (
         <DomainCard
@@ -134,6 +133,11 @@ function DomainCard({
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [localPart, setLocalPart] = useState("");
   const [changing, setChanging] = useState(false);
+  // Records stay open until they were copied once; after that they fold behind "Show records".
+  const copiedFlag = `agentlas.oneMail.domainRecordsCopied.${domain.id}`;
+  const [showRecords, setShowRecords] = useState(() => {
+    try { return window.localStorage.getItem(copiedFlag) !== "1"; } catch { return true; }
+  });
   const alive = useRef(true);
   useEffect(() => () => { alive.current = false; }, []);
 
@@ -161,6 +165,7 @@ function DomainCard({
   };
 
   const copyValue = (key: string, value: string) => {
+    try { window.localStorage.setItem(copiedFlag, "1"); } catch { /* best effort */ }
     void navigator.clipboard?.writeText(value).then(() => {
       setCopiedKey(key);
       window.setTimeout(() => setCopiedKey((current) => (current === key ? null : current)), 1500);
@@ -214,37 +219,42 @@ function DomainCard({
       {domain.status === "unverified" && <p className={styles.hint}>{copy.domainUnverifiedHint}</p>}
       {!verified && (
         <>
-          <p className={styles.hint}>{copy.domainRecordsHint}</p>
-          <div className={styles.recordTable} role="table" aria-label={copy.domainRecords}>
-            <div className={styles.recordHead} role="row">
-              <span role="columnheader">{copy.domainType}</span>
-              <span role="columnheader">{copy.domainHost}</span>
-              <span role="columnheader">{copy.domainValue}</span>
-            </div>
-            {domain.records.map((record, index) => {
-              const key = `${index}`;
-              return (
-                <div key={key} className={styles.recordRow} role="row" data-purpose={record.purpose}>
-                  <span role="cell">
-                    <strong>{record.type}</strong>
-                    <small>{copy.domainPurpose[record.purpose] ?? record.purpose} · {record.required ? copy.domainRequired : copy.domainOptional}</small>
-                  </span>
-                  <span role="cell" className={styles.recordValue}>
-                    <code>{record.host}</code>
-                    <button type="button" className={styles.ghostButton} onClick={() => copyValue(`${key}h`, record.host)} aria-label={`${copy.domainCopy} ${copy.domainHost}`}>
-                      <IconCopy size={11} aria-hidden="true" />{copiedKey === `${key}h` ? copy.domainCopied : copy.domainCopy}
-                    </button>
-                  </span>
-                  <span role="cell" className={styles.recordValue}>
-                    <code>{record.value}</code>
-                    <button type="button" className={styles.ghostButton} onClick={() => copyValue(`${key}v`, record.value)} aria-label={`${copy.domainCopy} ${copy.domainValue}`} data-one-mail-copy-record>
-                      <IconCopy size={11} aria-hidden="true" />{copiedKey === `${key}v` ? copy.domainCopied : copy.domainCopy}
-                    </button>
-                  </span>
-                </div>
-              );
-            })}
-          </div>
+          {showRecords ? (
+            <>
+              <p className={styles.hint}>{copy.domainRecordsHint}</p>
+              <ul className={styles.recordList} aria-label={copy.domainRecords}>
+                {domain.records.map((record, index) => {
+                  const key = `${index}`;
+                  return (
+                    <li key={key} className={styles.recordCard} data-purpose={record.purpose}>
+                      <div className={styles.recordTop}>
+                        <span className={styles.recordType}>{record.type}</span>
+                        <span className={styles.recordPurpose}>{copy.domainPurpose[record.purpose] ?? record.purpose}</span>
+                        <span className={styles.recordTag} data-required={record.required ? "true" : "false"}>{record.required ? copy.domainRequired : copy.domainOptional}</span>
+                      </div>
+                      <div className={styles.recordField}>
+                        <span>{copy.domainHost}</span>
+                        <code title={record.host}>{record.host}</code>
+                        <button type="button" className={styles.copyButton} onClick={() => copyValue(`${key}h`, record.host)} aria-label={`${copy.domainCopy} ${copy.domainHost}`}>
+                          <IconCopy size={11} aria-hidden="true" />{copiedKey === `${key}h` ? copy.domainCopied : copy.domainCopy}
+                        </button>
+                      </div>
+                      <div className={styles.recordField}>
+                        <span>{copy.domainValue}</span>
+                        <code title={record.value}>{record.value}</code>
+                        <button type="button" className={styles.copyButton} onClick={() => copyValue(`${key}v`, record.value)} aria-label={`${copy.domainCopy} ${copy.domainValue}`} data-one-mail-copy-record>
+                          <IconCopy size={11} aria-hidden="true" />{copiedKey === `${key}v` ? copy.domainCopied : copy.domainCopy}
+                        </button>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+              <button type="button" className={styles.ghostButton} onClick={() => setShowRecords(false)} data-one-mail-records-toggle>{copy.recordsHide}</button>
+            </>
+          ) : (
+            <button type="button" className={styles.blockSecondary} onClick={() => setShowRecords(true)} data-one-mail-records-toggle>{copy.recordsShow(domain.records.length)}</button>
+          )}
           <p className={styles.hint}>{domain.mx.found.length ? copy.domainMx(domain.mx.found.join(", ")) : copy.domainMxNone}</p>
         </>
       )}
