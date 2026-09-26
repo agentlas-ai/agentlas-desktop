@@ -5458,6 +5458,7 @@ ${effectiveUserPrompt}`;
       mcpConfigPath,
       ...(isolatedMcpConfig ? { isolatedMcpConfig: true as const } : {}),
       ...(ephemeralToolGrant ? { ephemeralToolGrant: true as const } : {}),
+      ...(executionContext?.source === "science" && !scienceReview ? { scienceController: true as const } : {}),
       // Science / Alive-Science grants are the whole catalog; a generic One/Work config is not.
       ...(mcpConfigPath && (executionContext?.source === "science" || scienceReview
         || (isAliveControllerRun && executionContext?.aliveScience))

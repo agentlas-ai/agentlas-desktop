@@ -144,6 +144,8 @@ export interface RunnerRequest {
    * carries a session grant (same token/config across turns) and is pooled like any chat.
    */
   ephemeralToolGrant?: true;
+  /** A root Science controller run: its Codex session compacts earlier (see scienceCompactionArgs in codex.ts). */
+  scienceController?: true;
   /**
    * Main-authored: this run has no next turn (a throwaway chat id, e.g. the post-turn memory review). Pooling it parks a
    * CLI nobody can lease again until the 12h idle reap. Measured 2026-09-20: a Science loop left one resident claude

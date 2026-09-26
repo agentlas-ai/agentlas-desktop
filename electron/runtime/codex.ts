@@ -92,6 +92,16 @@ type NativeFileProofObserver = ReturnType<typeof bindNativeFileProofObserver>;
 type NativeFileProofInput = Parameters<NativeFileProofObserver>[0];
 type NativeFileProofTicket = Exclude<ReturnType<NativeFileProofObserver>, null>;
 
+/**
+ * A Science controller session runs many turns of ~80 tool calls, and every call re-sends the whole context. Measured
+ * 2026-09-26 on one session: 1,197 calls, 191M input tokens, median 163k per call, compacting only near 250k. Compacting
+ * at 150k keeps the working context and roughly halves what each call re-reads; canonical state lives in Science, not in
+ * the transcript. Scoped to root Science controller runs only (Main sets scienceController).
+ */
+function scienceCompactionArgs(req: { scienceController?: true }): string[] {
+  return req.scienceController === true ? ["-c", "model_auto_compact_token_limit=150000"] : [];
+}
+
 /** Admit only paths that Codex included in a structured FileChange start. */
 export function codexNativeFileProofCandidates(
   toolId: string | undefined,
@@ -1317,7 +1327,7 @@ async function runCodexResidentTurn(input: {
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
    * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
    */
-  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...surfaceArgs, ...mcpArgs];
+  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...scienceCompactionArgs(req), ...surfaceArgs, ...mcpArgs];
   const pool = codexSessionPool();
   const poolKey = codexPoolKey({
     chatId: req.approvalChatId ?? chatId,
@@ -2216,7 +2226,7 @@ export const runCodex: Runner = async (
   // reasoning summary 아이템을 켠다 — 실측(codex 0.147): 이 설정 없이는 `--json`에
   // reasoning 아이템이 0건이라 화면이 "생각 중" 외에 아무것도 말할 수 없었다. 켜면
   // 모델이 낸 헤드라인("**Preparing file count command execution**")이 아이템으로 온다.
-  modelArgs.push("-c", "model_reasoning_summary=auto");
+  modelArgs.push("-c", "model_reasoning_summary=auto", ...scienceCompactionArgs(runReq));
   let appliedEffort: string | null = null;
   if (runReq.model) modelArgs.push("--model", runReq.model);
   // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를
