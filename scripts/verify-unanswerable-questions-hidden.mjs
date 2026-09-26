@@ -23,8 +23,15 @@ import { createRequire } from "node:module";
 const root = path.resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const require = createRequire(import.meta.url);
 const built = path.join(root, "dist", "shared", "types.js");
-assert.ok(fs.existsSync(built), "dist 가 없다 — 먼저 npm run build:electron");
-const { isUnfilledQuestionTemplate } = require(built);
+// existsSync 로 먼저 막지 않는다 — 커밋 관문 스냅샷에는 dist 가 없고, 거기서는 require 가
+// 걸리는 순간 인덱스 소스를 컴파일해 준다(scripts/lib/staged-gate-compile.cjs). 먼저 막으면
+// confirm/index.ts 를 건드리는 커밋이 전부 이 게이트에서 영원히 FAIL 했다(2026-09-26 실측).
+let isUnfilledQuestionTemplate;
+try {
+  ({ isUnfilledQuestionTemplate } = require(built));
+} catch (error) {
+  assert.fail(`dist/shared/types.js 를 읽지 못했다 — 먼저 npm run build:electron (${error?.code ?? error})`);
+}
 assert.equal(typeof isUnfilledQuestionTemplate, "function", "공용 판정 함수가 없다");
 
 // ── 1) 막아야 하는 것 ──

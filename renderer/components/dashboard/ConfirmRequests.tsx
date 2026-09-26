@@ -7,7 +7,7 @@ import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { useT } from "@/lib/i18n";
-import { navigate } from "@/lib/navigation";
+import { openPendingConfirmation } from "@/lib/open-pending-confirmation";
 import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { PendingConfirmation } from "@/lib/types";
 
@@ -65,19 +65,8 @@ export function ConfirmRequests() {
   // 주기 폴링은 캐시 신선도(10s)에 맡긴다 — force 는 명시적 새로고침 이벤트에만(같은 페이지의 다른 폴러와 왕복이 겹쳤다).
   useVisibleInterval(() => void load(false), POLL_MS);
 
-  const openConfirmation = useCallback(async (item: PendingConfirmation) => {
-    const api = ipc();
-    if (!api) return;
-    const chat = await api.chats.get(item.chatId).catch(() => null);
-    if (chat?.originSurface === "one") {
-      const task = await api.tasks.findForChat(item.chatId).catch(() => null);
-      navigate(task
-        ? `/one?task=${encodeURIComponent(task.id)}`
-        : `/one?chat=${encodeURIComponent(item.chatId)}`);
-      return;
-    }
-    navigate(`/workspace/task?id=${encodeURIComponent(item.chatId)}`);
-  }, []);
+  // 행마다 그 질문이 있는 정확한 대화로 — 상단 배너와 같은 단일 경로(open-pending-confirmation).
+  const openConfirmation = useCallback((item: PendingConfirmation) => openPendingConfirmation(item), []);
 
   const count = items?.length ?? 0;
 
@@ -116,7 +105,7 @@ export function ConfirmRequests() {
         </div>
       ) : (
         items.map((it) => (
-          <div key={it.chatId} className="dashboard-module-row">
+          <div key={it.chatId} className="dashboard-module-row" data-pending-chat-id={it.chatId}>
             <div className="dashboard-row-copy">
               <div>{it.question}</div>
               <div>

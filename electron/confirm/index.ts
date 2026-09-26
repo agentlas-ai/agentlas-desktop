@@ -15,6 +15,7 @@ import {
   type QuestionContinuationOptions,
 } from "../../shared/types";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
+import { isOneOperationalRecoveryPrompt } from "../../shared/one-operational-recovery-prompt";
 import { getLastChatMessage, listRecentChats } from "../store/chats";
 import { getDb } from "../store/db";
 import { recordRunEvent, tryRecordRunEvent } from "../store/run-events";
@@ -486,6 +487,68 @@ onDesktopStoreChange((change) => {
   if (change.entity === "chat") invalidatePendingConfirmationsCache();
 });
 
+/**
+ * 오너가 Goal 을 지우거나 멈춘 **뒤에** One 운영 복구 턴이 스스로 만든 질문인가.
+ *
+ * 실측(설치본 2026-09-26, 대화 9ac88e26): 오너가 Goal 을 삭제 → 돌던 턴이 끊김 → 그 끊김이
+ * (49687baf 이전에는) 실패로 적혀 One 운영 복구가 같은 대화에서 다시 돌았고, 4분 뒤
+ * "매일 알림을 복구할까요?" 질문을 남겼다. 오너는 아무것도 묻지 않았는데 상단 배너가
+ * "승인 대기" 로 계속 조른다. 49687baf 가 새 복구 실행은 막았지만, 이미 남은 질문과 같은
+ * 모양의 경합(삭제와 복구가 겹치는 순간)은 여전히 목록에 뜬다.
+ *
+ * 판정은 기계 사실만 쓴다(문장 해석 없음):
+ *  1) 마지막 사람 메시지 뒤, 질문 앞에 One 운영 복구 프롬프트(고정 첫 줄)가 있다
+ *     — 즉 이 질문을 만든 턴은 사람이 아니라 복구가 시작했다.
+ *  2) 이 대화에 묶였던 장기 실행의 **가장 최근 사용자 제어**가 delete/pause 이고,
+ *     그 시각이 마지막 사람 메시지 뒤·질문 앞이다.
+ *  3) 그 상태가 지금도 유효하다 — delete 면 대화가 더는 그 Goal 에 묶여 있지 않고,
+ *     pause 면 여전히 그 Goal 에 묶인 채 paused/pausing 이다.
+ * 사람이 그 뒤에 말을 걸었거나(1·2 가 깨짐) Goal 을 재개했으면(3 이 깨짐) 평소대로 뜬다.
+ * 질문 행 자체는 지우지 않는다 — 대화를 열면 그대로 보이고 직접 답할 수도 있다.
+ */
+function isQuestionFromRecoveryAfterOwnerGoalStop(
+  chat: { id: string; goalId?: string | null },
+  question: { id: string; createdAt: string },
+): boolean {
+  const db = getDb();
+  const lastUser = db
+    .prepare(
+      `SELECT created_at FROM chat_messages
+        WHERE chat_id = ? AND role = 'user' AND created_at <= ? AND id <> ?
+        ORDER BY created_at DESC LIMIT 1`,
+    )
+    .get(chat.id, question.createdAt, question.id) as { created_at: string } | undefined;
+  const since = lastUser?.created_at ?? "";
+  const systemRows = db
+    .prepare(
+      `SELECT role, text FROM chat_messages
+        WHERE chat_id = ? AND role = 'system' AND created_at > ? AND created_at <= ? AND id <> ?
+        ORDER BY created_at DESC LIMIT 50`,
+    )
+    .all(chat.id, since, question.createdAt, question.id) as Array<{ role: string; text: string }>;
+  if (!systemRows.some((row) => isOneOperationalRecoveryPrompt(row.role, row.text))) return false;
+  const control = db
+    .prepare(
+      `SELECT r.goal_id AS goalId, r.status AS status, e.payload_json AS payloadJson, e.occurred_at AS occurredAt
+         FROM long_run_events e JOIN long_runs r ON r.id = e.run_id
+        WHERE r.root_chat_id = ? AND e.kind = 'run.user_control' AND e.actor_kind = 'user'
+        ORDER BY e.occurred_at DESC LIMIT 1`,
+    )
+    .get(chat.id) as { goalId: string; status: string; payloadJson: string; occurredAt: string } | undefined;
+  if (!control) return false;
+  if (!(control.occurredAt > since && control.occurredAt <= question.createdAt)) return false;
+  let action: unknown;
+  try { action = (JSON.parse(control.payloadJson) as { action?: unknown }).action; } catch { return false; }
+  const boundGoalId = chat.goalId ?? null;
+  if (action === "delete") {
+    return boundGoalId !== control.goalId && ["cancelling", "cancelled"].includes(control.status);
+  }
+  if (action === "pause") {
+    return boundGoalId === control.goalId && ["pausing", "paused"].includes(control.status);
+  }
+  return false;
+}
+
 /** 지금 사용자 확인을 기다리는 채팅들. 최신순. */
 export function listPendingConfirmations(): PendingConfirmation[] {
   const cached = pendingConfirmationsCache;
@@ -504,6 +567,9 @@ export function listPendingConfirmations(): PendingConfirmation[] {
     // recovery reads the exact receipt through `committedAnswers` and must not
     // reuse this pending-question projection as a second question surface.
     if (listCommittedQuestionAnswers(c.id).some((answer) => answer.sourceMessageId === last.id)) continue;
+    // A question the product's own recovery turn raised after the owner deleted
+    // or paused the Goal is not a pending owner decision — do not nag with it.
+    if (isQuestionFromRecoveryAfterOwnerGoalStop(c, last)) continue;
     // A committed answer without a later user turn is handled by the separate
     // committedAnswers/continuation-recovery projection above; this list stays
     // limited to questions that still need a user decision.

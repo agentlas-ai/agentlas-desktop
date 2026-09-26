@@ -15,6 +15,10 @@ import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
+import { openPendingConfirmation } from "@/lib/open-pending-confirmation";
+import { hasFinalConsonant, useOnePersonaName } from "@/lib/one-persona-name";
+import type { PendingConfirmation } from "@/lib/types";
+import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
 import { useT } from "@/lib/i18n";
 import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
@@ -60,6 +64,7 @@ function sameJobList(prev: MultimodalJob[], next: MultimodalJob[]): boolean {
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
   const [pendingConfirmations, setPendingConfirmations] = useState(0);
+  const [pendingItems, setPendingItems] = useState<PendingConfirmation[]>([]);
   const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
@@ -126,12 +131,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     const api = ipc();
     if (!api) {
       setPendingConfirmations(0);
+      setPendingItems([]);
       return;
     }
     try {
       const list = await api.confirm.listPending();
       const count = list.length;
       setPendingConfirmations(count);
+      setPendingItems(list);
       await api.attention?.setPendingConfirmations(count);
     } catch {
       // Transient IPC errors should not clear an existing badge.
@@ -303,7 +310,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <AttentionNudge
             count={pendingConfirmations}
             locale={locale}
-            onOpen={() => router.push("/dashboard#approval-inbox")}
+            items={pendingItems}
+            onOpen={() => {
+              // 하나면 그 질문이 있는 정확한 대화로, 여럿이면 인박스로(행마다 정확한 대화를 연다).
+              const only = pendingConfirmations === 1 && pendingItems.length === 1 ? pendingItems[0] : null;
+              if (only) void openPendingConfirmation(only);
+              else router.push("/dashboard#approval-inbox");
+            }}
           />
         )}
         <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
@@ -403,15 +416,37 @@ function BackgroundWorkPill({
 function AttentionNudge({
   count,
   locale,
+  items,
   onOpen,
 }: {
   count: number;
   locale: string;
+  /** 지금 대기 중인 질문들 — 누가 기다리는지 이름으로 말한다. */
+  items: PendingConfirmation[];
   onOpen: () => void;
 }) {
   const ko = locale === "ko";
+  const oneName = useOnePersonaName();
+  // One 대화의 요청자는 저장된 에이전트 이름("Agentlas One")이 아니라 오너가 지어 준 이름이다.
+  const names = Array.from(new Set(items.map((item) => (
+    item.requesterKind === "agent" && item.agentId === BUILTIN_ONE_AGENT_ID ? oneName : item.requesterLabel
+  ).trim()).filter(Boolean)));
+  const subject = (name: string) => `${name}${hasFinalConsonant(name) ? "이" : "가"}`;
+  const waitingLine = names.length === 1
+    ? (ko ? `${subject(names[0])} 답을 기다려요.` : `${names[0]} is waiting for your answer.`)
+    : names.length > 1
+      ? (ko
+        ? `${names[0]} 외 ${names.length - 1}명이 답을 기다려요.`
+        : `${names[0]} and ${names.length - 1} more are waiting for your answer.`)
+      : (ko ? "에이전트가 답을 기다리고 있습니다." : "An agent is waiting for your answer.");
+  const only = count === 1 && items.length === 1;
   return (
-    <div className="app-attention-nudge titlebar-nodrag" role="status" aria-live="assertive">
+    <div
+      className="app-attention-nudge titlebar-nodrag"
+      role="status"
+      aria-live="assertive"
+      data-attention-target={only ? "chat" : "inbox"}
+    >
       <span className="app-attention-dot" aria-hidden="true" />
       <div className="app-attention-copy">
         <strong>
@@ -419,7 +454,7 @@ function AttentionNudge({
             ? `${count > 99 ? "99+" : count}개 승인 대기`
             : `${count > 99 ? "99+" : count} approval${count === 1 ? "" : "s"} waiting`}
         </strong>
-        <span>{ko ? "에이전트가 답을 기다리고 있습니다." : "An agent is waiting for your answer."}</span>
+        <span>{waitingLine}</span>
       </div>
       <button type="button" onClick={onOpen}>
         {ko ? "열기" : "Open"}

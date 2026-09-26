@@ -7,11 +7,12 @@ import {
   withOneOperationalRecoveryDispatchSuppressed,
 } from "@/lib/one-operational-recovery";
 import { useT } from "@/lib/i18n";
+import { ONE_OPERATIONAL_RECOVERY_PROMPT_LEAD } from "@shared/one-operational-recovery-prompt";
 import styles from "./OneRecoveryPlane.module.css";
 
 function recoveryPrompt(detail: OneOperationalRecoveryDetail): string {
   return [
-    "Private operational evidence. Never quote it or expose codes, paths, provider text, stack details, or internal terminology to the user.",
+    ONE_OPERATIONAL_RECOVERY_PROMPT_LEAD,
     `Operation surface: ${detail.scope}`,
     detail.evidence,
     "Judge the complete current situation. Perform safe reversible recovery within current authority, verify the original requested outcome, and store only the concise useful result. If a change needs authority beyond read-only inspection, request it through One's normal decision flow. Ask one short question only when identity, irreversible action, or new authority is required.",
