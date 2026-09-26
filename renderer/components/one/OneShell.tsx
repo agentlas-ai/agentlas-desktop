@@ -6408,6 +6408,24 @@ export function OneShell() {
     void refreshAll({ includeOrg: false });
   }, [conversations, refreshAll, router]);
 
+  // "세션 열기" on a One→teammate handoff line: open that exact session and,
+  // like entering a teammate from the rail, acknowledge its unread result.
+  const openDispatchedSession = useCallback((chatId: string) => {
+    openConversation(chatId);
+    const api = ipc();
+    if (!api?.chats?.get || !api?.oneOrg?.markRead) return;
+    void (async () => {
+      try {
+        const chat = await api.chats.get(chatId);
+        const member = oneOrgState?.members.find((item) => item.installedAgentId === chat?.agentId && !item.archivedAt);
+        if (!member || member.unreadCount <= 0) return;
+        setOneOrgState(await api.oneOrg.markRead({ id: member.id, expectedUnreadGeneration: member.unreadGeneration }));
+      } catch {
+        // A newer result arrived meanwhile: keep the dot, the rail shows the latest.
+      }
+    })();
+  }, [oneOrgState?.members, openConversation]);
+
   const openLatestOneSession = useCallback(() => {
     const latest = conversations
       .filter((chat) => isOneOwnedSession(chat, taskforces))
@@ -7866,7 +7884,7 @@ export function OneShell() {
                           {liveWorkBlock}
                         </>}
                         {(visibleText || hasAttachments) && (normalizeChatHostNotice(message.role, message.hostNotice)
-                          ? <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} />
+                          ? <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />
                           : systemLabel
                           ? (
                             // A prompt One sent on the person's behalf ("One

@@ -18,6 +18,7 @@ import { computerUseMcpLaunchArgs } from "../computer-use/mcp-server";
 import { systemTimeMcpLaunchArgs } from "../mcp-tools/system-time-server";
 import { workspacePreviewMcpLaunchArgs } from "../workspace-preview/mcp-server";
 import { agentMailMcpLaunchArgs } from "../agent-mail/mcp-server";
+import { oneTeamMcpLaunchArgs } from "../one/team-mcp-server";
 
 interface PluginManifest {
   slug: string;
@@ -37,6 +38,7 @@ export const BUILTIN_PLUGIN_MANIFEST_PATHS = [
   "../../plugins/agentlas-time/plugin.json",
   "../../plugins/agentlas-workspace-preview/plugin.json",
   "../../plugins/agentlas-agent-mail/plugin.json",
+  "../../plugins/agentlas-one-team/plugin.json",
   "../../plugins/flint-chart/plugin.json",
 ] as const;
 
@@ -117,6 +119,7 @@ const RESOLVERS: Record<string, () => { command: string; args: string[] }> = {
   "system-time": () => ({ command: process.execPath, args: systemTimeMcpLaunchArgs() }),
   "workspace-preview": () => ({ command: process.execPath, args: workspacePreviewMcpLaunchArgs() }),
   "agent-mail": () => ({ command: process.execPath, args: agentMailMcpLaunchArgs() }),
+  "one-team": () => ({ command: process.execPath, args: oneTeamMcpLaunchArgs() }),
 };
 
 interface PluginToolSurface {

@@ -33,6 +33,7 @@ const RELEASE_TOP_LEVEL = Object.freeze({
   "agentlas-time": ["plugin.json"],
   "agentlas-workspace-preview": ["plugin.json"],
   "agentlas-agent-mail": ["plugin.json"],
+  "agentlas-one-team": ["plugin.json"],
   design: ["README.md", "assets", "plugin.json", "references", "skills"],
   "flint-chart": ["plugin.json", "skills"],
   "plugin-make": ["README.md", "assets", "plugin.json", "skills"],

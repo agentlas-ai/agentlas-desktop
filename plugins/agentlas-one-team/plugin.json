@@ -1,0 +1,47 @@
+{
+  "schema": "agentlas.plugin/v2",
+  "slug": "agentlas-one-team",
+  "name": "Agentlas One Team",
+  "version": "1.0.0",
+  "builtin": true,
+  "publisher": { "name": "Agentlas", "url": "https://agentlas.cloud" },
+  "surface": {
+    "displayName": "One Team",
+    "displayNameKo": "One 팀",
+    "tagline": "One hands work to a teammate's own session",
+    "taglineKo": "One 이 팀원 세션에 일을 맡깁니다",
+    "description": "One starts and steers a teammate's own session and reports the result back.",
+    "descriptionKo": "One 이 팀원의 세션을 열어 일을 맡기고, 방향을 더하고, 결과를 돌려받아 보고합니다.",
+    "category": "productivity",
+    "brandColor": "#4F46E5",
+    "defaultPrompts": ["팀원에게 새 세션으로 이 일을 맡기고 결과 알려줘"]
+  },
+  "invocation": { "mention": "@one-team", "implicit": "always", "standalone": false },
+  "provides": {
+    "tools": [
+      {
+        "id": "one-team",
+        "capability": "agent-routing",
+        "kind": "builtin",
+        "resolver": "one-team",
+        "envKeys": [],
+        "form": "inline",
+        "surface": {
+          "name": "One 팀",
+          "nameEn": "One Team",
+          "description": "One 이 팀원 세션에 일을 맡기고 결과를 돌려받습니다.",
+          "descriptionEn": "One hands work to a teammate's own session and gets the result back.",
+          "category": "productivity",
+          "brandColor": "#4F46E5",
+          "mark": "OT"
+        },
+        "hostChannels": [
+          { "id": "control", "env": "AGENTLAS_ONE_TEAM_CONTROL_FILE", "mode": "read-only" }
+        ]
+      }
+    ]
+  },
+  "requires": { "prereq": [{ "id": "node", "provided-by": "app" }], "os": ["darwin", "win32", "linux"] },
+  "permissions": { "fileWrite": "none", "network": "none", "shell": "deny" },
+  "state": { "files": [], "assets": false }
+}

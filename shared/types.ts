@@ -1987,7 +1987,11 @@ export interface AgentConcurrencyInfo {
 /** Main-authored display metadata. It grants no execution authority. */
 export type ChatHostNotice =
   | { purpose: "goal-continuation"; runId: string }
-  | { purpose: "automation-report"; runId: string; automationId: string };
+  | { purpose: "automation-report"; runId: string; automationId: string }
+  /** Teammate session: the brief One handed over (shown as coming from One, not the owner). */
+  | { purpose: "one-dispatch-brief"; runId: string }
+  /** One's conversation: compact "handed to teammate · open session" / "result arrived" link. */
+  | { purpose: "one-dispatch-link" | "one-dispatch-result"; runId: string; chatId: string; memberName: string };
 
 export interface ChatHistoryEntry {
   goalResult?: import("./goal-result").GoalResultPresentation;

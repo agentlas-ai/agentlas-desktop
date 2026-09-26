@@ -2017,7 +2017,7 @@ async function runMcpInvocationInContext(
   const persistUserMessage = () => {
     if (req.agentAppMode || userMessagePersisted) return;
     if (promptIsSystemAuthored) {
-      appendChatMessage(chat.id, "system", req.userPrompt, hostNoticePurpose === "goal-continuation" && req.runId
+      appendChatMessage(chat.id, "system", req.userPrompt, (hostNoticePurpose === "goal-continuation" || hostNoticePurpose === "one-dispatch-brief") && req.runId
         ? { hostNotice: { purpose: hostNoticePurpose, runId: req.runId } } : undefined);
     } else {
       /*

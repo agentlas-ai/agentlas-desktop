@@ -41,6 +41,9 @@ import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-s
 import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-mail/mcp-server";
 import { createAgentMailCapability, removeAgentMailCapability } from "../agent-mail/control-server";
 import { agentMailToolsOfferedForRun } from "../agent-mail/client";
+import { ONE_TEAM_CONTROL_ENV, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
+import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
+import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
 import {
   isAuthenticComputerUseMcpLaunch,
   isCanonicalComputerUseMcpServer,
@@ -360,7 +363,7 @@ const OPERATIONAL_KEYS = [
   "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_BROWSER_AUTONOMY", "AGENTLAS_BROWSER_APPROVAL_AUTHORITY",
   "AGENTLAS_CDP_AUTO_STOP", "AGENTLAS_CDP_HEADLESS",
   "AGENTLAS_CDP_PROFILE", "AGENTLAS_CDP_PORT", "AGENTLAS_NATIVE_BROWSER_ENDPOINT",
-  "AGENTLAS_COMPUTER_USE_CONTROL_FILE", "AGENTLAS_AGENT_MAIL_CONTROL_FILE"
+  "AGENTLAS_COMPUTER_USE_CONTROL_FILE", "AGENTLAS_AGENT_MAIL_CONTROL_FILE", "AGENTLAS_ONE_TEAM_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
 // The Hephaestus engine launch (resolveHephaestusStdioLaunch) is python -c <bootstrap> that reads
@@ -714,6 +717,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
   let workspacePreviewCapabilityCleanup: (() => void) | undefined;
   const agentMailCapabilityCleanup: Array<() => void> = [];
+  const oneTeamCapabilityCleanup: Array<() => void> = [];
   const proxyHandles: string[] = [];
   const residentProxyHandles: string[] = [];
   const activatedResidentProxyHandles = new Set<string>();
@@ -734,6 +738,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
     for (const revoke of browserAuthorityCleanup) revoke();
     for (const revoke of agentMailCapabilityCleanup) revoke();
+    for (const revoke of oneTeamCapabilityCleanup) revoke();
     try { workspacePreviewCapabilityCleanup?.(); } finally {
       if (ownsFile) {
         try { fs.rmSync(configPath, { force: true }); } catch { /* Authority is already revoked. */ }
@@ -804,6 +809,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // Agent mail is offered only to an owner-started chat run, only when the
       // signed-in owner has an active agent mail address (last server answer),
       // and only for the exact inline launch shipped by this build.
+      continue;
+    }
+    if (s.catalogId === "one-team" && (!callerChatId || opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true
+      || !oneTeamDispatchAllowedFor(callerChatId) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
+      // One's own conversation only (depth 1): a teammate chat, a session One
+      // opened, Work chats and dry runs never see the team dispatch tools.
       continue;
     }
     if (s.catalogId === "workspace-preview" && !isAuthenticWorkspacePreviewMcpLaunch(s.command, s.args ?? [])) {
@@ -933,6 +944,20 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           continue;
         }
       }
+      if (s.catalogId === "one-team") {
+        try {
+          const capabilityConfigKey = opts?.configKey ?? key;
+          const capability = await createOneTeamCapability(
+            { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read" },
+            capabilityConfigKey,
+          );
+          oneTeamCapabilityCleanup.push(() => removeOneTeamCapability(capabilityConfigKey, capability.binding.capabilityId));
+          builtInEnv = { [ONE_TEAM_CONTROL_ENV]: capability.path };
+        } catch (error) {
+          console.warn("[one-team] capability unavailable:", error);
+          continue;
+        }
+      }
       if (s.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
         const launch = await resolveHephaestusStdioLaunch("agentlas_cloud", ["mcp", "serve"]);
         if (!launch) continue;
@@ -964,7 +989,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         (isAuthenticSystemTimeMcpLaunch(command, args)
           || isAuthenticComputerUseMcpLaunch(command, args)
           || isAuthenticWorkspacePreviewMcpLaunch(command, args)
-          || isAuthenticAgentMailMcpLaunch(command, args))
+          || isAuthenticAgentMailMcpLaunch(command, args)
+          || isAuthenticOneTeamMcpLaunch(command, args))
       ) {
         // The keyless built-in already has an exact, compressed in-memory
         // launch contract. Bypass the mutable per-run wrapper so no pathname is
@@ -1061,7 +1087,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           // call still passes the Main arbiter and the browser launcher's approval gate.
           pushCodexConfig(codexConfigArgs, key, "default_tools_approval_mode", tomlString("approve"));
         }
-        if (s.catalogId === "agent-mail") {
+        if (s.catalogId === "agent-mail" || s.catalogId === "one-team") {
           // codex exec's approval policy "never" refuses every non-readOnlyHint
           // MCP call in a read run, so "send this mail" could never reach Main in
           // auto mode. Main's agent-mail control server is the one gate for these
