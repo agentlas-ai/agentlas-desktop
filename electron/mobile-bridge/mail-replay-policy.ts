@@ -20,6 +20,11 @@ export const MOBILE_BRIDGE_MAIL_RETRYABLE_CODES: ReadonlySet<string> = new Set([
   "http_504",
   "service_unavailable",
   "agent_mail_unavailable",
+  // Web 06ac7b82: SES refused before taking the mail (rate / daily quota / paused).
+  // The web frees the idempotency key, so the same key sends once SES recovers.
+  "agent_mail_service_busy",
+  "agent_mail_provider_quota",
+  "agent_mail_provider_paused",
 ]);
 
 /**

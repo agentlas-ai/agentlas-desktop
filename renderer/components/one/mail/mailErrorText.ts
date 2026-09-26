@@ -93,6 +93,20 @@ const LOCAL: Record<string, Record<Locale, string>> = {
     ko: "처음 연락한 에이전트에게는 자동으로 답하지 않아요.",
     en: "Automatic replies aren't sent to an agent writing for the first time.",
   },
+  // Web 06ac7b82: the sending service (SES) refused for account-level reasons.
+  // Nothing was sent, the monthly allowance was not used, the draft stays.
+  agent_mail_service_busy: {
+    ko: "지금 메일 서버가 붐벼서 보내지 못했어요. 보낸 수에는 세지 않았고 쓴 내용은 그대로 있어요. 잠시 뒤 다시 보내 주세요.",
+    en: "The mail service is busy, so it wasn't sent. It didn't count toward your allowance and your text is kept. Please try again shortly.",
+  },
+  agent_mail_provider_quota: {
+    ko: "Agentlas 메일이 오늘 보낼 수 있는 양을 다 써서 보내지 못했어요. 보낸 수에는 세지 않았고 쓴 내용은 그대로 있어요. 나중에 다시 보내 주세요.",
+    en: "Agentlas mail reached today's sending limit, so it wasn't sent. It didn't count toward your allowance and your text is kept. Please try again later.",
+  },
+  agent_mail_provider_paused: {
+    ko: "Agentlas 메일 발송이 잠시 멈춰 있어 보내지 못했어요. 보낸 수에는 세지 않았고 쓴 내용은 그대로 있어요. 나중에 다시 보내 주세요.",
+    en: "Agentlas mail sending is paused, so it wasn't sent. It didn't count toward your allowance and your text is kept. Please try again later.",
+  },
   agent_mail_internal_delivery_failed: {
     ko: "받는 Agentlas 메일함에 전하지 못했어요. 잠시 뒤 다시 보내 주세요.",
     en: "Couldn't deliver to the Agentlas mailbox. Please try again shortly.",
