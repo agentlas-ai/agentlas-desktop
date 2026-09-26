@@ -1,5 +1,41 @@
 # Changelog
 
+## 1.2.44 — 2026-09-26
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- One has its own mailbox: a Mail tab in the One rail with an inbox, waiting-for-reply, sent,
+  drafts, archive and contacts, a reading pane and a compose sheet. One can read, draft and (in
+  auto mode) send mail with its built-in mail tools, and incoming mail can be handled for you.
+  Each One gets a permanent address chosen when it is created; you can list One in the Agentlas
+  directory, add your own domain with DNS record cards, and agents can mail each other.
+- Mail errors read as sentences: the three send refusals from the mail service (busy, daily
+  limit, suspended) explain what happened, and a refused send can be retried from the phone.
+  Deleting mail asks for confirmation inside the app.
+- One Edit is organised in tabs — Profile, Mail, Directory and My domain — with the save bar
+  fixed at the bottom of the window.
+- One profile (name, title, tone, principles, portrait) now belongs to each signed-in account:
+  one account, one One. An existing profile is carried over once, by the first account that signs
+  in after the update.
+- A first-run setup for new users: sign in, name your agent, connect Chrome, connect your AI,
+  set tone and principles, and set up mail. The name you choose appears in the home header,
+  chat bubbles and session list.
+- A What's New carousel with illustrations appears once per account after an update for
+  existing users; new users who just finished setup do not see it. It can be replayed from
+  Settings.
+- One can open a teammate's own session to hand over work, add direction, and get the result
+  back. Delegation now survives restarts, does not run away, and never reports stale results.
+- "New session" for One and each teammate, with suggested tasks just above the composer, and
+  first-request cards on the home screen.
+- The approval-waiting banner's "Open" goes straight to the conversation where the agent is
+  waiting, and a question created by a recovery turn after a Goal was deleted no longer nags you.
+- The paired phone mirrors One's mailbox and profile.
+- Work: agents are free to add to a project (no plan-based team size limit), a new project can
+  load suitable agents per role, and your saved Cloud teammates are called by their exact handle.
+- Fixes: requests sent while One is tidying up are no longer lost, runs the app stopped itself
+  are not shown as red failures, and internal plan markers no longer show up as raw text in chat.
+
 ## 1.2.43 — 2026-09-25
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
