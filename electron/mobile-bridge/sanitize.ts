@@ -113,3 +113,25 @@ export function sanitizeMobileBridgeText(value: string, maxBytes: number): strin
     .replace(WINDOWS_ABSOLUTE_PATH_RE, "[local-path]");
   return truncateMobileBridgeUtf8(safe, maxBytes);
 }
+
+// C0/C1 controls except tab/LF/CR, bidi embeddings/overrides/isolates
+// (CVE-2021-42574 "Trojan Source"), zero-width space and BOM. ZWJ/ZWNJ stay:
+// they are part of real scripts and emoji.
+const MAIL_INVISIBLE_RE = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u200b\u200e\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g;
+
+/**
+ * Mail text is the owner's own mail, not a Desktop transcript: it must reach
+ * the phone exactly as written. `sanitizeMobileBridgeText` rewrites paths and
+ * token-looking words, and a draft read through it and saved back would
+ * silently replace the owner's original with "[local-path]" (EDGE-CASES M4).
+ * Here only invisible/direction-changing characters are removed and the byte
+ * budget applied.
+ */
+export function sanitizeMailText(value: string, maxBytes: number): string {
+  return truncateMobileBridgeUtf8(repairMobileBridgeUtf16(value).replace(MAIL_INVISIBLE_RE, ""), maxBytes);
+}
+
+/** One-line metadata (subject, sender name): newlines also flattened. */
+export function sanitizeMailLine(value: string, maxBytes: number): string {
+  return sanitizeMailText(value.replace(/[\r\n\t\u2028\u2029]+/g, " "), maxBytes);
+}

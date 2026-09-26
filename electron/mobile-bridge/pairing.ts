@@ -954,6 +954,17 @@ export class MobileBridgePairingManager {
    */
   lastAuthenticationRefusal: MobileBridgeAuthenticationRefusal | null = null;
 
+  /**
+   * The workspace a live (unrevoked) device credential was issued under, or
+   * null for a record from before account binding / an unknown device.
+   */
+  deviceWorkspaceId(deviceId: string): string | null {
+    const record = readDevices(this.userDataPath).devices.find(
+      (device) => device.deviceId === deviceId && device.revokedAt === null,
+    );
+    return record?.workspaceId ?? null;
+  }
+
   listDevices(): MobileBridgeDeviceMetadata[] {
     return readDevices(this.userDataPath).devices.map((record) => this.publicMetadata(record));
   }

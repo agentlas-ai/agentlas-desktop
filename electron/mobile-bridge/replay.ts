@@ -250,6 +250,27 @@ export class MobileBridgeRequestReplayStore {
     this.writeLedger(ledger);
   }
 
+  /**
+   * Forget a pending entry this process owns, so the SAME key may run again.
+   * Only for a command whose own downstream layer is idempotent on a key
+   * derived from this one (mail.send → web Idempotency-Key `mob-<key>`) and
+   * whose answer was "not decided" (outcome unknown, transient outage). Storing
+   * such an answer as final would replay the failure forever, and the phone's
+   * only way out would be a new key — a second real email (EDGE-CASES M1/M7).
+   */
+  release(deviceId: string, key: string, fingerprint: string): void {
+    this.assertIdentity(deviceId, key, fingerprint);
+    const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
+    const ledger = this.readLedger();
+    const index = ledger.entries.findIndex((candidate) => candidate.deviceId === deviceId && candidate.keyHash === keyHash);
+    if (index < 0) return;
+    const entry = ledger.entries[index];
+    if (entry.fingerprint !== fingerprint || entry.ownerInstanceId !== this.instanceId) return;
+    if (entry.state === "completed") return;
+    ledger.entries.splice(index, 1);
+    this.writeLedger(ledger);
+  }
+
   markUncertain(deviceId: string, key: string, fingerprint: string): void {
     this.assertIdentity(deviceId, key, fingerprint);
     const keyHash = createHash("sha256").update(key, "utf8").digest("hex");
