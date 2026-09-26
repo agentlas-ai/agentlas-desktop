@@ -829,6 +829,16 @@ function quietHoursActive(preferences: OneBriefingPreferences, now: Date): boole
 }
 
 /**
+ * Whether another One notice (e.g. new agent mail) may show an OS notification
+ * now: the owner's briefing channel choice and quiet hours, read-only. New mail
+ * does not get its own notification setting — it follows this one.
+ */
+export function oneDesktopNotificationAllowed(now = new Date()): boolean {
+  const state = loadState(now);
+  return state.preferences.channels.includes("desktop_notification") && !quietHoursActive(state.preferences, now);
+}
+
+/**
  * Atomically claims one generic Desktop notification. The candidate is
  * re-derived while holding the state lock; a persisted receipt prevents
  * duplicate delivery after restart or concurrent scheduler ticks.

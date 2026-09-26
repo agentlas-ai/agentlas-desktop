@@ -1470,7 +1470,8 @@ export interface InvocationExecutionContext {
   scienceRecovery?: object;
   /** Main-minted object identity; serialized fields cannot authorize a reviewer. */
   scienceReview?: object;
-  source: "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science" | "alive";
+  /** "agent-mail": a One run the inbound-mail loop started for one received message (no person to ask). */
+  source: "automation" | "site-studio" | "telegram" | "trex" | "mobile" | "science" | "alive" | "agent-mail";
   /** An Alive wake's attached Science playground, not a Research Director turn. Main-only. */
   aliveScience?: Readonly<{ agentId: string; wakeId: string; controlEpoch: number; attachmentId: string }>;
   /** Main-owned Science turn authority. Never reconstruct this by parsing surfaceContext. */
@@ -1576,7 +1577,8 @@ function isUnattendedExecution(executionContext?: InvocationExecutionContext): b
     executionContext?.source === "automation" ||
     executionContext?.source === "site-studio" ||
     executionContext?.source === "trex" ||
-    executionContext?.source === "alive"
+    executionContext?.source === "alive" ||
+    executionContext?.source === "agent-mail"
   );
 }
 

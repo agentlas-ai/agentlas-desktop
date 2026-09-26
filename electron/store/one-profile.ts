@@ -196,6 +196,18 @@ export function getOneProfileDeviceProjection(): OneProfileDeviceProjection {
   return projectOneProfileForDevice(getOneProfile());
 }
 
+const displayNameListeners = new Set<(next: string, previous: string) => void>();
+
+/**
+ * Main-only: told after One's display name actually changed, whichever channel
+ * saved it (Desktop dialog, profile sheet, paired mobile). The agent mail sync
+ * uses it so the mail sender name follows One's name.
+ */
+export function onOneDisplayNameChanged(listener: (next: string, previous: string) => void): () => void {
+  displayNameListeners.add(listener);
+  return () => displayNameListeners.delete(listener);
+}
+
 export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
   if (!isRecord(input)) throw new TypeError("Invalid One profile update");
   assertOnlyKeys(input, ["expectedVersion", "patch"], "One profile update");
@@ -205,7 +217,9 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
   if (Object.keys(input.patch).length === 0) throw new TypeError("One profile patch is empty");
 
   const changedFields: string[] = [];
+  let previousDisplayName = "";
   const updated = mutateProfile(input.expectedVersion, (current, timestamp) => {
+    previousDisplayName = current.displayName;
     const next: OneProfile = { ...current };
     if ("displayName" in input.patch) next.displayName = cleanText(input.patch.displayName, "displayName", 1, 64);
     if ("role" in input.patch) next.role = cleanText(input.patch.role, "role", 1, 120);
@@ -254,6 +268,11 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
   });
   if (updated.version !== input.expectedVersion) {
     recordProfileUpdated(updated, changedFields.sort(), "profile");
+    if (changedFields.includes("displayName") && previousDisplayName !== updated.displayName) {
+      for (const listener of displayNameListeners) {
+        try { listener(updated.displayName, previousDisplayName); } catch { /* a listener never fails the save */ }
+      }
+    }
   }
   return updated;
 }

@@ -1034,6 +1034,7 @@ function responseLanguageGuide(locale: RuntimeLocale, _userPrompt?: string): str
   return [
     tStatus(locale, "sysGuide"),
     tStatus(locale, "sysReplyLanguageScope"),
+    tStatus(locale, "sysInterimLanguage"),
     "Do not infer a different reply language from the language of the current message, quoted text, file contents, or prior conversation.",
     "Do not expose hidden chain-of-thought. If you need to narrate progress, summarize only observable actions and results.",
     exactReplyGuide,

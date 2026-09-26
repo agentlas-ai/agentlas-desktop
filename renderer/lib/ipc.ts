@@ -52,6 +52,10 @@ interface AgentlasEvents {
   onActiveChats: (handler: (chatIds: string[]) => void) => () => void;
   /** Alive (AGI toggle) state changed for a surface/scope; re-read alive.getState. Absent on older preloads. */
   onAliveChanged?: (handler: (event: AliveChangedEvent) => void) => () => void;
+  /** Agent mail changed (ids + unread count). Absent on older preloads. */
+  onAgentMailChanged?: (handler: (event: import("@shared/agent-mail").AgentMailChangedEvent) => void) => () => void;
+  /** New-mail notification was clicked: open this thread in One's mailbox. */
+  onAgentMailOpen?: (handler: (event: { threadId: string | null }) => void) => () => void;
   /** Pairing/device lifecycle notification. Contains no nonce, token, or certificate. */
   onMobileBridgeChanged?: (handler: (event: { reason: string }) => void) => () => void;
   /** Signed product extension lifecycle notification. */

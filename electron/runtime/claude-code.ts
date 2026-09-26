@@ -909,8 +909,8 @@ const runClaudeTurn = async (
   const readOnlyToolNotice =
     !runReq.untrustedNoTools && req.permission !== "write" && req.permission !== "full"
       ? (runReq.locale === "ko"
-        ? `\n\n[읽기 전용 실행] 이 세션에는 파일 쓰기·편집·셸 도구가 없다(제거됨). 서브에이전트 위임이나 다른 도구로 우회하지 마라. 작업에 쓰기·실행이 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다. 읽기·검색·분석은 평소대로 하면 된다.`
-        : `\n\n[Read-only run] This session has no file write, edit, or shell tools — they were removed. Do not work around it by delegating to a subagent or substituting another tool. If the task needs writing or shell execution, say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume. Reading, searching, and analysis work as usual.`)
+        ? `\n\n[읽기 전용 실행] 이 세션에는 파일 쓰기·편집·셸 도구가 없다(제거됨). 서브에이전트 위임이나 다른 도구로 우회하지 마라. 작업에 쓰기·실행이 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다. 읽기·검색·분석은 평소대로 하면 된다. 에이전트 메일 도구(agent_mail_*)가 있으면 사용자가 요청한 메일 보내기·답장·초안은 이 실행에서도 그 도구로 바로 하라 — 전체 액세스 승격이 필요 없다.`
+        : `\n\n[Read-only run] This session has no file write, edit, or shell tools — they were removed. Do not work around it by delegating to a subagent or substituting another tool. If the task needs writing or shell execution, say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume. Reading, searching, and analysis work as usual. If agent mail tools (agent_mail_*) are available, sending, replying to or drafting mail the user asked for works in this run through those tools — no full-access escalation is needed.`)
       : "";
   /*
    * 쓰기 실행은 작업 폴더 샌드박스 안에서 돈다. 샌드박스·승인 거부를 말해 주지 않으면 모델은 그것을

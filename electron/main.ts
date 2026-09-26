@@ -65,6 +65,7 @@ import { setGoalWaitHost, pollGoalWaitSubscriptions, reconcileClaimedGoalWaitsAt
   interruptGoalWaitReplans, goalWaitReplansSettled } from "./long-run/wait-subscriptions";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
 import { invocationService } from "./invocation/service";
+import { startAgentMailSync } from "./agent-mail/sync";
 import {
   disposeAutoUpdater,
   getUpdaterState,
@@ -3921,6 +3922,7 @@ app.whenReady().then(async () => {
     legacyLearningJob = runDeferredLegacyLearningReconciliation(controller.signal);
   }, 3_000);
   startOneBriefingScheduler();
+  startAgentMailSync();
   startOneTeamNotificationBridge();
   startRunAlertBridge();
   /*

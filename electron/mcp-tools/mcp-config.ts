@@ -918,7 +918,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
           const capability = await createAgentMailCapability(
-            { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read" },
+            {
+              chatId: callerChatId ?? null,
+              permission: opts?.toolGate?.permission ?? "read",
+              cwd: canonicalCallerCwd,
+              dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true,
+            },
             capabilityConfigKey,
           );
           agentMailCapabilityCleanup.push(() => removeAgentMailCapability(capabilityConfigKey, capability.binding.capabilityId));
@@ -1054,6 +1059,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           // probed: the same write-sandbox call is refused without it and reaches the
           // server with it). Safe only because codexLaunch is the Main proxy: every
           // call still passes the Main arbiter and the browser launcher's approval gate.
+          pushCodexConfig(codexConfigArgs, key, "default_tools_approval_mode", tomlString("approve"));
+        }
+        if (s.catalogId === "agent-mail") {
+          // codex exec's approval policy "never" refuses every non-readOnlyHint
+          // MCP call in a read run, so "send this mail" could never reach Main in
+          // auto mode. Main's agent-mail control server is the one gate for these
+          // tools (owner deny rules, dry runs, inbound-run thread scope) — the same
+          // gate claude-code runs already reach.
           pushCodexConfig(codexConfigArgs, key, "default_tools_approval_mode", tomlString("approve"));
         }
       }

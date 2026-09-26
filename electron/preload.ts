@@ -313,10 +313,24 @@ const api: AgentlasIpc = {
   agentMail: {
     status: () => ipcRenderer.invoke("agentMail:status"),
     issue: (input) => ipcRenderer.invoke("agentMail:issue", input ?? {}),
+    updateMailbox: (patch) => ipcRenderer.invoke("agentMail:updateMailbox", patch ?? {}),
+    checkAddress: (localPart) => ipcRenderer.invoke("agentMail:checkAddress", localPart),
     list: (input) => ipcRenderer.invoke("agentMail:list", input ?? {}),
     get: (id) => ipcRenderer.invoke("agentMail:get", id),
     send: (input) => ipcRenderer.invoke("agentMail:send", input),
     remove: (id) => ipcRenderer.invoke("agentMail:remove", id),
+    threads: (input) => ipcRenderer.invoke("agentMail:threads", input ?? {}),
+    thread: (id) => ipcRenderer.invoke("agentMail:thread", id),
+    markRead: (input) => ipcRenderer.invoke("agentMail:markRead", input),
+    archive: (input) => ipcRenderer.invoke("agentMail:archive", input),
+    removeThread: (id) => ipcRenderer.invoke("agentMail:removeThread", id),
+    unread: () => ipcRenderer.invoke("agentMail:unread"),
+    drafts: (input) => ipcRenderer.invoke("agentMail:drafts", input ?? {}),
+    saveDraft: (input) => ipcRenderer.invoke("agentMail:saveDraft", input),
+    removeDraft: (id) => ipcRenderer.invoke("agentMail:removeDraft", id),
+    sendDraft: (input) => ipcRenderer.invoke("agentMail:sendDraft", input),
+    downloadAttachment: (input) => ipcRenderer.invoke("agentMail:downloadAttachment", input),
+    delegate: (input) => ipcRenderer.invoke("agentMail:delegate", input),
   },
   promptHub: {
     list: (params?: { q?: string; category?: string }) => ipcRenderer.invoke("promptHub:list", params),
@@ -1321,6 +1335,18 @@ contextBridge.exposeInMainWorld("agentlasEvents", {
     const wrapped = (_evt: Electron.IpcRendererEvent, event: import("../shared/alive").AliveChangedEvent) => handler(event);
     ipcRenderer.on("alive:changed", wrapped);
     return () => ipcRenderer.removeListener("alive:changed", wrapped);
+  },
+  // Agent mail: ids and counts only; the mailbox screen re-reads what it shows.
+  onAgentMailChanged: (handler: (event: import("../shared/agent-mail").AgentMailChangedEvent) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, event: import("../shared/agent-mail").AgentMailChangedEvent) => handler(event);
+    ipcRenderer.on("agentMail:changed", wrapped);
+    return () => ipcRenderer.removeListener("agentMail:changed", wrapped);
+  },
+  // New-mail notification click: open that thread in One's mailbox.
+  onAgentMailOpen: (handler: (event: { threadId: string | null }) => void) => {
+    const wrapped = (_evt: Electron.IpcRendererEvent, event: { threadId: string | null }) => handler(event);
+    ipcRenderer.on("agentMail:open", wrapped);
+    return () => ipcRenderer.removeListener("agentMail:open", wrapped);
   },
   // Mobile pairing lifecycle carries only a reason enum; QR nonces/tokens stay in main.
   onMobileBridgeChanged: (handler: (event: { reason: string }) => void) => {

@@ -60,11 +60,16 @@ const DICT = {
     //   결과물 언어 규칙은 결과물에만 걸린다 — 답변 언어는 화면 언어 그대로.
     sysReplyLanguageScope:
       "\"게시물은 영어로만\"처럼 다른 사람에게 내보낼 결과물의 언어 규칙은 그 결과물에만 적용됩니다. 사용자에게 하는 답변·보고·요약의 언어를 바꾸라는 요청이 아니므로, 사용자에게는 계속 화면 언어로 답하세요.",
+    // ★2026-09-26 실측(QA 대화 4687a520): 메일 발송 도구 사이에 모델이 쓴 영어 중간 메모
+    //   "Unsent state confirmed. Sending now." 가 한국어 답변 한가운데 그대로 저장·표시됐다.
+    //   도구 호출 사이의 글도 최종 답변에 이어 붙어 사용자에게 보인다.
+    sysInterimLanguage:
+      "도구를 부르기 전후에 쓰는 짧은 진행 메모도 사용자 화면에 그대로 보입니다. 그런 메모도 화면 언어로 쓰거나, 필요 없으면 아예 쓰지 마세요. 영어 내부 확인 문장(예: \"Sending now.\")을 남기지 마세요.",
     sysGuide:
       "사용자의 인터페이스 언어는 한국어입니다. 사용자가 어떤 언어로 입력하든 항상 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 언어로 답하라고 명시적으로 요청할 때만 그 언어를 쓰세요.",
     sysHeader: "당신은 Agentlas Desktop에서 사용자가 설치한 전문 어시스턴트입니다.",
     sysToolsOff:
-      "읽기 전용 권한입니다. 현재 작업 폴더의 파일은 읽고 검색하고 분석할 수 있지만 파일이나 외부 상태를 바꾸면 안 됩니다. 읽기 전용 샌드박스 안에서 필요한 조회 도구를 사용하세요. 작업에 쓰기·실행이 정말 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 [[NEEDS-FULL-ACCESS]] 를 한 줄로 남기세요 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행됩니다.",
+      "읽기 전용 권한입니다. 현재 작업 폴더의 파일은 읽고 검색하고 분석할 수 있지만 파일이나 외부 상태를 바꾸면 안 됩니다. 읽기 전용 샌드박스 안에서 필요한 조회 도구를 사용하세요. 작업에 쓰기·실행이 정말 필요하면 무엇이 왜 필요한지 한 문장으로 말한 뒤, 답의 마지막 줄에 정확히 [[NEEDS-FULL-ACCESS]] 를 한 줄로 남기세요 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행됩니다. 예외: 에이전트 메일 도구(agent_mail_*)가 있으면 사용자가 요청한 메일 보내기·답장·초안 저장은 이 모드에서도 그 도구로 바로 하세요 — 전체 액세스가 필요 없습니다.",
     sysAgentDef: "── 에이전트 정의 ──",
     histPrev: "── 이전 대화 ──",
     histThis: "── 이번 요청 ──",
@@ -121,11 +126,13 @@ const DICT = {
       "The local model ({model}) kept calling tools for {turns} turns without reaching an answer. This run is not accepted as a result.",
     sysReplyLanguageScope:
       "A language rule for content you produce for others (for example \"post only in English\" or \"write the email in Japanese\") governs that content only. It is not a request to change the language you use with the user: keep replies, reports and summaries to the user in the interface language.",
+    sysInterimLanguage:
+      "Short progress notes you write before or between tool calls are shown to the user as part of your answer. Write them in the interface language too, or leave them out.",
     sysGuide:
       "The user's interface language is English. Always reply in English, regardless of the language the user writes in. Only use another language if the user explicitly asks you to in this message.",
     sysHeader: "You are a specialist assistant installed by the user in Agentlas Desktop.",
     sysToolsOff:
-      "Read-only permission is selected. You may read, search, and analyze files in the current working folder, but must not change files or external state. Use the available inspection tools inside the read-only sandbox. If the task genuinely needs writing or execution, say in one sentence what is needed and why, then put exactly [[NEEDS-FULL-ACCESS]] on its own final line — the app will ask the user to escalate to full access and resume once approved.",
+      "Read-only permission is selected. You may read, search, and analyze files in the current working folder, but must not change files or external state. Use the available inspection tools inside the read-only sandbox. If the task genuinely needs writing or execution, say in one sentence what is needed and why, then put exactly [[NEEDS-FULL-ACCESS]] on its own final line — the app will ask the user to escalate to full access and resume once approved. Exception: if agent mail tools (agent_mail_*) are available, sending, replying to or drafting mail the user asked for works in this mode through those tools — do not ask for full access for it.",
     sysAgentDef: "── Agent definition ──",
     histPrev: "── Previous turns ──",
     histThis: "── Current request ──",
