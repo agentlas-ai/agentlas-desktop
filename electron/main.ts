@@ -48,6 +48,7 @@ import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from
 import { installDesktopScienceHost } from "./science-host";
 import { createScienceDaemonClient, type ScienceDaemonClientOptions } from "./science-host/daemon-client";
 import { registerScienceDaemonExecutionIpc } from "./science-host/daemon-ipc";
+import { isScienceStoreFormatRefusal, scienceBootstrapFailure } from "./science-host/bootstrap-failure";
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
@@ -2099,15 +2100,24 @@ app.whenReady().then(async () => {
       // Its earlier "disabled" result is not a live owner and must not be used
       // to open the GUI's data-client store on the first post-install visit.
       if (owner.state === "disabled") owner = await scienceDaemonClient.ensureStarted();
-      if (owner.state !== "ready") throw new Error("science_daemon_science_unavailable");
+      // The owner's errorCode is the cause (e.g. a Science data file written by a newer build); the Science UI
+      // prints this message as-is, so it must be a sentence with a way out, not the bare unavailable code.
+      if (owner.state !== "ready") throw scienceBootstrapFailure({ code: owner.errorCode, state: owner.state, locale: currentUiLocale() });
     }
     assertScienceSender(event, input);
+    let projects: ReturnType<ReturnType<typeof scienceStore>["listProjects"]>;
+    try {
+      projects = scienceStore().listProjects();
+    } catch (error) {
+      if (isScienceStoreFormatRefusal(error)) throw scienceBootstrapFailure({ code: error.message, locale: currentUiLocale() });
+      throw error;
+    }
     return {
       extensionId: status.id,
       extensionVersion: status.version ?? "0.0.0",
       schemaVersion: scienceSchemaVersion(),
       locale: currentUiLocale(),
-      projects: scienceStore().listProjects(),
+      projects,
       rendererPacks: scienceRendererPackStatuses(),
     };
   });
