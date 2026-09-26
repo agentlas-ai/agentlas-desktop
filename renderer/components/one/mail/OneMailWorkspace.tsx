@@ -49,7 +49,63 @@ const STATUS_KEYS = {
   uncertain: "one.mail.status.uncertain",
 } as const satisfies Record<AgentMailSendStatus, string>;
 
-/** Remote content and scripts are blocked; the frame cannot reach the app. */
+/** Bodies past this many characters are cut until the owner asks for the rest. */
+const BODY_PREVIEW_CHARS = 1_000_000;
+
+const BODY_TEXT = {
+  ko: { truncated: "메일이 길어서 앞부분만 보여 드려요.", showAll: "전체 보기" },
+  en: { truncated: "This email is long, so only the beginning is shown.", showAll: "Show all" },
+} as const;
+
+/**
+ * One message body. HTML sits in a frame sized to its content (capped at 70% of
+ * the window) instead of a 200px box that scrolled on its own; a body over 1M
+ * characters shows its beginning until "Show all" (EDGE-CASES K6).
+ */
+function MessageBody({ message, locale }: { message: AgentMailMessage; locale: Locale }) {
+  const [full, setFull] = useState(false);
+  const [height, setHeight] = useState<number | null>(null);
+  const frame = useRef<HTMLIFrameElement | null>(null);
+  const source = message.text || message.html || "";
+  const long = source.length > BODY_PREVIEW_CHARS;
+  const shown = long && !full ? source.slice(0, BODY_PREVIEW_CHARS) : source;
+  const measure = () => {
+    try {
+      const doc = frame.current?.contentDocument;
+      const next = doc ? Math.max(doc.documentElement.scrollHeight, doc.body?.scrollHeight ?? 0) : 0;
+      if (next > 0) setHeight(Math.min(next + 2, Math.round(window.innerHeight * 0.7)));
+    } catch { /* not measurable: CSS default height stays */ }
+  };
+  if (!source) return null;
+  return (
+    <>
+      {message.text
+        ? <pre className={styles.messageText}>{shown}</pre>
+        : (
+          <iframe
+            ref={frame}
+            className={styles.htmlFrame}
+            title={tFor(locale, "one.mail.html_title")}
+            // Scripts stay blocked (no allow-scripts); same-origin only lets
+            // this screen read the laid-out height. CSP inside blocks remote loads.
+            sandbox="allow-same-origin"
+            referrerPolicy="no-referrer"
+            srcDoc={sandboxedHtml(shown)}
+            onLoad={measure}
+            style={height ? { height } : undefined}
+          />
+        )}
+      {long && !full && (
+        <p className={styles.uncertain} data-one-mail-truncated>
+          {BODY_TEXT[locale].truncated}{" "}
+          <button type="button" className={styles.originLink} onClick={() => setFull(true)}>{BODY_TEXT[locale].showAll}</button>
+        </p>
+      )}
+    </>
+  );
+}
+
+/** Remote content and scripts are blocked; the frame cannot run code or load anything remote. */
 function sandboxedHtml(html: string): string {
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:"><base target="_blank"><style>body{margin:12px;font:13px/1.6 -apple-system,system-ui,sans-serif;color:#1c1d1f;background:#fff;overflow-wrap:anywhere}img{max-width:100%;height:auto}</style></head><body>${html}</body></html>`;
 }
@@ -528,13 +584,7 @@ function MessageSection({ message, locale, open, onToggle, onOpenConversation, o
         </div>
       )}
       {status === "uncertain" && <p className={styles.uncertain}>{tFor(locale, "one.mail.uncertain_hint")}</p>}
-      {open && (
-        message.text
-          ? <pre className={styles.messageText}>{message.text}</pre>
-          : message.html
-            ? <iframe className={styles.htmlFrame} title={tFor(locale, "one.mail.html_title")} sandbox="" referrerPolicy="no-referrer" srcDoc={sandboxedHtml(message.html)} />
-            : null
-      )}
+      {open && <MessageBody message={message} locale={locale} />}
       {open && message.attachments.length > 0 && (
         <div className={styles.chips}>
           {message.attachments.map((attachment, position) => {

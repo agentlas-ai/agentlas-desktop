@@ -1,7 +1,7 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import {
@@ -77,6 +77,18 @@ export function registerAgentMailAutoRun(chatId: string, scope: Omit<AgentMailAu
   autoRuns.set(chatId, entry);
   return () => { if (autoRuns.get(chatId) === entry) autoRuns.delete(chatId); };
 }
+
+/**
+ * The chat is an unattended inbound-mail run. Main gives such a run only the
+ * agent mail tools (and the clock): a mail that says "open this link" or "call
+ * that tool" must find nothing else to call (EDGE-CASES I4).
+ */
+export function isAgentMailAutoRunChat(chatId: string | null | undefined): boolean {
+  return Boolean(chatId) && autoRuns.has(chatId as string);
+}
+
+/** MCP catalog ids an inbound-mail run may see. */
+export const AGENT_MAIL_AUTO_RUN_MCP = new Set(["agent-mail", "agentlas-time"]);
 
 export function agentMailAutoRunUsed(chatId: string): boolean {
   return autoRuns.get(chatId)?.used === true;
@@ -232,6 +244,48 @@ function assertAutoSend(auto: AgentMailAutoRunScope | undefined, replyToMessageI
   if (auto.used) throw new Error("agent-mail-auto-reply-done: this message already got its one reply.");
 }
 
+/**
+ * An automatic run answers the sender only (RFC 3834 §3.1.5): no new addresses,
+ * no reply-all, no cc/bcc. A mail that says "also cc attacker@x" must not be able
+ * to widen who an unattended run writes to. The server holds the same line
+ * (409 recipient_not_in_conversation) — this is the second lock.
+ */
+function assertAutoRecipients(auto: AgentMailAutoRunScope | undefined, request: Record<string, unknown>): void {
+  if (!auto) return;
+  if (request.replyAll === true || list(request.cc).length || list(request.bcc).length || list(request.to).length) {
+    throw new Error("agent-mail-auto-reply-scope: in an automatic run, reply to the sender only (no reply-all, to, cc or bcc).");
+  }
+}
+
+/**
+ * Stable send key (Stripe Idempotency-Key pattern): a model that calls send again
+ * after a timeout gets the server's replay, not a second email. An automatic run
+ * has exactly one reply per received message; an ordinary One chat keys on the
+ * chat and the exact content, so a changed mail is a new send.
+ */
+function sendKey(binding: AgentMailCapabilityBinding, auto: AgentMailAutoRunScope | undefined, parts: unknown[]): string {
+  if (auto) return `auto-${auto.messageId}`.slice(0, 128);
+  const digest = createHash("sha256").update(JSON.stringify(parts)).digest("hex").slice(0, 32);
+  return `one-${safeKey(binding.chatId ?? "nochat").slice(0, 64)}-${digest}`;
+}
+
+/**
+ * Codes after which an automatic run must not try again: the outcome is unknown
+ * (a retry could be a second email) or the server's loop brakes refused it.
+ */
+const AUTO_FINAL_CODES = /^(send_outcome_unknown|agent_mail_auto_reply_blocked|agent_mail_loop_suspected|agent_mail_monthly_limit_reached|agent_mail_plan_required)\b/;
+
+async function autoSend<T>(auto: AgentMailAutoRunScope | undefined, run: () => Promise<T>): Promise<T> {
+  try {
+    const result = await run();
+    if (auto) auto.used = true;
+    return result;
+  } catch (error) {
+    if (auto && error instanceof Error && AUTO_FINAL_CODES.test(error.message)) auto.used = true;
+    throw error;
+  }
+}
+
 function assertAutoThread(auto: AgentMailAutoRunScope | undefined, threadId: string | null | undefined): void {
   if (!auto) return;
   if (threadId && threadId !== auto.threadId) throw new Error("agent-mail-auto-reply-scope: in this run you may only work on the thread you were started for.");
@@ -295,29 +349,31 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
     }
     case "send": {
       assertCanSend(binding);
+      if (auto) throw new Error("agent-mail-auto-reply-scope: in an automatic run, answer with agent_mail_reply to the message you were started for.");
       const replyTo = isAgentMailId(request.replyToMessageId) ? request.replyToMessageId : undefined;
       assertAutoSend(auto, replyTo);
-      const result = unwrap(await agentMailSend({
+      const input = {
         to: list(request.to),
         cc: list(request.cc),
         bcc: list(request.bcc),
         subject: typeof request.subject === "string" ? request.subject : "",
         text: typeof request.text === "string" ? request.text : "",
         ...(replyTo ? { replyToMessageId: replyTo } : typeof request.inReplyTo === "string" ? { inReplyTo: request.inReplyTo } : {}),
-        ...(auto ? { basedOnMessageId: auto.messageId } : {}),
-      }, authorityFor(binding, auto)));
-      if (auto) auto.used = true;
+      };
+      const idempotencyKey = sendKey(binding, auto, [input.to, input.cc, input.bcc, input.subject, input.text, replyTo ?? null]);
+      const result = unwrap(await agentMailSend({ ...input, idempotencyKey }, authorityFor(binding, auto)));
       return sendResultForModel(result);
     }
     case "reply": {
       assertCanSend(binding);
       const messageId = String(request.messageId ?? "");
       assertAutoSend(auto, messageId);
+      assertAutoRecipients(auto, request);
       const original = unwrap(await agentMailGet(messageId)).message;
       const recipients = await replyRecipients(original, request.replyAll === true);
       if (recipients.to.length === 0) throw new Error("agent-mail-reply-no-recipient: this message has no one to reply to except this mailbox.");
       const extraCc = list(request.cc);
-      const result = unwrap(await agentMailSend({
+      const input = {
         to: recipients.to,
         cc: [...recipients.cc, ...extraCc],
         subject: typeof request.subject === "string" && request.subject.trim()
@@ -326,8 +382,9 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
         text: typeof request.text === "string" ? request.text : "",
         replyToMessageId: original.id,
         ...(auto ? { basedOnMessageId: auto.messageId } : {}),
-      }, authorityFor(binding, auto)));
-      if (auto) auto.used = true;
+      };
+      const idempotencyKey = sendKey(binding, auto, [input.to, input.cc, input.subject, input.text, original.id]);
+      const result = await autoSend(auto, async () => unwrap(await agentMailSend({ ...input, idempotencyKey }, authorityFor(binding, auto))));
       return sendResultForModel(result);
     }
     case "draft": {
@@ -335,6 +392,7 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
       const replyTo = isAgentMailId(request.replyToMessageId) ? request.replyToMessageId : undefined;
       if (auto && replyTo !== auto.messageId) throw new Error("agent-mail-auto-reply-scope: in this run you may only draft a reply to the message you were started for.");
       if (auto?.used) throw new Error("agent-mail-auto-reply-done: the reply draft for this message is already saved.");
+      assertAutoRecipients(auto, request);
       let to = list(request.to);
       let cc = list(request.cc);
       let subject = typeof request.subject === "string" ? request.subject : undefined;

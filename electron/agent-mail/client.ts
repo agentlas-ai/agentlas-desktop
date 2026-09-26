@@ -53,6 +53,20 @@ export function agentMailLastKnownLimits(): AgentMailLimits | null {
   return lastKnown.limits;
 }
 
+export function agentMailLastKnownEntitlement(): AgentMailEntitlement | null {
+  return lastKnown.entitlement;
+}
+
+/**
+ * Forget everything the previous session told us (account switch / sign-out).
+ * Without this, account B's first run was offered A's mail tools and the sync
+ * loop compared B's feed against A's mailbox.
+ */
+export function resetAgentMailLastKnown(): void {
+  lastAskedAt = 0;
+  rememberMailbox(null, null, null);
+}
+
 /**
  * The answer a run should use. lastKnown used to be filled only when the
  * renderer opened Settings or onboarding, so after every app restart One ran
@@ -426,6 +440,8 @@ export async function agentMailUnread(): Promise<AgentMailResult<{ unread: Agent
 }
 
 export interface AgentMailChangesPage {
+  /** Mailbox the feed belongs to (null = older server that does not say). */
+  mailboxId: string | null;
   changeSeq: number;
   threads: AgentMailThreadSummary[];
   deletedThreadIds: string[];
@@ -438,15 +454,23 @@ export interface AgentMailChangesPage {
   events: Array<{ seq: number; kind: string; threadId: string | null; messageId: string | null; actor: string; at: string }>;
 }
 
-/** `since` null → baseline only. 409 resync_required is returned as the error code. */
-export async function agentMailChanges(since: number | null): Promise<AgentMailResult<AgentMailChangesPage>> {
-  const query = since === null ? "" : `?since=${encodeURIComponent(String(Math.max(0, Math.floor(since))))}`;
-  const res = await call<Partial<AgentMailChangesPage>>("GET", `/api/agent-mail/changes${query}`);
+/**
+ * `since` null → baseline only. 409 resync_required is returned as the error code.
+ * `mailboxId` = the mailbox the cursor was taken from: change numbers are per
+ * workspace, so after an account switch another mailbox's cursor would look
+ * valid; the server answers resync_required when it does not match.
+ */
+export async function agentMailChanges(since: number | null, mailboxId: string | null = null): Promise<AgentMailResult<AgentMailChangesPage>> {
+  const query = new URLSearchParams();
+  if (since !== null) query.set("since", String(Math.max(0, Math.floor(since))));
+  if (since !== null && mailboxId && isAgentMailId(mailboxId)) query.set("mailboxId", mailboxId);
+  const res = await call<Partial<AgentMailChangesPage>>("GET", `/api/agent-mail/changes${query.size ? `?${query.toString()}` : ""}`);
   if (!res.ok) return res;
   const json = res.json;
   if (json.mailbox) rememberMailbox(json.mailbox);
   return {
     ok: true,
+    mailboxId: typeof json.mailboxId === "string" ? json.mailboxId : json.mailbox?.id ?? null,
     changeSeq: typeof json.changeSeq === "number" ? json.changeSeq : 0,
     threads: Array.isArray(json.threads) ? json.threads : [],
     deletedThreadIds: Array.isArray(json.deletedThreadIds) ? json.deletedThreadIds.filter(isAgentMailId) : [],

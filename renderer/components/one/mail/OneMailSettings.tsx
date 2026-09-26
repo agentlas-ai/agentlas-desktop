@@ -18,6 +18,12 @@ import {
 } from "@shared/agent-mail";
 import styles from "./OneMail.module.css";
 
+/** Main runs "reply" as "draft" while the plan cannot send (sync.ts effectiveInboundMode). */
+const REPLY_DOWNGRADED: Record<Locale, string> = {
+  ko: "지금 요금제로는 메일을 보낼 수 없어서, 보내는 대신 답장 초안만 남겨요.",
+  en: "Your current plan can't send mail, so One saves reply drafts instead of sending.",
+};
+
 const MODE_KEYS = {
   notify: ["one.mail.settings.mode.notify", "one.mail.settings.mode.notify_desc"],
   draft: ["one.mail.settings.mode.draft", "one.mail.settings.mode.draft_desc"],
@@ -233,6 +239,9 @@ export function OneMailSettings({
                   </label>
                 ))}
               </div>
+              {inboundMode === "reply" && entitlement && !entitlement.mailbox.send && (
+                <p className={styles.error} role="status" data-one-mail-reply-downgraded>{REPLY_DOWNGRADED[locale]}</p>
+              )}
               <p className={styles.hint}>{tFor(locale, "one.mail.settings.desktop_only")}</p>
             </fieldset>
           )}

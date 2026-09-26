@@ -102,6 +102,50 @@ function composeKey(): string {
   return `ui-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
+const COMPOSE_KEY_STORE = "agentlas.oneMail.composeKeys.v1";
+
+function readComposeKeys(): Record<string, string> {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(COMPOSE_KEY_STORE) ?? "{}") as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"));
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * The send key of a compose sheet lives with its draft id, so sending the same
+ * draft again after a restart (e.g. after "result unknown") replays on the
+ * server instead of sending a second email (EDGE-CASES D3).
+ */
+export function rememberComposeKey(draftId: string, key: string): void {
+  try {
+    const keys = readComposeKeys();
+    if (keys[draftId] === key) return;
+    keys[draftId] = key;
+    const trimmed = Object.fromEntries(Object.entries(keys).slice(-200));
+    window.localStorage.setItem(COMPOSE_KEY_STORE, JSON.stringify(trimmed));
+  } catch { /* storage unavailable: the in-memory key still covers this session */ }
+}
+
+export function forgetComposeKey(draftId: string | null): void {
+  if (!draftId) return;
+  try {
+    const keys = readComposeKeys();
+    if (!(draftId in keys)) return;
+    delete keys[draftId];
+    window.localStorage.setItem(COMPOSE_KEY_STORE, JSON.stringify(keys));
+  } catch { /* best effort */ }
+}
+
+function composeKeyFor(draftId: string | null | undefined): string {
+  if (draftId) {
+    const saved = readComposeKeys()[draftId];
+    if (saved) return saved;
+  }
+  return composeKey();
+}
+
 /** A flat legacy message shown as a one-message thread. */
 function legacyThread(message: AgentMailMessageSummary): AgentMailThreadSummary {
   return {
@@ -186,7 +230,15 @@ export function useOneMail(): OneMailState {
     if (!events?.onAgentMailChanged) return;
     return events.onAgentMailChanged((event) => {
       if (event.reason === "signed-out") {
+        // Another account may sign in next: nothing of this mailbox stays on screen.
         setUnread(null);
+        setThreads([]);
+        setDrafts([]);
+        setDraftCount(null);
+        setSelection(null);
+        setDetail(null);
+        setCompose(null);
+        setChecked(new Set());
         void refreshStatus();
         return;
       }
@@ -393,7 +445,7 @@ export function useOneMail(): OneMailState {
   }, [api, checked, view, legacy, refreshUnread]);
 
   const openCompose = useCallback((seed?: Partial<OneMailComposeSeed>) => {
-    setCompose({ seed: { ...emptyComposeSeed(), ...(seed ?? {}) }, key: composeKey() });
+    setCompose({ seed: { ...emptyComposeSeed(), ...(seed ?? {}) }, key: composeKeyFor(seed?.draftId) });
   }, []);
 
   const ownAddresses = useMemo(

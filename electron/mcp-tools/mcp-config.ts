@@ -39,7 +39,7 @@ import { WORKSPACE_PREVIEW_CONTROL_ENV, type WorkspacePreviewOwnerGrant } from "
 import { createWorkspacePreviewCapability, removeWorkspacePreviewCapabilityForConfig } from "../workspace-preview/control-server";
 import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-server";
 import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-mail/mcp-server";
-import { createAgentMailCapability, removeAgentMailCapability } from "../agent-mail/control-server";
+import { AGENT_MAIL_AUTO_RUN_MCP, createAgentMailCapability, isAgentMailAutoRunChat, removeAgentMailCapability } from "../agent-mail/control-server";
 import { agentMailToolsOfferedForRun } from "../agent-mail/client";
 import { ONE_TEAM_CONTROL_ENV, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
@@ -786,10 +786,17 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     ? await agentMailToolsOfferedForRun()
     : false;
 
+  const inboundMailRun = isAgentMailAutoRunChat(callerChatId);
+
   try {
   for (const s of serializedServers) {
     let preparedRuntimeRoot: string | null = null;
     let consentTransport: unknown;
+    if (inboundMailRun && !AGENT_MAIL_AUTO_RUN_MCP.has(s.catalogId ?? "")) {
+      // A run started by a received mail answers that mail only: no web
+      // fetchers, browsers or other MCP servers a mail's text could steer.
+      continue;
+    }
     if (s.catalogId === "agentlas-time" && !isCanonicalSystemTimeMcpServer(s)) {
       // Official built-ins never fall through to generic stdio/remote paths.
       continue;

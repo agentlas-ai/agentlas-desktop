@@ -46,8 +46,25 @@ const KNOWN = new Set([
   "agent_mail_attachments_too_large",
 ]);
 
+/**
+ * Server loop brakes (agentlas a116f675). Kept beside the code that shows them;
+ * both languages are required.
+ */
+const LOCAL: Record<string, Record<Locale, string>> = {
+  agent_mail_auto_reply_blocked: {
+    ko: "자동 메일·자기 주소·대화 밖 주소에는 자동으로 답하지 않아요.",
+    en: "Automatic replies are not sent to automated mail, your own address, or people outside the conversation.",
+  },
+  agent_mail_loop_suspected: {
+    ko: "이 대화에서 자동 답장이 한 시간에 너무 많아 멈췄어요. 직접 확인해 주세요.",
+    en: "Paused: too many automatic replies in this conversation in the last hour. Please check it yourself.",
+  },
+};
+
 export function mailErrorText(locale: Locale, error: { code?: string | null } | null | undefined): string {
   const code = typeof error?.code === "string" ? error.code : "";
+  const local = LOCAL[code];
+  if (local) return local[locale] ?? local.en;
   if (KNOWN.has(code)) return tFor(locale, `one.mail.error.${code}` as Key);
   return tFor(locale, "one.mail.error.generic", { code: code || "unknown" });
 }

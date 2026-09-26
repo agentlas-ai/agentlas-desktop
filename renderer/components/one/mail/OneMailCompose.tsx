@@ -11,7 +11,7 @@ import { mailErrorText } from "./mailErrorText";
 import { tFor, type Locale } from "@/lib/i18n";
 import { agentMailBareAddress, agentMailDisplayName, type AgentMailOutboundAttachment } from "@shared/agent-mail";
 import { OneBottomSheet } from "../OneBottomSheet";
-import type { OneMailCompose, OneMailState } from "./useOneMail";
+import { forgetComposeKey, rememberComposeKey, type OneMailCompose, type OneMailState } from "./useOneMail";
 import styles from "./OneMail.module.css";
 
 /** "Kim <k@x>" and "k@x" are one person: keep the first (named) form. */
@@ -123,8 +123,9 @@ export function OneMailComposeSheet({ compose, mail, locale, onDone }: {
       return;
     }
     setDraft({ id: res.draft.id, version: res.draft.version });
+    rememberComposeKey(res.draft.id, compose.key);
     setSaveState("saved");
-  }, [api, draftsSupported, seed.replyToMessageId, seed.threadId, basedOn]);
+  }, [api, draftsSupported, seed.replyToMessageId, seed.threadId, basedOn, compose.key]);
 
   // Autosave when typing pauses.
   useEffect(() => {
@@ -154,6 +155,7 @@ export function OneMailComposeSheet({ compose, mail, locale, onDone }: {
     // Drafts hold text only: with files, send directly (same one-key-per-sheet
     // idempotency) and drop the text draft afterwards.
     const withFiles = files.length > 0;
+    if (withFiles && draftRef.current.id) rememberComposeKey(draftRef.current.id, compose.key);
     const res = draftRef.current.id && !withFiles
       ? await api.sendDraft({ id: draftRef.current.id, ...(draftRef.current.version !== null ? { expectedVersion: draftRef.current.version } : {}) })
       : await api.send({
@@ -198,6 +200,7 @@ export function OneMailComposeSheet({ compose, mail, locale, onDone }: {
       setNotice({ text: tFor(locale, "one.mail.compose.outcome_unknown"), error: true });
       return;
     }
+    forgetComposeKey(draftRef.current.id);
     if (withFiles && draftRef.current.id) await api.removeDraft(draftRef.current.id).catch(() => null);
     void mail.refreshStatus();
     onDone(tFor(locale, "one.mail.compose.sent"));

@@ -572,7 +572,9 @@
 .htmlFrame {
   display: block;
   width: 100%;
-  min-height: 200px;
+  height: 200px;
+  min-height: 120px;
+  max-height: 70vh;
   margin: 0 0 16px;
   border: 1px solid var(--paper-3);
   border-radius: 8px;
