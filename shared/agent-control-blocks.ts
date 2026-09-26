@@ -44,6 +44,18 @@ export const AGENT_MULTIMODAL_MARKER = "<<agentlas-multimodal-setup>>";
 export const AGENT_SURFACE_INTENT_MARKER = "<<surface-intent>>";
 /** Host-only completion marker. It is control metadata, never answer content. */
 export const AGENT_GOAL_COMPLETE_PREFIX = "<<agentlas-goal-complete";
+/**
+ * 한 줄 표식 — 표식 뒤에 JSON 하나가 오고 그 줄 끝까지가 표식이다. 표식 앞의 글은 남긴다.
+ * 정본 파서: `<<agentlas-tactic>>`·`<<agentlas-plan-op>>` → shared/goal-shape.ts extractGoalPlanMarkers,
+ * `<<agentlas-effect-observation>>` → shared/effect-observation.ts.
+ * ★2026-09-26 QA 0b03862a: 목표 이어가기 답이 전술 표식을 원문 그대로 채팅에 남겼다(Main 은 목표 원장용으로만
+ * 떼고, 대화 기록에는 원문이 저장된 경로가 있었다). 표시 층이 마지막 방어선이다.
+ */
+export const AGENT_LINE_MARKERS = [
+  "<<agentlas-tactic>>",
+  "<<agentlas-plan-op>>",
+  "<<agentlas-effect-observation>>",
+] as const;
 
 /**
  * One owns assistant identity in product chrome. Provider/persona badges such
@@ -87,6 +99,7 @@ const TAIL_TOKENS: readonly string[] = [
   AGENT_MULTIMODAL_MARKER,
   AGENT_SURFACE_INTENT_MARKER,
   AGENT_GOAL_COMPLETE_PREFIX,
+  ...AGENT_LINE_MARKERS,
 ];
 
 /** 값 없이 통째로 지워도 되는 제어 마커. */
@@ -168,7 +181,7 @@ function pairedHit(
  * 그 조각까지 감춘다. 완성된 응답에는 적용하지 않는다 — 정상 본문을 자르면 안 된다.
  */
 export function stripAgentControlBlocks(value: string, options?: { streaming?: boolean }): string {
-  let visible = value.replace(GOAL_COMPLETE_RE, "");
+  let visible = stripLineMarkers(value).replace(GOAL_COMPLETE_RE, "");
   for (const marker of BARE_MARKERS) visible = visible.split(marker).join("");
 
   // 모델은 제어 블록을 여러 개 낼 수 있다. 적대적 스팸에도 멈추도록 상한을 둔다.
@@ -207,6 +220,23 @@ export function stripAgentControlBlocks(value: string, options?: { streaming?: b
   visible = stripRunawayJsonFenceTail(visible, options?.streaming === true);
   visible = stripOrphanCodeFences(visible);
   return visible.replace(/\n{3,}/g, "\n\n").trim();
+}
+
+/** 한 줄 표식은 표식부터 줄 끝까지 지우고, 앞 글이 없으면 줄째 지운다(정본 파서와 같은 규칙). */
+function stripLineMarkers(value: string): string {
+  if (!value.includes("<<agentlas-")) return value;
+  const kept: string[] = [];
+  for (const line of value.split("\n")) {
+    let at = -1;
+    for (const marker of AGENT_LINE_MARKERS) {
+      const index = line.indexOf(marker);
+      if (index >= 0 && (at < 0 || index < at)) at = index;
+    }
+    if (at < 0) { kept.push(line); continue; }
+    const before = line.slice(0, at).trimEnd();
+    if (before) kept.push(before);
+  }
+  return kept.join("\n");
 }
 
 /** A line that is only a code fence, with or without an info string. */
