@@ -59,6 +59,15 @@ export function OneWhatsNew({
   const autoDecidedRef = useRef<string | null>(null);
   const pending = Boolean(introState && introState.acknowledgedIntroVersion < introState.currentIntroVersion);
 
+  // Keep the next illustration ready when someone moves through the deck quickly.
+  useEffect(() => {
+    if (!open) return;
+    for (const slide of slides) {
+      const image = new Image();
+      image.src = slide.image;
+    }
+  }, [open, slides]);
+
   const present = useCallback(() => {
     restoreFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     setIndex(0);
