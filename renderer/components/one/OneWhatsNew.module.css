@@ -94,7 +94,8 @@
   color: var(--muted-deep);
   font-size: 11px;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  /* Normal tracking: wide tracking splits Hangul syllables apart and reads as broken text. */
+  letter-spacing: normal;
 }
 
 .body h2 {
@@ -107,6 +108,8 @@
   letter-spacing: -0.03em;
   word-break: keep-all;
   overflow-wrap: anywhere;
+  /* No line may end up holding one short word ("않아요."). */
+  text-wrap: balance;
 }
 
 .body p {
@@ -117,6 +120,8 @@
   line-height: 1.6;
   word-break: keep-all;
   overflow-wrap: anywhere;
+  /* No line may end up holding one short word ("않아요."). */
+  text-wrap: balance;
 }
 
 .primary {
