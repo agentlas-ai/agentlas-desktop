@@ -23,6 +23,7 @@ import {
   IconTrash,
 } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
+import { mailErrorText } from "./mailErrorText";
 import { tFor, type Locale } from "@/lib/i18n";
 import {
   agentMailDisplayName,
@@ -145,7 +146,7 @@ function MailList({ mail, locale, notice, setNotice }: {
 
   const run = (action: "archive" | "delete" | "read" | "unread") => {
     if (action === "delete" && !window.confirm(tFor(locale, "one.mail.delete_selected_confirm", { count: mail.checked.size }))) return;
-    void mail.bulk(action).then((error) => { if (error) setNotice({ text: error.message, error: true }); });
+    void mail.bulk(action).then((error) => { if (error) setNotice({ text: mailErrorText(locale, error), error: true }); });
   };
 
   const moreItems: OneMailMenuItem[] = drafts || mail.legacy ? [] : [
@@ -205,7 +206,7 @@ function MailList({ mail, locale, notice, setNotice }: {
       </div>
       {moreOpen && <OneMailMenu anchor={moreRef.current} label={tFor(locale, "one.mail.more")} items={moreItems} onClose={() => setMoreOpen(false)} width={220} />}
       {notice && <p className={notice.error ? styles.error : styles.notice} role={notice.error ? "alert" : "status"}>{notice.text}</p>}
-      {mail.listError && <p className={styles.error} role="alert">{mail.listError}</p>}
+      {mail.listError && <p className={styles.error} role="alert">{mailErrorText(locale, mail.listError)}</p>}
       <div className={styles.rows} role="list" aria-busy={mail.listLoading} data-one-mail-list={mail.view}>
         {rows.length === 0 && !mail.listLoading ? (
           <div className={styles.empty}>
@@ -217,7 +218,7 @@ function MailList({ mail, locale, notice, setNotice }: {
         ) : drafts ? (
           mail.drafts.map((draft) => <DraftRow key={draft.id} draft={draft} mail={mail} locale={locale} />)
         ) : (
-          mail.threads.map((thread) => <ThreadRow key={thread.id} thread={thread} mail={mail} locale={locale} onError={(error) => setNotice({ text: error.message, error: true })} />)
+          mail.threads.map((thread) => <ThreadRow key={thread.id} thread={thread} mail={mail} locale={locale} onError={(error) => setNotice({ text: mailErrorText(locale, error), error: true })} />)
         )}
         {mail.listLoading && rows.length === 0 && <p className={styles.notice} role="status">{tFor(locale, "one.mail.loading")}</p>}
       </div>
@@ -371,13 +372,13 @@ function ReadingPane({ mail, locale, onOpenConversation, notice, setNotice }: {
   }, [detail, lastMessage]);
 
   const fail = (error: AgentMailError | null) => {
-    if (error) setNotice({ text: error.message, error: true });
+    if (error) setNotice({ text: mailErrorText(locale, error), error: true });
   };
 
   const download = async (message: AgentMailMessage, index: number) => {
     if (!api) return;
     const res = await api.downloadAttachment({ messageId: message.id, index });
-    setNotice(res.ok ? { text: tFor(locale, "one.mail.downloaded"), error: false } : { text: res.message, error: true });
+    setNotice(res.ok ? { text: tFor(locale, "one.mail.downloaded"), error: false } : { text: mailErrorText(locale, res), error: true });
   };
 
   const delegate = async () => {
@@ -397,7 +398,7 @@ function ReadingPane({ mail, locale, onOpenConversation, notice, setNotice }: {
   if (!detail) {
     return (
       <p className={mail.detailError ? styles.error : styles.centerState} role={mail.detailError ? "alert" : "status"}>
-        {mail.detailError ?? tFor(locale, "one.mail.loading")}
+        {mail.detailError ? mailErrorText(locale, mail.detailError) : tFor(locale, "one.mail.loading")}
       </p>
     );
   }

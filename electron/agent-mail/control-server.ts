@@ -201,6 +201,18 @@ async function replyRecipients(message: AgentMailMessage, replyAll: boolean): Pr
   return { to: cleanTo, cc: dedupe(cc) };
 }
 
+/**
+ * The allowance counts recipient addresses, not emails. The raw server field
+ * `remainingThisMonth` made One tell the owner "492 sends left" (live
+ * 2026-09-26) — name it for what it counts before the model reads it.
+ */
+const ALLOWANCE_NOTE = "recipient addresses per UTC calendar month (To+Cc+Bcc): one email to 3 people uses 3. Say \"recipients\", not emails or sends.";
+
+function sendResultForModel<T extends { remainingThisMonth?: number }>(result: T): Omit<T, "remainingThisMonth"> & { remainingRecipientsThisMonth: number | null; allowanceCounts: string } {
+  const { remainingThisMonth, ...rest } = result;
+  return { ...rest, remainingRecipientsThisMonth: typeof remainingThisMonth === "number" ? remainingThisMonth : null, allowanceCounts: ALLOWANCE_NOTE };
+}
+
 function authorityFor(binding: AgentMailCapabilityBinding, auto: AgentMailAutoRunScope | undefined): AgentMailSendAuthority {
   return {
     origin: "one",
@@ -241,7 +253,8 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
         available: status.entitlement?.available ?? false,
         canSend: Boolean(status.entitlement?.mailbox.send) && !binding.dryRun && !isDenied(binding.chatId, "agent_mail_send") && auto?.mode !== "draft",
         monthlyRecipientLimit: status.entitlement?.monthlyRecipientLimit ?? 0,
-        remainingThisMonth: status.entitlement?.remainingThisMonth ?? 0,
+        remainingRecipientsThisMonth: status.entitlement?.remainingThisMonth ?? 0,
+        allowanceCounts: ALLOWANCE_NOTE,
         periodEnd: status.entitlement?.period.end ?? null,
         signatureAddedByServer: typeof status.mailbox?.signature === "string" && status.mailbox.signature.length > 0,
       };
@@ -294,7 +307,7 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
         ...(auto ? { basedOnMessageId: auto.messageId } : {}),
       }, authorityFor(binding, auto)));
       if (auto) auto.used = true;
-      return result;
+      return sendResultForModel(result);
     }
     case "reply": {
       assertCanSend(binding);
@@ -315,7 +328,7 @@ export async function handleAgentMailControlRequest(request: Record<string, unkn
         ...(auto ? { basedOnMessageId: auto.messageId } : {}),
       }, authorityFor(binding, auto)));
       if (auto) auto.used = true;
-      return result;
+      return sendResultForModel(result);
     }
     case "draft": {
       assertCanChange(binding, "no draft was saved");

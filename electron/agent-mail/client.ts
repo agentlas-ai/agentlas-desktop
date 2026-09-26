@@ -17,6 +17,7 @@ import {
   type AgentMailMessageSummary,
   type AgentMailOrigin,
   type AgentMailOriginRef,
+  type AgentMailOutboundAttachment,
   type AgentMailResult,
   type AgentMailSendInput,
   type AgentMailSendResult,
@@ -306,6 +307,35 @@ function sendOutcome(res: { ok: true; status: number; json: AgentMailSendResult 
  * transport retry of the SAME call can never send twice. There is no automatic
  * retry: an uncertain result is returned as-is.
  */
+/**
+ * Owner-attached files for one send. The server is the judge of size (its
+ * limits travel in `limits`); this only refuses what it would refuse anyway,
+ * before tens of megabytes cross the wire.
+ */
+function outboundAttachments(input: unknown): { ok: true; list: AgentMailOutboundAttachment[] } | AgentMailError {
+  if (input === undefined || input === null) return { ok: true, list: [] };
+  if (!Array.isArray(input)) return err("agent_mail_invalid_request", "Attachments must be a list.", null, { field: "attachments" });
+  const list: AgentMailOutboundAttachment[] = [];
+  let bytes = 0;
+  for (const item of input) {
+    const value = item && typeof item === "object" ? item as Partial<AgentMailOutboundAttachment> : null;
+    const filename = typeof value?.filename === "string" ? value.filename.replace(/[\r\n\\/]+/g, " ").trim().slice(0, 255) : "";
+    const contentBase64 = typeof value?.contentBase64 === "string" ? value.contentBase64.replace(/\s+/g, "") : "";
+    if (!filename || !contentBase64 || !/^[A-Za-z0-9+/]*={0,2}$/.test(contentBase64)) {
+      return err("agent_mail_invalid_request", "An attachment is missing its name or bytes.", null, { field: "attachments" });
+    }
+    const contentType = typeof value?.contentType === "string" && /^[\w.+-]+\/[\w.+-]+$/.test(value.contentType) ? value.contentType : "application/octet-stream";
+    bytes += Math.floor((contentBase64.length * 3) / 4) - (contentBase64.endsWith("==") ? 2 : contentBase64.endsWith("=") ? 1 : 0);
+    list.push({ filename, contentType, contentBase64 });
+  }
+  const maxCount = lastKnown.limits?.maxAttachmentsPerMessage ?? null;
+  const maxBytes = lastKnown.limits?.maxAttachmentBytesTotal ?? null;
+  if ((maxCount !== null && list.length > maxCount) || (maxBytes !== null && bytes > maxBytes)) {
+    return err("agent_mail_attachments_too_large", "The attachments are larger than this mailbox can send.", 413, { maxAttachmentBytesTotal: maxBytes, maxAttachmentsPerMessage: maxCount, requestedBytes: bytes });
+  }
+  return { ok: true, list };
+}
+
 export async function agentMailSend(
   input: AgentMailSendInput,
   authority: AgentMailSendAuthority = OWNER_AUTHORITY,
@@ -315,6 +345,8 @@ export async function agentMailSend(
     : `desk-${randomUUID()}`;
   const replyTo = isAgentMailId(input?.replyToMessageId) ? input.replyToMessageId : undefined;
   const basedOn = isAgentMailId(input?.basedOnMessageId) ? input.basedOnMessageId : undefined;
+  const attachments = outboundAttachments(input?.attachments);
+  if (!attachments.ok) return attachments;
   const res = await call<AgentMailSendResult>(
     "POST",
     "/api/agent-mail/messages",
@@ -326,9 +358,10 @@ export async function agentMailSend(
       text: typeof input?.text === "string" ? input.text : "",
       ...(replyTo ? { replyToMessageId: replyTo } : typeof input?.inReplyTo === "string" ? { inReplyTo: input.inReplyTo } : {}),
       ...(basedOn ? { basedOnMessageId: basedOn } : {}),
+      ...(attachments.list.length ? { attachments: attachments.list } : {}),
       ...originBody(authority),
     },
-    { timeoutMs: SEND_TIMEOUT_MS, headers: { "Idempotency-Key": idempotencyKey } },
+    { timeoutMs: attachments.list.length ? ATTACHMENT_TIMEOUT_MS : SEND_TIMEOUT_MS, headers: { "Idempotency-Key": idempotencyKey } },
   );
   return sendOutcome(res, idempotencyKey);
 }

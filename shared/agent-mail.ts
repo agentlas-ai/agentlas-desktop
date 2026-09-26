@@ -54,6 +54,7 @@ export interface AgentMailLimits {
   maxTextBytes?: number;
   maxHtmlBytes?: number;
   maxAttachmentBytesTotal?: number;
+  maxAttachmentsPerMessage?: number;
   localPart?: { minLength: number; maxLength: number; pattern: string };
   signatureMaxChars?: number;
   displayNameMaxChars?: number;
@@ -184,6 +185,14 @@ export interface AgentMailSendInput {
   basedOnMessageId?: string;
   /** Same key → same send (no second email). Desktop mints one per compose. */
   idempotencyKey?: string;
+  /** Files the owner attached in the compose sheet (bytes as base64; limits come from the server). */
+  attachments?: AgentMailOutboundAttachment[];
+}
+
+export interface AgentMailOutboundAttachment {
+  filename: string;
+  contentType: string;
+  contentBase64: string;
 }
 
 export interface AgentMailSendReceipt {

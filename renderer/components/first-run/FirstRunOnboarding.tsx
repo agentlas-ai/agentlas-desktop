@@ -48,6 +48,7 @@ import {
   type FirstRunStep,
 } from "@/lib/first-run-state";
 import { setOnePersonaName } from "@/lib/one-persona-name";
+import { mailErrorText } from "@/components/one/mail/mailErrorText";
 import styles from "./FirstRun.module.css";
 
 const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
@@ -189,7 +190,7 @@ function makeCopy(ko: boolean, name: string) {
     mailIssued: "발급됨", mailPending: "주소 발급 전", mailPendingBody: "요금제에 포함돼 있어요. 주소를 만들면 여기에 보여요.",
     mailCreate: "메일 주소 만들기", mailCreating: "만드는 중…", mailPreparing: "준비 중", mailPreparingBody: "주소를 준비하고 있어요. 준비가 끝나면 설정에서 쓸 수 있어요.",
     mailPlanOnly: "Pro 이상 요금제에서 쓸 수 있어요.", mailSeePlans: "Free · Pro 보기",
-    mailQuota: (n: string) => `이번 달 ${n}명까지 보낼 수 있어요.`,
+    mailQuota: (left: string, limit: string) => `이번 달 보낼 수 있는 받는 사람 ${left}/${limit}명 (메일 1통을 3명에게 보내면 3명으로 셈)`,
     mailHint: "실제 주소는 서버에서 발급된 뒤에만 보여 드려요.",
     finish: `${name}에게 가기`, stepsLabel: "진행 단계",
     saveFailed: "저장하지 못했어요. 다시 시도해 주세요.",
@@ -242,7 +243,7 @@ function makeCopy(ko: boolean, name: string) {
     mailIssued: "Issued", mailPending: "Not issued yet", mailPendingBody: "Included in your plan. Create the address and it appears here.",
     mailCreate: "Create mail address", mailCreating: "Creating…", mailPreparing: "Preparing", mailPreparingBody: "The address is being prepared. Use it from Settings once it's ready.",
     mailPlanOnly: "Available on Pro and above.", mailSeePlans: "See Free · Pro",
-    mailQuota: (n: string) => `Send to up to ${n} recipients this month.`,
+    mailQuota: (left: string, limit: string) => `Recipients left this month: ${left}/${limit} (one email to 3 people counts as 3)`,
     mailHint: "An address is shown only after the server issues it.",
     finish: `Go to ${name}`, stepsLabel: "Progress",
     saveFailed: "Could not save. Please try again.",
@@ -559,10 +560,10 @@ export function FirstRunOnboarding({
     setMailBusy(true); setMailError(null);
     try {
       const res = await api.agentMail.issue({ displayName });
-      if (!res.ok) { setMailError(res.message || res.code); return; }
+      if (!res.ok) { setMailError(mailErrorText(ko ? "ko" : "en", res)); return; }
       await loadMail();
     } catch (err) {
-      setMailError(err instanceof Error ? err.message : String(err));
+      setMailError(mailErrorText(ko ? "ko" : "en", { code: err instanceof Error && err.name === "AbortError" ? "timeout" : "network" }));
     } finally {
       setMailBusy(false);
     }
@@ -759,9 +760,9 @@ export function FirstRunOnboarding({
                       : !mailEntitlement
                         ? copy.mailSoonBody
                         : mailbox
-                          ? (mailActive ? copy.mailQuota(num(mailEntitlement.remainingThisMonth)) : copy.mailPreparingBody)
+                          ? (mailActive ? copy.mailQuota(num(mailEntitlement.remainingThisMonth), num(mailEntitlement.monthlyRecipientLimit)) : copy.mailPreparingBody)
                           : mailEntitlement.addressLimit > 0
-                            ? `${copy.mailPendingBody} ${copy.mailQuota(num(mailEntitlement.monthlyRecipientLimit))}`
+                            ? `${copy.mailPendingBody} ${copy.mailQuota(num(mailEntitlement.monthlyRecipientLimit), num(mailEntitlement.monthlyRecipientLimit))}`
                             : copy.mailPlanOnly}</small>
                   </div>
                   <span className={styles.chip} data-tone={mailActive ? "ok" : undefined}>

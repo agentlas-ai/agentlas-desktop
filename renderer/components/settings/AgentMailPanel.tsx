@@ -10,6 +10,7 @@ import { ipc } from "@/lib/ipc";
 import { tFor, type Locale } from "@/lib/i18n";
 import type { AgentMailEntitlement, AgentMailMailbox } from "@shared/agent-mail";
 import { OneMailSettings } from "@/components/one/mail/OneMailSettings";
+import { mailErrorText } from "@/components/one/mail/mailErrorText";
 import { useOnePersonaName } from "@/lib/one-persona-name";
 import styles from "./AgentMailPanel.module.css";
 
@@ -24,7 +25,7 @@ export function AgentMailPanel({ locale }: { locale: string }) {
   const [signedIn, setSignedIn] = useState(false);
   const [entitlement, setEntitlement] = useState<AgentMailEntitlement | null>(null);
   const [mailbox, setMailbox] = useState<AgentMailMailbox | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<{ code: string } | null>(null);
   const [copied, setCopied] = useState(false);
   const oneName = useOnePersonaName();
 
@@ -32,7 +33,7 @@ export function AgentMailPanel({ locale }: { locale: string }) {
     if (!api) return;
     const status = await api.status();
     setLoaded(true);
-    if (!status.ok) { setError(status.message); return; }
+    if (!status.ok) { setError(status); return; }
     setSignedIn(status.signedIn);
     setEntitlement(status.entitlement);
     setMailbox(status.mailbox);
@@ -95,7 +96,7 @@ export function AgentMailPanel({ locale }: { locale: string }) {
             </div>
           </>
         )}
-        {error ? <p className={styles.error} role="alert">{error}</p> : null}
+        {error ? <p className={styles.error} role="alert">{mailErrorText(lang, error)}</p> : null}
       </div>
     </section>
   );

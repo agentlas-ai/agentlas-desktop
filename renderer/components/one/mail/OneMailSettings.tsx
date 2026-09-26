@@ -6,6 +6,7 @@
 import { useEffect, useState } from "react";
 import { IconCopy } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
+import { mailErrorText } from "./mailErrorText";
 import { tFor, type Locale } from "@/lib/i18n";
 import {
   AGENT_MAIL_INBOUND_MODES,
@@ -63,7 +64,7 @@ export function OneMailSettings({
     void api.status().then((status) => {
       if (!alive) return;
       setLoaded(true);
-      if (!status.ok) { setNotice({ text: status.message, error: true }); return; }
+      if (!status.ok) { setNotice({ text: mailErrorText(locale, status), error: true }); return; }
       setSignedIn(status.signedIn);
       setEntitlement(status.entitlement);
       setLimits(status.limits ?? null);
@@ -84,7 +85,7 @@ export function OneMailSettings({
     setNotice(null);
     const res = await api.issue({ displayName: oneName, ...(cleanLocal ? { localPart: cleanLocal } : {}) });
     setBusy(false);
-    if (!res.ok) { setNotice({ text: res.message, error: true }); return; }
+    if (!res.ok) { setNotice({ text: mailErrorText(locale, res), error: true }); return; }
     adopt(res.mailbox);
     if (res.entitlement) setEntitlement(res.entitlement);
     setLocalPart("");
@@ -94,7 +95,7 @@ export function OneMailSettings({
   const runCheck = async () => {
     if (!cleanLocal) return;
     const res = await api.checkAddress(cleanLocal);
-    if (!res.ok) { setNotice({ text: res.message, error: true }); return; }
+    if (!res.ok) { setNotice({ text: mailErrorText(locale, res), error: true }); return; }
     setCheck({ localPart: res.localPart, available: res.available, address: res.address });
   };
 
@@ -103,7 +104,7 @@ export function OneMailSettings({
     setNotice(null);
     const res = await api.updateMailbox(value);
     setBusy(false);
-    if (!res.ok) { setNotice({ text: res.message, error: true }); return false; }
+    if (!res.ok) { setNotice({ text: mailErrorText(locale, res), error: true }); return false; }
     adopt(res.mailbox);
     if (res.entitlement) setEntitlement(res.entitlement);
     setNotice({ text: tFor(locale, "one.mail.settings.saved"), error: false });

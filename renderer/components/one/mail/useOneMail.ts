@@ -62,7 +62,8 @@ export interface OneMailState {
   threads: AgentMailThreadSummary[];
   drafts: AgentMailDraft[];
   listLoading: boolean;
-  listError: string | null;
+  /** Machine refusal; screens turn it into their own words (mailErrorText). */
+  listError: { code: string } | null;
   hasMore: boolean;
   /** Pager: 1-based index of the first row on this page and the page size the server used. */
   pageStart: number;
@@ -79,7 +80,7 @@ export interface OneMailState {
   select: (selection: OneMailSelection) => void;
   detail: AgentMailThreadDetail | null;
   detailLoading: boolean;
-  detailError: string | null;
+  detailError: { code: string } | null;
   refreshStatus: () => Promise<void>;
   refreshList: () => void;
   reloadDetail: () => void;
@@ -144,14 +145,14 @@ export function useOneMail(): OneMailState {
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [draftCount, setDraftCount] = useState<number | null>(null);
   const [listLoading, setListLoading] = useState(false);
-  const [listError, setListError] = useState<string | null>(null);
+  const [listError, setListError] = useState<{ code: string } | null>(null);
   const [selection, setSelection] = useState<OneMailSelection>(null);
   const [compose, setCompose] = useState<OneMailCompose | null>(null);
   const selectionRef = useRef<OneMailSelection>(null);
   selectionRef.current = selection;
   const [detail, setDetail] = useState<AgentMailThreadDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<{ code: string } | null>(null);
   const listToken = useRef(0);
   const detailToken = useRef(0);
   const [listNonce, setListNonce] = useState(0);
@@ -213,7 +214,7 @@ export function useOneMail(): OneMailState {
         if (!res) return;
         if (!res.ok) {
           if (isMissingRoute(res)) setLegacy(true);
-          else setListError(res.message);
+          else setListError(res);
           setDrafts([]);
           return;
         }
@@ -234,7 +235,7 @@ export function useOneMail(): OneMailState {
       }
       if (res && !isMissingRoute(res)) {
         setListLoading(false);
-        setListError(res.message);
+        setListError(res);
         return;
       }
       // Older server: one message per row, inbox/sent only.
@@ -248,7 +249,7 @@ export function useOneMail(): OneMailState {
       const flat = await api.list({ direction: view === "sent" ? "outbound" : "inbound", cursor: pageCursor, limit: 25 }).catch(() => null);
       if (token !== listToken.current) return;
       setListLoading(false);
-      if (!flat || !flat.ok) { setListError(flat ? flat.message : null); return; }
+      if (!flat || !flat.ok) { setListError(flat ?? { code: "network" }); return; }
       const needle = query.trim().toLocaleLowerCase();
       setThreads(flat.messages
         .filter((m) => !needle || `${m.subject} ${m.from} ${m.to.join(" ")} ${m.preview}`.toLocaleLowerCase().includes(needle))
@@ -319,14 +320,14 @@ export function useOneMail(): OneMailState {
       }
       if (res && !isMissingRoute(res)) {
         setDetailLoading(false);
-        setDetailError(res.message);
+        setDetailError(res);
         return;
       }
       // Legacy: the "thread" is one message.
       const one = await api.get(selectedThreadId).catch(() => null);
       if (token !== detailToken.current) return;
       setDetailLoading(false);
-      if (!one || !one.ok) { setDetailError(one ? one.message : null); return; }
+      if (!one || !one.ok) { setDetailError(one ?? { code: "network" }); return; }
       setLegacy(true);
       setDetail({ thread: legacyThread(one.message), messages: [one.message], drafts: [] });
     })();

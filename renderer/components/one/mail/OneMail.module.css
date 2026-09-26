@@ -611,6 +611,39 @@
   outline: 2px solid transparent;
 }
 
+.attachRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.attachRow .ghostButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chipRemove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: -4px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+
+.chipRemove:hover:not(:disabled),
+.chipRemove:focus-visible {
+  background: var(--paper-edge);
+}
+
 .uncertain {
   margin: 0 0 10px;
   color: var(--danger);

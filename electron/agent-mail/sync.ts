@@ -50,6 +50,13 @@ interface SyncState {
   changeSeq: number | null;
   /** Received message ids already given to an inbound-handling run. */
   handled: Array<{ messageId: string; at: string; chatId: string | null }>;
+  /**
+   * Mailbox whose sender name was already given One's name once. Mailboxes made
+   * before the server stored a sender name have none, so mail went out as the
+   * bare address until the owner happened to rename One. Seeded once per
+   * mailbox; a name the owner clears afterwards stays cleared.
+   */
+  nameSeededFor?: string | null;
 }
 
 let state: SyncState | null = null;
@@ -77,13 +84,14 @@ function loadState(): SyncState {
         handled: Array.isArray(parsed.handled)
           ? parsed.handled.filter((item) => item && isAgentMailId(item.messageId)).slice(-HANDLED_KEEP)
           : [],
+        nameSeededFor: typeof parsed.nameSeededFor === "string" ? parsed.nameSeededFor : null,
       };
       return state;
     }
   } catch {
     // Missing or damaged: start from a fresh baseline (never replays history).
   }
-  state = { version: 1, mailboxId: null, changeSeq: null, handled: [] };
+  state = { version: 1, mailboxId: null, changeSeq: null, handled: [], nameSeededFor: null };
   return state;
 }
 
@@ -179,6 +187,7 @@ async function pull(): Promise<number> {
     saved.handled = [];
   }
   if (mailbox) saved.mailboxId = mailbox.id;
+  if (mailbox) await seedSenderName(saved, mailbox);
 
   if (saved.changeSeq === null) {
     const baseline = await agentMailChanges(null);
@@ -464,6 +473,28 @@ async function followOneName(next: string, previous: string): Promise<void> {
   if (mailbox.displayName !== null && mailbox.displayName !== previous) return;
   const res = await agentMailUpdateMailbox({ displayName: next });
   if (!res.ok) console.warn("[agent-mail] sender name not updated:", res.code);
+}
+
+async function seedSenderName(saved: SyncState, mailbox: AgentMailMailbox): Promise<void> {
+  if (saved.nameSeededFor === mailbox.id || mailbox.status !== "active" || mailbox.displayName === undefined) return;
+  if (mailbox.displayName === null) {
+    let name = "";
+    try {
+      const profile = require("../store/one-profile") as typeof import("../store/one-profile");
+      name = profile.getOneProfile().displayName?.trim() ?? "";
+    } catch {
+      return; // Profile store unavailable (contract runs): try again next pass.
+    }
+    if (name) {
+      const res = await agentMailUpdateMailbox({ displayName: name });
+      if (!res.ok) {
+        console.warn("[agent-mail] sender name not seeded:", res.code);
+        return;
+      }
+    }
+  }
+  saved.nameSeededFor = mailbox.id;
+  saveState();
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
