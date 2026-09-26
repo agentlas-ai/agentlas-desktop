@@ -941,6 +941,11 @@ export class InvocationService {
     return [...new Set([...this.activeRuns.activeChatIds(), ...[...this.settlingRuns.values(), ...this.pendingGoalVerifications.values()].map((record) => record.chatId)])];
   }
 
+  /** 오너가 보낸 요청이 이 대화에서 차례를 기다린다 — 자동 재개는 그 뒤로 미룬다. */
+  hasQueuedOwnerRequest(chatId: string): boolean {
+    return Boolean(this.steerQueues.get(chatId)?.length);
+  }
+
   activeRunIds(): string[] {
     return [...new Set([...this.activeRuns.entries()].map(([runId]) => runId).concat([...this.pendingGoalVerifications.keys(), ...this.settlingRuns.keys()]))];
   }
@@ -3563,6 +3568,8 @@ export class InvocationService {
             .finally(() => {
               this.pendingGoalVerifications.delete(runId);
               this.publishActiveChats();
+              // 검증을 기다리며 줄 선 오너 요청은 지금 바로 돈다(스윕의 옛 목표 재개보다 먼저).
+              this.drainSteerQueue(record.chatId);
               if (record.automaticGoalDeadline) clearTimeout(record.automaticGoalDeadline);
               this.settleAutomaticGoalInterruption(record);
               if (retryCheckpointId) retryGoalCheckpoint = { goalId: completionClaim.goalId!, checkpointId: retryCheckpointId };
@@ -4099,7 +4106,10 @@ export class InvocationService {
       ...req,
       permissions: effectiveInvocationPermission(req.permissions, req.planMode),
     };
-    const active = [...new Map([...this.settlingRuns, ...this.activeRuns.entries()])].find(([, record]) => record.chatId === req.chatId);
+    // 목표 턴이 끝나고 검증을 기다리는 동안에도 대화는 아직 "진행 중"이다. 그 사이 오너가 보낸 요청은
+    // 거절(invocation_cleanup_pending·goal_verification_pending)하지 않고 줄 세워, 검증이 끝나는 즉시 돌린다
+    // (Codex 의 Tab 대기열·Claude Code 의 작업 중 입력 대기열과 같은 규칙).
+    const active = [...new Map([...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()])].find(([, record]) => record.chatId === req.chatId);
     if (expectedRunId && active?.[0] !== expectedRunId) {
       throw new Error("Steering target is stale; attach to the current Desktop run and retry");
     }
@@ -4158,7 +4168,8 @@ export class InvocationService {
     });
     // Interactive One/Work steering settles the old one-shot process after the
     // replacement is durable. Other callers retain additive queue semantics.
-    const interruptsCurrent = req.steeringMode === "interrupt"
+    // 검증 중인 결과는 끊지 않는다 — 끝난 턴의 판정을 버리면 목표가 다시 막힌다. 줄만 선다.
+    const interruptsCurrent = req.steeringMode === "interrupt" && !this.pendingGoalVerifications.has(active[0])
       ? this.interruptForSteer(active[0], active[1])
       : false;
     return {

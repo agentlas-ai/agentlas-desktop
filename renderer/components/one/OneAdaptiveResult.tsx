@@ -1770,12 +1770,26 @@ function RunClosure({ receipt, locale, onRetryUnfinished, autoRecovery }: {
   // not have a customer-visible representation.
   const outcome = autoRecovery?.phase === "stopped" ? autoRecovery.diagnosis.trim() : "";
   if (!outcome) return null;
+  // 제목은 화면 언어의 고정 문장으로 멈춘 이유(판정 라벨)를 말한다. 모델이 쓴 진단은 모델의 언어로
+  // 오므로(2026-09-26 한국어 화면에 영어 진단이 제목으로 섰다) 펼침 안에만 둔다.
+  const reason = autoRecovery?.phase === "stopped" ? autoRecovery.reason : "";
+  // 멈춘 이유가 이미 작업 줄에 적힌 경우(사람의 중지·앱 종료·정리 끝) 카드를 또 세우지 않는다.
+  if (reason === "settled" || reason === "stopped-by-user") return null;
+  const headline = reason === "needs-person" ? tFor(locale, "one.res.closure.needs_person")
+    : reason === "unsafe-to-repeat" ? tFor(locale, "one.res.closure.unsafe_to_repeat")
+    : tFor(locale, "one.res.closure.not_finished");
+  // 사람의 확인을 기다리는 멈춤은 오류가 아니다 — 붉은 표시는 끝내지 못한 실패에만.
+  const tone = reason === "needs-person" || reason === "unsafe-to-repeat" ? "neutral" : "bad";
   return (
-    <section className={styles.failureClosure} data-status={stopped ? "cancelled" : "failed"} role="status">
+    <section className={styles.failureClosure} data-status={stopped ? "cancelled" : "failed"} data-recovery-reason={reason || undefined} role="status">
       <button type="button" className={styles.alertClose} aria-label={locale === "ko" ? "닫기" : "Close"} onClick={() => setDismissed(true)}><IconClose size={14} /></button>
-      <span className={styles.closureCheck} data-tone={stopped ? "neutral" : "bad"} aria-hidden="true">!</span>
+      <span className={styles.closureCheck} data-tone={stopped ? "neutral" : tone} aria-hidden="true">!</span>
       <div className={styles.closureSummaryCopy}>
-        <strong>{stopped ? tFor(locale, "one.res.closure.stopped_here") : outcome}</strong>
+        <strong>{stopped ? tFor(locale, "one.res.closure.stopped_here") : headline}</strong>
+        <details data-recovery-diagnosis="true" style={{ marginTop: 4 }}>
+          <summary style={{ cursor: "pointer", listStyle: "none", display: "inline", padding: 0, background: "none", color: "var(--ink-soft)", fontSize: 11, textDecoration: "underline" }}>{tFor(locale, "one.res.closure.why")}</summary>
+          <small>{outcome}</small>
+        </details>
       </div>
       {!stopped && onRetryUnfinished && (
         <button type="button" className={styles.actionPrimary} onClick={onRetryUnfinished}>

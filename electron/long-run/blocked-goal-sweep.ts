@@ -328,6 +328,8 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   const wait = latestGoalWaitSubscription(run.goalId);
   if (wait && (wait.state === "pending" || wait.state === "claimed")) return defer("wait_owns_next_step");
   if (run.rootChatId && dispatcher.activeChatIds().includes(run.rootChatId)) return defer("chat_busy");
+  // 오너 요청이 줄 서 있으면 그 요청이 먼저다 — 옛 목표를 앞질러 재개하지 않는다.
+  if (run.rootChatId && dispatcher.hasQueuedOwnerRequest?.(run.rootChatId)) return defer("owner_request_queued");
   const review = getLongRunAttemptReview(run.id);
   if (review.attempts.some((attempt) => attempt.state === "running")) return defer("attempt_running");
 

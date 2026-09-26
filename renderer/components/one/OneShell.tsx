@@ -5215,10 +5215,22 @@ export function OneShell() {
       }
       return;
     }
-    if (busy) {
-      const chatId = runChatIdRef.current;
-      const activeRunId = runIdRef.current;
+    // 화면은 한가해 보여도 Main 은 이 대화의 끝난 턴을 아직 정리·검증하는 중일 수 있다. 그때 새 실행을
+    // 시작하면 Main 이 거절해 요청이 사라졌다(2026-09-26 QA 0b03862a: invocation_cleanup_pending →
+    // 20초 뒤 옛 목표만 재개). 그 경우 새 요청은 줄에 세우고 정리가 끝나면 바로 돌린다.
+    let settlingChatId: string | null = null;
+    if (!busy && attachmentSnapshot.length === 0 && activeThreadChatIdRef.current) {
+      const threadChatId = activeThreadChatIdRef.current;
+      try {
+        if ((await api.invoke.activeChats()).includes(threadChatId)) settlingChatId = threadChatId;
+      } catch { /* unknown → the normal start path keeps its own no-start proof */ }
+    }
+    if (busy || settlingChatId) {
+      const chatId = busy ? runChatIdRef.current : settlingChatId;
+      const activeRunId = busy ? runIdRef.current : settlingChatId;
       if (!chatId || !activeRunId || attachmentSnapshot.length > 0) return;
+      // 줄 선 요청이 시작되면 활성 대화 구독이 그 실행에 붙는다 — 구독 대상 대화를 이 대화로 맞춘다.
+      if (!busy) runChatIdRef.current = chatId;
       const optimisticId = `one-steer:${uid()}`;
       setComposer("");
       // Codex keeps a queued instruction in the queue strip above the composer
@@ -5231,6 +5243,7 @@ export function OneShell() {
         const steerReceipt = await api.invoke.steer({
           chatId,
           userPrompt: value,
+          // 검증 중인 턴은 Main 이 끊지 않고 줄만 세운다(service.steer). 오너 요청이 먼저다.
           steeringMode: "interrupt",
           taskIntent: selected ? "task" : "conversation",
           oneMode: true,

@@ -5,6 +5,8 @@
  */
 export interface EffectObservationDispatcher {
   activeChatIds(): string[];
+  /** An owner request queued in this chat runs before any automatic resume. */
+  hasQueuedOwnerRequest?(chatId: string): boolean;
   start(request: import("../../shared/types").McpInvocationRequest, workspaceBinding?: undefined, executionContext?: undefined,
     questionContinuation?: undefined, hostNoticePurpose?: "goal-continuation"): { runId: string };
 }

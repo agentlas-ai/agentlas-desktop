@@ -164,7 +164,7 @@ export function oneRunFailureFingerprint(
  * `null` means "nothing decidable from form alone — ask the judge".
  */
 export function oneAutoRecoveryFormGate(input: {
-  receipt: Pick<InvocationRunReceipt, "status" | "executionPermission" | "interruptionCause">;
+  receipt: Pick<InvocationRunReceipt, "status" | "executionPermission" | "interruptionCause" | "hostStopCause">;
   attemptsSpent: number;
   previousFingerprint?: OneRunFailureFingerprint | null;
   currentFingerprint: OneRunFailureFingerprint;
@@ -178,6 +178,9 @@ export function oneAutoRecoveryFormGate(input: {
   }
   // An explicit stop is an instruction, not a failure to route around.
   if (status === "cancelled") return { retry: false, reason: "stopped-by-user" };
+  // 앱 종료로 끊긴 실행은 실패가 아니다 — 자동 복구가 다시 돌리지 않는다. 목표는 재시작 체크포인트가,
+  // 그 밖의 턴은 오너의 재개/다시 시도가 잇는다(Main 표식 hostStopCause, shared/invocation-host-stop.ts).
+  if (input.receipt.hostStopCause) return { retry: false, reason: "settled" };
   if (status !== "failed" && status !== "interrupted") {
     return { retry: false, reason: "settled" };
   }
