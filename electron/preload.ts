@@ -858,6 +858,7 @@ const api: AgentlasIpc = {
   },
   oneProfile: {
     get: () => ipcRenderer.invoke("oneProfile:get"),
+    origin: () => ipcRenderer.invoke("oneProfile:origin"),
     update: (input) => ipcRenderer.invoke("oneProfile:update", input),
     setAvatarImage: (input) => ipcRenderer.invoke("oneProfile:setAvatarImage", input),
     addPrinciple: (input) => ipcRenderer.invoke("oneProfile:addPrinciple", input),

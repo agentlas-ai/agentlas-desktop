@@ -3,6 +3,7 @@ import path from "node:path";
 import { getDb } from "../store/db";
 import { agentFolderPath } from "../agents/files";
 import { userDataPath } from "../runtime-paths";
+import { oneProfileAvatarSegment } from "../store/one-profile";
 
 const IMAGE_DATA_URL_RE = /^data:image\/(png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$/;
 const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
@@ -50,7 +51,10 @@ export function removeOneTeamAvatarDirectory(slug: string): void {
 export const ONE_SELF_AVATAR_ICON = "one-avatar:self";
 
 function oneSelfAvatarDir(): string {
-  return userDataPath("one-profile");
+  // 초상도 프로필처럼 계정마다다(계정 하나 = One 하나). 업데이트 전 프로필을 이어받은 One 은
+  // 옛 자리를 그대로 쓰고, 다른 계정은 accounts/<불투명 키> 아래 자기 자리를 쓴다.
+  const segment = oneProfileAvatarSegment();
+  return segment ? userDataPath("one-profile", "accounts", segment) : userDataPath("one-profile");
 }
 
 export function writeOneSelfAvatar(input: { bytes: Buffer; extension: "png" | "jpg" | "webp" }): string {

@@ -12,7 +12,7 @@ import {
   type OneFeatureIntroState,
 } from "../../shared/one-feature-intro";
 import { getDb } from "../store/db";
-import { getOneProfile } from "../store/one-profile";
+import { getOneProfile, oneScopedMetaKey } from "../store/one-profile";
 import { tryRecordOneDomainEvent } from "./domain-events";
 
 export const ONE_FEATURE_INTRO_META_KEY = "agentlas.one.feature-intro.v1";
@@ -89,13 +89,13 @@ function assertOneBinding(state: OneFeatureIntroState): void {
 function readOrCreateState(): { raw: string; state: OneFeatureIntroState } {
   const profile = getOneProfile();
   const db = getDb();
-  let row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(ONE_FEATURE_INTRO_META_KEY) as
+  let row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(oneScopedMetaKey(ONE_FEATURE_INTRO_META_KEY)) as
     | { value: string }
     | undefined;
   if (!row) {
     const candidate = JSON.stringify(initialState(profile.oneId));
-    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(ONE_FEATURE_INTRO_META_KEY, candidate);
-    row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(ONE_FEATURE_INTRO_META_KEY) as
+    db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)").run(oneScopedMetaKey(ONE_FEATURE_INTRO_META_KEY), candidate);
+    row = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1").get(oneScopedMetaKey(ONE_FEATURE_INTRO_META_KEY)) as
       | { value: string }
       | undefined;
   }
@@ -114,7 +114,7 @@ function assertExpectedStoreVersion(state: OneFeatureIntroState, expectedStoreVe
 function persist(currentRaw: string, next: OneFeatureIntroState): OneFeatureIntroState {
   if (!isOneFeatureIntroState(next)) throw new Error("Refused to persist invalid One Feature Intro state");
   const result = getDb().prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
-    .run(JSON.stringify(next), ONE_FEATURE_INTRO_META_KEY, currentRaw);
+    .run(JSON.stringify(next), oneScopedMetaKey(ONE_FEATURE_INTRO_META_KEY), currentRaw);
   if (result.changes !== 1) {
     throw new Error("One Feature Intro state changed concurrently; refresh and retry");
   }

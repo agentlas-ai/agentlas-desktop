@@ -12,7 +12,7 @@ import {
 import type { OneValueClosureRecord } from "../../shared/one-value-closure";
 import { getDb } from "../store/db";
 import { getChat } from "../store/chats";
-import { getOneProfile } from "../store/one-profile";
+import { getOneProfile, oneScopedMetaKey } from "../store/one-profile";
 import { ONE_DOMAIN_EVENT_KIND } from "../store/run-events";
 import { getCanonicalTask } from "../store/tasks";
 import { tryRecordOneDomainEvent } from "./domain-events";
@@ -192,7 +192,7 @@ function assertOneBinding(state: OneActivationState): void {
 
 function readExistingState(): { raw: string; state: OneActivationState } | null {
   const row = getDb().prepare("SELECT value FROM meta WHERE key = ? LIMIT 1")
-    .get(ONE_ACTIVATION_META_KEY) as { value: string } | undefined;
+    .get(oneScopedMetaKey(ONE_ACTIVATION_META_KEY)) as { value: string } | undefined;
   if (!row) return null;
   const state = parseState(row.value);
   assertOneBinding(state);
@@ -205,14 +205,14 @@ function readOrCreateState(input: GetOneActivationStateInput): { raw: string; st
   const db = getDb();
   const initialize = db.transaction(() => {
     const existing = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1")
-      .get(ONE_ACTIVATION_META_KEY) as { value: string } | undefined;
+      .get(oneScopedMetaKey(ONE_ACTIVATION_META_KEY)) as { value: string } | undefined;
     if (existing) return existing.value;
     const candidate = initialState(profile.oneId, input, hasPreexistingActivity());
     if (!isOneActivationState(candidate)) throw new Error("Could not initialize a valid One activation state");
     db.prepare("INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)")
-      .run(ONE_ACTIVATION_META_KEY, JSON.stringify(candidate));
+      .run(oneScopedMetaKey(ONE_ACTIVATION_META_KEY), JSON.stringify(candidate));
     const inserted = db.prepare("SELECT value FROM meta WHERE key = ? LIMIT 1")
-      .get(ONE_ACTIVATION_META_KEY) as { value: string } | undefined;
+      .get(oneScopedMetaKey(ONE_ACTIVATION_META_KEY)) as { value: string } | undefined;
     if (!inserted) throw new Error("Could not initialize One activation state");
     return inserted.value;
   });
@@ -232,7 +232,7 @@ function assertExpectedVersion(state: OneActivationState, expectedStoreVersion: 
 function persist(currentRaw: string, next: OneActivationState): OneActivationState {
   if (!isOneActivationState(next)) throw new Error("Refused to persist invalid One activation state");
   const result = getDb().prepare("UPDATE meta SET value = ? WHERE key = ? AND value = ?")
-    .run(JSON.stringify(next), ONE_ACTIVATION_META_KEY, currentRaw);
+    .run(JSON.stringify(next), oneScopedMetaKey(ONE_ACTIVATION_META_KEY), currentRaw);
   if (result.changes !== 1) {
     throw new Error("One activation state changed concurrently; refresh and retry");
   }

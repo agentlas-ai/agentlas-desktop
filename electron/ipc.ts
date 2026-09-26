@@ -532,6 +532,8 @@ import {
   setOneOperatingPrincipleEnabled,
   updateOneOperatingPrinciple,
   updateOneProfile,
+  noteOneProfileAccountMaybeChanged,
+  getOneProfileOrigin,
 } from "./store/one-profile";
 import {
   getOneBriefingSnapshot,
@@ -2728,6 +2730,8 @@ export function registerIpcHandlers(): void {
     // does not delete pairings: signing back into the same account must restore
     // them. A different account signing in revokes them at that point.
     await signOut();
+    // 계정 하나 = One 하나: 로그아웃하면 방금 계정의 One 이름·얼굴이 화면에 남지 않게 다시 읽힌다.
+    noteOneProfileAccountMaybeChanged();
     reconcileMobileBridgeDevicesForAccount(userDataDir());
     failCloseActiveHubBookmarks();
     broadcastHubBookmarkSnapshot();
@@ -4947,6 +4951,7 @@ export function registerIpcHandlers(): void {
     revoked: revokeOneArtifactPreview(input),
   }));
   ipcMain.handle("oneProfile:get", () => getOneProfile());
+  ipcMain.handle("oneProfile:origin", () => getOneProfileOrigin());
   ipcMain.handle("oneProfile:update", (_e, input: OneProfileUpdateInput) => updateOneProfile(input));
   /*
    * One 자신의 초상(생성·업로드 이미지). 팀원과 같은 창에서 같은 방식으로 고르므로,

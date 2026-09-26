@@ -66,8 +66,9 @@ async function loadOrClassify(accountFingerprint: string | undefined): Promise<F
   const api = ipc();
   let legacyWorkTourSeen = false;
   try { legacyWorkTourSeen = window.localStorage.getItem(LEGACY_WORK_TOUR_KEY) === "1"; } catch { /* storage optional */ }
-  const [profile, chats, projects] = await Promise.all([
+  const [profile, origin, chats, projects] = await Promise.all([
     api?.oneProfile?.get().catch(() => null) ?? null,
+    api?.oneProfile?.origin?.().catch(() => null) ?? null,
     api?.chats?.listRecent(1).catch(() => null) ?? null,
     api?.projects?.list().catch(() => null) ?? null,
   ]);
@@ -79,7 +80,10 @@ async function loadOrClassify(accountFingerprint: string | undefined): Promise<F
     chatCount: chats ? chats.length : null,
     projectCount: projects ? projects.length : null,
   });
-  const record = newFirstRunRecord(audience);
+  // 계정 하나 = One 하나: 이 기계에서 처음 One 을 갖는 계정은 다른 계정의 대화·프로젝트가
+  // 있어도 첫 설정을 본다(자기 One 을 아직 꾸민 적이 없을 때만).
+  const profileCustomized = Boolean(profile && (profile.displayName !== "One" || profile.profileContext || profile.operatingPrinciples.length > 0));
+  const record = newFirstRunRecord(origin === "fresh" && !profileCustomized ? "new" : audience);
   writeFirstRunRecord(window.localStorage, accountFingerprint, record);
   return record;
 }

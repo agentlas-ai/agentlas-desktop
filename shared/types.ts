@@ -7925,6 +7925,8 @@ export interface AgentlasIpc {
   /** Persistent One identity and user-approved operating principles. */
   oneProfile: {
     get: () => Promise<OneProfile>;
+    /** 계정 하나 = One 하나 — 이 계정의 One 이 기계 전역 프로필을 이어받았는지("inherited"), 새로 시작했는지("fresh"). */
+    origin?: () => Promise<"inherited" | "fresh" | "machine" | "signed-out">;
     update: (input: OneProfileUpdateInput) => Promise<OneProfile>;
     /** One 자신의 초상(생성·업로드 이미지)을 저장하고 프로필이 그것을 가리키게 한다. */
     setAvatarImage: (input: { dataUrl: string; expectedVersion: number }) => Promise<OneProfile>;
