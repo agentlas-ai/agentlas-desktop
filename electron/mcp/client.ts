@@ -5364,6 +5364,10 @@ ${effectiveUserPrompt}`;
       // 2026-09-24: 79k-500k input tokens per observation, growing with each retry). Its own isolated
       // session owner starts fresh and never replaces the conversation's stored session.
       ...(effectObservationRun && req.runId ? { runtimeSessionOwnerId: `effect-observation:${req.runId}` } : {}),
+      // An Alive wake is one decision over host-supplied state (its plan and last review ride in that state). Resuming the
+      // controller chat's native session replayed every earlier wake (measured 2026-09-26: a Claude Alive controller at
+      // 26 wakes/day read up to 500k cached tokens per call, 5.8M tokens a day; the Codex ones ~86k per wake).
+      ...(isAliveControllerRun && req.runId ? { runtimeSessionOwnerId: `alive-wake:${req.runId}` } : {}),
       // A checkpoint successor is seeded from host-owned neutral state. Its
       // native owner is assigned only after the exact checkpoint is validated
       // for the selected runtime below.
