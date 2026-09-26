@@ -524,6 +524,7 @@ const api: AgentlasIpc = {
     markRead: (input) => ipcRenderer.invoke("oneOrg:markRead", input),
     reorder: (input) => ipcRenderer.invoke("oneOrg:reorder", input),
     setTools: (input) => ipcRenderer.invoke("oneOrg:setTools", input),
+    suggestions: (input) => ipcRenderer.invoke("oneOrg:suggestions", input),
   },
   oneTaskforces: {
     list: () => ipcRenderer.invoke("oneTaskforces:list"),

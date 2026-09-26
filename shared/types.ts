@@ -7435,6 +7435,8 @@ export interface AgentlasIpc {
     markRead: (input: MarkOneOrgMemberReadInput) => Promise<OneOrgState>;
     reorder: (input: ReorderOneOrgMembersInput) => Promise<OneOrgState>;
     setTools: (input: SetOneOrgMemberToolsInput) => Promise<OneOrgState>;
+    /** 좌석 에이전트 패키지가 선언한 새 세션 추천 작업(없으면 빈 목록). */
+    suggestions: (input: { installedAgentId: string }) => Promise<import("./one-org").OneSeatSuggestion[]>;
   };
   /** Durable group conversations. One is implicit and always present. */
   oneTaskforces: {

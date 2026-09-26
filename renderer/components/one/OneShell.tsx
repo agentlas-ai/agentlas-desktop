@@ -110,7 +110,7 @@ import type {
   UpdaterState,
 } from "@/lib/types";
 import { isCallOnlyHubAgent } from "@shared/call-only-agent";
-import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
+import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState, OneSeatSuggestion } from "@shared/one-org";
 import { isOneTaskforceChat, type OneTaskforce } from "@shared/one-taskforces";
 import type { ComputerHistoryState } from "@shared/computer-history";
 import {
@@ -177,7 +177,7 @@ import { OneMemoryMap } from "./OneMemoryMap";
 import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
 import { OneSuggestionCard } from "./OneSuggestionCard";
-import { OneFirstRequestCards, oneFirstRequestCardsEntry, type OneFirstRequestCard } from "./OneFirstRequestCards";
+import { OneFirstRequestCards, OneNewSessionButton, OneSeatAttachLink, oneFirstRequestCardsEntry, oneFirstRequestSuggestionCards, type OneSuggestionCard as OneFirstRequestSuggestion } from "./OneFirstRequestCards";
 import { OneGrowthCard } from "./OneGrowthCard";
 import { TaskSidePanel, taskBrowserUrl, type OneLiveAppPreview } from "../workspace/TaskSidePanel";
 import { OneOrgChart, type OneOrgSearchItem } from "./OneOrgChart";
@@ -3334,6 +3334,15 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  /*
+   * ★머리말·담당·작성창 문구는 **지금 연 대화**로 판정한다 (좌석 전환 실측 2026-09-26).
+   *   activeThreadChat 은 런타임 탐지와 함께 늦게 도착해, 그 사이(격리 앱에서 1.5~2.4초)
+   *   본문은 새 좌석인데 머리말·"…에게 메시지"·조직도 선택은 앞 좌석으로 남았다.
+   *   조회가 오기 전에는 방금 연 대화 객체(conversation)를 쓰고, 앞 대화의 것은 쓰지 않는다.
+   */
+  const activeThreadChatNow = activeThreadChat?.id === activeThreadChatId
+    ? activeThreadChat
+    : (conversation?.id === activeThreadChatId ? conversation : null);
   const visibleUncertainAdmission = activeThreadChatId
     ? readOneUncertainAdmission(activeThreadChatId)
       ?? (uncertainAdmissionRef.current.get(activeThreadChatId)
@@ -3449,7 +3458,7 @@ export function OneShell() {
     const taskforce = taskforces.find((item) => item.chatId === chatId);
     const agentIds = taskforce
       ? taskforce.memberAgentIds
-      : (activeThreadChat?.agentId ? [activeThreadChat.agentId] : []);
+      : (activeThreadChatNow?.agentId ? [activeThreadChatNow.agentId] : []);
     const notices: Array<{ id: string; at: number; label: string }> = [];
     for (const agentId of agentIds) {
       const member = memberByAgent.get(agentId);
@@ -3471,7 +3480,7 @@ export function OneShell() {
       });
     }
     return notices.sort((left, right) => left.at - right.at);
-  }, [activeThreadChatId, activeThreadChat, taskforces, oneOrgState, appLocale]);
+  }, [activeThreadChatId, activeThreadChatNow, taskforces, oneOrgState, appLocale]);
 
   /** 나간 줄을 어느 메시지 앞에 놓을지. 남는 것은 대화 끝에 붙인다. */
   const departurePlan = useMemo(() => {
@@ -3651,14 +3660,28 @@ export function OneShell() {
     if (activeTaskforce) setTurnAgentIds(activeTaskforceAgentIds);
   }, [activeTaskforce, activeTaskforceAgentIds, activeThreadChatId, settleRun]);
   const activeOneMember = useMemo(() => {
-    if (!activeThreadChat || activeThreadChat.originSurface !== "one") return null;
-    return oneOrgState?.members.find((member) => member.installedAgentId === activeThreadChat.agentId) ?? null;
-  }, [activeThreadChat, oneOrgState?.members]);
+    if (!activeThreadChatNow || activeThreadChatNow.originSurface !== "one") return null;
+    return oneOrgState?.members.find((member) => member.installedAgentId === activeThreadChatNow.agentId) ?? null;
+  }, [activeThreadChatNow, oneOrgState?.members]);
   const activeOneSelected = Boolean(
-    activeThreadChat
-      && activeThreadChat.originSurface === "one"
-      && isOneOwnedSession(activeThreadChat, taskforces),
+    activeThreadChatNow
+      && activeThreadChatNow.originSurface === "one"
+      && isOneOwnedSession(activeThreadChatNow, taskforces),
   );
+  // 좌석 에이전트가 패키지에 선언한 추천 작업(defaultPrompts). 어느 에이전트의 것인지와 함께 든다.
+  const [seatSuggestionRead, setSeatSuggestionRead] = useState<{ agentId: string; items: OneSeatSuggestion[] } | null>(null);
+  const activeSeatMemberAgentId = activeOneMember?.installedAgentId ?? null;
+  useEffect(() => {
+    const agentId = activeSeatMemberAgentId;
+    const api = ipc();
+    if (!agentId || !api?.oneOrg?.suggestions) return;
+    if (seatSuggestionRead?.agentId === agentId) return;
+    let cancelled = false;
+    void api.oneOrg.suggestions({ installedAgentId: agentId })
+      .then((items) => { if (!cancelled) setSeatSuggestionRead({ agentId, items: Array.isArray(items) ? items : [] }); })
+      .catch(() => { if (!cancelled) setSeatSuggestionRead({ agentId, items: [] }); });
+    return () => { cancelled = true; };
+  }, [activeSeatMemberAgentId, seatSuggestionRead?.agentId]);
 
   useEffect(() => {
     const api = ipc();
@@ -3817,12 +3840,14 @@ export function OneShell() {
     const api = ipc();
     if (!api) { setActiveThreadChat(conversation); return; }
     let cancelled = false;
+    // 대화 조회는 런타임 탐지(느릴 수 있다)를 기다리지 않는다 — 머리말·담당 판정이 이 값을 쓴다.
+    const chatRead = activeThreadChatId ? api.chats.get(activeThreadChatId).catch(() => null) : Promise.resolve(null);
+    void chatRead.then((chat) => { if (!cancelled) setActiveThreadChat(chat); });
     void Promise.all([
       api.runtime.detect(),
-      activeThreadChatId ? api.chats.get(activeThreadChatId).catch(() => null) : Promise.resolve(null),
+      chatRead,
     ]).then(([runtimes, chat]) => {
       if (cancelled) return;
-      setActiveThreadChat(chat);
       // A model chosen in One is a product preference, not disposable state on
       // the current route. Prefer a chat's durable override, then the last
       // explicit One choice, then the globally active runtime.
@@ -6172,7 +6197,7 @@ export function OneShell() {
       : `Review ${member.displayName}'s failure record, then change the owner or tool and retry to completion. Failure marker: ${member.statusLine}`);
   }, [appLocale, router, startNewConversation]);
 
-  const openOneMember = useCallback((member: OneOrgMember) => {
+  const openOneMember = useCallback((member: OneOrgMember, options?: { fresh?: boolean }) => {
     const api = ipc();
     if (!api?.chats?.openOneMember) {
       requestOneOperationalRecovery("one-member-channel", new Error("Desktop bridge unavailable"));
@@ -6180,7 +6205,14 @@ export function OneShell() {
     }
     void (async () => {
       try {
-        const chat = await api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName });
+        /*
+         * 새 세션(오너 2026-09-26): 좌석을 누르면 늘 **마지막 대화**가 열려서, 좌석 에이전트와
+         * 처음부터 다시 시작할 길이 없었다. fresh 는 같은 좌석으로 빈 대화를 새로 만든다 —
+         * createChat 이 좌석을 붙이므로 담당·좌석 판정은 기존 대화와 같다.
+         */
+        const chat = options?.fresh
+          ? await api.chats.create({ agentId: member.installedAgentId, title: member.displayName, originSurface: "one", taskMode: "conversation" })
+          : await api.chats.openOneMember({ agentId: member.installedAgentId, title: member.displayName });
         const paneCommit = onePaneCommitWaiterRef.current.wait(chat.id);
         onePaneCommitWaiterRef.current.observe(selectedConversationId, activeThreadChatId);
         setRailOpen(false);
@@ -6229,6 +6261,22 @@ export function OneShell() {
     }
     startNewConversation();
   }, [activeSeat, oneOrgState?.members, openOneMember, startNewConversation]);
+
+  /*
+   * 새 세션 — One 은 빈 홈(첫 요청 전 One 세션), 좌석 에이전트는 같은 좌석의 빈 대화.
+   * 이미 그 담당의 빈 대화를 보고 있으면 또 만들지 않고 작성창에 초점만 준다.
+   */
+  const startFreshSession = useCallback((member: OneOrgMember | null) => {
+    const alreadyFresh = messages.length === 0 && !busy && (member
+      ? activeOneMember?.installedAgentId === member.installedAgentId
+      : !selected && !conversation);
+    if (alreadyFresh) {
+      window.requestAnimationFrame(() => composerInputRef.current?.focus());
+      return;
+    }
+    if (member) openOneMember(member, { fresh: true });
+    else startNewConversation();
+  }, [activeOneMember?.installedAgentId, busy, conversation, messages.length, openOneMember, selected, startNewConversation]);
 
   const retryFocusedFailure = useCallback(() => {
     const focus = failureFocus;
@@ -6627,10 +6675,22 @@ export function OneShell() {
     preparing: Boolean(teamPreflight || preflightPrompt) || (Boolean(activeThreadChatId) && hydratedThreadChatId !== activeThreadChatId),
     isGroupRoom: Boolean(activeTaskforce),
     isOneSession: activeOneSelected,
+    isSeatSession: Boolean(activeOneMember) && !activeTaskforce && !activeOneSelected,
     sessionUnavailable: activeDirectSessionUnavailable || activeSeatDissolved || activeSeatEmpty,
   });
+  // 새 세션 추천 — One 은 PLAN 의 세 장, 좌석은 그 에이전트 패키지가 선언한 것만(없으면 블록 없음).
+  const firstRequestCards: OneFirstRequestSuggestion[] = firstRequestEntry === "seat"
+    ? (seatSuggestionRead && seatSuggestionRead.agentId === activeOneMember?.installedAgentId ? seatSuggestionRead.items : [])
+      .map((item) => ({
+        id: item.id,
+        title: item.title[appLocale === "ko" ? "ko" : "en"],
+        description: item.description ? item.description[appLocale === "ko" ? "ko" : "en"] : null,
+        prompt: item.prompt,
+        icon: "wand" as const,
+      }))
+    : firstRequestEntry ? oneFirstRequestSuggestionCards(appLocale) : [];
   // 보내지 않는다 — 입력창에 채우고 초점만 옮긴다. 고쳐서 보내는 것은 사람이다.
-  const insertFirstRequestPrompt = (card: OneFirstRequestCard) => {
+  const insertFirstRequestPrompt = (card: OneFirstRequestSuggestion) => {
     setComposer(card.prompt);
     window.requestAnimationFrame(() => {
       const input = composerInputRef.current;
@@ -7370,6 +7430,7 @@ export function OneShell() {
               onFailure={openOneFailure}
               onOpenMember={openOneMember}
               onOpenOne={openLatestOneSession}
+              onNewSession={startFreshSession}
               onEditOne={() => {
                 // One 도 팀원과 같은 창에서 고친다. "지킬 것" 목록만 기존 프로필 창에 남는다.
                 setMemoryOpen(false);
@@ -7574,6 +7635,9 @@ export function OneShell() {
                   }}
                   aria-label={appLocale === "ko" ? "태스크포스 멤버 관리" : "Manage Taskforce members"}
                 ><IconUsers size={15} /><span data-one-taskforce-badge="true">{speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}</span></button>}
+                {!activeTaskforce && (activeOneSelected || activeOneMember) && (
+                  <OneNewSessionButton locale={appLocale} onClick={() => startFreshSession(activeOneSelected ? null : activeOneMember)} />
+                )}
                 <button
                   type="button"
                   className={styles.taskToolbarOutputToggle}
@@ -7678,14 +7742,8 @@ export function OneShell() {
                     <span className={styles.homeMessageAuthor}>{oneDisplayName}</span>
                     <strong id="one-home-message-title">{appLocale === "ko" ? "무엇을 맡길까요?" : "What should I take care of?"}</strong>
                   </section>
-                  {firstRequestEntry === "home" && (
-                    <OneFirstRequestCards
-                      locale={appLocale}
-                      entry="home"
-                      onInsert={insertFirstRequestPrompt}
-                      onAttachSeat={openSeatAttachFromHome}
-                    />
-                  )}
+                  {/* 추천 작업은 작성창 바로 위로 옮겼다(오너 2026-09-26). 좌석 붙이기만 여기 남는다. */}
+                  {firstRequestEntry === "home" && <OneSeatAttachLink locale={appLocale} onAttachSeat={openSeatAttachFromHome} />}
                   {homeMemoryMapOpen && (
                     <section className={styles.homeMemoryMapPanel} aria-label={appLocale === "ko" ? "One 기억 지도" : "One memory map"}>
                       <OneMemoryMap snapshot={oneMemoryMap ?? EMPTY_ONE_MEMORY_MAP} locale={appLocale} />
@@ -7906,9 +7964,6 @@ export function OneShell() {
                     />
                   )}
                   {messages.length === 0 && !busy && !teamPreflightBusy && !teamPreflight && !preflightPrompt && hydratedThreadChatId === activeThreadChatId && <div className={styles.emptyThread}>{selected ? tFor(appLocale, "one.shell.thread.empty_work") : tFor(appLocale, "one.shell.thread.empty_conversation")}</div>}
-                  {(firstRequestEntry === "session" || firstRequestEntry === "group") && (
-                    <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} onInsert={insertFirstRequestPrompt} />
-                  )}
                   {workBusy && !preflightPrompt && !liveWorkAnchorMessageId && (
                     <>
                       {busy && activeRunPrompt && !livePromptMounted && (
@@ -8656,6 +8711,10 @@ export function OneShell() {
                 disabled={taskforceBusy}
               >{appLocale === "ko" ? "같은 멤버로 새 단톡 만들기" : "Start a new group chat with the same members"}</button>
             </div>}
+            {/* 새 세션 추천 작업 — 작성창 바로 위(오너 2026-09-26, Codex 식). */}
+            {firstRequestEntry && !activeSeatDissolved && (
+              <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} />
+            )}
             <form className={styles.composer} data-one-composer="true" data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
               if (activeSeatDissolved || activeDirectSessionUnavailable) return;

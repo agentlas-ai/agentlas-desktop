@@ -1,77 +1,143 @@
 /*
- * 기존 One 토큰만 쓴다(--paper-2·--paper-edge·--shadow-1·--radius-md·--ink).
- * 새 시안의 색·간격·그림자를 가져오지 않는다(PLAN §5, 오너 2026-09-25).
- * 제목은 한 줄 — 단어 중간·글자 하나 줄바꿈 금지(keep-all + nowrap).
+ * 새 세션 추천 작업 — 작성창 바로 위(오너 시안 2026-09-26, Aside "Suggested tasks").
+ * 기존 토큰만 쓴다: 그라데이션은 --blue/--blue-deep · --amber/--peach · --green/--green-deep,
+ * 타일은 --white-faint/--white-soft, 표면은 --paper·--paper-edge·--shadow-1·--radius-md·--radius-lg.
+ * 폭은 작성창과 같은 자리(--one-composer-width). 좁은 창에서는 줄이 늘지 않고 옆으로 넘긴다
+ * (960×640 에서 작성창을 밀어 올리지 않게).
  */
 .root {
+  width: min(var(--one-composer-width, 720px), 100%);
   display: grid;
   gap: 8px;
-  justify-items: start;
+  margin: 0 auto 10px;
+  pointer-events: auto;
+}
+
+.heading {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: -.005em;
 }
 
 .cards {
-  width: 100%;
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(196px, 1fr));
-  gap: 8px;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(196px, 1fr);
+  gap: 10px;
   margin: 0;
-  padding: 0;
+  padding: 0 0 2px;
   list-style: none;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
 }
 
 .card {
-  width: 100%;
-  min-height: 44px;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 14px;
-  border: 1px solid var(--paper-edge);
-  border-radius: var(--radius-md);
-  background: var(--paper-2);
-  box-shadow: var(--shadow-1);
-  color: var(--ink);
-  font: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background-color .14s ease, border-color .14s ease, box-shadow .14s ease;
-}
-
-.card > svg {
-  flex: 0 0 auto;
-  color: var(--accent);
-}
-
-.card > strong {
   min-width: 0;
+  display: grid;
+  grid-template-rows: 64px auto;
+  overflow: hidden;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-lg);
+  background: var(--paper);
+  box-shadow: var(--shadow-1);
+}
+
+.art {
+  display: grid;
+  place-items: center;
+  background: linear-gradient(135deg, var(--blue) 0%, var(--blue-deep) 100%);
+}
+
+.card[data-art="1"] .art {
+  background: linear-gradient(135deg, var(--amber) 0%, var(--peach) 100%);
+}
+
+.card[data-art="2"] .art {
+  background: linear-gradient(135deg, var(--green) 0%, var(--green-deep) 100%);
+}
+
+.tile {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--white-faint);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--white) 22%, transparent);
+  color: var(--white);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.body {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  justify-items: start;
+  gap: 4px;
+  padding: 10px 12px 12px;
+}
+
+.title {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--ink);
   font-size: 12.5px;
-  font-weight: 650;
+  font-weight: 700;
   letter-spacing: -.01em;
+  text-overflow: ellipsis;
   white-space: nowrap;
   word-break: keep-all;
 }
 
-.card:hover,
-.card:focus-visible {
-  border-color: var(--paper-edge-strong);
-  background: var(--paper-3);
-  box-shadow: var(--shadow-2);
-  outline: none;
+.description {
+  display: -webkit-box;
+  min-height: calc(2 * 1.45em);
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted-deep);
+  font-size: 11px;
+  line-height: 1.45;
+  word-break: keep-all;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
-.card:focus-visible {
+.use {
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 4px;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  word-break: keep-all;
+  cursor: pointer;
+  transition: background-color .14s ease, border-color .14s ease;
+}
+
+.use:hover {
+  border-color: var(--ink-soft);
+  background: var(--paper-3);
+}
+
+.use:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
 
-.hint {
-  margin: 0;
-  color: var(--muted-deep);
-  font-size: 10.5px;
-  word-break: keep-all;
-}
-
 .seatLink {
+  justify-self: start;
   min-height: 30px;
   display: inline-flex;
   align-items: center;
@@ -96,5 +162,39 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .card { transition: none; }
+  .use { transition: none; }
+}
+
+/* 머리말 도구줄의 `.taskToolbar > button`(격자·40px·자간) 규칙보다 구체적으로 — 알약 단추로 선다. */
+.newSession.newSession {
+  height: 30px;
+  min-width: 0;
+  min-height: 28px;
+  display: inline-flex;
+  letter-spacing: normal;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--radius-sm);
+  background: var(--paper);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  word-break: keep-all;
+  cursor: pointer;
+}
+
+.newSession.newSession:hover {
+  border-color: var(--paper-edge-strong);
+  background: var(--paper-3);
+  color: var(--ink);
+}
+
+.newSession.newSession:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

@@ -107,6 +107,14 @@ export interface OneOrgState {
   generatedAt: string;
 }
 
+/** 좌석 에이전트 패키지가 선언한 새 세션 추천(defaultPrompts). 제품이 지어내지 않는다. */
+export interface OneSeatSuggestion {
+  id: string;
+  prompt: string;
+  title: { ko: string; en: string };
+  description: { ko: string; en: string } | null;
+}
+
 export interface AddOneOrgMemberInput {
   installedAgentId: string;
   displayName?: string;

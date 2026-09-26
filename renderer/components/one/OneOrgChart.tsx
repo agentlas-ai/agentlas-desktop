@@ -99,6 +99,7 @@ export function OneOrgChart({
   onFailure,
   onOpenMember,
   onOpenOne,
+  onNewSession,
   onEditOne,
   onEditIdentity,
   sheetRequest,
@@ -142,6 +143,8 @@ export function OneOrgChart({
   onFailure?: (member: OneOrgMember) => void;
   onOpenMember?: (member: OneOrgMember) => void;
   onOpenOne?: () => void;
+  /** 새 세션 — null 이면 One, 아니면 그 좌석 에이전트와 빈 대화를 새로 연다. */
+  onNewSession?: (member: OneOrgMember | null) => void;
   onEditOne?: () => void;
   /** 이름·캐릭터는 '에이전트 만들기'와 같은 창에서 고친다(오너 지적 2026-08-23). */
   onEditIdentity?: (member: OneOrgMember) => void;
@@ -551,6 +554,14 @@ export function OneOrgChart({
           </span>
         </div>
         <span className={styles.badge}>CEO</span>
+        {onNewSession && <button
+          type="button"
+          className={styles.oneEditButton}
+          data-one-new-session="one"
+          aria-label={locale === "ko" ? `새 세션 · ${onePersonaName}` : `New session with ${onePersonaName}`}
+          title={locale === "ko" ? "새 세션" : "New session"}
+          onClick={(event) => { event.stopPropagation(); onNewSession(null); }}
+        ><IconPlus size={14} /></button>}
         {onEditOne && <button
           type="button"
           className={styles.oneEditButton}
@@ -599,6 +610,14 @@ export function OneOrgChart({
               />
             )}
             <div className={styles.rowActions}>
+              {onNewSession && <button
+                type="button"
+                className={styles.editButton}
+                data-one-new-session={member.installedAgentId}
+                aria-label={locale === "ko" ? `새 세션 · ${member.displayName}` : `New session with ${member.displayName}`}
+                title={locale === "ko" ? "새 세션" : "New session"}
+                onClick={(event) => { event.stopPropagation(); onNewSession(member); }}
+              ><IconPlus size={14} /></button>}
               <button
                 type="button"
                 className={styles.editButton}

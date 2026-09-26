@@ -113,6 +113,7 @@ import {
   setOneOrgMemberTools,
   updateOneOrgMember,
 } from "./one/org";
+import { readOneSeatSuggestions } from "./one/seat-suggestions";
 import {
   createOneTaskforce,
   listOneTaskforces,
@@ -3296,6 +3297,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("oneOrg:markRead", (_e, input) => markOneOrgMemberRead(input));
   ipcMain.handle("oneOrg:reorder", (_e, input) => reorderOneOrgMembers(input));
   ipcMain.handle("oneOrg:setTools", (_e, input) => setOneOrgMemberTools(input));
+  ipcMain.handle("oneOrg:suggestions", (_e, input: { installedAgentId?: unknown } | undefined) =>
+    readOneSeatSuggestions(typeof input?.installedAgentId === "string" ? input.installedAgentId : ""));
 
   // ── One Taskforces (durable group chats; One is always implicit) ──
   ipcMain.handle("oneTaskforces:list", () => listOneTaskforces());
