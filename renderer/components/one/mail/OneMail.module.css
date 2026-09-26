@@ -1379,3 +1379,15 @@
 }
 .copyButton:hover { background: var(--paper-3); }
 :global([data-one-bottom-sheet-toolbar]) .topTabs { margin-bottom: 0; }
+
+/* Domain card: inline refusal / status right under the card header. */
+.cardAlert,
+.cardStatus {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.cardAlert { background: var(--danger-soft); color: var(--danger); font-weight: 620; }
+.cardStatus { background: var(--ok-soft); color: var(--ink); }

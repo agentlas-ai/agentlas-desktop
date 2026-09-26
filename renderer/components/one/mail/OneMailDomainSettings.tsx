@@ -206,6 +206,8 @@ function DomainCard({
           </button>
         )}
       </header>
+      {/* Refusals (delete / check / restart / address) show right under the header, where the owner just clicked. */}
+      {notice && <p className={notice.error ? styles.cardAlert : styles.cardStatus} role={notice.error ? "alert" : "status"} data-one-mail-domain-notice={notice.error ? "error" : "ok"}>{notice.text}</p>}
       {domain.warnings.map((warning) => (
         <p key={warning} className={styles.warn} role="status" data-one-mail-domain-warning={warning}>{copy.domainWarning[warning] ?? warning}</p>
       ))}
@@ -283,7 +285,6 @@ function DomainCard({
           <button type="button" className={styles.secondary} onClick={() => setChanging(true)}>{copy.domainChangeAddress}</button>
         </div>
       )}
-      {notice && <p className={notice.error ? styles.error : styles.hint} role={notice.error ? "alert" : "status"}>{notice.text}</p>}
     </section>
   );
 }
