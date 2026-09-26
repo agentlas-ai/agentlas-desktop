@@ -12,6 +12,7 @@ import { tFor, type Locale } from "@/lib/i18n";
 import type { AgentMailAgentCard, AgentMailContact } from "@shared/agent-mail";
 import { mailErrorText } from "./mailErrorText";
 import { mail2 } from "./mailCopy";
+import { confirmMailAction } from "./mailConfirm";
 import { oneMailTime } from "./OneMailRail";
 import type { OneMailState } from "./useOneMail";
 import styles from "./OneMail.module.css";
@@ -207,7 +208,7 @@ function ContactDetail({ id, locale, mail, onBack }: { id: string; locale: Local
   };
 
   const remove = async () => {
-    if (!contact || !window.confirm(copy.contactDeleteConfirm)) return;
+    if (!contact || !(await confirmMailAction({ locale, body: copy.contactDeleteConfirm }))) return;
     const res = await api.removeContact(contact.id);
     if (!res.ok) { setNotice({ text: mailErrorText(locale, res), error: true }); return; }
     onBack();

@@ -420,7 +420,33 @@
 }
 
 /* ── One edit: tabs (owner design 2026-09-26) ─────────────────────────── */
-.oneTabPanel { max-width: 640px; margin: 0 auto; width: 100%; }
+/* One edit: tab bodies start exactly at the tab row's left edge (no inner centered column). */
+.oneTabPanel { width: 100%; }
+
+/*
+ * One edit width follows the tab (owner 2026-09-26 "팝업 크기가 동적이면 되지"): Profile keeps the
+ * two-column width, Mail / Directory / My domain shrink to their content + ~1cm side padding.
+ * Header, tab row, body and footer share one inline padding; the width eases and stays centered.
+ */
+.oneEdit {
+  --one-sheet-horizontal-padding: 28px;
+  --one-edit-scrollbar: 8px;
+  transition: width 180ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+.oneEdit.oneEditWide { width: var(--popup-1-width); }
+.oneEdit.oneEditNarrow { width: min(calc(600px + 2 * var(--one-sheet-horizontal-padding)), calc(100vw - 48px)); }
+@media (prefers-reduced-motion: reduce) { .oneEdit { transition: none; } }
+
+/* The body reaches the dialog's right edge; its 8px scrollbar lives inside the right padding, so
+   content right edge = left edge = the shared padding, scrolling or not. */
+.oneEdit .oneEditBody {
+  scrollbar-gutter: stable;
+  margin-right: calc(-1 * var(--one-sheet-horizontal-padding));
+  padding-right: calc(var(--one-sheet-horizontal-padding) - var(--one-edit-scrollbar));
+}
+.oneEdit .oneEditBody::-webkit-scrollbar { width: var(--one-edit-scrollbar); }
+.oneEdit .oneEditBody::-webkit-scrollbar-thumb { border-radius: 8px; background: var(--paper-edge-strong, var(--paper-edge)); }
+.oneEdit .oneEditBody::-webkit-scrollbar-track { background: transparent; }
 
 /* Profile tab: each field in its own soft grey block, label on top, white input inside. */
 .layout[data-blocks="true"] .fields label {

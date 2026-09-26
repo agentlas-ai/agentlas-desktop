@@ -765,8 +765,8 @@ export function OneCreateAgentDialog({
       <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{oneTab === "profile" ? (ko ? "취소" : "Cancel") : (ko ? "닫기" : "Close")}</button>
       {oneTab === "profile" && <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void updateOne()} data-one-edit-save>{creating ? (ko ? "저장 중…" : "Saving…") : (ko ? "저장" : "Save")}</button>}
     </div> : undefined}
-    panelClassName={styles.dialog}
-    bodyClassName={styles.body}
+    panelClassName={editOne ? [styles.dialog, styles.oneEdit, oneTab === "profile" ? styles.oneEditWide : styles.oneEditNarrow].join(" ") : styles.dialog}
+    bodyClassName={editOne ? [styles.body, styles.oneEditBody].join(" ") : styles.body}
     eyebrow={editOne ? "One" : "One Team"}
     title={editOne ? (ko ? "One 편집" : "Edit One") : edit ? (ko ? "팀원 편집" : "Edit Teammate") : "New Agent"}
     titleId="one-create-agent-title"

@@ -10,6 +10,7 @@ import type { Locale } from "@/lib/i18n";
 import type { AgentMailDomain, AgentMailLimits, AgentMailMailbox } from "@shared/agent-mail";
 import { mailErrorText } from "./mailErrorText";
 import { mail2 } from "./mailCopy";
+import { confirmMailAction } from "./mailConfirm";
 import styles from "./OneMail.module.css";
 
 export function OneMailDomainSettings({
@@ -198,7 +199,7 @@ function DomainCard({
             type="button"
             className={styles.ghostButton}
             disabled={busy}
-            onClick={() => { if (window.confirm(copy.domainRemoveConfirm)) void run<{ deleted: true }>(() => api.removeDomain(domain.id), () => onRemoved()); }}
+            onClick={() => { void confirmMailAction({ locale, body: copy.domainRemoveConfirm }).then((ok) => { if (ok) void run<{ deleted: true }>(() => api.removeDomain(domain.id), () => onRemoved()); }); }}
             aria-label={copy.domainRemove}
             title={copy.domainRemove}
           >

@@ -1253,7 +1253,10 @@
   margin-bottom: 14px;
   border-bottom: 1px solid var(--paper-edge);
   overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
+.topTabs::-webkit-scrollbar { display: none; }
 
 .topTabs button {
   position: relative;
@@ -1275,7 +1278,7 @@
   position: absolute;
   left: 0;
   right: 0;
-  bottom: -1px;
+  bottom: 0;
   height: 2px;
   border-radius: 2px;
   background: var(--black);
@@ -1391,3 +1394,22 @@
 }
 .cardAlert { background: var(--danger-soft); color: var(--danger); font-weight: 620; }
 .cardStatus { background: var(--ok-soft); color: var(--ink); }
+
+/* In-app destructive confirm (replaces window.confirm). */
+.confirmBody { margin: 0; color: var(--ink); font-size: 13px; line-height: 1.6; }
+.confirmActions { display: flex; justify-content: flex-end; gap: 8px; width: 100%; }
+.confirmActions .blockSecondary { min-width: 96px; }
+.dangerButton {
+  min-width: 96px;
+  min-height: 40px;
+  padding: 0 16px;
+  border: 1px solid var(--danger);
+  border-radius: 10px;
+  background: var(--danger);
+  color: var(--white);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.dangerButton:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; }

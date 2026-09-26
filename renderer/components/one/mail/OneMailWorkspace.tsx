@@ -41,6 +41,7 @@ import { OneMailComposeSheet, uniqueNames } from "./OneMailCompose";
 import { OneMailSettings } from "./OneMailSettings";
 import { AgentBadge, OneMailContacts } from "./OneMailContacts";
 import { mail2 } from "./mailCopy";
+import { confirmMailAction } from "./mailConfirm";
 import type { OneMailState } from "./useOneMail";
 import styles from "./OneMail.module.css";
 
@@ -220,8 +221,9 @@ function MailList({ mail, locale, notice, setNotice }: {
   const address = mail.mailbox?.address ?? null;
 
   const run = (action: "archive" | "delete" | "read" | "unread") => {
-    if (action === "delete" && !window.confirm(tFor(locale, "one.mail.delete_selected_confirm", { count: mail.checked.size }))) return;
-    void mail.bulk(action).then((error) => { if (error) setNotice({ text: mailErrorText(locale, error), error: true }); });
+    const go = () => void mail.bulk(action).then((error) => { if (error) setNotice({ text: mailErrorText(locale, error), error: true }); });
+    if (action !== "delete") { go(); return; }
+    void confirmMailAction({ locale, body: tFor(locale, "one.mail.delete_selected_confirm", { count: mail.checked.size }) }).then((ok) => { if (ok) go(); });
   };
 
   const moreItems: OneMailMenuItem[] = drafts || mail.legacy ? [] : [
@@ -364,7 +366,7 @@ function ThreadRow({ thread, mail, locale, onError }: {
         {!mail.legacy && (
           <span className={styles.rowActions}>
             <button type="button" className={styles.iconButton} onClick={(event) => act(event, () => mail.archive(thread.id, !thread.archived))} aria-label={tFor(locale, thread.archived ? "one.mail.action.unarchive" : "one.mail.action.archive")} title={tFor(locale, thread.archived ? "one.mail.action.unarchive" : "one.mail.action.archive")}><IconArchive size={14} /></button>
-            <button type="button" className={styles.iconButton} onClick={(event) => act(event, async () => (window.confirm(tFor(locale, "one.mail.delete_confirm")) ? mail.removeThread(thread.id) : null))} aria-label={tFor(locale, "one.mail.action.delete")} title={tFor(locale, "one.mail.action.delete")}><IconTrash size={14} /></button>
+            <button type="button" className={styles.iconButton} onClick={(event) => act(event, async () => ((await confirmMailAction({ locale, body: tFor(locale, "one.mail.delete_confirm") })) ? mail.removeThread(thread.id) : null))} aria-label={tFor(locale, "one.mail.action.delete")} title={tFor(locale, "one.mail.action.delete")}><IconTrash size={14} /></button>
             <button type="button" className={styles.iconButton} onClick={(event) => act(event, () => mail.markRead(thread.id, unread))} aria-label={tFor(locale, unread ? "one.mail.mark_read" : "one.mail.action.mark_unread")} title={tFor(locale, unread ? "one.mail.mark_read" : "one.mail.action.mark_unread")}>{unread ? <IconMailOpen size={14} /> : <IconMail size={14} />}</button>
           </span>
         )}
@@ -469,8 +471,8 @@ function ReadingPane({ mail, locale, onOpenConversation, notice, setNotice }: {
   };
 
   const removeThread = () => {
-    if (!detail || !window.confirm(tFor(locale, "one.mail.delete_confirm"))) return;
-    void mail.removeThread(detail.thread.id).then(fail);
+    if (!detail) return;
+    void confirmMailAction({ locale, body: tFor(locale, "one.mail.delete_confirm") }).then((ok) => { if (ok) void mail.removeThread(detail.thread.id).then(fail); });
   };
 
   if (!detail) {
