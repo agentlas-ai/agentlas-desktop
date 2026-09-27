@@ -50,7 +50,7 @@ import { runMcpInvocation } from "./mcp/client";
 import { automationRuntimePermission } from "../shared/graph-node-protocol";
 import { runGraph } from "./workflow/run-graph";
 import { sweepAutomationEffectObservations } from "./long-run/effect-observation";
-import { registerAutomationObservationRuntime, type AutomationObservationRuntime } from "./long-run/effect-observation-tickets";
+import { automationObservationsInFlight, registerAutomationObservationRuntime, type AutomationObservationRuntime } from "./long-run/effect-observation-tickets";
 import { requiresGraphReconciliation, runAutomationStrategyCycle } from "./automation-strategy-cycle";
 import { broadcastLiveRun } from "./workflow/live-run";
 import {
@@ -179,7 +179,19 @@ export function scheduledOccurrenceIdForDueRun(a: Automation): string {
 let timer: ReturnType<typeof setInterval> | null = null;
 let startupTimer: ReturnType<typeof setTimeout> | null = null;
 let installQuiescing = false;
+/*
+ * App quit closes dispatch for good. stopAutomationScheduler() only cleared the timers, so a tick
+ * already past its guard, a runOne parked on the goal-ledger await, or a read-only resume could
+ * still start work after Quit — and every write it made after closeStore() died as "Store not
+ * initialized" (measured 2026-09-24T00:55Z: markAutomationRun, the graph-reconciliation suspension
+ * and the dispatch all failed, so the interrupted Threads run's outcome was never recorded).
+ */
+let shutdownDispatchClosed = false;
 const running = new Set<string>();
+
+function dispatchPaused(): boolean {
+  return installQuiescing || shutdownDispatchClosed;
+}
 
 /*
  * 묻기 전에 직접 본다(오너 2026-09-23) — 보류된 자동화·자동화가 이어받는 목표의 효과를 읽기 전용으로
@@ -745,7 +757,7 @@ async function runOne(
     preclaimed?: boolean;
   },
 ): Promise<TriggerDispatchResult> {
-  if (installQuiescing) return { accepted: false };
+  if (dispatchPaused()) return { accepted: false };
   if (running.has(a.id)) return { accepted: false }; // 직전 실행이 아직 진행 중이면 건너뜀
   if (a.goalId) {
     const goalDecision = await goalLedgerShouldContinue(a.goalId);
@@ -755,6 +767,8 @@ async function runOne(
       return { accepted: false };
     }
   }
+  // The goal-ledger read awaited: Quit or an update may have closed dispatch meanwhile.
+  if (dispatchPaused()) return { accepted: false };
   // 모든 실행 경로가 같은 크로스프로세스 리스를 사용한다. GUI의 Run now나 이벤트 트리거도
   // headless due 실행과 겹치면 외부 게시/결제 같은 부작용을 두 번 낼 수 있으므로 건너뛴다.
   if (
@@ -1917,7 +1931,7 @@ async function runDueAutomations(
   now: Date,
   dispatch: (action: () => Promise<void>) => Promise<void> = action => action(),
 ): Promise<void> {
-  if (installQuiescing) return;
+  if (dispatchPaused()) return;
   let due: Automation[];
   try {
     due = dueAutomations(now);
@@ -1938,6 +1952,7 @@ async function runDueAutomations(
 /** "Run now" — 스케줄 무관하게 지정 자동화를 즉시 1회 실행(enabled 여부 무시). */
 export async function runAutomationNow(id: string, opts?: { dryRun?: boolean; fresh?: boolean }, mainAdmission?: MainInvocationAdmission): Promise<TriggerDispatchResult> {
   mainAdmission = takeMainInvocationAdmission(mainAdmission);
+  if (shutdownDispatchClosed) throw new Error("Automation execution is closed because the app is quitting");
   if (installQuiescing) throw new Error("Automation execution is paused while an update is prepared");
   const a = getAutomation(id);
   if (!a) throw new Error(`Automation not found: ${id}`);
@@ -1970,7 +1985,7 @@ export interface AutomationRunNowAck {
  */
 export function enqueueAutomationRunNow(id: string, mainAdmission?: MainInvocationAdmission): AutomationRunNowAck {
   mainAdmission = takeMainInvocationAdmission(mainAdmission);
-  if (installQuiescing) return { accepted: false, automationId: id, runId: null, status: "rejected" };
+  if (dispatchPaused()) return { accepted: false, automationId: id, runId: null, status: "rejected" };
   const automation = getAutomation(id);
   if (!automation) throw new Error(`Automation not found: ${id}`);
   if (running.has(id)) return { accepted: false, automationId: id, runId: null, status: "rejected" };
@@ -2009,7 +2024,7 @@ export async function runAutomationFromTrigger(
   ctx: TriggerEventPayload = {},
   triggerDelivery?: TriggerDeliveryHooks,
 ): Promise<TriggerDispatchResult> {
-  if (installQuiescing) return { accepted: false };
+  if (dispatchPaused()) return { accepted: false };
   const a = getAutomation(id);
   if (!a) return { accepted: false };
   return runOne(a, { claim: true, advanceSchedule: false, triggerDelivery, triggerContext: ctx });
@@ -2037,7 +2052,7 @@ async function notifyPendingMonitorAttention(): Promise<void> {
 }
 
 function tick(): void {
-  if (installQuiescing) return;
+  if (dispatchPaused()) return;
   // A GUI and the optional headless runner may share this DB. Recovery only
   // closes snapshots that have been silent beyond the scheduler's absolute
   // active-tool ceiling; recent progress from either process keeps a run live.
@@ -2079,7 +2094,7 @@ function tick(): void {
 }
 
 export function startAutomationScheduler(): void {
-  if (installQuiescing || timer) return;
+  if (dispatchPaused() || timer) return;
   timer = setInterval(tick, 60_000);
   if (timer.unref) timer.unref();
   // 시작 직후 1회 점검 — 앱이 꺼져 있던 동안 놓친 due를 한 번 따라잡는다(누적 폭주 방지: markRun이 다음 미래로 전진).
@@ -2088,6 +2103,24 @@ export function startAutomationScheduler(): void {
     tick();
   }, 5_000);
   startupTimer.unref?.();
+}
+
+/**
+ * Quit only: close dispatch permanently for this process, then stop the timers. Unlike the update
+ * quiesce this is never reopened — the next process starts its own scheduler.
+ */
+export function closeAutomationDispatchForShutdown(): void {
+  shutdownDispatchClosed = true;
+  stopAutomationScheduler();
+}
+
+/**
+ * Automation work that can still write to the store: graph runs, System Optimizer runs and
+ * read-only effect observations. Quit waits for this to reach zero (bounded) before closeStore(),
+ * so an interrupted run records its own outcome instead of losing it to "Store not initialized".
+ */
+export function automationWorkInFlight(): number {
+  return running.size + optimizerControllers.size + automationObservationsInFlight();
 }
 
 export function stopAutomationScheduler(): void {

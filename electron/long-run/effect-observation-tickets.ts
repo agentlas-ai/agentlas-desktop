@@ -60,6 +60,10 @@ export function markAutomationObserving(automationId: string, observing: boolean
 export function isAutomationObserving(automationId: string | null | undefined): boolean {
   return Boolean(automationId && observingAutomations.has(automationId));
 }
+/** Headless automation observations still running — Quit drains these before closing the store. */
+export function automationObservationsInFlight(): number {
+  return observingAutomations.size;
+}
 
 /** Headless automation observation seam, registered by automation-scheduler at module load (QA registers a fake).
  * Kept in this import-free module so registration never depends on module load order. */

@@ -150,7 +150,10 @@ export function shutdownAppRuntimeCoordinator(timeoutMs = 15_000): Promise<AppRu
       failures.set(name, raw.replace(/[^a-zA-Z0-9_.:-]/g, "_").slice(0, 120) || "participant_failed");
     };
     let pausedRunIds: string[] = [];
-    try { pausedRunIds = pauseActiveDesktopLongRunsForAppShutdown(appInstanceId); }
+    // Before initialize this process owns no run (startup recovery has not claimed any) and the store
+    // may not be open yet — a Quit during launch recorded "coordinator:pause-state: Store not
+    // initialized" (2026-09-24T12:46Z). The previous process's runs are recovered by the next startup.
+    if (initialized) try { pausedRunIds = pauseActiveDesktopLongRunsForAppShutdown(appInstanceId); }
     catch (error) {
       // A storage failure cannot prevent Stop from reaching every runtime.
       // Existing Main report consumers already handle failed participant names.

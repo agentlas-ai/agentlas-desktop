@@ -6,7 +6,7 @@
 //
 // 실행 엔진은 손대지 않는다 — 러너는 "어떤 요청을 어떤 순서로 runMcpInvocation에 넘길지"만 결정.
 import { isHostPreflightTool, couldHaveChangedTheOutsideWorld } from "../../shared/tool-activity";
-import { isReadOnlyGraphBrowserObservation } from "../../shared/graph-browser-observation";
+import { isAgentlasBrowserToolName, isReadOnlyGraphBrowserObservation } from "../../shared/graph-browser-observation";
 import { findGraphContradictions } from "../../shared/graph-contradictions";
 import { getDb } from "../store/db";
 import type {
@@ -850,7 +850,7 @@ export function isReadOnlyCheckpointTool(name: string, rawArgs?: unknown): boole
   // the same tool names (notably browser_tabs). A name-only receipt cannot
   // authorize replay. Admit only closed argument shapes whose host behavior is
   // known, and only navigations to Threads profile/activity observation pages.
-  if (name.startsWith("mcp__agentlas-browser__browser_")) {
+  if (isAgentlasBrowserToolName(name)) {
     return isReadOnlyGraphBrowserObservation(name, rawArgs);
   }
   // search/validate are digest-bound transaction operations. Preparation may

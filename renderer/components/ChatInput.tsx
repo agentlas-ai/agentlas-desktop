@@ -2077,6 +2077,7 @@ function ComposerGoalBar({
   const paused = observed && runStatus === "paused";
   const pausing = observed && runStatus === "pausing";
   const blocked = observed && (runStatus === "blocked" || runStatus === "failed");
+  const budgetPause = paused && Boolean(pauseReason && (pauseReason === "budget" || pauseReason.startsWith("budget_")));
   const knownReason = (reason: string | null | undefined): string | null => {
     if (!reason) return null;
     if (reason === "app_closed") return locale === "ko" ? "앱이 종료되어 멈춤" : "Stopped when the app closed";
@@ -2159,7 +2160,9 @@ function ComposerGoalBar({
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z" /></svg>
         </button>
       )}
-      {observed && (paused || (blocked && blockedReason === "goal_wait_ongoing_authority_required")) && onResume && (
+      {/* A budget pause cannot be resumed (Main refuses long_run_budget_exhausted; before that the
+          button re-paused the Goal within 1 ms). Its copy already names the way out: a new Goal. */}
+      {observed && ((paused && !budgetPause) || (blocked && blockedReason === "goal_wait_ongoing_authority_required")) && onResume && (
         <button
           type="button"
           onClick={onResume}

@@ -1148,11 +1148,32 @@ export function transitionLongRun(input: {
       payload: { from: current.status, to: input.to, reason: input.reason ?? null },
       at: now,
     });
+    if (input.to === "cancelled" || input.to === "failed") closeOpenTasksOfEndedRun(current.id, now);
   })();
   emitDesktopStoreChange({ entity: "long-run", id: current.id });
   const next = getLongRun(current.id);
   if (!next) throw new Error("long_run_transition_readback_failed");
   return next;
+}
+
+/**
+ * A cancelled or failed run owns no open work. Measured 2026-09-27: 11 cancelled runs still held
+ * tasks in todo/doing/verifying (run_6d24b328 'doing' since 09-15) because every cancel path — user
+ * delete, blocked-goal sweep, MCP cancelRun — changed only long_runs. Nothing read them yet, but any
+ * count of open work across runs would have seen phantom work. Callers run inside their transaction.
+ */
+function closeOpenTasksOfEndedRun(runId: string, now: string): void {
+  const db = getDb();
+  const states = [...LONG_RUN_OPEN_TASK_STATES];
+  const open = db.prepare(`SELECT id, state FROM long_run_tasks WHERE run_id = ?
+      AND state IN (${states.map(() => "?").join(",")})`).all(runId, ...states) as Array<{ id: string; state: string }>;
+  if (open.length === 0) return;
+  db.prepare(`UPDATE long_run_tasks SET state = 'cancelled', updated_at = ?, completed_at = ?
+      WHERE run_id = ? AND state IN (${states.map(() => "?").join(",")})`).run(now, now, runId, ...states);
+  for (const task of open) {
+    appendEventInDb({ runId, kind: "task.status_changed", actorKind: "host",
+      payload: { taskId: task.id, from: task.state, to: "cancelled", reason: "run_ended" }, at: now });
+  }
 }
 
 /** Exceptional startup-only terminalization of a host pause after an
@@ -1332,6 +1353,20 @@ export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number
   return next;
 }
 
+/**
+ * Which budget of this run is spent, if any. The same three limits the message path refuses on
+ * (service.ts "budget" stall) — one answer for every way back in.
+ */
+export function longRunBudgetExhaustion(run: LongRunRecord, now = Date.now()): string | null {
+  const deadline = run.budget.wallclockDeadline ? Date.parse(run.budget.wallclockDeadline) : Number.NaN;
+  if (Number.isFinite(deadline) && now >= deadline) return "budget_wallclock_exhausted";
+  if (run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles) return "budget_cycles_exhausted";
+  return longRunMonetaryRefusal(run);
+}
+
+/** Resume refused because the run's budget is spent. The way out is a new Goal (the composer copy says so). */
+export const LONG_RUN_BUDGET_EXHAUSTED_CODE = "long_run_budget_exhausted";
+
 export function resumeLongRunByUser(runId: string, appInstanceId: string, expectedVersion: number): LongRunRecord {
   const current = getLongRun(runId);
   if (!current) throw new Error(`long_run_not_found:${runId}`);
@@ -1342,6 +1377,13 @@ export function resumeLongRunByUser(runId: string, appInstanceId: string, expect
   if (!["paused", "blocked"].includes(current.status)) {
     throw new Error(`long_run_resume_not_allowed:${current.status}`);
   }
+  /*
+   * A spent budget cannot be resumed into. Measured 2026-09-27 (run_9cad8ec0, paused 'budget' since
+   * 09-06): Resume queued the run, the invocation armed its wallclock timer with max(1, remaining)
+   * = 1 ms, and the Goal fell straight back to paused/budget — a button that could never work.
+   */
+  const exhausted = longRunBudgetExhaustion(current);
+  if (exhausted) throw new Error(`${LONG_RUN_BUDGET_EXHAUSTED_CODE}:${exhausted}`);
   if (unsettledLongRunAttemptCount(runId)) throw new Error("auto_goal_resume_attempt_unsettled");
   return transitionLongRun({
     runId,
@@ -2533,6 +2575,7 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
       ).run(userDelete ? "cancelled" : "paused", userDelete ? null : userPause ? "user" : reason === "app-quit" ? "app_closed" : "crash_recovery",
         userDelete ? null : now, userDelete ? now : null, now, appInstanceId ?? null, row.id);
       if (userDelete) {
+        closeOpenTasksOfEndedRun(row.id, now);
         db.prepare("UPDATE chat_goal_contracts SET status = 'cancelled', completed_at = ?, updated_at = ? WHERE goal_id = (SELECT goal_id FROM long_runs WHERE id = ?) AND status IN ('active','blocked')").run(now, now, row.id);
         db.prepare("UPDATE chats SET goal_id = NULL, continuous_mode = 0, updated_at = ? WHERE goal_id = (SELECT goal_id FROM long_runs WHERE id = ?)").run(now, row.id);
       }

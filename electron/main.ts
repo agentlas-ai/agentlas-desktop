@@ -61,7 +61,7 @@ import { clearDetectCache } from "./runtime/detect";
 import { repairPlaceholderTaskTitles } from "./store/chats";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
 import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
-import { startAutomationScheduler, stopAutomationScheduler } from "./automation-scheduler";
+import { automationWorkInFlight, closeAutomationDispatchForShutdown, startAutomationScheduler } from "./automation-scheduler";
 import { setGoalWaitHost, pollGoalWaitSubscriptions, reconcileClaimedGoalWaitsAtStartup,
   interruptGoalWaitReplans, goalWaitReplansSettled } from "./long-run/wait-subscriptions";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
@@ -1292,7 +1292,7 @@ function stopQuitServices(): Promise<void> {
   if (legacyLearningTimer) clearTimeout(legacyLearningTimer);
   legacyLearningTimer = null;
   legacyLearningController?.abort(new Error("legacy_learning_shutdown"));
-  try { stopAutomationScheduler(); } catch {}
+  try { closeAutomationDispatchForShutdown(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
   try { stopBrowserOrphanSweep(); } catch {}
   try { stopBrowserApprovalServer(); } catch {}
@@ -1421,9 +1421,17 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     });
     // Child termination resolves through the invocation lifecycle. Do not
     // close SQLite underneath a terminal receipt that is still settling.
+    // Automation runs, the System Optimizer and headless effect observations are not chats; their
+    // settlement (run outcome, next run, reconciliation hold) must land before SQLite closes too.
     const settleDeadline = Date.now() + 15_000;
-    while (invocationService.activeChatIds().length > 0 && Date.now() < settleDeadline) {
+    const settling = (): boolean => invocationService.activeChatIds().length > 0 || automationWorkInFlight() > 0;
+    while (settling() && Date.now() < settleDeadline) {
       await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    if (settling()) {
+      console.error("[shutdown] closing the store with work still settling", {
+        chats: invocationService.activeChatIds().length, automations: automationWorkInFlight(),
+      });
     }
     try { closeScienceStore(); } catch (error) { console.error("[science-store] close failed", error); }
     try { closeStore(); } catch (error) { console.error("[store] close failed", error); }
@@ -1578,6 +1586,10 @@ app.on("will-quit", (event) => {
 });
 
 let startupStage = "before-ready";
+
+class StartupAbandonedForQuit extends Error {
+  constructor() { super("startup_abandoned_for_quit"); this.name = "StartupAbandonedForQuit"; }
+}
 
 app.whenReady().then(async () => {
   // Native installers can launch the replacement before the old process has
@@ -1752,6 +1764,11 @@ app.whenReady().then(async () => {
   } catch (error) {
     console.error("[security] legacy run-event scrub failed:", error);
   }
+  // Quit can arrive while the store is still opening (measured 2026-09-24T12:46Z: Quit 2 s after
+  // launch). Its cleanup already ran against an unopened store and closed the runtime coordinator,
+  // so the next registration threw app_runtime_shutdown_in_progress and startup "failed". Starting
+  // services now would only run them past cleanup: stop here, close what we opened, let Quit finish.
+  if (quitCleanupPromise) throw new StartupAbandonedForQuit();
   const longRunStartup = developmentEffectsSuppressed() ? null : initializeAppRuntimeCoordinator();
   if (developmentEffectsSuppressed()) {
     invocationService.beginAppShutdown();
@@ -4296,6 +4313,11 @@ app.whenReady().then(async () => {
   traceUpdaterStartup("healthy-startup");
 }).catch(async (error) => {
   traceUpdaterStartup("startup-promise-rejected");
+  if (error instanceof StartupAbandonedForQuit) {
+    console.info("[startup] stopped: the app began quitting while the store was opening");
+    try { closeStore(); } catch (closeError) { console.error("[store] close failed", closeError); }
+    return;
+  }
   if (developmentEffectsSuppressed()) {
     console.error("[main] development startup failed", error);
     recordImmediateExit("startup-failed", 1, { stage: startupStage });
