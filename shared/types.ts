@@ -8377,7 +8377,7 @@ export interface AgentlasIpc {
     /** Explicit user action; source and destination are fixed by Main. */
     importBrowserCookies: () => Promise<NativeBrowserCookieImportResult>;
     listTabs: (input: { taskScopeId: string }) => Promise<{ ok: boolean; tabs: WorkLiveBrowserTab[]; reason?: string }>;
-    createTab: (input: { taskScopeId: string; url?: string }) => Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string }>;
+    createTab: (input: { taskScopeId: string; url?: string }) => Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string; message?: string }>;
     open: (input: {
       viewId: string;
       viewLeaseId?: string;

@@ -201,7 +201,7 @@ import { useOneMail } from "./mail/useOneMail";
 import { llmLogoSrc } from "@/lib/llm-logo";
 import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget, type OneEditSelfTarget } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
-import { OneRunComet, oneRunCometHostClass, useOneSpinningChatIds } from "./OneRunComet";
+import { OneRunComet, oneRunCometHostClass, useOneRunSignals } from "./OneRunComet";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
@@ -1277,8 +1277,8 @@ export function OneShell() {
   const [activeThreadChat, setActiveThreadChat] = useState<Chat | null>(null);
   const [activeChatIds, setActiveChatIds] = useState<string[]>([]);
   const [confirmations, setConfirmations] = useState<PendingConfirmation[]>([]);
-  // 사이드바 혜성: 실행 중이면서 오너를 기다리지 않는 대화만.
-  const spinningChatIds = useOneSpinningChatIds(activeChatIds, confirmations);
+  // 사이드바 실행 신호(실시간 방송, 오너 대기 제외): 작은 점 = 지금 실행, 혜성 = 실행 + 살아 있는 목표.
+  const { running: liveRunningChatIds, spinning: spinningChatIds } = useOneRunSignals(activeChatIds, confirmations);
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
   const [dismissedDecisionId, setDismissedDecisionId] = useState<string | null>(null);
   const [committedAnswers, setCommittedAnswers] = useState<CommittedQuestionAnswer[]>([]);
@@ -7779,7 +7779,7 @@ export function OneShell() {
                   onOpen={openConversation}
                   onRemove={removeConversation}
                   seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale, oneDisplayName)}
-                  running={activeChatIds.includes(row.chat.id)}
+                  running={liveRunningChatIds.has(row.chat.id)}
                   spinning={spinningChatIds.has(row.chat.id)}
                   unavailable={directSessionUnavailable(row.chat, oneOrgState)}
                   member={oneOrgState?.members.find((member) => member.installedAgentId === row.chat!.agentId) ?? null}
@@ -9286,7 +9286,7 @@ export function OneShell() {
                         <span className={styles.sessionSheetName}>{chat.title || (appLocale === "ko" ? "새 대화" : "New conversation")}</span>
                         {/* 표시=실행 (C-D-1): 이 세션의 마지막 실행이 실제로 돈 모델. */}
                         {sessionModels[chat.id] && <span className={styles.sessionSheetHint} data-session-model="true">{sessionModels[chat.id]}</span>}
-                        {activeChatIds.includes(chat.id) && <span className={styles.sessionRunningDot} aria-hidden="true" />}
+                        {liveRunningChatIds.has(chat.id) && <span className={styles.sessionRunningDot} aria-hidden="true" />}
                       </button>
                       <button
                         type="button"

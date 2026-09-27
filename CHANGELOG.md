@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.47 — 2026-09-28
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Stops unexpected sign-outs: browser automations no longer re-import your everyday Chrome
+  logins on every run. The automatic refresh follows its 3-day schedule and never overwrites a
+  newer login the Agentlas browser already has.
+- Agents close the browser tabs they open when their work ends, and a full tab limit frees an
+  unused agent tab instead of refusing; if every tab is in use it says what to do.
+- The small running dot on session rows disappears as soon as a run ends.
+
 ## 1.2.46 — 2026-09-28
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.

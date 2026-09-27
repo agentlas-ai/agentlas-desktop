@@ -37,14 +37,17 @@ function sameIds(a: readonly string[], b: readonly string[]): boolean {
 }
 
 /**
- * 혜성을 돌릴 대화 id 집합.
+ * 사이드바 실행 신호 두 벌.
+ *  - running: Main 이 지금 실행 중이라고 방송한 대화에서 오너 대기를 뺀 것 — 미리보기 앞 작은 점.
+ *  - spinning: running + 턴 사이에서 살아 있는 목표 — 테두리 혜성.
+ * 둘 다 같은 실시간 방송에서 나오므로 실행이 끝나는 즉시 함께 사라진다(5초 새로고침을 기다리지 않음).
  * @param polledActiveChatIds 셸이 5초마다 받아 둔 실행 중 목록(첫 값·방송 유실 시 복구용)
  * @param pendingConfirmations 오너 답을 기다리는 확인 카드(대화 id 만 본다)
  */
-export function useOneSpinningChatIds(
+export function useOneRunSignals(
   polledActiveChatIds: readonly string[],
   pendingConfirmations: readonly { chatId: string }[],
-): ReadonlySet<string> {
+): { running: ReadonlySet<string>; spinning: ReadonlySet<string> } {
   const [activeIds, setActiveIds] = useState<readonly string[]>(polledActiveChatIds);
   const [goalActiveIds, setGoalActiveIds] = useState<readonly string[]>([]);
   const [askWaits, setAskWaits] = useState<ReadonlyMap<string, string>>(() => new Map());
@@ -133,6 +136,9 @@ export function useOneSpinningChatIds(
     for (const request of toolApprovals.queue) {
       if (request.chatId && toolApprovals.actions.get(request.id)?.phase !== "terminal") waiting.add(request.chatId);
     }
-    return new Set([...activeIds, ...goalActiveIds].filter((chatId) => !waiting.has(chatId)));
+    return {
+      running: new Set(activeIds.filter((chatId) => !waiting.has(chatId))),
+      spinning: new Set([...activeIds, ...goalActiveIds].filter((chatId) => !waiting.has(chatId))),
+    };
   }, [activeIds, goalActiveIds, askWaits, browserWaits, pendingConfirmations, toolApprovals]);
 }

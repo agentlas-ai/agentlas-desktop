@@ -52,6 +52,7 @@ import {
   cookieFreshness,
   cookieIdentityColumns,
   decideCookieWrite,
+  decideRuntimeCookieFeed,
   resolveCookieStoreLayout,
 } from "./cookie-merge";
 import { currentUiLocale } from "../ui-locale";
@@ -740,6 +741,7 @@ async function importMacCookiesThroughDedicatedRuntime(
   browser: string,
   schemaVersion: number,
   jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>,
+  explicitImport: boolean,
 ): Promise<MacCdpCookieImportResult> {
   if (jobs.length === 0) {
     return { accepted: 0, domains: [], verifiedDomains: [], loginRequiredDomains: [] };
@@ -861,7 +863,22 @@ async function importMacCookiesThroughDedicatedRuntime(
     const context = connection.contexts()[0];
     if (!context) throw new Error(importCopy("Agentlas 로그인 가져오기 브라우저 컨텍스트가 없습니다.", "The Agentlas sign-in import browser has no context."));
     for (const page of context.pages()) await page.close().catch(() => undefined);
-    await context.addCookies(cookies);
+    // Automatic refresh must not roll the dedicated browser's live (possibly
+    // rotated) sign-in cookies back to the everyday browser's snapshot. Feed a
+    // cookie only when the runtime lacks it or the source expires later. An
+    // explicit import the user just pressed still makes the source win.
+    const runtimeExpires = new Map<string, number>();
+    if (!explicitImport) {
+      for (const cookie of await context.cookies(jobs.map((job) => `https://${job.domain}/`))) {
+        runtimeExpires.set(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`, cookie.expires);
+      }
+    }
+    const feed = cookies.filter((cookie) => decideRuntimeCookieFeed({
+      explicitImport,
+      existingExpires: runtimeExpires.get(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`) ?? null,
+      incomingExpires: cookie.expires,
+    }) === "feed");
+    if (feed.length > 0) await context.addCookies(feed);
     const observed = await context.cookies(jobs.map((job) => `https://${job.domain}/`));
     const acceptedDomains = new Set<string>();
     let accepted = 0;
@@ -936,6 +953,7 @@ const COOKIE_TABLE_DDL = `CREATE TABLE cookies(
 export async function importBrowserCredentials(
   profileId: string,
   domains: string[],
+  options: { automatic?: boolean } = {},
 ): Promise<BrowserCredentialImportResult> {
   if (developmentEffectsSuppressed()) return { ok: false, cookiesAdded: 0, linkedSites: [], skipped: [], error: "development_effect_policy_disabled", suppressionReason: "development_effect_policy_disabled" };
   const skipped: Array<{ domain: string; reason: string }> = [];
@@ -1143,7 +1161,7 @@ export async function importBrowserCredentials(
 
     let runtimeImported: MacCdpCookieImportResult | null = null;
     if (process.platform === "darwin" && jobs.length > 0) {
-      runtimeImported = await importMacCookiesThroughDedicatedRuntime(profile.browser, schemaVersion, jobs);
+      runtimeImported = await importMacCookiesThroughDedicatedRuntime(profile.browser, schemaVersion, jobs, options.automatic !== true);
       const acceptedDomains = new Set(runtimeImported.domains);
       for (const job of jobs) {
         if (!acceptedDomains.has(job.domain)) {

@@ -32,6 +32,13 @@ type ActiveWorkView = {
   error?: string;
   captureRestore?: () => void;
   nativeSessions?: Map<string, NativeBrowserCookieImportResult>;
+  /** Agent run hold that opened this browser tab; absent for owner-opened tabs. */
+  openedByHold?: string;
+  /** Agent run holds currently driving this tab (opened or adopted). */
+  holds: Set<string>;
+  /** Settlement kept this tab only because the owner was watching it. */
+  handedToOwner?: boolean;
+  lastUsedAt: number;
 };
 
 const activeViews = new Map<string, ActiveWorkView>();
@@ -41,6 +48,109 @@ type NativeTaskOwner = { ownerId: number; window: BrowserWindow; taskScopeId: st
 const nativeTaskOwners = new Map<string, NativeTaskOwner>();
 const ownerCleanup = new Map<number, { window: BrowserWindow; listener: () => void }>();
 const MAX_NATIVE_TASK_BINDINGS_PER_OWNER = 64;
+
+/*
+ * ★Agents close what they open (owner 2026-09-28: "일하고 끄는 게 기본인데").
+ * Before this, nothing closed an agent-opened tab when its run ended: tabs were
+ * released only when the window died or the chat was deleted. Every browser run
+ * left one hidden tab behind, and after eight the owner's own Browser panel
+ * showed the raw code `browser-tab-limit` — a dead end, since the owner could
+ * not see (let alone close) the hidden tabs from other chats.
+ *
+ * A hold is one agent run's claim on the native browser. The CDP relay opens a
+ * hold per run grant and settles it from the grant's single release path (run
+ * success, failure, cancel, interrupt, window close, host shutdown). Settlement
+ * closes the tabs that run opened, except a tab the owner is looking at right
+ * now; that one is handed to the owner and follows the owner's lifecycle.
+ */
+type AgentBrowserHold = { runId: string; isLive: () => boolean; settled: boolean };
+const agentBrowserHolds = new Map<string, AgentBrowserHold>();
+export const BROWSER_TAB_LIMIT_MESSAGE = `All ${MAX_NATIVE_BROWSER_TABS_PER_OWNER} browser tabs are in use by you or by tasks that are still running. `
+  + "Close a tab in the Browser panel, or wait for a running task to finish, then try again.";
+
+function holdLive(holdId: string | undefined): boolean {
+  if (!holdId) return false;
+  const hold = agentBrowserHolds.get(holdId);
+  if (!hold || hold.settled) return false;
+  try { return hold.isLive(); } catch { return false; }
+}
+
+function hasLiveHold(active: ActiveWorkView): boolean {
+  for (const holdId of active.holds) if (holdLive(holdId)) return true;
+  return false;
+}
+
+/** The owner is looking at this exact tab right now. */
+function ownerViewing(active: ActiveWorkView): boolean {
+  return active.visible && active.ownerAttached && active.state === "ready";
+}
+
+/** Main-only: the relay opens one hold per agent run grant. */
+export function openAgentBrowserHold(input: { runId: string; isLive: () => boolean }): string {
+  const holdId = `hold_${randomUUID().replace(/-/g, "")}`;
+  agentBrowserHolds.set(holdId, { runId: input.runId, isLive: input.isLive, settled: false });
+  return holdId;
+}
+
+/** Main-only: a live run is driving this tab (adopted, not necessarily opened by it). */
+export function claimNativeBrowserGuest(ownerId: number, taskScopeId: string, viewId: string, holdId: string): boolean {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (!active || active.mode !== "browser" || !holdLive(holdId)) return false;
+  active.holds.add(holdId);
+  active.lastUsedAt = Date.now();
+  return true;
+}
+
+/**
+ * The run behind this hold has ended, however it ended. Close every tab it
+ * opened that neither the owner is watching nor another live run is driving.
+ */
+export function settleAgentBrowserHold(holdId: string): { closed: number; handedToOwner: number } {
+  const hold = agentBrowserHolds.get(holdId);
+  if (hold) hold.settled = true;
+  agentBrowserHolds.delete(holdId);
+  let closed = 0, handedToOwner = 0;
+  for (const active of [...activeViews.values()]) {
+    if (active.mode !== "browser" || (!active.holds.has(holdId) && active.openedByHold !== holdId)) continue;
+    active.holds.delete(holdId);
+    if (active.openedByHold !== holdId) continue;
+    if (!isCurrent(active)) { closeActive(active); closed += 1; continue; }
+    if (hasLiveHold(active)) continue;
+    if (ownerViewing(active)) { active.handedToOwner = true; handedToOwner += 1; continue; }
+    closeActive(active);
+    closed += 1;
+  }
+  return { closed, handedToOwner };
+}
+
+/**
+ * Orphans: agent-opened tabs whose run is gone without a settlement reaching
+ * them (a crashed or aborted run, a hold that stopped being live). Tabs handed
+ * to the owner are not orphans; they leave only by the owner or by LRU.
+ */
+export function reclaimOrphanAgentBrowserTabs(ownerId?: number): number {
+  let closed = 0;
+  for (const active of [...activeViews.values()]) {
+    if (active.mode !== "browser" || !active.openedByHold || active.handedToOwner) continue;
+    if (ownerId !== undefined && active.ownerId !== ownerId) continue;
+    if (hasLiveHold(active) || ownerViewing(active)) continue;
+    closeActive(active);
+    closed += 1;
+  }
+  for (const [holdId, hold] of agentBrowserHolds) if (!holdLive(holdId) && !hold.settled) agentBrowserHolds.delete(holdId);
+  return closed;
+}
+
+/** Least-recently-used agent-opened tab nobody is watching or driving. */
+function evictableAgentBrowserTab(ownerId: number): ActiveWorkView | null {
+  let victim: ActiveWorkView | null = null;
+  for (const active of activeViews.values()) {
+    if (active.ownerId !== ownerId || active.mode !== "browser" || !active.openedByHold) continue;
+    if (ownerViewing(active) || hasLiveHold(active)) continue;
+    if (!victim || active.lastUsedAt < victim.lastUsedAt) victim = active;
+  }
+  return victim;
+}
 
 function ensureOwnerCleanup(ownerId: number, window: BrowserWindow): void {
   if (ownerCleanup.has(ownerId)) return;
@@ -85,8 +195,9 @@ export function listWorkBrowserTabs(ownerId: number, taskScopeId: string): WorkL
     && active.mode === "browser" && active.taskScopeId === taskScopeId && isCurrent(active)).map(browserTab);
 }
 
-export async function createWorkBrowserTab(ownerId: number, taskScopeId: string, url = "about:blank"):
-  Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string }> {
+export async function createWorkBrowserTab(ownerId: number, taskScopeId: string, url = "about:blank", opener?: { holdId: string }):
+  Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string; message?: string }> {
+  if (opener && !holdLive(opener.holdId)) return { ok: false, reason: "native-browser-grant-revoked" };
   const owner = nativeTaskOwners.get(key(ownerId, taskScopeId));
   if (!owner || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
   const nativeSessions = await (await import("./browser/native-session-cookie-import")).syncConnectBrowserSessionsByDomain();
@@ -94,19 +205,24 @@ export async function createWorkBrowserTab(ownerId: number, taskScopeId: string,
   if (!currentOwner || currentOwner.window !== owner.window || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
   const viewId = `browser_${randomUUID().replace(/-/g, "")}`;
   const result = await openWorkLiveView({ ...owner, viewId, url, mode: "browser", visible: false,
-    bounds: { x: 0, y: 0, width: 1000, height: 750 } });
+    bounds: { x: 0, y: 0, width: 1000, height: 750 }, ...(opener ? { agentHoldId: opener.holdId } : {}) });
   const active = registeredGuest(ownerId, viewId, taskScopeId);
+  // The run ended while its tab was loading: it must not outlive the run.
+  if (active && opener && !holdLive(opener.holdId)) { closeActive(active); return { ok: false, reason: "native-browser-grant-revoked" }; }
   if (active) {
     active.nativeSessions = nativeSessions;
     emit(active, { state: active.state, url: active.view.webContents.getURL() || active.pendingUrl });
   }
-  return result.ok && active ? { ok: true, tab: browserTab(active) } : { ok: false, reason: result.reason ?? "guest-unavailable" };
+  return result.ok && active ? { ok: true, tab: browserTab(active) }
+    : { ok: false, reason: result.reason ?? "guest-unavailable", ...(result.message ? { message: result.message } : {}) };
 }
 
 /** Main-only access for the scoped CDP relay; never exposed through renderer IPC. */
 export function nativeBrowserGuest(ownerId: number, taskScopeId: string, viewId: string): WebContents | null {
   const active = registeredGuest(ownerId, viewId, taskScopeId);
-  return active?.mode === "browser" ? active.view.webContents : null;
+  if (active?.mode !== "browser") return null;
+  active.lastUsedAt = Date.now();
+  return active.view.webContents;
 }
 
 /** Main-only document identity for work that must fail closed across navigation. */
@@ -373,7 +489,7 @@ export function setWorkLiveViewBounds(
   try {
     active.captureRestore?.();
     active.visible = input.visible !== false;
-    if (active.visible) showOnly(active);
+    if (active.visible) { showOnly(active); active.lastUsedAt = Date.now(); }
     active.ownerBounds = sanitizeBounds(input.bounds, active.window);
     active.view.setBounds(active.ownerBounds);
     setOwnerGuestVisible(active, active.visible && active.state !== "error");
@@ -445,8 +561,10 @@ export async function openWorkLiveView(input: {
   mode?: "app" | "browser";
   taskScopeId?: string;
   viewLeaseId?: string;
+  /** Main-only: the agent run hold that is opening this browser tab. */
+  agentHoldId?: string;
   send: (status: WorkLiveViewStatus) => void;
-}): Promise<{ ok: boolean; viewId: string; url?: string; reason?: string }> {
+}): Promise<{ ok: boolean; viewId: string; url?: string; reason?: string; message?: string }> {
   const viewId = sanitizeViewId(input?.viewId);
   const url = input?.mode === "browser" && input?.url === "about:blank" ? new URL("about:blank") : sanitizeWorkLiveUrl(input?.url);
   if (!viewId) return { ok: false, viewId: String(input?.viewId ?? ""), reason: "invalid-view-id" };
@@ -475,10 +593,19 @@ export async function openWorkLiveView(input: {
       title: existing.view.webContents.getTitle(), error: existing.error });
     return { ok: true, viewId, url: existing.view.webContents.getURL() };
   }
-  const owned = [...activeViews.values()].filter((active) => active.ownerId === input.ownerId);
-  if (mode === "browser" && owned.filter((active) => active.mode === "browser").length >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
-    return { ok: false, viewId, reason: "browser-tab-limit" };
+  if (mode === "browser") {
+    // Reclaim tabs of runs that died without settling, then make room by
+    // closing the least-recently-used agent tab nobody is watching or driving.
+    // Refuse only when every tab belongs to the owner or to a live run.
+    reclaimOrphanAgentBrowserTabs(input.ownerId);
+    while ([...activeViews.values()].filter((active) => active.ownerId === input.ownerId && active.mode === "browser").length
+      >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
+      const victim = evictableAgentBrowserTab(input.ownerId);
+      if (!victim) return { ok: false, viewId, reason: "browser-tab-limit", message: BROWSER_TAB_LIMIT_MESSAGE };
+      closeActive(victim);
+    }
   }
+  const owned = [...activeViews.values()].filter((active) => active.ownerId === input.ownerId);
   // An app changing presentation retains its document during its short lease grace.
   if (mode === "app") {
     for (const active of owned) if (active.mode === "app" && !active.viewLeaseId) closeActive(active);
@@ -515,7 +642,13 @@ export async function openWorkLiveView(input: {
     state: "opening",
     navigationEpoch: 0,
     pendingUrl: url.toString(),
+    holds: new Set(),
+    lastUsedAt: Date.now(),
   };
+  if (mode === "browser" && input.agentHoldId && holdLive(input.agentHoldId)) {
+    active.openedByHold = input.agentHoldId;
+    active.holds.add(input.agentHoldId);
+  }
   activeViews.set(key(input.ownerId, viewId), active);
 
   if (mode === "browser") {
@@ -595,7 +728,9 @@ export async function openWorkLiveView(input: {
     if (active.mode === "browser" && active.taskScopeId && permittedNavigation(active, target)) {
       // A popup becomes another task-scoped tab. The untrusted page never gets
       // a child BrowserWindow or a reference to the Agentlas renderer.
-      void createWorkBrowserTab(active.ownerId, active.taskScopeId, target);
+      // A popup opened while a run drives this tab belongs to that run.
+      const opener = [...active.holds].find(holdLive);
+      void createWorkBrowserTab(active.ownerId, active.taskScopeId, target, opener ? { holdId: opener } : undefined);
     } else if (active.mode === "app" && permittedNavigation(active, target)) {
       void view.webContents.loadURL(target).catch(() => undefined);
     }

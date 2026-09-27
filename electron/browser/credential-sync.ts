@@ -157,7 +157,9 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
   }
   const flight = (async (): Promise<BrowserCredentialRefreshReport> => {
     try {
-      const result = await importBrowserCredentials(consent.profileId!, consent.domains);
+      // Every sync-owned refresh is automatic: it must not roll live dedicated
+      // browser cookies back to the everyday browser's older snapshot.
+      const result = await importBrowserCredentials(consent.profileId!, consent.domains, { automatic: true });
       if (!result.ok) {
         // 전용 브라우저가 열려 있는 등 정당한 거절이 있다. 다음 기회에 다시 시도하도록
         // lastSyncedAt 을 갱신하지 않는다 — 실패를 성공으로 기록하면 영영 낡은 채로 남는다.
@@ -210,4 +212,19 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
   });
   refreshInFlight = tracked;
   return tracked;
+}
+
+/**
+ * 자동화·그래프 실행 앞의 갱신은 **주기(3일)를 지킨다**. 강제하지 않는다.
+ *
+ * ★오너 신고 2026-09-28 "왜 자꾸 로그아웃되냐 — 크롬 본판이나 브라우저나 다".
+ *   브라우저 모드 그래프가 실행마다 `force: true` 로 전체 가져오기를 돌렸다. 가져오기는 유지보수
+ *   잠금 안에서 전용 브라우저를 **닫고**(쓰던 창·탭·임대 전부) 평소 크롬의 쿠키를 다시 넣는다.
+ *   실측(main.log): 승인 범위가 3개→127개 사이트(google.com·youtube.com·x.com·naver.com 포함)로
+ *   넓어진 2026-09-27T10:59Z 부터 자동화 발생마다 "refreshed 127 site(s), +5xx cookies" 가 찍혀
+ *   09-27 하루 82회. 주기 규칙(REFRESH_INTERVAL_MS)은 이 길에서 한 번도 적용되지 않았다.
+ *   지금 갱신이 필요하면 사용자가 Connect 의 "지금 갱신" 을 누른다(그 길만 force).
+ */
+export function refreshBrowserCredentialsBeforeAutomatedRun(): Promise<BrowserCredentialRefreshReport> {
+  return refreshBrowserCredentialsIfDue();
 }

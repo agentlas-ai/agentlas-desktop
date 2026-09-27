@@ -25,6 +25,15 @@ function navigationUrl(input: string): string | null {
   } catch { return null; }
 }
 
+/** A refused tab must say what to do next, never a raw machine code. */
+function tabCreateFailureNotice(reason: string | undefined, ko: boolean): string {
+  if (reason === "browser-tab-limit") {
+    return ko ? "브라우저 탭이 모두 사용 중입니다(직접 연 탭 또는 아직 실행 중인 작업). 브라우저 패널에서 탭을 하나 닫거나 실행 중인 작업이 끝난 뒤 다시 시도하세요."
+      : "All browser tabs are in use by you or by tasks that are still running. Close a tab in the Browser panel, or wait for a running task to finish, then try again.";
+  }
+  return reason ?? (ko ? "탭을 열지 못했습니다." : "Could not open a tab.");
+}
+
 /** Main owns the tabs. One, Work and their tools attach to the same scoped guests. */
 export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, headerHost, onActivate, newTabRequest = 0, presentation, onAnnotation }: {
   onAnnotation?: (receipt: BrowserAnnotationReceipt) => boolean | Promise<boolean>;
@@ -148,7 +157,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
           if (!disposed && created.tab) {
             acceptStatus(created.tab);
           }
-          else if (!disposed && !created.ok) setNotice(created.reason ?? "Browser unavailable");
+          else if (!disposed && !created.ok) setNotice(tabCreateFailureNotice(created.reason, ko));
         } finally {
           createInFlight.current = false;
           if (!disposed) setCreating(false);
@@ -182,7 +191,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
         setSelectedId(result.tab.viewId);
         return result.tab;
       }
-      else if (!result.ok) setNotice(result.reason ?? (ko ? "탭을 열지 못했습니다." : "Could not open a tab."));
+      else if (!result.ok) setNotice(tabCreateFailureNotice(result.reason, ko));
     } catch { if (mounted.current) setNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection."); }
     finally { createInFlight.current = false; if (mounted.current) setCreating(false); }
   }, [acceptStatus, connected, ko, taskScopeId]);

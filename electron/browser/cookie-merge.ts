@@ -106,3 +106,29 @@ export function decideNativeCookieWrite(input: {
   if (!input.hasExisting) return "write";
   return input.explicitImport ? "write" : "preserve";
 }
+
+/**
+ * 자동 갱신이 전용 브라우저(CDP)에 쿠키를 **다시 넣을지** 판정한다.
+ *
+ * ★오너 신고 2026-09-28 "왜 자꾸 로그아웃되냐 — 크롬 본판이나 브라우저나 다".
+ *   macOS 경로는 SQL 병합 판정(decideCookieWrite)을 거친 뒤에도 CDP `addCookies` 로 원본의
+ *   **모든** 쿠키를 무조건 덮었다. 전용 브라우저가 그 사이 회전시킨 로그인 토큰(구글 PSIDTS 등)이
+ *   평소 크롬의 낡은 값으로 되돌아가고, 같은 세션이 두 브라우저에서 엇갈린 토큰으로 쓰인다 —
+ *   사이트의 세션 도용 방어가 반응할 수 있는 모양이다(사이트 쪽 판정은 미확인). 자동 갱신은 전용 브라우저에 **없거나**, 원본이
+ *   **더 늦게 만료되는**(더 새로 발급된) 쿠키만 넣는다. 사용자가 방금 누른 가져오기는 원본이 이긴다.
+ *
+ * 만료 값은 초 단위이며 세션 쿠키는 없음(undefined) 또는 음수다.
+ */
+export function decideRuntimeCookieFeed(input: {
+  explicitImport: boolean;
+  /** 전용 브라우저에 같은 (domain, name, path) 쿠키가 없으면 null. */
+  existingExpires: number | null;
+  incomingExpires: number | undefined;
+}): "feed" | "keep" {
+  if (input.explicitImport) return "feed";
+  if (input.existingExpires === null) return "feed";
+  const incoming = typeof input.incomingExpires === "number" && input.incomingExpires > 0 ? input.incomingExpires : 0;
+  const existing = input.existingExpires > 0 ? input.existingExpires : 0;
+  // 세션 쿠키(0)끼리이거나 전용 쪽이 같거나 더 새것이면 살아 있는 쪽을 지킨다.
+  return incoming > existing ? "feed" : "keep";
+}

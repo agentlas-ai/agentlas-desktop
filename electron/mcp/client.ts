@@ -221,7 +221,7 @@ import { createWorkerCapabilityPreparer, WorkerCapabilityMaterializationError } 
 import { WorkerCapabilityError, type PrepareWorkerCapabilities } from "./worker-capabilities";
 import { browserCdpHostFailureDiagnostic } from "../mcp-tools/browser-cdp-launcher";
 import {
-  refreshBrowserCredentialsIfDue,
+  refreshBrowserCredentialsBeforeAutomatedRun,
   type BrowserCredentialRefreshReport,
 } from "../browser/credential-sync";
 import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
@@ -3171,7 +3171,9 @@ ${effectiveUserPrompt}`;
     try {
       if (req.forceBrowserCredentialRefresh) {
         mcpPrepStage = "browser-credential-refresh";
-        const report = await refreshBrowserCredentialsIfDue({ force: true });
+        // Due-gated, never forced: a forced import closes the dedicated browser
+        // and re-feeds everyday-Chrome cookies on every automation occurrence.
+        const report = await refreshBrowserCredentialsBeforeAutomatedRun();
         sink({
           kind: "notice",
           notice: browserCredentialSyncNotice(report, locale),

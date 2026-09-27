@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.2.46",
+  "version": "1.2.47",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -30,6 +30,7 @@
     "test:work-agent-screen-rail": "node scripts/qa-work-agent-screen-rail.cjs",
     "test:work-capture-evidence": "node scripts/qa-work-capture-evidence.cjs",
     "test:output-rail-shadow": "node scripts/output-rail-shadow-contract.cjs",
+    "test:browser-tab-lifecycle": "node scripts/browser-tab-lifecycle-contract.cjs",
     "test:work-browser-capture-artifacts": "node scripts/qa-work-browser-capture-artifacts.cjs",
     "test:work-browser-intent-selection": "electron scripts/qa-work-browser-intent-selection.cjs",
     "test:work-generated-image": "node scripts/qa-work-generated-image.cjs",
@@ -271,6 +272,7 @@
     "test:loadout-editor": "node scripts/loadout-editor-contract.cjs",
     "test:mac-cookie-reencryption": "node scripts/mac-cookie-reencryption-contract.cjs",
     "test:cookie-import-merge": "node scripts/cookie-import-merge-contract.cjs",
+    "test:browser-credential-refresh-cadence": "node scripts/browser-credential-refresh-cadence-contract.cjs",
     "test:markdown-rendering": "node scripts/markdown-rendering-contract.cjs",
     "test:memory-hard-hook": "node scripts/memory-hard-hook-contract.cjs",
     "test:one-composer-enter": "node scripts/one-composer-enter-contract.cjs",

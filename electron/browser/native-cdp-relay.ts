@@ -19,7 +19,8 @@ const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { 
 import type { WebContents } from "electron";
 import { onHostShutdown } from "../host-lifecycle";
 import { createWorkBrowserTab, listWorkBrowserTabs, nativeBrowserGuest, nativeBrowserTaskOwner,
-  closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport, presentNativeBrowserGuest } from "../work-live-view";
+  closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport, presentNativeBrowserGuest,
+  openAgentBrowserHold, claimNativeBrowserGuest, settleAgentBrowserHold } from "../work-live-view";
 
 type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal; presentation?: "foreground" | "background"; onScreenshot?: (capture: { png: Buffer; isCurrent: () => boolean }) => void | Promise<void> };
 type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; lastPresentationAt?: number; detach: () => void };
@@ -29,6 +30,8 @@ const MAX_SESSIONS = 8;
 /** Preserve host-owned capture diagnostics without leaking arbitrary CDP errors. */
 export function nativeBrowserCommandFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
+  // The tab-limit refusal carries its way out; the agent must be able to read it.
+  if (message.startsWith("native-browser-tab-limit: ")) return message;
   return /^native-browser-(?:capture-(?:unavailable|busy|budget-exceeded|queue-full|stale(?:-task)?|timeout|empty)|screenshot-(?:format-unsupported|stale|clip-invalid|beyond-viewport-unsupported)|grant-revoked|target-missing)$/.test(message)
     ? message : "native-browser-command-failed";
 }
@@ -76,6 +79,8 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   const leases = new Map<string, Lease>();
   let closed = false;
   let port = 0;
+  // One hold per run grant: tabs this run opens close when the grant is released.
+  const holdId = openAgentBrowserHold({ runId: input.runId, isLive: () => !closed && !input.signal.aborted });
   const server = http.createServer();
   const websocket = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const current = () => !closed && !input.signal.aborted && nativeBrowserTaskOwner(input.chatId)?.ownerId === owner.ownerId
@@ -113,6 +118,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     const wc = nativeBrowserGuest(owner.ownerId, input.chatId, viewId);
     if (!wc || reservedGuests.has(reservation)) throw new Error("native-browser-guest-busy");
     reservedGuests.add(reservation);
+    claimNativeBrowserGuest(owner.ownerId, input.chatId, viewId, holdId);
     if (wc.debugger.isAttached()) { reservedGuests.delete(reservation); throw new Error("native-browser-debugger-busy"); }
     try { wc.debugger.attach("1.3"); }
     catch { reservedGuests.delete(reservation); throw new Error("native-browser-debugger-unavailable"); }
@@ -168,8 +174,11 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   };
   const createGuest = async (lease: Lease, url = "about:blank") => {
     if (url !== "about:blank" && !sanitizeWorkLiveUrl(url)) throw new Error("native-browser-navigation-denied");
-    const created = await createWorkBrowserTab(owner.ownerId, input.chatId, url);
-    if (!created.ok || !created.tab) throw new Error(created.reason ?? "native-browser-create-failed");
+    const created = await createWorkBrowserTab(owner.ownerId, input.chatId, url, { holdId });
+    if (!created.ok || !created.tab) {
+      throw new Error(created.reason === "browser-tab-limit" && created.message
+        ? `native-browser-tab-limit: ${created.message}` : created.reason ?? "native-browser-create-failed");
+    }
     try {
       if (!current() || !leases.has(lease.id)) throw new Error("native-browser-grant-revoked");
       return await addGuest(lease, created.tab.viewId);
@@ -395,7 +404,17 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       });
       ws.once("close", () => releaseLease(lease));
       });
-    }).catch(() => { releaseLease(lease); socket.destroy(); });
+    }).catch((error: unknown) => {
+      releaseLease(lease);
+      // A tab-limit refusal is the one failure here with a way out; say it
+      // instead of dropping the connection without a reason.
+      const message = error instanceof Error && error.message.startsWith("native-browser-tab-limit: ") ? error.message : "";
+      if (message && !socket.destroyed) {
+        const body = JSON.stringify({ error: message });
+        try { socket.end(`HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`); return; } catch {}
+      }
+      socket.destroy();
+    });
   });
   const release = () => {
     if (closed) return;
@@ -406,6 +425,10 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     for (const lease of [...leases.values()]) releaseLease(lease);
     websocket.close();
     server.close();
+    // The run settled (success, failure, cancel, interrupt, window or host
+    // shutdown all end here): close the tabs it opened unless the owner is
+    // watching one right now.
+    settleAgentBrowserHold(holdId);
   };
   const unregisterShutdown = onHostShutdown(release);
   input.signal.addEventListener("abort", release, { once: true });
