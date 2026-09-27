@@ -316,6 +316,21 @@ function MailList({ mail, locale, notice, setNotice, focusThreadId = null }: {
   );
 }
 
+/** ↓/↑ move between rows of the list; Home/End jump to its ends. */
+function moveRowFocus(event: KeyboardEvent<HTMLDivElement>): void {
+  const delta = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+  const edge = event.key === "Home" ? "first" : event.key === "End" ? "last" : null;
+  if (!delta && !edge) return;
+  const list = event.currentTarget.closest("[role=list]");
+  if (!list) return;
+  const rows = [...list.querySelectorAll<HTMLElement>(":scope > [role=listitem]")];
+  const at = rows.indexOf(event.currentTarget);
+  const target = edge === "first" ? rows[0] : edge === "last" ? rows[rows.length - 1] : rows[at + delta];
+  if (!target) return;
+  event.preventDefault();
+  target.focus();
+}
+
 function ThreadRow({ thread, mail, locale, onError }: {
   thread: AgentMailThreadSummary;
   mail: OneMailState;
@@ -340,7 +355,8 @@ function ThreadRow({ thread, mail, locale, onError }: {
   };
   const onKey = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget) return;
-    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); }
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); return; }
+    moveRowFocus(event);
   };
   return (
     <div
@@ -413,7 +429,7 @@ function DraftRow({ draft, mail, locale }: { draft: AgentMailDraft; mail: OneMai
       data-checked={checked ? "true" : "false"}
       data-one-mail-draft={draft.id}
       onClick={open}
-      onKeyDown={(event) => { if (event.target === event.currentTarget && (event.key === "Enter" || event.key === " ")) { event.preventDefault(); open(); } }}
+      onKeyDown={(event) => { if (event.target !== event.currentTarget) return; if (event.key === "Enter" || event.key === " ") { event.preventDefault(); open(); return; } moveRowFocus(event); }}
     >
       <input type="checkbox" className={styles.check} checked={checked} onClick={(event) => event.stopPropagation()} onChange={() => mail.toggleChecked(draft.id)} aria-label={tFor(locale, "one.mail.select_row", { subject: draft.subject || tFor(locale, "one.mail.no_subject") })} />
       <span className={styles.rowSender}><span className={styles.draftTag}>{tFor(locale, "one.mail.draft_tag")}</span><span>{to}</span></span>

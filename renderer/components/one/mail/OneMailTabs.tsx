@@ -2,7 +2,7 @@
 
 // Top underline tabs for One's settings (owner design 2026-09-26): each concern
 // on its own tab instead of one long scroll — profile · mail · directory · domain.
-import { useState } from "react";
+import { useState, type KeyboardEvent } from "react";
 import type { Locale } from "@/lib/i18n";
 import { OneMailSettings } from "./OneMailSettings";
 import styles from "./OneMail.module.css";
@@ -22,14 +22,32 @@ function Tabs<T extends OneEditTab>({ locale, items, value, onChange, label }: {
   onChange: (tab: T) => void;
   label: string;
 }) {
+  // Roving tabindex (WAI-ARIA tabs): one Tab stop for the row, arrows/Home/End move
+  // and select (QA 2026-09-27: arrows did nothing and Tab walked every tab).
+  const onKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    const index = items.indexOf(value);
+    let next = -1;
+    if (event.key === "ArrowRight") next = (index + 1) % items.length;
+    else if (event.key === "ArrowLeft") next = (index - 1 + items.length) % items.length;
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = items.length - 1;
+    if (next < 0) return;
+    event.preventDefault();
+    onChange(items[next]);
+    const tabs = event.currentTarget.querySelectorAll<HTMLButtonElement>("[role=tab]");
+    tabs[next]?.focus();
+    // The profile panel mounts with an autoFocus field; keep focus on the tab row.
+    requestAnimationFrame(() => tabs[next]?.focus());
+  };
   return (
-    <div className={styles.topTabs} role="tablist" aria-label={label}>
+    <div className={styles.topTabs} role="tablist" aria-label={label} onKeyDown={onKeyDown}>
       {items.map((item) => (
         <button
           key={item}
           type="button"
           role="tab"
           aria-selected={value === item}
+          tabIndex={value === item ? 0 : -1}
           data-active={value === item ? "true" : "false"}
           data-one-edit-tab={item}
           onClick={() => onChange(item)}

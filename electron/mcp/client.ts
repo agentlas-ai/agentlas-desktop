@@ -255,6 +255,7 @@ import {
   pickRunner,
   pinnedRuntimeCredentialOrModelUnavailable,
   rolePriorityRuntimes,
+  runtimeDisplayName,
   selectInvocationRuntime,
 } from "../runtime/selection";
 import { pickLocale, tStatus } from "../runtime/status-i18n";
@@ -2861,7 +2862,7 @@ ${effectiveUserPrompt}`;
     return earlyResult();
   }
   bindInvocationJudgmentRuntime(confirmedRuntime);
-  const runtimeLabel = `${confirmedRuntime.kind}${confirmedRuntime.model ? ` · ${confirmedRuntime.model}` : ""}`;
+  const runtimeLabel = `${runtimeDisplayName(confirmedRuntime.kind)}${confirmedRuntime.model ? ` · ${confirmedRuntime.model}` : ""}`;
   console.info(
     `[runtime-selection] run=${req.runId ?? "-"} node=${executionContext?.nodeId ?? "root"} `
       + `kind=${confirmedRuntime.kind} backend=${confirmedRuntime.backend ?? "-"} `
@@ -2875,12 +2876,15 @@ ${effectiveUserPrompt}`;
     notice: {
       level: "info",
       code: "runtime-selected",
+      // The label is usually an English product name, where 을/를 cannot be decided
+      // from the last syllable (koSubjectParticle falls back to "이(가)"). A labelled
+      // clause needs no particle, so no "을(를)" machine seam reaches the screen.
       message: locale === "ko"
-        ? `이번 실행은 ${runtimeLabel}을(를) 사용하도록 선택했습니다. 실제 호출 결과를 확인 중입니다.`
-        : `This run is connected to ${runtimeLabel}.`,
+        ? `이번 실행에 고른 AI: ${runtimeLabel}. 실제로 호출되는지 확인하고 있습니다.`
+        : `This run uses ${runtimeLabel}; checking that the call goes through.`,
       i18n: {
-        ko: `이번 실행은 ${runtimeLabel}을(를) 사용하도록 선택했습니다. 실제 호출 결과를 확인 중입니다.`,
-        en: `This run selected ${runtimeLabel}; the actual invocation result is still being verified.`,
+        ko: `이번 실행에 고른 AI: ${runtimeLabel}. 실제로 호출되는지 확인하고 있습니다.`,
+        en: `This run uses ${runtimeLabel}; checking that the call goes through.`,
       },
       details: JSON.stringify(confirmedRuntime),
     },

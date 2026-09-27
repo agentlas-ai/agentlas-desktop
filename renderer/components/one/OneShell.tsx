@@ -1375,6 +1375,8 @@ export function OneShell() {
   // Runs whose terminal this screen already settled: Main can still list one as
   // active for a moment (cancelling), and attaching to it hides the next run.
   const settledRunIdsRef = useRef<Set<string>>(new Set());
+  // Runs whose invoke.run call has not answered yet (Main is still admitting them).
+  const admittingRunIdsRef = useRef<Set<string>>(new Set());
   // Set by the active-chat listener below; settleRun asks it to follow a next turn.
   const followActiveRunRef = useRef<(chatId: string) => void>(() => undefined);
   // The "saved, continues after the current run" notice describes the queue; it
@@ -4097,6 +4099,8 @@ export function OneShell() {
           idleCheck = setTimeout(() => {
             idleCheck = null;
             if (runIdRef.current !== missedRunId || runChatIdRef.current !== chatId) return;
+            // Still being admitted: it has not started, let alone finished.
+            if (admittingRunIdsRef.current.has(missedRunId)) return;
             if (cancelNoticeRunIdRef.current === missedRunId) {
               const notice = cancelNoticeTextRef.current;
               cancelNoticeRunIdRef.current = null;
@@ -4197,11 +4201,13 @@ export function OneShell() {
     const reconcile = async () => {
       if (cancelled || (typeof document !== "undefined" && document.hidden)) return;
       try {
+        if (admittingRunIdsRef.current.has(expectedRunId)) return;
         const activeChatIds = await api.invoke.activeChats();
         if (
           cancelled
           || runIdRef.current !== expectedRunId
           || activeChatIds.includes(chatId)
+          || admittingRunIdsRef.current.has(expectedRunId)
         ) return;
         // Main has already settled this chat. Clear only this run's renderer
         // projection, then reload the durable transcript/task receipt.
@@ -4729,6 +4735,11 @@ export function OneShell() {
         : "The request ID could not be preserved across a restart, so the run was not sent. Check Desktop storage.");
       return;
     }
+    // Main may spend seconds admitting (preflight judges, runtime checks) before it
+    // lists this chat as active. Until invoke.run answers, "not active" means "not
+    // yet", never "already finished" (QA 2026-09-27: settled 0.7s after sending,
+    // the stream stayed blank and the answer appeared ~9s late).
+    admittingRunIdsRef.current.add(runId);
     try {
       await api.invoke.run({
         runId,
@@ -4757,6 +4768,7 @@ export function OneShell() {
         ...(options?.overrides?.sessionRouting ? { sessionRouting: true } : { sessionRouting: false }),
         ...(options?.overrides?.fastMode ? { fastMode: true } : {}),
       });
+      admittingRunIdsRef.current.delete(runId);
       clearOneUncertainAdmission(chatId, runId);
       if (options?.preflightSubmissionId && activeThreadChatIdRef.current === chatId) {
         setPreflightSteerReceipts(await api.invoke.preflightSteers(chatId).catch(() => []));
@@ -4803,6 +4815,7 @@ export function OneShell() {
           : "The run was accepted. The view could not refresh yet; do not resend the request.");
       }
     } catch (cause) {
+      admittingRunIdsRef.current.delete(runId);
       try { if (await reconcileAcceptedAdmission(runId, cause)) return; }
       catch { /* An unavailable receipt remains ambiguous, never rejected. */ }
       const controlFailure = goalAdmissionControlFailure(cause, runLocale === "ko");

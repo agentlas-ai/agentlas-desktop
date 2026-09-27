@@ -90,7 +90,13 @@ check("Work — 사진이 있었으면 다시 첨부해야 한다고 말한다(�
     "Work 제출 실패",
   );
   assert.match(block, /hadImages/, "사진 유무를 구분하지 않습니다");
-  assert.match(block, /다시 첨부/, "사진을 되돌릴 수 없다는 사실을 사용자에게 말하지 않습니다");
+  // The sentence moved into startFailureText(cause, locale, hadImages); the block passes
+  // hadImages to it. Check the helper's words, not the block's text.
+  const said = /다시 첨부/.test(block) || (
+    /startFailureText\([^)]*hadImages\)/.test(block)
+    && /function startFailureText[\s\S]*?hadImages[^\n]*다시 첨부/.test(workSource)
+  );
+  assert.ok(said, "사진을 되돌릴 수 없다는 사실을 사용자에게 말하지 않습니다");
 });
 
 check("어떤 표면도 '보존했다'고만 말하고 끝내지 않는다", () => {

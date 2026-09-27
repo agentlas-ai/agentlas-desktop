@@ -4,6 +4,7 @@ import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { selectionForRuntime } from "@shared/runtime-selection";
+import { isInterruptedPartial, markInterruptedPartial } from "@shared/interrupted-partial";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
@@ -3499,6 +3500,9 @@ function ChatPage() {
             if (!msg.text || !msg.text.trim()) return [];
             return [{
               ...msg,
+              // Same banner Main stores with the partial (One shows it via history):
+              // without it a cut-off stream reads as the finished answer.
+              text: isInterruptedPartial(msg.text) ? msg.text : markInterruptedPartial(msg.text, locale),
               busy: false,
               streaming: false,
               finishedAt: Date.now(),

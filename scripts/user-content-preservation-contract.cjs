@@ -212,13 +212,19 @@ check("★화면까지 배선되어 있다(IPC · preload · 시트 · 마운트
   assert.match(shell, /<ToolApprovalSheet \/>/, "전역 배지가 마운트되지 않았다");
   for (const rel of ["renderer/components/one/OneShell.tsx", "renderer/components/TaskCockpit.tsx"]) {
     const src = fs.readFileSync(path.join(root, rel), "utf8");
-    assert.match(src, /<ToolApprovalInline chatId=/, `${rel} 이 대화 안에 승인 카드를 그리지 않는다`);
+    // Prop order is not the contract (One passes permission= first since 2fcba3f7).
+    assert.match(src, /<ToolApprovalInline\b[^>]*\bchatId=/, `${rel} 이 대화 안에 승인 카드를 그리지 않는다`);
   }
 });
 
 check("★승인은 경계를 넘을 때만 묻는다 — 권한 범위 안은 처음부터 허용", () => {
   const ipcSrc = fs.readFileSync(path.join(root, "electron/ipc.ts"), "utf8");
-  const arb = ipcSrc.slice(ipcSrc.indexOf("setAcpPermissionArbiter(async"), ipcSrc.indexOf("onToolApprovalRequested((request)"));
+  // 5484e7fc generalized the ACP arbiter to every runtime (setRuntimeToolPermissionArbiter).
+  // indexOf(-1) on the old name sliced garbage, so every rule below "failed" while present.
+  const arbStart = ["setRuntimeToolPermissionArbiter(async", "setAcpPermissionArbiter(async"]
+    .map((name) => ipcSrc.indexOf(name)).find((index) => index >= 0) ?? -1;
+  assert.ok(arbStart >= 0, "권한 중재자가 등록되지 않았다");
+  const arb = ipcSrc.slice(arbStart, ipcSrc.indexOf("onToolApprovalRequested((request)"));
   assert.match(arb, /ask\.permission === "full"\) return "allow_session"/, "full 이 묻는다");
   assert.match(arb, /!ask\.mutating\) return/, "비변이 도구가 묻는다");
   assert.match(arb, /ask\.permission === "write"\) return "allow_session"/, "write 범위 안 변이가 묻는다");
@@ -240,13 +246,15 @@ check("★실행 전에 묻는 런타임(ACP)은 사용자에게 묻는다", () 
   const acp = path.join(root, "electron/runtime/acp.ts");
   if (!fs.existsSync(acp)) { console.log("       (acp.ts 없음 — 건너뜀)"); return; }
   const src = fs.readFileSync(acp, "utf8");
-  // 결합은 주입이다 — acp 는 승인 계약 파일을 import 하지 않는다(커밋 순서 독립).
-  assert.ok(!/from "\.\/tool-approval"/.test(src), "acp 가 승인 계약을 직접 import 한다(주입이어야 함)");
-  assert.match(src, /setAcpPermissionArbiter/, "arbiter 주입 지점이 없다");
+  // 결합은 주입이다 — acp 는 중재자 등록처(get/setRuntimeToolPermissionArbiter)만 쓰고,
+  // 사람에게 묻는 live 승인 계약(requestToolApproval)은 직접 부르지 않는다. 등록처가
+  // tool-approval.ts 로 옮겨진 뒤(5484e7fc) "그 파일 import 금지"는 설계가 아니라 옛 위치였다.
+  assert.ok(!/\brequestToolApproval\b/.test(src), "acp 가 live 승인 계약을 직접 부른다(주입이어야 함)");
+  assert.match(src, /setAcpPermissionArbiter|getRuntimeToolPermissionArbiter/, "arbiter 주입 지점이 없다");
   assert.match(src, /async answerPermission/, "승인 응답이 동기라 사용자에게 물을 수 없다");
 
   const ipcSrc = fs.readFileSync(path.join(root, "electron/ipc.ts"), "utf8");
-  assert.match(ipcSrc, /setAcpPermissionArbiter\(/, "arbiter 가 등록되지 않아 ACP 는 여전히 대신 답한다");
+  assert.match(ipcSrc, /set(?:Acp|RuntimeTool)PermissionArbiter\(/, "arbiter 가 등록되지 않아 ACP 는 여전히 대신 답한다");
   assert.match(ipcSrc, /requestToolApproval\(/, "ACP arbiter 가 live 승인 계약을 쓰지 않는다");
 });
 

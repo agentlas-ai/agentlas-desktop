@@ -157,7 +157,7 @@ function makeCopy(ko: boolean, name: string) {
   return ko ? {
     back: "이전", next: "계속", skip: "건너뛰기", saving: "저장하는 중…",
     nameTitle: "에이전트 이름을 정해주세요.", nameSub: "One 대신 이 이름으로 불리게 됩니다.",
-    nameLabel: "에이전트 이름", namePlaceholder: "예: 루나", namePreview: (n: string) => `안녕하세요, ${n}입니다.`,
+    nameLabel: "에이전트 이름", namePlaceholder: "예: 루나", namePreview: (n: string) => `안녕하세요, ${n}입니다.`, namePreviewEmpty: "이름을 적으면 여기에서 첫인사를 미리 볼 수 있어요.",
     nameHint: "나중에 프로필에서 언제든 바꿀 수 있어요.",
     browserTitle: "Chrome을 연결할까요?", browserSub: "에이전트가 로그인된 서비스를 쓰며 일하기 쉬워져요.",
     chromeName: "Google Chrome", chromeSub: "이 기기의 Chrome 프로필에서 가져올 사이트를 고릅니다.",
@@ -210,7 +210,7 @@ function makeCopy(ko: boolean, name: string) {
   } : {
     back: "Back", next: "Continue", skip: "Skip", saving: "Saving…",
     nameTitle: "Name your agent.", nameSub: "Your agent goes by this name instead of One.",
-    nameLabel: "Agent name", namePlaceholder: "e.g. Luna", namePreview: (n: string) => `Hi, I'm ${n}.`,
+    nameLabel: "Agent name", namePlaceholder: "e.g. Luna", namePreview: (n: string) => `Hi, I'm ${n}.`, namePreviewEmpty: "Type a name to preview its greeting here.",
     nameHint: "You can change it anytime in the profile.",
     browserTitle: "Connect Chrome?", browserSub: "Your agent can work in the services you're already signed in to.",
     chromeName: "Google Chrome", chromeSub: "Pick the sites to bring over from a Chrome profile on this computer.",
@@ -651,7 +651,9 @@ export function FirstRunOnboarding({
                   onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && name.trim()) void saveName(); }}
                 />
               </div>
-              <div className={styles.preview} aria-live="polite">{copy.namePreview(name.trim() || (ko ? "루나" : "Luna"))}</div>
+              {/* The placeholder "루나" is an example, not a value: with no name typed the
+                  preview used it as if the agent were already called that (QA 2026-09-27). */}
+              <div className={styles.preview} aria-live="polite" data-empty={name.trim() ? undefined : "true"}>{name.trim() ? copy.namePreview(name.trim()) : copy.namePreviewEmpty}</div>
               <p className={styles.hint}>{copy.nameHint}</p>
             </>
           )}

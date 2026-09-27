@@ -161,6 +161,16 @@ const RUNNER_LABEL: Record<string, string> = {
   agentlas: "Agentlas",
 };
 
+/**
+ * The name a person reads for a runtime kind ("Claude Code", not "claude-code").
+ * Chat copy used the raw kind (QA 2026-09-27: "claude-code을(를) 사용하도록 선택했습니다").
+ */
+export function runtimeDisplayName(kind: string): string {
+  const label = RUNNER_LABEL[kind];
+  if (!label) return kind;
+  return label.replace(/ CLI$/, "");
+}
+
 export interface RuntimeChoice {
   active: RuntimeStatus;
   picked: { runner: Runner; label: string } | null;
