@@ -1229,6 +1229,7 @@ const api: AgentlasIpc = {
     clearHistory: (chatId: string) =>
       ipcRenderer.invoke("invoke:clearHistory", chatId),
     activeChats: () => ipcRenderer.invoke("invoke:activeChats"),
+    goalActiveChats: () => ipcRenderer.invoke("invoke:goalActiveChats"),
     attach: (chatId: string, options?: { includeEvents?: boolean }) => ipcRenderer.invoke("invoke:attach", chatId, options),
     receipt: (runId: string) => ipcRenderer.invoke("invoke:receipt", runId),
     admission: (runId: string) => ipcRenderer.invoke("invoke:admission", runId),

@@ -264,8 +264,11 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   const defer = (detail: string): BlockedGoalSweepResult => ({ runId: run.id, fromReason: run.blockedReason, action: "deferred", detail });
   // An owner/user pause is a boundary: no observation, retry or resume until the owner resumes it.
   if (longRunOwnerHold(run.id)) return defer(LONG_RUN_OWNER_HOLD_CODE);
-  // A system-admitted Goal that spent its automatic retries settles (evidence) or waits for the owner.
-  if (isAutomaticGoal(run) && (run.blockedReason === AUTO_GOAL_OWNER_REVIEW_REQUIRED || automaticGoalAtRetryCap(run))) {
+  // A system-admitted Goal that spent its automatic retries settles (evidence) or waits for the owner — but not while
+  // it is stopped on an uncertain effect: that is answered by the read-only observation below, never by a person
+  // (owner direction 2026-09-27).
+  if (isAutomaticGoal(run) && (run.blockedReason === AUTO_GOAL_OWNER_REVIEW_REQUIRED
+    || (automaticGoalAtRetryCap(run) && !(run.status === "blocked" && isEffectUncertainBlockReason(run.blockedReason))))) {
     return defer(settleCappedAutomaticGoal(run, currentUiLocale() === "ko" ? "ko" : "en") ?? AUTO_GOAL_OWNER_REVIEW_REQUIRED);
   }
 

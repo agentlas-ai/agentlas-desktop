@@ -48,11 +48,28 @@ export function parseGoalWaitIntent(text: string): { text: string; request: Pars
   } catch { return invalid("goal_wait_request_malformed"); }
 }
 
-export function goalWaitProtocol(): string {
+/**
+ * Timer waits are admitted only for ongoing Goals (wait-subscriptions: goal_wait_ongoing_authority_required).
+ * Measured 2026-09-27 (owner's "X Marketing" One goal, lifecycle finite): the protocol advertised the timer
+ * subject to every Goal, the model twice requested a one-week follow-up timer, the host refused it twice
+ * ("The wait was not registered…") and the automatic-goal cap stopped the goal. A finite Goal is told the
+ * truth instead: no timer; finish the turn and name the later check in the reply.
+ */
+export function goalWaitProtocol(lifecycle?: "finite" | "ongoing" | null): string {
   return `When this Goal must wait for an already observed Desktop invocation or an existing artifact input to change, request a durable wait and end this turn. Do not repeatedly call a model to poll unchanged state. Waits are checked only while the app is running. Do not promise a wait was accepted; the host returns a durable registration receipt. Do not declare the Goal complete in the same response. Only use actual IDs already observed; never invent a subject. CI, arbitrary URLs and other external jobs currently need their own supported monitor and cannot be represented as an invocation ID.
 Emit at most one block:
 \`\`\`agentlas-goal-wait
 {"schemaVersion":"agentlas.goal-wait-intent.v1","subject":{"kind":"invocation","invocationRunId":"observed ID","chatId":"observed chat ID"},"condition":"terminal","nextAction":"What to inspect after it settles","deadline":null}
 \`\`\`
-For a saved artifact input, use subject {"kind":"artifact","artifactId":"observed artifact ID"} and condition "changed". For an explicitly ongoing Goal, use subject {"kind":"timer","notBefore":"future ISO timestamp"} and condition "due" to wait until the next useful work cycle. Respect the user's cadence, and inspect current external state before acting; never repeat an already completed post or purchase. Timer waits cannot be earlier than one minute from now. A requested deadline must be an ISO timestamp; null preserves no user-imposed deadline. New user directions, Stop and changed Goal authority always override this request.`;
+For a saved artifact input, use subject {"kind":"artifact","artifactId":"observed artifact ID"} and condition "changed". ${lifecycle !== "finite"
+    ? `For an explicitly ongoing Goal, use subject {"kind":"timer","notBefore":"future ISO timestamp"} and condition "due" to wait until the next useful work cycle. Respect the user's cadence, and inspect current external state before acting; never repeat an already completed post or purchase. Timer waits cannot be earlier than one minute from now.`
+    : `This Goal is a one-time (finite) Goal: a timer subject is refused unless a goal deadline is stated below. Without one, when the remaining outcome can only be measured later (followers, views, replies next week), do not request a wait: finish this turn normally, and state in your reply what should be re-measured and when, so the owner can ask for continued tracking.`} A requested deadline must be an ISO timestamp; null preserves no user-imposed deadline. New user directions, Stop and changed Goal authority always override this request.`;
+}
+
+/**
+ * Per-turn clause for a finite Goal whose current revision has a host-resolved deadline (goal-deadline.ts): it may
+ * wait for its next work cycle up to the deadline; the host moves a later request to the deadline itself.
+ */
+export function goalDeadlineWaitClause(deadlineAt: string): string {
+  return `This Goal has a deadline: ${deadlineAt}. Until then, keep working toward its target in bounded work cycles. When the next useful step is later (results need time to show), request the timer subject {"kind":"timer","notBefore":"future ISO timestamp"} with condition "due"; notBefore may not be later than the deadline (a later request is moved to the deadline). Inspect current external state before acting and never repeat a completed post or purchase. At the deadline, measure the target and finish the turn without a wait so it is verified.`;
 }

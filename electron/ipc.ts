@@ -1,4 +1,5 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
+import { goalActiveChatIds } from "./store/goal-active-chats";
 import { acknowledgeUncertainLongRunAttempts, getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { adoptExplicitGoalGrant } from "./long-run/explicit-goal-authority";
@@ -7016,6 +7017,8 @@ export function registerIpcHandlers(): void {
       invocationService.unsteer(req.chatId, req.position, req.text),
   );
   ipcMain.handle("invoke:activeChats", () => invocationService.activeChatIds());
+  // 목표가 살아 있어 턴 사이에서 다음 실행을 기다리는 대화(사이드바 혜성). 실행 권한 판단에는 안 쓴다.
+  ipcMain.handle("invoke:goalActiveChats", () => goalActiveChatIds());
   ipcMain.handle("invoke:attach", (_event, chatId: string, options?: { includeEvents?: boolean }) =>
     invocationService.attach(chatId, { includeEvents: options?.includeEvents !== false }));
   ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));

@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.2.46 — 2026-09-28
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Question cards in One and Work always show Submit, Skip and an "Other" answer field; the card
+  closes the moment you press and your answer appears right away. A host note under a question
+  no longer makes the question expire, and Skip now actually answers the agent.
+- One can create a new teammate and invite it into a group chat by itself.
+- Running conversations and group chats show a small comet circling their border, including a
+  Goal waiting for its next turn; it stops as soon as the run or Goal ends.
+- Goals no longer wake every 10 minutes when only you can unblock them: they tell you once in
+  the Goal chat and wait for your reply. Completed, out-of-budget and stalled Goals stop, and a
+  failed run backs off for two hours.
+- A message sent with a file or folder no longer appears twice, and the internal file marker is
+  never shown.
+- An answer already saved in a Goal is no longer saved again as an interrupted answer after a
+  new instruction, and helper-agent text no longer leaks into One's reply.
+- Pasted images and files are attached once, not twice.
+- Codex team planning no longer fails at the start with an output schema error.
+- Unrelated plugins are no longer attached to requests because of Goal checklist wording.
+- First-run setup sits in the middle of the window with a single-line input border, and the
+  plan card shows each plan's agent mail allowance.
+
 ## 1.2.45 — 2026-09-27
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.

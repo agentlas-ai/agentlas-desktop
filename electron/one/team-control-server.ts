@@ -5,6 +5,8 @@ import { randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import {
+  oneTeamCreateMember,
+  oneTeamInvite,
   oneTeamList,
   oneTeamSessionStatus,
   oneTeamStartSession,
@@ -81,6 +83,8 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
     case "start": return oneTeamStartSession(binding, { member: request.member, brief: request.brief, newSession: request.newSession });
     case "steer": return oneTeamSteer(binding, { sessionId: request.sessionId, message: request.message });
     case "status": return oneTeamSessionStatus(binding, { sessionId: request.sessionId, waitSeconds: request.waitSeconds });
+    case "create": return oneTeamCreateMember(binding, { name: request.name, role: request.role, personality: request.personality, invite: request.invite });
+    case "invite": return oneTeamInvite(binding, { member: request.member });
     default: throw new Error("one-team-unknown-operation");
   }
 }

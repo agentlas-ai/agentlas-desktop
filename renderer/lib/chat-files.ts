@@ -68,6 +68,16 @@ export function parseChatFileMessage(text: string): { visibleText: string; group
   return { visibleText, groupIds };
 }
 
+/**
+ * The prompt Main runs carries the attachment marker; the bubble the person saw
+ * carries only their words. They are the same turn. Comparing raw strings made
+ * One add a second bubble — and render the raw marker in it — for every send
+ * with a file or folder (owner, "Youtube launch" taskforce, 2026-09-27).
+ */
+export function isSameChatPrompt(left: string, right: string): boolean {
+  return parseChatFileMessage(left).visibleText.trim() === parseChatFileMessage(right).visibleText.trim();
+}
+
 function extOf(name: string): string {
   const leaf = name.replaceAll("\\", "/").split("/").pop() ?? name;
   const dot = leaf.lastIndexOf(".");

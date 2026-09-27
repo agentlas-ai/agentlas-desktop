@@ -24,7 +24,9 @@ import { RUNTIME_BACKENDS } from "./runtime-backends";
  * Electron main process and Flutter protocol generator can share one strict
  * JSON contract. Secrets, absolute paths, private system/provider prompts,
  * environment values, cookies, and provider session identifiers are never part
- * of these DTOs. User-visible transcript text is sanitized and byte-bounded.
+ * of metadata DTOs. The owner-only agents.cloudFiles read separately returns
+ * authenticated package source requested by the owner. User-visible transcript
+ * text is sanitized and byte-bounded.
  */
 
 export const MOBILE_BRIDGE_PROTOCOL_VERSION = 1 as const;
@@ -175,6 +177,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "hephaestus.routePreview",
   "ontology.projections.list",
   "ontology.attach.resolve",
+  "agents.cloudFiles",
   "agents.cloudUploadPreview",
   "agents.cloudUploadSave",
   "agents.cloudPublishHub",
@@ -3493,6 +3496,16 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         : "hephaestus.routePreview contains unsupported fields";
     case "ontology.attach.resolve":
       return validateOntologyAttach(params);
+    case "agents.cloudFiles":
+      return hasOnlyKeys(params, ["manifestId", "path", "packageHash"])
+        ? firstError(
+            requiredString(params, "manifestId", 256),
+            optionalString(params, "path", 1024),
+            optionalString(params, "packageHash", 64),
+            params.path !== undefined && (typeof params.packageHash !== "string" || !/^[a-f0-9]{64}$/i.test(params.packageHash))
+              ? "File reads require an exact package hash" : null,
+          )
+        : "agents.cloudFiles accepts only manifestId, path, and packageHash";
     case "agents.cloudUploadPreview":
       return hasOnlyKeys(params, ["agentLocalId"])
         ? requiredString(params, "agentLocalId")

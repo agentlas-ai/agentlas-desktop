@@ -297,6 +297,27 @@ function pendingQuestionMessage(chatId: string, sourceMessageId?: string): { id:
 }
 
 /**
+ * 지금 떠 있어야 할 질문 — 마지막 행이 아니라 "사용자 메시지가 나오기 전까지 거슬러 올라가 만난 질문".
+ *
+ * ★확정·미루기·모바일 접수·후속 실행은 이미 이 규칙(pendingQuestionMessage)을 쓰는데, 목록만
+ *   "마지막 행이 질문"을 요구했다 (격리 앱 실측 2026-09-27): 질문 뒤에 앱이 "아직 답을 기다린다"
+ *   말풍선을 붙이면 One 카드가 통째로 사라져 답할 길이 없었다. 목록도 같은 규칙으로 본다.
+ *   거슬러 보는 폭은 최근 8행 — 질문 뒤에 호스트 말풍선이 그보다 많이 쌓이는 일은 없다.
+ */
+function latestOpenQuestionMessage(chatId: string): { id: string; role: string; text: string; createdAt: string } | null {
+  const rows = getDb()
+    .prepare("SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 8")
+    .all(chatId) as Array<{ id: string; role: string; text: string; created_at: string }>;
+  for (const row of rows) {
+    if (row.role === "user") return null;
+    if (row.role === "assistant" && row.text.includes(OPEN) && firstQuestion(row.text)) {
+      return { id: row.id, role: row.role, text: row.text, createdAt: row.created_at };
+    }
+  }
+  return null;
+}
+
+/**
  * Desktop 바텀시트가 답변을 제출한 순간 호출 — 지금 대기 중인 정확한 질문을 확인하고
  * 확정 영수증을 남긴다. 이후 후속 실행이 어떤 분기로 빠지든 이 질문은 다시 뜨지 않는다.
  */
@@ -424,13 +445,13 @@ export function getCommittedQuestionContinuation(
 
 /** A not-yet-started intent may run only while its exact Decision is still current. */
 export function committedQuestionContinuationIsCurrent(chatId: string, sourceMessageId: string): boolean {
-  const last = getLastChatMessage(chatId);
-  return Boolean(
-    last
-    && last.id === sourceMessageId
-    && last.role === "assistant"
-    && firstQuestion(last.text),
-  );
+  /*
+   * ★"마지막 메시지여야 한다" 규칙이 여기 하나 더 남아 있었다 (격리 앱 실측 2026-09-27, Work).
+   *   질문 뒤에 앱이 "아직 답을 기다린다" 같은 말풍선을 붙이면, 확정(commit)은 받아 주고
+   *   후속 실행은 invalid-intent 로 거절했다 — 답은 저장됐는데 에이전트는 영영 못 받았다.
+   *   확정·미루기·모바일 접수와 같은 규칙을 쓴다: 그 뒤에 사용자 메시지가 없는 질문이면 현재다.
+   */
+  return Boolean(sourceMessageId && pendingQuestionMessage(chatId, sourceMessageId)?.id === sourceMessageId);
 }
 
 /**
@@ -558,9 +579,8 @@ export function listPendingConfirmations(): PendingConfirmation[] {
   const out: PendingConfirmation[] = [];
   for (const c of listRecentChats(40)) {
     if (c.archivedAt) continue;
-    const last = getLastChatMessage(c.id);
-    if (!last || last.role !== "assistant") continue;
-    if (!last.text.includes(OPEN)) continue;
+    const last = latestOpenQuestionMessage(c.id);
+    if (!last) continue;
     const q = firstQuestion(last.text);
     if (!q) continue;
     // A committed answer is no longer an unanswered confirmation.  Continuation

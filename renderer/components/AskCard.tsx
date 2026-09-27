@@ -23,6 +23,25 @@ export interface AskCardOption {
   disabled?: boolean;
   /** 이 선택지가 지금 선택된 상태인지(키보드 이동·기본 추천 표시). */
   active?: boolean;
+  /**
+   * 여러 개 고르는 질문의 체크 상태. 값이 있으면 오른쪽에 체크 상자가 그려지고
+   * aria-pressed 가 붙는다 — 고른 것이 "화살표 강조"로만 보이면 사람은 그것이
+   * 이미 보낸 답인지 고른 상태인지 가를 수 없었다(오너 신고 2026-09-27).
+   */
+  checked?: boolean;
+}
+
+/**
+ * 카드 아래 동작 줄 — [보조(건너뛰기/닫기)] [주(제출)].
+ * 판단은 shared/ask-action-bar.ts 가 하고, 여기는 그 결과를 그린다.
+ */
+export interface AskCardActionRow {
+  notice?: string | null;
+  reason?: string | null;
+  hint?: string | null;
+  secondary?: { id: string; label: string; disabled?: boolean };
+  primary?: { id: string; label: string; disabled?: boolean };
+  onAction: (id: string, freeText: string) => void;
 }
 
 export function AskCard({
@@ -36,9 +55,15 @@ export function AskCard({
   onFreeTextChange,
   children,
   locale = "ko",
+  subtitle,
+  actionRow,
   "data-testid": testId,
 }: {
   title: string;
+  /** 제목 아래 한 줄 — 질문 본문. 제목이 짧은 머리말(header)일 때 무엇을 묻는지 보인다. */
+  subtitle?: string;
+  /** 아래 동작 줄. 있으면 footer 의 단일 단추 대신 이 줄이 답을 보내고 건너뛴다. */
+  actionRow?: AskCardActionRow;
   options: AskCardOption[];
   onChoose: (id: string, freeText: string) => void;
   onClose?: () => void;
@@ -61,6 +86,8 @@ export function AskCard({
     hideInput?: boolean;
     /** 사람이 이미 보기를 골라 둔 상태인가 — 라벨이 "건너뛰기"로 거짓말하지 않게. */
     hasSelection?: boolean;
+    /** 단추 없이 입력칸만 — 동작은 actionRow 가 맡는다. Enter 는 여전히 onSkip 을 부른다. */
+    hideButton?: boolean;
   };
   /** An explicit, keyboard-reachable row for the free-text answer. */
   otherOption?: { title: string; note?: string };
@@ -93,7 +120,10 @@ export function AskCard({
   return (
     <section className={styles.card} role="group" aria-label={title} data-ask-card="true" data-testid={testId}>
       <div className={styles.head}>
-        <p className={styles.title}>{title}</p>
+        <div className={styles.titleBlock}>
+          <p className={styles.title}>{title}</p>
+          {subtitle && subtitle !== title && <p className={styles.subtitle}>{subtitle}</p>}
+        </div>
         {onClose && (
           <button
             type="button"
@@ -115,6 +145,7 @@ export function AskCard({
             className={styles.option}
             data-active={option.active ? "true" : "false"}
             data-ask-option={option.id}
+            {...(option.checked !== undefined ? { "aria-pressed": option.checked, "data-checked": option.checked ? "true" : "false" } : {})}
             disabled={option.disabled}
             onClick={() => onChoose(option.id, currentFreeText.trim())}
           >
@@ -126,7 +157,9 @@ export function AskCard({
               </span>
               {option.note && <span className={styles.optionNote}>{option.note}</span>}
             </span>
-            {option.active && <span className={styles.arrow} aria-hidden="true">→</span>}
+            {option.checked !== undefined
+              ? <span className={styles.check} data-checked={option.checked ? "true" : "false"} aria-hidden="true">{option.checked ? "✓" : ""}</span>
+              : option.active && <span className={styles.arrow} aria-hidden="true">→</span>}
           </button>
         ))}
         {otherOption && (
@@ -172,9 +205,43 @@ export function AskCard({
                 }
               }}
             />}
-          <button type="button" className={styles.skip} onClick={() => footer.onSkip(currentFreeText.trim())}>
+          {!footer.hideButton && <button type="button" className={styles.skip} onClick={() => footer.onSkip(currentFreeText.trim())}>
             {askCardFooterLabel(footerState, footer)}
-          </button>
+          </button>}
+        </div>
+      )}
+
+      {actionRow && (
+        <div className={styles.actionRow} data-ask-action-row="true">
+          {actionRow.notice && <p className={styles.actionNotice} role="status" data-ask-action-notice="true">{actionRow.notice}</p>}
+          <div className={styles.actionButtons}>
+            <p className={styles.actionReason} data-ask-action-reason={actionRow.reason ? "true" : undefined} aria-live="polite">
+              {actionRow.reason ?? actionRow.hint ?? ""}
+            </p>
+            {actionRow.secondary && (
+              <button
+                type="button"
+                className={styles.actionSecondary}
+                data-ask-action={actionRow.secondary.id}
+                disabled={actionRow.secondary.disabled}
+                onClick={() => actionRow.onAction(actionRow.secondary!.id, currentFreeText.trim())}
+              >
+                {actionRow.secondary.label}
+              </button>
+            )}
+            {actionRow.primary && (
+              <button
+                type="button"
+                className={styles.actionPrimary}
+                data-ask-action={actionRow.primary.id}
+                disabled={actionRow.primary.disabled}
+                title={actionRow.primary.disabled && actionRow.reason ? actionRow.reason : undefined}
+                onClick={() => actionRow.onAction(actionRow.primary!.id, currentFreeText.trim())}
+              >
+                {actionRow.primary.label}
+              </button>
+            )}
+          </div>
         </div>
       )}
     </section>

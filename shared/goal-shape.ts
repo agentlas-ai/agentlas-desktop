@@ -34,6 +34,8 @@ export const GOAL_SHAPE_LIMITS = {
   strategies: 6,
   tactics: 12,
   keyResults: 6,
+  /** A resolved goal deadline further away than this is not accepted as a deadline. */
+  maxDeadlineDays: 400,
   boundaries: 10,
   text: 600,
   shortText: 200,
@@ -98,6 +100,13 @@ export interface GoalShapePlan {
   strategies: GoalStrategy[];
   tactics: GoalTactic[];
   review_every_hours: number | null;
+  /**
+   * The owner's explicit time limit for the whole goal as the planner read it (ISO 8601 duration from the goal's
+   * start, or a date), and the host-resolved absolute time. Absent when the owner gave none. A finite goal with a
+   * deadline may wait for its next work cycle up to — never past — this time (goal-deadline.ts).
+   */
+  deadline?: string | null;
+  deadline_at?: string | null;
 }
 
 export type GoalShapeValidation =
@@ -341,9 +350,18 @@ export function validateGoalShape(raw: unknown, ownerText: string, createdAtIso:
     if (shape === "tactic_list" && tactics.length === 1) { notes.push("list_with_one_tactic_recorded_as_single"); shape = "single_tactic"; }
   }
   if (NATURE_SHAPE[nature] !== shape) notes.push(`nature_shape_mismatch:${nature}->${shape}`);
+  // The planner reads the owner's time limit; the host only resolves and bounds it (never a keyword guess).
+  const goalDeadline = str(raw.deadline, 40) || null;
+  let goalDeadlineAt = resolveGoalDeadline(goalDeadline, createdAtIso);
+  if (goalDeadline && !goalDeadlineAt) notes.push("goal_deadline_unreadable");
+  if (goalDeadlineAt && Date.parse(goalDeadlineAt) - Date.parse(createdAtIso) > GOAL_SHAPE_LIMITS.maxDeadlineDays * 86_400_000) {
+    notes.push("goal_deadline_out_of_range");
+    goalDeadlineAt = null;
+  }
   return { ok: true, notes, plan: {
     schemaVersion: GOAL_SHAPE_SCHEMA, shape, problem_nature: nature, rationale,
     mission, strategies, tactics, review_every_hours: shape === "mission_tree" ? reviewEveryHours : null,
+    ...(goalDeadlineAt ? { deadline: goalDeadline, deadline_at: goalDeadlineAt } : {}),
   } };
 }
 
@@ -396,6 +414,8 @@ export interface LiveGoalPlan {
   tactics: LiveTactic[];
   review_every_hours: number | null;
   createdAt: string;
+  /** Goal deadline: the plan's own deadline, else the earliest key-result deadline. Null when none. */
+  deadline_at: string | null;
 }
 
 /**

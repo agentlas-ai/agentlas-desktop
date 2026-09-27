@@ -118,6 +118,7 @@ import {
   isUserFacingProjectAgent,
   projectPoolMemberKey,
 } from "../../shared/project-agent-pool";
+import { readCloudFilesForDevice } from "./cloud-files";
 import { OwnerCloudActionError } from "../marketplace/mcp-source";
 import { resumeMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
 import { autoResolveOneTeamPreflight, prepareOneTeamPreflight } from "../one/team-preflight";
@@ -3494,6 +3495,18 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       // Server refusals surface through `refusal` with an explicit actionState;
       // partially committed withdrawal must not be treated as a no-op. Local
       // installations are never modified by these methods.
+      case "agents.cloudFiles": {
+        const params = guardedParams(request, ["manifestId", "path", "packageHash"]);
+        const result = await readCloudFilesForDevice({
+          manifestId: requiredIdentifier(params, "manifestId"),
+          ...(typeof params.path === "string" ? { path: params.path } : {}),
+          ...(typeof params.packageHash === "string" ? { packageHash: params.packageHash } : {}),
+        }, context.deviceId, {
+          accountGuard: this.options.mailAccountGuard,
+          read: this.cloudAgentActions.readMyFiles?.bind(this.cloudAgentActions),
+        });
+        return asJsonValue(result, request.method);
+      }
       case "agents.cloudUploadPreview": {
         const params = guardedParams(request, ["agentLocalId"]);
         const agentLocalId = requiredIdentifier(params, "agentLocalId");

@@ -11896,6 +11896,8 @@ button[data-toggle-state="on"] {
   --ask-footer-size: 12px;
   --ask-skip-ink: #4a5054;
   --ask-skip-line: #e2e4e5;
+  /* 키보드 초점 한 줄(1px) — 두 줄 검정 테두리 대신(오너 2026-09-27). */
+  --ask-focus-ring: #9b9fa3;
 }
 
 /* ── 팝업 크기 체계 — 오너 결정 2026-08-24 ────────────────────────────────

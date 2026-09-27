@@ -12,6 +12,13 @@ import type { ChatQuestion } from "@/components/ChatStream";
 import { useT } from "@/lib/i18n";
 import { AskCard } from "@/components/AskCard";
 import { ComposerDecisionPortal } from "@/components/ComposerDecisionPortal";
+import {
+  ASK_ACTION_COPY,
+  askActionBarState,
+  askResendMessage,
+  askSkipReply,
+  type AskActionBlock,
+} from "@shared/ask-action-bar";
 
 export interface QuestionSheetAnswer {
   questionId: string;
@@ -48,6 +55,8 @@ export function ChatQuestionSheet({
   onConfirm,
   onRetryCommitted,
   onDismiss,
+  block = "none",
+  onResend,
 }: {
   /** 현재 답변 대기 중인(unanswered) 질문들 — 최신 어시스턴트 메시지 기준. */
   questions: ChatQuestion[];
@@ -60,6 +69,10 @@ export function ChatQuestionSheet({
   onRetryCommitted?: () => void;
   /** ×로 닫기 — 이 배치를 답하지 않고 접는다(전송 없음). */
   onDismiss: () => void;
+  /** 이 질문에 지금 바로 답할 수 없는 이유(shared/ask-action-bar). 새 메시지 뒤면 "newer_message". */
+  block?: AskActionBlock;
+  /** 막힌 질문의 답을 새 메시지로 보낸다(작성창과 같은 전송 경로). */
+  onResend?: (text: string) => void;
 }) {
   const { locale } = useT();
   const ko = locale === "ko";
@@ -159,9 +172,29 @@ export function ChatQuestionSheet({
    * 판단해, 마지막 질문에 입력한 답이 통째로 빠진 채 전송되거나(여러 질문), 한 질문짜리 시트에선
    * 아무 일도 안 일어났다(2026-09-02 재현: 입력 후 Enter → 건너뛰기만 남음).
    */
+  const copy = ASK_ACTION_COPY[ko ? "ko" : "en"];
+  const multi = Boolean(q.multiSelect);
+  const currentNote = notes[q.id] ?? "";
+  const currentPicks = selected[q.id] ?? [];
+  /*
+   * 아래 동작 줄 판단은 One 과 같은 한 곳(shared/ask-action-bar.ts)이 한다 — 오너 2026-09-27:
+   * "Work 질문 카드에도 같은 수리". 제출 (N개)·건너뛰기·직접 입력·막힌 이유·새 메시지로 보내기.
+   */
+  const bar = askActionBarState({
+    multiSelect: multi,
+    selectedCount: !multi && currentNote.trim() ? 0 : currentPicks.length,
+    freeText: currentNote,
+    block,
+  });
+  const stale = bar.primary.action === "resend";
+
   const submitWith = (sel: Record<string, string[]>, nts: Record<string, string>) => {
     const c = composeQuestionReply(questions, sel, nts, ko);
     if (!c.reply.trim()) return;
+    if (stale) {
+      onResend?.(askResendMessage(ko ? "ko" : "en", questions.map((item) => item.question).join(" / "), c.reply));
+      return;
+    }
     if (busy) {
       setPendingSubmit(true);
       return;
@@ -179,15 +212,16 @@ export function ChatQuestionSheet({
   const next = () => advanceWith(selected, notes);
 
   const skip = () => {
-    if (isLast) {
-      // 실행 중이어도 버리지 않고 대기열에 넣는다. 푸터는 "실행이 정리되면 전송"이라고
-      // 약속해 놓고 dismiss 했고, dismissQuestionBatch 가 미답 질문을 "—" 로 못박아
-      // 앞 질문에 쓴 답까지 되찾을 길이 없었다(2026-09-03 실측).
-      if (hasAnyAnswer) submit();
-      else onDismiss();
-      return;
-    }
-    setActive(active + 1);
+    if (stale) { onDismiss(); return; }
+    if (!isLast) { setActive(active + 1); return; }
+    // 앞 질문에 답한 것이 있으면 그것을 보낸다. 아무것도 안 답했으면 에이전트에 "건너뜀"을
+    // 답으로 보낸다 — 조용히 접으면 에이전트는 영영 답을 기다린다(One 과 같은 규칙).
+    if (hasAnyAnswer) { submit(); return; }
+    if (busy) { onDismiss(); return; }
+    onConfirm(
+      askSkipReply(ko ? "ko" : "en", questions.map((item) => item.question).join(" / ")),
+      [],
+    );
   };
 
   /** 선택을 반영한 다음 상태를 돌려준다(전송 판단에 그대로 쓰기 위해). */
@@ -209,19 +243,44 @@ export function ChatQuestionSheet({
     return { sel, nts };
   };
 
+  const choose = (label: string) => {
+    const { sel, nts } = pick(label);
+    // 하나만 고르는 질문은 고르는 순간이 답이다 — 방금 고른 상태로 판단·전송한다.
+    // 막힌 질문(새 메시지 뒤)은 고른 상태로만 두고, 주 단추가 새 메시지로 보낸다.
+    if (!q.multiSelect && sel[q.id]?.length && !stale) advanceWith(sel, nts);
+  };
+
+  const primaryEnabled = isLast ? (bar.primary.enabled || (!stale && hasAnyAnswer)) : currentAnswered;
+  const runPrimary = (typed: string) => {
+    const nts = typed !== currentNote ? { ...notes, [q.id]: typed } : notes;
+    const sel = !multi && typed.trim() ? { ...selected, [q.id]: [] } : selected;
+    if (nts !== notes) setNotes(nts);
+    if (sel !== selected) setSelected(sel);
+    const answeredNow = (sel[q.id]?.length ?? 0) > 0 || Boolean((nts[q.id] ?? "").trim());
+    if (!isLast) { if (answeredNow) setActive(active + 1); return; }
+    submitWith(sel, nts);
+  };
+
   const handleKey = (e: KeyboardEvent) => {
     if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.isComposing || e.keyCode === 229) return;
     const target = e.target as HTMLElement | null;
+    const inSheet = Boolean(target && rootRef.current?.contains(target));
     const tag = target?.tagName?.toLowerCase();
-    if (tag === "input" || tag === "textarea" || tag === "select" || target?.isContentEditable) return;
+    const editable = tag === "input" || tag === "textarea" || tag === "select" || Boolean(target?.isContentEditable);
+    if (e.key === "Escape" && (inSheet || !editable)) {
+      e.preventDefault();
+      onDismiss();
+      return;
+    }
+    if (editable) return;
     // 다른 묻는 카드(도구 승인 등)에 포커스가 있으면 그쪽 차례다.
     const focused = document.activeElement as HTMLElement | null;
     if (focused?.closest("[data-ask-card]") && !rootRef.current?.contains(focused)) return;
     const n = Number(e.key);
     if (n >= 1 && n <= q.options.length) {
       e.preventDefault();
-      pick(q.options[n - 1].label);
+      choose(q.options[n - 1].label);
       return;
     }
     // "기타" 배지 번호 — 자유입력에 포커스(배지가 장식이 되지 않게).
@@ -233,9 +292,9 @@ export function ChatQuestionSheet({
     if (e.key === "Enter") {
       // 옵션 버튼에 포커스가 있으면 그 버튼의 기본 활성화가 답이다. 여기서 preventDefault 하면
       // 버튼이 눌리지도 다음으로 넘어가지도 않아 키보드만으로는 고를 수 없었다(2026-09-03 실측).
-      if (target?.closest("[data-ask-option]")) return;
+      if (target?.closest("button")) return;
       e.preventDefault();
-      if (currentAnswered || (isLast && hasAnyAnswer)) next();
+      if (primaryEnabled) next();
     }
   };
   keyHandlerRef.current = handleKey;
@@ -246,50 +305,58 @@ export function ChatQuestionSheet({
    * 규격은 docs/DESIGN-ASK-CARD.md.
    */
   const stepPrefix = questions.length > 1 ? `${active + 1}/${questions.length} · ` : "";
+  const primaryLabel = stale
+    ? copy.resend
+    : !isLast
+      ? (ko ? "다음 질문" : "Next question")
+      : busy
+        ? (ko ? "실행이 정리되면 전송" : "Sends when settled")
+        : multi ? copy.submit(bar.primary.count) : copy.submitSingle;
+  const secondaryLabel = stale ? copy.dismiss : copy.skip;
   return (
     <ComposerDecisionPortal enabled>
-    <div className="titlebar-nodrag" ref={rootRef} data-composer-decision-card="true">
+    <div className="titlebar-nodrag" ref={rootRef} data-composer-decision-card="true" data-work-question-block={block}>
       <AskCard
         // 질문이 바뀌면 자유입력칸도 새로 — 앞 질문에 친 글이 다음 질문에 그대로 남지 않게.
         key={q.id}
-        title={`${stepPrefix}${q.question}`}
+        title={`${stepPrefix}${q.header?.trim() || q.question}`}
+        subtitle={q.header?.trim() ? q.question : undefined}
         locale={ko ? "ko" : "en"}
         onClose={onDismiss}
         options={q.options.map((opt) => ({
           id: opt.label,
           title: opt.label,
           note: opt.description ?? undefined,
-          active: (selected[q.id] ?? []).includes(opt.label),
+          active: currentPicks.includes(opt.label),
+          ...(multi ? { checked: currentPicks.includes(opt.label) } : {}),
         }))}
-        otherOption={{
-          title: ko ? "기타" : "Other",
-          note: ko ? "직접 답변을 입력합니다." : "Type your own answer.",
+        otherOption={{ title: copy.other, note: copy.otherNote }}
+        freeText={currentNote}
+        onFreeTextChange={(value) => {
+          setNotes((current) => ({ ...current, [q.id]: value }));
+          // 하나만 고르는 질문에서 직접 입력은 고른 보기를 대신한다.
+          if (!multi && value.trim()) setSelected((current) => ({ ...current, [q.id]: [] }));
         }}
-        onChoose={(id) => {
-          const { sel, nts } = pick(id);
-          // 하나만 고르는 질문은 고르는 순간이 답이다 — 방금 고른 상태로 판단·전송한다.
-          if (!q.multiSelect && sel[q.id]?.length) advanceWith(sel, nts);
-        }}
+        onChoose={(id) => choose(id)}
+        data-testid="work-question-ask-card"
         footer={{
-          placeholder: ko ? "여기에 답변을 입력하세요" : "Type your answer here",
-          skipLabel: ko ? "건너뛰기" : "Skip",
+          placeholder: copy.placeholder,
+          skipLabel: copy.skip,
           // 고른 보기가 있으면 이 단추는 건너뛰지 않고 보낸다 — 라벨도 그렇게 말해야 한다.
           hasSelection: currentAnswered,
-          submitLabel: busy
-            ? (ko ? "실행이 정리되면 전송" : "Sends when settled")
-            : isLast
-              ? (ko ? "이 답 보내기" : "Send answer")
-              : (ko ? "다음 질문" : "Next question"),
-          onSkip: (freeText) => {
-            if (freeText) {
-              const nts = { ...notes, [q.id]: freeText };
-              const sel = q.multiSelect ? selected : { ...selected, [q.id]: [] };
-              setNotes(nts);
-              setSelected(sel);
-              advanceWith(sel, nts);
-              return;
-            }
-            skip();
+          submitLabel: primaryLabel,
+          hideButton: true,
+          onSkip: (typed) => { if (typed || primaryEnabled) runPrimary(typed); },
+        }}
+        actionRow={{
+          notice: bar.notice ? copy.notice[bar.notice] : null,
+          reason: primaryEnabled ? null : bar.primary.reason ? copy.reason[bar.primary.reason] : null,
+          hint: stale ? null : multi ? copy.hint.multi : copy.hint.single,
+          secondary: { id: stale ? "dismiss" : "skip", label: secondaryLabel },
+          primary: { id: stale ? "resend" : isLast ? "submit" : "next", label: primaryLabel, disabled: !primaryEnabled },
+          onAction: (id, typed) => {
+            if (id === "skip" || id === "dismiss") skip();
+            else runPrimary(typed);
           },
         }}
       />

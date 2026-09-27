@@ -14,6 +14,12 @@ export function normalizeChatHostNotice(role: string, value: unknown): ChatHostN
       || !validId(item.runId) || !validId(item.chatId) || !name || name.length > 80) return undefined;
     return { purpose: item.purpose, runId: item.runId, chatId: item.chatId, memberName: name };
   }
+  if (item.purpose === "one-team-member-joined") {
+    const name = typeof item.memberName === "string" ? item.memberName.replace(/\s+/g, " ").trim() : "";
+    if (Object.keys(item).some(key => !["purpose", "memberName", "created"].includes(key))
+      || !name || name.length > 80 || typeof item.created !== "boolean") return undefined;
+    return { purpose: "one-team-member-joined", memberName: name, created: item.created };
+  }
   if (item.purpose === "one-dispatch-brief") {
     if (Object.keys(item).some(key => key !== "purpose" && key !== "runId") || !validId(item.runId)) return undefined;
     return { purpose: "one-dispatch-brief", runId: item.runId };

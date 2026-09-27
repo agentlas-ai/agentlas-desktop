@@ -21,6 +21,7 @@ import { withGoalWaitAccounting } from "./accounting-context";
 import { reflectOngoingStall, replanModelFingerprint, type StallReplanResult } from "./stall-replan";
 import type { OngoingStallReplan } from "../../shared/runtime-plan";
 import { parseGoalWaitIntent, type GoalWaitIntent } from "./wait-emitter";
+import { timerWaitAuthority } from "./goal-deadline";
 
 export interface GoalWaitSubscription {
   schemaVersion: "agentlas.goal-wait-subscription.v1";
@@ -147,7 +148,14 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
     if (input.hasTransientAttachments) throw new Error("goal_wait_attachment_refresh_required");
     if (input.intent.deadline && Date.parse(input.intent.deadline) <= now) throw new Error("goal_wait_deadline_elapsed");
     if (input.intent.subject.kind === "timer") {
-      if (revision.lifecycle !== "ongoing") throw new Error("goal_wait_ongoing_authority_required");
+      // Ongoing Goals, and finite Goals with a deadline up to that deadline (goal-deadline.ts, owner 2026-09-27).
+      const authority = timerWaitAuthority(run.goalId, now);
+      if (!authority.ok) throw new Error(authority.reason);
+      if (authority.deadlineAt && Date.parse(input.intent.subject.notBefore) > Date.parse(authority.deadlineAt)) {
+        // Never past the deadline: a later check is due at the deadline, where the target is verified.
+        input = { ...input, intent: { ...input.intent, subject: { kind: "timer", notBefore: authority.deadlineAt } } };
+      }
+      if (input.intent.subject.kind !== "timer") throw new Error("goal_wait_timer_invalid");
       const due = Date.parse(input.intent.subject.notBefore);
       if (due < now + 60_000 || (input.intent.deadline && due >= Date.parse(input.intent.deadline))) throw new Error("goal_wait_timer_invalid");
     }
@@ -474,7 +482,9 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
         }
         const checkpoint = candidateCheckpoint(wait);
         prepareCheckpointContinuation(checkpoint);
-        if (!ownsHostGoalLoop(current.surface) || !revision || revision.lifecycle !== "ongoing"
+        if (!ownsHostGoalLoop(current.surface) || !revision
+          || (revision.lifecycle !== "ongoing" && !(wait.intent.subject.kind === "timer"
+            && timerWaitAuthority(wait.goalId, Date.parse(wait.intent.subject.notBefore) - 1).ok))
           || revision.revision !== wait.goalRevision || getChat(wait.chatId)?.goalId !== wait.goalId) {
           failure = "goal_wait_goal_revision_changed";
         } else if (!revision.authorityRefs.some(ref => /^invocation:([^:]+):permission:(read|write|full)$/.test(ref))) {
@@ -640,8 +650,11 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       }
       transitionLongRun({ runId: current.id, to: "running", actorKind: "host", reason: "goal_wait_satisfied" });
       if (wait.intent.subject.kind === "timer" && !listLongRunTasks(current.id, true).length) {
-        if (getChatGoalRevision(wait.goalId)?.lifecycle !== "ongoing") throw new Error("goal_wait_ongoing_authority_required");
-        addLongRunTask({ runId: current.id, id: `task:ongoing:${wait.waitId}`, title: "Next ongoing work cycle", objective: current.objective,
+        // The deadline itself has arrived for a finite Goal: this cycle is the one that verifies the target.
+        const authority = timerWaitAuthority(wait.goalId, Date.parse(wait.intent.subject.notBefore) - 1);
+        if (!authority.ok) throw new Error(authority.reason);
+        addLongRunTask({ runId: current.id, id: `task:ongoing:${wait.waitId}`, title: authority.lifecycle === "ongoing"
+          ? "Next ongoing work cycle" : "Next work cycle before the goal deadline", objective: current.objective,
           acceptanceCriteria: current.acceptanceCriteria, criterionIndices: current.acceptanceCriteria.map((_, index) => index) });
       }
       const fresh = recordTaskCheckpoint({ goalId: wait.goalId, workerId: checkpoint.capsule.workerId, attempt: checkpoint.capsule.attempt,

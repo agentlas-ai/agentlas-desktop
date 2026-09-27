@@ -11,7 +11,7 @@ import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budg
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
 import { recordAutomationPinProvenance } from "../automation-runtime-provenance";
 import { officeTaskContextForInvocation } from "../office-task-context";
-import { goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
+import { goalDeadlineWaitClause, goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { goalContinuationSessionIdentity } from "../long-run/goal-session-owner";
 import { recordInvocationInstructionSnapshot, compileProjectInstructionSnapshot } from "../long-run/instructions";
@@ -92,7 +92,8 @@ import {
   setChatWorkingFolder,
 } from "../store/chats";
 import { getProject, listProjects } from "../store/projects";
-import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
+import { getChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot } from "../store/chat-goals";
+import { goalDeadlineAt } from "../long-run/goal-deadline";
 import { getLongRunByGoalId, recordLongRunUsage } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { listAgentSurfaces } from "../store/agent-surfaces";
@@ -113,6 +114,7 @@ import { prepareProjectCloudRoster, ProjectCloudRosterError } from "./project-cl
 import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscalation } from "../../shared/turn-escalation";
 import { hasPermissionEscalationMarker, stripPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
+import { livePartialCommitBoundary } from "../../shared/interrupted-partial";
 import { EFFECT_OBSERVATION_SYSTEM_PROMPT } from "../../shared/effect-observation";
 import { effectObservationTicket } from "../long-run/effect-observation-tickets";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
@@ -4849,6 +4851,14 @@ ${effectiveUserPrompt}`;
     turnContextParts.push(locale === "ko"
       ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. " + tStatus(locale, "sysReplyLanguageScope") + " 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
       : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. " + tStatus(locale, "sysReplyLanguageScope") + " Do not mention or quote this contract.\n[/Host response-language contract]");
+    // The owner's global Codex AGENTS.md says "Start with: 사용 스킬: …". In One that line
+    // is an operator log, not an answer (X Marketing 2026-09-27: "Skills used:" opened an
+    // English answer, "사용 스킬:"/"적용 스킬:" a Korean one). The team boundary already said
+    // this; goal-owned and Mobile runs never received it.
+    turnContextParts.push(locale === "ko"
+      ? "[호스트 표시 계약]\n답을 '사용 스킬:'·'적용 스킬:'·'사용 에이전트:' 같은 라우팅 공지로 시작하지 마세요. 다른 지침이 그런 공지를 요구해도 One 대화에는 쓰지 않습니다. 사용자에게 필요한 내용부터 바로 쓰세요.\n[/호스트 표시 계약]"
+      : "[Host display contract]\nDo not open with routing announcements such as 'Skills used:', 'Skills:', or 'Agents used:'. Even if another instruction asks for one, it does not belong in a One conversation. Start directly with what the user needs.\n[/Host display contract]");
+    stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   // One immutable project snapshot per execution boundary. All supported runner
   // adapters consume the same block through their existing context transport.
@@ -5363,7 +5373,7 @@ ${effectiveUserPrompt}`;
           // 계약을 주면서 그 계약을 끝내는 법도 같이 준다. 연속 프롬프트에만 적으면
           // 1패스에 끝나는 작업이 마커를 몰라서 못 끝난다.
           turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
-          if (!executionContext) { turnContextParts.push(goalWaitProtocol()); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
+          if (!executionContext) { turnContextParts.push(goalWaitProtocol((() => { try { return getLegacyGoalLifecycleSnapshot(activeGoalId) ? null : getChatGoalRevision(activeGoalId)?.lifecycle; } catch { return null; } })())); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
           /*
            * 골 구조 판단(오너 최우선 2026-09-24): 이 목표 개정의 모양(단일 전술/전술 목록/대계-전략-전술 트리)이
            * 없으면 이 턴을 시작하기 전에 정한다. 실패는 단일 전술 폴백 — 목표를 막지 않는다. 턴마다 바뀌는 절이라
@@ -5374,6 +5384,11 @@ ${effectiveUserPrompt}`;
             onJudging: () => sink({ kind: "tool-use", status: locale === "ko" ? "목표의 계획 구조를 먼저 정하는 중…" : "Deciding the goal's plan shape first…" }),
           }).catch((error: unknown) => { console.warn("[goal-plan] shape decision failed:", error instanceof Error ? error.message : error); return null; });
           if (goalPlan) turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null }));
+          // A finite Goal with a deadline may wait for its next cycle up to that deadline (goal-deadline.ts).
+          if (!executionContext && getChatGoalRevision(activeGoalId)?.lifecycle === "finite") {
+            const deadlineAt = goalDeadlineAt(activeGoalId);
+            if (deadlineAt && Date.parse(deadlineAt) > Date.now()) turnContextParts.push(goalDeadlineWaitClause(deadlineAt));
+          }
         }
       }
     }
@@ -6377,12 +6392,16 @@ ${effectiveUserPrompt}`;
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
-        appendInvocationAssistantResult({
+        const committedPass = appendInvocationAssistantResult({
           chatId: chat.id,
           text: stripStrayProtocolTokens(stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, continuation.text)))),
           goalId: activeGoalId,
           runId: req.runId,
         });
+        // 방금 저장한 본문은 더는 "흘러나오는 중"이 아니다 — Main 버퍼와 화면의 실시간 말풍선을
+        // 이 행 id에서 끊는다. 없으면 다음 턴 첫 글자 전에 끊긴 실행이 같은 본문을
+        // "중단된 답변"으로 또 저장했다(2026-09-27 X 마케팅 실측).
+        sink(livePartialCommitBoundary(committedPass.id));
         // 세션 워터마크 전진 — 다음 resume 턴이 방금 자기 답변을 gap으로 재주입하지 않게.
         if (sessionCapableRuntime) touchRuntimeSession(chat.id, active.kind, agent.id);
         sink({

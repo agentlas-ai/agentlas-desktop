@@ -175,7 +175,16 @@ export function readGoalPlan(goalId: string, revision?: number): LiveGoalPlan | 
     fallback: decision.kind === "shape_fallback",
     mission: mission ? safeJson(mission.payload_json) as unknown as LiveGoalPlan["mission"] : null,
     strategies, tactics, review_every_hours: plan.review_every_hours, createdAt: decision.created_at,
+    deadline_at: goalPlanDeadlineAt(plan, mission ? safeJson(mission.payload_json) as unknown as LiveGoalPlan["mission"] : null),
   };
+}
+
+/** The plan's own goal deadline, else the earliest key-result deadline (both host-resolved at shaping time). */
+function goalPlanDeadlineAt(plan: GoalShapePlan, mission: LiveGoalPlan["mission"]): string | null {
+  const own = typeof plan.deadline_at === "string" && Number.isFinite(Date.parse(plan.deadline_at)) ? plan.deadline_at : null;
+  if (own) return own;
+  const krs = (mission?.key_results ?? []).map((kr) => kr.deadline_at).filter((at): at is string => typeof at === "string" && Number.isFinite(Date.parse(at)));
+  return krs.length ? krs.sort((a, b) => Date.parse(a) - Date.parse(b))[0] : null;
 }
 
 /** 노드 하나의 상태·payload 조각을 바꾼다(같은 차수 안에서만). */

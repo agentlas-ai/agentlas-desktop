@@ -19,6 +19,20 @@
   margin-bottom: var(--ask-title-gap);
 }
 
+.titleBlock {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+.subtitle {
+  margin: 0;
+  font-size: var(--ask-option-note-size);
+  color: var(--ask-option-note-ink);
+  line-height: 1.4;
+}
+
 .title {
   flex: 1 1 auto;
   min-width: 0;
@@ -187,3 +201,139 @@
 }
 
 .skip:hover { background: var(--ask-option-hover); color: var(--ask-title-ink); }
+
+/* 여러 개 고르는 질문의 체크 상자 — 고른 상태를 화살표 강조와 구분한다. */
+.check {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ask-skip-line);
+  border-radius: 5px;
+  background: var(--ask-card-bg);
+  color: var(--white);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.check[data-checked="true"] { background: var(--black); border-color: var(--black); }
+
+/* 아래 동작 줄: 이유(왼쪽) · 보조(외곽선) · 주(검은 알약). 오너 요청 2026-09-27. */
+.actionRow {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px var(--ask-option-pad-side) 0;
+  border-top: 1px solid var(--ask-card-line);
+}
+
+.actionNotice {
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--ask-option-active);
+  color: var(--ask-skip-ink);
+  font-size: var(--ask-footer-size);
+  line-height: 1.45;
+}
+
+.actionButtons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.actionReason {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  color: var(--ask-footer-ink);
+  font-size: var(--ask-footer-size);
+  line-height: 1.35;
+}
+
+.actionSecondary,
+.actionPrimary {
+  flex: 0 0 auto;
+  min-height: 30px;
+  padding: 0 14px;
+  border-radius: 999px;
+  font-size: var(--ask-footer-size);
+  font-weight: 640;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.actionSecondary {
+  border: 1px solid var(--ask-skip-line);
+  background: var(--ask-card-bg);
+  color: var(--ask-skip-ink);
+}
+
+.actionSecondary:hover:not(:disabled) { background: var(--ask-option-hover); color: var(--ask-title-ink); }
+
+.actionPrimary {
+  border: 1px solid var(--black);
+  background: var(--black);
+  color: var(--white);
+}
+
+.actionPrimary:disabled {
+  border-color: var(--ask-skip-line);
+  background: var(--ask-option-active);
+  color: var(--ask-footer-ink);
+  cursor: not-allowed;
+}
+
+/*
+ * One focus mark per control (owner 2026-09-27: "두줄 검정 테두리 너무 촌스러").
+ * The global keyboard baseline in globals.css (`:where(button, …, input):focus-visible`,
+ * 2px accent outline, !important for inputs) stacked a second dark line on top of the
+ * row's own background and border. Here the outline is off and each control shows a
+ * single 1px ring (--ask-focus-ring) with the state it already has:
+ *   - option rows: hover background + inset ring
+ *   - the Other input: the whole footer row gets the same inset ring
+ *   - outlined buttons: the existing hairline darkens to the ring colour
+ *   - the black pill: it lightens and carries one light inner hairline (an outer ring
+ *     around the black border reads as a double border again)
+ * Keyboard focus stays visible (checked with real Tab presses in the One QA harness).
+ */
+.option:focus-visible,
+.close:focus-visible,
+.skip:focus-visible,
+.actionSecondary:focus-visible,
+.actionPrimary:focus-visible {
+  outline: none;
+}
+
+.option:focus-visible {
+  background: var(--ask-option-hover);
+  box-shadow: inset 0 0 0 1px var(--ask-focus-ring);
+}
+
+.option[data-active="true"]:focus-visible { background: var(--ask-option-active); }
+
+.close:focus-visible { box-shadow: inset 0 0 0 1px var(--ask-focus-ring); }
+
+.footerInput:focus,
+.footerInput:focus-visible {
+  outline: none !important;
+}
+
+.footer:focus-within {
+  border-radius: var(--ask-option-radius);
+  box-shadow: inset 0 0 0 1px var(--ask-focus-ring);
+}
+
+.skip:focus-visible,
+.actionSecondary:focus-visible {
+  border-color: var(--ask-focus-ring);
+  color: var(--ask-title-ink);
+}
+
+.actionPrimary:focus-visible {
+  background: color-mix(in srgb, var(--black) 80%, var(--white));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--white) 55%, transparent);
+}

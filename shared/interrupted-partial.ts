@@ -33,3 +33,63 @@ export function markInterruptedPartial(text: string, locale: string): string {
 export function isInterruptedPartial(text: string): boolean {
   return /^> ⚠️ \*\*(중단된 답변입니다|Interrupted answer)/.test(text);
 }
+
+/**
+ * ★이미 저장한 글을 "중단된 답변"으로 한 번 더 저장하지 않는다.
+ *
+ * 실측(2026-09-27, One "X 마케팅", 1.2.45): 목표 연속 실행의 1턴 본문이 끝나자 client가
+ * 그 본문을 대화 행으로 곧바로 저장했다(10:49:51). 2턴이 아직 한 글자도 흘리지 않은 6초 뒤
+ * 오너의 새 지시가 실행을 끊었고, Main의 실시간 버퍼(record.partialText)에는 **이미 저장한
+ * 1턴 본문**이 그대로 남아 있었다. 그래서 같은 글이 "⚠️ 중단된 답변입니다" 머리를 달고
+ * 확인 답 **뒤에** 한 번 더 저장됐다(10:49:58) — 순서가 뒤집힌 중복.
+ *
+ * 규칙: 턴 본문을 대화 행으로 확정한 순간 client는 이 경계 이벤트를 보낸다. 빈 전문 +
+ * 확정된 행 id. Main은 빈 전문을 받아 버퍼를 비우고(중단 저장 대상이 사라진다),
+ * 화면은 지금까지 흘린 글을 그 행 id로 굳히고 새 말풍선을 연다.
+ */
+export interface LivePartialCommitBoundary {
+  kind: "partial";
+  text: "";
+  durableMessageId: string;
+}
+
+export function livePartialCommitBoundary(durableMessageId: string): LivePartialCommitBoundary {
+  return { kind: "partial", text: "", durableMessageId };
+}
+
+export function isLivePartialCommitBoundary(event: {
+  kind?: string;
+  text?: string;
+  delta?: string;
+  durableMessageId?: string;
+  agentId?: string;
+}): event is LivePartialCommitBoundary {
+  return event.kind === "partial"
+    && !event.agentId
+    && typeof event.durableMessageId === "string"
+    && event.durableMessageId.length > 0
+    && typeof event.delta !== "string"
+    && event.text === "";
+}
+
+/**
+ * Main의 실시간 본문 버퍼 한 걸음. partial의 `text`는 누적 전문이다.
+ * - 이어 붙은 글이면 델타만 보낸다(`delta`), 새로 늘어난 게 없으면 버린다(`drop`).
+ * - 이어 붙지 않으면(다음 턴·경계·재동기화) 전문을 보낸다(`delta: null`).
+ * 반환한 `partialText`가 곧 중단 시 저장 후보다 — 경계 뒤에는 비어 있다.
+ */
+export function advanceMainLivePartial(previous: string, full: string): {
+  partialText: string;
+  delta: string | null;
+  drop: boolean;
+} {
+  const probe = Math.min(32, previous.length);
+  const appended =
+    full.length >= previous.length &&
+    (probe === 0 || full.slice(previous.length - probe, previous.length) === previous.slice(-probe));
+  if (appended) {
+    const delta = full.slice(previous.length);
+    return { partialText: full, delta, drop: !delta };
+  }
+  return { partialText: full, delta: null, drop: false };
+}

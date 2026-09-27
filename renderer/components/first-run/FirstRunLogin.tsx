@@ -60,23 +60,25 @@ export function FirstRunLogin({ onSignedIn }: { onSignedIn: (session: AuthSessio
         <span className={styles.brand}><img src="/brand/agentlas-one-mark.png" alt="" />Agentlas</span>
       </div>
       <div className={styles.stage}>
-        <header className={styles.head}>
-          <h1 id="first-run-login-title">{ko ? "Agentlas에 오신 걸 환영해요." : "Welcome to Agentlas."}</h1>
-          <p>{ko ? "계정으로 로그인하고 나만의 에이전트를 설정하세요." : "Sign in and set up your own agent."}</p>
-        </header>
-        <section className={styles.body}>
-          <img className={styles.loginMark} src="/brand/agentlas-one-mark.png" alt="" />
-          <div className={styles.loginActions}>
-            <button type="button" className={styles.primary} onClick={() => void signIn()} disabled={busy} aria-busy={busy}>
-              {busy ? (ko ? "브라우저에서 로그인해 주세요…" : "Finish signing in in your browser…") : (ko ? "Agentlas 계정으로 로그인" : "Sign in with Agentlas")}
-            </button>
-            {busy
-              ? <button type="button" className={styles.secondary} onClick={cancel}>{ko ? "로그인 취소" : "Cancel sign-in"}</button>
-              : <button type="button" className={styles.secondary} onClick={() => void signIn()}>{ko ? "계정 만들기" : "Create an account"}</button>}
-          </div>
-          {notice && <p className={styles.error} role="status">{notice}</p>}
-          <p className={styles.hint}>{ko ? "브라우저에서 로그인하면 자동으로 이어져요." : "Signing in happens in your browser and continues here automatically."}</p>
-        </section>
+        <div className={styles.frame}>
+          <header className={styles.head}>
+            <h1 id="first-run-login-title">{ko ? "Agentlas에 오신 걸 환영해요." : "Welcome to Agentlas."}</h1>
+            <p>{ko ? "계정으로 로그인하고 나만의 에이전트를 설정하세요." : "Sign in and set up your own agent."}</p>
+          </header>
+          <section className={styles.body}>
+            <img className={styles.loginMark} src="/brand/agentlas-one-mark.png" alt="" />
+            <div className={styles.loginActions}>
+              <button type="button" className={styles.primary} onClick={() => void signIn()} disabled={busy} aria-busy={busy}>
+                {busy ? (ko ? "브라우저에서 로그인해 주세요…" : "Finish signing in in your browser…") : (ko ? "Agentlas 계정으로 로그인" : "Sign in with Agentlas")}
+              </button>
+              {busy
+                ? <button type="button" className={styles.secondary} onClick={cancel}>{ko ? "로그인 취소" : "Cancel sign-in"}</button>
+                : <button type="button" className={styles.secondary} onClick={() => void signIn()}>{ko ? "계정 만들기" : "Create an account"}</button>}
+            </div>
+            {notice && <p className={styles.error} role="status">{notice}</p>}
+            <p className={styles.hint}>{ko ? "브라우저에서 로그인하면 자동으로 이어져요." : "Signing in happens in your browser and continues here automatically."}</p>
+          </section>
+        </div>
       </div>
     </div>
   );

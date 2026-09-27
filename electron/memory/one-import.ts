@@ -195,6 +195,10 @@ function importedHashes(): Set<string> {
 
 let importTimer: NodeJS.Timeout | null = null;
 let lastImportedSoulMtimeMs = 0;
+/** One import at a time: the boot import and the rescan tick share it, so a
+ *  block can never be inserted twice by two overlapping chunked passes. */
+let inflightImport: Promise<OneImportResult> | null = null;
+let importStopped = false;
 
 /**
  * P3 — keep the import current while the app stays open. Boot-only import
@@ -203,84 +207,165 @@ let lastImportedSoulMtimeMs = 0;
  */
 export function startOneImportScheduler(intervalMs = 5 * 60 * 1000): void {
   if (importTimer) return;
+  importStopped = false;
   importTimer = setInterval(() => {
+    let mtimeMs: number;
     try {
-      const soulPath = path.join(oneWorkspaceRoot(), ONE_SOUL_RELATIVE);
-      const mtimeMs = fs.statSync(soulPath).mtimeMs;
-      if (mtimeMs <= lastImportedSoulMtimeMs) return;
-      const outcome = importOneDurableMemory();
+      mtimeMs = fs.statSync(path.join(oneWorkspaceRoot(), ONE_SOUL_RELATIVE)).mtimeMs;
+    } catch {
+      return; // soul missing or unreadable — nothing to import this tick
+    }
+    if (mtimeMs <= lastImportedSoulMtimeMs) return;
+    void runOneImportInBackground().then((outcome) => {
       // 일부 insert가 실패했으면 같은 파일을 다음 tick에 다시 읽는다. 성공하지 않은
       // 블록은 DB provenance가 없으므로 재시도되고, 성공한 블록은 전체 해시 조회로 skip된다.
-      if (outcome.failed === 0) lastImportedSoulMtimeMs = mtimeMs;
+      if (outcome.failed === 0 && !outcome.reason) lastImportedSoulMtimeMs = mtimeMs;
       if (outcome.imported > 0 || outcome.failed > 0) {
         console.log(
           `[one-import] rescan imported=${outcome.imported} skipped=${outcome.skipped} failed=${outcome.failed}`,
         );
       }
-    } catch {
-      // soul missing or unreadable — nothing to import this tick
-    }
+    }, () => { /* reported by the caller path; the next tick retries */ });
   }, intervalMs);
   importTimer.unref?.();
 }
 
+/** Stops the rescan tick and makes an in-flight chunked import return at its next block. */
 export function stopOneImportScheduler(): void {
+  importStopped = true;
   if (importTimer) clearInterval(importTimer);
   importTimer = null;
 }
 
-/**
- * One 소울 파일의 durable 블록을 `memory_entries` 로 반입한다.
- * 몇 번 호출해도 같은 결과이며, 실패는 건수로 보고한다.
- */
-export function importOneDurableMemory(rootOverride?: string): OneImportResult {
-  const root = rootOverride ?? oneWorkspaceRoot();
+interface PreparedImport {
+  result: OneImportResult;
+  pending: OneDurableBlock[];
+  already: Set<string>;
+  successors: Map<string, string>;
+}
+
+function prepareImport(root: string, text: string | null): PreparedImport | OneImportResult {
   const result: OneImportResult = { scanned: 0, imported: 0, skipped: 0, failed: 0 };
-
-  if (!oneIsOn(root)) return { ...result, reason: "one_off" };
-
-  const soulPath = path.join(root, ONE_SOUL_RELATIVE);
-  let text: string;
-  try {
-    text = fs.readFileSync(soulPath, "utf8");
-  } catch {
-    return { ...result, reason: "soul_missing" };
-  }
-
+  if (text === null) return { ...result, reason: "soul_missing" };
   const blocks = parseOneDurableBlocks(text);
   result.scanned = blocks.length;
   const already = importedHashes();
   const pending = selectUnimported(blocks, already);
   result.skipped = blocks.length - pending.length;
-  const successors = readEngineTranslationSuccessors(root);
+  return { result, pending, already, successors: readEngineTranslationSuccessors(root) };
+}
 
-  for (const block of pending) {
-    const predecessor = successors.get(block.hash);
-    if (predecessor && already.has(predecessor)) {
-      try {
-        adoptEngineTranslation(predecessor, block);
-        result.skipped += 1;
-      } catch {
-        result.failed += 1;
-      }
-      continue;
-    }
+/**
+ * One block = one committed row whose first evidence token is `one-soul:<h>`.
+ * That token is the resume point: a quit between two blocks leaves every
+ * committed block visible to `importedHashes()` on the next launch, and an
+ * uncommitted one simply is not there, so a restarted import neither loses
+ * nor duplicates anything.
+ */
+function importBlock(block: OneDurableBlock, prepared: PreparedImport): void {
+  const { result, already, successors } = prepared;
+  const predecessor = successors.get(block.hash);
+  if (predecessor && already.has(predecessor)) {
     try {
-      insertMemoryEntry({
-        scope: "agent_repo" as MemoryScope,
-        kind: normalizeKind(block.kind),
-        content: block.content,
-        // English block with its original wording → side table (plan §9-8).
-        ...(block.native ? { contentNative: block.native } : {}),
-        agentId: ONE_AGENT_ID,
-        sensitivity: "internal",
-        // 첫 항목이 멱등 키다. 두 번째는 One 이 기록한 원 근거.
-        evidence: [`one-soul:${block.hash}`, block.evidence].filter(Boolean),
-      });
-      result.imported += 1;
+      adoptEngineTranslation(predecessor, block);
+      result.skipped += 1;
     } catch {
       result.failed += 1;
     }
+    return;
   }
-  return result;
+  try {
+    insertMemoryEntry({
+      scope: "agent_repo" as MemoryScope,
+      kind: normalizeKind(block.kind),
+      content: block.content,
+      // English block with its original wording → side table (plan §9-8).
+      ...(block.native ? { contentNative: block.native } : {}),
+      agentId: ONE_AGENT_ID,
+      sensitivity: "internal",
+      // 첫 항목이 멱등 키다. 두 번째는 One 이 기록한 원 근거.
+      evidence: [`one-soul:${block.hash}`, block.evidence].filter(Boolean),
+    });
+    result.imported += 1;
+  } catch {
+    result.failed += 1;
+  }
+}
+
+/**
+ * One 소울 파일의 durable 블록을 `memory_entries` 로 반입한다.
+ * 몇 번 호출해도 같은 결과이며, 실패는 건수로 보고한다.
+ *
+ * Synchronous: it holds the calling thread for the whole backlog. Main must use
+ * `runOneImportInBackground` instead (see there for the measured cost).
+ */
+export function importOneDurableMemory(rootOverride?: string): OneImportResult {
+  const root = rootOverride ?? oneWorkspaceRoot();
+  if (!oneIsOn(root)) return { scanned: 0, imported: 0, skipped: 0, failed: 0, reason: "one_off" };
+  let text: string | null = null;
+  try { text = fs.readFileSync(path.join(root, ONE_SOUL_RELATIVE), "utf8"); } catch { text = null; }
+  const prepared = prepareImport(root, text);
+  if (!("pending" in prepared)) return prepared;
+  for (const block of prepared.pending) importBlock(block, prepared);
+  return prepared.result;
+}
+
+export interface OneImportProgress {
+  done: number;
+  total: number;
+}
+
+export interface OneImportOptions {
+  rootOverride?: string;
+  /** Longest stretch of Main work between two yields. */
+  sliceMs?: number;
+  onProgress?: (progress: OneImportProgress) => void;
+  /** Checked before every block; true ends the pass with reason "stopped". */
+  shouldStop?: () => boolean;
+}
+
+const yieldToEventLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
+
+/**
+ * The same import in bounded slices. Measured 2026-09-27 (1.2.44/1.2.45 smoke,
+ * fresh store, ~2,300 blocks): the synchronous pass held Main for 32–36s, so
+ * the first screen took 38–42s and the daemon ensure's control-socket ping
+ * timed out (`daemon_control_owner_unconfirmed`). Each block is its own
+ * committed row, so yielding between blocks changes no data outcome.
+ */
+export async function importOneDurableMemoryInSlices(options: OneImportOptions = {}): Promise<OneImportResult> {
+  const root = options.rootOverride ?? oneWorkspaceRoot();
+  const sliceMs = Math.max(1, options.sliceMs ?? 12);
+  if (!oneIsOn(root)) return { scanned: 0, imported: 0, skipped: 0, failed: 0, reason: "one_off" };
+  let text: string | null = null;
+  try { text = await fs.promises.readFile(path.join(root, ONE_SOUL_RELATIVE), "utf8"); } catch { text = null; }
+  if (options.shouldStop?.()) return { scanned: 0, imported: 0, skipped: 0, failed: 0, reason: "stopped" };
+  const prepared = prepareImport(root, text);
+  if (!("pending" in prepared)) return prepared;
+  const total = prepared.pending.length;
+  let sliceStartedAt = Date.now();
+  let reported = 0;
+  for (let index = 0; index < total; index += 1) {
+    if (options.shouldStop?.()) return { ...prepared.result, reason: "stopped" };
+    importBlock(prepared.pending[index], prepared);
+    if (Date.now() - sliceStartedAt >= sliceMs) {
+      reported = index + 1;
+      options.onProgress?.({ done: reported, total });
+      await yieldToEventLoop();
+      sliceStartedAt = Date.now();
+    }
+  }
+  if (total > 0 && reported < total) options.onProgress?.({ done: total, total });
+  return prepared.result;
+}
+
+/** Single-flight entry for Main: boot and rescan share one chunked pass. */
+export function runOneImportInBackground(
+  options: Omit<OneImportOptions, "shouldStop"> = {},
+): Promise<OneImportResult> {
+  if (inflightImport) return inflightImport;
+  const pass = importOneDurableMemoryInSlices({ ...options, shouldStop: () => importStopped })
+    .finally(() => { if (inflightImport === pass) inflightImport = null; });
+  inflightImport = pass;
+  return pass;
 }

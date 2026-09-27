@@ -43,6 +43,17 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat }: { t
         : <span>{open}</span>}
     </p>;
   }
+  if (notice?.purpose === "one-team-member-joined") {
+    // One 이 팀원을 만들거나 단톡방에 초대한 영수증 — 글은 Main 이 쓴 기록이 아니라 표식으로 다시 그린다.
+    const label = locale === "ko"
+      ? `${notice.created ? "새 팀원을 만들어 초대함" : "팀원 초대함"} · ${notice.memberName}`
+      : `${notice.created ? "New teammate created and invited" : "Teammate invited"} · ${notice.memberName}`;
+    return <p
+      data-host-notice="one-team-member-joined"
+      role="status"
+      style={{ alignSelf: "stretch", maxWidth: 760, margin: "6px 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5 }}
+    >{label}</p>;
+  }
   if (notice?.purpose === "automation-report") {
     // 기록 원문은 기계 표식을 일부러 남긴다 — 그릴 때만 사람 첫머리로 바꾸고 코드는 칩으로.
     const display = automationReportDisplay(text, locale);

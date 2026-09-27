@@ -1,5 +1,6 @@
 import type { McpInvocationEvent } from "@shared/types";
 import type { RunEventReplay, RunEventReplayInput } from "@shared/run-event-delivery";
+import { isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 
 interface Options {
   runId: string; chatId: string;
@@ -43,7 +44,9 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
       // Keep provider sequence in delivery.sourceSequence. UI sequence cannot collide
       // with unsequenced host notices or intentional provider-side gaps.
       const projected = { ...event, sequence: cursor };
-      if (event.kind === "partial" && !event.agentId) {
+      // A turn-commit boundary is not newer text; it seals the text before it. Merging it
+      // would drop the pending deltas (and a delta merged onto it would drop the seal).
+      if (event.kind === "partial" && !event.agentId && !isLivePartialCommitBoundary(event)) {
         if (partial && typeof event.delta === "string") {
           partial = typeof partial.text === "string"
             ? { ...projected, delta: undefined, text: partial.text + event.delta }

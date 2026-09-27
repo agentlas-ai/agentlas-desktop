@@ -11,6 +11,7 @@ import { OneAgentPortrait } from "./OneAgentPortrait";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneTaskforces.module.css";
+import { OneRunComet, oneRunCometHostClass } from "./OneRunComet";
 
 /** 웹인지 데스크탑인지는 Main 브릿지의 유무로 가른다(웹은 window.agentlas 를 심지 않는다). */
 function isWebSurface(): boolean {
@@ -56,6 +57,7 @@ export function OneTaskforceRail({
   taskforces,
   org,
   activeChatId,
+  spinningChatIds,
   locale,
   onOpen,
   onCreate,
@@ -64,6 +66,8 @@ export function OneTaskforceRail({
   taskforces: OneTaskforce[];
   org: OneOrgState | null;
   activeChatId: string | null;
+  /** 지금 실행 중(오너 대기 아님)인 대화 — 타일 테두리에 혜성이 돈다. */
+  spinningChatIds?: ReadonlySet<string>;
   locale: "ko" | "en";
   onOpen: (taskforce: OneTaskforce) => void;
   onCreate: () => void;
@@ -87,11 +91,13 @@ export function OneTaskforceRail({
       </button>}
       {taskforces.map((taskforce) => {
         const unavailable = taskforce.memberAgentIds.filter((id) => memberUnavailable(memberFor(org, id))).length;
+        const spinning = Boolean(spinningChatIds?.has(taskforce.chatId));
         return <button
           key={taskforce.id}
           type="button"
-          className={styles.taskforceRow}
+          className={`${styles.taskforceRow} ${oneRunCometHostClass}`}
           data-active={activeChatId === taskforce.chatId ? "true" : "false"}
+          data-one-running={spinning ? "true" : "false"}
           onClick={() => onOpen(taskforce)}
         >
           <TaskforcePortraits taskforce={taskforce} org={org} oneAvatarIcon={oneAvatarIcon} />
@@ -112,6 +118,7 @@ export function OneTaskforceRail({
               return `${who}${review}`;
             })()}</small>
           </span>
+          <OneRunComet running={spinning} locale={locale} variant="tile" />
         </button>;
       })}
     </div>

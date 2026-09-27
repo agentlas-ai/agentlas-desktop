@@ -92,6 +92,11 @@ function runtime() {
   return { chats, invocationService, org };
 }
 
+/** Group-chat membership, loaded only by the roster operations. */
+function taskforceStore() {
+  return require("./taskforces") as typeof import("./taskforces");
+}
+
 function ko(): boolean {
   return currentUiLocale() === "ko";
 }
@@ -225,8 +230,8 @@ export function resolveOneTeamMember(query: string): OneOrgMember {
   const names = members.map((member) => member.displayName).join(", ");
   if (pool.length === 0) {
     throw new Error(ko()
-      ? `one-team-member-not-found: "${query}"에 맞는 팀원이 없어요. 지금 팀원: ${names || "(없음)"}. 아무것도 시작되지 않았어요.`
-      : `one-team-member-not-found: no teammate matches "${query}". Teammates: ${names || "(none)"}. Nothing was started.`);
+      ? `one-team-member-not-found: "${query}"에 맞는 팀원이 없어요. 지금 팀원: ${names || "(없음)"}. 아무것도 시작되지 않았어요. 없는 역할이면 one_team_create_member 로 팀원을 먼저 만드세요.`
+      : `one-team-member-not-found: no teammate matches "${query}". Teammates: ${names || "(none)"}. Nothing was started. If nobody fits, create one first with one_team_create_member.`);
   }
   const matches = pool.map((member) => member.displayName).join(", ");
   throw new Error(ko()
@@ -622,4 +627,172 @@ export async function oneTeamSessionStatus(caller: OneTeamCaller, input: { sessi
   });
   if (settled) return view(settled);
   return { ...view(row(dispatch.id) ?? dispatch), note: "Still working. You can end your turn: the result is reported back to this conversation when it finishes." };
+}
+
+// ── Roster: create a teammate / invite one into this group chat ─────────────
+/*
+ * Live 2026-09-27 (chat "Youtube launch", a One group chat with 0 members): the
+ * owner said "단톡방에 에이전트 만들던지 팀원 초대하던지 해서 …" with Full access.
+ * One read one_team_list and then had no way to act — the only creation path
+ * was the renderer's "New Agent" dialog and the only membership path the
+ * group-settings sheet. These two operations call the SAME product functions
+ * (org.createOneTeamAgent, taskforces.updateOneTaskforce): no parallel store
+ * write, the same slot limit and the same group size limit, each refusal says
+ * exactly why and that nothing changed.
+ */
+
+/** The owner's own six base characters; a teammate One creates gets one of them, stable per name. */
+const DEFAULT_CHARACTERS = ["orange-dino", "blue-wave", "green-cloud", "purple-beacon", "amber-pod", "orange-sprout"] as const;
+
+export function defaultOneTeamCharacter(name: string): string {
+  const digest = createHash("sha256").update(normalizeName(name), "utf8").digest();
+  return DEFAULT_CHARACTERS[digest[0]! % DEFAULT_CHARACTERS.length]!;
+}
+
+/** Korean object/topic particle after a name: 받침 → 을/은, otherwise 를/는; non-Hangul → 을(를). */
+function particle(name: string, kind: "object" | "topic"): string {
+  const last = name.trim().slice(-1);
+  const code = last ? last.charCodeAt(0) - 0xac00 : -1;
+  if (code < 0 || code > 11_171) return kind === "object" ? "을(를)" : "은(는)";
+  const batchim = code % 28 !== 0;
+  return kind === "object" ? (batchim ? "을" : "를") : (batchim ? "은" : "는");
+}
+
+function assertRosterPermission(caller: OneTeamCaller): void {
+  if (caller.permission === "read") {
+    throw new Error(`one-team-permission-required: ${ownerMessage(
+      "이 실행은 읽기 권한이라 팀원을 만들거나 초대하지 않았어요. 쓰기 이상 권한으로 다시 시키면 됩니다.",
+      "This run has read-only permission, so no teammate was created or invited. Ask again with write or full access.",
+    )}`);
+  }
+}
+
+function clip(value: unknown, max: number): string {
+  return typeof value === "string" ? value.replace(/\s+/g, " ").trim().slice(0, max) : "";
+}
+
+function groupOf(chatId: string): { id: string; title: string; description: string; revision: number; memberAgentIds: string[] } | null {
+  const found = taskforceStore().listOneTaskforces().find((taskforce) => taskforce.chatId === chatId);
+  return found ? { id: found.id, title: found.title, description: found.description, revision: found.revision, memberAgentIds: [...found.memberAgentIds] } : null;
+}
+
+function appendJoinReceipt(chatId: string, member: OneOrgMember, created: boolean): void {
+  try {
+    const text = ownerMessage(
+      created ? `새 팀원 ${member.displayName}${particle(member.displayName, "object")} 만들어 이 단톡방에 초대했어요.` : `팀원 ${member.displayName}${particle(member.displayName, "object")} 이 단톡방에 초대했어요.`,
+      created ? `Created a new teammate, ${member.displayName}, and invited them to this group chat.` : `Invited teammate ${member.displayName} to this group chat.`,
+    );
+    runtime().chats.appendChatMessage(chatId, "system", text, {
+      hostNotice: { purpose: "one-team-member-joined", memberName: member.displayName.slice(0, 80), created },
+    });
+    emitDesktopStoreChange({ entity: "chat", id: chatId });
+  } catch (error) {
+    console.warn("[one-team] join receipt not written:", error instanceof Error ? error.message : error);
+  }
+}
+
+/** Adds an active member to the caller's group chat. Returns false when already a member. */
+function inviteIntoGroup(chatId: string, member: OneOrgMember): boolean {
+  const group = groupOf(chatId);
+  if (!group) {
+    throw new Error(`one-team-not-a-group-chat: ${ownerMessage(
+      "이 대화는 단톡방이 아니라서 초대하지 않았어요. 팀원에게 일을 맡기려면 one_team_start_session 을 쓰세요.",
+      "This conversation is not a group chat, so nobody was invited. To hand work to a teammate, use one_team_start_session.",
+    )}`);
+  }
+  if (group.memberAgentIds.includes(member.installedAgentId)) return false;
+  try {
+    taskforceStore().updateOneTaskforce({
+      id: group.id,
+      title: group.title,
+      description: group.description,
+      memberAgentIds: [...group.memberAgentIds, member.installedAgentId],
+      expectedRevision: group.revision,
+    });
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    const full = /up to (\d+)/.exec(raw);
+    throw new Error(`one-team-invite-refused: ${full
+      ? ownerMessage(`이 단톡방은 최대 ${full[1]}명이라 더 초대하지 않았어요(${group.memberAgentIds.length}/${full[1]}).`, `This group chat holds at most ${full[1]} members, so nobody else was invited (${group.memberAgentIds.length}/${full[1]}).`)
+      : ownerMessage(`초대하지 못했어요: ${raw}`, `Could not invite: ${raw}`)} ${ownerMessage("단톡방 구성은 바뀌지 않았어요.", "The group chat is unchanged.")}`);
+  }
+  return true;
+}
+
+function memberView(member: OneOrgMember) {
+  return { member_id: member.id, name: member.displayName, name_en: member.nameEn };
+}
+
+export function oneTeamInvite(caller: OneTeamCaller, input: { member?: unknown }) {
+  const chatId = assertCaller(caller.chatId);
+  assertRosterPermission(caller);
+  const member = resolveOneTeamMember(typeof input.member === "string" ? input.member : "");
+  const joined = inviteIntoGroup(chatId, member);
+  if (joined) appendJoinReceipt(chatId, member, false);
+  return {
+    ...memberView(member),
+    confirmed: true,
+    ...(joined ? {} : { already_member: true }),
+    owner_message: joined
+      ? ownerMessage(`팀원 ${member.displayName}${particle(member.displayName, "object")} 이 단톡방에 초대했어요.`, `Invited teammate ${member.displayName} to this group chat.`)
+      : ownerMessage(`팀원 ${member.displayName}${particle(member.displayName, "topic")} 이미 이 단톡방에 있어요.`, `Teammate ${member.displayName} is already in this group chat.`),
+    note: "To hand this teammate work, call one_team_start_session with this name.",
+  };
+}
+
+export function oneTeamCreateMember(caller: OneTeamCaller, input: { name?: unknown; role?: unknown; personality?: unknown; invite?: unknown }) {
+  const chatId = assertCaller(caller.chatId);
+  assertRosterPermission(caller);
+  const name = clip(input.name, 80);
+  if (!name) throw new Error(`one-team-name-required: ${ownerMessage("새 팀원의 이름을 적어 주세요.", "Give the new teammate a name.")}`);
+  const invite = input.invite !== false;
+  // A retry or a second call with the same name must not create a twin.
+  const existing = activeMembers().find((member) => normalizeName(member.displayName) === normalizeName(name)
+    || (member.nameEn && normalizeName(member.nameEn) === normalizeName(name)));
+  if (existing) {
+    const joined = invite && groupOf(chatId) ? inviteIntoGroup(chatId, existing) : false;
+    if (joined) appendJoinReceipt(chatId, existing, false);
+    return {
+      ...memberView(existing),
+      confirmed: true,
+      already_exists: true,
+      invited: joined,
+      owner_message: ownerMessage(
+        `이미 ${existing.displayName}라는 팀원이 있어 새로 만들지 않았어요.${joined ? " 이 단톡방에 초대했어요." : ""}`,
+        `A teammate named ${existing.displayName} already exists, so no new one was created.${joined ? " Invited them to this group chat." : ""}`,
+      ),
+      note: "Not created twice. Hand work with one_team_start_session using this name.",
+    };
+  }
+  let created: { installedAgentId: string; chatId: string };
+  try {
+    created = runtime().org.createOneTeamAgent({
+      name,
+      ...(clip(input.role, 100) ? { title: clip(input.role, 100) } : {}),
+      ...(typeof input.personality === "string" && input.personality.trim() ? { description: input.personality.trim().slice(0, 1_200) } : {}),
+      avatar: { kind: "preset", characterId: defaultOneTeamCharacter(name) },
+    });
+  } catch (error) {
+    const raw = error instanceof Error ? error.message : String(error);
+    throw new Error(`one-team-create-refused: ${raw} ${ownerMessage("아무도 만들어지지 않았어요.", "No teammate was created.")}`);
+  }
+  const member = activeMembers().find((row) => row.installedAgentId === created.installedAgentId);
+  if (!member) throw new Error("one-team-create-refused: the new teammate is not on the roster.");
+  let joined = false;
+  let inviteRefusal: string | null = null;
+  if (invite && groupOf(chatId)) {
+    try { joined = inviteIntoGroup(chatId, member); } catch (error) { inviteRefusal = error instanceof Error ? error.message : String(error); }
+  }
+  if (joined) appendJoinReceipt(chatId, member, true);
+  return {
+    ...memberView(member),
+    confirmed: true,
+    created: true,
+    invited: joined,
+    ...(inviteRefusal ? { invite_refusal: inviteRefusal } : {}),
+    owner_message: joined
+      ? ownerMessage(`새 팀원 ${member.displayName}${particle(member.displayName, "object")} 만들어 이 단톡방에 초대했어요.`, `Created a new teammate, ${member.displayName}, and invited them to this group chat.`)
+      : ownerMessage(`새 팀원 ${member.displayName}${particle(member.displayName, "object")} 만들었어요.`, `Created a new teammate, ${member.displayName}.`),
+    note: "The teammate exists now. Hand work with one_team_start_session using this name.",
+  };
 }

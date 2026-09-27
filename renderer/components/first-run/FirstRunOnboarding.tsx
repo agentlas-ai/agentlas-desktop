@@ -12,7 +12,7 @@
  *   Chrome     → CredentialImportDialog (consent ≠ import ≠ sign-in kept)
  *   AI         → runtime.installCli / openCliLogin / detect + usage (real data only)
  *   Pro        → web checkout, then billing.getCredits re-read before "Pro"
- *   mailbox    → agentMail.status() (server entitlement). Absent = "coming soon";
+ *   mailbox    → agentMail.status() (server entitlement). Absent = "sign in to check";
  *                Pro+ may create an address via agentMail.issue(), shown only after
  *                status() returns it.
  *
@@ -187,7 +187,7 @@ function makeCopy(ko: boolean, name: string) {
     planDefault: "기본 선택", planCurrent: "지금 요금제", perMonth: "/ 월", perYear: (p: string) => `/ 월 · 연 ${p}`,
     credits: (n: string) => `월 ${n} credits`, cloud: (n: string) => `비공개 Cloud 에이전트 ${n}개`,
     alive: "Alive Agent 포함",
-    byo: "내 AI 연결 · 로컬 실행", planMailSoon: "AI 전용 메일 · 도입 예정",
+    byo: "내 AI 연결 · 로컬 실행", planMail: (n: string) => `에이전트 전용 메일 · 월 ${n}명 발송`, planMailPlain: "에이전트 전용 메일",
     freeCta: "Free로 시작", proCta: "구독하기", proActive: (p: string) => `${p} 사용 중`,
     planNote: "가격과 혜택은 agentlas.cloud 상품 정보에서 불러왔어요. 결제는 웹에서 진행돼요.",
     planLoadFailed: "요금 정보를 불러오지 못했어요.", retry: "다시 시도", openWeb: "웹에서 보기", loadingPlans: "요금 정보를 불러오는 중…",
@@ -199,7 +199,7 @@ function makeCopy(ko: boolean, name: string) {
     principleLabel: "꼭 지켜야 할 원칙 · 한 줄에 하나", principlePlaceholder: "예: 외부로 보내기 전에 꼭 물어봐.",
     prefHint: "원칙은 적은 그대로만 지켜요. 언제든 프로필에서 고칠 수 있어요.",
     mailTitle: "에이전트에게 메일함을 줄까요?", mailSub: "에이전트만 쓰는 고유한 메일 주소예요.",
-    mailName: "에이전트 전용 메일", mailSoon: "도입 예정", mailSoonBody: "Pro 이상 요금제 혜택으로 준비하고 있어요. 준비되면 설정에서 켤 수 있어요.",
+    mailName: "에이전트 전용 메일", mailSoon: "확인 필요", mailSoonBody: "Agentlas에 로그인하면 요금제에 포함된 메일 주소를 확인하고 만들 수 있어요. 나중에 설정의 메일 탭에서도 할 수 있어요.",
     mailIssued: "발급됨", mailPending: "주소 발급 전", mailPendingBody: `요금제에 포함돼 있어요. 아래에서 ${name}의 메일 주소를 정해 주세요.`,
     mailPreparing: "준비 중", mailPreparingBody: "주소를 준비하고 있어요. 준비가 끝나면 설정에서 쓸 수 있어요.",
     mailPlanOnly: "Pro 이상 요금제에서 쓸 수 있어요.", mailSeePlans: "Free · Pro 보기",
@@ -240,7 +240,7 @@ function makeCopy(ko: boolean, name: string) {
     planDefault: "Selected", planCurrent: "Current plan", perMonth: "/ month", perYear: (p: string) => `/ month · ${p}/yr`,
     credits: (n: string) => `${n} credits / month`, cloud: (n: string) => `${n} private Cloud agents`,
     alive: "Alive Agent included",
-    byo: "Your own AI · local runs", planMailSoon: "Agent mailbox · coming soon",
+    byo: "Your own AI · local runs", planMail: (n: string) => `Agent mailbox · ${n} recipients / month`, planMailPlain: "Agent mailbox",
     freeCta: "Start with Free", proCta: "Subscribe", proActive: (p: string) => `On ${p}`,
     planNote: "Prices and benefits come from the agentlas.cloud catalog. Checkout happens on the web.",
     planLoadFailed: "Could not load plans.", retry: "Retry", openWeb: "Open on the web", loadingPlans: "Loading plans…",
@@ -252,7 +252,7 @@ function makeCopy(ko: boolean, name: string) {
     principleLabel: "Must-keep principles · one per line", principlePlaceholder: "e.g. Always ask before sending anything out.",
     prefHint: "Principles are followed exactly as written. Edit them anytime in the profile.",
     mailTitle: "Give your agent a mailbox?", mailSub: "A unique email address only your agent uses.",
-    mailName: "Agent mailbox", mailSoon: "Coming soon", mailSoonBody: "Planned as a Pro-and-above benefit. You'll be able to turn it on in Settings.",
+    mailName: "Agent mailbox", mailSoon: "Sign in", mailSoonBody: "Sign in to Agentlas to see and create the mail address your plan includes. You can also do this later from the Mail tab in Settings.",
     mailIssued: "Issued", mailPending: "Not issued yet", mailPendingBody: `Included in your plan. Choose ${name}'s mail address below.`,
     mailPreparing: "Preparing", mailPreparingBody: "The address is being prepared. Use it from Settings once it's ready.",
     mailPlanOnly: "Available on Pro and above.", mailSeePlans: "See Free · Pro",
@@ -630,172 +630,176 @@ export function FirstRunOnboarding({
         <span className={styles.brand}><img src="/brand/agentlas-one-mark.png" alt="" />Agentlas</span>
       </div>
       <div className={styles.stage} aria-hidden={popupOpen || undefined} inert={popupOpen || undefined}>
-        <header className={styles.head}>
-          <h1 id="first-run-title">{heading[0]}</h1>
-          <p>{heading[1]}</p>
-        </header>
+        {/* One fixed-height frame per flow, optically centred in .stage: the title stays put
+            from step to step instead of each step re-centring at its own height (owner 2026-09-27). */}
+        <div className={styles.frame}>
+          <header className={styles.head}>
+            <h1 id="first-run-title">{heading[0]}</h1>
+            <p>{heading[1]}</p>
+          </header>
 
-        <section className={styles.body}>
-          {step === "name" && (
-            <>
-              <div className={styles.field}>
-                <label htmlFor="first-run-name">{copy.nameLabel}</label>
-                <input
-                  id="first-run-name"
-                  className={styles.input}
-                  value={name}
-                  maxLength={64}
-                  autoFocus
-                  placeholder={copy.namePlaceholder}
-                  onChange={(event) => setName(event.target.value)}
-                  onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && name.trim()) void saveName(); }}
-                />
-              </div>
-              {/* The placeholder "루나" is an example, not a value: with no name typed the
-                  preview used it as if the agent were already called that (QA 2026-09-27). */}
-              <div className={styles.preview} aria-live="polite" data-empty={name.trim() ? undefined : "true"}>{name.trim() ? copy.namePreview(name.trim()) : copy.namePreviewEmpty}</div>
-              <p className={styles.hint}>{copy.nameHint}</p>
-            </>
-          )}
-
-          {step === "browser" && (
-            <>
-              <div className={styles.setupCard}>
-                <img src="/brand/browser/chrome.png" alt="" />
-                <div className={styles.setupCopy}>
-                  <strong>{copy.chromeName}</strong>
-                  <small>{copy.chromeSub}</small>
+          <section className={styles.body}>
+            {step === "name" && (
+              <>
+                <div className={styles.field}>
+                  <label htmlFor="first-run-name">{copy.nameLabel}</label>
+                  <input
+                    id="first-run-name"
+                    className={styles.input}
+                    value={name}
+                    maxLength={64}
+                    autoFocus
+                    placeholder={copy.namePlaceholder}
+                    onChange={(event) => setName(event.target.value)}
+                    onKeyDown={(event) => { if (event.key === "Enter" && !event.nativeEvent.isComposing && name.trim()) void saveName(); }}
+                  />
                 </div>
-                <span className={styles.chip} data-tone={importSummary ? "ok" : undefined}>
-                  {importSummary ? copy.chipImported : consent ? copy.chipConsented : copy.chipNone}
-                </span>
-              </div>
-              <label className={styles.consent}>
-                <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
-                <span>{copy.consent}</span>
-              </label>
-              <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} disabled={!consent} onClick={() => setImportOpen(true)}>
-                {importSummary ? copy.reopenChrome : copy.connectChrome}
-              </button>
-              <ul className={styles.facts} aria-label={copy.chromeName}>
-                <li><span>{copy.factConsent}</span><b>{consent ? copy.yes : copy.notYet}</b></li>
-                <li><span>{copy.factImport}</span><b>{importSummary ? copy.yes : copy.notYet}</b></li>
-                <li><span>{copy.factKept}</span><b>{keptSites === undefined ? copy.checking : keptSites === null ? copy.keptUnknown : copy.sitesKept(keptSites)}</b></li>
-              </ul>
-              {importSummary && <p className={styles.hint} role="status">{importSummary}</p>}
-              {!importSummary && <p className={styles.hint}>{copy.browserHint}</p>}
-            </>
-          )}
+                {/* The placeholder "루나" is an example, not a value: with no name typed the
+                    preview used it as if the agent were already called that (QA 2026-09-27). */}
+                <div className={styles.preview} aria-live="polite" data-empty={name.trim() ? undefined : "true"}>{name.trim() ? copy.namePreview(name.trim()) : copy.namePreviewEmpty}</div>
+                <p className={styles.hint}>{copy.nameHint}</p>
+              </>
+            )}
 
-          {step === "ai" && (
-            <>
-              <div className={styles.cards}>
-                {AI_CARDS.map((spec) => {
-                  const state = cardStates[spec.id];
-                  const busyNow = cardBusy[spec.id];
-                  const connected = state.login === "signed-in";
-                  const lines: string[] = runtimes === null
-                    ? [copy.checking]
-                    : state.login === "not-installed"
-                      ? [spec.installable ? copy.notInstalled : copy.noAutoInstall]
-                      : state.login === "sign-in-required"
-                        ? [copy.signInNeeded]
-                        : state.login === "installed-unverified"
-                          ? [copy.installed, spec.usageProvider ? copy.loginUnknown : copy.usageUnknown]
-                          : [copy.signedIn, state.usage ? copy.remaining(state.usage.remainingPercent, usageWindowLabel(state.usage, ko)) : copy.usageUnknown];
-                  const label = busyNow
-                    ? copy[busyNow]
-                    : connected
-                      ? copy.connectedCta
-                      : state.login === "not-installed" && !spec.installable
-                        ? copy.installGuide
-                        : copy.loginCta;
-                  return (
-                    <article key={spec.id} className={styles.aiCard} data-connected={connected}>
-                      <img src={spec.logo} alt="" />
-                      <strong>{copy.aiName[spec.id]}</strong>
-                      <span className={styles.sub}>{copy.aiSub2[spec.id]}</span>
-                      <div className={styles.status} data-tone={connected ? "ok" : state.login === "sign-in-required" ? "warn" : undefined} aria-live="polite">
-                        {lines.map((line) => <span key={line}>{line}</span>)}
-                      </div>
-                      <button
-                        type="button"
-                        data-connected={connected}
-                        aria-disabled={connected || undefined}
-                        disabled={Boolean(busyNow)}
-                        onClick={() => onCardAction(spec)}
-                        aria-label={`${copy.aiName[spec.id]} — ${label}`}
-                      >{label}</button>
-                    </article>
-                  );
-                })}
-                <article className={styles.aiCard}>
-                  <img src="/brand/agentlas-one-mark.png" alt="" />
-                  <strong>{copy.neverUsed}</strong>
-                  <span className={styles.sub}>{copy.neverUsedSub}</span>
-                  <div className={styles.status} />
-                  <button type="button" onClick={() => setPlansOpen(true)}>{copy.seePlans}</button>
-                </article>
-              </div>
-              {AI_CARDS.map((spec) => cardNote[spec.id] ? <p key={spec.id} className={styles.error} role="status">{`${copy.aiName[spec.id]}: ${cardNote[spec.id]}`}</p> : null)}
-              <p className={styles.caption}>{copy.aiCaption}</p>
-            </>
-          )}
-
-          {step === "preferences" && (
-            <>
-              <div className={styles.field}>
-                <label htmlFor="first-run-pref">{copy.prefLabel}</label>
-                <textarea id="first-run-pref" className={styles.textarea} rows={4} maxLength={4000} value={prefText} placeholder={copy.prefPlaceholder} onChange={(event) => setPrefText(event.target.value)} />
-              </div>
-              <div className={styles.field}>
-                <label htmlFor="first-run-principles">{copy.principleLabel}</label>
-                <textarea id="first-run-principles" className={styles.textarea} rows={2} value={principleText} placeholder={copy.principlePlaceholder} onChange={(event) => setPrincipleText(event.target.value)} />
-              </div>
-              <p className={styles.hint}>{copy.prefHint}</p>
-            </>
-          )}
-
-          {step === "mailbox" && (
-            <>
-              <div className={styles.mailCard}>
-                <div className={styles.mailRow}>
-                  <div>
-                    <strong>{copy.mailName}</strong>
-                    <small>{mail === null
-                      ? copy.checking
-                      : !mailEntitlement
-                        ? copy.mailSoonBody
-                        : mailbox
-                          ? (mailActive ? copy.mailQuota(num(mailEntitlement.remainingThisMonth), num(mailEntitlement.monthlyRecipientLimit)) : copy.mailPreparingBody)
-                          : mailEntitlement.addressLimit > 0
-                            ? `${copy.mailPendingBody} ${copy.mailQuota(num(mailEntitlement.monthlyRecipientLimit), num(mailEntitlement.monthlyRecipientLimit))}`
-                            : copy.mailPlanOnly}</small>
+            {step === "browser" && (
+              <>
+                <div className={styles.setupCard}>
+                  <img src="/brand/browser/chrome.png" alt="" />
+                  <div className={styles.setupCopy}>
+                    <strong>{copy.chromeName}</strong>
+                    <small>{copy.chromeSub}</small>
                   </div>
-                  <span className={styles.chip} data-tone={mailActive ? "ok" : undefined}>
-                    {mail === null ? copy.checking : !mailEntitlement ? copy.mailSoon : mailbox ? (mailActive ? copy.mailIssued : copy.mailPreparing) : copy.mailPending}
+                  <span className={styles.chip} data-tone={importSummary ? "ok" : undefined}>
+                    {importSummary ? copy.chipImported : consent ? copy.chipConsented : copy.chipNone}
                   </span>
                 </div>
-                {mailAddress && <div className={styles.mailAddress}>{mailAddress}</div>}
-                {mailEntitlement && !mailActive && mailEntitlement.addressLimit > 0 && (
-                  <OneMailIdentityPicker
-                    locale={ko ? "ko" : "en"}
-                    oneName={displayName}
-                    limits={mailOk?.limits ?? null}
-                    onCreated={() => void loadMail()}
-                    compact
-                  />
-                )}
-                {mailEntitlement && !mailbox && mailEntitlement.addressLimit <= 0 && (
-                  <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} onClick={() => setPlansOpen(true)}>{copy.mailSeePlans}</button>
-                )}
-              </div>
-              <p className={styles.hint}>{copy.mailHint}</p>
-            </>
-          )}
+                <label className={styles.consent}>
+                  <input type="checkbox" checked={consent} onChange={(event) => setConsent(event.target.checked)} />
+                  <span>{copy.consent}</span>
+                </label>
+                <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} disabled={!consent} onClick={() => setImportOpen(true)}>
+                  {importSummary ? copy.reopenChrome : copy.connectChrome}
+                </button>
+                <ul className={styles.facts} aria-label={copy.chromeName}>
+                  <li><span>{copy.factConsent}</span><b>{consent ? copy.yes : copy.notYet}</b></li>
+                  <li><span>{copy.factImport}</span><b>{importSummary ? copy.yes : copy.notYet}</b></li>
+                  <li><span>{copy.factKept}</span><b>{keptSites === undefined ? copy.checking : keptSites === null ? copy.keptUnknown : copy.sitesKept(keptSites)}</b></li>
+                </ul>
+                {importSummary && <p className={styles.hint} role="status">{importSummary}</p>}
+                {!importSummary && <p className={styles.hint}>{copy.browserHint}</p>}
+              </>
+            )}
 
-          {error && <p className={styles.error} role="alert">{error}</p>}
-        </section>
+            {step === "ai" && (
+              <>
+                <div className={styles.cards}>
+                  {AI_CARDS.map((spec) => {
+                    const state = cardStates[spec.id];
+                    const busyNow = cardBusy[spec.id];
+                    const connected = state.login === "signed-in";
+                    const lines: string[] = runtimes === null
+                      ? [copy.checking]
+                      : state.login === "not-installed"
+                        ? [spec.installable ? copy.notInstalled : copy.noAutoInstall]
+                        : state.login === "sign-in-required"
+                          ? [copy.signInNeeded]
+                          : state.login === "installed-unverified"
+                            ? [copy.installed, spec.usageProvider ? copy.loginUnknown : copy.usageUnknown]
+                            : [copy.signedIn, state.usage ? copy.remaining(state.usage.remainingPercent, usageWindowLabel(state.usage, ko)) : copy.usageUnknown];
+                    const label = busyNow
+                      ? copy[busyNow]
+                      : connected
+                        ? copy.connectedCta
+                        : state.login === "not-installed" && !spec.installable
+                          ? copy.installGuide
+                          : copy.loginCta;
+                    return (
+                      <article key={spec.id} className={styles.aiCard} data-connected={connected}>
+                        <img src={spec.logo} alt="" />
+                        <strong>{copy.aiName[spec.id]}</strong>
+                        <span className={styles.sub}>{copy.aiSub2[spec.id]}</span>
+                        <div className={styles.status} data-tone={connected ? "ok" : state.login === "sign-in-required" ? "warn" : undefined} aria-live="polite">
+                          {lines.map((line) => <span key={line}>{line}</span>)}
+                        </div>
+                        <button
+                          type="button"
+                          data-connected={connected}
+                          aria-disabled={connected || undefined}
+                          disabled={Boolean(busyNow)}
+                          onClick={() => onCardAction(spec)}
+                          aria-label={`${copy.aiName[spec.id]} — ${label}`}
+                        >{label}</button>
+                      </article>
+                    );
+                  })}
+                  <article className={styles.aiCard}>
+                    <img src="/brand/agentlas-one-mark.png" alt="" />
+                    <strong>{copy.neverUsed}</strong>
+                    <span className={styles.sub}>{copy.neverUsedSub}</span>
+                    <div className={styles.status} />
+                    <button type="button" onClick={() => setPlansOpen(true)}>{copy.seePlans}</button>
+                  </article>
+                </div>
+                {AI_CARDS.map((spec) => cardNote[spec.id] ? <p key={spec.id} className={styles.error} role="status">{`${copy.aiName[spec.id]}: ${cardNote[spec.id]}`}</p> : null)}
+                <p className={styles.caption}>{copy.aiCaption}</p>
+              </>
+            )}
+
+            {step === "preferences" && (
+              <>
+                <div className={styles.field}>
+                  <label htmlFor="first-run-pref">{copy.prefLabel}</label>
+                  <textarea id="first-run-pref" className={styles.textarea} rows={4} maxLength={4000} value={prefText} placeholder={copy.prefPlaceholder} onChange={(event) => setPrefText(event.target.value)} />
+                </div>
+                <div className={styles.field}>
+                  <label htmlFor="first-run-principles">{copy.principleLabel}</label>
+                  <textarea id="first-run-principles" className={styles.textarea} rows={2} value={principleText} placeholder={copy.principlePlaceholder} onChange={(event) => setPrincipleText(event.target.value)} />
+                </div>
+                <p className={styles.hint}>{copy.prefHint}</p>
+              </>
+            )}
+
+            {step === "mailbox" && (
+              <>
+                <div className={styles.mailCard}>
+                  <div className={styles.mailRow}>
+                    <div>
+                      <strong>{copy.mailName}</strong>
+                      <small>{mail === null
+                        ? copy.checking
+                        : !mailEntitlement
+                          ? copy.mailSoonBody
+                          : mailbox
+                            ? (mailActive ? copy.mailQuota(num(mailEntitlement.remainingThisMonth), num(mailEntitlement.monthlyRecipientLimit)) : copy.mailPreparingBody)
+                            : mailEntitlement.addressLimit > 0
+                              ? `${copy.mailPendingBody} ${copy.mailQuota(num(mailEntitlement.monthlyRecipientLimit), num(mailEntitlement.monthlyRecipientLimit))}`
+                              : copy.mailPlanOnly}</small>
+                    </div>
+                    <span className={styles.chip} data-tone={mailActive ? "ok" : undefined}>
+                      {mail === null ? copy.checking : !mailEntitlement ? copy.mailSoon : mailbox ? (mailActive ? copy.mailIssued : copy.mailPreparing) : copy.mailPending}
+                    </span>
+                  </div>
+                  {mailAddress && <div className={styles.mailAddress}>{mailAddress}</div>}
+                  {mailEntitlement && !mailActive && mailEntitlement.addressLimit > 0 && (
+                    <OneMailIdentityPicker
+                      locale={ko ? "ko" : "en"}
+                      oneName={displayName}
+                      limits={mailOk?.limits ?? null}
+                      onCreated={() => void loadMail()}
+                      compact
+                    />
+                  )}
+                  {mailEntitlement && !mailbox && mailEntitlement.addressLimit <= 0 && (
+                    <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} onClick={() => setPlansOpen(true)}>{copy.mailSeePlans}</button>
+                  )}
+                </div>
+                <p className={styles.hint}>{copy.mailHint}</p>
+              </>
+            )}
+
+            {error && <p className={styles.error} role="alert">{error}</p>}
+          </section>
+        </div>
       </div>
 
       <footer className={styles.foot} aria-hidden={popupOpen || undefined} inert={popupOpen || undefined}>
@@ -869,7 +873,7 @@ export function FirstRunOnboarding({
                     <li>{copy.credits(num(proPlan.monthlyCredits))}</li>
                     <li>{copy.cloud(num(proPlan.cloudAgentLimit))}</li>
                     {proPlan.aliveAgent && <li>{copy.alive}</li>}
-                    <li>{copy.planMailSoon}</li>
+                    <li>{proPlan.agentMailMonthlyRecipients ? copy.planMail(num(proPlan.agentMailMonthlyRecipients)) : copy.planMailPlain}</li>
                   </ul>
                   {onPaid
                     ? <button type="button" className={styles.secondary} disabled>{copy.proActive(planLabel(currentPlanId))}</button>

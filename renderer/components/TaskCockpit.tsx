@@ -4,7 +4,7 @@ import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { selectionForRuntime } from "@shared/runtime-selection";
-import { isInterruptedPartial, markInterruptedPartial } from "@shared/interrupted-partial";
+import { isInterruptedPartial, isLivePartialCommitBoundary, markInterruptedPartial } from "@shared/interrupted-partial";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
@@ -111,6 +111,7 @@ import { normalizeToolCall, shadowsToolRecordedPath } from "@shared/tool-call-de
 import { shellWrittenPaths } from "@shared/shell-written-paths";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { ChatQuestionSheet, type QuestionSheetAnswer } from "@/components/ChatQuestionSheet";
+import { questionOutrunByNewerUserMessage, type AskActionBlock } from "@shared/ask-action-bar";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { extractQuestions } from "@/lib/ask-question";
 import { stripMultimodalSetup } from "@/lib/multimodal-setup";
@@ -1990,6 +1991,13 @@ function restoreAnsweredQuestions(
     const nextUser = i >= messages.length - 1
       ? undefined
       : messages.slice(i + 1).find((m) => m.role === "user");
+    /*
+     * ★질문 뒤에 앱이 붙인 말풍선(아직 답을 기다린다 등)만 있고 사람 메시지가 없으면 질문은 살아 있다.
+     *   예전에는 "마지막 메시지가 아니면" 무조건 ✓ 로 잠가, 호스트 말풍선 한 줄에 Work 질문 시트가
+     *   사라졌다(격리 앱 실측 2026-09-27). Main 의 규칙(electron/confirm pendingQuestionMessage:
+     *   뒤에 사용자 메시지가 없고 확정 답이 없으면 산다)과 같게 맞춘다.
+     */
+    if (!nextUser) return msg;
     const answerText = (nextUser?.text?.trim() ?? "") || committedReply;
     // 질문 시트 배치 스캐폴드("질문: …\n선택: …\n답변: …" 청크의 \n\n join —
     // ChatQuestionSheet.composeQuestionReply와 짝)는 질문별로 파싱해 각 질문에 제 답만 넣는다.
@@ -2516,6 +2524,10 @@ function ChatPage() {
    */
   const [agentScreen, setAgentScreen] = useState<{ mode: "browser" | "computer" } | null>(null);
   const [questionCommitPending, setQuestionCommitPending] = useState(false);
+  /** 누른 순간 닫힌 질문 묶음(확정 대기 중). 거절되면 null 로 풀려 시트가 되살아난다. */
+  const [optimisticAnsweredQuestionId, setOptimisticAnsweredQuestionId] = useState<string | null>(null);
+  /** 실행 중에 "새 메시지로 보내기"를 누른 답 — 실행이 끝나는 순간 보낸다. */
+  const [pendingResendText, setPendingResendText] = useState<{ chatId: string; text: string } | null>(null);
   const questionCommitPendingRef = useRef<string | null>(null);
   const continuationResumeAttemptsRef = useRef(new Set<string>());
   const continuationTransportRetryableRef = useRef(new Set<string>());
@@ -3289,6 +3301,29 @@ function ChatPage() {
               : msg,
           ),
         );
+      } else if (ev.kind === "partial" && isLivePartialCommitBoundary(ev)) {
+        // Main saved the finished turn as its own row and restarted its buffer at empty.
+        // Seal what streamed under that row id and keep the live bubble for the next turn;
+        // otherwise a cancel before the next turn's first token re-showed the saved text
+        // as an "interrupted answer" (X Marketing 2026-09-27).
+        partialTextRef.current = "";
+        processedTextLenRef.current = 0;
+        transcriptRevisionRef.current += 1;
+        const committedId = ev.durableMessageId;
+        setMessages((m) => m.flatMap((msg) => {
+          if (msg.id !== placeholderId || !msg.text.trim()) return [msg];
+          return [
+            {
+              id: `turn:${committedId}`,
+              role: msg.role,
+              text: msg.text,
+              durableMessageId: committedId,
+              createdAt: new Date().toISOString(),
+              ...(msg.goalResult ? { goalResult: msg.goalResult } : {}),
+            },
+            { ...msg, text: "", questions: undefined },
+          ];
+        }));
       } else if (ev.kind === "partial") {
         // 델타 스트림 재조립 — main은 증분(delta)+검증 길이(textLen)만 보낸다.
         // 전문(text) 이벤트는 리플레이/폴백 경로로, 누적 버퍼를 그대로 덮어쓴다.
@@ -5067,6 +5102,13 @@ function ChatPage() {
       questionCommitPendingRef.current = messageId;
       setQuestionCommitPending(true);
       setSessionNotice(null);
+      /*
+       * 시트는 누른 순간 닫는다(오너 2026-09-27: "제출하면 바로 스무스하게 전달되야지").
+       * 예전에는 확정 IPC 와 후속 실행 시작을 기다리는 동안 시트가 "실행이 정리되면 전송"으로 남아
+       * 눌렀는지 알 수 없었다. 확정이 거절되면 아래에서 가림을 풀어 질문과 입력을 되살린다.
+       * (확정 → 전송은 전송이 확정 영수증의 continuationRunId 를 써야 해서 동시에 보낼 수 없다.)
+       */
+      setOptimisticAnsweredQuestionId(messageId);
       const perms = perQuestion.map((p) => inferPermissionFromAnswer(p.answers)).find(Boolean);
       try {
         let receipt: { chatId: string; sourceMessageId: string; continuationRunId: string } | null = null;
@@ -5108,6 +5150,7 @@ function ChatPage() {
           if (recovered?.continuationRunId) {
             receipt = { chatId, sourceMessageId, continuationRunId: recovered.continuationRunId };
           } else {
+            setOptimisticAnsweredQuestionId((current) => current === messageId ? null : current);
             setSessionNotice(locale === "ko"
               ? "이 질문의 답변을 저장하지 못했습니다. 질문과 입력은 그대로이므로 다시 시도해 주세요."
               : "The answer was not saved for this exact question. The question and your input are unchanged; try again.");
@@ -5165,6 +5208,9 @@ function ChatPage() {
           ),
         );
       } finally {
+        // 성공이면 위에서 질문이 답한 상태로 바뀌었고, 저장 뒤 실패면 재시도 카드가 떠야 한다 —
+        // 어느 쪽이든 가림은 여기서 푼다.
+        setOptimisticAnsweredQuestionId((current) => current === messageId ? null : current);
         if (isCurrentChat() && questionCommitPendingRef.current === messageId) {
           questionCommitPendingRef.current = null;
           setQuestionCommitPending(false);
@@ -5193,15 +5239,43 @@ function ChatPage() {
     );
   }, []);
 
+  useEffect(() => {
+    if (!pendingResendText || busy || questionCommitPending) return;
+    const { chatId: target, text } = pendingResendText;
+    setPendingResendText(null);
+    // 다른 대화로 옮겨 갔으면 거기로 보내지 않는다 — 그 답은 원래 대화의 것이다.
+    if (target !== chatId) return;
+    setSessionNotice(null);
+    void send(text);
+    // send 는 매 렌더 새로 만들어진다 — 보낼 글과 busy 가 바뀔 때만 다시 본다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingResendText, busy, questionCommitPending, chatId]);
+
   // 바텀 시트에 올릴 질문 묶음 — 가장 최근에 질문을 낸 어시스턴트 메시지 하나만 본다.
   // (더 오래된 미답 질문은 stale — 대화가 이미 지나갔으므로 다시 묻지 않는다.)
   const pendingQuestionSheet = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (m.role === "agent" && m.questions && m.questions.length > 0) {
+        if (m.id === optimisticAnsweredQuestionId) return null;
         const unanswered = m.questions.filter((q) => !q.answer || q.answer.length === 0);
+        /*
+         * 이 질문 뒤에 사람이 이미 새 메시지를 보냈나 — 그렇다면 옛 질문의 답을 확정하면 안 된다
+         * (Main 도 "Question is stale" 로 거절한다). 호스트 말풍선(agent/system)은 세지 않는다 —
+         * 질문 뒤에 앱이 붙인 안내 한 줄로 답이 만료되던 2026-09-14 사고와 같은 규칙.
+         */
+        const outrun = unanswered.length > 0 && questionOutrunByNewerUserMessage(
+          { sourceMessageId: m.questionSourceMessageId ?? m.id, createdAt: m.createdAt },
+          messages.map((row) => ({
+            id: row.id,
+            durableMessageId: row.durableMessageId,
+            role: row.role === "agent" ? "assistant" as const : row.role,
+            createdAt: row.createdAt,
+          })),
+        );
         return unanswered.length > 0
           ? {
+              block: (outrun ? "newer_message" : "none") as AskActionBlock,
               messageId: m.id,
               sourceMessageId: m.questionSourceMessageId ?? m.id,
               questions: unanswered,
@@ -5213,7 +5287,7 @@ function ChatPage() {
       }
     }
     return null;
-  }, [messages]);
+  }, [messages, optimisticAnsweredQuestionId]);
 
   // Both automatic reconciliation and explicit Retry use the accepted bytes
   // and Main-owned run. Neither path commits or parses a new answer.
@@ -6820,6 +6894,21 @@ function ChatPage() {
             )
           }
           onDismiss={() => dismissQuestionBatch(pendingQuestionSheet.messageId)}
+          block={pendingQuestionSheet.block}
+          onResend={(text) => {
+            // 답을 새 메시지로 — 옛 질문은 접고, 작성창과 같은 전송 경로로 보낸다.
+            // 실행이 도는 중이면 Work 작성창은 새 메시지를 받지 않는다(실측 2026-09-27: 그대로 보내면
+            // 답이 조용히 사라졌다). 그때는 실행이 끝나는 순간 보내도록 맡아 두고, 그렇다고 말한다.
+            dismissQuestionBatch(pendingQuestionSheet.messageId);
+            if (busy || questionCommitPendingRef.current) {
+              setPendingResendText({ chatId, text });
+              setSessionNotice(locale === "ko"
+                ? "실행이 끝나면 이 답을 새 메시지로 바로 보냅니다."
+                : "This answer will be sent as a new message as soon as the run finishes.");
+              return;
+            }
+            void send(text);
+          }}
         />
       )}
       {/* Codex식: 이 대화가 폴더(프로젝트)에서 작업하는지 / 전역 대화인지 선택 */}

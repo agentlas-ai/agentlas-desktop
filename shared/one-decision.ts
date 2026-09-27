@@ -418,3 +418,13 @@ export function isPendingConfirmationSnoozed(confirmation: Pick<PendingConfirmat
     && Number.isFinite(Date.parse(confirmation.snoozedUntil))
     && Date.parse(confirmation.snoozedUntil) > now;
 }
+
+/**
+ * 폰의 결정 카드 "거절"은 이 고정 문장을 사용자 턴으로 보낸다 — 모델이 읽을 지시라서
+ * 저장본은 그대로 둔다. 그러나 화면에 "오너가 영어로 친 말"로 보이면 안 된다
+ * (2026-09-27 X 마케팅: 한국어 대화에 "Reject. Do not take the proposed action."이
+ * 오너 말풍선으로 남았다). 화면은 이 판정으로 행동 영수증 한 줄로 바꿔 그린다.
+ */
+export function isOneDecisionProductSafeRejectReply(text: string): boolean {
+  return text.trim() === ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY;
+}

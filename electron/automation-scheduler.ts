@@ -1,4 +1,5 @@
 import { bindAutomationRunStop, releaseAutomationRunStop } from "./automation-execution-control";
+import { settleGoalContinuationRun, settleRefusedGoalContinuation, type GoalContinuationSignals } from "./goal-continuation-hold";
 import { selectionForRuntime } from "../shared/runtime-selection";
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { deliverAutomationResult } from "./automation-delivery";
@@ -21,7 +22,6 @@ import {
   startGraphRun,
   touchGraphRun,
   updateGraphRunNode,
-  finishGraphRun,
   countConsecutiveFailures,
   countGraphRunAttemptsForRun,
   computeNextRun,
@@ -34,15 +34,10 @@ import {
   updateAutomation,
 } from "./store/automations";
 import { checkComputerUsePermissions } from "./mac-permissions";
-import { appendChatMessage, clearChatGoalBindingByGoalId } from "./store/chats";
-import { completeChatGoalContract, getChatGoalContract, getChatGoalRevision } from "./store/chat-goals";
+import { appendChatMessage } from "./store/chats";
+import { getChatGoalContract, getChatGoalRevision } from "./store/chat-goals";
 import {
-  closeOpenGoalLedgerTasks,
-  completeGoalLedgerGoal,
-  GOAL_HARD_STOP_REASONS,
-  goalProgressKeyForText,
   goalLedgerShouldContinue,
-  recordGoalLedgerCycle,
 } from "./mcp/goal-ledger";
 import { getOrCreateAutomationSession } from "./store/automation-sessions";
 import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
@@ -54,9 +49,6 @@ import { automationObservationsInFlight, registerAutomationObservationRuntime, t
 import { requiresGraphReconciliation, runAutomationStrategyCycle } from "./automation-strategy-cycle";
 import { broadcastLiveRun } from "./workflow/live-run";
 import {
-  GOAL_COMPLETE_MARKER,
-  goalCompletionProtocol,
-  goalContinuationSchedule,
   isStormbreakerLongRunPrompt,
 } from "./hephaestus/loop-engineering";
 import { currentUiLocale } from "./ui-locale";
@@ -120,7 +112,6 @@ import {
   type AutomationFailureContext,
 } from "./automation-strategy";
 import { recordAutomationRecovery } from "./automation-recovery";
-import { buildAutomationContinuityCapsulePrompt } from "./automation-progress-facts";
 import {
   automationRunOutwardEffects,
   automationRunSettlementCause,
@@ -292,16 +283,6 @@ function notifyDone(a: Automation, status: AutomationResultStatus, error?: strin
   }
 }
 
-/** Provider resume is an optimization, not the continuity authority. Every run receives a
- * bounded durable capsule so a backend switch or expired CLI session cannot erase the prior run. */
-function buildAutomationContinuityPrompt(chatId: string, prompt: string, strategyDirective = ""): string {
-  // 전략 진화 지시문(실패 스트릭이 있을 때만 비어 있지 않음)은 프롬프트 바로 앞에 붙는다 —
-  // 재시도가 동일 방법을 그대로 반복하는 구조적 결함의 수리(run-graph 경로와 동일 계약).
-  const effectivePrompt = strategyDirective ? `${strategyDirective}\n\n${prompt}` : prompt;
-  // 호스트가 센 사실 + 최신 서술 1개(run-graph 와 같은 한 벌) — 이전 실행의 자세가 관성이 되지 않게.
-  return buildAutomationContinuityCapsulePrompt(chatId, effectivePrompt);
-}
-
 // ── 실패 처리 정책(2026-07-08) ─────────────────────────────────────────────
 // 문제: 자동화가 실패해도 챗창에 아무 피드백이 없고(프롬프트만 복붙처럼 쌓임),
 // 같은 시스템 원인이면 매 스케줄마다 실패 원인을 알 수 없었다.
@@ -402,17 +383,6 @@ function automationSessionInput(a: Automation): {
     runtimeSelection: a.runtimeSelection ?? null,
     ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
   };
-}
-
-/**
- * 스케줄러가 런타임에 넘기는 권한. 저장된 `executionPermission` 을 그대로 쓰지 않는다 —
- * 런타임에서 read 는 "쓰기 금지"가 아니라 **"도구 금지"** 이고, 도구 없는 자동화는
- * 자기 일을 못 한다(2026-08-13). 옛 청사진 경로가 read 로 못박아 만든 행이 그대로
- * 남아 있어서, 저장값을 믿으면 복구 실행조차 도구 없이 진단하게 된다.
- * 판정은 `automationRuntimePermission` 한 곳이 갖는다(그래프 경로와 같은 규칙).
- */
-function schedulerExecutionPermission(_a: Automation): "read" | "write" {
-  return automationRuntimePermission({ simulation: false });
 }
 
 /**
@@ -764,6 +734,12 @@ async function runOne(
     if (goalDecision && !goalDecision.continue) {
       // App-close/crash recovery is a durable pause. Merely starting the app,
       // catching up a schedule, or receiving a trigger cannot resume it.
+      // A ledger stop also parks the row and tells the goal chat once.
+      try {
+        settleRefusedGoalContinuation({ automation: a, decision: goalDecision, locale: currentUiLocale() });
+      } catch (error) {
+        console.error("[automation] refused goal continuation could not be parked:", error);
+      }
       return { accepted: false };
     }
   }
@@ -819,6 +795,8 @@ async function runOne(
   let machineError: string | null = null;
   let output: string | undefined;
   let currentRunId: string | null = null;
+  /** The last agent node's goal-loop signals (continue marker, completion claim). */
+  let goalSignals: GoalContinuationSignals | null = null;
   /** 호스트가 센 "제자리 돌기" — 걸리면 이 실행만 멈추고 기계 표식으로 남긴다(사용자 중지와 구분). */
   let noProgressLoop: NoProgressDecision | null = null;
   /**
@@ -1093,6 +1071,7 @@ async function runOne(
           occurrenceId: opts?.triggerDelivery?.occurrenceId ?? opts?.occurrenceId,
           initialVars: graphInitialVars,
           strategyCycle: "defer",
+          onAgentInvocationSignals: (_nodeId, signals) => { goalSignals = signals; },
           sink: (ev) => {
               // A cancellation-ignoring runtime may emit after the scheduler's finite abort
               // boundary. Do not revive watchdog/live state after this run has been finalized.
@@ -1223,299 +1202,10 @@ async function runOne(
           : classified.reason ?? graphError;
       }
     } else {
-      // 레거시 단일 프롬프트 경로(완전 backward-compat).
-      const runId = currentRunId ?? opts?.runId ?? `run-${a.id}-${Date.now()}`;
-      currentRunId = runId;
-      let lastDurableHeartbeatAt = 0;
-      const persistLegacyHeartbeat = (at = Date.now()): void => {
-        if (at - lastDurableHeartbeatAt < RUN_HEARTBEAT_INTERVAL_MS) return;
-        lastDurableHeartbeatAt = at;
-        try {
-          touchGraphRun(runId, new Date(at));
-        } catch {
-          /* best-effort; the in-process watchdog still receives the event */
-        }
-      };
-      tryRecordRunEvent({
-        runId,
-        kind: "automation_legacy_started",
-        automationId: a.id,
-        payload: { targetType: a.targetType, toolMode: a.toolMode, hubMode: a.hubMode },
-      });
-      const emitLegacyState = (nodeId: string, nodeState: "pending" | "running" | "done" | "failed" | "skipped"): void => {
-        try {
-          updateGraphRunNode(runId, nodeId, nodeState);
-        } catch {
-          /* 스냅샷 실패는 실행을 막지 않는다 */
-        }
-        tryRecordRunEvent({
-          runId,
-          kind: "automation_legacy_node_state",
-          automationId: a.id,
-          nodeId,
-          payload: { state: nodeState },
-        });
-        broadcastLiveRun(a.id, { kind: "partial", nodeId, nodeState, agentId: nodeId });
-      };
-      try {
-        // flow/page.tsx의 synthesizeLegacyGraph 노드 id와 맞춰 단일 프롬프트 자동화도
-        // 캔버스/상태 패널에서 즉시 보이게 한다.
-        startGraphRun({
-          runId,
-          automationId: a.id,
-          nodeIds: ["n0", "n1"],
-          dryRun: opts?.dryRun === true,
-        });
-        emitLegacyState("n0", "done");
-        emitLegacyState("n1", "running");
-      } catch (snapshotError) {
-        if (isAutomationRunParentMissingError(snapshotError)) throw snapshotError;
-        /* 스냅샷 시작 실패는 무시 */
-      }
-      /*
-       * goal 연속실행에만 종료 규약을 덧붙인다.
-       *
-       * promptTemplate은 자동화가 만들어질 때 DB에 굳는다. 규약을 프롬프트 빌더에만
-       * 넣으면 **이미 존재하는 캠페인은 영원히 마커를 배우지 못해** 여전히 못 끝난다.
-       * 실행 시점에 붙여야 옛 행도 같이 고쳐진다. 이미 들어 있으면 건드리지 않는다.
-       */
-      const withGoalCompletionProtocol = (prompt: string, goalId: string | null | undefined): string => {
-        if (!goalId || prompt.includes(GOAL_COMPLETE_MARKER)) return prompt;
-        return `${prompt}\n\n${goalCompletionProtocol(currentUiLocale())}`;
-      };
-      const chat = getOrCreateAutomationSession({
-        automationId: a.id,
-        projectId: a.projectId ?? null,
-        runtimeSelection: a.runtimeSelection ?? null,
-        ...(a.targetType === "firm" ? { firmId: a.targetId } : a.targetType === "agent" ? { agentId: a.targetId } : {}),
-      });
-      if (!hasInvocationRunReceipt(runId)) {
-        recordRunEvent({
-          runId,
-          kind: "invoke_started",
-          chatId: chat.chat.id,
-          automationId: a.id,
-          payload: {
-            invocationSource: "automation",
-            permissions: schedulerExecutionPermission(a),
-            toolMode: a.toolMode ?? "auto",
-            hubMode: a.targetType === "hub" ? "hub-first" : (a.hubMode ?? "hub-allowed"),
-          },
-        });
-      }
-      try {
-        let runnerError: string | null = null;
-        const req = {
-          runId,
-          chatId: chat.chat.id,
-          automationId: a.id,
-          userPrompt: withGoalCompletionProtocol(
-            buildAutomationContinuityPrompt(
-              chat.chat.id,
-              a.promptTemplate,
-              buildStrategyDirective(priorFailureContext),
-            ),
-            a.goalId,
-          ),
-          permissions: schedulerExecutionPermission(a),
-          // The owner's screen language; an absent locale fell back to "en" (goal continuations answered in English).
-          locale: currentUiLocale(),
-          borrowAgents: a.targetType === "hub" ? [a.targetId] : undefined,
-          // Hub 자동화는 위 preflight에서 exact package pin을 강제한다.
-          borrowVersions:
-            a.targetType === "hub" && a.targetVersion ? { [a.targetId]: a.targetVersion } : undefined,
-          runtimeSelection: a.runtimeSelection,
-          mcpBrowserProfileKey: `automation-${a.id}`,
-          toolMode: a.toolMode ?? "auto",
-          hubMode: a.targetType === "hub" ? "hub-first" as const : (a.hubMode ?? "hub-allowed"),
-        };
-        // 무활동 워치독 — 이벤트가 STALL_INACTIVITY_MS 동안 없으면 행으로 판정, abort(감시견 전용 손잡이).
-        const invocationSignal = AbortSignal.any([controller.signal, watchdogController.signal]);
-        const invocationWatchdog = createAutomationWatchdogState();
-        let stallDecision: AutomationWatchdogDecision | null = null;
-        const stallTimer = setInterval(() => {
-          const decision = evaluateAutomationWatchdog(
-            invocationWatchdog,
-            STALL_INACTIVITY_MS,
-            ACTIVE_TOOL_STALL_MS,
-          );
-          if (decision.stalled) {
-            stallDecision = decision;
-            watchdogStall = decision;
-            watchdogController.abort(new Error(automationWatchdogError(decision)));
-          }
-        }, 30_000);
-        let result;
-        let acceptInvocationEvents = true;
-        try {
-          // background 우선순위 — 그래프 경로와 같은 규율(사람이 기다리는 턴이 앞선다).
-          const invocationRun = Promise.resolve().then(() => withRunPriority("background", () =>
-            runMcpInvocation(
-              req,
-              (ev) => {
-                // Once the scheduler has crossed its abort boundary, ignore late callbacks from
-                // a broken cancellation-ignoring runtime (including writes after DB shutdown).
-                if (!acceptInvocationEvents) return;
-                noteAutomationWatchdogEvent(invocationWatchdog, ev);
-                persistLegacyHeartbeat();
-                if (ev.kind === "error") {
-                  runnerError = ev.error?.message || "runner failed";
-                }
-                if (ev.kind === "tool-use" && ev.tool?.isError) {
-                  runnerError = ev.tool.result?.trim() || `${ev.tool.name} failed`;
-                }
-                recordMcpInvocationEvent(runId, req, ev);
-              },
-              invocationSignal,
-              undefined,
-              { source: "automation" },
-            ),
-          ));
-          result = await awaitAutomationRunnerWithAbortGrace(invocationRun, invocationSignal);
-        } catch (err) {
-          if (stallDecision) {
-            throw new Error(automationWatchdogError(stallDecision));
-          }
-          throw err;
-        } finally {
-          acceptInvocationEvents = false;
-          clearInterval(stallTimer);
-        }
-        if (stallDecision) {
-          throw new Error(automationWatchdogError(stallDecision));
-        }
-        if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
-        output = result.finalText;
-        if (runnerError) throw new Error(runnerError);
-        if (!output?.trim()) throw new Error("Automation finished without an assistant result");
-        runCompleted = true;
-        // ★판정에 **호스트가 센 도구 호출**을 함께 준다. 모델이 "게시했다"고 써도
-        //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
-        const classified = await classifyAutomationOutcome(output, {
-          runtimeSelection: a.runtimeSelection,
-          ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
-          declaredGoal: declaredGoalForAutomation(a),
-        });
-        recordAutomationJudgeReceipt(currentRunId, a.id, "outcome", classified);
-        if (controller.signal.aborted) throw new Error("automation_stopped_by_user");
-        judgmentUnavailableRun = isJudgmentUnavailable(classified);
-        // 그래프 경로와 같은 규율 — 판정의 답은 자기 칸으로 간다.
-        // 여기서 runStatus를 덮으면 "끝까지 돌았다"는 사실이 다시 지워진다.
-        runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
-        runOutcomeReason = classified.reason ?? null;
-        runReasonCode = classified.reasonCode ?? null;
-        // 다만 판정이 명시적으로 "실패"·"건너뜀"이라고 본 것은 실행 결과 자체의 성질이라
-        // (레거시 경로엔 커널이 없어 이 판정이 유일한 종료 신호다) runStatus에 반영한다.
-        if (classified.outcome === "error" || classified.outcome === "partial"
-          || classified.outcome === "skipped") {
-          runStatus = classified.outcome;
-        }
-        runError = classified.reasonCode && classified.reason
-          ? `[${classified.reasonCode}] ${classified.reason}`
-          : classified.reason;
-        // 판정 불가는 노드를 실패로 칠하지 않는다 — 노드는 끝까지 실행됐다.
-        const legacyNodeFailed = !judgmentUnavailableRun &&
-          (runStatus === "error" || runOutcome === "blocked" || runOutcome === "needs_input");
-        emitLegacyState("n1", legacyNodeFailed ? "failed" : runStatus === "skipped" ? "skipped" : "done");
-        try {
-          finishGraphRun(runId, legacyNodeFailed ? "error" : "ok");
-        } catch {
-          /* ignore */
-        }
-        if (runStatus === "error") throw new Error(runError ?? "Automation result was classified as failed");
-        if (isStormbreakerLongRunPrompt(a.promptTemplate)) {
-          /*
-           * persistent goal 연속실행의 종료/지속 판단.
-           *
-           * 예전 규칙(마커가 없으면 즉시 자기 종료)은 지속을 "모델이 마커를
-           * 붙였는가"에 종속시켰다 — Codex와의 결정적 차이가 정확히 여기였다.
-           * goal_id가 있는 행은 goal 원장이 판단한다:
-           *   완료  = 판정기 ok + 모델도 계속 요청 없음 + 원장에도 미완 task 없음
-           *           (세 신호 일치 시에만 goal을 닫고 정확히 이 행만 끈다)
-           *   정지  = 예산 소진·무진전 정지·명시 종료 — 마커가 있어도 멈춘다
-           *   지속  = 그 외 전부. goal 상태에 따라 케이던스만 조정한다
-           *           (진행 중이면 짧게, 아니면 백오프).
-           * goal_id가 없거나 원장에 닿지 못하면 기존 마커-단독 규칙 그대로다.
-           */
-          /*
-           * ★모델의 완료 선언을 원장에 먼저 반영한다.
-           *
-           * 이 경로의 채팅은 division이라 client.ts의 goal 계약 블록에서 제외된다
-           * (`chat.kind !== "division"`). 그래서 선언을 원장에 옮기는 일이 저기서
-           * 일어나지 않고 여기서만 일어난다 — 이 몇 줄이 빠져 있으면 백그라운드
-           * 연속실행은 `no_open_tasks`에 영원히 도달하지 못하고, 아래
-           * verifiedComplete는 죽은 분기로 남는다(그게 정확히 수리 전 상태였다).
-           */
-          if (a.goalId && result.goalCompletionClaim?.claimed) {
-            await closeOpenGoalLedgerTasks({
-              goalId: a.goalId,
-              evidence: result.goalCompletionClaim.evidence
-                ?? `automation:${a.id} ${goalProgressKeyForText(output ?? "")}`,
-              outcomeText: output ?? "",
-              invocationRunId: runId,
-            });
-          }
-          const goalDecision = a.goalId
-            ? await recordGoalLedgerCycle({
-                goalId: a.goalId,
-                progressKey: goalProgressKeyForText(output ?? ""),
-                outcome: `run-${runOutcome}`,
-              })
-            : null;
-          if (a.goalId && goalDecision) {
-            const hardStop = !goalDecision.continue && GOAL_HARD_STOP_REASONS.has(goalDecision.reason);
-            // 판정기가 정확히 ok(수용)로 본 실행만 — skipped는 runStatus가 갈라내므로
-            // runStatus==="ok" && runOutcome==="accepted" 조합이 "verdict ok"와 동치다.
-            const verifiedComplete = !result.stormbreakerContinueRequested
-              && runStatus === "ok" && runOutcome === "accepted"
-              && goalDecision.reason === "no_open_tasks";
-            if (verifiedComplete) {
-              await completeGoalLedgerGoal({
-                goalId: a.goalId,
-                status: "completed",
-                reason: "judged-ok-no-open-tasks-no-marker",
-              });
-              completeChatGoalContract(a.goalId, "completed");
-              clearChatGoalBindingByGoalId(a.goalId);
-              toggleAutomation(a.id, false);
-            } else if (hardStop) {
-              // goal은 blocked/예산소진으로 원장에 남는다(사람 호출). 재실행만 멈춘다.
-              completeChatGoalContract(a.goalId, "blocked");
-              clearChatGoalBindingByGoalId(a.goalId);
-              toggleAutomation(a.id, false);
-            } else if (goalDecision.continue || result.stormbreakerContinueRequested) {
-              const cadence = goalContinuationSchedule(goalDecision);
-              if (a.scheduleHuman !== cadence) {
-                updateAutomation(a.id, { scheduleHuman: cadence });
-              }
-            } else {
-              // 미완인데 계속할 근거도 없음(예: task 0건인데 판정은 ok가 아님) —
-              // 완료를 주장하지 않고 재실행만 멈춘다. goal은 active로 남아
-              // 사용자가 채팅에서 다시 밀 수 있다.
-              toggleAutomation(a.id, false);
-            }
-          } else if (!result.stormbreakerContinueRequested) {
-            toggleAutomation(a.id, false);
-          }
-        }
-      } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        emitLegacyState("n1", "failed");
-        tryRecordFailureEvent({
-          runId,
-          source: "automation_legacy",
-          automationId: a.id,
-          nodeId: "n1",
-          errorCode: "automation_failed",
-          errorMessage: message,
-        });
-        try {
-          finishGraphRun(runId, "error");
-        } catch {
-          /* ignore */
-        }
-        throw err;
-      }
+      // Unreachable: every row carries a graph by this point (synthesizeLegacyGraph above),
+      // so the old direct single-prompt branch was removed. Goal-continuation settlement it
+      // held now runs for every path in settleGoalContinuationRun (goal-continuation-hold.ts).
+      throw new Error("automation_graph_missing");
     }
   } catch (err) {
     const rawError = err instanceof Error ? err.message : String(err);
@@ -1716,6 +1406,30 @@ async function runOne(
         );
       } catch (error) {
         console.error("[automation] graph reconciliation suspension failed:", error);
+      }
+    }
+    // Goal-continuation settlement (complete / hard stop / needs owner / backoff /
+    // cadence) — one function for every path. It used to live only inside the
+    // legacy branch, which no row reaches (live 2026-09-27: every-10m re-wakes).
+    if (
+      currentRunId && isStormbreakerLongRunPrompt(a.promptTemplate)
+      && !parentMissing && !leaseOwnershipLost && !controller.signal.aborted
+      && getAutomation(a.id)?.enabled === true
+    ) {
+      try {
+        await settleGoalContinuationRun({
+          automation: a,
+          runId: currentRunId,
+          runStatus,
+          runOutcome,
+          runOutcomeReason,
+          runError,
+          output: output ?? null,
+          signals: goalSignals,
+          locale: currentUiLocale(),
+        });
+      } catch (error) {
+        console.error("[automation] goal continuation settlement failed:", error);
       }
     }
     // 복구 학습 — 실패 스트릭 후의 성공은 "다른 방법이 통했다"는 증거다. durable 복구

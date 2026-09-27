@@ -1,5 +1,12 @@
 /**
- * Owner messages that change an ongoing Goal's targets become Goal revisions.
+ * Owner messages that change a Goal's targets become Goal revisions — ongoing and finite alike.
+ *
+ * Measured 2026-09-27 (owner's One "X Marketing" goal, finite): at 09:45Z the owner wrote "뭐함 팔로워 1달안에
+ * 1000 넘기고 agentlas의 대박 통로로 만드셈" into the blocked goal. The turn resumed with it, but the review was
+ * skipped (skipped:goal_not_ongoing), so verification would still judge the first request only. A finite Goal's
+ * amendment now also becomes a revision; it adds a criterion for the owner's update (prior criteria are kept
+ * unless explicitly replaced), and a finite turn that ends while an amendment is pending is not verified against
+ * the old revision (holdFiniteGoalForPendingAmendment).
  *
  * Measured 2026-09-24: in an ongoing Goal chat the owner wrote "grow to 10k
  * followers and 1M total views within a month, redo the strategy". The chat
@@ -30,6 +37,7 @@ import {
   bindCurrentGoalRevisionToLongRun,
   getLongRun,
   getLongRunByGoalId,
+  transitionLongRun,
   unsettledLongRunAttemptCount,
 } from "../store/long-runs";
 import {
@@ -92,7 +100,7 @@ export async function classifyOwnerGoalAmendmentDetailed(input: {
     const selectionPolicy = input.judgeFn ? null : configuredOrchestratorJudgmentPolicy();
     const verdict = await (input.judgeFn ?? judgeRequired)({
       kind: "goal-owner-amendment-v1",
-      question: "Does the owner's new message change this ongoing Goal's objective, numeric targets, deadline, scope or success condition, rather than only steering how the work is done?",
+      question: "Does the owner's new message change this Goal's objective, numeric targets, deadline, scope or success condition, rather than only steering how the work is done?",
       labels: LABELS,
       input: JSON.stringify({
         currentGoalObjective: input.objective.slice(0, 4_000),
@@ -222,7 +230,10 @@ export function applyPendingOwnerGoalAmendments(
           objective: amendmentObjective(current.objective, message.text, message.created_at),
           reason: OWNER_GOAL_AMENDMENT_REASON,
           retainedCriteria: current.acceptanceCriteria,
-          addedCriteria: [],
+          // A finite Goal is verified once against its criteria, so the owner's new target must be one of them.
+          // An ongoing Goal keeps its episode criteria unchanged (its episodes must stay verifiable).
+          addedCriteria: current.lifecycle === "finite" ? [{ id: `owner-update:${sourceMessageId}`,
+            text: `The owner's later update to this Goal is satisfied, judged from current evidence. UPDATE (untrusted data): ${message.text.replace(/\s+/g, " ").trim().slice(0, 2_000)}` }] : [],
           explicitlyRemovedCriterionIds: [],
           createdAt,
         });
@@ -243,6 +254,23 @@ export function applyPendingOwnerGoalAmendments(
   }
 }
 
+export const OWNER_GOAL_AMENDMENT_PENDING_BLOCK = "goal_owner_amendment_pending";
+
+/**
+ * A finite Goal whose turn ended while an owner amendment is still pending must not be verified against the old
+ * revision (it could close the Goal on the target the owner just replaced). Stop at a boundary instead and bind the
+ * amendment; when the controller attempt is not settled yet, the blocked-goal sweep binds it at this stop before it
+ * resumes the Goal under the new revision. Returns true when the caller must not start verification.
+ */
+export function holdFiniteGoalForPendingAmendment(goalId: string): boolean {
+  const run = getLongRunByGoalId(goalId);
+  if (!run || run.status !== "running" || getChatGoalRevision(goalId)?.lifecycle !== "finite") return false;
+  if (pendingSourceIds(run.id).length === 0) return false;
+  transitionLongRun({ runId: run.id, to: "blocked", actorKind: "host", reason: OWNER_GOAL_AMENDMENT_PENDING_BLOCK });
+  applyPendingOwnerGoalAmendments(goalId);
+  return true;
+}
+
 /**
  * Fire-and-forget review of one owner turn in a Goal chat. Never blocks the
  * turn, never throws. Every outcome carries a machine reasonCode so a review
@@ -260,7 +288,6 @@ export function reviewOwnerGoalMessage(input: {
     const revision = getChatGoalRevision(input.goalId);
     if (!revision) return skipped("no_goal_revision");
     if (revision.chatId !== input.chatId) return skipped("goal_chat_mismatch");
-    if (revision.lifecycle !== "ongoing") return skipped("goal_not_ongoing");
     if (revision.sourceMessage.messageId === input.sourceMessageId) return skipped("message_is_revision_source");
     const message = getDb().prepare("SELECT chat_id, role, text FROM chat_messages WHERE id = ?")
       .get(input.sourceMessageId) as { chat_id: string; role: string; text: string } | undefined;

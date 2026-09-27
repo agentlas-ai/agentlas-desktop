@@ -14,7 +14,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { UPLOAD_SKIP_DIRECTORIES } from "../../shared/upload-scan-catalog.generated";
 import { randomUUID } from "node:crypto";
-import { getSessionCookieHeader } from "../auth";
+import { fetchWithHubSession, getSessionCookieHeader, webBaseUrl } from "../auth";
+import { readOwnerCloudFiles, type OwnerCloudFilesInput } from "./cloud-files";
 import { getCargoSource, invalidateMyAgentsCache } from "../marketplace";
 import { registeredUploadOptions, registeredUploadRoot } from "../cloud-agents/registered-upload";
 import type {
@@ -69,6 +70,7 @@ export interface MobileBridgeCloudAgentActions {
     options?: MobileBridgeUploadOptions,
   ): Promise<CloudAgentPackageResult>;
   deleteMyAgent(slug: string): Promise<CloudAgentDeleteResult>;
+  readMyFiles?(input: OwnerCloudFilesInput): Promise<Record<string, unknown>>;
 }
 
 export interface MobileBridgeBuildRunInput {
@@ -137,6 +139,12 @@ function requireCargoSource(): NonNullable<ReturnType<typeof getCargoSource>> {
 export function createDesktopMobileBridgeCloudAgentActions(): MobileBridgeCloudAgentActions {
   return {
     hasCloudSession: () => Boolean(getSessionCookieHeader()),
+    readMyFiles: (input) => readOwnerCloudFiles(input, {
+      session: getSessionCookieHeader,
+      get: (cookie, endpoint) => fetchWithHubSession(cookie, `${webBaseUrl()}${endpoint}`, {
+        method: "GET", headers: { Accept: "application/json" }, redirect: "error",
+      }, 15_000),
+    }),
     listRegisteredUploadOptions: () => registeredUploadOptions(),
     estimateUploadFileCount: (target) => countCandidateFiles(registeredUploadRoot(target).rootPath),
     saveRegisteredPrivate: async (target, options) => {

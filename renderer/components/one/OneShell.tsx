@@ -33,6 +33,15 @@ import { flushSync } from "react-dom";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
+import {
+  ASK_ACTION_COPY,
+  askActionBarState,
+  askResendMessage,
+  askSkipReply,
+  composeAskAnswer,
+  questionOutrunByNewerUserMessage,
+  type AskActionBlock,
+} from "@shared/ask-action-bar";
 import { OneDocumentCard } from "@/components/one/OneDocumentCard";
 import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { readOneDocumentMark } from "@/lib/one-document-mark";
@@ -127,7 +136,8 @@ import type {
   OneSurfaceSemanticAction,
 } from "@shared/one-surface";
 import { toCustomerSafeText } from "@shared/one-customer-safe";
-import { stripAgentControlBlocks, stripAgentIdentityBadges } from "@shared/agent-control-blocks";
+import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "@shared/agent-control-blocks";
+import { isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 import { classifyOneRequestIntent } from "@shared/one-request-intent";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
@@ -154,6 +164,7 @@ import {
 import type { FsPathGrant, HubAgentBookmark, MarketplaceListing, OneSeatView, OrchestrationTarget, RuntimeSelection, RuntimeStatus } from "@shared/types";
 import { ONE_BRIEFING_CONTRACT_VERSION, isOneProactiveBriefing } from "@shared/one-briefing";
 import {
+  isOneDecisionProductSafeRejectReply,
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
   type OneDecisionField,
@@ -190,6 +201,7 @@ import { useOneMail } from "./mail/useOneMail";
 import { llmLogoSrc } from "@/lib/llm-logo";
 import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget, type OneEditSelfTarget } from "./OneCreateAgentDialog";
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
+import { OneRunComet, oneRunCometHostClass, useOneSpinningChatIds } from "./OneRunComet";
 import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
@@ -229,6 +241,7 @@ import {
   requestChatFileOpen,
   type ChatFileItem,
 } from "@/lib/chat-files";
+import { isPromptOnScreen, promptBubbleContent } from "@/lib/one-prompt-bubble";
 import {
   OneComposerControls,
   type OneComposerMenuKey,
@@ -986,15 +999,16 @@ function computeVisibleOneMessageText(message: UiMessage): string {
   // authored by the person. Only the explicitly translated labels above may
   // appear in One; every other system turn stays private.
   if (message.role === "system") return "";
-  if (message.role !== "assistant") return message.text;
+  // A user row can still hold the raw attachment marker (live prompt, optimistic
+  // bubble); the marker is transport and must never be drawn as words.
+  if (message.role !== "assistant") return message.role === "user" ? parseChatFileMessage(message.text).visibleText : message.text;
   const extracted = extractQuestions(message.text, message.id).text;
   const unfinishedFence = extracted.indexOf("<<agentlas-ask>>");
   const withoutFence = unfinishedFence >= 0 ? extracted.slice(0, unfinishedFence) : extracted;
   // Host/router worker banners are useful in operator logs, not in a personal
   // chief-of-staff conversation. Strip every standalone banner line because a
   // resumed provider turn can insert one after an introductory sentence.
-  const banded = stripAgentIdentityBadges(stripAgentControlBlocks(withoutFence, { streaming: message.streaming }))
-    .replace(/^\s*(?:\*\*)?(?:사용\s*(?:에이전트|스킬)|Agents used|Skills used)(?:\*\*)?\s*:\s*[^\n]*(?:\n[ \t]*)*/gim, "")
+  const banded = stripAgentRoutingBanners(stripAgentIdentityBadges(stripAgentControlBlocks(withoutFence, { streaming: message.streaming })))
     .trim();
   const completion = /\b\d+\s*\/\s*\d+\s+is\s+complete\b/i.exec(banded);
   const customerAnswer = stripGenericResultReadyCopy(completion && /^I(?:’|'| a)m using (?:the )?.*\bskill\b/i.test(banded)
@@ -1263,6 +1277,8 @@ export function OneShell() {
   const [activeThreadChat, setActiveThreadChat] = useState<Chat | null>(null);
   const [activeChatIds, setActiveChatIds] = useState<string[]>([]);
   const [confirmations, setConfirmations] = useState<PendingConfirmation[]>([]);
+  // 사이드바 혜성: 실행 중이면서 오너를 기다리지 않는 대화만.
+  const spinningChatIds = useOneSpinningChatIds(activeChatIds, confirmations);
   const [keyRequestSheet, setKeyRequestSheet] = useState<McpRunKeyRequest | null>(null);
   const [dismissedDecisionId, setDismissedDecisionId] = useState<string | null>(null);
   const [committedAnswers, setCommittedAnswers] = useState<CommittedQuestionAnswer[]>([]);
@@ -1868,9 +1884,7 @@ export function OneShell() {
   useEffect(() => { setWorkerSelection(null); }, [workerChatId]);
   const visibleMessages = messages;
   const liveResponseMounted = messages.some((message) => message.id === "one-live-response");
-  const livePromptMounted = Boolean(activeRunPrompt && messages.some((message) => (
-    message.role === "user" && message.text === activeRunPrompt.text
-  )));
+  const livePromptMounted = Boolean(activeRunPrompt && isPromptOnScreen(messages, activeRunPrompt.text));
   // The live run's work block: before the streaming reply once text arrives,
   // otherwise at the tail of the thread (after the prompt that started it).
   const liveWorkAnchorMessageId = workBusy && liveResponseMounted ? "one-live-response" : null;
@@ -2908,6 +2922,19 @@ export function OneShell() {
     }
     if (event.kind === "thinking" || event.kind === "tool-use") {
       if (!taskId && event.kind === "tool-use") void reconcileConversationTask(chatId);
+      return;
+    }
+    if (event.kind === "partial" && isLivePartialCommitBoundary(event)) {
+      // Main saved the streamed turn as its own row. Settle the live bubble under that
+      // row id and start the next turn empty (X Marketing 2026-09-27: without this the
+      // same text came back after the reply as an "interrupted answer").
+      streamTextRef.current = "";
+      oneTranscriptRevisionRef.current += 1;
+      setMessages((current) => ownsQueuedUpdate() ? current.flatMap((message) => {
+        if (message.id !== "one-live-response") return [message];
+        if (!message.text.trim()) return [];
+        return [{ ...message, id: `one-answer:${event.durableMessageId}`, streaming: false, durableMessageId: event.durableMessageId, createdAt: message.createdAt ?? new Date().toISOString() }];
+      }) : current);
       return;
     }
     if (event.kind === "partial") {
@@ -4697,12 +4724,17 @@ export function OneShell() {
       setMessages((current) => {
         const withoutLive = current.filter((item) => item.id !== "one-live-response");
         const userAlreadyVisible = options?.userAlreadyShown
-          && withoutLive.some((item) => item.role === "user" && item.text === text);
+          && isPromptOnScreen(withoutLive, text);
         return [
           ...withoutLive,
           ...(userAlreadyVisible || options?.displayUserMessage === false
             ? []
-            : [{ id: optimisticUserMessageId!, role: "user" as const, text, createdAt: new Date().toISOString() }]),
+            : [{
+              id: optimisticUserMessageId!,
+              role: "user" as const,
+              ...promptBubbleContent(text),
+              createdAt: new Date().toISOString(),
+            }]),
           { id: "one-live-response", role: "assistant" as const, text: "", streaming: true },
         ];
       });
@@ -6152,19 +6184,29 @@ export function OneShell() {
       || (!projectedTask && !isActiveOneConversation)
       || (shouldStart && projectedTask && !projectedTask.truth.mayStartExecution)
     ) return;
+    /*
+     * 카드는 누른 순간 닫는다(오너 2026-09-27: "제출하면 바로 스무스하게 전달되야지").
+     * 예전에는 영수증 조회 → 확정 IPC 두 번을 기다린 뒤에야 카드가 사라져 눌렀는지 알 수 없었다.
+     * 확정이 거절되면 아래 catch 가 Main 의 대기 목록을 다시 읽어 카드를 되살린다.
+     */
+    setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
     try {
-      const sourceReceipt = await api.invoke.latestReceipt(confirmation.chatId)
-        .catch(() => projectedTask?.latestReceipt ?? null);
+      // 두 호출은 서로 기다릴 이유가 없다 — 동시에 보낸다.
+      const [sourceReceipt] = await Promise.all([
+        api.invoke.latestReceipt(confirmation.chatId)
+          .catch(() => projectedTask?.latestReceipt ?? null),
+        api.confirm.commitAnswer({
+          chatId: confirmation.chatId,
+          sourceMessageId: confirmation.sourceMessageId,
+          reply: label,
+        }),
+      ]);
       // A missing receipt must fail closed. Falling back to the current Auto
       // chip would turn the newly materialized Task into write authority even
       // though the preceding conversation was read-only.
       const continuationPermission: OnePermissionMode = sourceReceipt?.executionPermission ?? "read";
-      await api.confirm.commitAnswer({
-        chatId: confirmation.chatId,
-        sourceMessageId: confirmation.sourceMessageId,
-        reply: label,
-      });
-      setCommittedAnswers(await api.confirm.committedAnswers(confirmation.chatId).catch(() => []));
+      // 영수증 목록 갱신은 이어지는 실행을 막지 않는다.
+      void api.confirm.committedAnswers(confirmation.chatId).then(setCommittedAnswers, () => undefined);
       setConfirmations((items) => items.filter((item) => item.sourceMessageId !== confirmation.sourceMessageId));
       if (shouldStart) {
         if (projectedTask) {
@@ -7183,6 +7225,18 @@ export function OneShell() {
     && !selectedCanSteerActiveRun
     && (!selected.chatId || (!selected.truth.mayStartExecution && !selectedCanContinueInPlace)),
   );
+  /*
+   * 이 질문에 지금 여기서 바로 답할 수 있나 — 못 한다면 왜인가(shared/ask-action-bar).
+   * 새 메시지를 이미 보냈거나(접수 준비 중 포함) 실행이 돌고 있으면 옛 질문의 답을 확정하면
+   * 안 된다. 실측(2026-09-27, 격리 앱): "Preparing" 중에 보기를 누르면 옛 질문 답이 확정돼
+   * 두 번째 실행이 겹치고 "이전 요청 접수 불명"이 떴다. 그때는 답을 새 메시지로 보낸다.
+   */
+  const visibleConfirmationBlock: AskActionBlock = !visibleSelectedConfirmation
+    ? "none"
+    : selectedReadOnly ? "read_only"
+    : teamPreflightBusy || questionOutrunByNewerUserMessage(visibleSelectedConfirmation, messages)
+      ? "newer_message"
+      : busy ? "running" : "none";
   // PRD §4.14 — 만료 판정이 **읽을 때만** 일어나서, 화면의 카드는 만료 뒤에도 눌렸다.
   // 화면도 시각으로 판단한다(제안 수명은 30분이다).
   const teamPreflightExpired = Boolean(teamPreflight && isOneTeamPreflightExpired(teamPreflight, nowTick));
@@ -7623,6 +7677,7 @@ export function OneShell() {
               taskforces={taskforces}
               org={oneOrgState}
               activeChatId={activeThreadChatId}
+              spinningChatIds={spinningChatIds}
               locale={appLocale}
               onOpen={openTaskforce}
               onCreate={() => {
@@ -7725,6 +7780,7 @@ export function OneShell() {
                   onRemove={removeConversation}
                   seatLabel={seatLabelForChat(row.chat, taskforces, oneOrgState, appLocale, oneDisplayName)}
                   running={activeChatIds.includes(row.chat.id)}
+                  spinning={spinningChatIds.has(row.chat.id)}
                   unavailable={directSessionUnavailable(row.chat, oneOrgState)}
                   member={oneOrgState?.members.find((member) => member.installedAgentId === row.chat!.agentId) ?? null}
                   groupMembers={(taskforces.find((taskforce) => taskforce.chatId === row.chat!.id)?.memberAgentIds ?? [])
@@ -8043,7 +8099,12 @@ export function OneShell() {
                     // 첨부만 있는 턴도 대화다 — 텍스트가 없다고 버리면 사진을 보낸 사실 자체가 사라진다.
                     const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
                     if (!visibleText && !hasAttachments && !liveBefore && blocksAfter.length === 0) return null;
-                    const systemLabel = message.role === "system" ? oneSystemPromptLabel(message) : null;
+                    const systemLabel = message.role === "system"
+                      ? oneSystemPromptLabel(message)
+                      // A phone decision-card Reject is an action, not English the owner typed.
+                      : message.role === "user" && isOneDecisionProductSafeRejectReply(message.text)
+                        ? tFor(appLocale, "one.shell.decision.reject_receipt")
+                        : null;
                     const graphRequest = message.role === "user" ? oneGraphRequest(message.text) : null;
                     const assistantGroupStart = message.role === "assistant"
                       && visibleMessages[messageIndex - 1]?.role !== "assistant";
@@ -8210,7 +8271,7 @@ export function OneShell() {
                     <>
                       {busy && activeRunPrompt && !livePromptMounted && (
                         <article className={styles.message} data-role="user">
-                          <div className={styles.messageBody}><Markdown text={activeRunPrompt.text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} onOpenLinkedFile={openOneLinkedFile} /></div>
+                          <div className={styles.messageBody}><Markdown text={promptBubbleContent(activeRunPrompt.text).text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} onOpenLinkedFile={openOneLinkedFile} /></div>
                         </article>
                       )}
                       {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
@@ -8504,7 +8565,13 @@ export function OneShell() {
                 taskId={selected?.taskId ?? null}
                 locale={appLocale}
                 disabled={busy || selectedReadOnly}
+                block={visibleConfirmationBlock}
                 onAnswer={answerConfirmation}
+                onResend={(confirmation, text) => {
+                  // 답을 새 메시지로 — 작성창과 같은 길(submit)이라 실행 중이면 조향·대기열로 간다.
+                  setDismissedDecisionId(confirmation.sourceMessageId);
+                  void submit(text);
+                }}
                 onAlwaysApprove={(confirmation) => { void markChatAlwaysApproved(confirmation); }}
                 onClarify={clarifyConfirmation}
                 onSnooze={snoozeConfirmation}
@@ -9017,7 +9084,9 @@ export function OneShell() {
                    * 두 장이 된다.
                    */
                   const seen = new Set<string>();
-                  const identityOf = (file: File) => `${file.name}|${file.size}|${file.type}|${file.lastModified}`;
+                  // lastModified 는 빼야 한다 — getAsFile() 이 만든 새 File 은 lastModified 가
+                  // 호출 시각이라 같은 스크린샷도 매번 다른 키가 되어 두 장이 붙었다(2026-09-27 오너 실측).
+                  const identityOf = (file: File) => `${file.name}|${file.size}|${file.type}`;
                   const add = (file: File | null) => {
                     if (!file) return;
                     const id = identityOf(file);
@@ -9025,9 +9094,13 @@ export function OneShell() {
                     seen.add(id);
                     files.push(file);
                   };
+                  // clipboard.files 가 있으면 그것이 정본이다. items 는 files 가 비었을 때만 본다
+                  // (일부 플랫폼은 files 를 채우지 않는다) — 같은 내용을 두 번 세지 않는다.
                   for (const file of Array.from(clipboard.files)) add(file);
-                  for (const item of Array.from(clipboard.items)) {
-                    if (item.kind === "file") add(item.getAsFile());
+                  if (files.length === 0) {
+                    for (const item of Array.from(clipboard.items)) {
+                      if (item.kind === "file") add(item.getAsFile());
+                    }
                   }
                   if (files.length === 0) return;
                   // 파일을 첨부로 가져간 경우에만 기본 붙여넣기를 막는다.
@@ -9644,7 +9717,7 @@ function TaskListButton({ item, active, locale, onOpen }: { item: OneTaskProject
   );
 }
 
-function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLabel, running, unavailable, member = null, groupMembers = [], oneAvatarTone = "character:orange-dino", oneName = "One" }: {
+function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLabel, running, spinning = false, unavailable, member = null, groupMembers = [], oneAvatarTone = "character:orange-dino", oneName = "One" }: {
   item: Chat;
   active: boolean;
   locale: "ko" | "en";
@@ -9652,6 +9725,7 @@ function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLa
   onRemove: (chatId: string) => Promise<void>;
   seatLabel?: string;
   running?: boolean;
+  spinning?: boolean;
   unavailable?: boolean;
   member?: OneOrgMember | null;
   groupMembers?: OneOrgMember[];
@@ -9666,7 +9740,7 @@ function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLa
   const preview = unavailable ? unavailableCopy : (item.lastMessagePreview?.trim() || briefingSourceName(item.title, locale));
   return (
     <div className={styles.conversationRow} data-unavailable={unavailable ? "true" : "false"}>
-      <button type="button" className={`${styles.taskButton} ${styles.sessionButton}`} data-active={active ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
+      <button type="button" className={`${styles.taskButton} ${styles.sessionButton} ${oneRunCometHostClass}`} data-active={active ? "true" : "false"} data-one-running={spinning ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
         {isGroup ? <span className={styles.sessionGroupAvatar} aria-label={roomTitle}>
           <OneAgentPortrait status="quiet" label={oneName} tone={oneAvatarTone} size="small" />
           {groupMembers.slice(0, 2).map((groupMember) => (
@@ -9686,6 +9760,7 @@ function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLa
           </span>
           <small>{running && <span className={styles.sessionRunningDot} aria-hidden="true" />}{preview}</small>
         </span>
+        <OneRunComet running={spinning} locale={locale} />
       </button>
       <button type="button" className={styles.conversationDelete} onClick={(event) => { event.stopPropagation(); void onRemove(item.id); }} aria-label={locale === "ko" ? "대화 삭제" : "Delete conversation"}><IconClose size={12} /></button>
     </div>
@@ -9790,11 +9865,14 @@ function decisionFieldValue(field: OneDecisionField, locale: "ko" | "en"): strin
     : tFor(locale, "one.shell.decision.not_stated");
 }
 
-function DecisionInline({ confirmation, taskId, locale, disabled, onAnswer, onAlwaysApprove, onClarify, onSnooze, onDismiss }: {
+function DecisionInline({ confirmation, taskId, locale, disabled, block, onAnswer, onResend, onAlwaysApprove, onClarify, onSnooze, onDismiss }: {
   confirmation: PendingConfirmation;
   taskId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
+  /** Why this question cannot take a direct answer right now (shared/ask-action-bar). */
+  block: AskActionBlock;
+  onResend: (confirmation: PendingConfirmation, text: string) => void;
   onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
   onAlwaysApprove: (confirmation: PendingConfirmation) => void;
   onClarify: (confirmation: PendingConfirmation) => void;
@@ -9813,8 +9891,11 @@ function DecisionInline({ confirmation, taskId, locale, disabled, onAnswer, onAl
         taskId={taskId}
         locale={locale}
         disabled={disabled}
+        block={block}
         compact
         onAnswer={onAnswer}
+        onResend={onResend}
+        onDismiss={onDismiss}
         onAlwaysApprove={onAlwaysApprove}
         onClarify={onClarify}
         onSnooze={onSnooze}
@@ -9831,13 +9912,16 @@ function DecisionInline({ confirmation, taskId, locale, disabled, onAnswer, onAl
   );
 }
 
-function DecisionCard({ confirmation, taskId, locale, disabled, compact = false, onAnswer, onAlwaysApprove, onClarify, onSnooze }: {
+function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", compact = false, onAnswer, onResend, onDismiss, onAlwaysApprove, onClarify, onSnooze }: {
   confirmation: PendingConfirmation;
   taskId: string | null;
   locale: "ko" | "en";
   disabled: boolean;
+  block?: AskActionBlock;
   compact?: boolean;
   onAnswer: (confirmation: PendingConfirmation, label: string, shouldStart?: boolean) => void;
+  onResend?: (confirmation: PendingConfirmation, text: string) => void;
+  onDismiss?: () => void;
   onAlwaysApprove: (confirmation: PendingConfirmation) => void;
   onClarify: (confirmation: PendingConfirmation) => void;
   onSnooze: (confirmation: PendingConfirmation) => void;
@@ -9861,7 +9945,17 @@ function DecisionCard({ confirmation, taskId, locale, disabled, compact = false,
   const highRiskNotice = approvalBlocked;
   const [multiSelection, setMultiSelection] = useState<number[]>([]);
   const [chosenIndex, setChosenIndex] = useState<number | null>(null);
-  useEffect(() => { setMultiSelection([]); setChosenIndex(null); }, [confirmation.sourceMessageId]);
+  const [answerText, setAnswerText] = useState("");
+  useEffect(() => { setMultiSelection([]); setChosenIndex(null); setAnswerText(""); }, [confirmation.sourceMessageId]);
+  // 숫자·Enter·Esc 는 document 에서 받는다(포커스를 못 받는 카드 div 의 onKeyDown 은 불리지 않는다 —
+  // ChatQuestionSheet 2026-09-03 실측과 같은 이유). 핸들러는 렌더마다 최신 상태로 갈아 끼운다.
+  const questionKeyRef = useRef<((event: KeyboardEvent) => void) | null>(null);
+  const questionCardRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => questionKeyRef.current?.(event);
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
   const selectedMultiLabels = directOptions
     .filter((option) => multiSelection.includes(option.index))
     .map((option) => option.label);
@@ -9926,28 +10020,147 @@ function DecisionCard({ confirmation, taskId, locale, disabled, compact = false,
      * 자리인지 알 수 없다. 고를 것이 있으면 고르는 것만 묻고, 승인·거절은
      * 고를 것이 없을 때의 답이다.
      */
-    const pickOptions: AskCardOption[] = lightweightChoice && directOptions.length > 1
-      ? directOptions.map((option) => ({
-        id: `direct:${option.index}`,
-        title: option.label,
-        note: option.description ?? undefined,
-        disabled,
-      }))
-      : selectableOptions.length > 1
-        ? selectableOptions.map((option) => ({
-          id: `pick:${option.index}`,
-          title: option.label,
-          note: option.description ?? undefined,
-          disabled,
-          active: confirmation.multiSelect
-            ? multiSelection.includes(option.index)
-            : chosenIndex === option.index,
-        }))
-        : [];
+    /*
+     * ★고르는 질문은 아래 동작 줄이 있어야 끝난다 (오너 신고 2026-09-27, 1.2.44/45).
+     *   "추가 항목"처럼 여러 개 고르는 질문에서 보기를 누르면 강조만 토글됐고, 이 카드에는
+     *   제출도 건너뛰기도 직접 입력도 없었다 — 답이 화면을 떠날 길이 0개였다. 그리고 새 메시지를
+     *   보낸 뒤 "Preparing" 동안에도 카드는 그대로 눌려, 하나만 고르는 질문은 새 요청 옆에서
+     *   옛 질문의 답을 확정해 "이전 요청 접수 불명"을 만들었다.
+     *   판단은 shared/ask-action-bar.ts 한 곳이 하고(계약 test:one-question-action-bar), 여기는 그린다.
+     */
+    const questionOptions = lightweightChoice && directOptions.length > 1
+      ? directOptions
+      : selectableOptions.length > 1 ? selectableOptions : [];
+    if (questionOptions.length > 0) {
+      const copy = ASK_ACTION_COPY[locale];
+      const multi = Boolean(confirmation.multiSelect);
+      const selectedLabels = questionOptions
+        .filter((option) => (multi ? multiSelection.includes(option.index) : chosenIndex === option.index))
+        .map((option) => option.label);
+      const bar = askActionBarState({
+        multiSelect: multi,
+        selectedCount: selectedLabels.length,
+        freeText: answerText,
+        block,
+      });
+      const questionText = confirmation.question?.trim() || compactTitle;
+      const currentAnswer = (typed: string) => composeAskAnswer(selectedLabels, typed);
+      const sendAnswer = (answer: string) => {
+        if (!answer) return;
+        if (bar.primary.action === "resend") {
+          onResend?.(confirmation, askResendMessage(locale, questionText, answer));
+          return;
+        }
+        onAnswer(confirmation, answer);
+      };
+      const runAction = (id: string, typed: string) => {
+        if (id === "skip") { onAnswer(confirmation, askSkipReply(locale, questionText)); return; }
+        if (id === "dismiss") { onDismiss?.(); return; }
+        if ((id === "submit" || id === "resend") && bar.primary.enabled) sendAnswer(currentAnswer(typed));
+      };
+      const pick = (index: number) => {
+        if (!bar.optionsEnabled) return;
+        if (multi) {
+          setMultiSelection((current) => current.includes(index)
+            ? current.filter((value) => value !== index)
+            : [...current, index]);
+          return;
+        }
+        setChosenIndex(index);
+        // 하나만 고르는 질문은 고르는 순간이 답이다 — 단, 바로 답할 수 있을 때만.
+        // 막혀 있으면 고른 상태로 남고, 주 단추("새 메시지로 보내기")가 그 답을 보낸다.
+        if (bar.singleClickSubmits) {
+          const option = questionOptions.find((item) => item.index === index);
+          if (option) onAnswer(confirmation, composeAskAnswer([option.label], ""));
+        }
+      };
+      questionKeyRef.current = (event: KeyboardEvent) => {
+        if (event.defaultPrevented || event.metaKey || event.ctrlKey || event.altKey) return;
+        if (event.isComposing || event.keyCode === 229) return;
+        const target = event.target as HTMLElement | null;
+        const inCard = Boolean(target && questionCardRef.current?.contains(target));
+        const tag = target?.tagName?.toLowerCase();
+        const editable = tag === "input" || tag === "textarea" || tag === "select" || Boolean(target?.isContentEditable);
+        if (event.key === "Escape" && (inCard || !editable)) {
+          event.preventDefault();
+          onDismiss?.();
+          return;
+        }
+        // 작성창·다른 입력칸에서 친 숫자와 Enter 는 그 칸의 글이다.
+        if (editable) return;
+        const focused = document.activeElement as HTMLElement | null;
+        if (focused?.closest("[data-ask-card]") && !questionCardRef.current?.contains(focused)) return;
+        const n = Number(event.key);
+        if (Number.isInteger(n) && n >= 1 && n <= questionOptions.length) {
+          event.preventDefault();
+          pick(questionOptions[n - 1].index);
+          return;
+        }
+        if (n === questionOptions.length + 1) {
+          event.preventDefault();
+          questionCardRef.current?.querySelector("input")?.focus();
+          return;
+        }
+        if (event.key === "Enter") {
+          if (target?.closest("button")) return;
+          event.preventDefault();
+          runAction(bar.primary.action, answerText);
+        }
+      };
+      const primaryLabel = bar.primary.action === "resend"
+        ? copy.resend
+        : multi ? copy.submit(bar.primary.count) : copy.submitSingle;
+      return (
+        <div ref={questionCardRef} data-one-question-block={block}>
+          <AskCard
+            title={compactTitle || questionText}
+            subtitle={questionText}
+            locale={locale}
+            options={questionOptions.map((option) => ({
+              id: `pick:${option.index}`,
+              title: option.label,
+              note: option.description ?? undefined,
+              disabled: !bar.optionsEnabled,
+              active: multi ? multiSelection.includes(option.index) : chosenIndex === option.index,
+              ...(multi ? { checked: multiSelection.includes(option.index) } : {}),
+            }))}
+            onChoose={(id) => {
+              if (!id.startsWith("pick:")) return;
+              pick(Number(id.slice("pick:".length)));
+            }}
+            otherOption={bar.optionsEnabled ? { title: copy.other, note: copy.otherNote } : undefined}
+            freeText={answerText}
+            onFreeTextChange={setAnswerText}
+            footer={bar.optionsEnabled ? {
+              placeholder: copy.placeholder,
+              skipLabel: copy.skip,
+              submitLabel: primaryLabel,
+              hideButton: true,
+              hasSelection: selectedLabels.length > 0,
+              onSkip: (typed) => runAction(bar.primary.action, typed),
+            } : undefined}
+            actionRow={{
+              notice: bar.notice ? copy.notice[bar.notice] : null,
+              reason: bar.primary.reason ? copy.reason[bar.primary.reason] : null,
+              // 막힌 질문에서는 위 안내가 이유를 말한다 — "Enter로 제출" 같은 힌트는 거짓이 된다.
+              hint: bar.primary.action === "resend" ? null : multi ? copy.hint.multi : copy.hint.single,
+              secondary: {
+                id: bar.secondary.action,
+                label: bar.secondary.action === "skip" ? copy.skip : copy.dismiss,
+                disabled: !bar.secondary.enabled,
+              },
+              primary: { id: bar.primary.action, label: primaryLabel, disabled: !bar.primary.enabled },
+              onAction: runAction,
+            }}
+            data-testid="one-decision-ask-card"
+          />
+        </div>
+      );
+    }
+    questionKeyRef.current = null;
 
-    const askOptions: AskCardOption[] = pickOptions.length > 0
-      ? pickOptions
-      : [
+    // 고를 것이 없을 때만 승인·거절을 묻는다(위 질문 경로와 같은 주제가 아니다).
+    const askOptions: AskCardOption[] = [
         {
           id: "approve",
           title: riskRank >= 2 ? tFor(locale, "one.shell.decision.approve") : (locale === "ko" ? "승인" : "Approve"),
@@ -9975,25 +10188,6 @@ function DecisionCard({ confirmation, taskId, locale, disabled, compact = false,
       if (id === "approve") {
         if (approvalReply !== null) onAnswer(confirmation, approvalReply);
         return;
-      }
-      if (id.startsWith("direct:")) {
-        const index = Number(id.slice("direct:".length));
-        const option = directOptions.find((item) => item.index === index);
-        if (option) onAnswer(confirmation, option.label);
-        return;
-      }
-      if (id.startsWith("pick:")) {
-        const index = Number(id.slice("pick:".length));
-        if (confirmation.multiSelect) {
-          setMultiSelection((current) => current.includes(index)
-            ? current.filter((value) => value !== index)
-            : [...current, index]);
-          return;
-        }
-        // 하나만 고르는 질문은 고르는 순간이 답이다 — 그 다음에 다시
-        // "승인" 을 누르게 하면 같은 답을 두 번 시키는 것이다.
-        const option = selectableOptions.find((item) => item.index === index);
-        if (option) onAnswer(confirmation, option.label);
       }
     };
 

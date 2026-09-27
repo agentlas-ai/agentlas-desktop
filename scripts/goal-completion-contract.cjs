@@ -184,9 +184,14 @@ const { GOAL_COMPLETE_MARKER, stripGoalCompleteMarker, goalCompletionVerdict } =
   assert.ok(recordAt > 0, "채팅 경로의 최종 사이클 기록을 못 찾았다");
   assert.ok(closeAt < recordAt, "채팅 경로가 선언을 반영하기 전에 판정을 읽는다");
 
-  const scheduler = fs.readFileSync(path.join(ROOT, "electron/automation-scheduler.ts"), "utf8");
+  // The scheduler's goal-continuation settlement lives in one function every path calls
+  // (goal-continuation-hold.ts settleGoalContinuationRun, 2026-09-27: the copy inside the
+  // scheduler's legacy branch was unreachable). The ordering invariant is measured there.
+  const scheduler = fs.readFileSync(path.join(ROOT, "electron/goal-continuation-hold.ts"), "utf8");
+  assert.match(fs.readFileSync(path.join(ROOT, "electron/automation-scheduler.ts"), "utf8"), /settleGoalContinuationRun\(/,
+    "the scheduler does not call the shared goal-continuation settlement");
   const schedClose = scheduler.indexOf("closeOpenGoalLedgerTasks({");
-  const schedRecord = scheduler.indexOf("const goalDecision = a.goalId");
+  const schedRecord = scheduler.indexOf("const decision = await recordGoalLedgerCycle(");
   assert.ok(schedClose > 0, "스케줄러가 미완 task 를 닫지 않는다 — division 채팅은 여기서만 닫을 수 있다");
   assert.ok(schedRecord > 0, "스케줄러의 사이클 기록을 못 찾았다");
   assert.ok(schedClose < schedRecord, "스케줄러가 선언을 반영하기 전에 판정을 읽는다");

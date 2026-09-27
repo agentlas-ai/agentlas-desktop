@@ -9,6 +9,8 @@ import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
+import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalMessage, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
+import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { parkGoalAfterPassStopWithPool } from "../long-run/goal-pass-stop";
@@ -49,7 +51,7 @@ import {
   transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
-import { reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
+import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
 import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 import { desktopAppInstanceId } from "../long-run/app-runtime-coordinator";
@@ -86,7 +88,7 @@ import {
   stripPermissionEscalationMarker,
 } from "../../shared/permission-escalation";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
-import { markInterruptedPartial } from "./interrupted-partial";
+import { advanceMainLivePartial, markInterruptedPartial } from "./interrupted-partial";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
 import {
   getInvocationRunReceipt,
@@ -2152,6 +2154,12 @@ export class InvocationService {
       goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
     }
     let goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
+    // An ongoing Goal's episode needs an open task, or no controller attempt is bound and its cycle wait is refused
+    // (goal_wait_attempt_missing; measured 2026-09-27, Thread Marketing — see ongoing-episode-task.ts).
+    if (!goalLongRunTask && goalLongRun && !executionContext && goalLongRun.rootChatId === chat.id) {
+      try { goalLongRunTask = ensureOngoingEpisodeTask({ longRunId: goalLongRun.id, invocationRunId: runId }); }
+      catch (error) { console.warn("[long-run] ongoing episode task unavailable:", error); }
+    }
     let goalInvocationProjection: DesktopLongRunInvocationProjection | null = null;
     const refreshGoalProjection = (): void => {
       goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
@@ -2792,19 +2800,14 @@ export class InvocationService {
         let wireEvent = event;
         if (event.kind === "partial" && !event.agentId && typeof event.text === "string") {
           const full = event.text;
-          const previous = record.partialText;
-          const probe = Math.min(32, previous.length);
-          const appended =
-            full.length >= previous.length &&
-            (probe === 0 || full.slice(previous.length - probe, previous.length) === previous.slice(-probe));
-          if (appended) {
-            const delta = full.slice(previous.length);
-            if (!delta) return;
-            wireEvent = { ...event, text: undefined, delta, textLen: full.length };
-          } else {
-            wireEvent = { ...event, textLen: full.length };
-          }
-          record.partialText = full;
+          // 턴 확정 경계(빈 전문 + durableMessageId)도 여기서 버퍼를 비운다 — 이미 저장한
+          // 본문이 중단 시 "중단된 답변"으로 또 저장되지 않게(shared/interrupted-partial.ts).
+          const step = advanceMainLivePartial(record.partialText, full);
+          if (step.drop) return;
+          wireEvent = step.delta !== null
+            ? { ...event, text: undefined, delta: step.delta, textLen: full.length }
+            : { ...event, textLen: full.length };
+          record.partialText = step.partialText;
         }
 
         const last = record.events[record.events.length - 1];
@@ -3370,6 +3373,8 @@ export class InvocationService {
           return;
         }
         if (result.goalWaitRequest && !executionContext) {
+          // A finite Goal's refused timer ends this turn through the ordinary end-of-turn verification below.
+          let finiteTimerEndsTurn = false;
           try {
             if (controller.signal.aborted || record.steeringInterruptRequested) return;
             if (result.goalWaitRequest.status === "invalid") throw new Error(result.goalWaitRequest.reason);
@@ -3393,7 +3398,21 @@ export class InvocationService {
               ? error.message : "goal_wait_registration_failed";
             const current = goalLongRun ? getLongRun(goalLongRun.id) : null;
             const revision = current ? getChatGoalRevision(current.goalId) : null;
-            if (current?.status === "running" && revision?.lifecycle === "ongoing"
+            const requestedIntent = result.goalWaitRequest.status === "requested" ? result.goalWaitRequest.intent : null;
+            if (current && finiteGoalTimerRefusalEndsTurn({ reason, lifecycle: revision?.lifecycle, status: current.status,
+              intent: requestedIntent, aborted: controller.signal.aborted })) {
+              // Measured 2026-09-27 (X Marketing): blocking here made the sweep resume the Goal, the model asked for
+              // the same timer, and the retry cap stopped a Goal whose deliverables were done. Say what happened and
+              // let the turn end through verification like any finite turn.
+              finiteTimerEndsTurn = true;
+              const message = finiteGoalTimerRefusalMessage(pickLocale(runReq), requestedIntent, reason);
+              appendChatMessage(chat.id, "assistant", message);
+              tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_refused", payload: { goalId: current.goalId,
+                reasonCode: reason, disposition: "turn_end_verification",
+                notBefore: requestedIntent?.subject.kind === "timer" ? requestedIntent.subject.notBefore : null } });
+              this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
+                notice: { code: GOAL_WAIT_FINITE_TIMER_NOTICE, level: "info", message } } });
+            } else if (current?.status === "running" && revision?.lifecycle === "ongoing"
               && !controller.signal.aborted && !record.hasTransientAttachments) {
               let fallbackRegistered = false;
               try {
@@ -3424,17 +3443,20 @@ export class InvocationService {
                 if (fallbackRegistered) return;
               }
             }
-            const latest = current ? getLongRun(current.id) : null;
-            if (latest?.status === "running") transitionLongRun({ runId: latest.id, to: "blocked", actorKind: "host", reason });
-            tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason, errorMessage: reason });
-            const message = pickLocale(runReq) === "ko" ? "대기를 등록하지 못했어요. 대기할 대상이나 실행 상태를 확인해 주세요."
-              : "The wait was not registered. Review the requested subject and the execution state.";
-            appendChatMessage(chat.id, "assistant", message);
-            this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice", notice: { code: reason, level: "warning", message } } });
+            if (!finiteTimerEndsTurn) {
+              const latest = current ? getLongRun(current.id) : null;
+              if (latest?.status === "running") transitionLongRun({ runId: latest.id, to: "blocked", actorKind: "host", reason });
+              tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason, errorMessage: reason });
+              // Say what was refused and what the owner can do — the old sentence ("Review the requested subject
+              // and the execution state") named neither (2026-09-27).
+              const message = goalWaitRefusalMessage(reason, pickLocale(runReq), requestedIntent);
+              appendChatMessage(chat.id, "assistant", message);
+              this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice", notice: { code: reason, level: "warning", message } } });
+            }
           }
           // An invalid/unsafe wait is a blocker, never permission for the
           // ordinary completion/retry path to keep calling the model.
-          return;
+          if (!finiteTimerEndsTurn) return;
         }
         let completionClaim = result.goalCompletionClaim ?? (record.automaticGoalId && !record.pendingQuestion && !controller.signal.aborted
           ? { claimed: true, goalId: record.automaticGoalId, evidence: "Automatic Goal: verify the durable terminal result against all criteria." }
@@ -3506,6 +3528,18 @@ export class InvocationService {
                 to: "blocked", actorKind: "host", reason: error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message)
                   ? error.message : "goal_wait_registration_failed" });
             }
+            return;
+          }
+          // A finite Goal the owner re-targeted during this turn is verified against the new revision, never the
+          // replaced one (2026-09-27, X Marketing 09:45Z "팔로워 1달안에 1000"). goal-owner-amendment.ts.
+          if (!controller.signal.aborted && holdFiniteGoalForPendingAmendment(completionClaim.goalId)) {
+            settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId, runId, verified: false });
+            const message = pickLocale(runReq) === "ko"
+              ? "새로 주신 목표를 반영한 뒤 이어갑니다. 이번 결과는 바뀌기 전 목표로 검증하지 않았어요."
+              : "Continuing under the goal you just updated. This result was not verified against the previous goal.";
+            appendChatMessage(chat.id, "assistant", message);
+            this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
+              notice: { code: "goal-owner-amendment-pending", level: "info", message } } });
             return;
           }
           let retryCheckpointId: string | null = null;

@@ -81,6 +81,7 @@ export function goalShapeSystemPrompt(): string {
     "- key_results: ONLY numeric targets the owner actually wrote (target must equal a number in the owner's text, e.g. '1만' = 10000, '백만' = 1000000, '$10k' = 10000). Never invent targets. If the owner wrote no numeric target, key_results is []. A yes/no end state (e.g. 'capture the capital') belongs in mission.objective, not in key_results. deadline as an ISO 8601 calendar duration from now (e.g. P30D for '1달'/'one month') or null; a limit in non-calendar units (game turns, rounds, levels) stays in mission.objective. baseline only if the owner stated it.",
     "- boundaries: ONLY (a) owner rules, source 'owner' with quote = an exact substring of the owner's text, or (b) explicit platform/legal rules, source 'platform_rule' with rule_ref naming the rule, no numbers. Do NOT invent caps, quotas or safety limits — self-made limits are not boundaries.",
     "- review_every_hours (mission_tree only): how often to review strategies against the key-result pace (1-168; 24 is typical).",
+    "- deadline (any shape): the owner's explicit time limit for the WHOLE goal, as an ISO 8601 duration from now (e.g. P30D for '1달 안에'/'within a month') or an ISO date for a named day ('by Friday' = that date). null when the owner gave no time limit. Never invent or infer one from the domain.",
     "- At most 6 strategies and 12 tactics. Tactics should each fit in one work session.",
     "- rationale: one or two sentences explaining the classification and shape.",
     "",
@@ -88,7 +89,7 @@ export function goalShapeSystemPrompt(): string {
     '{"shape":"single_tactic|tactic_list|mission_tree","problem_nature":"clear|complicated|complex|chaotic","rationale":"...",',
     '"mission":{"objective":"...","diagnosis":"...","key_results":[{"metric":"...","target":0,"unit":"...","deadline":"P30D","baseline":null}],"boundaries":[{"text":"...","source":"owner","quote":"..."}]},',
     '"strategies":[{"id":"s1","hypothesis":"...","serves_krs":["..."],"kpi":"...","budget":{"actions_per_day":null},"timebox_hours":72,"observation_window_hours":72}],',
-    '"tactics":[{"id":"t1","strategy_id":"s1","description":"...","done_when":"...","kind":"one_off"}],"review_every_hours":24}',
+    '"tactics":[{"id":"t1","strategy_id":"s1","description":"...","done_when":"...","kind":"one_off"}],"review_every_hours":24,"deadline":null}',
     "Omit mission and strategies (or use null/[]) unless the shape is mission_tree; tactics then have strategy_id null.",
   ].join("\n");
 }

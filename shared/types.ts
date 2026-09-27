@@ -1991,7 +1991,9 @@ export type ChatHostNotice =
   /** Teammate session: the brief One handed over (shown as coming from One, not the owner). */
   | { purpose: "one-dispatch-brief"; runId: string }
   /** One's conversation: compact "handed to teammate · open session" / "result arrived" link. */
-  | { purpose: "one-dispatch-link" | "one-dispatch-result"; runId: string; chatId: string; memberName: string };
+  | { purpose: "one-dispatch-link" | "one-dispatch-result"; runId: string; chatId: string; memberName: string }
+  /** Group chat: One created and/or invited a teammate into this group ("새 팀원 X를 만들어 초대했어요"). */
+  | { purpose: "one-team-member-joined"; memberName: string; created: boolean };
 
 export interface ChatHistoryEntry {
   goalResult?: import("./goal-result").GoalResultPresentation;
@@ -6180,6 +6182,9 @@ export interface BillingPlanOffer {
   cloudAgentLimit: number;
   projectAgentLimit: number;
   aliveAgent: boolean;
+  /** Agent mail allowance (web AGENT_MAIL_POLICY). Absent on older web deploys. */
+  agentMailAddresses?: number;
+  agentMailMonthlyRecipients?: number;
   highlighted: boolean;
 }
 
@@ -8464,6 +8469,11 @@ export interface AgentlasIpc {
     clearHistory: (chatId: string) => Promise<void>;
     /** 현재 실행 중인 chatId 목록 — 사이드바 "실행 중" 인디케이터 초기 시드용. */
     activeChats: () => Promise<string[]>;
+    /**
+     * 목표가 살아 있는(대기열·실행·작업자 대기·검증) 대화 — 턴 사이에도 사이드바 혜성이 돈다.
+     * 바뀌면 store:changed {entity:"long-run"} 가 온다. 구 preload 에는 없다.
+     */
+    goalActiveChats?: () => Promise<string[]>;
     /** 채팅 진입 시 진행 중 실행에 재접속 — 그 chat의 runId + 지금까지 버퍼된 이벤트 + 시작 시각. 없으면 null. */
     attach: (chatId: string, options?: { includeEvents?: boolean }) => Promise<{
       runId: string;

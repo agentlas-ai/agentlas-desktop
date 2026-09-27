@@ -358,3 +358,22 @@ function trimIncompleteTail(value: string, tokens: readonly string[]): string {
   }
   return cut === value.length ? value : value.slice(0, cut);
 }
+
+/**
+ * 라우터 공지 줄("사용 스킬: …. 이유: …")은 운영 로그지 답이 아니다.
+ *
+ * 오너의 전역 Codex 지침(~/.codex/AGENTS.md "Start with: `사용 스킬: <skills>. 이유: …`")이
+ * One 실행에도 실려 모델이 답 첫 줄에 이 공지를 쓴다. 영어 화면 계약 아래에선
+ * "Skills used:" / "Skills:"로 번역돼 나온다(2026-09-27 X 마케팅 실측: 07:36~10:12 영어 줄,
+ * 10:48 "사용 스킬:" 다음 줄 "적용 스킬:"). 예전 One 필터는 "사용 스킬"·"Skills used"만
+ * 알아서 "적용 스킬:"과 "Skills: …. Reason: …"은 그대로 화면에 남았다.
+ *
+ * 맨 "Skills:"/"Agents:"는 평범한 답(이력서의 "Skills: Python")일 수 있으므로 같은 줄에
+ * 라우터 공지의 짝인 "Reason:"/"이유:"가 있을 때만 지운다.
+ */
+const ROUTING_BANNER_LINE = /^[ \t]*(?:\*\*)?(?:(?:사용|적용)\s*(?:에이전트|스킬)|Agents used|Skills used)(?:\*\*)?[ \t]*:[^\n]*(?:\n[ \t]*)*/gim;
+const ROUTING_BANNER_WITH_REASON = /^[ \t]*(?:\*\*)?(?:Skills|Agents)(?:\*\*)?[ \t]*:[^\n]*\b(?:Reason|이유)[ \t]*:[^\n]*(?:\n[ \t]*)*/gim;
+
+export function stripAgentRoutingBanners(value: string): string {
+  return value.replace(ROUTING_BANNER_LINE, "").replace(ROUTING_BANNER_WITH_REASON, "");
+}

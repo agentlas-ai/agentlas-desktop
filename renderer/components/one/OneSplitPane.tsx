@@ -6,6 +6,7 @@ import { HostContinuationNotice } from "@/components/HostContinuationNotice";
 import { normalizeChatHostNotice } from "@shared/chat-host-notice";
 import type { ChatHostNotice } from "@shared/types";
 import { ipc } from "@/lib/ipc";
+import { parseChatFileMessage } from "@/lib/chat-files";
 import { projectOneActivityFromLedger } from "@/lib/one-activity";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import type { OneActivityArtifact } from "@/lib/one-activity";
@@ -202,7 +203,8 @@ export function OneSplitPane({
           <p className={styles.splitPaneNote}>{locale === "ko" ? "아직 오간 말이 없습니다." : "No messages yet."}</p>
         )}
         {(messages ?? []).map((message) => {
-          const text = typeof message.text === "string" ? message.text.trim() : "";
+          // Attachment markers are transport, never words (the files show in the full view).
+          const text = typeof message.text === "string" ? parseChatFileMessage(message.text).visibleText.trim() : "";
           const images = Array.isArray(message.imageDataUrls) ? message.imageDataUrls.filter(Boolean) : [];
           if (!text && images.length === 0) return null;
           if (message.role === "system") {

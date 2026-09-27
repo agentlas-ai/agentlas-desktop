@@ -2,8 +2,8 @@
  * Retry cap for system-admitted Goals (owner decision 2026-09-25).
  *
  * A Goal the app admitted on its own (automatic intake) gets at most AUTOMATIC_GOAL_RETRY_CAP host
- * continuations — verifier retries, sweep resumes, effect-observation resumes and observation
- * dispatches — counted since the latest owner action. At the cap the host stops spending and settles:
+ * continuations — verifier retries and sweep resumes — counted since the latest owner action (effect observations
+ * are reconciliation, not retries; see automaticGoalRetryCount). At the cap the host stops spending and settles:
  * done-with-evidence when the latest verification has passed criteria with admitted host refs and none
  * failed, otherwise it asks the owner once and waits (coded blocked reason; the owner's next message or
  * Resume continues it). Measured before: a one-line file write ran 17 invocations / 7 verifier attempts.
@@ -16,6 +16,7 @@ import {
 } from "../store/long-runs";
 import { completeChatGoalContract } from "../store/chat-goals";
 import { appendChatMessage, getChat, setChatGoalBinding } from "../store/chats";
+import { cappedGoalOwnerReviewMessage } from "./goal-wait-refusal";
 
 export const AUTOMATIC_GOAL_RETRY_CAP = 2;
 
@@ -23,7 +24,13 @@ export function isAutomaticGoal(run: Pick<LongRunRecord, "goalId">): boolean {
   return run.goalId.startsWith("goal:auto-message:");
 }
 
-/** Host continuations since the latest owner action (revision binding, user resume, resume with message). */
+/**
+ * Host continuations since the latest owner action (revision binding, user resume, resume with message).
+ * Effect observations and the resume they authorize are NOT counted: they reconcile an uncertain effect by looking,
+ * they do not retry the work (owner direction 2026-09-27). Measured that day (Thread Marketing goal): one observation
+ * settled the effect as done, yet its dispatch + resume made the count 2, so the next uncertain episode skipped
+ * observation and stopped at owner review ("I checked twice and could not confirm the result").
+ */
 export function automaticGoalRetryCount(runId: string): number {
   const row = getDb().prepare(`WITH boundary AS (
       SELECT COALESCE(MAX(seq), 0) AS seq FROM long_run_events WHERE run_id = ? AND (
@@ -35,8 +42,7 @@ export function automaticGoalRetryCount(runId: string): number {
       (kind = 'run.status_changed' AND actor_kind = 'host' AND (
         json_extract(payload_json, '$.reason') GLOB 'verification_inconclusive_retry:*'
         OR json_extract(payload_json, '$.reason') GLOB 'verification_repairable_retry:*'
-        OR json_extract(payload_json, '$.reason') IN ('blocked-sweep-resume', 'effect-observation-resume')))
-      OR (kind = 'run.effect_observation' AND json_extract(payload_json, '$.action') = 'dispatched'))`)
+        OR json_extract(payload_json, '$.reason') = 'blocked-sweep-resume')))`)
     .get(runId, runId) as { n: number } | undefined;
   return Number(row?.n ?? 0);
 }
@@ -86,8 +92,9 @@ export function settleCappedAutomaticGoal(run: LongRunRecord, locale: "ko" | "en
     }
     settleAutomaticGoalAtRetryCap({ runId: run.id, expectedVersion: run.version, outcome: AUTO_GOAL_OWNER_REVIEW_REQUIRED,
       retries, evidenceRefs: [], receiptIds: [] });
-    notify(run, locale, "두 번 다시 확인했지만 결과를 확인하지 못해 여기서 멈췄어요. 답장하거나 재개를 누르면 이어서 할게요.",
-      "I checked twice and could not confirm the result, so I stopped here. Reply or press Resume and I will continue.");
+    // Name what stopped it (goal-wait-refusal.ts): the single "could not confirm" sentence was shown on
+    // 2026-09-27 for a Goal whose only problem was a refused follow-up timer.
+    notify(run, locale, cappedGoalOwnerReviewMessage(run.blockedReason, "ko"), cappedGoalOwnerReviewMessage(run.blockedReason, "en"));
     return AUTO_GOAL_OWNER_REVIEW_REQUIRED;
   } catch (error) {
     return error instanceof Error && /^[a-z_]+$/.test(error.message) ? error.message : "auto_goal_retry_cap_failed";

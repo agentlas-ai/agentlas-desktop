@@ -10,6 +10,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
+import { openAiStrictSchemaOrNull } from "./strict-output-schema";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement } from "./runner";
@@ -1450,6 +1451,18 @@ async function runCodexResidentTurn(input: {
     settleTurn?.("completed");
   };
 
+  /*
+   * A Codex sub-agent (spawn_agent, depth 1) runs as its own thread on this same
+   * app-server connection, and its item notifications carry the child threadId.
+   * Its messages are delivered to the parent as an inter-agent message — they are
+   * not this turn's answer. Live 2026-09-27 (One chat "Youtube launch"): the
+   * sub-agent's "**[Hope]** … 부모 에이전트에 전달했습니다" landed in One's reply
+   * to the owner. A notification without threadId (older CLIs) stays ours.
+   */
+  const fromOtherThread = (params: any): boolean =>
+    typeof params?.threadId === "string" && typeof session.threadId === "string" && session.threadId !== ""
+    && params.threadId !== session.threadId;
+
   const onNotification = (method: string, params: any): void => {
     switch (method) {
       case "model/rerouted": {
@@ -1468,7 +1481,9 @@ async function runCodexResidentTurn(input: {
         break;
       }
       case "thread/started":
-        if (typeof params?.thread?.id === "string") session.threadId = params.thread.id;
+        // The thread/start and resume responses own session.threadId. A sub-agent's
+        // thread also announces itself here and must not take over this session.
+        if (typeof params?.thread?.id === "string" && !session.threadId) session.threadId = params.thread.id;
         break;
       case "turn/started":
         // 이 자리는 exec 경로와 같은 의미다 — 모델이 생각을 시작했다는 가장 이른 신호.
@@ -1496,6 +1511,7 @@ async function runCodexResidentTurn(input: {
         break;
       }
       case "item/agentMessage/delta": {
+        if (fromOtherThread(params)) break;
         const id = String(params?.itemId ?? "");
         const delta = typeof params?.delta === "string" ? params.delta : "";
         if (!id || !delta) break;
@@ -1512,6 +1528,7 @@ async function runCodexResidentTurn(input: {
         observeScienceTool(item);
         observeScienceFailure(item, "item/completed");
         if (item?.type === "agentMessage") {
+          if (fromOtherThread(params)) break;
           closeThinking();
           const id = String(item.id ?? "");
           if (id) {
@@ -1899,7 +1916,7 @@ async function runCodexResidentTurn(input: {
       sandboxPolicy: policy.sandboxPolicy,
       ...(appliedEffort ? { effort: appliedEffort } : {}),
       // ★출력 형태 계약 — app-server 는 스키마를 **인라인**으로 받는다(exec 은 파일 경로만).
-      ...(req.outputSchema ? { outputSchema: req.outputSchema.schema } : {}),
+      ...(req.outputSchema && openAiStrictSchemaOrNull(req.outputSchema.schema) ? { outputSchema: req.outputSchema.schema } : {}),
     };
     const settled = new Promise<"completed" | "closed">((resolve) => {
       settleTurn = (reason) => { settleTurn = null; resolve(reason); };
@@ -2350,11 +2367,12 @@ export const runCodex: Runner = async (
    * (실측 codex-cli 0.147.0: `--output-schema <FILE>`). 0600 임시 파일에 쓰고
    * 실행이 끝나면 지운다; argv 에 스키마 본문이 남지 않는 부수 효과도 있다.
    */
-  const schemaFile = runReq.outputSchema
+  const strictOutputSchema = runReq.outputSchema ? openAiStrictSchemaOrNull(runReq.outputSchema.schema) : null;
+  const schemaFile = strictOutputSchema
     ? path.join(os.tmpdir(), `agentlas-codex-schema-${process.pid}-${crypto.randomUUID()}.json`)
     : null;
-  if (schemaFile && runReq.outputSchema) {
-    await fs.writeFile(schemaFile, JSON.stringify(runReq.outputSchema.schema), { encoding: "utf8", mode: 0o600 });
+  if (schemaFile && strictOutputSchema) {
+    await fs.writeFile(schemaFile, JSON.stringify(strictOutputSchema), { encoding: "utf8", mode: 0o600 });
   }
   const schemaArgs = schemaFile ? ["--output-schema", schemaFile] : [];
   /*

@@ -25,6 +25,7 @@ import {
   listInstalledPluginCandidates,
   pluginCandidateId,
   pluginSlugFromCandidateId,
+  localRelevanceQuery,
   rankByLocalRelevance,
   type InstalledPluginCandidate,
 } from "../plugins/plugin-candidates";
@@ -780,8 +781,7 @@ export async function autoSelectMcpTools(input: {
   let selectionSource: "judge" | "local-relevance" | "none" = needs.decided ? "judge" : "none";
   const fallbackIds: string[] = [];
   if (!needs.decided) {
-    const query = [input.userPrompt, activeGoalScope?.objective ?? "", ...(activeGoalScope?.acceptanceCriteria ?? [])]
-      .filter(Boolean).join("\n");
+    const query = localRelevanceQuery({ userPrompt: input.userPrompt, objective: activeGoalScope?.objective });
     const eligible = needsCandidates.filter((candidate) => candidate.fallbackEligible && !candidate.needsCredential
       && !blockedByHostBinding(candidate.id)
       && candidate.id !== "agentlas-browser" && candidate.id !== "cua-driver" && candidate.id !== "playwright");

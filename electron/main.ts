@@ -1242,6 +1242,10 @@ app.on("activate", () => {
 // 캡처 뒤 renderer IPC write가 새로 들어올 수 없다.
 let quitCleanupDone = false;
 let quitCleanupPromise: Promise<void> | null = null;
+/** Set once the One import module loads; quitting ends its chunked pass at the next block. */
+let stopOneImport: (() => void) | null = null;
+/** Upper bound on waiting for the daemon ensure before the One import starts anyway. */
+const ONE_IMPORT_DAEMON_WAIT_MS = 30_000;
 let quitServicesStopPromise: Promise<void> | null = null;
 let quitCleanupDeadlineTimer: ReturnType<typeof setTimeout> | null = null;
 const QUIT_CLEANUP_DEADLINE_MS = 30_000;
@@ -1296,6 +1300,7 @@ function stopQuitServices(): Promise<void> {
   legacyLearningController?.abort(new Error("legacy_learning_shutdown"));
   try { closeAutomationDispatchForShutdown(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
+  try { stopOneImport?.(); } catch {}
   try { stopBrowserOrphanSweep(); } catch {}
   try { stopBrowserApprovalServer(); } catch {}
   try { stopMcpProxyApprovalServer(); } catch {}
@@ -4320,18 +4325,41 @@ app.whenReady().then(async () => {
   }
   // One 은 Desktop 밖(Claude Code·터미널 등)에서도 돌기 때문에 기억의 권위가 파일 계층에 있다.
   // 부팅 때 그 서랍의 durable 을 memory_entries 로 반입한다. 멱등이며 실패해도 부팅을 막지 않는다.
+  // Never on Main's critical path: a fresh store on a machine with One history
+  // imported ~2,300 blocks synchronously here and froze Main for 32–36s, so the
+  // first screen took ~38s and the daemon ensure's ping timed out
+  // (daemon_control_owner_unconfirmed). The import now waits for the daemon
+  // ensure to settle (bounded), then runs in ~12ms slices between yields.
   try {
-    const { importOneDurableMemory, startOneImportScheduler } = await import("./memory/one-import");
-    const outcome = importOneDurableMemory();
-    if (outcome.imported > 0 || outcome.failed > 0) {
-      console.log(
-        `[one-import] scanned=${outcome.scanned} imported=${outcome.imported} ` +
-        `skipped=${outcome.skipped} failed=${outcome.failed}`,
-      );
-    }
+    const { runOneImportInBackground, startOneImportScheduler, stopOneImportScheduler } =
+      await import("./memory/one-import");
+    stopOneImport = stopOneImportScheduler;
     // Boot-only import measured a 73-block backlog while the app stayed open —
     // re-import when the soul file actually changes (cheap mtime watch).
     startOneImportScheduler();
+    const daemonSettled = Promise.race([
+      daemonStartupPromise.then(() => undefined, () => undefined),
+      new Promise<void>((resolve) => setTimeout(resolve, ONE_IMPORT_DAEMON_WAIT_MS).unref?.()),
+    ]);
+    void daemonSettled.then(() => {
+      if (quitServicesStopPromise || quitCleanupPromise) return;
+      let lastLoggedAt = 0;
+      return runOneImportInBackground({
+        onProgress: ({ done, total }) => {
+          if (done !== total && Date.now() - lastLoggedAt < 5_000) return;
+          lastLoggedAt = Date.now();
+          console.log(`[one-import] importing ${done} of ${total}`);
+        },
+      }).then((outcome) => {
+        if (outcome.imported > 0 || outcome.failed > 0 || outcome.reason === "stopped") {
+          console.log(
+            `[one-import] scanned=${outcome.scanned} imported=${outcome.imported} ` +
+            `skipped=${outcome.skipped} failed=${outcome.failed}` +
+            (outcome.reason ? ` reason=${outcome.reason}` : ""),
+          );
+        }
+      });
+    }).catch((err) => console.error("[one-import] failed:", err));
   } catch (err) {
     console.error("[one-import] failed:", err);
   }

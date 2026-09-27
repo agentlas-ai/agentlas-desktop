@@ -124,6 +124,15 @@ export interface RunGraphOptions {
    * reflection merely because it entered through the daemon or SDK.
    */
   strategyCycle?: "auto" | "defer";
+  /**
+   * Goal-loop signals of each agent node's invocation (continue marker, completion
+   * claim). The scheduler settles a goal continuation from these; the graph result
+   * carries only text, and the markers are stripped from it.
+   */
+  onAgentInvocationSignals?: (nodeId: string, signals: {
+    stormbreakerContinueRequested: boolean;
+    goalCompletionClaim?: { claimed: boolean; evidence: string | null; goalId: string | null };
+  }) => void;
 }
 
 /** 노드가 바깥 세상에 무엇을 하는가. 선언하지 않으면 시뮬레이션에서 변경으로 간주한다(fail-closed). */
@@ -4070,6 +4079,12 @@ export async function runGraph(
           if (checkpointPersistenceError) throw checkpointPersistenceError;
           if (runnerError) throw new Error(runnerError);
           if (result.toolBroker) toolBrokerByNode.set(node.id, result.toolBroker);
+          try {
+            opts.onAgentInvocationSignals?.(node.id, {
+              stormbreakerContinueRequested: result.stormbreakerContinueRequested === true,
+              ...(result.goalCompletionClaim ? { goalCompletionClaim: result.goalCompletionClaim } : {}),
+            });
+          } catch { /* an observer must not change the node's result */ }
           const envelope = makeNodeEnvelope({
             nodeId: node.id,
             nodeLabel: node.label || node.id,

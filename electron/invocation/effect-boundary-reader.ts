@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
 import { decodeRuntimeEvidence } from "../../shared/runtime-evidence";
 import { parseEffectMetadata } from "./effect-metadata";
+import { failedCallLeftNoOutsideEffect } from "./no-effect-failure";
 
 export interface InvocationEffectBoundaryInput {
   invocationRunId: string; expectedChatId: string; expectedSource?: string;
@@ -21,6 +22,10 @@ export interface InvocationEffectBoundary {
    */
   quiesced?: boolean;
   artifactRefs: string[]; sourceRefs: string[]; pendingEffectRefs: string[];
+  /** Failed calls settled because their recorded name and arguments prove no outside effect (audit only). */
+  noEffectFailureIds?: string[];
+  /** Ledger ref of the read-only observation whose done/not_done verdict settled a quiesced boundary. */
+  settledByObservation?: string;
 }
 interface EventRow { id: string; seq: number; kind: string; chat_id: string | null; payload_json: string }
 const terminalKinds = new Set(["invoke_completed", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"]);
@@ -45,8 +50,10 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     const terminal = [...rows].reverse().find((row) => terminalKinds.has(row.kind));
     const effectRow = [...rows].reverse().find(row => row.kind === "runtime_effect_boundary");
     const boundary = effectRow ? payload(effectRow) : null;
-    const attempts = getDb().prepare("SELECT id, state, side_effect_state FROM long_run_worker_attempts WHERE invocation_run_id = ? ORDER BY id")
-      .all(input.invocationRunId) as Array<{ id: string; state: string; side_effect_state: string }>;
+    const attemptRows = getDb().prepare("SELECT id, run_id, state, side_effect_state FROM long_run_worker_attempts WHERE invocation_run_id = ? ORDER BY id")
+      .all(input.invocationRunId) as Array<{ id: string; run_id: string; state: string; side_effect_state: string }>;
+    // The digest below hashes `attempts`; keep its shape exactly as before (no run_id).
+    const attempts = attemptRows.map(({ id, state, side_effect_state }) => ({ id, state, side_effect_state }));
     const pending = new Set<string>();
     let exactBoundary: Record<string, unknown> | null = null;
     try {
@@ -93,6 +100,13 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     if (Array.isArray(boundary?.pendingEffectRefs)) for (const ref of boundary.pendingEffectRefs) if (typeof ref === "string") pending.add(ref);
     let toolEventCount = 0;
     const tools = new Map<string, { row: EventRow; started: boolean; result: boolean; outcome: "pending" | "succeeded" | "failed" | "unknown" }>();
+    // Every recorded row per tool id: runtimes reuse item ids inside one invocation (measured 2026-09-27, codex
+    // a5916446: item_289 was a failed python write and also a later read), so no single row speaks for the id.
+    const rowsByTool = new Map<string, Array<Record<string, unknown>>>();
+    // A start row after that id's result row is a new call reusing the id (codex numbers items per provider turn;
+    // a5916446 had two provider turns, so item_13 was a failed tool search and later a successful page load). Its
+    // different result is not a conflict about one call. Outcomes still collapse per id exactly as the tracker does.
+    const lastRowWasResult = new Map<string, boolean>(); const reusedId = new Set<string>();
     const artifactRefs = new Set<string>(); const sourceRefs = new Set<string>();
     for (const row of rows) {
       const data = payload(row);
@@ -105,13 +119,17 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       if (terminal && row.seq > terminal.seq) pending.add(`event:${row.id}:after-terminal`);
       const toolId = typeof data.toolId === "string" && data.toolId ? data.toolId : `event:${row.id}`;
       const previous = tools.get(toolId);
+      rowsByTool.set(toolId, [...(rowsByTool.get(toolId) ?? []), data]);
       const hasResult = typeof data.toolResultPreview === "string";
       // recordMcpInvocationEvent preserves toolIsError as a boolean but redacts
       // and truncates previews. Only a result's typed flag attests its outcome;
       // ACTIVE events may also carry isError=false without having a result.
       const outcome = hasResult ? (data.toolIsError === true ? "failed"
         : data.toolIsError === false && !data.toolFailureCode ? "succeeded" : "unknown") : "pending";
-      if (hasResult && previous?.result && previous.outcome !== outcome) pending.add(`tool:${toolId}:outcome-conflict`);
+      if (!hasResult && lastRowWasResult.get(toolId)) reusedId.add(toolId);
+      if (hasResult && previous?.result && previous.outcome !== outcome && !reusedId.has(toolId)) pending.add(`tool:${toolId}:outcome-conflict`);
+      if (hasResult) reusedId.delete(toolId);
+      lastRowWasResult.set(toolId, hasResult);
       tools.set(toolId, { row, started: !hasResult || previous?.started === true, result: hasResult || previous?.result === true,
         outcome: previous?.outcome === "failed" || previous?.outcome === "unknown" ? previous.outcome : hasResult ? outcome : previous?.outcome ?? "pending" });
     }
@@ -183,10 +201,44 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       || (ref === "runtime-effect-operation-snapshot-incomplete" && snapshotOnlyFailed)
       || [...failedIds].some(id => ref === `tool:${id}:outcome-pending` || (ref.startsWith("operation:") && ref.endsWith(`:${id}:failed`)));
     const quiesced = terminal?.kind === "invoke_completed" && failedIds.size > 0 && pendingEffectRefs.every(explainedByFailure);
+    // A failed call that provably could not change anything outside (read-only browser profile, read-only
+    // shell command, network query tool — judged from its recorded name and arguments, never its result text)
+    // is a settled effect. Measured 2026-09-27: failed `wc -l`, a failed Threads page load and failed
+    // context.verify calls each held a whole One goal episode "uncertain" (no-effect-failure.ts).
+    // Failed clicks, typing, page JavaScript and unknown tools stay open: that is the truly ambiguous case.
+    // Judge every failed/unknown result row recorded under the id (a reused id may also hold successful calls,
+    // whose own result is their receipt).
+    const noEffectFailedIds = terminal?.kind === "invoke_completed" ? [...failedIds].filter((id) => {
+      const failedResults = (rowsByTool.get(id) ?? []).filter((data) => typeof data.toolResultPreview === "string"
+        && !(data.toolIsError === false && !data.toolFailureCode));
+      return failedResults.length > 0 && failedResults.every((data) => failedCallLeftNoOutsideEffect({ toolName: data.toolName, toolArgs: data.toolArgs }));
+    }) : [];
+    const explainedByNoEffectFailure = (ref: string): boolean => (ref === "runtime-effect-boundary-unconfirmed" && boundaryOnlyFailed)
+      || (ref === "runtime-effect-operation-snapshot-incomplete" && snapshotOnlyFailed)
+      || noEffectFailedIds.some(id => ref === `tool:${id}:outcome-pending` || (ref.startsWith("operation:") && ref.endsWith(`:${id}:failed`)));
+    let openEffectRefs = noEffectFailedIds.length ? pendingEffectRefs.filter((ref) => !explainedByNoEffectFailure(ref)) : pendingEffectRefs;
+    // The rest of a quiesced boundary (nothing running; only failed calls such as a click whose element was gone)
+    // is settled once the goal's read-only observation looked at the live page and recorded done / not_done for
+    // exactly this invocation (effect-observation.ts settle_boundary). Owner direction 2026-09-27: an uncertain
+    // effect is reconciled by looking, never by asking a person; the look's verdict is the effect's resolution.
+    let settledByObservation: string | null = null;
+    if (openEffectRefs.length && quiesced) {
+      const runIds = [...new Set(attemptRows.map((row) => row.run_id))];
+      for (const runId of runIds) {
+        const row = getDb().prepare(`SELECT seq, json_extract(payload_json, '$.verdict') AS verdict FROM long_run_events
+          WHERE run_id = ? AND kind = 'run.effect_observation' AND json_extract(payload_json, '$.action') = 'settle_boundary'
+            AND EXISTS (SELECT 1 FROM json_each(payload_json, '$.targetIds') WHERE value = ?)
+          ORDER BY seq DESC LIMIT 1`).get(runId, `invocation:${input.invocationRunId}`) as { seq: number; verdict: string | null } | undefined;
+        if (row && (row.verdict === "done" || row.verdict === "not_done")) { settledByObservation = `long-run:${runId}:event:${row.seq}`; break; }
+      }
+      if (settledByObservation) openEffectRefs = [];
+    }
     const result: InvocationEffectBoundary = { invocationRunId: input.invocationRunId, terminalEventId: terminal?.id ?? null, receiptEventId: effectRow?.id ?? null, snapshotDigest: null,
-      terminal: Boolean(terminal), effects: pendingEffectRefs.length ? "uncertain" : "settled",
-      ...(pendingEffectRefs.length && quiesced ? { quiesced: true } : {}),
-      artifactRefs: [...artifactRefs].sort(), sourceRefs: [...sourceRefs].sort(), pendingEffectRefs };
+      terminal: Boolean(terminal), effects: openEffectRefs.length ? "uncertain" : "settled",
+      ...(openEffectRefs.length && quiesced ? { quiesced: true } : {}),
+      artifactRefs: [...artifactRefs].sort(), sourceRefs: [...sourceRefs].sort(), pendingEffectRefs: openEffectRefs,
+      ...(noEffectFailedIds.length ? { noEffectFailureIds: [...noEffectFailedIds].sort() } : {}),
+      ...(settledByObservation ? { settledByObservation } : {}) };
     if (terminal) {
       const digest = createHash("sha256").update(JSON.stringify({ input, terminal, effectRow, attempts,
         tools: [...tools].map(([id, tool]) => ({ id, ...tool })), result })).digest("hex");
