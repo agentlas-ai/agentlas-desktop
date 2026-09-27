@@ -35,7 +35,28 @@ type Registration = {
   resident?: { key: string; owner: string };
   timer?: NodeJS.Timeout;
   connections: Set<(cause?: unknown) => void>;
+  /** One initialized upstream parked after a clean wire end; see parkIdleUpstream. */
+  idle?: IdleUpstream;
 };
+/**
+ * agy restarts its MCP clients every step, so each step opened a new wire and
+ * Main spawned (then killed) a fresh Electron-as-node upstream per server:
+ * ~106 cycles/h x 4 servers in main.log 2026-09-27. A cleanly ended wire may
+ * park its upstream for a short linger; only the next wire of the SAME launch
+ * handle, SAME generation, SAME binding and SAME gate object may adopt it.
+ * Handles are per build/run and generations change on every resident rebind,
+ * so an upstream never crosses a run, a turn rebind, or a scope.
+ */
+type IdleUpstream = {
+  transport: Transport;
+  binding: PreparedMcpBinding;
+  generation: string;
+  gate: Readonly<McpProxyGate>;
+  init: UpstreamInit;
+  timer: NodeJS.Timeout;
+  revalidate: NodeJS.Timeout;
+};
+type UpstreamInit = { paramsKey: string; result: unknown };
 type Frame = Record<string, any>;
 type Policy = {
   mutating: (input: { catalogId?: string | null; toolName: string }) => boolean;
@@ -56,6 +77,89 @@ const UNUSED_LAUNCH_MS = 5 * 60_000;
 const MAX_ACTIVE_LAUNCHES = 256;
 const MAX_CONNECTIONS_PER_LAUNCH = 8;
 const REFUSED_LOG_COOLDOWN_MS = 30_000;
+const IDLE_UPSTREAM_LINGER_MS = 60_000;
+const MAX_IDLE_UPSTREAMS = 16;
+/**
+ * Client methods whose effect on the upstream is fully described by the
+ * request/response pair. A wire that used anything else (subscriptions,
+ * logging level, unknown extensions) leaves session state behind and is
+ * never parked. Server-initiated requests (roots/sampling/elicitation) also
+ * disqualify: the upstream may have cached the previous client's answers.
+ */
+const REUSE_SAFE_CLIENT_METHODS = new Set([
+  "initialize", "notifications/initialized", "notifications/cancelled", "ping",
+  "tools/list", "tools/call", "resources/list", "resources/templates/list", "resources/read",
+  "prompts/list", "prompts/get", "completion/complete",
+]);
+const idleOwners = new Set<Registration>();
+const upstreamStats = { spawned: 0, reused: 0, parked: 0, dropped: 0 };
+/** Diagnostics/QA only: how many real upstream processes the bridge started or adopted. */
+export function mcpProxyUpstreamStats(): Readonly<typeof upstreamStats & { idle: number }> {
+  return { ...upstreamStats, idle: idleOwners.size };
+}
+function stableKey(value: unknown): string | null {
+  try {
+    const seen = new Set<unknown>();
+    const walk = (node: unknown): unknown => {
+      if (node === null || typeof node !== "object") return node;
+      if (seen.has(node)) throw new Error("cycle");
+      seen.add(node);
+      if (Array.isArray(node)) return node.map(walk);
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(node as Record<string, unknown>).sort()) out[key] = walk((node as Record<string, unknown>)[key]);
+      return out;
+    };
+    return JSON.stringify(walk(value === undefined ? null : value));
+  } catch { return null; }
+}
+function detachTransport(transport: Transport): void {
+  transport.onmessage = undefined; transport.onclose = undefined; transport.onerror = undefined;
+}
+function dropIdleUpstream(entry: Registration): void {
+  const idle = entry.idle;
+  if (!idle) return;
+  entry.idle = undefined; idleOwners.delete(entry);
+  clearTimeout(idle.timer); clearInterval(idle.revalidate);
+  detachTransport(idle.transport);
+  upstreamStats.dropped++;
+  void idle.transport.close().catch(() => {});
+}
+/** Adopt only an exact same-handle/generation/binding/gate upstream; anything else is killed. */
+function takeIdleUpstream(entry: Registration, binding: PreparedMcpBinding, generation: string, gate: Readonly<McpProxyGate>): IdleUpstream | null {
+  const idle = entry.idle;
+  if (!idle) return null;
+  if (idle.binding !== binding || idle.generation !== generation || idle.gate !== gate
+    || entry.binding !== binding || entry.generation !== generation || entry.gate !== gate) {
+    dropIdleUpstream(entry); return null;
+  }
+  entry.idle = undefined; idleOwners.delete(entry);
+  clearTimeout(idle.timer); clearInterval(idle.revalidate);
+  detachTransport(idle.transport);
+  upstreamStats.reused++;
+  return idle;
+}
+function parkIdleUpstream(handle: string, entry: Registration, parked: Omit<IdleUpstream, "timer" | "revalidate">): boolean {
+  if (launches.get(handle) !== entry || entry.binding !== parked.binding || entry.generation !== parked.generation || entry.gate !== parked.gate) return false;
+  try { preparedMcpTargetTransport(parked.binding, parked.binding.server); validateLaunchCwd(entry.cwd); } catch { return false; }
+  dropIdleUpstream(entry);
+  while (idleOwners.size >= MAX_IDLE_UPSTREAMS) dropIdleUpstream(idleOwners.values().next().value!);
+  const { transport } = parked;
+  const drop = () => { if (entry.idle?.transport === transport) dropIdleUpstream(entry); else void transport.close().catch(() => {}); };
+  // Nobody is listening while parked: a server request cannot be answered and
+  // a response has no waiter, so either ends the linger. Notifications carry
+  // no obligation; the adopting wire re-reads inventory on its own.
+  transport.onmessage = (message) => { const frame = message as Frame; if (typeof frame?.method !== "string" || frame.id !== undefined) drop(); };
+  transport.onclose = drop; transport.onerror = drop;
+  const timer = setTimeout(drop, IDLE_UPSTREAM_LINGER_MS); timer.unref?.();
+  const revalidate = setInterval(() => {
+    if (launches.get(handle) !== entry || entry.binding !== parked.binding || entry.generation !== parked.generation || entry.gate !== parked.gate) { drop(); return; }
+    try { preparedMcpTargetTransport(parked.binding, parked.binding.server); validateLaunchCwd(entry.cwd); } catch { drop(); }
+  }, 5000);
+  revalidate.unref?.();
+  entry.idle = { ...parked, timer, revalidate }; idleOwners.add(entry);
+  upstreamStats.parked++;
+  return true;
+}
 const MAX_REFUSED_LOGS_PER_WINDOW = 32;
 let refusedLogWindowStartedAt = 0;
 let refusedLogsInWindow = 0;
@@ -93,7 +197,7 @@ function evictIdleLaunches(): void {
   if (launches.size < MAX_ACTIVE_LAUNCHES) return;
   for (const [handle, entry] of launches) {
     if (entry.connections.size || entry.resident || entry.binding) continue;
-    launches.delete(handle);
+    launches.delete(handle); dropIdleUpstream(entry);
     if (entry.timer) clearTimeout(entry.timer);
     if (launches.size < MAX_ACTIVE_LAUNCHES) return;
   }
@@ -105,7 +209,7 @@ function expireUnused(handle: string, entry: Registration): void {
     // A promoted handle is owned by the resident CLI, not by the last HTTP
     // wire.  Its child may be idle for hours between turns; expiring the map
     // here would make that child hit terminal 403 and strand the session.
-    if (!entry.connections.size && !entry.resident) launches.delete(handle);
+    if (!entry.connections.size && !entry.resident) { launches.delete(handle); dropIdleUpstream(entry); }
   }, UNUSED_LAUNCH_MS);
   entry.timer.unref?.();
 }
@@ -168,6 +272,7 @@ export function activateMcpProxyLaunch(handle: string, binding: PreparedMcpBindi
     // Rebinding is terminal for the old wire. Its child reconnects to the same
     // opaque handle and receives the new generation in the HTTP response.
     for (const close of [...entry.connections]) close("mcp_proxy_scope_rebound");
+    dropIdleUpstream(entry);
     entry.gate = nextGate;
     entry.binding = binding;
     entry.generation = nextGeneration;
@@ -190,6 +295,7 @@ export function revokeMcpProxyLaunch(handle: string): void {
   launches.delete(handle);
   if (entry.timer) clearTimeout(entry.timer);
   for (const close of [...entry.connections]) close();
+  dropIdleUpstream(entry);
 }
 /**
  * Promote one already-prepared browser launch to a resident scope. This is
@@ -214,6 +320,7 @@ export function deactivateMcpProxyLaunch(handle: string): void {
   const entry = launches.get(handle);
   if (!entry) return;
   for (const close of [...entry.connections]) close("mcp_proxy_scope_revoked");
+  dropIdleUpstream(entry);
   entry.binding = undefined;
   entry.pendingGate = undefined;
   entry.pendingGeneration = undefined;
@@ -236,6 +343,7 @@ export function revokeMcpProxyResidentKey(key: string, owner: string): boolean {
   launches.delete(handle!);
   if (entry.timer) clearTimeout(entry.timer);
   for (const close of [...entry.connections]) close("mcp_proxy_scope_revoked");
+  dropIdleUpstream(entry);
   return true;
 }
 export function isPersistentMcpProxyLaunch(handle: string): boolean {
@@ -266,7 +374,10 @@ export function stopMcpProxySessions(): void {
   for (const entry of entries) {
     if (entry.timer) clearTimeout(entry.timer);
     for (const close of [...entry.connections]) close();
+    dropIdleUpstream(entry);
   }
+  // Belt and braces: an owner already unlinked from launches still dies at quit.
+  for (const entry of [...idleOwners]) dropIdleUpstream(entry);
 }
 function graphAllows(gate: Readonly<McpProxyGate>, tool: string): boolean {
   if (!gate.planPath) return true;
@@ -313,9 +424,15 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
   }
   let transport: Transport | null = null, closed = false, initialized = false, buffer = "";
+  // Upstream reuse state (see IdleUpstream). `adopted` is provisional until the
+  // first client frame: only an initialize with byte-identical params is
+  // answered from the parked handshake; any other first frame swaps in a
+  // freshly spawned upstream so the server sees exactly what a new one would.
+  let adopted: UpstreamInit | null = null, upstreamInit: UpstreamInit | null = null, reusable = true;
+  let swallowInitialized = false, swapping: Promise<void> | null = null;
   setMaxListeners(0, lifetime.signal); // A lifetime can own any number of concurrent RPC waiters.
   const hostPrefix = `host:${randomUUID()}:`; let hostSequence = 0;
-  const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean; effect?: ReturnType<typeof beginMainMcpEffect> }>();
+  const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean; effect?: ReturnType<typeof beginMainMcpEffect>; initParamsKey?: string | null }>();
   const external = new Map<string, string>();
   const serverRequests = new Map<string, string | number>();
   const serverRequestIds = new Map<string, string>();
@@ -341,11 +458,19 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     // stay warnings; the clean end goes to debug (not mirrored to main.log).
     const line = `[mcp-proxy] bridge closed server=${gate.serverKey} handle=${handle.slice(0, 8)} initialized=${initialized} reason=${reason}`;
     if (initialized && reason === "wire_ended") console.debug(line); else console.warn(line);
+    // Park only a quiescent upstream after a clean client end: nothing in
+    // flight either way, one successful initialize, reuse-safe methods only.
+    const parkable = !invalidScope && reason === "wire_ended" && initialized && reusable && upstreamInit !== null
+      && swapping === null && transport !== null && native.size === 0 && internal.size === 0 && serverRequests.size === 0;
     lifetime.abort(new Error("mcp_proxy_closed"));
     for (const pending of internal.values()) { pending.cleanup(); pending.reject(new Error("mcp_proxy_closed")); } internal.clear();
     for (const pending of native.values()) { pending.effect?.finish(); pending.controller?.abort(new Error("mcp_proxy_closed")); pending.detach?.(); }
     native.clear(); external.clear(); serverRequests.clear(); serverRequestIds.clear();
-    void transport?.close().catch(() => {});
+    const upstream = transport; transport = null;
+    if (upstream) detachTransport(upstream);
+    const parked = parkable && upstream !== null && upstreamInit !== null
+      && parkIdleUpstream(handle, entry, { transport: upstream, binding, generation, gate, init: upstreamInit });
+    if (!parked) void upstream?.close().catch(() => {});
     entry.connections.delete(close); if (!entry.connections.size) expireUnused(handle, entry);
     if (invalidScope && !res.headersSent && !res.destroyed) {
       // The seal may change while the upstream is starting, after admission
@@ -365,7 +490,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     res.write(line);
   };
   const up = async (frame: Frame) => {
-    validate(); if (!transport) throw new Error("mcp_proxy_not_ready");
+    validate();
+    // Only a provisional-adoption swap ever sets this; frames queued behind it
+    // resume in arrival order once the fresh upstream has started.
+    if (swapping) { await swapping; validate(); }
+    if (!transport) throw new Error("mcp_proxy_not_ready");
     await transport.send(frame as JSONRPCMessage);
   };
   const finish = (wireId: string, frame: Frame) => {
@@ -441,6 +570,29 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   async function receive(frame: Frame): Promise<void> {
     validate();
     if (!frame || typeof frame !== "object" || Array.isArray(frame) || frame.jsonrpc !== "2.0") throw new Error("mcp_proxy_frame_invalid");
+    if (adopted) {
+      const parked = adopted; adopted = null;
+      if (frame.method === "initialize" && (typeof frame.id === "string" || typeof frame.id === "number")
+        && stableKey(frame.params) === parked.paramsKey) {
+        // Same client, same handshake: the parked server already answered it
+        // once. Never send a second initialize to a live MCP session.
+        upstreamInit = parked; initialized = true; swallowInitialized = true;
+        down({ jsonrpc: "2.0", id: frame.id, result: parked.result });
+        return;
+      }
+      swapping = (async () => {
+        const stale = transport; transport = null;
+        if (stale) { detachTransport(stale); void stale.close().catch(() => {}); }
+        await spawnUpstream();
+        swapping = null;
+      })();
+      swapping.catch(close);
+    }
+    if (swallowInitialized) {
+      swallowInitialized = false;
+      if (frame.method === "notifications/initialized" && frame.id === undefined) return;
+    }
+    if (typeof frame.method === "string" && !REUSE_SAFE_CLIENT_METHODS.has(frame.method)) reusable = false;
     if (typeof frame.method !== "string") {
       const original = serverRequests.get(idKey(frame.id));
       if (original === undefined) throw new Error("mcp_proxy_response_unmatched");
@@ -464,20 +616,23 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       ? beginMainMcpEffect(binding, tool, args, isCanonicalSystemTimeMcpServer(binding.server) ? "time"
         : gate.planReadAuthority === "agentlas-browser" ? "native-browser" : null) : undefined;
     native.set(wireId, { id: frame.id, method: frame.method, controller, sent: !controller, effect,
+      ...(frame.method === "initialize" ? { initParamsKey: stableKey(frame.params) } : {}),
       ...(controller ? { detach: () => lifetime.signal.removeEventListener("abort", abort) } : {}) });
     external.set(idKey(frame.id), wireId);
     if (controller) { void toolCall(wireId, frame, controller.signal); return; }
     await up({ ...frame, id: wireId });
   }
-  req.pause();
-  void (async () => {
-    validate(); transport = await createPreparedMcpTargetTransport(binding, lifetime.signal, entry.cwd.path); validate();
-    transport.onclose = () => close("upstream_transport_closed"); transport.onerror = (error) => close(error instanceof Error ? `upstream_transport_error:${error.message}` : "upstream_transport_error");
-    transport.onmessage = message => {
+  function attachUpstream(upstream: Transport): void {
+    upstream.onclose = () => { if (transport === upstream) close("upstream_transport_closed"); };
+    upstream.onerror = (error) => { if (transport === upstream) close(error instanceof Error ? `upstream_transport_error:${error.message}` : "upstream_transport_error"); };
+    upstream.onmessage = message => {
       const frame = message as Frame;
-      if (closed) return;
+      if (closed || transport !== upstream) return;
       if (typeof frame.method === "string") {
         if (frame.id !== undefined) {
+          // The upstream may cache this client's answer (roots, sampling):
+          // never hand that session to a later client.
+          reusable = false;
           if (serverRequestIds.has(idKey(frame.id))) { close(); return; }
           const id = `server:${randomUUID()}`;
           serverRequests.set(idKey(id), frame.id); serverRequestIds.set(idKey(frame.id), id); down({ ...frame, id });
@@ -501,10 +656,34 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       }
       const pending = native.get(String(frame.id));
       if (!pending) { close(); return; }
-      if (pending.method === "initialize" && !frame.error) initialized = true;
+      if (pending.method === "initialize" && !frame.error) {
+        initialized = true;
+        // Exactly one successful handshake per upstream may be replayed.
+        if (upstreamInit || !pending.initParamsKey) reusable = false;
+        else upstreamInit = { paramsKey: pending.initParamsKey, result: frame.result };
+      }
       finish(String(frame.id), frame);
     };
-    await transport.start(); validate();
+  }
+  async function spawnUpstream(): Promise<void> {
+    const upstream = await createPreparedMcpTargetTransport(binding, lifetime.signal, entry.cwd.path);
+    upstreamStats.spawned++;
+    if (closed) { void upstream.close().catch(() => {}); throw new Error("mcp_proxy_closed"); }
+    transport = upstream; validate();
+    attachUpstream(upstream);
+    await upstream.start(); validate();
+  }
+  req.pause();
+  void (async () => {
+    validate();
+    const idle = takeIdleUpstream(entry, binding, generation, gate);
+    if (idle) {
+      transport = idle.transport; adopted = idle.init;
+      attachUpstream(idle.transport);
+      validate();
+    } else {
+      await spawnUpstream();
+    }
     res.writeHead(200, {
       "content-type": "application/x-ndjson",
       "cache-control": "no-store",
