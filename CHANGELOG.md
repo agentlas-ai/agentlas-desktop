@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.2.45 — 2026-09-27
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Faster start: the app no longer re-checks unchanged data on every launch, and the macOS
+  app seal check is reused for the same installed bundle, so the window opens in about 1
+  second instead of about 7. The first launch after an update still runs the full check once.
+- Background retry storms stopped: a refused phone-link sign-in or an unreadable keychain no
+  longer retries every few seconds; retries back off and resume when the sign-in changes.
+- Stalls fixed: automations cut by an update restart resume, results are no longer lost while
+  the app quits, a Goal whose time budget ran out is not "resumed" into an instant stop, and
+  memory translation, stale queued jobs and old Goals with no runs no longer wait forever.
+- A new-mail draft can be reopened in full and edited on the phone, and a refused send tells
+  the phone when it can try again.
+- Mail dead ends fixed: one server error no longer hides the Mail tab until restart, a
+  conversation deleted on another device closes, a failed open offers back and retry, and
+  links in HTML mail open in your browser.
+- One shows the answer as it streams even when a request is admitted slowly, and the answer to
+  a direction you add mid-run now appears on screen.
+- When Science cannot open, it says why and what to do instead of showing a bare code.
+
 ## 1.2.44 — 2026-09-26
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
