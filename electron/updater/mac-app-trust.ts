@@ -459,19 +459,18 @@ function isSignedBundleSealFailure(output: string): boolean {
 }
 
 /**
- * Main-only trust gate for the currently running macOS app. Runtime update
- * eligibility uses the exact production Developer ID policy plus Gatekeeper.
- * Raw command output is discarded and only fixed diagnostics reach renderer.
+ * The cheap half of the trust gate (`codesign -d`, ~50ms): exact bundle
+ * identifier, team and Developer ID leaf from the signature itself, plus the
+ * CDHash of the main executable's code directory. It proves nothing about
+ * the resource seal or Gatekeeper; callers that skip the full gate must bind
+ * this to a stronger file identity (see runtime/mac-runtime-trust-cache.ts).
  */
-export async function inspectMacInstalledAppTrust(input: {
+export async function readMacInstalledAppSignedIdentity(input: {
   bundlePath: string;
-  policyPath: string;
+  policy: MacReleaseSigningPolicy;
   runCommand?: MacTrustCommandRunner;
-}): Promise<InstalledAppTrustResult> {
-  const policy = readSigningPolicy(input.policyPath);
-  if (!policy) {
-    return { ok: false, diagnostic: updaterDiagnostic("source-verification-unavailable") };
-  }
+}): Promise<{ ok: true; cdhash: string | null } | { ok: false; diagnostic: UpdaterDiagnostic }> {
+  const policy = input.policy;
   const run = input.runCommand ?? defaultCommandRunner;
   const displayed = await run("codesign", ["-d", "-r-", "--verbose=4", input.bundlePath]);
   if (!displayed.ok) {
@@ -487,6 +486,31 @@ export async function inspectMacInstalledAppTrust(input: {
   if (actualAuthorities[0] !== policy.leafAuthority) {
     return { ok: false, diagnostic: updaterDiagnostic("source-signature-class") };
   }
+  const cdhash = metadataValue(displayed.output, "CDHash");
+  return { ok: true, cdhash: cdhash && /^[0-9a-f]{40,64}$/.test(cdhash) ? cdhash : null };
+}
+
+export function readMacReleaseSigningPolicy(file: string): MacReleaseSigningPolicy | null {
+  return readSigningPolicy(file);
+}
+
+/**
+ * Main-only trust gate for the currently running macOS app. Runtime update
+ * eligibility uses the exact production Developer ID policy plus Gatekeeper.
+ * Raw command output is discarded and only fixed diagnostics reach renderer.
+ */
+export async function inspectMacInstalledAppTrust(input: {
+  bundlePath: string;
+  policyPath: string;
+  runCommand?: MacTrustCommandRunner;
+}): Promise<InstalledAppTrustResult> {
+  const policy = readSigningPolicy(input.policyPath);
+  if (!policy) {
+    return { ok: false, diagnostic: updaterDiagnostic("source-verification-unavailable") };
+  }
+  const run = input.runCommand ?? defaultCommandRunner;
+  const signed = await readMacInstalledAppSignedIdentity({ bundlePath: input.bundlePath, policy, runCommand: run });
+  if (!signed.ok) return signed;
 
   const verified = await run("codesign", [
     "--verify",

@@ -4,6 +4,14 @@ import {
   inspectMacInstalledAppTrust,
   repairMacInstalledAppGeneratedPythonCaches,
 } from "../updater/mac-app-trust";
+import {
+  clearMacRuntimeTrustCache,
+  computeMacBundleIdentity,
+  macRuntimeTrustCacheHit,
+  recordMacRuntimeTrustPass,
+  sameMacBundleIdentity,
+  type MacBundleIdentity,
+} from "./mac-runtime-trust-cache";
 
 const SEALED_RUNTIME_NAMES = ["Hephaestus", "python-runtime"] as const;
 
@@ -13,12 +21,23 @@ export type MacRuntimeSealResult = {
   changedEntries: number;
   alreadySealed: boolean;
   repairedGeneratedCaches: boolean;
+  /** "hit": a PASS for this exact bundle identity was reused; the full gate did not run. */
+  trustCache?: "hit" | "miss" | "disabled";
 };
 
 export type MacRuntimeSealInput = {
   bundlePath: string;
   resourcesPath: string;
   policyPath: string;
+  /**
+   * PASS-only trust cache location under userData. Absent = always run the
+   * full gate (tests, non-startup callers).
+   */
+  trustCachePath?: string;
+  /** Test seam: replaces the full `inspectMacInstalledAppTrust` gate. */
+  inspectTrust?: typeof inspectMacInstalledAppTrust;
+  /** Test seam: replaces identity collection. */
+  computeIdentity?: typeof computeMacBundleIdentity;
 };
 
 function isInside(parent: string, candidate: string): boolean {
@@ -267,11 +286,42 @@ export async function prepareMacRuntimeResourcesForExecution(
     throw new Error("Official macOS runtime signing policy is not a regular packaged resource");
   }
 
+  const inspectTrust = input.inspectTrust ?? inspectMacInstalledAppTrust;
+  const computeIdentity = input.computeIdentity ?? computeMacBundleIdentity;
+  const cachePath = input.trustCachePath;
+  const identityOf = () => computeIdentity({ bundlePath: realBundle, policyPath: input.policyPath });
+
+  if (cachePath) {
+    const current = await identityOf();
+    if (current && macRuntimeTrustCacheHit(cachePath, current)) {
+      // Identity already equals a recorded PASS (which includes every entry's
+      // mode), so sealing is expected to change nothing. If it does change
+      // something, the tree moved underneath us: forget the PASS and run the
+      // unchanged full path below.
+      const sealed = sealMacRuntimeResourcesForExecution(realResources);
+      if (sealed.changedEntries === 0) {
+        return { ...sealed, alreadySealed: true, repairedGeneratedCaches: false, trustCache: "hit" };
+      }
+    }
+    // Never leave an old PASS on disk while the full gate decides.
+    clearMacRuntimeTrustCache(cachePath);
+  }
+
+  // Identity captured right before the LAST full gate that ran. It is cached
+  // only if nothing moved between that snapshot and the end of sealing.
+  let identityBeforeLastGate: MacBundleIdentity | null = null;
+  const gate = async () => {
+    if (cachePath) identityBeforeLastGate = await identityOf();
+    return inspectTrust({ bundlePath: realBundle, policyPath: input.policyPath });
+  };
+  const remember = async (): Promise<void> => {
+    if (!cachePath || !identityBeforeLastGate) return;
+    const after = await identityOf();
+    if (after && sameMacBundleIdentity(identityBeforeLastGate, after)) recordMacRuntimeTrustPass(cachePath, after);
+  };
+
   let repairedGeneratedCaches = false;
-  let trust = await inspectMacInstalledAppTrust({
-    bundlePath: realBundle,
-    policyPath: input.policyPath,
-  });
+  let trust = await gate();
   if (!trust.ok) {
     if (trust.diagnostic.category !== "source-seal") {
       throw trustFailure("pre-seal trust check", trust.diagnostic.category);
@@ -283,10 +333,7 @@ export async function prepareMacRuntimeResourcesForExecution(
     if (!repairedGeneratedCaches) {
       throw trustFailure("generated-cache repair", trust.diagnostic.category);
     }
-    trust = await inspectMacInstalledAppTrust({
-      bundlePath: realBundle,
-      policyPath: input.policyPath,
-    });
+    trust = await gate();
     if (!trust.ok) throw trustFailure("post-repair trust check", trust.diagnostic.category);
   }
 
@@ -294,21 +341,22 @@ export async function prepareMacRuntimeResourcesForExecution(
   // Idempotent fast path: the pre-seal trust check already covered the exact
   // requirement and Gatekeeper, and no filesystem mode or content changed.
   if (sealed.changedEntries === 0) {
+    await remember();
     return {
       ...sealed,
       alreadySealed: true,
       repairedGeneratedCaches,
+      trustCache: cachePath ? "miss" : "disabled",
     };
   }
 
-  const finalTrust = await inspectMacInstalledAppTrust({
-    bundlePath: realBundle,
-    policyPath: input.policyPath,
-  });
+  const finalTrust = await gate();
   if (!finalTrust.ok) throw trustFailure("post-seal trust check", finalTrust.diagnostic.category);
+  await remember();
   return {
     ...sealed,
     alreadySealed: false,
     repairedGeneratedCaches,
+    trustCache: cachePath ? "miss" : "disabled",
   };
 }
