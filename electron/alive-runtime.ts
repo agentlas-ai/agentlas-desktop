@@ -30,13 +30,16 @@ interface AliveRuntimeReceipt {
   finalText?: string;
   errorCode?: string;
   decision?: { kind: "wait" | "review"; reason: string; nextWakeAtMs: number | null }
-    // Science fills the staleness guard from what the wake showed; the controller only names the attachment.
     | { kind: "act"; reason: string; nextWakeAtMs: number | null; action: {
-      kind: "science.continue_research"; attachmentId: string;
+      kind: "science.continue_research"; attachmentId: string; expected: {
+        loopSessionId: string; loopVersion: number; loopStateSha256: string;
+        conversationStopEpoch: number; approvalPolicySha256: string;
+      };
     } };
 }
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
+const SHA256 = /^[a-f0-9]{64}$/i;
 const AGENT_ID = builtinAgentId(ALIVE_CONTROLLER_SLUG);
 
 function runtimeChatId(agentId: string): string {
@@ -98,13 +101,23 @@ export function parseAliveDecision(text: string): AliveRuntimeReceipt["decision"
   const action = row.action;
   if (!action || typeof action !== "object" || Array.isArray(action)) return undefined;
   const a = action as Record<string, unknown>;
-  // An older controller may still send `expected`; its typed values are ignored, never validated, because Science
-  // takes the guard from its own copy of the wake (a mistyped hash used to drop the whole decision).
-  const actionKeys = Object.keys(a).sort().join("|");
-  if ((actionKeys !== "attachmentId|kind" && actionKeys !== "attachmentId|expected|kind")
+  if (Object.keys(a).sort().join("|") !== "attachmentId|expected|kind"
     || a.kind !== "science.continue_research" || typeof a.attachmentId !== "string"
-    || !a.attachmentId || a.attachmentId.length > 200) return undefined;
-  return { kind: "act", reason, nextWakeAtMs, action: { kind: "science.continue_research", attachmentId: a.attachmentId } };
+    || !a.attachmentId || a.attachmentId.length > 200
+    || !a.expected || typeof a.expected !== "object" || Array.isArray(a.expected)) return undefined;
+  const e = a.expected as Record<string, unknown>;
+  if (Object.keys(e).sort().join("|") !== "approvalPolicySha256|conversationStopEpoch|loopSessionId|loopStateSha256|loopVersion"
+    || typeof e.loopSessionId !== "string" || !UUID.test(e.loopSessionId)
+    || !Number.isSafeInteger(e.loopVersion) || Number(e.loopVersion) < 0
+    || !Number.isSafeInteger(e.conversationStopEpoch) || Number(e.conversationStopEpoch) < 0
+    || typeof e.loopStateSha256 !== "string" || !SHA256.test(e.loopStateSha256)
+    || typeof e.approvalPolicySha256 !== "string" || !SHA256.test(e.approvalPolicySha256)) return undefined;
+  return { kind: "act", reason, nextWakeAtMs, action: {
+    kind: "science.continue_research", attachmentId: a.attachmentId, expected: {
+      loopSessionId: e.loopSessionId, loopVersion: Number(e.loopVersion), loopStateSha256: e.loopStateSha256,
+      conversationStopEpoch: Number(e.conversationStopEpoch), approvalPolicySha256: e.approvalPolicySha256,
+    },
+  } };
 }
 
 function finalResult(runId: string, chatId: string): { text: string; tokensUsed?: number } | null {
@@ -210,7 +223,7 @@ export const desktopAliveRuntime = {
     const scienceAttachment = scienceAttachments[0];
     try {
       const started = invocationService.start({ runId: input.wakeId, chatId,
-        userPrompt: `You are the independent Alive controller. Review this host-observed state, use any separately granted tools that advance your purpose, and return one bare JSON decision. For rest or reflection, use {"schema":"agentlas.alive-decision.v2","kind":"wait","reason":"brief reason","nextWakeAtMs":null,"action":null}; "review" is also valid, and nextWakeAtMs may be a nonnegative integer. Only if capabilities includes science.continue_research AND an attached Science observation shows a paused loop, you may instead propose {"schema":"agentlas.alive-decision.v2","kind":"act","reason":"brief reason","nextWakeAtMs":null,"action":{"kind":"science.continue_research","attachmentId":"observed attachment ID"}}. The host binds the loop version and hashes from this wake itself; do not copy them. When a paused Science observation lists submission.agentOwnedFailingGates, those gates are the study's own unfinished work: a researcher-owned item (author details, attestation) waiting in parallel does not cover them, so propose the continuation rather than waiting. Copy the attachment ID exactly; do not invent it. The host independently checks current stop, grant, budget, binding, and revision before any action. You may revise your plan; do not claim an action, study, manuscript, or external effect happened until its separate host result exists.\n${context}`,
+        userPrompt: `You are the independent Alive controller. Review this host-observed state, use any separately granted tools that advance your purpose, and return one bare JSON decision. For rest or reflection, use {"schema":"agentlas.alive-decision.v2","kind":"wait","reason":"brief reason","nextWakeAtMs":null,"action":null}; "review" is also valid, and nextWakeAtMs may be a nonnegative integer. Only if capabilities includes science.continue_research AND an attached Science observation shows a paused loop, you may instead propose {"schema":"agentlas.alive-decision.v2","kind":"act","reason":"brief reason","nextWakeAtMs":null,"action":{"kind":"science.continue_research","attachmentId":"observed attachment ID","expected":{"loopSessionId":"observed loop ID","loopVersion":1,"loopStateSha256":"observed hash","conversationStopEpoch":0,"approvalPolicySha256":"observed hash"}}}. When a paused Science observation lists submission.agentOwnedFailingGates, those gates are the study's own unfinished work: a researcher-owned item (author details, attestation) waiting in parallel does not cover them, so propose the continuation rather than waiting. Copy observed IDs, revision numbers, and hashes exactly; do not invent them. The host independently checks current stop, grant, budget, binding, and revision before any action. You may revise your plan; do not claim an action, study, manuscript, or external effect happened until its separate host result exists.\n${context}`,
         promptOrigin: "system", taskIntent: "conversation", permissions: "full", sessionRouting: false,
         runtimeSelection: selection, locale: currentUiLocale() }, undefined, { source: "alive",
         ...(scienceAttachment ? { aliveScience: { agentId: input.agentId, wakeId: input.wakeId,
