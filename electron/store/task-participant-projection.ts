@@ -154,17 +154,60 @@ export function projectObservedTaskParticipantInDb(
 }
 
 /** Repair the same projection from durable historical events on ordinary boot. */
+/*
+ * ★The full GROUP BY over every run_events row ran on every boot: 1.0–1.3s of
+ *   blocked Main on a real 153k-row ledger (2026-09-27) to yield 212
+ *   observations and, on a healthy store, zero changes. The projection is
+ *   monotonic (participants are only added, agent_id only filled, last_seen
+ *   only advanced), so rows already reconciled cannot produce a new change
+ *   while the other inputs are unchanged. A boot therefore reconciles only the
+ *   run_events rows added since the last pass, unless tasks, installed agents
+ *   or participants changed since then (count + max rowid), the stored rowid
+ *   no longer holds the same row, or the rules version moved — then it does
+ *   the full pass as before.
+ */
+const PARTICIPANT_REPAIR_RULES = 1;
+const PARTICIPANT_REPAIR_MARK_KEY = "task_participant_repair_watermark";
+type ParticipantRepairMark = { rules: number; inputs: string; rowid: number; id: string };
+
+function participantRepairInputs(db: Database.Database): string {
+  const shape = (table: string): string => {
+    const row = db.prepare(`SELECT COUNT(*) AS n, COALESCE(MAX(rowid), 0) AS top FROM ${table}`).get() as { n: number; top: number };
+    return `${table}:${row.n}:${row.top}`;
+  };
+  return ["tasks", "installed_agents", "task_agent_participants"].map(shape).join("|");
+}
+
 export function reconcileTaskParticipantsFromRunEventsInDb(db: Database.Database): number {
   if (!tableExists(db, "run_events")) return 0;
+  const canMark = tableExists(db, "meta") && tableExists(db, "tasks")
+    && tableExists(db, "installed_agents") && tableExists(db, "task_agent_participants");
+  let from = 0;
+  let inputsBefore = "";
+  if (canMark) {
+    inputsBefore = participantRepairInputs(db);
+    try {
+      const raw = (db.prepare("SELECT value FROM meta WHERE key = ?").get(PARTICIPANT_REPAIR_MARK_KEY) as { value?: string } | undefined)?.value;
+      const mark = raw ? JSON.parse(raw) as Partial<ParticipantRepairMark> : null;
+      if (mark && mark.rules === PARTICIPANT_REPAIR_RULES && mark.inputs === inputsBefore
+        && Number.isSafeInteger(mark.rowid) && (mark.rowid ?? 0) > 0 && typeof mark.id === "string") {
+        const atMark = db.prepare("SELECT id FROM run_events WHERE rowid = ?").get(mark.rowid) as { id: string } | undefined;
+        if (atMark?.id === mark.id) from = mark.rowid!;
+      }
+    } catch {
+      from = 0;
+    }
+  }
+  const top = db.prepare("SELECT rowid AS rowid, id FROM run_events ORDER BY rowid DESC LIMIT 1").get() as { rowid: number; id: string } | undefined;
   const observations = db
     .prepare(
       `SELECT chat_id, agent_id, MAX(ts) AS seen_at
        FROM run_events
-       WHERE chat_id IS NOT NULL AND agent_id IS NOT NULL
+       WHERE rowid > ? AND chat_id IS NOT NULL AND agent_id IS NOT NULL
        GROUP BY chat_id, agent_id
        ORDER BY MAX(ts), chat_id, agent_id`,
     )
-    .all() as Array<{ chat_id: string; agent_id: string; seen_at: string }>;
+    .all(from) as Array<{ chat_id: string; agent_id: string; seen_at: string }>;
   let changes = 0;
   for (const observation of observations) {
     const projected = projectObservedTaskParticipantInDb(db, {
@@ -173,6 +216,12 @@ export function reconcileTaskParticipantsFromRunEventsInDb(db: Database.Database
       seenAt: observation.seen_at,
     });
     if (projected.changed) changes += 1;
+  }
+  if (canMark && top) {
+    // Record the inputs as they stand after this pass, so its own writes do
+    // not force the next boot into a full scan.
+    const mark: ParticipantRepairMark = { rules: PARTICIPANT_REPAIR_RULES, inputs: participantRepairInputs(db), rowid: top.rowid, id: top.id };
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(PARTICIPANT_REPAIR_MARK_KEY, JSON.stringify(mark));
   }
   return changes;
 }

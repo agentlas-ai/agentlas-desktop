@@ -728,15 +728,48 @@ function safePayload(
  * Older Desktop builds persisted shell tool arguments verbatim. Scrub only
  * rows carrying cookie/token markers, in place, without changing run identity
  * or sequence. This is intentionally idempotent and runs at startup.
+ *
+ * ★Each table is scanned only past the rowid it was last scanned to. The full
+ *   LOWER(payload_json) LIKE scan used to run on every launch inside an
+ *   IMMEDIATE write transaction: 0.5–1.1s of blocked Main on a real 153k-row
+ *   ledger (2026-09-27), and 40 rows were rewritten on every launch because the
+ *   scrub is not a fixed point for them. The only writer that changes an
+ *   existing payload is this scrub itself, so a row once scanned stays scanned.
+ *   Bump RUN_EVENT_SCRUB_RULES when the redaction rules change to rescan all.
+ *   If the top row was deleted and its rowid reused, the stored row id no
+ *   longer matches and the table is rescanned from the start.
  */
+const RUN_EVENT_SCRUB_RULES = 1;
+const RUN_EVENT_SCRUB_WATERMARK_KEY = "run_event_legacy_scrub_watermark";
+type RunEventScrubWatermark = { rules: number; tables: Partial<Record<"run_events" | "failure_events", { rowid: number; id: string }>> };
+
 export function scrubLegacyRunEventSecrets(): number {
   const db = getDb();
   const markers = ["%auth_token%", "%ct0%", "%access_token%", "%refresh_token%", "%authorization%", "%cookie%"];
   const where = markers.map(() => "LOWER(payload_json) LIKE ?").join(" OR ");
   let changed = 0;
+  let stored: RunEventScrubWatermark = { rules: RUN_EVENT_SCRUB_RULES, tables: {} };
+  try {
+    const raw = (db.prepare("SELECT value FROM meta WHERE key = ?").get(RUN_EVENT_SCRUB_WATERMARK_KEY) as { value?: string } | undefined)?.value;
+    const parsed = raw ? JSON.parse(raw) as Partial<RunEventScrubWatermark> : null;
+    if (parsed && parsed.rules === RUN_EVENT_SCRUB_RULES && parsed.tables && typeof parsed.tables === "object") {
+      stored = { rules: RUN_EVENT_SCRUB_RULES, tables: parsed.tables };
+    }
+  } catch {
+    // An unreadable watermark only means one full scan.
+  }
+  const next: RunEventScrubWatermark = { rules: RUN_EVENT_SCRUB_RULES, tables: {} };
   const scrubTable = (table: "run_events" | "failure_events") => {
-    const rows = db.prepare(`SELECT id, run_id, chat_id, ${table === "run_events" ? "kind, seq" : "'failure_event' AS kind, NULL AS seq"}, payload_json FROM ${table} WHERE ${where}`)
-      .all(...markers) as Array<{ id: string; run_id: string; chat_id: string | null; kind: string; seq: number | null; payload_json: string }>;
+    const top = db.prepare(`SELECT rowid AS rowid, id FROM ${table} ORDER BY rowid DESC LIMIT 1`).get() as { rowid: number; id: string } | undefined;
+    const mark = stored.tables[table];
+    let from = 0;
+    if (mark && Number.isSafeInteger(mark.rowid) && mark.rowid > 0 && typeof mark.id === "string") {
+      const atMark = db.prepare(`SELECT id FROM ${table} WHERE rowid = ?`).get(mark.rowid) as { id: string } | undefined;
+      if (atMark?.id === mark.id && top && top.rowid >= mark.rowid) from = mark.rowid;
+    }
+    if (top) next.tables[table] = { rowid: top.rowid, id: top.id };
+    const rows = db.prepare(`SELECT id, run_id, chat_id, ${table === "run_events" ? "kind, seq" : "'failure_event' AS kind, NULL AS seq"}, payload_json FROM ${table} WHERE rowid > ? AND (${where})`)
+      .all(from, ...markers) as Array<{ id: string; run_id: string; chat_id: string | null; kind: string; seq: number | null; payload_json: string }>;
     const update = db.prepare(`UPDATE ${table} SET payload_json = ? WHERE id = ?`);
     for (const row of rows) {
       let next = redactRunEventSensitiveText(row.payload_json);
@@ -795,6 +828,7 @@ export function scrubLegacyRunEventSecrets(): number {
   db.transaction(() => {
     scrubTable("run_events");
     scrubTable("failure_events");
+    db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(RUN_EVENT_SCRUB_WATERMARK_KEY, JSON.stringify(next));
   }).immediate();
   return changed;
 }

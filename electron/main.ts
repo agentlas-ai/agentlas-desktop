@@ -1630,6 +1630,20 @@ app.whenReady().then(async () => {
   } catch (err) {
     console.warn("[model-catalog] resolver not installed:", err instanceof Error ? err.message : String(err));
   }
+  // The official runtime seal below runs `codesign --verify --deep --strict`
+  // and `spctl` over the whole bundle: 3.4–5.8s measured on 1.2.44
+  // (2026-09-27), twice after an update. Nothing was on screen for that time,
+  // so the app looked dead. The placeholder is a read-only data: page with no
+  // IPC surface and starts no runtime, so it may appear before the seal. Only
+  // GUI launches get it; headless entries below never open a window.
+  const headlessEntry = process.argv.includes("--graph-surface") || process.argv.includes("--headless-automations");
+  let startupPlaceholderShown = false;
+  if (!headlessEntry) {
+    await createWindow({ startupPlaceholder: true });
+    startupPlaceholderShown = true;
+    traceUpdaterStartup("startup-window-visible");
+    traceStartup("startup-window-visible");
+  }
   if (app.isPackaged && process.platform === "darwin" && installIdentity.channel === "official") {
     try {
       const bundlePath = resolveMacAppBundle(process.execPath);
@@ -1654,6 +1668,7 @@ app.whenReady().then(async () => {
       app.exit(78);
       return;
     }
+    traceStartup("runtime-sealed");
   }
   // Every quit path from here on is attributable: signals are received with their name (see quit-reason.ts).
   installQuitSignalHandlers();
@@ -1751,9 +1766,11 @@ app.whenReady().then(async () => {
   // screen first so a locked or slow Keychain never makes Agentlas look dead.
   // The application renderer and IPC surface still load only after migration,
   // continuity, authentication, and bootstrap gates have completed.
-  await createWindow({ startupPlaceholder: true });
-  traceUpdaterStartup("startup-window-visible");
-  traceStartup("startup-window-visible");
+  if (!startupPlaceholderShown || !mainWindow || mainWindow.isDestroyed()) {
+    await createWindow({ startupPlaceholder: true });
+    traceUpdaterStartup("startup-window-visible");
+    traceStartup("startup-window-visible");
+  }
   startupStage = "store-opening";
   await initializeDesktopStore({ deferPostContinuityRepairs: updatePreflight.pendingInstall || developmentEffectsSuppressed() });
   if (!developmentEffectsSuppressed()) {

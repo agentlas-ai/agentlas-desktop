@@ -393,6 +393,78 @@ function pruneOldRecoveryCopies(root: string, keepPath: string): void {
 
 const RECOVERY_DATABASE_NAME = "agentlas.sqlite";
 const MAX_INACTIVE_RECOVERY_DATABASES = 2;
+const RECOVERY_SANITIZATION_VERSION = "opencrab-url-credential-v1";
+/*
+ * ★Every launch used to re-verify the same immutable recovery copies: a full
+ *   `PRAGMA quick_check` plus a latin1 regex scan of every byte, for up to two
+ *   ~450MB SQLite files, synchronously on Electron Main before the window.
+ *   Measured on copies of a real profile (2026-09-27): 4.7s cold / 0.7s warm
+ *   of blocked Main, and the result was "0 scrubbed" on every launch.
+ *   A copy that this exact scrubber already proved clean, and whose file
+ *   identity (dev/ino/size/mtime/ctime) is unchanged with no sidecars, cannot
+ *   have gained a credential. Any change to the file, a sidecar, or the
+ *   scrubber version makes it a new file and it is scanned again.
+ */
+const RECOVERY_SCRUB_CLEAN_LEDGER = "recovery-opencrab-scrub-clean.v1.json";
+
+type RecoveryCleanFingerprint = { dev: number; ino: number; size: number; mtimeMs: number; ctimeMs: number };
+type RecoveryCleanLedger = {
+  schemaVersion: 1;
+  sanitizationVersion: string;
+  entries: Record<string, RecoveryCleanFingerprint>;
+};
+
+function recoveryCleanFingerprint(databasePath: string): RecoveryCleanFingerprint | null {
+  try {
+    for (const sidecar of [`${databasePath}-wal`, `${databasePath}-shm`, `${databasePath}-journal`]) {
+      if (fs.existsSync(sidecar)) return null;
+    }
+    const stat = fs.lstatSync(databasePath);
+    if (!stat.isFile() || stat.isSymbolicLink()) return null;
+    return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs };
+  } catch {
+    return null;
+  }
+}
+
+function sameRecoveryFingerprint(left: RecoveryCleanFingerprint | undefined, right: RecoveryCleanFingerprint | null): boolean {
+  return Boolean(left && right)
+    && left!.dev === right!.dev && left!.ino === right!.ino && left!.size === right!.size
+    && left!.mtimeMs === right!.mtimeMs && left!.ctimeMs === right!.ctimeMs;
+}
+
+function readRecoveryCleanLedger(ledgerPath: string): RecoveryCleanLedger["entries"] {
+  try {
+    const stat = fs.lstatSync(ledgerPath);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 64 * 1024) return {};
+    const parsed = JSON.parse(fs.readFileSync(ledgerPath, "utf8")) as Partial<RecoveryCleanLedger>;
+    if (parsed.schemaVersion !== 1 || parsed.sanitizationVersion !== RECOVERY_SANITIZATION_VERSION) return {};
+    if (!parsed.entries || typeof parsed.entries !== "object" || Array.isArray(parsed.entries)) return {};
+    const entries: RecoveryCleanLedger["entries"] = {};
+    for (const [key, value] of Object.entries(parsed.entries)) {
+      if (!value || typeof value !== "object") continue;
+      const row = value as Partial<RecoveryCleanFingerprint>;
+      if ([row.dev, row.ino, row.size, row.mtimeMs, row.ctimeMs].every((field) => typeof field === "number" && Number.isFinite(field))) {
+        entries[key] = row as RecoveryCleanFingerprint;
+      }
+    }
+    return entries;
+  } catch {
+    return {};
+  }
+}
+
+function writeRecoveryCleanLedger(ledgerPath: string, entries: RecoveryCleanLedger["entries"]): void {
+  const ledger: RecoveryCleanLedger = { schemaVersion: 1, sanitizationVersion: RECOVERY_SANITIZATION_VERSION, entries };
+  const temporary = `${ledgerPath}.${randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(temporary, JSON.stringify(ledger), { mode: 0o600, flag: "wx" });
+    fs.renameSync(temporary, ledgerPath);
+  } catch {
+    // A missing ledger only costs the next launch a re-scan; it never skips one.
+    try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
+  }
+}
 
 export interface InactiveRecoveryOpenCrabScrubResult {
   scanned: number;
@@ -401,6 +473,8 @@ export interface InactiveRecoveryOpenCrabScrubResult {
   consolidatedRows: number;
   skippedActive: boolean;
   skippedUnsafe: number;
+  /** Unchanged copies this scrubber already proved clean; not re-read. */
+  skippedVerifiedClean: number;
 }
 
 type RecoveryMcpRow = {
@@ -528,7 +602,7 @@ function resealRecoveryContinuityMetadata(databasePath: string): boolean {
       rowCounts: facts.rowCounts,
       tableIdentityHashes: facts.tableIdentityHashes,
       sanitizedAt: new Date().toISOString(),
-      sanitizationVersion: "opencrab-url-credential-v1",
+      sanitizationVersion: RECOVERY_SANITIZATION_VERSION,
     });
     return true;
   } catch {
@@ -659,6 +733,7 @@ export function scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls(input: {
     consolidatedRows: 0,
     skippedActive: false,
     skippedUnsafe: 0,
+    skippedVerifiedClean: 0,
   };
   const updaterRoot = path.join(input.userDataPath, "updater");
   const journalPath = path.join(updaterRoot, "install-journal.v1.json");
@@ -698,16 +773,24 @@ export function scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls(input: {
   }
   candidates.sort((left, right) => right.mtimeMs - left.mtimeMs);
 
+  const ledgerPath = path.join(updaterRoot, RECOVERY_SCRUB_CLEAN_LEDGER);
+  const previousClean = readRecoveryCleanLedger(ledgerPath);
+  const nextClean: RecoveryCleanLedger["entries"] = {};
   for (const candidate of candidates.slice(0, MAX_INACTIVE_RECOVERY_DATABASES)) {
     if (!fs.existsSync(candidate.databasePath)) continue;
-    result.scanned += 1;
     try {
       const stat = fs.lstatSync(candidate.databasePath);
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("unsafe inactive recovery SQLite path");
       const realDatabasePath = fs.realpathSync(candidate.databasePath);
-      if (!isInside(realRecoveryRoot, realDatabasePath) || !quickCheck(realDatabasePath)) {
-        throw new Error("unsafe inactive recovery SQLite copy");
+      if (!isInside(realRecoveryRoot, realDatabasePath)) throw new Error("unsafe inactive recovery SQLite copy");
+      const before = recoveryCleanFingerprint(realDatabasePath);
+      if (sameRecoveryFingerprint(previousClean[realDatabasePath], before)) {
+        nextClean[realDatabasePath] = before!;
+        result.skippedVerifiedClean += 1;
+        continue;
       }
+      result.scanned += 1;
+      if (!quickCheck(realDatabasePath)) throw new Error("unsafe inactive recovery SQLite copy");
       const scrubbed = scrubRecoveryDatabase(realDatabasePath);
       if (scrubbed.changed) result.scrubbedDatabases += 1;
       result.scrubbedRows += scrubbed.scrubbedRows;
@@ -716,13 +799,19 @@ export function scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls(input: {
         // The credential remains removed and the DB passed quick_check, but the
         // preserved metadata can no longer be claimed as a verified snapshot.
         result.skippedUnsafe += 1;
+        continue;
       }
+      // Only a copy that passed quick_check and holds no credential bytes, with
+      // no sidecar left behind, is remembered as clean for this exact identity.
+      const after = recoveryCleanFingerprint(realDatabasePath);
+      if (after) nextClean[realDatabasePath] = after;
     } catch {
       // A malformed copy remains available for manual recovery. Never delete or
       // replace user recovery material merely because credential scrub failed.
       result.skippedUnsafe += 1;
     }
   }
+  if (JSON.stringify(nextClean) !== JSON.stringify(previousClean)) writeRecoveryCleanLedger(ledgerPath, nextClean);
   return result;
 }
 

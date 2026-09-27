@@ -2,7 +2,7 @@
 //   - BYOK: 각 provider의 /models 엔드포인트를 사용자 키로 조회
 //   - 실패/무키: 빈 목록 + UI의 manual model ID 입력 (버전 ID를 앱에 고정하지 않음)
 // 5분 메모리 캐시 — detect/picker가 자주 호출해도 네트워크는 가끔만.
-import { readApiKey } from "../secrets/vault";
+import { apiKeyPresenceHint, getCredentialStateRevision, readApiKey } from "../secrets/vault";
 import { getDb } from "../store/db";
 import {
   BYOK_BACKENDS_ALL,
@@ -17,6 +17,26 @@ type ModelOption = CliModelOption;
 
 const TTL_MS = 5 * 60 * 1000;
 const cache = new Map<ByokBackend, { at: number; models: ModelOption[] }>();
+
+/*
+ * ★keychain_unavailable is a fact about the credential store, not about this
+ *   poll. The renderer asks for every listed BYOK runtime's models on a 5-min
+ *   TTL, and this cache expired on the same TTL, so one failed store produced
+ *   11 warnings every 5 minutes for as long as the app ran (94 rounds x 11
+ *   providers = 1,034 lines in main.log 2026-09-24..26), each round re-entering
+ *   the vault. A failure is now remembered per provider: a latched failure
+ *   ("automatic retry suppressed") waits until credential state actually
+ *   changes (save/delete/user retry/any successful native read); other
+ *   keychain failures back off 5m -> 10m -> ... -> 1h. It is logged once per
+ *   distinct failure, not once per poll.
+ */
+const KEYCHAIN_BACKOFF_MAX_MS = 60 * 60 * 1000;
+type KeychainFailure = { until: number; streak: number; revision: number; signature: string };
+const keychainFailures = new Map<ByokBackend, KeychainFailure>();
+
+function catalogModels(backend: ByokBackend): ModelOption[] {
+  return byokModels(backend).map((m) => ({ id: m.id, label: m.label }));
+}
 
 const BYOK_BACKENDS: readonly ByokBackend[] = BYOK_BACKENDS_ALL;
 
@@ -108,9 +128,27 @@ export async function fetchByokModels(backend: ByokBackend, now: number): Promis
   const hit = cache.get(backend);
   if (hit && now - hit.at < TTL_MS) return hit.models;
 
+  const revision = getCredentialStateRevision();
+  const failure = keychainFailures.get(backend);
+  if (failure && failure.revision === revision && now < failure.until) {
+    const models = catalogModels(backend);
+    cache.set(backend, { at: now, models });
+    return models;
+  }
+  // No stored key: nothing to fetch and no reason to touch the keychain.
+  if (apiKeyPresenceHint(backend) === "missing") {
+    keychainFailures.delete(backend);
+    const models = catalogModels(backend);
+    cache.set(backend, { at: now, models });
+    return models;
+  }
+
   let models: ModelOption[] = [];
+  let keyRead = false;
   try {
     const key = await readApiKey(backend);
+    keyRead = true;
+    keychainFailures.delete(backend);
     if (key) {
       models =
         backend === "anthropic"
@@ -123,13 +161,31 @@ export async function fetchByokModels(backend: ByokBackend, now: number): Promis
               );
     }
   } catch (err) {
-    // 실시간 조회 실패를 조용히 삼키지 않는다. UI는 manual ID 입력을 계속 제공한다.
-    console.warn(
-      `[providers] live ${backend} model fetch failed; manual model selection remains available:`,
-      err instanceof Error ? err.message : err,
-    );
+    const code = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
+    if (!keyRead && code === "keychain_unavailable") {
+      const suppressed = (err as { automaticRetrySuppressed?: unknown }).automaticRetrySuppressed === true;
+      const signature = suppressed ? "keychain_unavailable:latched" : "keychain_unavailable";
+      const streak = (failure?.streak ?? 0) + 1;
+      const until = suppressed
+        ? Number.POSITIVE_INFINITY
+        : now + Math.min(TTL_MS * 2 ** Math.min(streak - 1, 10), KEYCHAIN_BACKOFF_MAX_MS);
+      if (failure?.signature !== signature) {
+        console.warn(
+          `[providers] live ${backend} model fetch skipped: credential store unavailable; manual model selection remains available`
+            + (suppressed ? " (retries when credentials change)" : ` (next attempt in ${Math.round((until - now) / 60_000)}m)`),
+          err instanceof Error ? err.message : err,
+        );
+      }
+      keychainFailures.set(backend, { until, streak, revision, signature });
+    } else {
+      // 실시간 조회 실패를 조용히 삼키지 않는다. UI는 manual ID 입력을 계속 제공한다.
+      console.warn(
+        `[providers] live ${backend} model fetch failed; manual model selection remains available:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
   }
-  if (models.length === 0) models = byokModels(backend).map((m) => ({ id: m.id, label: m.label }));
+  if (models.length === 0) models = catalogModels(backend);
   cache.set(backend, { at: now, models });
   return models;
 }
@@ -163,6 +219,7 @@ export async function listRuntimeModels(
 /** 디버그/테스트용 — 캐시 비우기. */
 export function clearModelCache(): void {
   cache.clear();
+  keychainFailures.clear();
 }
 
 export { BYOK_MODELS };

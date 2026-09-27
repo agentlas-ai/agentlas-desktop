@@ -33,6 +33,26 @@ const MAX_TIMEOUT_MS = 120_000;
 const nativeRequests = new Map<string, Promise<unknown>>();
 const failedRequests = new Set<string>();
 
+/*
+ * ★In-process keytar calls run on libuv's thread pool (4 threads by default),
+ *   the same pool that serves fs.promises, dns.lookup, zlib and crypto for all
+ *   of Electron Main. Startup fires 11 BYOK presence reads (detect) plus env
+ *   reads at once; while macOS holds those Security.framework calls (slow
+ *   keychain, a pending access prompt) every pool thread is occupied and
+ *   unrelated async I/O in Main queues behind them — including this layer's
+ *   own recovery-state files. Measured with a thread-pool stand-in
+ *   (2026-09-27): an fs.stat issued during 11 concurrent 1s native calls
+ *   waited up to 936ms; with one slot it waited 0ms. A healthy lookup takes
+ *   ~0.1ms (11 absent items: 0–6ms), so one native call at a time costs
+ *   nothing normally and bounds the pool cost to one thread when macOS stalls.
+ */
+let nativeSlot: Promise<unknown> = Promise.resolve();
+function inProcessNative<T>(direct: () => Promise<T>): Promise<T> {
+  const run = nativeSlot.then(direct, direct);
+  nativeSlot = run.then(() => undefined, () => undefined);
+  return run;
+}
+
 function requestKey(operation: string, service: string, account: string): string {
   return JSON.stringify([operation, service, account]);
 }
@@ -200,7 +220,7 @@ export async function keychainGet(
 ): Promise<string | null> {
   return sharedNativeRequest("read", service, account, async () => {
     if (keychainPromptsAreAnswerable()) {
-      try { return await direct(); }
+      try { return await inProcessNative(direct); }
       catch {
         // A signed GUI build can still lose the in-process keytar binding after
         // an update while the same signed executable succeeds in isolated Node
@@ -237,7 +257,7 @@ export async function keychainSet(
 ): Promise<void> {
   await runWithCredentialRecovery({ operation: "read", service, account }, true, async () => {
     if (keychainPromptsAreAnswerable()) {
-      try { await direct(); return; }
+      try { await inProcessNative(direct); return; }
       catch { /* use the bounded isolated fallback below */ }
     }
     const result = await runKeychainChild("set", service, account, value);
@@ -253,7 +273,7 @@ export async function keychainDelete(
 ): Promise<void> {
   await runWithCredentialRecovery({ operation: "read", service, account }, true, async () => {
     if (keychainPromptsAreAnswerable()) {
-      try { await direct(); return; }
+      try { await inProcessNative(direct); return; }
       catch { /* use the bounded isolated fallback below */ }
     }
     const result = await runKeychainChild("delete", service, account, null);
@@ -270,7 +290,7 @@ export async function keychainListAccounts(
 ): Promise<string[]> {
   return sharedNativeRequest("list", service, "", async () => {
     if (keychainPromptsAreAnswerable()) {
-      try { return await direct(); }
+      try { return await inProcessNative(direct); }
       catch {
         const fallback = await runKeychainChild("find", service, "", null);
         if (!fallback.error) return fallback.accounts ?? [];

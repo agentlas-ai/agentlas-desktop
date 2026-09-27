@@ -49,6 +49,20 @@ const userListRetries = new Map<string, Promise<string[]>>();
 let envKeyCache: string[] | null = null;
 let envKeyCacheService: string | null = null;
 let envKeyRead: Promise<string[]> | null = null;
+// Every account name the last successful listing saw, per service. Used only as
+// a value-free presence hint; it never replaces a read of an existing account.
+let knownAccounts: { service: string; accounts: Set<string> } | null = null;
+// Bumps whenever native credential state was observed or changed successfully.
+// Pollers that backed off after keychain_unavailable retry only after it moves.
+let credentialStateRevision = 0;
+
+/** Value-free epoch; changes after any successful native read, write, delete or list. */
+export function getCredentialStateRevision(): number { return credentialStateRevision; }
+
+function rememberAccounts(service: string, accounts: string[]): void {
+  knownAccounts = { service, accounts: new Set(accounts) };
+  credentialStateRevision += 1;
+}
 
 function keychainService(): string {
   // An unconfigured test, plugin, or temporary Electron host must never inherit
@@ -90,6 +104,7 @@ async function getPassword(account: string): Promise<string | null> {
     if (keychainCache.has(key)) return keychainCache.get(key) ?? null;
     const value = await keychainGet(service, account, () => keytarApi().getPassword(service, account));
     keychainCache.set(key, value);
+    credentialStateRevision += 1;
     return value;
   });
   passwordReads.set(key, started);
@@ -112,6 +127,8 @@ async function setPassword(account: string, value: string): Promise<void> {
     await queuePasswordOperation(key, async () => {
       await keychainSet(service, account, value, () => keytarApi().setPassword(service, account, value));
       keychainCache.set(key, value);
+      if (knownAccounts?.service === service) knownAccounts.accounts.add(account);
+      credentialStateRevision += 1;
     });
   }
 }
@@ -127,6 +144,8 @@ async function deletePassword(account: string): Promise<void> {
     await queuePasswordOperation(key, async () => {
       await keychainDelete(service, account, async () => { await keytarApi().deletePassword(service, account); });
       keychainCache.set(key, null);
+      if (knownAccounts?.service === service) knownAccounts.accounts.delete(account);
+      credentialStateRevision += 1;
     });
   }
 }
@@ -153,6 +172,7 @@ function retryAccountFromUser(service: string, account: string): Promise<string 
   const started = queuePasswordOperation(key, async () => {
     const value = await retryKeychainReadFromUser(service, account, () => keytarApi().getPassword(service, account));
     keychainCache.set(key, value);
+    credentialStateRevision += 1;
     return value;
   });
   userPasswordRetries.set(key, started);
@@ -204,7 +224,7 @@ function retryEnvListFromUser(service: string): Promise<string[]> {
   const started = retryKeychainListFromUser(service, async () => (await keytarApi().findCredentials(service)).map((item) => item.account))
     .then((accounts) => {
       const keys = accounts.filter((account) => account.startsWith(ENV_PREFIX)).map((account) => account.slice(ENV_PREFIX.length));
-      if (keychainService() === service) { envKeyCacheService = service; envKeyCache = keys; }
+      if (keychainService() === service) { envKeyCacheService = service; envKeyCache = keys; rememberAccounts(service, accounts); }
       return keys;
     });
   userListRetries.set(service, started);
@@ -296,6 +316,29 @@ export async function hasApiKey(backend: RuntimeBackend): Promise<boolean> {
 export async function deleteApiKey(backend: RuntimeBackend): Promise<void> {
   await deletePassword(byokAccount(backend));
   await deletePassword(byokMetaAccount(backend));
+}
+
+/**
+ * Value-free presence hint that never touches the native backend: "missing"
+ * when this process already read the account as absent or the last successful
+ * listing did not contain it, "present" when a value is cached, else "unknown".
+ * Polling callers use it to skip a keychain read for a provider with no key.
+ */
+export function apiKeyPresenceHint(backend: RuntimeBackend): "present" | "missing" | "unknown" {
+  if (developmentEffectsSuppressed() || USE_MEMORY_VAULT) {
+    const value = memoryVault.get(byokAccount(backend));
+    return typeof value === "string" && value.length > 0 ? "present" : "missing";
+  }
+  let service: string;
+  try { service = keychainService(); } catch { return "unknown"; }
+  const account = byokAccount(backend);
+  const key = passwordKey(service, account);
+  if (!passwordOperations.has(key) && keychainCache.has(key)) {
+    const value = keychainCache.get(key);
+    return typeof value === "string" && value.length > 0 ? "present" : "missing";
+  }
+  if (knownAccounts?.service === service && !knownAccounts.accounts.has(account) && !passwordOperations.has(key)) return "missing";
+  return "unknown";
 }
 
 /** main 내부 사용 — MCP 호출 시 자식 env에 주입. renderer 노출 X */
@@ -417,6 +460,7 @@ export async function listEnvKeys(): Promise<string[]> {
       ? [...memoryVault.keys()]
       : await keychainListAccounts(service, async () =>
           (await keytarApi().findCredentials(service)).map((c) => c.account));
+    if (!(developmentEffectsSuppressed() || USE_MEMORY_VAULT)) rememberAccounts(service, accounts);
     const keys = accounts.filter((a) => a.startsWith(ENV_PREFIX)).map((a) => a.slice(ENV_PREFIX.length));
     if (envKeyCacheService === service) envKeyCache = keys;
     return keys;
