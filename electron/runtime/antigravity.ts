@@ -203,11 +203,56 @@ async function probeAgyModels(binary: string): Promise<DiscoveryOutcome> {
   });
 }
 
+/*
+ * `agy models` 결과 캐시 (2026-09-27).
+ *
+ * detectRuntimes() 는 모든 런타임 탐지를 한꺼번에 기다리고, 그 캐시는 10초다. 그래서 실행
+ * 시작·런타임 선택 화면·자동화 스케줄러가 부를 때마다 `agy models`(네트워크 카탈로그)를 새로
+ * 띄웠고, 그게 12초 타임아웃에 걸리는 날(main.log 2026-09-20..26, 하루 한 번 꼴 — 매번 직전
+ * 성공 25~40초 뒤)에는 그 모든 호출자가 12초씩 함께 멈췄다. 목록은 거의 안 바뀐다.
+ *   - 성공: 10분 동안 그대로 쓴다.
+ *   - 실패: 1분 뒤에 다시 본다(지난 성공 목록은 settleDiscovery 가 stale 로 이미 채운다).
+ *   - 만료됐지만 값이 있으면 기다리지 않는다 — 그 값을 바로 주고 뒤에서 한 번만 새로 본다.
+ *   - 값이 없을 때(첫 탐지·바이너리 변경)만 기다린다.
+ */
+export const ANTIGRAVITY_MODEL_DISCOVERY_FRESH_MS = 10 * 60_000;
+export const ANTIGRAVITY_MODEL_DISCOVERY_FAILED_RETRY_MS = 60_000;
+let agyModelsCache: { binary: string; at: number; outcome: DiscoveryOutcome } | null = null;
+let agyModelsFlight: { binary: string; promise: Promise<DiscoveryOutcome> } | null = null;
+
+/** 런타임 교체·재로그인 등 감지 캐시를 비울 때 — 값은 남기고 다음 탐지에서 뒤에서 새로 본다. */
+export function invalidateAntigravityModelDiscovery(): void {
+  if (agyModelsCache) agyModelsCache = { ...agyModelsCache, at: 0 };
+}
+
+export function cachedAgyModelDiscovery(
+  binary: string,
+  probe: (binary: string) => Promise<DiscoveryOutcome> = probeAgyModels,
+  now: number = Date.now(),
+): Promise<DiscoveryOutcome> {
+  const refresh = (): Promise<DiscoveryOutcome> => {
+    if (agyModelsFlight?.binary === binary) return agyModelsFlight.promise;
+    const promise = probe(binary)
+      .then((outcome) => {
+        agyModelsCache = { binary, at: Date.now(), outcome };
+        return outcome;
+      })
+      .finally(() => { if (agyModelsFlight?.promise === promise) agyModelsFlight = null; });
+    agyModelsFlight = { binary, promise };
+    return promise;
+  };
+  const cached = agyModelsCache?.binary === binary ? agyModelsCache : null;
+  if (!cached) return refresh();
+  const ttl = cached.outcome.status === "ok" ? ANTIGRAVITY_MODEL_DISCOVERY_FRESH_MS : ANTIGRAVITY_MODEL_DISCOVERY_FAILED_RETRY_MS;
+  if (now - cached.at >= ttl) void refresh().catch(() => undefined);
+  return Promise.resolve(cached.outcome);
+}
+
 export async function probeAntigravity(): Promise<AntigravityProbe | null> {
   const found = await firstExisting(AGY_CANDIDATES);
   if (!found) return null;
   const version = (await probeCliVersion(found)) ?? "unknown";
-  const discovery = await probeAgyModels(found);
+  const discovery = await cachedAgyModelDiscovery(found);
   return { path: found, version, models: discovery.models, discovery };
 }
 

@@ -26,8 +26,32 @@ import { BROWSER_CREDENTIAL_CONSENT_KEY, type BrowserCredentialConsent } from ".
 import type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
 export type { NativeBrowserCookieImportResult, NativeBrowserCookieImportCode } from "../../shared/types";
 
+/**
+ * What a receipt deserves in main.log. "partial" is ok:true (some cookies were intentionally
+ * skipped, e.g. partitioned ones), never a failure. With observed=0 it is only the remembered
+ * verdict of an earlier migration — every domain already completed, nothing ran in this call.
+ * main.log 2026-09-20..27: all 170 "import failed {code:partial}" lines were that no-op,
+ * repeated on every 15-minute credential refresh and every live-view open.
+ */
+export function nativeSessionLogLevel(receipt: Pick<NativeBrowserCookieImportResult, "code" | "observed">): "none" | "info" | "warn" {
+  if (receipt.code === "imported" || receipt.code === "already-migrated") return "none";
+  if (receipt.code === "partial") return receipt.observed > 0 ? "info" : "none";
+  return "warn";
+}
+
 function logNativeSessionFailure(receipt: NativeBrowserCookieImportResult, requestedDomainCount: number): void {
-  if (receipt.code === "imported" || receipt.code === "already-migrated") return;
+  const level = nativeSessionLogLevel(receipt);
+  if (level === "none") return;
+  if (level === "info") {
+    console.info("[browser-native-session] import partial", JSON.stringify({
+      requestedDomainCount,
+      observed: receipt.observed,
+      imported: receipt.imported,
+      preserved: receipt.preserved ?? 0,
+      skipped: receipt.skipped,
+    }));
+    return;
+  }
   // Keep the diagnostic useful for QA while excluding domains, profiles, cookie
   // names/values, paths, and provider error text from the main log.
   console.warn("[browser-native-session] import failed", JSON.stringify({

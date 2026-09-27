@@ -305,6 +305,21 @@ import type {
 /** Runtimes whose read permission keeps a configured tool surface usable. Antigravity's headless
  * read mode refuses it outright (runtime/antigravity.ts antigravityReadToolFailure). */
 const OBSERVATION_READ_TOOL_CAPABLE = (kind: string): boolean => kind !== "antigravity";
+
+/**
+ * Bounded machine code for an MCP preparation failure. Plain Errors used to collapse to
+ * "unknown"; we accept only a machine-shaped message, a Node/SQLite `code`, or the error
+ * class name — never free-form prose, paths or values.
+ */
+function mcpConfigFailureCode(err: unknown): string | null {
+  const machine = /^[a-z][a-z0-9_-]{2,80}$/;
+  if (err instanceof Error && machine.test(err.message)) return err.message;
+  const code = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
+  if (typeof code === "string" && /^[A-Za-z][A-Za-z0-9_-]{1,60}$/.test(code)) return code.toLowerCase();
+  if (err instanceof Error && /^[A-Za-z][A-Za-z0-9]{1,60}$/.test(err.name)) return `error-class:${err.name}`;
+  return null;
+}
+
 const ONE_LOCAL_ARTIFACT_PATH_KEYS = ["path", "filePath", "localPath", "file"] as const;
 const ONE_LOCAL_ARTIFACT_EXTENSIONS = new Set([
   ".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif", ".bmp",
@@ -3138,8 +3153,13 @@ ${effectiveUserPrompt}`;
   // can fail before the Science grant is even attempted in a headless daemon.
   if (runtimeCanUseMcp && executionContext?.source !== "science" && !isAliveControllerRun
     && !workforceOwnsCapabilityChoice && !explicitWorkforceGoal && !scienceReview) {
+    // Which preparation step was running when a failure escaped. A thrown plain Error used to
+    // log {stage:"unknown",code:"unknown"} (13x in production 2026-09-23) with no way to tell
+    // tool selection from the browser grant from config materialization. Fixed vocabulary only.
+    let mcpPrepStage = "prepare";
     try {
       if (req.forceBrowserCredentialRefresh) {
+        mcpPrepStage = "browser-credential-refresh";
         const report = await refreshBrowserCredentialsIfDue({ force: true });
         sink({
           kind: "notice",
@@ -3221,6 +3241,7 @@ ${effectiveUserPrompt}`;
         // conversation's previous run is attached now (never a Hub install).
         requestedPluginSlugs: readMidTurnPluginRequests(chat.id, req.runId),
       };
+      mcpPrepStage = "tool-selection";
       let selectedContext = await autoSelectMcpTools(autoSelectInput);
       const keyConfigurationRevision = getEnvConfigurationRevision();
       const keyUserMessageId = persistedUserMessageId
@@ -3231,6 +3252,7 @@ ${effectiveUserPrompt}`;
       // 직접 저장하고, 여기로는 완료 신호만 돌아온다(mcp:supplyRunKeys).
       // 무인 실행(automation/site-studio/trex/telegram/agent-app)은 사람에게 절대
       // 블록되지 않는다 — interactive:false로 게이트 전체가 no-op.
+      mcpPrepStage = "key-gate";
       const keyGate = await runMcpKeyElicitationGate({
         runId: req.runId,
         // 데스크탑 렌더러 대화형 런만. workspaceBinding(모바일)은 시트를 렌더링할
@@ -3421,6 +3443,7 @@ ${effectiveUserPrompt}`;
       let hubBridgedServerIds: string[] = [];
       if (selectedContext.hubPlugins.length > 0) {
         try {
+          mcpPrepStage = "hub-bridge";
           const bridged = await bridgeHubPluginCandidates(selectedContext.hubPlugins);
           hubBridgedServerIds = bridged.liveServerIds;
           if (bridged.receipts.length > 0) {
@@ -3450,6 +3473,7 @@ ${effectiveUserPrompt}`;
         (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
         // The daemon imports this client too. Load Electron's native views only
         // for a real interactive browser grant, never during headless startup.
+        mcpPrepStage = "native-browser-grant";
         const { createNativeBrowserRelayGrant } = await import("../browser/native-cdp-relay");
         try {
           nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
@@ -3470,6 +3494,7 @@ ${effectiveUserPrompt}`;
             payload: { schemaVersion: 1, binding: "dedicated-profile", reasonCode: "native-browser-task-unbound" } });
         }
       }
+      mcpPrepStage = "config-build";
       const cfg = await buildMcpConfigFile({
         // Graph nodes can share a runId. Every preparation, including doctor
         // and unattended runs, needs its own sealed file and launch lifetime.
@@ -3532,6 +3557,7 @@ ${effectiveUserPrompt}`;
         // 선언하므로, 두 이름을 다 아는 유일한 지점이 여기다 — 아래 관문 생성이 이걸 쓴다.
         mcpIncludedServers = cfg.includedServers ?? [];
       }
+      mcpPrepStage = "worker-preparer";
       const workerGoalScope = autoSelectInput.resolveActiveGoalScope();
       if (workerGoalScope && !executionContext && !req.agentAppMode) {
         const baselineIds = [...new Set(mcpIncludedServers.map((row) => row.catalogId ?? row.serverId))];
@@ -3631,9 +3657,12 @@ ${effectiveUserPrompt}`;
       const hostDiagnostic = browserCdpHostFailureDiagnostic(err);
       // A non-launcher failure used to collapse to {unknown, unknown} and "(unknown)" in the
       // message, hiding e.g. native-browser-task-unbound. Carry a bounded machine code only.
-      const thrownCode = err instanceof Error && /^[a-z][a-z0-9_-]{2,80}$/.test(err.message) ? err.message : null;
-      const diagnostic = hostDiagnostic.code === "unknown" && thrownCode
-        ? { ...hostDiagnostic, code: thrownCode } as typeof hostDiagnostic : hostDiagnostic;
+      const thrownCode = mcpConfigFailureCode(err);
+      const diagnostic = {
+        ...hostDiagnostic,
+        ...(hostDiagnostic.stage === "unknown" ? { stage: mcpPrepStage } : {}),
+        ...(hostDiagnostic.code === "unknown" && thrownCode ? { code: thrownCode } : {}),
+      };
       const scopeChanged = err && typeof err === "object" && "code" in err
         && err.code === "mcp-goal-tool-scope-changed";
       const code = scopeChanged ? "mcp-goal-tool-scope-changed" : "mcp-runtime-config-unavailable";

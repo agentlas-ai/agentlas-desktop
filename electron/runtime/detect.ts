@@ -13,7 +13,7 @@ import { cliConfiguredDefaultModel } from "./cli-default-model";
 import { registerProbeModels } from "./model-catalog";
 import { ACP_AGENTS, acpDisabledFor, probeAcpModelsCached } from "./acp";
 import { listAcpKindSpecs, resolveAcpCommand } from "./acp-agents";
-import { probeAntigravity } from "./antigravity";
+import { invalidateAntigravityModelDiscovery, probeAntigravity } from "./antigravity";
 import { probeKimi } from "./kimi";
 import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
@@ -148,6 +148,7 @@ export function clearDetectCache(): void {
   // fresh resident process run the new binary while runtime.detect() still
   // reports the previous generation until its probe TTL expires.
   clearCliVersionProbeCache();
+  invalidateAntigravityModelDiscovery();
   // `codex.ts` keeps the executable path separately for invocation; clearing
   // only the dashboard snapshot would pin a moved binary until app restart.
   clearCodexBinCache();

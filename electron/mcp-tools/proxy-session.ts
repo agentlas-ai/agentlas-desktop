@@ -334,7 +334,13 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     const invalidScope = cause instanceof PreparedMcpScopeChangedError || cause instanceof McpProxyCwdChangedError;
     if (invalidScope) revokeMcpProxyLaunch(handle);
     const reason = cause instanceof Error ? cause.message : typeof cause === "string" ? cause : initialized ? "wire_closed" : "closed_before_initialize";
-    console.warn(`[mcp-proxy] bridge closed server=${gate.serverKey} handle=${handle.slice(0, 8)} initialized=${initialized} reason=${reason}`);
+    // An initialized wire that the client ended cleanly is the normal end of an MCP client
+    // (a runtime exiting, or agy restarting its MCP clients each step). main.log 2026-09-20..27:
+    // 3,210 of 3,370 closes were exactly this, 91% during antigravity runs, up to 424/hour —
+    // noise that buried the abnormal closes. Those (aborted, upstream, scope, pre-initialize)
+    // stay warnings; the clean end goes to debug (not mirrored to main.log).
+    const line = `[mcp-proxy] bridge closed server=${gate.serverKey} handle=${handle.slice(0, 8)} initialized=${initialized} reason=${reason}`;
+    if (initialized && reason === "wire_ended") console.debug(line); else console.warn(line);
     lifetime.abort(new Error("mcp_proxy_closed"));
     for (const pending of internal.values()) { pending.cleanup(); pending.reject(new Error("mcp_proxy_closed")); } internal.clear();
     for (const pending of native.values()) { pending.effect?.finish(); pending.controller?.abort(new Error("mcp_proxy_closed")); pending.detach?.(); }

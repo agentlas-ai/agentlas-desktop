@@ -12,6 +12,50 @@ const TOKEN_PATTERN = /^[A-Za-z0-9_-]{43,256}$/;
 const MAX_PENDING_BYTES = 8 * 1024 * 1024;
 const CONTROL_HEARTBEAT_MS = 20_000;
 
+/*
+ * 제어 채널 재시도 정책 (2026-09-27, main.log 2026-09-25 실측).
+ *
+ * ★ 무엇이 있었나
+ *   세션이 중계에서 401 로 거절되는 동안 8시간(03:34~11:32Z) 동안 1,222번 다시 붙었다 —
+ *   23.4초마다 한 번, 시간당 ~153번 시도·~306줄 경고. 이유는 두 겹이었다.
+ *   ① 401 은 "다시 로그인해야 풀리는" 거절인데 네트워크 끊김과 똑같이 1·2·4·8·15초로
+ *      다시 두드렸다(상한 15초, 지터 없음).
+ *   ② ws 는 `unexpected-response` 리스너가 있으면 요청을 스스로 끊지 않는다. 그래서 401 을
+ *      받은 소켓이 8초 핸드셰이크 타임아웃까지 매달려 있다가 "Opening handshake has timed
+ *      out" 을 한 줄 더 남겼다 — 로그의 타임아웃 1,223줄은 별개 장애가 아니라 같은 401 의 그림자.
+ *      두 줄이 번갈아 나와 상태 중복 제거(logControl)도 한 번도 효과가 없었다.
+ *
+ * ★ 지금
+ *   - 401/403/410 = 인증 거절: 같은 쿠키로는 네트워크에 다시 가지 않는다. 쿠키가 바뀌면(다시
+ *     로그인) 즉시 붙고, 안 바뀌면 30분→60분→120분(상한) 에 한 번만 확인한다. 쿠키 비교는
+ *     메모리 안이라 공짜다.
+ *   - 그 밖(타임아웃·503·429·끊김) = 일시 장애: 1초부터 두 배, 상한 2분, 반은 고정 반은 지터
+ *     ("equal jitter") — 중계 재배포 때 모든 데스크탑이 같은 초에 몰리지 않게.
+ *   - 연결에 성공하면 둘 다 처음으로 돌아간다.
+ */
+export const RELAY_TRANSIENT_BASE_MS = 1_000;
+export const RELAY_TRANSIENT_CAP_MS = 120_000;
+export const RELAY_AUTH_REFUSED_BASE_MS = 30 * 60_000;
+export const RELAY_AUTH_REFUSED_CAP_MS = 120 * 60_000;
+/** 인증 거절 동안 "쿠키가 바뀌었나"만 보는 로컬 확인 주기 — 네트워크를 쓰지 않는다. */
+export const RELAY_AUTH_RECHECK_MS = 30_000;
+
+/** 다시 로그인하기 전엔 같은 결과가 나오는 HTTP 상태. */
+export function isRelayAuthRefusal(status: number | null): boolean {
+  return status === 401 || status === 403 || status === 410;
+}
+
+/** 일시 장애 재시도 대기. attempt 는 0부터. random 은 [0,1). */
+export function relayTransientDelayMs(attempt: number, random: number = Math.random()): number {
+  const ceiling = Math.min(RELAY_TRANSIENT_CAP_MS, RELAY_TRANSIENT_BASE_MS * 2 ** Math.min(Math.max(attempt, 0), 20));
+  return Math.round(ceiling / 2 + (ceiling / 2) * Math.min(Math.max(random, 0), 1));
+}
+
+/** 인증 거절 뒤 같은 쿠키로 다시 확인하기까지의 대기. refusals 는 1부터. */
+export function relayAuthRefusedDelayMs(refusals: number): number {
+  return Math.min(RELAY_AUTH_REFUSED_CAP_MS, RELAY_AUTH_REFUSED_BASE_MS * 2 ** Math.min(Math.max(refusals - 1, 0), 10));
+}
+
 interface RelaySocket {
   readyState: number;
   on(event: "open", listener: () => void): this;
@@ -23,6 +67,12 @@ interface RelaySocket {
   ping(): void;
   close(code?: number, reason?: string): void;
   terminate(): void;
+}
+
+function upgradeStatusCode(response: unknown): number | null {
+  if (!response || typeof response !== "object" || !("statusCode" in response)) return null;
+  const code = (response as { statusCode?: unknown }).statusCode;
+  return typeof code === "number" && Number.isInteger(code) ? code : null;
 }
 
 function upgradeStatus(response: unknown): string {
@@ -229,6 +279,10 @@ export class MobileBridgeCloudRelay {
   private controlHeartbeatTimer: NodeJS.Timeout | null = null;
   private stopped = true;
   private retryAttempt = 0;
+  // 인증 거절(401/403/410)을 받은 그 쿠키. 같은 쿠키로는 authRetryAt 전에 네트워크에 가지 않는다.
+  private authRefusedCookie: string | null = null;
+  private authRefusals = 0;
+  private authRetryAt = 0;
   // Deduplicates control-channel diagnostics so a 5s retry loop cannot spam the
   // log. Only transitions are logged, never the cookie or relay secret.
   private lastControlLog: "signed-out" | "connected" | "closed" | "error" | "rejected" | null = null;
@@ -262,12 +316,18 @@ export class MobileBridgeCloudRelay {
 
   private scheduleConnect(delay?: number): void {
     if (this.stopped || this.retryTimer) return;
-    const wait = delay ?? Math.min(15_000, 1_000 * 2 ** Math.min(this.retryAttempt++, 4));
+    const wait = delay ?? relayTransientDelayMs(this.retryAttempt++);
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
       this.connectControl();
     }, wait);
     this.retryTimer.unref?.();
+  }
+
+  private clearAuthRefusal(): void {
+    this.authRefusedCookie = null;
+    this.authRefusals = 0;
+    this.authRetryAt = 0;
   }
 
   private logControl(state: typeof this.lastControlLog, message: string, warn = false): void {
@@ -309,6 +369,15 @@ export class MobileBridgeCloudRelay {
       this.scheduleConnect(5_000);
       return;
     }
+    if (this.authRefusedCookie !== null) {
+      if (cookie !== this.authRefusedCookie) {
+        // 다시 로그인했다 — 새 쿠키는 거절된 적이 없으니 지금 바로 붙는다.
+        this.clearAuthRefusal();
+      } else if (Date.now() < this.authRetryAt) {
+        this.scheduleConnect(Math.min(RELAY_AUTH_RECHECK_MS, Math.max(1_000, this.authRetryAt - Date.now())));
+        return;
+      }
+    }
     const socket = new RelayWebSocket(relayUrl(this.endpoint, {
       role: "desktop",
       hostId: this.options.hostId,
@@ -323,6 +392,7 @@ export class MobileBridgeCloudRelay {
     socket.on("open", () => {
       opened = true;
       this.retryAttempt = 0;
+      this.clearAuthRefusal();
       this.logControl("connected", "remote access control channel connected");
       this.options.onStatusChanged?.();
       this.controlHeartbeatTimer = setInterval(() => {
@@ -347,14 +417,35 @@ export class MobileBridgeCloudRelay {
     socket.on("pong", () => {
       controlAlive = true;
     });
+    let refusedStatus: number | null = null;
     socket.on("unexpected-response", (_request, response) => {
-      const status =
-        response && typeof response === "object" && "statusCode" in response
-          ? (response as { statusCode?: unknown }).statusCode
-          : "unknown";
+      const status = upgradeStatusCode(response);
+      refusedStatus = status ?? 0;
+      const refusal = upgradeRefusal(response);
       // Server-side reason, no secrets: 401 = bad relay credential/session,
-      // 503 = relay endpoint unavailable, 429 = too many devices.
-      this.logControl("rejected", `remote access control channel rejected by server (HTTP ${status})`, true);
+      // 503 = relay endpoint unavailable, 429 = too many devices. The relay also
+      // names the reason in X-Agentlas-Refusal (session_expired, …).
+      if (isRelayAuthRefusal(status)) {
+        this.authRefusedCookie = cookie;
+        this.authRefusals += 1;
+        const wait = relayAuthRefusedDelayMs(this.authRefusals);
+        this.authRetryAt = Date.now() + wait;
+        this.logControl(
+          "rejected",
+          `remote access control channel rejected by server (HTTP ${status}${refusal ? `, refusal=${refusal}` : ""}); ` +
+            `not retrying with this sign-in for ${Math.round(wait / 60_000)} min — sign in again to reconnect now`,
+          true,
+        );
+      } else {
+        this.logControl(
+          "rejected",
+          `remote access control channel rejected by server (HTTP ${status ?? "unknown"}${refusal ? `, refusal=${refusal}` : ""})`,
+          true,
+        );
+      }
+      // ws 는 이 리스너가 있으면 요청을 스스로 끊지 않는다 — 두면 8초 핸드셰이크 타임아웃까지
+      // 매달렸다가 "Opening handshake has timed out" 을 한 줄 더 남긴다. 지금 끊는다.
+      socket.terminate();
     });
     socket.on("message", (data) => this.handleControlMessage(data));
     const disconnected = (...args: unknown[]) => {
@@ -362,7 +453,9 @@ export class MobileBridgeCloudRelay {
       this.control = null;
       if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
       this.controlHeartbeatTimer = null;
-      if (!opened) {
+      if (refusedStatus !== null) {
+        // 거절은 unexpected-response 에서 이미 한 줄 남겼다. terminate() 가 내는 error 는 그 그림자다.
+      } else if (!opened) {
         socket.terminate();
         const detail = args[0] instanceof Error ? `: ${args[0].message}` : "";
         this.logControl("error", `remote access control channel unavailable${detail}`, true);
@@ -370,7 +463,11 @@ export class MobileBridgeCloudRelay {
         this.logControl("closed", "remote access control channel closed; retrying");
       }
       this.options.onStatusChanged?.();
-      this.scheduleConnect();
+      if (refusedStatus !== null && isRelayAuthRefusal(refusedStatus)) {
+        this.scheduleConnect(Math.min(RELAY_AUTH_RECHECK_MS, Math.max(1_000, this.authRetryAt - Date.now())));
+      } else {
+        this.scheduleConnect();
+      }
     };
     socket.on("close", disconnected);
     socket.on("error", disconnected);
@@ -453,9 +550,10 @@ export class MobileBridgeCloudRelay {
     });
     cloud.on("close", () => finish("relay side closed"));
     cloud.on("error", (error) => finish(`relay side failed: ${error instanceof Error ? error.message : String(error)}`));
-    cloud.on("unexpected-response", (_request, response) =>
-      finish(`relay refused the pairing tunnel (HTTP ${upgradeStatus(response)})`),
-    );
+    cloud.on("unexpected-response", (_request, response) => {
+      finish(`relay refused the pairing tunnel (HTTP ${upgradeStatus(response)})`);
+      cloud.terminate();
+    });
   }
 
   private openTunnel(channelId: string, deviceToken: string): void {
@@ -547,12 +645,14 @@ export class MobileBridgeCloudRelay {
           `local hop refused the upgrade (HTTP ${upgradeStatus(response)}` +
             `${refusal ? `, refusal=${refusal}` : ", refusal=none"})`,
         );
+        local?.terminate();
       });
     });
     cloud.on("close", () => closeBoth("relay side closed"));
     cloud.on("error", (error) => closeBoth("relay side failed", error));
-    cloud.on("unexpected-response", (_request, response) =>
-      closeBoth(`relay refused the tunnel upgrade (HTTP ${upgradeStatus(response)})`),
-    );
+    cloud.on("unexpected-response", (_request, response) => {
+      closeBoth(`relay refused the tunnel upgrade (HTTP ${upgradeStatus(response)})`);
+      cloud.terminate();
+    });
   }
 }
