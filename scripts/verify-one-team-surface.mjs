@@ -103,7 +103,8 @@ assert.match(taskforceStyles, /\.taskforceCopy strong[^}]*font-size:\s*9px/);
 assert.match(orgChart, /className=\{styles\.createAgentButton\}[\s\S]*?<IconPlus size=\{15\} \/>[\s\S]*?<\/button>/);
 assert.match(orgChart, /className=\{styles\.oneRow\}[\s\S]*?role=\{onOpenOne \? "button"/);
 assert.match(oneShell, /onOpenOne=\{startNewConversation\}/);
-for (const mode of ["Original", "2D Sketch", "Generated", "Upload"]) assert.match(createAgent, new RegExp(`label: "${mode}"`));
+// Korean screens show localized labels (QA 2026-09-27); the English label stays the fallback.
+for (const mode of ["Original", "2D Sketch", "Generated", "Upload"]) assert.match(createAgent, new RegExp(`label: (?:ko \\? "[^"]+" : )?"${mode}"`));
 assert.doesNotMatch(createAgent, />Advanced</);
 assert.match(createAgent, /말투와 성격, 영혼을 부여하세요/);
 assert.match(createAgent, /자동 임시저장됨/);

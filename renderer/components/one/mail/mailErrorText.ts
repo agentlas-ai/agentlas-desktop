@@ -146,10 +146,31 @@ const LOCAL: Record<string, Record<Locale, string>> = {
   },
 };
 
+/**
+ * Bare HTTP refusals (no server code). "Try again in a moment" is the wrong advice
+ * for a 403, and a 429/5xx should say it is the server, not the owner (QA 2026-09-27).
+ */
+const HTTP: Record<string, Record<Locale, string>> = {
+  http_403: {
+    ko: "이 메일함에 접근할 권한이 없어요. 로그인한 계정과 요금제를 확인해 주세요.",
+    en: "This account can't access the mailbox. Check the signed-in account and plan.",
+  },
+  http_429: {
+    ko: "요청이 너무 잦아 메일 서버가 잠시 쉬어 가요. 1분쯤 뒤 다시 시도해 주세요.",
+    en: "Too many requests; the mail server asked to slow down. Try again in about a minute.",
+  },
+  server: {
+    ko: "메일 서버가 잠시 응답하지 않아요. 잠시 뒤 새로고침해 주세요.",
+    en: "The mail server isn't responding right now. Refresh again shortly.",
+  },
+};
+
 export function mailErrorText(locale: Locale, error: { code?: string | null } | null | undefined): string {
   const code = typeof error?.code === "string" ? error.code : "";
   const local = LOCAL[code];
   if (local) return local[locale] ?? local.en;
+  const http = HTTP[code] ?? (/^http_5\d\d$/.test(code) ? HTTP.server : null);
+  if (http) return http[locale] ?? http.en;
   if (KNOWN.has(code)) return tFor(locale, `one.mail.error.${code}` as Key);
   return tFor(locale, "one.mail.error.generic", { code: code || "unknown" });
 }

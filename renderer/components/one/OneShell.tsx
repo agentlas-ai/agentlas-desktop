@@ -1369,6 +1369,17 @@ export function OneShell() {
   // look like duplicates of the previous run.
   const activityEventRunIdRef = useRef<string | null>(null);
   const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string }>>([]);
+  // Read by the active-chat listener, which must not re-subscribe on every queue change.
+  const queuedSteersRef = useRef(queuedSteers);
+  queuedSteersRef.current = queuedSteers;
+  // Runs whose terminal this screen already settled: Main can still list one as
+  // active for a moment (cancelling), and attaching to it hides the next run.
+  const settledRunIdsRef = useRef<Set<string>>(new Set());
+  // Set by the active-chat listener below; settleRun asks it to follow a next turn.
+  const followActiveRunRef = useRef<(chatId: string) => void>(() => undefined);
+  // The "saved, continues after the current run" notice describes the queue; it
+  // is withdrawn once the queued direction's run is on screen.
+  const steerQueuedNoticeRef = useRef<string | null>(null);
   const [preflightSteerReceipts, setPreflightSteerReceipts] = useState<import("@shared/one-preflight-steers").OnePreflightSteerReceipt[]>([]);
   const [preflightFenceStatus, setPreflightFenceStatus] = useState<OnePreflightFenceStatus | null>(null);
   const preflightSubmissionRef = useRef<{ submissionId: string; chatId: string } | null>(null);
@@ -2736,6 +2747,11 @@ export function OneShell() {
   }, [refreshAll, router, taskforces]);
 
   const settleRun = useCallback(async (chatId: string, taskId: string | null, settledRunId: string | null) => {
+    if (settledRunId) {
+      const settled = settledRunIdsRef.current;
+      settled.add(settledRunId);
+      if (settled.size > 64) settled.delete(settled.values().next().value as string);
+    }
     const api = ipc();
     if (!api) {
       requestOneOperationalRecovery("one-run-settle", new Error("Desktop bridge unavailable"));
@@ -2801,6 +2817,14 @@ export function OneShell() {
       }
     }
     if (supersededByNewerRun()) return;
+    /*
+     * ★ Main may already be running this chat's next turn: an interrupting or queued
+     * direction starts as soon as this run settles, with no idle broadcast in
+     * between. Measured 2026-09-27: the direction's answer reached the transcript
+     * 14s later and never appeared (and no progress was shown) until the chat was
+     * reopened. Follow whatever Main runs now.
+     */
+    if (runChatIdRef.current === chatId && !runIdRef.current) followActiveRunRef.current(chatId);
     // A canonical Task projection can intentionally omit a receipt that has
     // not yet been bound into its immutable reference list. That must not
     // erase the Activity for the run that just settled: the chat-owned durable
@@ -3988,8 +4012,70 @@ export function OneShell() {
     const chatId = activeThreadChatId;
     if (!api || !events || !chatId) return;
     let idleCheck: ReturnType<typeof setTimeout> | null = null;
+    let handoffRetry: ReturnType<typeof setTimeout> | null = null;
+    const withdrawQueuedNotice = () => {
+      const queuedNotice = steerQueuedNoticeRef.current;
+      if (!queuedNotice) return;
+      steerQueuedNoticeRef.current = null;
+      setActionNotice((current) => current === queuedNotice ? null : current);
+    };
+    let followRetry: ReturnType<typeof setTimeout> | null = null;
+    const attachToActiveRun = (attempt = 0) => {
+      void api.invoke.attach(chatId).then(async (attachment) => {
+        if (!attachment || runIdRef.current || runChatIdRef.current !== chatId) return;
+        if (settledRunIdsRef.current.has(attachment.runId)) {
+          // A run this screen already settled. If Main still runs it (the screen
+          // settled early) follow it again; if it is only winding down (the
+          // interrupted run, cancelling) ask again shortly for the next one.
+          const receipt = await api.invoke.receipt(attachment.runId).catch(() => null);
+          if (runIdRef.current || runChatIdRef.current !== chatId) return;
+          if (receipt?.status !== "running") {
+            if (attempt < 25) {
+              if (followRetry) clearTimeout(followRetry);
+              followRetry = setTimeout(() => { followRetry = null; followActive(attempt + 1); }, 400);
+            }
+            return;
+          }
+          settledRunIdsRef.current.delete(attachment.runId);
+        }
+        runIdRef.current = attachment.runId;
+        activityRunIdRef.current = attachment.runId;
+        activityEventRunIdRef.current = null;
+        setActivityStateRunId(null);
+        runTaskIdRef.current = selected?.taskId ?? null;
+        setBusy(true);
+        setActivity(initialOneActivityState());
+        setRunStartedAt(attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now());
+        // The queued instruction is now the model's turn: it leaves the queue
+        // strip and enters the conversation as the prompt of this run.
+        setQueuedSteers((current) => {
+          const started = current[0];
+          if (started) {
+            setMessages((messages) => messages.some((message) => message.id === started.id)
+              ? messages
+              : [
+                ...messages.filter((message) => message.id !== "one-live-response"),
+                { id: started.id, role: "user" as const, text: started.text, createdAt: attachment.startedAt ?? new Date().toISOString() },
+              ]);
+          }
+          return current.slice(1);
+        });
+        withdrawQueuedNotice();
+        subscribeRun(attachment.runId);
+        if (typeof api.invoke.replay !== "function") for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
+      }).catch(() => undefined);
+    };
+    const followActive = (attempt = 0) => {
+      if (runIdRef.current || runChatIdRef.current !== chatId) return;
+      void api.invoke.activeChats().then((active) => {
+        if (runIdRef.current || runChatIdRef.current !== chatId) return;
+        if (active.includes(chatId)) attachToActiveRun(attempt);
+      }).catch(() => undefined);
+    };
+    followActiveRunRef.current = (settledChatId: string) => { if (settledChatId === chatId) followActive(0); };
     const unsubscribe = events.onActiveChats((chatIds) => {
       if (idleCheck) { clearTimeout(idleCheck); idleCheck = null; }
+      if (handoffRetry) { clearTimeout(handoffRetry); handoffRetry = null; }
       if (!chatIds.includes(chatId)) {
         /*
          * ★ 실시간이 안 왔는데 서버는 끝났다고 한다 (2026-08-24 프로덕션 실측).
@@ -4035,43 +4121,64 @@ export function OneShell() {
             idleCheck = null;
             if (runIdRef.current || runChatIdRef.current !== chatId) return;
             void api.invoke.activeChats().then((active) => {
-              if (!active.includes(chatId) && !runIdRef.current) setQueuedSteers([]);
+              if (active.includes(chatId) || runIdRef.current) return;
+              // A queued direction whose run this screen never attached to (see
+              // the hand-off retry below) may already have answered. Its answer
+              // lives in the durable transcript: read it rather than leaving the
+              // conversation ending on the instruction (QA 2026-09-27).
+              const unattachedQueue = queuedSteersRef.current.length > 0;
+              setQueuedSteers([]);
+              if (unattachedQueue) withdrawQueuedNotice();
+              if (unattachedQueue && runChatIdRef.current === chatId) {
+                void settleOrderedRunRef.current(chatId, runTaskIdRef.current, null).catch(() => undefined);
+              }
             }).catch(() => undefined);
           }, 1_500);
         }
         return;
       }
-      if (runIdRef.current) return;
-      void api.invoke.attach(chatId).then((attachment) => {
-        if (!attachment || runIdRef.current || runChatIdRef.current !== chatId) return;
-        runIdRef.current = attachment.runId;
-        activityRunIdRef.current = attachment.runId;
-        activityEventRunIdRef.current = null;
-        setActivityStateRunId(null);
-        runTaskIdRef.current = selected?.taskId ?? null;
-        setBusy(true);
-        setActivity(initialOneActivityState());
-        setRunStartedAt(attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now());
-        // The queued instruction is now the model's turn: it leaves the queue
-        // strip and enters the conversation as the prompt of this run.
-        setQueuedSteers((current) => {
-          const started = current[0];
-          if (started) {
-            setMessages((messages) => messages.some((message) => message.id === started.id)
-              ? messages
-              : [
-                ...messages.filter((message) => message.id !== "one-live-response"),
-                { id: started.id, role: "user" as const, text: started.text, createdAt: attachment.startedAt ?? new Date().toISOString() },
-              ]);
+      if (runIdRef.current) {
+        /*
+         * ★ An interrupting direction starts its run while the interrupted run
+         * still owns this screen (QA 2026-09-27: "새 지시를 저장했습니다" stayed up,
+         * the answer landed in the transcript at +14s and never appeared). The
+         * chat never goes idle between the two runs, so this broadcast is the
+         * only one until the new run ends — returning here lost the hand-off.
+         * Wait for the old run's projection to clear, then attach to whatever
+         * Main is running now.
+         */
+        if (queuedSteersRef.current.length === 0) return;
+        const waitingOn = runIdRef.current;
+        let tries = 0;
+        const retry = () => {
+          handoffRetry = null;
+          if (runChatIdRef.current !== chatId) return;
+          if (runIdRef.current === waitingOn && tries < 75) {
+            tries += 1;
+            handoffRetry = setTimeout(retry, 400);
+            return;
           }
-          return current.slice(1);
-        });
-        subscribeRun(attachment.runId);
-        if (typeof api.invoke.replay !== "function") for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
-      }).catch(() => undefined);
+          if (runIdRef.current) return;
+          void api.invoke.activeChats().then((active) => {
+            if (runIdRef.current || runChatIdRef.current !== chatId) return;
+            if (active.includes(chatId)) attachToActiveRun();
+            else if (queuedSteersRef.current.length > 0) {
+              setQueuedSteers([]);
+              withdrawQueuedNotice();
+              void settleOrderedRunRef.current(chatId, runTaskIdRef.current, null).catch(() => undefined);
+            }
+          }).catch(() => undefined);
+        };
+        handoffRetry = setTimeout(retry, 400);
+        return;
+      }
+      attachToActiveRun();
     });
     return () => {
       if (idleCheck) clearTimeout(idleCheck);
+      if (handoffRetry) clearTimeout(handoffRetry);
+      if (followRetry) clearTimeout(followRetry);
+      followActiveRunRef.current = () => undefined;
       unsubscribe();
     };
   }, [activeThreadChatId, appLocale, selected?.taskId, subscribeRun]);
@@ -5084,6 +5191,24 @@ export function OneShell() {
     const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => orchestrationTargetForAgentId(agentId));
     const explicitValue = text.trim();
     if (!explicitValue && attachmentSnapshot.length === 0) return;
+    /*
+     * Main refuses a turn over its byte budget (store/one-preflight-steers: 200KB for a
+     * request, 32KB for a follow-up queued before the first run starts). Measured
+     * 2026-09-27 with a 243k-character paste: the screen showed the machine code
+     * `one_preflight_invalid_prompt`, and the failure also raised an operational
+     * recovery turn that answered the *previous* message a second time. Say the limit
+     * here, keep the text, and start nothing.
+     */
+    const promptBytes = new TextEncoder().encode(explicitValue).length;
+    const promptByteLimit = teamPreflightBusy ? 32_000 : 200_000;
+    if (promptBytes > promptByteLimit) {
+      const limitKb = Math.floor(promptByteLimit / 1000);
+      const sizeKb = Math.ceil(promptBytes / 1000);
+      setActionNotice(appLocale === "ko"
+        ? `메시지가 너무 길어 보내지 않았습니다 (${sizeKb}KB · 최대 ${limitKb}KB). 긴 내용은 파일로 첨부해 주세요. 글은 작성창에 그대로 있습니다.`
+        : `The message is too long to send (${sizeKb} KB, limit ${limitKb} KB). Attach long content as a file instead. Your text is still in the composer.`);
+      return;
+    }
     const currentSubmitChatId = selected?.chatId ?? conversation?.id;
     if (!teamPreflightBusy && currentSubmitChatId && readOneUncertainPreflightSteer(currentSubmitChatId)) {
       void reconcileUncertainPreflightSteer(currentSubmitChatId);
@@ -5259,7 +5384,7 @@ export function OneShell() {
         if (!steerReceipt.accepted || steerReceipt.chatId !== chatId) {
           throw new Error("Desktop did not acknowledge steering for the active conversation");
         }
-        setActionNotice(steerReceipt.queued
+        const steerNotice = steerReceipt.queued
           ? steerReceipt.interruptsCurrent
             ? (appLocale === "ko"
               ? "새 지시를 저장했습니다. 현재 실행을 정리한 뒤 이어서 실행합니다."
@@ -5269,7 +5394,9 @@ export function OneShell() {
               : "The new instruction is saved and will continue after the current execution settles.")
           : (appLocale === "ko"
             ? "현재 실행은 이미 끝났습니다. 새 지시를 새 실행으로 시작했습니다."
-            : "The previous execution had already settled, so the new instruction started as a new run."));
+            : "The previous execution had already settled, so the new instruction started as a new run.");
+        steerQueuedNoticeRef.current = steerReceipt.queued ? steerNotice : null;
+        setActionNotice(steerNotice);
       } catch (cause) {
         setQueuedSteers((current) => current.filter((item) => item.id !== optimisticId));
         setComposer(value);
@@ -7083,6 +7210,16 @@ export function OneShell() {
     // Signed out or the plan no longer offers mail: leave the Mail tab.
     if (railMode === "mail" && mail.loaded && !mailTabVisible) setRailMode("sessions");
   }, [railMode, mail.loaded, mailTabVisible, setRailMode]);
+  // Arriving at a specific conversation (notification, Work, dashboard link) must show
+  // it. The rail mode is remembered across visits, so a last-used Mail tab covered the
+  // requested chat with the mailbox list (QA 2026-09-27).
+  const arrivedChatIdRef = useRef<string | null | undefined>(undefined);
+  useEffect(() => {
+    const previous = arrivedChatIdRef.current;
+    arrivedChatIdRef.current = selectedConversationId;
+    if (!selectedConversationId || previous === selectedConversationId) return;
+    if (railMode === "mail") setRailMode("sessions");
+  }, [selectedConversationId]); // eslint-disable-line react-hooks/exhaustive-deps
   // A direct room belongs to its seated agent; the general room and a taskforce
   // synthesis belong to One. Never borrow either identity for user messages.
   const assistantSpeaker = activeTaskforce
@@ -9467,6 +9604,7 @@ export function OneShell() {
         blocked={introBlockingCategory !== null}
         replayToken={whatsNewReplayToken}
         mailEntitled={Boolean(mail.signedIn && mail.entitlement && mail.entitlement.addressLimit > 0)}
+        mailReady={mail.available}
         onAcknowledge={acknowledgeOneIntro}
         onAction={(action) => {
           if (action === "mail") {

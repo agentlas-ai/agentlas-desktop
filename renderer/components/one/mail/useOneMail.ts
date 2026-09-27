@@ -210,22 +210,40 @@ export function useOneMail(): OneMailState {
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<{ code: string } | null>(null);
   const listToken = useRef(0);
+  // Declared before the list effect that uses it; assigned where resetPages is defined.
+  const resetPagesRef = useRef<() => void>(() => undefined);
   const detailToken = useRef(0);
   const [listNonce, setListNonce] = useState(0);
   const [detailNonce, setDetailNonce] = useState(0);
 
   const available = Boolean(entitlement?.available && mailbox?.status === "active");
 
+  const [statusFailures, setStatusFailures] = useState(0);
   const refreshStatus = useCallback(async () => {
     if (!api) { setLoaded(true); return; }
     const status = await api.status().catch(() => null);
     setLoaded(true);
-    if (!status || !status.ok) return;
+    if (!status || !status.ok) {
+      // A failed read is not "no mailbox": keep what we knew and ask again (below).
+      setStatusFailures((n) => n + 1);
+      return;
+    }
+    setStatusFailures(0);
     setSignedIn(status.signedIn);
     setMailbox(status.mailbox);
     setEntitlement(status.entitlement);
     setLimits(status.limits ?? null);
   }, [api]);
+
+  // One 503 while One opened used to hide the Mail tab until the app restarted —
+  // nothing asked for the status again (QA 2026-09-27: server back for 45s, tab still
+  // gone). Retry with backoff: 5s, 10s, 20s … up to 2 minutes.
+  useEffect(() => {
+    if (statusFailures === 0) return;
+    const delay = Math.min(5_000 * 2 ** Math.min(statusFailures - 1, 5), 120_000);
+    const timer = setTimeout(() => { void refreshStatus(); }, delay);
+    return () => clearTimeout(timer);
+  }, [statusFailures, refreshStatus]);
 
   const refreshUnread = useCallback(async () => {
     if (!api?.unread) return;
@@ -261,7 +279,12 @@ export function useOneMail(): OneMailState {
       if (event.contactsChanged || event.receivedMessageIds.length) setContactsNonce((n) => n + 1);
       setListNonce((n) => n + 1);
       const current = selectionRef.current;
-      if (current?.kind === "thread" && (event.threadIds.includes(current.id) || event.deletedThreadIds.includes(current.id))) {
+      if (current?.kind === "thread" && event.deletedThreadIds.includes(current.id)) {
+        // Deleted on another device (or by One) while it was open: back to the list,
+        // not a stale copy that can still be replied to (QA 2026-09-27).
+        setSelection(null);
+        setDetail(null);
+      } else if (current?.kind === "thread" && event.threadIds.includes(current.id)) {
         setDetailNonce((n) => n + 1);
       }
     });
@@ -285,6 +308,7 @@ export function useOneMail(): OneMailState {
           setDrafts([]);
           return;
         }
+        if (res.drafts.length === 0 && pageCursor) { resetPagesRef.current(); return; }
         setDrafts(res.drafts);
         if (!pageCursor) setDraftCount(res.nextCursor ? null : res.drafts.length);
         setNextCursor(res.nextCursor);
@@ -292,6 +316,12 @@ export function useOneMail(): OneMailState {
       }
       const res = await api.threads({ view, q: query.trim() || undefined, cursor: pageCursor }).catch(() => null);
       if (token !== listToken.current) return;
+      if (res && res.ok && res.threads.length === 0 && pageCursor) {
+        // A later page emptied (bulk delete here or on another device): "no mail yet"
+        // with no pager was a dead end while earlier pages still had mail. Start over.
+        resetPagesRef.current();
+        return;
+      }
       if (res && res.ok) {
         setLegacy(false);
         setListLoading(false);
@@ -399,6 +429,13 @@ export function useOneMail(): OneMailState {
       }
       if (res && !isMissingRoute(res)) {
         setDetailLoading(false);
+        if (res.code === "agent_mail_thread_not_found") {
+          // Gone: drop it from the list and go back instead of keeping the last copy.
+          setDetail(null);
+          setThreads((prev) => prev.filter((t) => t.id !== selectedThreadId));
+          setSelection((currentSelection) => (currentSelection?.kind === "thread" && currentSelection.id === selectedThreadId ? null : currentSelection));
+          return;
+        }
         setDetailError(res);
         return;
       }
@@ -525,6 +562,7 @@ export function useOneMail(): OneMailState {
     setPageStart(1);
     setChecked(new Set());
   }, []);
+  resetPagesRef.current = resetPages;
   const setView = useCallback((next: OneMailView) => {
     setThreads([]);
     setDrafts([]);

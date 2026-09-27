@@ -20,6 +20,7 @@ import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPi
 import { OneBottomSheet } from "./OneBottomSheet";
 import { OneMailSettings } from "./mail/OneMailSettings";
 import { OneEditTabs, type OneEditTab } from "./mail/OneMailTabs";
+import { confirmMailAction } from "./mail/mailConfirm";
 import { tFor } from "@/lib/i18n";
 import styles from "./OneCreateAgentDialog.module.css";
 
@@ -323,6 +324,27 @@ export function OneCreateAgentDialog({
     runtimeSelection,
   }), [characterId, description, generatePrompt, generatedSrc, mode, name, runtimeSelection, title, uploadedName, uploadedSrc]);
 
+  /*
+   * Unsaved edits. Esc or a backdrop click closed "One 편집" / "팀원 편집" at once and
+   * threw the typed changes away (QA 2026-09-27) — only the create form keeps a draft.
+   * The baseline is what the edit effects below filled in; it is captured on the
+   * render after they ran (this effect is declared first, so it runs first in the
+   * commit that schedules those fills and captures in the next one).
+   */
+  const editSnapshot = JSON.stringify([name, title, description, characterId, mode, uploadedSrc, generatedSrc, collaborationStyle, runtimeSelection]);
+  const editBaselineRef = useRef<string | null>(null);
+  const captureEditBaselineRef = useRef(false);
+  // Forces the capturing render even when the fill left every value unchanged.
+  const [, bumpEditBaseline] = useState(0);
+  const discardConfirmOpenRef = useRef(false);
+  useEffect(() => {
+    if (!open || (!edit && !editOne)) { editBaselineRef.current = null; return; }
+    if (captureEditBaselineRef.current) {
+      captureEditBaselineRef.current = false;
+      editBaselineRef.current = editSnapshot;
+    }
+  });
+
   useEffect(() => {
     if (draftHydratedRef.current) return;
     const restored = readDraft();
@@ -571,6 +593,8 @@ export function OneCreateAgentDialog({
     const key = `${edit.memberId}:${edit.revision}`;
     if (editKeyRef.current === key) return;
     editKeyRef.current = key;
+    captureEditBaselineRef.current = true;
+    bumpEditBaseline((tick) => tick + 1);
     skipNextDraftWriteRef.current = true;
     setName(edit.displayName);
     // ★ 여기가 "수정"을 수정으로 만드는 자리다. 지금 값이 적혀 있지 않으면 사람은
@@ -598,6 +622,8 @@ export function OneCreateAgentDialog({
     }
     if (editOneKeyRef.current === editOne.expectedVersion) return;
     editOneKeyRef.current = editOne.expectedVersion;
+    captureEditBaselineRef.current = true;
+    bumpEditBaseline((tick) => tick + 1);
     skipNextDraftWriteRef.current = true;
     setName(editOne.displayName);
     setTitle(editOne.role);
@@ -740,19 +766,35 @@ export function OneCreateAgentDialog({
   };
 
   const tabs: Array<{ id: AvatarMode; label: string; icon: ReactNode }> = [
-    { id: "original", label: "Original", icon: <IconImage size={14} /> },
-    { id: "sketch", label: "2D Sketch", icon: <IconSparkles size={14} /> },
-    { id: "generated", label: "Generated", icon: <IconWand size={14} /> },
-    { id: "upload", label: "Upload", icon: <IconFileUp size={14} /> },
+    { id: "original", label: ko ? "기본" : "Original", icon: <IconImage size={14} /> },
+    { id: "sketch", label: ko ? "2D 스케치" : "2D Sketch", icon: <IconSparkles size={14} /> },
+    { id: "generated", label: ko ? "생성" : "Generated", icon: <IconWand size={14} /> },
+    { id: "upload", label: ko ? "업로드" : "Upload", icon: <IconFileUp size={14} /> },
   ];
+
+  const requestDismiss = () => {
+    if (creating || discardConfirmOpenRef.current) return;
+    const dirty = Boolean(edit || editOne) && editBaselineRef.current !== null && editBaselineRef.current !== editSnapshot;
+    if (!dirty) {
+      persistDraftNow();
+      onClose();
+      return;
+    }
+    discardConfirmOpenRef.current = true;
+    void confirmMailAction({
+      locale,
+      title: ko ? "저장하지 않고 닫을까요?" : "Close without saving?",
+      body: ko ? "고친 내용이 저장되지 않았어요. 닫으면 사라져요." : "Your changes aren't saved. They will be lost if you close.",
+      confirmLabel: ko ? "버리고 닫기" : "Discard",
+    }).then((discard) => {
+      discardConfirmOpenRef.current = false;
+      if (discard) onClose();
+    });
+  };
 
   return <OneBottomSheet
     open={open}
-    onClose={() => {
-      if (creating) return;
-      persistDraftNow();
-      onClose();
-    }}
+    onClose={requestDismiss}
     closeLabel={editOne
       ? (ko ? "One 편집 닫기" : "Close edit One")
       : edit ? (ko ? "팀원 편집 닫기" : "Close edit teammate") : (ko ? "새 에이전트 닫기" : "Close new agent")}
@@ -762,13 +804,13 @@ export function OneCreateAgentDialog({
     size="wide"
     toolbar={editOne ? <OneEditTabs locale={ko ? "ko" : "en"} value={oneTab} onChange={setOneTab} /> : undefined}
     footer={editOne ? <div className={styles.footerActions}>
-      <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{oneTab === "profile" ? (ko ? "취소" : "Cancel") : (ko ? "닫기" : "Close")}</button>
+      <button type="button" disabled={creating} onClick={requestDismiss}>{oneTab === "profile" ? (ko ? "취소" : "Cancel") : (ko ? "닫기" : "Close")}</button>
       {oneTab === "profile" && <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void updateOne()} data-one-edit-save>{creating ? (ko ? "저장 중…" : "Saving…") : (ko ? "저장" : "Save")}</button>}
     </div> : undefined}
     panelClassName={editOne ? [styles.dialog, styles.oneEdit, oneTab === "profile" ? styles.oneEditWide : styles.oneEditNarrow].join(" ") : styles.dialog}
     bodyClassName={editOne ? [styles.body, styles.oneEditBody].join(" ") : styles.body}
     eyebrow={editOne ? "One" : "One Team"}
-    title={editOne ? (ko ? "One 편집" : "Edit One") : edit ? (ko ? "팀원 편집" : "Edit Teammate") : "New Agent"}
+    title={editOne ? (ko ? "One 편집" : "Edit One") : edit ? (ko ? "팀원 편집" : "Edit Teammate") : (ko ? "새 에이전트" : "New Agent")}
     titleId="one-create-agent-title"
     ariaLabelledBy="one-create-agent-title"
     description={editOne
@@ -834,9 +876,9 @@ export function OneCreateAgentDialog({
 
       <section className={styles.fields}>
         {/* 라벨 ko 표기는 웹 New Agent 폼과 통일(D-9) — 이름/제목/설명. */}
-        <label>{ko ? "이름" : "Name"}<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder="inbox-triage" autoFocus /></label>
+        <label>{ko ? "이름" : "Name"}<input value={name} onChange={(event) => setName(event.target.value)} maxLength={80} placeholder={ko ? "예: 메일비서" : "inbox-triage"} autoFocus /></label>
         {/* 만들 때와 고칠 때가 같은 칸을 쓴다. 편집이면 지금 값이 이미 적혀 있고, 그것이 곧 수정이다. */}
-        {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "역할" : "Role") : (ko ? "제목" : "Title")}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={editOne ? 120 : 100} placeholder={editOne ? "Agentlas One" : "e.g. Inbox Triage"} /></label>}
+        {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "역할" : "Role") : (ko ? "제목" : "Title")}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={editOne ? 120 : 100} placeholder={editOne ? "Agentlas One" : (ko ? "예: 메일 분류 담당" : "e.g. Inbox Triage")} /></label>}
         {(!edit || edit.identityEditable) && <label>{editOne ? (ko ? "말투·성격과 내 선호" : "Voice, personality, and preferences") : (ko ? "설명" : "Description")}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={editOne ? 4_000 : 1_200} placeholder={ko ? (editOne ? "예: 항상 턴 끝에 진척도를 표로 보여 주고, 내가 결정할 것이 있으면 먼저 말해 줘." : "이 에이전트에게 말투와 성격, 영혼을 부여하세요.") : (editOne ? "e.g. End every turn with a progress table and tell me what needs my decision." : "Give this agent a voice, personality, and soul.")} /></label>}
         {edit && !edit.identityEditable && <p className={styles.lockedIdentity}>
           {ko
@@ -905,7 +947,7 @@ export function OneCreateAgentDialog({
         {error && <p className={styles.error} role="alert">{error}</p>}
         {creating && <div className={styles.creatingState} role="status" aria-live="polite"><span className={styles.spinner} aria-hidden="true" /><span><strong>{ko ? "One Team에 팀원을 만들고 있어요" : "Creating your One Team teammate"}</strong><small>{ko ? "로컬 정체성, 팀원 등록, 독립 채팅을 함께 저장합니다." : "Saving its local identity, teammate entry, and independent chat."}</small><LoadingEstimate locale={locale} operationKey="one-agent-create" expectedSeconds={[1, 12]} /></span></div>}
         {!editOne && <div className={styles.actions}>
-          <button type="button" disabled={creating} onClick={() => { persistDraftNow(); onClose(); }}>{ko ? "취소" : "Cancel"}</button>
+          <button type="button" disabled={creating} onClick={requestDismiss}>{ko ? "취소" : "Cancel"}</button>
           <button type="button" className={styles.primaryButton} disabled={!name.trim() || !avatarReady || creating} onClick={() => void (editOne ? updateOne() : edit ? updateMember() : createAgent())}>{creating
             ? (editOne || edit ? (ko ? "저장 중…" : "Saving…") : (ko ? "만드는 중…" : "Creating…"))
             : (editOne || edit ? (ko ? "저장" : "Save") : (ko ? "만들고 채팅 열기" : "Create & open chat"))}</button>

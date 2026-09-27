@@ -35,6 +35,7 @@ export function OneWhatsNew({
   blocked,
   replayToken = 0,
   mailEntitled,
+  mailReady = false,
   onAcknowledge,
   onAction,
 }: {
@@ -46,6 +47,8 @@ export function OneWhatsNew({
   replayToken?: number;
   /** Free plan → the mail slide leads to plans instead of the create flow. */
   mailEntitled: boolean;
+  /** The mailbox already has its address: the mail slide opens it instead of offering to create one. */
+  mailReady?: boolean;
   onAcknowledge: (resolution: OneFeatureIntroResolution) => void | Promise<void>;
   onAction: (action: WhatsNewAction) => void;
 }) {
@@ -176,6 +179,8 @@ export function OneWhatsNew({
   const text = (value: { ko: string; en: string }) => (ko ? value.ko : value.en);
   const ctaLabel = slide.id === "mail" && !mailEntitled
     ? (ko ? "플랜 보기" : "See plans")
+    : slide.id === "mail" && mailReady
+      ? (ko ? "메일함 열기" : "Open mailbox")
     : slide.cta
       ? text(slide.cta)
       : last

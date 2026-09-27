@@ -58,8 +58,8 @@ const STATUS_KEYS = {
 const BODY_PREVIEW_CHARS = 1_000_000;
 
 const BODY_TEXT = {
-  ko: { truncated: "메일이 길어서 앞부분만 보여 드려요.", showAll: "전체 보기" },
-  en: { truncated: "This email is long, so only the beginning is shown.", showAll: "Show all" },
+  ko: { truncated: "메일이 길어서 앞부분만 보여 드려요.", showAll: "전체 보기", retry: "다시 시도" },
+  en: { truncated: "This email is long, so only the beginning is shown.", showAll: "Show all", retry: "Try again" },
 } as const;
 
 /**
@@ -85,7 +85,7 @@ function MessageBody({ message, locale }: { message: AgentMailMessage; locale: L
   return (
     <>
       {message.text
-        ? <pre className={styles.messageText}>{shown}</pre>
+        ? <pre className={styles.messageText} dir="auto">{shown}</pre>
         : (
           <iframe
             ref={frame}
@@ -93,7 +93,10 @@ function MessageBody({ message, locale }: { message: AgentMailMessage; locale: L
             title={tFor(locale, "one.mail.html_title")}
             // Scripts stay blocked (no allow-scripts); same-origin only lets
             // this screen read the laid-out height. CSP inside blocks remote loads.
-            sandbox="allow-same-origin"
+            // allow-popups: links carry <base target="_blank">; without it every
+            // link in an HTML mail was dead (QA 2026-09-27). Main's window-open
+            // handler denies the window and hands http(s) to the system browser.
+            sandbox="allow-same-origin allow-popups"
             referrerPolicy="no-referrer"
             srcDoc={sandboxedHtml(shown)}
             onLoad={measure}
@@ -140,6 +143,9 @@ export function OneMailWorkspace({
 }) {
   const [notice, setNotice] = useState<Notice>(null);
   const threadId = mail.selection?.kind === "thread" ? mail.selection.id : null;
+  // Back from a conversation returns focus to its row (keyboard users kept their place).
+  const lastThreadRef = useRef<string | null>(null);
+  if (threadId) lastThreadRef.current = threadId;
 
   const composeSheet = mail.compose ? (
     <OneMailComposeSheet
@@ -168,7 +174,7 @@ export function OneMailWorkspace({
       ) : threadId ? (
         <ReadingPane mail={mail} locale={locale} onOpenConversation={onOpenConversation} notice={notice} setNotice={setNotice} />
       ) : (
-        <MailList mail={mail} locale={locale} notice={notice} setNotice={setNotice} />
+        <MailList mail={mail} locale={locale} notice={notice} setNotice={setNotice} focusThreadId={lastThreadRef.current} />
       )}
       {composeSheet}
     </section>
@@ -202,13 +208,20 @@ function MailSetup({ mail, locale, oneName }: { mail: OneMailState; locale: Loca
   );
 }
 
-function MailList({ mail, locale, notice, setNotice }: {
+function MailList({ mail, locale, notice, setNotice, focusThreadId = null }: {
   mail: OneMailState;
   locale: Locale;
   notice: Notice;
   setNotice: (value: Notice) => void;
+  focusThreadId?: string | null;
 }) {
   const moreRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    if (!focusThreadId) return;
+    const row = document.querySelector<HTMLElement>(`[data-one-mail-thread="${CSS.escape(focusThreadId)}"]`);
+    row?.focus({ preventScroll: false });
+    // Only on arrival from the reading pane.
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
   const [moreOpen, setMoreOpen] = useState(false);
   const [query, setQuery] = useState(mail.query);
   useEffect(() => { setQuery(mail.query); }, [mail.query]);
@@ -350,15 +363,17 @@ function ThreadRow({ thread, mail, locale, onError }: {
         aria-label={tFor(locale, "one.mail.select_row", { subject: thread.subject || tFor(locale, "one.mail.no_subject") })}
       />
       <span className={styles.rowSender} title={who}>
-        <span>{who}</span>
+        <span dir="auto">{who}</span>
         {thread.messageCount > 1 && <span className={styles.count}>{thread.messageCount}</span>}
       </span>
       <span className={styles.rowMain}>
         {agent && <AgentBadge locale={locale} />}
         {origin && <span className={thread.lastOrigin === "owner" ? styles.chipOwner : styles.chipOne} data-one-mail-origin={thread.lastOrigin ?? undefined}>{origin}</span>}
         {problem && <span className={styles.chipProblem}>{problem}</span>}
-        <span className={styles.rowSubject}>{thread.subject || tFor(locale, "one.mail.no_subject")}</span>
-        <span className={styles.rowSnippet}>{thread.snippet ? ` — ${thread.snippet}` : ""}</span>
+        {/* Each piece keeps its own direction: an Arabic/Hebrew subject next to its
+            snippet in an LTR row otherwise reorders across the two (QA 2026-09-27). */}
+        <span className={styles.rowSubject} dir="auto">{thread.subject || tFor(locale, "one.mail.no_subject")}</span>
+        <span className={styles.rowSnippet}>{thread.snippet ? <> — <bdi>{thread.snippet}</bdi></> : ""}</span>
       </span>
       <span className={styles.rowEnd}>
         {thread.hasAttachments && <IconPaperclip size={13} />}
@@ -475,11 +490,43 @@ function ReadingPane({ mail, locale, onOpenConversation, notice, setNotice }: {
     void confirmMailAction({ locale, body: tFor(locale, "one.mail.delete_confirm") }).then((ok) => { if (ok) void mail.removeThread(detail.thread.id).then(fail); });
   };
 
+  // Keyboard: opening a conversation moves focus to its subject (it used to fall to
+  // <body>), and Escape goes back to the list when nothing else is open on top.
+  const subjectRef = useRef<HTMLHeadingElement | null>(null);
+  useEffect(() => {
+    if (detail?.thread.id) subjectRef.current?.focus({ preventScroll: true });
+  }, [detail?.thread.id]);
+  const composeOpen = Boolean(mail.compose);
+  useEffect(() => {
+    const onKey = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented || actionsOpen || composeOpen) return;
+      if (document.querySelector("[role=dialog], [role=alertdialog], [role=menu]")) return;
+      event.preventDefault();
+      mail.select(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [actionsOpen, composeOpen, mail]);
+
   if (!detail) {
+    const failed = Boolean(mail.detailError);
     return (
-      <p className={mail.detailError ? styles.error : styles.centerState} role={mail.detailError ? "alert" : "status"}>
-        {mail.detailError ? mailErrorText(locale, mail.detailError) : tFor(locale, "one.mail.loading")}
-      </p>
+      <>
+        {failed && (
+          // A failed open used to be a line of red text with no way back or retry.
+          <div className={`${styles.toolbar} titlebar-nodrag`} role="toolbar" aria-label={tFor(locale, "one.mail.thread_actions")}>
+            <button type="button" className={styles.iconButton} onClick={() => mail.select(null)} aria-label={tFor(locale, "one.mail.back")} title={tFor(locale, "one.mail.back")}>
+              <IconArrowLeft size={15} />
+            </button>
+            <button type="button" className={styles.iconButton} onClick={() => mail.reloadDetail()} aria-label={BODY_TEXT[locale].retry} title={BODY_TEXT[locale].retry} data-one-mail-detail-retry>
+              <IconRefresh size={15} />
+            </button>
+          </div>
+        )}
+        <p className={failed ? styles.error : styles.centerState} role={failed ? "alert" : "status"}>
+          {mail.detailError ? mailErrorText(locale, mail.detailError) : tFor(locale, "one.mail.loading")}
+        </p>
+      </>
     );
   }
 
@@ -523,7 +570,7 @@ function ReadingPane({ mail, locale, onOpenConversation, notice, setNotice }: {
       )}
       <div className={styles.threadBody}>
         <div className={styles.threadColumn}>
-          <h2 className={styles.threadSubject} title={detail.thread.subject}>{detail.thread.subject || tFor(locale, "one.mail.no_subject")}</h2>
+          <h2 ref={subjectRef} tabIndex={-1} className={styles.threadSubject} title={detail.thread.subject} dir="auto">{detail.thread.subject || tFor(locale, "one.mail.no_subject")}</h2>
           {notice && <p className={notice.error ? styles.error : styles.notice} role={notice.error ? "alert" : "status"}>{notice.text}</p>}
           {detail.messages.map((message) => (
             <MessageSection
