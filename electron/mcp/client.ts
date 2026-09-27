@@ -2457,7 +2457,12 @@ ${effectiveUserPrompt}`;
     }
   }
 
-  const runtimes = await detectRuntimes();
+  let runtimes = await detectRuntimes();
+  // A pinned runtime missing from the cached inventory is re-probed once before the run fails: one slow probe under
+  // load dropped codex and failed a Science turn with science-runtime-unavailable (dev app, 2026-09-27 00:23Z).
+  if (req.runtimeSelection && !runtimes.some((runtime) => runtime.kind === req.runtimeSelection!.kind)) {
+    runtimes = await detectRuntimes(true);
+  }
   throwIfInvocationAborted(signal, locale);
   if (boundOneTeamRuntime && !oneTeamRuntimeBindingMatches(boundOneTeamRuntime, runtimes)) {
     sink({
