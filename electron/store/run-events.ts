@@ -2056,7 +2056,12 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
   // project the most recent non-terminal attempt as the completed run's
   // terminal error. A receipt carries failure copy only when the run itself
   // did not complete.
-  const terminalFailure = status === "completed" ? undefined : failure;
+  // An interrupted/cancelled run ended by a stop (app close, owner stop, steering), not by the
+  // tool refusal that happened to be its last in-turn failure — that refusal was answered and
+  // the turn went on. Measured 2026-09-27: 12 Science turns cut by a dev-app restart were
+  // reported `tool_failed` with a stale claim-ledger refusal as their cause.
+  const terminalFailure = status === "completed"
+    || (status !== "failed" && failure?.source === "tool") ? undefined : failure;
 
   // 표시=실행 (계약 7-C-8 / C-D-1): 이 실행이 실제로 돈 모델은 원장의
   // final/invoke_result 행에만 있다. 설정의 "현재 기본값"은 과거 실행의
@@ -2116,7 +2121,9 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
       ? { executionPermission: executionPermissionPayload(startPayload) }
       : {}),
     ...(executedModel ? { model: executedModel } : {}),
-    ...(terminalFailure?.error_code ? { errorCode: terminalFailure.error_code } : {}),
+    ...(terminalFailure?.error_code ? { errorCode: terminalFailure.error_code }
+      : status !== "completed" && stringPayload(terminalPayload, "errorCode")
+        ? { errorCode: stringPayload(terminalPayload, "errorCode") } : {}),
     ...(terminalFailure?.error_message
       ? { errorMessage: terminalFailure.error_message }
       : status !== "completed" && stringPayload(terminalPayload, "errorMessage")
