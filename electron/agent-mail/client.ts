@@ -556,6 +556,14 @@ export async function agentMailDrafts(input: { threadId?: string; cursor?: strin
   return { ok: true, drafts: Array.isArray(res.json.drafts) ? res.json.drafts : [], nextCursor: res.json.nextCursor ?? null };
 }
 
+/** One draft in full (the list carries the same shape; this reads a single id). */
+export async function agentMailDraft(id: string): Promise<AgentMailResult<{ draft: AgentMailDraft }>> {
+  if (!isAgentMailId(id)) return err("invalid_draft_id", "Invalid draft id.");
+  const res = await call<{ draft: AgentMailDraft }>("GET", `/api/agent-mail/drafts/${encodeURIComponent(id)}`);
+  if (!res.ok) return res;
+  return { ok: true, draft: res.json.draft };
+}
+
 export async function agentMailSaveDraft(
   input: { id?: string | null; expectedVersion?: number; fields: AgentMailDraftInput },
   authority: AgentMailSendAuthority = OWNER_AUTHORITY,

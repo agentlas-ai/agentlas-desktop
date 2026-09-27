@@ -24,6 +24,7 @@ import {
   type MobileBridgeMailIdentityDto,
   type MobileBridgeMailDelegateDto,
   type MobileBridgeMailDraftDto,
+  type MobileBridgeMailDraftResultDto,
   type MobileBridgeMailInboundMode,
   type MobileBridgeMailMessageDto,
   type MobileBridgeMailOrigin,
@@ -57,6 +58,7 @@ export interface MobileBridgeAgentMailClient {
   agentMailRemoveThread?: ClientFn;
   agentMailSend?: ClientFn;
   agentMailDrafts?: ClientFn;
+  agentMailDraft?: ClientFn;
   agentMailSaveDraft?: ClientFn;
   agentMailRemoveDraft?: ClientFn;
   agentMailUpdateMailbox?: ClientFn;
@@ -93,6 +95,8 @@ export interface MobileBridgeAgentMailService {
     basedOnMessageId?: string;
     idempotencyKey: string;
   }): Promise<Loose>;
+  /** Read-only: one draft in full, bounded like thread drafts. */
+  draft(draftId: string): Promise<MobileBridgeMailDraftResultDto | MobileBridgeMailRefusalDto>;
   saveDraft(input: {
     draftId?: string;
     expectedVersion?: number;
@@ -641,6 +645,18 @@ export function createMobileBridgeAgentMailService(
         replay: result.replay === true,
         remainingThisMonth: nullableCount(result.remainingThisMonth),
       };
+    },
+
+    async draft(draftId) {
+      const read = fn("agentMailDraft");
+      if (!read) return unavailable("open a draft");
+      const result = await read(draftId);
+      const failure = failureOf(result);
+      if (failure) return failure;
+      const draft = projectMobileBridgeMailDraft(result.draft);
+      // Never hand the phone a different draft than it asked for.
+      if (!draft || draft.id !== draftId) return refusal("mail_error", "Desktop returned a draft without a matching id.");
+      return { schemaVersion: 1, ok: true, draft };
     },
 
     async saveDraft(input) {

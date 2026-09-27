@@ -56,6 +56,7 @@ export const MOBILE_BRIDGE_MAIL_METHODS = [
   "mail.archive",
   "mail.delete",
   "mail.send",
+  "mail.draft.get",
   "mail.draft.save",
   "mail.draft.delete",
   "mail.updateSettings",
@@ -2302,6 +2303,18 @@ export interface MobileBridgeMailDraftDto {
   updatedAt: string | null;
 }
 
+/**
+ * `mail.draft.get`: one draft in full (read-only), so the phone can reopen a
+ * new-mail draft whose list row carries only a 200-character snippet. Bounded
+ * by the same projection as thread drafts; `textTruncated` still forbids saving
+ * the copy back over a larger stored draft.
+ */
+export interface MobileBridgeMailDraftResultDto {
+  schemaVersion: 1;
+  ok: true;
+  draft: MobileBridgeMailDraftDto;
+}
+
 export interface MobileBridgeMailThreadsDto {
   schemaVersion: 1;
   ok: true;
@@ -3611,6 +3624,10 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             optionalString(params, "basedOnMessageId", MOBILE_BRIDGE_MAIL_LIMITS.id),
           )
         : "mail.send accepts only to, cc, bcc, subject, text, replyToMessageId, draftId and basedOnMessageId";
+    case "mail.draft.get":
+      return hasOnlyKeys(params, ["draftId"])
+        ? requiredString(params, "draftId", MOBILE_BRIDGE_MAIL_LIMITS.id)
+        : "mail.draft.get accepts only draftId";
     case "mail.draft.save":
       return hasOnlyKeys(params, ["draftId", "threadId", "replyToMessageId", "to", "cc", "bcc", "subject", "text", "expectedVersion"])
         ? firstError(

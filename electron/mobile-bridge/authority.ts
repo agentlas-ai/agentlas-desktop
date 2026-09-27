@@ -3894,6 +3894,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           idempotencyKey: mobileMailIdempotencyKey(request.idempotencyKey),
         }), request.method);
       }
+      case "mail.draft.get": {
+        const params = guardedParams(request, ["draftId"]);
+        return asJsonValue(await this.agentMail.draft(requiredMailId(params, "draftId")), request.method);
+      }
       case "mail.draft.save": {
         const params = guardedParams(request, ["draftId", "threadId", "replyToMessageId", "to", "cc", "bcc", "subject", "text", "expectedVersion"]);
         const draftId = optionalMailId(params, "draftId");
