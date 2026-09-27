@@ -173,10 +173,17 @@ function origin(value: unknown, direction?: unknown): MobileBridgeMailOrigin | n
   return direction === "inbound" ? "external" : null;
 }
 
-function failureOf(result: ClientResult | undefined): MobileBridgeMailRefusalDto | null {
+function failureOf(result: ClientResult | undefined): (MobileBridgeMailRefusalDto & { retryAfterSeconds?: number }) | null {
   if (!isRecord(result)) return refusal("mail_error", "Desktop mail answered without a result.");
   if (result.ok === true) return null;
-  return refusal(typeof result.code === "string" ? result.code : "mail_error", typeof result.message === "string" ? result.message : "Mail request failed.");
+  const base = refusal(typeof result.code === "string" ? result.code : "mail_error", typeof result.message === "string" ? result.message : "Mail request failed.");
+  // The web's "wait this long" hint (503 busy / quota / paused) rides in the
+  // client's detail; the phone keeps Send off until it passes.
+  const detail = isRecord(result.detail) ? result.detail : null;
+  const wait = detail?.retryAfterSeconds;
+  return typeof wait === "number" && Number.isFinite(wait) && wait > 0
+    ? { ...base, retryAfterSeconds: Math.min(Math.ceil(wait), 86_400) }
+    : base;
 }
 
 function sendIssue(value: unknown): "bounced" | "unknown" | null {
