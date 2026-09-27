@@ -137,8 +137,14 @@ function exactAppliedAssets(input: EnsureOneExperienceReuseReceiptInput): {
   const appliedEvents = events.filter((event) => event.kind === "one_memory_context_applied");
   if (appliedEvents.length === 0) return null;
   if (appliedEvents.length !== 1) throw new Error("Run has ambiguous Memory application receipts");
-  const payload = appliedEvents[0].payload;
-  if (!isRecord(payload)) throw new Error("Memory application receipt is malformed");
+  const rawPayload = appliedEvents[0].payload;
+  if (!isRecord(rawPayload)) throw new Error("Memory application receipt is malformed");
+  // ★Since 10152299 (2026-09-12) the run ledger attaches a host-owned
+  //   `runtimeEvidence` envelope to EVERY event payload, on write and on read
+  //   (run-events.ts runRowToUi). It is not part of the producer's receipt, so
+  //   the exact-shape check below must not count it — otherwise every run that
+  //   applied memory threw "unsupported fields" and no reuse was ever recorded.
+  const { runtimeEvidence: _runtimeEvidence, ...payload } = rawPayload;
   if (exactKeys(payload, ["storeVersion", "memoryIds", "scopeKinds"])) {
     // Pre-v1 run events have no exact asset/version/source binding and cannot
     // be upgraded into a stronger historical reuse claim after the fact.

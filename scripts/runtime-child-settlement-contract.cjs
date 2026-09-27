@@ -287,10 +287,20 @@ async function main() {
   // 7. 빈 답이 빈 말풍선으로 남지 않는다 — 단, 조용히 삼키지도 않는다.
   await check("빈 최종 답은 저장 전에 걸러지고 사실은 원장에 남는다", () => {
     const src = fs.readFileSync(path.join(root, "electron/mcp/client.ts"), "utf8");
+    // 2026-09-27: a3dabd65 moved the save from appendChatMessage(chat.id, "assistant", …)
+    // to appendInvocationAssistantResult({ chatId, text, … }) (same row, plus
+    // invocation dedupe). The guard in front of it did not change; the anchor
+    // only knew the old callee. Either callee is accepted, the guard is not.
     assert.match(
       src,
-      /if \(persistedDisplay\.trim\(\) \|\| finalImageOptions\?\.images\?\.length\) \{\s*\n\s*durableAssistantEntry = appendChatMessage\(chat\.id, "assistant", persistedDisplay, finalImageOptions\);/,
+      /if \(persistedDisplay\.trim\(\) \|\| finalImageOptions\?\.images\?\.length\) \{\s*\n\s*durableAssistantEntry = (?:appendChatMessage\(chat\.id, "assistant", persistedDisplay, finalImageOptions\)|appendInvocationAssistantResult\(\{\s*chatId: chat\.id,\s*text: persistedDisplay,[^}]*options: finalImageOptions,\s*\}\));/,
       "텍스트와 이미지가 모두 빈 최종 답을 거르는 저장 가드가 없다",
+    );
+    const chatsSrc = fs.readFileSync(path.join(root, "electron/store/chats.ts"), "utf8");
+    assert.match(
+      chatsSrc,
+      /export function appendInvocationAssistantResult[\s\S]*?appendChatMessage\(p\.chatId, "assistant", p\.text, p\.options\)/,
+      "invocation 저장 도우미가 assistant 행을 쓰지 않는다",
     );
     assert.match(src, /emptyDisplayText: true/, "빈 답 사실이 원장에 남지 않는다 — 조용한 삭제 금지");
   });

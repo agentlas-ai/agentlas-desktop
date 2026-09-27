@@ -822,6 +822,14 @@ interface NodeTurn {
    * not left as a prose suggestion that a model can ignore.
    */
   runtimeToolsDisabled?: boolean;
+  /**
+   * The CEO answers the request itself: no division to delegate to, or the
+   * delegation plan stalled and the turn is retried "as a direct execution".
+   * It rides the synthesize phase for its main-bubble shape, but it receives
+   * no bounded results to synthesize — it IS the work — so it is not a
+   * control-plane turn and keeps project memory, folder and tool authority.
+   */
+  directExecution?: boolean;
   /** Main-only mutable receipt shared with runNodeTurnSafe so an aborted turn
    * can return bounded tool/artifact evidence instead of a one-line failure. */
   executionEvidence?: FirmExecutionEvidenceCollector;
@@ -862,7 +870,11 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
   // They receive the bounded roster/results in the prompt and must not regain
   // ambient project, MCP, memory, or resident-session authority merely because
   // the selected runtime exposes built-in shell/file tools.
-  const controlPlaneTurn = phase === "synthesize" || (phase === "plan" && hasReports);
+  // ★ A direct-execution CEO turn (solo firm, or stalled-plan retry) reuses the
+  //   synthesize phase but has no results to synthesize. Treating it as control
+  //   plane (e8fed86f) left the only worker with no project memory, no folder and
+  //   no tools — "retrying as a direct execution" could not execute anything.
+  const controlPlaneTurn = (phase === "synthesize" && !turn.directExecution) || (phase === "plan" && hasReports);
   const runtimeRole: "orchestrator" | "worker" = tier === 1
     ? p.controllerRuntimeRole ?? "orchestrator"
     : "worker";
@@ -1595,6 +1607,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       chatId: chat.id,
       toMainBubble: true,
       withImages: true,
+      directExecution: true,
     });
     if (!solo.ok) {
       sink({ kind: "error", error: firmFailure(req.agentAppMode, "ceo-failed", solo.text) });
@@ -1632,6 +1645,7 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       chatId: chat.id,
       toMainBubble: true,
       withImages: true,
+      directExecution: true,
     });
     if (!solo.ok) {
       if (!req.agentAppMode) appendChatMessage(chat.id, "assistant", redactWorkAttachmentText(p.req, solo.text));

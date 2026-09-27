@@ -2563,13 +2563,41 @@ export class InvocationService {
         if (event.kind === "surface" && event.surface) {
           const ownerChat = getChat(runReq.chatId);
           if (!ownerChat) throw new Error("artifact_owner_missing");
-          const persisted = recordAgentSurface({
-            id: event.surfaceId ?? `surface:${runId}`,
-            chatId: ownerChat.id, projectId: ownerChat.projectId,
-            agentId: attributedAgentId ?? record.actualAgentId ?? ownerChat.agentId,
-            manifest: event.surface,
-          });
-          event = { ...event, surfaceId: persisted.id };
+          /*
+           * ★A surface that cannot be persisted is one result card, not the turn.
+           *   Since 6bdbab38 (2026-09-12) persistence runs before publication, and a
+           *   manifest it cannot serialize/validate threw straight out of the sink —
+           *   the runtime then reported invoke-threw and the whole run failed, where
+           *   the projection contract below says a bad surface degrades to a
+           *   content-free status. Without a durable id it still must not publish,
+           *   so it is dropped here and the fact (not the raw error, which can carry
+           *   a Main-private path) goes to the ledger.
+           */
+          try {
+            const persisted = recordAgentSurface({
+              id: event.surfaceId ?? `surface:${runId}`,
+              chatId: ownerChat.id, projectId: ownerChat.projectId,
+              agentId: attributedAgentId ?? record.actualAgentId ?? ownerChat.agentId,
+              manifest: event.surface,
+            });
+            event = { ...event, surfaceId: persisted.id };
+          } catch (error) {
+            console.error(`[surface] chat ${runReq.chatId}: surface not persisted — ${error instanceof Error ? error.message : String(error)}`);
+            tryRecordRunEvent({
+              runId,
+              chatId: runReq.chatId,
+              kind: "surface_persist_failed",
+              payload: { reasonCode: "surface_persist_failed" },
+            });
+            event = {
+              ...event,
+              surface: undefined,
+              oneSurface: undefined,
+              status: pickLocale(runReq) === "ko"
+                ? "결과를 정리하는 중 문제가 생겨 이번 응답을 완성하지 못했어요."
+                : "Something went wrong while preparing this result, so it is not complete.",
+            };
+          }
         }
         const rawSurfaceForArtifactBinding = event.kind === "surface" ? event.surface : undefined;
         // Desktop Work owns and consumes its native Work surface. Only One or
