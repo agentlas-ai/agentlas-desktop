@@ -11,6 +11,8 @@ import { currentRunPriority, type RunPriority } from "./run-priority";
 
 let inUse = 0;
 let maintenance = false;
+/** Last moment a run held or released a slot (process start counts as activity). */
+let lastSlotActivityAt = Date.now();
 
 interface Waiter {
   resolve: (release: () => void) => void;
@@ -51,6 +53,7 @@ function makeRelease(): () => void {
     if (released) return;
     released = true;
     inUse -= 1;
+    lastSlotActivityAt = Date.now();
     pump();
   };
 }
@@ -68,6 +71,7 @@ function pump(): void {
       continue;
     }
     inUse += 1;
+    lastSlotActivityAt = Date.now();
     w.resolve(makeRelease());
   }
 }
@@ -86,6 +90,7 @@ export function acquireRunSlot(
   if (signal?.aborted) return Promise.reject(abortError());
   if (!maintenance && inUse < getAgentConcurrency()) {
     inUse += 1;
+    lastSlotActivityAt = Date.now();
     return Promise.resolve(makeRelease());
   }
   const effectivePriority = priority ?? currentRunPriority();
@@ -128,6 +133,17 @@ export function tryAcquireRuntimeMaintenance(): (() => void) | null {
 }
 
 /** 진단/표시용 스냅샷. queued 는 두 대기열 합계(기존 소비자 계약 유지). */
+/**
+ * How long no run has held a slot — "this app is quiet", independent of system HID idle. Measured
+ * 2026-09-27: Codex Computer Use and a remote-desktop tool assert UserIsActive on this machine
+ * (pmset log: 217 SkyComputerUseService + 259 remoting tickles in 7 days), so system idle stops
+ * meaning "the owner is away" and idle-gated maintenance starved. 0 while any run holds or awaits one.
+ */
+export function runSlotsQuietForMs(now = Date.now()): number {
+  if (inUse > 0 || queuedCount() > 0) return 0;
+  return Math.max(0, now - lastSlotActivityAt);
+}
+
 export function runSlotStats(): { inUse: number; queued: number; limit: number; maintenance: boolean } {
   return { inUse, queued: queuedCount(), limit: getAgentConcurrency(), maintenance };
 }

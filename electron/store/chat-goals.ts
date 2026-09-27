@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import { emitDesktopStoreChange } from "./change-bus";
+import { recordRunEvent } from "./run-events";
 import type { ChatGoalContext } from "../../shared/types";
 import {
   createAutomaticGoalRevision,
@@ -394,4 +395,65 @@ export function reviseStoredAutomaticGoal(input: Omit<Parameters<typeof reviseAu
       next.goalId, next.chatId);
     return next;
   })();
+}
+
+/** Contracts older than this with no run and no revision never started; a goal gets its run on its first turn. */
+const ABANDONED_GOAL_CONTRACT_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const GOAL_CONTRACT_RECONCILED_EVENT = "goal_contract_reconciled";
+
+/**
+ * Startup: close Goal contracts that are active but were never backed by a run. Measured 2026-09-27:
+ * goal:desktop:9535… (a pre-uuid derived id) active since 2026-08-12 with no long run and no revision.
+ * No chip showed it (the goal context needs a run), the composer toggle read ON, and every new
+ * automatic Goal in that chat was refused with auto_goal_chat_already_bound.
+ *
+ * Closing is what the user's toggle-off does (contract cancelled, chat binding and continuous mode
+ * cleared) and nothing more: no run exists, so nothing is cancelled. Held back when a run, a revision,
+ * a continuation automation or recent contract activity exists. Each close is written to run_events
+ * with the previous status and binding so it can be read back and restored.
+ */
+export function reconcileAbandonedGoalContracts(now = new Date()): string[] {
+  const db = getDb();
+  const cutoff = new Date(now.getTime() - ABANDONED_GOAL_CONTRACT_AGE_MS).toISOString();
+  const rows = db.prepare(
+    `SELECT g.goal_id, g.chat_id, g.status, g.updated_at,
+            c.goal_id AS chat_goal_id, c.continuous_mode AS continuous_mode
+       FROM chat_goal_contracts g LEFT JOIN chats c ON c.id = g.chat_id
+      WHERE g.status IN ('active','blocked') AND g.updated_at < ?
+        AND NOT EXISTS (SELECT 1 FROM long_runs l WHERE l.goal_id = g.goal_id)
+        AND NOT EXISTS (SELECT 1 FROM chat_goal_revisions r WHERE r.goal_id = g.goal_id)
+        AND NOT EXISTS (SELECT 1 FROM automations a WHERE a.goal_id = g.goal_id)`,
+  ).all(cutoff) as Array<{ goal_id: string; chat_id: string; status: string; updated_at: string;
+    chat_goal_id: string | null; continuous_mode: number | null }>;
+  const closed: string[] = [];
+  const touchedChats: string[] = [];
+  const stamp = now.toISOString();
+  const tx = db.transaction(() => {
+    for (const row of rows) {
+      const changed = db.prepare(
+        `UPDATE chat_goal_contracts SET status = 'cancelled', completed_at = ?, updated_at = ?
+          WHERE goal_id = ? AND status = ? AND updated_at = ?`,
+      ).run(stamp, stamp, row.goal_id, row.status, row.updated_at);
+      if (changed.changes !== 1) continue;
+      const wasBound = row.chat_goal_id === row.goal_id;
+      if (wasBound) {
+        db.prepare("UPDATE chats SET goal_id = NULL, continuous_mode = 0, updated_at = ? WHERE id = ? AND goal_id = ?")
+          .run(stamp, row.chat_id, row.goal_id);
+      }
+      recordRunEvent({
+        runId: `goal-reconcile:${row.goal_id}`,
+        kind: GOAL_CONTRACT_RECONCILED_EVENT,
+        chatId: row.chat_id,
+        payload: {
+          goalId: row.goal_id, reason: "active_contract_without_run", from: row.status, to: "cancelled",
+          previousUpdatedAt: row.updated_at, chatWasBound: wasBound, previousContinuousMode: row.continuous_mode ?? 0,
+        },
+      });
+      closed.push(row.goal_id);
+      touchedChats.push(row.chat_id);
+    }
+  });
+  tx();
+  for (const chatId of touchedChats) emitDesktopStoreChange({ entity: "chat", id: chatId });
+  return closed;
 }

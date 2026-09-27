@@ -17,7 +17,7 @@ import { looksSecret } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { getMeta, setMeta } from "../store/meta";
-import { runSlotStats } from "../runtime/run-slots";
+import { runSlotStats, runSlotsQuietForMs } from "../runtime/run-slots";
 import { dreamingIdleRequiredSec } from "./curator-rules";
 import { autoLocalEmbedding, cosineSimilarity, type LocalMemoryEmbedding } from "./local-embedding";
 import { currentMemoryForgetEpoch, assertMemoryWriteAllowed, MemoryRevokedError } from "./revocations";
@@ -223,6 +223,8 @@ export interface MigrationRecord {
   completedAt: string | null;
   lastTranslator: string | null;
   lastError: string | null;
+  /** Last batch attempt (any outcome). Absent until the first one; starvation is measured from startedAt. */
+  lastBatchAt?: string | null;
 }
 
 function readRecord(): MigrationRecord | null {
@@ -246,8 +248,16 @@ function today(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+/*
+ * ★The cap was 0 on every store that never set it: Number(null) is 0, finite and >= 0, so the
+ * default never applied and every pass broke out of its loop before the first batch (owner's store
+ * 2026-09-27: no cap key, 3,138 jobs attempts=0, budget meta never written). Unset means default;
+ * an explicit "0" still pauses the job.
+ */
 function dailyCap(): number {
-  const configured = Number(getMeta(DAILY_CAP_KEY));
+  const raw = getMeta(DAILY_CAP_KEY);
+  if (raw == null || String(raw).trim() === "") return DEFAULT_DAILY_CAP;
+  const configured = Number(raw);
   return Number.isFinite(configured) && configured >= 0 ? Math.floor(configured) : DEFAULT_DAILY_CAP;
 }
 
@@ -747,6 +757,43 @@ export async function runEnglishMigrationBatch(options: {
 let timer: NodeJS.Timeout | null = null;
 let running = false;
 let lastSweepAt = 0;
+let lastGateLogAt = 0;
+
+/*
+ * ★Starvation (measured 2026-09-27 on the owner's machine): 3,138 jobs, every one attempts=0 since
+ * 2026-09-23. The pass needed 10 minutes of *system* HID idle, but Codex Computer Use and a
+ * remote-desktop tool assert UserIsActive (pmset log), so "the owner is away" was never observed
+ * while agents drove the machine — and no gate said so. Two changes, both still yield to runs:
+ *  - every blocked tick names its gate in one log line, at most once an hour;
+ *  - after STARVED_AFTER_MS without a batch, a quiet-window pass may run when this app has had no
+ *    run in a slot for APP_QUIET_MS: one small batch, aborted the moment any run takes a slot.
+ * Run slots in use or queued always block, in both modes — this job never contends with a run.
+ */
+const STARVED_AFTER_MS = 6 * 60 * 60 * 1000;
+const APP_QUIET_MS = 10 * 60 * 1000;
+const QUIET_WINDOW_MAX_ITEMS = 10;
+const GATE_LOG_EVERY_MS = 60 * 60 * 1000;
+
+export type EnglishMigrationGate =
+  | "not_store_owner" | "opted_out" | "nothing_pending" | "daily_cap_reached"
+  | "runs_active" | "dreaming_running" | "system_not_idle" | "app_not_quiet";
+
+export interface EnglishMigrationTickEnv {
+  now(): number;
+  idleSeconds(): number;
+  slots(): { inUse: number; queued: number };
+  slotsQuietForMs(): number;
+  dreamingRunning(): Promise<boolean>;
+  runtimes(): Promise<RuntimeStatus[]>;
+  translate?: TranslateCall;
+  log(line: string): void;
+}
+
+export interface EnglishMigrationTickReceipt {
+  gate: EnglishMigrationGate | "already_running" | null;
+  mode: "idle" | "quiet-window" | null;
+  batches: number;
+}
 
 function idleSeconds(): number {
   try {
@@ -754,6 +801,105 @@ function idleSeconds(): number {
   } catch {
     return 0;
   }
+}
+
+const defaultTickEnv: EnglishMigrationTickEnv = {
+  now: () => Date.now(),
+  idleSeconds,
+  slots: () => runSlotStats(),
+  slotsQuietForMs: () => runSlotsQuietForMs(),
+  dreamingRunning,
+  runtimes: defaultRuntimes,
+  log: (line) => console.info(line),
+};
+
+/** Which gate holds the pass now, and in which mode it may run otherwise. Reads meta; no writes. */
+export async function englishMigrationGate(env: EnglishMigrationTickEnv, pending: number):
+  Promise<{ gate: EnglishMigrationGate | null; mode: "idle" | "quiet-window" | null; starved: boolean }> {
+  const hold = (gate: EnglishMigrationGate, starved = false) => ({ gate, mode: null, starved });
+  if (openedStoreMigrationRole() !== "owner") return hold("not_store_owner");
+  if (englishMigrationOptedOut()) return hold("opted_out");
+  if (pending <= 0) return hold("nothing_pending");
+  if (dailyCap() - budgetUsed() <= 0) return hold("daily_cap_reached");
+  const slots = env.slots();
+  if (slots.inUse > 0 || slots.queued > 0) return hold("runs_active");
+  if (await env.dreamingRunning()) return hold("dreaming_running");
+  const record = readRecord();
+  const lastProgress = Date.parse(record?.lastBatchAt ?? record?.startedAt ?? "");
+  const starved = Number.isFinite(lastProgress) && env.now() - lastProgress >= STARVED_AFTER_MS;
+  if (env.idleSeconds() >= dreamingIdleRequiredSec()) return { gate: null, mode: "idle", starved };
+  if (!starved) return hold("system_not_idle");
+  if (env.slotsQuietForMs() < APP_QUIET_MS) return hold("app_not_quiet", true);
+  return { gate: null, mode: "quiet-window", starved };
+}
+
+/** One scheduler tick. The timer calls it with the real environment; the contract fakes idle and slots. */
+export async function runEnglishMigrationTick(overrides: Partial<EnglishMigrationTickEnv> = {}): Promise<EnglishMigrationTickReceipt> {
+  const env: EnglishMigrationTickEnv = { ...defaultTickEnv, ...overrides };
+  if (running) return { gate: "already_running", mode: null, batches: 0 };
+  const pending = openedStoreMigrationRole() === "owner" ? pendingCount(getDb()) : 0;
+  const decision = await englishMigrationGate(env, pending);
+  if (decision.gate) {
+    if (decision.gate !== "nothing_pending" && decision.gate !== "not_store_owner"
+      && env.now() - lastGateLogAt >= GATE_LOG_EVERY_MS) {
+      lastGateLogAt = env.now();
+      const slots = env.slots();
+      env.log(`[english-memory] waiting gate=${decision.gate} pending=${pending} idle=${Math.round(env.idleSeconds())}s `
+        + `slots=${slots.inUse}/${slots.queued} appQuiet=${Math.round(env.slotsQuietForMs() / 60_000)}m starved=${decision.starved ? "yes" : "no"}`);
+    }
+    return { gate: decision.gate, mode: null, batches: 0 };
+  }
+  const quietWindow = decision.mode === "quiet-window";
+  running = true;
+  let batches = 0;
+  const controller = new AbortController();
+  const watchdog = setInterval(() => {
+    const slots = env.slots();
+    if (slots.inUse > 0 || slots.queued > 0) controller.abort(new Error("run-started"));
+    else if (!quietWindow && env.idleSeconds() < 30) controller.abort(new Error("user-returned"));
+  }, quietWindow ? 2_000 : 15_000);
+  watchdog.unref?.();
+  try {
+    if (env.now() - lastSweepAt > SWEEP_EVERY_MS) {
+      ensureEnglishMigration();
+      lastSweepAt = env.now();
+    }
+    const translatorChoice = chooseTranslator(await env.runtimes());
+    const maxBatches = quietWindow ? 1 : BATCHES_PER_TICK;
+    for (let index = 0; index < maxBatches && !controller.signal.aborted; index += 1) {
+      const remaining = dailyCap() - budgetUsed();
+      if (remaining <= 0) break;
+      const receipt = await runEnglishMigrationBatch({
+        signal: controller.signal,
+        maxItems: Math.min(quietWindow ? QUIET_WINDOW_MAX_ITEMS : BATCH_MAX_ITEMS, remaining),
+        translator: translatorChoice,
+        ...(env.translate ? { translate: env.translate } : {}),
+      });
+      batches += 1;
+      spendBudget(receipt.attempted + receipt.reused);
+      const record = readRecord();
+      if (record) {
+        const db = getDb();
+        writeRecord({
+          ...record,
+          lastBatchAt: new Date(env.now()).toISOString(),
+          lastTranslator: receipt.translator ?? record.lastTranslator,
+          lastError: receipt.failure ?? null,
+          completedAt: pendingCount(db) === 0 ? record.completedAt ?? new Date().toISOString() : null,
+        });
+      }
+      if (receipt.translated + receipt.reused > 0 || receipt.failure) {
+        env.log(`[english-memory] ${JSON.stringify({ ...receipt, mode: decision.mode })}`);
+      }
+      if (receipt.failure || receipt.attempted + receipt.reused + receipt.stale === 0) break;
+    }
+  } catch (error) {
+    console.error("[english-memory] pass failed:", error);
+  } finally {
+    clearInterval(watchdog);
+    running = false;
+  }
+  return { gate: null, mode: decision.mode, batches };
 }
 
 async function dreamingRunning(): Promise<boolean> {
@@ -766,55 +912,7 @@ async function dreamingRunning(): Promise<boolean> {
 }
 
 async function tick(): Promise<void> {
-  if (running) return;
-  if (openedStoreMigrationRole() !== "owner") return;
-  if (englishMigrationOptedOut()) return;
-  if (idleSeconds() < dreamingIdleRequiredSec()) return;
-  const slots = runSlotStats();
-  if (slots.inUse > 0 || slots.queued > 0) return;
-  if (await dreamingRunning()) return;
-  running = true;
-  const controller = new AbortController();
-  const watchdog = setInterval(() => {
-    if (idleSeconds() < 30) controller.abort(new Error("user-returned"));
-  }, 15_000);
-  watchdog.unref?.();
-  try {
-    if (Date.now() - lastSweepAt > SWEEP_EVERY_MS) {
-      ensureEnglishMigration();
-      lastSweepAt = Date.now();
-    }
-    const translatorChoice = chooseTranslator(await defaultRuntimes());
-    for (let index = 0; index < BATCHES_PER_TICK && !controller.signal.aborted; index += 1) {
-      const remaining = dailyCap() - budgetUsed();
-      if (remaining <= 0) break;
-      const receipt = await runEnglishMigrationBatch({
-        signal: controller.signal,
-        maxItems: Math.min(BATCH_MAX_ITEMS, remaining),
-        translator: translatorChoice,
-      });
-      spendBudget(receipt.attempted + receipt.reused);
-      const record = readRecord();
-      if (record) {
-        const db = getDb();
-        writeRecord({
-          ...record,
-          lastTranslator: receipt.translator ?? record.lastTranslator,
-          lastError: receipt.failure ?? null,
-          completedAt: pendingCount(db) === 0 ? record.completedAt ?? new Date().toISOString() : null,
-        });
-      }
-      if (receipt.translated + receipt.reused > 0 || receipt.failure) {
-        console.info("[english-memory]", JSON.stringify(receipt));
-      }
-      if (receipt.failure || receipt.attempted + receipt.reused + receipt.stale === 0) break;
-    }
-  } catch (error) {
-    console.error("[english-memory] pass failed:", error);
-  } finally {
-    clearInterval(watchdog);
-    running = false;
-  }
+  await runEnglishMigrationTick();
 }
 
 /**

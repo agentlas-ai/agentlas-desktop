@@ -59,6 +59,8 @@ import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./mem
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
 import { clearDetectCache } from "./runtime/detect";
 import { repairPlaceholderTaskTitles } from "./store/chats";
+import { expireOrphanedSurfaceJobs } from "./store/agent-surface-jobs";
+import { reconcileAbandonedGoalContracts } from "./store/chat-goals";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
 import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
 import { automationWorkInFlight, closeAutomationDispatchForShutdown, startAutomationScheduler } from "./automation-scheduler";
@@ -1843,6 +1845,19 @@ app.whenReady().then(async () => {
   }
   traceUpdaterStartup("store-ready");
   repairPlaceholderTaskTitles();
+  // Dead waits nothing will ever answer: surface jobs no executor picks up (their $1 template
+  // estimate held every guarded action at the approval threshold) and Goal contracts never backed by
+  // a run (they refuse every new automatic Goal in their chat). Both keep the row and write a record.
+  if (!developmentEffectsSuppressed()) {
+    try {
+      const expired = expireOrphanedSurfaceJobs();
+      if (expired.length) console.info("[startup] expired surface jobs with no executor", expired.length);
+    } catch (error) { console.error("[startup] surface job expiry failed", error); }
+    try {
+      const closedGoals = reconcileAbandonedGoalContracts();
+      if (closedGoals.length) console.info("[startup] closed goal contracts never backed by a run", closedGoals);
+    } catch (error) { console.error("[startup] goal contract reconciliation failed", error); }
+  }
   /*
    * ★부팅 시점의 running Task는 전부 고아다 — 실행 권위인 activeRuns 맵이 방금 비어서
    * 시작했다. 정산하지 않으면 화면이 영원히 "진행 중"을 말한다(실측: 나흘째 running).
