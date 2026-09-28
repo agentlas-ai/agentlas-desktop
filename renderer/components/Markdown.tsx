@@ -41,14 +41,26 @@ export interface LinkedFileArtifact {
   fileUrl: string;
 }
 
-export function Markdown({
+/*
+ * ★기본값 배열은 모듈에 하나만 둔다 (실측 2026-09-28, One "X Marketing" 스크롤 끊김).
+ *   `mediaBasePaths = []` 기본값은 렌더마다 새 배열이라, 아래 useMemo 의 의존성이 매번 바뀌어
+ *   글 전체에서 경로 힌트를 다시 긁었고, memo 세그먼트(MarkdownSegment)도 매번 깨졌다.
+ *   실행 중 이벤트 하나마다 대화의 모든 지난 말풍선이 다시 파싱됐다.
+ */
+const NO_MEDIA_BASE_PATHS: string[] = [];
+
+/**
+ * 같은 글·같은 콜백이면 다시 그리지 않는다. 대화 화면은 실행 이벤트마다 통째로 다시 그려지는데,
+ * 지난 말풍선의 본문은 그 사이 바뀌지 않는다 — 그 재파싱이 스크롤 중 메인 스레드를 먹었다.
+ */
+export const Markdown = memo(function Markdown({
   chatId,
   text,
   messageId,
   onOpenArtifact,
   onOpenMedia,
   onOpenLinkedFile,
-  mediaBasePaths = [],
+  mediaBasePaths = NO_MEDIA_BASE_PATHS,
 }: {
   /** Exact chat scope for links without an owning callback. Unbound links cannot select another task panel. */
   chatId?: string | null;
@@ -83,7 +95,7 @@ export function Markdown({
       {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, openLinkedFile, resolvedMediaBasePaths))}
     </div>
   );
-}
+});
 
 // 완결 세그먼트 렌더 — props가 안 바뀌면(텍스트 불변) 재파싱/재렌더를 통째로 건너뛴다.
 // ChatStream의 인터리브 본문(SingleRunBody)도 완결 세그먼트에 이걸 써서 매 partial마다
@@ -94,7 +106,7 @@ export const MarkdownSegment = memo(function MarkdownSegment({
   onOpenArtifact,
   onOpenMedia,
   onOpenLinkedFile,
-  mediaBasePaths = [],
+  mediaBasePaths = NO_MEDIA_BASE_PATHS,
 }: {
   text: string;
   messageId: string;
@@ -124,7 +136,7 @@ export function StreamingMarkdown({
   onOpenArtifact,
   onOpenMedia,
   onOpenLinkedFile,
-  mediaBasePaths = [],
+  mediaBasePaths = NO_MEDIA_BASE_PATHS,
 }: {
   text: string;
   messageId: string;
@@ -575,7 +587,7 @@ function TableBlock({
   block,
   onOpenMedia,
   onOpenLinkedFile,
-  mediaBasePaths = [],
+  mediaBasePaths = NO_MEDIA_BASE_PATHS,
 }: {
   block: { type: "table"; header: string[]; align: TableAlign[]; rows: string[][] };
   onOpenMedia?: (a: MediaArtifact) => void;

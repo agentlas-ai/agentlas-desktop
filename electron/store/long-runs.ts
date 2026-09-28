@@ -443,8 +443,9 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
       && attestation.statement === "user_says_external_outcomes_reviewed_before_new_work"
       && attestation.externalOutcomeProof === "not_observed_by_host";
     const observed = attestation?.schemaVersion === EFFECT_OBSERVATION_ATTESTATION_SCHEMA
-      && (attestation.statement === "observed_external_outcome_done" || attestation.statement === "observed_external_outcome_not_done")
-      && attestation.externalOutcomeProof === "observed_read_only_by_model";
+      && (((attestation.statement === "observed_external_outcome_done" || attestation.statement === "observed_external_outcome_not_done")
+        && attestation.externalOutcomeProof === "observed_read_only_by_model")
+        || (attestation.statement === EFFECT_RECEIPT_STATEMENT && attestation.externalOutcomeProof === EFFECT_RECEIPT_PROOF));
     if (!attestation || (!userAttested && !observed)
       || !Array.isArray(attestation.reviewedAttemptIds)
       || attestation.reviewedAttemptIds.length === 0
@@ -617,6 +618,9 @@ export function acknowledgeUncertainLongRunAttempts(
 
 export const EFFECT_OBSERVATION_EVENT_KIND = "run.effect_observation";
 export const EFFECT_OBSERVATION_ATTESTATION_SCHEMA = "agentlas.uncertain-attempt-observation-attestation.v1";
+/** The host's own closed ledger proved every recorded call observation-only (attempt-effect-receipt.ts). */
+export const EFFECT_RECEIPT_STATEMENT = "receipt_no_outward_call";
+export const EFFECT_RECEIPT_PROOF = "host_receipt_closed_ledger";
 
 /**
  * 효과 관찰(오너 지시 2026-09-23 "직접 보면 알잖아") — Main 이 띄운 읽기 전용 관찰 실행이 바깥을
@@ -634,7 +638,10 @@ export function settleUncertainAttemptsByObservation(runId: string, input: {
   evidence: string;
   observationInvocationRunId: string;
   observationDigest: string;
+  /** "receipt": no look was needed — the host's closed ledger proved no outward call (verdict must be not_done). */
+  proof?: "observation" | "receipt";
 }): LongRunAttemptAcknowledgment {
+  if (input.proof === "receipt" && input.verdict !== "not_done") throw new Error("effect_receipt_verdict_invalid");
   const db = getDb();
   let result: LongRunAttemptAcknowledgment | null = null;
   db.transaction(() => {
@@ -675,8 +682,11 @@ export function settleUncertainAttemptsByObservation(runId: string, input: {
         observationInvocationRunId: input.observationInvocationRunId, observationDigest: input.observationDigest,
         attestation: { schemaVersion: EFFECT_OBSERVATION_ATTESTATION_SCHEMA,
           reviewedAttemptIds: review.attemptIds, reviewedAttemptSetDigest: review.attemptSetDigest,
-          statement: input.verdict === "done" ? "observed_external_outcome_done" : "observed_external_outcome_not_done",
-          externalOutcomeProof: "observed_read_only_by_model", verdict: input.verdict, evidence } },
+          ...(input.proof === "receipt"
+            ? { statement: EFFECT_RECEIPT_STATEMENT, externalOutcomeProof: EFFECT_RECEIPT_PROOF }
+            : { statement: input.verdict === "done" ? "observed_external_outcome_done" : "observed_external_outcome_not_done",
+              externalOutcomeProof: "observed_read_only_by_model" }),
+          verdict: input.verdict, evidence } },
       at: new Date().toISOString() });
     const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;
     if (typeof version !== "number") throw new Error(`long_run_not_found:${runId}`);

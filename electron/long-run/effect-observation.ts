@@ -50,6 +50,7 @@ import { registerOngoingGoalCycle, type GoalWaitSubscription } from "./wait-subs
 import { getChatGoalRevision } from "../store/chat-goals";
 import { confirmDesktopLongRunResumeDispatched, desktopAppInstanceId, failDesktopLongRunResumeDispatch } from "./app-runtime-coordinator";
 import { currentUiLocale } from "../ui-locale";
+import { readAttemptEffectReceipt, receiptSettlesAttempts } from "./attempt-effect-receipt";
 import {
   effectObservationTicket, registerEffectObservationTicket, takeEffectObservationTicket, isGoalObserving,
   markGoalObserving, isAutomationObserving, markAutomationObserving, automationObservationRuntime,
@@ -201,6 +202,10 @@ function scheduleResumeRetryAfterDispatchFailure(longRunId: string, detail: stri
   }
 }
 
+function receiptDigest(scope: string, ids: readonly string[]): string {
+  return `sha256:${createHash("sha256").update(JSON.stringify({ receipt: scope, ids: [...ids].sort() })).digest("hex")}`;
+}
+
 export function effectObservationDigest(longRunId: string, attemptIds: readonly string[], epoch = 0): string {
   // Epoch 0 keeps the original digest; a scheduled re-observation (epoch n) is a new look at the same set.
   return `sha256:${createHash("sha256").update(JSON.stringify({ longRunId, attemptIds: [...attemptIds].sort(),
@@ -253,6 +258,39 @@ function attemptActivity(invocationRunId: string | null): string[] {
   return lines;
 }
 
+/** Query strings may carry tokens: keep only origin + path of any URL inside recorded arguments. */
+function redactUrls(text: string): string {
+  return text.replace(/(https?:\/\/[^\s"'?#]+)[?#][^\s"']*/giu, "$1");
+}
+
+/**
+ * What the look must judge for one interrupted attempt. Measured 2026-09-28 (Youtube launch, invocation 0b8772c1):
+ * the last eight tool rows were three web searches and host status lines, so three looks were shown nothing that
+ * could have changed the channel and were asked about the whole goal instead — each answered unknown. When the
+ * attempt's ledger is closed, the look is shown exactly the calls the host could not prove read-only, with their
+ * arguments; the read-only rest is named as not in question. An open ledger keeps the old recent-activity lines.
+ */
+function attemptActionLines(invocationRunId: string | null): string {
+  if (invocationRunId) {
+    try {
+      const receipt = readAttemptEffectReceipt(invocationRunId);
+      if (receipt.closed) {
+        const calls = receipt.candidates.slice(0, 8).map((call) => `   - ${redactUrls([call.toolName, call.args].filter(Boolean).join(" · "))}`);
+        return [
+          "   calls in question (recorded with their arguments; the app could not prove they only read):",
+          ...(calls.length ? calls : ["   - (none)"]),
+          ...(receipt.candidates.length > 8 ? [`   - …and ${receipt.candidates.length - 8} more`] : []),
+          ...(receipt.readOnlyCalls ? [`   ${receipt.readOnlyCalls} other recorded call(s) only searched, read files or loaded pages; they are not in question.`] : []),
+        ].join("\n");
+      }
+    } catch { /* an unreadable receipt falls back to recent activity */ }
+  }
+  const activity = attemptActivity(invocationRunId);
+  return activity.length ? `   last recorded actions:\n${activity.map((line) => `   - ${line}`).join("\n")}` : "   last recorded actions: (none recorded)";
+}
+
+const READ_ONLY_CALLS_RULE = "- If every call in question visibly only reads (its code or arguments only get state, list tabs, or load/read a page), nothing outside can exist to find: answer not_done and name those calls in the evidence.";
+
 /** 관찰 답의 문장은 채팅에 그대로 보인다 — 화면 언어로 쓰게 한다(한국어 화면에 영어 문장이 섞이던 자리, 2026-09-26). 표식 줄은 언어와 무관하다. */
 function observationReplyLanguage(): string {
   return currentUiLocale() === "ko" ? "Korean" : "English";
@@ -263,12 +301,11 @@ export function buildEffectObservationPrompt(input: {
   attempts: ReadonlyArray<{ id: string; taskTitle: string; taskObjective: string; invocationRunId: string | null }>;
 }): string {
   const blocks = input.attempts.map((attempt, index) => {
-    const activity = attemptActivity(attempt.invocationRunId);
     return [
       `${index + 1}. attempt id: ${attempt.id}`,
       `   task: ${attempt.taskTitle.slice(0, 240)}`,
       attempt.taskObjective && attempt.taskObjective !== attempt.taskTitle ? `   objective: ${attempt.taskObjective.slice(0, 600)}` : null,
-      activity.length ? `   last recorded actions:\n${activity.map((line) => `   - ${line}`).join("\n")}` : "   last recorded actions: (none recorded)",
+      attemptActionLines(attempt.invocationRunId),
     ].filter(Boolean).join("\n");
   }).join("\n");
   const ids = JSON.stringify(input.attempts.map((attempt) => attempt.id));
@@ -285,6 +322,7 @@ Rules for this check:
 - This run is read-only. Do not perform, retry, complete, or undo any action. Do not post, send, submit, buy, reply, like, delete or edit anything.
 - Only look: open or refresh the relevant page in the browser, list recent posts / messages / orders / files, read logs or the working folder, or read this app's own state (for example the registered automations and their schedules).
 - Decide from what you actually see, not from what should have happened.
+${READ_ONLY_CALLS_RULE}
 
 End your answer with exactly one final line, starting with the marker (no code fence, no prefix), covering all attempts above in one verdict:
 ${EFFECT_OBSERVATION_MARKER}{"verdict":"done","attempts":${ids},"evidence":"the URL or short text you saw"}
@@ -292,6 +330,10 @@ ${EFFECT_OBSERVATION_MARKER}{"verdict":"done","attempts":${ids},"evidence":"the 
 - "not_done": you clearly saw it does not exist (the list is visible and the item is absent).
 - "unknown": you could not see it, the attempts differ, or you are not sure. Unknown is always acceptable; a wrong "done" or "not_done" is not.`;
 }
+
+/** The host's own record answered: no look, no person (attempt-effect-receipt.ts). */
+const RECEIPT_KO = "중단된 작업의 기록을 확인했어요. 검색·읽기·페이지 열기만 했고 바깥을 바꾼 동작은 없어서, 다시 보지 않고 이어갑니다.";
+const RECEIPT_EN = "Checked the interrupted work's own record: it only searched, read and opened pages, so nothing outside changed. Continuing without another look.";
 
 function sayExhausted(chatId: string, runId: string): void {
   say(chatId, runId,
@@ -419,6 +461,23 @@ export function maybeDispatchEffectObservation(
     targets = [{ id: `invocation:${last.run_id}`, taskTitle: run.objective.slice(0, 240), taskObjective: "", invocationRunId: last.run_id }];
   }
   const targetIds = targets.map((target) => target.id);
+  // The attempt's own closed receipt answers first — even after the look cap, since it costs no model run.
+  if (kind === "attempts") {
+    const receipt = receiptSettlesAttempts(targets);
+    if (receipt) {
+      const observationRunId = `effect-receipt-${randomUUID()}`;
+      const digest = receiptDigest(run.id, targetIds);
+      appendLongRunEvent({ runId: run.id, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
+        payload: { action: "receipt", observationDigest: digest, observationInvocationRunId: observationRunId,
+          attemptIds: targetIds, trigger: trigger.slice(0, 80), evidence: receipt.evidence } });
+      registerEffectObservationTicket(Object.freeze({ observationRunId, goalId, longRunId: run.id, chatId,
+        attemptIds: Object.freeze([...targetIds]), digest, surface: run.surface, kind, needsBrowser: false, dispatcher }));
+      const outcome = completeEffectObservation({ runId: observationRunId, aborted: false, failed: false, proof: "receipt",
+        parsed: { status: "reported", report: { verdict: "not_done", attemptIds: [...targetIds], evidence: receipt.evidence, outputs: {} } } });
+      return outcome && outcome.outcome !== "fallback" ? { status: "dispatched", runId: observationRunId }
+        : { status: "skipped", reason: outcome?.reason ?? "effect_receipt_settle_failed" };
+    }
+  }
   if (observationExhausted(run.id, targetIds)) return { status: "skipped", reason: EFFECT_OBSERVATION_EXHAUSTED };
   const digest = effectObservationDigest(run.id, targetIds, epoch);
   if (alreadyObserved(run.id, digest)) return { status: "skipped", reason: "already_observed" };
@@ -528,6 +587,8 @@ export function completeEffectObservation(input: {
   parsed: ParsedEffectObservation | null;
   aborted: boolean;
   failed: boolean;
+  /** "receipt": the host's closed ledger answered not_done; nothing was dispatched to look. */
+  proof?: "receipt";
 }): EffectObservationOutcome | null {
   const ticket = takeEffectObservationTicket(input.runId);
   if (!ticket) return null;
@@ -563,7 +624,8 @@ export function completeEffectObservation(input: {
       const settled = ticket.kind === "boundary"
         ? settleBoundaryByObservation(current.id, ticket, verdict, report.evidence)
         : settleUncertainAttemptsByObservation(current.id, { attemptIds: ticket.attemptIds, verdict,
-          evidence: report.evidence, observationInvocationRunId: ticket.observationRunId, observationDigest: ticket.digest });
+          evidence: report.evidence, observationInvocationRunId: ticket.observationRunId, observationDigest: ticket.digest,
+          ...(input.proof === "receipt" ? { proof: "receipt" as const } : {}) });
       getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
         .run(new Date().toISOString(), ticket.goalId);
       const wait = ongoingWaitAfterObservation(current, ticket, settled.version);
@@ -591,10 +653,10 @@ export function completeEffectObservation(input: {
     return { outcome: "wait_registered", verdict, waitId: prepared.wait.waitId };
   }
   say(ticket.chatId, ticket.observationRunId,
-    verdict === "done"
+    input.proof === "receipt" ? RECEIPT_KO : verdict === "done"
       ? "확인해 보니 이전 작업은 이미 반영돼 있었어요. 다시 하지 않고 다음 작업을 이어갑니다."
       : "확인해 보니 이전 작업은 반영되지 않았어요. 다시 시도하며 이어갑니다.",
-    verdict === "done"
+    input.proof === "receipt" ? RECEIPT_EN : verdict === "done"
       ? "Checked: the earlier action already went through. Continuing with the next step without redoing it."
       : "Checked: the earlier action did not go through. Continuing and trying it again.");
   try {
@@ -720,8 +782,8 @@ interface AutomationObservationPlan {
   digest: string;
 }
 
-function planAutomationObservation(runtime: AutomationObservationRuntime, automationId: string, epoch = 0):
-  { plan: AutomationObservationPlan } | { skip: string } {
+function planAutomationObservation(runtime: AutomationObservationRuntime, automationId: string, epoch = 0,
+  options: { ignoreDigest?: boolean } = {}): { plan: AutomationObservationPlan } | { skip: string } {
   if (isAutomationObserving(automationId)) return { skip: "in_flight" };
   const automation = getAutomation(automationId);
   if (!automation) return { skip: "automation_missing" };
@@ -749,7 +811,7 @@ function planAutomationObservation(runtime: AutomationObservationRuntime, automa
     occurrenceId: hold?.occurrenceId ?? null, checkpointDigest: hold?.checkpointDigest ?? null, ids,
     ...(value > 0 ? { epoch: value } : {}) });
   let digest = digestFor(epoch);
-  if (automationAlreadyObserved(automationId, digest)) {
+  if (!options.ignoreDigest && automationAlreadyObserved(automationId, digest)) {
     // A Goal-bound hold has its own re-observation schedule (scheduleObservationRetry).
     if (epoch !== 0 || goal || !hold) return { skip: "already_observed" };
     const retry = nextAutomationObservationEpoch(automationId, digestFor);
@@ -773,13 +835,10 @@ export function buildAutomationEffectObservationPrompt(plan: AutomationObservati
       activity.length ? `   last recorded actions:\n${activity.map((line) => `   - ${line}`).join("\n")}` : "   last recorded actions: (none recorded)",
     ].filter(Boolean).join("\n");
   });
-  const attempts = (goal?.attempts ?? []).map((attempt, index) => {
-    const activity = attemptActivity(attempt.invocationRunId);
-    return [
-      `${steps.length + index + 1}. target id: ${attempt.id} — goal task "${attempt.taskTitle.slice(0, 240)}"`,
-      activity.length ? `   last recorded actions:\n${activity.map((line) => `   - ${line}`).join("\n")}` : "   last recorded actions: (none recorded)",
-    ].join("\n");
-  });
+  const attempts = (goal?.attempts ?? []).map((attempt, index) => [
+    `${steps.length + index + 1}. target id: ${attempt.id} — interrupted turn of goal task "${attempt.taskTitle.slice(0, 240)}"`,
+    attemptActionLines(attempt.invocationRunId),
+  ].join("\n"));
   const ids = JSON.stringify(plan.ids);
   const outputsHint = hold?.nodes.some((node) => node.produces)
     ? `,"outputs":{"node:<id>":"exact produced text, only if you saw it"}` : "";
@@ -794,7 +853,7 @@ Rules for this check:
 - This run is read-only. Do not perform, retry, complete, or undo any action. Do not post, send, submit, buy, reply, like, delete or edit anything.
 - Only look: open or refresh the relevant page in the browser (this automation's own browser profile), list recent posts / messages / orders / files, read logs.
 - Decide from what you actually see, not from what should have happened.
-
+${goal?.attempts.length ? `${READ_ONLY_CALLS_RULE}\n` : ""}
 End your answer with exactly one final line, starting with the marker (no code fence, no prefix), covering all targets above in one verdict:
 ${EFFECT_OBSERVATION_MARKER}{"verdict":"done","attempts":${ids},"evidence":"the URL or short text you saw"${outputsHint}}
 - "done": you saw that the result exists. "not_done": you clearly saw it does not exist. "unknown": anything else, or the targets differ. Unknown is always acceptable; a wrong "done" or "not_done" is not.`;
@@ -811,9 +870,36 @@ function sayGoal(plan: AutomationObservationPlan, runId: string, ko: string, en:
 export function maybeDispatchAutomationEffectObservation(
   runtime: AutomationObservationRuntime, automationId: string, trigger: string, options: { epoch?: number } = {},
 ): EffectObservationDispatchResult & { settled?: Promise<AutomationEffectObservationOutcome> } {
+  // A Goal's uncertain attempts (no graph hold) are answered by their own closed receipt first — no look, no person.
+  // Measured 2026-09-28 (Youtube launch): one owner-interrupted turn of searches and reads took four looks and two
+  // "3번 확인했지만 판단할 수 없어" notices; its receipt proves no outward call.
+  const receiptPlanned = planAutomationObservation(runtime, automationId, options.epoch ?? 0, { ignoreDigest: true });
+  if ("plan" in receiptPlanned && !receiptPlanned.plan.hold && receiptPlanned.plan.goal?.attempts.length) {
+    const receipt = receiptSettlesAttempts(receiptPlanned.plan.goal.attempts);
+    if (receipt) {
+      const receiptRunId = `effect-receipt-${randomUUID()}`;
+      const plan = { ...receiptPlanned.plan, digest: receiptDigest(`automation:${automationId}`, receiptPlanned.plan.ids) };
+      recordRunEvent({ runId: receiptRunId, kind: AUTOMATION_EFFECT_OBSERVATION_EVENT_KIND, automationId,
+        payload: { action: "receipt", observationDigest: plan.digest, observationInvocationRunId: receiptRunId,
+          targetIds: plan.ids, goalId: plan.goal!.goalId, trigger: trigger.slice(0, 80), evidence: receipt.evidence } });
+      appendLongRunEvent({ runId: plan.goal!.longRunId, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
+        payload: { action: "receipt", observationDigest: plan.digest, observationInvocationRunId: receiptRunId,
+          attemptIds: plan.goal!.attempts.map((attempt) => attempt.id), automationId, trigger: trigger.slice(0, 80), evidence: receipt.evidence } });
+      const outcome = completeAutomationEffectObservation({ runtime, plan, observationRunId: receiptRunId, aborted: false, failed: false,
+        proof: "receipt", parsed: { status: "reported", report: { verdict: "not_done", attemptIds: [...plan.ids], evidence: receipt.evidence, outputs: {} } } });
+      return outcome.outcome === "reconciled"
+        ? { status: "dispatched", runId: receiptRunId, settled: Promise.resolve(outcome) }
+        : { status: "skipped", reason: outcome.reason };
+    }
+  }
   const planned = planAutomationObservation(runtime, automationId, options.epoch ?? 0);
   if ("skip" in planned) return { status: "skipped", reason: planned.skip };
   const plan = planned.plan;
+  // The Goal's look cap holds on this path too: before, a Goal continued by an automation skipped it, so a fourth
+  // look ran after the cap and the owner got the exhausted notice twice (Youtube launch 22:13Z and 22:54Z).
+  if (plan.goal && observationExhausted(plan.goal.longRunId, plan.goal.attempts.map((attempt) => attempt.id))) {
+    return { status: "skipped", reason: EFFECT_OBSERVATION_EXHAUSTED };
+  }
   const observationRunId = `effect-observation-${randomUUID()}`;
   const session = getOrCreateAutomationSession({
     automationId, projectId: plan.automation.projectId ?? null, runtimeSelection: plan.automation.runtimeSelection ?? null,
@@ -865,7 +951,7 @@ export type AutomationEffectObservationOutcome =
 
 function completeAutomationEffectObservation(input: {
   runtime: AutomationObservationRuntime; plan: AutomationObservationPlan; observationRunId: string;
-  parsed: ParsedEffectObservation | null; aborted: boolean; failed: boolean;
+  parsed: ParsedEffectObservation | null; aborted: boolean; failed: boolean; proof?: "receipt";
 }): AutomationEffectObservationOutcome {
   const { plan, runtime, observationRunId } = input;
   const automationId = plan.automation.id;
@@ -936,7 +1022,8 @@ function completeAutomationEffectObservation(input: {
         }
         if (plan.goal.attempts.length) {
           settleUncertainAttemptsByObservation(current.id, { attemptIds: plan.goal.attempts.map((attempt) => attempt.id), verdict,
-            evidence: report.evidence, observationInvocationRunId: observationRunId, observationDigest: plan.digest });
+            evidence: report.evidence, observationInvocationRunId: observationRunId, observationDigest: plan.digest,
+            ...(input.proof === "receipt" ? { proof: "receipt" as const } : {}) });
         }
         if (unsettledLongRunAttempts(current.id).length) throw new Error("auto_goal_resume_attempt_unsettled");
         const version = getLongRun(current.id)!.version;
@@ -972,10 +1059,10 @@ function completeAutomationEffectObservation(input: {
     }
   }
   sayGoal(plan, observationRunId,
-    verdict === "done"
+    input.proof === "receipt" ? RECEIPT_KO : verdict === "done"
       ? "확인해 보니 이전 작업은 이미 반영돼 있었어요. 다시 하지 않고 다음 작업을 이어갑니다."
       : "확인해 보니 이전 작업은 반영되지 않았어요. 다시 시도하며 이어갑니다.",
-    verdict === "done"
+    input.proof === "receipt" ? RECEIPT_EN : verdict === "done"
       ? "Checked: the earlier action already went through. Continuing with the next step without redoing it."
       : "Checked: the earlier action did not go through. Continuing and trying it again.");
   return { outcome: "reconciled", verdict, reconciled: Boolean(result.reconciled), goalResumed, enqueued };

@@ -9,7 +9,7 @@ import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
-import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalMessage, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
+import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
 import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
@@ -3406,11 +3406,15 @@ export class InvocationService {
               // let the turn end through verification like any finite turn.
               finiteTimerEndsTurn = true;
               const message = finiteGoalTimerRefusalMessage(pickLocale(runReq), requestedIntent, reason);
-              appendChatMessage(chat.id, "assistant", message);
+              // One notice per Goal revision: a goal whose turns keep asking for a follow-up must not repeat the same
+              // line every cycle (the refusal is recorded every time; the chat line is not).
+              const alreadyTold = goalWaitRefusalAlreadyNotified({ chatId: chat.id, goalId: current.goalId,
+                revision: revision?.revision ?? null, reason });
+              if (!alreadyTold) appendChatMessage(chat.id, "assistant", message);
               tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_refused", payload: { goalId: current.goalId,
-                reasonCode: reason, disposition: "turn_end_verification",
+                revision: revision?.revision ?? null, reasonCode: reason, disposition: "turn_end_verification", notified: !alreadyTold,
                 notBefore: requestedIntent?.subject.kind === "timer" ? requestedIntent.subject.notBefore : null } });
-              this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
+              if (!alreadyTold) this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
                 notice: { code: GOAL_WAIT_FINITE_TIMER_NOTICE, level: "info", message } } });
             } else if (current?.status === "running" && revision?.lifecycle === "ongoing"
               && !controller.signal.aborted && !record.hasTransientAttachments) {

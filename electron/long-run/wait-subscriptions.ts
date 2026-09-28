@@ -156,8 +156,16 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
         input = { ...input, intent: { ...input.intent, subject: { kind: "timer", notBefore: authority.deadlineAt } } };
       }
       if (input.intent.subject.kind !== "timer") throw new Error("goal_wait_timer_invalid");
-      const due = Date.parse(input.intent.subject.notBefore);
-      if (due < now + 60_000 || (input.intent.deadline && due >= Date.parse(input.intent.deadline))) throw new Error("goal_wait_timer_invalid");
+      let due = Date.parse(input.intent.subject.notBefore);
+      // notBefore is the earliest time, so a too-soon timer is served at the minimum spacing instead of refused.
+      // Measured 2026-09-28 (Youtube launch 34e108bb): "wait for the app restart, then re-check the browser" asked for
+      // notBefore 47 s after the turn; a refusal here blocked the Goal on a person ("reply with the time you want").
+      if (Number.isFinite(due) && due < now + 60_000) {
+        due = now + 60_000;
+        input = { ...input, intent: { ...input.intent, subject: { kind: "timer", notBefore: new Date(due).toISOString() } } };
+      }
+      if (!Number.isFinite(due) || (authority.deadlineAt && due > Date.parse(authority.deadlineAt))
+        || (input.intent.deadline && due >= Date.parse(input.intent.deadline))) throw new Error("goal_wait_timer_invalid");
     }
     if (input.recoveryMode && (!ownsHostGoalLoop(run.surface) || input.intent.subject.kind !== "timer"
       || run.stallStreak < run.stallWindow || !input.recoveryProgressKey

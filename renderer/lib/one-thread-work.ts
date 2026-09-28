@@ -141,3 +141,22 @@ export function planOneThreadWork(input: {
   }
   return { afterMessage, leading };
 }
+
+/**
+ * May the settlement of a run in `settleChatId` repaint the screen's live Activity?
+ *
+ * ★ 오너 신고 2026-09-28 — "X 자동화 결과가 Thread Marketing 단톡에 뜬다".
+ * DB·원장에는 X 대화 행이 Thread 대화에 한 줄도 없었다(표시 전용 결함). X Marketing 의
+ * 실행(484f24f2, 22:54:43Z 종료)이 끝난 직후 오너가 Thread Marketing 으로 옮겼고
+ * (last_viewed 22:54:47Z), 끝난 실행의 정산(settleRun)이 refreshAll·영수증·원장 읽기를
+ * 기다린 뒤 **어느 대화가 화면에 있는지 보지 않고** 그 실행의 Activity 를 화면에 칠했다.
+ * 화면은 "방금 끝난 실행 = 이 대화의 마지막 블록"으로 그리므로(threadWorkPlan), X 의
+ * 작업 블록과 단톡 대화가 Thread 대화 끝에 붙었다. 대화 전환은 runChatIdRef 를 새 대화로
+ * 동기적으로 바꾸므로, 정산이 칠해도 되는지는 그 값 하나로 가른다.
+ */
+export function settledRunMayPaintScreen(input: {
+  settleChatId: string;
+  screenRunChatId: string | null;
+}): boolean {
+  return Boolean(input.settleChatId) && input.screenRunChatId === input.settleChatId;
+}

@@ -71,6 +71,8 @@ const READ_ONLY_EXECUTABLES = new Set([
   "id", "cut", "tr", "jq", "diff", "cmp", "md5", "shasum", "sha256sum",
 ]);
 const READ_ONLY_GIT = new Set(["status", "log", "show", "diff", "rev-parse", "ls-files", "blame"]);
+/** Lookup-only executables whose every form reads (recorded 0b8772c1: `printenv A; printenv B`, `command -v yt-dlp`). */
+const READ_ONLY_LOOKUPS = new Set(["printenv", "type", "whereis"]);
 
 function unwrapShell(command: string): string {
   let current = command.trim();
@@ -110,7 +112,9 @@ function readOnlySimpleCommand(segment: string): boolean {
   if (exe === "rg") return !rest.some((word) => /^--(?:pre|replace|command)(?:=|$)/u.test(word));
   if (exe === "find") return !rest.some((word) => /^-(?:exec|execdir|ok|okdir|delete|fprint|fprint0|fprintf|fls)$/u.test(word));
   if (exe === "git") return READ_ONLY_GIT.has(rest[0] ?? "") && !rest.some((word) => /^--output(?:=|$)/u.test(word));
-  return READ_ONLY_EXECUTABLES.has(exe);
+  // `command NAME` runs NAME; only the lookup forms `command -v|-V NAME…` are reads.
+  if (exe === "command") return (rest[0] === "-v" || rest[0] === "-V") && rest.length > 1 && rest.slice(1).every((word) => !word.startsWith("-"));
+  return READ_ONLY_EXECUTABLES.has(exe) || READ_ONLY_LOOKUPS.has(exe);
 }
 
 /** True only for commands made entirely of read-only simple commands joined by && || ; or |. */
@@ -149,13 +153,56 @@ function shellCommand(args: Record<string, unknown> | null): string | null {
 }
 
 /**
- * Whether a finished-but-failed call provably left the outside world unchanged, judged only from its
- * recorded name and arguments. Unknown names and unproven argument shapes answer false.
+ * The runtime's own web search (codex `web_search`, Claude `WebSearch`) returns search results to the model and
+ * has no argument that can post, send or write. Recorded 0b8772c1 (Youtube launch, 2026-09-27): seven searches were
+ * the "last recorded actions" of an interrupted attempt that three read-only looks could never settle.
  */
-export function failedCallLeftNoOutsideEffect(input: { toolName: unknown; toolArgs: unknown }): boolean {
+const RUNTIME_WEB_SEARCH = new Set(["web_search", "WebSearch"]);
+
+/**
+ * Playwright MCP spoken by another server name (codex's own `playwright` plugin: `playwright.browser_navigate`;
+ * Claude spelling `mcp__playwright__…` / `mcp__plugin_playwright_playwright__…`). Same tool contract as the bundled
+ * browser, so the same argument proof applies; only the name spelling differs.
+ */
+const PLAYWRIGHT_BROWSER = /^(?:playwright\.|mcp__playwright__|mcp__plugin_playwright_playwright__)(browser_[a-z_]+)$/u;
+
+/**
+ * Codex computer use (`cua_repl.js`) runs JavaScript, so it is judged by its code: only a program made entirely of
+ * awaited getter calls on `cua` (or on a handle one of them returned) with literal arguments is a read. Anything
+ * else — tab.click, setValue, typeText, goto, createBrowserTab, expressions, templates, functions — stays unproven.
+ * Recorded 0b8772c1: `await cua.getState();` and `let tab = await cua.getTab("…", { browser: "1" });`.
+ */
+const CUA_TOOL_NAMES = new Set(["cua_repl.js", "mcp__cua_repl__js"]);
+const CUA_READ_METHODS = new Set(["getState", "getTab", "getApp", "getBrowser", "listTabs", "getAXState", "getScreenshot", "getAXStateAndScreenshot"]);
+const JS_LITERAL = String.raw`(?:"[^"\\\n]*"|'[^'\\\n]*'|-?\d+(?:\.\d+)?|true|false|null)`;
+const JS_ARG = String.raw`(?:${JS_LITERAL}|\{\s*(?:[A-Za-z_$][\w$]*\s*:\s*${JS_LITERAL}\s*,?\s*)*\})`;
+const CUA_READ_STATEMENT = new RegExp(String.raw`^(?:(?:let|const|var)\s+([A-Za-z_$][\w$]*)\s*=\s*)?await\s+([A-Za-z_$][\w$]*)\.([A-Za-z]+)\(\s*(?:${JS_ARG}\s*(?:,\s*${JS_ARG}\s*)*)?\)$`, "u");
+
+export function isReadOnlyCuaCode(code: unknown): boolean {
+  if (typeof code !== "string" || !code.trim() || code.length > 2_000) return false;
+  const statements = code.split(/[;\n]/u).map((statement) => statement.trim()).filter(Boolean);
+  if (!statements.length || statements.length > 8) return false;
+  const handles = new Set(["cua"]);
+  for (const statement of statements) {
+    const match = CUA_READ_STATEMENT.exec(statement);
+    if (!match || !handles.has(match[2]) || !CUA_READ_METHODS.has(match[3])) return false;
+    if (match[1]) handles.add(match[1]);
+  }
+  return true;
+}
+
+/**
+ * Whether a recorded call provably left the outside world unchanged, judged only from its recorded name and
+ * arguments (never its result text). Holds for a failed call and for a finished one alike: these calls only read.
+ * Unknown names and unproven argument shapes answer false.
+ */
+export function callLeftNoOutsideEffect(input: { toolName: unknown; toolArgs: unknown }): boolean {
   if (typeof input.toolName !== "string" || !input.toolName.trim()) return false;
   const name = input.toolName.trim();
-  const browser = canonicalAgentlasBrowserToolName(name);
+  if (RUNTIME_WEB_SEARCH.has(name)) return true;
+  if (CUA_TOOL_NAMES.has(name)) return isReadOnlyCuaCode(parseArgs(input.toolArgs)?.code);
+  const playwright = PLAYWRIGHT_BROWSER.exec(name);
+  const browser = playwright ? `${BROWSER_PREFIX}${playwright[1]}` : canonicalAgentlasBrowserToolName(name);
   if (browser.startsWith(BROWSER_PREFIX)) {
     const args = parseArgs(input.toolArgs ?? "{}");
     if (!args) return false;
@@ -168,4 +215,9 @@ export function failedCallLeftNoOutsideEffect(input: { toolName: unknown; toolAr
     return command !== null && isNoEffectShellCommand(command);
   }
   return false;
+}
+
+/** A finished-but-failed call that provably left the outside world unchanged (see callLeftNoOutsideEffect). */
+export function failedCallLeftNoOutsideEffect(input: { toolName: unknown; toolArgs: unknown }): boolean {
+  return callLeftNoOutsideEffect(input);
 }

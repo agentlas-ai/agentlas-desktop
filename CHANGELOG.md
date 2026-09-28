@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.48 — 2026-09-28
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Science service updated to 0.1.36: Science tools no longer risk failing together from an
+  oversized launch environment, drafting continues the same manuscript, and loop turns start
+  writing sooner.
+- A finished run no longer appears inside another chat you switched to.
+- Goal chats scroll smoothly: past messages are not re-rendered on every update, and a run
+  ending or streaming no longer pulls you away from where you were reading.
+- Goals no longer stop with "could not verify" after an interrupted turn that only looked
+  things up; the app settles it from its own record and continues.
+- A refused short recheck no longer says the Goal is finishing; it says what it was waiting
+  for and continues next cycle, and sub-minute rechecks are accepted at one minute.
+
 ## 1.2.47 — 2026-09-28
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.

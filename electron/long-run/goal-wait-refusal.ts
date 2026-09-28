@@ -15,6 +15,7 @@
  * what went wrong and what the owner can do (owner rule "raised errors must have a way out").
  */
 import type { GoalWaitIntent } from "./wait-emitter";
+import { getDb } from "../store/db";
 
 export const GOAL_WAIT_FINITE_TIMER_NOTICE = "goal-wait-finite-timer";
 
@@ -22,6 +23,14 @@ function followUpDate(intent: GoalWaitIntent | null | undefined): string | null 
   if (intent?.subject.kind !== "timer") return null;
   const at = Date.parse(intent.subject.notBefore);
   return Number.isFinite(at) ? new Date(at).toISOString().slice(0, 10) : null;
+}
+
+/** Whether this Goal revision's chat was already told about this refusal (the notice is once per revision). */
+export function goalWaitRefusalAlreadyNotified(input: { chatId: string; goalId: string; revision: number | null; reason: string }): boolean {
+  return Boolean(getDb().prepare(`SELECT 1 FROM run_events WHERE chat_id = ? AND kind = 'goal_wait_refused'
+    AND json_extract(payload_json, '$.goalId') = ? AND json_extract(payload_json, '$.revision') IS ?
+    AND json_extract(payload_json, '$.reasonCode') = ? AND json_extract(payload_json, '$.notified') = 1 LIMIT 1`)
+    .get(input.chatId, input.goalId, input.revision, input.reason));
 }
 
 /** A timer refused only because the Goal is finite ends the turn; it does not block the Goal. */
@@ -44,10 +53,14 @@ export function finiteGoalTimerRefusalMessage(locale: "ko" | "en", intent: GoalW
       ? "목표 마감이 지나 더 기다리지 않고, 지금 결과를 목표치와 대조해 검증합니다."
       : "The goal's deadline has passed, so there is no further wait: the result is now verified against the target.";
   }
+  // Measured 2026-09-28 (Youtube launch, a 3-month finite goal whose plan predates the deadline field): the old copy
+  // said "verifying the results so far to close the goal" for a goal that was far from done and kept running, and told
+  // the owner to type a sentence. The refusal only ends this turn; say what was waiting and that the goal goes on.
   const date = followUpDate(intent);
+  const next = intent?.nextAction?.replace(/\s+/g, " ").trim().slice(0, 160) ?? "";
   return locale === "ko"
-    ? `이 목표는 한 번에 끝내는 작업으로 등록돼 있어서 ${date ? `${date} ` : ""}재확인 예약은 만들지 않았어요. 지금까지의 결과를 검증해 이 목표를 마무리합니다. 목표가 닫힌 뒤에도 계속 추적하길 원하시면 "멈추라고 할 때까지 매주 팔로워와 반응을 확인하고 이어가줘"처럼 보내 주세요. 멈출 때까지 도는 목표로 새로 잡습니다.`
-    : `This goal is registered as a one-time task, so the ${date ? `${date} ` : ""}follow-up check was not scheduled. I'm verifying the results so far to close the goal. After it closes, if you want continued tracking, send something like "Check followers and engagement every week and keep going until I say stop" — that starts a goal that runs until you stop it.`;
+    ? `이 목표는 마감 없이 한 번 끝내는 목표라 ${date ? `${date} ` : ""}재확인 예약${next ? `(“${next}”)` : ""}은 걸지 않았어요. 목표를 닫는 건 아니에요: 이번 턴은 지금까지의 결과로 검증하고, 아직 끝나지 않았으면 목표의 다음 회차에 이어갑니다.`
+    : `This goal is a one-time goal without a deadline, so the ${date ? `${date} ` : ""}follow-up${next ? ` ("${next}")` : ""} was not scheduled. The goal is not closed: this turn is verified against the results so far, and if the goal is not done it continues at its next cycle.`;
 }
 
 /** Specific copy for a refused wait that does block the Goal. */

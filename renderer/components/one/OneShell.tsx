@@ -216,7 +216,7 @@ import {
   outputPresentationKindForName,
   type OutputPresentationKind,
 } from "@/lib/output-presentation";
-import { planOneThreadWork, projectThreadRuns, type OneThreadRunBlock } from "@/lib/one-thread-work";
+import { planOneThreadWork, projectThreadRuns, settledRunMayPaintScreen, type OneThreadRunBlock } from "@/lib/one-thread-work";
 import { memberUnavailable, speakableCountIncludingOne } from "@/lib/one-team-availability";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 
@@ -2139,10 +2139,21 @@ export function OneShell() {
     });
   }, []);
 
+  /*
+   * ★위로 올린 사람은 흐름이 다시 끌어내리지 않는다 (실측 2026-09-28, X Marketing).
+   *   따라가기가 "맨 아래 160px 안" 만 봐서, 답이 흐르는 중에 휠 한 칸(100px)씩 올리면 다음 조각이
+   *   곧바로 맨 아래로 되돌렸다 — 800px 올려도 맨 아래에서 21px 에 머물렀다. 위로 움직인 것은 사람의 뜻이다.
+   *   맨 아래에 다시 닿으면 따라가기가 돌아온다(내용이 줄어 브라우저가 올린 것도 거기서 풀린다).
+   */
+  const readerLeftLatestRef = useRef(false);
+  const lastScrollTopRef = useRef(0);
   const syncScrollToLatestButton = useCallback(() => {
     const scroller = scrollRef.current;
     if (!scroller) return;
     const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
+    if (scroller.scrollTop < lastScrollTopRef.current - 1) readerLeftLatestRef.current = true;
+    if (distanceFromBottom <= 4) readerLeftLatestRef.current = false;
+    lastScrollTopRef.current = scroller.scrollTop;
     const hasOverflow = scroller.scrollHeight - scroller.clientHeight > 96;
     setShowScrollToLatest(hasOverflow && distanceFromBottom >= 96);
   }, []);
@@ -2227,7 +2238,7 @@ export function OneShell() {
     const scroller = scrollRef.current;
     if (!scroller) return;
     const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
-    if (distanceFromBottom > 160) return;
+    if (readerLeftLatestRef.current || distanceFromBottom > 160) return;
     window.requestAnimationFrame(() => {
       const live = scrollRef.current;
       if (!live) return;
@@ -2860,6 +2871,10 @@ export function OneShell() {
     if (ledgerEvents.length === 0) return;
     const restoredActivity = projectOneActivityFromLedger(ledgerEvents, latestReceipt);
     cacheOneActivity(chatId, restoredActivity);
+    // The person may have opened another conversation while this settle awaited
+    // Main. The screen's Activity is drawn as *that* conversation's last block, so
+    // painting it here put X Marketing's run into Thread Marketing (2026-09-28).
+    if (!settledRunMayPaintScreen({ settleChatId: chatId, screenRunChatId: runChatIdRef.current })) return;
     activityEventRunIdRef.current = latestReceipt.runId;
     setActivityStateRunId(latestReceipt.runId);
     setActivity(restoredActivity);
@@ -2959,7 +2974,8 @@ export function OneShell() {
     }
     if (event.kind === "surface") {
       if (event.oneSurface) setSurface(event.oneSurface);
-      scrollToLatest();
+      // 위로 올려 읽는 중이면 자리를 뺏지 않는다(아래 final 과 같은 규칙).
+      followStreamToLatest();
       if (!taskId) void reconcileConversationTask(chatId);
       return;
     }
@@ -2994,7 +3010,12 @@ export function OneShell() {
       streamTextRef.current = "";
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
-      scrollToLatest();
+      /*
+       * ★실행이 끝났다고 읽던 자리를 뺏지 않는다 (실측 2026-09-28, X Marketing).
+       *   목표 대화는 몇 분마다 실행이 끝나는데, 끝날 때마다 무조건 맨 아래로 부드럽게 끌어내려
+       *   위로 올려 읽던 사람이 4,000px → 21,617px 로 튕겼다. 맨 아래를 보고 있을 때만 따라간다.
+       */
+      followStreamToLatest();
       void settleRun(chatId, taskId, settledRunId);
       return;
     }
@@ -3347,9 +3368,11 @@ export function OneShell() {
        * ★대화를 열면 **가장 최근 말**이 보여야 한다 (실측 2026-09-08).
        *   60개짜리 대화를 열어 재 보니 One 은 맨 위에 머물렀다(스크롤 0 / 전체 4,628px,
        *   마지막 메시지는 화면 아래 4,364px 지점). Work 는 같은 조건에서 아래로 내려간다.
-       *   실행 중에 붙은 경우는 이미 다른 자리에서 따라 내려가므로 여기서는 첫 수화만.
+       *   ★실행 중인 대화도 내린다 (실측 2026-09-28, X Marketing): "다른 자리에서 따라 내려간다"는
+       *   가정은 틀렸다 — 흐름 따라가기는 맨 아래 160px 안에서만 움직여, 목표가 돌고 있는 대화를
+       *   열면 scrollTop 0(20,700px 위 맨 처음 말)에 머물렀다.
        */
-      if (!cancelled && shownThreadChatIdRef.current === chatId && !attachment) {
+      if (!cancelled && shownThreadChatIdRef.current === chatId) {
         pinToLatest();
       }
     }).catch((cause) => {
@@ -3850,11 +3873,15 @@ export function OneShell() {
     };
   }, [activeThreadChatId, busy, surface?.manifestId]);
 
+  // 산출물 목록은 실행 이벤트마다 자란다. 콜백이 그것에 매이면 모든 말풍선의 Markdown memo 가
+  // 이벤트마다 깨진다(2026-09-28 X Marketing 스크롤 끊김) — 누를 때 최신 값을 읽는다.
+  const runtimeArtifactsRef = useRef(runtimeArtifacts);
+  runtimeArtifactsRef.current = runtimeArtifacts;
   const openOneLinkedFile = useCallback((file: LinkedFileArtifact) => {
     if (!activeThreadChatId) return;
     requestReadableContextRailWidth();
     const normalized = (file.path || file.paths?.[0] || file.href || file.name).replace(/\\/g, "/").toLowerCase();
-    const matched = runtimeArtifacts.find((artifact) => {
+    const matched = runtimeArtifactsRef.current.find((artifact) => {
       const label = artifact.label.replace(/\\/g, "/").toLowerCase();
       return label === file.name.toLowerCase()
         || normalized.endsWith(`/${label}`)
@@ -3869,7 +3896,7 @@ export function OneShell() {
     if (typeof window !== "undefined") {
       window.dispatchEvent(new CustomEvent("agentlas:in-app-linked-file", { detail: { ...file, chatId: activeThreadChatId } }));
     }
-  }, [activeThreadChatId, requestReadableContextRailWidth, runtimeArtifacts]);
+  }, [activeThreadChatId, requestReadableContextRailWidth]);
   const openOneChatFile = useCallback(async (file: ChatFileItem) => {
     setContextRailOpen(true);
     requestReadableContextRailWidth();
