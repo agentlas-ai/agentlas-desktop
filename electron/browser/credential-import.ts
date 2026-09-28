@@ -729,23 +729,28 @@ async function stopMacCookieImportBrowser(child: ChildProcess): Promise<void> {
   }
 }
 
+/** Portable (Playwright/CDP) shape of one decrypted source cookie. Values stay in memory only. */
+export interface PortableSourceCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires?: number;
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite?: "Strict" | "Lax" | "None";
+}
+
 /**
- * macOS Chromium does not reliably adopt cookie rows written into a closed DB:
- * it can accept the SQLite schema and ciphertext, then discard authentication
- * rows during OSCrypt/store initialization. Feed the selected plaintext only to
- * the loopback CDP of one attested Agentlas runtime instead. The runtime writes
- * its own durable encrypted row, values never enter logs/files, and the exact
- * browser root is reaped before the maintenance window is released.
+ * Decrypt the selected macOS source rows into the portable cookie shape. Shared by the
+ * maintenance-window import and the login-recovery targeted feed, so both use exactly one
+ * decryption path. The caller must call `wipe()` once the cookies were handed to a browser.
  */
-async function importMacCookiesThroughDedicatedRuntime(
+function decryptMacSourceCookies(
   browser: string,
   schemaVersion: number,
   jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>,
-  explicitImport: boolean,
-): Promise<MacCdpCookieImportResult> {
-  if (jobs.length === 0) {
-    return { accepted: 0, domains: [], verifiedDomains: [], loginRequiredDomains: [] };
-  }
+): { cookies: PortableSourceCookie[]; cookieDomain: Map<string, string>; wipe: () => void } {
   const sourceService = MAC_SAFE_STORAGE_SERVICE[browser];
   if (!sourceService) throw new Error(importCopy(`${browser}의 macOS 쿠키 암호화 방식을 지원하지 않습니다.`, `${browser}'s macOS cookie encryption is not supported.`));
   const sourceKey = readMacSafeStorageKey(sourceService);
@@ -754,16 +759,7 @@ async function importMacCookiesThroughDedicatedRuntime(
   }
 
   const plaintexts: Buffer[] = [];
-  const cookies: Array<{
-    name: string;
-    value: string;
-    domain: string;
-    path: string;
-    expires?: number;
-    httpOnly: boolean;
-    secure: boolean;
-    sameSite?: "Strict" | "Lax" | "None";
-  }> = [];
+  const cookies: PortableSourceCookie[] = [];
   const cookieDomain = new Map<string, string>();
   try {
     for (const job of jobs) {
@@ -793,7 +789,7 @@ async function importMacCookiesThroughDedicatedRuntime(
         if (Number(row.has_expires ?? 0) !== 0 && Number.isFinite(expires) && expires <= Date.now() / 1000) {
           continue;
         }
-        const cookie: (typeof cookies)[number] = {
+        const cookie: PortableSourceCookie = {
           name,
           value,
           domain: hostKey,
@@ -812,18 +808,41 @@ async function importMacCookiesThroughDedicatedRuntime(
   } finally {
     sourceKey.fill(0);
   }
+
+  return { cookies, cookieDomain, wipe: () => { for (const plaintext of plaintexts) plaintext.fill(0); } };
+}
+
+/**
+ * macOS Chromium does not reliably adopt cookie rows written into a closed DB:
+ * it can accept the SQLite schema and ciphertext, then discard authentication
+ * rows during OSCrypt/store initialization. Feed the selected plaintext only to
+ * the loopback CDP of one attested Agentlas runtime instead. The runtime writes
+ * its own durable encrypted row, values never enter logs/files, and the exact
+ * browser root is reaped before the maintenance window is released.
+ */
+async function importMacCookiesThroughDedicatedRuntime(
+  browser: string,
+  schemaVersion: number,
+  jobs: Array<{ domain: string; rows: Record<string, unknown>[] }>,
+  explicitImport: boolean,
+): Promise<MacCdpCookieImportResult> {
+  if (jobs.length === 0) {
+    return { accepted: 0, domains: [], verifiedDomains: [], loginRequiredDomains: [] };
+  }
+  const decrypted = decryptMacSourceCookies(browser, schemaVersion, jobs);
+  const { cookies, cookieDomain } = decrypted;
   if (cookies.length === 0) {
-    for (const plaintext of plaintexts) plaintext.fill(0);
+    decrypted.wipe();
     return { accepted: 0, domains: [], verifiedDomains: [], loginRequiredDomains: [] };
   }
 
   const runtime = resolveAgentlasBrowserRuntime();
   if (!runtime?.executable || !fs.existsSync(runtime.executable)) {
-    for (const plaintext of plaintexts) plaintext.fill(0);
+    decrypted.wipe();
     throw new Error(importCopy("Agentlas 전용 브라우저 런타임이 없어 로그인을 가져올 수 없습니다.", "The Agentlas browser runtime is missing, so sign-ins cannot be imported."));
   }
   if (await browserCdpPortReady()) {
-    for (const plaintext of plaintexts) plaintext.fill(0);
+    decrypted.wipe();
     throw new Error(importCopy(`Agentlas 브라우저 포트 ${browserCdpPort()}가 이미 사용 중입니다.`, `Agentlas browser port ${browserCdpPort()} is already in use.`));
   }
 
@@ -912,7 +931,7 @@ async function importMacCookiesThroughDedicatedRuntime(
     }
     return { accepted, domains: [...acceptedDomains], verifiedDomains, loginRequiredDomains };
   } finally {
-    for (const plaintext of plaintexts) plaintext.fill(0);
+    decrypted.wipe();
     if (connection) await connection.close().catch(() => undefined);
     if (child) {
       const pid = child.pid;
@@ -1276,6 +1295,121 @@ export async function importBrowserCredentials(
       skipped,
       error: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    removeBrowserProfileImportWorkDir(workDir);
+  }
+}
+
+/** Value-free row of a Chromium cookie store: never the value or ciphertext columns. */
+export interface CookieStoreMetadataRow {
+  domain: string;
+  name: string;
+  /** Seconds since epoch; null for session cookies. */
+  expires: number | null;
+  updatedAt: number | null;
+}
+
+const CHROME_EPOCH_OFFSET_SECONDS = 11_644_473_600;
+
+function chromeMicrosToUnixSeconds(value: unknown): number | null {
+  const micros = Number(value ?? 0);
+  if (!Number.isFinite(micros) || micros <= 0) return null;
+  return micros / 1_000_000 - CHROME_EPOCH_OFFSET_SECONDS;
+}
+
+/**
+ * Login-recovery measurement: which session cookies (name + expiry) exist for these sites.
+ * Works on a private snapshot (never attaches to a live browser DB) and selects only
+ * host_key/name/expiry/update columns — the value and encrypted_value columns are never read.
+ */
+export function readCookieStoreMetadata(storeFile: string, domains: readonly string[]): CookieStoreMetadataRow[] | null {
+  if (!fs.existsSync(storeFile)) return null;
+  const wanted = [...new Set(domains.map((d) => registrableDomain(d)).filter(Boolean))];
+  if (wanted.length === 0) return [];
+  const workDir = makeBrowserProfileImportWorkDir();
+  try {
+    const snap = snapshotBrowserSqlite(storeFile, workDir, "Cookies.metadata");
+    if (!snap) return null;
+    const db = new Database(snap, { readonly: true });
+    try {
+      const columns = new Set((db.pragma("table_info(cookies)") as Array<{ name: string }>).map((c) => c.name));
+      if (!columns.has("host_key") || !columns.has("name")) return null;
+      const expiresCol = columns.has("expires_utc") ? "expires_utc" : "0";
+      const hasExpiresCol = columns.has("has_expires") ? "has_expires" : "1";
+      const updatedCol = columns.has("last_update_utc") ? "last_update_utc" : "0";
+      const select = db.prepare(`SELECT host_key AS host, name AS name, ${expiresCol} AS expires_utc, ${hasExpiresCol} AS has_expires, ${updatedCol} AS last_update_utc
+        FROM cookies WHERE host_key = ? OR host_key = ? OR host_key LIKE ?`);
+      const rows: CookieStoreMetadataRow[] = [];
+      for (const domain of wanted) {
+        for (const row of select.all(domain, `.${domain}`, `%.${domain}`) as Array<Record<string, unknown>>) {
+          rows.push({
+            domain: String(row.host ?? ""),
+            name: String(row.name ?? ""),
+            expires: Number(row.has_expires ?? 1) === 0 ? null : chromeMicrosToUnixSeconds(row.expires_utc),
+            updatedAt: chromeMicrosToUnixSeconds(row.last_update_utc),
+          });
+        }
+      }
+      return rows;
+    } finally {
+      db.close();
+    }
+  } catch {
+    return null;
+  } finally {
+    removeBrowserProfileImportWorkDir(workDir);
+  }
+}
+
+/** Cookie store file of a discovered everyday-browser profile, or null. */
+export function sourceCookieStoreForProfile(profileId: string): string | null {
+  const profile = resolveDiscoveredBrowserProfile(profileId);
+  return profile ? cookieStorePath(profile.path) : null;
+}
+
+/** The dedicated CDP profile's cookie store actually used by Chrome (network layout first). */
+export function dedicatedCookieStoreFile(): string | null {
+  return cookieStorePath(path.join(browserCdpProfilePath(), "Default"));
+}
+
+/**
+ * Login recovery: decrypt only the named sites' cookies from the everyday browser so they can be
+ * fed straight into the store an agent is actually using (source wins for those sites only).
+ * macOS only — other platforms keep the maintenance-window import path. Values never leave memory;
+ * the caller must call `wipe()` after handing the cookies to a browser.
+ */
+export function readSourceSessionCookies(
+  profileId: string,
+  domains: readonly string[],
+): { ok: true; cookies: PortableSourceCookie[]; wipe: () => void } | { ok: false; reason: "unsupported-platform" | "no-profile" | "snapshot-failed" | "no-cookies" } {
+  if (developmentEffectsSuppressed()) return { ok: false, reason: "unsupported-platform" };
+  if (process.platform !== "darwin") return { ok: false, reason: "unsupported-platform" };
+  const profile = resolveDiscoveredBrowserProfile(profileId);
+  const store = profile ? cookieStorePath(profile.path) : null;
+  if (!profile || !store) return { ok: false, reason: "no-profile" };
+  const wanted = [...new Set(domains.map((d) => registrableDomain(d)).filter(Boolean))];
+  const workDir = makeBrowserProfileImportWorkDir();
+  try {
+    const snap = snapshotBrowserSqlite(store, workDir, "Cookies.recovery");
+    if (!snap) return { ok: false, reason: "snapshot-failed" };
+    const src = new Database(snap, { readonly: true });
+    let jobs: Array<{ domain: string; rows: Record<string, unknown>[] }> = [];
+    let schemaVersion = 0;
+    try {
+      schemaVersion = Number((src.prepare("SELECT value FROM meta WHERE key = 'version'").get() as { value?: unknown } | undefined)?.value ?? 0);
+      const select = src.prepare("SELECT * FROM cookies WHERE host_key = ? OR host_key = ? OR host_key LIKE ?");
+      jobs = wanted.map((domain) => ({ domain, rows: select.all(domain, `.${domain}`, `%.${domain}`) as Record<string, unknown>[] }))
+        .filter((job) => job.rows.length > 0);
+    } finally {
+      src.close();
+    }
+    if (jobs.length === 0) return { ok: false, reason: "no-cookies" };
+    const decrypted = decryptMacSourceCookies(profile.browser, schemaVersion, jobs);
+    if (decrypted.cookies.length === 0) {
+      decrypted.wipe();
+      return { ok: false, reason: "no-cookies" };
+    }
+    return { ok: true, cookies: decrypted.cookies, wipe: decrypted.wipe };
   } finally {
     removeBrowserProfileImportWorkDir(workDir);
   }

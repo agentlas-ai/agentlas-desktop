@@ -907,6 +907,8 @@ function checkpointProducerHadNoEffects(goalId: string, invocationRunId: string 
 export class InvocationService {
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
+  /** Machine marker for turns this process interrupts at shutdown (see markShutdownForUpdate). */
+  private appShutdownCause: "app_closed" | "update_restart" = "app_closed";
   private readonly eventListeners = new Set<InvocationEventListener>();
   private readonly activeChatsListeners = new Set<ActiveChatsListener>();
   private readonly settledListeners = new Set<InvocationSettledListener>();
@@ -1084,8 +1086,49 @@ export class InvocationService {
   beginAppShutdown(): string[] {
     this.acceptingStarts = false;
     const runIds = this.activeRunIds();
-    for (const runId of runIds) this.cancelWithReason(runId, new Error("app_closed"));
+    for (const runId of runIds) this.cancelWithReason(runId, new Error(this.appShutdownCause));
     return runIds;
+  }
+
+  /**
+   * The person confirmed "업데이트하고 이어하기": the coming shutdown interrupts turns for the update,
+   * not because the app closed. Same stop, different machine marker (hostStopCause "update_restart"),
+   * so the receipt reads "paused for the update" and the relaunch continues it once.
+   */
+  markShutdownForUpdate(): void {
+    this.appShutdownCause = "update_restart";
+  }
+
+  /**
+   * What is running right now, for the update confirm and its resume ledger. Main-memory facts only:
+   * the request fields needed to continue the same turn later, never its prompt.
+   */
+  activeWorkSummaries(): Array<{
+    runId: string;
+    chatId: string;
+    oneMode: boolean;
+    automaticGoalId: string | null;
+    executionSource: string | null;
+    workspaceSource: string | null;
+    request: Pick<McpInvocationRequest, "taskIntent" | "permissions" | "onePermissionMode" | "runtimeSelection" | "locale" | "oneMode">;
+  }> {
+    const records = new Map([...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()]);
+    return [...records].map(([runId, record]) => ({
+      runId,
+      chatId: record.chatId,
+      oneMode: record.oneMode,
+      automaticGoalId: record.automaticGoalId ?? null,
+      executionSource: record.executionSource ?? null,
+      workspaceSource: record.workspaceBinding?.source ?? null,
+      request: {
+        ...(record.request.taskIntent ? { taskIntent: record.request.taskIntent } : {}),
+        ...(record.request.permissions ? { permissions: record.request.permissions } : {}),
+        ...(record.request.onePermissionMode ? { onePermissionMode: record.request.onePermissionMode } : {}),
+        ...(record.request.runtimeSelection ? { runtimeSelection: record.request.runtimeSelection } : {}),
+        ...(record.request.locale ? { locale: record.request.locale } : {}),
+        ...(record.request.oneMode ? { oneMode: true } : {}),
+      },
+    }));
   }
 
   /** Rehydrate exact accepted directions after SQLite is initialized on boot. */
@@ -2902,6 +2945,10 @@ export class InvocationService {
                 resultFolder: record.resultFolder,
                 errorCode: event.error?.code,
                 errorMessage: event.error?.message,
+                // The runner's own error line does not know who stopped it; Main does (app quit, update, Goal stop).
+                ...(controller.signal.aborted && controller.signal.reason instanceof Error
+                  && invocationHostStopCause(controller.signal.reason.message)
+                  ? { hostStopCause: invocationHostStopCause(controller.signal.reason.message) } : {}),
                 runtimeFailureKind: event.error?.runtimeFailure?.kind,
                 runtimeFailureSource: event.error?.runtimeFailure?.source,
                 runtimeFailureProviderCode: event.error?.runtimeFailure?.providerCode,
@@ -3722,7 +3769,12 @@ export class InvocationService {
             kind: terminalKind,
             chatId: runReq.chatId,
             agentId: record.actualAgentId,
-            payload: { resultFolder: record.resultFolder, errorCode: safeFailure.code, errorMessage: message },
+            payload: { resultFolder: record.resultFolder, errorCode: safeFailure.code, errorMessage: message,
+              // Measured 2026-09-28 (isolated app, before): a turn cut by app quit landed here as
+              // invoke-threw with no cause, so it read as a crash. Keep Main's own stop marker.
+              ...(controller.signal.aborted && controller.signal.reason instanceof Error
+                && invocationHostStopCause(controller.signal.reason.message)
+                ? { hostStopCause: invocationHostStopCause(controller.signal.reason.message) } : {}) },
           });
           recordTaskTerminalEvidence({ task: canonicalTask, runId, terminalKind });
           if (requestedOneMode && canonicalTask) {
@@ -4078,8 +4130,21 @@ export class InvocationService {
       try {
         const goal = getLongRunByGoalId(record.automaticGoalId);
         if (goal && !["completed", "failed", "cancelled", "cancelling", "paused"].includes(goal.status)) {
+          /*
+           * [중지] on a Goal's turn stops THIS turn and pauses the Goal — it never deletes it.
+           * Owner store 2026-09-28 ("Thread Marketing", 1.2.48): the owner stopped the running turn to
+           * let an update install; the stop moved the run to cancelling → cancelled, cancelled the
+           * contract and unbound the chat, so after the update "계속" ran with no Goal ("업데이트하면
+           * 골이 사라짐"). Deleting a Goal has its own control (deleteGoal). The pause is recorded as the
+           * owner's own control so app quit keeps it paused(user) and never auto-resumes it; the next
+           * message in the chat resumes the same Goal (resumesPausedGoal).
+           */
+          if (reason.message === STOPPED_BY_USER) {
+            appendLongRunEvent({ runId: goal.id, kind: "run.user_control", actorKind: "user",
+              payload: { action: "pause", source: "turn-stop", chatId: record.chatId, goalId: goal.goalId, invocationRunId: runId } });
+          }
           transitionLongRun({ runId: goal.id,
-            to: reason.message === STOPPED_BY_USER ? "cancelling" : "pausing",
+            to: "pausing",
             actorKind: reason.message === STOPPED_BY_USER ? "user" : "host",
             reason: reason.message === "automatic_goal_time_budget" ? "budget" : "user" });
         }
@@ -4464,7 +4529,8 @@ export class InvocationService {
     if (record.oneMode && record.actualAgentId) {
       // 사람이 멈춘 실행(중지·Goal 일시정지/삭제)과 방향 전환은 실패가 아니다 — 조직도에 붉은
       // "실패 · 확인 필요"로 남기지 않는다(2026-09-26 실측: Goal 삭제 직후 좌석이 실패로 표시).
-      const stopped = receipt.status === "cancelled" || receipt.interruptionCause === "steering";
+      const stopped = receipt.status === "cancelled" || receipt.interruptionCause === "steering"
+        || receipt.hostStopCause === "update_restart";
       const failed = !stopped && (receipt.status === "failed" || receipt.status === "interrupted");
       const creditBlocked = receipt.errorCode === "insufficient_credits" || /insufficient[_ -]?credits/i.test(receipt.errorMessage || "");
       cacheOneOrgCompletionSummary({ installedAgentId: record.actualAgentId, runId });

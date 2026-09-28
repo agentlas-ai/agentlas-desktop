@@ -579,8 +579,54 @@ export async function checkSafely(): Promise<UpdaterState> {
 
 /** The controller creates a verified SQLite recovery copy before this can quit the app. */
 export async function quitAndInstall(): Promise<UpdaterActionResult> {
-  if (!controller) return { accepted: false, state: fallbackState };
+  if (!controller) {
+    if (qaUpdaterSeamArmed && fallbackState.status === "downloaded") return qaSeamHandoff();
+    return { accepted: false, state: fallbackState };
+  }
   return controller.install();
+}
+
+// ── QA controller seam ──────────────────────────────────────────────────────
+// Never in a packaged app, and only with an isolated QA profile. It stands exactly where
+// controller.install() stands: publish `installing`, record the handoff, then let the native
+// updater's quit happen (before-quit-for-update, then app.quit) — the relaunch is the harness's.
+const QA_SEAM_VERSION = "9.9.9-qa";
+let qaUpdaterSeamArmed = false;
+
+/**
+ * Isolated QA only (unpackaged, QA profile, explicit env): present a downloaded update so the
+ * confirm → checkpoint → handoff → relaunch path can be driven end to end without replacing any
+ * real application. A no-op everywhere else.
+ */
+export function armQaUpdaterSeamIfRequested(): void {
+  if (!qaUpdaterSeamRequested() || controller) return;
+  qaUpdaterSeamArmed = true;
+  broadcast({ status: "downloaded", version: QA_SEAM_VERSION, progress: 100 });
+  console.log("[updater] QA controller seam armed");
+}
+
+function qaUpdaterSeamRequested(): boolean {
+  return !app.isPackaged
+    && process.env.AGENTLAS_QA_UPDATER_SEAM === "downloaded"
+    && Boolean(process.env.AGENTLAS_QA_USER_DATA_DIR?.trim());
+}
+
+function qaSeamHandoff(): UpdaterActionResult {
+  const state: UpdaterState = { status: "installing", version: QA_SEAM_VERSION, progress: 100 };
+  broadcast(state);
+  try {
+    fs.writeFileSync(path.join(userDataDir(), "qa-updater-handoff.json"),
+      JSON.stringify({ at: new Date().toISOString(), version: QA_SEAM_VERSION }), { mode: 0o600 });
+  } catch (error) {
+    console.warn("[updater] QA seam handoff record failed", error);
+  }
+  setTimeout(() => {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { autoUpdater: nativeUpdater } = require("electron") as typeof import("electron");
+    nativeUpdater.emit("before-quit-for-update");
+    app.quit();
+  }, 50);
+  return { accepted: true, state };
 }
 
 export async function openManualDownload(): Promise<UpdaterActionResult> {

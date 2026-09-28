@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import { createHash, randomUUID } from "node:crypto";
 import { app, BrowserWindow, nativeImage, nativeTheme, screen, WebContentsView } from "electron";
 import type { Rectangle } from "electron";
+import { measuringZoomFactor, ownerCssBoundsToWindow } from "../native-view-bounds";
 import { onAskUserLifecycle, submitAskUserAnswer } from "../confirm/ask-user";
 import {
   getToolApprovalResolution,
@@ -135,7 +136,9 @@ function installScienceToolApprovalForwarding(): void {
 
 installScienceToolApprovalForwarding();
 
-function safeBounds(bounds: ProductExtensionViewBounds, window: BrowserWindow): ProductExtensionViewBounds {
+/** `cssBounds` come from the shell page (CSS px at its zoom); the view is placed in window DIPs. */
+function safeBounds(cssBounds: ProductExtensionViewBounds, window: BrowserWindow, ownerId: number): ProductExtensionViewBounds {
+  const bounds = ownerCssBoundsToWindow(cssBounds, measuringZoomFactor(ownerId));
   const content = window.getContentBounds();
   const x = Number.isFinite(bounds?.x) ? Math.max(0, Math.min(Math.floor(bounds.x), Math.max(0, content.width - 1))) : 0;
   const y = Number.isFinite(bounds?.y) ? Math.max(0, Math.min(Math.floor(bounds.y), Math.max(0, content.height - 1))) : 0;
@@ -144,16 +147,20 @@ function safeBounds(bounds: ProductExtensionViewBounds, window: BrowserWindow): 
   return { x, y, width, height };
 }
 
-function safeRendererBounds(bounds: ScienceRendererBounds, active: ActiveScienceView): Rectangle {
+/** `cssBounds` are measured inside the extension page, relative to it, in CSS px at that page's zoom. */
+function safeRendererBounds(cssBounds: ScienceRendererBounds, active: ActiveScienceView): Rectangle {
   const parent = active.view.getBounds();
-  const numbers = [bounds?.x, bounds?.y, bounds?.width, bounds?.height];
+  const numbers = [cssBounds?.x, cssBounds?.y, cssBounds?.width, cssBounds?.height];
   if (!numbers.every((item) => typeof item === "number" && Number.isFinite(item))) throw new Error("science-renderer-bounds-invalid");
-  if (bounds.width < 1 || bounds.height < 1) throw new Error("science-renderer-bounds-out-of-range");
+  if (cssBounds.width < 1 || cssBounds.height < 1) throw new Error("science-renderer-bounds-out-of-range");
+  const zoom = measuringZoomFactor(active.view.webContents);
+  const bounds = ownerCssBoundsToWindow(cssBounds, zoom);
   const x = Math.max(0, Math.floor(bounds.x));
   const y = Math.max(0, Math.floor(bounds.y));
   const right = Math.min(parent.width, Math.ceil(bounds.x + bounds.width));
   const bottom = Math.min(parent.height, Math.ceil(bounds.y + bounds.height));
-  if (x >= parent.width || y >= parent.height || right - x < 240 || bottom - y < 200) throw new Error("science-renderer-bounds-out-of-range");
+  // Minimum size is a CSS-pixel contract of the extension page, not a DIP one.
+  if (x >= parent.width || y >= parent.height || right - x < Math.floor(240 * zoom) || bottom - y < Math.floor(200 * zoom)) throw new Error("science-renderer-bounds-out-of-range");
   return { x: parent.x + x, y: parent.y + y, width: right - x, height: bottom - y };
 }
 
@@ -870,7 +877,7 @@ export function failScienceRendererCapture(instanceId: string, code: string, sum
 export function setScienceExtensionViewBounds(ownerId: number, leaseId: string, bounds: ProductExtensionViewBounds): { ok: boolean } {
   const active = activeViews.get(ownerId);
   if (!active || active.leaseId !== leaseId || active.window.isDestroyed() || active.view.webContents.isDestroyed()) return { ok: false };
-  active.view.setBounds(safeBounds(bounds, active.window));
+  active.view.setBounds(safeBounds(bounds, active.window, active.ownerId));
   if (active.renderer && !active.renderer.view.webContents.isDestroyed()) {
     active.renderer.view.setBounds(safeRendererBounds(active.renderer.relativeBounds, active));
   }
@@ -959,7 +966,7 @@ export async function openScienceExtensionView(input: {
     if (active.renderer) closeRenderer(active, "failed", "science-extension-view-destroyed", "The Science interface was closed.");
   });
   input.window.contentView.addChildView(view);
-  view.setBounds(safeBounds(input.bounds, input.window));
+  view.setBounds(safeBounds(input.bounds, input.window, input.ownerId));
   view.setVisible(true);
   input.window.once("closed", () => closeActive(active, false));
   const opening: ProductExtensionViewStatus = { id: SCIENCE_EXTENSION_ID, leaseId: active.leaseId, state: "opening" };

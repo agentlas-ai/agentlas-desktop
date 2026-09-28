@@ -52,13 +52,13 @@ import { isScienceStoreFormatRefusal, scienceBootstrapFailure } from "./science-
 import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual-session";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
-import { closeStore, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
+import { closeStore, getDb, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
 import { markDaemonAutostartStoreReady, readDaemonAutostartStoreReady, resolveDaemonAutostartPolicy } from "./store/daemon-autostart";
 import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
 import { clearDetectCache } from "./runtime/detect";
-import { repairPlaceholderTaskTitles } from "./store/chats";
+import { getChat, repairPlaceholderTaskTitles } from "./store/chats";
 import { expireOrphanedSurfaceJobs } from "./store/agent-surface-jobs";
 import { reconcileAbandonedGoalContracts } from "./store/chat-goals";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
@@ -70,6 +70,7 @@ import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from
 import { invocationService } from "./invocation/service";
 import { startAgentMailSync } from "./agent-mail/sync";
 import {
+  armQaUpdaterSeamIfRequested,
   disposeAutoUpdater,
   getUpdaterState,
   handleUpdaterBootstrapFailure,
@@ -81,6 +82,15 @@ import {
   quitAndInstall as installDownloadedUpdate,
 } from "./updater";
 import { createAutomaticQuitInstaller } from "./updater/automatic-quit-install";
+import {
+  UPDATE_CHECKPOINT_CAP_MS,
+  UPDATE_RESUME_LEDGER_SCHEMA,
+  classifyInvocationWork,
+  configureUpdateResumeHost,
+  updateInstallDeferredForVersion,
+  writeUpdateResumeLedger,
+  type UpdateWorkItem,
+} from "./updater/update-resume";
 import { scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls } from "./updater/continuity";
 import { resolveMacAppBundle } from "./updater/controller";
 import { disposeAppFactoryLaunches } from "./app-factory/operations";
@@ -1339,8 +1349,90 @@ function stopQuitServices(): Promise<void> {
   return quitServicesStopPromise;
 }
 
+// ── Update while work is running (updater/update-resume.ts) ─────────────────
+/** Everything running now, by who can continue it after the restart. Counts only; never prompts. */
+function collectUpdateWork(): UpdateWorkItem[] {
+  const teamChild = (chatId: string): boolean => {
+    try {
+      return Boolean(getDb().prepare("SELECT 1 FROM one_team_dispatches WHERE child_chat_id = ? AND status = 'running' LIMIT 1").get(chatId));
+    } catch { return false; } // Stores without the table have no teammate sessions.
+  };
+  const title = (chatId: string): string | null => {
+    try { return getChat(chatId)?.title?.trim() || null; } catch { return null; }
+  };
+  const items = invocationService.activeWorkSummaries()
+    .map((fact) => classifyInvocationWork(fact, { title: title(fact.chatId), teamChild: teamChild(fact.chatId) }));
+  // Graph/automation work that is not a model turn right now (a tool node, a hold) still counts.
+  const automationTurns = items.filter((item) => item.kind === "automation").length;
+  for (let i = automationWorkInFlight() - automationTurns; i > 0; i -= 1) {
+    items.push({ kind: "automation", owner: "automation", runId: null, chatId: null, title: null });
+  }
+  return items;
+}
+
+let updateWorkCheckpointed = false;
+/**
+ * The person confirmed: arm the resume ledger, then stop the running turns FOR the update (typed
+ * hostStopCause "update_restart", Goals paused app_closed as on any quit so their own startup
+ * resume takes them), bounded by UPDATE_CHECKPOINT_CAP_MS. Leftovers are already in the ledger;
+ * their receipts settle as the process exits.
+ */
+async function checkpointWorkForUpdate(items: UpdateWorkItem[]): Promise<void> {
+  if (updateWorkCheckpointed) return;
+  updateWorkCheckpointed = true;
+  const startedAt = Date.now();
+  try {
+    writeUpdateResumeLedger(userDataDir(), {
+      schemaVersion: UPDATE_RESUME_LEDGER_SCHEMA,
+      reason: "update_restart",
+      armedAt: new Date().toISOString(),
+      sourceVersion: app.getVersion(),
+      targetVersion: getUpdaterState().version ?? null,
+      items,
+    });
+  } catch (error) {
+    // The person already chose to update. Goals/automations still continue on their own paths.
+    console.error("[updater] update resume ledger could not be written; interrupted chats will not continue", error);
+  }
+  invocationService.markShutdownForUpdate();
+  try { closeAutomationDispatchForShutdown(); } catch { /* the scheduler also closes on quit */ }
+  const report = await shutdownAppRuntimeCoordinator(UPDATE_CHECKPOINT_CAP_MS).catch((error) => {
+    console.error("[updater] update checkpoint shutdown failed", error);
+    return null;
+  });
+  const deadline = startedAt + UPDATE_CHECKPOINT_CAP_MS;
+  while (invocationService.activeChatIds().length > 0 && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+  }
+  console.info("[updater] work checkpointed for update", {
+    items: items.length,
+    pausedGoals: report?.pausedRunIds.length ?? 0,
+    leftoverTurns: invocationService.activeChatIds().length,
+    ms: Date.now() - startedAt,
+  });
+}
+
+configureUpdateResumeHost({
+  state: getUpdaterState,
+  census: collectUpdateWork,
+  locale: () => (currentUiLocale() === "ko" ? "ko" : "en"),
+  install: installDownloadedUpdate,
+  checkpoint: checkpointWorkForUpdate,
+  restartAfterRefusedHandoff: () => {
+    // The checkpoint closed this process's admission. Never leave a live-looking app that can no
+    // longer run anything: restart it; the ledger continues the paused work on the next launch.
+    console.warn("[updater] update handoff was refused after work was paused; restarting to continue it");
+    app.relaunch();
+    app.quit();
+  },
+});
+
 let restoreDaemonAutostartAfterFailedUpdate: (() => void) | null = null;
 async function prepareAutomaticUpdateQuit(): Promise<void> {
+  // [나중에] was chosen for this version while work ran: this quit is the consented install. Pause
+  // the work for the update first so it continues after the relaunch (owner brief rule 4).
+  const deferredWork = updateInstallDeferredForVersion(getUpdaterState().version) ? collectUpdateWork() : [];
+  if (deferredWork.length > 0) await checkpointWorkForUpdate(deferredWork);
   // An update explicitly stops the execution service before replacing files.
   // Close observers first so no UI reconnect can respawn it during the handoff.
   const { buildDaemonAutostartCommand, reconcileDaemonAutostart, suspendDaemonAutostart, stopDaemonService } = await import("./daemon/app-launcher");
@@ -1362,7 +1454,11 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
     if (report.failedParticipantNames.length > 0) {
       throw new Error(`App runtime shutdown failed: ${report.failedParticipantNames.join(", ")}`);
     }
-    if (report.timedOut) {
+    // Turns the person paused for this update are in the resume ledger; one still unwinding past
+    // the few-second cap must not cancel the update they asked for. Any other participant still does.
+    const onlyCheckpointedTurnsUnsettled = updateWorkCheckpointed
+      && report.unsettledParticipantNames.every((name) => name === "invocation-service");
+    if (report.timedOut && !onlyCheckpointedTurnsUnsettled) {
       throw new Error(`App runtime did not settle: ${report.unsettledParticipantNames.join(", ")}`);
     }
     await stopQuitServices();
@@ -1466,7 +1562,10 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
     app.quit();
   },
   subscribe: onUpdaterStateChange,
-  shouldInstallOnQuit: () => !developmentEffectsSuppressed() && !systemShutdownInProgress && invocationService.activeChatIds().length === 0,
+  // Running work blocks quit-install unless the person already chose [나중에] for this version in
+  // the in-app confirm — then this quit installs and the work continues after the relaunch.
+  shouldInstallOnQuit: () => !developmentEffectsSuppressed() && !systemShutdownInProgress
+    && (invocationService.activeChatIds().length === 0 || updateInstallDeferredForVersion(getUpdaterState().version)),
   logger: console,
 });
 electronAutoUpdater.on("before-quit-for-update", () => {
@@ -1948,6 +2047,7 @@ app.whenReady().then(async () => {
   } else if (initialAuthRestoreWasTemporary) {
     scheduleDeferredAuthRestore();
   }
+  armQaUpdaterSeamIfRequested();
   if (updatePreflight.pendingInstall) {
     // The update transaction now owns the startup boundary. Only after the
     // pre-update snapshot has passed continuity verification may ordinary boot
@@ -4250,6 +4350,17 @@ app.whenReady().then(async () => {
         .then((legacy) => { if (legacy.length) console.info("[long-run] legacy ongoing startup reconciliation", legacy); })
         .catch((error) => console.error("[long-run] legacy ongoing startup reconciliation failed", error))
         .finally(() => {
+          // Owner signed in after a login-recovery card: continue now (event), not on the next tick.
+          void import("./browser/login-recovery-runtime").then(({ setLoginRecoveryResumeHandler }) => {
+            setLoginRecoveryResumeHandler(() => {
+              try {
+                const swept = sweepBlockedGoals(invocationService, "periodic").filter((entry) => entry.action !== "deferred");
+                console.info("[login-recovery] resume sweep", JSON.stringify({ resumed: swept.length }));
+              } catch (error) {
+                console.error("[login-recovery] resume sweep failed", error);
+              }
+            });
+          }).catch(() => undefined);
           try {
             const swept = sweepBlockedGoals(invocationService, "startup");
             if (swept.length) console.info("[long-run] blocked goal sweep", swept);
@@ -4268,6 +4379,17 @@ app.whenReady().then(async () => {
         });
     } catch (error) {
       console.error("[long-run] checkpoint startup reconciliation failed", error);
+    }
+  }
+  // Turns the person paused with "업데이트하고 이어하기" continue once, after Goal checkpoints
+  // (which own Goal turns) and before teammate-dispatch recovery (15 s later) looks for live children.
+  if (!developmentEffectsSuppressed()) {
+    try {
+      const { resumeWorkInterruptedByUpdate } = await import("./updater/update-resume-startup");
+      const outcomes = resumeWorkInterruptedByUpdate(userDataDir(), invocationService);
+      if (outcomes.length) console.info("[updater] work interrupted by the update", outcomes);
+    } catch (error) {
+      console.error("[updater] resuming work interrupted by the update failed", error);
     }
   }
   // One/Work Alive organisms (AGI toggle) — after DB migration and long-run admission. Enabled lives

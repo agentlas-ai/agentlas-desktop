@@ -4,6 +4,7 @@ import { GoalResultReport } from "./GoalResultReport";
 import type { ChatHostNotice } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
 import { HostContinuationNotice } from "./HostContinuationNotice";
+import { AutomationLiveRows, AutomationReportSummary } from "./automation/AutomationChatActivity";
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
 import { Fragment, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
@@ -582,6 +583,8 @@ export function ChatStream({
             />
           </div>
         ))}
+        {/* 이 대화·프로젝트의 자동화가 숨은 세션에서 도는 동안의 실시간 줄. */}
+        <AutomationLiveRows chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"} />
       </div>
 
       {messages.length > 0 && hasOverflow && awayFromBottom && (
@@ -1030,7 +1033,11 @@ const Bubble = memo(function Bubble({
   }
   if (message.role === "system") {
     if (normalizeChatHostNotice(message.role, message.hostNotice)) {
-      return <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} notice={message.hostNotice} />;
+      const notice = <HostContinuationNotice text={message.text} locale={locale === "ko" ? "ko" : "en"} notice={message.hostNotice} />;
+      // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28, One 과 같은 표면).
+      return message.hostNotice?.purpose === "automation-report"
+        ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={locale === "ko" ? "ko" : "en"} fallback={notice} />
+        : notice;
     }
     if (message.recoveryForRunId) {
       const label = <span style={{ display: "inline-flex", gap: 7, alignItems: "center" }}>

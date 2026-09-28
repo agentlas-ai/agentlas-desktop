@@ -15,6 +15,7 @@ import { useT } from "@/lib/i18n";
 import type { UpdaterState } from "@/lib/types";
 import { updaterCanUseOfficialInstaller } from "@shared/types";
 import { LoadingEstimate } from "./LoadingEstimate";
+import { UpdateResumeConfirm } from "./UpdateResumeConfirm";
 
 export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const { t, locale } = useT();
@@ -23,6 +24,10 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
   const [showReleaseNotes, setShowReleaseNotes] = useState(false);
   const [installDeferred, setInstallDeferred] = useState(false);
+  /** Main's count + one-line names of the running work; the in-app confirm is open while set. */
+  const [resumeConfirm, setResumeConfirm] = useState<{ count: number; line?: string } | null>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [laterChosen, setLaterChosen] = useState(false);
   const lastFocusCheck = useRef(0);
 
   useEffect(() => {
@@ -70,17 +75,50 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
     .map((line) => line.replace(/^[-*•]\s*/, "").trim())
     .filter(Boolean)
     .slice(0, 5);
-  // 실제 업데이트가 있을 때만 노출. checking/not-available/error 등 routine 백그라운드 체크는 숨김.
-  if (!isDownloaded && !isDownloading && !isInstalling && !isManual) return null;
-  if (isDownloaded && isDismissed) return null;
-
   async function install() {
     const api = ipc();
     if (!api) return;
     setInstallDeferred(false);
     const result = await api.updater.install();
-    setInstallDeferred(result.blockedBy === "active-runs");
+    if (result.blockedBy === "active-runs") {
+      // Work is running: ask in-app (count + names from Main) instead of refusing.
+      setResumeConfirm({ count: result.activeRunCount ?? 1, line: result.activeWorkLine });
+      return;
+    }
   }
+
+  async function installAndResume() {
+    const api = ipc();
+    if (!api || resumeBusy) return;
+    setResumeBusy(true);
+    try {
+      const result = await api.updater.install({ resumeWork: true });
+      if (!result.accepted) setInstallDeferred(result.blockedBy === "active-runs");
+    } finally {
+      setResumeBusy(false);
+      setResumeConfirm(null);
+    }
+  }
+
+  async function installLater() {
+    const result = await ipc()?.updater.deferInstall();
+    setResumeConfirm(null);
+    setLaterChosen(Boolean(result?.deferred));
+  }
+
+  const confirm = resumeConfirm ? (
+    <UpdateResumeConfirm
+      count={resumeConfirm.count}
+      line={resumeConfirm.line}
+      busy={resumeBusy}
+      onInstall={() => void installAndResume()}
+      onLater={() => void installLater()}
+    />
+  ) : null;
+
+  // 실제 업데이트가 있을 때만 노출. checking/not-available/error 등 routine 백그라운드 체크는 숨김.
+  if (!isDownloaded && !isDownloading && !isInstalling && !isManual) return confirm;
+  if (isDownloaded && isDismissed) return confirm;
 
   async function retrySafetyAction() {
     const api = ipc();
@@ -124,6 +162,8 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
           : "";
 
   return (
+    <>
+    {confirm}
     <div
       className="sidenav-update-card titlebar-nodrag"
       data-downloaded={isDownloaded ? "true" : "false"}
@@ -153,6 +193,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                 <span className="sidenav-update-version">v{state.version ?? "?"}</span>
                 <span>{t("update.ready_description")}</span>
                 {installDeferred && <span role="status">{t("update.active_runs")}</span>}
+                {laterChosen && !installDeferred && <span role="status" data-update-resume-deferred>{t("update.resume_deferred")}</span>}
               </span>
               <button
                 onClick={() => state.version && setDismissedVersion(state.version)}
@@ -244,6 +285,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
         </>
       )}
     </div>
+    </>
   );
 }
 

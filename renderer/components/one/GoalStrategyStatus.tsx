@@ -80,6 +80,7 @@ export function GoalStrategyStatus({ continuity, surface, locale }: Props) {
   // observed status only to keep this card's labels aligned with Continuity.
   const observedSurface = classifyGoalSurfaceStatus({
     runStatus: goal.runStatus,
+    pauseReason: goal.pauseReason,
     blockedReason: goal.blockedReason,
     wait: goal.wait,
     invocation: continuity.invocation,

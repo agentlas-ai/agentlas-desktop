@@ -1917,6 +1917,17 @@ async function runMcpInvocationInContext(
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
     }
+    // Login wall = product defect (owner 2026-09-28). After a browser tool result, read where the
+    // agent actually stands from its own browser surface and run the recovery ladder; never blocks.
+    const browserTool = ev.kind === "tool-use" && ev.tool?.result !== undefined && !ev.tool.isError
+      && ev.tool.name.startsWith("agentlas-browser.") ? ev.tool.name : null;
+    if (browserTool) {
+      void import("../browser/login-recovery-runtime").then(({ observeBrowserToolForLoginWall, ownerLoginCardNotice }) =>
+        observeBrowserToolForLoginWall({
+          toolName: browserTool, runId: req.runId, chatId: req.chatId, nativeGrant: nativeBrowserGrant,
+          notify: (card) => { try { emit({ kind: "notice", notice: ownerLoginCardNotice(card, pickLocale(req)) }); } catch { /* run ended */ } },
+        })).catch(() => undefined);
+    }
     emit(ev);
   };
   const earlyResult = () => ({
@@ -2035,7 +2046,7 @@ async function runMcpInvocationInContext(
   const persistUserMessage = () => {
     if (req.agentAppMode || userMessagePersisted) return;
     if (promptIsSystemAuthored) {
-      appendChatMessage(chat.id, "system", req.userPrompt, (hostNoticePurpose === "goal-continuation" || hostNoticePurpose === "one-dispatch-brief") && req.runId
+      appendChatMessage(chat.id, "system", req.userPrompt, (hostNoticePurpose === "goal-continuation" || hostNoticePurpose === "one-dispatch-brief" || hostNoticePurpose === "update-resume") && req.runId
         ? { hostNotice: { purpose: hostNoticePurpose, runId: req.runId } } : undefined);
     } else {
       /*

@@ -25,6 +25,7 @@ function goalStatus(snapshot: ChatContinuitySnapshot, ko: boolean, observationSt
   if (observationStale) return ko ? "Goal 상태 재확인 중" : "Rechecking Goal status";
   const status = classifyGoalSurfaceStatus({
     runStatus: goal.runStatus,
+    pauseReason: goal.pauseReason,
     blockedReason: goal.blockedReason,
     wait: goal.wait,
     invocation: snapshot.invocation,
@@ -134,6 +135,7 @@ export function ContinuityStatus({ chatId, locale, detail = false }: Props) {
       : "Goal";
   const surface = snapshot.goal ? classifyGoalSurfaceStatus({
     runStatus: snapshot.goal.runStatus,
+    pauseReason: snapshot.goal.pauseReason,
     blockedReason: snapshot.goal.blockedReason,
     wait: snapshot.goal.wait,
     invocation: snapshot.invocation,

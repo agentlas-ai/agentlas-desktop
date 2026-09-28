@@ -41,6 +41,7 @@ import {
   captureClaudeExecutableOwner,
   setClaudeResidentModel,
   writeClaudeResidentTurn,
+  interruptClaudeResidentTurn,
   type AcpSessionLease,
   type ClaudeResidentSession,
   type ClaudeStreamEvent,
@@ -144,6 +145,8 @@ export function claudeArtifactPathsFromToolResult(name: string, content: unknown
  * 누른 적 없는 사람이 거짓 사유를 받았다(실사용 실측).
  */
 
+/** Stop → protocol interrupt → tree kill if the CLI has not ended the turn by then (Paseo: 3s). */
+const CLAUDE_INTERRUPT_GRACE_MS = 3_000;
 const KIND = "claude-code";
 const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
 
@@ -1395,7 +1398,23 @@ const runClaudeTurn = async (
 
     // 취소 — 사용자가 Stop을 누르면 자식 프로세스 트리 종료. 병렬 세션 각각 독립 취소.
     // 상주 세션은 취소와 함께 버린다(상태를 모르는 세션을 다음 턴에 물려주지 않는다).
-    const onAbort = () => { broken = true; killCliTree(child); };
+    //
+    // Stop ends the turn through the CLI first (resident: control_request interrupt;
+    // one-shot: SIGINT to the CLI), so the turn is recorded before the tree is
+    // killed — SIGTERM alone records no result, and a steering message resumes
+    // exactly this session. The tree kill still follows after a bounded grace.
+    const onAbort = () => {
+      broken = true;
+      const graceful = session
+        ? interruptClaudeResidentTurn(session)
+        : process.platform !== "win32" && child.pid != null && child.exitCode === null && child.signalCode === null
+          && (() => { try { return child.kill("SIGINT"); } catch { return false; } })();
+      if (!graceful) { killCliTree(child); return; }
+      const fallback = setTimeout(() => killCliTree(child), CLAUDE_INTERRUPT_GRACE_MS);
+      fallback.unref?.();
+      // The leader exiting early still leaves its process group (MCP servers) to reap.
+      child.once("close", () => { clearTimeout(fallback); killCliTree(child, 500); });
+    };
     if (req.signal) {
       if (req.signal.aborted) onAbort();
       else req.signal.addEventListener("abort", onAbort, { once: true });
@@ -1838,7 +1857,19 @@ const runClaudeTurn = async (
       // --include-partial-messages: 토큰 델타를 즉시 이어붙여 글자 단위 스트리밍을 만든다.
       // 본문은 text_delta만. thinking 블록은 본문에 싣지 않되 시작/종료 신호와 문자 수(토큰
       // 추정)는 소비한다 — 상태줄 "생각 중…" 회전의 근거 데이터.
+      /*
+       * A sub-agent (Task/Agent tool) streams as its own messages on this same
+       * stdout, stamped with parent_tool_use_id = the root's tool_use id
+       * (Claude Code 2.1.283: `yield{type:"assistant",…,parent_tool_use_id:e.parentToolUseID}`;
+       * SDK type SDKAssistantMessage.parent_tool_use_id). Its text is the
+       * sub-agent's report to the parent, delivered back as the Task tool_result —
+       * never this turn's answer. Same class as the Codex spawn_agent leak
+       * (52f4c734). Its tool calls stay visible as work; its text, thinking and
+       * per-message usage counters do not touch the root answer.
+       */
+      const fromSubAgent = ev.parent_tool_use_id != null || ev.isSidechain === true;
       if (ev.type === "stream_event") {
+        if (fromSubAgent) return;
         const se = ev.event;
         if (se?.type === "message_start") {
           curMsgUsage = 0;
@@ -1889,6 +1920,7 @@ const runClaudeTurn = async (
         turnModel.observe(ev);
         for (const block of ev.message.content) {
           if (block.type === "text" && block.text) {
+            if (fromSubAgent) continue;
             if (!accCapped) {
               // 메시지 완결 — 델타 누적분(cur)을 권위 전문으로 대체해 acc에 폴드.
               cur = "";
@@ -1897,7 +1929,7 @@ const runClaudeTurn = async (
               emitPartial();
             }
           } else if (block.type === "tool_use" && block.name) {
-            if (runReq.outputSchema && block.name === "StructuredOutput") {
+            if (runReq.outputSchema && block.name === "StructuredOutput" && !fromSubAgent) {
               if (block.id) answerChannelToolIds.add(block.id);
               try { structuredAnswer = JSON.stringify(block.input ?? null); } catch { /* result.result still carries it */ }
               continue;

@@ -127,6 +127,7 @@ export const ONE_DECISION_JUDGE_RETRY_DELAYS_MS = [0, 2_000, 8_000] as const;
 const JUDGMENT_STATE_MAX = 500;
 const readyDecisionJudgments = new Map<string, ReadyDecisionJudgment>();
 const deferredDecisionJudgments = new Map<string, DeferredDecisionJudgment>();
+const manualRetryAt = new Map<string, number>();
 let activeDeferredDecisionKeys = new Set<string>();
 
 function decisionJudgmentKey(confirmation: OneDecisionJudgmentConfirmation): string {
@@ -350,6 +351,36 @@ export function deferPrejudgeOneDecisions(
   }
 }
 
+/** Queue only this exact pending question; never wait for a model in the RPC. */
+export function retryPrejudgeOneDecision(
+  confirmation: OneDecisionJudgmentConfirmation,
+): "scheduled" | "ready" | "needs_details" | "cooldown" {
+  const key = decisionJudgmentKey(confirmation);
+  const ready = readyDecisionJudgments.get(key);
+  if (ready) return ready.authorityReadiness === "ready" ? "ready" : "needs_details";
+  if (deferredDecisionJudgments.has(key)) return "scheduled";
+  const now = Date.now();
+  if (now - (manualRetryAt.get(key) ?? 0) < 60_000) return "cooldown";
+  manualRetryAt.delete(key);
+  manualRetryAt.set(key, now);
+  if (manualRetryAt.size > JUDGMENT_STATE_MAX) {
+    const oldest = manualRetryAt.keys().next().value;
+    if (oldest !== undefined) manualRetryAt.delete(oldest);
+  }
+  activeDeferredDecisionKeys.add(key);
+  const job: DeferredDecisionJudgment = {
+    key,
+    confirmation,
+    attempt: 0,
+    controller: null,
+    timer: null,
+    options: {},
+  };
+  deferredDecisionJudgments.set(key, job);
+  scheduleDeferredAttempt(job);
+  return "scheduled";
+}
+
 /** Warm every listed pending decision when an explicit caller chooses to wait. */
 export async function prejudgeOneDecisions(
   confirmations: readonly OneDecisionJudgmentConfirmation[],
@@ -367,6 +398,7 @@ export function cancelDeferredOneDecisionJudgments(): void {
 export function resetOneDecisionJudgmentStateForTests(): void {
   cancelDeferredOneDecisionJudgments();
   readyDecisionJudgments.clear();
+  manualRetryAt.clear();
 }
 
 onHostShutdown(cancelDeferredOneDecisionJudgments);

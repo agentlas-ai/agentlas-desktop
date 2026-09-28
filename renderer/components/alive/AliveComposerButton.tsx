@@ -36,6 +36,7 @@ import {
 } from "@shared/alive";
 import { navigate } from "@/lib/navigation";
 import styles from "./AliveComposerButton.module.css";
+import { AgiUnblockLimits } from "../agi/AgiUnblockLimits";
 
 type AliveApi = AgentlasIpc["alive"];
 
@@ -579,6 +580,7 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
           </span>
         </label>
       </div>
+      <AgiUnblockLimits locale={ko ? "ko" : "en"} />
       {error && <p className={styles.error} role="alert">{error}</p>}
     </div>
   );

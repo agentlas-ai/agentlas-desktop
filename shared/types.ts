@@ -791,6 +791,8 @@ export interface ChatContinuitySnapshot {
     runStatus: string | null;
     runVersion: number | null;
     blockedReason: string | null;
+    /** Typed pause reason: only "user" is an explicit stop; a host pause (app_closed, …) looks like running. */
+    pauseReason?: string | null;
     eventSeq: number | null;
     /** Host-verified descriptive strategy for the exact current Goal revision. */
     episodeStrategy: null | { planRevision: number; state: "changed" | "unchanged" | "unknown";
@@ -1809,6 +1811,8 @@ export interface Chat {
   updatedAt: string;
   /** 세션 목록 한 줄용 마지막 사용자/에이전트 메시지 미리보기. */
   lastMessagePreview?: string;
+  /** 화면에 보이는 마지막 줄(사용자·에이전트 말, 표식 있는 시스템 알림)의 시각 — One 세션 목록 정렬 키. 조용한 상태 변경은 움직이지 않는다. */
+  lastActivityAt?: string;
   /** "계속 라이브로" 모드 — Stormbreaker 연속실행 상한에 닿아도 백그라운드로 넘기지 않고
    *  같은 채팅에서 라이브 스트리밍을 계속 이어간다(수 시간 단위). */
   continuousMode: boolean;
@@ -1987,6 +1991,8 @@ export interface AgentConcurrencyInfo {
 /** Main-authored display metadata. It grants no execution authority. */
 export type ChatHostNotice =
   | { purpose: "goal-continuation"; runId: string }
+  /** A turn the update restart interrupted, continued by the app after it came back (one line, no prompt). */
+  | { purpose: "update-resume"; runId: string }
   | { purpose: "automation-report"; runId: string; automationId: string }
   /** Teammate session: the brief One handed over (shown as coming from One, not the owner). */
   | { purpose: "one-dispatch-brief"; runId: string }
@@ -5423,6 +5429,15 @@ export interface UpdaterActionResult {
   blockedBy?: "active-runs";
   /** Count only; renderer never receives run prompts or runtime internals. */
   activeRunCount?: number;
+  /** Plain one-line names of the running work (kinds and titles), for the in-app confirm. */
+  activeWorkLine?: string;
+  /** The person chose "later": the update stays ready and installs on the next quit. */
+  deferred?: boolean;
+}
+
+/** "재시작 업데이트" options. `resumeWork` is the person's confirm to stop running work and resume it after. */
+export interface UpdaterInstallOptions {
+  resumeWork?: boolean;
 }
 
 // ── 마이그레이션 (OpenClaw / Hermes → Agentlas) ──────────────
@@ -6573,7 +6588,7 @@ export interface InvocationRunReceipt {
 }
 
 /** Closed vocabulary of Main-owned abort markers (shared/invocation-host-stop.ts). */
-export type InvocationHostStopCause = "app_closed" | "goal_paused_by_user" | "goal_deleted_by_user";
+export type InvocationHostStopCause = "app_closed" | "update_restart" | "goal_paused_by_user" | "goal_deleted_by_user";
 
 /** Content-free Main admission status; absent is not proof that an in-flight IPC request never started. */
 export type InvocationAdmissionReceipt =
@@ -7321,7 +7336,9 @@ export interface AgentlasIpc {
     /** 사용자가 "지금 확인" 누름. 동시 호출은 하나로 합치고 최종 authoritative state를 반환한다. */
     check: () => Promise<UpdaterState>;
     /** "재시작 업데이트" 클릭. 백업·권한·버전 가드를 모두 통과해야 종료/설치를 시작한다. */
-    install: () => Promise<UpdaterActionResult>;
+    install: (options?: UpdaterInstallOptions) => Promise<UpdaterActionResult>;
+    /** 확인 창의 [나중에] — 준비된 업데이트는 그대로 두고 다음 종료 때 설치·작업은 다음 실행 때 이어간다. */
+    deferInstall: () => Promise<UpdaterActionResult>;
     /** macOS 네이티브 교체가 시작·적용되지 않았거나 서명 계보가 다를 때 공식 설치 페이지를 연다. */
     openManualDownload: () => Promise<UpdaterActionResult>;
     /** 현재 버전의 공개 릴리즈 노트를 기본 브라우저에서 연다. 업데이트 상태는 바꾸지 않는다. */
@@ -8092,6 +8109,17 @@ export interface AgentlasIpc {
     setEnabled: (input: import("./alive").AliveSetEnabledInput) => Promise<import("./alive").AliveState>;
     setTokenLimit: (input: import("./alive").AliveSetTokenLimitInput) => Promise<import("./alive").AliveState>;
   };
+  /** AGI goal manager: owner-editable token limits (D1) and defect reports (D5, sent only on the owner's press). */
+  agi: {
+    getTokenLimits: () => Promise<import("./agi").AgiTokenLimitsView>;
+    setTokenLimits: (input: { attemptTokenLimit?: number; dailyGoalTokenLimit?: number }) => Promise<import("./agi").AgiTokenLimitsView>;
+    defectsForChat: (chatId: string) => Promise<import("./agi").AgiDefectChip[]>;
+    /** Builds and stores the exact redacted payload; sends nothing. */
+    bugReportPreview: (input: import("./agi").AgiBugReportDraftInput) => Promise<import("./agi").AgiBugReportPreview>;
+    /** The owner pressed Send on this previewed draft. Queued offline and retried with the same id. */
+    bugReportSend: (input: { clientReportId: string }) => Promise<import("./agi").AgiBugReportRow>;
+    bugReportList: () => Promise<import("./agi").AgiBugReportRow[]>;
+  };
   automations: {
     list: () => Promise<Automation[]>;
     get: (id: string) => Promise<Automation | null>;
@@ -8293,6 +8321,17 @@ export interface AgentlasIpc {
     liveRunChannel: (automationId: string) => string;
     /** 이 자동화의 최근 실행 스냅샷(per-node 상태). 라이브 오버레이 초기 하이드레이트용. */
     latestRun: (automationId: string) => Promise<WorkflowRunSnapshot | null>;
+    /**
+     * 대화(또는 Work 프로젝트)에 딸린 자동화와 지금 도는 실행의 원장 요약. 구 preload 에는 없다.
+     * 바뀌면 store:changed {entity:"automation"}, 도구 활동은 liveRunChannel(id) 로 온다.
+     */
+    chatActivity?: (scope: { chatId?: string | null; projectId?: string | null; includeProject?: boolean }) => Promise<import("./automation-activity-ipc").AutomationChatActivitySnapshot>;
+    /** 한 실행이 원장에 남긴 행동 요약(모델 문장 아님). 모르는 실행이면 null. */
+    runDigest?: (runId: string) => Promise<import("./automation-activity").AutomationRunDigest | null>;
+    /** 한 자동화의 실행 기록, 최신부터 한 쪽씩. `before` 는 이전 쪽의 nextCursor. */
+    runPage?: (automationId: string, options?: { before?: string | null; limit?: number }) => Promise<import("./automation-activity-ipc").AutomationChatActivityRunPage>;
+    /** 자동화가 방문한 공개 사이트의 아이콘(data URL). 렌더러는 사이트에 직접 붙지 않는다. */
+    siteIcon?: (host: string) => Promise<string | null>;
     /** Automation-owned session transcript rendered beside the node graph. */
     getSession: (automationId: string) => Promise<AutomationSession>;
     /** 멈춘 자동화에 대해 지금 실행 가능한 조치까지 포함한 복구 계획. */

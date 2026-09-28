@@ -11,6 +11,7 @@
 //  · 화면을 떠나면 반드시 파괴한다 — 남으면 다음 화면 위에 유령으로 남는다.
 import { BrowserWindow, WebContentsView, session as electronSession, shell } from "electron";
 import { getSessionCookieHeader } from "./auth";
+import { ownerCssBoundsToWindow } from "./native-view-bounds";
 
 const EMBED_PARTITION = "persist:agentlas-hub-profile";
 
@@ -121,7 +122,9 @@ function isExperienceChipDetailPath(target: string): boolean {
   }
 }
 
-function sanitizeBounds(bounds: HubProfileBounds): HubProfileBounds {
+/** `ownerZoom`: zoom factor of the renderer that measured the CSS-pixel slot. */
+function sanitizeBounds(cssBounds: HubProfileBounds, ownerZoom: number): HubProfileBounds {
+  const bounds = ownerCssBoundsToWindow(cssBounds, ownerZoom);
   const round = (value: unknown) => {
     const n = Math.round(Number(value));
     return Number.isFinite(n) ? n : 0;
@@ -155,10 +158,10 @@ export function closeHubProfileView(): { ok: true } {
   return { ok: true };
 }
 
-export function setHubProfileViewBounds(bounds: HubProfileBounds): { ok: boolean } {
+export function setHubProfileViewBounds(bounds: HubProfileBounds, ownerZoom = 1): { ok: boolean } {
   if (!active) return { ok: false };
   try {
-    active.view.setBounds(sanitizeBounds(bounds));
+    active.view.setBounds(sanitizeBounds(bounds, ownerZoom));
     return { ok: true };
   } catch {
     return { ok: false };
@@ -169,6 +172,8 @@ export async function openHubProfileView(input: {
   slug: string;
   bounds: HubProfileBounds;
   locale?: "ko" | "en";
+  /** Main-only: zoom factor of the renderer that measured `bounds`. */
+  ownerZoom?: number;
 }): Promise<{ ok: boolean; url?: string; reason?: string }> {
   const slug = String(input?.slug ?? "").trim().toLowerCase();
   if (!SLUG_PATTERN.test(slug)) return { ok: false, reason: "invalid-slug" };
@@ -184,7 +189,7 @@ export async function openHubProfileView(input: {
   if (active && active.window === window && !active.view.webContents.isDestroyed()) {
     const url = `${allowedOrigin()}/p/${slug}`;
     active.slug = slug;
-    setHubProfileViewBounds(input.bounds);
+    setHubProfileViewBounds(input.bounds, input.ownerZoom ?? 1);
     try {
       await active.view.webContents.loadURL(url);
       return { ok: true, url };
@@ -253,7 +258,7 @@ export async function openHubProfileView(input: {
   });
 
   window.contentView.addChildView(view);
-  view.setBounds(sanitizeBounds(input.bounds));
+  view.setBounds(sanitizeBounds(input.bounds, input.ownerZoom ?? 1));
   active = { view, window, slug };
 
   // 창이 닫히면 뷰도 같이 간다 — 창에 붙은 채로 남으면 다음 창에서 유령이 된다.

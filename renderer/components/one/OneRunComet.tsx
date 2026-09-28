@@ -121,7 +121,8 @@ export function useOneRunSignals(
     let unsubscribe: (() => void) | undefined;
     try {
       unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
-        if (change?.entity === "long-run" || change?.entity === "chat") refresh();
+        // automation: 이 대화의 자동화가 숨은 세션에서 시작·종료될 때(Main 이 goalActiveChats 에 합쳐 준다).
+        if (change?.entity === "long-run" || change?.entity === "chat" || change?.entity === "automation") refresh();
       });
     } catch {
       unsubscribe = undefined;

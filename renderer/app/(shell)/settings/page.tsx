@@ -27,6 +27,7 @@ import { navigate } from "@/lib/navigation";
 import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
 import { AgentFileEditor, runtimeEditorSource } from "@/components/AgentFileEditor";
 import { MigrationPanel } from "@/components/MigrationPanel";
+import { UpdateResumeConfirm } from "@/components/UpdateResumeConfirm";
 import { MediaDisplaySettings } from "@/components/MediaDisplaySettings";
 import QRCode from "qrcode";
 import type { HephaestusUpdateJournal, MobileBridgeDeviceSummary, MobileBridgeRuntimeStatus, RunAlertSettings } from "@shared/types";
@@ -2327,6 +2328,9 @@ function UpdatePanel() {
   const [version, setVersion] = useState("");
   const [checking, setChecking] = useState(false);
   const [installDeferred, setInstallDeferred] = useState(false);
+  const [resumeConfirm, setResumeConfirm] = useState<{ count: number; line?: string } | null>(null);
+  const [resumeBusy, setResumeBusy] = useState(false);
+  const [laterChosen, setLaterChosen] = useState(false);
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
   /*
    * Desktop's own version is not the whole answer. Build, upload, routing and
@@ -2406,7 +2410,27 @@ function UpdatePanel() {
     if (!api) return;
     setInstallDeferred(false);
     const result = await api.updater.install();
-    setInstallDeferred(result.blockedBy === "active-runs");
+    // Work is running: the in-app confirm names it (Main's count and line) instead of refusing.
+    if (result.blockedBy === "active-runs") setResumeConfirm({ count: result.activeRunCount ?? 1, line: result.activeWorkLine });
+  }
+
+  async function installAndResume() {
+    const api = ipc();
+    if (!api || resumeBusy) return;
+    setResumeBusy(true);
+    try {
+      const result = await api.updater.install({ resumeWork: true });
+      if (!result.accepted) setInstallDeferred(result.blockedBy === "active-runs");
+    } finally {
+      setResumeBusy(false);
+      setResumeConfirm(null);
+    }
+  }
+
+  async function installLater() {
+    const result = await ipc()?.updater.deferInstall();
+    setResumeConfirm(null);
+    setLaterChosen(Boolean(result?.deferred));
   }
 
   async function revealRecoveryBackup() {
@@ -2426,6 +2450,7 @@ function UpdatePanel() {
 
   const statusText = (() => {
     if (installDeferred) return t("settings.update.active_runs");
+    if (laterChosen && state.status === "downloaded") return t("update.resume_deferred");
     if (state.code === "install-source-untrusted") return t(state.diagnostic?.category === "source-seal" ? "settings.update.source_files_changed" : "settings.update.repair_required");
     if (state.code === "install-not-applied") return t("settings.update.install_not_applied");
     if (state.code === "install-start-failed") return t("settings.update.install_start_failed");
@@ -2490,6 +2515,15 @@ function UpdatePanel() {
             {statusText}
           </div>
         </div>
+        {resumeConfirm && (
+          <UpdateResumeConfirm
+            count={resumeConfirm.count}
+            line={resumeConfirm.line}
+            busy={resumeBusy}
+            onInstall={() => void installAndResume()}
+            onLater={() => void installLater()}
+          />
+        )}
         {state.status === "downloaded" ? (
           <button
             onClick={() => void install()}

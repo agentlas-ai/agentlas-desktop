@@ -1130,11 +1130,13 @@ export function touchGraphRun(runId: string, at: Date = new Date()): boolean {
 /** 실행 종료 시 최종 상태(ok/error) 기록. */
 export function finishGraphRun(runId: string, status: "ok" | "error"): void {
   const db = getDb();
+  let finishedAutomationId = null as string | null;
   const finish = db.transaction(() => {
     const row = db
-      .prepare("SELECT node_states_json FROM automation_runs WHERE id = ? AND status = 'running'")
-      .get(runId) as { node_states_json: string | null } | undefined;
+      .prepare("SELECT node_states_json, automation_id FROM automation_runs WHERE id = ? AND status = 'running'")
+      .get(runId) as { node_states_json: string | null; automation_id: string | null } | undefined;
     if (!row) return;
+    finishedAutomationId = row.automation_id;
     let nodeStatesJson = row.node_states_json;
     if (status === "error" && nodeStatesJson) {
       try {
@@ -1159,6 +1161,8 @@ export function finishGraphRun(runId: string, status: "ok" | "error"): void {
     ).run(status, nodeStatesJson, new Date().toISOString(), runId);
   });
   finish.immediate();
+  // The conversation's live automation row and sidebar comet end on this broadcast (owner 2026-09-28).
+  if (finishedAutomationId) emitDesktopStoreChange({ entity: "automation", id: finishedAutomationId });
 }
 
 /** 이 자동화의 최근 실행 스냅샷(per-node 상태). 라이브 오버레이 초기 하이드레이트용. */

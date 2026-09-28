@@ -13,6 +13,7 @@ import { GoalResultReport } from "../GoalResultReport";
 import type { ChatHostNotice } from "../../../shared/types";
 import { normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
+import { AutomationLiveRows, AutomationReportSummary } from "../automation/AutomationChatActivity";
 import { OneGoalControls } from "./OneGoalControls";
 
 import { useRouter, useSearchParams } from "next/navigation";
@@ -1207,6 +1208,11 @@ function directSessionAgentId(chat: Chat): string | null {
   return agentId;
 }
 
+/** 두 ISO 시각 중 늦은 쪽. 세션 목록 정렬 키에 로컬 보냄 표식을 겹칠 때 쓴다. */
+function latestIso(base: string, bump: string | undefined): string {
+  return bump && bump > base ? bump : base;
+}
+
 function isOneOwnedSession(chat: Chat, taskforces: OneTaskforce[]): boolean {
   if (chat.seatKind === "group" || taskforces.some((taskforce) => taskforce.chatId === chat.id)) return false;
   const agentId = chat.agentId?.trim() || "";
@@ -1272,6 +1278,11 @@ export function OneShell() {
   const [loaded, setLoaded] = useState(false);
   const [projections, setProjections] = useState<OneTaskProjection[]>([]);
   const [conversations, setConversations] = useState<Chat[]>([]);
+  // 세션 목록 순서(오너 2026-09-28 "최근 대화가 가장 위로"): 보낸 순간 그 프레임에 올리는 로컬 표식과,
+  // 목록 위에 포인터가 있는 동안 잡아 두는 순서. 메신저처럼 누르려는 줄이 손 밑에서 도망가지 않는다.
+  const [sessionActivityBumps, setSessionActivityBumps] = useState<Record<string, string>>({});
+  const [sessionOrderHold, setSessionOrderHold] = useState<string[] | null>(null);
+  const taskforcesForListRef = useRef<OneTaskforce[]>([]);
   const [selected, setSelected] = useState<OneTaskProjection | null>(null);
   const [conversation, setConversation] = useState<Chat | null>(null);
   const [activeThreadChat, setActiveThreadChat] = useState<Chat | null>(null);
@@ -1294,6 +1305,7 @@ export function OneShell() {
   const [oneProfile, setOneProfile] = useState<OneProfile | null>(null);
   const [oneOrgState, setOneOrgState] = useState<OneOrgState | null>(null);
   const [taskforces, setTaskforces] = useState<OneTaskforce[]>([]);
+  taskforcesForListRef.current = taskforces;
   const [taskforceDialogOpen, setTaskforceDialogOpen] = useState(false);
   const [taskforceEditingId, setTaskforceEditingId] = useState<string | null>(null);
   const [taskforceBusy, setTaskforceBusy] = useState(false);
@@ -2736,7 +2748,8 @@ export function OneShell() {
   useEffect(() => {
     const events = ipcEvents();
     if (!events?.onStoreChanged) return;
-    return events.onStoreChanged((change) => {
+    let sessionListRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+    const unsubscribe = events.onStoreChanged((change) => {
       const api = ipc();
       if (!api) return;
       if (change.entity === "one-org") {
@@ -2749,8 +2762,27 @@ export function OneShell() {
         }).catch(() => undefined);
       } else if (change.entity === "one-taskforce") {
         void refreshAll({ includeOrg: false });
+      } else if (change.entity === "chat") {
+        // 다른 방에 답·자동화 보고가 떨어지면 5초 폴링을 기다리지 않고 목록만 다시 읽는다.
+        // 정렬 키(lastActivityAt)는 Main 이 보이는 줄로만 계산하므로 조용한 변경은 순서를 안 바꾼다.
+        if (sessionListRefreshTimer) return;
+        sessionListRefreshTimer = setTimeout(() => {
+          sessionListRefreshTimer = null;
+          void api.chats.listRecentOne(40).then((recentChats) => {
+            const taskforceChatIds = new Set(taskforcesForListRef.current.map((taskforce) => taskforce.chatId));
+            setConversations(keepPrevIfDeepEqual(
+              recentChats
+                .filter((chat) => chat.originSurface === "one")
+                .map((chat) => (taskforceChatIds.has(chat.id) ? { ...chat, isTaskforce: true } : chat)),
+            ));
+          }).catch(() => undefined);
+        }, 80);
       }
     });
+    return () => {
+      unsubscribe();
+      if (sessionListRefreshTimer) clearTimeout(sessionListRefreshTimer);
+    };
   }, [refreshAll]);
 
   const reconcileConversationTask = useCallback(async (chatId: string) => {
@@ -3612,7 +3644,7 @@ export function OneShell() {
       key: chat.id,
       chat,
       task: taskByChat.get(chat.id) ?? null,
-      sortAt: chat.updatedAt,
+      sortAt: latestIso(chat.lastActivityAt ?? chat.updatedAt, sessionActivityBumps[chat.id]),
     }));
     /*
      * 작업은 **줄을 따로 세우지 않는다** (오너 결정 2026-08-24: "두 개 합치라").
@@ -3625,10 +3657,16 @@ export function OneShell() {
       rows.push({ kind: "task" as const, key: `task:${item.taskId}`, task: item, chat: null, sortAt: item.status.asOf });
     }
     rows.sort((a, b) => String(b.sortAt).localeCompare(String(a.sortAt)));
+    if (sessionOrderHold) {
+      // 포인터가 목록 위에 있는 동안은 잡아 둔 순서를 지킨다. 새로 생긴 줄만 맨 위에 선다.
+      const heldIndex = new Map(sessionOrderHold.map((key, index) => [key, index]));
+      const rank = (key: string) => heldIndex.get(key) ?? -1;
+      rows.sort((a, b) => rank(a.key) - rank(b.key));
+    }
     // Messenger grammar: one uninterrupted latest-first list. Date buckets
     // make a room move between visual sections over time, so they stay out.
     return { rows };
-  }, [conversations, projections]);
+  }, [conversations, projections, sessionActivityBumps, sessionOrderHold]);
   const hasOtherSessionAttention = useMemo(() => {
     const pendingChatIds = new Set(
       confirmations
@@ -4742,6 +4780,10 @@ export function OneShell() {
       setActivityStateRunId(null);
       setLiveRunPrompt({ runId, text });
       setDispatchRunPrompt({ runId, text });
+      if (options?.displayUserMessage !== false) {
+        const sentAt = new Date(optimisticStartedAt).toISOString();
+        setSessionActivityBumps((current) => ({ ...current, [chatId]: sentAt }));
+      }
       setBusy(true);
       setRunStartedAt(optimisticStartedAt);
       setSurface(null);
@@ -5731,8 +5773,11 @@ export function OneShell() {
     // than the prior answer's stale, falsely-live Activity.
     const preflightId = `one-preflight:${uid()}`;
     const preflightStartedAt = Date.now();
+    const sentChatId = freshChatSubmissionPendingRef.current ? null : (conversation?.id ?? selected?.chatId ?? null);
     flushSync(() => {
       setPreflightPrompt({ id: preflightId, text: value, startedAt: preflightStartedAt });
+      // 보낸 방은 내 말풍선과 같은 커밋에서 목록 맨 위로 간다(준비 단계가 몇 초 걸려도).
+      if (sentChatId) setSessionActivityBumps((current) => ({ ...current, [sentChatId]: new Date(preflightStartedAt).toISOString() }));
       setActivityStateRunId(null);
       setActivity(initialOneActivityState());
       setRunStartedAt(null);
@@ -7796,7 +7841,12 @@ export function OneShell() {
             {sessionGroups.rows.length === 0 && (
               <div className={styles.railEmpty}>{appLocale === "ko" ? "아직 대화가 없어요. 위에서 새 대화를 시작하세요." : "No conversations yet. Start one above."}</div>
             )}
-            <div className={styles.railList} data-one-session-list="latest-first">
+            <div
+              className={styles.railList}
+              data-one-session-list="latest-first"
+              onPointerEnter={() => setSessionOrderHold(sessionGroups.rows.map((row) => row.key))}
+              onPointerLeave={() => setSessionOrderHold(null)}
+            >
               {sessionGroups.rows.map((row) => (row.chat ? (
                 <ConversationListButton
                   key={row.key}
@@ -8149,7 +8199,11 @@ export function OneShell() {
                           {liveWorkBlock}
                         </>}
                         {(visibleText || hasAttachments) && (normalizeChatHostNotice(message.role, message.hostNotice)
-                          ? <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />
+                          ? (message.hostNotice?.purpose === "automation-report"
+                            // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28).
+                            ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={appLocale === "ko" ? "ko" : "en"}
+                                fallback={<HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />} />
+                            : <HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />)
                           : systemLabel
                           ? (
                             // A prompt One sent on the person's behalf ("One
@@ -8305,6 +8359,8 @@ export function OneShell() {
                       {liveWorkBlock}
                     </>
                   )}
+                  {/* 이 대화의 자동화가 숨은 세션에서 도는 동안의 실시간 줄 — 끝나면 보고 요약으로 바뀐다. */}
+                  <AutomationLiveRows chatId={activeThreadChatId} locale={appLocale === "ko" ? "ko" : "en"} />
                 </section>
                 {awaitingWorkforceConsent && !teamPreflightBusy && !busy && (
                   <section className={styles.teamPreflightConsent} role="group" aria-live="polite">
@@ -8333,7 +8389,8 @@ export function OneShell() {
                   이제 순서가 반대다: 런타임이 말한 사유가 있으면 **그것을 보여 준다.**
                   사유가 정말 없을 때만 일반 문구로 떨어진다.
                 */}
-                {teamPreflight && ["workforce_reserved", "recovery_required"].includes(teamPreflight.status) && receipt?.status !== "completed" && receipt?.interruptionCause !== "steering" && !teamPreflightBusy && !busy && !awaitingWorkforceConsent && (
+                {/* 목표·자동화가 이 방에서 살아 있으면 실패한 턴은 턴의 실패일 뿐 — 방 전체를 멈춤처럼 말하지 않는다(오너 2026-09-28). */}
+                {teamPreflight && ["workforce_reserved", "recovery_required"].includes(teamPreflight.status) && receipt?.status !== "completed" && receipt?.interruptionCause !== "steering" && !teamPreflightBusy && !busy && !awaitingWorkforceConsent && !(activeThreadChatId && spinningChatIds.has(activeThreadChatId)) && (
                   <p className={styles.teamPreflightRecovery} role="status">
                     {receipt?.errorMessage?.trim()
                       ? receipt.errorMessage.trim().slice(0, 300)

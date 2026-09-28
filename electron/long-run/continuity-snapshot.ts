@@ -70,7 +70,8 @@ export function getChatContinuitySnapshot(chatId: string, hostActiveRunId: strin
     const goal: ChatContinuitySnapshot["goal"] = goalId ? {
       goalId, lifecycle: revision?.lifecycle ?? null, goalRevision: revision?.revision ?? null,
       contractStatus: contract?.status ?? null, runId: run?.id ?? null, runStatus: run?.status ?? null,
-      runVersion: run?.version ?? null, blockedReason: code(run?.blockedReason), eventSeq: run?.lastEventSeq ?? null,
+      runVersion: run?.version ?? null, blockedReason: code(run?.blockedReason), pauseReason: code(run?.pauseReason),
+      eventSeq: run?.lastEventSeq ?? null,
       episodeStrategy: strategy && plan ? { planRevision: plan.revision, state: strategy.state,
         nextAction: strategy.nextAction, reasonCode: strategy.reasonCode, metrics: strategy.metrics,
         nextWakeAt: strategy.nextWakeAt } : null,

@@ -143,7 +143,8 @@ export interface RecordFailureEventInput {
   payload?: Record<string, unknown>;
 }
 
-const SECRET_RE = /(sk-[A-Za-z0-9_-]{12,}|api[_-]?key\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|token\s*[:=]\s*\S+|BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY)/gi;
+// sk- must start a token (see shared/secret-patterns.ts): "task-force-failed" is a code, not a key.
+const SECRET_RE = /((?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{12,}|api[_-]?key\s*[:=]\s*\S+|secret\s*[:=]\s*\S+|password\s*[:=]\s*\S+|token\s*[:=]\s*\S+|BEGIN (?:RSA |OPENSSH |EC |DSA )?PRIVATE KEY)/gi;
 const COOKIE_OBJECT_VALUE_RE = /((?:["']?name["']?\s*:\s*["'][^"']{1,160}["'][\s\S]{0,160}?["']?value["']?\s*:\s*["']))[^"']*(["'])/gi;
 const SENSITIVE_NAMED_VALUE_RE = /((?:auth_token|ct0|access_token|refresh_token|session(?:id|_id|token)?|cookie|authorization)\s*[:=]\s*["']?)[^"'\s,;}]+/gi;
 const SENSITIVE_JSON_VALUE_RE = /(["'](?:encrypted_value|authorization|cookie|set-cookie|access_token|refresh_token|auth_token|ct0)["']\s*:\s*["'])[^"']*(["'])/gi;
@@ -2032,6 +2033,8 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
   const hostStopCause = status !== "completed"
     ? invocationHostStopCause(terminalPayload.hostStopCause) ?? invocationHostStopCause(terminalPayload.errorMessage) : null;
   if (status === "failed" && isOwnerGoalStopCause(hostStopCause)) status = "cancelled";
+  // A turn the person paused to install an update was interrupted, not failed: it continues after the restart.
+  if (status === "failed" && hostStopCause === "update_restart") status = "interrupted";
   const runtimeFailure = boundedRuntimeFailure({
     kind: terminalPayload.runtimeFailureKind,
     source: terminalPayload.runtimeFailureSource,

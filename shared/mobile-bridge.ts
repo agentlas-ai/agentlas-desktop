@@ -1,6 +1,10 @@
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
-import { ONE_DECISION_CONTRACT_VERSION, type OneDecisionViewV1 } from "./one-decision";
+import {
+  ONE_DECISION_CONTRACT_VERSION,
+  ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION,
+  type OneDecisionViewV1,
+} from "./one-decision";
 import type { OneMobileEcosystemSuggestionV1 } from "./one-mobile-suggestion";
 import { PROJECT_AGENT_POOL_MAX } from "./project-agent-pool";
 import {
@@ -96,6 +100,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "host.status",
   "team.list",
   "one.org.get",
+  "one.avatar.get",
   "one.org.add",
   "one.org.openMember",
   "one.org.markRead",
@@ -150,6 +155,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "invoke.receipt",
   "invoke.activeChats",
   "confirm.listPending",
+  "one.decision.retryReview",
   "browser.resolveApproval",
   // 동기 런타임 질문 — 기존 chat Decision/도구 승인과 섞지 않는다.
   "runtime.submitUserInput",
@@ -297,7 +303,13 @@ export interface MobileBridgeInvokeSteerParams {
   expectedQuestionMessageId?: string;
   expectedTaskId?: string;
   expectedTaskVersion?: number;
-  expectedDecisionContractVersion?: typeof ONE_DECISION_CONTRACT_VERSION;
+  expectedDecisionContractVersion?: typeof ONE_DECISION_CONTRACT_VERSION | typeof ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION;
+  /** V2 only: authenticated host, source timestamp, and complete displayed option set. */
+  expectedAuthoritativeHostRef?: string;
+  expectedDecisionCreatedAt?: string;
+  expectedDecisionOptionLabels?: string[];
+  /** V2 only: nonempty, strictly ascending indexes into the bound option set. */
+  expectedDecisionSelectionIndexes?: number[];
   expectedRunId: string;
 }
 
@@ -1444,6 +1456,21 @@ export interface MobileBridgeOneDecisionDto {
   view: OneDecisionViewV1;
 }
 
+/** Additive multi-select authority; the V1 row remains visible to older clients. */
+export interface MobileBridgeOneDecisionMultiSelectionV2Dto {
+  contractVersion: typeof ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION;
+  authoritativeHostRef: string;
+  canonicalTaskVersion: number;
+  taskId: string;
+  chatId: string;
+  decisionId: string;
+  createdAt: string;
+  /** Exact ordered labels of the bound V1 view, including rejected/locked choices. */
+  optionLabels: string[];
+  /** Only currently judged, non-reject, non-modify choices may be selected. */
+  selectableIndexes: number[];
+}
+
 export type MobileBridgeOneValueClosurePhase = "discovery" | "preparation" | "execution" | "verification";
 export type MobileBridgeOneValueClosurePhaseStatus =
   | "not_started"
@@ -2099,6 +2126,8 @@ export interface MobileBridgeOneProfileDto {
   version: number;
   displayName: string;
   role: string;
+  /** Main-owned visual identity; image bytes require one.avatar.get. */
+  avatarIcon?: string;
   preferredLocale: "system" | "ko" | "en";
   timeZone: string | null;
   updatedAt: string;
@@ -2463,6 +2492,8 @@ export interface MobileBridgeSnapshot {
    * is no current safe Decision so Mobile can clear stale approval UI.
    */
   oneDecisions?: MobileBridgeOneDecisionDto[];
+  /** Additive closed multi-select overlays, each bound to a row in oneDecisions. */
+  oneDecisionMultiSelectionsV2?: MobileBridgeOneDecisionMultiSelectionV2Dto[];
   /** Absent on older builds; new Desktop builds emit [] to clear stale Mobile cards. */
   oneValueClosures?: MobileBridgeOneValueClosureDto[];
   /** Approved reuse only; no raw Memory or improvement assertion crosses the bridge. */
@@ -2714,12 +2745,34 @@ function validateInvokeOptions(
   const hasDecisionTaskId = params.expectedTaskId !== undefined;
   const hasDecisionTaskVersion = params.expectedTaskVersion !== undefined;
   const hasDecisionContract = params.expectedDecisionContractVersion !== undefined;
-  const hasDecisionTaskBinding = hasDecisionTaskId || hasDecisionTaskVersion || hasDecisionContract;
+  const hasV2Binding = params.expectedAuthoritativeHostRef !== undefined
+    || params.expectedDecisionCreatedAt !== undefined
+    || params.expectedDecisionOptionLabels !== undefined
+    || params.expectedDecisionSelectionIndexes !== undefined;
+  const hasDecisionTaskBinding = hasDecisionTaskId || hasDecisionTaskVersion || hasDecisionContract || hasV2Binding;
   let decisionBindingError: string | null = null;
   if (hasDecisionTaskBinding || (hasDecisionId && !allowObservedRunQuestion)) {
     if (!hasDecisionId || !hasDecisionTaskId || !hasDecisionTaskVersion || !hasDecisionContract) {
       decisionBindingError = "Decision answers require expectedQuestionMessageId, expectedTaskId, expectedTaskVersion, and expectedDecisionContractVersion";
-    } else if (params.expectedDecisionContractVersion !== ONE_DECISION_CONTRACT_VERSION) {
+    } else if (params.expectedDecisionContractVersion === ONE_DECISION_CONTRACT_VERSION) {
+      if (hasV2Binding) decisionBindingError = "V1 Decision answers cannot include V2 selection fields";
+    } else if (params.expectedDecisionContractVersion === ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION) {
+      const labels = params.expectedDecisionOptionLabels;
+      const indexes = params.expectedDecisionSelectionIndexes;
+      if (
+        typeof params.expectedAuthoritativeHostRef !== "string"
+        || !/^host_[a-f0-9]{32}$/.test(params.expectedAuthoritativeHostRef)
+        || typeof params.expectedDecisionCreatedAt !== "string"
+        || !Number.isFinite(Date.parse(params.expectedDecisionCreatedAt))
+        || !Array.isArray(labels) || labels.length < 2 || labels.length > 8
+        || labels.some((label) => typeof label !== "string" || !label || label.length > 200)
+        || new Set(labels).size !== labels.length
+        || !Array.isArray(indexes) || indexes.length < 1 || indexes.length > 8
+        || indexes.some((index, position) => !Number.isSafeInteger(index)
+          || index < 0 || index >= labels.length
+          || (position > 0 && index <= indexes[position - 1]))
+      ) decisionBindingError = "V2 Decision answers require exact host, creation time, option labels, and ordered selection indexes";
+    } else {
       decisionBindingError = "expectedDecisionContractVersion is unsupported";
     }
   }
@@ -2731,6 +2784,8 @@ function validateInvokeOptions(
     optionalString(params, "expectedTaskId", 256),
     optionalInteger(params, "expectedTaskVersion", 1, Number.MAX_SAFE_INTEGER),
     optionalString(params, "expectedDecisionContractVersion", 32),
+    optionalString(params, "expectedAuthoritativeHostRef", 64),
+    optionalString(params, "expectedDecisionCreatedAt", 64),
     requiredText(params, "userPrompt", 200_000),
     validateEnum(params, "locale", ["ko", "en"]),
     validateEnum(params, "permissions", ["read", "write", "full"]),
@@ -3139,6 +3194,11 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             optionalString(params, "displayName", 80),
           )
         : "one.org.add accepts only installedAgentId and displayName";
+    case "one.avatar.get":
+      return hasOnlyKeys(params, ["icon"])
+        ? (typeof params.icon === "string" && /^one-avatar:(?:self|[a-f0-9-]{16,80})$/i.test(params.icon)
+          ? null : "icon must be an exact One avatar identity")
+        : "one.avatar.get accepts only icon";
     case "one.org.openMember":
       return hasOnlyKeys(params, ["id", "expectedRevision"])
         ? firstError(
@@ -3352,12 +3412,12 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
       );
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "steeringMode", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "steeringMode", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));
@@ -3366,6 +3426,16 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["runId"]) ? requiredString(params, "runId", 160) : `${method} accepts only runId`;
     case "invoke.attach":
       return hasOnlyKeys(params, ["chatId"]) ? requiredString(params, "chatId") : "invoke.attach accepts only chatId";
+    case "one.decision.retryReview":
+      return hasOnlyKeys(params, ["chatId", "taskId", "taskVersion", "decisionId"])
+        ? firstError(
+            requiredString(params, "chatId", 256),
+            requiredString(params, "taskId", 256),
+            Number.isSafeInteger(params.taskVersion) && Number(params.taskVersion) >= 1
+              ? null : "one.decision.retryReview requires a Task version",
+            requiredString(params, "decisionId", 256),
+          )
+        : "one.decision.retryReview accepts only exact Decision binding";
     case "browser.resolveApproval":
       return hasOnlyKeys(params, ["requestId", "decision"])
         ? firstError(

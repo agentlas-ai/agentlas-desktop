@@ -391,7 +391,9 @@ export interface LiveTactic extends GoalTactic {
   failures: number;
   evidence: string | null;
   /** 지속 정책이 고른 다음 수의 안내(없으면 null). */
-  guidance: { move: string; cause: string; at: string | null; boundary: string | null } | null;
+  guidance: { move: string; cause: string; at: string | null; boundary: string | null;
+    /** switch_tool chosen by the AGI unblocker: the installed alternative path the next turn must use. */
+    path?: string | null } | null;
   /** retry_backoff 로 미룬 시각. 이 전에는 다른 전술이 있으면 고르지 않는다. */
   deferredUntil: string | null;
 }

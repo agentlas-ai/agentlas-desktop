@@ -19,7 +19,7 @@ import type { AliveAgent, AliveAttachment, AliveClockPort, AliveWakeRuntimeRecor
 import type { RuntimeStatus } from "../../shared/types";
 import type { AliveAgentAccess } from "../billing";
 import { AliveLifetimeStore, aliveStableId } from "../alive-core/lifetime-store";
-import { AliveLifetimeService } from "../alive-core/lifetime-service";
+import { AliveLifetimeService, type AliveLifetimeServiceOptions } from "../alive-core/lifetime-service";
 import { GoalAlivePlayground, attachedGoalId, type GoalPlaygroundDeps } from "./goal-playground";
 import { GoalAliveRuntime } from "./goal-runtime";
 import { LightWakeRunner, type LightWakeDeps } from "./light-wake";
@@ -53,6 +53,8 @@ export interface AliveHostDeps {
   checkPlanAccess(): Promise<AliveAgentAccess>;
   emit(event: AliveChangedEvent): void;
   registerShutdown?(stop: () => void): void;
+  /** Decision point unblock_attempt_due (see AliveLifetimeServiceOptions.unblockAttempt). Absent = not built yet. */
+  unblockAttempt?: AliveLifetimeServiceOptions["unblockAttempt"];
   /** Goal/chat store changes (goal deleted, ended, cancelled, rebound). Returns an unsubscribe. */
   onGoalStoreChanged?(listener: () => void): () => void;
 }
@@ -128,6 +130,7 @@ export class AliveOrganismHost {
         },
         // Nothing changed: never every beat. 5m → 15m → 60m between unchanged reviews; a salience change wakes now.
         actionSpacingMs: deps.actionSpacingMs ?? ALIVE_ACTION_SPACING_MS,
+        ...(deps.unblockAttempt ? { unblockAttempt: deps.unblockAttempt } : {}),
         reviewFloorMs: (agent) => floors[Math.min(floors.length - 1, Math.max(0, Number(agent.state.unchangedReviews ?? 0)))] ?? 0,
       });
       return { kind, store, playground, runtime, service, releaseClock: null, beating: false, digests: new Map() };

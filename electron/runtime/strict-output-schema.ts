@@ -42,3 +42,29 @@ function isStrictNode(node: unknown): boolean {
   if (types.includes("array") && n.items !== undefined && !isStrictNode(n.items)) return false;
   return true;
 }
+
+/**
+ * A schema codex cannot carry (not OpenAI-strict) is not dropped silently: the
+ * runner contract (RunnerRequest.outputSchema) requires the instruction
+ * fallback so the model still sees the exact shape. Dropping it without this
+ * made the ordinary task-force planner answer in prose / omit workspaceAccess
+ * (2026-09-28). Strict schemas travel natively and need no prose copy.
+ *
+ * The block text mirrors shared/runtime-capabilities.ts schemaFallbackInstruction;
+ * it is inlined because this module must stay dependency-free (the codex
+ * residency source-contract gate loads it in a sealed VM).
+ */
+export function codexSystemPromptWithSchemaFallback(req: {
+  systemPrompt: string;
+  outputSchema?: { schema: Record<string, unknown> };
+}): string {
+  if (!req.outputSchema || openAiStrictSchemaOrNull(req.outputSchema.schema)) return req.systemPrompt;
+  return [
+    req.systemPrompt,
+    "[OUTPUT CONTRACT]",
+    "Your final message must be exactly one JSON document matching this schema,",
+    "with no prose, no explanation, and no code fence around it:",
+    JSON.stringify(req.outputSchema.schema),
+    "[/OUTPUT CONTRACT]",
+  ].join("\n");
+}

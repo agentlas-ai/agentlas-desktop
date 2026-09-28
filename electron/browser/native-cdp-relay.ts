@@ -66,10 +66,39 @@ async function waitForStableNativeBrowserViewport(
 
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 
+/** One page an agent is currently driving through this grant. URL is read from the guest itself. */
+export interface NativeBrowserRelayPage {
+  url: string;
+  /** Reload and resolve with the URL the page settled on (null if it went away). */
+  reload: () => Promise<string | null>;
+  /** Open a URL in the same guest (owner sign-in card). */
+  navigate: (url: string) => Promise<void>;
+}
+
 export interface NativeBrowserRelayGrant {
   endpoint: string;
   token: string;
   release: () => void;
+  /** Login recovery reads where the agent actually is — structurally, never from tool prose. */
+  pages: () => NativeBrowserRelayPage[];
+}
+
+function settledUrl(wc: WebContents, timeoutMs = 20_000): Promise<string | null> {
+  return new Promise((resolve) => {
+    if (wc.isDestroyed()) { resolve(null); return; }
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      wc.removeListener("did-stop-loading", finish);
+      wc.removeListener("destroyed", finish);
+      resolve(wc.isDestroyed() ? null : wc.getURL());
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    wc.once("did-stop-loading", finish);
+    wc.once("destroyed", finish);
+  });
 }
 
 export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<NativeBrowserRelayGrant> {
@@ -439,5 +468,33 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   const address = server.address();
   if (!address || typeof address === "string" || !current()) { release(); server.close(); throw new Error("native-browser-relay-unavailable"); }
   port = address.port;
-  return { endpoint: `http://127.0.0.1:${port}`, token: secret, release };
+  const pages = (): NativeBrowserRelayPage[] => {
+    if (!current()) return [];
+    const seen = new Set<WebContents>();
+    const out: NativeBrowserRelayPage[] = [];
+    for (const lease of leases.values()) {
+      for (const guest of lease.guests.values()) {
+        const wc = guest.wc;
+        if (seen.has(wc) || wc.isDestroyed() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== wc) continue;
+        seen.add(wc);
+        out.push({
+          url: wc.getURL(),
+          reload: async () => {
+            if (wc.isDestroyed()) return null;
+            const settled = settledUrl(wc);
+            wc.reload();
+            return settled;
+          },
+          navigate: async (target: string) => {
+            const safe = sanitizeWorkLiveUrl(target);
+            if (!safe || wc.isDestroyed()) return;
+            presentAction(guest);
+            await wc.loadURL(safe.toString()).catch(() => undefined);
+          },
+        });
+      }
+    }
+    return out;
+  };
+  return { endpoint: `http://127.0.0.1:${port}`, token: secret, release, pages };
 }

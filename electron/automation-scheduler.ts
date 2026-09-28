@@ -1773,7 +1773,11 @@ function tick(): void {
   try {
     recoverStaleAutomationRuns();
   } catch (err) {
-    console.error("[automation] stale run recovery failed:", err);
+    // Recovery runs with busy_timeout 0 on purpose (a tick must not hold Main for 15 s), so a locked store is the
+    // expected outcome of contention and is retried next tick. Logged as one line: 23 full stacks in a day buried
+    // real errors in app.log (2026-09-27).
+    if ((err as { code?: string } | null)?.code === "SQLITE_BUSY") console.warn("[automation] stale run recovery skipped: store busy; retrying next tick");
+    else console.error("[automation] stale run recovery failed:", err);
   }
   try {
     for (const recovered of recoverReadOnlySuspendedGraphs()) {

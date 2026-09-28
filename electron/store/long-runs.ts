@@ -2558,8 +2558,11 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
         .get(row.id) as { payload_json: string } | undefined;
       const control = userControl ? JSON.parse(userControl.payload_json) : null;
       const action = control?.action ?? control?.command;
-      const userPause = row.status === "pausing" && action === "pause";
-      const userDelete = row.status === "cancelling";
+      // Only an explicit Goal delete ends the Goal at quit. A turn [중지] used to leave `cancelling`
+      // behind, and a quit or update right after it turned the owner's Goal into `cancelled`
+      // (2026-09-28 "업데이트하면 골이 사라짐"): quit, update and pause-then-quit end paused.
+      const userDelete = row.status === "cancelling" && action === "delete";
+      const userPause = (row.status === "pausing" && action === "pause") || (row.status === "cancelling" && !userDelete);
       db.prepare(
         `UPDATE long_run_worker_attempts
          SET state = 'interrupted',

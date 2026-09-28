@@ -1,0 +1,141 @@
+/* Automation activity in the thread and the right-panel tab. Tokens only; no new palette. */
+
+.logos { display: inline-flex; align-items: center; gap: 4px; vertical-align: middle; }
+.logo {
+  display: inline-grid;
+  place-items: center;
+  flex: 0 0 auto;
+  border-radius: 4px;
+  overflow: hidden;
+  color: var(--muted-deep);
+  background: var(--paper-2, var(--paper));
+  box-shadow: inset 0 0 0 1px var(--paper-edge);
+}
+.logo img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.monogram { font-size: 9px; font-weight: 700; line-height: 1; color: var(--ink-soft); }
+
+.actions { list-style: none; margin: 0; padding: 0; display: grid; gap: 3px; }
+.action {
+  display: grid;
+  grid-template-columns: auto 16px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-height: 22px;
+  color: var(--muted-deep);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+.action:not(:has(time)) { grid-template-columns: 16px minmax(0, 1fr); }
+.action time { color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.actionText { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.actionText a { color: inherit; text-decoration: none; }
+.actionText a:hover, .actionText a:focus-visible { text-decoration: underline; color: var(--ink); outline: none; }
+.action[data-outward="true"] { color: var(--ink); font-weight: 600; }
+.action[data-failed="true"] { color: var(--muted-deep); }
+.failure { font-style: normal; color: var(--danger, var(--accent)); font-weight: 500; }
+.actionMuted { color: var(--muted); font-size: 12px; }
+
+/* Thread: live row */
+.liveStack { display: grid; gap: 8px; align-self: stretch; max-width: 760px; margin: 8px 0 4px; }
+.liveRow {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 12px;
+  background: var(--paper-raised, var(--paper));
+}
+.liveHeader { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; font-size: 13px; color: var(--ink); }
+.liveHeader > strong { font-weight: 640; }
+.liveName { color: var(--ink-soft); max-width: 36ch; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.liveElapsed { color: var(--muted-deep); font-variant-numeric: tabular-nums; }
+.liveHeader .logos { margin-left: auto; }
+.liveHeadline { margin: 0; font-size: 12.5px; color: var(--ink-soft); }
+.liveFooter { display: flex; gap: 12px; align-items: center; font-size: 12px; }
+.liveFooter button, .liveFooter a {
+  border: 0; background: none; padding: 0; font: inherit; color: var(--muted-deep); cursor: pointer; text-decoration: none;
+}
+.liveFooter button:hover, .liveFooter a:hover, .liveFooter button:focus-visible, .liveFooter a:focus-visible { color: var(--ink); text-decoration: underline; outline: none; }
+
+/* Thread: finished report */
+.report {
+  align-self: stretch;
+  max-width: 760px;
+  margin: 6px 0;
+  padding: 10px 12px;
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 12px;
+  background: var(--paper);
+}
+.reportHeader { display: flex; gap: 6px; align-items: baseline; color: var(--muted-deep); font-size: 12px; }
+.reportHeader time { font-variant-numeric: tabular-nums; color: var(--ink-soft); font-weight: 600; }
+.reportStatus { margin-left: auto; font-size: 11px; color: var(--muted-deep); }
+.reportStatus[data-status="error"] { color: var(--danger, var(--accent)); }
+.reportHeadline { margin: 0; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; color: var(--ink); }
+.reportHeadline strong { font-weight: 640; }
+.reportFailures { color: var(--muted-deep); font-size: 12px; }
+.reportToggle {
+  justify-self: start;
+  display: inline-flex; align-items: center; gap: 4px;
+  border: 0; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--muted-deep); cursor: pointer;
+}
+.reportToggle[aria-expanded="true"] svg { transform: rotate(180deg); }
+.reportToggle:hover, .reportToggle:focus-visible { color: var(--ink); outline: none; text-decoration: underline; }
+.reportProse { border-top: 1px solid var(--paper-3, var(--paper-edge)); padding-top: 6px; }
+
+/* Right panel: 자동화 tab */
+.railList { display: grid; }
+.railItem { padding: 4px 0 12px; }
+.railHeader {
+  display: grid;
+  gap: 2px;
+  padding: 10px 10px;
+  margin: 6px 0;
+  border-radius: 10px;
+}
+.railHeader strong { font-size: 14px; color: var(--ink); font-weight: 620; }
+.railHeader small { font-size: 12px; color: var(--muted-deep); }
+.railHeader [data-automation-state="running"] { color: var(--ink); font-weight: 600; }
+.timeline { list-style: none; margin: 0; padding: 0; display: grid; gap: 4px; }
+.run { display: grid; gap: 4px; }
+.runHeader {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 32px;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink-soft);
+  text-align: left;
+  cursor: pointer;
+}
+.runHeader:hover, .runHeader:focus-visible { color: var(--ink); outline: none; }
+.runHeader time { font-variant-numeric: tabular-nums; color: var(--muted-deep); font-size: 12px; }
+.runStatus { font-size: 11px; color: var(--muted-deep); }
+.runStatus[data-status="running"] { color: var(--ink); font-weight: 600; }
+.runStatus[data-status="error"] { color: var(--danger, var(--accent)); }
+.runHeadline { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.run > .actions { padding: 0 0 6px 8px; border-left: 1px solid var(--paper-3, var(--paper-edge)); margin-left: 6px; }
+.more {
+  justify-self: start;
+  margin-top: 6px;
+  border: 0; background: none; padding: 0; font: inherit; font-size: 12px; color: var(--muted-deep); cursor: pointer;
+}
+.more:hover, .more:focus-visible { color: var(--ink); text-decoration: underline; outline: none; }
+
+.tabLiveDot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: var(--ink);
+  display: inline-block;
+  margin-left: 4px;
+  animation: automation-tab-pulse 1.6s ease-in-out infinite;
+}
+@keyframes automation-tab-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
+@media (prefers-reduced-motion: reduce) { .tabLiveDot { animation: none; } }

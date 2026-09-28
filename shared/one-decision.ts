@@ -2,6 +2,7 @@ import { redactSecrets } from "./secret-patterns";
 import type { PendingConfirmation } from "./types";
 
 export const ONE_DECISION_CONTRACT_VERSION = "1.0.0" as const;
+export const ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION = "2.0.0" as const;
 export const ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY = "Reject. Do not take the proposed action." as const;
 
 export type OneDecisionRiskLevel = "R0" | "R1" | "R2" | "R3" | "R4";
@@ -205,7 +206,11 @@ function inferRisk(
   if (reasons.length === 0) reasons.push(level === "R0" ? "read_only" : "unstructured_authority_request");
   return {
     level,
-    certainty: reasons.includes("conflicting_signals") ? "ambiguous" : "inferred",
+    // Mixed lexical signals are useful context for the card, but they do not
+    // invalidate a complete resident-model risk verdict. Authority readiness
+    // remains a separate gate below; a missing verdict still returns R4 with
+    // ambiguous certainty above.
+    certainty: "inferred",
     reasons: [...new Set(reasons)],
   };
 }
@@ -300,7 +305,11 @@ export function normalizeOneDecision(
       description: option.description || null,
       disposition,
       grantsAuthority,
-      enabled: disposition === "reject" || (disposition !== "modify" && blockedReason === null),
+      // V1 is a single-reply contract. A multi-select option cannot be sent by
+      // an older Mobile client as one positive label: that silently changes the
+      // owner's answer. Keep the exact V1 shape and its existing reason enum;
+      // the additive V2 projection carries independently selectable indexes.
+      enabled: disposition === "reject" || (!confirmation.multiSelect && disposition !== "modify" && blockedReason === null),
       blockedReason,
     };
   });
@@ -411,6 +420,15 @@ export function isOneDecisionViewV1(value: unknown): value is OneDecisionViewV1 
       && modify && exactKeys(modify, ["enabled", "destination"]) && modify.enabled === true && modify.destination === "one"
       && snooze && exactKeys(snooze, ["enabled", "durationHours"]) && snooze.enabled === true && snooze.durationHours === 24,
   );
+}
+
+/** Candidate indexes for V2 after Main's resident judgment, independent of the V1 multi-select lock. */
+export function oneDecisionMultiSelectableIndexes(view: OneDecisionViewV1): number[] {
+  return view.options
+    .filter((option) => option.blockedReason === null
+      && option.disposition !== "reject"
+      && option.disposition !== "modify")
+    .map((option) => option.index);
 }
 
 export function isPendingConfirmationSnoozed(confirmation: Pick<PendingConfirmation, "snoozedUntil">, now = Date.now()): boolean {

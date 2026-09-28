@@ -277,7 +277,9 @@ function guidanceLine(tactic: LiveTactic): string | null {
     case "observe": return `This tactic was blocked (${g.cause}). First inspect the current state read-only; do not repeat an external action whose effect is unknown.`;
     case "retry_backoff": return `This tactic was blocked (${g.cause}); retry it${g.at ? ` after ${g.at}` : ""}. Work on another open tactic meanwhile if there is one.`;
     case "escalate_boundary": return `This tactic waits on the owner for a ${g.boundary ?? "boundary"} decision. Ask that one question once, then continue other tactics.`;
-    case "switch_tool": return `This tactic was blocked (${g.cause}); use an alternative installed tool with the same capability.`;
+    case "switch_tool": return g.path
+      ? `This tactic was blocked (${g.cause}); the AGI unblocker chose the installed alternative "${g.path}". Use "${g.path}" for this tactic now, not the path that failed.`
+      : `This tactic was blocked (${g.cause}); use an alternative installed tool with the same capability.`;
     default: return `This tactic was blocked (${g.cause}); the host chose ${g.move}.`;
   }
 }
@@ -320,7 +322,9 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: nu
     if (plan.shape === "tactic_list") {
       const current = new Set(tactics.map((t) => t.id));
       const later = [...plan.tactics].filter((t) => (t.status === "active" || t.status === "proposed") && !current.has(t.id)).sort((a, b) => a.ord - b.ord);
-      if (later.length) lines.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})`).join(" | ")}`);
+      // A tool path the AGI unblocker chose applies whenever the tactic is reached in this turn, not only when current.
+      if (later.length) lines.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})${t.guidance?.move === "switch_tool" && t.guidance.path
+        ? ` [host: use the installed alternative "${t.guidance.path}" for this tactic; the previous path failed]` : ""}`).join(" | ")}`);
     }
   } else {
     lines.push("Every planned tactic is done or retired. Verify the goal's acceptance criteria; if work remains, add a tactic with an add_tactic plan-op.");

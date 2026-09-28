@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.2.50 — 2026-09-28
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Updating while work runs now asks first, pauses the work for the update, and continues it
+  once after the restart. Stop on a Goal turn pauses the Goal instead of ending it.
+- AGI watches every Goal. When a Goal is blocked it reads the run records, then tries a fix
+  itself — creating or inviting a teammate, switching model, re-planning, retrying another path
+  or recovering a login — before asking you, and only asks for what only you can do. It no
+  longer spends tokens re-checking Goals that are waiting for you. Its token limits are in the
+  AGI popover.
+- A "결함 보고" (report a defect) chip shows exactly what will be sent and sends only when you
+  press it.
+- Chats with automations show what the automation is doing while it runs, a summary of what it
+  did (counted from real actions, with site and app logos), and an Automations tab in the right
+  panel. A room is no longer shown as stopped while its automation is working.
+- A login wall is recovered by re-importing that site's login into the browser the agent is
+  actually using; you are asked only if Chrome is signed out too.
+- Team turns no longer fail when the planner omits workspace access.
+- The session list keeps the most recently active conversation on top, live.
+- A message you just sent is no longer buried under old work blocks.
+- Stop withdraws pending tool approvals and ends Claude turns cleanly before stopping the process;
+  helper-agent errors and text no longer leak into the parent answer.
+- Agent Hub profile and Science views stay in place when the window is zoomed.
+
 ## 1.2.49 — 2026-09-28
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.

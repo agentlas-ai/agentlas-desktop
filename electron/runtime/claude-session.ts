@@ -220,6 +220,29 @@ export async function setClaudeResidentModel(session: ClaudeResidentSession, mod
 }
 
 /**
+ * Stop = end the turn through the protocol, then (bounded) stop the process.
+ *
+ * SIGTERM "leaves the turn that was in progress unfinished and records no result
+ * for it. To end the turn instead, send SIGINT, or call the Agent SDK's
+ * interrupt(), before you stop the process" (code.claude.com/docs headless).
+ * The SDK's interrupt() is exactly this control_request
+ * (anthropics/claude-agent-sdk-python@36f9548 _internal/query.py:792-794), and
+ * Paseo sends it before tearing a session down (getpaseo/paseo@da48803
+ * providers/claude/agent.ts:2257-2275). Our steering flow resumes the stored
+ * session right after a Stop, so the interrupted turn must be on disk.
+ */
+export function interruptClaudeResidentTurn(session: ClaudeResidentSession): boolean {
+  if (!claudeResidentSessionAlive(session)) return false;
+  try {
+    session.child.stdin!.write(`${JSON.stringify({ type: "control_request", request_id: crypto.randomUUID(),
+      request: { subtype: "interrupt" } })}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 한 턴의 사용자 메시지를 stdin 으로 보낸다(NDJSON 한 줄, stdin 은 열어 둔다).
  * 실측 형태 그대로 — 이 모양이 아니면 CLI 가 그 줄을 조용히 버린다.
  */

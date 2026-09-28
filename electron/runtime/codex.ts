@@ -10,7 +10,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
-import { openAiStrictSchemaOrNull } from "./strict-output-schema";
+import { codexSystemPromptWithSchemaFallback, openAiStrictSchemaOrNull } from "./strict-output-schema";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement } from "./runner";
@@ -237,7 +237,7 @@ async function getBin(): Promise<string | null> {
 
 function buildPrompt(req: RunnerRequest): string {
   const sys = wrapSystemPrompt(
-    req.systemPrompt,
+    codexSystemPromptWithSchemaFallback(req),
     req.locale,
     req.permission,
     cumulativeSurfaceGateText(req.history, req.userPrompt),
@@ -270,7 +270,7 @@ function buildPrompt(req: RunnerRequest): string {
  */
 function buildDeveloperInstructions(req: RunnerRequest): string {
   return wrapSystemPrompt(
-    req.systemPrompt,
+    codexSystemPromptWithSchemaFallback(req),
     req.locale,
     req.permission,
     cumulativeSurfaceGateText(req.history, req.userPrompt),
@@ -1495,7 +1495,7 @@ async function runCodexResidentTurn(input: {
       case "item/started": {
         const item = params?.item;
         observeScienceTool(item);
-        if (item?.type === "reasoning") { openThinking(); break; }
+        if (item?.type === "reasoning") { if (!fromOtherThread(params)) openThinking(); break; }
         const tool = codexToolEventFromItem(item, false);
         if (tool) {
           closeThinking();
@@ -1540,6 +1540,8 @@ async function runCodexResidentTurn(input: {
           break;
         }
         if (item?.type === "reasoning") {
+          // A sub-agent's reasoning is not this turn's thinking row.
+          if (fromOtherThread(params)) break;
           openThinking();
           const summary = [
             ...(Array.isArray(item.summary) ? item.summary : []),
@@ -1587,6 +1589,10 @@ async function runCodexResidentTurn(input: {
         break;
       }
       case "thread/tokenUsage/updated": {
+        // A sub-agent thread reports its own usage on this connection. Taking it
+        // would overwrite this turn's observed usage (the allocation receipt and
+        // serving admission read usage.last) with the child's numbers.
+        if (fromOtherThread(params)) break;
         // `last` 는 **이번 턴**, `total` 은 스레드 누적이다(실측). exec 경로가 누적에서
         // 빼서 구하던 값을 프로토콜이 직접 준다 — baseline 산수가 필요 없다.
         const last = params?.tokenUsage?.last;
@@ -1613,6 +1619,15 @@ async function runCodexResidentTurn(input: {
         break;
       }
       case "error": {
+        // A sub-agent's non-retry error (its own turn failed or was interrupted)
+        // is reported to the parent through the collab/subAgentActivity item, not
+        // as this turn's failure. codex exec routes Error by exact thread+turn
+        // (exec/src/lib.rs should_process_notification); so do we.
+        if (fromOtherThread(params)) {
+          const childMessage = typeof params?.error?.message === "string" ? params.error.message : "";
+          if (childMessage) events.onStatus(`codex sub-agent: ${childMessage.slice(0, 200)}`);
+          break;
+        }
         // 턴이 재시도할 수 있는 오류는 실패가 아니다 — 서버가 willRetry 로 말해 준다.
         const message = typeof params?.error?.message === "string" ? params.error.message : "";
         if (message) events.onStatus(`codex: ${message.slice(0, 400)}`);
@@ -1623,7 +1638,7 @@ async function runCodexResidentTurn(input: {
       }
       case "turn/completed": {
         const turn = params?.turn;
-        if (!turn || (turnId && String(turn.id ?? "") !== turnId)) break;
+        if (!turn || fromOtherThread(params) || (turnId && String(turn.id ?? "") !== turnId)) break;
         if (usage.last && Number.isSafeInteger(usage.last.inputTokens) && usage.last.inputTokens >= 0
           && Number.isSafeInteger(usage.last.outputTokens) && usage.last.outputTokens >= 0) {
           events.onTerminalObservedUsage?.(usage.last);
@@ -1641,6 +1656,10 @@ async function runCodexResidentTurn(input: {
 
   const approvalCtx = {
     ...(req.planMode ? { planMode: true as const } : {}),
+    // Same lifetime as MCP elicitations: Stop, transport close and turn settle
+    // withdraw a pending approval card (codex itself cancels the server request
+    // on turn transition — openai/codex@44fe510c outgoing_message.rs:215-230).
+    signal: elicitationAbort.signal,
     runtime: KIND,
     sessionKey: `${KIND}:${req.sessionFingerprintSeed ?? chatId}`,
     cwd,
@@ -1671,6 +1690,7 @@ async function runCodexResidentTurn(input: {
         }
         const ask: RuntimeToolPermissionAsk = {
           ...(req.planMode ? { planMode: true as const } : {}),
+          signal: elicitationAbort.signal,
           runtime: KIND,
           sessionKey: `${KIND}:${req.sessionFingerprintSeed ?? chatId}`,
           tool: CODEX_IMAGE_TOOL_NAME,

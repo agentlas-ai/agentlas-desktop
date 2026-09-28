@@ -1,4 +1,5 @@
 import type { ChatContinuitySnapshot } from "@shared/types";
+import { goalDisplayState } from "@shared/goal-display-state";
 
 /**
  * Renderer-only projection of the Main continuity snapshot.
@@ -7,20 +8,25 @@ import type { ChatContinuitySnapshot } from "@shared/types";
  * exact Goal-bound invocation must also be active. Likewise, a timer wait is
  * a schedule, not a stopped Goal. Keeping this decision in one pure helper
  * prevents the One chip and the Work continuity rail from drifting apart.
+ *
+ * Owner correction 2026-09-28 ("명시적 멈춤이 멈춤 아니냐"): a goal between turns — waiting for its next
+ * scheduled/continuation run, a host-owned retry, or a pause the app took by itself — is `active_idle` and looks
+ * exactly like a running goal. Only an explicit owner pause is `paused`; only explicit owner-needed states are
+ * `needs_owner`; only an explicit blocked status is blocked. See shared/goal-display-state.ts.
  */
 export type GoalSurfaceState =
   | "unknown"
   | "active_run"
   | "active_unconfirmed"
+  /** Between turns: waiting for the next scheduled/continuation run or a host-owned step. Same look as running. */
+  | "active_idle"
+  /** An explicit owner-needed state: approval/budget stop, waiting_user, or the goal asked a question. */
+  | "needs_owner"
   | "queued"
-  | "scheduled_wait"
-  | "waiting"
   | "waiting_confirmation"
   | "blocked_uncertain"
   | "checking_effects"
   | "blocked"
-  | "paused_app_closed"
-  | "paused_crash_recovery"
   | "paused"
   | "verifying"
   | "completed"
@@ -93,13 +99,16 @@ export function classifyGoalSurfaceStatus(input: GoalSurfaceStatusInput): GoalSu
   if (status === "completed") return { ...fallback, state: "completed" };
   if (status === "cancelled") return { ...fallback, state: "cancelled" };
   if (status === "failed") return { ...fallback, state: "failed" };
+  const display = goalDisplayState({ status, pauseReason: input.pauseReason, blockedReason });
   if (status === "paused") {
-    if (input.pauseReason === "app_closed") return { ...fallback, state: "paused_app_closed" };
-    if (input.pauseReason === "crash_recovery") return { ...fallback, state: "paused_crash_recovery" };
+    // A pause the app took itself (app_closed, crash_recovery, runtime_unavailable, agent_paused) continues on its own.
+    if (display === "running") return { ...fallback, state: "active_idle" };
+    if (display === "needs_owner") return { ...fallback, state: "needs_owner" };
     return { ...fallback, state: "paused" };
   }
   if (status === "blocked") {
     if (input.effectObservationChecking) return { ...fallback, state: "checking_effects" };
+    if (display === "needs_owner") return { ...fallback, state: "needs_owner" };
     if (blockedReason === "goal_wait_ongoing_authority_required") return { ...fallback, state: "waiting_confirmation" };
     if (blockedReason === "goal_wait_claimed_dispatch_uncertain"
       || blockedReason === "goal_wait_claimed_binding_changed"
@@ -108,12 +117,10 @@ export function classifyGoalSurfaceStatus(input: GoalSurfaceStatusInput): GoalSu
     }
     return { ...fallback, state: "blocked" };
   }
-  if (wait?.state === "pending") {
-    return { ...fallback, state: wait.subjectKind === "timer" ? "scheduled_wait" : "waiting" };
-  }
-  if (status === "waiting_worker" || status === "waiting_tool" || status === "waiting_user") {
-    return { ...fallback, state: "waiting" };
-  }
+  if (status === "waiting_user") return { ...fallback, state: "needs_owner" };
+  // Waiting for the next scheduled cycle, a watched result, a worker or a host-owned retry is the goal operating.
+  if (wait?.state === "pending") return { ...fallback, state: "active_idle" };
+  if (status === "waiting_worker" || status === "waiting_tool") return { ...fallback, state: "active_idle" };
   if (status === "verifying") return { ...fallback, state: "verifying" };
   if (status === "queued") return { ...fallback, state: "queued" };
   if (status === "running") {
@@ -127,15 +134,13 @@ export function goalSurfaceStatusLabel(state: GoalSurfaceState, locale: "ko" | "
   switch (state) {
     case "active_run": return ko ? "이 Goal 실행 중 · Main에서 확인됨" : "This Goal is running · confirmed by Main";
     case "active_unconfirmed": return ko ? "Goal 실행 기록 있음 · 실제 실행을 재확인하는 중" : "Goal run recorded · rechecking the live invocation";
+    case "active_idle": return ko ? "이 Goal 작동 중 · 다음 실행에서 이어집니다" : "This Goal is running · it continues on its next run";
+    case "needs_owner": return ko ? "이 Goal이 답변이나 승인을 기다려요" : "This Goal needs your answer or approval";
     case "queued": return ko ? "이 Goal의 다음 실행 준비 중" : "Preparing this Goal's next run";
-    case "scheduled_wait": return ko ? "다음 Goal 주기 예약됨" : "Next Goal cycle scheduled";
-    case "waiting": return ko ? "이 Goal의 결과·입력 대기 중" : "This Goal is waiting for a result or input";
     case "waiting_confirmation": return ko ? "다음 Goal 판단 주기 확인 대기" : "The next Goal decision cycle awaits confirmation";
     case "blocked_uncertain": return ko ? "이전 호출·효과 경계 불확실 · 자동 재실행 중단 · 확인 필요" : "Previous dispatch/effect boundary uncertain · automatic replay stopped · review needed";
     case "checking_effects": return ko ? "이전 작업이 반영됐는지 직접 확인하는 중" : "Checking whether the earlier action went through";
     case "blocked": return ko ? "Goal이 실제로 차단됨 · 조치 필요" : "Goal is actually blocked · action needed";
-    case "paused_app_closed": return ko ? "앱 종료로 멈춤 · 재개 조건 확인 중" : "Paused when the app closed · checking whether safe resume is possible";
-    case "paused_crash_recovery": return ko ? "중단된 실행을 복구해 멈춤 · 안전한 재개 조건 확인 중" : "Paused after recovering an interrupted run · checking safe resume conditions";
     case "paused": return ko ? "일시정지 · 기록 보존" : "Paused · history preserved";
     case "verifying": return ko ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria";
     case "completed": return ko ? "완료" : "Completed";

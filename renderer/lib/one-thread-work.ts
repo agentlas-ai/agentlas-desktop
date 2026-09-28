@@ -122,7 +122,15 @@ export function planOneThreadWork(input: {
     }
     // 3) Rows without a timestamp (optimistic turns of a session-only
     //    conversation): the last prompt row in the list started this run.
-    if (!anchor) {
+    //
+    //    ★ Only when *no* row carries a timestamp. A timestamped list that has
+    //    no row at or before this run means the run is older than the loaded
+    //    window (history reads the latest 200 rows, the ledger the latest 40
+    //    runs) — its prompt is simply not on screen, so it leads the list.
+    //    Owner 2026-09-28, Thread Marketing: 20 runs older than the window were
+    //    all hung under the newest prompt, so the "계속" just sent sat 20 work
+    //    blocks above the bottom and the screen showed old runs instead of it.
+    if (!anchor && durable.length === 0) {
       for (let index = input.messages.length - 1; index >= 0; index -= 1) {
         const message = input.messages[index];
         if (message.role === "user" || message.role === "system") {

@@ -9,6 +9,7 @@ import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-su
 import { GoalStrategyStatus } from "./GoalStrategyStatus";
 import { GoalPlanSummary, goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import styles from "./OneGoalControls.module.css";
+import { AgiDefectChip } from "../agi/AgiBugReport";
 
 type GoalAction = "pause" | "delete" | "resume" | "edit";
 type GoalView = { goalId: string | null; context: ChatGoalContext | null; continuity: ChatContinuitySnapshot | null; handoff: GoalRuntimeSelectionReceipt | null;
@@ -323,7 +324,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
       ? (ko ? "이전 호출의 효과 경계를 확인할 수 없습니다 · 기록은 보존했고 자동 재실행을 막았습니다" : "The previous effect boundary could not be verified · history preserved and automatic replay stopped")
     : status === "blocked" ? (ko ? "진행이 멈췄습니다 · 재개 전 상태 확인이 필요합니다" : "Blocked · check the outcome before resuming")
     : status === "verifying" ? (ko ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria")
-    : timedWait ? (ko ? `다음 확인 ${nextCheck ?? "대기 중"} · 앱 실행 중 자동 재개` : `Next check ${nextCheck ?? "pending"} · resumes while app is running`)
+    : timedWait ? (ko ? `작동 중 · 다음 확인 ${nextCheck ?? "예정"}` : `Running · next check ${nextCheck ?? "scheduled"}`)
     : status === "waiting_tool" ? (ko ? "이 Goal의 도구 결과 대기 중" : "Waiting for this Goal's tool result")
     : status === "queued" ? (ko ? "이 Goal의 다음 실행 준비 중" : "Preparing this Goal's next run")
     : status === "running" ? (ko ? "이 Goal을 실행하고 있습니다" : "This Goal is running")
@@ -331,12 +332,12 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
   const shortStatus = view.pending ? (ko ? "처리 중" : "Working")
     : !observationFresh ? (ko ? "확인 중" : "Checking")
     : status === "blocked" && verificationUnavailable ? (ko ? "검증 오류" : "Verification error")
-    : surface.state === "active_run" ? (ko ? "실행 중" : "Running")
+    // Between turns looks exactly like running (owner 2026-09-28: "작동 중과 똑같게").
+    : surface.state === "active_run" || surface.state === "active_idle" ? (ko ? "실행 중" : "Running")
+    : surface.state === "needs_owner" ? (ko ? "확인 필요" : "Needs you")
     : surface.state === "active_unconfirmed" ? (ko ? "실행 확인 중" : "Checking run")
     : surface.state === "queued" ? (ko ? "준비 중" : "Queued")
-    : surface.state === "scheduled_wait" ? (ko ? "예약됨" : "Scheduled")
     : surface.state === "waiting_confirmation" ? (ko ? "확인 필요" : "Confirm")
-    : surface.state === "waiting" ? (ko ? "대기 중" : "Waiting")
     : surface.state === "checking_effects" ? (ko ? "반영 여부 확인 중" : "Checking…")
     : surface.state === "blocked_uncertain" ? (ko ? "결과 확인 필요" : "Review outcome")
     : surface.state === "blocked" ? (ko ? "조치 필요" : "Needs action")
@@ -377,6 +378,7 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
       <IconTarget size={13} />
       <strong>{ongoing ? (ko ? "지속 목표" : "Ongoing goal") : (ko ? "목표" : "Goal")}</strong>
       <span className={styles.label} title={label} role="status">{shortStatus}</span>
+      <AgiDefectChip chatId={chatId} locale={locale} />
       {modelPending && <button type="button" ref={modelChipRef} className={styles.modelChip} data-goal-model-pending="true"
         aria-expanded={modelNoteOpen} aria-controls={modelNoteId} aria-describedby={modelNoteOpen ? modelNoteId : undefined}
         aria-label={ko ? "모델 변경 대기 — 설명 보기" : "Model change pending — show details"}

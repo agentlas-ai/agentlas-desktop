@@ -4780,6 +4780,15 @@ export function initStore(options: StoreInitOptions = {}): void {
           ON run_events(chat_id, kind, ts DESC);
       `);
     }
+    // Chain-trigger reconciliation (automations.ts reconcileDurableChainDeliveries) reads the newest rows of one kind
+    // every scheduler tick. With no kind-leading index it scanned the whole ledger and sorted it on Main: measured
+    // 2026-09-28 on a 292k-row store, ~1.6 s every minute, stalling every renderer IPC call behind it.
+    if (["kind", "ts"].every((column) => runEventColumns.has(column))) {
+      _db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_run_events_kind_ts
+          ON run_events(kind, ts DESC);
+      `);
+    }
   }
 
   // Codex `exec resume` reports a session-cumulative output counter. Persist

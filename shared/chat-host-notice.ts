@@ -24,6 +24,10 @@ export function normalizeChatHostNotice(role: string, value: unknown): ChatHostN
     if (Object.keys(item).some(key => key !== "purpose" && key !== "runId") || !validId(item.runId)) return undefined;
     return { purpose: "one-dispatch-brief", runId: item.runId };
   }
+  if (item.purpose === "update-resume") {
+    if (Object.keys(item).some(key => key !== "purpose" && key !== "runId") || !validId(item.runId)) return undefined;
+    return { purpose: "update-resume", runId: item.runId };
+  }
   if (Object.keys(item).some((key) => key !== "purpose" && key !== "runId")
     || item.purpose !== "goal-continuation" || typeof item.runId !== "string"
     || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item.runId)) return undefined;

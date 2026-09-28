@@ -1,0 +1,30 @@
+.chip { flex: 0 0 auto; min-height: 22px; padding: 1px 9px; border: 1px solid var(--paper-edge); border-radius: 999px; background: var(--paper); color: var(--ink); font-size: 11px; line-height: 1.4; cursor: pointer; }
+.chip:hover, .chip:focus-visible { background: var(--paper-2); }
+.backdrop { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: center; justify-content: center; padding: 16px; background: rgba(0, 0, 0, 0.32); }
+.dialog { box-sizing: border-box; display: flex; flex-direction: column; width: min(640px, 100%); max-height: min(720px, calc(100vh - 32px)); border: 1px solid var(--paper-edge); border-radius: 12px; background: var(--paper); color: var(--ink); box-shadow: 0 16px 40px rgba(0, 0, 0, 0.22); font-size: 13px; }
+.head { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid var(--paper-edge); }
+.head strong { flex: 0 0 auto; }
+.tabs { display: flex; gap: 4px; flex: 1 1 auto; }
+.tabs button { padding: 3px 9px; border: 1px solid transparent; border-radius: 999px; background: transparent; color: var(--muted-deep); font-size: 12px; cursor: pointer; }
+.tabs button[aria-selected="true"] { border-color: var(--paper-edge); background: var(--paper-2); color: var(--ink); }
+.close { border: none; background: transparent; color: var(--muted-deep); font-size: 18px; cursor: pointer; }
+.body { display: grid; gap: 10px; padding: 12px 14px 14px; overflow: auto; }
+.form { display: grid; gap: 10px; }
+.form label { display: grid; gap: 4px; color: var(--muted-deep); font-size: 12px; }
+.form input, .form textarea, .form select { box-sizing: border-box; width: 100%; padding: 6px 8px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; }
+.form button, .foot button { justify-self: start; padding: 6px 12px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); color: var(--ink); cursor: pointer; }
+.foot { display: flex; justify-content: flex-end; gap: 8px; }
+.foot .primary { background: var(--black); border-color: var(--black); color: var(--white); }
+.foot button:disabled, .form button:disabled { opacity: 0.55; cursor: default; }
+.preview { max-height: 360px; margin: 0; padding: 10px; overflow: auto; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper-2); font-size: 11px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; }
+.muted { margin: 0; color: var(--muted-deep); }
+.result { margin: 0; color: var(--ink); }
+.error { margin: 0; color: var(--danger, #b3261e); overflow-wrap: anywhere; }
+.list { display: grid; gap: 6px; margin: 0; padding: 0; list-style: none; }
+.list li { display: grid; grid-template-columns: minmax(0, 1fr) max-content; gap: 8px; padding: 6px 8px; border: 1px solid var(--paper-edge); border-radius: 8px; }
+.list li span { overflow-wrap: anywhere; }
+.list li em { color: var(--muted-deep); font-style: normal; }
+.limits { display: grid; gap: 6px; padding: 8px 10px 4px; border-top: 1px solid var(--paper-edge); font-size: 12px; }
+.limitRow { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.limitField { display: inline-flex; align-items: center; gap: 4px; }
+.limitField input { width: 84px; padding: 3px 6px; border: 1px solid var(--paper-edge); border-radius: 6px; background: var(--paper); color: var(--ink); font: inherit; text-align: right; }

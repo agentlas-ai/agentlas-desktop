@@ -455,7 +455,8 @@ const api: AgentlasIpc = {
   updater: {
     getState: () => ipcRenderer.invoke("updater:getState"),
     check: () => ipcRenderer.invoke("updater:check"),
-    install: () => ipcRenderer.invoke("updater:install"),
+    install: (options?: { resumeWork?: boolean }) => ipcRenderer.invoke("updater:install", options),
+    deferInstall: () => ipcRenderer.invoke("updater:deferInstall"),
     openManualDownload: () => ipcRenderer.invoke("updater:openManualDownload"),
     openReleaseNotes: (version?: string) => ipcRenderer.invoke("updater:openReleaseNotes", version),
     revealRecoveryBackup: () => ipcRenderer.invoke("updater:revealRecoveryBackup"),
@@ -971,6 +972,14 @@ const api: AgentlasIpc = {
     setEnabled: (input) => ipcRenderer.invoke("alive:setEnabled", input),
     setTokenLimit: (input) => ipcRenderer.invoke("alive:setTokenLimit", input),
   },
+  agi: {
+    getTokenLimits: () => ipcRenderer.invoke("agi:getTokenLimits"),
+    setTokenLimits: (input) => ipcRenderer.invoke("agi:setTokenLimits", input),
+    defectsForChat: (chatId) => ipcRenderer.invoke("agi:defectsForChat", chatId),
+    bugReportPreview: (input) => ipcRenderer.invoke("agi:bugReportPreview", input),
+    bugReportSend: (input) => ipcRenderer.invoke("agi:bugReportSend", input),
+    bugReportList: () => ipcRenderer.invoke("agi:bugReportList"),
+  },
   automations: {
     list: () => ipcRenderer.invoke("automations:list"),
     get: (id: string) => ipcRenderer.invoke("automations:get", id),
@@ -1081,6 +1090,12 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:reconcileGraph", input),
     liveRunChannel: (automationId: string) => `automations:liveRun:${automationId}`,
     latestRun: (automationId: string) => ipcRenderer.invoke("automations:latestRun", automationId),
+    chatActivity: (scope: { chatId?: string | null; projectId?: string | null; includeProject?: boolean }) =>
+      ipcRenderer.invoke("automations:chatActivity", scope),
+    runDigest: (runId: string) => ipcRenderer.invoke("automations:runDigest", runId),
+    runPage: (automationId: string, options?: { before?: string | null; limit?: number }) =>
+      ipcRenderer.invoke("automations:runPage", automationId, options),
+    siteIcon: (host: string) => ipcRenderer.invoke("automations:siteIcon", host),
     getSession: (automationId: string) => ipcRenderer.invoke("automations:getSession", automationId),
     planFix: (automationId: string) => ipcRenderer.invoke("automations:planFix", automationId),
     applyFix: (automationId: string, actionId: string) =>

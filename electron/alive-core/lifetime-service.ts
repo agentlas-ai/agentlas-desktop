@@ -11,7 +11,8 @@
  *    would charge 0 tokens anyway, invariant c, but it would also push the next review out to "rest").
  */
 import { createHash } from "node:crypto";
-import type { AliveActionPacket, AliveAgent, AlivePlaygroundObservation, AlivePlaygroundPort, AliveRuntimePort, AliveRuntimeStart } from "./contracts";
+import type { AliveActionPacket, AliveAgent, AliveAttachment, AlivePlaygroundObservation, AlivePlaygroundPort, AliveRuntimePort,
+  AliveRuntimeStart, AliveUnblockAttempt, AliveUnblockOutcome, AliveUnblockResult } from "./contracts";
 import { aliveActionKindsForDomain, aliveActionRegistration } from "./action-registry";
 import { AliveLifetimeStore } from "./lifetime-store";
 
@@ -36,6 +37,13 @@ export interface AliveLifetimeServiceOptions {
    * intermediate change re-acts on it. Isolated live run 2026-09-24: 21 wakes + 21 accepted actions in 10 min.
    */
   actionSpacingMs?: number;
+  /**
+   * Decision point "unblock_attempt_due": called at most once per exact owner-blocked state (ownerWait
+   * "needs-owner"), never for an owner stop. Absent = no unblocker installed yet (recorded as no-handler).
+   * The controller model is never woken for such a state: its no-tools "wait" was ~23k tokens per hour for a
+   * fact the host already knew (owner store 2026-09-27..28: 30 wakes, 0 actions).
+   */
+  unblockAttempt?: (input: AliveUnblockAttempt) => AliveUnblockResult;
 }
 
 /** Agent time belongs to the host clock, and survives the completion or removal of a playground. */
@@ -68,6 +76,65 @@ export class AliveLifetimeService {
       this.store.event(agent.agentId, "agent.waiting", { reasonCode }, nowMs);
     }
     return { agentId: agent.agentId, outcome: "wait", reasonCode };
+  }
+  /**
+   * Owner-blocked admission (zero model calls). For the exact owner-blocked state (hash of each owner-wait
+   * attachment's blockedBy + salience):
+   *  1. "needs-owner" → decision point unblock_attempt_due, once per state (a no-handler record is retried once an
+   *     unblocker exists); an owner stop gets no attempt;
+   *  2. then one zero-cost "agent.owner-wait-skipped" record per state, and quiet until the state changes or clears
+   *     (an owner answer / resume / stop moves the ledger, so its hash changes or the owner wait disappears).
+   * Leaving every owner wait clears the record, so the same block reached again later is a new episode.
+   */
+  private ownerWaitAdmission(agent: AliveAgent, observations: ReadonlyArray<{ attachment: AliveAttachment; result: AlivePlaygroundObservation }>,
+    nowMs: number): AliveAgent {
+    const waiting = observations.filter(({ result }) => result.blockedBy && result.ownerWait);
+    const recorded = agent.state.ownerWait as { stateSha?: unknown; unblock?: unknown } | undefined;
+    if (!waiting.length) {
+      if (!recorded) return agent;
+      const { ownerWait: _cleared, ...rest } = agent.state;
+      this.store.update(agent.agentId, { state: rest }, nowMs);
+      return this.store.get(agent.agentId) ?? agent;
+    }
+    const stateSha = digest(waiting.map(({ attachment, result }) => ({ attachmentId: attachment.attachmentId,
+      blockedBy: result.blockedBy, ownerWait: result.ownerWait, salience: result.salience ?? result.observation })));
+    const sameState = recorded?.stateSha === stateSha;
+    const retryNoHandler = sameState && recorded?.unblock === "no-handler" && Boolean(this.options.unblockAttempt);
+    if (sameState && !retryNoHandler) return agent;
+    let unblock: AliveUnblockOutcome | null = null;
+    const needsOwner = waiting.filter(({ result }) => result.ownerWait === "needs-owner");
+    if (needsOwner.length) {
+      const outcomes: AliveUnblockOutcome[] = [];
+      for (const { attachment, result } of needsOwner) {
+        let outcome: AliveUnblockOutcome = "no-handler";
+        let code: string | null = null;
+        if (this.options.unblockAttempt) {
+          let admissionCode: string | null = null;
+          try { admissionCode = this.options.admission?.(agent, nowMs) ?? null; } catch { admissionCode = "alive.admission-unavailable"; }
+          const input: AliveUnblockAttempt = { kind: "unblock_attempt_due", agentId: agent.agentId, attachment,
+            blockedBy: String(result.blockedBy), stateSha, observation: result.observation, admissionCode };
+          let answer: AliveUnblockResult | null = null;
+          try { answer = this.options.unblockAttempt(input); } catch { answer = { outcome: "failed", code: "alive.unblock-threw" }; }
+          outcome = answer && ["acted", "needs-human", "failed"].includes(answer.outcome) ? answer.outcome : "failed";
+          code = typeof answer?.code === "string" && /^[a-z][a-z0-9._-]{2,119}$/.test(answer.code) ? answer.code : null;
+        }
+        outcomes.push(outcome);
+        this.store.event(agent.agentId, "agent.unblock-attempt-due", { stateSha, attachmentId: attachment.attachmentId,
+          blockedBy: result.blockedBy, outcome, code }, nowMs);
+      }
+      unblock = outcomes.includes("acted") ? "acted" : outcomes.includes("needs-human") ? "needs-human"
+        : outcomes.includes("failed") ? "failed" : "no-handler";
+    }
+    const reasonCode = String(waiting[0].result.blockedBy);
+    const current = this.store.get(agent.agentId) ?? agent;
+    this.store.update(agent.agentId, { state: { ...current.state,
+      ownerWait: { stateSha, reasonCode, ownerWait: waiting[0].result.ownerWait, unblock, atMs: nowMs } } }, nowMs);
+    // An unblocker that acted changed the world; its own notice tells the owner. Otherwise the skip is recorded.
+    if (unblock !== "acted" && !retryNoHandler) {
+      this.store.event(agent.agentId, "agent.owner-wait-skipped", { stateSha, reasonCode,
+        ownerWait: waiting[0].result.ownerWait, unblock, tokensUsed: 0 }, nowMs);
+    }
+    return this.store.get(agent.agentId) ?? agent;
   }
   private withinGrant(agent: AliveAgent, nowMs: number): boolean {
     return agent.status === "enabled"
@@ -201,8 +268,10 @@ export class AliveLifetimeService {
       const otherAvailable = observations.some((entry) => eligible(entry) && !continuable(entry));
       if (observations.length > 0 && !available) {
         const blocked = observations.find(({ result }) => result.blockedBy)?.result.blockedBy;
+        agent = this.ownerWaitAdmission(agent, observations, nowMs);
         beats.push(this.wait(agent, blocked ?? "playground.owns-work", nowMs)); continue;
       }
+      agent = this.ownerWaitAdmission(agent, observations, nowMs);
       const canAct = observations.some(continuable);
       const contextAttachments = observations.map(({ attachment, result }) => ({ attachmentId: attachment.attachmentId,
         domain: attachment.domain, scope: attachment.scope, work: result.work,

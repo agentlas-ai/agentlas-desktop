@@ -54,6 +54,16 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat }: { t
       style={{ alignSelf: "stretch", maxWidth: 760, margin: "6px 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5 }}
     >{label}</p>;
   }
+  if (notice?.purpose === "update-resume") {
+    // The app continued a turn the update restart interrupted. The ledger keeps the internal
+    // continuation instructions; the person sees one line.
+    return <p
+      data-host-notice="update-resume"
+      data-run-id={notice.runId}
+      role="status"
+      style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}
+    >{locale === "ko" ? "업데이트 후 이어서 진행합니다" : "Continuing after the update"}</p>;
+  }
   if (notice?.purpose === "automation-report") {
     // 기록 원문은 기계 표식을 일부러 남긴다 — 그릴 때만 사람 첫머리로 바꾸고 코드는 칩으로.
     const display = automationReportDisplay(text, locale);

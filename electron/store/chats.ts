@@ -52,6 +52,7 @@ interface ChatRow {
   seat_kind: string | null;
   participants_json: string | null;
   last_message_preview?: string | null;
+  last_activity_at?: string | null;
 }
 
 const CHAT_RUNTIME_KINDS = new Set<RuntimeKind>(RUNTIME_KINDS);
@@ -155,6 +156,7 @@ function toChat(row: ChatRow): Chat {
     ...(row.last_message_preview?.trim()
       ? { lastMessagePreview: row.last_message_preview.replace(/\s+/g, " ").trim().slice(0, 160) }
       : {}),
+    ...(row.last_activity_at ? { lastActivityAt: row.last_activity_at } : {}),
     kind: row.kind === "division" ? "division" : "user",
     continuousMode: row.continuous_mode === 1,
     swarmMode: row.swarm_mode === 1,
@@ -225,13 +227,25 @@ export function listRecentOneChats(limit = 50): Chat[] {
            WHERE chat_messages.chat_id = chats.id
              AND chat_messages.role IN ('user', 'assistant')
            ORDER BY chat_messages.created_at DESC
-           LIMIT 1) AS last_message_preview
+           LIMIT 1) AS last_message_preview,
+         /*
+          * 세션 목록의 "최근" 은 화면에 보이는 줄이 마지막으로 생긴 시각이다(오너 2026-09-28
+          * "최근 대화가 가장 위로"). updated_at 은 모델 선택·목표 결속·연속 모드 같은 조용한
+          * 상태 변경에도 움직여서, 새 줄 없이 방이 맨 위로 튀었다. 보이는 줄 = 사용자/에이전트
+          * 말 + 구조적 표식이 있는 시스템 줄(자동화 보고 등). 표식 없는 시스템 줄은 One 화면이
+          * 숨기므로 세지 않는다.
+          */
+         (SELECT created_at FROM chat_messages
+           WHERE chat_messages.chat_id = chats.id
+             AND (chat_messages.role IN ('user', 'assistant') OR chat_messages.host_notice_json IS NOT NULL)
+           ORDER BY chat_messages.created_at DESC
+           LIMIT 1) AS last_activity_at
        FROM chats
        WHERE archived_at IS NULL
          AND kind = 'user'
          AND used_at IS NOT NULL
          AND origin_surface = 'one'
-       ORDER BY updated_at DESC
+       ORDER BY COALESCE(last_activity_at, updated_at) DESC
        LIMIT ?`,
     )
     .all(limit) as ChatRow[];

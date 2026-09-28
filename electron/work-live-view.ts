@@ -5,7 +5,8 @@ import { nativeSessionForUrl } from "./browser/native-session-status";
 // frame-ancestors/X-Frame-Options still run in-app. The loaded page receives no
 // Agentlas preload, no Node integration or Desktop IPC. Browser tabs share only
 // the persistent Agentlas native-browser session; app previews remain isolated.
-import { BaseWindow, BrowserWindow, WebContentsView, nativeImage, webContents as allWebContents } from "electron";
+import { BaseWindow, BrowserWindow, WebContentsView, nativeImage } from "electron";
+import { measuringZoomFactor, ownerCssBoundsToWindow } from "./native-view-bounds";
 import { randomUUID } from "node:crypto";
 import type { WebContents, NativeImage, Rectangle } from "electron";
 import type { NativeBrowserCookieImportResult, WorkLiveViewBounds, WorkLiveViewStatus, WorkLiveViewInput, WorkLiveBrowserTab } from "../shared/types";
@@ -376,30 +377,9 @@ function permittedNavigation(active: ActiveWorkView, target: string): boolean {
   return sameLiveAppTarget(active, target);
 }
 
-/**
- * The owner renderer measures its slot with getBoundingClientRect(), which is in
- * CSS pixels of a page that may be zoomed (View > Zoom, Cmd +/-). A native view
- * is positioned in window DIPs. Without this conversion a zoomed window placed
- * the browser guest at rect / zoom: shifted up-left over the chat column and
- * the address bar, visible the moment the "..." menu closed and the frozen DOM
- * frame gave way to the native view again.
- */
-function ownerZoomFactor(ownerId: number): number {
-  try {
-    const owner = allWebContents.fromId(ownerId);
-    const factor = owner && !owner.isDestroyed() ? owner.getZoomFactor() : 1;
-    return Number.isFinite(factor) && factor > 0 ? factor : 1;
-  } catch { return 1; }
-}
-
-export function ownerCssBoundsToWindow(bounds: WorkLiveViewBounds, zoomFactor: number): WorkLiveViewBounds {
-  const scale = Number.isFinite(zoomFactor) && zoomFactor > 0 ? zoomFactor : 1;
-  const value = (entry: unknown) => Number(entry) * scale;
-  return { x: value(bounds?.x), y: value(bounds?.y), width: value(bounds?.width), height: value(bounds?.height) };
-}
-
+// The owner renderer sends CSS pixels; see native-view-bounds.ts.
 function sanitizeBounds(cssBounds: WorkLiveViewBounds, window: BrowserWindow, ownerId: number): WorkLiveViewBounds {
-  const bounds = ownerCssBoundsToWindow(cssBounds, ownerZoomFactor(ownerId));
+  const bounds = ownerCssBoundsToWindow(cssBounds, measuringZoomFactor(ownerId));
   const round = (value: unknown) => {
     const number = Math.round(Number(value));
     return Number.isFinite(number) ? number : 0;

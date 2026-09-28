@@ -22,7 +22,10 @@ const SECRET_SHAPES: RegExp[] = [
   // Stripe and similar: secret/restricted/publishable, live or test.
   /(?:sk|rk|pk)_(?:live|test)_[A-Za-z0-9]{16,}/,
   // OpenAI / Anthropic, including the newer provider-segmented forms (sk-proj-, sk-ant-).
-  /sk-(?:proj-|ant-)?[A-Za-z0-9_-]{12,}/,
+  // Keys only ever start a token: without the left boundary the "sk-" inside an
+  // ordinary kebab-case code was taken for a key — "task-force-failed" reached
+  // the owner as "ta[redacted]" (2026-09-28), "decision-task-..." likewise.
+  /(?<![A-Za-z0-9_-])sk-(?:proj-|ant-)?[A-Za-z0-9_-]{12,}/,
   // HuggingFace, GitLab, npm.
   /hf_[A-Za-z0-9]{20,}/,
   /glpat-[A-Za-z0-9_-]{20,}/,

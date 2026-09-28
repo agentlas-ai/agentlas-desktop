@@ -24,6 +24,7 @@ import type {
 } from "@/lib/types";
 import { useRouter } from "next/navigation";
 import { CONTEXT_MANAGED_BY, runtimeUsesEngineModelSetting } from "@shared/models";
+import { goalDisplayState } from "@shared/goal-display-state";
 import { runtimeModelFallbackLabel } from "./dashboard/RuntimeModelPicker";
 import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } from "@/lib/apps";
@@ -2074,7 +2075,10 @@ function ComposerGoalBar({
    *   tooltip instead of taking over the input bar.
    */
   const observed = !goalStatusStale;
-  const paused = observed && runStatus === "paused";
+  // Owner 2026-09-28 ("명시적 멈춤이 멈춤"): a pause the app took itself (app_closed, crash_recovery,
+  // runtime_unavailable, agent_paused) continues on its own and reads like running; only an explicit stop or an
+  // owner-needed stop (approval, budget) shows the stopped copy.
+  const paused = observed && runStatus === "paused" && goalDisplayState({ status: runStatus, pauseReason, blockedReason }) !== "running";
   const pausing = observed && runStatus === "pausing";
   const blocked = observed && (runStatus === "blocked" || runStatus === "failed");
   const budgetPause = paused && Boolean(pauseReason && (pauseReason === "budget" || pauseReason.startsWith("budget_")));

@@ -156,7 +156,7 @@ export class AcpSessionClient {
     private readonly events: RunnerEvents,
     private readonly permission: RunnerRequest["permission"],
     private readonly locale: "ko" | "en",
-    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; agentId?: string; unattended?: boolean; planMode?: true } = { runtime: "acp", sessionKey: "acp" },
+    private readonly approval: { runtime: string; sessionKey: string; cwd?: string; chatId?: string; agentId?: string; unattended?: boolean; planMode?: true; signal?: AbortSignal } = { runtime: "acp", sessionKey: "acp" },
   ) {}
 
   /** Everything between these two calls is history replay, not this turn. */
@@ -291,10 +291,14 @@ export class AcpSessionClient {
           chatId: this.approval.chatId,
           agentId: this.approval.agentId,
           unattended: this.approval.unattended,
+          ...(this.approval.signal ? { signal: this.approval.signal } : {}),
         });
       } catch {
         decision = "deny"; // an arbiter failure must never turn into an allow
       }
+      // ACP: a client cancelling the turn answers pending permission requests with
+      // the `cancelled` outcome, not a user rejection.
+      if (this.approval.signal?.aborted) return { outcome: { outcome: "cancelled" } };
       if (decision === "deny") return selected(rejectOption());
       return selected(allowOption(decision === "allow_session"));
     }
@@ -852,7 +856,18 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     const configuredCommand = req.runtimeSource ?? spec.command;
     const executableIdentity = observeCliExecutableIdentity({ bin: configuredCommand, cwd, env: runEnv });
     if (!executableIdentity) throw new Error(`ACP executable unavailable: ${configuredCommand}`);
+    /*
+     * The turn's lifetime for pending permission cards: Stop or turn settle
+     * withdraws the card (Paseo rejectAllPendingPermissions on interrupt/close,
+     * getpaseo/paseo@da48803 providers/claude/agent.ts:4862). Before this, a Stop
+     * killed the agent and left its card on screen for the 5-minute expiry.
+     */
+    const approvalTurn = new AbortController();
+    const endApprovalTurn = () => approvalTurn.abort(req.signal?.reason ?? new Error("acp_turn_settled"));
+    if (req.signal?.aborted) endApprovalTurn();
+    else req.signal?.addEventListener("abort", endApprovalTurn, { once: true });
     const client = new AcpSessionClient(events, req.permission, locale, {
+      signal: approvalTurn.signal,
       ...(req.planMode ? { planMode: true as const } : {}),
       runtime: spec.id,
       sessionKey: `${spec.id}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
@@ -1255,6 +1270,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     } finally {
       effectRun?.complete(client.effectReport(req.signal?.aborted ? "cancelled" : effectTerminal));
       req.signal?.removeEventListener("abort", onAbort);
+      req.signal?.removeEventListener("abort", endApprovalTurn);
+      endApprovalTurn();
       // 수신자를 먼저 뗀다 — 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다.
       if (session) session.state.active = null;
       if (lease) {

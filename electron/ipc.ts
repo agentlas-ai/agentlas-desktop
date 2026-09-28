@@ -1,5 +1,6 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { goalActiveChatIds } from "./store/goal-active-chats";
+import { registerAutomationChatActivityIpc } from "./automation-chat-activity-ipc";
 import { acknowledgeUncertainLongRunAttempts, getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { adoptExplicitGoalGrant } from "./long-run/explicit-goal-authority";
@@ -149,6 +150,7 @@ import {
   readMcpOAuthSession,
 } from "./mcp-tools/oauth";
 import { getPluginBrandMap } from "./mcp-tools/plugin-brand";
+import { measuringZoomFactor } from "./native-view-bounds";
 import {
   closeHubProfileView,
   openHubProfileView,
@@ -260,6 +262,7 @@ import { assertChatRemovalAllowed } from "./chat/removal-guard";
 import { startStudio, stopStudio } from "./hephaestus/studio";
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import type {
+  UpdaterInstallOptions,
   HephaestusBuildEvent,
   HephaestusBuildRequest,
   CreateAgentEvolutionProposalInput,
@@ -317,6 +320,7 @@ import {
   quitAndInstall as updaterInstall,
   revealRecoveryBackup as updaterRevealRecoveryBackup,
 } from "./updater";
+import { deferUpdaterInstall, requestUpdaterInstall } from "./updater/update-resume";
 import { listDirectory, pickDirectory, readTextFilePreview } from "./fs/workspace";
 import { grantDroppedPath, grantPastedAttachment, grantPastedImage, grantPath, pathFromGrant, resolveFsReadPath } from "./fs/access";
 import { unwatchFsPreviewFile, unwatchFsPreviewFilesForOwner, watchFsPreviewFile } from "./fs/file-watch";
@@ -2475,18 +2479,24 @@ export function registerIpcHandlers(): void {
   // renderer가 마운트되자마자 현재 상태를 동기 조회. broadcast 이전에 새 창이 열려도 onState로 캐치.
   ipcMain.handle("updater:getState", () => getUpdaterState());
   ipcMain.handle("updater:check", () => updaterCheck());
-  ipcMain.handle("updater:install", () => {
-    const activeRunCount = invocationService.activeChatIds().length;
-    if (activeRunCount > 0) {
-      return {
-        accepted: false,
-        state: getUpdaterState(),
-        blockedBy: "active-runs" as const,
-        activeRunCount,
-      };
-    }
-    return updaterInstall();
-  });
+  // Running work asks first (in-app confirm), then pauses for the update and continues after the
+  // restart (updater/update-resume.ts). The fallback is the refusal used before Main wires the host.
+  ipcMain.handle("updater:install", (_e, options?: UpdaterInstallOptions) => requestUpdaterInstall(
+    options && typeof options === "object" ? { resumeWork: options.resumeWork === true } : undefined,
+    async () => {
+      const activeRunCount = invocationService.activeChatIds().length;
+      if (activeRunCount > 0) {
+        return {
+          accepted: false,
+          state: getUpdaterState(),
+          blockedBy: "active-runs" as const,
+          activeRunCount,
+        };
+      }
+      return updaterInstall();
+    },
+  ));
+  ipcMain.handle("updater:deferInstall", () => deferUpdaterInstall());
   ipcMain.handle("updater:openManualDownload", () => updaterOpenManualDownload());
   ipcMain.handle("updater:openReleaseNotes", (_event, version?: string) => updaterOpenReleaseNotes(version));
   ipcMain.handle("updater:revealRecoveryBackup", () => updaterRevealRecoveryBackup());
@@ -3552,12 +3562,12 @@ export function registerIpcHandlers(): void {
   // 허브 소개 페이지 임베드 — 원격 페이지라 preload/IPC를 붙이지 않는다(hub-profile-view 참고).
   ipcMain.handle(
     "marketplace:openProfileView",
-    (_e, input: { slug: string; bounds: HubProfileBounds; locale?: "ko" | "en" }) =>
-      openHubProfileView(input),
+    (e, input: { slug: string; bounds: HubProfileBounds; locale?: "ko" | "en" }) =>
+      openHubProfileView({ slug: input?.slug, bounds: input?.bounds, locale: input?.locale, ownerZoom: measuringZoomFactor(e.sender) }),
   );
   ipcMain.handle(
     "marketplace:setProfileViewBounds",
-    (_e, bounds: HubProfileBounds) => setHubProfileViewBounds(bounds),
+    (e, bounds: HubProfileBounds) => setHubProfileViewBounds(bounds, measuringZoomFactor(e.sender)),
   );
   ipcMain.handle("marketplace:closeProfileView", () => closeHubProfileView());
   ipcMain.handle("marketplace:bookmarksSync", () => syncHubBookmarks({ rerunIfBusy: true }));
@@ -6074,6 +6084,8 @@ export function registerIpcHandlers(): void {
     return graphInputRequirement(automation.graph);
   });
   ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
+  // 대화에 딸린 자동화 — 실행 중 줄·보고 요약·오른쪽 "자동화" 탭. 원장(run_events)만 읽는다.
+  registerAutomationChatActivityIpc();
   // 승인은 사람의 결정이라 판정 모델 가용성과 무관하게 동작해야 한다. 결정은 가장 최근
   // 실행의 occurrence에 묶는다 — 승인 하나가 다음 실행까지 조용히 재사용되면 안 된다.
   ipcMain.handle(

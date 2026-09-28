@@ -78,7 +78,32 @@ export interface AlivePlaygroundObservation {
   salience?: Record<string, unknown>;
   /** Hard admission from the attached domain; a controller cannot bypass an explicit stop. */
   blockedBy?: string | null;
+  /**
+   * Typed owner boundary behind blockedBy (host facts, never prose):
+   *  - "owner-stopped": the owner deliberately stopped it. Quiet, no unblock attempt.
+   *  - "needs-owner":   the goal is parked on something the owner has (an answer, a review, an approval, input).
+   *                     One unblock attempt is due per exact blocked state, then quiet until it changes.
+   * Neither ever wakes the controller model: its no-tools "wait" cannot change such a state.
+   */
+  ownerWait?: AliveOwnerWait | null;
 }
+export type AliveOwnerWait = "owner-stopped" | "needs-owner";
+/**
+ * Outcome of one unblock attempt for one exact owner-blocked state (decision point "unblock_attempt_due"):
+ *  - acted:       it changed something (the next observation shows it); the owner is told by the unblocker;
+ *  - needs-human: exhausted — only a human has what is missing (credential, payment approval, physical action, answer);
+ *  - failed:      the attempt itself failed; still counts as this state's one attempt;
+ *  - no-handler:  no unblocker is installed yet; re-attempted for the same state once one is.
+ */
+export type AliveUnblockOutcome = "acted" | "needs-human" | "failed" | "no-handler";
+export interface AliveUnblockAttempt {
+  kind: "unblock_attempt_due";
+  agentId: string; attachment: AliveAttachment; blockedBy: string; stateSha: string;
+  observation: Record<string, unknown>;
+  /** Host admission at this moment (plan access / pool); a non-null code means the attempt must not spend. */
+  admissionCode: string | null;
+}
+export interface AliveUnblockResult { outcome: Exclude<AliveUnblockOutcome, "no-handler">; code?: string }
 export interface AlivePlaygroundPort {
   observe(attachment: AliveAttachment, nowMs: number): AlivePlaygroundObservation;
   /** Must verify current domain authority and durably deduplicate actionId before any side effect. */

@@ -62,14 +62,17 @@ import {
 } from "../confirm";
 import {
   ONE_DECISION_CONTRACT_VERSION,
+  ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION,
   ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY,
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
+  oneDecisionMultiSelectableIndexes,
 } from "../../shared/one-decision";
 import {
   cancelDeferredOneDecisionJudgments,
   oneDecisionJudgedReadersFor,
   prejudgeOneDecision,
+  retryPrejudgeOneDecision,
 } from "../one/judged-decision";
 import { prejudgeOneRequestIntent } from "../one/judged-request-intent";
 import { prejudgeOneMemoryIntent } from "../one/memory-detector";
@@ -83,6 +86,7 @@ import { listModelRoleMembers, setModelRoleMembers } from "../store/model-roles"
 import { listRuntimeCommands } from "../runtime/commands";
 import { installPublicHubRelease, listInstalledAgents } from "../mcp/registry";
 import { addOneOrgMember, getOneOrgState, markOneOrgMemberRead, openOneOrgMember } from "../one/org";
+import { readMobileOneAvatar } from "./one-avatar-preview";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { routeOnly } from "../hephaestus/commands";
@@ -857,12 +861,22 @@ function requireChat(id: string): Chat {
   return chat;
 }
 
-interface MobileDecisionAnswerPrecondition {
+interface MobileDecisionAnswerBinding {
   decisionId: string;
   taskId: string;
   taskVersion: number;
-  contractVersion: typeof ONE_DECISION_CONTRACT_VERSION;
 }
+
+type MobileDecisionAnswerPrecondition = MobileDecisionAnswerBinding & (
+  | { contractVersion: typeof ONE_DECISION_CONTRACT_VERSION }
+  | {
+      contractVersion: typeof ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION;
+      authoritativeHostRef: string;
+      createdAt: string;
+      optionLabels: string[];
+      selectionIndexes: number[];
+    }
+);
 
 function mobileDecisionAnswerAcknowledgement(expected: MobileDecisionAnswerPrecondition) {
   return {
@@ -892,14 +906,19 @@ async function prejudgePendingDecisionAnswer(
 function validateCurrentMobileDecisionAnswer(
   invocation: McpInvocationRequest,
   expected: MobileDecisionAnswerPrecondition,
+  authenticatedHostRef: string,
 ): void {
   const currentTask = findCanonicalTaskForChat(invocation.chatId);
+  const chat = getChat(invocation.chatId);
   if (
     !currentTask
+    || !chat || chat.archivedAt !== null
     || currentTask.id !== expected.taskId
     || currentTask.version !== expected.taskVersion
     || currentTask.status !== "waiting-decision"
     || currentTask.archivedAt !== null
+    || !currentTask.originChatId
+    || findCanonicalTaskForChat(currentTask.originChatId)?.id !== expected.taskId
     || getCanonicalTask(expected.taskId)?.version !== expected.taskVersion
   ) {
     throw new Error("Decision Task is stale or no longer waiting for this answer");
@@ -912,7 +931,10 @@ function validateCurrentMobileDecisionAnswer(
     throw new Error("Decision is stale, snoozed, or no longer pending");
   }
   const reply = invocation.userPrompt ?? "";
-  if (reply === ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY) return;
+  if (
+    expected.contractVersion === ONE_DECISION_CONTRACT_VERSION
+    && reply === ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY
+  ) return;
   // The async invoke paths warm the judged risk/disposition verdicts before this
   // synchronous validation; a cache miss remains fail-closed and cannot create
   // a lexical or static verdict.
@@ -922,12 +944,40 @@ function validateCurrentMobileDecisionAnswer(
     oneDecisionJudgedReadersFor(pending),
   );
   if (
-    view.contractVersion !== expected.contractVersion
+    view.contractVersion !== ONE_DECISION_CONTRACT_VERSION
     || view.decisionId !== expected.decisionId
     || view.taskId !== expected.taskId
     || view.chatId !== invocation.chatId
   ) {
     throw new Error("Decision projection changed; refresh before answering");
+  }
+  if (expected.contractVersion === ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION) {
+    if (
+      expected.authoritativeHostRef !== authenticatedHostRef
+      || !pending.multiSelect
+      || view.createdAt !== expected.createdAt
+      || pending.options.length !== view.options.length
+      || view.options.length !== expected.optionLabels.length
+      || view.options.some((option, index) => option.index !== index || option.label !== expected.optionLabels[index])
+      || new Set(expected.optionLabels).size !== expected.optionLabels.length
+    ) throw new Error("Multi-select Decision binding changed; refresh before answering");
+    const selectable = new Set(oneDecisionMultiSelectableIndexes(view));
+    if (
+      expected.selectionIndexes.length < 1
+      || expected.selectionIndexes.some((index, position) =>
+        !selectable.has(index) || (position > 0 && index <= expected.selectionIndexes[position - 1]))
+    ) throw new Error("Multi-select Decision includes a locked or duplicate option");
+    const canonicalReply = expected.selectionIndexes.map((index) => view.options[index].label).join(", ");
+    if (
+      !canonicalReply
+      || reply !== canonicalReply
+      || reply === view.controls.reject.reply
+      || reply === ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY
+    ) throw new Error("Multi-select Decision reply is not canonical");
+    return;
+  }
+  if (pending.multiSelect && reply !== view.controls.reject.reply) {
+    throw new Error("Multi-select Decision requires V2 selection authority or a rejection");
   }
   const optionAllowed = view.options.some((option) =>
     option.label === reply
@@ -973,6 +1023,10 @@ function invocationParams(
           "expectedTaskId",
           "expectedTaskVersion",
           "expectedDecisionContractVersion",
+          "expectedAuthoritativeHostRef",
+          "expectedDecisionCreatedAt",
+          "expectedDecisionOptionLabels",
+          "expectedDecisionSelectionIndexes",
           "expectedRunId",
         ]
       : [
@@ -993,6 +1047,10 @@ function invocationParams(
           "expectedTaskId",
           "expectedTaskVersion",
           "expectedDecisionContractVersion",
+          "expectedAuthoritativeHostRef",
+          "expectedDecisionCreatedAt",
+          "expectedDecisionOptionLabels",
+          "expectedDecisionSelectionIndexes",
         ],
   );
   const chatId = requiredIdentifier(params, "chatId");
@@ -1020,26 +1078,59 @@ function invocationParams(
   const expectedTaskId = optionalIdentifier(params, "expectedTaskId");
   const expectedTaskVersion = optionalInteger(params, "expectedTaskVersion", 1, Number.MAX_SAFE_INTEGER);
   const expectedDecisionContractVersion = optionalIdentifier(params, "expectedDecisionContractVersion", 32);
+  const hasV2Fields = params.expectedAuthoritativeHostRef !== undefined
+    || params.expectedDecisionCreatedAt !== undefined
+    || params.expectedDecisionOptionLabels !== undefined
+    || params.expectedDecisionSelectionIndexes !== undefined;
   const hasDecisionPrecondition = expectedQuestionMessageId !== undefined
     || expectedTaskId !== undefined
     || expectedTaskVersion !== undefined
-    || expectedDecisionContractVersion !== undefined;
+    || expectedDecisionContractVersion !== undefined
+    || hasV2Fields;
   let decisionAnswer: MobileDecisionAnswerPrecondition | undefined;
   if (hasDecisionPrecondition) {
     if (
       expectedQuestionMessageId === undefined
       || expectedTaskId === undefined
       || expectedTaskVersion === undefined
-      || expectedDecisionContractVersion !== ONE_DECISION_CONTRACT_VERSION
+      || (expectedDecisionContractVersion !== ONE_DECISION_CONTRACT_VERSION
+        && expectedDecisionContractVersion !== ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION)
     ) {
       throw new TypeError("Decision answers require exact Decision, Task, version, and contract preconditions");
     }
-    decisionAnswer = {
+    const binding: MobileDecisionAnswerBinding = {
       decisionId: expectedQuestionMessageId,
       taskId: expectedTaskId,
       taskVersion: expectedTaskVersion,
-      contractVersion: ONE_DECISION_CONTRACT_VERSION,
     };
+    if (expectedDecisionContractVersion === ONE_DECISION_CONTRACT_VERSION) {
+      if (hasV2Fields) throw new TypeError("V1 Decision answer cannot carry V2 selection fields");
+      decisionAnswer = { ...binding, contractVersion: ONE_DECISION_CONTRACT_VERSION };
+    } else {
+      const authoritativeHostRef = requiredBoundedString(params, "expectedAuthoritativeHostRef", 64);
+      const createdAt = requiredBoundedString(params, "expectedDecisionCreatedAt", 64);
+      const rawLabels = params.expectedDecisionOptionLabels;
+      const rawIndexes = params.expectedDecisionSelectionIndexes;
+      if (
+        !/^host_[a-f0-9]{32}$/.test(authoritativeHostRef)
+        || !Number.isFinite(Date.parse(createdAt))
+        || !Array.isArray(rawLabels) || rawLabels.length < 2 || rawLabels.length > 8
+        || rawLabels.some((label) => typeof label !== "string" || !label || label.length > 200)
+        || new Set(rawLabels).size !== rawLabels.length
+        || !Array.isArray(rawIndexes) || rawIndexes.length < 1 || rawIndexes.length > 8
+        || rawIndexes.some((index, position) => !Number.isSafeInteger(index)
+          || index < 0 || index >= rawLabels.length
+          || (position > 0 && index <= rawIndexes[position - 1]))
+      ) throw new TypeError("V2 Decision answer has invalid host, time, labels, or selection indexes");
+      decisionAnswer = {
+        ...binding,
+        contractVersion: ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION,
+        authoritativeHostRef,
+        createdAt,
+        optionLabels: rawLabels as string[],
+        selectionIndexes: rawIndexes as number[],
+      };
+    }
   }
   if (runId !== undefined) invocation.runId = runId;
   if (locale !== undefined) invocation.locale = locale;
@@ -2266,6 +2357,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         noParams(request);
         return asJsonValue(getOneOrgState(), request.method);
       }
+      case "one.avatar.get": {
+        const params = guardedParams(request, ["icon"]);
+        return asJsonValue(readMobileOneAvatar(requiredIdentifier(params, "icon", /^one-avatar:(?:self|[a-f0-9-]{16,80})$/i)), request.method);
+      }
       case "one.org.add": {
         const params = guardedParams(request, ["installedAgentId", "displayName"]);
         const installedAgentId = requiredIdentifier(params, "installedAgentId");
@@ -2978,7 +3073,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             invocation.userPrompt ?? "",
           );
         }
-        if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
+        if (decisionAnswer) validateCurrentMobileDecisionAnswer(
+          invocation, decisionAnswer, this.options.hostIdentity.hostId,
+        );
         // The host keeps this identity through preflight and actual admission.
         invocation.runId ??= randomUUID();
         await withInvocationPreflightAccounting({ runId: invocation.runId, chatId: invocation.chatId }, () => Promise.all([
@@ -2992,6 +3089,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const workspaceBinding = mobileOneTurn
           ? captureMobileOneInvocationBinding()
           : captureInvocationWorkspaceBinding(getChatWorkingFolder(invocation.chatId));
+        // Request-intent and One-turn binding both await asynchronous work.
+        // Re-read the durable Task and pending options immediately before the
+        // claim so a changed question cannot inherit the earlier validation.
+        if (decisionAnswer) validateCurrentMobileDecisionAnswer(
+          effectiveInvocation, decisionAnswer, this.options.hostIdentity.hostId,
+        );
         const rollbackQuestionClaim = decisionAnswer
           ? claimPendingConfirmationAnswer(invocation.chatId, decisionAnswer.decisionId)
           : null;
@@ -3022,7 +3125,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
             invocation.userPrompt ?? "",
           );
         }
-        if (decisionAnswer) validateCurrentMobileDecisionAnswer(invocation, decisionAnswer);
+        if (decisionAnswer) validateCurrentMobileDecisionAnswer(
+          invocation, decisionAnswer, this.options.hostIdentity.hostId,
+        );
         const mobileOneTurn = isMobileBridgeOneChat(requireChat(invocation.chatId));
         const effectiveInvocation = mobileOneTurn
           ? await bindMobileOneTurn(invocation)
@@ -3030,6 +3135,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const workspaceBinding = mobileOneTurn
           ? captureMobileOneInvocationBinding()
           : captureInvocationWorkspaceBinding(getChatWorkingFolder(invocation.chatId));
+        if (decisionAnswer) validateCurrentMobileDecisionAnswer(
+          effectiveInvocation, decisionAnswer, this.options.hostIdentity.hostId,
+        );
         const rollbackQuestionClaim = decisionAnswer
           ? claimPendingConfirmationAnswer(invocation.chatId, decisionAnswer.decisionId)
           : null;
@@ -3086,6 +3194,31 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "confirm.listPending": {
         noParams(request);
         return asJsonValue(projectMobileBridgeConfirmations(), request.method);
+      }
+      case "one.decision.retryReview": {
+        const params = guardedParams(request, ["chatId", "taskId", "taskVersion", "decisionId"]);
+        const chatId = requiredIdentifier(params, "chatId");
+        const taskId = requiredIdentifier(params, "taskId");
+        const decisionId = requiredIdentifier(params, "decisionId");
+        const taskVersion = optionalInteger(params, "taskVersion", 1, Number.MAX_SAFE_INTEGER);
+        const chat = getChat(chatId);
+        const task = findCanonicalTaskForChat(chatId);
+        if (
+          taskVersion === undefined
+          || !chat || chat.archivedAt !== null
+          || !task || task.id !== taskId || task.version !== taskVersion
+          || task.status !== "waiting-decision" || task.archivedAt !== null
+          || !task.originChatId || findCanonicalTaskForChat(task.originChatId)?.id !== taskId
+          || getCanonicalTask(taskId)?.version !== taskVersion
+        ) throw new Error("Decision Task changed; refresh before retrying review");
+        const pending = listPendingConfirmations().find((candidate) =>
+          candidate.chatId === chatId && candidate.sourceMessageId === decisionId);
+        if (!pending || isPendingConfirmationSnoozed(pending, Date.now())) {
+          throw new Error("Decision is no longer pending");
+        }
+        const status = retryPrejudgeOneDecision(pending);
+        if (status === "ready") this.scheduleSnapshotUpdated();
+        return asJsonValue({ status }, request.method);
       }
 
       // DESKTOP_MOBILE_BRIDGE: Resolve only the opaque live browser request.
@@ -4063,7 +4196,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
    * keep serving B's mail. Checked on every mail/profile request, reads too.
    */
   private mailAccountRefusal(method: string, context: MobileBridgeConnectionContext): MobileBridgeJsonValue | null {
-    if (!(method.startsWith("mail.") || method.startsWith("one.profile."))) return null;
+    if (!(method.startsWith("mail.") || method.startsWith("one.profile.") || method === "one.avatar.get")) return null;
     const guard = this.options.mailAccountGuard;
     if (!guard || context.devBootstrap) return null;
     let verdict: ReturnType<NonNullable<typeof guard>>;

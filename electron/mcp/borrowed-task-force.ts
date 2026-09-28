@@ -2542,6 +2542,54 @@ export function selectLocalPlannerRepair(input: {
     : { selectedAttempt: 2, reason: "use_repair" };
 }
 
+/**
+ * Deterministic host decision for packets whose planner omitted or garbled
+ * workspaceAccess even after the bounded same-model repair.
+ *
+ * workspaceAccess is filesystem intent, not authority: taskForceChildPermission
+ * still applies the host ceiling, plan/pre-approval gates and Agent App limits.
+ * So the host can always decide it from facts it owns — the chat's granted
+ * permission and the member's role — and must never end the owner's turn
+ * because a model forgot one enum field (2026-09-28 Thread Marketing room died
+ * with local_planner_workspace_access_unresolved after two planner attempts).
+ *
+ * - host read / plan / runtime-default / Agent App  -> read
+ * - host write|full and the packet produces work (implementation or writing
+ *   input, declared tool use, or a nested team that runs its own workers) -> write
+ * - otherwise (research, review, analysis) -> read
+ */
+export function hostDerivedWorkspaceAccess(
+  packet: Pick<BorrowedInputPacket, "inputType" | "allocation">,
+  host: { permission: RunnerRequest["permission"]; agentAppMode?: boolean },
+  memberKind?: BorrowedAgentSpec["entityKind"],
+): "read" | "write" {
+  const writable = (host.permission === "write" || host.permission === "full") && !host.agentAppMode;
+  if (!writable) return "read";
+  const inputType = cleanString(packet.inputType).toLowerCase();
+  if (inputType === "implementation" || inputType === "writing") return "write";
+  if (packet.allocation?.requirements?.toolRequired === true) return "write";
+  if (memberKind === "team") return "write";
+  return "read";
+}
+
+/** Fill only the packets whose workspaceAccess is missing/invalid; planner-
+ * declared values are kept verbatim. Returns what was derived for the receipt. */
+export function fillHostDerivedWorkspaceAccess(
+  packets: BorrowedInputPacket[],
+  specs: BorrowedAgentSpec[],
+  host: { permission: RunnerRequest["permission"]; agentAppMode?: boolean },
+): { packets: BorrowedInputPacket[]; derived: Array<{ agent: string; stepId: string | null; access: "read" | "write" }> } {
+  const kindBySlug = new Map(specs.map((spec) => [spec.slug, spec.entityKind]));
+  const derived: Array<{ agent: string; stepId: string | null; access: "read" | "write" }> = [];
+  const filled = packets.map((packet) => {
+    if (packet.workspaceAccess === "read" || packet.workspaceAccess === "write") return packet;
+    const access = hostDerivedWorkspaceAccess(packet, host, kindBySlug.get(packet.agent));
+    derived.push({ agent: packet.agent, stepId: cleanString(packet.stepId) || null, access });
+    return { ...packet, workspaceAccess: access };
+  });
+  return { packets: filled, derived };
+}
+
 export function normalizePacketsForRoster(
   packets: BorrowedInputPacket[],
   specs: BorrowedAgentSpec[],
@@ -3120,7 +3168,7 @@ function buildPlannerSystemPrompt(
       : "This is a standing One Team room: every selected Taskforce member must receive one initial conversational step. A single-agent member may appear again only in a later step that depends on its earlier result and explicitly requests a revision or follow-up. A team-orchestrator member represents an entire nested team: emit exactly one packet for it, never decompose or repeat its internal roles here; that team's manager owns its internal delegation, review, and revision.",
     requireExactRoster
       ? "The response object must contain exactly packets and synthesis. Every packet must include agent, inputType, inputKind, brief, context, expectedOutput, constraints, doneWhen, allocation, and capabilityBindings."
-      : "The response object must contain packets and synthesis. Every packet must include stepId, dependsOn, agent, oneReply, requiresApproval, inputType, inputKind, brief, context, expectedOutput, constraints, and allocation; add doneWhen when completion is checkable.",
+      : "The response object must contain packets and synthesis. Every packet must include stepId, dependsOn, agent, oneReply, requiresApproval, workspaceAccess, inputType, inputKind, brief, context, expectedOutput, constraints, and allocation; add doneWhen when completion is checkable. synthesis is itself one allocation object for the final synthesize phase, not a wrapper around one.",
     requireExactRoster
       ? ""
       : "Taskforce chat is the product surface. Each brief is shown as One's actual message in the room, so make it concise, natural, role-specific, and free of system prompts, host facts, execution boundaries, IDs, receipts, or control-plane prose.",
@@ -3206,9 +3254,55 @@ function buildPlannerPrompt(
   ].filter(Boolean).join("\n");
 }
 
-/** llama.cpp JSON grammar for the ordinary Taskforce dispatch envelope. The
- * dynamic agent enum prevents a small local model from inventing or omitting
- * the roster identity while keeping allocation normalization host-owned. */
+/** Closed allocation object for the ordinary planner envelope.
+ *
+ * OpenAI strict mode (codex --output-schema / app-server outputSchema) rejects
+ * any open object, so `allocation` and `synthesis` used to be `{type:"object"}`
+ * and codex refused the whole planner turn (400 invalid_json_schema,
+ * 2026-09-27). The follow-up stopped sending that schema to codex at all, and
+ * the planner then answered in free prose or dropped `workspaceAccess` (owner
+ * Thread Marketing room, 2026-09-28: attempt 1 prose, attempt 2 two packets
+ * with no workspaceAccess -> local_planner_workspace_access_unresolved).
+ *
+ * Every property is required and the object is closed so the schema is
+ * strict-valid. Optional ideas are expressed as values the host normalizer
+ * already ignores: an empty runtimeId/modelId, modelClass "auto". The field
+ * names are exactly what normalizeWorkloadAllocation reads. */
+export function taskForceAllocationOutputSchema(phase: "delegate" | "synthesize"): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["runtimeId", "modelId", "tier", "modelClass", "effort", "phase", "requirements", "reasonCodes", "rationale"],
+    properties: {
+      runtimeId: { type: "string" },
+      modelId: { type: "string" },
+      tier: { type: "string", enum: ["economy", "balanced", "frontier"] },
+      modelClass: { type: "string" },
+      effort: { type: "string" },
+      phase: { type: "string", enum: [phase] },
+      requirements: {
+        type: "object",
+        additionalProperties: false,
+        required: ["inputTokens", "expectedOutputTokens", "toolRequired", "multimodalRequired"],
+        properties: {
+          inputTokens: { type: "integer" },
+          expectedOutputTokens: { type: "integer" },
+          toolRequired: { type: "boolean" },
+          multimodalRequired: { type: "boolean" },
+        },
+      },
+      reasonCodes: { type: "array", items: { type: "string" } },
+      rationale: { type: "string" },
+    },
+  };
+}
+
+/** JSON grammar for the ordinary Taskforce dispatch envelope (llama.cpp
+ * constrained decoding, claude/grok/agy --json-schema, codex strict schema).
+ * The dynamic agent enum prevents a model from inventing or omitting the
+ * roster identity; allocation normalization stays host-owned. This schema must
+ * stay OpenAI-strict-valid (openAiStrictSchemaOrNull) or codex silently loses
+ * it — test-task-force-planner-strict-schema.cjs pins that. */
 export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[]): Record<string, unknown> {
   const strings = { type: "array", items: { type: "string" } } as const;
   return {
@@ -3241,11 +3335,11 @@ export function ordinaryTaskForcePlannerOutputSchema(specs: BorrowedAgentSpec[])
             expectedOutput: { type: "string" },
             constraints: strings,
             doneWhen: strings,
-            allocation: { type: "object" },
+            allocation: taskForceAllocationOutputSchema("delegate"),
           },
         },
       },
-      synthesis: { type: "object" },
+      synthesis: taskForceAllocationOutputSchema("synthesize"),
     },
   };
 }
@@ -5523,6 +5617,7 @@ async function runPlanner(
       agentId: p.orchestratorAgent.id,
     }, "read");
     const parsedPlan = parseBorrowedWorkloadPlan(plannerText);
+    let selectedPlannerPackets = parsedPlan.packets;
     let normalized = normalizePacketsForRoster(parsedPlan.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale, !p.benchmarkMode && !p.req.agentAppMode, semanticSubset);
     synthesisAllocation = parsedPlan.synthesisAllocation ?? defaultWorkloadAllocation("synthesize");
 
@@ -5599,6 +5694,7 @@ async function runPlanner(
       if (selection.selectedAttempt === 2) {
         selectedPlanRuntime = plannerRuntime;
         normalized = repairedNormalized;
+        selectedPlannerPackets = repairedPlan.packets;
         plannerText = repairedText;
         synthesisAllocation = repairedPlan.synthesisAllocation ?? synthesisAllocation;
         result = repairedResult;
@@ -5607,7 +5703,24 @@ async function runPlanner(
       }
     }
     if (normalized.validationCodes.includes("workspace_access_missing_or_invalid")) {
-      throw new Error("local_planner_workspace_access_unresolved");
+      // The planner still omitted workspaceAccess after its one repair. The host
+      // owns this decision (permission ceiling + member role), so decide it and
+      // keep the turn alive instead of failing the owner's message.
+      const host = { permission: taskForcePermission(p), agentAppMode: Boolean(p.req.agentAppMode) };
+      const filled = fillHostDerivedWorkspaceAccess(selectedPlannerPackets, specs, host);
+      const hostNormalized = normalizePacketsForRoster(filled.packets, specs, oneAttachmentExecutionPrompt(p.req), p.locale, true, semanticSubset);
+      tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
+        nodeId: orchestratorId, agentId: p.orchestratorAgent.id, kind: "task_force_workspace_access_derived",
+        payload: { reason: "planner_omitted_after_repair", hostPermission: host.permission ?? null,
+          derived: filled.derived, remainingValidationCodes: hostNormalized.validationCodes } });
+      if (hostNormalized.validationCodes.includes("workspace_access_missing_or_invalid")) {
+        // Unreachable by construction (every packet now carries read|write);
+        // kept as a named invariant with a sentence the owner can act on.
+        throw new Error(p.locale === "ko"
+          ? "팀 계획의 작업 폴더 권한을 정하지 못했습니다(local_planner_workspace_access_unresolved). 같은 메시지를 다시 보내거나 작성창에서 권한(읽기/쓰기)을 골라 다시 보내 주세요."
+          : "Could not decide the team plan's workspace access (local_planner_workspace_access_unresolved). Send the message again, or pick a permission (read/write) in the composer and resend.");
+      }
+      normalized = hostNormalized;
     }
     if (semanticSubset && !normalized.parseSuccess) {
       throw new Error("local_planner_subset_unresolved");

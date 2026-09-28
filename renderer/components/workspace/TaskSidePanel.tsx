@@ -18,6 +18,7 @@ import {
   IconCheck,
   IconChevronDown,
   IconChevronRight,
+  IconClock,
   IconClose,
   IconCode,
   IconFileUp,
@@ -68,10 +69,11 @@ import { OneWorkerPanel } from "../one/OneWorkerPanel";
 import { ContinuityStatus } from "../ContinuityStatus";
 import type { OneWorkerPanelRun, OneWorkerPanelSelection } from "@/lib/one-worker-panel";
 import styles from "./TaskSidePanel.module.css";
+import { AUTOMATION_TAB_OPEN_EVENT, AutomationRailPanel, AutomationTabLiveDot, automationTabRunning, useAutomationChatActivity } from "../automation/AutomationChatActivity";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
-type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen";
+type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "automation";
 
 /** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
 function RailTabIcon({ view }: { view: OutputRailView }) {
@@ -79,6 +81,7 @@ function RailTabIcon({ view }: { view: OutputRailView }) {
   if (view === "screen") return <IconPanelRight size={12} />;
   if (view === "terminal") return <IconCode size={12} />;
   if (view === "result") return <IconCheck size={12} />;
+  if (view === "automation") return <IconClock size={12} />;
   return <IconSparkles size={12} />;
 }
 
@@ -88,6 +91,7 @@ function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
   if (view === "activity") return locale === "ko" ? "작업" : "Activity";
   if (view === "terminal") return locale === "ko" ? "터미널" : "Terminal";
   if (view === "screen") return locale === "ko" ? "화면" : "Screen";
+  if (view === "automation") return locale === "ko" ? "자동화" : "Automations";
   return locale === "ko" ? "브라우저" : "Browser";
 }
 function readCollapsedOutputSections(): Set<OutputSectionKey> {
@@ -951,6 +955,27 @@ function TaskSidePanelContent({
     });
     return () => { disposed = true; off?.(); };
   }, [screenChatId, openRailTab]);
+  // 이 대화(Work 는 프로젝트까지)에 걸린 자동화 — 있을 때만 "자동화" 탭이 선다(오너 2026-09-28).
+  const automationSnapshot = useAutomationChatActivity({ chatId: screenChatId ?? null });
+  const hasAutomations = (automationSnapshot?.automations.length ?? 0) > 0;
+  const automationRunning = automationTabRunning(automationSnapshot);
+  useEffect(() => {
+    setOpenTabs((tabs) => hasAutomations
+      ? (tabs.includes("automation") ? tabs : [...tabs, "automation"])
+      : (tabs.includes("automation") ? tabs.filter((tab) => tab !== "automation") : tabs));
+    if (hasAutomations) setRailView((current) => current ?? "automation");
+    else setRailView((current) => (current === "automation" ? null : current));
+  }, [hasAutomations]);
+  useEffect(() => {
+    const open = (event: Event) => {
+      const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
+      if (!screenChatId || chatId !== screenChatId) return;
+      openRailTab("automation");
+      onRequestOpen?.();
+    };
+    window.addEventListener(AUTOMATION_TAB_OPEN_EVENT, open);
+    return () => window.removeEventListener(AUTOMATION_TAB_OPEN_EVENT, open);
+  }, [screenChatId, openRailTab, onRequestOpen]);
   const closeRailTab = useCallback((view: OutputRailView) => {
     setOpenTabs((tabs) => {
       const next = tabs.filter((tab) => tab !== view);
@@ -1409,6 +1434,7 @@ function TaskSidePanelContent({
               >
                 <RailTabIcon view={view} />
                 {railTabLabel(view, locale)}
+                {view === "automation" && automationRunning && <AutomationTabLiveDot locale={locale} />}
               </button>
               <button
                 type="button"
@@ -1591,6 +1617,7 @@ function TaskSidePanelContent({
               : computerUse.slice(-3).map((item) => <div key={item.id} className={styles.artifactRuntimeRow}><IconPanelRight size={13} /><span>{item.tool?.name || (locale === "ko" ? "컴퓨터 작업" : "Computer task")}</span><small>{item.status === "completed" ? <IconCheck size={12} /> : null}</small></div>)}
           </OutputDisclosure>
         </>}
+        {railView === "automation" && <AutomationRailPanel snapshot={automationSnapshot} locale={locale} />}
         {railView === "screen" && (
           <RailAgentScreen
             mode={screenMode}
