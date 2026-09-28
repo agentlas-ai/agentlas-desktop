@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.49 — 2026-09-28
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- The side-panel browser stays in place when the app window is zoomed in or out: closing the
+  browser's ⋮ menu no longer moves the page over the chat and the address bar.
+
 ## 1.2.48 — 2026-09-28
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.

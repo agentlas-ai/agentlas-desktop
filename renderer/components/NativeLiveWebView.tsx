@@ -108,7 +108,10 @@ export function NativeLiveWebView({ url, title, runtimeLabel, bare = false, mode
       // Hiding never waits for a paint or a fresh layout measurement.
       if (visible) lastGeometry = bounds();
       const next = { viewId, taskScopeId, viewLeaseId, bounds: lastGeometry, visible };
-      const signature = JSON.stringify(next);
+      // Bounds are CSS pixels; Main converts them with the page zoom. A zoom
+      // change can leave the CSS rect identical, so the scale is part of the
+      // identity of what Main last placed (devicePixelRatio includes page zoom).
+      const signature = JSON.stringify({ ...next, scale: window.devicePixelRatio });
       if (signature === lastBounds) return;
       lastBounds = signature;
       void api.setBounds(next).then((result) => {
