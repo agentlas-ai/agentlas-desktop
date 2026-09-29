@@ -229,6 +229,28 @@ function enabledPluginShipsAgentlasBrowser(codexHome: string, texts: readonly st
 }
 
 /**
+ * Whether the owner's Codex config would hand this run an outside browser
+ * (a Playwright-style server or the Playwright plugin) while no Agentlas browser
+ * is declared there. Production 1.2.50 (2026-09-29, One Team "Shorts Metrics
+ * Operator", receipt `browser_surface=fallback agentlas_browser=unknown`): the
+ * tool judge was undecided, Main bound no browser, and the model drove the
+ * owner's `playwright` server — every navigate raised a Codex MCP elicitation
+ * ("Allow the playwright MCP server to run tool …") because that server is not
+ * behind Main's gate. The tool selector reads this to attach the Agentlas
+ * browser instead, which then closes the outside one (`hostBound`).
+ */
+export function codexUserConfigOutsideBrowser(input: { env?: NodeJS.ProcessEnv; cwd?: string }): boolean {
+  const home = codexHomeFor(input);
+  const texts = readUserConfigTexts(home);
+  if (texts.length === 0) return false;
+  if (readUserConfigServers(texts, declaredAgentlasBrowserServers).length > 0) return false;
+  if (enabledPluginShipsAgentlasBrowser(home, texts)) return false;
+  if (readUserConfigServers(texts, declaredBrowserAutomationServers).length > 0) return true;
+  const plugins = new Set(texts.flatMap(enabledCodexPlugins));
+  return BROWSER.codexPlugins.some((plugin) => plugins.has(plugin));
+}
+
+/**
  * `-c` overrides for this run:
  *   - vendor desktop control closed for unattended/browser-only runs;
  *   - the owner's own browser (bundled chrome/browser plugins) closed on every run;

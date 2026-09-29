@@ -125,6 +125,60 @@ function readJudgmentPool(): JudgmentPool {
   }
 }
 
+/*
+ * Measured judgment latency per runtime identity (in-process, last N attempts).
+ * Soak 1.2.50: the optional-tool judge is called with the invocation's codex pin,
+ * whose no-tools isolation is not release-verified, so it was never invoked and
+ * every codex run was "undecided". A pool fallback is allowed only to a runtime
+ * that is no-tools verified AND whose measured p50 fits the caller's deadline —
+ * an unmeasured or slow runtime would only add latency before the same undecided.
+ * Timeouts count at their elapsed time, so a runtime that keeps timing out is slow.
+ */
+const JUDGMENT_LATENCY_WINDOW = 20;
+const JUDGMENT_LATENCY_MIN_SAMPLES = 3;
+const judgmentLatencies = new Map<string, number[]>();
+
+function noteJudgmentLatency(selection: JudgmentSelectionIdentity | undefined, outcome: JudgmentRuntimeAttempt["outcome"], elapsedMs: number): void {
+  if (!selection || (outcome !== "success" && outcome !== "timeout" && outcome !== "invalid_output")) return;
+  const key = judgmentSelectionIdentity(selection);
+  const samples = judgmentLatencies.get(key) ?? [];
+  samples.push(Math.max(0, elapsedMs));
+  if (samples.length > JUDGMENT_LATENCY_WINDOW) samples.splice(0, samples.length - JUDGMENT_LATENCY_WINDOW);
+  judgmentLatencies.set(key, samples);
+}
+
+/** Median of the measured attempts, or null when there are too few to call it measured. */
+export function measuredJudgmentP50(selection: JudgmentSelectionIdentity): number | null {
+  const samples = judgmentLatencies.get(judgmentSelectionIdentity(selection));
+  if (!samples || samples.length < JUDGMENT_LATENCY_MIN_SAMPLES) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+}
+
+/** Test seam only: seed or clear measured latencies. */
+export function __setJudgmentLatenciesForTest(entries: Array<{ selection: JudgmentSelectionIdentity; samples: number[] }> | null): void {
+  judgmentLatencies.clear();
+  for (const entry of entries ?? []) judgmentLatencies.set(judgmentSelectionIdentity(entry.selection), [...entry.samples]);
+}
+
+/**
+ * Who may judge a no-tools selection when the invocation's own pin cannot.
+ * Returns the pool member (in the owner's pool order) that is no-tools verified
+ * with a measured p50 under `timeoutMs`, or null — then the caller skips judging.
+ */
+export function noToolsJudgmentFallback(timeoutMs: number,
+  readPool: () => { state: string; selections: RuntimeSelection[] } = readJudgmentPool): RuntimeSelection | null {
+  const pool = readPool();
+  if (pool.state !== "configured") return null;
+  for (const selection of pool.selections) {
+    if (inspectJudgmentCapability(selection, "no_tools").status !== "verified") continue;
+    const p50 = measuredJudgmentP50(selection);
+    if (p50 !== null && p50 < timeoutMs) return selection;
+  }
+  return null;
+}
+
 /** Read the user-configured judgment pool without falling back to execution. */
 export function configuredOrchestratorJudgmentPolicy(): JudgmentSelectionPolicy | null {
   const pool = readJudgmentPool();
@@ -753,6 +807,7 @@ async function callJudgmentModelDetailed(opts: {
       ...(failure ? { failureKind: failure.kind } : {}),
     };
     attempts.push(attempt);
+    noteJudgmentLatency(runtimeReceipt.selection, outcome, attempt.elapsedMs);
     console.info("[judgment-runtime-result]", JSON.stringify(attempt));
   };
   const failedOutcome = (failure: RunnerFailure, timedOut = false): JudgmentRuntimeAttempt["outcome"] =>

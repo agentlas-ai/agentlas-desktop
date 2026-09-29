@@ -25,8 +25,6 @@ import {
   listInstalledPluginCandidates,
   pluginCandidateId,
   pluginSlugFromCandidateId,
-  localRelevanceQuery,
-  rankByLocalRelevance,
   type InstalledPluginCandidate,
 } from "../plugins/plugin-candidates";
 import { selectedPluginRouterPrompt } from "../plugins/router-prompt";
@@ -425,6 +423,12 @@ export async function autoSelectMcpTools(input: {
   workingFolder?: string | null;
   /** Capabilities proven by Main for this exact invocation. Missing means unknown. */
   runtimeCapabilities?: McpRuntimeCapabilities;
+  /**
+   * The runtime's own config would expose an outside browser (e.g. the owner's
+   * Codex `playwright` server) to this run. Capability priority then attaches
+   * the Agentlas browser so the outside one is closed instead of used.
+   */
+  runtimeOutsideBrowser?: boolean;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
   /** Abort the optional tool-need judgment when the parent invocation stops. */
@@ -504,7 +508,7 @@ export async function autoSelectMcpTools(input: {
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
+      input.runtimeOutsideBrowser === true ? "outside-browser" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -778,24 +782,11 @@ export async function autoSelectMcpTools(input: {
   // judge timed out or could not run. Same candidates, local relevance only, and
   // only installed credential-free entries: no install, no key prompt, no change
   // of the browser/computer-use host binding. An unrelated task selects nothing.
-  let selectionSource: "judge" | "local-relevance" | "none" = needs.decided ? "judge" : "none";
+  // Coordinator decision 2026-09-29 (soak 1.2.50): an undecided judgment falls back to the
+  // baseline set only (below), never to local-relevance guesses — those attached
+  // science-statistics and research-director to a YouTube metrics teammate.
+  const selectionSource = (needs.decided ? "judge" : "none") as "judge" | "local-relevance" | "none";
   const fallbackIds: string[] = [];
-  if (!needs.decided) {
-    const query = localRelevanceQuery({ userPrompt: input.userPrompt, objective: activeGoalScope?.objective });
-    const eligible = needsCandidates.filter((candidate) => candidate.fallbackEligible && !candidate.needsCredential
-      && !blockedByHostBinding(candidate.id)
-      && candidate.id !== "agentlas-browser" && candidate.id !== "cua-driver" && candidate.id !== "playwright");
-    const hits = rankByLocalRelevance(query, eligible.map((candidate) => {
-      const slug = pluginSlugFromCandidateId(candidate.id);
-      return {
-        id: candidate.id,
-        text: (slug && pluginBySlug.get(slug)?.searchText) || `${candidate.name}\n${candidate.description}`,
-        agentlas: candidate.agentlas === true,
-      };
-    }));
-    for (const hit of hits) { neededIds.add(hit.id); fallbackIds.push(hit.id); }
-    if (hits.length > 0) selectionSource = "local-relevance";
-  }
   // Reuse only exact prior choices in the same still-active host scope. Inserting
   // IDs before normal resolution prevents carrying stale ready/credential states.
   if (goalScopeStillCurrent()) {
@@ -849,6 +840,22 @@ export async function autoSelectMcpTools(input: {
       hostBindingPins.add("agentlas-browser");
     }
   }
+  // Capability priority (shared/capability-priority.ts): the runtime would otherwise hand
+  // this run an outside browser from the owner's own config (production 1.2.50: Codex
+  // drove the owner's `playwright` server after an undecided judgment, and every navigate
+  // raised an ungated MCP approval prompt). Attach the Agentlas browser as an ordinary
+  // selection — the host mode stays "auto", so a failed probe keeps the old fallback
+  // instead of blocking the run.
+  if (
+    automaticHostDecision
+    && effectiveToolMode === "auto"
+    && input.runtimeOutsideBrowser === true
+    && canonicalBrowserAvailable
+    && !neededIds.has("agentlas-browser")
+  ) {
+    neededIds.add("agentlas-browser");
+    pinnedReasons.set("agentlas-browser", "capability priority: replaces the runtime's outside browser (Playwright-style server in the owner's config)");
+  }
   const cappedHub = Math.max(0, hubInventory.listings.length - hubOffered.length);
   const needsNote = [
     needs.decided
@@ -865,6 +872,27 @@ export async function autoSelectMcpTools(input: {
   ]
     .filter(Boolean)
     .join(" ");
+
+  // Baseline capability (owner 2026-09-29 "agentlas browser면 다 되야 하는거 아니냐"): the
+  // Agentlas browser is core, not an optional pick. A run under a writable active Goal or a
+  // One Team member's run gets it whatever the judge said (soak 1.2.50: t5/t7 teammates had
+  // no browser and reached for the owner's Playwright / Computer Use instead). Host mode
+  // stays "auto", so a failed probe keeps the old fallback instead of blocking the run.
+  const writableGoalRun = activeGoalScope !== null && activeGoalScope.permission !== "read";
+  const oneTeamMemberRun = input.autoSelectTools === true;
+  if (
+    automaticHostDecision
+    && effectiveToolMode === "auto"
+    && (writableGoalRun || oneTeamMemberRun)
+    && canonicalBrowserAvailable
+    && !blockedByHostBinding("agentlas-browser")
+    && !neededIds.has("agentlas-browser")
+  ) {
+    neededIds.add("agentlas-browser");
+    pinnedReasons.set("agentlas-browser", writableGoalRun
+      ? "baseline capability: runs under a writable Goal always carry the Agentlas browser"
+      : "baseline capability: One Team member runs always carry the Agentlas browser");
+  }
 
   // Rank before the probe cap so a convenience pin can never crowd out a host binding or a
   // capability the judge said the task actually needs.

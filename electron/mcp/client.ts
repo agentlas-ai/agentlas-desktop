@@ -226,6 +226,7 @@ import {
 } from "../browser/credential-sync";
 import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
 import { agentRunCwd } from "../runtime/exec";
+import { codexUserConfigOutsideBrowser } from "../runtime/codex-desktop-surface";
 import { generateImage, removeGeneratedImageArtifact } from "../multimodal/image";
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { multimodalImageSlot } from "../multimodal/slot";
@@ -3217,6 +3218,11 @@ ${effectiveUserPrompt}`;
             ? "available" as const
             : "unknown" as const,
         },
+        // Codex loads the owner's ~/.codex MCP servers; a Playwright-style one there would
+        // be the run's only browser unless the Agentlas browser is attached (codex-desktop-surface).
+        ...(active.kind === "codex" && codexUserConfigOutsideBrowser({ env: process.env, cwd: agentRunCwd() })
+          ? { runtimeOutsideBrowser: true as const }
+          : {}),
         agentName: agent.nameEn || agent.name,
         workingFolder,
         toolMode: req.toolMode,

@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.2.51 — 2026-09-29
+
+- **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a published installer or an installed update; verify those separately.
+
+- Science works again in the installed app. Since 1.2.4x the background service could not load
+  Science, so Science never started and its requests timed out. The service now starts Science
+  normally, and if it ever refuses again the app log names the cause.
+- One Team: a teammate you dispatch now runs with your permission instead of read-only, so it can
+  write what you can.
+- AGI delegation notices name the teammate instead of an internal member id.
+- A question from a running agent now appears only in its own chat; elsewhere it is counted in the
+  "waiting" badge, and it no longer shows up off to the left on Settings.
+- Goal and teammate runs always get the Agentlas browser. They no longer fall back to an outside
+  Playwright server from your Codex settings or ask for approval on every page, and the optional
+  tool check never holds a run up.
+
 ## 1.2.50 — 2026-09-29
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.

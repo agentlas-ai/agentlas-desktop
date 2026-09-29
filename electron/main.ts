@@ -356,6 +356,16 @@ const oneTeamNotificationKeys = new Set<string>();
  * the verifier; ordinary packaged launches never create this file.
  */
 const UPDATER_E2E_TRACE_PATH_ENV = "AGENTLAS_UPDATER_E2E_TRACE_PATH";
+/**
+ * A remote Science rejection carries the daemon's machine code in `failure`;
+ * logging only the Error printed a bare stack and hid the cause for days
+ * (science_daemon_remote_rejected on every packaged boot, 2026-09-27~29).
+ */
+function scienceDaemonFailureForLog(error: unknown): unknown {
+  const failure = (error as { failure?: unknown } | null)?.failure;
+  return failure && typeof failure === "object" ? { ...failure } : error;
+}
+
 function traceUpdaterStartup(stage: string): void {
   if (developmentEffectPolicyRequested()) return;
   const tracePath = process.env[UPDATER_E2E_TRACE_PATH_ENV]?.trim();
@@ -4154,7 +4164,7 @@ app.whenReady().then(async () => {
     });
     void scienceDaemonStartupPromise.then(status => {
       console.info("[science-runtime] daemon service", { state: status.state, ownerEpoch: status.ownerEpoch });
-    }).catch(error => console.error("[science-runtime] daemon startup failed", error));
+    }).catch(error => console.error("[science-runtime] daemon startup failed", scienceDaemonFailureForLog(error)));
   }
   // The OS supervisor is an owner continuity mechanism, not a Codex task.
   // Ask the live Science owner whether recoverable work exists; the GUI never
@@ -4168,7 +4178,7 @@ app.whenReady().then(async () => {
         const scienceReady = scienceDaemonStartupPromise
           ?? (scienceDaemonClient ? scienceDaemonClient.ensureStarted() : Promise.resolve(null));
         const status = await scienceReady.catch(error => {
-          console.error("[daemon] Science recovery observation unavailable", error);
+          console.error("[daemon] Science recovery observation unavailable", scienceDaemonFailureForLog(error));
           return null;
         });
         let hasRecoverableScienceWork = false;

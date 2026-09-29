@@ -9,13 +9,47 @@ import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
 // 결과를 받아 다음 단계로 가야 한다. 이 시트가 답을 돌려주면 그 자리에서 실행이 이어진다.
 //
 // 형태는 BrowserActionApprovalSheet 와 같은 규칙(큐 + 만료 + 창 없으면 애초에 안 옴).
-import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { AskCard } from "@/components/AskCard";
 import { clearAskUserDraft, loadAskUserDraft, saveAskUserDraft } from "@/lib/ask-user-draft";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { useToolApprovals } from "@/lib/tool-approvals";
 import type { AskUserRequestEvent } from "@/lib/types";
+
+/*
+ * ★질문 카드는 그 질문을 낸 대화 안에서만 편다 (오너 2026-09-29, 1.2.50 설정 화면 실측:
+ * "이게 왜 여기 뜨냐;; 그리고 왜 좌측에 뜨냐").
+ *
+ * 이 시트는 AppShell 전역이라 어느 화면에서든 큐 첫 질문을 폈다. 작성창이 없는 화면(설정)
+ * 에서는 포털 슬롯이 없어 fixed `left:50%` 로 **창 전체** 가운데에 떨어졌고 — 사이드바를
+ * 포함한 폭이라 본문 기준으로는 왼쪽으로 치우쳤다. 다른 대화를 보고 있으면 엉뚱한 대화의
+ * 작성창 위에 붙었다. 도구 승인 카드는 이미 같은 규칙이다(ToolApprovalSheet 머리말,
+ * 오너 결정 2026-08-15): 자기 대화가 화면에 있을 때만 카드, 아니면 배지 하나.
+ *
+ * 그래서 chatId 가 있는 질문은 그 대화가 보일 때(markChatVisible)만 카드로 그리고,
+ * 나머지는 여기서 세어 ToolApprovalSheet 의 배지(대화 열기)에 합친다.
+ * chatId 가 없는 질문만 갈 곳이 없으니 어디서나 편다 — 작성창이 없으면 배지 줄(우하단)에.
+ */
+const EMPTY: readonly AskUserRequestEvent[] = [];
+let elsewhereSnapshot: readonly AskUserRequestEvent[] = EMPTY;
+const elsewhereListeners = new Set<() => void>();
+function publishElsewhere(next: readonly AskUserRequestEvent[]): void {
+  const same = next.length === elsewhereSnapshot.length
+    && next.every((item, index) => item.requestId === elsewhereSnapshot[index]?.requestId);
+  if (same) return;
+  elsewhereSnapshot = next.length === 0 ? EMPTY : next;
+  for (const listener of elsewhereListeners) listener();
+}
+function subscribeElsewhere(listener: () => void): () => void {
+  elsewhereListeners.add(listener);
+  return () => { elsewhereListeners.delete(listener); };
+}
+/** Live questions whose conversation is not on screen — the global badge counts them. */
+export function useAskUserElsewhere(): readonly AskUserRequestEvent[] {
+  return useSyncExternalStore(subscribeElsewhere, () => elsewhereSnapshot, () => EMPTY);
+}
 
 export function AskUserSheet() {
   const pathname = usePathname();
@@ -33,7 +67,12 @@ export function AskUserSheet() {
   } | null>(null);
   const [draftValue, setDraftValue] = useState("");
   const [now, setNow] = useState(() => Date.now());
-  const req = queue[0] ?? null;
+  const { visible } = useToolApprovals();
+  const onScreen = (item: AskUserRequestEvent): boolean => !item.chatId || visible.has(item.chatId);
+  const req = queue.find(onScreen) ?? null;
+  const elsewhere = queue.filter((item) => !onScreen(item));
+  useEffect(() => { publishElsewhere(elsewhere); });
+  useEffect(() => () => publishElsewhere(EMPTY), []);
   const currentRequestIdRef = useRef<string | null>(null);
   currentRequestIdRef.current = req?.requestId ?? null;
 
@@ -217,14 +256,19 @@ export function AskUserSheet() {
         </AskCard>
       </div>
       <style jsx>{`
+        /* Without a composer slot (a chat-less question on a non-chat page) there is no
+           composer to line up with; window-centred fell left of the content column. Sit in
+           the badge column instead. Inside the slot the shared composer rule resets this. */
         .aus {
           position: fixed;
-          left: 50%;
-          bottom: 96px;
+          right: 84px;
+          bottom: 64px;
           z-index: 95;
-          transform: translateX(-50%);
-          width: min(var(--agentlas-composer-width, 740px), calc(100% - var(--agentlas-composer-inset, 0px)));
-          max-width: calc(100% - 32px);
+          width: min(440px, calc(100vw - 32px));
+          max-width: calc(100vw - 32px);
+        }
+        @media (max-width: 600px) {
+          .aus { right: 16px; left: 16px; width: auto; }
         }
         .aus-card {
           padding: 14px 16px;

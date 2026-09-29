@@ -4,7 +4,6 @@ import os from "node:os";
 import path from "node:path";
 import { createReadStream } from "node:fs";
 import { createGunzip } from "node:zlib";
-import { net } from "electron";
 import { electronAppVersion, isPackagedRuntime, optionalElectronAppPath, runtimeResourcesPath, userDataPath } from "../runtime-paths";
 import type {
   ProductExtensionInstallReceipt,
@@ -26,6 +25,23 @@ import { downloadAndInstallSciencePackage, type SciencePackageArchiveSpec } from
 import { fetchScienceReleaseCatalog } from "./science-catalog";
 import { ScienceRendererRegistry } from "agentlas-science";
 import type { ScienceRendererBinding, ScienceRendererExecutorBinding } from "agentlas-science/dist/contracts/science-renderer-runtime";
+
+/*
+ * The Desktop daemon loads this module under ELECTRON_RUN_AS_NODE, where the
+ * packaged app.asar has no `electron` module. A top-level `import { net }`
+ * threw "Cannot find module 'electron'" before Science could start, so every
+ * packaged boot since the daemon took Science ownership ended with
+ * science_daemon_remote_rejected (dev builds borrow node_modules/electron and
+ * never saw it). Resolve Electron's net lazily; headless hosts use fetch.
+ */
+type ElectronNet = { fetch?: typeof globalThis.fetch };
+function optionalElectronNet(): ElectronNet | null {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const electron = require("electron") as { net?: ElectronNet } | string;
+    return typeof electron === "object" && electron?.net ? electron.net : null;
+  } catch { return null; }
+}
 
 export const SCIENCE_EXTENSION_ID = "agentlas-science";
 
@@ -156,6 +172,7 @@ async function downloadArchive(
   timer.unref?.();
   let fd: number | null = null;
   try {
+    const net = optionalElectronNet();
     const response = await (net?.fetch ? net.fetch.bind(net) : globalThis.fetch)(url.toString(), {
       cache: "no-store",
       redirect: "error",

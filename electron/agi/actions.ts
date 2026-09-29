@@ -85,8 +85,8 @@ export interface AgiExecutorDeps {
   resolveEvidence(goalId: string, ref: string): { runId: string; summary: string } | null;
   team?: {
     create(chatId: string, permission: AgiGoalView["permission"], input: { name: string; role?: string; personality?: string }): { memberId: string; created: boolean };
-    invite(chatId: string, permission: AgiGoalView["permission"], member: string): { memberId: string; joined: boolean };
-    dispatch(chatId: string, permission: AgiGoalView["permission"], input: { member: string; brief: string }): { sessionId: string };
+    invite(chatId: string, permission: AgiGoalView["permission"], member: string): { memberId: string; joined: boolean; memberName?: string };
+    dispatch(chatId: string, permission: AgiGoalView["permission"], input: { member: string; brief: string }): { sessionId: string; memberName?: string };
   };
   plan?: {
     read(goalId: string): AgiPlanView | null;
@@ -292,7 +292,8 @@ export class AgiActionExecutor {
         const member = text(args.member, 120);
         if (!member) return no("agi.team.member-required");
         const joined = this.deps.team.invite(goal.chatId, goal.permission, member);
-        return ok(joined.joined ? "agi.team.invited" : "agi.team.already-member", { memberId: joined.memberId, member });
+        return ok(joined.joined ? "agi.team.invited" : "agi.team.already-member", { memberId: joined.memberId, member,
+          ...(joined.memberName ? { memberName: joined.memberName } : {}) });
       }
       case "dispatch_teammate": {
         if (!this.deps.team || !goal.chatId) return no("agi.team.unavailable");
@@ -304,7 +305,8 @@ export class AgiActionExecutor {
         const plan = this.deps.plan?.read(goal.goalId) ?? null;
         if (!plan?.tactics.some((tactic) => tactic.id === nodeId && tactic.status === "active")) return no("agi.team.node-not-active");
         const session = this.deps.team.dispatch(goal.chatId, goal.permission, { member, brief: `[${nodeId}] ${brief}` });
-        return ok("agi.team.dispatched", { sessionId: session.sessionId, member, nodeId });
+        return ok("agi.team.dispatched", { sessionId: session.sessionId, member, nodeId,
+          ...(session.memberName ? { memberName: session.memberName } : {}) });
       }
       case "switch_runtime": {
         if (!this.deps.recordMove) return no("agi.move.unavailable");
@@ -442,14 +444,20 @@ function intentProposal(op: AgiPlanOp): AgiIntentProposal | null {
   return null;
 }
 
+function teammateLabel(detail: Record<string, unknown>): string {
+  return typeof detail.memberName === "string" && detail.memberName.trim() ? detail.memberName.trim() : String(detail.member ?? "");
+}
+
 /** One plain line per real action (plan §3.8); nothing for rest, nothing for a refusal. */
 export function noticeLine(action: AgiActionKind, receipt: AgiActionReceipt): { ko: string; en: string } | null {
   const detail = receipt.detail ?? {};
   switch (action) {
     case "settle_uncertain_effect": return { ko: "AGI: 이전 작업은 이미 반영돼 있었어요 — 실행 기록으로 정리했어요", en: "AGI: the earlier action had already gone through — settled it from the run record" };
     case "create_teammate": return { ko: `AGI: ${String(detail.name ?? "")} 팀원을 만들었어요`, en: `AGI: created teammate ${String(detail.name ?? "")}` };
-    case "invite_teammate": return { ko: `AGI: ${String(detail.member ?? "")} 팀원을 초대했어요`, en: `AGI: invited ${String(detail.member ?? "")}` };
-    case "dispatch_teammate": return { ko: `AGI: ${String(detail.member ?? "")}에게 ${String(detail.nodeId ?? "")} 작업을 맡겼어요`, en: `AGI: handed ${String(detail.nodeId ?? "")} to ${String(detail.member ?? "")}` };
+    // The model may name a teammate by its member id (a UUID). The owner sees
+    // the resolved display name; the raw argument stays in the receipt.
+    case "invite_teammate": return { ko: `AGI: ${teammateLabel(detail)} 팀원을 초대했어요`, en: `AGI: invited ${teammateLabel(detail)}` };
+    case "dispatch_teammate": return { ko: `AGI: ${teammateLabel(detail)}에게 ${String(detail.nodeId ?? "")} 작업을 맡겼어요`, en: `AGI: handed ${String(detail.nodeId ?? "")} to ${teammateLabel(detail)}` };
     case "switch_runtime": return { ko: "AGI: 다음 실행은 다른 모델로 이어가요", en: "AGI: the next run continues on another model" };
     case "retry_node_with": return { ko: `AGI: ${String(detail.nodeId ?? "")}를 다른 방법(${String(detail.path ?? "")})으로 다시 해요`, en: `AGI: retrying ${String(detail.nodeId ?? "")} another way (${String(detail.path ?? "")})` };
     case "replan_tree": return { ko: "AGI: 전술 목록을 정리했어요", en: "AGI: tidied the tactic list" };

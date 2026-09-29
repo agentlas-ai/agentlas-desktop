@@ -96,12 +96,12 @@ export function createAgiExecutor(): AgiActionExecutor {
         return { memberId: made.member_id, created: made.created === true };
       },
       invite: (chatId, permission, member) => {
-        const joined = oneTeamInvite({ chatId, permission }, { member }) as { member_id: string; already_member?: boolean };
-        return { memberId: joined.member_id, joined: joined.already_member !== true };
+        const joined = oneTeamInvite({ chatId, permission }, { member }) as { member_id: string; name?: string; already_member?: boolean };
+        return { memberId: joined.member_id, joined: joined.already_member !== true, ...(joined.name ? { memberName: joined.name } : {}) };
       },
       dispatch: (chatId, permission, input) => {
-        const session = oneTeamStartSession({ chatId, permission }, { member: input.member, brief: input.brief }) as { session_id: string };
-        return { sessionId: session.session_id };
+        const session = oneTeamStartSession({ chatId, permission }, { member: input.member, brief: input.brief }) as { session_id: string; teammate?: string };
+        return { sessionId: session.session_id, ...(session.teammate ? { memberName: session.teammate } : {}) };
       },
     },
     plan: {

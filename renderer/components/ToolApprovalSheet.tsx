@@ -13,6 +13,8 @@
  *    대화로 간다. 대화가 없는 요청(chatId 없음)만 여기서 직접 카드를 편다 — 갈 곳이 없으니.
  *  - post-denial 은 아예 오지 않는다(큐가 live 만 담는다). 이미 거부된 호출은 러너의
  *    알림 한 줄로 실행 본문에 남는다.
+ *  - 러너가 기다리는 **질문**(AskUserSheet — codex MCP 승인 elicitation 포함)도 같은
+ *    규칙이다(2026-09-29): 자기 대화가 화면에 없으면 이 배지에 함께 센다.
  */
 import { useState } from "react";
 import { useT } from "@/lib/i18n";
@@ -20,6 +22,7 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { ToolApprovalCard } from "@/components/ToolApprovalInline";
 import { needsBadge, useToolApprovals } from "@/lib/tool-approvals";
+import { useAskUserElsewhere } from "@/components/AskUserSheet";
 
 async function openConversation(chatId: string): Promise<void> {
   const api = ipc();
@@ -36,21 +39,23 @@ export function ToolApprovalSheet() {
   const { locale } = useT();
   const ko = locale === "ko";
   const { queue, visible } = useToolApprovals();
+  const asksElsewhere = useAskUserElsewhere();
   const [expanded, setExpanded] = useState(false);
   const elsewhere = queue.filter((request) => needsBadge(request, visible));
-  if (elsewhere.length === 0) return null;
+  if (elsewhere.length === 0 && asksElsewhere.length === 0) return null;
   const withChat = elsewhere.filter((request) => request.chatId);
   const orphan = elsewhere.filter((request) => !request.chatId);
-  const first = withChat[0];
+  const firstChatId = withChat[0]?.chatId ?? asksElsewhere[0]?.chatId ?? null;
+  const waitingCount = withChat.length + asksElsewhere.length;
 
   return (
     <div className="tab" data-testid="tool-approval-badge" aria-live="polite">
-      {first && (
-        <button type="button" className="tab-pill" onClick={() => void openConversation(first.chatId as string)}>
+      {firstChatId && (
+        <button type="button" className="tab-pill" onClick={() => void openConversation(firstChatId)}>
           <span className="tab-dot" aria-hidden />
           {ko
-            ? `도구 승인 대기 ${withChat.length}건 · 대화 열기`
-            : `${withChat.length} tool approval${withChat.length > 1 ? "s" : ""} waiting · open conversation`}
+            ? `도구 승인 대기 ${waitingCount}건 · 대화 열기`
+            : `${waitingCount} tool approval${waitingCount > 1 ? "s" : ""} waiting · open conversation`}
         </button>
       )}
       {orphan.length > 0 && !expanded && (

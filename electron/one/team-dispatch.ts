@@ -567,6 +567,10 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
       promptOrigin: "system",
       locale: currentUiLocale(),
       permissions: caller.permission,
+      // A One-owned invocation takes its permission from onePermissionMode only;
+      // without it, a "conversation" turn resolves to read and the teammate
+      // could not write what the caller could (soak 1.2.50: t5/t7 ran read).
+      onePermissionMode: caller.permission,
       taskIntent: "conversation",
       oneMode: true,
     }, undefined, undefined, undefined, "one-dispatch-brief");
@@ -613,6 +617,7 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
     promptOrigin: "system",
     locale: currentUiLocale(),
     permissions: caller.permission,
+    onePermissionMode: caller.permission,
     taskIntent: "conversation",
     oneMode: true,
   });

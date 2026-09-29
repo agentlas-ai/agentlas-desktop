@@ -17,7 +17,10 @@
 // Hub first: the Hub routing plugin already resolves capabilities and tool-calls correctly,
 // so its entries are offered first and win ties against a local catalog entry.
 
-import { judgeSubset, type JudgeHint, type SubsetVerdict } from "../system-agents/judgment";
+import { judgeSubset, noToolsJudgmentFallback, type JudgeHint, type SubsetVerdict } from "../system-agents/judgment";
+import { isVerifiedJudgmentCapability } from "../system-agents/judgment-capability";
+import { invocationJudgmentContext, withInvocationJudgmentContext } from "../runtime/judgment-context";
+import type { RuntimeSelection } from "../../shared/types";
 
 export interface McpNeedCandidate {
   /** Catalog id or hub slug. */
@@ -157,6 +160,24 @@ function renderMcpRuntimeCapabilities(capabilities?: McpRuntimeCapabilities): st
  * Ask the connected model which of the available tools the task really needs.
  * Never falls back to keyword scoring: an undecided run attaches no optional tool.
  */
+const MCP_NEED_DEFAULT_TIMEOUT_MS = 15_000;
+
+export type McpJudgeRoute =
+  | { kind: "pin" }
+  | { kind: "fallback"; selection: RuntimeSelection }
+  | { kind: "skip"; reason: string };
+
+/** Pin when it can judge without tools (or there is no pin: the pool route applies). */
+export function planMcpJudgeRoute(timeoutMs: number,
+  deps: { pin?: () => RuntimeSelection | undefined; fallback?: (timeoutMs: number) => RuntimeSelection | null } = {}): McpJudgeRoute {
+  const pin = (deps.pin ?? (() => invocationJudgmentContext()?.selection))();
+  if (!pin || isVerifiedJudgmentCapability(pin, "no_tools")) return { kind: "pin" };
+  const fallback = (deps.fallback ?? noToolsJudgmentFallback)(timeoutMs);
+  return fallback
+    ? { kind: "fallback", selection: fallback }
+    : { kind: "skip", reason: `judgment_skipped:${pin.kind}_cannot_judge_without_tools_and_no_measured_pool_runtime_under_${timeoutMs}ms` };
+}
+
 export async function resolveMcpNeeds(input: {
   /** The request for this turn only (user text plus attachment summary). */
   task: string;
@@ -169,6 +190,8 @@ export async function resolveMcpNeeds(input: {
   timeoutMs?: number;
   /** Injectable judge (tests). Defaults to the resident judgment service. */
   judgeSubsetFn?: typeof judgeSubset;
+  /** Injectable route planner (tests). Defaults to the invocation pin + measured pool fallback. */
+  planJudgeRoute?: (timeoutMs: number) => McpJudgeRoute;
 }): Promise<ResolvedMcpNeeds> {
   const ordered = preferHub(input.candidates);
   const candidates = ordered.slice(0, MAX_CANDIDATES);
@@ -184,7 +207,18 @@ export async function resolveMcpNeeds(input: {
     )
     .join("\n");
 
-  const verdict = await (input.judgeSubsetFn ?? judgeSubset)({
+  // The judge must never block the run. When the invocation's pinned runtime cannot
+  // judge without tools (codex: not release-verified), borrow a pool member only if
+  // it is verified and measured to answer inside the deadline; otherwise skip.
+  const route = (input.planJudgeRoute ?? planMcpJudgeRoute)(input.timeoutMs ?? MCP_NEED_DEFAULT_TIMEOUT_MS);
+  if (route.kind === "skip") {
+    return { needed: [], decided: false, reason: route.reason, omitted, decisionFailure: "unavailable" };
+  }
+  const judge = input.judgeSubsetFn ?? judgeSubset;
+  const judgeOnRoute: typeof judgeSubset = route.kind === "fallback"
+    ? (spec) => withInvocationJudgmentContext(route.selection, input.signal ?? invocationJudgmentContext()?.signal, () => judge(spec))
+    : judge;
+  const verdict = await judgeOnRoute({
     kind: MCP_NEED_JUDGMENT_KIND,
     // Optional selection is metadata preparation, not authority to run tools.
     // Unsupported isolation returns undecided; configured pins and exact active
