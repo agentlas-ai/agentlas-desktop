@@ -162,6 +162,12 @@ function pendingSourceIds(runId: string): string[] {
   return pending.filter((id) => !settled.has(id));
 }
 
+/** Owner amendments recorded for this Goal's run and not yet bound as a revision (goal panel shows the count). */
+export function pendingOwnerGoalAmendmentCount(goalId: string): number {
+  const run = getLongRunByGoalId(goalId);
+  return run ? pendingSourceIds(run.id).length : 0;
+}
+
 /** Durable, content-free record that this owner message amends the Goal. */
 export function recordPendingOwnerGoalAmendment(goalId: string, sourceMessageId: string): boolean {
   const run = getLongRunByGoalId(goalId);

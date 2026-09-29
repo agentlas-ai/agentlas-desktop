@@ -1329,7 +1329,10 @@ export class AgentlasMobileBridgeServer {
       !Array.isArray(result) &&
       result.status === "live" &&
       typeof result.visualSessionId === "string";
-    if (!acceptedNonReplayableBuild && !acceptedNonReplayableVisualSession) {
+    const acceptedPendingGoalShape = request.method === "goalPanel.shape" && result !== null
+      && typeof result === "object" && !Array.isArray(result) && result.ok === true
+      && result.outcome === "accepted" && result.pending === true && result.replayable === false;
+    if (!acceptedNonReplayableBuild && !acceptedNonReplayableVisualSession && !acceptedPendingGoalShape) {
       return this.completeReplay(deviceId, key, fingerprint, response, request.id);
     }
     if (!this.replayStore) {

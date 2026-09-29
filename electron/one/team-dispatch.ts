@@ -376,6 +376,7 @@ function finalizeDispatch(id: string, receiptStatus: string, runId: string): voi
     // One is waiting on one_team_session_status: the result goes back as that
     // tool's answer, so no second report turn is started.
     waiters.delete(id);
+    withdrawQueuedOneTeamReport(id);
     getDb().prepare("UPDATE one_team_dispatches SET reported_at = ? WHERE id = ?").run(now, id);
     for (const waiter of pending) waiter.resolve(row(id)!);
     appendParentNotice(settled, "result");
@@ -383,6 +384,23 @@ function finalizeDispatch(id: string, receiptStatus: string, runId: string): voi
   }
   appendParentNotice(settled, "result");
   reportToOne(settled);
+}
+
+/**
+ * The report turn queued for a dispatch while One was busy. One report per settled result: when the
+ * session is continued, or One reads the result itself, or a newer result settles, the older queued
+ * report is withdrawn. Owner Thread Marketing 2026-09-28: session dispatch-c00a11bd settled at 14:53Z
+ * (run 9fc97318) while One's turn ran; One read it and asked for a revision (run eb2a0e42, settled
+ * 15:00Z). Both queued reports ran after the long turn (15:54Z and 15:56Z), so One answered the
+ * 30-draft bank twice (c8054bc6, e166a6d8).
+ */
+const queuedReports = new Map<string, { chatId: string; queuedRequestId: string }>();
+
+export function withdrawQueuedOneTeamReport(dispatchId: string): boolean {
+  const queued = queuedReports.get(dispatchId);
+  if (!queued) return false;
+  queuedReports.delete(dispatchId);
+  try { return runtime().invocationService.unsteerQueuedById(queued.chatId, queued.queuedRequestId); } catch { return false; }
 }
 
 function reportPrompt(dispatch: OneDispatchRow): string {
@@ -416,7 +434,11 @@ function reportToOne(dispatch: OneDispatchRow): void {
   try {
     // steer() starts right away when One is idle and queues after the current
     // run otherwise (additive, never interrupting what One is doing).
-    invocationService.steer({ ...request, runId: undefined });
+    withdrawQueuedOneTeamReport(dispatch.id);
+    const steered = invocationService.steer({ ...request, runId: undefined });
+    if (steered.queued && steered.queuedRequestId) {
+      queuedReports.set(dispatch.id, { chatId: dispatch.parent_chat_id, queuedRequestId: steered.queuedRequestId });
+    }
     getDb().prepare("UPDATE one_team_dispatches SET reported_at = ? WHERE id = ?").run(new Date().toISOString(), dispatch.id);
   } catch (error) {
     // One cannot take a turn right now (e.g. a paused Goal owns the chat and a
@@ -595,7 +617,9 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
     oneMode: true,
   });
   const now = new Date().toISOString();
-  // A steer on a finished session reopens it: the report comes back again.
+  // A steer on a finished session reopens it: the report comes back again — and the older
+  // report still waiting in One's queue is withdrawn (One already saw that result).
+  withdrawQueuedOneTeamReport(dispatch.id);
   getDb().prepare(
     "UPDATE one_team_dispatches SET status = 'running', reported_at = NULL, child_run_id = COALESCE(?, child_run_id), updated_at = ? WHERE id = ?",
   ).run(result.runId ?? result.activeRunId ?? null, now, dispatch.id);
@@ -608,6 +632,8 @@ export async function oneTeamSessionStatus(caller: OneTeamCaller, input: { sessi
   const dispatch = rowForSession(typeof input.sessionId === "string" ? input.sessionId : "", parentChatId);
   const waitSeconds = Math.max(0, Math.min(180, Math.floor(Number(input.waitSeconds) || 0)));
   if (dispatch.status !== "running" || waitSeconds === 0) {
+    // One is reading the settled result itself: a queued report of it would repeat it.
+    if (dispatch.status !== "running") withdrawQueuedOneTeamReport(dispatch.id);
     if (dispatch.status !== "running" && !dispatch.reported_at) {
       getDb().prepare("UPDATE one_team_dispatches SET reported_at = ? WHERE id = ?").run(new Date().toISOString(), dispatch.id);
     }

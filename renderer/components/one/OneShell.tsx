@@ -1,5 +1,7 @@
 "use client";
 
+import { hasInlineVisualBlock } from "@/lib/visual-html";
+import { LinkedLocalFiles } from "@/components/LinkedLocalFiles";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { readStoredRuntimeSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
@@ -11,7 +13,7 @@ import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
 import type { ChatHostNotice } from "../../../shared/types";
-import { normalizeChatHostNotice } from "../../../shared/chat-host-notice";
+import { hostStatusLabel, isQuietHostStatus, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "../automation/AutomationChatActivity";
 import { OneGoalControls } from "./OneGoalControls";
@@ -168,6 +170,7 @@ import {
   isOneDecisionProductSafeRejectReply,
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
+  oneDecisionMultiSelectableIndexes,
   type OneDecisionField,
   type OneDecisionViewV1,
 } from "@shared/one-decision";
@@ -207,7 +210,7 @@ import { OneComputerHistory } from "./OneComputerHistory";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
-import { OneTurnWork, OneTurnWorkDividers } from "./OneTurnWork";
+import { OneTurnWork, OneTurnWorkDividers, type OneTurnHostNote } from "./OneTurnWork";
 import { OneTaskforceConversation } from "./OneTaskforceConversation";
 import { buildOneWorkPresentation } from "@/lib/one-turn-work";
 import { isDocumentLikeText } from "@/lib/one-doc-like";
@@ -1938,6 +1941,23 @@ export function OneShell() {
       excludeRunId: workBusy ? activeActivityRunId : null,
     });
   }, [activeActivityRunId, activity, activityStateRunId, visibleMessages, runStartedAt, threadRuns, workBusy]);
+  // The host's quiet status lines (effect check, wait, cycle) fold into the work block of the run they
+  // describe — matched by the durable marker's runId, never by wording. A line whose run is not drawn
+  // here (live run, or older than the loaded window) stays one quiet line in place.
+  const foldedHostNotes = useMemo(() => {
+    const drawn = new Set<string>([...threadWorkPlan.leading, ...[...threadWorkPlan.afterMessage.values()].flat()].map((block) => block.runId));
+    const byRun = new Map<string, OneTurnHostNote[]>();
+    const messageIds = new Set<string>();
+    for (const message of visibleMessages) {
+      const notice = normalizeChatHostNotice(message.role, message.hostNotice);
+      if (!isQuietHostStatus(notice) || !drawn.has(notice.runId)) continue;
+      const list = byRun.get(notice.runId) ?? [];
+      list.push({ id: message.id, label: hostStatusLabel(notice, appLocale), text: message.text });
+      byRun.set(notice.runId, list);
+      messageIds.add(message.id);
+    }
+    return { byRun, messageIds };
+  }, [appLocale, threadWorkPlan, visibleMessages]);
   const durableThreadBrowserUrl = useMemo(() => {
     for (let index = threadRuns.length - 1; index >= 0; index -= 1) {
       const url = taskBrowserUrl(threadRuns[index].state.items);
@@ -8150,6 +8170,7 @@ export function OneShell() {
                         runStatus={block.status}
                         interruptionCause={block.interruptionCause}
                         hostStopCause={block.hostStopCause}
+                        hostNotes={foldedHostNotes.byRun.get(block.runId)}
                         startedAt={Date.parse(block.startedAt)}
                         locale={appLocale}
                         workspacePath={workspacePath}
@@ -8168,6 +8189,12 @@ export function OneShell() {
                     // (measured: it dropped links/fences and rendered raw
                     // "[hello.txt]([local path]" and a stray ``` ).
                     const visibleText = visibleOneMessageText(message);
+                    // A quiet host status line folded into its run's work block draws nothing here.
+                    const foldedIntoWork = foldedHostNotes.messageIds.has(message.id);
+                    const messageHostNotice = normalizeChatHostNotice(message.role, message.hostNotice);
+                    // Host status lines that report a failure or need the owner stay ordinary bubbles.
+                    const drawsAsHostNotice = Boolean(messageHostNotice)
+                      && (messageHostNotice?.purpose !== "host-status" || isQuietHostStatus(messageHostNotice));
                     // Codex draws the turn's work above the answer it produced:
                     // the live block sits right before the streaming reply,
                     // settled blocks right after the prompt that started them.
@@ -8175,7 +8202,7 @@ export function OneShell() {
                     const blocksAfter = threadWorkPlan.afterMessage.get(message.id) ?? [];
                     // 첨부만 있는 턴도 대화다 — 텍스트가 없다고 버리면 사진을 보낸 사실 자체가 사라진다.
                     const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
-                    if (!visibleText && !hasAttachments && !liveBefore && blocksAfter.length === 0) return null;
+                    if ((foldedIntoWork || (!visibleText && !hasAttachments)) && !liveBefore && blocksAfter.length === 0) return null;
                     const systemLabel = message.role === "system"
                       ? oneSystemPromptLabel(message)
                       // A phone decision-card Reject is an action, not English the owner typed.
@@ -8198,7 +8225,7 @@ export function OneShell() {
                           {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                           {liveWorkBlock}
                         </>}
-                        {(visibleText || hasAttachments) && (normalizeChatHostNotice(message.role, message.hostNotice)
+                        {(visibleText || hasAttachments) && !foldedIntoWork && (drawsAsHostNotice
                           ? (message.hostNotice?.purpose === "automation-report"
                             // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28).
                             ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={appLocale === "ko" ? "ko" : "en"}
@@ -8255,7 +8282,8 @@ export function OneShell() {
                               <ChatFileCards files={message.chatFiles} locale={appLocale} onOpen={openOneChatFile} />
                             )}
                             {(visibleText || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
-                            <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && isDocumentLikeText(message.text) ? "true" : undefined}>
+                            <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && isDocumentLikeText(message.text) ? "true" : undefined}
+                              data-one-visual-answer={message.role === "assistant" && hasInlineVisualBlock(message.text) ? "true" : undefined}>
                               {message.files && message.files.filter((f) => f.kind !== "image").length > 0 && (
                                 <div className={styles.messageFiles}>
                                   {message.files.filter((f) => f.kind !== "image").map((f, i) => (
@@ -8272,13 +8300,14 @@ export function OneShell() {
                                 */}
                               <GoalResultReport result={message.goalResult} locale={appLocale}>
                               {visibleText && (message.streaming
-                                ? <StreamingMarkdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />
+                                ? <StreamingMarkdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} />
                                 : (() => {
                                   const documentMark = readOneDocumentMark(visibleText);
                                   return documentMark
                                     ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={message.id} />
-                                    : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} />;
+                                    : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} />;
                                 })())}
+                              {message.role === "assistant" && !message.streaming && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
                               </GoalResultReport>
                             </div>
                             )}
@@ -8320,6 +8349,7 @@ export function OneShell() {
                               runStatus={block.status}
                               interruptionCause={block.interruptionCause}
                               hostStopCause={block.hostStopCause}
+                              hostNotes={foldedHostNotes.byRun.get(block.runId)}
                               {...(message.role === "user" && message.text.trim()
                                 ? { onRetry: () => retryUnansweredTurn(message.text, block.state.model), retryDisabled: busy }
                                 : {})}
@@ -10016,7 +10046,12 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
   const { readers: judgedReaders, modelUnavailable } = useJudgedOneDecision(confirmation);
   const decision: OneDecisionViewV1 = normalizeOneDecision(confirmation, taskId, judgedReaders);
   const riskRank = Number(decision.risk.level.slice(1));
-  const directOptions = decision.options.filter((option) => option.enabled && option.disposition !== "reject" && option.disposition !== "modify");
+  // V1 intentionally disables multi-select rows for single-reply clients.
+  // Desktop uses the same judged selectable indexes as Mobile's V2 contract.
+  const multiSelectableIndexes = new Set(oneDecisionMultiSelectableIndexes(decision));
+  const directOptions = decision.options.filter((option) =>
+    (confirmation.multiSelect ? multiSelectableIndexes.has(option.index) : option.enabled)
+    && option.disposition !== "reject" && option.disposition !== "modify");
   /*
    * 경고를 띄울 상황인가 — 승인을 막을 상황인가가 아니다.
    *
@@ -10112,9 +10147,13 @@ function DecisionCard({ confirmation, taskId, locale, disabled, block = "none", 
      *   옛 질문의 답을 확정해 "이전 요청 접수 불명"을 만들었다.
      *   판단은 shared/ask-action-bar.ts 한 곳이 하고(계약 test:one-question-action-bar), 여기는 그린다.
      */
-    const questionOptions = lightweightChoice && directOptions.length > 1
+    // Even one positive multi-select choice needs a checkbox and Submit when
+    // the other option is rejection. Never turn a locked V1 row into authority.
+    const questionOptions = confirmation.multiSelect
       ? directOptions
-      : selectableOptions.length > 1 ? selectableOptions : [];
+      : lightweightChoice && directOptions.length > 1
+        ? directOptions
+        : selectableOptions.length > 1 ? selectableOptions : [];
     if (questionOptions.length > 0) {
       const copy = ASK_ACTION_COPY[locale];
       const multi = Boolean(confirmation.multiSelect);

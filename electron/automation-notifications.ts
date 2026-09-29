@@ -7,6 +7,8 @@ import { recordRunEvent } from "./store/run-events";
 export interface AutomationNotificationInput {
   automationId: string; runId: string; status: AutomationResultStatus;
   output?: string; error?: string | null; observationDigest?: string; unchanged?: boolean;
+  /** The judge's answer for this run (accepted / rejected / needs_input / blocked / unjudged). */
+  outcome?: string | null;
 }
 /** Claim a durable notification attempt before delivery. This guarantees one
  * attempt per run, not an unobservable exactly-once OS notification receipt. */

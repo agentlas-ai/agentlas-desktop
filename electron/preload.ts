@@ -980,6 +980,11 @@ const api: AgentlasIpc = {
     bugReportSend: (input) => ipcRenderer.invoke("agi:bugReportSend", input),
     bugReportList: () => ipcRenderer.invoke("agi:bugReportList"),
   },
+  goalPanel: {
+    view: (chatId) => ipcRenderer.invoke("goalPanel:view", chatId),
+    edit: (request) => ipcRenderer.invoke("goalPanel:edit", request),
+    shape: (chatId, expectedGoalId) => ipcRenderer.invoke("goalPanel:shape", chatId, expectedGoalId),
+  },
   automations: {
     list: () => ipcRenderer.invoke("automations:list"),
     get: (id: string) => ipcRenderer.invoke("automations:get", id),

@@ -1,3 +1,4 @@
+import { desktopGoalControlServices } from "./goal-control";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
 
@@ -219,6 +220,7 @@ async function startBridgeInternal(
   const terminalLoadoutFeedWriter = new TerminalOntologyLoadoutFeedWriter(terminalLoadoutFeedFile);
   const terminalControl = createDesktopMobileTerminalControl();
   const authority = createMobileBridgeAuthority({
+    goalControl: desktopGoalControlServices(),
     hostIdentity: identity,
     displayName,
     appVersion: options.appVersion,

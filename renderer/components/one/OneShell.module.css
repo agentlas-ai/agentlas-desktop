@@ -2166,6 +2166,9 @@
 .composerPopover[data-one-composer-popover="plus"] {
   padding: 6px;
 }
+.composerPopover[data-one-composer-popover="plus"] .composerPopoverRow {
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+}
 .composerPopover[data-one-composer-popover="plus"] .composerPopoverList {
   max-height: calc(var(--one-composer-popover-max-height, 540px) - 12px);
   display: flex;
@@ -2173,8 +2176,8 @@
   overflow: hidden;
 }
 .composerPopover[data-one-composer-popover="plus"] .composerPluginList {
-  min-height: 58px;
-  flex: 1 1 184px;
+  min-height: 0;
+  flex: 0 1 auto;
 }
 .composerPopover[data-one-composer-popover="effort"] { max-height: min(var(--one-composer-popover-max-height, 360px), 360px); }
 
@@ -2258,13 +2261,35 @@
 .composerPopoverCopy { min-width: 0; display: grid; gap: 2px; }
 .composerPopoverCopy strong { overflow: hidden; font-size: 12px; font-weight: 570; text-overflow: ellipsis; white-space: nowrap; }
 .composerPopoverCopy small { overflow: hidden; color: var(--muted-deep); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.composerPopoverMeta { display: inline-flex; align-items: center; justify-self: end; gap: 7px; }
+.composerPopoverStatus {
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--paper-3);
+  color: var(--muted-deep);
+  font-size: 9px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+}
+.composerPopoverVisuallyHidden {
+  position: absolute !important;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 .composerPopover[data-one-composer-popover="model"] .composerPopoverCopy {
   display: flex;
   align-items: baseline;
   gap: 7px;
 }
 .composerPopover[data-one-composer-popover="model"] .composerPopoverCopy small { font-size: 10px; }
-.composerPopoverRow > svg { color: var(--ok); justify-self: end; }
+.composerPopoverMeta > svg { color: var(--ok); }
 .composerPopoverToggle {
   width: 34px;
   height: 20px;
@@ -3391,6 +3416,19 @@
   /* --ink local override removed — it would reference itself (colour migration 2026-09-05) */
   --ink-soft: var(--muted-deep);
   --accent-soft: var(--info-soft);
+}
+
+/* 차트·시각물이 든 답은 말풍선이 없다(오너 2026-09-29 "챗창에 경계선 없게") — Claude 처럼 차트가 대화
+   바탕 위에 바로 놓인다. 글자 왼쪽 선은 차트 왼쪽 선과 같다. 시각물이 없는 답은 위 말풍선 그대로. */
+.message[data-role="assistant"] .messageBody[data-one-visual-answer="true"]:not([data-doc="true"]) {
+  /* 말풍선은 글 길이만큼 줄어든다 — 짧은 한 줄 + 차트면 차트가 기본 300px 로 쪼그라들었다(실측). 열 전체를 쓴다. */
+  width: 100%;
+  max-width: min(790px, 100%);
+  padding: 2px 0 6px;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  border: 0;
 }
 
 /* 산출물이 답변의 경계에 붙어 보이지 않게, 문서/미디어 카드에도 최소한의

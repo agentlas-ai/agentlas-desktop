@@ -5,7 +5,7 @@
  * 추가형 곁 테이블이다. 스키마 사다리(db.ts) 번호를 올리지 않고 처음 쓸 때 만든다(memory_entry_native 와 같은 방식).
  *  - goal_plan_nodes: (goal_id, revision, plan_seq, node_id) — revision=목표 개정 번호, plan_seq=그 개정 안의 모양 판단 차수.
  *  - goal_plan_decisions: 영수증(append-only) — shape · shape_fallback · reshape_requested · tactic_dispatch · tactic_status ·
- *    strategy_review · plan_op.
+ *    strategy_review · plan_op · owner_edit.
  */
 import { randomUUID } from "node:crypto";
 import { getDb } from "./db";
@@ -13,8 +13,8 @@ import {
   INITIAL_ACTIVE_STRATEGIES,
   type GoalShapePlan,
   type GoalTactic,
+  liveGoalPlanFromRows,
   type LiveGoalPlan,
-  type LiveStrategy,
   type LiveTactic,
   type PlanNodeStatus,
 } from "../../shared/goal-shape";
@@ -54,7 +54,9 @@ export function ensureGoalPlanTables(db: Db = getDb()): void {
 }
 
 export type GoalPlanDecisionKind =
-  | "shape" | "shape_fallback" | "reshape_requested" | "tactic_dispatch" | "tactic_status" | "strategy_review" | "plan_op";
+  | "shape" | "shape_fallback" | "reshape_requested" | "tactic_dispatch" | "tactic_status" | "strategy_review" | "plan_op"
+  /** An edit the owner made in the goal panel (electron/long-run/goal-panel.ts). Receipt only; the node rows carry the state. */
+  | "owner_edit";
 
 export interface GoalPlanDecisionRow {
   id: string;
@@ -152,39 +154,9 @@ export function readGoalPlan(goalId: string, revision?: number): LiveGoalPlan | 
     WHERE goal_id = ? AND revision = ? AND kind IN ('shape','shape_fallback') ORDER BY plan_seq DESC LIMIT 1`)
     .get(goalId, rev) as { kind: string; plan_seq: number; payload_json: string; created_at: string } | undefined;
   if (!decision) return null;
-  const payload = safeJson(decision.payload_json);
-  const plan = payload.plan as GoalShapePlan | undefined;
-  if (!plan) return null;
   const nodes = db.prepare("SELECT * FROM goal_plan_nodes WHERE goal_id = ? AND revision = ? AND plan_seq = ? ORDER BY ord, created_at")
     .all(goalId, rev, decision.plan_seq) as Array<{ node_id: string; kind: string; parent_id: string | null; status: PlanNodeStatus; ord: number; payload_json: string }>;
-  const mission = nodes.find((node) => node.kind === "mission");
-  const strategies: LiveStrategy[] = nodes.filter((node) => node.kind === "strategy").map((node) => {
-    const p = safeJson(node.payload_json) as unknown as LiveStrategy;
-    return { ...p, id: node.node_id, status: node.status, priority: node.ord, activatedAt: String(p.activatedAt ?? decision.created_at) };
-  });
-  const tactics: LiveTactic[] = nodes.filter((node) => node.kind === "tactic").map((node) => {
-    const p = safeJson(node.payload_json) as Record<string, unknown>;
-    return { id: node.node_id, strategy_id: node.parent_id, description: String(p.description ?? ""), done_when: String(p.done_when ?? ""),
-      kind: p.kind === "recurring" ? "recurring" : "one_off", status: node.status, ord: node.ord,
-      runs: Number(p.runs ?? 0) || 0, failures: Number(p.failures ?? 0) || 0, evidence: typeof p.evidence === "string" ? p.evidence : null,
-      guidance: (p.guidance && typeof p.guidance === "object" ? p.guidance : null) as LiveTactic["guidance"],
-      deferredUntil: typeof p.deferredUntil === "string" ? p.deferredUntil : null };
-  });
-  return {
-    goalId, revision: rev, planSeq: decision.plan_seq, shape: plan.shape, problem_nature: plan.problem_nature, rationale: plan.rationale,
-    fallback: decision.kind === "shape_fallback",
-    mission: mission ? safeJson(mission.payload_json) as unknown as LiveGoalPlan["mission"] : null,
-    strategies, tactics, review_every_hours: plan.review_every_hours, createdAt: decision.created_at,
-    deadline_at: goalPlanDeadlineAt(plan, mission ? safeJson(mission.payload_json) as unknown as LiveGoalPlan["mission"] : null),
-  };
-}
-
-/** The plan's own goal deadline, else the earliest key-result deadline (both host-resolved at shaping time). */
-function goalPlanDeadlineAt(plan: GoalShapePlan, mission: LiveGoalPlan["mission"]): string | null {
-  const own = typeof plan.deadline_at === "string" && Number.isFinite(Date.parse(plan.deadline_at)) ? plan.deadline_at : null;
-  if (own) return own;
-  const krs = (mission?.key_results ?? []).map((kr) => kr.deadline_at).filter((at): at is string => typeof at === "string" && Number.isFinite(Date.parse(at)));
-  return krs.length ? krs.sort((a, b) => Date.parse(a) - Date.parse(b))[0] : null;
+  return liveGoalPlanFromRows(goalId, rev, decision, nodes);
 }
 
 /** 노드 하나의 상태·payload 조각을 바꾼다(같은 차수 안에서만). */

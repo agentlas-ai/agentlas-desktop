@@ -8,6 +8,11 @@
 "use client";
 import { memo, useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import { MermaidBlock } from "./MermaidBlock";
+import { ChartBlock } from "./ChartBlock";
+import { HtmlVisualBlock } from "./HtmlVisualBlock";
+import { isChartFenceLanguage } from "@/lib/chart-spec";
+import { fenceTitle, isVisualFenceLanguage } from "@/lib/visual-html";
+import { VisualChatScope } from "@/lib/visual-artifacts";
 import { MathSpan } from "./MathSpan";
 import { useT } from "@/lib/i18n";
 import { splitStreamingSegments, type SegmentCache } from "@shared/streaming-segments";
@@ -87,7 +92,7 @@ export const Markdown = memo(function Markdown({
     [text, mediaBasePaths],
   );
   const blocks = useMemo(() => parseBlocks(text, messageId), [text, messageId]);
-  return (
+  const body = (
     <div
       {...designOutputSurfaceProps("report")}
       style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--design-font-sans)", overflowWrap: "anywhere" }}
@@ -95,6 +100,8 @@ export const Markdown = memo(function Markdown({
       {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, openLinkedFile, resolvedMediaBasePaths))}
     </div>
   );
+  // 차트·시각물이 "이 대화"의 산출물 탭에 알리려면 대화 id 가 필요하다. 셸이 준 것을 넘긴다.
+  return chatId ? <VisualChatScope.Provider value={chatId}>{body}</VisualChatScope.Provider> : body;
 });
 
 // 완결 세그먼트 렌더 — props가 안 바뀌면(텍스트 불변) 재파싱/재렌더를 통째로 건너뛴다.
@@ -131,6 +138,7 @@ export const MarkdownSegment = memo(function MarkdownSegment({
  *  memo로 고정하고 마지막(미완결) 세그먼트만 매 partial마다 재파싱한다. 긴 답변에서
  *  프레임당 O(전체) 재파싱이 O(마지막 세그먼트)로 줄어 스트리밍 끊김을 없앤다. */
 export function StreamingMarkdown({
+  chatId,
   text,
   messageId,
   onOpenArtifact,
@@ -138,6 +146,8 @@ export function StreamingMarkdown({
   onOpenLinkedFile,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
 }: {
+  /** 차트·시각물이 이 대화의 산출물 탭에 알릴 때 쓰는 대화 id. */
+  chatId?: string | null;
   text: string;
   messageId: string;
   onOpenArtifact?: (a: CodeArtifact) => void;
@@ -165,7 +175,7 @@ export function StreamingMarkdown({
   if (cacheRef.current.msgId !== messageId) cacheRef.current = { msgId: messageId, cache: null };
   const { segments, cache } = splitStreamingSegments(shownText, cacheRef.current.cache);
   cacheRef.current.cache = cache;
-  return (
+  const body = (
     <>
       {segments.map((seg, i) => (
         <MarkdownSegment
@@ -180,12 +190,13 @@ export function StreamingMarkdown({
       ))}
     </>
   );
+  return chatId ? <VisualChatScope.Provider value={chatId}>{body}</VisualChatScope.Provider> : body;
 }
 
 // ── 파서 ─────────────────────────────────────────────────
 type TableAlign = "left" | "center" | "right" | "default";
 type Block =
-  | { type: "code"; lang: string; code: string; id: string }
+  | { type: "code"; lang: string; code: string; id: string; info?: string }
   | { type: "math"; tex: string }
   | { type: "h1" | "h2" | "h3"; text: string }
   | { type: "ul" | "ol"; items: ListItem[]; start?: number }
@@ -218,9 +229,11 @@ function parseBlocks(input: string, messageId: string): Block[] {
     const line = lines[i];
 
     // 펜스 코드 블록
-    const fence = line.match(/^```(\w*)\s*$/);
+    const fence = line.match(/^```([\w+.-]*)(?:[ \t]+([^`]*?))?\s*$/);
     if (fence) {
       const lang = fence[1] || "text";
+      // 정보 줄(```visual title=q3_summary)은 언어 뒤에 남는다 — 시각물 제목·저장 파일명에 쓴다.
+      const info = fence[2]?.trim() || undefined;
       const codeLines: string[] = [];
       i++;
       while (i < lines.length && !/^```\s*$/.test(lines[i])) {
@@ -240,6 +253,7 @@ function parseBlocks(input: string, messageId: string): Block[] {
         type: "code",
         lang,
         code,
+        ...(info ? { info } : {}),
         id: `${messageId}-c${codeIdx++}`,
       });
       continue;
@@ -449,6 +463,14 @@ function renderBlock(
     case "code":
       // ```mermaid 는 코드가 아니라 그림으로 보여준다. 그리지 못하면(문법 오류·스트리밍
       // 중간·미지원 종류) 원래의 코드블록이 그대로 남는다 — 내용을 잃지 않는다.
+      // ```chart / ```vega-lite 는 대화 안의 차트로(안전 관문 통과분만), ```visual 은 격리된
+      // HTML 시각물로. 못 그리면 원래 코드블록이 그대로 남는다.
+      if (isChartFenceLanguage(b.lang)) {
+        return <ChartBlock key={i} code={b.code} blockId={b.id} fallback={<CodeBlock block={b} onOpen={onOpenArtifact} t={t} />} />;
+      }
+      if (isVisualFenceLanguage(b.lang)) {
+        return <HtmlVisualBlock key={i} html={b.code} blockId={b.id} title={fenceTitle(b.info) ?? undefined} fallback={<CodeBlock block={b} onOpen={onOpenArtifact} t={t} />} />;
+      }
       if (b.lang.trim().toLowerCase() === "mermaid") {
         return (
           <MermaidBlock

@@ -39,7 +39,6 @@ interface AcceptedResultEvidenceBinding {
   acceptanceReceiptRef: string;
   internalResultRef: string;
   valueItemRef: string;
-  remainingWorkRef: string;
 }
 
 interface VerifiedAcceptedArtifactBinding {
@@ -52,7 +51,6 @@ interface VerifiedAcceptedArtifactBinding {
   outcomeReceiptRef: string;
   outcomeRef: string;
   valueItemRef: string;
-  remainingWorkRef: string;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -96,7 +94,6 @@ function bindingFor(
     acceptanceReceiptRef: `receipt:result-acceptance:${digest}`,
     internalResultRef: `result:accepted-internal:${digest}`,
     valueItemRef: `value:accepted-internal:${digest}`,
-    remainingWorkRef: `remaining:external-verification:${digest}`,
   };
 }
 
@@ -120,7 +117,6 @@ function verifiedArtifactBindingFor(
     outcomeReceiptRef: `receipt:accepted-artifact-set:${digest}`,
     outcomeRef: `outcome:accepted-artifact-set:${digest}`,
     valueItemRef: `value:accepted-artifact-set:${digest}`,
-    remainingWorkRef: `remaining:external-effect:${digest}`,
   };
 }
 
@@ -304,15 +300,7 @@ function buildCreateInput(
       artifactRefs: [],
       receiptRefs: [],
     },
-    remainingWork: [
-      {
-        itemRef: binding.remainingWorkRef,
-        action: "Check the target system separately if this work was intended to change anything outside Agentlas.",
-        owner: "external",
-        status: "pending",
-        reason: "This record covers only the bound internal run and the user's acceptance of its result.",
-      },
-    ],
+    remainingWork: [],
     receiptRefs: [binding.runReceiptRef, binding.acceptanceReceiptRef],
     reflectionEligible: false,
     trustedHostEvidence: evidence,
@@ -425,15 +413,7 @@ function buildVerifiedArtifactCreateInput(
       artifactRefs: [],
       receiptRefs: [],
     },
-    remainingWork: [
-      {
-        itemRef: binding.remainingWorkRef,
-        action: "Verify any intended change outside Agentlas in the target system.",
-        owner: "external",
-        status: "pending",
-        reason: "Filesystem verification proves only the exact internal media deliverable, not an external effect.",
-      },
-    ],
+    remainingWork: [],
     receiptRefs: [
       execution.receiptRef,
       acceptance.receiptRef,

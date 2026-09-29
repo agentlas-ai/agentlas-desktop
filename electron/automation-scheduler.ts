@@ -83,6 +83,7 @@ import { notifyTelegramAutomationDone } from "./telegram/connect";
 import {
   MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS,
   automationWatchdogError,
+  automationWatchdogOwnerText,
   awaitAutomationRunnerWithAbortGrace,
   createAutomationWatchdogState,
   evaluateAutomationWatchdog,
@@ -98,6 +99,7 @@ import {
   AUTOMATION_NO_PROGRESS_LOOP,
   createNoProgressGuard,
   noProgressLoopError,
+  noProgressLoopOwnerText,
   noteNoProgressEvent,
   type NoProgressDecision,
 } from "./automation-progress-guard";
@@ -1219,10 +1221,10 @@ async function runOne(
       ? { status: "partial" as const, reasonCode: "automation_stopped_by_user", reason: "The run was stopped. Review its recorded effects before restarting." }
       : watchdogStopped
       // 호스트가 잰 사실(무활동 시간)이다 — 판정 모델에게 묻지 않고, 사용자 중지로도 적지 않는다. 복구 경로로 간다.
-      ? { status: "error" as const, reasonCode: AUTOMATION_WATCHDOG_STALL, reason: automationWatchdogError(watchdogStall!) }
+      ? { status: "error" as const, reasonCode: AUTOMATION_WATCHDOG_STALL, reason: automationWatchdogOwnerText(watchdogStall!, currentUiLocale()) }
       : loopStopped
       // 판정 모델에게 묻지 않는다 — 호스트가 센 사실이고, 표식(reasonCode)이 다음 실행의 핸드오프를 연다.
-      ? { status: "error" as const, reasonCode: AUTOMATION_NO_PROGRESS_LOOP, reason: rawError.replace(/^automation_no_progress_loop:\s*/, "") }
+      ? { status: "error" as const, reasonCode: AUTOMATION_NO_PROGRESS_LOOP, reason: noProgressLoopOwnerText(noProgressLoop!, currentUiLocale()) }
       : await classifyAutomationFailure(rawError, { runtimeSelection: a.runtimeSelection });
     if ("judge" in classified) recordAutomationJudgeReceipt(currentRunId, a.id, "failure", classified);
     runStatus = controller.signal.aborted ? "partial" : classified.status;
@@ -1500,7 +1502,7 @@ async function runOne(
     }
     try {
       if (!parentMissing && !leaseOwnershipLost && currentRunId && deliverAutomationResult({
-        automationId: a.id, runId: currentRunId, status: runStatus, output, error: runError,
+        automationId: a.id, runId: currentRunId, status: runStatus, output, error: runError, outcome: runOutcome,
         ...(typeof opts?.triggerContext?.observationDigest === "string" ? { observationDigest: opts.triggerContext.observationDigest } : {}),
         unchanged: opts?.triggerContext?.unchanged === true,
       })) {

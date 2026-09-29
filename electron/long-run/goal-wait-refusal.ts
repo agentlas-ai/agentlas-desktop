@@ -63,6 +63,15 @@ export function finiteGoalTimerRefusalMessage(locale: "ko" | "en", intent: GoalW
     : `This goal is a one-time goal without a deadline, so the ${date ? `${date} ` : ""}follow-up${next ? ` ("${next}")` : ""} was not scheduled. The goal is not closed: this turn is verified against the results so far, and if the goal is not done it continues at its next cycle.`;
 }
 
+/**
+ * True only for the refusal the app resolves on its own: an outside effect of this run is unconfirmed,
+ * so the app re-reads the page read-only and continues without repeating it. Every other refused wait
+ * needs the owner (a new time, a new deadline, or Resume). Decided by the reason code, never the copy.
+ */
+export function goalWaitRefusalResolvesItself(reason: string): boolean {
+  return reason === "goal_wait_effects_uncertain";
+}
+
 /** Specific copy for a refused wait that does block the Goal. */
 export function goalWaitRefusalMessage(reason: string, locale: "ko" | "en", intent?: GoalWaitIntent | null): string {
   const ko = locale === "ko";

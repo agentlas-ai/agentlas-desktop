@@ -61,6 +61,8 @@ import { clearDetectCache } from "./runtime/detect";
 import { getChat, repairPlaceholderTaskTitles } from "./store/chats";
 import { expireOrphanedSurfaceJobs } from "./store/agent-surface-jobs";
 import { reconcileAbandonedGoalContracts } from "./store/chat-goals";
+import { repairDetachedGoalBindings } from "./store/goal-binding-repair";
+import { appendLongRunEvent } from "./store/long-runs";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
 import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
 import { automationWorkInFlight, closeAutomationDispatchForShutdown, startAutomationScheduler } from "./automation-scheduler";
@@ -1981,6 +1983,13 @@ app.whenReady().then(async () => {
       const closedGoals = reconcileAbandonedGoalContracts();
       if (closedGoals.length) console.info("[startup] closed goal contracts never backed by a run", closedGoals);
     } catch (error) { console.error("[startup] goal contract reconciliation failed", error); }
+    // A chat detached from its still-live goal (contract active/blocked, run not ended) lost its goal chip, its
+    // answer path and its AGI room life. Rebind it; goal status is never changed (owner 2026-09-28 "Youtube launch").
+    try {
+      const rebound = repairDetachedGoalBindings({ db: getDb(), appendEvent: appendLongRunEvent,
+        emitChatChanged: (chatId) => emitDesktopStoreChange({ entity: "chat", id: chatId }) });
+      if (rebound.length) console.info("[startup] rebound chats to their live goals", rebound.map((row) => ({ chatId: row.chatId, goalId: row.goalId, reason: row.reason })));
+    } catch (error) { console.error("[startup] goal binding repair failed", error); }
   }
   /*
    * ★부팅 시점의 running Task는 전부 고아다 — 실행 권위인 activeRuns 맵이 방금 비어서

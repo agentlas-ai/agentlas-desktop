@@ -18,6 +18,7 @@
 // 산출물 레이아웃: build-resources/python-runtime/bin/python3 (mac/linux),
 //                  build-resources/python-runtime/python.exe (win)
 import { execFileSync } from "node:child_process";
+import verificationBoundary from "../build-resources/runtime-verification-boundary.cjs";
 import { createHash } from "node:crypto";
 import {
   createReadStream,
@@ -252,6 +253,10 @@ console.log(`[fetch-python] bundling ${BUNDLED_PYTHON_PACKAGES.length} engine pa
     env: { ...process.env, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1", PIP_DISABLE_PIP_VERSION_CHECK: "1" },
   });
 }
+// Prune wheel verification suites before import checks and the tree receipt.
+// sympy.testing is runtime-coupled and remains; only known test-suite folders go.
+const prunedVerification = verificationBoundary.prunePythonVerificationDirectories(sitePackages);
+console.log(`[fetch-python] excluded ${prunedVerification.length} nonruntime verification directories.`);
 // 넣었다고 믿지 않고 실제로 불러 본다 — 없으면 그 기능은 사용자 손에서 죽는다.
 for (const moduleName of ["jsonschema", "referencing", "sympy", "mpmath"]) {
   execFileSync(bin, ["-c", `import ${moduleName}`], {

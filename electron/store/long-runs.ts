@@ -1340,6 +1340,49 @@ export function nextBlockedGoalRetrySlot(runId: string, now = Date.now()): { ret
   return { retryIndex, nextAt: new Date(now + delayMs).toISOString() };
 }
 
+/** Blocker put in place of an effect-uncertain retry that a later committed turn already answered. */
+export const EFFECT_BOUNDARY_SETTLED_BY_TURN = "effect_boundary_settled_by_turn";
+
+/**
+ * A turn in this Goal's chat ran after the effect-uncertain retry was scheduled and finished committed
+ * (worker.attempt_settled completed/committed, later than the retry). That turn saw the world as it is now;
+ * the question "did the interrupted action take effect?" no longer blocks the next step. Returns the
+ * settling attempt id, or null. Owner X Marketing 2026-09-28: the owner's 13:51Z turn committed at seq 195,
+ * yet the Goal went back to blocked(goal_resume_effect_boundary_uncertain) and retry 4 (seq 196-198).
+ */
+export function committedTurnSinceRetry(runId: string, retrySeq: number): string | null {
+  const row = getDb().prepare(`SELECT json_extract(payload_json, '$.attemptId') AS attemptId FROM long_run_events
+    WHERE run_id = ? AND seq > ? AND kind = 'worker.attempt_settled'
+      AND json_extract(payload_json, '$.state') = 'completed' AND json_extract(payload_json, '$.sideEffectState') = 'committed'
+    ORDER BY seq DESC LIMIT 1`).get(runId, retrySeq) as { attemptId: string | null } | undefined;
+  return row ? (row.attemptId ?? "attempt") : null;
+}
+
+/** The due effect-uncertain retry is closed by a committed turn: blocked on a settled (resumable) reason instead. */
+export function settleDueBoundaryRetryByTurn(runId: string, expectedVersion: number, attemptId: string): LongRunRecord {
+  if (longRunOwnerHold(runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
+  const db = getDb();
+  db.transaction(() => {
+    const current = getLongRun(runId);
+    const retry = current ? pendingBlockedGoalRetry(runId) : null;
+    if (!current || !retry || current.version !== expectedVersion) throw new Error("blocked_goal_retry_state_changed");
+    const now = new Date().toISOString();
+    const changed = db.prepare(`UPDATE long_runs SET status='blocked', pause_reason=NULL, blocked_reason=?,
+      paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status=? AND version=?`)
+      .run(EFFECT_BOUNDARY_SETTLED_BY_TURN, now, runId, current.status, expectedVersion);
+    if (changed.changes !== 1) throw new Error("blocked_goal_retry_state_changed");
+    appendEventInDb({ runId, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
+      payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "boundary_settled_by_turn", fromReason: retry.fromReason,
+        retryIndex: retry.retryIndex, attemptId }, at: now });
+    appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
+      payload: { from: current.status, to: "blocked", reason: EFFECT_BOUNDARY_SETTLED_BY_TURN, settledBy: attemptId }, at: now });
+  })();
+  emitDesktopStoreChange({ entity: "long-run", id: runId });
+  const next = getLongRun(runId);
+  if (!next) throw new Error("blocked_goal_retry_readback_failed");
+  return next;
+}
+
 /** The retry came due: put back the exact blocker it stood in for, so the same (observation/resume) decision runs again. */
 export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number): LongRunRecord {
   if (longRunOwnerHold(runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);

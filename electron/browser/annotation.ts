@@ -9,6 +9,8 @@ type Entry = { ownerId: number; guest: WebContents; session: BrowserAnnotationSe
   sequence: number; selection: BrowserAnnotationSelection | null; receipt: BrowserAnnotationReceipt | null };
 const sessions = new Map<string, Entry>();
 const starts = new Map<string, string>();
+/** Sessions an agent's browser command ended; the owner is told why, once. */
+const endedByAgent = new Map<string, number>();
 const TTL = 5 * 60_000;
 function targetValid(value: BrowserAnnotationTarget): boolean {
   return !!value && /^[A-Za-z0-9_-]{8,80}$/.test(String(value.viewId ?? "")) && /^[A-Za-z0-9_:.-]{8,200}$/.test(String(value.taskScopeId ?? ""));
@@ -75,9 +77,35 @@ export async function stopBrowserAnnotation(ownerId: number, input: BrowserAnnot
   if (entry) { starts.delete(`${ownerId}:${input.taskScopeId}:${input.viewId}`); await remove(entry); }
   return { ok: true };
 }
+/**
+ * ★An agent drives this guest: the owner's element picker must end first.
+ * The picker is a full-page overlay inside the document. While it stayed up,
+ * every agent click hit it ("<div> intercepts pointer events") and timed out;
+ * that is how a YouTube Studio upload control "timed out on normal clicks" in
+ * production (2026-09-28). The overlay is removed before the agent's command
+ * runs, and the owner's selection poll reports annotation_agent_active.
+ */
+export function browserAnnotationActiveOn(guest: WebContents): boolean {
+  for (const entry of sessions.values()) if (entry.guest === guest) return true;
+  return false;
+}
+export async function endBrowserAnnotationsForAgent(guest: WebContents): Promise<number> {
+  let ended = 0;
+  for (const entry of [...sessions.values()]) {
+    if (entry.guest !== guest) continue;
+    if (endedByAgent.size >= 128) endedByAgent.delete(endedByAgent.keys().next().value!);
+    endedByAgent.set(entry.session.sessionId, Date.now());
+    await remove(entry);
+    ended += 1;
+  }
+  return ended;
+}
 export async function browserAnnotationSelection(ownerId: number, input: BrowserAnnotationTarget & { sessionId: string }): ReturnType<BrowserAnnotationAPI["selection"]> {
   const entry = find(ownerId, input);
-  if (!entry) return failure("annotation_session_unavailable");
+  if (!entry) {
+    if (typeof input?.sessionId === "string" && endedByAgent.delete(input.sessionId)) return failure("annotation_agent_active");
+    return failure("annotation_session_unavailable");
+  }
   if (!current(entry)) { await remove(entry); return failure("annotation_navigation_changed"); }
   try {
     const raw = await execute(entry.guest, annotationReadScript(entry.session.sessionId)) as { error?: unknown; sequence?: unknown; element?: unknown };

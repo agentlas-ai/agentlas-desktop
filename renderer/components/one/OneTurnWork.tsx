@@ -28,6 +28,8 @@ import {
   cellVerb,
   cellObject,
   groupOneWorkerWork,
+  isOneOrchestratorGroup,
+  isQuietHostNote,
   workerModelLabel,
   type OneWorkerWorkGroup,
   formatWorkElapsed,
@@ -421,6 +423,52 @@ function WorkRow({ cell, locale }: { cell: OneWorkCell; locale: "ko" | "en" }) {
   }
 }
 
+/** A host status chat line (effect check, wait, cycle) folded into its run's block by its durable marker. */
+export interface OneTurnHostNote {
+  id: string;
+  /** Short status from the marker ("확인 중", "반영 안 됨 → 이어감", "예약 안 함"). */
+  label: string;
+  /** The sentence as stored. */
+  text: string;
+}
+
+/**
+ * The turn's host notes (app info, not owner decisions) as one quiet line.
+ * Opening it shows every original row — display only, nothing is dropped.
+ */
+function HostNotesRow({ cells, notes = [], locale }: {
+  cells: Extract<OneWorkCell, { kind: "notice" }>[];
+  notes?: OneTurnHostNote[];
+  locale: "ko" | "en";
+}) {
+  const [open, setOpen] = useState(false);
+  const count = cells.length + notes.length;
+  const statuses = [...new Set(notes.map((note) => note.label).filter(Boolean))];
+  const label = `${locale === "ko" ? `실행 안내 ${count}건` : `${count} run ${count === 1 ? "note" : "notes"}`}${statuses.length ? ` · ${statuses.join(" · ")}` : ""}`;
+  return (
+    <div className={styles.row} data-kind="host-notes" data-status="completed" data-open={open ? "true" : "false"}
+      data-one-host-notes="true" data-count={count}>
+      <button type="button" className={styles.rowHead} onClick={() => setOpen((current) => !current)} aria-expanded={open}
+        title={locale === "ko" ? "자세히" : "Details"}>
+        <span className={styles.rowMark} data-status="completed" aria-hidden="true"><IconCheck size={13} strokeWidth={1.7} /></span>
+        <span className={`${styles.rowText} ${styles.muted}`}>{label}</span>
+        <span className={styles.rowChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
+      </button>
+      {open && <div className={styles.rowBody}>
+        {cells.map((cell) => <WorkRow key={cell.id} cell={{ ...cell, agent: undefined }} locale={locale} />)}
+        {notes.map((note) => (
+          <div key={note.id} className={styles.row} data-kind="notice" data-status="completed" data-host-status-note="true">
+            <span className={styles.rowHead}>
+              <span className={styles.rowMark} data-status="completed" aria-hidden="true"><IconCheck size={13} strokeWidth={1.7} /></span>
+              <span className={styles.rowText}><span className={styles.notice} data-level="info">{note.label ? `${note.label} · ` : ""}{note.text}</span></span>
+            </span>
+          </div>
+        ))}
+      </div>}
+    </div>
+  );
+}
+
 /** One invocation's exact node identity; an avatar is a fallback, not a provider logo. */
 function WorkerWorkCard({ group, active, locale, onInspectWorker }: {
   group: OneWorkerWorkGroup;
@@ -516,6 +564,7 @@ export function OneTurnWork({
   onRetry,
   retryDisabled = false,
   onInspectWorker,
+  hostNotes,
 }: {
   state: OneActivityState;
   artifactScope?: { chatId: string; runId: string };
@@ -548,6 +597,8 @@ export function OneTurnWork({
   retryDisabled?: boolean;
   /** Caller binds this exact node group to its own chat and invocation scope. */
   onInspectWorker?: (group: OneWorkerWorkGroup) => void;
+  /** Quiet host status chat lines about this run (durable marker runId), folded into its one quiet line. */
+  hostNotes?: OneTurnHostNote[];
 }) {
   const ko = locale === "ko";
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
@@ -594,11 +645,15 @@ export function OneTurnWork({
     ? presentation.cells
     : presentation.cells.filter((_cell, index) => index !== liveHeadlineCell), [presentation.cells, liveHeadlineCell]);
   // Worker details retain every attributed receipt, including the live headline.
-  const workerGroups = useMemo(() => groupOneWorkerWork(presentation.cells), [presentation.cells]);
+  const workerGroups = useMemo(() => groupOneWorkerWork(presentation.cells).filter((group) => !isOneOrchestratorGroup(group)), [presentation.cells]);
   // Attribution must not hide real tool actions behind the worker button.
   // Only the worker lifecycle cell is represented exclusively by that button.
   const inlineCells = useMemo(() => visibleCells.filter((cell) => !cell.agentId || cell.kind !== "agent"), [visibleCells]);
-  const hasRows = visibleCells.length > 0;
+  const hasRows = visibleCells.length > 0 || (hostNotes?.length ?? 0) > 0;
+  // App info notes fold into one quiet line at the first note's place; warnings,
+  // failures and live retry/queue states keep their own rows.
+  const quietNotes = useMemo(() => inlineCells.filter(isQuietHostNote), [inlineCells]);
+  const firstQuietNote = quietNotes[0]?.id;
 
   if (!active && !hasRows && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !state.artifacts.length) {
     // Nothing happened beyond the answer itself (no thought, no tool). Codex
@@ -671,9 +726,12 @@ export function OneTurnWork({
           {workerGroups.map((group) => <WorkerWorkCard key={group.agentId} group={group} active={active} locale={locale} onInspectWorker={onInspectWorker} />)}
         </div>
       )}
-      {expanded && inlineCells.length > 0 && (
+      {expanded && (inlineCells.length > 0 || (hostNotes?.length ?? 0) > 0) && (
         <div className={styles.rows}>
-          {inlineCells.map((cell) => <WorkRow key={cell.id} cell={cell} locale={locale} />)}
+          {inlineCells.map((cell) => (isQuietHostNote(cell)
+            ? cell.id === firstQuietNote ? <HostNotesRow key="host-notes" cells={quietNotes} notes={hostNotes} locale={locale} /> : null
+            : <WorkRow key={cell.id} cell={cell} locale={locale} />))}
+          {!firstQuietNote && (hostNotes?.length ?? 0) > 0 && <HostNotesRow key="host-notes" cells={[]} notes={hostNotes} locale={locale} />}
         </div>
       )}
       {/* Keep an actionable summary visible while diagnostic payloads stay in a disclosure. */}

@@ -364,7 +364,7 @@ const OPERATIONAL_KEYS = [
   "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY", "DBUS_SESSION_BUS_ADDRESS", "NO_COLOR",
   "AGENTLAS_BROWSER_APPROVAL_FILE", "AGENTLAS_BROWSER_AUTONOMY", "AGENTLAS_BROWSER_APPROVAL_AUTHORITY",
   "AGENTLAS_CDP_AUTO_STOP", "AGENTLAS_CDP_HEADLESS",
-  "AGENTLAS_CDP_PROFILE", "AGENTLAS_CDP_PORT", "AGENTLAS_NATIVE_BROWSER_ENDPOINT",
+  "AGENTLAS_CDP_PROFILE", "AGENTLAS_CDP_PORT", "AGENTLAS_NATIVE_BROWSER_ENDPOINT", "AGENTLAS_BROWSER_UPLOAD_ROOTS",
   "AGENTLAS_COMPUTER_USE_CONTROL_FILE", "AGENTLAS_AGENT_MAIL_CONTROL_FILE", "AGENTLAS_ONE_TEAM_CONTROL_FILE"
 ];
 const PROXY_KEYS = ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY"];
@@ -597,6 +597,18 @@ export function isKeylessPlaywrightMcpDuplicate(server: InstalledMcpServer): boo
  */
 function argsWithBrowserProfile(_key: string, args: string[], _opts?: McpConfigBuildOptions): string[] {
   return args;
+}
+
+/**
+ * The run's own workspace, every agent working folder under Agentlas, and
+ * image-generation output. The browser launcher refuses uploads from anywhere
+ * else (a signed-in page must not be handed arbitrary files from the disk).
+ */
+function browserUploadRoots(opts?: McpConfigBuildOptions): string[] {
+  const roots = [opts?.workingFolder, opts?.toolGate?.cwd];
+  try { roots.push(userDataPath("agent-cwd")); } catch { /* headless tests: no userData */ }
+  roots.push(path.join(os.homedir(), ".codex", "generated_images"));
+  return [...new Set(roots.filter((root): root is string => typeof root === "string" && path.isAbsolute(root)).map((root) => path.resolve(root)))];
 }
 
 /** Narrow default roots before sealing the exact per-run launch transport. */
@@ -905,6 +917,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
               // requested authority cannot silently be downgraded to gated.
               AGENTLAS_BROWSER_AUTONOMY: (opts?.toolGate?.permission ?? opts?.browserApproval?.permission) === "full" ? "trust" : "gated",
               ...(browserRuntime && opts?.nativeBrowser ? { AGENTLAS_NATIVE_BROWSER_ENDPOINT: opts.nativeBrowser.endpoint } : {}),
+              // Folders an agent may upload files from (browser_file_upload / browser_drop).
+              AGENTLAS_BROWSER_UPLOAD_ROOTS: JSON.stringify(browserUploadRoots(opts)),
               ...(canonicalComputerUseSelected ? { [COMPUTER_USE_CONTROL_FILE_ENV]: computerUseControlInfoPath() } : {}),
               ...(canonicalComputerUseSelected && opts?.toolGate && mcpProxyApprovalPort() > 0 ? {
                 AGENTLAS_UNIFIED_CUA_GATE_CONTROL: mcpProxyControlInfoPath(),

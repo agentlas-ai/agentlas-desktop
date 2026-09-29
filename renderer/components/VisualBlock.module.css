@@ -1,0 +1,116 @@
+/* 대화 안 차트·HTML 시각물 — 테두리·틀 없이 글의 일부처럼(오너 2026-09-29).
+   도구는 올려놓을 때만 보인다(키보드 초점 포함). */
+.visual {
+  position: relative;
+  margin: 14px 0 22px;
+  max-width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 0;
+}
+.visual + .visual { margin-top: 24px; }
+.visual[data-size="thumb"] {
+  margin: 0;
+  pointer-events: none;
+}
+/* HTML 시각물 미리보기는 원래 폭으로 그리고 줄여서 보인다(모양 유지). */
+.visual[data-size="thumb"][data-visual-kind="html"] {
+  height: 100%;
+  overflow: hidden;
+}
+.visual[data-size="thumb"][data-visual-kind="html"] .frame {
+  width: 250%;
+  transform: scale(0.4);
+  transform-origin: 0 0;
+}
+.visual[data-size="panel"] {
+  margin: 0;
+  padding: 16px 18px 12px;
+}
+.chartHost {
+  width: 100%;
+  min-height: 60px;
+}
+.chartHost :global(svg) {
+  max-width: 100%;
+  height: auto;
+}
+.frame {
+  display: block;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color-scheme: normal;
+}
+.tools {
+  position: absolute;
+  top: -4px;
+  right: 0;
+  display: flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06), 0 0 0 1px var(--paper-edge);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+  z-index: 2;
+}
+.visual:hover .tools,
+.visual:focus-within .tools,
+.visual[data-size="panel"] .tools {
+  opacity: 1;
+  pointer-events: auto;
+}
+.visual[data-size="panel"] .tools {
+  position: static;
+  justify-content: flex-end;
+  box-shadow: none;
+  background: transparent;
+  margin-bottom: 6px;
+}
+.tools button {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 1;
+  padding: 5px 7px;
+  border-radius: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tools button:hover,
+.tools button:focus-visible {
+  background: var(--paper-2, rgba(0, 0, 0, 0.04));
+  color: var(--ink);
+  outline: none;
+}
+.status {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin: 4px 0;
+}
+.refusal {
+  font-size: 12px;
+  color: var(--ink-soft);
+  margin: 2px 0 0;
+}
+.loading {
+  height: 180px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, transparent, var(--paper-edge), transparent);
+  background-size: 200% 100%;
+  animation: visualShimmer 1.4s linear infinite;
+  opacity: 0.6;
+}
+@keyframes visualShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .loading { animation: none; }
+}

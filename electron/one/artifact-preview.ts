@@ -11,7 +11,7 @@ import {
 } from "../../shared/one-artifacts";
 import { isDurableOneSurfaceManifestV1 } from "../../shared/one-surface-durable";
 import type { OneSurfaceBlock, OneSurfaceManifestV1 } from "../../shared/one-surface";
-import type { AgentlasSurfaceDataSet, AgentlasSurfaceManifest, JsonObject } from "../../shared/types";
+import type { AgentlasSurfaceDataSet, AgentlasSurfaceManifest, ImageAttachment, JsonObject } from "../../shared/types";
 import { resolveFsReadPath } from "../fs/access";
 import { listOneDomainEvents } from "./domain-events";
 import { getOneValueClosureState } from "./value-closure";
@@ -1073,6 +1073,91 @@ export function readOneArtifactImagePreview(
   } finally {
     fs.closeSync(verified.fd);
   }
+}
+
+/**
+ * Markdown names a candidate, never grants a file read. Only a pre-existing
+ * exact chat/run artifact binding can promote it to durable chat image bytes.
+ * Removing the promoted image line prevents Mobile's path sanitizer from
+ * leaving a broken duplicate beside the already-bound attachment gallery.
+ */
+export function promoteBoundOneMarkdownImages(input: {
+  text: string;
+  chatId: string;
+  runId: string;
+  images: readonly ImageAttachment[];
+}): { text: string; images: ImageAttachment[] } {
+  const images = [...input.images];
+  // The Mobile transcript projects at most four image attachments. Never
+  // remove a Markdown image that would exceed that visible gallery budget.
+  const visibleLimit = Math.min(4, ONE_ATTACHMENT_LIMITS.maxCount);
+  if (images.length > visibleLimit) return { text: input.text, images };
+  const digests = new Set(images.slice(0, visibleLimit).map((image) =>
+    createHash("sha256").update(Buffer.from(image.data, "base64")).digest("hex"),
+  ));
+  let totalBytes = images.reduce((sum, image) => sum + Buffer.byteLength(image.data, "base64"), 0);
+  let fence: { marker: string; length: number } | null = null;
+  let candidates = 0;
+  const lines = input.text.split("\n");
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const delimiter = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+    if (delimiter) {
+      if (!fence) fence = { marker: delimiter[1][0], length: delimiter[1].length };
+      else if (delimiter[1][0] === fence.marker && delimiter[1].length >= fence.length && !delimiter[2].trim()) fence = null;
+      continue;
+    }
+    if (fence || candidates >= ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE) continue;
+    // Match standalone images only; code examples and inline prose remain
+    // untouched. Angle destinations allow local filenames containing spaces.
+    const match = /^ {0,3}!\[[^\]\r\n]*\]\(\s*(?:<([^<>\r\n]+)>|((?:[^\s()]|\([^\s()]*\))+))(?:\s+"[^"\r\n]*")?\s*\)\s*$/.exec(line);
+    if (!match) continue;
+    const source = match[1] ?? match[2];
+    let candidate: string;
+    try {
+      candidate = source.startsWith("file://") ? fileURLToPath(source) : source;
+      if (!path.isAbsolute(candidate)) continue;
+      candidate = path.resolve(candidate);
+    } catch { continue; }
+    candidates += 1;
+    ensureBindingTable();
+    const rows = getDb().prepare(
+      `SELECT * FROM one_artifact_bindings
+       WHERE chat_id = ? AND run_id = ? AND source_path = ? AND kind = 'image'
+       LIMIT ?`,
+    ).all(input.chatId, input.runId, candidate, ONE_ARTIFACT_MAX_BINDINGS_PER_SURFACE) as BindingRow[];
+    for (const row of rows) {
+      if (!MOBILE_IMAGE_PREVIEW_MIME_TYPES.has(row.mime_type) || row.size_bytes > MAX_MOBILE_IMAGE_PREVIEW_BYTES) continue;
+      const verified = verifiedFile({
+        taskId: row.task_id, taskVersion: row.bound_task_version,
+        chatId: input.chatId, runId: input.runId,
+        manifestId: row.manifest_id, artifactRef: row.artifact_ref,
+      });
+      if (!verified) continue;
+      fs.closeSync(verified.fd);
+      let image: ImageAttachment;
+      try {
+        // This root comes from the re-verified Main binding, never the
+        // Markdown candidate. The stable attachment reader also checks MIME
+        // signatures and rejects hard links before producing durable bytes.
+        image = chatImageAttachmentFromTrustedFile({
+          filePath: row.source_path, trustedRoot: path.dirname(row.source_path),
+        });
+      } catch { continue; }
+      const bytes = Buffer.from(image.data, "base64");
+      // Recheck the bytes actually copied, including mutation during the read.
+      if (createHash("sha256").update(bytes).digest("hex") !== row.sha256) continue;
+      if (!digests.has(row.sha256)) {
+        if (images.length >= visibleLimit || totalBytes + bytes.length > ONE_ATTACHMENT_LIMITS.maxTotalBytes) continue;
+        images.push(image);
+        digests.add(row.sha256);
+        totalBytes += bytes.length;
+      }
+      lines[index] = "";
+      break;
+    }
+  }
+  return { text: lines.join("\n"), images };
 }
 
 function parseRange(raw: string | null, size: number): { start: number; end: number; partial: boolean } | null {

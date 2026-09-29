@@ -79,6 +79,7 @@ const ok = (name) => { passed += 1; console.log(`ok   ${name}`); };
       const now = new Date().toISOString();
       db.prepare(`INSERT INTO chat_goal_contracts (goal_id, chat_id, objective, acceptance_criteria_json, status, created_at, updated_at)
         VALUES (?, ?, ?, '[]', 'active', ?, ?)`).run(goalId, chat.id, name, now, now);
+      chats.setChatGoalBinding(chat.id, goalId);
       assert.equal(ledger.ensureGoalLedgerGoal({ goalId, objective: name, acceptanceCriteria: [`${name} is done`], ...ledgerOptions }), true, `ledger goal created: ${JSON.stringify(ledger.lastGoalLedgerFailure())}`);
       const run = longRuns.getLongRunByGoalId(goalId);
       for (let i = 0; i < openTasks; i += 1) longRuns.addLongRunTask({ runId: run.id, title: `task ${i}`, objective: `task ${i}` });
@@ -92,6 +93,7 @@ const ok = (name) => { passed += 1; console.log(`ok   ${name}`); };
       .filter((row) => parseChatHostNotice("system", row.host_notice_json)?.purpose === "automation-report");
     const row = (id) => automations.getAutomation(id);
     const contract = (goalId) => db.prepare("SELECT status FROM chat_goal_contracts WHERE goal_id = ?").get(goalId).status;
+    const bound = (chatId) => db.prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId).goal_id;
     const due = (minutes) => scheduler.runDueAutomationsNow(new Date(Date.now() + minutes * 60_000));
 
     // 1) complete: the pass finishes the last open task (its receipt lands during the pass),
@@ -121,20 +123,27 @@ const ok = (name) => { passed += 1; console.log(`ok   ${name}`); };
     script.set(budget.id, { text: "BUDGET-pass one", continue: true });
     await scheduler.runAutomationNow(budget.id);
     assert.equal(row(budget.id).enabled, false, "stopped on budget");
-    assert.equal(contract(budget.goalId), "blocked");
+    // A budget-stopped goal is not over (1d6d233b): the hard stop parks the row only; the contract and the
+    // chat binding stay so the owner's next turn and the goal chip still reach it.
+    assert.equal(contract(budget.goalId), "active", "hard stop keeps the goal contract");
+    assert.equal(bound(budget.chatId), budget.goalId, "hard stop keeps the chat binding");
     assert.equal(notices(budget.chatId).length, 1);
-    assert.match(notices(budget.chatId)[0].text, /budget_cycles_exhausted/, "the reason is in the notice");
+    // 263a0109: the notice carries a sentence, not the ledger code (the code stays in the ledger and run events).
+    assert.match(notices(budget.chatId)[0].text, /반복 횟수 한도/, "the reason is in the notice");
+    assert.doesNotMatch(notices(budget.chatId)[0].text, /budget_cycles_exhausted/, "no raw ledger code in the chat");
     assert.match(notices(budget.chatId)[0].text, /멈췄어요/);
-    ok("budget exhausted → stopped with the reason (budget_cycles_exhausted), notified once");
+    ok("budget exhausted → row stopped, goal contract and binding kept, notified once with a sentence");
 
     // 3) no-progress stall: the same output three times on a stall window of 2.
     const stall = goalContinuation("stall", { stallWindow: 2 }, 1);
     script.set(stall.id, { text: "STALL-same result every time", continue: true });
     for (let i = 0; i < 3 && row(stall.id).enabled; i += 1) await scheduler.runAutomationNow(stall.id);
     assert.equal(row(stall.id).enabled, false, "stalled continuation is hard-stopped");
-    assert.equal(contract(stall.goalId), "blocked");
+    assert.equal(contract(stall.goalId), "active", "hard stop keeps the goal contract");
+    assert.equal(bound(stall.chatId), stall.goalId, "hard stop keeps the chat binding");
     assert.equal(notices(stall.chatId).length, 1, "one stop notice, not one per pass");
-    assert.match(notices(stall.chatId)[0].text, /goal_blocked/);
+    assert.match(notices(stall.chatId)[0].text, /막힘 상태/);
+    assert.doesNotMatch(notices(stall.chatId)[0].text, /goal_blocked/, "no raw ledger code in the chat");
     ok(`no-progress stall → hard stop after ${calls.get(stall.id)} identical passes, notified once`);
 
     // 4) transient failure: the run itself fails → every-2h, enabled, no wake before 2h.
@@ -177,7 +186,8 @@ const ok = (name) => { passed += 1; console.log(`ok   ${name}`); };
     assert.equal(calls.get(review.id) ?? 0, 0, "the refused continuation never calls the model");
     assert.equal(row(review.id).enabled, false, "a ledger stop parks the row");
     assert.equal(notices(review.chatId).length, 1, "the goal chat is told once");
-    assert.match(notices(review.chatId)[0].text, /auto_goal_owner_review_required/);
+    assert.match(notices(review.chatId)[0].text, /답을 기다리고/);
+    assert.doesNotMatch(notices(review.chatId)[0].text, /auto_goal_owner_review_required/, "no raw ledger code in the chat");
     await due(11);
     await due(21);
     await scheduler.runAutomationNow(review.id); // a manual re-gate on the same ledger state

@@ -1,8 +1,12 @@
+import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobileGoalControlMethod, validateMobileGoalControlParams } from "./mobile-goal-control";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
 import {
   ONE_DECISION_CONTRACT_VERSION,
   ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION,
+  ONE_DECISION_OTHER_ANSWER_CONTRACT_VERSION,
+  ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION,
+  isOneDecisionOtherText,
   type OneDecisionViewV1,
 } from "./one-decision";
 import type { OneMobileEcosystemSuggestionV1 } from "./one-mobile-suggestion";
@@ -96,6 +100,7 @@ export const MOBILE_BRIDGE_MAIL_WRITE_METHODS = [
 ] as const;
 
 export const MOBILE_BRIDGE_METHODS = [
+  ...MOBILE_GOAL_CONTROL_METHODS,
   "snapshot.get",
   "host.status",
   "team.list",
@@ -146,6 +151,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "composer.context",
   "plugins.list",
   "invoke.history",
+  "invoke.historyPage",
   "request.status",
   "one.invoke.start",
   "invoke.start",
@@ -156,6 +162,8 @@ export const MOBILE_BRIDGE_METHODS = [
   "invoke.activeChats",
   "confirm.listPending",
   "one.decision.retryReview",
+  "one.decision.clarify",
+  "one.decision.clarifyAnswer",
   "browser.resolveApproval",
   // 동기 런타임 질문 — 기존 chat Decision/도구 승인과 섞지 않는다.
   "runtime.submitUserInput",
@@ -208,6 +216,7 @@ export type MobileBridgeMethod =
 
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  ...MOBILE_GOAL_CONTROL_WRITE_METHODS,
   "device.revokeSelf",
   "hub.invoke",
   "hub.install",
@@ -240,6 +249,8 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "invoke.start",
   "invoke.steer",
   "invoke.cancel",
+  "one.decision.clarify",
+  "one.decision.clarifyAnswer",
   "browser.resolveApproval",
   "runtime.submitUserInput",
   "runtime.resolveToolApproval",
@@ -259,6 +270,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
 ]);
 
 export const MOBILE_BRIDGE_EVENT_NAMES = [
+  "goalControl.updated",
   "bridge.ready",
   "snapshot.updated",
   "invoke.event",
@@ -303,13 +315,18 @@ export interface MobileBridgeInvokeSteerParams {
   expectedQuestionMessageId?: string;
   expectedTaskId?: string;
   expectedTaskVersion?: number;
-  expectedDecisionContractVersion?: typeof ONE_DECISION_CONTRACT_VERSION | typeof ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION;
-  /** V2 only: authenticated host, source timestamp, and complete displayed option set. */
+  expectedDecisionContractVersion?: typeof ONE_DECISION_CONTRACT_VERSION | typeof ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION | typeof ONE_DECISION_OTHER_ANSWER_CONTRACT_VERSION | typeof ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION;
+  /** V2/V3/V4: authenticated host, source timestamp, and complete displayed option set. */
   expectedAuthoritativeHostRef?: string;
   expectedDecisionCreatedAt?: string;
   expectedDecisionOptionLabels?: string[];
-  /** V2 only: nonempty, strictly ascending indexes into the bound option set. */
+  /** V2/V4: nonempty; V3: possibly empty; always strictly ascending bound indexes. */
   expectedDecisionSelectionIndexes?: number[];
+  /** V3 only: exact, bounded owner text; selected labels precede it in userPrompt. */
+  expectedDecisionOtherText?: string;
+  /** V4 only: exact source-content binding and a separate explicit owner confirmation. */
+  expectedDecisionBindingDigest?: string;
+  expectedDecisionOwnerConfirmed?: true;
   expectedRunId: string;
 }
 
@@ -802,6 +819,8 @@ export interface MobileBridgeInvocationArtifactDto {
   sizeBytes?: number;
   /** Optional immutable content identity used to collapse repeated reads. */
   contentSha256?: string;
+  /** Original ledger event time for placing restored output in the chat. */
+  occurredAt?: string;
 }
 
 export interface MobileBridgeOneArtifactsPageDto {
@@ -1364,6 +1383,8 @@ export interface MobileBridgeChatFileDto {
 export interface MobileBridgeChatMessageDto {
   id: string;
   role: "user" | "assistant" | "system";
+  /** Exact installed assistant author when persisted by Main; absent on older rows. */
+  speakerAgentId?: string;
   text: string;
   createdAt: string;
   /** Exact prompt-owning run from invoke_prompt_bound; absent on older Desktop builds. */
@@ -1372,6 +1393,14 @@ export interface MobileBridgeChatMessageDto {
   images?: MobileBridgeChatImageDto[];
   /** Bounded generic-file metadata; raw paths, URLs, bytes, and manifests stay on Desktop. */
   files?: MobileBridgeChatFileDto[];
+}
+
+/** invoke.historyPage: newest page first, each page in (createdAt, id) ascending order. */
+export interface MobileBridgeChatHistoryPageDto {
+  messages: MobileBridgeChatMessageDto[];
+  hasOlder: boolean;
+  /** Pass unchanged as cursor; null when no older page exists. */
+  nextCursor: string | null;
 }
 
 /**
@@ -1469,6 +1498,37 @@ export interface MobileBridgeOneDecisionMultiSelectionV2Dto {
   optionLabels: string[];
   /** Only currently judged, non-reject, non-modify choices may be selected. */
   selectableIndexes: number[];
+}
+
+/** Additive typed-answer authority; only non-authorizing judged Decisions receive it. */
+export interface MobileBridgeOneDecisionAnswerV3Dto {
+  contractVersion: typeof ONE_DECISION_OTHER_ANSWER_CONTRACT_VERSION;
+  authoritativeHostRef: string;
+  canonicalTaskVersion: number;
+  taskId: string;
+  chatId: string;
+  decisionId: string;
+  createdAt: string;
+  optionLabels: string[];
+  multiSelect: boolean;
+  selectableIndexes: number[];
+  allowOther: true;
+}
+
+/** Owner-selected original options, independent of advisory model availability. */
+export interface MobileBridgeOneDecisionOwnerAnswerV4Dto {
+  contractVersion: typeof ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION;
+  authoritativeHostRef: string;
+  canonicalTaskVersion: number;
+  taskId: string;
+  chatId: string;
+  decisionId: string;
+  createdAt: string;
+  optionLabels: string[];
+  multiSelect: boolean;
+  selectableIndexes: number[];
+  bindingDigest: string;
+  requiresOwnerConfirmation: true;
 }
 
 export type MobileBridgeOneValueClosurePhase = "discovery" | "preparation" | "execution" | "verification";
@@ -1806,6 +1866,16 @@ export interface MobileBridgeDecisionAnswerAcknowledgementDto {
   taskId: string;
   taskVersion: number;
   status: "answer_claimed";
+}
+
+/** Admission of a non-authorizing clarification turn, not approval resolution. */
+export interface MobileBridgeOneDecisionClarifyReceiptDto {
+  status: "accepted";
+  chatId: string;
+  taskId: string;
+  taskVersion: number;
+  decisionId: string;
+  runId: string;
 }
 
 /** A reconnect-safe, secret-free view of one live irreversible browser action. */
@@ -2494,6 +2564,10 @@ export interface MobileBridgeSnapshot {
   oneDecisions?: MobileBridgeOneDecisionDto[];
   /** Additive closed multi-select overlays, each bound to a row in oneDecisions. */
   oneDecisionMultiSelectionsV2?: MobileBridgeOneDecisionMultiSelectionV2Dto[];
+  /** Additive, exact-bound non-authorizing Other-answer overlays. */
+  oneDecisionAnswersV3?: MobileBridgeOneDecisionAnswerV3Dto[];
+  /** V1 remains fail-closed for old clients; V4 requires explicit owner confirmation. */
+  oneDecisionOwnerAnswersV4?: MobileBridgeOneDecisionOwnerAnswerV4Dto[];
   /** Absent on older builds; new Desktop builds emit [] to clear stale Mobile cards. */
   oneValueClosures?: MobileBridgeOneValueClosureDto[];
   /** Approved reuse only; no raw Memory or improvement assertion crosses the bridge. */
@@ -2745,17 +2819,24 @@ function validateInvokeOptions(
   const hasDecisionTaskId = params.expectedTaskId !== undefined;
   const hasDecisionTaskVersion = params.expectedTaskVersion !== undefined;
   const hasDecisionContract = params.expectedDecisionContractVersion !== undefined;
-  const hasV2Binding = params.expectedAuthoritativeHostRef !== undefined
+  const hasBoundAnswerFields = params.expectedAuthoritativeHostRef !== undefined
     || params.expectedDecisionCreatedAt !== undefined
     || params.expectedDecisionOptionLabels !== undefined
-    || params.expectedDecisionSelectionIndexes !== undefined;
-  const hasDecisionTaskBinding = hasDecisionTaskId || hasDecisionTaskVersion || hasDecisionContract || hasV2Binding;
+    || params.expectedDecisionSelectionIndexes !== undefined
+    || params.expectedDecisionOtherText !== undefined
+    || params.expectedDecisionBindingDigest !== undefined
+    || params.expectedDecisionOwnerConfirmed !== undefined;
+  const hasDecisionTaskBinding = hasDecisionTaskId || hasDecisionTaskVersion || hasDecisionContract || hasBoundAnswerFields;
   let decisionBindingError: string | null = null;
+  if (params.expectedDecisionContractVersion !== ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION
+    && (params.expectedDecisionBindingDigest !== undefined || params.expectedDecisionOwnerConfirmed !== undefined)) {
+    return "Only V4 Decision answers can include owner confirmation fields";
+  }
   if (hasDecisionTaskBinding || (hasDecisionId && !allowObservedRunQuestion)) {
     if (!hasDecisionId || !hasDecisionTaskId || !hasDecisionTaskVersion || !hasDecisionContract) {
       decisionBindingError = "Decision answers require expectedQuestionMessageId, expectedTaskId, expectedTaskVersion, and expectedDecisionContractVersion";
     } else if (params.expectedDecisionContractVersion === ONE_DECISION_CONTRACT_VERSION) {
-      if (hasV2Binding) decisionBindingError = "V1 Decision answers cannot include V2 selection fields";
+      if (hasBoundAnswerFields) decisionBindingError = "V1 Decision answers cannot include bound answer fields";
     } else if (params.expectedDecisionContractVersion === ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION) {
       const labels = params.expectedDecisionOptionLabels;
       const indexes = params.expectedDecisionSelectionIndexes;
@@ -2771,7 +2852,45 @@ function validateInvokeOptions(
         || indexes.some((index, position) => !Number.isSafeInteger(index)
           || index < 0 || index >= labels.length
           || (position > 0 && index <= indexes[position - 1]))
+        || params.expectedDecisionOtherText !== undefined
       ) decisionBindingError = "V2 Decision answers require exact host, creation time, option labels, and ordered selection indexes";
+    } else if (params.expectedDecisionContractVersion === ONE_DECISION_OTHER_ANSWER_CONTRACT_VERSION) {
+      const labels = params.expectedDecisionOptionLabels;
+      const indexes = params.expectedDecisionSelectionIndexes;
+      if (
+        typeof params.expectedAuthoritativeHostRef !== "string"
+        || !/^host_[a-f0-9]{32}$/.test(params.expectedAuthoritativeHostRef)
+        || typeof params.expectedDecisionCreatedAt !== "string"
+        || !Number.isFinite(Date.parse(params.expectedDecisionCreatedAt))
+        || !Array.isArray(labels) || labels.length < 2 || labels.length > 8
+        || labels.some((label) => typeof label !== "string" || !label || label.length > 200)
+        || new Set(labels).size !== labels.length
+        || !Array.isArray(indexes) || indexes.length > 8
+        || indexes.some((index, position) => !Number.isSafeInteger(index)
+          || index < 0 || index >= labels.length
+          || (position > 0 && index <= indexes[position - 1]))
+        || !isOneDecisionOtherText(params.expectedDecisionOtherText)
+      ) decisionBindingError = "V3 Decision answers require exact host, time, labels, ordered indexes, and bounded Other text";
+    } else if (params.expectedDecisionContractVersion === ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION) {
+      const labels = params.expectedDecisionOptionLabels;
+      const indexes = params.expectedDecisionSelectionIndexes;
+      if (
+        typeof params.expectedAuthoritativeHostRef !== "string"
+        || !/^host_[a-f0-9]{32}$/.test(params.expectedAuthoritativeHostRef)
+        || typeof params.expectedDecisionCreatedAt !== "string"
+        || !Number.isFinite(Date.parse(params.expectedDecisionCreatedAt))
+        || !Array.isArray(labels) || labels.length < 2 || labels.length > 8
+        || labels.some((label) => typeof label !== "string" || !label || label.length > 200)
+        || new Set(labels).size !== labels.length
+        || !Array.isArray(indexes) || indexes.length < 1 || indexes.length > 8
+        || indexes.some((index, position) => !Number.isSafeInteger(index)
+          || index < 0 || index >= labels.length
+          || (position > 0 && index <= indexes[position - 1]))
+        || typeof params.expectedDecisionBindingDigest !== "string"
+        || !/^[a-f0-9]{64}$/.test(params.expectedDecisionBindingDigest)
+        || params.expectedDecisionOwnerConfirmed !== true
+        || params.expectedDecisionOtherText !== undefined
+      ) decisionBindingError = "V4 Decision answers require exact content binding, selected options, and explicit owner confirmation";
     } else {
       decisionBindingError = "expectedDecisionContractVersion is unsupported";
     }
@@ -2786,6 +2905,9 @@ function validateInvokeOptions(
     optionalString(params, "expectedDecisionContractVersion", 32),
     optionalString(params, "expectedAuthoritativeHostRef", 64),
     optionalString(params, "expectedDecisionCreatedAt", 64),
+    params.expectedDecisionOtherText === undefined || isOneDecisionOtherText(params.expectedDecisionOtherText)
+      ? null
+      : "expectedDecisionOtherText must be one exact single-line answer of at most 500 characters",
     requiredText(params, "userPrompt", 200_000),
     validateEnum(params, "locale", ["ko", "en"]),
     validateEnum(params, "permissions", ["read", "write", "full"]),
@@ -3084,6 +3206,7 @@ function validateVisualInputAction(value: unknown): string | null {
 
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
+  if (isMobileGoalControlMethod(method)) return validateMobileGoalControlParams(method, params);
   if (EMPTY_METHODS.has(method)) {
     return Object.keys(params).length === 0 ? null : `${method} does not accept parameters`;
   }
@@ -3386,6 +3509,11 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["chatId", "limit"])
         ? firstError(requiredString(params, "chatId"), optionalInteger(params, "limit", 1, 200))
         : "invoke.history accepts only chatId and limit";
+    case "invoke.historyPage":
+      return hasOnlyKeys(params, ["chatId", "limit", "cursor"])
+        ? firstError(requiredString(params, "chatId"), optionalInteger(params, "limit", 1, 200),
+            params.cursor === undefined || params.cursor === null ? null : requiredString(params, "cursor", 1024))
+        : "invoke.historyPage accepts only chatId, limit and cursor";
     case "composer.context":
       return hasOnlyKeys(params, ["chatId"])
         ? requiredString(params, "chatId")
@@ -3412,12 +3540,12 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
       );
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes", "expectedDecisionOtherText", "expectedDecisionBindingDigest", "expectedDecisionOwnerConfirmed"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "steeringMode", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "steeringMode", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes", "expectedDecisionOtherText", "expectedDecisionBindingDigest", "expectedDecisionOwnerConfirmed"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));
@@ -3436,6 +3564,29 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             requiredString(params, "decisionId", 256),
           )
         : "one.decision.retryReview accepts only exact Decision binding";
+    case "one.decision.clarify":
+      return hasOnlyKeys(params, ["chatId", "taskId", "taskVersion", "decisionId"])
+        ? firstError(
+            requiredString(params, "chatId", 256),
+            requiredString(params, "taskId", 256),
+            Number.isSafeInteger(params.taskVersion) && Number(params.taskVersion) >= 1
+              ? null : "one.decision.clarify requires a Task version",
+            requiredString(params, "decisionId", 256),
+          )
+        : "one.decision.clarify accepts only exact Decision binding";
+    case "one.decision.clarifyAnswer":
+      return hasOnlyKeys(params, ["chatId", "taskId", "taskVersion", "decisionId", "clarification"])
+        ? firstError(
+            requiredString(params, "chatId", 256),
+            requiredString(params, "taskId", 256),
+            Number.isSafeInteger(params.taskVersion) && Number(params.taskVersion) >= 1
+              ? null : "one.decision.clarifyAnswer requires a Task version",
+            requiredString(params, "decisionId", 256),
+            requiredText(params, "clarification", 2_000),
+            typeof params.clarification === "string" && params.clarification.trim() === params.clarification
+              ? null : "Decision clarification must be trimmed text",
+          )
+        : "one.decision.clarifyAnswer accepts only exact Decision binding and clarification";
     case "browser.resolveApproval":
       return hasOnlyKeys(params, ["requestId", "decision"])
         ? firstError(

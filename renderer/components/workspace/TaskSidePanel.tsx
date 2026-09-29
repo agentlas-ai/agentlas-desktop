@@ -30,6 +30,7 @@ import {
   IconRefresh,
   IconShield,
   IconSparkles,
+  IconTarget,
 } from "@/components/Icon";
 import { TaskBrowser } from "@/components/browser/TaskBrowser";
 import panelMenu from "@/components/PanelPopover.module.css";
@@ -64,16 +65,20 @@ import type { OnePermissionMode } from "../one/OneComposerControls";
 import { OneComputerHistory } from "../one/OneComputerHistory";
 import { McpResultPreview } from "../McpResultPreview";
 import { ChatFileTabs, nextFileTabSelection } from "../ChatFileExperience";
-import { CHAT_FILE_OPEN_EVENT, chatFilesBridge, formatChatFileSize, isChatFileItem, type ChatFileItem } from "@/lib/chat-files";
+import { CHAT_FILE_OPEN_EVENT, chatFilesBridge, formatChatFileSize, isChatFileItem, requestChatFileOpen, type ChatFileItem } from "@/lib/chat-files";
+import { linkedLocalFileItem, type LinkedLocalCandidate } from "@/lib/linked-local-file";
+import { announceChatFiles } from "@/lib/visual-artifacts";
 import { OneWorkerPanel } from "../one/OneWorkerPanel";
 import { ContinuityStatus } from "../ContinuityStatus";
 import type { OneWorkerPanelRun, OneWorkerPanelSelection } from "@/lib/one-worker-panel";
 import styles from "./TaskSidePanel.module.css";
 import { AUTOMATION_TAB_OPEN_EVENT, AutomationRailPanel, AutomationTabLiveDot, automationTabRunning, useAutomationChatActivity } from "../automation/AutomationChatActivity";
+import { GOAL_PANEL_OPEN_EVENT, GoalRailPanel, useGoalPanel } from "../goal/GoalPanel";
+import { ArtifactsRailPanel, artifactsRailCount, useArtifactsRail } from "./ArtifactsRailPanel";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
-type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "automation";
+type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "automation" | "goal" | "artifacts";
 
 /** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
 function RailTabIcon({ view }: { view: OutputRailView }) {
@@ -82,6 +87,8 @@ function RailTabIcon({ view }: { view: OutputRailView }) {
   if (view === "terminal") return <IconCode size={12} />;
   if (view === "result") return <IconCheck size={12} />;
   if (view === "automation") return <IconClock size={12} />;
+  if (view === "goal") return <IconTarget size={12} />;
+  if (view === "artifacts") return <IconFileUp size={12} />;
   return <IconSparkles size={12} />;
 }
 
@@ -92,6 +99,8 @@ function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
   if (view === "terminal") return locale === "ko" ? "터미널" : "Terminal";
   if (view === "screen") return locale === "ko" ? "화면" : "Screen";
   if (view === "automation") return locale === "ko" ? "자동화" : "Automations";
+  if (view === "goal") return locale === "ko" ? "목표" : "Goal";
+  if (view === "artifacts") return locale === "ko" ? "산출물" : "Artifacts";
   return locale === "ko" ? "브라우저" : "Browser";
 }
 function readCollapsedOutputSections(): Set<OutputSectionKey> {
@@ -923,8 +932,9 @@ function TaskSidePanelContent({
    */
   const selectRailView = useCallback((view: OutputRailView) => {
     setRailView(view);
-    if (view !== "browser") return;
-    const readable = Math.min(maxWidth, 560);
+    if (view !== "browser" && view !== "goal") return;
+    // 목표 패널도 좁은 칸에서는 한 줄 목적이 몇 글자로 잘린다 — 읽을 만한 폭(360px)만 확보한다.
+    const readable = Math.min(maxWidth, view === "goal" ? (window.innerWidth < 1100 ? 320 : 360) : 560);
     (onRequestReadableWidth ?? onResize)?.(Math.max(width ?? defaultWidth, readable));
   }, [defaultWidth, maxWidth, onRequestReadableWidth, onResize, width]);
   const openRailTab = useCallback((view: OutputRailView) => {
@@ -976,6 +986,45 @@ function TaskSidePanelContent({
     window.addEventListener(AUTOMATION_TAB_OPEN_EVENT, open);
     return () => window.removeEventListener(AUTOMATION_TAB_OPEN_EVENT, open);
   }, [screenChatId, openRailTab, onRequestOpen]);
+  // 이 대화의 목표 — 목표가 있으면 "목표" 탭이 선다(선택은 빼앗지 않는다). 목표 칩의 편집이 이 탭을 연다(오너 2026-09-28).
+  const goalPanel = useGoalPanel(screenChatId ?? null);
+  const hasGoal = goalPanel.view !== null;
+  useEffect(() => {
+    setOpenTabs((tabs) => hasGoal
+      ? (tabs.includes("goal") ? tabs : [...tabs, "goal"])
+      : (tabs.includes("goal") ? tabs.filter((tab) => tab !== "goal") : tabs));
+    if (!hasGoal) setRailView((current) => (current === "goal" ? null : current));
+  }, [hasGoal]);
+  useEffect(() => {
+    const open = (event: Event) => {
+      const detail = (event as CustomEvent<{ chatId?: string; handled?: boolean }>).detail;
+      if (!screenChatId || !detail || detail.chatId !== screenChatId) return;
+      detail.handled = true;
+      openRailTab("goal");
+      onRequestOpen?.();
+      goalPanel.refresh();
+    };
+    window.addEventListener(GOAL_PANEL_OPEN_EVENT, open);
+    return () => window.removeEventListener(GOAL_PANEL_OPEN_EVENT, open);
+  }, [screenChatId, openRailTab, onRequestOpen, goalPanel.refresh]);
+  // 이 대화의 산출물(차트·시각물·파일 칩·실행 결과) — 하나라도 있으면 "산출물" 탭이 선다(선택은 빼앗지 않는다).
+  // 대화 안 차트의 "패널에서 열기" 가 이 탭을 연다(오너 2026-09-29 비주얼라이즈).
+  const artifactsRail = useArtifactsRail(screenChatId ?? null);
+  const hasArtifacts = artifactsRailCount({ items, files: artifactsRail.files, visuals: artifactsRail.visuals }) > 0;
+  useEffect(() => {
+    setOpenTabs((tabs) => hasArtifacts
+      ? (tabs.includes("artifacts") ? tabs : [...tabs, "artifacts"])
+      : (tabs.includes("artifacts") ? tabs.filter((tab) => tab !== "artifacts") : tabs));
+    if (!hasArtifacts) setRailView((current) => (current === "artifacts" ? null : current));
+  }, [hasArtifacts]);
+  useEffect(() => {
+    if (artifactsRail.openRequest === 0) return;
+    setOpenTabs((tabs) => (tabs.includes("artifacts") ? tabs : [...tabs, "artifacts"]));
+    setRailView("artifacts");
+    (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
+    onRequestOpen?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [artifactsRail.openRequest]);
   const closeRailTab = useCallback((view: OutputRailView) => {
     setOpenTabs((tabs) => {
       const next = tabs.filter((tab) => tab !== view);
@@ -1185,7 +1234,24 @@ function TaskSidePanelContent({
         : typeof candidate.fileUrl === "string" && /^https?:\/\//iu.test(candidate.fileUrl)
           ? candidate.fileUrl
           : null;
-      if (!url) return;
+      if (!url) {
+        // 결속 안 된 로컬 파일 링크(One 막다른 길, 2026-09-29) — 절대 경로면 Main 이 이미 지키는 읽기 길
+        // (agentlas://localfile: Main 이 정한 루트 + 미디어 종류 + 최종 realpath, 심볼릭 탈출 거절)로 이 패널의
+        // 파일 탭에 연다. 글자 파일은 같은 Main 확인을 거치는 fs.readTextFile(chat-assets). 렌더러가 경로를 믿지 않는다.
+        const linked = linkedLocalFileItem(candidate as LinkedLocalCandidate, screenChatId);
+        if (!linked) return;
+        (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
+        onRequestOpen?.();
+        announceChatFiles([linked.item]);
+        if (linked.textPath) {
+          void ipc()?.fs.readTextFile(linked.textPath, { kind: "chat-assets", chatId: screenChatId })
+            .then((preview) => requestChatFileOpen(preview && !preview.reason
+              ? { ...linked.item, size: preview.size, viewer: { ...linked.item.viewer, content: preview.content, truncated: preview.truncated, size: preview.size, available: true, reason: undefined } }
+              : { ...linked.item, viewer: { ...linked.item.viewer, available: false } }))
+            .catch(() => requestChatFileOpen({ ...linked.item, viewer: { ...linked.item.viewer, available: false } }));
+        } else requestChatFileOpen(linked.item);
+        return;
+      }
       const scope = browserScopeKey ?? "unscoped";
       setBrowserUrlsByScope((current) => current[scope] === url ? current : { ...current, [scope]: url });
       setOpenTabs((tabs) => tabs.includes("browser") ? tabs : [...tabs, "browser"]);
@@ -1193,7 +1259,7 @@ function TaskSidePanelContent({
     };
     window.addEventListener("agentlas:in-app-linked-file", handleInAppLink);
     return () => window.removeEventListener("agentlas:in-app-linked-file", handleInAppLink);
-  }, [browserScopeKey, screenChatId]);
+  }, [browserScopeKey, screenChatId, maxWidth, onRequestOpen, onRequestReadableWidth, onResize]);
   useEffect(() => {
     if (!latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
     presentedArtifactIdRef.current = latestArtifactId;
@@ -1476,7 +1542,7 @@ function TaskSidePanelContent({
                     : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : null;
                   if (next !== null) { event.preventDefault(); buttons[next]?.focus(); }
                 }}>
-                {(["activity", "terminal", "browser", "screen"] as const).map((view) => (
+                {([...(hasGoal ? ["goal"] as const : []), "activity", "terminal", "browser", "screen"] as const).map((view) => (
                   <button
                     key={view}
                     type="button"
@@ -1618,6 +1684,9 @@ function TaskSidePanelContent({
           </OutputDisclosure>
         </>}
         {railView === "automation" && <AutomationRailPanel snapshot={automationSnapshot} locale={locale} />}
+        {railView === "goal" && <GoalRailPanel view={goalPanel.view} locale={locale} onView={goalPanel.replace} />}
+        {railView === "artifacts" && <ArtifactsRailPanel chatId={screenChatId ?? null} locale={locale} items={items} files={artifactsRail.files} visuals={artifactsRail.visuals}
+          opened={artifactsRail.opened} onOpenVisual={artifactsRail.setOpened} onBack={() => artifactsRail.setOpened(null)} />}
         {railView === "screen" && (
           <RailAgentScreen
             mode={screenMode}

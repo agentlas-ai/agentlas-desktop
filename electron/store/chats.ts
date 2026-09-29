@@ -942,6 +942,7 @@ interface MessageRow {
   text: string;
   created_at: string;
   host_notice_json?: string | null;
+  speaker_agent_id?: string | null;
 }
 
 // Builds before v0.9.36 accidentally persisted the CEO's private synthesis
@@ -964,6 +965,12 @@ export function appendChatMessage(
   const now = new Date().toISOString();
   const db = getDb();
   const hostNotice = normalizeChatHostNotice(role, options?.hostNotice);
+  const requestedSpeakerId = options?.speakerAgentId?.trim();
+  const speakerAgentId = role === "assistant" && requestedSpeakerId
+    && requestedSpeakerId.length <= 256
+    && !/[\u0000-\u001f\u007f]/u.test(requestedSpeakerId)
+    ? requestedSpeakerId
+    : null;
   // 앱이 쓴 안내(hostNotice 를 요청한 줄)는 작업 보고가 아니다. assistant 역할이면 안내 칸은 저장되지
   // 않지만, 여기서 "검증 전" 표를 달면 결속될 실행이 없어 영원히 대기로 남는다
   // (오너 녹화 2026-09-26: 목표 대화의 안내 말풍선마다 "Verification pending").
@@ -972,8 +979,8 @@ export function appendChatMessage(
   let persistedImageUrls: string[] | undefined;
   const write = db.transaction(() => {
     db.prepare(
-      "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json) VALUES (?, ?, ?, ?, ?, ?)",
-    ).run(id, chatId, role, text, now, hostNotice ? JSON.stringify(hostNotice) : null);
+      "INSERT INTO chat_messages (id, chat_id, role, text, created_at, host_notice_json, speaker_agent_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+    ).run(id, chatId, role, text, now, hostNotice ? JSON.stringify(hostNotice) : null, speakerAgentId);
     if (goalResult) persistGoalResult(chatId, id, goalResult);
     if (options?.images?.length) {
       const persisted = persistChatMessageImages({ messageId: id, chatId, images: options.images, createdAt: now });
@@ -990,6 +997,7 @@ export function appendChatMessage(
     durableMessageId: id,
     ...(goalResult ? { goalResult } : {}),
     role,
+    ...(speakerAgentId ? { speakerAgentId } : {}),
     text,
     createdAt: now,
     ...(hostNotice ? { hostNotice } : {}),
@@ -1002,6 +1010,8 @@ export function appendChatMessage(
 type ChatMessageAppendOptions = {
   images?: readonly ImageAttachment[];
   hostNotice?: ChatHostNotice;
+  /** Exact installed author from the producer, never inferred from stream order. */
+  speakerAgentId?: string;
 };
 
 /** Completion may be published only after its exact assistant body is durable. */
@@ -1020,10 +1030,10 @@ export function hasDurableAssistantMessage(chatId: string, text: string, notBefo
 export function latestDurableAssistantMessage(
   chatId: string,
   notBefore?: string,
-): { id: string; text: string; createdAt: string } | null {
+): { id: string; text: string; createdAt: string; speakerAgentId?: string } | null {
   if (!chatId) return null;
   const row = getDb().prepare(
-    `SELECT id, text, created_at FROM chat_messages
+    `SELECT id, text, created_at, speaker_agent_id FROM chat_messages
      WHERE chat_id = ? AND role = 'assistant' AND text <> ''
        AND (? IS NULL OR created_at >= ?)
      ORDER BY created_at DESC, rowid DESC LIMIT 1`,
@@ -1031,8 +1041,14 @@ export function latestDurableAssistantMessage(
     id: string;
     text: string;
     created_at: string;
+    speaker_agent_id: string | null;
   } | undefined;
-  return row ? { id: row.id, text: row.text, createdAt: row.created_at } : null;
+  return row ? {
+    id: row.id,
+    text: row.text,
+    createdAt: row.created_at,
+    ...(row.speaker_agent_id ? { speakerAgentId: row.speaker_agent_id } : {}),
+  } : null;
 }
 
 /** Result presentation is a typed ledger fact, independent of model text and schema migrations. */
@@ -1103,13 +1119,14 @@ export function appendInvocationAssistantResult(p: {
   text: string;
   goalId?: string | null;
   runId?: string | null;
+  speakerAgentId?: string;
   options?: ChatMessageAppendOptions;
 }): ChatHistoryEntry {
   const activeGoalId = getChat(p.chatId)?.goalId ?? null;
   const hasExactInvocation = Boolean(p.goalId && p.runId && activeGoalId === p.goalId);
   const hasDisplayMetadata = Object.keys(p.options ?? {}).length > 0;
   if (hasExactInvocation && !hasDisplayMetadata) {
-    const existing = getDb().prepare(`SELECT m.id, m.created_at
+    const existing = getDb().prepare(`SELECT m.id, m.created_at, m.speaker_agent_id
       FROM chat_messages m
       WHERE m.chat_id = ? AND m.role = 'assistant' AND m.text = ? AND m.host_notice_json IS NULL
         AND NOT EXISTS (SELECT 1 FROM chat_message_attachments a WHERE a.message_id = m.id)
@@ -1123,7 +1140,7 @@ export function appendInvocationAssistantResult(p: {
         )
       ORDER BY m.rowid DESC LIMIT 1`).get(
         p.chatId, p.text, p.runId, p.goalId, p.runId,
-      ) as {id: string; created_at: string} | undefined;
+      ) as {id: string; created_at: string; speaker_agent_id: string | null} | undefined;
     if (existing) {
       return {
         id: existing.id,
@@ -1131,12 +1148,14 @@ export function appendInvocationAssistantResult(p: {
         goalResult: storedGoalResults(p.chatId, [existing.id]).get(existing.id)
           ?? { goalId: p.goalId!, runId: p.runId!, status: "pending" },
         role: "assistant",
+        ...(existing.speaker_agent_id ? { speakerAgentId: existing.speaker_agent_id } : {}),
         text: p.text,
         createdAt: existing.created_at,
       };
     }
   }
-  const entry = appendChatMessage(p.chatId, "assistant", p.text, p.options);
+  const entry = appendChatMessage(p.chatId, "assistant", p.text,
+    { ...p.options, ...(p.speakerAgentId ? { speakerAgentId: p.speakerAgentId } : {}) });
   if (!hasExactInvocation) return entry;
   return bindGoalResultMessageId({ chatId: p.chatId, messageId: entry.id, goalId: p.goalId!, runId: p.runId! })
     ? { ...entry, goalResult: { goalId: p.goalId!, runId: p.runId!, status: "pending" } }
@@ -1183,8 +1202,8 @@ function legacyGoalResults(chatId: string, messageIds: string[]): Map<string, Go
 export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[] {
   const rows = getDb()
     .prepare(
-      `SELECT id, role, text, created_at, host_notice_json FROM (
-         SELECT id, role, text, created_at, host_notice_json
+      `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id FROM (
+         SELECT id, role, text, created_at, host_notice_json, speaker_agent_id
            FROM chat_messages
           WHERE chat_id = ?
             AND NOT (role = 'user' AND instr(text, ?) > 0)
@@ -1193,6 +1212,38 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
        ) ORDER BY created_at ASC`,
     )
     .all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER, limit) as MessageRow[];
+  return projectChatMessageRows(chatId, rows);
+}
+
+/** Stable keyset pagination; the extra row only establishes whether older rows exist. */
+export function listChatMessagesPage(
+  chatId: string,
+  limit: number,
+  before?: { id: string; createdAt: string },
+): { messages: ChatHistoryEntry[]; hasOlder: boolean } {
+  if (!Number.isInteger(limit) || limit < 1 || limit > 200) throw new TypeError("Invalid history page limit");
+  const db = getDb();
+  if (before && !db.prepare(
+    `SELECT 1 FROM chat_messages WHERE chat_id = ? AND id = ? AND created_at = ?
+      AND NOT (role = 'user' AND instr(text, ?) > 0)`,
+  ).get(chatId, before.id, before.createdAt, LEGACY_FIRM_SYNTHESIS_MARKER)) {
+    throw new TypeError("History cursor no longer matches this chat; reload the newest page");
+  }
+  const rows = db.prepare(
+    `SELECT id, role, text, created_at, host_notice_json, speaker_agent_id
+       FROM chat_messages
+      WHERE chat_id = ? AND NOT (role = 'user' AND instr(text, ?) > 0)
+        ${before ? "AND (created_at < ? OR (created_at = ? AND id < ?))" : ""}
+      ORDER BY created_at DESC, id DESC LIMIT ?`,
+  ).all(chatId, LEGACY_FIRM_SYNTHESIS_MARKER,
+    ...(before ? [before.createdAt, before.createdAt, before.id] : []), limit + 1) as MessageRow[];
+  return {
+    messages: projectChatMessageRows(chatId, rows.slice(0, limit).reverse()),
+    hasOlder: rows.length > limit,
+  };
+}
+
+function projectChatMessageRows(chatId: string, rows: MessageRow[]): ChatHistoryEntry[] {
   const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
   const goalResults = storedGoalResults(chatId, rows.filter((row) => row.role === "assistant").map((row) => row.id));
   const legacyResults = legacyGoalResults(chatId, rows.filter((row) => row.role === "assistant" && !goalResults.has(row.id)).map((row) => row.id));
@@ -1204,6 +1255,7 @@ export function listChatMessages(chatId: string, limit = 200): ChatHistoryEntry[
       ...(r.role === "assistant" && (goalResults.get(r.id) ?? legacyResults.get(r.id))
         ? { goalResult: goalResults.get(r.id) ?? legacyResults.get(r.id) } : {}),
       role: r.role,
+      ...(r.role === "assistant" && r.speaker_agent_id ? { speakerAgentId: r.speaker_agent_id } : {}),
       text: r.text,
       createdAt: r.created_at,
       ...(hostNotice ? { hostNotice } : {}),

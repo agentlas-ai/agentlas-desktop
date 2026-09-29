@@ -22,7 +22,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 125;
+const SCHEMA_VERSION = 126;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6761,6 +6761,17 @@ export function initStore(options: StoreInitOptions = {}): void {
         _db!.exec(`ALTER TABLE long_runs ADD COLUMN host_owner_kind TEXT NOT NULL DEFAULT 'desktop'
           CHECK(host_owner_kind IN ('desktop','daemon','hosted'))`);
         _db!.exec("UPDATE long_runs SET host_owner_kind = 'hosted' WHERE execution_location = 'web-hosted'");
+      }
+    })();
+  }
+
+  // v126: an assistant row records the installed agent that actually wrote it.
+  // Older rows remain unknown; a room's current occupant cannot author history.
+  if (userVersion < 126 && tableExists(_db, "chat_messages")) {
+    _db.transaction(() => {
+      const columns = new Set(schemaColumns(_db!, "chat_messages").map((column) => column.name));
+      if (!columns.has("speaker_agent_id")) {
+        _db!.exec("ALTER TABLE chat_messages ADD COLUMN speaker_agent_id TEXT");
       }
     })();
   }

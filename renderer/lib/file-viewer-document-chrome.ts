@@ -1,4 +1,5 @@
 import { findFileViewerZoomProvider, type FileViewerZoomState } from "@file-viewer/core";
+import { markUncachedFormulas } from "./table-data";
 import {
   renderFileViewerSpreadsheet,
   spreadsheetRenderer,
@@ -430,6 +431,13 @@ export const agentlasSpreadsheetRenderer = {
       };
       target.addEventListener(SPREADSHEET_CELL_EVENT, handleCell);
       try {
+        // openpyxl·pandas 가 쓴 xlsx 는 수식 칸에 계산값이 없어 격자가 0 을 그렸다(가짜 숫자). 그 칸만 수식 글자
+        // (=SUM(…)) 또는 "값 없음(수식)" 으로 바꾼 사본을 그린다. xlsx 가 아니거나 고칠 것이 없으면 원본 그대로.
+        if (buffer instanceof ArrayBuffer && buffer.byteLength <= MAX_FORMULA_WORKBOOK_BYTES) {
+          const ko = (target.ownerDocument.documentElement.lang || "").toLowerCase().startsWith("ko");
+          const patched = await markUncachedFormulas(buffer, ko).catch(() => null);
+          if (patched) args[0] = patched as typeof args[0];
+        }
         const rendered = await renderFileViewerSpreadsheet(...args);
         if ("unmount" in rendered && typeof rendered.unmount === "function") {
           const originalUnmount = rendered.unmount.bind(rendered);

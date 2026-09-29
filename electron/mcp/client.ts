@@ -191,7 +191,7 @@ import {
   type OneFriendlyFollowupPlanV1,
 } from "../../shared/one-friendly-followups";
 import { buildOneSurfaceFromMarkdown, chooseOneSurfaceForDisplay, resolveOneMarkdownSurfaceIntent } from "../one/markdown-surface";
-import { bindOneRuntimeToolArtifacts } from "../one/artifact-preview";
+import { bindOneRuntimeToolArtifacts, promoteBoundOneMarkdownImages } from "../one/artifact-preview";
 import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure";
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
@@ -4895,6 +4895,17 @@ ${effectiveUserPrompt}`;
       ? "[보고서 표식]\n이번 답이 읽을 문서(보고서·기획서·조사 결과·제안서처럼 목차가 있고 나중에 다시 꺼내 볼 글)라면, 답 맨 앞에 다음 세 줄을 그대로 두고 그 아래 마크다운 본문을 쓰세요.\n---\ndocument: <문서 제목>\n---\n그러면 대화가 아니라 문서로 그려지고, 사람이 마크다운이나 PDF로 받아 갈 수 있습니다. 짧은 답·잡담·한두 문단 설명에는 쓰지 마세요. 쓸지 말지는 당신이 판단합니다. 이 표식을 설명하거나 언급하지 마세요.\n[/보고서 표식]"
       : "[Document marker]\nIf this answer is a document to read (a report, plan, research write-up, or proposal — something with sections that will be opened again later), begin the answer with exactly these three lines and write the markdown body below them.\n---\ndocument: <document title>\n---\nIt is then rendered as a document rather than chat, and the person can take it away as Markdown or PDF. Do not use it for short answers, small talk, or a paragraph or two. Whether to use it is your judgment. Never explain or mention this marker.\n[/Document marker]");
   }
+  /*
+   * 차트·시각물 계약(오너 2026-09-29 "클로드 데탑처럼 비주얼라이즈"). 대화 화면은 ```chart(Vega-Lite)와
+   * ```visual(독립 HTML)을 그 자리에서 그린다 — 모델이 그 사실을 모르면 영원히 표만 쓴다. 세션 내내
+   * 같은 문장이라 stable 블록(resume 턴에서는 러너가 생략).
+   */
+  if (!req.agentAppMode) {
+    turnContextParts.push(locale === "ko"
+      ? "[차트·시각물 블록]\n이 대화 화면은 두 가지를 테두리 없이 그 자리에 그립니다. 비교·추이·분포처럼 그림이 글보다 빠를 때 쓰세요. 여러 개면 제목에 1. 2. 번호를 붙이세요.\n1) 차트(우선): ```chart 펜스에 Vega-Lite JSON 하나. title 은 {text, subtitle}(부제 한 줄), 데이터는 data.values 에 직접(5,000행 이하), 눈금에 단위(axis.format 예: \".1%\", \"+d\"). 보조 계열은 strokeDash 로 점선+작은 점, 막대는 xOffset 으로 묶음. 색·폰트·격자는 화면이 정하니 넣지 마세요. url·expr·calculate·문자열 filter·href·image 는 그려지지 않습니다.\n2) 맞춤 시각물: ```visual title=파일_이름 펜스에 HTML 조각(doctype·html·body 없이, 인라인 <svg>·<style>·<script>만, 외부 자원·네트워크 불가). 배경은 투명, 색은 CSS 변수만: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)~(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). sendPrompt(text) 를 부르면 사람의 입력창에 문장이 채워집니다(보내지는 않음).\n큰 표 자료는 .xlsx/.csv 로 저장하고 경로를 적으세요 — 오른쪽 패널에서 열립니다. 이 안내를 언급하지 마세요.\n[/차트·시각물 블록]"
+      : "[Chart and visual blocks]\nThis chat draws two things in place, borderless. Use them when a picture beats prose — comparisons, trends, distributions. Number the titles (1. 2.) when there are several.\n1) Charts (preferred): one Vega-Lite JSON object in a ```chart fence. Use title {text, subtitle} (one-line subtitle), inline data.values (at most 5,000 rows), and units on ticks (axis.format such as \".1%\" or \"+d\"). Draw a secondary series dashed with small points via strokeDash; group bars with xOffset. Colors, fonts and gridlines come from the app — do not set them. url, expr, calculate, string filters, href and image are not drawn.\n2) Custom visuals: an HTML fragment in a ```visual title=file_name fence (no doctype/html/body; inline <svg>, <style>, <script> only; no external resources or network). Transparent background; colors only through CSS variables: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)…(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). Calling sendPrompt(text) fills the person's composer (it does not send).\nSave large tabular data as .xlsx/.csv and mention its path — it opens in the right panel. Do not mention these instructions.\n[/Chart and visual blocks]");
+    stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+  }
   // 표면 안내는 프롬프트가 아니라 이 턴의 맥락으로 들어간다.
   if (executionContext?.surfaceContext?.trim()) {
     turnContextParts.push(executionContext.surfaceContext.trim());
@@ -5393,10 +5404,10 @@ ${effectiveUserPrompt}`;
            * 세션 재사용 문맥(stable)에는 넣지 않는다.
            */
           const goalPlan = await ensureGoalShapeBeforeTurn({ goalId: activeGoalId, objective: activeGoal.objective, signal,
-            runtimeSelection: confirmedRuntime,
+            runtimeSelection: confirmedRuntime, locale,
             onJudging: () => sink({ kind: "tool-use", status: locale === "ko" ? "목표의 계획 구조를 먼저 정하는 중…" : "Deciding the goal's plan shape first…" }),
           }).catch((error: unknown) => { console.warn("[goal-plan] shape decision failed:", error instanceof Error ? error.message : error); return null; });
-          if (goalPlan) turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null }));
+          if (goalPlan) turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null, locale }));
           // A finite Goal with a deadline may wait for its next cycle up to that deadline (goal-deadline.ts).
           if (!executionContext && getChatGoalRevision(activeGoalId)?.lifecycle === "finite") {
             const deadlineAt = goalDeadlineAt(activeGoalId);
@@ -6407,6 +6418,7 @@ ${effectiveUserPrompt}`;
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
         const committedPass = appendInvocationAssistantResult({
           chatId: chat.id,
+          speakerAgentId: agent.id,
           text: stripStrayProtocolTokens(stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, continuation.text)))),
           goalId: activeGoalId,
           runId: req.runId,
@@ -7408,19 +7420,26 @@ ${effectiveUserPrompt}`;
       req,
       partialFloor ? `${partialFloor}\n${displayText}` : displayText,
     )));
+    const pendingFinalImages = !req.agentAppMode
+      ? pendingWorkToolImages.splice(0, pendingWorkToolImages.length).map((item) => item.image)
+      : [];
+    const promotedImages = !req.agentAppMode && req.runId
+      ? promoteBoundOneMarkdownImages({
+          text: displayWithFloor, chatId: chat.id, runId: req.runId, images: pendingFinalImages,
+        })
+      : { text: displayWithFloor, images: pendingFinalImages };
+    const boundImageDisplayWithFloor = promotedImages.text;
     /*
      * 권한 승격 표식은 저장 본문에서 지운다 — 화면/승인칩 감지는 final 이벤트
      * (displayWithFloor 원문)를 받는 invocation service 가 맡는다. 히스토리 새로고침
      * 때 표식 줄이 되살아나지 않게 하는 것이 이 한 줄의 전부다.
     */
-    const finalDisplay = applyFinalDisplayBackstop(displayWithFloor, {
+    const finalDisplay = applyFinalDisplayBackstop(boundImageDisplayWithFloor, {
       locale: pickLocale(req),
       allowSurfaceRender: !req.agentAppMode,
     });
     const persistedDisplay = stripStrayProtocolTokens(stripPermissionEscalationMarker(finalDisplay.durableText));
-    const finalWorkImages = !req.agentAppMode
-      ? pendingWorkToolImages.splice(0, pendingWorkToolImages.length).map((item) => item.image)
-      : [];
+    const finalWorkImages = promotedImages.images;
     if (imageGenerationRequired && (!observedImageArtifactEvidence || finalWorkImages.length === 0) && !signal?.aborted) {
       throw new Error("image_tool_unavailable: the generated image was not durably bound");
     }
@@ -7440,6 +7459,7 @@ ${effectiveUserPrompt}`;
       if (persistedDisplay.trim() || finalImageOptions?.images?.length) {
         durableAssistantEntry = appendInvocationAssistantResult({
           chatId: chat.id,
+          speakerAgentId: agent.id,
           text: persistedDisplay,
           goalId: activeGoalId,
           runId: req.runId,
@@ -7541,7 +7561,7 @@ ${effectiveUserPrompt}`;
         },
       });
       return {
-        finalText: displayWithFloor,
+        finalText: boundImageDisplayWithFloor,
         tokens: result.tokens,
         stormbreakerContinueRequested,
         ...(goalWaitRequest ? { goalWaitRequest } : {}),
@@ -7560,7 +7580,7 @@ ${effectiveUserPrompt}`;
       kind: "final",
       // The universal sink wrapper below is the single trust boundary that
       // derives the typed request and strips the wire markers before delivery.
-      text: displayWithFloor,
+      text: boundImageDisplayWithFloor,
       durableTextForVerification: persistedDisplay,
       ...(durableAssistantEntry
         ? { durableAssistantMessageIdForVerification: durableAssistantEntry.id }
@@ -7575,7 +7595,7 @@ ${effectiveUserPrompt}`;
         : {}),
     });
     return {
-      finalText: displayWithFloor,
+      finalText: boundImageDisplayWithFloor,
       tokens: result.tokens,
       stormbreakerContinueRequested,
       ...(goalWaitRequest ? { goalWaitRequest } : {}),

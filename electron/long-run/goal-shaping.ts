@@ -46,6 +46,7 @@ import {
 import { getChatGoalRevision } from "../store/chat-goals";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { ownsHostGoalLoop } from "./host-goal-surface";
+import { currentUiLocale } from "../ui-locale";
 
 export const GOAL_SHAPE_TIMEOUT_MS = 60_000;
 /** 폴백 뒤 재판단 상한 — 넘으면 6시간에 한 번만 다시 묻는다(매 턴 60초 지연 방지). */
@@ -57,8 +58,21 @@ export const SINGLE_TACTIC_PROMOTION_FAILURES = 2;
 export type GoalShapeModelCall = (opts: Parameters<typeof callConnectedModelDetailed>[0]) =>
   Promise<{ text: string | null; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[]; failure?: { kind?: string; message?: string } }>;
 
-export function goalShapeSystemPrompt(): string {
+/**
+ * The language of every owner-visible text field of the plan tree. Owner 2026-09-28: the goal panel showed
+ * English strategic/sub-goal text, methods and done_when in Korean rooms because the planner always wrote
+ * English. Ids, enum values and JSON keys stay English (machine), owner quotes stay verbatim.
+ */
+export function goalPlanTextLanguageRule(locale: "ko" | "en"): string {
+  return locale === "ko"
+    ? "Language: write every human-readable text field — rationale, mission.objective, mission.diagnosis, key_results metric and unit, strategies hypothesis and kpi, tactics description and done_when, boundaries text — in Korean (한국어), whatever language the goal or the evidence is in. Keep ids (t1, s1), enum values (shape, problem_nature, kind, source), JSON keys and ISO durations in English; a boundary quote stays an exact substring of the owner's text."
+    : "Language: write every human-readable text field — rationale, mission.objective, mission.diagnosis, key_results metric and unit, strategies hypothesis and kpi, tactics description and done_when, boundaries text — in English. Keep ids, enum values and JSON keys as specified; a boundary quote stays an exact substring of the owner's text.";
+}
+
+export function goalShapeSystemPrompt(locale: "ko" | "en" = "en"): string {
   return [
+    goalPlanTextLanguageRule(locale),
+    "",
     "You are the planning lead for an autonomous agent. BEFORE any work starts, decide the SHAPE of the plan for the owner's goal.",
     "The domain can be anything: software, money, marketing, a game, a reminder, research. Never assume a domain.",
     "",
@@ -122,6 +136,10 @@ export async function judgeGoalShape(input: {
    * from this decomposition (shared/goal-rollup.ts), so an unshaped Goal would never get its own checklist.
    */
   runtimeSelection?: RuntimeSelection;
+  /** The owner pressed "나누기" in the goal panel: decompose this goal into a structured plan. */
+  ownerRequest?: boolean;
+  /** The owner's app locale; the plan's text fields are written in it. Default: the app UI locale. */
+  locale?: "ko" | "en";
 }): Promise<GoalShapeJudgment> {
   const started = Date.now();
   const fail = (reason: string, extra: Partial<GoalShapeJudgment> = {}): GoalShapeJudgment => ({
@@ -135,11 +153,12 @@ export async function judgeGoalShape(input: {
     owner_text: input.ownerText,
     ...(input.priorFacts ? { previous_attempt: input.priorFacts,
       instruction: "The previous plan shape failed in practice. Decompose further only where it failed; a larger shape is allowed." } : {}),
+    ...(input.ownerRequest ? { owner_request: "The owner asked to break this goal into a structured plan: sub-goals, and strategic goals if the problem is complex. Keep the owner's intent exactly; choose the shape by the rules above." } : {}),
   });
   let detailed: Awaited<ReturnType<GoalShapeModelCall>>;
   try {
     detailed = await (input.callModel ?? callConnectedModelDetailed)({
-      systemPrompt: goalShapeSystemPrompt(),
+      systemPrompt: goalShapeSystemPrompt(input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en")),
       input: payload,
       timeoutMs: input.timeoutMs ?? GOAL_SHAPE_TIMEOUT_MS,
       signal: input.signal,
@@ -201,6 +220,13 @@ export async function ensureGoalShapeBeforeTurn(input: {
   selectionPolicy?: ReturnType<typeof configuredOrchestratorJudgmentPolicy>;
   runtimeSelection?: RuntimeSelection;
   onJudging?: () => void;
+  /**
+   * The owner asked for a decomposition from the goal panel ("나누기"). An unshaped, provisional or single-tactic plan is
+   * judged again now (no cooldown); a structured plan is left alone.
+   */
+  ownerRequested?: boolean;
+  /** The owner's app locale for the plan's text fields (One turns pass the reply locale). */
+  locale?: "ko" | "en";
 }): Promise<LiveGoalPlan | null> {
   const run = getLongRunByGoalId(input.goalId);
   if (!run || !ownsHostGoalLoop(run.surface)) return null;
@@ -216,9 +242,12 @@ export async function ensureGoalShapeBeforeTurn(input: {
     const failedRetries = listGoalPlanDecisions(input.goalId, { revision, planSeq: existing.planSeq, kind: "reshape_requested", limit: 50 })
       .filter((row) => row.payload.reason === "shape_retry_failed");
     const lastRetry = failedRetries[0] ? Date.parse(failedRetries[0].createdAt) : Date.parse(existing.createdAt);
-    if (failedRetries.length < GOAL_SHAPE_FALLBACK_RETRIES || nowMs - lastRetry >= FALLBACK_RETRY_COOLDOWN_MS) {
-      trigger = "fallback_retry";
+    if (input.ownerRequested || failedRetries.length < GOAL_SHAPE_FALLBACK_RETRIES || nowMs - lastRetry >= FALLBACK_RETRY_COOLDOWN_MS) {
+      trigger = input.ownerRequested ? "owner_requested" : "fallback_retry";
     }
+  } else if (input.ownerRequested && existing.shape === "single_tactic") {
+    trigger = "owner_requested";
+    priorFacts = tacticFacts(existing);
   } else {
     const promotion = listGoalPlanDecisions(input.goalId, { revision, planSeq: existing.planSeq, kind: "reshape_requested", limit: 5 })
       .find((row) => row.payload.reason === "single_tactic_failed_twice");
@@ -227,7 +256,9 @@ export async function ensureGoalShapeBeforeTurn(input: {
   if (!trigger) return existing;
   input.onJudging?.();
   const judgment = await judgeGoalShape({ objective: input.objective, ownerText, createdAt, priorFacts, signal: input.signal,
-    callModel: input.callModel, selectionPolicy: input.selectionPolicy, runtimeSelection: input.runtimeSelection });
+    callModel: input.callModel, selectionPolicy: input.selectionPolicy, runtimeSelection: input.runtimeSelection,
+    ...(input.locale ? { locale: input.locale } : {}),
+    ...(input.ownerRequested ? { ownerRequest: true } : {}) });
   if (judgment.ok && judgment.plan) {
     return saveGoalPlan({ goalId: input.goalId, revision, plan: judgment.plan, fallback: false,
       receipt: { ...judgmentReceipt(judgment, trigger), ownerText: ownerText.slice(0, 2000), rawText: judgment.rawText }, createdAt });
@@ -243,6 +274,12 @@ export async function ensureGoalShapeBeforeTurn(input: {
 }
 
 // ── 턴 문맥 ──────────────────────────────────────────────────────────────────
+
+/** Open sub-goals held only by the owner's explicit branch pause (goal panel). */
+export function ownerPausedOpen(plan: LiveGoalPlan): LiveTactic[] {
+  const paused = new Set(plan.strategies.filter((s) => s.ownerPaused && s.status !== "retired").map((s) => s.id));
+  return plan.tactics.filter((t) => (t.status === "active" || t.status === "proposed") && (t.ownerPaused || (t.strategy_id !== null && paused.has(t.strategy_id))));
+}
 
 function utcDay(iso: string): string { return iso.slice(0, 10); }
 
@@ -287,7 +324,7 @@ function guidanceLine(tactic: LiveTactic): string | null {
 /**
  * 계획을 턴 문맥 한 절로(R9: 활성 전술만). 선택한 전술의 발송 영수증과, 트리면 리뷰 영수증을 남긴다.
  */
-export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: number; runId?: string | null; record?: boolean } = {}): string {
+export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: number; runId?: string | null; record?: boolean; locale?: "ko" | "en" } = {}): string {
   const nowMs = input.nowMs ?? Date.now();
   const tactics = selectActiveTactics(plan, { nowMs, dispatchesToday: dispatchesToday(plan, nowMs) });
   const strategyOf = (id: string | null) => plan.strategies.find((s) => s.id === id) ?? null;
@@ -326,6 +363,9 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: nu
       if (later.length) lines.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})${t.guidance?.move === "switch_tool" && t.guidance.path
         ? ` [host: use the installed alternative "${t.guidance.path}" for this tactic; the previous path failed]` : ""}`).join(" | ")}`);
     }
+  } else if (ownerPausedOpen(plan).length) {
+    // Only the owner's explicit branch pause holds these; they are open leaves, so the goal is not done.
+    lines.push(`The remaining sub-goals (${ownerPausedOpen(plan).map((t) => t.id).join(", ")}) are paused by the owner. Do not work on them and do not claim the goal is complete; report briefly and end this turn.`);
   } else {
     lines.push("Every planned tactic is done or retired. Verify the goal's acceptance criteria; if work remains, add a tactic with an add_tactic plan-op.");
   }
@@ -339,6 +379,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: nu
   lines.push('- Plan changes: <<agentlas-plan-op>>{"op":"replace_tactic","id":"t1","with":[{"description":"...","done_when":"..."}]} · {"op":"add_tactic","strategy_id":"s1","description":"...","done_when":"..."}' +
     (plan.shape === "mission_tree" ? ' · {"op":"retire_strategy","id":"s2","evidence":"..."} · {"op":"add_strategy","hypothesis":"...","serves_krs":["kr id"],"kpi":"...","timebox_hours":72,"tactics":[{"description":"...","done_when":"..."}]}' : ""));
   lines.push("Do not invent caps or pacing limits; only the mission boundaries and the goal's permissions limit you.");
+  lines.push(`Plan-op text (description, done_when, hypothesis, kpi, evidence) is shown to the owner: write it in ${(input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en")) === "ko" ? "Korean" : "English"}; ids and op names stay as above.`);
   if (input.record !== false) {
     if (tactics.length) {
       recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", createdAt: new Date(nowMs).toISOString(),
@@ -360,6 +401,7 @@ export function goalPlanContinuationNote(goalId: string, nowMs = Date.now()): st
   const plan = readGoalPlan(goalId);
   if (!plan) return null;
   const next = selectActiveTactics(plan, { nowMs, dispatchesToday: dispatchesToday(plan, nowMs) });
+  if (!next.length && ownerPausedOpen(plan).length) return "Goal plan: the remaining sub-goals are paused by the owner — do not work on them and do not claim completion.";
   if (!next.length) return "Goal plan: every planned tactic is done or retired — verify the acceptance criteria before claiming completion.";
   return `Goal plan — next tactic: ${next.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})`).join(" | ")}. Emit the tactic marker when it is done.`;
 }

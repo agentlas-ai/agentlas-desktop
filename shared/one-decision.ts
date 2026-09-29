@@ -1,9 +1,23 @@
 import { redactSecrets } from "./secret-patterns";
 import type { PendingConfirmation } from "./types";
 
+/** Shared bounded budget for Desktop and Mobile resident decision review. */
+export const ONE_DECISION_JUDGE_TIMEOUT_MS = 60_000;
+
 export const ONE_DECISION_CONTRACT_VERSION = "1.0.0" as const;
 export const ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION = "2.0.0" as const;
+export const ONE_DECISION_OTHER_ANSWER_CONTRACT_VERSION = "3.0.0" as const;
+export const ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION = "4.0.0" as const;
 export const ONE_DECISION_PRODUCT_SAFE_REJECT_REPLY = "Reject. Do not take the proposed action." as const;
+
+/** V3 is a single-line, exact-text answer. No client or host rewrites its contents. */
+export function isOneDecisionOtherText(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length >= 1
+    && value.length <= 500
+    && value === value.trim()
+    && !/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/u.test(value);
+}
 
 export type OneDecisionRiskLevel = "R0" | "R1" | "R2" | "R3" | "R4";
 export type OneDecisionRiskCertainty = "inferred" | "ambiguous";
@@ -429,6 +443,17 @@ export function oneDecisionMultiSelectableIndexes(view: OneDecisionViewV1): numb
       && option.disposition !== "reject"
       && option.disposition !== "modify")
     .map((option) => option.index);
+}
+
+/** Offer typed answers only for a judged question with no granting option. */
+export function oneDecisionOtherAnswerAllowed(
+  view: OneDecisionViewV1,
+  readiness: OneDecisionAuthorityReadiness | null,
+): boolean {
+  return (view.risk.level === "R0" || view.risk.level === "R1")
+    && view.risk.certainty === "inferred"
+    && readiness === "ready"
+    && view.options.every((option) => !option.grantsAuthority);
 }
 
 export function isPendingConfirmationSnoozed(confirmation: Pick<PendingConfirmation, "snoozedUntil">, now = Date.now()): boolean {

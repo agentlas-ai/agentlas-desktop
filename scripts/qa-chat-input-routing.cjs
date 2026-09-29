@@ -96,9 +96,21 @@ async function main() {
     page.setDefaultTimeout(30_000);
     await page.setViewportSize({ width: 1320, height: 920 }).catch(() => undefined);
     await page.waitForLoadState("domcontentloaded");
-    await page.waitForFunction(() => Boolean(window.agentlas));
+    // Electron first paints a data: startup placeholder while the app opens its
+    // store. The preload bridge exists there too, but storage is unavailable;
+    // wait until the real agentlas: renderer is loaded before seeding UI state.
+    await page.waitForFunction(() => Boolean(window.agentlas) && window.location.protocol !== "data:", { timeout: 60_000 });
     await page.evaluate((locale) => {
       window.localStorage.setItem("agentlas.locale", locale);
+      // QA uses an empty isolated account. Mark it as prior-use so the live
+      // first-run flow cannot cover the Work composer under test.
+      window.localStorage.setItem("agentlas.desktop.firstRun.v1:anonymous", JSON.stringify({
+        schema: 1,
+        audience: "existing",
+        steps: {},
+        completedAt: null,
+        updatedAt: new Date().toISOString(),
+      }));
     }, QA_LOCALE);
     // 전역 로그인 게이트(AuthGate) 우회 — QA user-data엔 세션이 없어 랜딩에 갇힌다.
     await app.evaluate(({ ipcMain }) => {
@@ -111,20 +123,27 @@ async function main() {
       }));
     });
     await page.reload({ waitUntil: "domcontentloaded" });
-    await page.waitForFunction(() => Boolean(window.agentlas));
+    await page.waitForFunction(() => Boolean(window.agentlas) && window.location.protocol !== "data:", { timeout: 60_000 });
     await page.evaluate((locale) => {
       try {
         window.localStorage.setItem("agentlas.onboarded", "1");
         window.localStorage.setItem("agentlas.featureUpdate.desktop-v0.8.13-ontology-chips.ack", "qa-suppressed");
         window.localStorage.setItem("agentlas.locale", locale);
+        window.localStorage.setItem("agentlas.desktop.firstRun.v1:anonymous", JSON.stringify({
+          schema: 1,
+          audience: "existing",
+          steps: {},
+          completedAt: null,
+          updatedAt: new Date().toISOString(),
+        }));
       } catch {
         // Some transient Electron documents deny storage; the visible onboarding
         // skip button below covers that first-run path.
       }
-      window.location.href = "/chat";
+      window.location.href = "/workspace/task";
     }, QA_LOCALE);
     await Promise.race([
-      page.waitForFunction(() => location.pathname.includes("/chat")),
+      page.waitForFunction(() => location.pathname.includes("/workspace/task")),
       page.waitForFunction(() => location.pathname.includes("/onboarding")),
     ]);
     if (new URL(page.url()).pathname.includes("/onboarding")) {
@@ -138,9 +157,9 @@ async function main() {
         } catch {
           // Continue; the skip action already persisted onboarding state.
         }
-        window.location.href = "/chat";
+        window.location.href = "/workspace/task";
       }, QA_LOCALE);
-      await page.waitForFunction(() => location.pathname.includes("/chat"));
+      await page.waitForFunction(() => location.pathname.includes("/workspace/task"));
     }
     await app.evaluate(({ ipcMain }) => {
       globalThis.__qaRouting = { routeCalls: 0, runs: [], cancels: [] };
@@ -228,9 +247,9 @@ async function main() {
     }, { grants, qaLocale: QA_LOCALE });
 
     await page.evaluate((chatId) => {
-      window.location.href = `/chat?id=${chatId}`;
+      window.location.href = `/workspace/task?id=${chatId}`;
     }, setup.chat.id);
-    await page.waitForFunction(() => location.pathname.includes("/chat"));
+    await page.waitForFunction(() => location.pathname.includes("/workspace/task"));
     await page.waitForSelector('[data-chat-input="true"]');
 
     const textarea = page.locator('[data-chat-input="true"]');
@@ -263,6 +282,35 @@ async function main() {
       `Mouse hover should keep the targeted row active: ${JSON.stringify(activeRows)}`,
     );
     await page.screenshot({ path: path.join(SHOTS, "01-autocomplete-stable.png"), fullPage: true });
+
+    // Focused mode still runs the real Electron shell and opens the compact
+    // composer popover, but stops before unrelated task-panel resize gates.
+    await page.keyboard.press("Escape");
+    await textarea.fill("");
+    const plusButton = page.locator('[data-chat-plus-button="true"]').first();
+    const plusMenu = page.locator('[data-popover-kind="plus-menu"]');
+    await plusButton.click();
+    await plusMenu.waitFor({ state: "visible" });
+    await page.screenshot({ path: path.join(SHOTS, "06-compact-plus-menu.png"), fullPage: true });
+    const initialMenuFocus = await page.evaluate(() => ({
+      role: document.activeElement?.getAttribute("role"),
+      label: (document.activeElement?.textContent || "").replace(/\s+/g, " ").trim(),
+    }));
+    assert.ok(initialMenuFocus.role?.startsWith("menuitem"), "opening + must place keyboard focus in its menu");
+    await page.keyboard.press("End");
+    const lastMenuItem = await page.evaluate(() => ({
+      role: document.activeElement?.getAttribute("role"),
+      label: (document.activeElement?.textContent || "").replace(/\s+/g, " ").trim(),
+    }));
+    assert.ok(lastMenuItem.role?.startsWith("menuitem"), "End must focus the final menu option");
+    assert.match(lastMenuItem.label, /Agent|에이전트/, "End must reach the agent selection action");
+    await page.keyboard.press("Escape");
+    await plusMenu.waitFor({ state: "hidden" });
+    assert.equal(await plusButton.evaluate((button) => button === document.activeElement), true, "Escape must restore focus to +");
+    if (process.env.AGENTLAS_QA_POPUP_ONLY === "1") {
+      console.log(`Composer popup QA ok. Screenshot: ${path.join(SHOTS, "06-compact-plus-menu.png")}`);
+      return;
+    }
 
     const sidebar = page.locator("[data-tour-id='workspace.sidebar']").first();
     const sidebarBefore = await sidebar.boundingBox();

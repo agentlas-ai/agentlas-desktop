@@ -2543,6 +2543,51 @@ export function selectLocalPlannerRepair(input: {
 }
 
 /**
+ * The owner-facing body when a task force run did not pass verification.
+ * Owner Youtube launch 2026-09-28 13:24Z (run c50e8c87): four members worked, one
+ * reported a blocker (blocking_remaining:metrics_prep), and the owner read only
+ * "완료 검증이 통과하지 않아…" with nothing saying what was left. Each worker's own
+ * blocker sentence is named here (the unverified synthesis stays hidden).
+ */
+export function taskForceIncompleteMessage(input: {
+  locale: "ko" | "en";
+  incompleteWorkerNames: string[];
+  unclearedBlockers: Array<{ name: string; items: string[] }>;
+  requiredSurfaceMissing: boolean;
+}): string {
+  const ko = input.locale === "ko";
+  const blockerLines = input.unclearedBlockers
+    .filter((blocker) => blocker.items.length > 0)
+    .map((blocker) => `- ${blocker.name}: ${blocker.items.slice(0, 3).join(" / ").slice(0, 400)}`);
+  const blockerBlock = blockerLines.length > 0
+    ? `${ko ? "남은 막힘(담당자 보고):" : "Still blocking (as reported by each worker):"}\n${blockerLines.join("\n")}`
+    : "";
+  return ko
+    ? [
+        "이 작업은 아직 완료되지 않았습니다.",
+        input.incompleteWorkerNames.length > 0
+          ? `완료되지 않은 담당자: ${input.incompleteWorkerNames.join(", ")}`
+          : "완료 검증이 통과하지 않아 최종 결과로 확정하지 않았습니다.",
+        blockerBlock,
+        input.requiredSurfaceMissing
+          ? "요청한 결과 화면도 안전하게 확인되지 않았습니다."
+          : "같은 작업공간에서 남은 항목을 이어서 완료해야 합니다.",
+        "검증 전 종합문은 완성된 결과처럼 표시하지 않았습니다. 각 담당자의 구체적인 보고와 증거는 이 실행의 작업 기록에 남아 있습니다.",
+      ].filter(Boolean).join("\n\n")
+    : [
+        "This task is not complete yet.",
+        input.incompleteWorkerNames.length > 0
+          ? `Incomplete owners: ${input.incompleteWorkerNames.join(", ")}`
+          : "Completion verification did not pass, so this was not confirmed as a final result.",
+        blockerBlock,
+        input.requiredSurfaceMissing
+          ? "The requested result view was not safely verified either."
+          : "The remaining items must continue in the same shared workspace.",
+        "The unverified synthesis was not shown as a finished result. Each worker's detailed report and evidence remain in this run's activity record.",
+      ].filter(Boolean).join("\n\n");
+}
+
+/**
  * Deterministic host decision for packets whose planner omitted or garbled
  * workspaceAccess even after the bounded same-model repair.
  *
@@ -6669,6 +6714,8 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   });
   const workforce = p.workforceSelectionReceipt;
   const verifierIssues: string[] = [];
+  // What each worker said still blocks the result — shown to the owner when the run is not verified.
+  const unclearedBlockers: Array<{ name: string; items: string[] }> = [];
   if (!plan.parseSuccess) verifierIssues.push("planner_parse_failed");
   if (plan.fallbackUsed) verifierIssues.push("planner_fallback_used");
   for (const result of results) {
@@ -6700,7 +6747,10 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       TASK_FORCE_REVIEW_PACKET_RE.test(taskForcePacketSemanticText(executionPackets[candidateIndex])) &&
       dependsTransitively(candidateIndex, stepIds[index])
     ));
-    if (!clearedByLaterReview) verifierIssues.push(`blocking_remaining:${stepIds[index]}`);
+    if (!clearedByLaterReview) {
+      verifierIssues.push(`blocking_remaining:${stepIds[index]}`);
+      unclearedBlockers.push({ name: result.spec.name || result.spec.slug, items: result.blockingRemaining ?? [] });
+    }
   }
   if (!displayText.trim()) verifierIssues.push("empty_synthesis");
   if (requiredSurfaceMissing) verifierIssues.push("required_surface_missing");
@@ -6976,27 +7026,12 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       .filter((result) => !result.ok)
       .map((result) => result.spec.name)
       .filter(Boolean);
-    displayText = p.locale === "ko"
-      ? [
-          "이 작업은 아직 완료되지 않았습니다.",
-          incompleteWorkerNames.length > 0
-            ? `완료되지 않은 담당자: ${incompleteWorkerNames.join(", ")}`
-            : "완료 검증이 통과하지 않아 최종 결과로 확정하지 않았습니다.",
-          requiredSurfaceMissing
-            ? "요청한 결과 화면도 안전하게 확인되지 않았습니다."
-            : "같은 작업공간에서 남은 항목을 이어서 완료해야 합니다.",
-          "검증 전 종합문은 완성된 결과처럼 표시하지 않았습니다. 각 담당자의 구체적인 보고와 증거는 이 실행의 작업 기록에 남아 있습니다.",
-        ].join("\n\n")
-      : [
-          "This task is not complete yet.",
-          incompleteWorkerNames.length > 0
-            ? `Incomplete owners: ${incompleteWorkerNames.join(", ")}`
-            : "Completion verification did not pass, so this was not confirmed as a final result.",
-          requiredSurfaceMissing
-            ? "The requested result view was not safely verified either."
-            : "The remaining items must continue in the same shared workspace.",
-          "The unverified synthesis was not shown as a finished result. Each worker's detailed report and evidence remain in this run's activity record.",
-        ].join("\n\n");
+    displayText = taskForceIncompleteMessage({
+      locale: p.locale,
+      incompleteWorkerNames,
+      unclearedBlockers,
+      requiredSurfaceMissing: Boolean(requiredSurfaceMissing),
+    });
   }
   displayText = redactOneAttachmentText(p.req, displayText);
   for (let index = 0; index < oneTaskForceSurfaces.length; index += 1) {

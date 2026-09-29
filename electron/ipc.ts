@@ -1,10 +1,12 @@
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { goalActiveChatIds } from "./store/goal-active-chats";
 import { registerAutomationChatActivityIpc } from "./automation-chat-activity-ipc";
+import { registerGoalPanelIpc } from "./goal-panel-ipc";
 import { acknowledgeUncertainLongRunAttempts, getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { adoptExplicitGoalGrant } from "./long-run/explicit-goal-authority";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
+import { ONE_DECISION_JUDGE_TIMEOUT_MS } from "../shared/one-decision";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
 import { matchesGoalResumeReview } from "../shared/goal-resume-review";
 import { getGoalRuntimeSelection, requestGoalRuntimeSelection } from "./long-run/runtime-handoff";
@@ -1619,7 +1621,7 @@ export function registerIpcHandlers(): void {
   // the renderer supplies only labels, input, hint wordlists (reference only),
   // and its own deterministic fallback. No model → the fallback verdict comes
   // back labeled source:"fallback", never silently lexical.
-  const RENDERER_JUDGE_KINDS: Record<string, { question: string; guidance: string }> = {
+  const RENDERER_JUDGE_KINDS: Record<string, { question: string; guidance: string; maxTimeoutMs?: number }> = {
     "oberon-brief-format": {
       question: "Which film/video FORMAT does this production brief ask for? Pick exactly one listed format id.",
       guidance: "Judge the meaning in any language. A passing mention of a platform is not a format request.",
@@ -1652,6 +1654,7 @@ export function registerIpcHandlers(): void {
     // through the bridge and FAILS CLOSED (highest risk / approval required) when
     // no model answers; it never keyword-decides.
     "one-decision-risk": {
+      maxTimeoutMs: ONE_DECISION_JUDGE_TIMEOUT_MS,
       question:
         "How risky is the action this assistant decision request asks the user to authorize? " +
         "R0 read-only; R1 preparation/draft only; R2 limited reversible change (save, upload, install); " +
@@ -1662,6 +1665,7 @@ export function registerIpcHandlers(): void {
         "destroys, say R3/R4 even in a language no wordlist covers. Negated/hypothetical phrasing lowers it.",
     },
     "one-decision-disposition": {
+      maxTimeoutMs: ONE_DECISION_JUDGE_TIMEOUT_MS,
       question:
         "For this ONE decision option, does choosing it approve/execute the proposed action (approve), " +
         "refuse it (reject), ask to modify or narrow it first (modify), or merely pick among neutral " +
@@ -1671,6 +1675,7 @@ export function registerIpcHandlers(): void {
         "the action itself is a rejection.",
     },
     "one-decision-authority-readiness": {
+      maxTimeoutMs: ONE_DECISION_JUDGE_TIMEOUT_MS,
       question:
         "Does this One decision request contain enough human-readable detail for the user to knowingly choose an option that grants authority?",
       guidance:
@@ -6086,6 +6091,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
   // 대화에 딸린 자동화 — 실행 중 줄·보고 요약·오른쪽 "자동화" 탭. 원장(run_events)만 읽는다.
   registerAutomationChatActivityIpc();
+  // 목표 전용 패널(오른쪽 "목표" 탭) — 원장 읽기와 오너의 형식 있는 편집(오너 2026-09-28).
+  registerGoalPanelIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   // 승인은 사람의 결정이라 판정 모델 가용성과 무관하게 동작해야 한다. 결정은 가장 최근
   // 실행의 occurrence에 묶는다 — 승인 하나가 다음 실행까지 조용히 재사용되면 안 된다.
   ipcMain.handle(

@@ -12,6 +12,7 @@
  * attempt cap and the goal's daily cap are admitted before each call with a size estimate and charged with the
  * measured usage afterwards, also against the goal's Alive grant.
  */
+import { currentUiLocale } from "../ui-locale";
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import type { Runner, RunnerFailure } from "../runtime/runner";
@@ -196,7 +197,11 @@ export class AgiModelAttempt {
     let inputTokens = 0;
     let outputTokens = 0;
     const evidence = this.evidenceBlock(input.goalId, agiEvidenceReads(input));
-    let userPrompt = `## Blocker (host facts)\n${JSON.stringify(facts)}\n\n## Evidence (P2 read tools, capped and redacted)\n${evidence}\n\nRound 1 of 2.`;
+    // Plan text the owner sees in the goal panel (replan_tree split descriptions, ask text) follows the app locale.
+    const ownerLanguage = currentUiLocale() === "ko" ? "Korean" : "English";
+    let userPrompt = `## Blocker (host facts)\n${JSON.stringify(facts)}\n\n## Evidence (P2 read tools, capped and redacted)\n${evidence}`
+      + `\n\nOwner-visible text you write (replan_tree descriptions, ask_owner_once ask, dispatch brief) is in ${ownerLanguage}; ids, actions and codes stay English.`
+      + "\n\nRound 1 of 2.";
     const candidates = await Promise.resolve(d.candidates(input.goalId)).catch(() => [] as AgiModelCandidate[]);
     if (!candidates.length) { settle("refused", "agi.model.no-runtime"); return { attemptId, outcome: "failed", code: "agi.model.no-runtime" }; }
     let decision: Decision | null = null;

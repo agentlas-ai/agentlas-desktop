@@ -6,6 +6,7 @@ const { promisify } = require("node:util");
 const embeddedCoreContract = require("./embedded-core-contract.cjs");
 const { verifyStudioRuntime } = require("./studio-runtime-contract.cjs");
 const { verifyScienceRuntimePackage } = require("./science-runtime-package.cjs");
+const { verifyPackagedVerificationBoundary } = require("./runtime-verification-boundary.cjs");
 const {
   verifyProductExtensionSigningPolicyFile,
 } = require("./product-extension-signing-policy.cjs");
@@ -1019,6 +1020,8 @@ exports.default = async function afterPackClean(context) {
     typeof context.arch === "string" ? context.arch : require("builder-util").Arch[context.arch],
   );
   console.log(`[afterPack] verified Science runtime dependencies (${sciencePackage.platform}-${sciencePackage.arch})`);
+  const verificationBoundary = verifyPackagedVerificationBoundary(studioResources);
+  console.log(`[afterPack] verified nonruntime verification exclusions ${JSON.stringify(verificationBoundary)}`);
   await verifyStudioRuntime(path.join(studioResources, "studio-pack"));
   if (process.platform === "darwin" && context.electronPlatformName === "darwin") {
     try {

@@ -918,6 +918,7 @@ interface MobileOneArtifactCursor {
 
 interface MobileOneArtifactEventRow {
   event_rowid: number;
+  event_ts: string;
   payload_json: string;
 }
 
@@ -1003,7 +1004,7 @@ export function listRecentOneArtifactsForMobile(input: {
   const limit = Math.max(1, Math.min(100, Math.floor(Number(input.limit ?? 100))));
   const start = decodeMobileOneArtifactCursor(input.chatId, input.cursor);
   const eventRows = getDb().prepare(
-    `SELECT rowid AS event_rowid, payload_json
+    `SELECT rowid AS event_rowid, ts AS event_ts, payload_json
        FROM run_events
       WHERE chat_id = ? AND rowid >= ? AND instr(payload_json, '"oneArtifacts"') > 0
       ORDER BY rowid ASC
@@ -1027,6 +1028,9 @@ export function listRecentOneArtifactsForMobile(input: {
     const rows = eventRows.all(input.chatId, scanRowId, batchSize) as MobileOneArtifactEventRow[];
     if (rows.length === 0) break;
     for (const row of rows) {
+      const occurredAt = typeof row.event_ts === "string" && Number.isFinite(Date.parse(row.event_ts))
+        ? new Date(row.event_ts).toISOString()
+        : null;
       const payload = parseMobileOneArtifactPayload(row.payload_json);
       const artifacts = Array.isArray(payload.oneArtifacts) ? payload.oneArtifacts : [];
       const itemStart = row.event_rowid === start.rowId ? firstItemIndex : 0;
@@ -1089,6 +1093,7 @@ export function listRecentOneArtifactsForMobile(input: {
             type: type as MobileBridgeInvocationArtifactDto["type"],
             sizeBytes: Number(binding.size_bytes),
             contentSha256: binding.sha256,
+            ...(occurredAt ? { occurredAt } : {}),
           },
           cursor: { rowId: row.event_rowid, itemIndex },
         });
@@ -1793,6 +1798,16 @@ export function listRunEvents(runId: string, limit?: number): RunEventUi[] {
     .prepare("SELECT * FROM run_events WHERE run_id = ? ORDER BY seq ASC LIMIT ?")
     .all(runId, capped) as RunEventRow[];
   return rows.map(runRowToUi);
+}
+
+/** Read one exact durable source event without depending on a run's event window. */
+export function getRunEventBySource(runId: string, sourceEventId: string): RunEventUi | null {
+  if (!runId || !sourceEventId) return null;
+  const id = `evt_${stableUuid(`${runId}:${sourceEventId}`)}`;
+  const row = getDb()
+    .prepare("SELECT * FROM run_events WHERE id = ? AND run_id = ? LIMIT 1")
+    .get(id, runId) as RunEventRow | undefined;
+  return row ? runRowToUi(row) : null;
 }
 
 /**

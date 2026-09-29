@@ -8,6 +8,7 @@
 
 import { useEffect, useState } from "react";
 import {
+  ONE_DECISION_JUDGE_TIMEOUT_MS,
   lexicalOneDecisionDisposition,
   lexicalOneDecisionRiskLevel,
   oneDecisionJudgmentTexts,
@@ -51,14 +52,14 @@ export function useJudgedOneDecision(
             labels: RISK_LABELS,
             input: texts.combined,
             fallback: lexicalOneDecisionRiskLevel(texts.combined, lexicalDispositions),
-            timeoutMs: 8_000,
+            timeoutMs: ONE_DECISION_JUDGE_TIMEOUT_MS,
           }),
           judgeLabelViaBridge<OneDecisionAuthorityReadiness>({
             kind: "one-decision-authority-readiness",
             labels: AUTHORITY_READINESS_LABELS,
             input: texts.combined,
             fallback: "needs_details",
-            timeoutMs: 8_000,
+            timeoutMs: ONE_DECISION_JUDGE_TIMEOUT_MS,
           }),
           Promise.all(texts.options.map((optionText) =>
             judgeLabelViaBridge<OneDecisionOptionDisposition>({
@@ -66,7 +67,7 @@ export function useJudgedOneDecision(
               labels: DISPOSITION_LABELS,
               input: optionText,
               fallback: lexicalOneDecisionDisposition(optionText),
-              timeoutMs: 8_000,
+              timeoutMs: ONE_DECISION_JUDGE_TIMEOUT_MS,
             }).then((verdict) => ({ optionText, verdict })),
           )),
         ]);

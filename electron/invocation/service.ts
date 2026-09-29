@@ -9,7 +9,7 @@ import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
-import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
+import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, goalWaitRefusalResolvesItself, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
 import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
@@ -80,6 +80,7 @@ import {
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
+import { permissionEscalationContinuationRequest } from "./permission-escalation-continuation";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
 import {
@@ -1295,8 +1296,11 @@ export class InvocationService {
       chat.goalId = null;
     }
     if (!chat.goalId) {
+      // A `blocked` contract is a live goal too (it asked the owner a question, or a hard stop parked it): the
+      // owner's reply in this chat must reach it. Looking only at `active` left owner room "Youtube launch"
+      // (2026-09-28) unbound through two owner messages while its goal waited for exactly that answer.
       const orphan = getDb().prepare(
-        "SELECT goal_id FROM chat_goal_contracts WHERE chat_id = ? AND status = 'active' ORDER BY updated_at DESC LIMIT 1",
+        "SELECT goal_id FROM chat_goal_contracts WHERE chat_id = ? AND status IN ('active','blocked') ORDER BY updated_at DESC LIMIT 1",
       ).get(chat.id) as { goal_id: string } | undefined;
       if (orphan) {
         const orphanRun = getLongRunByGoalId(orphan.goal_id);
@@ -1765,6 +1769,9 @@ export class InvocationService {
       ...(runWorkspaceBinding ? { workspaceBinding: runWorkspaceBinding } : {}),
     };
     let recoverablePartialPersisted = false;
+    // Main-stream events carry the resolved installed author. Worker events
+    // must never replace it when an interrupted partial becomes durable.
+    let mainSpeakerAgentId: string | null = null;
     const persistRecoverableAssistantPartial = (): void => {
       if (
         recoverablePartialPersisted
@@ -1777,6 +1784,7 @@ export class InvocationService {
           runReq.chatId,
           "assistant",
           markInterruptedPartial(record.partialText, pickLocale(runReq)),
+          mainSpeakerAgentId ? { speakerAgentId: mainSpeakerAgentId } : undefined,
         );
         recoverablePartialPersisted = true;
       } catch {
@@ -2482,6 +2490,9 @@ export class InvocationService {
         }
         const attributedAgentId = event.runtimeAgentId ?? event.agentId;
         if (attributedAgentId) record.actualAgentId = attributedAgentId;
+        if (!event.agentId && event.runtimeAgentId) {
+          mainSpeakerAgentId = event.runtimeAgentId;
+        }
         const participantPresentation = attributedAgentId
           ? oneParticipantPresentation.get(attributedAgentId)
           : undefined;
@@ -2507,6 +2518,9 @@ export class InvocationService {
             });
             event = {
               ...event,
+              ...(durableFinal.speakerAgentId
+                ? { runtimeAgentId: durableFinal.speakerAgentId }
+                : {}),
               text: hygiene.text,
               durableTextForVerification: durableText,
               durableAssistantMessageIdForVerification: durableFinal.id,
@@ -3432,7 +3446,7 @@ export class InvocationService {
               projectDir: executionCwd });
             const message = pickLocale(runReq) === "ko" ? "대기를 등록했어요. 앱 실행 중 확인하며, 조건이 바뀌면 이어서 진행합니다."
               : "The wait is registered. While the app is running, the Goal continues when its condition changes.";
-            appendChatMessage(chat.id, "assistant", message);
+            appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId, status: "wait-registered" } });
             const event: McpInvocationEvent = { kind: "notice", notice: { code: "goal-wait-registered", level: "info", message } };
             tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: { waitId: subscription.waitId,
               goalId, subjectRef: subscription.subjectRef, nextCheckAt: subscription.nextCheckAt, deadline: subscription.deadline, executionAvailability: "app-running" } });
@@ -3457,7 +3471,7 @@ export class InvocationService {
               // line every cycle (the refusal is recorded every time; the chat line is not).
               const alreadyTold = goalWaitRefusalAlreadyNotified({ chatId: chat.id, goalId: current.goalId,
                 revision: revision?.revision ?? null, reason });
-              if (!alreadyTold) appendChatMessage(chat.id, "assistant", message);
+              if (!alreadyTold) appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId, status: "wait-not-scheduled" } });
               tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_refused", payload: { goalId: current.goalId,
                 revision: revision?.revision ?? null, reasonCode: reason, disposition: "turn_end_verification", notified: !alreadyTold,
                 notBefore: requestedIntent?.subject.kind === "timer" ? requestedIntent.subject.notBefore : null } });
@@ -3482,7 +3496,7 @@ export class InvocationService {
                 const message = pickLocale(runReq) === "ko"
                   ? "요청한 대기를 등록하지 못해 현재 상태를 다시 확인하도록 예약했습니다. 이전 작업은 반복하지 않습니다."
                   : "The requested wait could not be registered. A current-state check is scheduled without repeating prior work.";
-                appendChatMessage(chat.id, "assistant", message);
+                appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId, status: "wait-registered" } });
                 this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
                   notice: { code: "goal-wait-observation-scheduled", level: "info", message } } });
                 tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: {
@@ -3501,8 +3515,13 @@ export class InvocationService {
               // Say what was refused and what the owner can do — the old sentence ("Review the requested subject
               // and the execution state") named neither (2026-09-27).
               const message = goalWaitRefusalMessage(reason, pickLocale(runReq), requestedIntent);
-              appendChatMessage(chat.id, "assistant", message);
-              this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice", notice: { code: reason, level: "warning", message } } });
+              // Only the uncertain-effect refusal resolves itself (the app re-checks read-only, then continues);
+              // every other refused wait asks the owner for a time or a Resume and stays prominent.
+              const selfResolving = goalWaitRefusalResolvesItself(reason);
+              appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId,
+                status: selfResolving ? "wait-not-scheduled" : "needs-owner" } });
+              this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
+                notice: { code: reason, level: selfResolving ? "info" : "warning", message } } });
             }
           }
           // An invalid/unsafe wait is a blocker, never permission for the
@@ -3653,7 +3672,7 @@ export class InvocationService {
                 const message = pickLocale(runReq) === "ko"
                   ? "이번 회차를 확인했습니다. 지속 목표는 유지되며, 앱 실행 중 30분 뒤 현재 상태를 확인해 이어갑니다. 중지하면 더 이상 재개하지 않습니다."
                   : "This cycle is verified. The ongoing Goal stays open and will check current state again in 30 minutes while the app is running. Stop prevents further continuation.";
-                appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "goal-continuation", runId } });
+                appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId, status: "cycle-verified" } });
                 tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: { waitId: wait?.waitId,
                   goalId: verifiedGoalId, nextCheckAt: wait?.nextCheckAt, lifecycle: "ongoing", executionAvailability: "app-running" } });
               } else if (verification?.disposition === "retry_required") {
@@ -4018,22 +4037,16 @@ export class InvocationService {
       if (getChat(input.chatId)?.goalId !== input.goalId || !current
         || ["paused", "pausing", "cancelling", "cancelled", "completed", "failed", "blocked"].includes(current.status)) return;
     }
-    const continuation = input.locale === "ko"
-      ? "전체 액세스가 승인되었다. 방금 권한이 없어 멈춘 작업을 이어서 완료하라."
-      : "Full access has been approved. Continue and finish the work that was blocked by the read-only permission.";
     try {
       await input.record.mainLifetime?.afterSettled(() => {
         if (input.signal.aborted || controlEpoch() !== originalControlEpoch || this.activeChatIds().includes(input.chatId)) return;
         const successorRunId = randomUUID();
-        this.start({
+        this.start(permissionEscalationContinuationRequest({
           runId: successorRunId,
           chatId: input.chatId,
-          userPrompt: continuation,
-          promptOrigin: "system",
-          taskIntent: "task",
-          permissions: "full",
-          ...(input.oneMode ? { oneMode: true, onePermissionMode: "full" } : {}),
-        } as McpInvocationRequest, undefined, undefined, undefined, undefined,
+          oneMode: input.oneMode,
+          locale: input.locale,
+        }), undefined, undefined, undefined, undefined,
           input.record.mainLifetime?.successor(input.chatId, successorRunId));
       });
     } catch {
@@ -4328,6 +4341,22 @@ export class InvocationService {
     const index = position - 1;
     if (index < 0 || index >= queue.length) return false;
     if (queue[index].request.userPrompt !== text) return false;
+    settleQueuedSteer(queue[index].id, "cancelled");
+    queue.splice(index, 1);
+    if (!queue.length) this.steerQueues.delete(chatId);
+    else this.drainSteerQueue(chatId);
+    return true;
+  }
+
+  /**
+   * Main-owned withdrawal of one queued direction by its durable id (not by the visible position): a host
+   * report whose content is already stale (the teammate session was continued, or One read the result
+   * itself) must not run as a second report turn. Returns false when it already started or is gone.
+   */
+  unsteerQueuedById(chatId: string, queuedRequestId: string): boolean {
+    const queue = this.steerQueues.get(chatId);
+    const index = queue?.findIndex((queued) => queued.id === queuedRequestId) ?? -1;
+    if (!queue || index < 0) return false;
     settleQueuedSteer(queue[index].id, "cancelled");
     queue.splice(index, 1);
     if (!queue.length) this.steerQueues.delete(chatId);

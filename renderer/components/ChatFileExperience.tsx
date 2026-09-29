@@ -1,10 +1,38 @@
 "use client";
 
-import { useEffect, useRef, type KeyboardEvent } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { IconClose, IconFileUp, IconFolder } from "./Icon";
 import type { ChatFileItem } from "@/lib/chat-files";
 import { formatChatFileSize } from "@/lib/chat-files";
 import styles from "./ChatFileExperience.module.css";
+import { HtmlVisualBlock } from "./HtmlVisualBlock";
+import { announceChatFiles, VisualChatScope } from "@/lib/visual-artifacts";
+import { VISUAL_HTML_MAX_BYTES } from "@/lib/visual-html";
+
+/** 에이전트가 만든 독립 .html 시각물은 칩 아래에 글의 일부처럼 바로 보인다(오너 2026-09-29). */
+function isInlineVisualFile(file: ChatFileItem): boolean {
+  return file.kind === "file"
+    && file.provenance === "agent-output"
+    && /\.html?$/i.test(file.name)
+    && Boolean(file.fileUrl)
+    && file.size > 0 && file.size <= VISUAL_HTML_MAX_BYTES;
+}
+
+function InlineVisualFile({ file }: { file: ChatFileItem }) {
+  const [html, setHtml] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void fetch(file.fileUrl!)
+      .then((response) => (response.ok ? response.text() : Promise.reject(new Error(String(response.status)))))
+      .then((text) => { if (!cancelled) setHtml(text); })
+      .catch(() => { if (!cancelled) setHtml(null); });
+    return () => { cancelled = true; };
+  }, [file.fileUrl]);
+  if (!html) return null;
+  return <VisualChatScope.Provider value={file.chatId}>
+    <HtmlVisualBlock html={html} blockId={file.tabId} title={file.name.replace(/\.html?$/i, "")} fallback={null} />
+  </VisualChatScope.Provider>;
+}
 
 export type ChatFileTab = {
   id: string;
@@ -27,8 +55,12 @@ export function ChatFileCards({
   locale: "ko" | "en";
   onOpen: (file: ChatFileItem) => void;
 }) {
+  // 오른쪽 "산출물" 탭이 이 대화의 파일을 알게 한다(셸을 거치지 않는다).
+  useEffect(() => { announceChatFiles(files); }, [files]);
   if (files.length === 0) return null;
-  return <div className={styles.cards} data-chat-file-cards="true">
+  const visuals = files.filter(isInlineVisualFile);
+  return <>
+  <div className={styles.cards} data-chat-file-cards="true">
     {files.map((file) => (
       <button
         key={file.tabId}
@@ -50,7 +82,9 @@ export function ChatFileCards({
         </span>
       </button>
     ))}
-  </div>;
+  </div>
+  {visuals.map((file) => <InlineVisualFile key={`visual:${file.tabId}`} file={file} />)}
+  </>;
 }
 
 export function ChatFileTabs({

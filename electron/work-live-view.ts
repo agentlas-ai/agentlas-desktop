@@ -40,6 +40,8 @@ type ActiveWorkView = {
   /** Settlement kept this tab only because the owner was watching it. */
   handedToOwner?: boolean;
   lastUsedAt: number;
+  /** When the native view last moved between hosts or changed size. */
+  layoutChangedAt?: number;
 };
 
 const activeViews = new Map<string, ActiveWorkView>();
@@ -81,9 +83,9 @@ function hasLiveHold(active: ActiveWorkView): boolean {
   return false;
 }
 
-/** The owner is looking at this exact tab right now. */
+/** The owner is looking at this exact tab right now (a page still loading counts). */
 function ownerViewing(active: ActiveWorkView): boolean {
-  return active.visible && active.ownerAttached && active.state === "ready";
+  return active.visible && active.ownerAttached && (active.state === "ready" || active.state === "loading");
 }
 
 /** Main-only: the relay opens one hold per agent run grant. */
@@ -142,15 +144,58 @@ export function reclaimOrphanAgentBrowserTabs(ownerId?: number): number {
   return closed;
 }
 
-/** Least-recently-used agent-opened tab nobody is watching or driving. */
+/**
+ * The tab to close so a new one can open, least valuable first: an
+ * agent-opened tab, then an owner tab still on about:blank, then any owner tab
+ * — each least-recently-used, and never one the owner is looking at or a live
+ * run is driving.
+ *
+ * ★Owner tabs used to be exempt. The cap of 8 is per window across every
+ * chat, and each chat whose Browser panel was ever shown keeps a tab, so a day
+ * of normal use left 8 tabs the owner could not see from the current chat and
+ * no run could open one (production 1.2.49, 2026-09-28 14:13Z: a Threads goal
+ * turn refused with native-browser-tab-limit while nothing was on screen).
+ * A closed owner tab only loses its page; the chat's panel reopens its page.
+ */
 function evictableAgentBrowserTab(ownerId: number): ActiveWorkView | null {
+  const rank = (active: ActiveWorkView) => active.openedByHold ? 0
+    : (active.view.webContents.getURL() || active.pendingUrl) === "about:blank" ? 1 : 2;
   let victim: ActiveWorkView | null = null;
   for (const active of activeViews.values()) {
-    if (active.ownerId !== ownerId || active.mode !== "browser" || !active.openedByHold) continue;
+    if (active.ownerId !== ownerId || active.mode !== "browser") continue;
     if (ownerViewing(active) || hasLiveHold(active)) continue;
-    if (!victim || active.lastUsedAt < victim.lastUsedAt) victim = active;
+    if (!victim || rank(active) < rank(victim) || (rank(active) === rank(victim) && active.lastUsedAt < victim.lastUsedAt)) victim = active;
   }
   return victim;
+}
+
+/**
+ * Make room for one more browser tab of this owner, or report that none can
+ * be made: reclaim tabs of dead runs, then evict (evictableAgentBrowserTab).
+ * Synchronous so a page's window.open can be answered before it returns.
+ */
+function ensureBrowserTabCapacity(ownerId: number): boolean {
+  reclaimOrphanAgentBrowserTabs(ownerId);
+  while ([...activeViews.values()].filter((active) => active.ownerId === ownerId && active.mode === "browser").length
+    >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
+    const victim = evictableAgentBrowserTab(ownerId);
+    if (!victim) return false;
+    closeActive(victim);
+  }
+  return true;
+}
+
+/** Main-only: tabs this run's hold opened that are still open (a reconnecting client reuses them). */
+export function agentBrowserTabsOfHold(ownerId: number, taskScopeId: string, holdId: string): string[] {
+  return [...activeViews.values()].filter((active) => active.ownerId === ownerId && active.mode === "browser"
+    && active.taskScopeId === taskScopeId && active.openedByHold === holdId && isCurrent(active)).map((active) => active.viewId);
+}
+
+/** Main-only: the relay learns about popups opened by pages its run drives. */
+const agentPopupListeners = new Map<string, (viewId: string, openerViewId: string) => void>();
+export function onAgentBrowserPopup(holdId: string, listener: (viewId: string, openerViewId: string) => void): () => void {
+  agentPopupListeners.set(holdId, listener);
+  return () => { if (agentPopupListeners.get(holdId) === listener) agentPopupListeners.delete(holdId); };
 }
 
 function ensureOwnerCleanup(ownerId: number, window: BrowserWindow): void {
@@ -281,6 +326,27 @@ function registeredGuest(ownerId: number, viewId: unknown, taskScopeId?: string)
 /** Hidden native views must leave the owner's native/AX tree, not merely stop
  * painting. The WebContents remains alive for its exact task's background run. */
 function setOwnerGuestVisible(active: ActiveWorkView, visible: boolean): void {
+  const before = active.view.getBounds();
+  const hostBefore = active.ownerAttached ? "owner" : active.hiddenHost ? "hidden" : "none";
+  try { setOwnerGuestVisibleNow(active, visible); } finally {
+    const after = active.view.getBounds();
+    const hostAfter = active.ownerAttached ? "owner" : active.hiddenHost ? "hidden" : "none";
+    if (hostBefore !== hostAfter || before.width !== after.width || before.height !== after.height) active.layoutChangedAt = Date.now();
+  }
+}
+
+/**
+ * Main-only: how long ago this guest last changed host or size. Chromium drops
+ * mouse input that arrives while a view is being re-hosted or resized: an
+ * agent's first click on a tab the Browser panel was just switching to never
+ * reached the page (measured 2026-09-29: no mousedown at all, keys fine).
+ */
+export function nativeBrowserGuestLayoutAge(ownerId: number, taskScopeId: string, viewId: string): number {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  return active?.layoutChangedAt === undefined ? Number.POSITIVE_INFINITY : Date.now() - active.layoutChangedAt;
+}
+
+function setOwnerGuestVisibleNow(active: ActiveWorkView, visible: boolean): void {
   if (!visible) {
     active.view.setVisible(false);
     if (active.ownerAttached && !active.window.isDestroyed()) {
@@ -493,8 +559,10 @@ export function setWorkLiveViewBounds(
     active.captureRestore?.();
     active.visible = input.visible !== false;
     if (active.visible) { showOnly(active); active.lastUsedAt = Date.now(); }
+    const previous = active.view.getBounds();
     active.ownerBounds = sanitizeBounds(input.bounds, active.window, ownerId);
     active.view.setBounds(active.ownerBounds);
+    if (previous.width !== active.ownerBounds.width || previous.height !== active.ownerBounds.height) active.layoutChangedAt = Date.now();
     setOwnerGuestVisible(active, active.visible && active.state !== "error");
     return { ok: true };
   } catch {
@@ -566,10 +634,13 @@ export async function openWorkLiveView(input: {
   viewLeaseId?: string;
   /** Main-only: the agent run hold that is opening this browser tab. */
   agentHoldId?: string;
+  /** Main-only: a popup's own WebContents (window.opener kept); it loads its URL itself. */
+  adoptWebContents?: WebContents;
   send: (status: WorkLiveViewStatus) => void;
 }): Promise<{ ok: boolean; viewId: string; url?: string; reason?: string; message?: string }> {
   const viewId = sanitizeViewId(input?.viewId);
-  const url = input?.mode === "browser" && input?.url === "about:blank" ? new URL("about:blank") : sanitizeWorkLiveUrl(input?.url);
+  const url = input?.mode === "browser" && (input?.url === "about:blank" || input?.adoptWebContents && !input?.url)
+    ? new URL("about:blank") : sanitizeWorkLiveUrl(input?.url);
   if (!viewId) return { ok: false, viewId: String(input?.viewId ?? ""), reason: "invalid-view-id" };
   if (!url) return { ok: false, viewId, reason: "Only HTTPS or loopback HTTP live apps are allowed." };
   if (input.window.isDestroyed()) return { ok: false, viewId, reason: "window-closed" };
@@ -598,15 +669,9 @@ export async function openWorkLiveView(input: {
   }
   if (mode === "browser") {
     // Reclaim tabs of runs that died without settling, then make room by
-    // closing the least-recently-used agent tab nobody is watching or driving.
-    // Refuse only when every tab belongs to the owner or to a live run.
-    reclaimOrphanAgentBrowserTabs(input.ownerId);
-    while ([...activeViews.values()].filter((active) => active.ownerId === input.ownerId && active.mode === "browser").length
-      >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
-      const victim = evictableAgentBrowserTab(input.ownerId);
-      if (!victim) return { ok: false, viewId, reason: "browser-tab-limit", message: BROWSER_TAB_LIMIT_MESSAGE };
-      closeActive(victim);
-    }
+    // closing the least valuable tab nobody is watching or driving.
+    // Refuse only when every tab is on screen or driven by a live run.
+    if (!ensureBrowserTabCapacity(input.ownerId)) return { ok: false, viewId, reason: "browser-tab-limit", message: BROWSER_TAB_LIMIT_MESSAGE };
   }
   const owned = [...activeViews.values()].filter((active) => active.ownerId === input.ownerId);
   // An app changing presentation retains its document during its short lease grace.
@@ -617,18 +682,22 @@ export async function openWorkLiveView(input: {
     }
   }
   const partition = mode === "browser" ? NATIVE_BROWSER_PARTITION : `agentlas-work-live-${input.ownerId}-${viewId}`;
-  const view = new WebContentsView({
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webSecurity: true,
-      navigateOnDragDrop: false,
-      safeDialogs: true,
-      backgroundThrottling: false,
-      partition,
-    },
-  });
+  // A popup keeps the WebContents Chromium created for it (and so its
+  // window.opener); its preferences were inherited from the opener tab.
+  const view = input.adoptWebContents && mode === "browser"
+    ? new WebContentsView({ webContents: input.adoptWebContents })
+    : new WebContentsView({
+      webPreferences: {
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        webSecurity: true,
+        navigateOnDragDrop: false,
+        safeDialogs: true,
+        backgroundThrottling: false,
+        partition,
+      },
+    });
   const active: ActiveWorkView = {
     ownerId: input.ownerId,
     viewLeaseId: input.viewLeaseId,
@@ -662,8 +731,12 @@ export async function openWorkLiveView(input: {
   }
 
   view.setBackgroundColor(active.mode === "browser" ? "#ffffff" : "#111111");
-  view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-  view.webContents.session.setPermissionCheckHandler(() => false);
+  // Deny by default, without a prompt. Writing to the clipboard (a page's own
+  // "Copy" button) is what Chrome grants every page after a user gesture; an
+  // agent copying inside a page needs it too. Reading the clipboard stays denied.
+  const permitted = (permission: string) => active.mode === "browser" && permission === "clipboard-sanitized-write";
+  view.webContents.session.setPermissionRequestHandler((_contents, permission, callback) => callback(permitted(permission)));
+  view.webContents.session.setPermissionCheckHandler((_contents, permission) => permitted(permission));
   view.webContents.on("did-start-navigation", (_event, target, isInPlace, isMainFrame) => {
     if (!isCurrent(active) || !isMainFrame || isInPlace) return;
     active.captureRestore?.();
@@ -732,8 +805,26 @@ export async function openWorkLiveView(input: {
       // A popup becomes another task-scoped tab. The untrusted page never gets
       // a child BrowserWindow or a reference to the Agentlas renderer.
       // A popup opened while a run drives this tab belongs to that run.
+      //
+      // ★The tab adopts the popup's own WebContents instead of loading the
+      // URL in a fresh one. A fresh tab had no window.opener, so sign-in
+      // popups (OAuth "Sign in with Google" and similar) could never post
+      // their result back to the page that opened them, and the agent's CDP
+      // client never saw the popup at all (measured 2026-09-29).
       const opener = [...active.holds].find(holdLive);
-      void createWorkBrowserTab(active.ownerId, active.taskScopeId, target, opener ? { holdId: opener } : undefined);
+      const taskOwner = nativeTaskOwners.get(key(active.ownerId, active.taskScopeId));
+      if (!taskOwner || taskOwner.window.isDestroyed() || !ensureBrowserTabCapacity(active.ownerId)) return { action: "deny" };
+      const taskScopeId = active.taskScopeId;
+      return { action: "allow", outlivesOpener: true, createWindow: (options) => {
+        const popupId = `browser_${randomUUID().replace(/-/g, "")}`;
+        const webContents = (options as { webContents?: WebContents }).webContents;
+        void openWorkLiveView({ ...taskOwner, viewId: popupId, url: target, mode: "browser", visible: false,
+          bounds: active.ownerBounds ?? { x: 0, y: 0, width: 1000, height: 750 }, adoptWebContents: webContents,
+          ...(opener ? { agentHoldId: opener } : {}) });
+        const adopted = registeredGuest(active.ownerId, popupId, taskScopeId);
+        if (adopted && opener) agentPopupListeners.get(opener)?.(popupId, active.viewId);
+        return adopted?.view.webContents ?? webContents!;
+      } };
     } else if (active.mode === "app" && permittedNavigation(active, target)) {
       void view.webContents.loadURL(target).catch(() => undefined);
     }
@@ -751,6 +842,8 @@ export async function openWorkLiveView(input: {
   });
   const epoch = ++active.navigationEpoch;
   emit(active, { state: "loading", url: url.toString() });
+  // An adopted popup navigates itself; its load events drive the status.
+  if (input.adoptWebContents && mode === "browser") return { ok: true, viewId, url: url.toString() };
   try {
     await view.webContents.loadURL(url.toString());
     if (!isCurrent(active) || active.navigationEpoch !== epoch) return { ok: false, viewId, reason: "navigation-superseded" };

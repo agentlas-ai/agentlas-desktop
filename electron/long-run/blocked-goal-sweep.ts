@@ -37,7 +37,7 @@ import { completeChatGoalContract, getChatGoalRevision } from "../store/chat-goa
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import {
   appendLongRunEvent, bindCurrentGoalRevisionToLongRun, getLongRun, getLongRunAttemptReview, nextBlockedGoalRetrySlot,
-  pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, scheduleBlockedGoalRetry, transitionLongRun,
+  pendingBlockedGoalRetry, reopenDueBlockedGoalRetry, committedTurnSinceRetry, settleDueBoundaryRetryByTurn, scheduleBlockedGoalRetry, transitionLongRun,
   BLOCKED_GOAL_SWEEP_EVENT_KIND, BLOCKED_GOAL_SWEEP_SCHEMA, type LongRunRecord,
   longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE, AUTO_GOAL_OWNER_REVIEW_REQUIRED,
 } from "../store/long-runs";
@@ -93,11 +93,15 @@ function missingGoalWorkspace(run: LongRunRecord): string | null {
   }
 }
 
-function notify(run: LongRunRecord, ko: string, en: string): void {
+/**
+ * `status` is the durable host-status marker: a resumed goal folds into the resumed run's work line
+ * (`runId` = that invocation); a closed goal or a failed attempt that will be retried stays prominent.
+ */
+function notify(run: LongRunRecord, status: "goal-resuming" | "goal-closed" | "effect-retrying", ko: string, en: string, runId: string = run.id): void {
   if (!run.rootChatId) return;
   try {
     appendChatMessage(run.rootChatId, "assistant", currentUiLocale() === "ko" ? ko : en,
-      { hostNotice: { purpose: "goal-continuation", runId: run.id } });
+      { hostNotice: { purpose: "host-status", runId, status } });
   } catch (error) {
     console.warn("[blocked-goal-sweep] chat notice failed:", error);
   }
@@ -138,7 +142,7 @@ function cancel(run: LongRunRecord, rule: string, trigger: string): BlockedGoalS
           : { ko: "정해 둔 예산을 다 써서", en: "its budget is spent" };
   const again = rule.startsWith("qa_") ? { ko: "", en: "" }
     : { ko: " 다시 하려면 요청을 새로 보내 주세요.", en: " Send the request again to start it fresh." };
-  notify(run, `이 목표는 ${why.ko} 정리(취소)했어요. 기록은 남아 있습니다.${again.ko}`,
+  notify(run, "goal-closed", `이 목표는 ${why.ko} 정리(취소)했어요. 기록은 남아 있습니다.${again.ko}`,
     `This goal was closed (cancelled) because ${why.en}. Its history is kept.${again.en}`);
   return { runId: run.id, fromReason: run.blockedReason, action: "cancelled", detail: rule };
 }
@@ -153,7 +157,7 @@ function scheduleRetry(run: LongRunRecord, kind: "observe" | "resume", detail: s
     effectUncertain: options.effectUncertain, appInstanceId: desktopAppInstanceId() });
   if (slot.retryIndex === 0) {
     const minutes = Math.max(1, Math.round((Date.parse(slot.nextAt) - Date.now()) / 60_000));
-    notify(run, kind === "observe"
+    notify(run, "effect-retrying", kind === "observe"
       ? `이전 작업이 반영됐는지 지금은 확인하지 못했어요. ${minutes}분 뒤 앱이 스스로 다시 확인하고 이어갑니다.`
       : `지금은 이 목표를 이어갈 모델을 띄우지 못했어요. ${minutes}분 뒤 앱이 스스로 다시 시도합니다.`,
     kind === "observe"
@@ -233,8 +237,9 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
   }
   if (!prepared) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "blocked_goal_resume_unavailable" };
   // Once per blocked cause: a repeat of the same stop is not news to the person.
-  if (!toldBefore) notify(run, "멈춰 있던 목표를 원래 권한과 예산 그대로 다시 이어갑니다. 결과는 끝나면 다시 검증합니다.",
-    "Continuing the stopped goal with its original permissions and budget. The result is verified again when it finishes.");
+  if (!toldBefore) notify(run, "goal-resuming", "멈춰 있던 목표를 원래 권한과 예산 그대로 다시 이어갑니다. 결과는 끝나면 다시 검증합니다.",
+    "Continuing the stopped goal with its original permissions and budget. The result is verified again when it finishes.",
+    prepared.request.runId ?? run.id);
   try {
     dispatcher.start(prepared.request, undefined, undefined, undefined, "goal-continuation");
     confirmDesktopLongRunResumeDispatched(prepared.queuedId);
@@ -317,7 +322,17 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
         }
         return defer(`retry_at:${retry.nextAt}`);
       }
-      run = reopenDueBlockedGoalRetry(run.id, run.version);
+      // A turn is live in the goal's chat (the owner's own message, typically): the retry waits for it.
+      // Reopening first flipped a working goal to "blocked" on screen — owner Thread Marketing 2026-09-28
+      // 14:38Z (goal_wait_effects_uncertain while run 89c2e879 was answering the owner's 14:35Z message).
+      if (chatLive || getLongRunAttemptReview(run.id).attempts.some((attempt) => attempt.state === "running")) {
+        return defer("chat_busy");
+      }
+      // A turn that ran after this effect-uncertain retry was scheduled and committed is newer evidence than
+      // any look: settle the boundary and take the ordinary resume path, instead of re-blocking on it.
+      const settledBy = retry.kind === "observe" && isEffectUncertainBlockReason(retry.fromReason)
+        && getLongRunAttemptReview(run.id).attempts.length === 0 ? committedTurnSinceRetry(run.id, retry.seq) : null;
+      run = settledBy ? settleDueBoundaryRetryByTurn(run.id, run.version, settledBy) : reopenDueBlockedGoalRetry(run.id, run.version);
       epoch = retry.retryIndex + 1;
     } else if (run.status === "paused" && run.pauseReason === "runtime_unavailable") {
       // A host dispatch failure pause is not a person's decision: put it on the automatic retry schedule.

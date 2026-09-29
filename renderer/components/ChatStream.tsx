@@ -1,5 +1,6 @@
 "use client";
 import type { GoalResultPresentation } from "../../shared/goal-result";
+import { VisualChatScope } from "@/lib/visual-artifacts";
 import { GoalResultReport } from "./GoalResultReport";
 import type { ChatHostNotice } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
@@ -556,6 +557,7 @@ export function ChatStream({
         {messages.length === 0 && (
           <EmptyChatState agentName={agentName} directory={emptyDirectory} />
         )}
+        <VisualChatScope.Provider value={artifactChatId ?? null}>
         {messages.map((m, index) => (
           <div
             key={m.id}
@@ -583,6 +585,7 @@ export function ChatStream({
             />
           </div>
         ))}
+        </VisualChatScope.Provider>
         {/* 이 대화·프로젝트의 자동화가 숨은 세션에서 도는 동안의 실시간 줄. */}
         <AutomationLiveRows chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"} />
       </div>

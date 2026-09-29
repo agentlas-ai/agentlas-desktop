@@ -188,6 +188,20 @@ async function decide(parsed: ProxyApprovalRequest): Promise<"allow" | "deny"> {
   }
 }
 
+/**
+ * The /bridge/ wire is one long-lived POST whose body is the client's MCP stream. Node's http server
+ * aborts any request whose body has not finished within requestTimeout (default 300 s, checked every
+ * 30 s), so every bridge was cut about every 5.5 min: main.log 2026-09-28 shows
+ * "bridge closed … reason=wire_aborted" per handle at :06:53 :12:23 :17:53 :23:23 :28:53, and a Threads
+ * automation call in flight at 15:31:54.124Z failed with "agentlas proxy reconnecting
+ * (bridge_response_error)" 4 ms after its wire was aborted. The server is loopback-only and every
+ * request carries the bearer token; headersTimeout still bounds a client that never sends headers.
+ */
+export function allowLongLivedBridgeWires(srv: http.Server): http.Server {
+  srv.requestTimeout = 0;
+  return srv;
+}
+
 export function startMcpProxyApprovalServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
   token = randomUUID();
@@ -226,6 +240,7 @@ export function startMcpProxyApprovalServer(): Promise<number> {
       });
     });
 
+    allowLongLivedBridgeWires(srv);
     srv.on("error", () => {
       server = null;
       boundPort = 0;

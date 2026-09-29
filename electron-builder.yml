@@ -62,6 +62,14 @@ files:
   - dist/plugins/**/*
   - package.json
   - "!**/*.map"
+  # Confirmed nonruntime suites; runtime-coupled Iconify/Playwright test paths stay.
+  - "!**/node_modules/zod/src/**/{tests,benchmarks}/**"
+  - "!**/node_modules/fast-uri/benchmark/**"
+  - "!**/node_modules/gaxios/build/{cjs,esm}/test/**"
+  - "!**/node_modules/json-schema-traverse/spec/**"
+  - "!**/node_modules/katex/contrib/**/test/**"
+  - "!**/node_modules/maplibre-gl/src/util/test/**"
+  - "!**/node_modules/cytoscape/AGENTS.md"
 
 asar: true
 asarUnpack:

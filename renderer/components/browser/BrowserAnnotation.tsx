@@ -7,8 +7,12 @@ import menu from "@/components/PanelPopover.module.css";
 import styles from "./BrowserAnnotation.module.css";
 
 type Bounds = { x: number; y: number; width: number; height: number };
-export function BrowserAnnotation({ target, ko, onPrepareOverlay, onOverlayClosed, onComment, getViewportBounds }: {
+/** How long a picker outcome notice stays up. It sits under the toolbar button and never covers the page. */
+const NOTICE_MS = 6_000;
+export function BrowserAnnotation({ target, documentKey, ko, onPrepareOverlay, onOverlayClosed, onComment, getViewportBounds }: {
   target: BrowserAnnotationTarget | null;
+  /** The page the owner sees (its URL). A new page retires any picker notice. */
+  documentKey?: string;
   ko: boolean;
   onPrepareOverlay: () => Promise<void>;
   onOverlayClosed: () => void;
@@ -50,9 +54,18 @@ export function BrowserAnnotation({ target, ko, onPrepareOverlay, onOverlayClose
     }
     stop();
   }, [target?.taskScopeId, target?.viewId, stop]);
+  // ★A picker notice is an outcome, not a state: it used to stay up forever
+  // ("페이지가 바뀌었거나 선택이 끝났습니다" floating over a blank-looking panel
+  // long after the selection ended, owner report 2026-09-28).
+  useEffect(() => {
+    if (!notice) return;
+    const timer = window.setTimeout(() => setNotice(null), NOTICE_MS);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
+  useEffect(() => { if (!active.current) setNotice(null); }, [documentKey, target?.taskScopeId, target?.viewId]);
   useEffect(() => () => { const previous = active.current; epoch.current++; active.current = null; if (previous) void window.agentlas?.browserAnnotation.stop(previous).catch(() => {}); callbacks.current.onOverlayClosed(); }, []);
   useEffect(() => {
-    if (!session || open) return;
+    if (!session) return;
     let disposed = false, pending = false;
     const poll = async () => {
       if (pending || opening.current) return;
@@ -60,14 +73,22 @@ export function BrowserAnnotation({ target, ko, onPrepareOverlay, onOverlayClose
       try {
         const result = await window.agentlas.browserAnnotation.selection(session);
         if (disposed || active.current?.sessionId !== session.sessionId) return;
+        // With the comment box open, element churn is handled on submit; only
+        // an ended session (agent took over, page left) closes it.
+        if (!result.ok && open && !["annotation_agent_active", "annotation_navigation_changed", "annotation_session_unavailable"].includes(result.reason ?? "")) return;
         if (!result.ok) {
+          // An open comment keeps its text (drafts survive stop()); only the
+          // frozen frame and the picker go, so the live page is back at once.
           stop();
-          setNotice(result.reason === "annotation_cross_frame_unsupported" || result.reason === "annotation_shadow_frame_unsupported"
+          setNotice(result.reason === "annotation_agent_active"
+            ? ko ? "에이전트가 이 페이지를 조작하기 시작해 요소 선택을 끝냈습니다." : "An agent started using this page, so element selection ended."
+            : result.reason === "annotation_cross_frame_unsupported" || result.reason === "annotation_shadow_frame_unsupported"
             ? ko ? "이 프레임의 요소 선택은 아직 지원하지 않습니다." : "Element selection in this frame is not supported."
             : ko ? "페이지가 바뀌었거나 선택이 끝났습니다. 다시 선택해 주세요." : "The page or selection changed. Select an element again.");
           return;
         }
-        if (!result.selection) return;
+        // While the comment box is open only the session's survival matters.
+        if (open || !result.selection) return;
         opening.current = true;
         const generation = epoch.current;
         const bounds = callbacks.current.getViewportBounds?.();
@@ -82,7 +103,7 @@ export function BrowserAnnotation({ target, ko, onPrepareOverlay, onOverlayClose
       } catch { if (!disposed) { stop(); setNotice(ko ? "요소 선택에 연결하지 못했습니다." : "Could not connect element selection."); } }
       finally { pending = false; }
     };
-    void poll(); const timer = window.setInterval(() => void poll(), 160);
+    void poll(); const timer = window.setInterval(() => void poll(), open ? 400 : 160);
     return () => { disposed = true; window.clearInterval(timer); };
   }, [session, open, ko, stop]);
   useEffect(() => { if (open) input.current?.focus(); }, [open]);

@@ -396,11 +396,18 @@ export interface LiveTactic extends GoalTactic {
     path?: string | null } | null;
   /** retry_backoff 로 미룬 시각. 이 전에는 다른 전술이 있으면 고르지 않는다. */
   deferredUntil: string | null;
+  /**
+   * The owner paused this branch in the goal panel (explicit; never inferred from time or a wait). A paused tactic
+   * is not dispatched and stays an open leaf of the roll-up, so the goal is not achieved around it.
+   */
+  ownerPaused?: boolean;
 }
 
 export interface LiveStrategy extends GoalStrategy {
   status: PlanNodeStatus;
   activatedAt: string;
+  /** The owner paused this strategy and every sub-goal under it (goal panel). */
+  ownerPaused?: boolean;
 }
 
 export interface LiveGoalPlan {
@@ -420,6 +427,54 @@ export interface LiveGoalPlan {
   deadline_at: string | null;
 }
 
+export interface GoalPlanDecisionRowInput { kind: string; plan_seq: number; payload_json: string; created_at: string }
+export interface GoalPlanNodeRowInput { node_id: string; kind: string; parent_id: string | null; status: PlanNodeStatus; ord: number; payload_json: string }
+
+function safeRecord(value: string): Record<string, unknown> {
+  try { const parsed = JSON.parse(value); return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {}; }
+  catch { return {}; }
+}
+
+/** The plan's own goal deadline, else the earliest key-result deadline (both host-resolved at shaping time). */
+function goalPlanDeadlineAt(plan: GoalShapePlan, mission: LiveGoalPlan["mission"]): string | null {
+  const own = typeof plan.deadline_at === "string" && Number.isFinite(Date.parse(plan.deadline_at)) ? plan.deadline_at : null;
+  if (own) return own;
+  const krs = (mission?.key_results ?? []).map((kr) => kr.deadline_at).filter((at): at is string => typeof at === "string" && Number.isFinite(Date.parse(at)));
+  return krs.length ? krs.sort((a, b) => Date.parse(a) - Date.parse(b))[0] : null;
+}
+
+/**
+ * The live plan from its ledger rows (the latest shape decision of a revision and that plan_seq's nodes). Pure: the
+ * store (electron/store/goal-plans.ts readGoalPlan) and read-only replays of a real store share this one mapping.
+ */
+export function liveGoalPlanFromRows(goalId: string, revision: number, decision: GoalPlanDecisionRowInput, nodes: readonly GoalPlanNodeRowInput[]): LiveGoalPlan | null {
+  const plan = safeRecord(decision.payload_json).plan as GoalShapePlan | undefined;
+  if (!plan) return null;
+  const ordered = [...nodes].sort((a, b) => a.ord - b.ord);
+  const missionRow = ordered.find((node) => node.kind === "mission");
+  const mission = missionRow ? safeRecord(missionRow.payload_json) as unknown as LiveGoalPlan["mission"] : null;
+  const strategies: LiveStrategy[] = ordered.filter((node) => node.kind === "strategy").map((node) => {
+    const p = safeRecord(node.payload_json) as unknown as LiveStrategy;
+    return { ...p, id: node.node_id, status: node.status, priority: node.ord, activatedAt: String(p.activatedAt ?? decision.created_at),
+      ownerPaused: (p as { ownerPaused?: unknown }).ownerPaused === true };
+  });
+  const tactics: LiveTactic[] = ordered.filter((node) => node.kind === "tactic").map((node) => {
+    const p = safeRecord(node.payload_json);
+    return { id: node.node_id, strategy_id: node.parent_id, description: String(p.description ?? ""), done_when: String(p.done_when ?? ""),
+      kind: p.kind === "recurring" ? "recurring" : "one_off", status: node.status, ord: node.ord,
+      runs: Number(p.runs ?? 0) || 0, failures: Number(p.failures ?? 0) || 0, evidence: typeof p.evidence === "string" ? p.evidence : null,
+      guidance: (p.guidance && typeof p.guidance === "object" ? p.guidance : null) as LiveTactic["guidance"],
+      deferredUntil: typeof p.deferredUntil === "string" ? p.deferredUntil : null,
+      ownerPaused: p.ownerPaused === true };
+  });
+  return {
+    goalId, revision, planSeq: decision.plan_seq, shape: plan.shape, problem_nature: plan.problem_nature, rationale: plan.rationale,
+    fallback: decision.kind === "shape_fallback",
+    mission, strategies, tactics, review_every_hours: plan.review_every_hours, createdAt: decision.created_at,
+    deadline_at: goalPlanDeadlineAt(plan, mission),
+  };
+}
+
 /**
  * 트리에서 처음 활성으로 두는 전략 — 계획자가 낸 전략 전부(오너 2026-09-25: 개수 하드코딩 금지).
  * 예전엔 앞의 3개만 active 였다. 몇 개의 가설을 동시에 돌릴지는 계획자의 판단이고, 상한은
@@ -434,7 +489,10 @@ export const INITIAL_ACTIVE_STRATEGIES = GOAL_SHAPE_LIMITS.strategies;
  */
 export function selectActiveTactics(plan: LiveGoalPlan, input: { nowMs: number; dispatchesToday?: Readonly<Record<string, number>>; limit?: number }): LiveTactic[] {
   const limit = Math.max(1, input.limit ?? 2);
-  const open = (tactic: LiveTactic) => tactic.status === "active" || tactic.status === "proposed";
+  // An owner-paused branch (goal panel) is never dispatched — only an explicit pause stops a sub-goal.
+  const pausedStrategies = new Set(plan.strategies.filter((s) => s.ownerPaused).map((s) => s.id));
+  const open = (tactic: LiveTactic) => (tactic.status === "active" || tactic.status === "proposed")
+    && !tactic.ownerPaused && !(tactic.strategy_id && pausedStrategies.has(tactic.strategy_id));
   const waiting = (tactic: LiveTactic) => Boolean(
     (tactic.deferredUntil && Date.parse(tactic.deferredUntil) > input.nowMs) || tactic.guidance?.move === "escalate_boundary");
   const ordered = [...plan.tactics].filter(open).sort((a, b) => a.ord - b.ord);
@@ -442,7 +500,7 @@ export function selectActiveTactics(plan: LiveGoalPlan, input: { nowMs: number; 
   if (plan.shape === "single_tactic") return rank(ordered).slice(0, 1);
   if (plan.shape === "tactic_list") return rank(ordered).slice(0, 1);
   const picks: LiveTactic[] = [];
-  const strategies = plan.strategies.filter((s) => s.status === "active").sort((a, b) => a.priority - b.priority);
+  const strategies = plan.strategies.filter((s) => s.status === "active" && !s.ownerPaused).sort((a, b) => a.priority - b.priority);
   for (const strategy of strategies) {
     const used = input.dispatchesToday?.[strategy.id] ?? 0;
     if (strategy.actions_per_day !== null && used >= strategy.actions_per_day) continue;

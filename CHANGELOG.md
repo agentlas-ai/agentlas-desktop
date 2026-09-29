@@ -1,30 +1,49 @@
 # Changelog
 
-## 1.2.50 — 2026-09-28
+## 1.2.50 — 2026-09-29
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
 - Source readiness does not prove a published installer or an installed update; verify those separately.
 
+- Goals have their own panel: a Goal tab in the right panel of One and Work shows the goal,
+  its plan and its progress, and editing the goal chip opens it. A chat no longer loses its
+  live Goal: a hard stop keeps the binding, a new turn rebinds a blocked Goal, and startup
+  repairs chats that had come loose. Goal plan text follows your app language.
 - Updating while work runs now asks first, pauses the work for the update, and continues it
   once after the restart. Stop on a Goal turn pauses the Goal instead of ending it.
 - AGI watches every Goal. When a Goal is blocked it reads the run records, then tries a fix
   itself — creating or inviting a teammate, switching model, re-planning, retrying another path
   or recovering a login — before asking you, and only asks for what only you can do. It no
   longer spends tokens re-checking Goals that are waiting for you. Its token limits are in the
-  AGI popover.
-- A "결함 보고" (report a defect) chip shows exactly what will be sent and sends only when you
-  press it.
-- Chats with automations show what the automation is doing while it runs, a summary of what it
-  did (counted from real actions, with site and app logos), and an Automations tab in the right
-  panel. A room is no longer shown as stopped while its automation is working.
+  AGI popover. A "결함 보고" (report a defect) chip shows exactly what will be sent and sends
+  only when you press it.
+- Chats with automations show what the automation is doing while it runs and a summary of what
+  it did, and the right panel has an Automations tab. A run that changed nothing outside stays
+  in that tab as "no change" instead of adding a chat line. Failure reports read as sentences
+  in your language.
+- Status notes the app writes into a chat are folded into one quiet line per turn.
+- Charts and HTML visuals render inside the conversation, in a Claude-style chart design. A new
+  Artifacts tab in the right panel collects them with files and documents, and spreadsheets open
+  in a data view with sorting, filtering and quick charts.
+- The Agentlas browser can do what a person does in Chrome: pick files and upload from the run's
+  own folders, answer page dialogs, follow popups and keep downloads. Agents close the tabs they
+  open, the tab limit no longer strands a run, and cleanup leaves a browser in use alone.
 - A login wall is recovered by re-importing that site's login into the browser the agent is
   actually using; you are asked only if Chrome is signed out too.
-- Team turns no longer fail when the planner omits workspace access.
-- The session list keeps the most recently active conversation on top, live.
-- A message you just sent is no longer buried under old work blocks.
-- Stop withdraws pending tool approvals and ends Claude turns cleanly before stopping the process;
-  helper-agent errors and text no longer leak into the parent answer.
-- Agent Hub profile and Science views stay in place when the window is zoomed.
+- Runtime fixes: Codex and Claude helper-agent text, errors and usage no longer leak into or fail
+  the parent answer; Stop withdraws pending approvals and ends Claude turns cleanly; a continued
+  turn after a permission approval keeps your language; long tool calls through the bridge are no
+  longer cut every five and a half minutes; team turns no longer fail when the planner omits
+  workspace access.
+- Goal retries settle correctly: read-only turns are no longer treated as interrupted attempts,
+  owner turns are not flipped to blocked by a scheduled retry, and "not done" notices no longer
+  promise another try.
+- The session list keeps the most recently active conversation on top, and a message you just
+  sent is no longer buried under old work blocks. One and Work composer menus are more compact.
+- The phone app can control goals and AGI, page back through chat history, and answer One
+  decisions with exact choices.
+- Agent Hub profile and Science views stay in place when the window is zoomed. Packages no longer
+  ship dependency test suites.
 
 ## 1.2.49 — 2026-09-28
 

@@ -8,6 +8,7 @@ import { failureMessage } from "@/lib/invocation-failure";
 import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-surface-status";
 import { GoalStrategyStatus } from "./GoalStrategyStatus";
 import { GoalPlanSummary, goalPlanOf } from "@/components/goal/GoalPlanSummary";
+import { requestGoalPanelOpen } from "@/components/goal/GoalPanel";
 import styles from "./OneGoalControls.module.css";
 import { AgiDefectChip } from "../agi/AgiBugReport";
 
@@ -400,9 +401,10 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
           : needsOngoingConfirmation && ongoing ? (ko ? "지속 목표 확인 후 재개" : "Confirm ongoing goal")
           : needsOngoingConfirmation ? (ko ? "목표 검토 후 재개" : "Review goal before resuming")
           : ko ? "재개" : "Resume"}</button>}
-      <button type="button" disabled={!editable || view.pending !== null} aria-label={ko ? "목표 편집" : "Edit goal"}
-        title={!editable ? (ko ? "실행을 먼저 일시정지하면 편집할 수 있습니다" : "Pause the run before editing") : undefined}
-        onClick={() => { setDraft(view.context?.objective ?? ""); setEditing(true); }}><IconEdit size={13} /></button>
+      {/* 편집 = 오른쪽 "목표" 탭(목표 전용 패널, 오너 2026-09-28). 패널이 없는 화면에서만 예전 편집기. */}
+      <button type="button" disabled={view.pending !== null} aria-label={ko ? "목표 편집" : "Edit goal"} data-goal-chip-edit="true"
+        title={ko ? "목표 패널에서 편집" : "Edit in the goal panel"}
+        onClick={() => { if (!requestGoalPanelOpen(chatId)) { setDraft(view.context?.objective ?? ""); setEditing(true); } }}><IconEdit size={13} /></button>
       <button type="button" aria-label={ko ? "목표 삭제" : "Delete goal"}
         title={ko ? "목표를 삭제합니다. 대화와 작업 파일은 유지됩니다" : "Delete the goal; keep the conversation and files"}
         onClick={() => { void session.current?.act("delete"); }}><IconTrash size={13} /></button>

@@ -9,6 +9,7 @@
 "use client";
 import { GoalPlanSummary } from "@/components/goal/GoalPlanSummary";
 import type { GoalPlanView } from "../../shared/goal-shape";
+import { requestGoalPanelOpen } from "./goal/GoalPanel";
 import { ComposerDecisionSlot } from "./ComposerDecisionPortal";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
 import { AliveComposerButton } from "./alive/AliveComposerButton";
@@ -101,6 +102,7 @@ import {
   IconArrowUp,
   IconAtSign,
   IconBuilding,
+  IconCheck,
   IconChevronDown,
   IconChevronRight,
   IconClose,
@@ -114,6 +116,7 @@ import {
   IconNetwork,
   IconPaperclip,
   IconPlus,
+  IconRefresh,
   IconRoute,
   IconShield,
   IconSparkles,
@@ -503,6 +506,7 @@ function ChatInputComponent({
   const [activeIndex, setActiveIndex] = useState(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const modelTriggerRef = useRef<HTMLButtonElement>(null);
   const dragDepthRef = useRef(0);
   const lastActiveAgentIdRef = useRef<string | null | undefined>(undefined);
   const expectedAgentChangesRef = useRef<Map<string, number>>(new Map());
@@ -1264,10 +1268,12 @@ function ChatInputComponent({
           onSelectModel={(id) => {
             onSelectModel?.(id);
             setModelOpen(false);
+            window.requestAnimationFrame(() => modelTriggerRef.current?.focus());
           }}
           onSelectEffort={(id) => {
             onSelectEffort?.(id);
             setModelOpen(false);
+            window.requestAnimationFrame(() => modelTriggerRef.current?.focus());
           }}
           t={t}
         />
@@ -1429,6 +1435,7 @@ function ChatInputComponent({
           onResume={onResumeGoal}
           onPause={onPauseGoal}
           onEdit={onEditGoal}
+          chatId={activeChatId}
           onEndGoal={() => toggleGoalMode(false)}
         />
       )}
@@ -1781,6 +1788,7 @@ function ChatInputComponent({
               aria-label={`${locale === "ko" ? "권한" : "Permissions"}: ${t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}`}
               title={`${locale === "ko" ? "권한" : "Permissions"}: ${t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}`}
               aria-expanded={permOpen}
+              aria-haspopup="menu"
               data-popover-trigger="permission"
               onClick={() => setPermOpen((v) => !v)}
               disabled={disabled}
@@ -1810,6 +1818,7 @@ function ChatInputComponent({
             {runtime &&
               ((modelOptions?.length ?? 0) > 0 || effortOptionsForModel(runtime).length > 0) && (
                 <button
+                  ref={modelTriggerRef}
                   className="chat-input-chip chat-input-model-chip"
                   data-popover-trigger="model"
                   onClick={() => setModelOpen((v) => !v)}
@@ -1817,6 +1826,7 @@ function ChatInputComponent({
                   title={`${t("chatinput.model")}: ${modelChipLabel(runtime, modelOptions ?? [])}`}
                   aria-label={`${t("chatinput.model")}: ${modelChipLabel(runtime, modelOptions ?? [])}`}
                   aria-expanded={modelOpen}
+                  aria-haspopup="menu"
                   style={{
                     ...toolBtnStyle(modelOpen),
                     width: "auto",
@@ -2040,6 +2050,7 @@ function ComposerGoalBar({
   onResume,
   onPause,
   onEdit,
+  chatId,
   onEndGoal,
 }: {
   label?: string;
@@ -2054,6 +2065,8 @@ function ComposerGoalBar({
   onResume?: () => void;
   onPause?: () => void;
   onEdit?: (objective: string) => Promise<boolean>;
+  /** 편집 = 오른쪽 "목표" 탭(목표 전용 패널). 패널이 없으면 예전 편집기. */
+  chatId?: string | null;
   onEndGoal: () => void;
 }) {
   const { locale } = useT();
@@ -2184,9 +2197,10 @@ function ComposerGoalBar({
         </button>
       )}
       {onEdit && label && (
-        <button type="button" disabled={!editable} onClick={() => { setDraft(label); setEditing(true); }}
+        <button type="button" data-goal-chip-edit="true"
+          onClick={() => { if (!requestGoalPanelOpen(chatId)) { setDraft(label); setEditing(true); } }}
           aria-label={locale === "ko" ? "목표 편집" : "Edit goal"}
-          title={!editable ? (locale === "ko" ? "실행을 먼저 일시정지하면 편집할 수 있습니다" : "Pause the run before editing") : undefined}>
+          title={locale === "ko" ? "목표 패널에서 편집" : "Edit in the goal panel"}>
           <IconEdit size={12} />
         </button>
       )}
@@ -2848,8 +2862,10 @@ function PlusMenu({
 }) {
   if (submenu === "plugins") {
     return (
-      <Popover dataKind="plus">
+      <Popover dataKind="plus" role="menu" compact ariaLabel={locale === "ko" ? "플러그인" : "Plugins"}>
         <button
+          type="button"
+          role="menuitem"
           onClick={() => setSubmenu(null)}
           style={{
             display: "flex",
@@ -2874,6 +2890,7 @@ function PlusMenu({
               key={p}
               icon={<IconLayers size={13} style={{ color: "var(--accent)" }} />}
               title={p}
+              compact
             />
           ))
         )}
@@ -2881,22 +2898,25 @@ function PlusMenu({
     );
   }
   return (
-    <Popover dataKind="plus" role="menu">
+    <Popover dataKind="plus" role="menu" compact ariaLabel={locale === "ko" ? "추가 옵션" : "More options"}>
       <Row
         onClick={onAddFile}
         icon={<IconFileUp size={14} />}
         title={t("chatinput.plus.attach")}
+        compact
       />
       <Row
         onClick={onAddFolder}
         icon={<IconFolder size={14} />}
         title={t("chatinput.plus.attach_folder")}
+        compact
       />
       <Row
         onClick={() => setSubmenu("plugins")}
         icon={<IconLayers size={14} style={{ color: "var(--accent)" }} />}
         title={t("chatinput.plus.plugins")}
         right={<IconChevronRight size={11} style={{ color: "var(--muted)" }} />}
+        compact
       />
       <Divider />
       <ToggleRow
@@ -2904,35 +2924,27 @@ function PlusMenu({
         title={t("chatinput.plan_mode")}
         on={planMode}
         onChange={setPlanMode}
+        compact
       />
       <ToggleRow
         icon={<IconTarget size={14} />}
         title={t("chatinput.goal_mode")}
         on={goalMode}
         onChange={setGoalMode}
+        compact
       />
       {!projectOrchestration && <ToggleRow
           icon={<IconApps size={14} />}
           title={t("chatinput.apps_generate_mode")}
           on={appsGenerateMode}
           onChange={onToggleAppsGenerate}
+          compact
         />}
       {!projectOrchestration && showModeToggles && (
         <>
           <Divider />
           <ToggleRow
-            icon={
-              <span
-                style={{
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  background: continuousMode ? "var(--accent)" : "var(--muted)",
-                  display: "inline-block",
-                  flexShrink: 0,
-                }}
-              />
-            }
+            icon={<IconRefresh size={14} aria-hidden />}
             title={locale === "ko" ? "계속 라이브로" : "Keep going live"}
             subtitle={
               locale === "ko"
@@ -2941,6 +2953,7 @@ function PlusMenu({
             }
             on={continuousMode}
             onChange={onToggleContinuous}
+            compact
           />
           <ToggleRow
             icon={<IconNetwork size={14} aria-hidden />}
@@ -2952,6 +2965,7 @@ function PlusMenu({
             }
             on={swarmMode}
             onChange={onToggleSwarm}
+            compact
           />
         </>
       )}
@@ -2960,30 +2974,21 @@ function PlusMenu({
         <ToggleRow
           key={tg.id}
           hepToggleId={tg.id}
-          icon={
-            <span
-              style={{
-                width: 8,
-                height: 8,
-                borderRadius: "50%",
-                background: hepToggles.has(tg.id) ? "var(--accent)" : "var(--muted)",
-                display: "inline-block",
-                flexShrink: 0,
-              }}
-            />
-          }
+          icon={tg.id === "recommend" ? <IconUsers size={14} aria-hidden /> : <IconShield size={14} aria-hidden />}
           title={locale === "ko" ? tg.labelKo : tg.labelEn}
           subtitle={locale === "ko" ? tg.titleKo : tg.titleEn}
           on={hepToggles.has(tg.id)}
           onChange={() => onToggleHep(tg.id)}
+          compact
         />
       ))}
       <Divider />
       <Row
         onClick={onInsertMention}
         icon={<IconAtSign size={14} />}
-        title={locale === "ko" ? "특정 에이전트 지정 (선택)" : "Specify an agent (optional)"}
+        title={locale === "ko" ? "에이전트" : "Agent"}
         subtitle={locale === "ko" ? "이 턴에만 수동으로 추가" : "One-turn manual override"}
+        compact
       />
     </Popover>
   );
@@ -3005,7 +3010,7 @@ function PermissionMenu({
     { id: "full", color: "var(--red-deep)" },
   ];
   return (
-    <Popover title={t("chatinput.perm.title")} dataKind="permission">
+    <Popover title={t("chatinput.perm.title")} dataKind="permission" role="menu" compact>
       {opts.map((o) => (
         <Row
           key={o.id}
@@ -3013,7 +3018,9 @@ function PermissionMenu({
           icon={<IconShield size={13} style={{ color: o.color }} />}
           title={t(`chatinput.perm.${o.id}` as `chatinput.perm.${PermissionLevel}`)}
           subtitle={t(`chatinput.perm.${o.id}.desc` as `chatinput.perm.${PermissionLevel}.desc`)}
-          right={value === o.id ? <span style={{ color: "var(--accent)", fontWeight: 700 }}>•</span> : undefined}
+          selected={value === o.id}
+          right={value === o.id ? <IconCheck size={14} style={{ color: "var(--accent)" }} /> : undefined}
+          compact
         />
       ))}
     </Popover>
@@ -3044,7 +3051,7 @@ function ModelMenu({
   // CLI/ACP에서 모델을 생략하면 엔진 설정을 사용한다. BYOK·로컬·Agentlas는 실제 모델이 필수다.
   const allowDefaultModel = runtimeUsesEngineModelSetting(runtime.kind);
   const managedByRuntime = CONTEXT_MANAGED_BY[runtime.kind] === "runtime";
-  const check = <span style={{ color: "var(--accent)", fontWeight: 700 }}>•</span>;
+  const check = <IconCheck size={14} style={{ color: "var(--accent)" }} />;
   const modelIcon = <IconSparkles size={13} style={{ color: "var(--accent)" }} />;
   const effortIcon = <IconRoute size={13} style={{ color: "var(--muted-deep)" }} />;
 
@@ -3055,7 +3062,9 @@ function ModelMenu({
           onClick={() => onSelectModel("")}
           icon={modelIcon}
           title={runtimeModelFallbackLabel(runtime.kind, locale === "ko" ? "ko" : "en", runtime)}
+          selected={!runtime.model}
           right={!runtime.model ? check : undefined}
+          compact
         />
       )}
       {options.map((o) => (
@@ -3065,7 +3074,9 @@ function ModelMenu({
           icon={modelIcon}
           title={o.label}
           subtitle={o.tag}
+          selected={runtime.model === o.id}
           right={runtime.model === o.id ? check : undefined}
+          compact
         />
       ))}
       {efforts.length > 0 && (
@@ -3076,7 +3087,9 @@ function ModelMenu({
           onClick={() => onSelectEffort("")}
           icon={effortIcon}
           title={t("chat.effort.default")}
+          selected={!currentEffort}
           right={!currentEffort ? check : undefined}
+          compact
         />
           {efforts.map((e) => (
             <Row
@@ -3084,13 +3097,15 @@ function ModelMenu({
               onClick={() => onSelectEffort(e.id)}
               icon={effortIcon}
               title={e.label}
+              selected={currentEffort === e.id}
               right={currentEffort === e.id ? check : undefined}
+              compact
             />
           ))}
         </>
       )}
       <Divider />
-      <div style={{ padding: "6px 10px", fontSize: 10.5, color: "var(--muted-deep)", lineHeight: 1.5 }}>
+      <div className="sr-only">
         {managedByRuntime
           ? t("settings.runtime.managed_runtime")
           : t("settings.runtime.managed_agentlas")}
@@ -3106,25 +3121,55 @@ function Popover({
   dataKind,
   role,
   align = "left",
+  compact = false,
+  ariaLabel,
 }: {
   title?: string;
   children: React.ReactNode;
   dataKind?: string;
   role?: React.AriaRole;
+  compact?: boolean;
+  ariaLabel?: string;
   /** 트리거가 우측 그룹에 있으면 "right" — 메뉴가 트리거 반대편에 열리지 않게 한다. */
   align?: "left" | "right";
 }) {
+  const compactMenu = compact || dataKind === "plus" || dataKind === "permission" || dataKind === "model";
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (role !== "menu") return;
+    const root = rootRef.current;
+    const selected = root?.querySelector<HTMLElement>('[role^="menuitem"][aria-checked="true"]:not(:disabled)');
+    const first = root?.querySelector<HTMLElement>('[role^="menuitem"]:not(:disabled)');
+    (selected ?? first)?.focus();
+  }, [role]);
   return (
     <div
+      ref={rootRef}
       data-popover-root
       data-popover-kind={dataKind}
-      role={role}
+      data-compact-menu={compactMenu ? "true" : undefined}
+      role={role ?? (dataKind === "permission" || dataKind === "model" ? "menu" : undefined)}
+      aria-label={ariaLabel ?? title}
       className="glass-lift"
+      onKeyDown={role === "menu" ? (event) => {
+        const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role^="menuitem"]:not(:disabled)'));
+        if (items.length === 0) return;
+        const current = items.indexOf(document.activeElement as HTMLElement);
+        let next = -1;
+        if (event.key === "ArrowDown") next = current < 0 ? 0 : (current + 1) % items.length;
+        else if (event.key === "ArrowUp") next = current < 0 ? items.length - 1 : (current - 1 + items.length) % items.length;
+        else if (event.key === "Home") next = 0;
+        else if (event.key === "End") next = items.length - 1;
+        if (next < 0) return;
+        event.preventDefault();
+        items[next]?.focus();
+      } : undefined}
       style={{
         position: "absolute",
         bottom: "calc(100% - 4px)",
         ...(align === "right" ? { right: 16 } : { left: 16 }),
-        minWidth: 240,
+        minWidth: compactMenu ? 0 : 240,
+        width: compactMenu ? "min(280px, calc(100vw - 32px))" : undefined,
         maxWidth: 320,
         maxHeight: 360,
         overflowY: "auto",
@@ -3135,6 +3180,7 @@ function Popover({
     >
       {title && (
         <div
+          role={role === "menu" ? "presentation" : undefined}
           style={{
             padding: "6px 10px 4px",
             fontSize: 10,
@@ -3203,6 +3249,8 @@ function Row({
   subtitle,
   right,
   autocompleteOption = false,
+  compact = false,
+  selected,
 }: {
   onClick?: () => void;
   /** 마우스가 위로 올라오면 호출 — 키보드 activeIndex와 마우스 활성을 동기화 */
@@ -3214,22 +3262,29 @@ function Row({
   subtitle?: string;
   right?: React.ReactNode;
   autocompleteOption?: boolean;
+  compact?: boolean;
+  selected?: boolean;
 }) {
   // active일 때는 hover 색을 항상 표시 — inline 토글이라 ref로 보존하지 않음
   return (
     <button
+      type="button"
       onClick={onClick}
       disabled={!onClick}
+      title={compact ? subtitle : undefined}
+      aria-label={compact && subtitle ? `${title}. ${subtitle}` : undefined}
+      aria-checked={compact ? selected : undefined}
+      aria-pressed={!compact ? selected : undefined}
       data-autocomplete-option={autocompleteOption ? "true" : undefined}
-      role={autocompleteOption ? "option" : undefined}
+      role={autocompleteOption ? "option" : compact ? (selected === undefined ? "menuitem" : "menuitemradio") : undefined}
       aria-selected={autocompleteOption ? (active ? "true" : "false") : undefined}
       style={{
         display: "flex",
         width: "100%",
         alignItems: "center",
         gap: 10,
-        minHeight: 46,
-        padding: "8px 10px",
+        minHeight: compact ? 36 : 46,
+        padding: compact ? "6px 8px" : "8px 10px",
         borderRadius: 8,
         background: active ? "var(--fill-1)" : "transparent",
         border: "none",
@@ -3250,8 +3305,8 @@ function Row({
         <span
           style={{
             display: "block",
-            fontSize: 12.5,
-            fontWeight: 600,
+            fontSize: compact ? 12 : 12.5,
+            fontWeight: compact ? 500 : 600,
             color: "var(--ink)",
             whiteSpace: "nowrap",
             overflow: "hidden",
@@ -3262,6 +3317,7 @@ function Row({
         </span>
         {subtitle && (
           <span
+            className={compact ? "sr-only" : undefined}
             style={{
               display: "block",
               fontSize: 10.5,
@@ -3287,6 +3343,7 @@ function ToggleRow({
   on,
   onChange,
   hepToggleId,
+  compact = false,
 }: {
   icon: React.ReactNode;
   title: string;
@@ -3295,17 +3352,26 @@ function ToggleRow({
   onChange: (v: boolean) => void;
   /** Locale-independent hook for Hephaestus mode controls and release QA. */
   hepToggleId?: HepToggleId;
+  compact?: boolean;
 }) {
   return (
     <button
+      type="button"
       onClick={() => onChange(!on)}
       data-hep-toggle-id={hepToggleId}
+      data-compact-menu-row={compact ? "true" : undefined}
+      title={compact ? subtitle : undefined}
+      aria-label={compact && subtitle ? `${title}. ${subtitle}` : undefined}
+      role={compact ? "menuitemcheckbox" : undefined}
+      aria-checked={compact ? on : undefined}
+      aria-pressed={!compact ? on : undefined}
       style={{
         display: "flex",
         width: "100%",
         alignItems: "center",
         gap: 10,
-        padding: "8px 10px",
+        minHeight: compact ? 36 : undefined,
+        padding: compact ? "6px 8px" : "8px 10px",
         borderRadius: 8,
         background: "transparent",
         border: "none",
@@ -3319,19 +3385,19 @@ function ToggleRow({
     >
       <span style={{ flexShrink: 0, color: on ? "var(--accent)" : "var(--ink-soft)" }}>{icon}</span>
       <span style={{ flex: 1, minWidth: 0, textAlign: "left" }}>
-        <span style={{ display: "block", fontSize: 12.5, fontWeight: 600, color: "var(--ink)" }}>
+        <span style={{ display: "block", fontSize: compact ? 12 : 12.5, fontWeight: compact ? 500 : 600, color: "var(--ink)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
           {title}
         </span>
         {subtitle && (
-          <span style={{ display: "block", marginTop: 2, fontSize: 11, lineHeight: 1.35, color: "var(--muted-deep)" }}>
+          <span className={compact ? "sr-only" : undefined} style={{ display: "block", marginTop: 2, fontSize: 11, lineHeight: 1.35, color: "var(--muted-deep)" }}>
             {subtitle}
           </span>
         )}
       </span>
       <span
         style={{
-          width: 36,
-          height: 20,
+          width: compact ? 30 : 36,
+          height: compact ? 18 : 20,
           borderRadius: 999,
           background: on ? "var(--accent)" : "var(--paper-edge)",
           position: "relative",
@@ -3342,9 +3408,9 @@ function ToggleRow({
           style={{
             position: "absolute",
             top: 2,
-            left: on ? 18 : 2,
-            width: 16,
-            height: 16,
+            left: on ? (compact ? 14 : 18) : 2,
+            width: compact ? 14 : 16,
+            height: compact ? 14 : 16,
             borderRadius: "50%",
             background: "white",
             transition: "left 0.12s",

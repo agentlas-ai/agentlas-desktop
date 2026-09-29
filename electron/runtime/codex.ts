@@ -562,6 +562,18 @@ export function resolveCodexRunFailure(input: {
 }): RunnerFailure | null {
   if (input.terminalFailure) return input.terminalFailure;
   if (input.code === 0 && input.turnCompleted && input.text.trim()) return null;
+  if (!input.itemFailure) return null;
+  // The process ended before its turn completed: the item diagnostic is the last thing it
+  // said, not why it stopped. Owner Threads automation 2026-09-28 13:12Z (app quit for an
+  // update mid-node) was recorded as "codex runtime exit: clamping SessionEnd hook timeout
+  // to 3s …" — a harmless hook warning read as the cause. Say that the turn never finished.
+  if (!input.turnCompleted || input.code !== 0) {
+    const how = input.code === null ? "was stopped" : `exited with code ${input.code}`;
+    return {
+      ...input.itemFailure,
+      message: `codex ${how} before its turn finished (last diagnostic: ${input.itemFailure.message})`.slice(0, 2000),
+    };
+  }
   return input.itemFailure;
 }
 

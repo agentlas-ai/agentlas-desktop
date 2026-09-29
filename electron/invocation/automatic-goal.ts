@@ -221,7 +221,7 @@ export async function prepareInvocationAutomaticGoal(input: {
 export function automaticGoalResumeRequest(chatId: string, expectedVersion: number, actor: "user" | "host" = "host",
   /** Main-only: a read-only observation already looked at the external outcome of the
    * interrupted attempts and the ledger recorded its exact verdict in this transaction. */
-  observation?: { verdict: "done" | "not_done"; evidence: string }): import("../../shared/types").McpInvocationRequest | null {
+  observation?: { verdict: "done" | "not_done"; evidence: string; proof?: "receipt" }): import("../../shared/types").McpInvocationRequest | null {
   const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
   if (!chat?.goal_id) return null;
   const revision = getChatGoalRevision(chat.goal_id);
@@ -268,9 +268,14 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
       ? " The user acknowledged interrupted attempts, but the host did not prove their external outcomes. First inspect Activity and the external state read-only; do not repeat previous side effects or make a new external change until the prior outcomes are reconciled. If evidence is absent, report them as unknown."
       : observation?.verdict === "done"
         ? ` A read-only check just observed that the interrupted earlier action already took effect (evidence: ${observation.evidence}). Do not repeat it; continue with the next remaining step.`
-        : observation?.verdict === "not_done"
-          ? ` A read-only check just observed that the interrupted earlier action did not take effect (evidence: ${observation.evidence}). It is safe to perform it again as part of the next step; re-check the current state right before acting.`
-          : ""}\n\n${revision.objective}` };
+        : observation?.proof === "receipt"
+          // The host's own record: the interrupted turn only read. There is nothing to repeat.
+          ? ` The host's record shows the interrupted turn only searched, read or loaded pages (${observation.evidence}); nothing outside changed and there is nothing to repeat. Continue with the next remaining step.`
+          : observation?.verdict === "not_done"
+            // A model look can be wrong (owner Thread Marketing 2026-09-28 15:57Z: "not_done" from a follower
+            // count, three minutes after the reply had been posted and verified). Never a licence to repeat blindly.
+            ? ` A read-only check reported that the interrupted earlier action did not take effect (evidence: ${observation.evidence}). Before doing it again, look at the exact page it targeted and at this conversation's later messages; if either shows it already happened (a posted reply, a permalink, a sent message), do not repeat it.`
+            : ""}\n\n${revision.objective}` };
 }
 
 /** 사람이 누른 재개 — 인지 이벤트와 재개가 한 트랜잭션이라, 요청을 못 만들면 인지도 남지 않는다. */

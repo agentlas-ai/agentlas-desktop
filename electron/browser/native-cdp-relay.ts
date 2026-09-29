@@ -1,7 +1,11 @@
 import { showNativeAgentPointer } from "./native-agent-pointer";
+import { browserAnnotationActiveOn, endBrowserAnnotationsForAgent } from "./annotation";
+import { AGENT_DIALOG_BINDING, agentDialogInstallSource, agentDialogRestoreSource, parseAgentDialogReport, type AgentDialogType } from "./agent-dialogs";
 // Main-owned CDP compatibility endpoint for Agentlas native browser guests.
 // No Electron remote-debugging port or renderer-supplied endpoint is exposed.
 import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
 import { randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { Duplex } from "node:stream";
 interface RelaySocket {
@@ -20,13 +24,65 @@ import type { WebContents } from "electron";
 import { onHostShutdown } from "../host-lifecycle";
 import { createWorkBrowserTab, listWorkBrowserTabs, nativeBrowserGuest, nativeBrowserTaskOwner,
   closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport, presentNativeBrowserGuest,
-  openAgentBrowserHold, claimNativeBrowserGuest, settleAgentBrowserHold } from "../work-live-view";
+  openAgentBrowserHold, claimNativeBrowserGuest, settleAgentBrowserHold, onAgentBrowserPopup, nativeBrowserGuestLayoutAge, agentBrowserTabsOfHold } from "../work-live-view";
+import { observeNativeBrowserDownloads } from "./download-registry";
 
 type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal; presentation?: "foreground" | "background"; onScreenshot?: (capture: { png: Buffer; isCurrent: () => boolean }) => void | Promise<void> };
-type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; lastPresentationAt?: number; detach: () => void };
-type Lease = { id: string; guests: Map<string, Guest>; socket: RelaySocket | null; connecting: boolean; autoAttach: boolean; current: string | null };
+type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; lastPresentationAt?: number; detach: () => void;
+  chooser: FileChooserGate;
+  /** Synthetic JS dialogs reported to the agent and not yet handled, per CDP session key. */
+  dialogs: Map<string, AgentDialogType[]>;
+  /** Last agent command on this guest; a beforeunload right after one is the agent's. */
+  lastAgentCommandAt: number;
+  /** Target of the page whose window.open created this one. */
+  openerId?: string;
+  /** Last main-frame cross-document commit (paint holding starts here). */
+  navigatedAt: number };
+
+/*
+ * ★File choosers belong to whoever clicked. Chromium's
+ * Page.setInterceptFileChooserDialog is per target, not per input source: left
+ * on, the owner's own clicks would never open a chooser; left off, an agent's
+ * click on an upload control opens the OS "Open" panel, a modal sheet over the
+ * whole Agentlas window that no agent can operate (reproduced 2026-09-28 in an
+ * isolated app: a click on a JS-triggered chooser without a listener put an
+ * 880x448 "열기" panel over the app).
+ *
+ * The relay therefore owns the real interception flag. The agent's
+ * setInterceptFileChooserDialog is recorded, not forwarded. Real interception
+ * is armed only around the agent's own input and for a short activation window
+ * after it (JS-triggered choosers open asynchronously). Owner input while armed
+ * disarms at once. An intercepted chooser goes to the agent when it asked for
+ * choosers (Playwright: filechooser -> DOM.setFileInputFiles); otherwise it is
+ * dropped, so no OS panel appears for an agent click.
+ */
+type FileChooserGate = { wants: Map<string, boolean>; armedUntil: number; real: Set<string>; timer?: ReturnType<typeof setTimeout>; agentInput: number;
+  /** input-event can trail the CDP reply; events this soon after an agent gesture are the agent's. */
+  agentEchoUntil: number };
+const FILE_CHOOSER_ACTIVATION_MS = 3_000;
+function agentGestureInput(method: string, params: Record<string, unknown>): boolean {
+  if (method === "Input.dispatchMouseEvent") return params.type === "mousePressed" || params.type === "mouseReleased";
+  if (method === "Input.dispatchKeyEvent") return params.type === "keyDown" || params.type === "rawKeyDown" || params.type === "char";
+  if (method === "Input.dispatchTouchEvent") return params.type === "touchStart" || params.type === "touchEnd";
+  return method === "Input.dispatchDragEvent" && params.type === "drop";
+}
+type Lease = { id: string; guests: Map<string, Guest>; socket: RelaySocket | null; connecting: boolean; autoAttach: boolean; current: string | null;
+  /** Commands reach the guest in the order the client sent them (mousePressed before mouseReleased). */
+  order: Promise<void>;
+  /** Browser.setDownloadBehavior as the client asked for it (Playwright: allowAndName + events). */
+  downloads?: { downloadPath: string; eventsEnabled: boolean } };
 const reservedGuests = new Set<string>();
 const MAX_SESSIONS = 8;
+const HOLD_IDLE_MS = 120_000;
+const LAYOUT_SETTLE_MS = 400;
+const PAINT_HOLDING_MS = 800;
+async function firstContentfulPaint(guest: { wc: WebContents }): Promise<boolean> {
+  try {
+    const result = await guest.wc.debugger.sendCommand("Runtime.evaluate", {
+      expression: "performance.getEntriesByName('first-contentful-paint').length > 0", returnByValue: true });
+    return result?.result?.value === true;
+  } catch { return false; }
+}
 /** Preserve host-owned capture diagnostics without leaking arbitrary CDP errors. */
 export function nativeBrowserCommandFailure(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
@@ -106,10 +162,21 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   if (!owner || input.signal.aborted || !input.runId || !["read", "write", "full"].includes(input.permission)) throw new Error("native-browser-task-unbound");
   const secret = randomBytes(32).toString("hex");
   const leases = new Map<string, Lease>();
+  const pdfStreams = new Map<string, { data: Buffer; offset: number }>();
   let closed = false;
+  // Assigned below; addGuest's owner-input listener needs it before the helpers.
+  let disarmFileChooser: (guest: Guest) => void = () => {};
   let port = 0;
   // One hold per run grant: tabs this run opens close when the grant is released.
-  const holdId = openAgentBrowserHold({ runId: input.runId, isLive: () => !closed && !input.signal.aborted });
+  // ★A hold is live while its run can still use the browser: an open CDP socket,
+  // or browser activity within HOLD_IDLE_MS. A grant whose release never ran
+  // (a leaked worker lease, a resident bridge of an ended turn) used to count
+  // as a live run forever, so its tabs could never be reclaimed and the next
+  // run hit the tab limit.
+  let lastActivity = Date.now();
+  const touch = () => { lastActivity = Date.now(); };
+  const holdId = openAgentBrowserHold({ runId: input.runId, isLive: () => !closed && !input.signal.aborted
+    && ([...leases.values()].some((lease) => lease.socket?.readyState === 1 || lease.connecting) || Date.now() - lastActivity < HOLD_IDLE_MS) });
   const server = http.createServer();
   const websocket = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
   const current = () => !closed && !input.signal.aborted && nativeBrowserTaskOwner(input.chatId)?.ownerId === owner.ownerId
@@ -125,7 +192,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       try { lease.socket.send(JSON.stringify(message)); } catch { releaseLease(lease); }
     }
   };
-  const targetInfo = (guest: Guest) => ({ targetId: guest.targetId, type: "page", title: guest.wc.getTitle(),
+  const targetInfo = (guest: Guest) => ({ targetId: guest.targetId, type: "page", title: guest.wc.getTitle(), ...(guest.openerId ? { openerId: guest.openerId } : {}),
     url: guest.wc.getURL(), attached: true, canAccessOpener: false, browserContextId: guest.browserContextId });
   const findGuest = (lease: Lease, sessionId?: string) => [...lease.guests.values()].find((guest) =>
     guest.sessionId === sessionId || (sessionId !== undefined && guest.children.has(sessionId)));
@@ -141,7 +208,15 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     lease.socket?.close();
     lease.socket = null;
   };
-  const addGuest = async (lease: Lease, viewId: string): Promise<Guest> => {
+  const resetLease = (lease: Lease) => {
+    for (const guest of lease.guests.values()) { guest.detach(); reservedGuests.delete(`${owner.ownerId}:${guest.viewId}`); }
+    lease.guests.clear();
+    lease.socket = null;
+    lease.connecting = false;
+    lease.autoAttach = false;
+    lease.current = null;
+  };
+  const addGuest = async (lease: Lease, viewId: string, openerId?: string): Promise<Guest> => {
     if (!current()) throw new Error("native-browser-grant-revoked");
     const reservation = `${owner.ownerId}:${viewId}`;
     const wc = nativeBrowserGuest(owner.ownerId, input.chatId, viewId);
@@ -152,7 +227,12 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     try { wc.debugger.attach("1.3"); }
     catch { reservedGuests.delete(reservation); throw new Error("native-browser-debugger-unavailable"); }
     let relayAttached = true;
-    const debuggerDetached = () => { relayAttached = false; releaseLease(lease); };
+    // ★A guest's debugger detaching (its page closed itself, e.g. a sign-in
+    // popup after posting its result) ends that target only. Releasing the
+    // whole lease here closed the agent's CDP socket, so the opener page died
+    // with its popup ("Target page, context or browser has been closed").
+    let guestReady = false;
+    const debuggerDetached = () => { relayAttached = false; if (guestReady) dropGuest(); };
     wc.debugger.on("detach", debuggerDetached);
     const detachOwnedDebugger = () => {
       wc.debugger.removeListener("detach", debuggerDetached);
@@ -177,29 +257,125 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     }
     const guest: Guest = { viewId, wc, targetId: identity.targetInfo.targetId,
       browserContextId: typeof identity.targetInfo.browserContextId === "string" ? identity.targetInfo.browserContextId : "agentlas-native-default",
-      sessionId: randomUUID(), children: new Set(), detach: () => {} };
+      sessionId: randomUUID(), children: new Set(), detach: () => {}, chooser: { wants: new Map(), armedUntil: 0, real: new Set(), agentInput: 0, agentEchoUntil: 0 },
+      dialogs: new Map(), lastAgentCommandAt: 0, navigatedAt: 0, ...(openerId ? { openerId } : {}) };
+    const navigated = () => { guest.navigatedAt = Date.now(); };
+    wc.on("did-navigate", navigated);
+    const reportDialog = (sessionKey: string, type: AgentDialogType, message: string, defaultPrompt: string) => {
+      const queue = guest.dialogs.get(sessionKey) ?? [];
+      if (queue.length >= 16) queue.shift();
+      queue.push(type); guest.dialogs.set(sessionKey, queue);
+      send(lease, { method: "Page.javascriptDialogOpening", sessionId: sessionKey || guest.sessionId,
+        params: { url: wc.getURL(), frameId: undefined, message, type, hasBrowserHandler: false, defaultPrompt } });
+    };
+    const installDialogs = (sessionKey: string) => {
+      const session = sessionKey || undefined;
+      void wc.debugger.sendCommand("Runtime.addBinding", { name: AGENT_DIALOG_BINDING }, session)
+        .then(() => wc.debugger.sendCommand("Page.addScriptToEvaluateOnNewDocument", { source: agentDialogInstallSource, runImmediately: true }, session))
+        .then(() => wc.debugger.sendCommand("Runtime.evaluate", { expression: agentDialogInstallSource }, session))
+        .catch(() => undefined);
+    };
+    installDialogs("");
+    // Agent-driven navigation away from a page with a beforeunload handler:
+    // Electron would silently cancel it. Proceed, and report it as a dialog.
+    const beforeUnload = (event: { preventDefault: () => void }) => {
+      if (Date.now() - guest.lastAgentCommandAt > 5_000) return;
+      event.preventDefault();
+      reportDialog("", "beforeunload", "", "");
+    };
+    wc.on("will-prevent-unload", beforeUnload);
     const message = (_event: unknown, method: string, params: Record<string, unknown>, childSessionId?: string) => {
       if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, viewId) !== wc) return;
-      if (method === "Target.attachedToTarget" && typeof params.sessionId === "string") guest.children.add(params.sessionId);
-      if (method === "Target.detachedFromTarget" && typeof params.sessionId === "string") guest.children.delete(params.sessionId);
+      // Electron decides beforeunload through will-prevent-unload (below);
+      // Chromium's own event for it names a dialog nobody can handle.
+      if (method === "Page.javascriptDialogOpening" && params.type === "beforeunload") return;
+      if (method === "Runtime.bindingCalled" && params.name === AGENT_DIALOG_BINDING) {
+        const report = parseAgentDialogReport(params.payload);
+        if (report) reportDialog(childSessionId || "", report.type, report.message, report.defaultPrompt);
+        return;
+      }
+      if (method === "Target.attachedToTarget" && typeof params.sessionId === "string") {
+        guest.children.add(params.sessionId);
+        installDialogs(params.sessionId);
+        // A frame attached while armed must not open an OS panel either.
+        if (guest.chooser.real.size) void setRealInterception(guest, params.sessionId, true);
+      }
+      if (method === "Target.detachedFromTarget" && typeof params.sessionId === "string") {
+        guest.children.delete(params.sessionId); guest.chooser.wants.delete(params.sessionId); guest.chooser.real.delete(params.sessionId);
+      }
+      // An intercepted chooser the agent did not ask for is dropped: nothing opens.
+      if (method === "Page.fileChooserOpened" && !guest.chooser.wants.get(childSessionId || "")) return;
       send(lease, { method, params, sessionId: childSessionId || guest.sessionId });
     };
-    const destroyed = () => {
-      lease.guests.delete(guest.targetId);
+    // Owner input (mouse or key) outside an agent command ends the agent's
+    // activation window at once, so the owner's click opens the normal chooser.
+    const ownerInput = (_event: unknown, event: { type?: string }) => {
+      if (guest.chooser.agentInput > 0 || Date.now() < guest.chooser.agentEchoUntil || !guest.chooser.real.size) return;
+      if (event.type === "mouseDown" || event.type === "keyDown" || event.type === "rawKeyDown" || event.type === "touchStart") disarmFileChooser(guest);
+    };
+    wc.on("input-event", ownerInput);
+    const destroyed = () => dropGuest();
+    let dropped = false;
+    function dropGuest() {
+      if (dropped) return;
+      dropped = true;
+      if (lease.guests.get(guest.targetId) === guest) lease.guests.delete(guest.targetId);
       guest.detach();
       reservedGuests.delete(reservation);
+      if (lease.current === guest.targetId) lease.current = lease.guests.keys().next().value ?? null;
       send(lease, { method: "Target.detachedFromTarget", params: { sessionId: guest.sessionId, targetId: guest.targetId } });
-    };
+    }
+    guestReady = true;
     wc.debugger.on("message", message);
     wc.once("destroyed", destroyed);
     guest.detach = () => {
       wc.debugger.removeListener("message", message); wc.removeListener("destroyed", destroyed);
+      wc.removeListener("input-event", ownerInput);
+      wc.removeListener("will-prevent-unload", beforeUnload);
+      wc.removeListener("did-navigate", navigated);
+      // Give the page its own dialogs back before the debugger goes.
+      try {
+        if (!wc.isDestroyed() && wc.debugger.isAttached()) {
+          for (const key of ["", ...guest.children]) void wc.debugger.sendCommand("Runtime.evaluate", { expression: agentDialogRestoreSource }, key || undefined).catch(() => undefined);
+        }
+      } catch { /* detached */ }
+      if (guest.chooser.timer) clearTimeout(guest.chooser.timer);
+      guest.chooser.real.clear(); guest.chooser.armedUntil = 0;
+      // Detaching the debugger drops Chromium's interception with it.
       detachOwnedDebugger();
     };
     lease.guests.set(guest.targetId, guest);
     lease.current = guest.targetId;
     if (lease.autoAttach) announce(lease, guest);
     return guest;
+  };
+  const setRealInterception = (guest: Guest, sessionKey: string, enabled: boolean): Promise<unknown> => {
+    if (enabled) guest.chooser.real.add(sessionKey); else guest.chooser.real.delete(sessionKey);
+    try {
+      if (!guest.wc.isDestroyed() && guest.wc.debugger.isAttached()) {
+        // Issued synchronously so it is ordered before the next command.
+        return guest.wc.debugger.sendCommand("Page.setInterceptFileChooserDialog", { enabled }, sessionKey || undefined).catch(() => undefined);
+      }
+    } catch { /* A detached frame session has nothing to intercept. */ }
+    return Promise.resolve();
+  };
+  const armFileChooser = async (guest: Guest): Promise<void> => {
+    guest.chooser.armedUntil = Date.now() + FILE_CHOOSER_ACTIVATION_MS;
+    if (guest.chooser.timer) clearTimeout(guest.chooser.timer);
+    const disarmAt = () => {
+      const left = guest.chooser.armedUntil - Date.now();
+      if (left > 0) { guest.chooser.timer = setTimeout(disarmAt, left); guest.chooser.timer.unref?.(); return; }
+      disarmFileChooser(guest);
+    };
+    guest.chooser.timer = setTimeout(disarmAt, FILE_CHOOSER_ACTIVATION_MS);
+    guest.chooser.timer.unref?.();
+    await Promise.all(["", ...guest.children].filter((key) => !guest.chooser.real.has(key)).map((key) => setRealInterception(guest, key, true)));
+  };
+  disarmFileChooser = (guest: Guest) => {
+    guest.chooser.armedUntil = 0;
+    if (guest.chooser.timer) clearTimeout(guest.chooser.timer);
+    guest.chooser.timer = undefined;
+    for (const key of [...guest.chooser.real]) void setRealInterception(guest, key, false);
   };
   const createGuest = async (lease: Lease, url = "about:blank") => {
     if (url !== "about:blank" && !sanitizeWorkLiveUrl(url)) throw new Error("native-browser-navigation-denied");
@@ -218,13 +394,16 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   };
   const createLease = async () => {
     if (leases.size >= MAX_SESSIONS) throw new Error("native-browser-session-limit");
-    const lease: Lease = { id: randomUUID(), guests: new Map(), socket: null, connecting: false, autoAttach: false, current: null };
+    const lease: Lease = { id: randomUUID(), guests: new Map(), socket: null, connecting: false, autoAttach: false, current: null, order: Promise.resolve() };
     leases.set(lease.id, lease);
     return lease;
   };
   const initializeLease = async (lease: Lease) => {
     const available = listWorkBrowserTabs(owner.ownerId, input.chatId).find((tab) => tab.visible === true && !reservedGuests.has(`${owner.ownerId}:${tab.viewId}`));
+    // A reconnect (Playwright after a dropped socket) gets back the tab this run opened.
+    const own = available ? undefined : agentBrowserTabsOfHold(owner.ownerId, input.chatId, holdId).find((viewId) => !reservedGuests.has(`${owner.ownerId}:${viewId}`));
     if (available) await addGuest(lease, available.viewId);
+    else if (own) await addGuest(lease, own);
     else await createGuest(lease);
   };
   const presentAction = (guest: Guest) => {
@@ -237,9 +416,20 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   };
   const dispatch = async (lease: Lease, method: string, params: Record<string, unknown>, sessionId?: string): Promise<unknown> => {
     if (!current()) throw new Error("native-browser-grant-revoked");
+    touch();
     if (!sessionId) {
-      if (method === "Browser.getVersion") return { protocolVersion: "1.3", product: `Chrome/${process.versions.chrome}`,
-        revision: "", userAgent: `AgentlasNativeBrowser/${process.versions.electron}` , jsVersion: process.versions.v8 };
+      // ★The real user agent. Playwright derives the platform from it and only
+      // on "Macintosh" sends the editing commands behind Cmd+A/C/V/X/Z; with
+      // "AgentlasNativeBrowser/…" an agent's select-all, copy and paste did
+      // nothing (measured 2026-09-29: pasted "" between two inputs).
+      if (method === "Browser.getVersion") {
+        const guest = [...lease.guests.values()][0];
+        let userAgent = "";
+        try { userAgent = guest && !guest.wc.isDestroyed() ? guest.wc.getUserAgent() : ""; } catch { userAgent = ""; }
+        return { protocolVersion: "1.3", product: `Chrome/${process.versions.chrome}`,
+          revision: "", userAgent: userAgent || `Mozilla/5.0 (${process.platform === "darwin" ? "Macintosh; Intel Mac OS X 10_15_7" : process.platform === "win32" ? "Windows NT 10.0; Win64; x64" : "X11; Linux x86_64"}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${process.versions.chrome} Safari/537.36 AgentlasNativeBrowser/${process.versions.electron}`,
+          jsVersion: process.versions.v8 };
+      }
       if (method === "Target.setAutoAttach") {
         lease.autoAttach = params.autoAttach === true;
         if (lease.autoAttach) for (const guest of lease.guests.values()) announce(lease, guest);
@@ -264,7 +454,19 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       }
       // CDP attachment preserves the host's download policy, as Playwright's
       // extension bridge does. Never apply global Browser settings to other tasks.
-      if (method === "Browser.setDownloadBehavior") return {};
+      // ★The client's request is still honoured for this lease alone: downloads
+      // stay in the Agentlas download folder, and the client is told about them
+      // with Browser.downloadWillBegin/downloadProgress and gets its own copy
+      // named by guid in its downloadPath (what Playwright's download.path()
+      // reads). Without this an agent never learned that a download happened.
+      if (method === "Browser.setDownloadBehavior") {
+        const downloadPath = typeof params.downloadPath === "string" ? params.downloadPath : "";
+        let directory = false;
+        try { directory = path.isAbsolute(downloadPath) && fs.statSync(downloadPath).isDirectory(); } catch { directory = false; }
+        lease.downloads = (params.behavior === "allow" || params.behavior === "allowAndName") && directory
+          ? { downloadPath, eventsEnabled: params.eventsEnabled === true } : undefined;
+        return {};
+      }
       throw new Error("native-browser-root-command-denied");
     }
     const guest = findGuest(lease, sessionId);
@@ -281,6 +483,16 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     // Only the authenticated run's trusted MCP adapter obtains this endpoint;
     // per-tool approval/cancellation remains in the existing launcher proxy.
     // Child session IDs are accepted only after this guest's debugger emitted them.
+    // Streams this relay created (printToPDF ReturnAsStream); no other IO handle is reachable.
+    if ((method === "IO.read" || method === "IO.close") && typeof params.handle === "string" && pdfStreams.has(params.handle)) {
+      const stream = pdfStreams.get(params.handle)!;
+      if (method === "IO.close") { pdfStreams.delete(params.handle); return {}; }
+      const size = typeof params.size === "number" && params.size > 0 ? Math.min(params.size, 1 << 20) : 1 << 20;
+      const start = typeof params.offset === "number" && params.offset >= 0 ? params.offset : stream.offset;
+      const chunk = stream.data.subarray(start, start + size);
+      stream.offset = start + chunk.length;
+      return { base64Encoded: true, data: chunk.toString("base64"), eof: stream.offset >= stream.data.length };
+    }
     if (!/^(DOM|DOMSnapshot|Accessibility|Page|Runtime|Input|Network|Emulation|Log|Performance|Target)\.[A-Za-z]+$/.test(method)) {
       throw new Error("native-browser-page-command-denied");
     }
@@ -291,6 +503,48 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       }
     }
     lease.current = guest.targetId;
+    const sessionKey = sessionId === guest.sessionId ? "" : sessionId!;
+    guest.lastAgentCommandAt = Date.now();
+    if (method === "Page.handleJavaScriptDialog") {
+      const queue = guest.dialogs.get(sessionKey);
+      const type = queue?.shift();
+      // The page already continued (see agent-dialogs.ts); close it for the
+      // client. Never forward: Electron does not implement this command and
+      // answers "No dialog is showing" even while its own box is up.
+      if (type) send(lease, { method: "Page.javascriptDialogClosed", sessionId: sessionId,
+        params: { result: params.accept === true, userInput: typeof params.promptText === "string" ? params.promptText : "" } });
+      return {};
+    }
+    if (method === "Page.setInterceptFileChooserDialog") {
+      guest.chooser.wants.set(sessionKey, params.enabled === true);
+      return {};
+    }
+    // Headful Chromium does not implement Page.printToPDF; Electron prints the
+    // same document. Options map 1:1 (inches for paper and margins).
+    if (method === "Page.printToPDF" && sessionId === guest.sessionId) {
+      const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
+      const width = number(params.paperWidth), height = number(params.paperHeight);
+      const pdf = await guest.wc.printToPDF({
+        landscape: params.landscape === true,
+        displayHeaderFooter: params.displayHeaderFooter === true,
+        printBackground: params.printBackground === true,
+        ...(number(params.scale) ? { scale: number(params.scale) } : {}),
+        ...(width && height ? { pageSize: { width, height } } : {}),
+        margins: { top: number(params.marginTop) ?? 0.4, bottom: number(params.marginBottom) ?? 0.4, left: number(params.marginLeft) ?? 0.4, right: number(params.marginRight) ?? 0.4 },
+        ...(typeof params.pageRanges === "string" && params.pageRanges ? { pageRanges: params.pageRanges } : {}),
+        ...(typeof params.headerTemplate === "string" ? { headerTemplate: params.headerTemplate } : {}),
+        ...(typeof params.footerTemplate === "string" ? { footerTemplate: params.footerTemplate } : {}),
+        preferCSSPageSize: params.preferCSSPageSize === true,
+      });
+      if (params.transferMode === "ReturnAsStream") {
+        const handle = `agentlas-pdf-${randomUUID()}`;
+        pdfStreams.set(handle, { data: pdf, offset: 0 });
+        if (pdfStreams.size > 8) pdfStreams.delete(pdfStreams.keys().next().value!);
+        return { stream: handle };
+      }
+      return { data: pdf.toString("base64") };
+    }
+
     if (method === "Page.captureScreenshot" && sessionId === guest.sessionId) {
       // Both viewport and document pixels use the same guarded hidden-host
       // lifecycle; raw CDP on an unattached guest can wait indefinitely.
@@ -378,7 +632,51 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     if (method === "Page.navigate" || method === "Page.reload" || method === "Page.navigateToHistoryEntry"
       || method === "Input.insertText" || (method === "Input.dispatchKeyEvent" && params.type !== "keyUp")
       || (method === "Input.dispatchMouseEvent" && (params.type === "mousePressed" || params.type === "mouseWheel"))) presentAction(guest);
-    const result = await guest.wc.debugger.sendCommand(method, params, sessionId === guest.sessionId ? undefined : sessionId);
+    const gesture = agentGestureInput(method, params);
+    if (gesture) guest.chooser.agentInput += 1;
+    let result: unknown;
+    try {
+      // Issue in client order. Anything awaited before the send (ending the
+      // owner's picker) runs inside the lease's order chain, so a later
+      // mouseReleased can never overtake this mousePressed.
+      let sent!: Promise<unknown>;
+      const step = lease.order.then(async () => {
+        // The owner's element picker would swallow this agent's input (see annotation.ts).
+        if (browserAnnotationActiveOn(guest.wc)) await endBrowserAnnotationsForAgent(guest.wc).catch(() => 0);
+        // ★Chromium's paint holding drops input for a moment after a
+        // cross-document navigation, until the page's first contentful paint
+        // (or a timeout). An agent's first click on a page it just opened was
+        // lost without a trace: no mousedown, while keys still arrived
+        // (measured 2026-09-29; gone with --disable-features=PaintHolding).
+        // Wait out that window before the press; a re-hosted or resized view
+        // gets the same short settle.
+        if (method === "Input.dispatchMouseEvent" && params.type === "mousePressed") {
+          const deadline = Date.now() + 1_500;
+          while (Date.now() < deadline) {
+            const layoutAge = nativeBrowserGuestLayoutAge(owner.ownerId, input.chatId, guest.viewId);
+            const navigationAge = Date.now() - guest.navigatedAt;
+            if (layoutAge >= LAYOUT_SETTLE_MS && navigationAge >= PAINT_HOLDING_MS) break;
+            if (layoutAge >= LAYOUT_SETTLE_MS && await firstContentfulPaint(guest)) break;
+            await new Promise<void>((resolve) => setTimeout(resolve, 50));
+          }
+        }
+        // Await the enable: Blink holds the interception flag, and its DevTools
+        // channel is not ordered with input. Sent back to back, the click won
+        // the race about one time in three and the OS "Open" panel appeared.
+        if (gesture) await armFileChooser(guest);
+        sent = guest.wc.debugger.sendCommand(method, params, sessionId === guest.sessionId ? undefined : sessionId);
+      });
+      lease.order = step.catch(() => {});
+      await step;
+      result = await sent;
+    } finally {
+      if (gesture) {
+        guest.chooser.agentInput -= 1;
+        guest.chooser.agentEchoUntil = Date.now() + 500;
+        // The activation window starts when the gesture has been delivered.
+        guest.chooser.armedUntil = Math.max(guest.chooser.armedUntil, Date.now() + FILE_CHOOSER_ACTIVATION_MS);
+      }
+    }
     if (!current() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== guest.wc) throw new Error("native-browser-grant-revoked");
     if (method === "Input.dispatchMouseEvent" && sessionId === guest.sessionId &&
       typeof params.x === "number" && typeof params.y === "number") {
@@ -401,7 +699,10 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     }
     const match = /^\/session\/([a-f0-9-]+)(?:\/(.*))?$/.exec(url.pathname);
     const lease = match ? leases.get(match[1]) : undefined;
-    if (!lease) return reply(response, 404, { error: "native-browser-session-missing" });
+    // 410, not 404: this session existed and ended. Playwright reports any
+    // non-200 here as "does not look like a DevTools server"; the body says why.
+    if (!lease) return reply(response, 410, { error: "native-browser-session-ended: this browser session was released. Start the browser tool again." });
+    touch();
     if (request.method === "DELETE") { releaseLease(lease); return reply(response, 200, { ok: true }); }
     if (match?.[2]?.replace(/\/$/, "") === "json/version") return reply(response, 200, { Browser: `Chrome/${process.versions.chrome}`,
       webSocketDebuggerUrl: `ws://127.0.0.1:${port}/session/${lease.id}/devtools/browser` });
@@ -431,12 +732,18 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
         void dispatch(lease, value.method, params, sessionId).then((result) => send(lease, { id: value.id, sessionId, result }))
           .catch((error) => send(lease, { id: value.id, sessionId, error: { code: -32000, message: nativeBrowserCommandFailure(error) } }));
       });
-      ws.once("close", () => releaseLease(lease));
+      // A closed socket frees the tabs, not the session: Playwright reconnects
+      // to this same endpoint (the launcher's lease URL is fixed for its life).
+      ws.once("close", () => { if (lease.socket === ws) resetLease(lease); });
       });
     }).catch((error: unknown) => {
-      releaseLease(lease);
-      // A tab-limit refusal is the one failure here with a way out; say it
-      // instead of dropping the connection without a reason.
+      // ★Keep the lease. Releasing it here turned one tab-limit refusal into
+      // every later connect answering 404 "does not look like a DevTools
+      // server" on the same session (production 2026-09-28 14:14Z, three calls
+      // in a row). The session stays; the next connect tries again once a tab
+      // is free, and each refusal says why.
+      resetLease(lease);
+      if (!current()) releaseLease(lease);
       const message = error instanceof Error && error.message.startsWith("native-browser-tab-limit: ") ? error.message : "";
       if (message && !socket.destroyed) {
         const body = JSON.stringify({ error: message });
@@ -445,9 +752,38 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       socket.destroy();
     });
   });
+  const offDownloads = observeNativeBrowserDownloads((event) => {
+    if (!current()) return;
+    for (const lease of leases.values()) {
+      const guest = [...lease.guests.values()].find((candidate) => !candidate.wc.isDestroyed() && candidate.wc.id === event.webContentsId);
+      if (!guest || !lease.downloads?.eventsEnabled) continue;
+      const guid = event.id;
+      if (event.phase === "start") {
+        send(lease, { method: "Browser.downloadWillBegin", params: { frameId: guest.targetId, guid, url: event.url, suggestedFilename: event.fileName } });
+      } else if (event.phase === "progress") {
+        send(lease, { method: "Browser.downloadProgress", params: { guid, totalBytes: event.totalBytes, receivedBytes: event.receivedBytes, state: "inProgress" } });
+      } else {
+        const target = path.join(lease.downloads.downloadPath, guid);
+        const finish = (state: "completed" | "canceled") => send(lease, { method: "Browser.downloadProgress",
+          params: { guid, totalBytes: event.totalBytes, receivedBytes: event.receivedBytes, state } });
+        if (event.state !== "completed" || !event.savePath) { finish("canceled"); continue; }
+        fs.promises.copyFile(event.savePath, target, fs.constants.COPYFILE_EXCL).then(() => finish("completed"), () => finish("canceled"));
+      }
+    }
+  });
+  // A popup opened by a page this run drives joins the same CDP session, so
+  // the agent sees it as a new page (Playwright: context "page" / page "popup").
+  const offPopup = onAgentBrowserPopup(holdId, (viewId, openerViewId) => {
+    for (const lease of leases.values()) {
+      const opener = lease.socket ? [...lease.guests.values()].find((guest) => guest.viewId === openerViewId) : undefined;
+      if (opener) { void addGuest(lease, viewId, opener.targetId).catch(() => undefined); return; }
+    }
+  });
   const release = () => {
     if (closed) return;
     closed = true;
+    offPopup();
+    offDownloads();
     input.signal.removeEventListener("abort", release);
     owner.window.removeListener("closed", release);
     unregisterShutdown();

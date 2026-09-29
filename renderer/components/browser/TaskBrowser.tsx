@@ -293,7 +293,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
         }
       }} spellCheck={false}/>
       {loginNotice && !importBanner && <button type="button" title={ko ? "로그인 연결 확인" : "Check sign-in connection"} aria-label={ko ? "로그인 연결 확인" : "Check sign-in connection"} onClick={() => void openImport()}><IconAlertTriangle size={15}/></button>}
-      {onAnnotation && <BrowserAnnotation target={current && active ? { viewId: current.id, taskScopeId } : null} ko={ko} onPrepareOverlay={prepareOverlay} onOverlayClosed={overlayClosed} onComment={onAnnotation} getViewportBounds={() => pagesRef.current?.getBoundingClientRect() ?? null} />}
+      {onAnnotation && <BrowserAnnotation target={current && active ? { viewId: current.id, taskScopeId } : null} documentKey={current?.status.url} ko={ko} onPrepareOverlay={prepareOverlay} onOverlayClosed={overlayClosed} onComment={onAnnotation} getViewportBounds={() => pagesRef.current?.getBoundingClientRect() ?? null} />}
       <BrowserControls target={current ? { viewId: current.id, taskScopeId } : null} ko={ko} onImport={openImport} onNavigate={url => void navigate(current?.id, url)} onPrepareOverlay={prepareOverlay} onOverlayClosed={overlayClosed} />
     </form>
     {importBanner && <BrowserImportBanner ko={ko} onImport={openImport} onDismiss={dismissImportBanner} />}

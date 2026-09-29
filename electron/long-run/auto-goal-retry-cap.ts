@@ -68,9 +68,10 @@ export function automaticGoalSettlementEvidence(runId: string): { refs: string[]
   return refs.size > 0 ? { refs: [...refs], receiptIds } : null;
 }
 
-function notify(run: LongRunRecord, locale: "ko" | "en", ko: string, en: string): void {
+/** `status` is the durable host-status marker (both lines here stay prominent: a closed goal, an owner review). */
+function notify(run: LongRunRecord, locale: "ko" | "en", status: "goal-closed" | "needs-owner", ko: string, en: string): void {
   if (!run.rootChatId) return;
-  try { appendChatMessage(run.rootChatId, "assistant", locale === "ko" ? ko : en, { hostNotice: { purpose: "goal-continuation", runId: run.id } }); }
+  try { appendChatMessage(run.rootChatId, "assistant", locale === "ko" ? ko : en, { hostNotice: { purpose: "host-status", runId: run.id, status } }); }
   catch (error) { console.warn("[auto-goal-retry-cap] chat notice failed:", error); }
 }
 
@@ -86,7 +87,7 @@ export function settleCappedAutomaticGoal(run: LongRunRecord, locale: "ko" | "en
         retries, evidenceRefs: evidence.refs, receiptIds: evidence.receiptIds });
       completeChatGoalContract(run.goalId, "completed");
       if (run.rootChatId && getChat(run.rootChatId)?.goalId === run.goalId) setChatGoalBinding(run.rootChatId, null);
-      notify(run, locale, "확인된 결과가 있어 이 목표를 마쳤어요(자동 재시도 2회 한도). 빠진 게 있으면 말씀해 주세요.",
+      notify(run, locale, "goal-closed", "확인된 결과가 있어 이 목표를 마쳤어요(자동 재시도 2회 한도). 빠진 게 있으면 말씀해 주세요.",
         "I closed this goal on the verified result (automatic retry limit of 2 reached). Tell me if anything is missing.");
       return AUTO_GOAL_SETTLED_WITH_EVIDENCE;
     }
@@ -94,7 +95,7 @@ export function settleCappedAutomaticGoal(run: LongRunRecord, locale: "ko" | "en
       retries, evidenceRefs: [], receiptIds: [] });
     // Name what stopped it (goal-wait-refusal.ts): the single "could not confirm" sentence was shown on
     // 2026-09-27 for a Goal whose only problem was a refused follow-up timer.
-    notify(run, locale, cappedGoalOwnerReviewMessage(run.blockedReason, "ko"), cappedGoalOwnerReviewMessage(run.blockedReason, "en"));
+    notify(run, locale, "needs-owner", cappedGoalOwnerReviewMessage(run.blockedReason, "ko"), cappedGoalOwnerReviewMessage(run.blockedReason, "en"));
     return AUTO_GOAL_OWNER_REVIEW_REQUIRED;
   } catch (error) {
     return error instanceof Error && /^[a-z_]+$/.test(error.message) ? error.message : "auto_goal_retry_cap_failed";

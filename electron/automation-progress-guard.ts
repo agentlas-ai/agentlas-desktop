@@ -209,6 +209,26 @@ export function noteNoProgressEvent(
   return null;
 }
 
+/**
+ * The owner-facing sentence for the same decision, in the owner's language and
+ * without the machine marker. noProgressLoopError() stays the machine string the
+ * classifier and handoff read; this one is what the origin chat shows (owner
+ * Thread Marketing 2026-09-28 10:16Z read "[automation_no_progress_loop] the run
+ * repeated the same browser_find lookup 5 times…" in English).
+ */
+export function noProgressLoopOwnerText(decision: NoProgressDecision, locale: "ko" | "en"): string {
+  if (locale === "ko") {
+    const where = decision.nodeId ? `"${decision.nodeId}" 단계에서 ` : "";
+    const what = decision.rule === "same_url_node" || decision.rule === "same_url_run"
+      ? `같은 페이지를 ${decision.count}번 다시 열면서 아무것도 바꾸지 못해`
+      : decision.rule === "identical_streak"
+        ? `똑같은 ${decision.tool} 호출을 ${decision.count}번 연달아 되풀이해`
+        : `같은 ${decision.tool} 조회를 ${decision.count}번 되풀이하면서 아무것도 바꾸지 못해`;
+    return `${where}${what}, 제자리를 돌지 않도록 호스트가 이 실행을 멈췄습니다.`;
+  }
+  return noProgressLoopError(decision).replace(`${AUTOMATION_NO_PROGRESS_LOOP}: `, "").replace(/^the run/, "The run");
+}
+
 /** 사람이 읽는 한 줄 + 맨 앞 기계 표식. 분류기는 표식만 본다. */
 export function noProgressLoopError(decision: NoProgressDecision): string {
   const where = decision.nodeId ? ` in step "${decision.nodeId}"` : "";

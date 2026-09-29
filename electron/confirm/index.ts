@@ -302,12 +302,15 @@ function pendingQuestionMessage(chatId: string, sourceMessageId?: string): { id:
  * ★확정·미루기·모바일 접수·후속 실행은 이미 이 규칙(pendingQuestionMessage)을 쓰는데, 목록만
  *   "마지막 행이 질문"을 요구했다 (격리 앱 실측 2026-09-27): 질문 뒤에 앱이 "아직 답을 기다린다"
  *   말풍선을 붙이면 One 카드가 통째로 사라져 답할 길이 없었다. 목록도 같은 규칙으로 본다.
- *   거슬러 보는 폭은 최근 8행 — 질문 뒤에 호스트 말풍선이 그보다 많이 쌓이는 일은 없다.
+ *   후보 8행은 사용자 메시지와 실제 질문 fence가 있는 assistant 메시지만 센다.
+ *   One의 설명 보완을 여러 번 주고받아도 일반 설명/시스템 말풍선이 대기 질문을 밀어내지 않는다.
  */
 function latestOpenQuestionMessage(chatId: string): { id: string; role: string; text: string; createdAt: string } | null {
   const rows = getDb()
-    .prepare("SELECT id, role, text, created_at FROM chat_messages WHERE chat_id = ? ORDER BY created_at DESC LIMIT 8")
-    .all(chatId) as Array<{ id: string; role: string; text: string; created_at: string }>;
+    .prepare(`SELECT id, role, text, created_at FROM chat_messages
+      WHERE chat_id = ? AND (role = 'user' OR (role = 'assistant' AND instr(text, ?) > 0))
+      ORDER BY created_at DESC LIMIT 8`)
+    .all(chatId, OPEN) as Array<{ id: string; role: string; text: string; created_at: string }>;
   for (const row of rows) {
     if (row.role === "user") return null;
     if (row.role === "assistant" && row.text.includes(OPEN) && firstQuestion(row.text)) {

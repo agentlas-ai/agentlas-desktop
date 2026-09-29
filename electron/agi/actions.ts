@@ -335,7 +335,9 @@ export class AgiActionExecutor {
           const raw = op as unknown as Record<string, unknown>;
           // R9: intent (purpose + end state) is the owner's. Any op that carries an intent edit is purpose_change.
           if ("intent" in raw || "doneWhen" in raw || "done_when" in raw || "objective" in raw || "mission" in raw) {
-            return no("agi.plan.purpose-change-boundary", { boundary: "purpose_change" satisfies PersistenceBoundaryKind });
+            // Refused, and kept as the owner's suggestion: the goal panel shows it with Accept (owner edits intent).
+            return no("agi.plan.purpose-change-boundary", { boundary: "purpose_change" satisfies PersistenceBoundaryKind,
+              proposals: ops.map(intentProposal).filter((proposal): proposal is AgiIntentProposal => proposal !== null).slice(0, 6) });
           }
           if (op.op === "split") {
             const node = byId.get(op.nodeId);
@@ -425,8 +427,23 @@ export class AgiActionExecutor {
   }
 }
 
+/** An intent edit the AGI proposed (refused as purpose_change); the owner may accept it in the goal panel. */
+export interface AgiIntentProposal { nodeId: string | null; field: "objective" | "intent" | "done_when"; text: string }
+
+function intentProposal(op: AgiPlanOp): AgiIntentProposal | null {
+  const raw = op as unknown as Record<string, unknown>;
+  const nodeId = text(raw.nodeId, 80) ?? text(raw.keep, 80);
+  const objective = text(raw.objective, 600) ?? (raw.mission && typeof raw.mission === "object" ? text((raw.mission as Record<string, unknown>).objective, 600) : null);
+  if (objective) return { nodeId: null, field: "objective", text: objective };
+  const doneWhen = text(raw.doneWhen, 600) ?? text(raw.done_when, 600);
+  const intent = text(raw.intent, 600);
+  if (intent && nodeId) return { nodeId, field: "intent", text: intent };
+  if (doneWhen && nodeId) return { nodeId, field: "done_when", text: doneWhen };
+  return null;
+}
+
 /** One plain line per real action (plan §3.8); nothing for rest, nothing for a refusal. */
-function noticeLine(action: AgiActionKind, receipt: AgiActionReceipt): { ko: string; en: string } | null {
+export function noticeLine(action: AgiActionKind, receipt: AgiActionReceipt): { ko: string; en: string } | null {
   const detail = receipt.detail ?? {};
   switch (action) {
     case "settle_uncertain_effect": return { ko: "AGI: 이전 작업은 이미 반영돼 있었어요 — 실행 기록으로 정리했어요", en: "AGI: the earlier action had already gone through — settled it from the run record" };

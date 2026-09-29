@@ -16,8 +16,8 @@
 //
 // 그래서 답할 화면이 없는 호스트에서는 키체인 호출을 **자식 프로세스**에서 한다.
 // 자식이 멈추면 부모는 멀쩡하므로 상한이 실제로 동작하고, 시간이 지나면 죽여서 회수한다.
-// Electron 안(데스크탑 앱·데몬)에서는 사람이 그 물음에 답할 수 있으므로 예전처럼 직접 부른다 —
-// 여기서 상한을 걸면 사용자가 프롬프트를 읽는 동안 정상 요청이 취소된다.
+// GUI reads can still wait for a native prompt, but their observation deadline must
+// release callers. A timed-out native worker retains its slot until it really ends.
 import { execFile } from "node:child_process";
 import { createRequire } from "node:module";
 import { runWithCredentialRecovery } from "./recovery-state";
@@ -51,6 +51,33 @@ function inProcessNative<T>(direct: () => Promise<T>): Promise<T> {
   const run = nativeSlot.then(direct, direct);
   nativeSlot = run.then(() => undefined, () => undefined);
   return run;
+}
+
+/** Bound both queueing and native observation without pretending to cancel
+ * Security.framework. Keep the real worker in nativeSlot, discard late values,
+ * and never dispatch a queued lookup after its caller's deadline expired. */
+async function observeInProcessNative<T>(
+  operation: "read" | "list",
+  account: string | null,
+  direct: () => Promise<T>,
+): Promise<T> {
+  let expired = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const failure = new NativeObservationTimeout(operation, account);
+  const native = inProcessNative(() => {
+    if (expired) throw failure;
+    return direct();
+  });
+  try {
+    return await Promise.race([
+      native,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => { expired = true; reject(failure); }, keychainCallTimeoutMs());
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 function requestKey(operation: string, service: string, account: string): string {
@@ -112,6 +139,12 @@ export class KeychainUnavailableError extends Error {
     this.account = account;
     this.operation = operation;
     this.automaticRetrySuppressed = automaticRetrySuppressed;
+  }
+}
+
+class NativeObservationTimeout extends KeychainUnavailableError {
+  constructor(operation: "read" | "list", account: string | null) {
+    super(operation, account, "native observation timed out", true);
   }
 }
 
@@ -220,8 +253,11 @@ export async function keychainGet(
 ): Promise<string | null> {
   return sharedNativeRequest("read", service, account, async () => {
     if (keychainPromptsAreAnswerable()) {
-      try { return await inProcessNative(direct); }
-      catch {
+      try { return await observeInProcessNative("read", account, direct); }
+      catch (error) {
+        // The native call is still owned by its slot. Starting a fallback here
+        // would duplicate the blocked access and bypass its recovery marker.
+        if (error instanceof NativeObservationTimeout) throw error;
         // A signed GUI build can still lose the in-process keytar binding after
         // an update while the same signed executable succeeds in isolated Node
         // mode. Keep the ordinary prompt-capable path first, then use the
@@ -290,8 +326,9 @@ export async function keychainListAccounts(
 ): Promise<string[]> {
   return sharedNativeRequest("list", service, "", async () => {
     if (keychainPromptsAreAnswerable()) {
-      try { return await inProcessNative(direct); }
-      catch {
+      try { return await observeInProcessNative("list", null, direct); }
+      catch (error) {
+        if (error instanceof NativeObservationTimeout) throw error;
         const fallback = await runKeychainChild("find", service, "", null);
         if (!fallback.error) return fallback.accounts ?? [];
         throw new KeychainUnavailableError("list", null, `native request rejected; isolated fallback: ${fallback.error}`);

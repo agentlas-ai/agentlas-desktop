@@ -2,6 +2,7 @@
 import type { ChatHostNotice } from "../../shared/types";
 import { Markdown } from "./Markdown";
 import { automationReportDisplay } from "../lib/automation-report-display";
+import { hostStatusLabel } from "../../shared/chat-host-notice";
 
 /** Historical host request, not a projection of the invocation's current state.
  * Keep the original text in the message ledger; internal resume instructions
@@ -63,6 +64,17 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat }: { t
       role="status"
       style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}
     >{locale === "ko" ? "업데이트 후 이어서 진행합니다" : "Continuing after the update"}</p>;
+  }
+  if (notice?.purpose === "host-status") {
+    // The host's own status line (effect check, wait, cycle). Where One cannot fold it into its turn's
+    // work block it is still one quiet line: the short status, then the sentence as written.
+    return <p
+      data-host-notice="host-status"
+      data-host-status={notice.status}
+      data-run-id={notice.runId}
+      role="status"
+      style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5, overflowWrap: "anywhere" }}
+    ><strong style={{ fontWeight: 600 }}>{hostStatusLabel(notice, locale)}</strong> · {text}</p>;
   }
   if (notice?.purpose === "automation-report") {
     // 기록 원문은 기계 표식을 일부러 남긴다 — 그릴 때만 사람 첫머리로 바꾸고 코드는 칩으로.

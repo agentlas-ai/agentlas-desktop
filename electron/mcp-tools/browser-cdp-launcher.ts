@@ -1204,6 +1204,36 @@ export async function recoverAgentlasBrowserRuntimeAtStartup(): Promise<BrowserC
 
 let orphanCandidate: { key: string; firstSeenAt: number } | null = null;
 
+function execText(file: string, args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(file, args, { encoding: "utf8", timeout: 3_000, maxBuffer: 16 * 1024 * 1024, windowsHide: true },
+      (error, stdout) => resolve(error && !stdout ? null : String(stdout ?? "")));
+  });
+}
+
+/**
+ * ★A lease file is not the only proof that someone is using the browser.
+ * Main's mcp-proxy spawns a fresh launcher per wire and parks or kills it
+ * between wires, so an automation node can be mid-run with its Playwright
+ * client connected while no lease row exists. The sweep closed exactly such a
+ * browser (production 2026-09-28 15:04:55Z, "cleaned lease-less automation
+ * browser" while the Threads audit node's bridge was open; its next
+ * browser_navigate failed "Target page, context or browser has been closed").
+ * Before closing, look for a live client: a Playwright MCP child bound to this
+ * CDP port, or any process with an established connection to it.
+ */
+export async function browserCdpHasLiveClient(port = browserCdpPort()): Promise<boolean> {
+  if (process.platform === "win32") return false;
+  const endpoint = `--cdp-endpoint http://127.0.0.1:${port}`;
+  const ps = await execText("ps", ["-ax", "-o", "pid=,command="]);
+  if (ps && ps.split("\n").some((line) => {
+    const pid = Number(line.trim().split(/\s+/)[0]);
+    return pid !== process.pid && (line.includes(`${endpoint} `) || line.trimEnd().endsWith(endpoint));
+  })) return true;
+  const lsof = await execText("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:ESTABLISHED", "-Fn"]);
+  return !!lsof && lsof.split("\n").some((line) => line.startsWith("n") && line.endsWith(`->127.0.0.1:${port}`));
+}
+
 /**
  * Desktop's always-on safety net. A browser with no live lease is observed for
  * a grace period before cleanup, so a just-spawned login/automation process is
@@ -1212,6 +1242,10 @@ let orphanCandidate: { key: string; firstSeenAt: number } | null = null;
 export async function sweepAgentlasBrowserOrphans(options: {
   now?: number;
   graceMs?: number;
+  /** Contract seams; default to the real process inspection and maintenance. */
+  hasLiveClient?: () => Promise<boolean>;
+  inspectRoots?: () => Promise<BrowserCdpProcessSnapshot[]>;
+  maintain?: () => Promise<BrowserCdpMaintenanceResult>;
 } = {}): Promise<BrowserCdpOrphanSweepResult> {
   const now = options.now ?? Date.now();
   const graceMs = Math.max(0, options.graceMs ?? 45_000);
@@ -1219,10 +1253,14 @@ export async function sweepAgentlasBrowserOrphans(options: {
     orphanCandidate = null;
     return { action: "protected", rootsFound: 0, maintenance: null };
   }
-  const roots = await inspectBrowserCdpProfileRoots();
+  const roots = await (options.inspectRoots ?? inspectBrowserCdpProfileRoots)();
   if (roots.length === 0) {
     orphanCandidate = null;
     return { action: "idle", rootsFound: 0, maintenance: null };
+  }
+  if (await (options.hasLiveClient ?? browserCdpHasLiveClient)()) {
+    orphanCandidate = null;
+    return { action: "protected", rootsFound: roots.length, maintenance: null };
   }
   const key = roots.map((root) => root.pid).sort((a, b) => a - b).join(",");
   if (graceMs > 0 && (!orphanCandidate || orphanCandidate.key !== key)) {
@@ -1233,7 +1271,8 @@ export async function sweepAgentlasBrowserOrphans(options: {
     return { action: "observing", rootsFound: roots.length, maintenance: null };
   }
   let maintenance: BrowserCdpMaintenanceResult | null = null;
-  await withBrowserCdpMaintenance((value) => { maintenance = value; });
+  if (options.maintain) maintenance = await options.maintain();
+  else await withBrowserCdpMaintenance((value) => { maintenance = value; });
   orphanCandidate = null;
   return { action: "cleaned", rootsFound: roots.length, maintenance };
 }
@@ -3102,6 +3141,64 @@ async function main() {
     };
   };
 
+  // ★Uploads come from the agent's own folders. Playwright MCP only accepts
+  // paths inside its output dir or the MCP client's first root; Codex sends no
+  // roots, so a rendered MP4 in the agent workspace was refused and the agent
+  // reported that the upload "did not open" (owner report 2026-09-28). Main
+  // names the folders this run may upload from (AGENTLAS_BROWSER_UPLOAD_ROOTS:
+  // the run's workspace, the Agentlas agent-cwd root, image-generation output).
+  // A file inside one of them is staged by hard link (or symlink) under the
+  // output dir with its own name, so the page sees the real file name. A path
+  // anywhere else is refused before dispatch, with the way out.
+  const UPLOAD_STAGE_ROOT = path.join(os.homedir(), '.agentlas', 'captures', 'browser', 'uploads');
+  const uploadRoots = (() => {
+    let roots = [];
+    try { roots = JSON.parse(process.env.AGENTLAS_BROWSER_UPLOAD_ROOTS || '[]'); } catch (e) { roots = []; }
+    const out = [];
+    for (const root of Array.isArray(roots) ? roots : []) {
+      if (typeof root !== 'string' || !path.isAbsolute(root)) continue;
+      try { out.push(fs.realpathSync(root)); } catch (e) { /* absent folder grants nothing */ }
+    }
+    return out;
+  })();
+  const insideRoot = (file, root) => { const rel = path.relative(root, file); return rel === '' || (!!rel && !rel.startsWith('..') && !path.isAbsolute(rel)); };
+  try {
+    for (const entry of fs.readdirSync(UPLOAD_STAGE_ROOT)) {
+      const dir = path.join(UPLOAD_STAGE_ROOT, entry);
+      try { if (Date.now() - fs.statSync(dir).mtimeMs > 86400000) fs.rmSync(dir, { recursive: true, force: true }); } catch (e) {}
+    }
+  } catch (e) { /* nothing staged yet */ }
+  const stageUploadArguments = (name, args) => {
+    if ((name !== 'browser_file_upload' && name !== 'browser_drop') || !args || !Array.isArray(args.paths) || !args.paths.length) return { args };
+    const staged = [];
+    const refused = [];
+    let dir = '';
+    for (const raw of args.paths) {
+      let real = '';
+      try { real = typeof raw === 'string' && path.isAbsolute(raw) ? fs.realpathSync(raw) : ''; } catch (e) { real = ''; }
+      let file = null;
+      try { file = real ? fs.statSync(real) : null; } catch (e) { file = null; }
+      if (!real || !file || !file.isFile() || !uploadRoots.some((root) => insideRoot(real, root))) { refused.push(String(raw)); continue; }
+      if (!dir) {
+        dir = path.join(UPLOAD_STAGE_ROOT, Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10));
+        fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      }
+      // Distinct names can repeat across folders; keep each one in its own slot.
+      const slot = path.join(dir, String(staged.length));
+      fs.mkdirSync(slot, { mode: 0o700 });
+      const target = path.join(slot, path.basename(real));
+      try { fs.linkSync(real, target); } catch (e) { fs.symlinkSync(real, target); }
+      staged.push(target);
+    }
+    if (refused.length) {
+      return { error: { content: [{ type: 'text', text: 'File upload refused before dispatch: ' + refused.join(', ')
+        + ' is not an existing file inside the folders this run may upload from (' + (uploadRoots.join(', ') || 'none') + ').'
+        + ' Save or copy the file into the run workspace and call ' + name + ' again with its absolute path.' }], isError: true,
+        _meta: { agentlasToolDispatch: 'not-dispatched', agentlasFailureCode: 'browser_upload_path_outside_roots' } } };
+    }
+    return { args: { ...args, paths: staged } };
+  };
+
   // 승인 게이트 통과 여부 판정(공유). 통과=null, 거부=사유문자열.
   const gate = async (name, args, signal) => {
     const observedUrl = await readCdpPageUrl();
@@ -3368,9 +3465,14 @@ async function main() {
     if (msg && msg.method === 'tools/call' && msg.params) {
       const name = msg.params.name || '';
       const originalArgs = msg.params.arguments || {};
-      const args = normalizeToolArguments(name, originalArgs);
+      let args = normalizeToolArguments(name, originalArgs);
       const argumentFailure = browserEvaluateArgumentFailure(name, args) || browserFindArgumentFailure(name, args);
       if (argumentFailure) { writeClient({ jsonrpc: '2.0', id: msg.id, result: argumentFailure }); return; }
+      let upload;
+      try { upload = stageUploadArguments(name, args); }
+      catch (e) { upload = { error: { content: [{ type: 'text', text: 'File upload staging failed: ' + String(e && e.message || e).slice(0, 300) }], isError: true } }; }
+      if (upload.error) { writeClient({ jsonrpc: '2.0', id: msg.id, result: upload.error }); return; }
+      args = upload.args;
       const forwardedLine = args === originalArgs
         ? line
         : JSON.stringify({ ...msg, params: { ...msg.params, arguments: args } });

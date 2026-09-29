@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { projectOneDecisionOwnerAnswerV4 } from "./one-decision-owner-answer";
 import path from "node:path";
 
 import { listInstalledAgents } from "../mcp/registry";
@@ -73,10 +74,13 @@ import {
 } from "../../shared/one-profile";
 import {
   ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION,
+  ONE_DECISION_OTHER_ANSWER_CONTRACT_VERSION,
   isOneDecisionViewV1,
   isPendingConfirmationSnoozed,
   normalizeOneDecision,
+  oneDecisionJudgmentTexts,
   oneDecisionMultiSelectableIndexes,
+  oneDecisionOtherAnswerAllowed,
 } from "../../shared/one-decision";
 import {
   deferPrejudgeOneDecisions,
@@ -124,6 +128,8 @@ import {
   type MobileBridgeOneBriefingDto,
   type MobileBridgeOneDecisionDto,
   type MobileBridgeOneDecisionMultiSelectionV2Dto,
+  type MobileBridgeOneDecisionAnswerV3Dto,
+  type MobileBridgeOneDecisionOwnerAnswerV4Dto,
   type MobileBridgeOneImprovementMetricDto,
   type MobileBridgeOneImprovementProofDto,
   type MobileBridgeOneExperienceReuseDto,
@@ -296,6 +302,8 @@ function optionalDisplayText(
 const MOBILE_BRIDGE_ONE_DECISION_LIMIT = 20;
 const MOBILE_BRIDGE_ONE_DECISION_BYTES = 128 * 1024;
 const MOBILE_BRIDGE_ONE_DECISION_MULTI_SELECTION_BYTES = 32 * 1024;
+const MOBILE_BRIDGE_ONE_DECISION_ANSWER_V3_BYTES = 32 * 1024;
+const MOBILE_BRIDGE_ONE_DECISION_OWNER_ANSWER_V4_BYTES = 32 * 1024;
 const MOBILE_BRIDGE_ONE_VALUE_CLOSURE_LIMIT = 20;
 const MOBILE_BRIDGE_ONE_VALUE_CLOSURE_BYTES = 128 * 1024;
 const MOBILE_BRIDGE_ONE_IMPROVEMENT_PROOF_LIMIT = 20;
@@ -500,7 +508,11 @@ function hostDto(options: MobileBridgeProjectionOptions): MobileBridgeHostDto {
       "one-invocation-v1",
       "one-decisions-v1",
       "one-decision-multi-select-v2",
+      "one-decision-answers-v3",
+      "one-decision-owner-answers-v4",
       "one-decision-review-retry-v1",
+      "one-decision-clarify-v1",
+      "one-decision-clarify-answer-v1",
       "one-value-closures-v1",
       "one-experience-reuse-v1",
       "one-improvement-proofs-v1",
@@ -951,6 +963,11 @@ export function projectMobileBridgeHistory(
     const shell: MobileBridgeChatMessageDto = {
       id: message.id,
       role: message.role,
+      ...(message.role === "assistant" && message.speakerAgentId
+        && message.speakerAgentId.length <= 256
+        && !/[\u0000-\u001f\u007f]/u.test(message.speakerAgentId)
+        ? { speakerAgentId: message.speakerAgentId }
+        : {}),
       text: "",
       createdAt: message.createdAt,
       ...(message.role === "user" && promptRunIds.has(message.id)
@@ -1206,6 +1223,120 @@ export function projectMobileBridgeOneDecisionMultiSelectionsV2FromCurrent(
     out.push(row);
   }
   return out;
+}
+
+/** Exact-bound typed answers for judged, non-authorizing questions only. */
+export function projectMobileBridgeOneDecisionAnswersV3FromCurrent(
+  decisions: readonly MobileBridgeOneDecisionDto[],
+  confirmations: readonly PendingConfirmation[],
+): MobileBridgeOneDecisionAnswerV3Dto[] {
+  const pendingByBinding = new Map(confirmations.map((confirmation) => [
+    `${confirmation.chatId}\0${confirmation.sourceMessageId}\0${confirmation.createdAt}`,
+    confirmation,
+  ]));
+  const out: MobileBridgeOneDecisionAnswerV3Dto[] = [];
+  for (const decision of decisions) {
+    const view = decision.view;
+    const pending = pendingByBinding.get(`${view.chatId}\0${view.decisionId}\0${view.createdAt}`);
+    if (!pending || !view.taskId || pending.options.length !== view.options.length) continue;
+    const optionLabels = view.options.map((option) => option.label);
+    if (
+      new Set(optionLabels).size !== optionLabels.length
+      || view.options.some((option, index) => option.index !== index || !option.label)
+    ) continue;
+    const texts = oneDecisionJudgmentTexts(pending);
+    const readiness = oneDecisionJudgedReadersFor(pending).authorityReadiness?.(texts.combined) ?? null;
+    if (!oneDecisionOtherAnswerAllowed(view, readiness)) continue;
+    const row: MobileBridgeOneDecisionAnswerV3Dto = {
+      contractVersion: ONE_DECISION_OTHER_ANSWER_CONTRACT_VERSION,
+      authoritativeHostRef: decision.authoritativeHostRef,
+      canonicalTaskVersion: decision.canonicalTaskVersion,
+      taskId: view.taskId,
+      chatId: view.chatId,
+      decisionId: view.decisionId,
+      createdAt: view.createdAt,
+      optionLabels,
+      multiSelect: pending.multiSelect,
+      selectableIndexes: pending.multiSelect ? oneDecisionMultiSelectableIndexes(view) : [],
+      allowOther: true,
+    };
+    if (mobileBridgeJsonBytes([...out, row]) > MOBILE_BRIDGE_ONE_DECISION_ANSWER_V3_BYTES) continue;
+    out.push(row);
+  }
+  return out;
+}
+
+/** Additive owner authority; no model availability is required to publish this route. */
+export function projectMobileBridgeOneDecisionOwnerAnswersV4FromCurrent(
+  decisions: readonly MobileBridgeOneDecisionDto[],
+  confirmations: readonly PendingConfirmation[],
+): MobileBridgeOneDecisionOwnerAnswerV4Dto[] {
+  return projectMobileBridgeOneDecisionOwnerPairsFromCurrent(decisions, confirmations).oneDecisionOwnerAnswersV4;
+}
+
+/** A budget cannot strip the only owner-answer route from a visible Decision. */
+export function projectMobileBridgeOneDecisionOwnerPairsFromCurrent(
+  decisions: readonly MobileBridgeOneDecisionDto[],
+  confirmations: readonly PendingConfirmation[],
+  options: { maxBytes?: number } = {},
+): {
+  oneDecisions: MobileBridgeOneDecisionDto[];
+  oneDecisionOwnerAnswersV4: MobileBridgeOneDecisionOwnerAnswerV4Dto[];
+  omittedDecisions: MobileBridgeOneDecisionDto[];
+} {
+  const requestedBudget = options.maxBytes ?? MOBILE_BRIDGE_ONE_DECISION_OWNER_ANSWER_V4_BYTES;
+  const budget = Number.isFinite(requestedBudget)
+    ? Math.max(0, Math.min(MOBILE_BRIDGE_ONE_DECISION_OWNER_ANSWER_V4_BYTES, Math.floor(requestedBudget)))
+    : 0;
+  const oneDecisions: MobileBridgeOneDecisionDto[] = [];
+  const oneDecisionOwnerAnswersV4: MobileBridgeOneDecisionOwnerAnswerV4Dto[] = [];
+  const omittedDecisions: MobileBridgeOneDecisionDto[] = [];
+  for (const decision of decisions) {
+    const pending = confirmations.find((confirmation) =>
+      confirmation.chatId === decision.view.chatId
+      && confirmation.sourceMessageId === decision.view.decisionId);
+    const row = pending ? projectOneDecisionOwnerAnswerV4(decision, pending) : null;
+    if (row && mobileBridgeJsonBytes([...oneDecisionOwnerAnswersV4, row]) > budget) {
+      omittedDecisions.push(decision);
+      continue;
+    }
+    oneDecisions.push(decision);
+    if (row) oneDecisionOwnerAnswersV4.push(row);
+  }
+  return { oneDecisions, oneDecisionOwnerAnswersV4, omittedDecisions };
+}
+
+/** Trim complete authority pairs, including their legacy read-only fallback. */
+export function trimMobileBridgeDecisionMetadata(
+  snapshot: MobileBridgeSnapshot,
+  maxBytes = MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES,
+): number {
+  let bytes = mobileBridgeJsonBytes(snapshot);
+  while (bytes > maxBytes && snapshot.oneDecisionOwnerAnswersV4?.length) {
+    const owner = snapshot.oneDecisionOwnerAnswersV4.pop()!;
+    const sameBinding = (row: MobileBridgeOneDecisionDto | MobileBridgeOneDecisionMultiSelectionV2Dto | MobileBridgeOneDecisionAnswerV3Dto) => {
+      const view = "view" in row ? row.view : row;
+      return row.authoritativeHostRef === owner.authoritativeHostRef
+        && row.canonicalTaskVersion === owner.canonicalTaskVersion
+        && view.taskId === owner.taskId && view.chatId === owner.chatId
+        && view.decisionId === owner.decisionId && view.createdAt === owner.createdAt;
+    };
+    snapshot.oneDecisions = snapshot.oneDecisions?.filter((row) => !sameBinding(row));
+    snapshot.oneDecisionMultiSelectionsV2 = snapshot.oneDecisionMultiSelectionsV2?.filter((row) => !sameBinding(row));
+    snapshot.oneDecisionAnswersV3 = snapshot.oneDecisionAnswersV3?.filter((row) => !sameBinding(row));
+    snapshot.pendingConfirmations = snapshot.pendingConfirmations.filter((row) =>
+      row.chatId !== owner.chatId || row.sourceMessageId !== owner.decisionId || row.createdAt !== owner.createdAt);
+    bytes = mobileBridgeJsonBytes(snapshot);
+  }
+  while (bytes > maxBytes && snapshot.oneDecisionAnswersV3?.length) {
+    snapshot.oneDecisionAnswersV3.pop();
+    bytes = mobileBridgeJsonBytes(snapshot);
+  }
+  while (bytes > maxBytes && snapshot.oneDecisionMultiSelectionsV2?.length) {
+    snapshot.oneDecisionMultiSelectionsV2.pop();
+    bytes = mobileBridgeJsonBytes(snapshot);
+  }
+  return bytes;
 }
 
 interface MobileBridgeOneEvidenceProjectionOptions {
@@ -1924,12 +2055,19 @@ export async function projectMobileBridgeSnapshot(
   deferPrejudgeOneDecisions(
     pendingConfirmations.slice(0, MOBILE_BRIDGE_ONE_DECISION_LIMIT),
   );
-  const oneDecisions = projectMobileBridgeOneDecisionsFromCurrent(
+  const projectedOneDecisions = projectMobileBridgeOneDecisionsFromCurrent(
     options.hostIdentity,
     pendingConfirmations,
     { now: options.now },
   );
+  const { oneDecisions, oneDecisionOwnerAnswersV4, omittedDecisions } = projectMobileBridgeOneDecisionOwnerPairsFromCurrent(
+    projectedOneDecisions, pendingConfirmations,
+  );
   const oneDecisionMultiSelectionsV2 = projectMobileBridgeOneDecisionMultiSelectionsV2FromCurrent(
+    oneDecisions,
+    pendingConfirmations,
+  );
+  const oneDecisionAnswersV3 = projectMobileBridgeOneDecisionAnswersV3FromCurrent(
     oneDecisions,
     pendingConfirmations,
   );
@@ -1966,7 +2104,9 @@ export async function projectMobileBridgeSnapshot(
     projects: projectsDto(),
     chats: chatsDto(activeSet),
     messages: {},
-    pendingConfirmations: projectMobileBridgeConfirmations(pendingConfirmations),
+    pendingConfirmations: projectMobileBridgeConfirmations(pendingConfirmations.filter((pending) =>
+      !omittedDecisions.some((decision) => decision.view.chatId === pending.chatId
+        && decision.view.decisionId === pending.sourceMessageId && decision.view.createdAt === pending.createdAt))),
     pendingBrowserApprovals: [...(options.pendingBrowserApprovals ?? [])],
     pendingToolApprovals: [...(options.pendingToolApprovals ?? [])],
     pendingUserInputs: [...(options.pendingUserInputs ?? [])],
@@ -1976,6 +2116,8 @@ export async function projectMobileBridgeSnapshot(
     taskProjections,
     oneDecisions,
     oneDecisionMultiSelectionsV2,
+    oneDecisionAnswersV3,
+    oneDecisionOwnerAnswersV4,
     oneValueClosures: boundOneEvidence.valueClosures,
     oneExperienceReuseReceipts: boundOneEvidence.experienceReuseReceipts,
     oneImprovementProofs: boundOneEvidence.improvementProofs,
@@ -2014,13 +2156,7 @@ export async function projectMobileBridgeSnapshot(
       ? { ontologyChipProjections: [...options.ontology.projections] }
       : {}),
   };
-  // Additive V2 rows never make the whole snapshot unavailable when the
-  // pre-existing projections happen to sit close to the shared wire cap.
-  let baseBytes = mobileBridgeJsonBytes(snapshot);
-  while (baseBytes > MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES && snapshot.oneDecisionMultiSelectionsV2?.length) {
-    snapshot.oneDecisionMultiSelectionsV2.pop();
-    baseBytes = mobileBridgeJsonBytes(snapshot);
-  }
+  const baseBytes = trimMobileBridgeDecisionMetadata(snapshot);
   if (baseBytes > MOBILE_BRIDGE_SAFE_PAYLOAD_BYTES) {
     throw new Error("Mobile Bridge snapshot metadata exceeds the safe wire budget");
   }

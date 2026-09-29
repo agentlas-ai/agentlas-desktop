@@ -7,6 +7,7 @@
 // Closed-form fields (SAFE_ID_RE, COST_RE, DEADLINE_RE) stay deterministic.
 
 import {
+  ONE_DECISION_JUDGE_TIMEOUT_MS,
   ONE_DECISION_AUTHORITY_READINESS_JUDGMENT_KIND,
   ONE_DECISION_DISPOSITION_JUDGMENT_KIND,
   ONE_DECISION_RISK_JUDGMENT_KIND,
@@ -121,7 +122,7 @@ interface ReadyDecisionJudgment {
 // runtime a 30-second cold-start window. The old 8-second ceiling guaranteed a
 // fail-closed R4 projection before the resident model could answer. The normal
 // projection path is deferred and does not block snapshot delivery.
-export const ONE_DECISION_JUDGE_TIMEOUT_MS = 60_000;
+export { ONE_DECISION_JUDGE_TIMEOUT_MS } from "../../shared/one-decision";
 export const ONE_DECISION_JUDGE_RETRY_DELAYS_MS = [0, 2_000, 8_000] as const;
 
 const JUDGMENT_STATE_MAX = 500;

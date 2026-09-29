@@ -64,6 +64,17 @@ function networkLeaf(name: string): string | null {
 
 const SHELL_TOOL_NAMES = new Set(["bash", "shell", "exec_command", "run_shell_command", "local_shell"]);
 
+/**
+ * The bundled filesystem MCP server's read tools (its write tools — write_file, edit_file, create_directory,
+ * move_file — are not here). Owner Thread Marketing 2026-09-28: an effect check listed two
+ * filesystem.read_text_file calls as "calls in question" ahead of the turn's real outward calls.
+ */
+const FILESYSTEM_SERVER = /^(?:mcp__)?filesystem(?:__|\.|\/|·)/;
+const READ_ONLY_FILESYSTEM_TOOLS = new Set([
+  "read_file", "read_text_file", "read_media_file", "read_multiple_files", "list_directory",
+  "list_directory_with_sizes", "directory_tree", "search_files", "get_file_info", "list_allowed_directories",
+]);
+
 /** Executables whose every form below only reads (no file output option is admitted). */
 const READ_ONLY_EXECUTABLES = new Set([
   "cat", "head", "tail", "wc", "ls", "pwd", "stat", "file", "du", "df", "nl", "grep", "egrep", "fgrep",
@@ -210,6 +221,8 @@ export function callLeftNoOutsideEffect(input: { toolName: unknown; toolArgs: un
   }
   const leaf = networkLeaf(name);
   if (leaf !== null) return READ_ONLY_NETWORK_TOOLS.has(leaf);
+  const filesystem = FILESYSTEM_SERVER.exec(name);
+  if (filesystem) return READ_ONLY_FILESYSTEM_TOOLS.has(name.slice(filesystem[0].length).trim());
   if (SHELL_TOOL_NAMES.has(name.toLowerCase())) {
     const command = shellCommand(parseArgs(input.toolArgs));
     return command !== null && isNoEffectShellCommand(command);

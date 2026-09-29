@@ -1,12 +1,14 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
   IconAtSign,
   IconCheck,
   IconChevronRight,
+  IconEdit,
   IconFileUp,
+  IconFileText,
   IconFolder,
   IconLayers,
   IconRoute,
@@ -134,11 +136,13 @@ export function OneComposerControls({
 
       const composerRect = composer.getBoundingClientRect();
       const viewportMargin = window.innerWidth <= 700 ? 10 : 24;
-      const preferredWidth = activeMenu === "permission" ? composerRect.width
-          : activeMenu === "effort" ? 240
-            : 390;
+      const preferredWidth = activeMenu === "effort" ? 240
+        : activeMenu === "plus" ? 300
+          : activeMenu === "permission" ? 340
+            : activeMenu === "agents" ? 320
+              : 390;
       const width = Math.min(
-        activeMenu === "plus" ? composerRect.width : preferredWidth,
+        preferredWidth,
         window.innerWidth - viewportMargin * 2,
       );
       const left = Math.min(
@@ -204,41 +208,46 @@ export function OneComposerControls({
       {activeMenu === "plus" ? (
         <div className={styles.composerPopoverList}>
           <div className={styles.composerPopoverSectionLabel}>{locale === "ko" ? "추가" : "Add"}</div>
-          <ComposerRow icon={<IconFileUp size={15} />} title={locale === "ko" ? "사진 및 파일 추가" : "Add photos and files"} onClick={onAttach} />
+          <ComposerRow
+            icon={<IconFileUp size={15} />}
+            title={locale === "ko" ? "파일 추가" : "Add files"}
+            subtitle={locale === "ko" ? "사진과 문서를 첨부합니다" : "Attach photos and documents"}
+            compactDetails
+            onClick={onAttach}
+          />
           <ComposerRow
             icon={<IconFolder size={15} />}
-            title={localFilesConnected
-              ? (locale === "ko" ? "로컬 파일 연결됨" : "Local files connected")
-              : (locale === "ko" ? "로컬 파일 연결" : "Connect local files")}
+            title={locale === "ko" ? "폴더 연결" : "Connect folder"}
             subtitle={localFilesConnected
               ? (locale === "ko" ? "이번 대화의 실행 컨텍스트입니다. 눌러서 바꿀 수 있습니다" : "Execution context for this conversation. Select to change it")
               : (locale === "ko" ? "필요할 때만 원본 위치에서 읽습니다. 업로드하거나 복사하지 않습니다" : "Read in place only when needed. Nothing is uploaded or copied")}
             checked={localFilesConnected}
+            compactDetails
             onClick={onAddFolder}
           />
           {localFilesConnected ? <ComposerRow
             icon={<IconShield size={15} />}
-            title={locale === "ko" ? "로컬 파일 접근 해제" : "Disconnect local files"}
+            title={locale === "ko" ? "폴더 연결 해제" : "Disconnect folder"}
             subtitle={locale === "ko" ? "대화는 유지하고 로컬 파일 경로만 분리합니다" : "Keep the conversation and remove only its local file access"}
+            compactDetails
             onClick={onClearFolder}
           /> : null}
           <div className={styles.composerPopoverDivider} />
           <ComposerRow icon={<IconRoute size={15} />} title={locale === "ko" ? "플랜 모드" : "Plan mode"} toggle checked={Boolean(turnOptions.planMode)} onClick={() => onToggleTurnOption("planMode")} />
           <ComposerRow icon={<IconTarget size={15} />} title={locale === "ko" ? "목표 추진" : "Goal mode"} toggle checked={Boolean(turnOptions.goalMode)} onClick={() => onToggleTurnOption("goalMode")} />
           <div className={styles.composerPopoverDivider} />
-          <ComposerRow icon={<IconAtSign size={15} />} title={locale === "ko" ? "특정 에이전트 지정 (선택)" : "Choose specific agents (optional)"} subtitle={locale === "ko" ? "이 턴에만 수동으로 추가" : "Add manually for this turn"} onClick={() => onMenuChange("agents")} />
+          <ComposerRow
+            icon={<IconAtSign size={15} />}
+            title={locale === "ko" ? "에이전트 추가" : "Add agents"}
+            subtitle={locale === "ko" ? "이 턴에만 직접 지정합니다" : "Choose agents for this turn"}
+            trailing={<IconChevronRight size={13} />}
+            compactDetails
+            onClick={() => onMenuChange("agents")}
+          />
           <div className={styles.composerPopoverDivider} />
           <div className={styles.composerPopoverSectionLabel}>{locale === "ko" ? "도구" : "Tools"}</div>
-          <div className={styles.composerPluginList}>
-            {plugins.length === 0 ? (
-              <ComposerRow
-                icon={<IconLayers size={15} />}
-                title={locale === "ko" ? "연결된 도구 없음" : "No connected tools"}
-                subtitle={locale === "ko" ? "도구 설정 열기" : "Open tool settings"}
-                trailing={<IconChevronRight size={13} />}
-                onClick={onOpenPlugins}
-              />
-            ) : plugins.map((plugin) => (
+          {plugins.length > 0 && <div className={styles.composerPluginList}>
+            {plugins.map((plugin) => (
               <ComposerRow
                 key={plugin.id}
                 icon={(
@@ -252,20 +261,20 @@ export function OneComposerControls({
                   />
                 )}
                 title={plugin.name}
-                subtitle={plugin.enabled && plugin.ready
-                  ? plugin.description
-                  : `${plugin.enabled
-                    ? (locale === "ko" ? "설정 필요" : "Setup required")
-                    : (locale === "ko" ? "비활성화됨" : "Disabled")} · ${plugin.description}`}
+                subtitle={plugin.description}
+                status={!plugin.ready ? (locale === "ko" ? "설정 필요" : "Setup needed") : undefined}
                 checked={plugin.enabled && plugin.ready}
+                toggle
+                compactDetails
                 onClick={() => onTogglePlugin(plugin.id)}
               />
             ))}
-          </div>
+          </div>}
           <ComposerRow
             icon={<IconLayers size={15} />}
             title={locale === "ko" ? "도구 관리" : "Manage tools"}
             trailing={<IconChevronRight size={13} />}
+            compactDetails
             onClick={onOpenPlugins}
           />
         </div>
@@ -281,7 +290,7 @@ export function OneComposerControls({
           <div className={styles.composerPopoverDivider} />
           <div className={styles.composerPopoverScroll} data-one-composer-scroll={activeMenu}>
             {activeMenu === "agents" && filteredAgents.map((item) => (
-              <ComposerRow key={item.id} icon={<IconAtSign size={15} />} title={item.name} subtitle={item.tagline} checked={item.selected} onClick={() => onToggleAgent(item.id)} />
+              <ComposerRow key={item.id} icon={<IconAtSign size={15} />} title={item.name} subtitle={item.tagline} compactDetails checked={item.selected} onClick={() => onToggleAgent(item.id)} />
             ))}
             {activeMenu === "model" && (
               <>
@@ -307,11 +316,18 @@ export function OneComposerControls({
             {activeMenu === "permission" && permissions.map((item) => (
               <ComposerRow
                 key={item.id}
-                icon={<IconShield size={15} />}
+                icon={item.id === "auto"
+                  ? <IconSparkles size={15} />
+                  : item.id === "read"
+                    ? <IconFileText size={15} />
+                    : item.id === "write"
+                      ? <IconEdit size={15} />
+                      : <IconShield size={15} />}
                 title={locale === "ko" ? item.ko : item.en}
                 subtitle={locale === "ko" ? item.descriptionKo : item.descriptionEn}
                 dataPermission={item.id}
                 checked={permission === item.id}
+                compactDetails
                 onClick={() => onSelectPermission(item.id)}
               />
             ))}
@@ -324,12 +340,25 @@ export function OneComposerControls({
   return portalHost ? createPortal(popover, portalHost) : null;
 }
 
-function ComposerRow({ icon, title, subtitle, checked, toggle, trailing, dataPermission, onClick }: { icon: React.ReactNode; title: string; subtitle?: string; checked?: boolean; toggle?: boolean; trailing?: React.ReactNode; dataPermission?: OnePermissionMode; onClick: () => void }) {
+function ComposerRow({ icon, title, subtitle, checked, toggle, trailing, status, compactDetails, dataPermission, onClick }: { icon: React.ReactNode; title: string; subtitle?: string; checked?: boolean; toggle?: boolean; trailing?: React.ReactNode; status?: string; compactDetails?: boolean; dataPermission?: OnePermissionMode; onClick: () => void }) {
+  const descriptionId = useId();
   return (
-    <button type="button" className={styles.composerPopoverRow} data-selected={checked ? "true" : undefined} data-one-permission-option={dataPermission} onClick={onClick}>
+    <button
+      type="button"
+      className={styles.composerPopoverRow}
+      data-selected={checked ? "true" : undefined}
+      data-one-permission-option={dataPermission}
+      aria-pressed={toggle ? checked : undefined}
+      aria-describedby={subtitle ? descriptionId : undefined}
+      title={compactDetails ? subtitle : undefined}
+      onClick={onClick}
+    >
       <span className={styles.composerPopoverIcon} aria-hidden="true">{icon}</span>
-      <span className={styles.composerPopoverCopy}><strong>{title}</strong>{subtitle && <small>{subtitle}</small>}</span>
-      {toggle ? <span className={styles.composerPopoverToggle} data-on={checked ? "true" : "false"}><span /></span> : trailing ?? (checked && <IconCheck size={14} />)}
+      <span className={styles.composerPopoverCopy}><strong>{title}</strong>{subtitle && <small id={descriptionId} className={compactDetails ? styles.composerPopoverVisuallyHidden : undefined}>{subtitle}</small>}</span>
+      <span className={styles.composerPopoverMeta}>
+        {status && <span className={styles.composerPopoverStatus}>{status}</span>}
+        {toggle ? <span className={styles.composerPopoverToggle} data-on={checked ? "true" : "false"}><span /></span> : trailing ?? (checked && <IconCheck size={14} />)}
+      </span>
     </button>
   );
 }

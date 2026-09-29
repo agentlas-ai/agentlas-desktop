@@ -124,6 +124,19 @@ export function evaluateAutomationWatchdog(
   };
 }
 
+/** Owner-facing sentence for a watchdog stop (the error string above stays the machine form). */
+export function automationWatchdogOwnerText(decision: AutomationWatchdogDecision, locale: "ko" | "en"): string {
+  const seconds = Math.round(decision.timeoutMs / 1000);
+  if (locale === "ko") {
+    return decision.mode === "active-tool"
+      ? `실행 중인 도구가 ${seconds}초 동안 아무 응답이 없어 이 실행을 자동으로 멈췄습니다.`
+      : `실행이 ${seconds}초 동안 아무 응답이 없어 자동으로 멈췄습니다.`;
+  }
+  return decision.mode === "active-tool"
+    ? `A running tool produced nothing for ${seconds}s, so this run was stopped automatically.`
+    : `The run produced nothing for ${seconds}s, so it was stopped automatically.`;
+}
+
 export function automationWatchdogError(decision: AutomationWatchdogDecision): string {
   const seconds = Math.round(decision.timeoutMs / 1000);
   if (decision.mode === "active-tool") {

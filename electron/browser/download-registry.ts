@@ -43,6 +43,18 @@ interface AgentTicket {
   progress?: (phase: "transfer" | "hash", bytes: number) => void;
 }
 const agentTickets = new Map<number, AgentTicket>();
+
+/** Main-only: a page download in a guest, as it starts, progresses and ends (the CDP relay reports it to the agent). */
+export type NativeBrowserDownloadEvent = { webContentsId: number; id: string; url: string; fileName: string;
+  phase: "start" | "progress" | "done"; state: "inProgress" | "completed" | "canceled"; receivedBytes: number; totalBytes: number; savePath: string | null };
+const downloadObservers = new Set<(event: NativeBrowserDownloadEvent) => void>();
+export function observeNativeBrowserDownloads(observer: (event: NativeBrowserDownloadEvent) => void): () => void {
+  downloadObservers.add(observer);
+  return () => { downloadObservers.delete(observer); };
+}
+function notifyDownload(event: NativeBrowserDownloadEvent): void {
+  for (const observer of downloadObservers) { try { observer(event); } catch { /* an observer never breaks the download */ } }
+}
 const urlDigest = (url: string) => createHash("sha256").update(url).digest("hex");
 
 /** Main-only registration for a private guest with no page/renderer input. A
@@ -208,6 +220,15 @@ export function ensureBrowserDownloadRegistry(resolveOwner: (webContentsId: numb
     records.set(id, record);
     activeItems.set(id, item);
     persist();
+    const sourceContentsId = webContents.id;
+    const observed = (phase: NativeBrowserDownloadEvent["phase"], state: NativeBrowserDownloadEvent["state"]) => notifyDownload({
+      webContentsId: sourceContentsId, id, url: item.getURL(), fileName, phase, state,
+      receivedBytes: Math.max(0, item.getReceivedBytes()), totalBytes: Math.max(0, item.getTotalBytes()), savePath: records.get(id)?.savePath ?? null });
+    if (!ticket) {
+      observed("start", "inProgress");
+      item.on("updated", () => observed("progress", "inProgress"));
+      item.once("done", (_doneEvent, state) => setImmediate(() => observed("done", state === "completed" ? "completed" : "canceled")));
+    }
     item.on("updated", (_downloadEvent, state) => {
       const current = records.get(id);
       if (!current || !activeItems.has(id)) return;

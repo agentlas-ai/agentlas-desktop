@@ -21,14 +21,18 @@
 
 .trigger:hover,
 .trigger:focus-visible {
-  background: var(--paper-3);
-  outline: 2px solid transparent;
+  background: var(--paper-2);
+}
+
+.trigger:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: 2px;
 }
 
 .mark {
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
   display: grid;
   place-items: center;
   border-radius: 50%;
@@ -65,8 +69,9 @@
 }
 
 .chevron {
+  display: grid;
+  place-items: center;
   color: color-mix(in srgb, currentColor 52%, transparent);
-  font-size: 12px;
   transition: transform 150ms ease;
 }
 
@@ -81,10 +86,10 @@
   z-index: 220;
   top: calc(100% + 7px);
   left: 0;
-  width: 238px;
-  min-width: min(238px, calc(100vw - 24px));
+  width: 228px;
+  min-width: min(228px, calc(100vw - 24px));
   max-width: calc(100vw - 24px);
-  padding: 6px;
+  padding: 5px;
   border: 1px solid rgba(15, 23, 42, 0.1);
   border-radius: 14px;
   background: color-mix(in srgb, var(--paper) 98%, transparent);
@@ -94,18 +99,19 @@
 
 .option {
   width: 100%;
-  min-height: 62px;
+  min-height: 42px;
+  position: relative;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 24px;
+  grid-template-columns: 24px minmax(0, 1fr) 18px;
   align-items: center;
-  gap: 12px;
-  padding: 9px 11px;
+  gap: 9px;
+  padding: 6px 9px;
   border: 0;
   border-radius: 10px;
   background: transparent;
   color: inherit;
   font: inherit;
-  overflow: hidden;
+  overflow: visible;
   text-align: left;
   text-decoration: none !important;
 }
@@ -113,40 +119,104 @@
 .option:hover,
 .option:focus-visible {
   background: var(--paper-2);
-  outline: none;
+}
+
+.option[aria-current="page"] {
+  background: color-mix(in srgb, var(--accent) 8%, var(--paper));
+}
+
+.option:hover {
+  z-index: 2;
+}
+
+.option:focus-visible {
+  z-index: 3;
+  outline: 2px solid color-mix(in srgb, var(--accent) 72%, transparent);
+  outline-offset: -2px;
+  background: var(--paper-2);
+}
+
+.optionIcon {
+  width: 24px;
+  height: 24px;
+  display: grid;
+  place-items: center;
+  color: var(--muted-deep);
+}
+
+.optionOneMark {
+  width: 24px;
+  height: 16px;
 }
 
 .optionCopy {
   min-width: 0;
-  display: grid;
-  gap: 2px;
+  display: flex;
+  align-items: center;
 }
 
 .optionCopy strong {
   overflow: hidden;
-  font-size: 14px;
-  line-height: 20px;
+  font-size: 13px;
+  font-weight: 560;
+  line-height: 18px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .optionCopy small {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--muted-deep);
-  font-size: 12px;
-  line-height: 17px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  position: absolute;
+  z-index: 4;
+  top: calc(100% - 2px);
+  left: 42px;
+  width: max-content;
+  max-width: calc(100vw - 56px);
+  padding: 6px 8px;
+  border: 1px solid color-mix(in srgb, var(--paper) 14%, transparent);
+  border-radius: 8px;
+  background: var(--ink);
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.16);
+  color: var(--paper);
+  font-size: 11px;
+  font-weight: 450;
+  line-height: 15px;
+  white-space: normal;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transform: translateY(-2px);
+  transition: opacity 120ms ease, transform 120ms ease, visibility 120ms ease;
+}
+
+.option:hover .optionCopy small,
+.option:focus-visible .optionCopy small {
+  opacity: 1;
+  visibility: visible;
+  transform: translateY(2px);
+}
+
+.optionIcon,
+.statusIcon {
+  color: color-mix(in srgb, var(--ink) 58%, transparent);
+}
+
+.option[aria-current="page"] .optionIcon,
+.option[aria-current="page"] .check {
+  color: var(--accent);
+}
+
+.statusIcon {
+  grid-column: 3;
+  display: grid;
+  place-items: center;
 }
 
 .check {
-  grid-column: 2;
+  grid-column: 3;
   align-self: center;
   justify-self: center;
-  color: var(--ok);
-  font-size: 15px;
-  font-weight: 800;
+  font-size: 14px;
+  font-weight: 700;
 }
 
 .compact .trigger {
@@ -171,7 +241,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .chevron {
+  .chevron,
+  .optionCopy small {
     transition: none;
   }
 }

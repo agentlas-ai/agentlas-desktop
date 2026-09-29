@@ -16,6 +16,7 @@ import {
   goalContinuationSchedule,
   isStormbreakerLongRunPrompt,
 } from "./hephaestus/loop-engineering";
+import { goalStopReasonText } from "../shared/goal-stop-reason-text";
 
 /*
  * Settlement of a hidden goal continuation run — the ONE place that decides
@@ -31,7 +32,8 @@ import {
  *   completed  = judge ok(accepted) + no continue marker + ledger has no open task
  *                → ledger/contract closed, this row off, goal chat told once
  *   hard stop  = ledger says budget / blocked / terminal / paused
- *                → contract blocked, row off, goal chat told the reason once
+ *                → row off, goal chat told the reason once; contract and chat
+ *                binding stay (a blocked/paused goal is not over)
  *   needs owner= judge needs_input → goal chat told once, row off (the owner's
  *                next turn re-enables exactly this row, mcp/client.ts)
  *   backoff    = the run itself failed (error / graph partial) → every-2h, no
@@ -180,10 +182,13 @@ export async function settleGoalContinuationRun(input: {
     return "completed";
   }
   if (hardStop) {
-    completeChatGoalContract(goalId, "blocked");
-    clearChatGoalBindingByGoalId(goalId);
+    // Stop the continuation row only. A blocked / paused / budget-stopped goal is not over: its contract and its
+    // chat binding stay, so the goal chip, the owner's answer and the AGI room life still reach it. Before this the
+    // hard stop blocked the contract and cleared chats.goal_id — owner room "Youtube launch" 2026-09-28 11:46:19Z
+    // (goal_owner_answer_required) lost its goal on every surface. A goal that really ended is unbound by the next
+    // turn's terminal check (invocation/service.ts), which reads the long run, not this settlement.
     toggleAutomation(a.id, false);
-    notice("hard-stop", [decision.reason, decision.blockedReason].filter(Boolean).join(" · "));
+    notice("hard-stop", goalStopReasonText(decision.reason, decision.blockedReason, input.locale));
     return "hard-stop";
   }
   if (goalContinuationNeedsOwner(input)) {
@@ -229,7 +234,7 @@ export function settleRefusedGoalContinuation(input: {
     automationId: a.id,
     automationName: a.name,
     runId: noticeKey,
-    reason: [input.decision.reason, input.decision.blockedReason].filter(Boolean).join(" · "),
+    reason: goalStopReasonText(input.decision.reason, input.decision.blockedReason, input.locale),
     locale: input.locale,
   });
   if (a.enabled !== false) toggleAutomation(a.id, false);

@@ -25,7 +25,7 @@
  */
 import { longRunOwnerHold, LONG_RUN_OWNER_HOLD_CODE } from "../store/long-runs";
 import { createHash, randomUUID } from "node:crypto";
-import type { McpInvocationRequest, RuntimeSelection } from "../../shared/types";
+import type { HostStatusKind, McpInvocationRequest, RuntimeSelection } from "../../shared/types";
 import type { LongRunRuntimeSelection } from "../../shared/long-run";
 import { restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 import { resolveDesktopRuntimeAdapter } from "./runtime-adapters";
@@ -275,11 +275,14 @@ function attemptActionLines(invocationRunId: string | null): string {
     try {
       const receipt = readAttemptEffectReceipt(invocationRunId);
       if (receipt.closed) {
-        const calls = receipt.candidates.slice(0, 8).map((call) => `   - ${redactUrls([call.toolName, call.args].filter(Boolean).join(" · "))}`);
+        // The interruption is at the end of the turn, so the newest calls are the ones in doubt. Showing the
+        // first eight hid the reply typed last (Thread Marketing 2026-09-28 14:21Z: "…and 41 more").
+        const shown = receipt.candidates.slice(-8);
+        const calls = shown.map((call) => `   - ${redactUrls([call.toolName, call.args].filter(Boolean).join(" · "))}`);
         return [
-          "   calls in question (recorded with their arguments; the app could not prove they only read):",
+          "   calls in question, newest last (recorded with their arguments; the app could not prove they only read):",
+          ...(receipt.candidates.length > 8 ? [`   - …${receipt.candidates.length - 8} earlier call(s) not shown`] : []),
           ...(calls.length ? calls : ["   - (none)"]),
-          ...(receipt.candidates.length > 8 ? [`   - …and ${receipt.candidates.length - 8} more`] : []),
           ...(receipt.readOnlyCalls ? [`   ${receipt.readOnlyCalls} other recorded call(s) only searched, read files or loaded pages; they are not in question.`] : []),
         ].join("\n");
       }
@@ -322,6 +325,7 @@ Rules for this check:
 - This run is read-only. Do not perform, retry, complete, or undo any action. Do not post, send, submit, buy, reply, like, delete or edit anything.
 - Only look: open or refresh the relevant page in the browser, list recent posts / messages / orders / files, read logs or the working folder, or read this app's own state (for example the registered automations and their schedules).
 - Decide from what you actually see, not from what should have happened.
+- Judge only whether the listed action(s) took effect. The Goal line is context: whether the goal is reached (a follower count, a target number) is not this check's question and is never evidence for either verdict.
 ${READ_ONLY_CALLS_RULE}
 
 End your answer with exactly one final line, starting with the marker (no code fence, no prefix), covering all attempts above in one verdict:
@@ -336,14 +340,22 @@ const RECEIPT_KO = "중단된 작업의 기록을 확인했어요. 검색·읽�
 const RECEIPT_EN = "Checked the interrupted work's own record: it only searched, read and opened pages, so nothing outside changed. Continuing without another look.";
 
 function sayExhausted(chatId: string, runId: string): void {
-  say(chatId, runId,
+  say(chatId, runId, { status: "needs-owner" },
     `이전 작업이 반영됐는지 ${MAX_INCONCLUSIVE_OBSERVATIONS}번 직접 확인했지만 판단할 수 없어, 자동 재확인을 멈췄어요(${EFFECT_OBSERVATION_EXHAUSTED}). 결과를 직접 확인하신 뒤 목표 칩에서 이어가기를 누르거나 이 대화에 한 문장을 보내면, 반복하기 전에 먼저 확인하도록 이어서 진행합니다.`,
     `I checked ${MAX_INCONCLUSIVE_OBSERVATIONS} times but could not tell whether the earlier action went through, so automatic re-checks stopped (${EFFECT_OBSERVATION_EXHAUSTED}). Check the result, then press Continue on the goal chip or send one sentence here; the goal resumes and verifies before repeating anything.`);
 }
 
-function say(chatId: string, runId: string, ko: string, en: string): void {
+/**
+ * The host's own status line in the goal's chat. `status` is the durable machine marker the screen
+ * reads (quiet kinds fold into the turn's one line; failures and owner asks stay prominent) —
+ * the sentence itself is never parsed. Owner 2026-09-29 "말풍선 4개가 뭐여".
+ */
+type SayStatus = { status: HostStatusKind; verdict?: "done" | "not_done" };
+
+function say(chatId: string, runId: string, marker: SayStatus, ko: string, en: string): void {
   try {
-    appendChatMessage(chatId, "assistant", currentUiLocale() === "ko" ? ko : en, { hostNotice: { purpose: "goal-continuation", runId } });
+    appendChatMessage(chatId, "assistant", currentUiLocale() === "ko" ? ko : en,
+      { hostNotice: { purpose: "host-status", runId, status: marker.status, ...(marker.verdict ? { verdict: marker.verdict } : {}) } });
   } catch (error) {
     console.warn("[effect-observation] chat notice failed:", error);
   }
@@ -442,7 +454,18 @@ export function maybeDispatchEffectObservation(
   if (continuation) {
     const runtime = automationObservationRuntime();
     if (!runtime) return { status: "skipped", reason: "automation_runtime_unavailable" };
-    return maybeDispatchAutomationEffectObservation(runtime, continuation.id, trigger, { epoch });
+    const viaAutomation = maybeDispatchAutomationEffectObservation(runtime, continuation.id, trigger, { epoch });
+    // The automation path looks at its graph hold and the Goal's attempt rows. A boundary blocker with no
+    // attempt rows has neither, so it answered no_uncertain_attempts, the sweep's resume was refused on the
+    // same blocker, and the Goal re-scheduled the same look forever (owner X Marketing 2026-09-28 13:12Z→:
+    // retries at 13:17/13:27/13:47/14:27, zero messages, "5분 뒤 … 이어갑니다" shown). That blocker is
+    // answered by the boundary look below, exactly as for a Goal without a continuation automation.
+    if (!(viaAutomation.status === "skipped" && ["no_uncertain_attempts", "nothing_to_observe"].includes(viaAutomation.reason)
+      && continuation.enabled === false
+      && BOUNDARY_BLOCK_REASONS.has(run.blockedReason ?? "")
+      && getLongRunAttemptReview(run.id).attempts.length === 0)) {
+      return viaAutomation;
+    }
   }
   if (dispatcher.activeChatIds().includes(chatId)) return { status: "skipped", reason: "chat_busy" };
   const review = getLongRunAttemptReview(run.id);
@@ -453,16 +476,34 @@ export function maybeDispatchEffectObservation(
   if (!targets.length) {
     // 시도 행이 없는 효과 경계 불확실 — 마지막 실행이 바깥에 무엇을 했는지 한 번 본다.
     if (!BOUNDARY_BLOCK_REASONS.has(run.blockedReason ?? "")) return { status: "skipped", reason: "no_uncertain_attempts" };
-    const last = getDb().prepare(
-      "SELECT run_id FROM run_events WHERE chat_id = ? AND kind = 'invoke_started' ORDER BY rowid DESC LIMIT 1",
-    ).get(chatId) as { run_id: string } | undefined;
+    // The last real turn of the chat — never an earlier look. Owner Thread Marketing 2026-09-28 14:27Z: the
+    // re-observation after an inconclusive look picked that look (b355a6e1, which only ran ls/cat) as the
+    // "interrupted attempt", so each look examined the previous look instead of the reply left in 816f9ae6.
+    const recentTurns = getDb().prepare(
+      `SELECT run_id FROM run_events WHERE chat_id = ? AND kind = 'invoke_started'
+         AND run_id NOT IN (SELECT json_extract(payload_json, '$.observationInvocationRunId') FROM long_run_events
+                             WHERE kind = ? AND json_extract(payload_json, '$.observationInvocationRunId') IS NOT NULL)
+       ORDER BY rowid DESC LIMIT 10`,
+    ).all(chatId, EFFECT_OBSERVATION_EVENT_KIND) as Array<{ run_id: string }>;
+    // A turn whose own closed receipt has no call in question (it only read) is never the interrupted attempt:
+    // pick the newest turn that could have changed something (owner Thread Marketing 15:57Z picked 8dbfd6d0,
+    // a completed 0-tool conversation turn). When every recent turn only read, the newest one is answered by
+    // its receipt below — no model look.
+    const cleanTurn = (runId: string): boolean => {
+      try { const receipt = readAttemptEffectReceipt(runId); return receipt.closed && receipt.candidates.length === 0; }
+      catch { return false; }
+    };
+    const last = recentTurns.find((turn) => !cleanTurn(turn.run_id)) ?? recentTurns[0];
     if (!last) return { status: "skipped", reason: "no_uncertain_attempts" };
     kind = "boundary";
     targets = [{ id: `invocation:${last.run_id}`, taskTitle: run.objective.slice(0, 240), taskObjective: "", invocationRunId: last.run_id }];
   }
   const targetIds = targets.map((target) => target.id);
   // The attempt's own closed receipt answers first — even after the look cap, since it costs no model run.
-  if (kind === "attempts") {
+  // A boundary target (the chat's last real turn) too: owner Thread Marketing 2026-09-28 15:57Z sent a
+  // completed, effect-settled read-only turn (8dbfd6d0, zero tool calls in question) to a model look, which
+  // answered not_done from the follower count and told the owner "반영되지 않았어요. 다시 시도하며 이어갑니다".
+  if (kind === "attempts" || kind === "boundary") {
     const receipt = receiptSettlesAttempts(targets);
     if (receipt) {
       const observationRunId = `effect-receipt-${randomUUID()}`;
@@ -485,6 +526,8 @@ export function maybeDispatchEffectObservation(
   const goalRuntime = goalObservationRuntime(run.id, chatId);
   const request: McpInvocationRequest = {
     chatId, runId: observationRunId, promptOrigin: "system", taskIntent: "task", permissions: "read",
+    // Its run notices are shown in the owner's chat; without a locale they were English in Korean rooms.
+    locale: currentUiLocale() === "ko" ? "ko" : "en",
     ...(goalRuntime ? { runtimeSelection: goalRuntime } : {}),
     ...(chat.originSurface === "one" ? { oneMode: true, onePermissionMode: "read" as const } : {}),
     userPrompt: buildEffectObservationPrompt({ objective: run.objective, attempts: targets }),
@@ -499,7 +542,7 @@ export function maybeDispatchEffectObservation(
     attemptIds: Object.freeze([...targetIds]), digest, surface: run.surface, kind, needsBrowser, dispatcher });
   registerEffectObservationTicket(ticket);
   markGoalObserving(goalId, true);
-  say(chatId, observationRunId, "이전 작업이 반영됐는지 확인하는 중…", "Checking whether the earlier action went through…");
+  say(chatId, observationRunId, { status: "effect-checking" }, "이전 작업이 반영됐는지 확인하는 중…", "Checking whether the earlier action went through…");
   try {
     const started = dispatcher.start(request, undefined, undefined, undefined, "goal-continuation");
     if (started.runId !== observationRunId) throw new Error("effect_observation_dispatch_identity_mismatch");
@@ -531,14 +574,14 @@ function recordInconclusive(ticket: EffectObservationTicket, reason: string,
   const retryKo = "잠시 뒤 앱이 스스로 다시 확인하고, 확인되는 대로 이어갑니다.";
   const retryEn = "The app will look again shortly on its own and continue as soon as it can tell.";
   if (copy === "not_started") {
-    say(ticket.chatId, ticket.observationRunId, `이전 작업을 지금은 확인하지 못했어요. ${retryKo}`,
+    say(ticket.chatId, ticket.observationRunId, { status: "effect-retrying" }, `이전 작업을 지금은 확인하지 못했어요. ${retryKo}`,
       `I could not start checking the earlier action right now. ${retryEn}`);
   } else if (typeof copy === "object") {
-    say(ticket.chatId, ticket.observationRunId,
+    say(ticket.chatId, ticket.observationRunId, { status: "effect-retrying", verdict: copy.observed },
       `확인해 보니 이전 작업은 ${copy.observed === "done" ? "이미 반영돼 있었어요" : "반영되지 않았어요"}. 다만 지금 바로 이어가지 못했어요. ${retryKo}`,
       `Checked: the earlier action ${copy.observed === "done" ? "already went through" : "did not go through"}, but the goal could not continue right away. ${retryEn}`);
   } else {
-    say(ticket.chatId, ticket.observationRunId, `직접 확인했지만 이전 작업이 반영됐는지 알 수 없었어요. ${retryKo}`,
+    say(ticket.chatId, ticket.observationRunId, { status: "effect-retrying" }, `직접 확인했지만 이전 작업이 반영됐는지 알 수 없었어요. ${retryKo}`,
       `I looked, but could not tell whether the earlier action went through. ${retryEn}`);
   }
 }
@@ -620,7 +663,12 @@ export function completeEffectObservation(input: {
       if (!current || current.goalId !== ticket.goalId || current.status !== "blocked"
         || (!OBSERVABLE_BLOCK_REASONS.has(current.blockedReason ?? "") && ticket.kind !== "attempts")) throw new Error("effect_observation_goal_state_changed");
       if (getChat(ticket.chatId)?.goalId !== ticket.goalId) throw new Error("goal_control_binding_changed");
-      if (findAutomationByGoalId(ticket.goalId)) throw new Error("effect_observation_automation_continuation");
+      // An enabled continuation automation owns the next run. A boundary look (no attempt rows, no graph
+      // hold — the automation path cannot see it) on a Goal whose continuation is off resumes in the chat.
+      const continuation = findAutomationByGoalId(ticket.goalId);
+      if (continuation && (ticket.kind !== "boundary" || continuation.enabled !== false)) {
+        throw new Error("effect_observation_automation_continuation");
+      }
       const settled = ticket.kind === "boundary"
         ? settleBoundaryByObservation(current.id, ticket, verdict, report.evidence)
         : settleUncertainAttemptsByObservation(current.id, { attemptIds: ticket.attemptIds, verdict,
@@ -630,7 +678,8 @@ export function completeEffectObservation(input: {
         .run(new Date().toISOString(), ticket.goalId);
       const wait = ongoingWaitAfterObservation(current, ticket, settled.version);
       if (wait) return { wait };
-      const request = automaticGoalResumeRequest(ticket.chatId, settled.version, "host", { verdict, evidence: report.evidence });
+      const request = automaticGoalResumeRequest(ticket.chatId, settled.version, "host", { verdict, evidence: report.evidence,
+        ...(input.proof === "receipt" ? { proof: "receipt" as const } : {}) });
       if (!request) throw new Error("long_run_resume_dispatch_unavailable");
       const queued = transitionLongRun({ runId: current.id, to: "queued", actorKind: "host",
         reason: "effect-observation-resume", appInstanceId: desktopAppInstanceId(), expectedVersion: settled.version });
@@ -643,7 +692,7 @@ export function completeEffectObservation(input: {
   }
   if (prepared.wait) {
     const at = prepared.wait.nextCheckAt;
-    say(ticket.chatId, ticket.observationRunId,
+    say(ticket.chatId, ticket.observationRunId, { status: "effect-continuing", verdict },
       verdict === "done"
         ? `확인해 보니 이전 작업은 이미 반영돼 있었어요. 다시 하지 않고, 다음 회차(${at})에 이어갑니다.`
         : `확인해 보니 이전 작업은 반영되지 않았어요. 다음 회차(${at})에 현재 상태를 다시 보고 필요하면 다시 합니다.`,
@@ -652,13 +701,13 @@ export function completeEffectObservation(input: {
         : `Checked: the earlier action did not go through. The next cycle (${at}) re-checks the page and redoes it only if still needed.`);
     return { outcome: "wait_registered", verdict, waitId: prepared.wait.waitId };
   }
-  say(ticket.chatId, ticket.observationRunId,
+  say(ticket.chatId, ticket.observationRunId, { status: "effect-continuing", ...(input.proof === "receipt" ? {} : { verdict }) },
     input.proof === "receipt" ? RECEIPT_KO : verdict === "done"
       ? "확인해 보니 이전 작업은 이미 반영돼 있었어요. 다시 하지 않고 다음 작업을 이어갑니다."
-      : "확인해 보니 이전 작업은 반영되지 않았어요. 다시 시도하며 이어갑니다.",
+      : "확인해 보니 이전 작업의 결과는 바깥에 보이지 않았어요. 반복하기 전에 현재 상태를 다시 확인하며 이어갑니다.",
     input.proof === "receipt" ? RECEIPT_EN : verdict === "done"
       ? "Checked: the earlier action already went through. Continuing with the next step without redoing it."
-      : "Checked: the earlier action did not go through. Continuing and trying it again.");
+      : "Checked: the earlier action's result was not visible outside. Continuing, and the current state is checked again before anything is repeated.");
   try {
     const started = ticket.dispatcher.start(prepared.request, undefined, undefined, undefined, "goal-continuation");
     confirmDesktopLongRunResumeDispatched(prepared.queuedId);
@@ -859,8 +908,8 @@ ${EFFECT_OBSERVATION_MARKER}{"verdict":"done","attempts":${ids},"evidence":"the 
 - "done": you saw that the result exists. "not_done": you clearly saw it does not exist. "unknown": anything else, or the targets differ. Unknown is always acceptable; a wrong "done" or "not_done" is not.`;
 }
 
-function sayGoal(plan: AutomationObservationPlan, runId: string, ko: string, en: string): void {
-  if (plan.goal?.chatId) say(plan.goal.chatId, runId, ko, en);
+function sayGoal(plan: AutomationObservationPlan, runId: string, marker: SayStatus, ko: string, en: string): void {
+  if (plan.goal?.chatId) say(plan.goal.chatId, runId, marker, ko, en);
 }
 
 /**
@@ -924,7 +973,7 @@ export function maybeDispatchAutomationEffectObservation(
     markGoalObserving(plan.goal.goalId, true);
   }
   markAutomationObserving(automationId, true);
-  sayGoal(plan, observationRunId, "이전 작업이 반영됐는지 확인하는 중…", "Checking whether the earlier action went through…");
+  sayGoal(plan, observationRunId, { status: "effect-checking" }, "이전 작업이 반영됐는지 확인하는 중…", "Checking whether the earlier action went through…");
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new Error("effect_observation_time_budget")), EFFECT_OBSERVATION_TIME_LIMIT_MS);
   const settled = Promise.resolve()
@@ -976,7 +1025,7 @@ function completeAutomationEffectObservation(input: {
         return { outcome: "fallback", reason: EFFECT_OBSERVATION_EXHAUSTED };
       }
     }
-    sayGoal(plan, observationRunId,
+    sayGoal(plan, observationRunId, { status: "effect-retrying", ...(observed ? { verdict: observed } : {}) },
       observed
         ? `확인해 보니 이전 작업은 ${observed === "done" ? "이미 반영돼 있었어요" : "반영되지 않았어요"}. 다만 지금 바로 이어가지 못했어요. 잠시 뒤 앱이 스스로 다시 확인하고 이어갑니다.`
         : "직접 확인했지만 이전 작업이 반영됐는지 알 수 없었어요. 잠시 뒤 앱이 스스로 다시 확인하고, 확인되는 대로 이어갑니다.",
@@ -1058,13 +1107,13 @@ function completeAutomationEffectObservation(input: {
       console.warn("[effect-observation] goal resume transition failed:", error);
     }
   }
-  sayGoal(plan, observationRunId,
+  sayGoal(plan, observationRunId, { status: "effect-continuing", ...(input.proof === "receipt" ? {} : { verdict }) },
     input.proof === "receipt" ? RECEIPT_KO : verdict === "done"
       ? "확인해 보니 이전 작업은 이미 반영돼 있었어요. 다시 하지 않고 다음 작업을 이어갑니다."
-      : "확인해 보니 이전 작업은 반영되지 않았어요. 다시 시도하며 이어갑니다.",
+      : "확인해 보니 이전 작업의 결과는 바깥에 보이지 않았어요. 반복하기 전에 현재 상태를 다시 확인하며 이어갑니다.",
     input.proof === "receipt" ? RECEIPT_EN : verdict === "done"
       ? "Checked: the earlier action already went through. Continuing with the next step without redoing it."
-      : "Checked: the earlier action did not go through. Continuing and trying it again.");
+      : "Checked: the earlier action's result was not visible outside. Continuing, and the current state is checked again before anything is repeated.");
   return { outcome: "reconciled", verdict, reconciled: Boolean(result.reconciled), goalResumed, enqueued };
 }
 

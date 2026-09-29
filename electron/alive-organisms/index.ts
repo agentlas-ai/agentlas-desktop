@@ -1,3 +1,5 @@
+import { AliveOwnerIntentGate } from "./owner-intent";
+import { emitGoalControlChange } from "../goal-control-events";
 /**
  * Real wiring of the One/Work Alive organisms (Main only) and their IPC surface.
  * The host logic lives in ./host.ts behind injectable deps so contracts can drive it without Electron.
@@ -30,6 +32,7 @@ import type { GoalPlaygroundDeps, GoalRunView } from "./goal-playground";
 import type { AliveChangedEvent, AliveState, AliveSurface } from "../../shared/alive";
 import { AgiGoalMonitor } from "../agi/monitor";
 import { listAgiMonitoredGoalIds, readAgiBlockerFacts } from "../agi/goal-facts";
+import { effectiveGoalIdForChat } from "../store/goal-binding-repair";
 import { createAgiHandler } from "../agi/wiring";
 import { AgiBugReports } from "../agi/bug-report";
 import { callAgiReadTool } from "../agi/read-tools";
@@ -40,6 +43,7 @@ import type { AgiBugReportDraftInput, AgiTokenLimitsView } from "../../shared/ag
 const PROCESS_STARTED_AT_MS = Date.now();
 let host: AliveOrganismHost | null = null;
 let agiMonitor: AgiGoalMonitor | null = null;
+const ownerIntentGate = new AliveOwnerIntentGate();
 
 let agiBugReports: AgiBugReports | null = null;
 let agiBugReportTimer: ReturnType<typeof setInterval> | null = null;
@@ -111,7 +115,9 @@ function runView(goalId: string): GoalRunView | null {
 const playgroundDeps: GoalPlaygroundDeps = {
   chat: (chatId) => {
     const chat = getChat(chatId);
-    return chat ? { id: chat.id, title: chat.title, goalId: chat.goalId ?? null, projectId: chat.projectId ?? null,
+    // The goal comes from the contract table when the chat binding was detached from a still-live goal, so a
+    // cleared chats.goal_id can never hide a goal from AGI (owner room "Youtube launch" 2026-09-28).
+    return chat ? { id: chat.id, title: chat.title, goalId: effectiveGoalIdForChat(getDb(), chat.id, chat.goalId ?? null), projectId: chat.projectId ?? null,
       originSurface: chat.originSurface ?? null } : null;
   },
   runForGoal: runView,
@@ -149,6 +155,7 @@ const playgroundDeps: GoalPlaygroundDeps = {
 };
 
 function broadcast(event: AliveChangedEvent): void {
+  emitGoalControlChange({ kind: "alive", ...event });
   // Lazy: this module is also loaded by contracts that have no Electron.
   const { BrowserWindow } = require("electron") as typeof import("electron");
   for (const window of BrowserWindow.getAllWindows()) {
@@ -260,32 +267,10 @@ function requireHost(): AliveOrganismHost {
 }
 
 export function registerAliveIpc(deps: { ipc: Pick<IpcMain, "handle">; assertTrustedSender: (event: IpcMainInvokeEvent) => unknown }): void {
-  deps.ipc.handle("alive:getState", async (event, input: unknown): Promise<AliveState> => {
-    deps.assertTrustedSender(event);
-    const row = parseAliveSurfaceChat(input, ["surface", "chatId"]);
-    if (!host || !host.isRunning()) return offState("alive-host-not-running");
-    await host.refreshPlanAccess();
-    return host.getState(row.surface as AliveSurface, row.chatId as string);
-  });
-  deps.ipc.handle("alive:setEnabled", async (event, input: unknown): Promise<AliveState> => {
-    deps.assertTrustedSender(event);
-    const row = parseAliveSurfaceChat(input, ["surface", "chatId", "enabled", "tokenLimit", "moveFrom"]);
-    if (typeof row.enabled !== "boolean" || (row.moveFrom !== undefined && typeof row.moveFrom !== "boolean")) throw new AliveHostError("alive-input-invalid");
-    const target = requireHost();
-    if (row.enabled) await target.refreshPlanAccess();
-    return target.setEnabled({ surface: row.surface as AliveSurface, chatId: row.chatId as string, enabled: row.enabled,
-      ...(row.tokenLimit !== undefined ? { tokenLimit: parseAliveTokenLimit(row.tokenLimit) } : {}),
-      ...(row.moveFrom === true ? { moveFrom: true } : {}) });
-  });
-  // AGI goal manager: token limits (D1) and defect reports (D5). Sending needs the owner's press on a preview.
-  deps.ipc.handle("agi:getTokenLimits", (event): AgiTokenLimitsView => { deps.assertTrustedSender(event); return agiTokenLimitsView(); });
-  deps.ipc.handle("agi:setTokenLimits", (event, input: unknown): AgiTokenLimitsView => {
-    deps.assertTrustedSender(event);
-    const row = input && typeof input === "object" ? input as Record<string, unknown> : {};
-    const pick = (key: string): number | undefined => typeof row[key] === "number" ? row[key] as number : undefined;
-    writeAgiTokenLimits(getDb(), { attemptTokenLimit: pick("attemptTokenLimit"), dailyGoalTokenLimit: pick("dailyGoalTokenLimit") }, Date.now());
-    return agiTokenLimitsView();
-  });
+  deps.ipc.handle("alive:getState", (event, input: unknown) => { deps.assertTrustedSender(event); return readAliveState(input); });
+  deps.ipc.handle("alive:setEnabled", (event, input: unknown) => { deps.assertTrustedSender(event); return setAliveEnabled(input); });
+  deps.ipc.handle("agi:getTokenLimits", (event) => { deps.assertTrustedSender(event); return getAgiTokenLimits(); });
+  deps.ipc.handle("agi:setTokenLimits", (event, input: unknown) => { deps.assertTrustedSender(event); return setAgiTokenLimits(input); });
   deps.ipc.handle("agi:defectsForChat", (event, chatId: unknown) => {
     deps.assertTrustedSender(event);
     return typeof chatId === "string" && chatId ? agiBugReportSender().defectsForChat(chatId) : [];
@@ -308,11 +293,46 @@ export function registerAliveIpc(deps: { ipc: Pick<IpcMain, "handle">; assertTru
     return agiBugReportSender().send(id);
   });
   deps.ipc.handle("agi:bugReportList", async (event) => { deps.assertTrustedSender(event); return agiBugReportSender().list(); });
-  deps.ipc.handle("alive:setTokenLimit", (event, input: unknown): AliveState => {
-    deps.assertTrustedSender(event);
-    const row = parseAliveSurfaceChat(input, ["surface", "chatId", "tokenLimit"]);
-    if (!("tokenLimit" in row)) throw new AliveHostError("alive-input-invalid");
-    return requireHost().setTokenLimit({ surface: row.surface as AliveSurface, chatId: row.chatId as string,
-      tokenLimit: parseAliveTokenLimit(row.tokenLimit) });
+  deps.ipc.handle("alive:setTokenLimit", (event, input: unknown) => { deps.assertTrustedSender(event); return setAliveTokenLimit(input); });
+}
+
+export function getAgiTokenLimits(): AgiTokenLimitsView { return agiTokenLimitsView(); }
+
+export async function readAliveState(input: unknown): Promise<AliveState> {
+  const row = parseAliveSurfaceChat(input, ["surface", "chatId"]);
+  if (!host || !host.isRunning()) return offState("alive-host-not-running");
+  await host.refreshPlanAccess();
+  return host.getState(row.surface as AliveSurface, row.chatId as string);
+}
+
+export async function setAliveEnabled(input: unknown): Promise<AliveState> {
+  const row = parseAliveSurfaceChat(input, ["surface", "chatId", "enabled", "tokenLimit", "moveFrom"]);
+  if (typeof row.enabled !== "boolean" || (row.moveFrom !== undefined && typeof row.moveFrom !== "boolean")) throw new AliveHostError("alive-input-invalid");
+  const target = requireHost();
+  const next = { surface: row.surface as AliveSurface, chatId: row.chatId as string, enabled: row.enabled,
+    ...(row.tokenLimit !== undefined ? { tokenLimit: parseAliveTokenLimit(row.tokenLimit) } : {}),
+    ...(row.moveFrom === true ? { moveFrom: true } : {}) };
+  const current = target.getState(next.surface, next.chatId);
+  // Work toggles in different chats still control one project life. A pending enable must share that fence.
+  const scopeKey = `${next.surface}:${current.scope?.kind ?? "chat"}:${current.scope?.id ?? next.chatId}`;
+  return ownerIntentGate.run(scopeKey, next.enabled, {
+    refreshAccess: () => target.refreshPlanAccess(),
+    read: () => target.getState(next.surface, next.chatId),
+    apply: () => target.setEnabled(next),
   });
+}
+
+export function setAgiTokenLimits(input: unknown): AgiTokenLimitsView {
+  const row = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const pick = (key: string): number | undefined => typeof row[key] === "number" ? row[key] as number : undefined;
+  writeAgiTokenLimits(getDb(), { attemptTokenLimit: pick("attemptTokenLimit"), dailyGoalTokenLimit: pick("dailyGoalTokenLimit") }, Date.now());
+  emitGoalControlChange({ kind: "agi-limits" });
+  return agiTokenLimitsView();
+}
+
+export function setAliveTokenLimit(input: unknown): AliveState {
+  const row = parseAliveSurfaceChat(input, ["surface", "chatId", "tokenLimit"]);
+  if (!("tokenLimit" in row)) throw new AliveHostError("alive-input-invalid");
+  return requireHost().setTokenLimit({ surface: row.surface as AliveSurface, chatId: row.chatId as string,
+    tokenLimit: parseAliveTokenLimit(row.tokenLimit) });
 }

@@ -199,7 +199,9 @@ function notifyOnce(input: { chatId: string; stop: GoalPassStop }, longRunId: st
       : `Paused for now. The app continues on its own in about ${minutes} min.`;
   }
   try {
-    appendChatMessage(input.chatId, "assistant", text, { hostNotice: { purpose: "goal-continuation", runId: longRunId } });
+    // Typed marker: a sign-in only the owner can do vs. a stopped pass the app resumes itself — both stay prominent.
+    appendChatMessage(input.chatId, "assistant", text, { hostNotice: { purpose: "host-status", runId: longRunId,
+      status: move.kind === "escalate_boundary" ? "needs-owner" : "goal-paused" } });
   } catch (error) {
     console.warn("[goal-pass-stop] chat notice failed:", error);
   }

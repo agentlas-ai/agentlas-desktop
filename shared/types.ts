@@ -1999,7 +1999,30 @@ export type ChatHostNotice =
   /** One's conversation: compact "handed to teammate · open session" / "result arrived" link. */
   | { purpose: "one-dispatch-link" | "one-dispatch-result"; runId: string; chatId: string; memberName: string }
   /** Group chat: One created and/or invited a teammate into this group ("새 팀원 X를 만들어 초대했어요"). */
-  | { purpose: "one-team-member-joined"; memberName: string; created: boolean };
+  | { purpose: "one-team-member-joined"; memberName: string; created: boolean }
+  /**
+   * A status line the host itself wrote on an assistant row (effect check, wait registration/refusal,
+   * cycle verified). The row text stays as written; `status` is the only thing the screen reads to
+   * decide whether it folds into the turn's quiet line or stays a prominent bubble.
+   */
+  | { purpose: "host-status"; runId: string; status: HostStatusKind; verdict?: "done" | "not_done" };
+
+/**
+ * Closed vocabulary of host status lines. Quiet kinds need nothing from the owner; the rest report a
+ * failure or ask the owner to act and stay prominent (see shared/chat-host-notice.ts).
+ */
+export type HostStatusKind =
+  | "effect-checking"
+  | "effect-continuing"
+  | "wait-registered"
+  | "wait-not-scheduled"
+  | "cycle-verified"
+  | "goal-resuming"
+  | "effect-retrying"
+  | "goal-paused"
+  | "goal-closed"
+  | "runtime-kept"
+  | "needs-owner";
 
 export interface ChatHistoryEntry {
   goalResult?: import("./goal-result").GoalResultPresentation;
@@ -2007,6 +2030,8 @@ export interface ChatHistoryEntry {
   /** Opaque Main-issued durable chat-message identity; never derived from copy or timestamps. */
   durableMessageId?: string;
   role: "user" | "assistant" | "system";
+  /** Installed agent that authored this assistant row; absent for older or host-authored rows. */
+  speakerAgentId?: string;
   text: string;
   createdAt: string;
   /** Exact Main-issued purpose of a system turn; absent on legacy history. */
@@ -8119,6 +8144,13 @@ export interface AgentlasIpc {
     /** The owner pressed Send on this previewed draft. Queued offline and retried with the same id. */
     bugReportSend: (input: { clientReportId: string }) => Promise<import("./agi").AgiBugReportRow>;
     bugReportList: () => Promise<import("./agi").AgiBugReportRow[]>;
+  };
+  /** Goal panel (right-panel "목표" tab): ledger read model and the owner's typed edits (shared/goal-panel.ts). */
+  goalPanel: {
+    view: (chatId: string) => Promise<import("./goal-panel").GoalPanelView | null>;
+    edit: (request: import("./goal-panel").GoalPanelEditRequest) => Promise<import("./goal-panel").GoalPanelEditResult>;
+    /** "나누기": asks the planner to shape the goal; returns at once, the view refreshes when it lands. */
+    shape: (chatId: string, expectedGoalId: string) => Promise<import("./goal-panel").GoalPanelEditResult>;
   };
   automations: {
     list: () => Promise<Automation[]>;

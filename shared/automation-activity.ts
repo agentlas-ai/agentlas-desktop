@@ -408,6 +408,12 @@ export function automationRunHeadline(digest: Pick<AutomationRunDigest, "outward
   const site = digest.sites[0] ? siteDisplayName(digest.sites[0].domain) : "";
   if (digest.outwardTotal > 0) return `${site ? `${site} ` : ""}${automationOutwardSummary(digest.outward, locale)}`;
   if (digest.status === "running") return locale === "ko" ? `${site ? `${site} ` : ""}진행 중 · 도구 ${digest.toolCalls}회` : `${site ? `${site} ` : ""}in progress · ${digest.toolCalls} tool calls`;
+  // A completed run with no outward action is the quiet "변화 없음" entry (it posts no chat row).
+  if (digest.status === "ok") {
+    return locale === "ko"
+      ? `변화 없음${digest.toolCalls > 0 ? ` · ${site ? `${site} ` : ""}확인 ${digest.toolCalls}회` : ""}`
+      : `No change${digest.toolCalls > 0 ? ` · ${site ? `${site} ` : ""}checked ${digest.toolCalls}×` : ""}`;
+  }
   if (digest.toolCalls === 0) return locale === "ko" ? "도구 사용 없음" : "No tool activity";
   return locale === "ko" ? `${site ? `${site} ` : ""}확인만 함 · 도구 ${digest.toolCalls}회` : `${site ? `${site} ` : ""}checked only · ${digest.toolCalls} tool calls`;
 }

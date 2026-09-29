@@ -657,7 +657,8 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
         const text = currentUiLocale() === "ko"
           ? `이 작업은 시작할 때 고른 ${label(selection)} 로 이어갑니다 · 지금 선택은 ${label(chosen)} 입니다 — 새 모델로 하려면 중지한 뒤 다시 보내 주세요.`
           : `This task continues with ${label(selection)}, the runtime it started with · your current choice is ${label(chosen)} — to use the new model, stop and send again.`;
-        appendChatMessage(chat.id, "assistant", text, { hostNotice: { purpose: "goal-continuation", runId: successorRunId } });
+        // The owner's newer model choice was not applied — typed and prominent, not a quiet note.
+        appendChatMessage(chat.id, "assistant", text, { hostNotice: { purpose: "host-status", runId: successorRunId!, status: "runtime-kept" } });
       }
       const started = dispatcher.start(resumedRequest, undefined, undefined, undefined, "goal-continuation");
       if (started.runId !== successorRunId) throw new Error("checkpoint_startup_dispatch_identity_mismatch");

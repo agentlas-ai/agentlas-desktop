@@ -48,6 +48,10 @@ function scanSegment(segment: string, depth: number): LaunchEscape | null {
   if (LAUNCHERS.has(head)) {
     // `at` 와 `start` 는 흔한 낱말이라 인자가 있을 때만(예약·실행 형태) 막는다.
     if ((head === "at" || head === "start") && tokens.length <= i + 1) return null;
+    // `at` 은 시각이 따라올 때만 예약이다 — 문장 속 "at least …" 가 괄호 뒤에서 명령처럼 잘려 막혔다(실측 2026-09-29).
+    if (head === "at" && !/^(?:now|noon|midnight|teatime|today|tomorrow|-[a-z]|\d)/i.test(tokens[i + 1] ?? "")) return null;
+    // 인자 없는 `open` 은 아무것도 열지 않는다 — 코드 조각 `json.load(open("x"))` 가 괄호로 잘려 남는 모양이다.
+    if (head === "open" && tokens.length <= i + 1) return null;
     return { launcher: head, segment: tokens.slice(i, i + 4).join(" ").slice(0, 80) };
   }
   if (head === "gio" && tokens[i + 1] === "open") return { launcher: "gio open", segment: tokens.slice(i, i + 4).join(" ").slice(0, 80) };
@@ -60,8 +64,33 @@ function scanSegment(segment: string, depth: number): LaunchEscape | null {
   return null;
 }
 
+const SHELL_INTERPRETERS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+
+/**
+ * 히어독 본문은 그것을 받는 프로그램의 입력이다. `python3 - <<'EOF'` 의 본문은 파이썬이지 셸이 아니므로 명령으로
+ * 읽지 않는다(실측 2026-09-29: 파이썬 문자열 "(at least their mean" 이 `at` 예약으로 막혔다). 셸이 받는
+ * 히어독(`bash <<EOF`)만 본문까지 본다.
+ */
+function maskNonShellHeredocs(text: string): string {
+  const lines = text.split("\n");
+  for (let index = 0; index < lines.length; index++) {
+    const opener = lines[index]!.match(/<<-?\s*(["']?)([A-Za-z_][A-Za-z0-9_]*)\1/);
+    if (!opener) continue;
+    const before = lines[index]!.slice(0, opener.index).split(SEGMENT_SPLIT).pop() ?? "";
+    const tokens = before.trim().split(/\s+/).filter(Boolean);
+    let head = 0;
+    while (head < tokens.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[head]!) || WRAPPERS.has(baseName(tokens[head]!)))) head++;
+    const shell = SHELL_INTERPRETERS.has(baseName(tokens[head] ?? ""));
+    let end = index + 1;
+    while (end < lines.length && lines[end]!.trim() !== opener[2]) end++;
+    if (!shell) for (let body = index + 1; body < end && body < lines.length; body++) lines[body] = "";
+    index = end;
+  }
+  return lines.join("\n");
+}
+
 export function classifyLaunchEscape(command: string, depth = 0): LaunchEscape | null {
-  const text = String(command ?? "");
+  const text = maskNonShellHeredocs(String(command ?? ""));
   if (!text.trim()) return null;
   for (const segment of text.split(SEGMENT_SPLIT)) {
     const hit = scanSegment(segment, depth);

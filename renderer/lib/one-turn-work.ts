@@ -4,6 +4,7 @@ import { mergeConsecutiveThoughts } from "@shared/turn-activity-rows";
 import { parseShellCommand, stripShellWrapper } from "@shared/exploratory-shell";
 import { toolFailureCopy, type ToolFailureCode } from "@shared/tool-failure";
 import type { ToolInvocationOrigin } from "@shared/tool-invocation-origin";
+import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
 
 /**
  * One turn's work, in the shape Codex draws it.
@@ -308,6 +309,34 @@ function sameCellActor(cell: OneWorkCell, item: OneActivityItem): boolean {
   if (cell.agentId || item.agentId) return Boolean(cell.agentId && cell.agentId === item.agentId);
   // Unattributed owner rows can fold; named workers without identity cannot.
   return !cell.agent && !item.agentName;
+}
+
+/**
+ * A host note the owner does not need to act on: the app's own info/success
+ * notice ("이번 실행에 고른 AI …", "연결된 도구로 작업을 계속합니다 …", "브라우저
+ * 캡처를 저장했습니다"). The screen folds these into one quiet line per turn;
+ * the rows themselves stay in the ledger and open from that line.
+ *
+ * Owner 2026-09-29 "말풍선 4개가 뭐여": every browser turn stacked 2 + N such
+ * rows (Thread Marketing ledger: runtime-selected + mcp-selection-undecided on
+ * every run, native-browser-capture-bound ×2–6 on browser runs, all level=info).
+ * Decided by the typed level and activity code only — never by the wording.
+ * Warnings, failures and live activity states (retry/queue) stay prominent.
+ */
+export function isQuietHostNote(cell: OneWorkCell): cell is Extract<OneWorkCell, { kind: "notice" }> {
+  return cell.kind === "notice"
+    && !cell.activityCode
+    && cell.status !== "failed"
+    && (cell.level === "info" || cell.level === "success");
+}
+
+/**
+ * One is the turn's orchestrator, not a worker of it. Its rows stay inline
+ * (attributed), but a worker card for it only repeated the latest row and read
+ * "실행 모델 미확인" beside a header that already names the executed model.
+ */
+export function isOneOrchestratorGroup(group: Pick<OneWorkerWorkGroup, "agentId">): boolean {
+  return group.agentId === BUILTIN_ONE_AGENT_ID;
 }
 
 export interface OneWorkerWorkGroup {
