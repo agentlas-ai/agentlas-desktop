@@ -1,0 +1,333 @@
+/* 연결 칩 + 작은 연결 버튼 + 단계 팝업 — 온보딩·설정 LLM 연결이 같은 모양을 쓴다(오너 2026-09-29). */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  width: min(820px, 100%);
+}
+
+@media (max-width: 1000px) {
+  .grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+
+.chip {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 118px;
+  padding: 14px 14px 12px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--rd-r-md, 14px);
+  background: var(--paper);
+  box-shadow: var(--shadow-1);
+  text-align: left;
+  min-width: 0;
+}
+
+.chip[data-state="ready"] {
+  border-color: var(--green);
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.top img {
+  width: 26px;
+  height: 26px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.names {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.names strong {
+  font-size: 13.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.names small {
+  color: var(--ink-soft);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bottom {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: auto;
+  min-width: 0;
+}
+
+.facts {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.facts span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  padding: 3px 8px;
+  border-radius: 99px;
+  background: var(--paper-3);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+}
+
+.badge[data-tone="ok"] {
+  background: var(--ok-soft);
+  color: var(--rd-accent-text, var(--ink));
+}
+
+.badge[data-tone="warn"] {
+  background: var(--warn-soft, var(--paper-3));
+  color: var(--ink);
+}
+
+.small {
+  flex: 0 0 auto;
+  min-height: 26px;
+  padding: 0 11px;
+  border: 0;
+  border-radius: 99px;
+  background: var(--paper-3);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--paper-edge);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.small:hover:not(:disabled) {
+  background: var(--paper-edge);
+}
+
+.small:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.small[data-variant="upgrade"] {
+  background: var(--black);
+  color: var(--white);
+  box-shadow: none;
+}
+
+/* ── 단계 팝업 ─────────────────────────── */
+.scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+  display: grid;
+  place-items: center;
+  background: color-mix(in oklch, var(--black) 28%, transparent);
+}
+
+.popup {
+  position: relative;
+  width: min(420px, calc(100vw - 32px));
+  padding: 22px 22px 18px;
+  border-radius: 16px;
+  background: var(--paper);
+  color: var(--ink);
+  box-shadow: var(--shadow-3, var(--shadow-2));
+  border: 1px solid var(--paper-edge);
+}
+
+.popupHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.popupHead img {
+  width: 28px;
+  height: 28px;
+  object-fit: contain;
+}
+
+.popupHead h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.steps {
+  list-style: none;
+  margin: 16px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.steps li {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ink-soft);
+  font-size: 12.5px;
+}
+
+.steps li[data-status="current"] {
+  color: var(--ink);
+  font-weight: 650;
+}
+
+.steps li[data-status="done"] {
+  color: var(--ink);
+}
+
+.steps li[data-status="failed"] {
+  color: var(--danger);
+  font-weight: 650;
+}
+
+.dot {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border-radius: 99px;
+  display: grid;
+  place-items: center;
+  font-size: 10px;
+  line-height: 1;
+  background: var(--paper-3);
+  box-shadow: inset 0 0 0 1px var(--paper-edge);
+}
+
+.steps li[data-status="done"] .dot {
+  background: var(--green);
+  color: var(--black);
+  box-shadow: none;
+}
+
+.steps li[data-status="current"] .dot {
+  box-shadow: inset 0 0 0 2px var(--ink);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.steps li[data-status="failed"] .dot {
+  background: var(--danger);
+  color: var(--white);
+  box-shadow: none;
+}
+
+.steps li[data-status="skipped"] {
+  opacity: 0.55;
+}
+
+@keyframes pulse {
+  50% { opacity: 0.45; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .steps li[data-status="current"] .dot { animation: none; }
+}
+
+.note {
+  margin: 14px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ink-soft);
+}
+
+.note[data-tone="error"] {
+  color: var(--danger);
+}
+
+.code {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+.log {
+  margin: 10px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--paper-2, var(--paper-3));
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 10.5px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--ink-soft);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 16px;
+}
+
+.button {
+  min-height: 32px;
+  padding: 0 14px;
+  border: 0;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+  background: var(--paper-3);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--paper-edge);
+}
+
+.button[data-variant="primary"] {
+  background: var(--black);
+  color: var(--white);
+  box-shadow: none;
+}
+
+.link {
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--info, var(--ink));
+  font: inherit;
+  font-size: 12px;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.secondaryActions { display: flex; flex-wrap: wrap; gap: 10px; padding-top: 4px; }
+.popup { max-height: calc(100vh - 32px); overflow-y: auto; }
+.note { word-break: keep-all; overflow-wrap: anywhere; }
+@media (max-width: 640px) { .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 380px) { .grid { grid-template-columns: minmax(0, 1fr); } }

@@ -4,12 +4,18 @@
 // 프롬프트 저장소 정책(2026-07): 유료 구독=무제한 열람+저장, 무료=프롬프트당 맛보기 1회.
 "use client";
 import { useT } from "@/lib/i18n";
+import { openPlanPicker, type PlanPickerSource } from "@/lib/plan-picker";
 
 export const PRICING_URL = "https://agentlas.cloud/pricing";
 
-/** 결제/구독 페이지를 시스템 기본 브라우저로 연다. */
-export function openPricing(): void {
+/**
+ * 요금제 보기 — 앱 안의 "플랜 선택" 모달(PlanPickerHost)을 연다(오너 2026-09-29: 모든
+ * 페이월은 같은 모달). 호스트가 아직 없을 때만 웹 요금제 페이지로 대신 간다.
+ * onClick={openPricing} 처럼 이벤트 객체가 들어와도 되게 source 는 문자열일 때만 읽는다.
+ */
+export function openPricing(source?: PlanPickerSource | unknown): void {
   if (typeof window === "undefined") return;
+  if (openPlanPicker(typeof source === "string" ? (source as PlanPickerSource) : "other")) return;
   window.open(PRICING_URL, "_blank", "noopener,noreferrer");
 }
 

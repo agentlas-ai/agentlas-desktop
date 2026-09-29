@@ -1,6 +1,6 @@
 "use client";
 
-import { useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { tFor, useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
@@ -8,6 +8,8 @@ import { OneBrandMark } from "./OneBrand";
 import { IconApps, IconBrain, IconChevronDown, IconDownload, IconPower } from "@/components/Icon";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
 import { useScienceSuiteStatus } from "@/lib/use-science-suite-status";
+import { AttentionDot } from "@/components/AttentionDot";
+import { attentionLabel, openAttentionEntry, useAttention, type AttentionChatEntry } from "@/lib/attention";
 import styles from "./ProductModeMenu.module.css";
 
 const ONE_RETURN_ROUTE_KEY = "agentlas.one.return-route.v1";
@@ -30,7 +32,25 @@ export function ProductModeMenu({
 }) {
   const { locale } = useT();
   const router = useRouter();
+  const pathname = usePathname() ?? "/";
   const activeLocale = localeOverride ?? locale;
+  /*
+   * ★화면 밖에서 오너를 기다리는 것 — 시트·칩 대신 이 전환기에 파란 점 하나(오너 2026-09-29).
+   * 트리거의 점을 누르면 첫 대기 대화로 간다. 펼친 목록에서는 제품별·대화별로 같은 점을 보인다.
+   */
+  const attention = useAttention(pathname);
+  const firstEntry: AttentionChatEntry | null = attention.entries.find((entry) => entry.approvals > 0)
+    ?? attention.entries[0] ?? null;
+  const surfaceLabel = (name: string, counts: { approvals: number; results: number }) => {
+    const extra = attentionLabel(counts, activeLocale);
+    return extra ? `${name}, ${extra}` : name;
+  };
+  const entryTitle = (entry: AttentionChatEntry) => entry.label?.trim()
+    || (entry.orphan
+      ? (activeLocale === "ko" ? "대화 밖 요청" : "Request outside a chat")
+      : entry.href === "/build"
+        ? (activeLocale === "ko" ? "에이전트 빌드" : "Agent build")
+        : (activeLocale === "ko" ? "제목 없는 대화" : "Untitled conversation"));
   const [open, setOpen] = useState(false);
   const [oneHref, setOneHref] = useState("/one");
   const scienceSuite = useScienceSuiteStatus();
@@ -106,7 +126,7 @@ export function ProductModeMenu({
   };
 
   return (
-    <div className={`${styles.root} ${compact ? styles.compact : ""} ${darkText ? styles.dark : ""}`}>
+    <div className={`${styles.root} ${compact ? styles.compact : ""} ${darkText ? styles.dark : ""}`} data-product-mode-menu={current}>
       <button
         ref={triggerRef}
         type="button"
@@ -133,6 +153,15 @@ export function ProductModeMenu({
         </span>
         <span className={styles.chevron} aria-hidden="true"><IconChevronDown size={13} /></span>
       </button>
+      {firstEntry && (
+        <AttentionDot
+          counts={{ approvals: attention.approvals, results: attention.results }}
+          locale={activeLocale}
+          className={styles.triggerDot}
+          testId="product-mode-attention-dot"
+          onClick={() => { setOpen(false); void openAttentionEntry(firstEntry, (href) => router.push(href)); }}
+        />
+      )}
       {open && (
         <div id="agentlas-product-mode-menu" ref={menuRef} className={styles.menu} role="menu" aria-label={tFor(activeLocale, "one.mode.menu_aria")}>
           <button
@@ -140,14 +169,14 @@ export function ProductModeMenu({
             className={styles.option}
             type="button"
             role="menuitem"
-            aria-label="One"
+            aria-label={surfaceLabel("One", attention.bySurface.one)}
             aria-describedby="agentlas-product-mode-one-help"
             aria-current={current === "one" ? "page" : undefined}
             onClick={() => navigate(oneHref)}
             onKeyDown={(event) => handleOptionKeyDown(event, () => navigate(oneHref))}
           >
             <span className={styles.optionIcon} aria-hidden="true"><OneBrandMark size="small" className={styles.optionOneMark} /></span>
-            <span className={styles.optionCopy}><strong>One</strong><small id="agentlas-product-mode-one-help">{tFor(activeLocale, "one.mode.one_sub")}</small></span>
+            <span className={styles.optionCopy}><strong>One</strong><AttentionDot counts={attention.bySurface.one} locale={activeLocale} className={styles.optionDot} testId="product-mode-attention-one" /><small id="agentlas-product-mode-one-help">{tFor(activeLocale, "one.mode.one_sub")}</small></span>
             {current === "one" && <span className={styles.check} aria-hidden="true">✓</span>}
           </button>
           <button
@@ -155,14 +184,14 @@ export function ProductModeMenu({
             className={styles.option}
             type="button"
             role="menuitem"
-            aria-label="Work"
+            aria-label={surfaceLabel("Work", attention.bySurface.work)}
             aria-describedby="agentlas-product-mode-work-help"
             aria-current={current === "work" ? "page" : undefined}
             onClick={() => navigate("/dashboard")}
             onKeyDown={(event) => handleOptionKeyDown(event, () => navigate("/dashboard"))}
           >
             <span className={styles.optionIcon} aria-hidden="true"><IconApps size={18} /></span>
-            <span className={styles.optionCopy}><strong>Work</strong><small id="agentlas-product-mode-work-help">{tFor(activeLocale, "one.mode.work_sub")}</small></span>
+            <span className={styles.optionCopy}><strong>Work</strong><AttentionDot counts={attention.bySurface.work} locale={activeLocale} className={styles.optionDot} testId="product-mode-attention-work" /><small id="agentlas-product-mode-work-help">{tFor(activeLocale, "one.mode.work_sub")}</small></span>
             {current === "work" && <span className={styles.check} aria-hidden="true">✓</span>}
           </button>
           {(scienceAvailable || SCIENCE_INSTALL_DISCOVERY_ENABLED) && (
@@ -171,7 +200,7 @@ export function ProductModeMenu({
               className={styles.option}
               type="button"
               role="menuitem"
-              aria-label="Science"
+              aria-label={surfaceLabel("Science", attention.bySurface.science)}
               aria-describedby="agentlas-product-mode-science-help"
               aria-current={current === "science" ? "page" : undefined}
               onClick={openScience}
@@ -180,6 +209,7 @@ export function ProductModeMenu({
               <span className={styles.optionIcon} aria-hidden="true"><IconBrain size={18} /></span>
               <span className={styles.optionCopy}>
                 <strong>Science</strong>
+                <AttentionDot counts={attention.bySurface.science} locale={activeLocale} className={styles.optionDot} testId="product-mode-attention-science" />
                 <small id="agentlas-product-mode-science-help">
                   {scienceAvailable
                     ? tFor(activeLocale, "one.mode.science_sub")
@@ -196,6 +226,31 @@ export function ProductModeMenu({
                   </span>
                 )}
             </button>
+          )}
+          {attention.entries.length > 0 && (
+            <>
+              <div className={styles.attentionHead} role="presentation">{activeLocale === "ko" ? "확인이 필요한 곳" : "Needs you"}</div>
+              {attention.entries.slice(0, 6).map((entry) => {
+                const title = entryTitle(entry);
+                const where = entry.surface === "one" ? "One" : entry.surface === "science" ? "Science" : entry.surface === "work" ? "Work" : "";
+                return (
+                  <button
+                    key={`${entry.chatId ?? entry.href ?? "orphan"}:${title}`}
+                    className={`${styles.option} ${styles.attentionOption}`}
+                    type="button"
+                    role="menuitem"
+                    data-attention-entry={entry.chatId ?? entry.href ?? "orphan"}
+                    aria-label={`${title}${where ? ` (${where})` : ""}, ${attentionLabel(entry, activeLocale)}`}
+                    onClick={() => { setOpen(false); void openAttentionEntry(entry, (href) => router.push(href)); }}
+                    onKeyDown={(event) => handleOptionKeyDown(event, () => { setOpen(false); void openAttentionEntry(entry, (href) => router.push(href)); })}
+                  >
+                    <span className={styles.attentionWhere} aria-hidden="true">{where}</span>
+                    <span className={styles.attentionTitle}>{title}</span>
+                    <AttentionDot counts={entry} locale={activeLocale} className={styles.attentionEntryDot} />
+                  </button>
+                );
+              })}
+            </>
           )}
         </div>
       )}

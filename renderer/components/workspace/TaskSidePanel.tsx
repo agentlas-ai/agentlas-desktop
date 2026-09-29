@@ -75,6 +75,7 @@ import styles from "./TaskSidePanel.module.css";
 import { AUTOMATION_TAB_OPEN_EVENT, AutomationRailPanel, AutomationTabLiveDot, automationTabRunning, useAutomationChatActivity } from "../automation/AutomationChatActivity";
 import { GOAL_PANEL_OPEN_EVENT, GoalRailPanel, useGoalPanel } from "../goal/GoalPanel";
 import { ArtifactsRailPanel, artifactsRailCount, useArtifactsRail } from "./ArtifactsRailPanel";
+import { WorkbookView } from "./WorkbookView";
 
 const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
 type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
@@ -644,8 +645,8 @@ function ArtifactOpenViewer({ target, locale, wide, onOfficeSelection, onOfficeE
         onOfficeSelection={onOfficeSelection} onOfficeEditIntent={onOfficeEditIntent} />;
 }
 
-function ChatFileOpenViewer({ file, locale, onExpand, onOfficeSelection, onOfficeEditIntent }: {
-  file: ChatFileItem; locale: "ko" | "en"; onExpand?: () => void;
+function ChatFileOpenViewer({ file, locale, chatId = null, onClose, onExpand, onOfficeSelection, onOfficeEditIntent }: {
+  file: ChatFileItem; locale: "ko" | "en"; chatId?: string | null; onClose?: () => void; onExpand?: () => void;
   onOfficeSelection?: (selection: OfficeTaskSelection) => Promise<void>;
   onOfficeEditIntent?: (intent: OfficeEditIntent) => Promise<void>;
 }) {
@@ -655,7 +656,7 @@ function ChatFileOpenViewer({ file, locale, onExpand, onOfficeSelection, onOffic
   const kindLabel = file.kind === "directory"
     ? (locale === "ko" ? "폴더" : "Folder")
     : (file.name.trim().match(/\.([a-z0-9]+)$/iu)?.[1]?.toUpperCase() ?? preview.viewerKind.toUpperCase());
-  return <div data-chat-file-viewer="true" data-chat-file-tab-id={file.tabId} style={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>
+  const viewer = <div data-chat-file-viewer="true" data-chat-file-tab-id={file.tabId} style={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>
     {!liveKind && <div data-chat-file-header="true" style={{ display: "grid", gap: 2, padding: "8px 10px", borderBottom: "1px solid var(--paper-edge)", fontSize: 10.5, color: "var(--muted-deep)" }}>
       <strong style={{ color: "var(--ink)", overflowWrap: "anywhere" }}>{file.name}</strong>
       <span>{file.kind === "directory" ? kindLabel : `${formatChatFileSize(file.size)} · ${kindLabel}`}</span>
@@ -692,6 +693,23 @@ function ChatFileOpenViewer({ file, locale, onExpand, onOfficeSelection, onOffic
         </div>
       )}
     </div>
+  </div>;
+  // xlsx 는 Claude 급 통합문서 뷰어(Data·Charts·표 도구) — Data 는 위의 격자 뷰어 그대로.
+  if (file.kind === "file" && file.fileUrl && preview.viewerKind === "spreadsheet" && /\.(xlsx|xlsm)$/iu.test(file.name)) {
+    return <WorkbookView name={file.name} fileUrl={file.fileUrl} chatId={chatId} locale={locale} data={viewer} onClose={onClose} />;
+  }
+  if (!onClose) return viewer;
+  return <div style={{ display: "flex", flexDirection: "column", minHeight: 0, height: "100%" }}>
+    <div data-chat-file-bar="true" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "4px 10px 4px 14px", borderBottom: "1px solid var(--paper-edge)", fontSize: 12.5, color: "var(--ink-soft)" }}>
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <strong style={{ color: "var(--ink)", fontWeight: 500 }}>{file.name.replace(/\.[a-z0-9]+$/iu, "")}</strong> · {kindLabel}
+      </span>
+      <button type="button" onClick={onClose} aria-label={locale === "ko" ? "파일 닫기" : "Close file"} data-chat-file-close="true"
+        style={{ appearance: "none", display: "grid", placeItems: "center", width: 28, height: 28, border: 0, borderRadius: 7, background: "transparent", color: "var(--ink-soft)", cursor: "pointer" }}>
+        <IconClose size={15} />
+      </button>
+    </div>
+    <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>{viewer}</div>
   </div>;
 }
 
@@ -1066,6 +1084,8 @@ function TaskSidePanelContent({
   const presentedBrowserTargetRef = useRef<string | null>(null);
   const presentedResultKeyRef = useRef<string | null>(null);
   const presentedArtifactIdRef = useRef<string | null>(null);
+  /** 파일을 열기 직전에 보던 레일 보기 — 마지막 파일을 닫으면 그리로 돌아간다. */
+  const fileReturnViewRef = useRef<OutputRailView | null>(null);
   const presentedMcpResultIdRef = useRef<string | null>(null);
   const presentedToolIdRef = useRef<string | null>(null);
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
@@ -1197,14 +1217,20 @@ function TaskSidePanelContent({
     const handleChatFile = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
       if (!isChatFileItem(detail) || !screenChatId || detail.chatId !== screenChatId) return;
-      (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
+      // 표는 넓게 — Claude 의 xlsx 뷰어는 화면 절반쯤을 쓴다(레퍼런스 f014). 나머지 파일은 읽을 만한 폭.
+      const wide = detail.viewer.viewerKind === "spreadsheet" || detail.viewer.viewerKind === "presentation";
+      (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, wide ? 760 : 560));
       setChatFileTabs((current) => current.some((file) => file.tabId === detail.tabId)
         ? current.map((file) => file.tabId === detail.tabId ? detail : file)
         : [...current, detail]);
       setActiveChatFileTabId(detail.tabId);
       setOpenedArtifact(null);
-      setOpenTabs((tabs) => tabs.includes("result") ? tabs : [...tabs, "result"]);
-      setRailView("result");
+      // 파일은 그 파일 탭 하나로 선다 — "결과" 탭을 덤으로 세우지 않는다(탭 두 개가 같은 것을 가리키던 겹침).
+      // 닫으면 보던 곳(산출물 목록 등)으로 돌아간다.
+      setRailView((current) => {
+        if (current && current !== "result") fileReturnViewRef.current = current;
+        return "result";
+      });
     };
     window.addEventListener(CHAT_FILE_OPEN_EVENT, handleChatFile);
     return () => window.removeEventListener(CHAT_FILE_OPEN_EVENT, handleChatFile);
@@ -1221,8 +1247,16 @@ function TaskSidePanelContent({
     const nextId = nextFileTabSelection(tabs, id, activeChatFileTabId);
     setChatFileTabs((current) => current.filter((file) => file.tabId !== id));
     setActiveChatFileTabId(nextId);
-    if (!nextId) onRestorePreferredWidth?.();
-  }, [activeChatFileTabId, chatFileTabs, onRestorePreferredWidth]);
+    if (!nextId) {
+      onRestorePreferredWidth?.();
+      // 마지막 파일을 닫으면 빈 "결과" 가 아니라 파일을 열기 전에 보던 곳으로(레퍼런스: 닫기 → 산출물 레일).
+      setRailView((current) => {
+        if (current !== "result") return current;
+        const back = fileReturnViewRef.current;
+        return back && openTabs.includes(back) ? back : openTabs.includes("result") ? "result" : openTabs[0] ?? null;
+      });
+    }
+  }, [activeChatFileTabId, chatFileTabs, onRestorePreferredWidth, openTabs]);
   useEffect(() => {
     const handleInAppLink = (event: Event) => {
       const detail = (event as CustomEvent<unknown>).detail;
@@ -1462,7 +1496,10 @@ function TaskSidePanelContent({
           onPointerDown={(event) => {
             if (event.button !== 0) return;
             event.currentTarget.focus({ preventScroll: true });
-            const startWidth = width ?? defaultWidth;
+            // 끌기는 **보이는** 폭에서 시작한다. 좁은 창에서는 요청 폭(예: 표 뷰어 760px)이 화면이 허락하는 폭
+            // (예: 416px)보다 커서, 손잡이를 한참 끌어도 아무것도 안 변하는 죽은 구간이 생겼다(실측 2026-09-29, 960px).
+            const shown = Math.round(event.currentTarget.closest("aside")?.getBoundingClientRect().width ?? 0);
+            const startWidth = shown > 0 ? Math.min(width ?? defaultWidth, shown) : width ?? defaultWidth;
             resizeRef.current = { pointerId: event.pointerId, startX: event.clientX, startWidth, rawWidth: startWidth };
             try { event.currentTarget.setPointerCapture(event.pointerId); } catch { /* Window tracking remains available. */ }
             setResizing(true);
@@ -1601,7 +1638,7 @@ function TaskSidePanelContent({
           {onClose && <button type="button" onClick={onClose} aria-label={locale === "ko" ? "출력 패널 접기" : "Collapse output panel"}><IconClose size={15} /></button>}
         </div>
       </nav>
-      {openTabs.length === 0 && (
+      {openTabs.length === 0 && chatFileTabs.length === 0 && (
         <div className={styles.artifactEmptyStage}>
           <p className={styles.artifactEmptyTitle}>{locale === "ko" ? "여기에 결과가 쌓입니다" : "Outputs appear here"}</p>
           <p className={styles.artifactEmptyNote}>
@@ -1628,6 +1665,8 @@ function TaskSidePanelContent({
           {activeChatFile && <ChatFileOpenViewer
             file={activeChatFile}
             locale={locale}
+            chatId={screenChatId ?? null}
+            onClose={() => closeChatFileTab(activeChatFile.tabId)}
             onOfficeSelection={activeChatFile.chatId === screenChatId ? selection => sendOfficeContext(selection) : undefined}
             onOfficeEditIntent={activeChatFile.chatId === screenChatId ? intent => sendOfficeContext(intent.selection, intent) : undefined}
             onExpand={onResize || onRequestReadableWidth ? () => (onRequestReadableWidth ?? onResize)?.(maxWidth) : undefined}

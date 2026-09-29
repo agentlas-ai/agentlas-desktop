@@ -92,6 +92,29 @@ const REUSE_SAFE_CLIENT_METHODS = new Set([
   "prompts/list", "prompts/get", "completion/complete",
 ]);
 const idleOwners = new Set<Registration>();
+/** The failed call waits at most this long for the fallback ladder's synchronous rungs. */
+const BROWSER_LADDER_WAIT_MS = 55_000;
+function browserCallFailed(frame: Frame): boolean {
+  return Boolean(frame && (frame.error || frame.result?.isError === true));
+}
+function browserFailureText(frame: Frame): string {
+  const parts: string[] = [];
+  if (typeof frame.error?.message === "string") parts.push(frame.error.message);
+  const content = frame.result?.content;
+  if (Array.isArray(content)) for (const item of content) if (item && typeof item.text === "string") parts.push(item.text.slice(0, 16 * 1024));
+  return parts.join("\n");
+}
+/** Keep the original error, add the ladder's machine block and one line for the agent. */
+function annotateBrowserFailure(frame: Frame, answer: { meta: Record<string, unknown>; text: string }): Frame {
+  if (frame.error) {
+    return { jsonrpc: "2.0", id: frame.id, result: { isError: true, _meta: { agentlasBrowserLadder: answer.meta },
+      content: [{ type: "text", text: String(frame.error.message ?? "browser call failed") }, { type: "text", text: answer.text }] } };
+  }
+  const result = frame.result ?? {};
+  const content = Array.isArray(result.content) ? result.content : [];
+  return { ...frame, result: { ...result, _meta: { ...(result._meta ?? {}), agentlasBrowserLadder: answer.meta },
+    content: [...content, { type: "text", text: answer.text }] } };
+}
 const upstreamStats = { spawned: 0, reused: 0, parked: 0, dropped: 0 };
 /** Diagnostics/QA only: how many real upstream processes the bridge started or adopted. */
 export function mcpProxyUpstreamStats(): Readonly<typeof upstreamStats & { idle: number }> {
@@ -432,7 +455,9 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   let swallowInitialized = false, swapping: Promise<void> | null = null;
   setMaxListeners(0, lifetime.signal); // A lifetime can own any number of concurrent RPC waiters.
   const hostPrefix = `host:${randomUUID()}:`; let hostSequence = 0;
-  const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean; effect?: ReturnType<typeof beginMainMcpEffect>; initParamsKey?: string | null }>();
+  const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean; effect?: ReturnType<typeof beginMainMcpEffect>; initParamsKey?: string | null;
+    /** agentlas-browser tools/call only: the call as sent, for one bounded ladder replay. */
+    browserCall?: { frame: Frame; mutating: boolean; laddered: boolean } }>();
   const external = new Map<string, string>();
   const serverRequests = new Map<string, string | number>();
   const serverRequestIds = new Map<string, string>();
@@ -457,6 +482,13 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     // noise that buried the abnormal closes. Those (aborted, upstream, scope, pre-initialize)
     // stay warnings; the clean end goes to debug (not mirrored to main.log).
     const line = `[mcp-proxy] bridge closed server=${gate.serverKey} handle=${handle.slice(0, 8)} initialized=${initialized} reason=${reason}`;
+    // Fallback ladder rung 1 for a cut browser wire: proxy-child reconnects on its own; record the drop with the
+    // calls it cut so the reopen (or its absence) is countable.
+    const cutBrowserCalls = [...native.values()].filter((pending) => pending.browserCall).length;
+    if (gate.catalogId === "agentlas-browser" && reason === "wire_aborted" && cutBrowserCalls > 0) {
+      void import("../browser/fallback-ladder-runtime").then(({ noteBrowserBridgeWire }) =>
+        noteBrowserBridgeWire("dropped", { chatId: gate.chatId ?? null, handle, inflight: cutBrowserCalls })).catch(() => undefined);
+    }
     if (initialized && reason === "wire_ended") console.debug(line); else console.warn(line);
     // Park only a quiescent upstream after a clean client end: nothing in
     // flight either way, one successful initialize, reuse-safe methods only.
@@ -498,6 +530,38 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     await transport.send(frame as JSONRPCMessage);
   };
   const finish = (wireId: string, frame: Frame) => {
+    const pending = native.get(wireId); if (!pending) return;
+    // Browser fallback ladder (electron/browser/fallback-ladder.ts): a failed agentlas-browser call waits for the
+    // bounded ladder, which may bring the surface back (then a read-only call is replayed once) or annotate the
+    // error with a machine block and one line for the agent. Never more than one ladder per call.
+    const browserCall = pending.browserCall;
+    if (browserCall && !browserCall.laddered && browserCallFailed(frame)) {
+      browserCall.laddered = true;
+      void browserLadderAnswer(frame, browserCall).then((answer) => {
+        if (closed || native.get(wireId) !== pending) return;
+        if (answer?.replay) {
+          void up({ ...browserCall.frame, id: wireId }).catch(() => finishNow(wireId, annotateBrowserFailure(frame, answer)));
+          return;
+        }
+        finishNow(wireId, answer ? annotateBrowserFailure(frame, answer) : frame);
+      }, () => { if (!closed && native.get(wireId) === pending) finishNow(wireId, frame); });
+      return;
+    }
+    finishNow(wireId, frame);
+  };
+  const browserLadderAnswer = async (frame: Frame, call: { frame: Frame; mutating: boolean }) => {
+    let nativeEndpoint: string | null = null;
+    try {
+      const target = preparedMcpTargetTransport(binding, binding.server);
+      nativeEndpoint = target.kind === "stdio" ? target.env.AGENTLAS_NATIVE_BROWSER_ENDPOINT ?? null : null;
+    } catch { nativeEndpoint = null; }
+    const { onAgentlasBrowserToolFailure } = await import("../browser/fallback-ladder-runtime");
+    const bounded = new Promise<null>((resolve) => { const t = setTimeout(() => resolve(null), BROWSER_LADDER_WAIT_MS); t.unref?.(); });
+    return Promise.race([onAgentlasBrowserToolFailure({ chatId: gate.chatId ?? null, nativeEndpoint,
+      toolName: `agentlas-browser.${String(call.frame.params?.name ?? "")}`, mutating: call.mutating,
+      resultText: browserFailureText(frame) }), bounded]);
+  };
+  const finishNow = (wireId: string, frame: Frame) => {
     const pending = native.get(wireId); if (!pending) return;
     pending.effect?.finish(frame);
     pending.detach?.(); native.delete(wireId); external.delete(idKey(pending.id));
@@ -564,6 +628,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       if (await schema(tool, signal) !== digest) { deny(wireId, "schema_changed"); return; }
       signal.throwIfAborted(); validate();
       const pending = native.get(wireId); if (!pending) return; pending.sent = true; pending.effect?.dispatched();
+      if (gate.catalogId === "agentlas-browser") pending.browserCall = { frame, mutating, laddered: false };
       await up({ ...frame, id: wireId });
     } catch { deny(wireId, signal.aborted ? "cancelled" : "scope_or_schema_unavailable"); }
   }
@@ -683,6 +748,10 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       validate();
     } else {
       await spawnUpstream();
+    }
+    if (gate.catalogId === "agentlas-browser") {
+      void import("../browser/fallback-ladder-runtime").then(({ noteBrowserBridgeWire }) =>
+        noteBrowserBridgeWire("reopened", { chatId: gate.chatId ?? null, handle, inflight: 0 })).catch(() => undefined);
     }
     res.writeHead(200, {
       "content-type": "application/x-ndjson",

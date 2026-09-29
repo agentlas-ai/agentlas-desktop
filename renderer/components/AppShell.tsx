@@ -3,7 +3,7 @@
 // + Electron 메뉴 → 라우터 브릿지.
 // + 자동 업데이트 배너 (downloading/downloaded 상태에서만 노출).
 "use client";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ProjectSidebar } from "./ProjectSidebar";
 import { ProjectSettingsHost } from "./ProjectSettingsHost";
@@ -15,10 +15,8 @@ import { SideNav } from "./SideNav";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { usePathname } from "next/navigation";
 import { registerRouter } from "@/lib/navigation";
-import { openPendingConfirmation } from "@/lib/open-pending-confirmation";
-import { hasFinalConsonant, useOnePersonaName } from "@/lib/one-persona-name";
-import type { PendingConfirmation } from "@/lib/types";
-import { BUILTIN_ONE_AGENT_ID } from "@shared/builtin-agent-ids";
+import { useAttention } from "@/lib/attention";
+import { AttentionCoveredSwitcherDot } from "./AttentionDot";
 import { useT } from "@/lib/i18n";
 import { IconLayers, IconBug, IconCheck } from "./Icon";
 import { PageTour, replayCurrentPageTour } from "./PageTour";
@@ -40,11 +38,12 @@ import {
   type MultimodalJob,
 } from "@/lib/multimodal/jobs";
 
-const ONBOARDED_KEY = "agentlas.onboarded";
-const IMPORT_PROMPTED_KEY = "agentlas.import.prompted";
+/**
+ * 오너가 부르지 않은 창(페이지 투어·Science 소개·에이전트 가져오기)을 저절로 여는가.
+ * 오너 2026-09-29 "시트 띄우지말고 …" — 끈다. 각 창은 오너가 여는 길로만 남는다.
+ */
+const UNINVITED_AUTO_OPEN = false;
 const GUIDE_FAB_HIDDEN_KEY = "agentlas.guideFab.hidden";
-const ATTENTION_POLL_MS = 3_000;
-const ATTENTION_POLL_HIDDEN_MS = 15_000;
 
 // 표시 내용이 같으면 이전 배열 참조를 그대로 돌려줘야 셸이 리렌더되지 않는다.
 // visibleMultimodalJobs()는 호출마다 새 배열을 만들므로 여기서 걸러 준다.
@@ -64,8 +63,6 @@ function sameJobList(prev: MultimodalJob[], next: MultimodalJob[]): boolean {
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const [importOpen, setImportOpen] = useState(false);
-  const [pendingConfirmations, setPendingConfirmations] = useState(0);
-  const [pendingItems, setPendingItems] = useState<PendingConfirmation[]>([]);
   const [activeChatCount, setActiveChatCount] = useState<number | null>(null);
   const [multimodalJobs, setMultimodalJobs] = useState<MultimodalJob[]>([]);
   const [appUpdateBusy, setAppUpdateBusy] = useState(true);
@@ -74,6 +71,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname() ?? "/";
   const { locale } = useT();
+  // 승인 대기 수는 전역 주의 저장소가 센다(폴링·독 배지 포함 — 라우트 트리와 무관하게 돈다).
+  // 대시보드 항목의 알림 수는 예전 그대로 "대화 질문(승인 인박스)"만 센다.
+  const pendingConfirmations = useAttention(pathname).items.filter((item) => item.key.startsWith("confirm:")).length;
 
   // navigate() 헬퍼가 hard navigation(window.location) 대신 soft navigation을
   // 쓰도록 App Router 인스턴스를 등록한다. static export 셸에서 hard navigation은
@@ -128,48 +128,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const syncAttention = useCallback(async () => {
-    const api = ipc();
-    if (!api) {
-      setPendingConfirmations(0);
-      setPendingItems([]);
-      return;
-    }
-    try {
-      const list = await api.confirm.listPending();
-      const count = list.length;
-      setPendingConfirmations(count);
-      setPendingItems(list);
-      await api.attention?.setPendingConfirmations(count);
-    } catch {
-      // Transient IPC errors should not clear an existing badge.
-    }
-  }, []);
-
-  // 승인 대기(독 빨간 배지·독 튕김·"승인 대기" 알림)는 앱을 내려놓은 사이에 와도 떠야 하므로
-  // 이 폴링만은 화면이 숨어도 계속 돈다(다른 폴러와 달리 절전 예외). 이 알림은 오직 렌더러
-  // 폴링에만 물려 있어서(메인이 따로 안 쏨) 멈추면 최소화 중 승인 요청이 배지·알림으로 안 뜬다.
-  // 다만 숨김 중 배지는 몇 초 늦어도 무방하므로 간격만 늘려 백그라운드 IPC를 줄인다.
-  useEffect(() => {
-    void syncAttention();
-    let timer = window.setInterval(() => void syncAttention(), ATTENTION_POLL_MS);
-    const onVisibility = () => {
-      window.clearInterval(timer);
-      const hidden = document.visibilityState === "hidden";
-      timer = window.setInterval(() => void syncAttention(), hidden ? ATTENTION_POLL_HIDDEN_MS : ATTENTION_POLL_MS);
-      if (!hidden) void syncAttention();
-    };
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("agentlas:attention-refresh", syncAttention);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("agentlas:attention-refresh", syncAttention);
-      const api = ipc();
-      void api?.attention?.setPendingConfirmations(0);
-    };
-  }, [syncAttention]);
-
   useEffect(() => {
     if (!SCIENCE_INSTALL_DISCOVERY_ENABLED) return;
     let cancelled = false;
@@ -191,31 +149,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // 온보딩을 마쳤는데 로컬 에이전트가 0개면 "내 에이전트 가져오기" 팝업을 한 번 띄운다.
-  useEffect(() => {
-    const api = ipc();
-    if (!api) return;
-    let onboarded = false;
-    let prompted = false;
-    try {
-      onboarded = window.localStorage.getItem(ONBOARDED_KEY) === "1";
-      prompted = window.sessionStorage.getItem(IMPORT_PROMPTED_KEY) === "1";
-    } catch {
-      // ignore
-    }
-    if (!onboarded || prompted) return;
-    void api.team.list().then((agents) => {
-      if (agents.length === 0) {
-        try {
-          window.sessionStorage.setItem(IMPORT_PROMPTED_KEY, "1");
-        } catch {
-          // ignore
-        }
-        setImportOpen(true);
-      }
-    });
-  }, []);
-
+  /*
+   * ★저절로 뜨는 창은 없다 (오너 2026-09-29 "시트 띄우지말고 …").
+   *   예전에는 로컬 에이전트가 0개면 "내 에이전트 가져오기" 모달을 세션마다 한 번 저절로
+   *   띄웠다. 이제 이 모달은 오너가 여는 것만 남는다. 페이지 투어·Science 소개도 같은 이유로
+   *   저절로 열지 않는다(투어는 도움말 버튼의 "투어 다시 보기"로 연다).
+   */
   useEffect(() => {
     // 이 폴은 잡이 하나도 없어도 2초마다 새 배열로 setState 해 셸 전체(사이드바·
     // 투어·토스트 전부)를 상시 리렌더시키던 유일한 지점이다. 내용이 같으면 이전
@@ -280,7 +219,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     && !appUpdateBusy
     && !multimodalJobs.some(isMultimodalJobActive)
     && !importOpen;
-  const pageTourAutoOpenSuspended = workFirstRunVisible
+  // 투어는 저절로 열지 않는다 — 도움말 버튼의 "투어 다시 보기"(replayCurrentPageTour)로만.
+  const pageTourAutoOpenSuspended = !UNINVITED_AUTO_OPEN
+    || workFirstRunVisible
     || sciencePromoVisible
     || (SCIENCE_INSTALL_DISCOVERY_ENABLED && sciencePromoRouteEligible);
 
@@ -307,19 +248,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           background: "transparent",
         }}
       >
-        {pendingConfirmations > 0 && (
-          <AttentionNudge
-            count={pendingConfirmations}
-            locale={locale}
-            items={pendingItems}
-            onOpen={() => {
-              // 하나면 그 질문이 있는 정확한 대화로, 여럿이면 인박스로(행마다 정확한 대화를 연다).
-              const only = pendingConfirmations === 1 && pendingItems.length === 1 ? pendingItems[0] : null;
-              if (only) void openPendingConfirmation(only);
-              else router.push("/dashboard#approval-inbox");
-            }}
-          />
-        )}
         <ErrorBoundary resetKey={pathname}>{children}</ErrorBoundary>
       </main>
       <ProjectSettingsHost />
@@ -329,11 +257,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
       {SCIENCE_INSTALL_DISCOVERY_ENABLED && (
         <ScienceInstallExperience
-          eligible={sciencePromoEligible}
+          // 저절로 뜨는 소개 모달은 끈다. 설치는 전환기의 Science 항목(다운로드 필요)에서.
+          eligible={UNINVITED_AUTO_OPEN && sciencePromoEligible}
           locale={locale === "ko" ? "ko" : "en"}
           onVisibilityChange={setSciencePromoVisible}
         />
       )}
+      <AttentionCoveredSwitcherDot pathname={pathname} locale={locale === "ko" ? "ko" : "en"} />
       <BuildDoneToast />
       <BrowserActionApprovalSheet />
       <AskUserSheet />
@@ -414,57 +344,6 @@ function BackgroundWorkPill({
   );
 }
 
-function AttentionNudge({
-  count,
-  locale,
-  items,
-  onOpen,
-}: {
-  count: number;
-  locale: string;
-  /** 지금 대기 중인 질문들 — 누가 기다리는지 이름으로 말한다. */
-  items: PendingConfirmation[];
-  onOpen: () => void;
-}) {
-  const ko = locale === "ko";
-  const oneName = useOnePersonaName();
-  // One 대화의 요청자는 저장된 에이전트 이름("Agentlas One")이 아니라 오너가 지어 준 이름이다.
-  const names = Array.from(new Set(items.map((item) => (
-    item.requesterKind === "agent" && item.agentId === BUILTIN_ONE_AGENT_ID ? oneName : item.requesterLabel
-  ).trim()).filter(Boolean)));
-  const subject = (name: string) => `${name}${hasFinalConsonant(name) ? "이" : "가"}`;
-  const waitingLine = names.length === 1
-    ? (ko ? `${subject(names[0])} 답을 기다려요.` : `${names[0]} is waiting for your answer.`)
-    : names.length > 1
-      ? (ko
-        ? `${names[0]} 외 ${names.length - 1}명이 답을 기다려요.`
-        : `${names[0]} and ${names.length - 1} more are waiting for your answer.`)
-      : (ko ? "에이전트가 답을 기다리고 있습니다." : "An agent is waiting for your answer.");
-  const only = count === 1 && items.length === 1;
-  return (
-    <div
-      className="app-attention-nudge titlebar-nodrag"
-      role="status"
-      aria-live="assertive"
-      data-attention-target={only ? "chat" : "inbox"}
-    >
-      <span className="app-attention-dot" aria-hidden="true" />
-      <div className="app-attention-copy">
-        <strong>
-          {ko
-            ? `${count > 99 ? "99+" : count}개 승인 대기`
-            : `${count > 99 ? "99+" : count} approval${count === 1 ? "" : "s"} waiting`}
-        </strong>
-        <span>{waitingLine}</span>
-      </div>
-      <button type="button" onClick={onOpen}>
-        {ko ? "열기" : "Open"}
-      </button>
-    </div>
-  );
-}
-
-// 우측 하단 상시 가이드 버튼 — 언제든 메뉴 투어를 다시 부른다.
 function GuideFab({
   avoidComposer,
   onReplayTour,

@@ -91,6 +91,10 @@ function cssString(value: string | undefined): string {
 export function visualCssVariables(tokens: VisualThemeTokens): Record<string, string> {
   const palette = visualPalette(tokens).map(cssString);
   const vars: Record<string, string> = {
+    // Claude 위젯이 실제로 쓰는 이름(레퍼런스 survey_bond_view_vs_actual_yields.html): --text-primary/secondary/muted.
+    "--text-primary": tokens.ink,
+    "--text-secondary": tokens.inkSoft,
+    "--text-muted": tokens.tick,
     "--color-text-primary": tokens.ink,
     "--color-text-secondary": tokens.inkSoft,
     "--color-text-tertiary": tokens.tick,
@@ -123,6 +127,8 @@ export function visualBaseCss(tokens: VisualThemeTokens): string {
   return `:root{${vars}}
 html,body{margin:0;padding:0;background:transparent;color:var(--color-text-primary);font-family:var(--font-sans);font-size:14px;line-height:1.5;-webkit-font-smoothing:antialiased;overflow:hidden}
 body{display:flow-root}
+.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+body>:first-child:not(.sr-only),body>.sr-only+*{margin-top:0}
 *{box-sizing:border-box}
 h1,h2,h3,.av-title{font-size:13px;font-weight:500;margin:0 0 3px;color:var(--color-text-primary);letter-spacing:0}
 .av-subtitle,p.av-note,.av-note{font-size:12px;color:var(--color-text-secondary);margin:0 0 8px}
@@ -143,6 +149,53 @@ td.num,th.num{text-align:right}
 button{font:inherit;font-size:12px;color:var(--color-text-primary);background:var(--color-background-secondary);border:1px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:5px 10px;cursor:pointer}`;
 }
 
+/**
+ * 알려진 Chart.js 4 CDN 주소 하나만 앱에 묶인 사본(renderer/public/vendor/chartjs/chart.umd.js, v4.4.1, MIT)으로
+ * 바꿔 **인라인**으로 싣는다. 격리 문서의 네트워크는 여전히 0 — 다른 <script src> 는 CSP 가 막는다.
+ * Claude 위젯(show_widget)이 cdnjs Chart.js 를 쓰므로 그대로 붙여 넣어도 같은 그림이 나와야 한다(오너 2026-09-29).
+ */
+export const CHARTJS_ASSET_PATH = "vendor/chartjs/chart.umd.js";
+const CHARTJS_CDN_SCRIPT_RE = /<script\b[^>]*\bsrc\s*=\s*["']https:\/\/(?:cdnjs\.cloudflare\.com\/ajax\/libs\/Chart\.js\/4(?:\.\d+){0,2}\/chart(?:\.umd)?(?:\.min)?\.js|cdn\.jsdelivr\.net\/npm\/chart\.js@4(?:\.\d+){0,2}(?:\/dist\/chart\.umd(?:\.min)?\.js)?|unpkg\.com\/chart\.js@4(?:\.\d+){0,2}(?:\/dist\/chart\.umd(?:\.min)?\.js)?)["'][^>]*>\s*<\/script>/gi;
+
+export function usesKnownChartJs(html: string): boolean {
+  CHARTJS_CDN_SCRIPT_RE.lastIndex = 0;
+  return CHARTJS_CDN_SCRIPT_RE.test(html);
+}
+
+export function inlineKnownChartJs(html: string, chartJsSource: string | null): string {
+  if (!chartJsSource) return html;
+  const safe = chartJsSource.replace(/<\/script/gi, "<\\/script");
+  return html.replace(CHARTJS_CDN_SCRIPT_RE, () => `<script data-agentlas-vendored="chart.js@4.4.1">${safe}</script>`);
+}
+
+/**
+ * 테마 다리 — 위젯은 matchMedia('(prefers-color-scheme: dark)') 나 documentElement.dataset.mode 로 다크를 판단한다.
+ * OS 설정이 아니라 **앱 화면**의 테마를 따르게 둘 다 맞춘다(앱은 밝은데 OS 가 어두우면 격자가 어둡게 나오던 것).
+ */
+function themeBridge(dark: boolean): string {
+  return `(function(){var dark=${dark ? "true" : "false"};document.documentElement.dataset.mode=dark?"dark":"light";var mm=window.matchMedia?window.matchMedia.bind(window):null;function fake(q,m){return{matches:m,media:q,onchange:null,addListener:function(){},removeListener:function(){},addEventListener:function(){},removeEventListener:function(){},dispatchEvent:function(){return false}}}window.matchMedia=function(q){q=String(q);if(/prefers-color-scheme\\s*:\\s*dark/i.test(q))return fake(q,dark);if(/prefers-color-scheme\\s*:\\s*light/i.test(q))return fake(q,!dark);return mm?mm(q):fake(q,false)};})();`;
+}
+
+/**
+ * 그림으로 복사 — 부모는 격리 문서 안을 못 본다(opaque origin). 문서가 스스로를 그림으로 만든다:
+ * 캔버스는 그림으로 바꾸고, 스타일·변수를 담아 SVG foreignObject 로 그린 뒤 PNG 로. 스크립트는 빼고 그린다.
+ */
+function snapshotResponder(frameId: string): string {
+  const id = JSON.stringify(frameId);
+  return `(function(){var id=${id};window.addEventListener("message",function(e){if(e.source!==parent||!e.data||e.data.type!=="agentlas-visual:snapshot")return;var nonce=e.data.nonce,bg=String(e.data.background||"#ffffff");
+function done(url,err){parent.postMessage({type:"agentlas-visual:snapshot-result",id:id,nonce:nonce,dataUrl:url||null,error:err||null},"*")}
+try{var body=document.body,rect=body.getBoundingClientRect(),w=Math.ceil(Math.max(rect.width,document.documentElement.clientWidth)),h=Math.ceil(rect.height);
+var clone=body.cloneNode(true);var src=body.querySelectorAll("canvas"),dst=clone.querySelectorAll("canvas");
+for(var i=0;i<src.length;i++){var r=src[i].getBoundingClientRect(),img=document.createElement("img");try{img.src=src[i].toDataURL("image/png")}catch(x){}img.setAttribute("width",String(Math.round(r.width)));img.setAttribute("height",String(Math.round(r.height)));img.style.width=r.width+"px";img.style.height=r.height+"px";img.style.display="block";dst[i].parentNode.replaceChild(img,dst[i])}
+Array.prototype.forEach.call(clone.querySelectorAll("script"),function(n){n.remove()});
+var styles="";Array.prototype.forEach.call(document.querySelectorAll("style"),function(n){styles+=n.textContent+"\\n"});
+var cs=getComputedStyle(document.documentElement),vars="";for(var k=0;k<cs.length;k++){var p=cs[k];if(p.indexOf("--")===0)vars+=p+":"+cs.getPropertyValue(p)+";"}
+var wrap=document.createElement("div");wrap.setAttribute("xmlns","http://www.w3.org/1999/xhtml");wrap.setAttribute("style",vars+"width:"+w+"px;background:"+bg+";color:var(--text-primary);font-family:"+getComputedStyle(body).fontFamily+";font-size:14px;line-height:1.5");
+var st=document.createElement("style");st.textContent=styles.replace(/:root/g,"div");wrap.appendChild(st);while(clone.firstChild)wrap.appendChild(clone.firstChild);
+var xml=new XMLSerializer().serializeToString(wrap);var svg='<svg xmlns="http://www.w3.org/2000/svg" width="'+w+'" height="'+h+'"><foreignObject width="100%" height="100%">'+xml+'</foreignObject></svg>';
+var im=new Image();im.onload=function(){try{var c=document.createElement("canvas"),s=2;c.width=w*s;c.height=h*s;var g=c.getContext("2d");g.scale(s,s);g.fillStyle=bg;g.fillRect(0,0,w,h);g.drawImage(im,0,0);done(c.toDataURL("image/png"))}catch(x){done(null,String(x))}};im.onerror=function(){done(null,"render")};im.src="data:image/svg+xml;charset=utf-8,"+encodeURIComponent(svg)}catch(x){done(null,String(x))}});})();`;
+}
+
 /** 높이 알림 — 이 문서 안에서만 돈다. 부모 DOM 에 접근하지 못한다(opaque origin). */
 function sizeReporter(frameId: string): string {
   const id = JSON.stringify(frameId);
@@ -157,17 +210,17 @@ window.addEventListener("load",report);document.addEventListener("DOMContentLoad
  * 격리 문서를 만든다. CSP 메타를 가장 먼저 둔다 — 그 뒤에 파싱되는 모든 자원에 적용된다.
  * 에이전트 HTML 이 자기 <html>/<head> 를 가져와도 파서가 한 문서로 합친다.
  */
-export function buildVisualSrcdoc(html: string, tokens: VisualThemeTokens, frameId: string): string {
+export function buildVisualSrcdoc(html: string, tokens: VisualThemeTokens, frameId: string, chartJsSource: string | null = null): string {
   const csp = VISUAL_CSP.replace(/"/g, "");
-  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="referrer" content="no-referrer"><style>${visualBaseCss(tokens)}</style><script>${sizeReporter(frameId)}</script></head><body>${html}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><meta name="referrer" content="no-referrer"><style>${visualBaseCss(tokens)}</style><script>${themeBridge(tokens.dark)}${sizeReporter(frameId)}${snapshotResponder(frameId)}</script></head><body>${inlineKnownChartJs(html, chartJsSource)}</body></html>`;
 }
 
 /** 저장(내려받기)용 독립 문서 — 같은 CSP·스타일, 높이 알림 스크립트는 뺀다. */
-export function buildStandaloneVisualHtml(html: string, tokens: VisualThemeTokens, title: string): string {
+export function buildStandaloneVisualHtml(html: string, tokens: VisualThemeTokens, title: string, chartJsSource: string | null = null): string {
   const csp = VISUAL_CSP.replace(/"/g, "");
   const safeTitle = title.replace(/[<>&"]/g, "");
   return `<!doctype html><html><head><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="${csp}"><title>${safeTitle}</title><style>${visualBaseCss(tokens).replace("overflow:hidden", "overflow:auto")}
-body{max-width:880px;margin:32px auto;padding:0 24px;background:${cssString(tokens.paper)}}</style></head><body>${html}</body></html>`;
+body{max-width:880px;margin:32px auto;padding:0 24px;background:${cssString(tokens.paper)}}</style></head><body>${inlineKnownChartJs(html, chartJsSource)}</body></html>`;
 }
 
 /**

@@ -136,6 +136,36 @@ function missedDueRun(db: Database.Database, goalId: string, nowMs: number): str
   return automation.next_run_at;
 }
 
+/**
+ * The browser fallback ladder's last word in this chat (electron/browser/fallback-ladder.ts): a stop or an owner
+ * wait that no later successful agentlas-browser call has superseded. Typed fields only (run_events payload).
+ */
+export function browserLadderSignal(db: Database.Database, chatId: string, nowMs: number): { signal: AgiBlockerSignal; ref: string } | null {
+  if (!tableExists(db, "run_events")) return null;
+  const since = new Date(nowMs - 24 * 60 * 60_000).toISOString();
+  const row = db.prepare(`SELECT id, ts, json_extract(payload_json, '$.code') AS code, json_extract(payload_json, '$.final') AS final,
+    json_extract(payload_json, '$.reasonCode') AS reasonCode, json_extract(payload_json, '$.site') AS site
+    FROM run_events WHERE chat_id = ? AND kind = 'browser_fallback_ladder' AND ts >= ?
+    AND json_extract(payload_json, '$.step') = 'final' ORDER BY ts DESC LIMIT 1`)
+    .get(chatId, since) as { id: string; ts: string; code: string | null; final: string | null; reasonCode: string | null; site: string | null } | undefined;
+  if (!row || !row.code || (row.final !== "stopped" && row.final !== "waiting-owner")) return null;
+  const later = db.prepare(`SELECT 1 FROM run_events WHERE chat_id = ? AND kind = 'mcp_tool-use' AND ts > ?
+    AND json_extract(payload_json, '$.toolName') LIKE 'agentlas-browser.%'
+    AND json_extract(payload_json, '$.runtimeEvidence.phase') = 'executed' LIMIT 1`).get(chatId, row.ts);
+  if (later) return null;
+  const ref = `run_event:${row.id}`;
+  if (row.code === "human-check-required") {
+    // A site's human check is the owner's (never solved or bypassed); its card is already open.
+    return { signal: { kind: "boundary", boundary: "security_consent", code: "human_check_required" }, ref };
+  }
+  if (row.code === "login-wall") {
+    const domain = typeof row.site === "string" && /^[a-z0-9.-]+$/i.test(row.site) ? row.site : "unknown";
+    return { signal: { kind: "login_wall", domain, sourceSession: "unknown" }, ref };
+  }
+  if (row.final !== "stopped") return null;
+  return { signal: { kind: "browser_unavailable", code: `browser_ladder:${row.code}` }, ref };
+}
+
 /** Map a turn receipt error code to the specific typed signal it names (code families only). */
 function receiptSignal(code: string, runId: string | null): AgiBlockerSignal {
   if (/cdp|browser_unavailable|browser_target_closed|agentlas_browser_unreachable/.test(code)) return { kind: "browser_unavailable", code };
@@ -189,6 +219,8 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
         signals.push(receiptSignal(receipt.errorCode, receipt.runId ?? null));
         if (receipt.runId) refs.push(`run:${receipt.runId}`);
       }
+      const ladder = run.rootChatId ? browserLadderSignal(db, run.rootChatId, deps.nowMs()) : null;
+      if (ladder) { signals.push(ladder.signal); refs.push(ladder.ref); }
       const due = missedDueRun(db, goalId, deps.nowMs());
       if (due) signals.push({ kind: "missed_due_run", dueAt: due });
     }

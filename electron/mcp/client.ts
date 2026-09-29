@@ -1781,6 +1781,9 @@ async function runMcpInvocationInContext(
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
   let mcpConfigCleanup: (() => void) | undefined;
+  // Browser fallback ladder binding (electron/browser/fallback-ladder-runtime.ts): chat/run ids + notice sink.
+  let unbindBrowserLadder: (() => void) | undefined;
+  let browserLadderSettled = false;
   try {
   // A scheduled invocation is the worker leg of the automation, even though
   // it shares this implementation with an interactive orchestrator turn.
@@ -1928,6 +1931,10 @@ async function runMcpInvocationInContext(
           toolName: browserTool, runId: req.runId, chatId: req.chatId, nativeGrant: nativeBrowserGrant,
           notify: (card) => { try { emit({ kind: "notice", notice: ownerLoginCardNotice(card, pickLocale(req)) }); } catch { /* run ended */ } },
         })).catch(() => undefined);
+      // A site's human check (CAPTCHA/anti-bot) is not solved or bypassed: one card, browser in front, auto-resume.
+      void import("../browser/fallback-ladder-runtime").then(({ observeBrowserToolForHumanCheck }) =>
+        observeBrowserToolForHumanCheck({ toolName: browserTool, ...(req.chatId ? { chatId: req.chatId } : {}), nativeGrant: nativeBrowserGrant ?? null }))
+        .catch(() => undefined);
     }
     emit(ev);
   };
@@ -3586,6 +3593,22 @@ ${effectiveUserPrompt}`;
         // 관문이 좁힐 이름은 config key에서 나온다(`mcp__<key>__*`). 커널은 catalog id로
         // 선언하므로, 두 이름을 다 아는 유일한 지점이 여기다 — 아래 관문 생성이 이걸 쓴다.
         mcpIncludedServers = cfg.includedServers ?? [];
+      }
+      // Browser fallback ladder: lend this run's ids and notice sink; a browser run without the browser MCP
+      // attached is recorded as a typed ladder stop (one card) instead of silently using another browser.
+      if (req.chatId && req.runId) {
+        const browserAttached = mcpIncludedServers.some((row) => row.catalogId === "agentlas-browser" || row.serverId === "agentlas-browser");
+        const browserNeeded = req.toolMode === "browser" || Boolean(req.requiredToolCatalogIds?.includes("agentlas-browser"));
+        const ladderChatId = req.chatId, ladderRunId = req.runId;
+        const ladderNotify = (notice: NonNullable<McpInvocationEvent["notice"]>) => { try { sink({ kind: "notice", notice }); } catch { /* run ended */ } };
+        void import("../browser/fallback-ladder-runtime").then((ladder) => {
+          if (browserAttached) {
+            const unbind = ladder.bindBrowserLadderRun({ chatId: ladderChatId, runId: ladderRunId, locale: pickLocale(req), notify: ladderNotify });
+            if (browserLadderSettled) unbind(); else unbindBrowserLadder = unbind;
+          } else if (browserNeeded) {
+            ladder.recordBrowserMcpNotAttached({ chatId: ladderChatId, runId: ladderRunId, locale: pickLocale(req), notify: ladderNotify });
+          }
+        }).catch(() => undefined);
       }
       mcpPrepStage = "worker-preparer";
       const workerGoalScope = autoSelectInput.resolveActiveGoalScope();
@@ -7654,6 +7677,8 @@ ${effectiveUserPrompt}`;
       : earlyResult();
   }
   } finally {
+    browserLadderSettled = true;
+    try { unbindBrowserLadder?.(); } catch { /* binding already gone */ }
     try { nativeBrowserGrant?.release(); } finally { mcpConfigCleanup?.(); }
   }
 }

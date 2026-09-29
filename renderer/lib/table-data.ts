@@ -71,12 +71,44 @@ async function workbookSheets(entries: ZipEntry[]): Promise<Array<{ name: string
   return sheets;
 }
 
+/** styles.xml → 칸 서식 번호(s)마다 날짜 서식인지. 날짜 칸은 일련번호가 아니라 yyyy-mm-dd 로 읽는다. */
+async function dateStyleFlags(entries: ZipEntry[]): Promise<boolean[]> {
+  const xml = await entryText(entries, "xl/styles.xml");
+  if (!xml) return [];
+  const custom = new Map<number, string>();
+  for (const match of xml.matchAll(/<numFmt\b([^>]*)\/?>/g)) {
+    const id = Number(attr(match[1], "numFmtId"));
+    const code = attr(match[1], "formatCode") ?? "";
+    if (Number.isFinite(id)) custom.set(id, code);
+  }
+  const isDateCode = (code: string) => {
+    const bare = code.replace(/"[^"]*"|\[[^\]]*\]|\\./g, "");
+    return /[ymd]/i.test(bare) && !/^[#0.,%\s+-]*$/.test(bare);
+  };
+  const cellXfs = xml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/)?.[1] ?? "";
+  const flags: boolean[] = [];
+  for (const match of cellXfs.matchAll(/<xf\b([^>]*)\/?>/g)) {
+    const id = Number(attr(match[1], "numFmtId") ?? 0);
+    flags.push((id >= 14 && id <= 22) || (id >= 45 && id <= 47) || (custom.has(id) && isDateCode(custom.get(id) ?? "")));
+  }
+  return flags;
+}
+
+function excelSerialToDate(serial: number): string {
+  const ms = Math.round((serial - 25569) * 86_400_000);
+  const date = new Date(ms);
+  if (!Number.isFinite(date.getTime())) return String(serial);
+  const iso = date.toISOString();
+  return serial % 1 === 0 ? iso.slice(0, 10) : `${iso.slice(0, 10)} ${iso.slice(11, 16)}`;
+}
+
 /** xlsx 를 표로 읽는다. 계산값이 없는 수식 칸은 { formula } 로 남긴다. */
 export async function readXlsxTables(buffer: ArrayBuffer | Uint8Array, limits = TABLE_LIMITS): Promise<TableSheet[]> {
   const entries = readZip(buffer);
   const sharedXml = await entryText(entries, "xl/sharedStrings.xml");
   const shared: string[] = [];
   if (sharedXml) for (const match of sharedXml.matchAll(/<si>([\s\S]*?)<\/si>/g)) shared.push(textRuns(match[1]));
+  const dateStyles = await dateStyleFlags(entries);
   const sheets: TableSheet[] = [];
   for (const sheet of await workbookSheets(entries)) {
     const xml = await entryText(entries, sheet.path);
@@ -107,7 +139,11 @@ export async function readXlsxTables(buffer: ArrayBuffer | Uint8Array, limits = 
         else if (type === "inlineStr") value = textRuns(inner);
         else if (type === "str" || type === "e") value = raw ?? "";
         else if (type === "b") value = raw === "1";
-        else if (raw !== undefined && raw !== "") value = Number.isFinite(Number(raw)) ? Number(raw) : raw;
+        else if (raw !== undefined && raw !== "") {
+          const numeric = Number(raw);
+          const style = Number(attr(attrs, "s") ?? 0);
+          value = Number.isFinite(numeric) ? (dateStyles[style] && numeric > 0 && numeric < 2_958_466 ? excelSerialToDate(numeric) : numeric) : raw;
+        }
         while (row.length < col) row.push(null);
         row[col] = value;
       }
@@ -305,4 +341,181 @@ export async function readDocxLines(buffer: ArrayBuffer | Uint8Array, maxLines =
     if (lines.length >= maxLines) break;
   }
   return lines;
+}
+
+/* ── 엑셀 안에 든 차트(xl/charts/chartN.xml) ─────────────────────────────────────────────
+ * Claude 의 xlsx 뷰어는 "Charts N" 탭에 통합문서가 가진 차트를 시트 이름과 함께 그린다(레퍼런스 f011).
+ * 여기서는 차트 XML 을 읽어 계열·범주를 시트 칸에서 다시 찾아(openpyxl 은 캐시를 안 쓴다) Vega-Lite 로 옮긴다 —
+ * 그림은 대화의 ```chart 와 같은 ChartBlock(같은 관문·같은 디자인)이 그린다. */
+
+export interface XlsxChartSeries { name: string; categories: string[]; values: Array<number | null> }
+export interface XlsxChart {
+  sheetName: string;
+  title: string;
+  type: "bar" | "line" | "area" | "pie" | "doughnut" | "scatter";
+  horizontal: boolean;
+  stacked: boolean;
+  series: XlsxChartSeries[];
+}
+
+function resolveRelative(base: string, target: string): string {
+  if (target.startsWith("/")) return target.slice(1);
+  const parts = base.split("/").slice(0, -1);
+  for (const part of target.split("/")) {
+    if (part === "..") parts.pop();
+    else if (part && part !== ".") parts.push(part);
+  }
+  return parts.join("/");
+}
+
+async function relationTargets(entries: ZipEntry[], partPath: string, typeSuffix: string): Promise<string[]> {
+  const slash = partPath.lastIndexOf("/");
+  const relsPath = `${partPath.slice(0, slash)}/_rels/${partPath.slice(slash + 1)}.rels`;
+  const xml = await entryText(entries, relsPath);
+  if (!xml) return [];
+  const out: string[] = [];
+  for (const match of xml.matchAll(/<Relationship\b([^>]*)\/?>/g)) {
+    const type = attr(match[1], "Type") ?? "";
+    const target = attr(match[1], "Target");
+    if (!target || !type.endsWith(typeSuffix) || /TargetMode\s*=\s*"External"/i.test(match[1])) continue;
+    const resolved = resolveRelative(partPath, target);
+    if (!resolved.includes("..")) out.push(resolved);
+  }
+  return out;
+}
+
+function parseRef(formula: string): { sheet: string | null; c1: number; r1: number; c2: number; r2: number } | null {
+  const match = formula.trim().match(/^(?:(?:'((?:[^']|'')+)'|([^!]+))!)?\$?([A-Z]{1,3})\$?(\d+)(?::\$?([A-Z]{1,3})\$?(\d+))?$/i);
+  if (!match) return null;
+  const sheet = match[1] ? match[1].replace(/''/g, "'") : match[2] ?? null;
+  const c1 = columnIndex(match[3]);
+  const r1 = Number(match[4]) - 1;
+  const c2 = match[5] ? columnIndex(match[5]) : c1;
+  const r2 = match[6] ? Number(match[6]) - 1 : r1;
+  return { sheet, c1: Math.min(c1, c2), r1: Math.min(r1, r2), c2: Math.max(c1, c2), r2: Math.max(r1, r2) };
+}
+
+function refCells(formula: string | undefined, sheets: TableSheet[], fallbackSheet: string): TableCell[] | null {
+  if (!formula) return null;
+  const ref = parseRef(formula);
+  if (!ref) return null;
+  const sheet = sheets.find((item) => item.name === (ref.sheet ?? fallbackSheet));
+  if (!sheet) return null;
+  const out: TableCell[] = [];
+  for (let r = ref.r1; r <= ref.r2 && out.length < 5_000; r += 1) {
+    for (let c = ref.c1; c <= ref.c2 && out.length < 5_000; c += 1) out.push(sheet.rows[r]?.[c] ?? null);
+  }
+  return out;
+}
+
+function cachePoints(xml: string | undefined): string[] {
+  if (!xml) return [];
+  const points: Array<[number, string]> = [];
+  for (const match of xml.matchAll(/<pt\b[^>]*idx="(\d+)"[^>]*>\s*<v>([\s\S]*?)<\/v>/g)) points.push([Number(match[1]), decodeXml(match[2])]);
+  const out: string[] = [];
+  for (const [idx, value] of points) out[idx] = value;
+  return out;
+}
+
+function refPart(xml: string, tag: string): { formula?: string; cache: string[] } | null {
+  const block = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`))?.[1];
+  if (!block) return null;
+  const formula = block.match(/<f>([\s\S]*?)<\/f>/)?.[1];
+  const literal = block.match(/<v>([\s\S]*?)<\/v>/)?.[1];
+  const cache = cachePoints(block);
+  return { formula: formula ? decodeXml(formula) : undefined, cache: cache.length ? cache : literal ? [decodeXml(literal)] : [] };
+}
+
+function textOfTitle(xml: string): string {
+  const title = xml.match(/<title>([\s\S]*?)<\/title>/)?.[1];
+  if (!title) return "";
+  const runs = [...title.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map((match) => decodeXml(match[1]));
+  if (runs.length) return runs.join("").trim();
+  return decodeXml(title.match(/<v>([\s\S]*?)<\/v>/)?.[1] ?? "").trim();
+}
+
+/** 통합문서의 모든 시트에 붙은 차트를 시트 순서대로. 계열 값은 시트 칸에서 다시 찾고, 없으면 캐시. */
+export async function readXlsxCharts(buffer: ArrayBuffer | Uint8Array, sheetsIn?: TableSheet[]): Promise<XlsxChart[]> {
+  const entries = readZip(buffer);
+  const sheets = sheetsIn ?? await readXlsxTables(buffer);
+  const charts: XlsxChart[] = [];
+  for (const sheet of await workbookSheets(entries)) {
+    for (const drawing of await relationTargets(entries, sheet.path, "/drawing")) {
+      for (const chartPath of await relationTargets(entries, drawing, "/chart")) {
+        const raw = await entryText(entries, chartPath);
+        if (!raw) continue;
+        // Excel 은 c: 접두사, openpyxl 은 기본 네임스페이스로 쓴다 — 차트 네임스페이스 접두사를 걷고 읽는다.
+        const xml = raw.replace(/<(\/?)c:/g, "<$1");
+        const chartBody = xml.match(/<chart>([\s\S]*)<\/chart>/)?.[1] ?? xml;
+        const plotIndex = chartBody.indexOf("<plotArea");
+        const title = textOfTitle(plotIndex > 0 ? chartBody.slice(0, plotIndex) : "") || sheet.name;
+        const plot = chartBody.slice(Math.max(0, plotIndex));
+        const kindMatch = plot.match(/<(bar3DChart|barChart|line3DChart|lineChart|area3DChart|areaChart|pie3DChart|pieChart|doughnutChart|scatterChart)>([\s\S]*?)<\/\1>/);
+        if (!kindMatch) continue;
+        const kind = kindMatch[1];
+        const body = kindMatch[2];
+        const type: XlsxChart["type"] = kind.startsWith("bar") ? "bar" : kind.startsWith("line") ? "line" : kind.startsWith("area") ? "area"
+          : kind === "doughnutChart" ? "doughnut" : kind.startsWith("pie") ? "pie" : "scatter";
+        const horizontal = /<barDir val="bar"\/>/.test(body);
+        const stacked = /<grouping val="(?:stacked|percentStacked)"\/>/.test(body);
+        const series: XlsxChartSeries[] = [];
+        for (const ser of body.matchAll(/<ser>([\s\S]*?)<\/ser>/g)) {
+          const s = ser[1];
+          const nameRef = refPart(s, "tx");
+          const nameCells = refCells(nameRef?.formula, sheets, sheet.name);
+          const name = (nameCells && nameCells[0] !== null && !isFormulaCell(nameCells[0]) ? String(nameCells[0]) : nameRef?.cache[0]) || `${series.length + 1}`;
+          const catRef = refPart(s, "cat") ?? refPart(s, "xVal");
+          const valRef = refPart(s, "val") ?? refPart(s, "yVal");
+          const valCells = refCells(valRef?.formula, sheets, sheet.name);
+          const values = (valCells ?? (valRef?.cache ?? []).map((v) => (v === undefined ? null : Number(v))))
+            .map((cell) => (typeof cell === "number" && Number.isFinite(cell) ? cell : null));
+          const catCells = refCells(catRef?.formula, sheets, sheet.name);
+          const categories = catCells ? catCells.map((cell) => cellText(cell, true)) : (catRef?.cache ?? []).map((v) => v ?? "");
+          series.push({ name, categories: values.map((_, index) => categories[index] ?? String(index + 1)), values });
+        }
+        if (series.length) charts.push({ sheetName: sheet.name, title, type, horizontal, stacked, series });
+      }
+    }
+  }
+  return charts;
+}
+
+/** 엑셀 차트 → Vega-Lite(관문 통과 모양: 인라인 값, 식·URL 없음). */
+export function xlsxChartSpec(chart: XlsxChart, ko: boolean): Record<string, unknown> {
+  const catField = ko ? "항목" : "Category";
+  const seriesField = ko ? "계열" : "Series";
+  const valueField = ko ? "값" : "Value";
+  const values = chart.series.flatMap((ser) => ser.values.map((value, index) => (value === null ? null : {
+    [catField]: ser.categories[index] ?? String(index + 1), [seriesField]: ser.name, [valueField]: value,
+  }))).filter(Boolean).slice(0, 5_000) as Array<Record<string, unknown>>;
+  const title = { text: chart.title, subtitle: chart.sheetName };
+  if (chart.type === "pie" || chart.type === "doughnut") {
+    return {
+      title, data: { values: values.filter((row) => row[seriesField] === chart.series[0].name) },
+      mark: { type: "arc", ...(chart.type === "doughnut" ? { innerRadius: 60 } : {}) },
+      encoding: { theta: { field: valueField, type: "quantitative" }, color: { field: catField, type: "nominal" } },
+    };
+  }
+  if (chart.type === "scatter") {
+    const numericX = values.every((row) => Number.isFinite(Number(row[catField])));
+    return {
+      title, data: { values: numericX ? values.map((row) => ({ ...row, [catField]: Number(row[catField]) })) : values },
+      mark: { type: "point", filled: true },
+      encoding: {
+        x: { field: catField, type: numericX ? "quantitative" : "ordinal", ...(numericX ? { scale: { zero: false } } : { sort: null }) },
+        y: { field: valueField, type: "quantitative", scale: { zero: false } },
+        color: { field: seriesField, type: "nominal" },
+      },
+    };
+  }
+  const cat = { field: catField, type: "ordinal", sort: null };
+  const val = { field: valueField, type: "quantitative", ...(chart.type === "line" ? { scale: { zero: false } } : {}) };
+  const encoding: Record<string, unknown> = chart.horizontal ? { y: cat, x: val } : { x: cat, y: val };
+  encoding.color = { field: seriesField, type: "nominal" };
+  if (chart.type === "bar" && !chart.stacked && chart.series.length > 1) encoding[chart.horizontal ? "yOffset" : "xOffset"] = { field: seriesField, sort: null };
+  return {
+    title, data: { values },
+    mark: chart.type === "bar" ? { type: "bar" } : chart.type === "area" ? { type: "area" } : { type: "line", point: values.length <= 60 },
+    encoding,
+  };
 }

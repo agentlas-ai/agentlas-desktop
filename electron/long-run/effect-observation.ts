@@ -51,6 +51,7 @@ import { getChatGoalRevision } from "../store/chat-goals";
 import { confirmDesktopLongRunResumeDispatched, desktopAppInstanceId, failDesktopLongRunResumeDispatch } from "./app-runtime-coordinator";
 import { currentUiLocale } from "../ui-locale";
 import { readAttemptEffectReceipt, receiptSettlesAttempts } from "./attempt-effect-receipt";
+import { channelPublishReceiptsPromptBlockFor } from "../publish-receipts";
 import {
   effectObservationTicket, registerEffectObservationTicket, takeEffectObservationTicket, isGoalObserving,
   markGoalObserving, isAutomationObserving, markAutomationObserving, automationObservationRuntime,
@@ -283,6 +284,7 @@ function attemptActionLines(invocationRunId: string | null): string {
           "   calls in question, newest last (recorded with their arguments; the app could not prove they only read):",
           ...(receipt.candidates.length > 8 ? [`   - …${receipt.candidates.length - 8} earlier call(s) not shown`] : []),
           ...(calls.length ? calls : ["   - (none)"]),
+          ...(receipt.hostConfirmed.length ? [`   confirmed by the app itself — these already took effect (the app performed and recorded them; not in question, do not try to verify them): ${receipt.hostConfirmed.map((call) => redactUrls([call.toolName, call.args].filter(Boolean).join(" · "))).join("; ").slice(0, 600)}`] : []),
           ...(receipt.readOnlyCalls ? [`   ${receipt.readOnlyCalls} other recorded call(s) only searched, read files or loaded pages; they are not in question.`] : []),
         ].join("\n");
       }
@@ -292,7 +294,8 @@ function attemptActionLines(invocationRunId: string | null): string {
   return activity.length ? `   last recorded actions:\n${activity.map((line) => `   - ${line}`).join("\n")}` : "   last recorded actions: (none recorded)";
 }
 
-const READ_ONLY_CALLS_RULE = "- If every call in question visibly only reads (its code or arguments only get state, list tabs, or load/read a page), nothing outside can exist to find: answer not_done and name those calls in the evidence.";
+const READ_ONLY_CALLS_RULE = "- If every call in question visibly only reads (its code or arguments only get state, list tabs, or load/read a page), nothing outside can exist to find: answer not_done and name those calls in the evidence — unless the app confirmed a call above.\n"
+  + "- A call listed as confirmed by the app itself already took effect. If the remaining calls in question are none, only read, or also took effect, answer done and cite the confirmed call in the evidence.";
 
 /** 관찰 답의 문장은 채팅에 그대로 보인다 — 화면 언어로 쓰게 한다(한국어 화면에 영어 문장이 섞이던 자리, 2026-09-26). 표식 줄은 언어와 무관하다. */
 function observationReplyLanguage(): string {
@@ -320,7 +323,7 @@ Goal: ${input.objective.slice(0, 1_200)}
 
 Interrupted attempt(s):
 ${blocks}
-
+${(() => { const receipts = channelPublishReceiptsPromptBlockFor(input.objective); return receipts ? `\n${receipts}\n` : ""; })()}
 Rules for this check:
 - This run is read-only. Do not perform, retry, complete, or undo any action. Do not post, send, submit, buy, reply, like, delete or edit anything.
 - Only look: open or refresh the relevant page in the browser, list recent posts / messages / orders / files, read logs or the working folder, or read this app's own state (for example the registered automations and their schedules).
@@ -490,7 +493,7 @@ export function maybeDispatchEffectObservation(
     // a completed 0-tool conversation turn). When every recent turn only read, the newest one is answered by
     // its receipt below — no model look.
     const cleanTurn = (runId: string): boolean => {
-      try { const receipt = readAttemptEffectReceipt(runId); return receipt.closed && receipt.candidates.length === 0; }
+      try { const receipt = readAttemptEffectReceipt(runId); return receipt.closed && receipt.candidates.length === 0 && receipt.hostConfirmed.length === 0; }
       catch { return false; }
     };
     const last = recentTurns.find((turn) => !cleanTurn(turn.run_id)) ?? recentTurns[0];

@@ -29,6 +29,8 @@ import { observeNativeBrowserDownloads } from "./download-registry";
 
 type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal; presentation?: "foreground" | "background"; onScreenshot?: (capture: { png: Buffer; isCurrent: () => boolean }) => void | Promise<void> };
 type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; lastPresentationAt?: number; detach: () => void;
+  /** Re-attach the debugger to the same live page (lost CDP session); false when the page is gone or held by another client. */
+  reattach: () => boolean;
   chooser: FileChooserGate;
   /** Synthetic JS dialogs reported to the agent and not yet handled, per CDP session key. */
   dialogs: Map<string, AgentDialogType[]>;
@@ -129,6 +131,33 @@ export interface NativeBrowserRelayPage {
   reload: () => Promise<string | null>;
   /** Open a URL in the same guest (owner sign-in card). */
   navigate: (url: string) => Promise<void>;
+  /** Main-only script evaluation in the page (vault autofill, structural checks). Never reachable by the agent. */
+  evaluate?: (expression: string) => Promise<unknown>;
+  /** Bring this page in front of the owner (human-check card). */
+  present?: () => void;
+}
+
+/** Machine state of the relay for the fallback ladder (electron/browser/fallback-ladder.ts). */
+export interface NativeBrowserRelayHealth {
+  /** The grant still has its window/guest owner and was not released. */
+  current: boolean;
+  /** The last refusal this relay answered, by our own code (never parsed prose). */
+  lastRefusal: "session-ended" | "tab-limit" | "session-unavailable" | "grant-revoked" | null;
+  leases: number;
+  liveSockets: number;
+  /** Sessions brought back after they had been dropped (see revive below). */
+  revived: number;
+  /** Connections are being served by the dedicated Agentlas Chrome (switch-surface rung). */
+  failedOver: boolean;
+}
+
+export interface NativeBrowserRelayFailover {
+  /** ws://127.0.0.1:<port>/devtools/browser/<id> of the dedicated Agentlas Chrome we own. */
+  webSocketDebuggerUrl: string;
+  /** Loopback CDP port of that Chrome, for /json/list. */
+  port: number;
+  /** Called once when this failover ends (grant released or replaced): frees the dedicated-browser lease. */
+  release?: () => void;
 }
 
 export interface NativeBrowserRelayGrant {
@@ -137,7 +166,30 @@ export interface NativeBrowserRelayGrant {
   release: () => void;
   /** Login recovery reads where the agent actually is — structurally, never from tool prose. */
   pages: () => NativeBrowserRelayPage[];
+  /** Fallback ladder: measured relay state. */
+  health?: () => NativeBrowserRelayHealth;
+  /** Fallback ladder rung 1: drop dead sockets and clear the last refusal so the next connect starts clean. */
+  reestablish?: () => NativeBrowserRelayHealth;
+  /**
+   * Fallback ladder rung 2 (switch surface): serve this run's CDP connects from the dedicated Agentlas Chrome.
+   * The launcher's endpoint stays the same, so no MCP process is rebuilt; open agent sockets are closed so
+   * Playwright reconnects through the relay to the other browser. null returns to the in-app browser.
+   */
+  failover?: (target: NativeBrowserRelayFailover | null) => void;
 }
+
+/** Live grants by endpoint, so Main-side observers (MCP bridge) can find the grant a launcher is bound to. */
+const liveGrants = new Map<string, NativeBrowserRelayGrant>();
+export function nativeBrowserRelayGrantForEndpoint(endpoint: string | null | undefined): NativeBrowserRelayGrant | null {
+  return endpoint ? liveGrants.get(endpoint) ?? null : null;
+}
+
+/** Visible iframe sources and the top URL, read structurally (no page wording). */
+export const PAGE_FRAME_PROBE_SOURCE = `(() => {
+  const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
+    return r.width >= 20 && r.height >= 20 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity || '1') > 0.05; };
+  return { url: location.href, frames: [...document.querySelectorAll('iframe')].filter(visible).map((f) => String(f.src || '')).filter(Boolean).slice(0, 32) };
+})()`;
 
 function settledUrl(wc: WebContents, timeoutMs = 20_000): Promise<string | null> {
   return new Promise((resolve) => {
@@ -175,6 +227,14 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   // run hit the tab limit.
   let lastActivity = Date.now();
   const touch = () => { lastActivity = Date.now(); };
+  // Fallback-ladder state. `issued` remembers every session id this grant handed out: a session that was
+  // dropped while the grant is still current is brought back under the same id instead of answering 410 for
+  // the rest of the run (production 2026-09-27..28: 45 calls in 17 runs failed on one dead session URL,
+  // because the launcher's lease URL is fixed for its life).
+  const issued = new Set<string>();
+  let revived = 0;
+  let lastRefusal: NativeBrowserRelayHealth["lastRefusal"] = null;
+  let failoverTarget: NativeBrowserRelayFailover | null = null;
   const holdId = openAgentBrowserHold({ runId: input.runId, isLive: () => !closed && !input.signal.aborted
     && ([...leases.values()].some((lease) => lease.socket?.readyState === 1 || lease.connecting) || Date.now() - lastActivity < HOLD_IDLE_MS) });
   const server = http.createServer();
@@ -232,7 +292,33 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     // whole lease here closed the agent's CDP socket, so the opener page died
     // with its popup ("Target page, context or browser has been closed").
     let guestReady = false;
-    const debuggerDetached = () => { relayAttached = false; if (guestReady) dropGuest(); };
+    /*
+     * ★A lost debugger session on a page that is still alive (reason other than "target closed": DevTools took
+     * the page, Chromium dropped the session) is re-attached under the same target and session ids, so the
+     * agent keeps its page. Before, every such detach looked like the page closing ("Target page, context or
+     * browser has been closed", 13 calls in 11 runs 09-26..29). Idea: ego-lite (MIT) browser-runtime.ts
+     * ensureSession / retry-after-lost-session; reimplemented here, no code copied.
+     */
+    let reattaches = 0;
+    const reattach = (): boolean => {
+      if (wc.isDestroyed() || !current() || nativeBrowserGuest(owner.ownerId, input.chatId, viewId) !== wc || reattaches >= 3) return false;
+      if (wc.debugger.isAttached()) return relayAttached;
+      try { wc.debugger.attach("1.3"); } catch { return false; }
+      reattaches += 1;
+      relayAttached = true;
+      // Child (iframe) sessions died with the old attach; the page-level session carries on.
+      for (const child of guest.children) send(lease, { method: "Target.detachedFromTarget", params: { sessionId: child } });
+      guest.children.clear();
+      installDialogs("");
+      if (lease.autoAttach) void wc.debugger.sendCommand("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }).catch(() => undefined);
+      return true;
+    };
+    const debuggerDetached = (_event?: unknown, reason?: unknown) => {
+      relayAttached = false;
+      if (!guestReady) return;
+      if (reason !== "target closed" && reattach()) return;
+      dropGuest();
+    };
     wc.debugger.on("detach", debuggerDetached);
     const detachOwnedDebugger = () => {
       wc.debugger.removeListener("detach", debuggerDetached);
@@ -257,7 +343,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     }
     const guest: Guest = { viewId, wc, targetId: identity.targetInfo.targetId,
       browserContextId: typeof identity.targetInfo.browserContextId === "string" ? identity.targetInfo.browserContextId : "agentlas-native-default",
-      sessionId: randomUUID(), children: new Set(), detach: () => {}, chooser: { wants: new Map(), armedUntil: 0, real: new Set(), agentInput: 0, agentEchoUntil: 0 },
+      sessionId: randomUUID(), children: new Set(), detach: () => {}, reattach, chooser: { wants: new Map(), armedUntil: 0, real: new Set(), agentInput: 0, agentEchoUntil: 0 },
       dialogs: new Map(), lastAgentCommandAt: 0, navigatedAt: 0, ...(openerId ? { openerId } : {}) };
     const navigated = () => { guest.navigatedAt = Date.now(); };
     wc.on("did-navigate", navigated);
@@ -392,10 +478,19 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       throw error;
     }
   };
-  const createLease = async () => {
+  const createLease = async (reviveId?: string) => {
     if (leases.size >= MAX_SESSIONS) throw new Error("native-browser-session-limit");
-    const lease: Lease = { id: randomUUID(), guests: new Map(), socket: null, connecting: false, autoAttach: false, current: null, order: Promise.resolve() };
+    const lease: Lease = { id: reviveId ?? randomUUID(), guests: new Map(), socket: null, connecting: false, autoAttach: false, current: null, order: Promise.resolve() };
     leases.set(lease.id, lease);
+    issued.add(lease.id);
+    return lease;
+  };
+  /** A session this grant issued and later dropped comes back under its id while the grant is current. */
+  const reviveLease = (id: string): Lease | undefined => {
+    if (!issued.has(id) || !current() || leases.size >= MAX_SESSIONS) return undefined;
+    const lease: Lease = { id, guests: new Map(), socket: null, connecting: false, autoAttach: false, current: null, order: Promise.resolve() };
+    leases.set(id, lease);
+    revived += 1;
     return lease;
   };
   const initializeLease = async (lease: Lease) => {
@@ -664,7 +759,13 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
         // channel is not ordered with input. Sent back to back, the click won
         // the race about one time in three and the OS "Open" panel appeared.
         if (gesture) await armFileChooser(guest);
-        sent = guest.wc.debugger.sendCommand(method, params, sessionId === guest.sessionId ? undefined : sessionId);
+        const root = sessionId === guest.sessionId;
+        sent = guest.wc.debugger.sendCommand(method, params, root ? undefined : sessionId).catch((error: unknown) => {
+          // Lost session on a live page: re-attach and retry once (page-level commands only; Target.*/Browser.*
+          // describe the session itself and are not replayed).
+          if (!root || /^(Target|Browser)\./.test(method) || guest.wc.isDestroyed() || guest.wc.debugger.isAttached() || !guest.reattach()) throw error;
+          return guest.wc.debugger.sendCommand(method, params);
+        });
       });
       lease.order = step.catch(() => {});
       await step;
@@ -694,16 +795,40 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     const url = new URL(request.url ?? "/", "http://localhost");
     if (url.pathname === "/session" && request.method === "POST") {
       void createLease().then((lease) => reply(response, 200, { endpoint: `http://127.0.0.1:${port}/session/${lease.id}` }))
-        .catch(() => reply(response, 409, { error: "native-browser-session-unavailable" }));
+        .catch(() => { lastRefusal = "session-unavailable"; reply(response, 409, { error: "native-browser-session-unavailable" }); });
       return;
     }
     const match = /^\/session\/([a-f0-9-]+)(?:\/(.*))?$/.exec(url.pathname);
-    const lease = match ? leases.get(match[1]) : undefined;
+    let lease = match ? leases.get(match[1]) : undefined;
+    // A dropped session this grant issued is revived (same id, fresh tabs) rather than answering 410 until the
+    // run ends. DELETE never revives: that is the launcher ending its own session.
+    if (!lease && match && request.method !== "DELETE") lease = reviveLease(match[1]);
     // 410, not 404: this session existed and ended. Playwright reports any
     // non-200 here as "does not look like a DevTools server"; the body says why.
-    if (!lease) return reply(response, 410, { error: "native-browser-session-ended: this browser session was released. Start the browser tool again." });
+    if (!lease) { lastRefusal = "session-ended"; return reply(response, 410, { error: "native-browser-session-ended: this browser session was released. Start the browser tool again." }); }
     touch();
-    if (request.method === "DELETE") { releaseLease(lease); return reply(response, 200, { ok: true }); }
+    if (request.method === "DELETE") { releaseLease(lease); issued.delete(lease.id); return reply(response, 200, { ok: true }); }
+    // Switch-surface rung: this run's connects are served by the dedicated Agentlas Chrome.
+    if (failoverTarget && match?.[2]?.replace(/\/$/, "") === "json/version") return reply(response, 200, { Browser: "Agentlas dedicated Chrome",
+      webSocketDebuggerUrl: failoverTarget.webSocketDebuggerUrl });
+    if (failoverTarget && match?.[2]?.replace(/\/$/, "") === "json/list") {
+      const target = failoverTarget;
+      const upstream = http.get({ host: "127.0.0.1", port: target.port, path: "/json/list", timeout: 1_500 }, (res) => {
+        let body = "";
+        res.setEncoding("utf8");
+        res.on("data", (chunk: string) => { if (body.length < 1024 * 1024) body += chunk; });
+        res.on("end", () => {
+          let rows: unknown = [];
+          try { rows = JSON.parse(body); } catch { rows = []; }
+          const pages = Array.isArray(rows) ? rows.filter((row) => row && typeof row === "object" && (row as { type?: unknown }).type === "page")
+            .map((row) => { const r = row as Record<string, unknown>; return { id: String(r.id ?? ""), type: "page", url: String(r.url ?? ""), title: String(r.title ?? "") }; }) : [];
+          reply(response, 200, pages);
+        });
+      });
+      upstream.on("timeout", () => upstream.destroy());
+      upstream.on("error", () => { if (!response.headersSent) reply(response, 200, []); });
+      return;
+    }
     if (match?.[2]?.replace(/\/$/, "") === "json/version") return reply(response, 200, { Browser: `Chrome/${process.versions.chrome}`,
       webSocketDebuggerUrl: `ws://127.0.0.1:${port}/session/${lease.id}/devtools/browser` });
     if (match?.[2]?.replace(/\/$/, "") === "json/list") {
@@ -714,7 +839,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   });
   server.on("upgrade", (request, socket, head) => {
     const match = /^\/session\/([a-f0-9-]+)\/devtools\/browser$/.exec(request.url ?? "");
-    const lease = match ? leases.get(match[1]) : undefined;
+    const lease = match ? leases.get(match[1]) ?? (authorized(request) ? reviveLease(match[1]) : undefined) : undefined;
     if (!authorized(request) || !lease || lease.socket || lease.connecting) { socket.destroy(); return; }
     lease.connecting = true;
     // MCP initialization/listing allocates only a lease; no tab or browser is
@@ -723,6 +848,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       if (!current() || !leases.has(lease.id) || socket.destroyed) { releaseLease(lease); socket.destroy(); return; }
       websocket.handleUpgrade(request, socket, head, (ws) => {
       lease.socket = ws;
+      lastRefusal = null;
       ws.on("message", (data) => {
         let value: { id?: unknown; method?: unknown; params?: unknown; sessionId?: unknown };
         try { value = JSON.parse(String(data)); } catch { ws.close(1003); return; }
@@ -745,6 +871,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       resetLease(lease);
       if (!current()) releaseLease(lease);
       const message = error instanceof Error && error.message.startsWith("native-browser-tab-limit: ") ? error.message : "";
+      lastRefusal = message ? "tab-limit" : !current() ? "grant-revoked" : lastRefusal;
       if (message && !socket.destroyed) {
         const body = JSON.stringify({ error: message });
         try { socket.end(`HTTP/1.1 409 Conflict\r\ncontent-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`); return; } catch {}
@@ -788,6 +915,9 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     owner.window.removeListener("closed", release);
     unregisterShutdown();
     for (const lease of [...leases.values()]) releaseLease(lease);
+    if (port) liveGrants.delete(`http://127.0.0.1:${port}`);
+    try { failoverTarget?.release?.(); } catch { /* lease already gone */ }
+    failoverTarget = null;
     websocket.close();
     server.close();
     // The run settled (success, failure, cancel, interrupt, window or host
@@ -827,10 +957,55 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
             presentAction(guest);
             await wc.loadURL(safe.toString()).catch(() => undefined);
           },
+          evaluate: async (expression: string) => {
+            if (wc.isDestroyed() || !current()) return null;
+            return wc.executeJavaScript(expression, true);
+          },
+          present: () => {
+            if (wc.isDestroyed() || !current()) return;
+            try { if (owner.window.isMinimized()) owner.window.restore(); owner.window.show(); owner.window.focus(); } catch { /* window gone */ }
+            // The owner asked to be shown this page: present even a background run's guest.
+            presentNativeBrowserGuest(owner.ownerId, input.chatId, input.runId, guest.viewId);
+          },
         });
       }
     }
     return out;
   };
-  return { endpoint: `http://127.0.0.1:${port}`, token: secret, release, pages };
+  const health = (): NativeBrowserRelayHealth => ({
+    current: current(),
+    lastRefusal: !current() ? "grant-revoked" : lastRefusal,
+    leases: leases.size,
+    liveSockets: [...leases.values()].filter((lease) => lease.socket?.readyState === 1).length,
+    revived,
+    failedOver: failoverTarget !== null,
+  });
+  const reestablish = (): NativeBrowserRelayHealth => {
+    if (current()) {
+      for (const lease of leases.values()) {
+        if (lease.socket && lease.socket.readyState !== 1) resetLease(lease);
+      }
+      lastRefusal = null;
+    }
+    return health();
+  };
+  const failover = (target: NativeBrowserRelayFailover | null) => {
+    const refuse = () => { try { target?.release?.(); } catch { /* lease already gone */ } };
+    if (!current()) { refuse(); return; }
+    if (target && (!/^ws:\/\/127\.0\.0\.1:\d+\/devtools\/browser\/[A-Za-z0-9-]+$/.test(target.webSocketDebuggerUrl)
+      || !Number.isInteger(target.port) || target.port < 1 || target.port > 65_535)) { refuse(); return; }
+    const previous = failoverTarget;
+    failoverTarget = target;
+    if (previous && previous !== target) { try { previous.release?.(); } catch { /* lease already gone */ } }
+    lastRefusal = null;
+    // Close the agent's open sockets: Playwright reconnects through /json/version, which now names the other browser.
+    for (const lease of leases.values()) {
+      const socket = lease.socket;
+      resetLease(lease);
+      try { socket?.close(); } catch { /* already closed */ }
+    }
+  };
+  const grant: NativeBrowserRelayGrant = { endpoint: `http://127.0.0.1:${port}`, token: secret, release, pages, health, reestablish, failover };
+  liveGrants.set(grant.endpoint, grant);
+  return grant;
 }

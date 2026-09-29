@@ -10,6 +10,8 @@ import { I18nProvider } from "@/lib/i18n";
 import { ThemeProvider } from "@/lib/theme";
 import { AuthGate } from "@/components/AuthGate";
 import { OneRecoveryPlane } from "@/components/OneRecoveryPlane";
+import { PlanPickerHost } from "@/components/billing/PlanPickerModal";
+import { AttentionHost } from "@/components/AttentionHost";
 
 export const metadata: Metadata = {
   title: "Agentlas",
@@ -39,7 +41,10 @@ export default function RootLayout({
         <ThemeProvider>
           <I18nProvider>
             <OneRecoveryPlane />
+            <AttentionHost />
             <AuthGate>{children}</AuthGate>
+            {/* The one paywall ("플랜 선택"): every "see plans" entry point opens this. */}
+            <PlanPickerHost />
           </I18nProvider>
         </ThemeProvider>
       </body>

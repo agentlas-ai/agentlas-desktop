@@ -332,6 +332,7 @@ export type {
   HubMailboxEntitlement,
   BillingPlanCatalog,
   BillingPlanOffer,
+  BillingCheckoutReadiness,
   Chat,
   ChatGoalContext,
   ChatHistoryEntry,

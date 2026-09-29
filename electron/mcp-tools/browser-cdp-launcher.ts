@@ -1376,7 +1376,7 @@ type BrowserCdpLauncherMessage = {
  * a bootstrap client: the live-view lease stays in this process and the
  * guardian is rebound to this process before the bootstrap exits.
  */
-async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<void> {
+async function invokeBrowserTabsListThroughLauncher(launcher: string, options: { headed?: boolean } = {}): Promise<void> {
   let stderrBytes = 0;
   let stderrTruncated = false;
   const failure = (stage: BrowserCdpHostFailureStage, code: BrowserCdpHostFailureCode) => new BrowserCdpHostError(
@@ -1390,7 +1390,7 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<v
       ELECTRON_RUN_AS_NODE: "1",
       AGENTLAS_CDP_PROFILE: browserCdpProfilePath(),
       AGENTLAS_CDP_PORT: String(browserCdpPort()),
-      AGENTLAS_CDP_HEADLESS: process.env.AGENTLAS_CDP_HEADLESS ?? "1",
+      AGENTLAS_CDP_HEADLESS: options.headed ? "0" : process.env.AGENTLAS_CDP_HEADLESS ?? "1",
       // This short-lived bootstrap must leave the host alive for the Electron
       // process to attest and adopt it after the MCP child exits. AUTO_STOP=1
       // schedules the child's idle reaper when its temporary lease is released,
@@ -1490,7 +1490,7 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string): Promise<v
   }
 }
 
-async function ensureBrowserCdpHostOnce(): Promise<BrowserCdpHostEnsureResult> {
+async function ensureBrowserCdpHostOnce(options: { headed?: boolean } = {}): Promise<BrowserCdpHostEnsureResult> {
   try { ensureBrowserCdpProfilePrivate(); }
   catch { throw new BrowserCdpHostError("profile", "profile-unavailable"); }
   if (await browserCdpPortReady()) {
@@ -1508,7 +1508,7 @@ async function ensureBrowserCdpHostOnce(): Promise<BrowserCdpHostEnsureResult> {
     if (error instanceof BrowserCdpHostError) throw error;
     throw new BrowserCdpHostError("launcher", "launcher-materialize-failed");
   }
-  try { await invokeBrowserTabsListThroughLauncher(launcher); }
+  try { await invokeBrowserTabsListThroughLauncher(launcher, options); }
   catch (error) {
     if (error instanceof BrowserCdpHostError) throw error;
     throw new BrowserCdpHostError("launcher", "unknown");
@@ -1523,15 +1523,48 @@ async function ensureBrowserCdpHostOnce(): Promise<BrowserCdpHostEnsureResult> {
 }
 
 /** Ensure the exact Agentlas browser host exists without opening a login window. */
-export function ensureBrowserCdpHost(): Promise<BrowserCdpHostEnsureResult> {
+export function ensureBrowserCdpHost(options: { headed?: boolean } = {}): Promise<BrowserCdpHostEnsureResult> {
   if (browserCdpHostEnsureFlight) return browserCdpHostEnsureFlight;
-  const flight = ensureBrowserCdpHostOnce();
+  const flight = ensureBrowserCdpHostOnce(options);
   browserCdpHostEnsureFlight = flight;
   void flight.then(
     () => { if (browserCdpHostEnsureFlight === flight) browserCdpHostEnsureFlight = null; },
     () => { if (browserCdpHostEnsureFlight === flight) browserCdpHostEnsureFlight = null; },
   );
   return flight;
+}
+
+/**
+ * Fallback ladder rung 5 (computer use on OUR Chrome): computer use needs a real window, and the dedicated
+ * Chrome is headless by default. Decision (2026-09-29): at rung 5 only, the owned dedicated Chrome is relaunched
+ * visible (headed, on screen: an off-screen window cannot be seen or clicked by screen-coordinate computer use).
+ * It is relaunched only when no other client holds it (at most the failing run's own lease); a browser that is
+ * not ours is never touched. The next idle relaunch is headless again.
+ */
+export async function ensureBrowserCdpHostHeaded(input: {
+  processes?: () => Promise<BrowserCdpProcessSnapshot[]>;
+  close?: (maxLiveLeases: number) => Promise<BrowserCdpIdleCloseResult>;
+  ensure?: (options: { headed?: boolean }) => Promise<BrowserCdpHostEnsureResult>;
+  ownership?: () => Promise<BrowserCdpOwnership>;
+  portReady?: () => Promise<boolean>;
+} = {}): Promise<{ ok: true; pid: number; relaunched: boolean } | { ok: false; reason: "not-owned" | "shared-headless" | "relaunch-failed" }> {
+  const portReady = input.portReady ?? browserCdpPortReady;
+  const ownership = input.ownership ?? (() => reconcileBrowserCdpOwnerWithRetry());
+  const processes = input.processes ?? (() => inspectBrowserCdpProcesses());
+  const ensure = input.ensure ?? ((options) => ensureBrowserCdpHost(options));
+  const close = input.close ?? ((max) => closeBrowserCdpIfIdle(max));
+  if (await portReady()) {
+    const owned = await ownership();
+    if (owned.state !== "owned" || !owned.pid) return { ok: false, reason: "not-owned" };
+    const row = (await processes().catch(() => [] as BrowserCdpProcessSnapshot[])).find((entry) => entry.pid === owned.pid);
+    if (row && !/--headless\b/.test(row.commandLine)) return { ok: true, pid: owned.pid, relaunched: false };
+    const closed = await close(1);
+    if (!closed.closed) return { ok: false, reason: closed.reason === "active-leases" ? "shared-headless" : "relaunch-failed" };
+  }
+  try {
+    const host = await ensure({ headed: true });
+    return { ok: true, pid: host.pid, relaunched: true };
+  } catch { return { ok: false, reason: "relaunch-failed" }; }
 }
 
 /**
@@ -1698,6 +1731,70 @@ function approvalContextUrl(name, args, observedUrl) {
  * 모델은 같은 프로필을 다시 열어 처음부터 되풀이했다. 상위 Playwright MCP 설명엔 이 구분이 없다.
  * 설명(tools/list)에 한 줄을 붙이고, ref 모양의 text/regex 는 보내지 않고 바로 길을 알려 준다.
  */
+/*
+ * Upload with no chooser open (production 2026-09-28 16:08Z and the Studio upload at 12:57Z: Playwright's
+ * browser_file_upload refuses unless a file-chooser modal is open, and the agent had not clicked one).
+ * When browser_file_upload comes back as an error, the files are set directly on the page's file input
+ * (Playwright setInputFiles → CDP DOM.setFileInputFiles): the input the agent last clicked (the ref itself, a
+ * label's control, its only contained input, or its explicit aria-controls target), else the page's only
+ * file input. Shared ancestors do not establish an association. Ambiguous candidates are never guessed.
+ * Paths are the staged copies
+ * the upload-root check already approved. Idea: ego-lite (MIT) driver/files.ts + page-input.ts and paseo
+ * (Apache-2.0) service.ts — resolve the input, then DOM.setFileInputFiles; reimplemented, no code copied.
+ */
+export const BROWSER_UPLOAD_FALLBACK_SOURCE = String.raw`
+function uploadFallbackCode(paths, ref) {
+  const safeRef = typeof ref === 'string' && /^[A-Za-z0-9_-]{1,40}$/.test(ref) ? ref : '';
+  return 'async (page) => {\n'
+    + '  const paths = ' + JSON.stringify(paths) + ';\n'
+    + '  const ref = ' + JSON.stringify(safeRef) + ';\n'
+    + '  if (ref) {\n'
+    + '    try {\n'
+    + '      const handle = await page.locator("aria-ref=" + ref).evaluateHandle((node) => {\n'
+    + '        const isFile = (n) => n instanceof HTMLInputElement && n.type === "file";\n'
+    + '        if (isFile(node)) return node;\n'
+    + '        const label = node.closest && node.closest("label");\n'
+    + '        if (label instanceof HTMLLabelElement && isFile(label.control)) return label.control;\n'
+    + '        const candidates = new Set();\n'
+    + '        for (const id of (node.getAttribute && node.getAttribute("aria-controls") || "").split(/\\s+/).filter(Boolean)) { const target = node.ownerDocument.getElementById(id); if (isFile(target)) candidates.add(target); }\n'
+    + '        for (const input of node.querySelectorAll ? node.querySelectorAll("input[type=file]") : []) candidates.add(input);\n'
+    + '        if (candidates.size === 1) return candidates.values().next().value;\n'
+    + '        return null; }, undefined, { timeout: 3000 });\n'
+    + '      const element = handle.asElement();\n'
+    + '      if (element) { await element.setInputFiles(paths, { timeout: 5000 }); return { ok: true, via: "ref" }; }\n'
+    + '    } catch (e) { /* fall through to the page-wide input */ }\n'
+    + '  }\n'
+    + '  const inputs = page.locator("input[type=file]");\n'
+    + '  const count = await inputs.count();\n'
+    + '  if (count !== 1) return { ok: false, reason: count === 0 ? "no-file-input" : "ambiguous-file-inputs", count };\n'
+    + '  await inputs.first().setInputFiles(paths, { timeout: 5000 });\n'
+    + '  return { ok: true, via: "only-file-input" };\n'
+    + '}';
+}
+function uploadFallbackVerdict(reply) {
+  const text = reply && reply.result && Array.isArray(reply.result.content)
+    ? reply.result.content.map((item) => item && typeof item.text === 'string' ? item.text : '').join('\n') : '';
+  if (!reply || reply.error || (reply.result && reply.result.isError)) return { ok: false, reason: 'run-code-failed' };
+  const match = /\{[^{}]*"ok"\s*:\s*(true|false)[^{}]*\}/.exec(text);
+  if (!match) return { ok: false, reason: 'no-verdict' };
+  try { return JSON.parse(match[0]); } catch (e) { return { ok: false, reason: 'no-verdict' }; }
+}
+/** Returns a replacement result for a failed browser_file_upload, or null to keep the original error. */
+async function uploadWithoutChooser(reply, args, lastClickRef, callChildWithin) {
+  if (!reply || !(reply.error || (reply.result && reply.result.isError))) return null;
+  const paths = args && Array.isArray(args.paths) ? args.paths.filter((p) => typeof p === 'string' && p) : [];
+  if (!paths.length) return null;
+  const verdict = uploadFallbackVerdict(await callChildWithin('browser_run_code_unsafe', { code: uploadFallbackCode(paths, lastClickRef) }, 15000));
+  if (verdict.ok) {
+    return { content: [{ type: 'text', text: 'Uploaded ' + paths.length + ' file(s) directly to the page\'s file input (' + verdict.via + '); no file chooser was open.' }],
+      _meta: { agentlasUpload: { via: verdict.via, files: paths.length } } };
+  }
+  return { content: [{ type: 'text', text: 'No file chooser was open and the direct upload did not apply (' + verdict.reason + (verdict.count ? ', ' + verdict.count + ' file inputs' : '')
+    + '). Click the upload control first (browser_click), then call browser_file_upload again.' }], isError: true,
+    _meta: { agentlasFailureCode: 'browser_upload_' + String(verdict.reason).replace(/[^a-z-]/g, '') } };
+}
+`;
+
 export const BROWSER_FIND_GUIDANCE_SOURCE = String.raw`
 // Playwright refs are lowercase (e123, f1e2). "E2" (a spreadsheet cell) is page text.
 const SNAPSHOT_REF_TEXT = /^\s*(?:\[?\s*[Rr][Ee][Ff]\s*[=:]\s*)?((?:f\d{1,4})?e\d{1,6})\s*\]?\s*$/;
@@ -1863,9 +1960,9 @@ function ensurePrivateProfile() {
   fs.mkdirSync(CDP_PROFILE, { recursive: true, mode: 0o700 });
   try { fs.chmodSync(CDP_PROFILE, 0o700); } catch (e) {}
 }
-function execFileText(executable, args, allowedExitCodes = []) {
+function execFileText(executable, args, allowedExitCodes = [], timeoutMs = 3000) {
   return new Promise((resolve, reject) => {
-    execFile(executable, args, { encoding: 'utf8', timeout: 3000, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
+    execFile(executable, args, { encoding: 'utf8', timeout: timeoutMs, maxBuffer: 1024 * 1024, windowsHide: true }, (error, stdout) => {
       if (error) {
         if (error.code === 'ENOENT' || error.killed) return reject(error);
         if (!allowedExitCodes.includes(Number(error.code))) return reject(error);
@@ -1878,7 +1975,8 @@ function uniquePositivePids(values) {
   return [...new Set(values.filter((pid) => Number.isInteger(pid) && pid > 0))];
 }
 async function inspectDarwinProcesses() {
-  const listenerOutput = await execFileText('/usr/sbin/lsof', ['-nP', '-a', '-iTCP:' + PORT, '-sTCP:LISTEN', '-Fpn'], [1]);
+  // lsof walks every process; 3 s was too short while Chrome was starting its helpers.
+  const listenerOutput = await execFileText('/usr/sbin/lsof', ['-nP', '-a', '-iTCP:' + PORT, '-sTCP:LISTEN', '-Fpn'], [1], 10000);
   const addressesByPid = new Map();
   let currentPid = null;
   for (const line of listenerOutput.split(/\r?\n/)) {
@@ -1989,11 +2087,24 @@ async function reconcileOwner() {
   return Object.assign({}, after, { reason: 'adoption-race:' + after.reason });
 }
 let reconcileOwnerRetryFlight = null;
+// A failed inspection is not evidence of a foreign listener. Soak 1.2.50 (11:06Z, 11:09Z):
+// lsof failed right after our own Chrome launch ("unverifiable:Command failed: lsof ...
+// -iTCP:9222"), the launcher killed the browser it had just started and the Threads nodes
+// lost their browser. Give an unverifiable result a few paced re-inspections first.
+const UNVERIFIABLE_REINSPECTIONS = 6;
+const UNVERIFIABLE_REINSPECT_DELAY_MS = 750;
 async function runReconcileOwnerWithRetry(attempts = 4, delayMs = 90) {
   let ownership = { state: 'unverifiable', pid: null, reason: 'not-inspected' };
+  let reinspections = 0;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
     ownership = await reconcileOwner();
     if (ownership.state === 'owned') return ownership;
+    if (ownership.state === 'unverifiable' && reinspections < UNVERIFIABLE_REINSPECTIONS) {
+      reinspections += 1;
+      attempt -= 1;
+      await new Promise((resolve) => setTimeout(resolve, UNVERIFIABLE_REINSPECT_DELAY_MS));
+      continue;
+    }
     if (attempt + 1 < attempts) await new Promise((resolve) => setTimeout(resolve, delayMs));
   }
   return ownership;
@@ -2881,6 +2992,7 @@ ${BROWSER_APPROVAL_CLASSIFIER_SOURCE}
 ${BROWSER_SOCIAL_ENGAGE_SOURCE}
 ${BROWSER_APPROVAL_CONTEXT_SOURCE}
 ${BROWSER_FIND_GUIDANCE_SOURCE}
+${BROWSER_UPLOAD_FALLBACK_SOURCE}
 function readCdpPageUrl() {
   if (NATIVE_ENDPOINT) return nativeRequest(nativeLeaseEndpoint + '/json/list', 'GET').then(extractCdpPageUrl, () => '');
   return new Promise((resolve) => {
@@ -3082,6 +3194,7 @@ async function main() {
   const pending = new Map();       // client 원본 tools/call: id -> {name, args}
   const waiters = new Map();       // 내부(replay) tools/call: id -> resolve
   const engageHooks = new Map();   // client click id -> post-click state check (social engage)
+  const uploadHooks = new Map();   // client browser_file_upload id -> args (direct-input retry when no chooser)
   ${BROWSER_GATE_LIFECYCLE_SOURCE}
   const gateLifecycle = createGateLifecycle();
   let currentUrl = '';
@@ -3519,6 +3632,7 @@ async function main() {
             const engageIntent = socialEngageIntent(name, args);
             if (engageIntent) { void forwardVerifiedSocialClick(msg, forwardedLine, name, args, engageIntent); return; }
             if (RECORDABLE.has(name)) pending.set(msg.id, { name, arguments: args });
+            if (name === 'browser_file_upload') uploadHooks.set(msg.id, args);
             forwardRaw(forwardedLine);
           }).catch((error) => {
             if (!gateLifecycle.settle(msg.id, controller)) return;
@@ -3540,6 +3654,17 @@ async function main() {
     let msg; try { msg = JSON.parse(line); } catch (e) { writeOutput(line); return; }
     // 내부 replay 응답 → waiter 로, client 로는 안 보냄.
     if (msg && typeof msg.id === 'string' && waiters.has(msg.id)) { const r = waiters.get(msg.id); waiters.delete(msg.id); r(msg); return; }
+    // A failed upload (no chooser open) is retried once directly on the page's file input.
+    if (msg && msg.id != null && uploadHooks.has(msg.id)) {
+      const uploadArgs = uploadHooks.get(msg.id); uploadHooks.delete(msg.id);
+      const lastClick = [...recording].reverse().find((step) => step && step.name === 'browser_click');
+      const lastRef = lastClick && lastClick.arguments ? (lastClick.arguments.target || lastClick.arguments.ref || '') : '';
+      void uploadWithoutChooser(msg, uploadArgs, lastRef, callChildWithin).then((replacement) => {
+        if (pending.has(msg.id)) { const call = pending.get(msg.id); pending.delete(msg.id); if (!replacement ? !(msg.result && msg.result.isError) && !msg.error : !replacement.isError) recording.push(call); }
+        if (replacement) writeClient({ jsonrpc: '2.0', id: msg.id, result: replacement }); else writeOutput(line);
+      }, () => writeOutput(line));
+      return;
+    }
     // client 원본 액션 응답 → 성공 시 기록.
     if (msg && msg.id != null && pending.has(msg.id)) {
       const call = pending.get(msg.id); pending.delete(msg.id);

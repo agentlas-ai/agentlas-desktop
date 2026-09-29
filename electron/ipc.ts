@@ -61,6 +61,8 @@ import { tryAcquireRuntimeMaintenance } from "./runtime/run-slots";
 import { clearModelCache, listRuntimeModels } from "./runtime/providers";
 import { fireRunAlert, getRunAlerts, setRunAlerts } from "./run-alerts";
 import { installCli, openCliLogin, updateCli, type InstallableCli, type ManageableCli } from "./runtime/install-cli";
+import { defaultRuntimeConnector, probeAllRuntimeAuth, probeRuntimeAuthCached, setRuntimeConnectEmitter } from "./runtime/runtime-connect";
+import { CONNECTABLE_RUNTIMES, type ConnectableRuntime } from "../shared/runtime-connect";
 import { listRuntimeCommands } from "./runtime/commands";
 import { resolveInvocationRunId } from "./runtime/run-id";
 import {
@@ -342,7 +344,7 @@ import {
   signOut,
 } from "./auth";
 import { reconcileMobileBridgeDevicesForAccount } from "./mobile-bridge/runtime";
-import { getBillingCredits, getBillingPlans, getFreshProjectAgentLimitGrant, transferEarnings } from "./billing";
+import { getBillingCheckoutReadiness, getBillingCredits, getBillingPlans, getFreshProjectAgentLimitGrant, transferEarnings } from "./billing";
 import {
   addHubPromptBookmark,
   getHubPrompt,
@@ -2790,6 +2792,7 @@ export function registerIpcHandlers(): void {
   // ── AI 사용 잔액 조회. 과거 Hub 수익 전송 IPC는 refusal-only. ─────────
   ipcMain.handle("billing:getCredits", () => getBillingCredits());
   ipcMain.handle("billing:getPlans", () => getBillingPlans());
+  ipcMain.handle("billing:checkoutReadiness", (_e, input: { plan?: unknown; cycle?: unknown }) => getBillingCheckoutReadiness(input ?? {}));
   ipcMain.handle("billing:transferEarnings", (_e, credits: number) => transferEarnings(credits));
 
   // ── 프롬프트 저장소 — 웹 /api/prompts 프록시(쿠키+Origin, billing 패턴) ──────
@@ -3029,6 +3032,33 @@ export function registerIpcHandlers(): void {
       ?? runtimes.find((runtime) => runtime.kind === kind);
     return openCliLogin(kind, selected?.source);
   });
+  // 연결 팝업(오너 2026-09-29): 확인 → 설치 → 로그인(브라우저) → 확인 → 완료. 초록불은 살아 있는 확인 뒤에만.
+  setRuntimeConnectEmitter((snapshot) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) win.webContents.send("runtime:connectEvent", snapshot);
+    }
+  });
+  const runtimeConnector = defaultRuntimeConnector(
+    (url) => { if (/^https:\/\//i.test(url)) void shell.openExternal(url); },
+    (kind) => {
+      clearDetectCache();
+      if (kind === "claude-code" || kind === "codex") invalidateUsage(kind);
+      emitDesktopStoreChange({ entity: "runtime" });
+    },
+  );
+  app.once("before-quit", () => runtimeConnector.disposeAll());
+  const connectable = (kind: unknown): kind is ConnectableRuntime =>
+    typeof kind === "string" && (CONNECTABLE_RUNTIMES as readonly string[]).includes(kind);
+  ipcMain.handle("runtime:probeAuth", (_e, kind?: ConnectableRuntime | null, force?: boolean) =>
+    connectable(kind) ? probeRuntimeAuthCached(kind, force === true) : probeAllRuntimeAuth(force === true));
+  ipcMain.handle("runtime:connectStart", (_e, kind: ConnectableRuntime) => {
+    if (!connectable(kind)) throw new Error(`Unknown runtime: ${String(kind)}`);
+    return runtimeConnector.start(kind);
+  });
+  ipcMain.handle("runtime:connectCancel", (_e, kind: ConnectableRuntime) => (connectable(kind) ? runtimeConnector.cancel(kind) : null));
+  ipcMain.handle("runtime:connectGet", (_e, kind: ConnectableRuntime) => (connectable(kind) ? runtimeConnector.get(kind) : null));
+  // 앱 시작 때 한 번 — 설치된 런타임의 로그인을 실제로 물어 둔다(결과는 60초 캐시).
+  setTimeout(() => { void probeAllRuntimeAuth(true).catch(() => undefined); }, 4_000).unref?.();
   ipcMain.handle("runtime:updateCli", async (_e, kind: ManageableCli) => {
     const releaseMaintenance = tryAcquireRuntimeMaintenance();
     if (!releaseMaintenance) {
@@ -4702,6 +4732,11 @@ export function registerIpcHandlers(): void {
       // 이어갈 방법이 없는 막다른 길. 재개는 옛 시도를 재실행하지 않으며, 자동화의 옛 발생분
       // 재실행은 자동화 자신의 그래프 조정 관문이 따로 막는다.
       const acknowledged = acknowledgeUncertainLongRunAttempts(current.id, confirmation);
+      // Same as queueAutomaticGoalResume: a person's resume returns a blocked contract to active.
+      // Soak 1.2.50 (Youtube launch 12:53Z): this path skipped it, the continuation's goal gate read
+      // goal_revision_pending, refused silently, and the goal sat "running" with nothing running.
+      getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
+        .run(new Date().toISOString(), current.goalId);
       return resumeDesktopLongRunManually(current.id, acknowledged.version);
     })();
     try {

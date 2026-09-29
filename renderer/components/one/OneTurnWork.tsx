@@ -664,9 +664,15 @@ export function OneTurnWork({
   const terminal = presentation.terminal;
   const hostStop = !active && !steeringInterrupted && hostStopCause ? invocationHostStopCopy(hostStopCause, locale) : null;
   const failed = !active && !steeringInterrupted && !hostStop && (terminal === "failed" || terminal === "cancelled");
-  const workedFor = settledMs != null
-    ? (ko ? `${formatWorkElapsed(settledMs)} 동안 작업` : `Worked for ${formatWorkElapsed(settledMs)}`)
-    : (ko ? "작업" : "Work");
+  // Claude 처럼 접힌 줄이 "무엇을" 했는지 먼저 말한다(레퍼런스 "명령 2개 실행함 ›") — 명령이 있던 턴은
+  // 명령 개수 + 걸린 시간, 없으면 지금처럼 걸린 시간만. 개수는 실제로 돈 명령 행(run 칸)만 센다.
+  const commandCount = visibleCells.filter((cell) => cell.kind === "run").length;
+  const elapsedLabel = settledMs != null ? formatWorkElapsed(settledMs) : null;
+  const workedFor = commandCount > 0
+    ? (ko ? `명령 ${commandCount}개 실행함${elapsedLabel ? ` · ${elapsedLabel}` : ""}` : `Ran ${commandCount} command${commandCount === 1 ? "" : "s"}${elapsedLabel ? ` · ${elapsedLabel}` : ""}`)
+    : settledMs != null
+      ? (ko ? `${formatWorkElapsed(settledMs)} 동안 작업` : `Worked for ${formatWorkElapsed(settledMs)}`)
+      : (ko ? "작업" : "Work");
   return (
     <>
     <section

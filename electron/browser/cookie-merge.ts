@@ -132,3 +132,76 @@ export function decideRuntimeCookieFeed(input: {
   // 세션 쿠키(0)끼리이거나 전용 쪽이 같거나 더 새것이면 살아 있는 쪽을 지킨다.
   return incoming > existing ? "feed" : "keep";
 }
+
+/**
+ * 한 번에 넣을 쿠키를 **로그인 묶음 단위로** 고른다(자동 갱신 전용 판정, 사용자가 누른 가져오기는
+ * 원본이 전부 이긴다).
+ *
+ * ★오너 신고 "왜 자꾸 로그아웃되냐" (09-27~) — 실측 2026-09-29(오너 기기, 이름·도메인·시각만):
+ *   전용 크롬의 .youtube.com 에는 __Secure-3PSID·3PAPISID·1PSIDTS·3PSIDTS·3PSIDCC 만 있고
+ *   SID·HSID·SSID·APISID·SAPISID·__Secure-1PSID·1PAPISID·LOGIN_INFO 가 **없었다**. 평소 크롬(원본)에는
+ *   전부 있다. 같은 저장소의 .google.com 은 __Secure-1PSID 가 21:27:30 발급, SID·HSID·PSIDTS 는
+ *   21:45:18 투입 — 한 로그인의 쿠키가 두 세대로 섞여 있다. 자동화가 선 로그인 벽 9건은 전부
+ *   youtube.com/signin → accounts.google.com accountchooser 였다(run_events 09-27~29).
+ *   원인은 쿠키 **한 줄씩** 내리던 판정(decideRuntimeCookieFeed·decideNativeCookieWrite): 목적지에
+ *   묶음 일부만 남아 있으면 "있는 줄은 지키고 없는 줄만 넣기" 가 되어 두 세션을 섞거나, 반쪽 묶음을
+ *   "살아 있는 세션"으로 여겨 영영 채우지 않는다. 섞인·반쪽 로그인은 사이트가 로그인으로 받지 않는다.
+ *
+ * 규칙(로그인 쿠키 이름을 아는 묶음만; 모르는 사이트는 perCookie 그대로):
+ *   - 원본에 그 묶음의 로그인 쿠키가 없으면 → 줄 단위 판정(옮길 로그인이 없다).
+ *   - 목적지가 원본이 가진 로그인 쿠키 이름을 **모두** 갖고 있으면 → 묶음 전체를 지킨다(아무것도
+ *     넣지 않는다). 목적지 쪽이 그 사이 회전한 살아 있는 세션일 수 있다 — 섞지 않는다.
+ *   - 하나라도 빠졌으면(반쪽·없음) → 원본의 그 묶음 쿠키를 **전부** 넣는다(한 세대로 맞춘다).
+ * 묶음 = 로그인을 함께 발급하는 등록 가능 도메인들(youtube.com + google.com 은 한 묶음).
+ */
+export interface SessionGroupCookie {
+  domain: string;
+  name: string;
+  path: string;
+}
+
+export function planSessionGroupFeed<T extends SessionGroupCookie>(input: {
+  explicitImport: boolean;
+  incoming: readonly T[];
+  /** 목적지에 지금 있는(만료 안 된) 쿠키. */
+  existing: readonly SessionGroupCookie[];
+  /** 쿠키 호스트 → 로그인 묶음 키와 그 호스트의 사이트(등록 가능 도메인). 로그인 쿠키 이름을 모르는 사이트는 null. */
+  groupOf: (host: string) => { group: string; site: string } | null;
+  /** 쿠키 호스트 → 그 사이트의 로그인 쿠키 이름들(모르면 null). */
+  sessionNamesFor: (host: string) => readonly string[] | null;
+  /** 묶음 밖(모르는 사이트)이거나 원본에 로그인이 없는 묶음의 줄 단위 판정. */
+  perCookie: (cookie: T) => "feed" | "keep";
+}): { feed: T[]; keptGroups: string[]; replacedGroups: string[] } {
+  if (input.explicitImport) return { feed: [...input.incoming], keptGroups: [], replacedGroups: [] };
+  const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
+  const loginNames = (cookies: readonly SessionGroupCookie[], group: string) => {
+    const names = new Set<string>();
+    for (const cookie of cookies) {
+      const h = host(cookie.domain);
+      const at = input.groupOf(h);
+      if (at?.group !== group) continue;
+      const known = input.sessionNamesFor(h);
+      if (known?.includes(cookie.name)) names.add(`${at.site}\u0000${cookie.name}`);
+    }
+    return names;
+  };
+  const decision = new Map<string, "keep-group" | "replace-group" | "per-cookie">();
+  for (const cookie of input.incoming) {
+    const group = input.groupOf(host(cookie.domain))?.group;
+    if (!group || decision.has(group)) continue;
+    const source = loginNames(input.incoming, group);
+    if (source.size === 0) { decision.set(group, "per-cookie"); continue; }
+    const destination = loginNames(input.existing, group);
+    decision.set(group, [...source].every((name) => destination.has(name)) ? "keep-group" : "replace-group");
+  }
+  const feed: T[] = [];
+  for (const cookie of input.incoming) {
+    const group = input.groupOf(host(cookie.domain))?.group;
+    const verdict = group ? decision.get(group) : undefined;
+    if (verdict === "keep-group") continue;
+    if (verdict === "replace-group") { feed.push(cookie); continue; }
+    if (input.perCookie(cookie) === "feed") feed.push(cookie);
+  }
+  const groups = (wanted: string) => [...decision].filter(([, verdict]) => verdict === wanted).map(([group]) => group).sort();
+  return { feed, keptGroups: groups("keep-group"), replacedGroups: groups("replace-group") };
+}

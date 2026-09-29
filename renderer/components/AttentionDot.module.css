@@ -1,0 +1,61 @@
+/* 파란 점 — "오너가 봐야 할 것이 화면 밖에 있다". 색은 --attention(진짜 파랑) 토큰이다.
+   One 조직도의 읽지 않은 결과 점(OneOrgChart .unreadDot)과 같은 색·같은 뜻이다.
+   hover·선택된 행 위에서도 읽히도록 흰 테두리 2px(비텍스트 대비 3:1 이상 — QA 가 잰다). */
+.dot {
+  display: inline-block;
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--attention);
+  box-shadow: 0 0 0 2px var(--white);
+  vertical-align: middle;
+}
+
+.button {
+  position: relative;
+  padding: 0;
+  border: 0;
+  cursor: pointer;
+}
+
+/* 8px 점은 누르기엔 작다 — 보이는 크기는 그대로, 누를 수 있는 곳만 넓힌다. */
+.button::before {
+  content: "";
+  position: absolute;
+  inset: -8px;
+  border-radius: 50%;
+}
+
+.button:focus-visible {
+  outline: 2px solid var(--attention);
+  outline-offset: 3px;
+}
+
+/* 전환기가 덮인 동안(첫 실행 안내)만 — 평소엔 보이지 않는다. */
+.covered {
+  display: none;
+}
+
+:global(body:has([aria-labelledby="work-onboarding-title"])) .covered {
+  position: fixed;
+  top: 64px;
+  left: 20px;
+  z-index: 1401;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+}
+
+.covered:focus-visible {
+  outline: 2px solid var(--attention);
+  outline-offset: 2px;
+}

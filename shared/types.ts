@@ -15,6 +15,8 @@ import type {
   BrowserCredentialScanResult,
 } from "./browser-credentials";
 import type { BrowserProfileImportAPI } from "./browser-profile-import";
+import type { BrowserSessionProbeResult } from "./browser-session-probe";
+export type { BrowserSessionProbeResult } from "./browser-session-probe";
 import type { OberonTitleSpec } from "./oberon-titles";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import type { DurableOneSurfaceResult } from "./one-surface-durable";
@@ -6226,7 +6228,16 @@ export interface BillingPlanOffer {
   agentMailAddresses?: number;
   agentMailMonthlyRecipients?: number;
   highlighted: boolean;
+  /** One-line plan tagline. Not sent by the web catalog yet (desktop falls back to its own copy). */
+  tagline?: string;
+  /** Feature keys the web marks as not launched yet ("agentMail", "aliveAgent"…). Not sent yet. */
+  comingSoon?: string[];
 }
+
+/** GET /api/billing/config — checkout availability for one plan/cycle. Machine fields only. */
+export type BillingCheckoutReadiness =
+  | { ok: true; plan: string; cycle: "monthly" | "annual"; open: boolean; code: string | null }
+  | { ok: false; error: "network" | "http" | "invalid" };
 
 export type BillingPlanCatalog =
   | { ok: true; plans: BillingPlanOffer[]; fetchedAt: number }
@@ -7210,6 +7221,8 @@ export interface AgentlasIpc {
     getCredits: () => Promise<HubCreditBalance>;
     /** Public plan catalog from the deployed web. Optional on older preloads. */
     getPlans?: () => Promise<BillingPlanCatalog>;
+    /** Is checkout open for this plan/cycle? Asked only after "Upgrade" is pressed. Optional on older preloads. */
+    checkoutReadiness?: (input: { plan: string; cycle: "monthly" | "annual" }) => Promise<BillingCheckoutReadiness>;
     transferEarnings: (credits: number) => Promise<EarningsTransferResult>;
   };
   /** 프롬프트 저장소 — 웹 프롬프트 카탈로그 탐색/열람/맛보기/저장(북마크). Hub 메뉴와 동형. */
@@ -7382,6 +7395,16 @@ export interface AgentlasIpc {
     openCliLogin: (
       kind: "claude-code" | "codex" | "antigravity" | "kimi" | "grok",
     ) => Promise<{ ok: boolean; message: string; command?: string }>;
+    /** 살아 있는 인증 확인(auth status 명령·로그인 필요한 서버 호출). kind 없으면 전부. 60초 캐시. */
+    probeAuth?: {
+      (kind: import("./runtime-connect").ConnectableRuntime, force?: boolean): Promise<import("./runtime-connect").RuntimeAuthProbe>;
+      (kind?: null, force?: boolean): Promise<import("./runtime-connect").RuntimeAuthProbe[]>;
+    };
+    /** 연결 팝업 — 확인 → 설치 → 로그인(브라우저) → 확인 → 완료. 진행은 onConnectEvent 로 온다. */
+    connectStart?: (kind: import("./runtime-connect").ConnectableRuntime) => Promise<import("./runtime-connect").RuntimeConnectSnapshot>;
+    connectCancel?: (kind: import("./runtime-connect").ConnectableRuntime) => Promise<import("./runtime-connect").RuntimeConnectSnapshot | null>;
+    connectGet?: (kind: import("./runtime-connect").ConnectableRuntime) => Promise<import("./runtime-connect").RuntimeConnectSnapshot | null>;
+    onConnectEvent?: (handler: (snapshot: import("./runtime-connect").RuntimeConnectSnapshot) => void) => () => void;
     /** CLI를 최신으로 업데이트 — 미설치면 설치, npm 관리본은 재설치, claude는 self-updater. */
     updateCli: (
       kind: "claude-code" | "codex" | "antigravity" | "kimi" | "grok",
@@ -7755,6 +7778,7 @@ export interface AgentlasIpc {
     saveSite: (input: BrowserSiteInput) => Promise<BrowserSite>;
     deleteSite: (site: string) => Promise<{ ok: true }>;
     openLogin: (site: string) => Promise<{ ok: boolean; error?: string }>;
+    probeSession: (site: string) => Promise<BrowserSessionProbeResult>;
     markSession: (site: string, status: BrowserSessionStatus) => Promise<{ ok: boolean; error?: string }>;
     /** 평소 브라우저 프로필 목록과, profileId 를 주면 그 프로필에 로그인된 도메인 목록. */
     scanCredentials: (profileId?: string | null) => Promise<BrowserCredentialScanResult>;

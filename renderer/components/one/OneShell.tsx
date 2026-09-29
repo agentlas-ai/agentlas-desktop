@@ -13,7 +13,7 @@ import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
 import type { ChatHostNotice } from "../../../shared/types";
-import { hostStatusLabel, isQuietHostStatus, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
+import { agiActionNoticeLine, hostStatusLabel, isQuietHostStatus, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "../automation/AutomationChatActivity";
 import { OneGoalControls } from "./OneGoalControls";
@@ -183,6 +183,8 @@ import {
   type OneTaskProjection,
 } from "@/lib/one-task-adapter";
 import { ProductModeMenu } from "./ProductModeMenu";
+import { AttentionDot } from "@/components/AttentionDot";
+import { useChatAttention } from "@/lib/attention";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
 import { OneAdaptiveResult, type OneAgentDraftSeed } from "./OneAdaptiveResult";
@@ -5125,7 +5127,10 @@ export function OneShell() {
       }
       selectedTaskIdRef.current = proposal.binding.taskId;
       selectedConversationIdRef.current = null;
-      router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
+      // 오너가 그 사이 다른 메뉴로 갔으면 끌고 돌아오지 않는다 — 실행은 그대로 시작한다.
+      if (window.location.pathname.startsWith("/one")) {
+        router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
+      }
       await startRun(
         proposal.binding.chatId,
         proposal.binding.taskId,
@@ -5224,7 +5229,9 @@ export function OneShell() {
       if (result.kind !== "reserved") throw new Error("One could not reserve the work safely");
       selectedTaskIdRef.current = proposal.binding.taskId;
       selectedConversationIdRef.current = null;
-      router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
+      if (window.location.pathname.startsWith("/one")) {
+        router.replace(`/one?task=${encodeURIComponent(proposal.binding.taskId)}`);
+      }
       await startRun(
         proposal.binding.chatId,
         proposal.binding.taskId,
@@ -8226,7 +8233,7 @@ export function OneShell() {
                           {liveWorkBlock}
                         </>}
                         {(visibleText || hasAttachments) && !foldedIntoWork && (drawsAsHostNotice
-                          ? (message.hostNotice?.purpose === "automation-report"
+                          ? (message.hostNotice?.purpose === "automation-report" && !agiActionNoticeLine(message.hostNotice, message.text)
                             // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28).
                             ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={appLocale === "ko" ? "ko" : "en"}
                                 fallback={<HostContinuationNotice text={message.text} locale={appLocale === "ko" ? "ko" : "en"} notice={message.hostNotice} onOpenChat={openDispatchedSession} />} />
@@ -9810,7 +9817,7 @@ export function OneShell() {
           if (action === "mail") {
             // Free plan (no address allowance) → plans; otherwise the Mail tab's create card.
             if (mail.signedIn && mail.entitlement && mail.entitlement.addressLimit > 0) setRailMode("mail");
-            else openPricing();
+            else openPricing("agent-mail");
           } else if (action === "newSession") startNewConversation();
           else if (action === "addTeammate") openCreateAgentDialog();
           else if (action === "work") router.push("/work");
@@ -9847,6 +9854,7 @@ function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLa
   oneName?: string;
 }) {
   const isGroup = item.seatKind === "group" || groupMembers.length > 0;
+  const attention = useChatAttention(item.id);
   const roomTitle = seatLabel?.trim() || briefingSourceName(item.title, locale);
   const unavailableCopy = locale === "ko"
     ? "에이전트가 사라져 세션을 계속할 수 없습니다."
@@ -9869,6 +9877,8 @@ function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLa
         <span className={styles.sessionCopy}>
           <span className={styles.sessionTitleLine}>
             <strong>{roomTitle}</strong>
+            {/* 화면 밖에서 오너를 기다리는 대화(승인·질문·안 본 결과) — 파란 점(lib/attention). */}
+            <AttentionDot counts={attention} locale={locale} className={styles.sessionAttentionDot} />
             {unavailable && <span className={styles.sessionWarning} aria-label={locale === "ko" ? "에이전트 없음" : "Agent unavailable"}><IconAlertTriangle size={14} strokeWidth={2} /></span>}
             <time dateTime={item.updatedAt}>{sessionListTime(item.updatedAt, locale)}</time>
           </span>

@@ -8,7 +8,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { tFor, type Locale } from "@/lib/i18n";
-import type { AgentMailEntitlement, AgentMailMailbox } from "@shared/agent-mail";
+import type { AgentMailEntitlement, AgentMailMailbox, AgentMailStatus } from "@shared/agent-mail";
+import { agentMailOffer } from "@shared/agent-mail-offer";
+import { AgentMailOfferCard } from "@/components/one/mail/AgentMailOfferCard";
+import { PLAN_CHANGED_EVENT } from "@/components/billing/PlanPickerModal";
 import { OneMailSettingsTabs } from "@/components/one/mail/OneMailTabs";
 import { mailErrorText } from "@/components/one/mail/mailErrorText";
 import { useOnePersonaName } from "@/lib/one-persona-name";
@@ -22,24 +25,30 @@ export function AgentMailPanel({ locale }: { locale: string }) {
   const router = useRouter();
   const api = ipc()?.agentMail;
   const [loaded, setLoaded] = useState(false);
-  const [signedIn, setSignedIn] = useState(false);
   const [entitlement, setEntitlement] = useState<AgentMailEntitlement | null>(null);
   const [mailbox, setMailbox] = useState<AgentMailMailbox | null>(null);
   const [error, setError] = useState<{ code: string } | null>(null);
+  const [raw, setRaw] = useState<AgentMailStatus | null>(null);
   const [copied, setCopied] = useState(false);
   const oneName = useOnePersonaName();
 
   const refresh = useCallback(async () => {
     if (!api) return;
-    const status = await api.status();
+    const status = await api.status().catch((): AgentMailStatus => ({ ok: false, code: "network", message: "", status: null }));
     setLoaded(true);
+    setRaw(status);
     if (!status.ok) { setError(status); return; }
-    setSignedIn(status.signedIn);
+    setError(null);
     setEntitlement(status.entitlement);
     setMailbox(status.mailbox);
   }, [api]);
 
   useEffect(() => { void refresh(); }, [refresh]);
+  useEffect(() => {
+    const onPlan = () => { void refresh(); };
+    window.addEventListener(PLAN_CHANGED_EVENT, onPlan);
+    return () => window.removeEventListener(PLAN_CHANGED_EVENT, onPlan);
+  }, [refresh]);
 
   const usage = useMemo(() => {
     if (!entitlement || entitlement.monthlyRecipientLimit <= 0) return null;
@@ -55,15 +64,15 @@ export function AgentMailPanel({ locale }: { locale: string }) {
 
   if (!api || !loaded) return null;
   const active = mailbox?.status === "active";
+  const offerKind = agentMailOffer(raw).kind;
 
   return (
     <section className={styles.panel} aria-labelledby="agent-mail-title">
       <h2 id="agent-mail-title" className={styles.title}>{tFor(lang, "one.mail.settings.title")}</h2>
       <div className={styles.card}>
-        {!signedIn ? (
-          <p className={styles.muted}>{tFor(lang, "one.mail.settings.no_sign_in")}</p>
-        ) : !entitlement || entitlement.addressLimit <= 0 ? (
-          <p className={styles.muted}>{tFor(lang, "one.mail.settings.no_plan")}</p>
+        {offerKind !== "active" && offerKind !== "choose-address" && offerKind !== "provisioning" ? (
+          // Every non-ready state names itself and offers one next step (sign in, plan picker, recheck).
+          <AgentMailOfferCard locale={lang} oneName={oneName} status={raw} reload={refresh} compact />
         ) : !mailbox ? (
           // No address yet: the same "create address" control as One's edit window.
           <OneMailSettingsTabs locale={lang} oneName={oneName} />
@@ -96,7 +105,7 @@ export function AgentMailPanel({ locale }: { locale: string }) {
             </div>
           </>
         )}
-        {error ? <p className={styles.error} role="alert">{mailErrorText(lang, error)}</p> : null}
+        {error && offerKind === "active" ? <p className={styles.error} role="alert">{mailErrorText(lang, error)}</p> : null}
       </div>
     </section>
   );

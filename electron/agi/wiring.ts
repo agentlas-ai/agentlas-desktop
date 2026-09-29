@@ -35,7 +35,8 @@ import { PERSISTENCE_DECISION_SCHEMA, type FailureCauseKind } from "../../shared
 import { AgiActionExecutor, type AgiExecutorDeps, type AgiGoalView, type AgiLoginRecoveryOutcome, type AgiPlanView } from "./actions";
 import { createAgiDeterministicHandler, type AgiUnblockHandlerWithModel } from "./unblock-handler";
 
-export const AGI_ACTION_NOTICE_AUTOMATION_ID = "agi-unblocker";
+export { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
+import { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
 
 type LoginSeam = (input: { domain: string; goalId: string; runId: string; chatId: string | null }) => AgiLoginRecoveryOutcome | Promise<AgiLoginRecoveryOutcome>;
 let loginSeam: LoginSeam | null = agiRunLoginRecovery;
@@ -134,7 +135,8 @@ export function createAgiExecutor(): AgiActionExecutor {
       const already = getDb().prepare("SELECT id FROM chat_messages WHERE chat_id = ? AND host_notice_json LIKE ? LIMIT 1")
         .get(chatId, `%"runId":${JSON.stringify(runId)}%`);
       if (already) return;
-      appendChatMessage(chatId, "system", `AGI\n\n${currentUiLocale() === "ko" ? text.ko : text.en}`, {
+      // One line, not a report card with a separate "AGI" name line (soak 1.2.50 owner screenshot).
+      appendChatMessage(chatId, "system", currentUiLocale() === "ko" ? text.ko : text.en, {
         hostNotice: { purpose: "automation-report", runId, automationId: AGI_ACTION_NOTICE_AUTOMATION_ID },
       });
       emitDesktopStoreChange({ entity: "chat", id: chatId });

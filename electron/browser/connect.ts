@@ -7,7 +7,7 @@
 // 승인 게이트: 결제(payment)는 매번 확인. 그 외는 "한 번만 / 항상 승인 / 거부", always만 기억.
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chromium } from "playwright";
+import { probeBrowserSession } from "./session-probe";
 import {
   acquireBrowserCdpLease,
   browserCdpProfilePath,
@@ -127,7 +127,7 @@ export async function browserDeleteSite(site: string): Promise<{ ok: true }> {
 
 // ── 전용 프로필 로그인 창 ───────────────────────────────────────
 // 전용 CDP 프로필로 크롬 창을 headful 로 열어(MCP 없이) 사용자가 직접 로그인하게 한다.
-// 사용자가 명시적으로 세션 저장을 누르면 valid 로 기록(쿠키는 전용 프로필에 영속 → 이후 자동화가 재사용).
+// 세션 저장은 실제 인증 화면 확인 후 기록한다(쿠키는 전용 프로필에 영속).
 const openLoginChildren = new Map<string, ReturnType<typeof spawn>>();
 type BrowserOpenLoginResult = { ok: boolean; error?: string };
 const openLoginFlights = new Map<string, Promise<BrowserOpenLoginResult>>();
@@ -348,39 +348,15 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
   }
 }
 
-async function verifyXSession(): Promise<boolean> {
-  if (!(await browserCdpPortReady())) return false;
-  const ownership = await reconcileBrowserCdpOwnerWithRetry();
-  if (ownership.state !== "owned") return false;
-  const connection = await chromium.connectOverCDP(`http://127.0.0.1:${browserCdpPort()}`);
-  try {
-    const context = connection.contexts()[0];
-    if (!context) return false;
-    const cookies = await context.cookies(["https://x.com/", "https://twitter.com/"]);
-    const names = new Set(cookies.map((cookie) => cookie.name));
-    if (!names.has("auth_token") || !names.has("ct0")) return false;
-    const page = await context.newPage();
-    try {
-      await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: 20_000 });
-      if (/\/i\/flow\/login|\/login(?:[/?#]|$)/i.test(page.url())) return false;
-      return await page.locator('[data-testid="SideNav_AccountSwitcher_Button"], [data-testid="primaryColumn"] [aria-label="Home timeline"]').first().isVisible({ timeout: 8_000 }).catch(() => false);
-    } finally {
-      await page.close().catch(() => undefined);
-    }
-  } finally {
-    await connection.close().catch(() => undefined);
-  }
-}
-
-/** 사용자가 UI에서 저장을 눌러도 X는 실제 전용 프로필에서 로그인된 경우에만 valid다. */
+/** Mark valid only after the dedicated browser shows authenticated account UI. */
 export async function browserMarkSession(site: string, status: "valid" | "expired" | "none"): Promise<{ ok: boolean; error?: string }> {
   const norm = normalizeSite(site);
-  if (status === "valid" && norm === "x.com") {
-    const verified = await verifyXSession().catch(() => false);
-    if (!verified) {
-      setBrowserSession(norm, "none");
-      logBrowserAction({ site: norm, action: "session.verify", result: "not-signed-in" });
-      return { ok: false, error: currentUiLocale() === "ko" ? "X 로그인을 실제 전용 브라우저에서 확인하지 못했습니다. 열린 창에서 로그인한 뒤 다시 저장해 주세요." : "Could not confirm the X sign-in in the dedicated browser. Sign in in the open window, then save again." };
+  if (status === "valid") {
+    const probe = await probeBrowserSession(norm);
+    if (probe.state !== "signed-in") {
+      if (probe.state === "signed-out") setBrowserSession(norm, "none");
+      logBrowserAction({ site: norm, action: "session.verify", result: probe.state, meta: { reasonCode: probe.reasonCode ?? "authentication-unconfirmed", evidence: probe.evidence } });
+      return { ok: false, error: currentUiLocale() === "ko" ? "전용 브라우저에서 로그인을 확인하지 못했습니다. 열린 창에서 로그인한 뒤 다시 확인해 주세요." : "Could not confirm sign-in in the dedicated browser. Sign in in the open window, then check again." };
     }
   }
   setBrowserSession(norm, status);

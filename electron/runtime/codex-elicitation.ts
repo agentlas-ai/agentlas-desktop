@@ -5,6 +5,8 @@ export const CODEX_MCP_ELICITATION_METHOD = "mcpServer/elicitation/request" as c
 type ElicitationAction = "accept" | "decline" | "cancel";
 type ElicitationReason =
   | "answered"
+  | "policy-allowed"
+  | "policy-denied"
   | "declined"
   | "timeout"
   | "no-surface"
@@ -22,10 +24,22 @@ export interface CodexMcpElicitationContext {
   signal?: AbortSignal;
   /** Rechecked after the last answer, immediately before an accept response. */
   isCurrent: () => boolean;
+  /**
+   * Codex's own MCP tool-call approval (see codexMcpToolApprovalFrom). When present, that request is
+   * answered by the same permission arbiter that answers Codex's bash/apply_patch approvals instead of
+   * becoming an Accept/Decline question to the owner.
+   */
+  decideToolApproval?: CodexMcpToolApprovalDecider;
 }
 
+export type CodexMcpToolApprovalDecision = "allow_once" | "allow_session" | "deny";
+export type CodexMcpToolApprovalDecider = (input: {
+  serverName: string;
+  toolName: string;
+}) => Promise<CodexMcpToolApprovalDecision>;
+
 export interface CodexMcpElicitationResult {
-  response: { action: ElicitationAction; content?: Record<string, unknown> };
+  response: { action: ElicitationAction; content?: Record<string, unknown>; _meta?: Record<string, unknown> };
   receipt: {
     serverName: string;
     chatId: string;
@@ -243,6 +257,39 @@ function questionFor(message: string, field: Field, retry: boolean): AskUserRequ
   };
 }
 
+/*
+ * Codex asks its client to approve a call to one of Codex's own MCP servers (the owner's ~/.codex
+ * playwright, cua_repl, ...) through an MCP elicitation with an EMPTY form and a privileged marker:
+ *   _meta.codex_approval_kind = "mcp_tool_call", _meta.persist = "session" | ["session","always"]
+ * (openai/codex, Apache-2.0: codex-rs/protocol/src/mcp_approval_meta.rs:4-19,
+ *  codex-rs/core/src/mcp_tool_call.rs:1915-2040 builds it, :2131-2170 parses the answer; an accept
+ *  whose _meta.persist is "session" becomes ApprovedForSession and is not asked again this session).
+ * Codex itself skips the prompt only under approval_policy=never with full disk access
+ * (codex-rs/codex-mcp/src/mcp/mod.rs:91-110), so every write run and every read run reached this path.
+ * We used to turn it into an Accept/Decline sheet: on 2026-09-29 teammate runs c2523fb2 (playwright)
+ * and 6118d8d4 (cua_repl) waited the full 10-minute ask timeout and were declined, and the sheet
+ * appeared over Settings. The approval is a tool permission, not a question, so it is answered by
+ * the permission arbiter exactly like Codex's bash approval.
+ */
+export function codexMcpToolApprovalFrom(params: Record<string, unknown>): { serverName: string; toolName: string; persistSession: boolean } | null {
+  const meta = record(params._meta);
+  if (!meta || meta.codex_approval_kind !== "mcp_tool_call") return null;
+  if (params.mode !== "form") return null;
+  const schema = record(params.requestedSchema);
+  const properties = record(schema?.properties);
+  // An approval carries no form. Anything asking for fields is a real question for the owner.
+  if (!schema || schema.type !== "object" || !properties || Object.keys(properties).length > 0) return null;
+  if (Array.isArray(schema.required) && schema.required.length > 0) return null;
+  const serverName = boundedText(params.serverName, 200);
+  if (!serverName) return null;
+  const message = typeof params.message === "string" ? params.message : "";
+  const quoted = /run tool "([^"\n]{1,200})"/u.exec(message)?.[1];
+  const toolName = boundedText(meta.tool_name, 200) ?? boundedText(quoted, 200) ?? boundedText(meta.tool_title, 200) ?? "unknown";
+  const persist = meta.persist;
+  const persistSession = persist === "session" || (Array.isArray(persist) && persist.includes("session"));
+  return { serverName, toolName: toolName.replace(/[^a-zA-Z0-9_.:-]/g, "_"), persistSession };
+}
+
 function finish(
   context: CodexMcpElicitationContext,
   serverName: string,
@@ -279,6 +326,21 @@ export async function answerCodexMcpElicitation(
   if (params.mode === "url" || params.mode === "openai/form" || params.mode === "openaiForm") {
     return finish(context, serverName, "cancel", "unsupported", 0);
   }
+  const toolApproval = context.decideToolApproval ? codexMcpToolApprovalFrom(params) : null;
+  if (toolApproval && context.decideToolApproval) {
+    let decision: CodexMcpToolApprovalDecision;
+    try {
+      decision = await context.decideToolApproval({ serverName: toolApproval.serverName, toolName: toolApproval.toolName });
+    } catch {
+      decision = "deny"; // an arbiter failure is never an approval
+    }
+    if (decision === "deny") return finish(context, toolApproval.serverName, "decline", "policy-denied", 0);
+    if (!context.isCurrent() || context.signal?.aborted) return finish(context, toolApproval.serverName, "cancel", "stale", 0);
+    const result = finish(context, toolApproval.serverName, "accept", "policy-allowed", 0, {});
+    if (decision === "allow_session" && toolApproval.persistSession) result.response._meta = { persist: "session" };
+    return result;
+  }
+
   const form = parseForm(params);
   if (!form) return finish(context, serverName, "cancel", "invalid-request", 0);
 

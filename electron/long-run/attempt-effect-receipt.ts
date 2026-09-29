@@ -35,7 +35,16 @@ export interface AttemptEffectReceipt {
   readOnlyCalls: number;
   /** Recorded calls whose name/arguments do not prove observation-only: the only things a look must judge. */
   candidates: AttemptEffectCandidate[];
+  /**
+   * App registrations the host itself performed and recorded as completed (automation.create/update/pause/resume
+   * with a non-error result). Their effect is known — it is this app's own state — so a read-only look is never
+   * asked about them. Soak 1.2.50 (X Marketing 11:48Z): two such calls were "in question", the look could not
+   * read the app state folder, answered unknown, and the goal waited for another look.
+   */
+  hostConfirmed: AttemptEffectCandidate[];
 }
+
+const HOST_REGISTRATION_TOOLS = new Set(["automation.create", "automation.update", "automation.pause", "automation.resume"]);
 
 interface Row { id: string; seq: number; kind: string; payload_json: string }
 
@@ -48,7 +57,7 @@ function parse(row: Row): Record<string, unknown> | null {
 
 export function readAttemptEffectReceipt(invocationRunId: string): AttemptEffectReceipt {
   const open = (openReason: string, candidates: AttemptEffectCandidate[] = [], readOnlyCalls = 0): AttemptEffectReceipt =>
-    ({ invocationRunId, closed: false, openReason, readOnlyCalls, candidates });
+    ({ invocationRunId, closed: false, openReason, readOnlyCalls, candidates, hostConfirmed: [] });
   const rows = getDb().prepare("SELECT id, seq, kind, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC")
     .all(invocationRunId) as Row[];
   const terminal = [...rows].reverse().find((row) => TERMINAL_KINDS.has(row.kind));
@@ -68,7 +77,7 @@ export function readAttemptEffectReceipt(invocationRunId: string): AttemptEffect
   if (operations.some((operation) => typeof operation?.toolId !== "string" || operation.resultObserved !== true)) return open("operation_open");
 
   // Every recorded call, grouped by id; each distinct (name, arguments) pair under an id is judged (ids are reused).
-  const calls = new Map<string, Array<{ toolName: string; toolArgs: unknown }>>();
+  const calls = new Map<string, Array<{ toolName: string; toolArgs: unknown; completed: boolean }>>();
   let toolEvents = 0;
   for (const row of rows) {
     if (row.kind !== "mcp_tool-use") continue;
@@ -79,7 +88,8 @@ export function readAttemptEffectReceipt(invocationRunId: string): AttemptEffect
     if (row.seq > effectRow.seq) return open("call_after_receipt");
     if (typeof data.toolId !== "string" || !data.toolId) return open("call_without_id");
     const list = calls.get(data.toolId) ?? [];
-    list.push({ toolName: data.toolName, toolArgs: data.toolArgs });
+    list.push({ toolName: data.toolName, toolArgs: data.toolArgs,
+      completed: data.toolIsError === false && typeof data.toolResultPreview === "string" && data.toolResultPreview.trim() !== "" });
     calls.set(data.toolId, list);
   }
   if (boundary.observedToolEventCount !== toolEvents) return open("call_count_mismatch");
@@ -87,8 +97,15 @@ export function readAttemptEffectReceipt(invocationRunId: string): AttemptEffect
   if (operationIds.size !== calls.size || [...calls.keys()].some((id) => !operationIds.has(id))) return open("operation_set_mismatch");
 
   const candidates: AttemptEffectCandidate[] = [];
+  const hostConfirmed: AttemptEffectCandidate[] = [];
   let readOnlyCalls = 0;
   for (const [toolId, list] of calls) {
+    if (list.every((call) => HOST_REGISTRATION_TOOLS.has(call.toolName)) && list.some((call) => call.completed)) {
+      const named = list.find((call) => call.toolArgs !== undefined && call.toolArgs !== null && call.toolArgs !== "") ?? list[0]!;
+      const args = typeof named.toolArgs === "string" ? named.toolArgs : named.toolArgs == null ? "" : JSON.stringify(named.toolArgs);
+      hostConfirmed.push({ toolId, toolName: named.toolName.slice(0, 120), args: args.replace(/\s+/g, " ").trim().slice(0, 240) });
+      continue;
+    }
     // Judge the arguments a row actually carried; a name recorded only without arguments is judged by name alone.
     const withArgs = list.filter((call) => call.toolArgs !== undefined && call.toolArgs !== null && call.toolArgs !== "");
     const judged = [...withArgs, ...list.filter((call) => !withArgs.some((other) => other.toolName === call.toolName))
@@ -98,7 +115,7 @@ export function readAttemptEffectReceipt(invocationRunId: string): AttemptEffect
     const args = typeof unproven.toolArgs === "string" ? unproven.toolArgs : unproven.toolArgs === undefined ? "" : JSON.stringify(unproven.toolArgs);
     candidates.push({ toolId, toolName: unproven.toolName.slice(0, 120), args: args.replace(/\s+/g, " ").trim().slice(0, 240) });
   }
-  return { invocationRunId, closed: true, openReason: null, readOnlyCalls, candidates };
+  return { invocationRunId, closed: true, openReason: null, readOnlyCalls, candidates, hostConfirmed };
 }
 
 /**
@@ -113,7 +130,8 @@ export function receiptSettlesAttempts(attempts: ReadonlyArray<{ id: string; inv
     if (!attempt.invocationRunId) return null;
     let receipt: AttemptEffectReceipt;
     try { receipt = readAttemptEffectReceipt(attempt.invocationRunId); } catch { return null; }
-    if (!receipt.closed || receipt.candidates.length) return null;
+    // A host-confirmed registration took effect: never settle that attempt as "not_done".
+    if (!receipt.closed || receipt.candidates.length || receipt.hostConfirmed.length) return null;
     readOnlyCalls += receipt.readOnlyCalls;
   }
   return { readOnlyCalls,

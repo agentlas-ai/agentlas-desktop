@@ -1,4 +1,5 @@
 import { bindWorkAttachmentRun, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
+import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
@@ -1335,7 +1336,7 @@ export class InvocationService {
     if (boundGoal?.status === "paused" && !resumesPausedGoal) {
       throw new Error("goal_explicit_resume_required");
     }
-    let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked" } | null = null;
+    let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked"; ownerAnswer?: boolean } | null = null;
     // The request's taskIntent is only a claim for One: semantic intake may
     // promote a conversation to a task below. Defer blocked-goal eligibility
     // until runReq carries that effective intent; otherwise a valid One task
@@ -1723,8 +1724,13 @@ export class InvocationService {
       ...(attachmentCapabilitySummary ? { attachmentCapabilitySummary } : {}),
     };
     if (effectObservation && runReq.permissions !== "read") throw new Error("effect_observation_must_be_read_only");
+    // The owner's reply to the Goal's own question is the resume, however short it is ("승인"): soak 1.2.50,
+    // Youtube launch — the answer was classified a conversation turn, the Goal stayed blocked
+    // goal_owner_answer_required from 2026-09-28 11:51Z until a manual resume the next day.
+    const reopen = boundGoal ? stoppedGoalMessageReopens(boundGoal, runReq.taskIntent) : { reopens: false, ownerAnswer: false };
+    const ownerAnswersGoalQuestion = reopen.ownerAnswer;
     if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused")
-      && localUserTurn && runReq.taskIntent !== "conversation") {
+      && localUserTurn && reopen.reopens) {
       // A new task message must not silently reactivate a claimed wait whose
       // successor may already have reached an external runtime before crash.
       const recoveryBlocker = goalResumeRecoveryBlockerCode(boundGoal.blockedReason);
@@ -1740,7 +1746,8 @@ export class InvocationService {
         || (boundGoal.budget.wallclockDeadline != null
           && Date.parse(boundGoal.budget.wallclockDeadline) <= Date.now());
       if (budgetExhausted) throw new Error(longRunMonetaryRefusal(boundGoal) ?? "auto_goal_budget_exhausted");
-      stoppedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version, status: boundGoal.status };
+      stoppedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version, status: boundGoal.status,
+        ...(ownerAnswersGoalQuestion ? { ownerAnswer: true } : {}) };
     }
     const record: RunRecord = {
       controller,
@@ -3065,7 +3072,7 @@ export class InvocationService {
           this.publishRunEvent(record, { runId, chatId: chat.id, event: noticeEvent });
         };
         if (stoppedGoalReactivation) {
-          if (runReq.taskIntent === "conversation") {
+          if (runReq.taskIntent === "conversation" && !stoppedGoalReactivation.ownerAnswer) {
             stoppedGoalReactivation = null;
             record.automaticGoalId = undefined;
             record.longRunProjection = undefined;

@@ -2,7 +2,6 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { FileThumb } from "./FileThumb";
-import { SheetDataView, isSheetDataFile } from "./SheetDataView";
 import { IconArrowLeft, IconFileText, IconFileUp, IconFolder, IconImage, IconLayers } from "@/components/Icon";
 import { ChartBlock } from "@/components/ChartBlock";
 import { HtmlVisualBlock } from "@/components/HtmlVisualBlock";
@@ -176,26 +175,9 @@ export function ArtifactsRailPanel({
     [files, items],
   );
   const openRun = useCallback((item: OneActivityArtifact) => requestOneArtifactOpen({ binding: item.binding, label: item.label }), []);
-  // 표 파일(xlsx·csv·tsv)은 여기 "데이터 보기"(정렬·필터·빠른 차트)로, 원본 모양은 "원본 보기"(기존 격자 뷰어).
-  const [sheetFile, setSheetFile] = useState<ChatFileItem | null>(null);
-  useEffect(() => { setSheetFile(null); }, [chatId]);
-  const openFile = useCallback((file: ChatFileItem) => {
-    if (file.kind === "file" && file.fileUrl && isSheetDataFile(file.name)) { setSheetFile(file); return; }
-    void openChatFileFromList(file);
-  }, []);
-
-  if (!opened && sheetFile?.fileUrl) {
-    return <section className={styles.viewer} data-artifacts-viewer="sheet">
-      <header className={styles.viewerHead}>
-        <button type="button" className={styles.back} onClick={() => setSheetFile(null)} aria-label={ko ? "산출물 목록으로" : "Back to artifacts"}>
-          <IconArrowLeft size={14} />
-        </button>
-        <strong title={sheetFile.name}>{sheetFile.name}</strong>
-      </header>
-      <SheetDataView key={sheetFile.tabId} name={sheetFile.name} fileUrl={sheetFile.fileUrl} chatId={chatId} locale={locale}
-        onOpenOriginal={() => void openChatFileFromList(sheetFile)} />
-    </section>;
-  }
+  // 파일 카드는 Claude 처럼 큰 파일 뷰어로 연다(레퍼런스 f011·f014: 카드 → 오른쪽 뷰어). xlsx 는 그 뷰어 안에
+  // Data·Charts·표 도구 탭이 있다(정렬·필터·빠른 차트는 "표 도구"). 목록 안에서 따로 여는 길은 두지 않는다.
+  const openFile = useCallback((file: ChatFileItem) => { void openChatFileFromList(file); }, []);
 
   if (opened) {
     return <section className={styles.viewer} data-artifacts-viewer={opened.kind}>

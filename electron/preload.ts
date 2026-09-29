@@ -35,6 +35,7 @@ import type {
   ScheduleSpec,
 } from "../shared/types";
 import type { PluginBuilderProgressEvent } from "../shared/plugin-builder";
+import type { ConnectableRuntime, RuntimeConnectSnapshot } from "../shared/runtime-connect";
 import type {
   SiteActivityEvent,
   SiteAgentAppPublishBackendRequest,
@@ -145,6 +146,7 @@ const api: AgentlasIpc = {
     downloads: (input) => ipcRenderer.invoke("browserUi:downloads", input),
     downloadAction: (input) => ipcRenderer.invoke("browserUi:downloadAction", input),
     clearData: (input) => ipcRenderer.invoke("browserUi:clearData", input),
+    ladderAction: (input) => ipcRenderer.invoke("browserUi:ladderAction", input),
   },
   localModelMigration: {
     snapshot: () => ipcRenderer.invoke("localModelMigration:snapshot"),
@@ -308,10 +310,12 @@ const api: AgentlasIpc = {
   billing: {
     getCredits: () => ipcRenderer.invoke("billing:getCredits"),
     getPlans: () => ipcRenderer.invoke("billing:getPlans"),
+    checkoutReadiness: (input) => ipcRenderer.invoke("billing:checkoutReadiness", input ?? {}),
     transferEarnings: (credits: number) => ipcRenderer.invoke("billing:transferEarnings", credits),
   },
   agentMail: {
     status: () => ipcRenderer.invoke("agentMail:status"),
+    joinWaitlist: () => ipcRenderer.invoke("agentMail:joinWaitlist"),
     issue: (input) => ipcRenderer.invoke("agentMail:issue", input ?? {}),
     updateMailbox: (patch) => ipcRenderer.invoke("agentMail:updateMailbox", patch ?? {}),
     checkAddress: (localPart) => ipcRenderer.invoke("agentMail:checkAddress", localPart),
@@ -471,6 +475,16 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("runtime:openCliLogin", kind),
     updateCli: (kind: "claude-code" | "codex" | "antigravity" | "kimi" | "grok") =>
       ipcRenderer.invoke("runtime:updateCli", kind),
+    probeAuth: (kind?: ConnectableRuntime | null, force?: boolean) =>
+      ipcRenderer.invoke("runtime:probeAuth", kind ?? null, force === true),
+    connectStart: (kind: ConnectableRuntime) => ipcRenderer.invoke("runtime:connectStart", kind),
+    connectCancel: (kind: ConnectableRuntime) => ipcRenderer.invoke("runtime:connectCancel", kind),
+    connectGet: (kind: ConnectableRuntime) => ipcRenderer.invoke("runtime:connectGet", kind),
+    onConnectEvent: (handler: (snapshot: RuntimeConnectSnapshot) => void) => {
+      const listener = (_event: unknown, snapshot: RuntimeConnectSnapshot) => handler(snapshot);
+      ipcRenderer.on("runtime:connectEvent", listener);
+      return () => ipcRenderer.removeListener("runtime:connectEvent", listener);
+    },
     listCommands: () => ipcRenderer.invoke("runtime:listCommands"),
     listModels: (sel) => ipcRenderer.invoke("runtime:listModels", sel),
     listRoleMembers: () => ipcRenderer.invoke("runtime:listRoleMembers"),
@@ -740,6 +754,7 @@ const api: AgentlasIpc = {
     saveSite: (input) => ipcRenderer.invoke("browser:saveSite", input),
     deleteSite: (site: string) => ipcRenderer.invoke("browser:deleteSite", site),
     openLogin: (site: string) => ipcRenderer.invoke("browser:openLogin", site),
+    probeSession: (site: string) => ipcRenderer.invoke("browser:probeSession", site),
     markSession: (site: string, status) => ipcRenderer.invoke("browser:markSession", site, status),
     scanCredentials: (profileId?: string | null) => ipcRenderer.invoke("browser:scanCredentials", profileId ?? null),
     importCredentials: (profileId: string, domains: string[]) =>

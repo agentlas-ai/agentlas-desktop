@@ -967,17 +967,27 @@ const Bubble = memo(function Bubble({
   // hook-order crash exactly at that transition.
   const workspaceRootForRun = useContext(WorkspaceRootContext);
   const workActivity = useMemo(() => workActivityStateFromMessage(message), [message]);
-  const workActivities = useMemo(
-    () => message.activityRuns?.length
+  const workActivities = useMemo(() => {
+    const runs = message.activityRuns?.length
       ? message.activityRuns.map((run) => ({ runId: run.runId, state: run.state }))
-      : [{ runId: message.runId ?? message.id, state: workActivity }],
-    [message.activityRuns, message.id, message.runId, workActivity],
-  );
+      : [{ runId: message.runId ?? message.id, state: workActivity }];
+    // The browser fallback ladder's owner card is drawn once, as the actionable row below (it has the
+    // button). Its copy in the activity projection is the same notice (same text; the projection may drop the
+    // typed details), so it is left out there; it was shown twice while the run worked.
+    const ladderCards = new Set((message.notices ?? [])
+      .filter((notice) => notice.code === "browser-ladder-stopped" || notice.code === "browser-human-check")
+      .map((notice) => notice.message));
+    if (!ladderCards.size) return runs;
+    return runs.map(({ runId, state }) => ({ runId, state: { ...state, items: state.items.filter((item) =>
+      item.kind !== "notice" || !ladderCards.has(item.message ?? "")) } }));
+  }, [message.activityRuns, message.id, message.notices, message.runId, workActivity]);
   // Activity notices belong under the work heading. Keep a separate plain
   // row only for an actionable sign-in, a context boundary, or a notice that
   // is absent from the canonical activity projection.
   const persistentNotices = (message.notices ?? []).filter((notice) =>
     notice.code === "runtime-signed-out" || notice.display === "divider"
+    // The browser fallback ladder's owner card carries its one action; it stays visible while the run works.
+    || notice.code === "browser-ladder-stopped" || notice.code === "browser-human-check"
     || (!message.busy && (notice.level === "warning" || notice.level === "error"))
     || !workActivities.some(({ state }) => state.items.some((item) =>
       item.kind === "notice" && item.message === notice.message
@@ -2490,6 +2500,18 @@ function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
   const { locale } = useT();
   const [open, setOpen] = useState(false);
   const [signInBusy, setSignInBusy] = useState(false);
+  const [ladderBusy, setLadderBusy] = useState(false);
+  /** The browser fallback ladder card's single action, read from its typed details (never its wording). */
+  const ladderAction = (() => {
+    if ((notice.code !== "browser-ladder-stopped" && notice.code !== "browser-human-check") || !notice.details) return null;
+    try {
+      const parsed = JSON.parse(notice.details) as { action?: unknown; site?: unknown };
+      const action: "retry" | "open-browser" | "fix" | null = parsed.action === "retry" || parsed.action === "open-browser" || parsed.action === "fix" ? parsed.action : null;
+      return action ? { action, site: typeof parsed.site === "string" ? parsed.site : null } : null;
+    } catch {
+      return null;
+    }
+  })();
   /** Which runtime needs a sign-in, taken from the typed notice rather than its wording. */
   const signedOutRuntime = (() => {
     if (notice.code !== "runtime-signed-out" || !notice.details) return null;
@@ -2553,6 +2575,26 @@ function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
             {locale === "ko"
               ? (signInBusy ? "로그인 창 여는 중…" : "로그인")
               : (signInBusy ? "Opening sign-in…" : "Sign in")}
+          </button>
+        )}
+        {ladderAction && (
+          <button
+            type="button"
+            className="agentlas-chat-notice-toggle"
+            data-testid="browser-ladder-action"
+            disabled={ladderBusy}
+            onClick={() => {
+              setLadderBusy(true);
+              void (window.agentlas?.browserUi?.ladderAction?.({ action: ladderAction.action, site: ladderAction.site }) ?? Promise.resolve(null))
+                .catch(() => null)
+                .finally(() => setLadderBusy(false));
+            }}
+          >
+            {ladderAction.action === "open-browser"
+              ? (locale === "ko" ? "브라우저 열기" : "Open browser")
+              : ladderAction.action === "fix"
+                ? (locale === "ko" ? "고치기" : "Fix")
+                : (locale === "ko" ? "다시 시도" : "Retry")}
           </button>
         )}
         {expandable && (

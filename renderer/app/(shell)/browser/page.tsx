@@ -4,6 +4,10 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
+import { ChipGrid, ConnectChip } from "@/components/connect/RuntimeConnect";
+import { ServiceConnectPopup, waitForConnectPoll, type ServiceConnectRun } from "@/components/connect/ServiceConnect";
+import { IconLock } from "@/components/Icon";
+import type { BrowserSessionProbeResult } from "@shared/browser-session-probe";
 import type { BrowserStatus, BrowserSite, BrowserActionLog } from "@/lib/types";
 
 type Tab = "sites" | "logs";
@@ -19,7 +23,8 @@ export default function BrowserPage() {
   const [importing, setImporting] = useState(false);
   const [consentPrompt, setConsentPrompt] = useState<{ count: number } | null>(null);
   const [toast, setToast] = useState<string | null>(null);
-  const [openingSite, setOpeningSite] = useState<string | null>(null);
+  const [connectingSite, setConnectingSite] = useState<BrowserSite | null>(null);
+  const [probes, setProbes] = useState<Record<string, BrowserSessionProbeResult>>({});
 
   const api = ipc();
 
@@ -33,6 +38,12 @@ export default function BrowserPage() {
     setStatus(st);
     setSites(ss);
     setLogs(lg);
+    // A stored/imported session is never proof. Recheck registered sites using Main's read-only dedicated-browser probe.
+    setProbes({});
+    if (api.browser.probeSession) {
+      const results = await Promise.all(ss.map(async (site) => ({ site: site.site, probe: await api.browser.probeSession(site.site).catch(() => null) })));
+      setProbes(Object.fromEntries(results.flatMap(({ site, probe }) => probe ? [[site, probe]] : [])));
+    }
     // 승인 상태는 목록과 함께 다시 읽는다 — 가져오기 직후 배너가 스스로 사라져야 한다.
     try {
       const c = await api.browser.credentialConsent();
@@ -50,6 +61,35 @@ export default function BrowserPage() {
     setToast(msg);
     setTimeout(() => setToast(null), 2600);
   }, []);
+
+  const connectSite = useCallback<ServiceConnectRun>(async (signal, update) => {
+    if (!api || !connectingSite) throw new Error(ko ? "브라우저 연결을 사용할 수 없어요. (bridge_unavailable)" : "Browser connection is unavailable. (bridge_unavailable)");
+    const probeSession = api.browser.probeSession;
+    const check = async () => {
+      if (!probeSession) return null;
+      const probe = await probeSession(connectingSite.site);
+      if (signal.aborted) throw new Error("cancelled");
+      setProbes((previous) => ({ ...previous, [connectingSite.site]: probe }));
+      return probe;
+    };
+    const initial = await check();
+    if (initial?.state === "signed-in") return { evidence: [initial.evidence, `${initial.latencyMs}ms · ${new Date(initial.checkedAt).toLocaleTimeString()}`] };
+    update({ step: "setup", note: ko ? "Agentlas 전용 브라우저를 준비하고 있어요." : "Preparing the dedicated Agentlas browser." });
+    if (signal.aborted) throw new Error("cancelled");
+    const opened = await api.browser.openLogin(connectingSite.site);
+    if (signal.aborted) throw new Error("cancelled");
+    if (!opened.ok) throw new Error(`${opened.error ?? (ko ? "로그인 창을 열지 못했어요." : "Could not open sign-in.")} (login_open_failed)`);
+    update({ step: "login", note: ko ? "전용 브라우저에서 로그인 페이지를 열었어요. 로그인을 마치면 실제 상태를 확인해요." : "Opened sign-in in the dedicated browser. We will verify the live session after you sign in." });
+    if (!probeSession) throw new Error(ko ? "로그인 페이지는 열었지만 실제 상태를 확인할 수 없어요. 연결 완료로 표시하지 않습니다. (probe_unavailable)" : "Sign-in opened, but the live session cannot be verified. (probe_unavailable)");
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      await waitForConnectPoll(signal);
+      const result = await check();
+      if (result?.state === "signed-in") return { evidence: [result.evidence, `${result.latencyMs}ms · ${new Date(result.checkedAt).toLocaleTimeString()}`] };
+      update({ step: "login", note: ko ? "열린 브라우저에서 로그인을 마쳐 주세요. 실제 상태를 다시 확인하고 있어요." : "Finish sign-in in the opened browser. Rechecking the live session.", evidence: result ? [result.evidence] : [] });
+      if (result?.state === "unverified") throw new Error(`${result.evidence} (${result.reasonCode ?? "probe_unavailable"})`);
+    }
+    throw new Error(ko ? "제한 시간 안에 로그인을 확인하지 못했어요. (login_timeout)" : "Sign-in was not verified in time. (login_timeout)");
+  }, [api, connectingSite, ko]);
 
   const logsByDate = useMemo(() => {
     const groups: Record<string, BrowserActionLog[]> = {};
@@ -117,12 +157,12 @@ export default function BrowserPage() {
             <span className="browser-point-copy">
               {ko ? (
                 <>
-                  비밀번호는 Agentlas에 저장하지 않습니다. <b>사이트의 실제 로그인 화면</b>에서 직접
+                  로그인은 사이트의 공식 화면에서 진행합니다. <b>사이트의 실제 로그인 화면</b>에서 직접
                   입력하고, 이후에는 전용 프로필의 로그인 세션만 재사용합니다.
                 </>
               ) : (
                 <>
-                  Agentlas does not store site passwords. Enter them directly on the <b>provider&apos;s sign-in
+                  Sign-in happens on the provider’s own page. Enter them directly on the <b>provider&apos;s sign-in
                   page</b>; only the dedicated profile&apos;s signed-in session is reused afterward.
                 </>
               )}
@@ -198,16 +238,11 @@ export default function BrowserPage() {
                 </span>
               </div>
               <button className="browser-btn accent" onClick={() => setImporting(true)}>
-                {ko ? "골라서 가져오기" : "Choose what to import"}
+                {ko ? "연결" : "Connect"}
               </button>
             </div>
           )}
           <div className="sites-toolbar">
-            {/* ★주 행동은 "가져오기"다. 평소 브라우저에 이미 있는 로그인을 고르기만 하면 되는데
-                주소를 손으로 치고 다시 로그인하는 쪽이 기본일 이유가 없다. */}
-            <button className="browser-btn accent" onClick={() => setImporting(true)}>
-              {ko ? "브라우저에서 가져오기" : "Import from your browser"}
-            </button>
             <button className="browser-btn" onClick={() => setEditing("new")}>
               {ko ? "+ 직접 추가" : "+ Add manually"}
             </button>
@@ -219,56 +254,20 @@ export default function BrowserPage() {
                 : "No sites have been added yet. Use “Add site” to register a place to sign in."}
             </div>
           )}
-          <div className="sites-grid">
-            {sites.map((s) => (
-              <SiteCard
-                key={s.id}
-                site={s}
-                opening={openingSite === s.site}
-                loginBusy={openingSite !== null}
-                onEdit={() => setEditing(s)}
-                onLogin={async () => {
-                  if (openingSite) return;
-                  setOpeningSite(s.site);
-                  try {
-                    const r = await api?.browser.openLogin(s.site);
-                    if (r?.ok) {
-                      flash(
-                        ko
-                          ? `${s.site} 로그인 창을 열었어요. 로그인 후 이 화면에서 ‘세션 저장’을 누르세요.`
-                          : `Opened the ${s.site} sign-in window. Sign in, then click Save session here.`,
-                      );
-                    } else {
-                      flash(r?.error ?? (ko ? "로그인 창을 열지 못했어요." : "Could not open the sign-in window."));
-                    }
-                  } finally {
-                    setOpeningSite(null);
-                  }
-                }}
-                onCaptured={async () => {
-                  const result = await api?.browser.markSession(s.site, "valid");
-                  flash(result?.ok
-                    ? (ko ? "로그인 세션을 확인하고 저장했어요." : "Verified and saved the login session.")
-                    : (result?.error ?? (ko ? "실제 로그인 상태를 확인하지 못했어요." : "The signed-in session could not be verified.")));
-                  void refresh();
-                }}
-                onDelete={async () => {
-                  try {
-                    await api?.browser.deleteSite(s.site);
-                    flash(ko ? `${s.site} 삭제됨` : `${s.site} removed`);
-                    void refresh();
-                  } catch {
-                    flash(
-                      ko
-                        ? `${s.site}의 보안 저장소 정리에 실패해 삭제하지 않았어요. 다시 시도해 주세요.`
-                        : `Could not clear ${s.site} from secure storage, so it was not removed. Try again.`,
-                    );
-                  }
-                }}
-                ko={ko}
-              />
-            ))}
-          </div>
+          <ChipGrid label={ko ? "사이트 연결" : "Site connections"}>
+            <ConnectChip logo="/brand/browser/chrome.png" name="Chrome" sub={ko ? "선택한 로그인 쿠키 가져오기" : "Import selected sign-in cookies"} ready={false} badge={ko ? "선택 후 가져오기" : "Choose before import"} action={{ label: ko ? "연결" : "Connect", onClick: () => setImporting(true) }} />
+            {sites.map((site) => {
+              const probe = probes[site.site];
+              const ready = probe?.state === "signed-in";
+              return <ConnectChip key={site.id} icon={<IconLock size={26} />} name={site.label || site.site} sub={site.site}
+                ready={ready} badge={ready ? (ko ? "연결됨" : "Connected") : probe?.state === "unverified" ? (ko ? "로그인 확인 불가" : "Sign-in unverified") : probe?.state === "signed-out" ? (ko ? "로그인 필요" : "Sign-in needed") : site.session.status === "valid" ? (ko ? "세션 있음 · 확인 필요" : "Session saved · unverified") : (ko ? "로그인 필요" : "Sign-in needed")}
+                badgeTone={ready ? "ok" : undefined} facts={probe ? [probe.evidence, `${probe.latencyMs}ms · ${new Date(probe.checkedAt).toLocaleTimeString()}`] : []}
+                action={{ label: ready ? (ko ? "다시 확인" : "Recheck") : (ko ? "연결" : "Connect"), onClick: () => setConnectingSite(site) }}
+                secondaryActions={[{ label: ko ? "수정" : "Edit", onClick: () => setEditing(site) }, { label: ko ? "삭제" : "Remove", onClick: () => {
+                  void api?.browser.deleteSite(site.site).then(() => { setProbes((previous) => { const next = { ...previous }; delete next[site.site]; return next; }); void refresh(); }).catch(() => flash(ko ? "삭제하지 못했어요. 다시 시도해 주세요." : "Could not remove this site. Retry."));
+                } }]} />;
+            })}
+          </ChipGrid>
         </section>
       )}
 
@@ -305,6 +304,9 @@ export default function BrowserPage() {
           ))}
         </section>
       )}
+
+      {connectingSite && <ServiceConnectPopup name={connectingSite.label || connectingSite.site} icon={<IconLock size={28} />} ko={ko} run={connectSite}
+        onClose={() => { setConnectingSite(null); void refresh(); }} onDone={() => { setConnectingSite(null); void refresh(); }} />}
 
       {editing && (
         <SiteEditor
@@ -604,122 +606,6 @@ export default function BrowserPage() {
   );
 }
 
-function SiteCard({
-  site,
-  opening,
-  loginBusy,
-  onEdit,
-  onLogin,
-  onCaptured,
-  onDelete,
-  ko,
-}: {
-  site: BrowserSite;
-  opening: boolean;
-  loginBusy: boolean;
-  onEdit: () => void;
-  onLogin: () => void;
-  onCaptured: () => void;
-  onDelete: () => void;
-  ko: boolean;
-}) {
-  const st = site.session.status;
-  const badge =
-    st === "valid"
-      ? ko
-        ? "🟢 로그인됨"
-        : "🟢 Signed in"
-      : st === "expired"
-        ? ko
-          ? "🟡 만료"
-          : "🟡 Expired"
-        : ko
-          ? "⚪ 로그인 안 됨"
-          : "⚪ Not signed in";
-  return (
-    <div className="sc">
-      <div className="sc-main">
-        <div className="sc-site">{site.label || site.site}</div>
-        <div className="sc-sub">
-          {site.site}
-          {site.username ? ` · ${site.username}` : ""}
-        </div>
-        <div className="sc-badge">
-          {badge}
-          {site.session.capturedAt ? ` · ${site.session.capturedAt.slice(0, 10)}` : ""}
-        </div>
-      </div>
-      <div className="sc-actions">
-        <button
-          onClick={onLogin}
-          disabled={loginBusy}
-          aria-busy={opening}
-          title={ko ? "전용 프로필로 로그인 창 열기" : "Open the sign-in window in the dedicated profile"}
-        >
-          {opening ? (ko ? "확인 중…" : "Checking…") : ko ? "로그인 창" : "Sign in"}
-        </button>
-        <button
-          onClick={onCaptured}
-          title={ko ? "지금 로그인돼 있으면 세션 저장" : "Save the session if it is currently signed in"}
-        >
-          {ko ? "세션 저장" : "Save session"}
-        </button>
-        <button onClick={onEdit}>{ko ? "수정" : "Edit"}</button>
-        <button className="danger" onClick={onDelete}>
-          {ko ? "삭제" : "Delete"}
-        </button>
-      </div>
-      <style jsx>{`
-        .sc {
-          border: 1px solid var(--rd-hair);
-          border-radius: 12px;
-          padding: 14px 16px;
-          display: flex;
-          align-items: center;
-          justify-content: space-between;
-          gap: 14px;
-          background: var(--rd-surface, transparent);
-        }
-        .sc-site {
-          font-weight: 700;
-          font-size: 14.5px;
-        }
-        .sc-sub {
-          font-size: 12px;
-          opacity: 0.6;
-          margin-top: 2px;
-        }
-        .sc-badge {
-          font-size: 12px;
-          margin-top: 6px;
-        }
-        .sc-actions {
-          display: flex;
-          gap: 6px;
-          flex-shrink: 0;
-        }
-        .sc-actions button {
-          border: 1px solid var(--rd-hair);
-          background: var(--rd-bg, transparent);
-          color: var(--rd-ink);
-          border-radius: 8px;
-          padding: 6px 10px;
-          font-size: 12px;
-          font-weight: 600;
-          cursor: pointer;
-        }
-        .sc-actions button:disabled {
-          cursor: wait;
-          opacity: 0.55;
-        }
-        .sc-actions button.danger {
-          color: var(--rd-err);
-        }
-      `}</style>
-    </div>
-  );
-}
-
 function SiteEditor({
   site,
   onClose,
@@ -762,8 +648,8 @@ function SiteEditor({
         </label>
         <p className="hint">
           {ko
-            ? "저장 후 ‘로그인 창’을 열어 사이트에서 직접 로그인하세요. Agentlas는 비밀번호를 받거나 저장하지 않습니다."
-            : "After saving, open Sign in and authenticate on the provider page. Agentlas never receives or stores the password."}
+            ? "저장 후 사이트 칩의 ‘연결’을 눌러 공식 페이지에서 로그인하세요. 이 화면에는 비밀번호를 입력하지 않습니다."
+            : "After saving, click Connect on the site chip and sign in on the provider page. Do not enter passwords on this screen."}
         </p>
         <div className="be-actions">
           <button className="ghost" onClick={onClose}>

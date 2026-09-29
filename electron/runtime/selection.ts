@@ -40,6 +40,32 @@ import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import { withNativeBrowserGuidance, type Runner, type RunnerFailure } from "./runner";
 import { peekProviderUsedPercent } from "../usage";
 import { listModelRoleMembers } from "../store/model-roles";
+import { CONNECTABLE_RUNTIMES, type ConnectableRuntime } from "../../shared/runtime-connect";
+import { probeRuntimeAuthForRun } from "./runtime-connect";
+import { abortReasonError } from "./abort-reason";
+
+/** Per-turn, before the provider or its reusable session is used. Unknown probes are not authentication. */
+function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
+  if (!CONNECTABLE_RUNTIMES.includes(runtimeKind as ConnectableRuntime)) return runner;
+  const kind = runtimeKind as ConnectableRuntime;
+  return async (req, events) => {
+    if (req.signal?.aborted) throw abortReasonError(req);
+    events.onStatus(req.locale === "ko" ? "AI 연결을 다시 확인하는 중..." : "Checking the AI connection...");
+    try {
+      const probe = await probeRuntimeAuthForRun(kind, { runtimeSource: req.runtimeSource, env: req.env, cwd: req.cwd, signal: req.signal });
+      // Only measured codes and command evidence: no credential values, stdout, account, source path or env.
+      console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
+        state: probe.state, reason: probe.reason ?? probe.state, checkedAt: probe.checkedAt, latencyMs: probe.latencyMs, evidence: probe.evidence }));
+    } catch {
+      console.info("[runtime-auth-probe]", JSON.stringify({ schemaVersion: "agentlas.runtime-auth-before-run.v1", kind,
+        state: "unknown", reason: "probe-failed" }));
+    }
+    // Stop/cancel wins even when a probe just failed or completed. The provider remains authoritative for
+    // auth failure and runtime fallback; absent status commands (Kimi) and timeouts never block a valid run.
+    if (req.signal?.aborted) throw abortReasonError(req);
+    return runner(req, events);
+  };
+}
 
 /**
  * CLI 러너를 전역 실행 슬롯으로 래핑 — 챗·firm·swarm·워크플로우·자동화가 각자 캡으로
@@ -50,6 +76,7 @@ import { listModelRoleMembers } from "../store/model-roles";
  * 주의: 러너 내부 재시도(runClaudeCode의 세션 복구 재귀)는 래핑 밖이라 이중 획득이 없다.
  */
 function withRunSlot(runner: Runner, runtimeKind: string): Runner {
+  const checkedRunner = withRuntimeAuthProbe(runner, runtimeKind);
   return async (req, events) => {
     // 우선순위: 요청 명시값 → 호출 문맥(withRunPriority) → interactive.
     // 자동화 스케줄러·데몬 graph.run 이 background 문맥을 깔고, 채팅 턴은 기본값이다.
@@ -91,7 +118,7 @@ function withRunSlot(runner: Runner, runtimeKind: string): Runner {
       // 등록소 실패가 실행을 막지 않는다 — 관측은 실행보다 뒤에 선다.
     }
     try {
-      return await runner(req, events);
+      return await checkedRunner(req, events);
     } finally {
       try { touchAgentResidency(residencyKey, { inUse: false }); } catch { /* 관측 실패 무시 */ }
       release();
@@ -260,8 +287,8 @@ function pickRunnerWithoutHostGuidance(active: RuntimeStatus): { runner: Runner;
       }),
     };
   }
-  if (active.kind === "claude-code") return { runner: runClaudeCodeSlotted, label: RUNNER_LABEL["claude-code"] };
-  if (active.kind === "codex") return { runner: runCodexSlotted, label: RUNNER_LABEL.codex };
+  if (active.kind === "claude-code") return { runner: bindRuntimeSource(runClaudeCodeSlotted, active.source), label: RUNNER_LABEL["claude-code"] };
+  if (active.kind === "codex") return { runner: bindRuntimeSource(runCodexSlotted, active.source), label: RUNNER_LABEL.codex };
   if (active.kind === "antigravity") {
     return {
       runner: bindRuntimeSource(runAntigravitySlotted, active.source),
@@ -338,17 +365,17 @@ export function pickRecoveryRunner(selection: Pick<RuntimeStatus, "kind"> & { so
   runner: Runner;
   label: string;
 } | null {
-  if (selection.kind === "claude-code") return { runner: runClaudeCode, label: RUNNER_LABEL["claude-code"] };
-  if (selection.kind === "codex") return { runner: runCodex, label: RUNNER_LABEL.codex };
+  if (selection.kind === "claude-code") return { runner: bindRuntimeSource(withRuntimeAuthProbe(runClaudeCode, "claude-code"), selection.source), label: RUNNER_LABEL["claude-code"] };
+  if (selection.kind === "codex") return { runner: bindRuntimeSource(withRuntimeAuthProbe(runCodex, "codex"), selection.source), label: RUNNER_LABEL.codex };
   if (selection.kind === "antigravity") {
     return {
-      runner: bindRuntimeSource(runAntigravity, selection.source),
+      runner: bindRuntimeSource(withRuntimeAuthProbe(runAntigravity, "antigravity"), selection.source),
       label: RUNNER_LABEL.antigravity,
     };
   }
-  if (selection.kind === "kimi") return { runner: bindRuntimeSource(acpOrLegacyRunner("kimi", runKimi), selection.source), label: RUNNER_LABEL.kimi };
-  if (selection.kind === "grok") return { runner: bindRuntimeSource(acpOrLegacyRunner("grok", runGrok), selection.source), label: RUNNER_LABEL.grok };
-  if (selection.kind === "cursor") return { runner: bindRuntimeSource(acpOrLegacyRunner("cursor", runCursor), selection.source), label: RUNNER_LABEL.cursor };
+  if (selection.kind === "kimi") return { runner: bindRuntimeSource(withRuntimeAuthProbe(acpOrLegacyRunner("kimi", runKimi), "kimi"), selection.source), label: RUNNER_LABEL.kimi };
+  if (selection.kind === "grok") return { runner: bindRuntimeSource(withRuntimeAuthProbe(acpOrLegacyRunner("grok", runGrok), "grok"), selection.source), label: RUNNER_LABEL.grok };
+  if (selection.kind === "cursor") return { runner: bindRuntimeSource(withRuntimeAuthProbe(acpOrLegacyRunner("cursor", runCursor), "cursor"), selection.source), label: RUNNER_LABEL.cursor };
   if (selection.kind === "acp") {
     const spec = resolveAcpAgentSpec(selection.acpAgentId);
     if (!spec) return null;

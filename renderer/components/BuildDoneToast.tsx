@@ -9,6 +9,7 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { buildScanDisposition } from "@/lib/build-scan";
+import { clearBuildDoneUnseen, markBuildDoneUnseen } from "@/lib/attention";
 import { IconBuilding, IconCheck, IconStore } from "@/components/Icon";
 
 /**
@@ -85,10 +86,9 @@ export function BuildDoneToast() {
     if (prevPhase.current !== "done" && s.phase === "done" && s.result) {
       const name = s.result.workspace.split("/").pop() || "package";
       // 빌드 화면을 보고 있으면 화면 자체가 결과를 보여주므로 팝업은 생략.
-      if (!pathname.startsWith("/build")) {
-        setMsg(null);
-        setOpen(true);
-      }
+      // ★저절로 뜨는 토스트 대신 전환기의 파란 점(오너 2026-09-29 "시트 띄우지말고 …").
+      //   빌드 화면 밖에서 끝났으면 점으로 알리고, 결과·업로드는 빌드 화면에서 한다.
+      if (!pathname.startsWith("/build")) markBuildDoneUnseen(name);
       try {
         new Notification(ko ? "빌드 완료" : "Build complete", {
           body: ko ? `${name} 패키지가 준비됐습니다.` : `The ${name} package is ready.`,
@@ -99,6 +99,10 @@ export function BuildDoneToast() {
     }
     prevPhase.current = s.phase;
   }, [s.phase, s.result, pathname, ko]);
+
+  useEffect(() => {
+    if (pathname.startsWith("/build")) clearBuildDoneUnseen();
+  }, [pathname]);
 
   if (!open || s.phase !== "done" || !s.result) return null;
   const workspace = s.result.workspace;

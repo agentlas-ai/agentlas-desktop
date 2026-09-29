@@ -22,6 +22,7 @@ import {
   agentMailDrafts,
   agentMailGet,
   agentMailIssue,
+  agentMailJoinWaitlist,
   agentMailList,
   agentMailMarkThreadRead,
   agentMailRemove,
@@ -57,6 +58,7 @@ function afterChange<T extends { ok: boolean }>(result: T): T {
 
 export function registerAgentMailIpc(ipc: Pick<IpcMain, "handle">): void {
   ipc.handle(CH.status, () => agentMailStatus());
+  ipc.handle(CH.joinWaitlist, () => agentMailJoinWaitlist());
   ipc.handle(CH.issue, async (_e, input: unknown) => afterChange(await agentMailIssue(obj<{ displayName?: string; localPart?: string }>(input))));
   ipc.handle(CH.updateMailbox, (_e, patch: unknown) => {
     // The address is permanent (P2.2): an old renderer's localPart is not forwarded.

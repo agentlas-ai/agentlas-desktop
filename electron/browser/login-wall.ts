@@ -136,6 +136,27 @@ export function identityDomainsFor(site: string): string[] {
   return [...(SITE_IDENTITY_DOMAINS[root] ?? [])];
 }
 
+/**
+ * 로그인을 함께 발급하는 도메인 묶음(쿠키 투입을 묶음 단위로 판정할 때, cookie-merge.ts
+ * planSessionGroupFeed). youtube.com 과 google.com 은 한 묶음, threads 와 instagram 도 한 묶음.
+ * 로그인 쿠키 이름을 아는 사이트만 묶음을 가진다 — 모르는 사이트는 null(줄 단위 판정).
+ */
+export function sessionCookieGroupOf(host: string): { group: string; site: string } | null {
+  const site = registrableDomain(host);
+  if (!site || !SESSION_COOKIE_NAMES[site]) return null;
+  const members = new Set<string>([site]);
+  const walk = (domain: string) => {
+    for (const next of SITE_IDENTITY_DOMAINS[domain] ?? []) {
+      if (!members.has(next)) { members.add(next); walk(next); }
+    }
+    for (const [other, providers] of Object.entries(SITE_IDENTITY_DOMAINS)) {
+      if (providers.includes(domain) && !members.has(other)) { members.add(other); walk(other); }
+    }
+  };
+  walk(site);
+  return { group: [...members].sort()[0], site };
+}
+
 function parseHttpUrl(value: string | null | undefined): URL | null {
   if (!value || typeof value !== "string" || value.length > 8_192) return null;
   try {

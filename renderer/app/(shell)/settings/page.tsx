@@ -24,7 +24,7 @@ import {
 } from "@shared/models";
 import { AUTO_PROVIDER } from "@shared/multimodal";
 import { navigate } from "@/lib/navigation";
-import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconRefresh, IconWand } from "@/components/Icon";
+import { IconCheck, IconFilm, IconImage, IconKey, IconLock, IconWand } from "@/components/Icon";
 import { AgentFileEditor, runtimeEditorSource } from "@/components/AgentFileEditor";
 import { MigrationPanel } from "@/components/MigrationPanel";
 import { UpdateResumeConfirm } from "@/components/UpdateResumeConfirm";
@@ -36,6 +36,7 @@ import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@s
 import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
 import { OllamaMigrationPanel } from "@/components/settings/OllamaMigrationPanel";
 import { AgentMailPanel } from "@/components/settings/AgentMailPanel";
+import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
 const BYOK_BACKENDS: ByokBackend[] = [
@@ -3172,84 +3173,17 @@ function CliInstallPanel({
   statuses: RuntimeStatus[];
   onChanged: () => void | Promise<void>;
 }) {
-  const { t } = useT();
-  const [installing, setInstalling] = useState<CliKind | null>(null);
-  const [msg, setMsg] = useState<Partial<Record<CliKind, string>>>({});
-  // copilot은 전용 kind가 없고 kind "acp"의 acpAgentId로 감지된다 — 그 신원까지 봐야
-  // "설치됨"이 실제와 맞는다(kind만 보면 설치해 놓고도 영원히 미설치로 보인다).
-  const installedKinds = new Set<string>([
-    ...statuses.map((s) => s.kind),
-    ...statuses.flatMap((s) => (s.kind === "acp" && s.acpAgentId ? [s.acpAgentId] : [])),
-  ]);
-
-  async function doInstall(kind: CliKind) {
-    const api = ipc();
-    if (!api) return;
-    setInstalling(kind);
-    setMsg((m) => ({ ...m, [kind]: "" }));
-    const def = CLI_DEFS.find((entry) => entry.kind === kind);
-    if (def?.setup === "manual") {
-      // 우리가 대신 설치할 수 없는 CLI — 정확한 명령을 보여주고 사용자가 실행한다.
-      setMsg((m) => ({ ...m, [kind]: def.manual ?? "" }));
-      setInstalling(null);
-      return;
-    }
-    try {
-      const r = def?.setup === "login"
-        ? await api.runtime.openCliLogin(kind as "antigravity")
-        : await api.runtime.installCli(kind as "claude-code" | "codex" | "kimi" | "grok");
-      if (r.ok) {
-        setMsg((m) => ({ ...m, [kind]: def?.setup === "login" ? t("settings.cli.login_hint") : t("settings.cli.install_ok") }));
-        await onChanged();
-      } else {
-        const reason = r.message?.trim() || t("settings.cli.install_failed_unknown");
-        const command = r.command?.trim();
-        setMsg((m) => ({
-          ...m,
-          [kind]: command
-            ? t("settings.cli.install_failed_command", { reason, command })
-            : t("settings.cli.install_failed", { reason }),
-        }));
-      }
-    } catch (err) {
-      setMsg((m) => ({
-        ...m,
-        [kind]: t("settings.cli.install_failed", { reason: detailForUser(err) }),
-      }));
-    } finally {
-      setInstalling(null);
-    }
-  }
-
-  async function doLogin(kind: CliKind) {
-    const api = ipc();
-    if (!api) return;
-    const def = CLI_DEFS.find((entry) => entry.kind === kind);
-    if (def?.setup === "manual") {
-      setMsg((m) => ({ ...m, [kind]: def.manual ?? "" }));
-      return;
-    }
-    try {
-      const result = await api.runtime.openCliLogin(kind as "claude-code" | "codex" | "kimi" | "grok" | "antigravity");
-      if (!result?.ok) {
-        const reason = result?.message?.trim() || t("settings.cli.login_failed_unknown");
-        const command = result?.command?.trim();
-        setMsg((m) => ({
-          ...m,
-          [kind]: command
-            ? t("settings.cli.login_failed_command", { reason, command })
-            : t("settings.cli.login_failed", { reason }),
-        }));
-        return;
-      }
-      setMsg((m) => ({ ...m, [kind]: t("settings.cli.login_hint") }));
-    } catch (err) {
-      setMsg((m) => ({
-        ...m,
-        [kind]: t("settings.cli.login_failed", { reason: detailForUser(err) }),
-      }));
-    }
-  }
+  // 오너 2026-09-29: 온보딩과 같은 한 벌 — 칩 하나 = 연결할 것 하나, 초록은 살아 있는 확인 뒤에만,
+  // 작은 [연결] → 단계 팝업(확인·설치·로그인·확인·완료), 끝나면 알아서 닫힌다.
+  const { t, locale } = useT();
+  const ko = locale === "ko";
+  const cc = useMemo(() => connectCopy(ko), [ko]);
+  const auth = useRuntimeAuth();
+  const [connectFor, setConnectFor] = useState<RuntimeChipSpec | null>(null);
+  const [copilotNote, setCopilotNote] = useState<string | null>(null);
+  const copilotInstalled = statuses.some((s) => s.kind === "acp" && s.acpAgentId === "github-copilot-cli");
+  const copilot = CLI_DEFS.find((def) => def.kind === "github-copilot-cli");
+  const subOf = (kind: string, fallback: string) => CLI_DEFS.find((def) => def.kind === kind)?.sub ?? fallback;
 
   return (
     <>
@@ -3259,122 +3193,40 @@ function CliInstallPanel({
         count={CLI_DEFS.length}
         defaultOpen
       >
-      {CLI_DEFS.map((def) => {
-        const installed = installedKinds.has(def.kind);
-        const isInstalling = installing === def.kind;
-        return (
-          <div
-            key={def.kind}
-            style={{
-              padding: 14,
-              marginBottom: 10,
-              border: "1px solid var(--paper-edge)",
-              borderRadius: "var(--radius-md)",
-              background: "var(--paper)",
-              display: "flex",
-              flexDirection: "column",
-              gap: 8,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-              <div style={{ flex: "1 1 160px", minWidth: 0 }}>
-                <div style={{ fontSize: 13, fontWeight: 600 }}>{def.name}</div>
-                <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>{def.sub}</div>
-              </div>
-              {installed ? (
-                <>
-                  <span
-                    style={{
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: "var(--green-deep)",
-                      background: "rgba(168,217,155,0.20)",
-                      padding: "3px 10px",
-                      borderRadius: 999,
-                      display: "inline-flex",
-                      alignItems: "center",
-                      gap: 4,
-                    }}
-                  >
-                    <IconCheck size={12} />
-                    {t("settings.cli.installed")}
-                  </span>
-                  {/* 설치돼 있어도 아직 로그인 안 했을 수 있으므로 웹 로그인 버튼 유지 */}
-                  <button
-                    onClick={() => void doLogin(def.kind)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: 999,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      background: "transparent",
-                      color: "var(--accent)",
-                      border: "1px solid var(--paper-edge)",
-                    }}
-                  >
-                    {t("settings.cli.login")}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <button
-                    onClick={() => void doInstall(def.kind)}
-                    disabled={isInstalling}
-                    style={{
-                      padding: "6px 14px",
-                      borderRadius: 999,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      background: isInstalling ? "var(--paper-2)" : "var(--paper)",
-                      color: isInstalling ? "var(--muted-deep)" : "var(--ink)",
-                      border: "1px solid var(--paper-edge)",
-                      boxShadow: isInstalling ? "none" : "var(--neu-raised)",
-                    }}
-                  >
-                    {isInstalling
-                      ? t("settings.cli.installing")
-                      : def.kind === "antigravity" ? t("settings.cli.login") : t("settings.cli.install")}
-                  </button>
-                  <button
-                    onClick={() => void doLogin(def.kind)}
-                    style={{
-                      padding: "6px 12px",
-                      borderRadius: 999,
-                      fontSize: 12,
-                      fontWeight: 600,
-                      background: "transparent",
-                      color: "var(--accent)",
-                      border: "1px solid var(--paper-edge)",
-                    }}
-                  >
-                    {t("settings.cli.login")}
-                  </button>
-                  <button
-                    onClick={() => void onChanged()}
-                    title={t("settings.cli.redetect")}
-                    aria-label={t("settings.cli.redetect")}
-                    style={{
-                      padding: 6,
-                      borderRadius: 999,
-                      color: "var(--muted-deep)",
-                      background: "transparent",
-                      border: "1px solid var(--paper-edge)",
-                    }}
-                  >
-                    <IconRefresh size={13} />
-                  </button>
-                </>
-              )}
-            </div>
-            {msg[def.kind] && (
-              <div style={{ fontSize: 11.5, color: "var(--ink-soft)", lineHeight: 1.5 }}>
-                {msg[def.kind]}
-              </div>
-            )}
-          </div>
-        );
-      })}
+        <ChipGrid label={t("settings.cli.subscription_title")}>
+          {RUNTIME_CHIPS.map((spec) => (
+            <RuntimeChip
+              key={spec.kind}
+              spec={{ ...spec, sub: subOf(spec.kind, spec.sub) }}
+              probe={auth.probes[spec.kind]}
+              loaded={auth.loaded}
+              copy={cc}
+              onConnect={setConnectFor}
+            />
+          ))}
+          {copilot && (
+            <ConnectChip
+              logo="/brand/llm/githubcopilot.svg"
+              name={copilot.name}
+              sub={copilot.sub}
+              ready={false}
+              badge={copilotInstalled ? cc.unverified : cc.notInstalled}
+              action={{ label: cc.connect, onClick: () => setCopilotNote(copilot.manual ?? null) }}
+            />
+          )}
+        </ChipGrid>
+        {copilotNote && (
+          <div style={{ marginTop: 8, fontSize: 11.5, color: "var(--ink-soft)", fontFamily: "var(--font-mono)" }}>{copilotNote}</div>
+        )}
       </ConnectSection>
+      {connectFor && (
+        <RuntimeConnectPopup
+          spec={{ ...connectFor, sub: subOf(connectFor.kind, connectFor.sub) }}
+          copy={cc}
+          onClose={() => { const kind = connectFor.kind; setConnectFor(null); void auth.refresh(kind); }}
+          onDone={() => { const kind = connectFor.kind; setConnectFor(null); void auth.refresh(kind); void onChanged(); }}
+        />
+      )}
     </>
   );
 }

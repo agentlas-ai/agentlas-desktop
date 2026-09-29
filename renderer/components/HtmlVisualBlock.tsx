@@ -4,6 +4,8 @@ import { useEffect, useId, useMemo, useRef, useState, type ReactNode } from "rea
 import {
   VISUAL_MAX_HEIGHT,
   VISUAL_CSP,
+  CHARTJS_ASSET_PATH,
+  usesKnownChartJs,
   VISUAL_SANDBOX,
   VISUAL_PROMPT_MESSAGE,
   VISUAL_SIZE_MESSAGE,
@@ -15,8 +17,10 @@ import {
 } from "@/lib/visual-html";
 import {
   announceVisual,
+  copyPngDataUrl,
   documentIsKorean,
   fillComposer,
+  loadChartJsSource,
   downloadDataUrl,
   readVisualTheme,
   requestVisualOpen,
@@ -25,6 +29,7 @@ import {
   type VisualArtifact,
 } from "@/lib/visual-artifacts";
 import styles from "./VisualBlock.module.css";
+import { VisualMenu } from "./VisualMenu";
 
 /** <html data-theme> 이 바뀌면 시각물을 새 토큰으로 다시 그린다. */
 export function useVisualThemeKey(): string {
@@ -69,12 +74,22 @@ export function HtmlVisualBlock({
   const [navigatedAway, setNavigatedAway] = useState(false);
   const screened = useMemo(() => screenVisualHtml(html), [html]);
   const title = useMemo(() => givenTitle ?? visualTitle(html, ko ? "시각물" : "Visual"), [givenTitle, html, ko]);
+  // Chart.js 를 쓰는 위젯(Claude show_widget 그대로)은 앱에 묶인 사본을 인라인으로 — 읽을 때까지 그리지 않는다.
+  const needsChartJs = useMemo(() => screened.ok && usesKnownChartJs(html), [html, screened.ok]);
+  const [chartJs, setChartJs] = useState<{ ready: boolean; source: string | null }>({ ready: false, source: null });
+  useEffect(() => {
+    if (!needsChartJs) return undefined;
+    let cancelled = false;
+    void loadChartJsSource(CHARTJS_ASSET_PATH).then((source) => { if (!cancelled) setChartJs({ ready: true, source }); });
+    return () => { cancelled = true; };
+  }, [needsChartJs]);
   // themeKey 는 토큰을 다시 읽게 하는 신호다.
   const srcdoc = useMemo(
-    () => (screened.ok ? buildVisualSrcdoc(html, readVisualTheme(), frameId) : ""),
+    () => (screened.ok && (!needsChartJs || chartJs.ready) ? buildVisualSrcdoc(html, readVisualTheme(), frameId, chartJs.source) : ""),
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [html, screened.ok, frameId, themeKey],
+    [html, screened.ok, frameId, themeKey, needsChartJs, chartJs],
   );
+  const snapshotWaiters = useRef(new Map<string, (url: string | null) => void>());
 
   useEffect(() => {
     loadsRef.current = 0;
@@ -90,6 +105,15 @@ export function HtmlVisualBlock({
       // sendPrompt(text) — 작성창을 채우기만 한다(보내지 않는다). Claude show_widget 계약의 그 자리.
       if (data.type === VISUAL_PROMPT_MESSAGE) {
         if (typeof data.text === "string") fillComposer(data.text, frame);
+        return;
+      }
+      if (data.type === "agentlas-visual:snapshot-result") {
+        const result = data as { nonce?: unknown; dataUrl?: unknown };
+        const waiter = typeof result.nonce === "string" ? snapshotWaiters.current.get(result.nonce) : undefined;
+        if (waiter) {
+          snapshotWaiters.current.delete(result.nonce as string);
+          waiter(typeof result.dataUrl === "string" && result.dataUrl.startsWith("data:image/png") ? result.dataUrl : null);
+        }
         return;
       }
       if (data.type !== VISUAL_SIZE_MESSAGE) return;
@@ -125,18 +149,27 @@ export function HtmlVisualBlock({
       {ko ? "이 시각물이 다른 주소로 넘어가려 해서 내렸어요." : "This visual tried to navigate away, so it was taken down."}
     </p>;
   }
+  const snapshot = () => new Promise<string | null>((resolve) => {
+    const frame = frameRef.current;
+    if (!frame?.contentWindow) { resolve(null); return; }
+    const nonce = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    snapshotWaiters.current.set(nonce, resolve);
+    window.setTimeout(() => { if (snapshotWaiters.current.delete(nonce)) resolve(null); }, 5_000);
+    frame.contentWindow.postMessage({ type: "agentlas-visual:snapshot", nonce, background: readVisualTheme().paper }, "*");
+  });
   const save = () => {
-    const doc = buildStandaloneVisualHtml(html, readVisualTheme(), title);
+    const doc = buildStandaloneVisualHtml(html, readVisualTheme(), title, chartJs.source);
     const url = URL.createObjectURL(new Blob([doc], { type: "text/html;charset=utf-8" }));
     downloadDataUrl(url, `${safeFileStem(title)}.html`);
     window.setTimeout(() => URL.revokeObjectURL(url), 4_000);
   };
   return (
     <figure className={styles.visual} data-size={size} data-visual-kind="html" aria-label={title}>
-      {size !== "thumb" && <div className={styles.tools} role="toolbar" aria-label={ko ? "시각물 도구" : "Visual tools"}>
-        {visual && size === "inline" && <button type="button" onClick={() => requestVisualOpen(visual)}>{ko ? "패널에서 열기" : "Open in panel"}</button>}
-        <button type="button" onClick={save}>{ko ? "HTML 저장" : "Save HTML"}</button>
-      </div>}
+      {size !== "thumb" && <VisualMenu ko={ko} label={ko ? "시각물 메뉴" : "Visual menu"} items={[
+        { key: "copy", label: ko ? "클립보드에 복사" : "Copy to clipboard", run: async () => { const url = await snapshot(); return url ? copyPngDataUrl(url) : false; } },
+        { key: "download", label: ko ? "파일 다운로드" : "Download file", run: () => { save(); } },
+        ...(visual && size === "inline" ? [{ key: "panel", label: ko ? "패널에서 열기" : "Open in panel", run: () => { requestVisualOpen(visual); } }] : []),
+      ]} />}
       <iframe
         ref={frameRef}
         className={styles.frame}

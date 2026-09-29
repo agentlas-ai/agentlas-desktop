@@ -12,6 +12,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { usePathname, useSearchParams } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { useOrphanAttentionRevealed } from "@/lib/attention";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
 
 const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
@@ -36,6 +37,7 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
   const searchParams = useSearchParams();
   const { locale } = useT();
   const ko = locale === "ko";
+  const orphansRevealed = useOrphanAttentionRevealed();
   const oneRoute = pathname.startsWith("/one");
   const buildRoute = pathname === "/build" || pathname.startsWith("/build/");
   const surface = oneRoute ? "one" : pathname.startsWith("/science") ? "science" : "work";
@@ -54,9 +56,15 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
     }
     if (owner.context === "build" || owner.surface !== surface) return false;
     if (surface === "science") return true;
-    return currentChatId === null ? owner.chatId === null : owner.chatId === currentChatId;
+    // 대화가 없는 요청은 오너가 전환기 점 목록에서 열었을 때만(아래 orphansRevealed).
+    return owner.chatId === null ? orphansRevealed : owner.chatId === currentChatId;
   });
-  const ownerlessQueue = queue.filter((request) => request.owner === null);
+  /*
+   * ★소유자 없는 요청이 아무 화면에나 뜨던 길을 닫았다 (오너 2026-09-29 "시트 띄우지말고 …").
+   *   화면 밖 요청은 전환기의 파란 점(lib/attention)이 세고, 갈 대화가 없는 요청은 오너가
+   *   그 점 목록의 "대화 밖 요청"을 눌렀을 때만 여기서 편다. 만료는 메인의 expiresAt 그대로다.
+   */
+  const ownerlessQueue = orphansRevealed ? queue.filter((request) => request.owner === null) : [];
   const visibleQueue = ownedQueue.length > 0 ? ownedQueue : ownerlessQueue;
   const req = visibleQueue[0] ?? null;
   const usesConversationComposer = Boolean(

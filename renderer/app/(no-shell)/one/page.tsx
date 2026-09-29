@@ -1,5 +1,6 @@
 import { Suspense } from "react";
 import { AskUserSheet } from "@/components/AskUserSheet";
+import { ToolApprovalSheet } from "@/components/ToolApprovalSheet";
 import { OneShell } from "@/components/one/OneShell";
 
 export default function AgentlasOnePage() {
@@ -13,6 +14,8 @@ export default function AgentlasOnePage() {
         The sheet portals into One's composer slot and only for the chat on screen.
       */}
       <AskUserSheet />
+      {/* Chat-less tool approvals only, and only when the owner opens them from the switcher dot. */}
+      <ToolApprovalSheet />
     </Suspense>
   );
 }

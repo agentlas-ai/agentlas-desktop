@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.52 — 2026-09-30
+
+- This release binds Agentlas OS v1.2.51 at 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448. Its public runtime asset `hephaestus-runtime-v1.2.51.tar.gz` is pinned at SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
+- Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+- AI connection chips open installation and official-login steps; Installed reflects a live runtime probe.
+- Pair Science 0.1.44 with Research Director 1.25.0; report daemon reasons, retry recovery, and show research stages.
+- Install verified native Claude, Codex, Grok, and Kimi binaries on macOS with progress and cancellation; preserve the selected CLI for login and runtime checks.
+- Clear stale Science startup errors only after recovery succeeds; retain later failures. Mail provisioning failures support retry and dismissal across client versions.
+- Keep vault autofill on matching origins, and refuse ambiguous chooser-less upload targets.
+- Record YouTube publication receipts, resume answered goals, and show attention across One and Work.
+- Render conversation charts and spreadsheets with the updated artifact panels.
+
 ## 1.2.51 — 2026-09-29
 
 - **Pinned runtime** — Agentlas OS v1.2.51 at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; public asset `hephaestus-runtime-v1.2.51.tar.gz` has SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.

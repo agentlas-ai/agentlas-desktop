@@ -11,6 +11,7 @@
 // Main에서만 복호화되어 기존 암호화 vault로 저장되고, 임시 바이트는 즉시 지운다.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ConnectSteps } from "./ServiceConnect";
 import { createPortal } from "react-dom";
 import { ipc } from "@/lib/ipc";
 import { browserLoginImportNotice } from "@/lib/browser-login-import-notice";
@@ -75,6 +76,9 @@ export function CredentialImportDialog({
   const [importingNow, setImportingNow] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const scanRevision = useRef(0);
+  const stopRemaining = useRef(false);
+  const close = useCallback(() => { stopRemaining.current = true; scanRevision.current += 1; onClose(); }, [onClose]);
+  useEffect(() => { stopRemaining.current = false; return () => { stopRemaining.current = true; }; }, []);
 
   /*
    * ★대화상자는 Escape 로 닫혀야 한다 (실측 2026-09-08).
@@ -85,11 +89,11 @@ export function CredentialImportDialog({
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
       event.stopPropagation();
-      if (!importingNow) onClose();
+      close();
     };
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
-  }, [importingNow, onClose]);
+  }, [close]);
 
   // 1단계: 어떤 브라우저 프로필이 있는지.
   useEffect(() => {
@@ -221,6 +225,7 @@ export function CredentialImportDialog({
 
   const run = async () => {
     if (!api || !profileId || !consented || checked.size + passwordChecked.size + historyChecked.size === 0) return;
+    stopRemaining.current = false;
     setImportingNow(true);
     setError(null);
     try {
@@ -237,6 +242,7 @@ export function CredentialImportDialog({
       let cookieDetail = "";
       if (checked.size > 0) {
         const res = await api.browser.importCredentials(profileId, [...checked]);
+        if (stopRemaining.current) return;
         if (!res.ok) {
           affected.cookies = true;
           warnings.push(res.error ?? (ko ? "로그인 상태를 가져오지 못했습니다." : "Could not import sign-in sessions."));
@@ -254,6 +260,7 @@ export function CredentialImportDialog({
             : `Cookies +${added} · updated ${updated} · kept ${kept}`;
         }
       }
+      if (stopRemaining.current) return;
       if (passwordChecked.size > 0 || historyChecked.size > 0) {
         try {
           const data = await api.browserProfileImport.import({
@@ -263,6 +270,7 @@ export function CredentialImportDialog({
             ...(taskScopeId ? { taskScopeId } : {}),
             userConfirmed: true,
           });
+          if (stopRemaining.current) return;
           passwordCount = data.passwords.imported + data.passwords.updated;
           historyCount = data.history.imported;
           skipped += data.skipped.length;
@@ -281,6 +289,7 @@ export function CredentialImportDialog({
         setError(warnings.join(" ") || (ko ? "선택한 항목을 가져오지 못했습니다." : "Could not import the selected items."));
         return;
       }
+      if (stopRemaining.current) return;
       setResult({ attempted, affected, linked, passwordCount, historyCount, cookieDetail, skipped, warnings, loginRequired: protectedSites });
     } catch {
       setError(ko ? "로그인을 가져오지 못했습니다. 브라우저 연결을 확인하고 다시 시도하세요." : "Could not import logins. Check the browser connection and try again.");
@@ -291,8 +300,8 @@ export function CredentialImportDialog({
 
   const selectedCount = checked.size + passwordChecked.size + historyChecked.size;
   const summary = result && (ko
-    ? `연결 사이트 ${result.linked} · 비밀번호 ${result.passwordCount} · 기록 ${result.historyCount}${result.skipped ? ` · ${result.skipped}개 제외` : ""}`
-    : `Connected sites ${result.linked} · passwords ${result.passwordCount} · history ${result.historyCount}${result.skipped ? ` · ${result.skipped} skipped` : ""}`);
+    ? `가져온 사이트 ${result.linked} · 비밀번호 ${result.passwordCount} · 기록 ${result.historyCount}${result.skipped ? ` · ${result.skipped}개 제외` : ""}`
+    : `Imported sites ${result.linked} · passwords ${result.passwordCount} · history ${result.historyCount}${result.skipped ? ` · ${result.skipped} skipped` : ""}`);
   const resultStatus = (count: number, attempted: number, affected: boolean) => attempted === 0
     ? <span className="cid-result-unselected">{ko ? "미선택" : "Not selected"}</span>
     : count > 0 && !affected && count >= attempted
@@ -301,7 +310,7 @@ export function CredentialImportDialog({
 
   if (typeof document === "undefined") return null;
   return createPortal(
-    <div className="cid-backdrop" onClick={() => { if (!importingNow) onClose(); }}>
+    <div className="cid-backdrop" onClick={close}>
       <div className={`cid-panel${result ? " cid-complete" : ""}`} role="dialog" aria-modal="true" aria-labelledby="credential-import-title" onClick={(event) => event.stopPropagation()}>
         <header className="cid-head">
           <div>
@@ -310,18 +319,20 @@ export function CredentialImportDialog({
               ? (ko ? "선택한 데이터의 실제 처리 결과입니다." : "Here is what was actually imported.")
               : (ko ? "내장 브라우저로 가져올 데이터를 선택하세요" : "Choose what to import into the Agentlas browser")}</p>
           </div>
-          {!result && <button className="cid-close" type="button" aria-label={ko ? "닫기" : "Close"} disabled={importingNow} onClick={onClose}><IconClose size={18} /></button>}
+          {!result && <button className="cid-close" type="button" aria-label={ko ? "닫기" : "Close"} onClick={close}><IconClose size={18} /></button>}
         </header>
 
+        <div className="cid-stepper"><ConnectSteps labels={ko ? ["프로필 확인", "항목 선택", "가져오기", "결과 확인"] : ["Check profile", "Choose items", "Import", "Review results"]} current={result ? 3 : importingNow ? 2 : scanning ? 0 : 1} failed={Boolean(error)} /></div>
         {result ? (
           <div className="cid-result-body">
             <div className="cid-categories cid-result-list">
               <div className="cid-category"><IconKey size={22} /><strong>{ko ? "저장된 비밀번호" : "Saved passwords"}</strong><span className="cid-result-count">{result.passwordCount}</span>{resultStatus(result.passwordCount, result.attempted.passwords, result.affected.passwords)}</div>
-              <div className="cid-category"><IconLock size={22} /><strong>{ko ? "쿠키 · 연결 사이트" : "Cookies · connected sites"}</strong><span className="cid-result-count">{result.linked}</span>{resultStatus(result.linked, result.attempted.cookies, result.affected.cookies)}</div>
+              <div className="cid-category"><IconLock size={22} /><strong>{ko ? "쿠키 · 가져온 사이트" : "Cookies · imported sites"}</strong><span className="cid-result-count">{result.linked}</span>{resultStatus(result.linked, result.attempted.cookies, result.affected.cookies)}</div>
               <div className="cid-category"><IconRefresh size={22} /><strong>{ko ? "방문 기록" : "Browsing history"}</strong><span className="cid-result-count">{result.historyCount}</span>{resultStatus(result.historyCount, result.attempted.history, result.affected.history)}</div>
               <div className="cid-category"><IconPuzzle size={22} /><strong>{ko ? "확장 프로그램" : "Extensions"}</strong><span className="cid-result-status warn"><IconAlertTriangle size={17}/></span></div>
             </div>
             {result.cookieDetail && <p className="cid-result-note">{result.cookieDetail}</p>}
+            {result.attempted.cookies > 0 && <p className="cid-result-note">{ko ? "쿠키를 가져온 결과이며, 실제 로그인 상태는 사이트의 연결 버튼에서 확인합니다." : "Cookies were imported. Use the site’s Connect button to verify live sign-in."}</p>}
             <div className="cid-result-warnings">
               <strong>{ko ? "확장 프로그램" : "Extensions"}</strong>
               <p>{ko ? "확장 프로그램 가져오기는 현재 지원하지 않습니다." : "Extension import is not currently supported."}</p>
@@ -392,10 +403,12 @@ export function CredentialImportDialog({
           </div>
         )}
 
-        <footer className="cid-foot"><span className="cid-count">{result ? summary : (ko ? `${selectedCount}개 선택` : `${selectedCount} selected`)}</span><div className="cid-actions">{!result && <button type="button" onClick={onClose} disabled={importingNow}>{ko ? "취소" : "Cancel"}</button>}<button className="accent" type="button" disabled={!result && (!consented || selectedCount === 0 || importingNow)} onClick={result ? () => onDone(summary || "") : () => void run()}>{result ? (ko ? "완료" : "Done") : importingNow ? (ko ? "가져오는 중…" : "Importing…") : (ko ? "가져오기" : "Import")}</button></div></footer>
+        {importingNow && <p className="cid-result-note">{ko ? "취소하면 이후 단계를 멈춥니다. 이미 시작한 가져오기는 완료될 수 있어요." : "Cancel stops remaining steps. An import already started may finish."}</p>}
+        <footer className="cid-foot"><span className="cid-count">{result ? summary : (ko ? `${selectedCount}개 선택` : `${selectedCount} selected`)}</span><div className="cid-actions">{!result && <button type="button" onClick={close}>{ko ? "취소" : "Cancel"}</button>}<button className="accent" type="button" disabled={!result && (!consented || selectedCount === 0 || importingNow)} onClick={result ? () => onDone(summary || "") : () => void run()}>{result ? (ko ? "완료" : "Done") : importingNow ? (ko ? "가져오는 중…" : "Importing…") : (ko ? "연결" : "Connect")}</button></div></footer>
       </div>
 
       <style jsx>{`
+        .cid-stepper { padding: 0 24px; flex-shrink: 0; }
         .cid-backdrop {
           position: fixed;
           inset: 0;

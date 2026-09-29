@@ -9,12 +9,14 @@ import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
 // 결과를 받아 다음 단계로 가야 한다. 이 시트가 답을 돌려주면 그 자리에서 실행이 이어진다.
 //
 // 형태는 BrowserActionApprovalSheet 와 같은 규칙(큐 + 만료 + 창 없으면 애초에 안 옴).
-import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { usePathname } from "next/navigation";
 import { useT } from "@/lib/i18n";
 import { AskCard } from "@/components/AskCard";
 import { clearAskUserDraft, loadAskUserDraft, saveAskUserDraft } from "@/lib/ask-user-draft";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { ipc } from "@/lib/ipc";
+import { askUserQueueSnapshot, removeAskUserRequest, useAskUserQueue } from "@/lib/ask-user-queue";
+import { useOrphanAttentionRevealed } from "@/lib/attention";
 import { useToolApprovals } from "@/lib/tool-approvals";
 import type { AskUserRequestEvent } from "@/lib/types";
 
@@ -22,33 +24,19 @@ import type { AskUserRequestEvent } from "@/lib/types";
  * ★질문 카드는 그 질문을 낸 대화 안에서만 편다 (오너 2026-09-29, 1.2.50 설정 화면 실측:
  * "이게 왜 여기 뜨냐;; 그리고 왜 좌측에 뜨냐").
  *
- * 이 시트는 AppShell 전역이라 어느 화면에서든 큐 첫 질문을 폈다. 작성창이 없는 화면(설정)
- * 에서는 포털 슬롯이 없어 fixed `left:50%` 로 **창 전체** 가운데에 떨어졌고 — 사이드바를
- * 포함한 폭이라 본문 기준으로는 왼쪽으로 치우쳤다. 다른 대화를 보고 있으면 엉뚱한 대화의
- * 작성창 위에 붙었다. 도구 승인 카드는 이미 같은 규칙이다(ToolApprovalSheet 머리말,
- * 오너 결정 2026-08-15): 자기 대화가 화면에 있을 때만 카드, 아니면 배지 하나.
+ * chatId 가 있는 질문은 그 대화가 보일 때(markChatVisible)만 카드로 그린다. 다른 화면에서는
+ * 카드도 떠다니는 칩도 없다 — 좌측 위 제품 전환기(ProductModeMenu)의 파란 점 하나로만
+ * 알린다(오너 2026-09-29 "시트 띄우지말고 … 파란동그라미 등으로 피드백").
+ * chatId 가 없는 질문은 갈 대화가 없으니 오너가 그 점의 목록에서 직접 열 때만 편다
+ * (revealOrphanAttention).
  *
- * 그래서 chatId 가 있는 질문은 그 대화가 보일 때(markChatVisible)만 카드로 그리고,
- * 나머지는 여기서 세어 ToolApprovalSheet 의 배지(대화 열기)에 합친다.
- * chatId 가 없는 질문만 갈 곳이 없으니 어디서나 편다 — 작성창이 없으면 배지 줄(우하단)에.
+ * 대기열 자체는 lib/ask-user-queue 의 모듈 저장소다 — 시트가 언마운트돼도 질문은 살아 있다.
  */
-const EMPTY: readonly AskUserRequestEvent[] = [];
-let elsewhereSnapshot: readonly AskUserRequestEvent[] = EMPTY;
-const elsewhereListeners = new Set<() => void>();
-function publishElsewhere(next: readonly AskUserRequestEvent[]): void {
-  const same = next.length === elsewhereSnapshot.length
-    && next.every((item, index) => item.requestId === elsewhereSnapshot[index]?.requestId);
-  if (same) return;
-  elsewhereSnapshot = next.length === 0 ? EMPTY : next;
-  for (const listener of elsewhereListeners) listener();
-}
-function subscribeElsewhere(listener: () => void): () => void {
-  elsewhereListeners.add(listener);
-  return () => { elsewhereListeners.delete(listener); };
-}
-/** Live questions whose conversation is not on screen — the global badge counts them. */
+/** Live questions whose conversation is not on screen — the attention dot counts them. */
 export function useAskUserElsewhere(): readonly AskUserRequestEvent[] {
-  return useSyncExternalStore(subscribeElsewhere, () => elsewhereSnapshot, () => EMPTY);
+  const queue = useAskUserQueue();
+  const { visible } = useToolApprovals();
+  return queue.filter((item) => !item.chatId || !visible.has(item.chatId));
 }
 
 export function AskUserSheet() {
@@ -56,8 +44,8 @@ export function AskUserSheet() {
   const { locale } = useT();
   const ko = locale === "ko";
   const oneRoute = pathname.startsWith("/one");
-  const [queue, setQueue] = useState<AskUserRequestEvent[]>([]);
-  const liveRequestsRef = useRef(new Set<string>());
+  const queue = useAskUserQueue();
+  const orphansRevealed = useOrphanAttentionRevealed();
   const attemptsRef = useRef(new Map<string, symbol>());
   const [submission, setSubmission] = useState<{
     requestId: string;
@@ -68,40 +56,11 @@ export function AskUserSheet() {
   const [draftValue, setDraftValue] = useState("");
   const [now, setNow] = useState(() => Date.now());
   const { visible } = useToolApprovals();
-  const onScreen = (item: AskUserRequestEvent): boolean => !item.chatId || visible.has(item.chatId);
+  const onScreen = (item: AskUserRequestEvent): boolean => item.chatId ? visible.has(item.chatId) : orphansRevealed;
   const req = queue.find(onScreen) ?? null;
-  const elsewhere = queue.filter((item) => !onScreen(item));
-  useEffect(() => { publishElsewhere(elsewhere); });
-  useEffect(() => () => publishElsewhere(EMPTY), []);
+  const isLive = (requestId: string): boolean => askUserQueueSnapshot().some((item) => item.requestId === requestId);
   const currentRequestIdRef = useRef<string | null>(null);
   currentRequestIdRef.current = req?.requestId ?? null;
-
-  useEffect(() => {
-    const events = ipcEvents();
-    if (!events?.onAskUser) return;
-    const unsubscribe = events.onAskUser((r) => {
-      if (r.expiresAt <= Date.now()) {
-        clearAskUserDraft(r);
-        liveRequestsRef.current.delete(r.requestId);
-        attemptsRef.current.delete(r.requestId);
-        if (currentRequestIdRef.current === r.requestId) setDraftValue("");
-      } else {
-        liveRequestsRef.current.add(r.requestId);
-      }
-      setQueue((current) => {
-        // expiresAt 0 = 이 질문은 끝났다(만료·취소). 시트에서 치운다.
-        if (r.expiresAt <= Date.now()) {
-          return current.filter((item) => item.requestId !== r.requestId);
-        }
-        return current.some((item) => item.requestId === r.requestId) ? current : [...current, r];
-      });
-    });
-    return () => {
-      unsubscribe();
-      liveRequestsRef.current.clear();
-      attemptsRef.current.clear();
-    };
-  }, []);
 
   useEffect(() => {
     if (!req) {
@@ -111,24 +70,15 @@ export function AskUserSheet() {
     setDraftValue(loadAskUserDraft(req) ?? "");
     setNow(Date.now());
     const tick = window.setInterval(() => setNow(Date.now()), 1_000);
-    const remaining = Math.max(0, req.expiresAt - Date.now());
-    const expire = window.setTimeout(() => {
-      liveRequestsRef.current.delete(req.requestId);
-      attemptsRef.current.delete(req.requestId);
-      clearAskUserDraft(req);
-      if (currentRequestIdRef.current === req.requestId) setDraftValue("");
-      setQueue((current) => current.filter((item) => item.requestId !== req.requestId));
-    }, remaining);
     return () => {
       window.clearInterval(tick);
-      window.clearTimeout(expire);
     };
   }, [req]);
 
   const answer = async (value: string | null) => {
     if (!req) return;
     const requestId = req.requestId;
-    if (!liveRequestsRef.current.has(requestId) || attemptsRef.current.has(requestId)) return;
+    if (!isLive(requestId) || attemptsRef.current.has(requestId)) return;
     const attempt = Symbol(requestId);
     attemptsRef.current.set(requestId, attempt);
     setSubmission({ requestId, value, pending: true });
@@ -136,12 +86,11 @@ export function AskUserSheet() {
       const api = ipc();
       if (typeof api?.confirm?.submitAskUserAnswer !== "function") throw new Error("ask_bridge_unavailable");
       const accepted = await api.confirm.submitAskUserAnswer(requestId, value);
-      if (attemptsRef.current.get(requestId) !== attempt || !liveRequestsRef.current.has(requestId)) return;
+      if (attemptsRef.current.get(requestId) !== attempt || !isLive(requestId)) return;
       if (accepted === true) {
         clearAskUserDraft(req);
         setDraftValue("");
-        liveRequestsRef.current.delete(requestId);
-        setQueue((current) => current.filter((item) => item.requestId !== requestId));
+        removeAskUserRequest(requestId);
       } else {
         // Main returns false only when this request is no longer pending. It
         // exposes no Desktop pending-list API; do not invent an accepted reply
@@ -150,7 +99,7 @@ export function AskUserSheet() {
           ? { ...current, pending: false, error: "ended" } : current);
       }
     } catch {
-      if (attemptsRef.current.get(requestId) !== attempt || !liveRequestsRef.current.has(requestId)) return;
+      if (attemptsRef.current.get(requestId) !== attempt || !isLive(requestId)) return;
       setSubmission((current) => current?.requestId === requestId
         ? { ...current, pending: false, error: "unavailable" } : current);
     } finally {
@@ -168,10 +117,9 @@ export function AskUserSheet() {
     // Main explicitly reported that this request ended elsewhere. It is safe
     // to clear this stale card locally; no answer is still waiting for it.
     if (submission?.requestId === requestId && submission.error === "ended") {
-      liveRequestsRef.current.delete(requestId);
       clearAskUserDraft(req);
       setDraftValue("");
-      setQueue((current) => current.filter((item) => item.requestId !== requestId));
+      removeAskUserRequest(requestId);
       return;
     }
     void answer(null);

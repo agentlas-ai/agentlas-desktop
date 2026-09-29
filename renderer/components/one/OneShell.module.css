@@ -4446,3 +4446,17 @@
   max-width: none;
   pointer-events: auto;
 }
+
+/* 화면 밖에서 오너를 기다리는 대화 — 세션 행의 파란 점(AttentionDot). */
+/* 제목 줄은 [제목][점?][경고?][시각] 한 줄이다 — 항목 수가 늘어도 줄바꿈하지 않게 열을 자동으로. */
+.sessionTitleLine:has(.sessionAttentionDot) {
+  grid-auto-flow: column;
+  grid-template-columns: minmax(0, 1fr);
+  grid-auto-columns: auto;
+}
+
+.sessionAttentionDot {
+  align-self: center;
+  flex: 0 0 auto;
+  margin-left: 2px;
+}

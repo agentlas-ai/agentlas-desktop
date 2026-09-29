@@ -17,7 +17,8 @@ import {
 } from "../mcp-tools/browser-cdp-launcher";
 import { NATIVE_BROWSER_PARTITION } from "../work-live-view";
 import { browserCredentialConsentRevision } from "./credential-sync";
-import { decideNativeCookieWrite } from "./cookie-merge";
+import { decideNativeCookieWrite, planSessionGroupFeed } from "./cookie-merge";
+import { sessionCookieGroupOf, sessionCookieNamesFor } from "./login-wall";
 import { listBrowserSites } from "../store/browser-vault";
 import { getMeta, setMeta } from "../store/meta";
 import { getDb } from "../store/db";
@@ -347,6 +348,32 @@ export async function writeNativeBrowserCookies(
   const counts = emptyCounts();
   counts.observed = cookies.length;
   let begun = false;
+  /*
+   * An automatic sync never mixes two logins: a login group the partition already holds in full is
+   * kept whole, a partial or missing one is written whole (cookie-merge.ts planSessionGroupFeed).
+   * Line-by-line "keep what exists, add what is missing" stitched the dedicated browser's tokens into
+   * the owner's own partition login.
+   */
+  let groupFeed: Set<CdpCookie> | null = null;
+  if (connect && connect.explicitImport !== true) {
+    const text = (value: unknown) => typeof value === "string" ? value : "";
+    const existing = (await destination.cookies.get({}).catch(() => [])).map((item) => ({
+      domain: item.domain ?? "", name: item.name, path: item.path ?? "/" }));
+    const incoming = cookies.map((cookie) => ({ cookie, domain: text(cookie.domain), name: text(cookie.name), path: text(cookie.path) || "/" }));
+    const plan = planSessionGroupFeed({
+      explicitImport: false,
+      incoming,
+      existing,
+      groupOf: sessionCookieGroupOf,
+      sessionNamesFor: sessionCookieNamesFor,
+      perCookie: (row) => {
+        const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
+        const hasExisting = existing.some((item) => host(item.domain) === host(row.domain) && item.name === row.name && item.path === row.path);
+        return decideNativeCookieWrite({ hasExisting, explicitImport: false }) === "write" ? "feed" : "keep";
+      },
+    });
+    groupFeed = new Set(plan.feed.map((row) => row.cookie));
+  }
   for (const cookie of cookies) {
     const converted = nativeCookieDetails(cookie, nowSeconds);
     if (converted.kind === "skip") {
@@ -366,7 +393,8 @@ export async function writeNativeBrowserCookies(
          * 그러나 사용자가 방금 가져오기를 눌렀다면 가져온 값이 이겨야 한다 — 그러지 않으면
          * "가져왔는데 여전히 로그아웃"이 되고, 사용자 눈에는 가져오기가 안 된 것이다.
          */
-        if (decideNativeCookieWrite({ hasExisting, explicitImport: connect.explicitImport === true }) === "preserve") {
+        const write = groupFeed ? groupFeed.has(cookie) : decideNativeCookieWrite({ hasExisting, explicitImport: connect.explicitImport === true }) === "write";
+        if (!write) {
           counts.preserved = (counts.preserved ?? 0) + 1;
           continue;
         }

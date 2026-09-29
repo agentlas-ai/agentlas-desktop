@@ -143,7 +143,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
       {!collapsed && remaining < LOW_BALANCE_THRESHOLD && (
         <button
           type="button"
-          onClick={openPricing}
+          onClick={() => openPricing("ai-credits")}
           title={ko ? "구독 플랜 보기" : "View subscription plans"}
           style={{
             display: "block",

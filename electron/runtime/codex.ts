@@ -26,6 +26,7 @@ import {
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { nativeCliCandidates } from "./native-cli";
+import { observeCliExecutableIdentity } from "./cli-executable-identity";
 import { stageCliImageAttachments } from "./image-attachments";
 import { inferInlineImageMime, parseMcpResult } from "../../shared/mcp-result-rendering";
 import { saveBrowserCaptureArtifact } from "../media/capture-artifacts";
@@ -228,7 +229,10 @@ export function clearCodexBinCache(): void {
   cachedBin = undefined;
 }
 
-async function getBin(): Promise<string | null> {
+async function getBin(source?: string, cwd = agentRunCwd(), env = process.env): Promise<string | null> {
+  // Use the same exact executable as the invocation's auth probe. A selected source must never fall
+  // through to the app-wide cached sibling; this bin also participates in the resident session pool key.
+  if (source) return observeCliExecutableIdentity({ bin: source, cwd, env })?.executable ?? null;
   if (cachedBin !== undefined) return cachedBin;
   const probe = await probeCodex();
   cachedBin = probe?.path ?? null;
@@ -1763,6 +1767,32 @@ async function runCodexResidentTurn(input: {
           unattended: req.unattended === true || req.noSynchronousAsk === true,
           signal: elicitationAbort.signal,
           isCurrent,
+          // Codex's own MCP tool approvals are answered by the same arbiter as its bash approvals
+          // (codex-elicitation.ts codexMcpToolApprovalFrom), not by an owner question sheet.
+          decideToolApproval: async ({ serverName, toolName }) => {
+            const ask: RuntimeToolPermissionAsk = {
+              ...(req.planMode ? { planMode: true as const } : {}),
+              signal: elicitationAbort.signal,
+              runtime: KIND,
+              sessionKey: `${KIND}:${req.sessionFingerprintSeed ?? chatId}`,
+              tool: `mcp__${serverName}__${toolName}`,
+              kind: "other",
+              cwd,
+              permission: req.permission,
+              // Codex only asks for calls it judged not read-only (mcp_tool_call.rs:2466-2497).
+              mutating: true,
+              chatId: req.approvalChatId ?? chatId,
+              ...(req.agentId ? { agentId: req.agentId } : {}),
+              ...(req.unattended || req.noSynchronousAsk ? { unattended: true as const } : {}),
+            };
+            const arbiter = getRuntimeToolPermissionArbiter();
+            let decision = defaultRuntimeToolPermission(ask);
+            if (arbiter) {
+              try { decision = await arbiter(ask); } catch { decision = "deny"; }
+            }
+            events.onStatus(`[tool-approval] runtime=${KIND} capability=other tool=${ask.tool} decision=${decision}`);
+            return decision;
+          },
         });
         // The helper rechecks immediately before accept. Check once more at the
         // transport boundary so a close/replacement between its return and this
@@ -2206,7 +2236,7 @@ export const runCodex: Runner = async (
     || residencyDisabledFor(KIND, req.env ?? process.env) || req.isolatedMcpConfig || !req.chatId)) {
     throw new Error("workforce_codex_observation_app_server_required");
   }
-  const bin = await getBin();
+  const bin = await getBin(req.runtimeSource, req.cwd ?? agentRunCwd(), req.env ?? process.env);
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingCodex"));
   }

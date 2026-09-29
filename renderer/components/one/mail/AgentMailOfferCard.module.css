@@ -1,0 +1,146 @@
+.card {
+  width: min(500px, 100%);
+  padding: 20px 22px;
+  border: 1px solid var(--paper-edge);
+  border-radius: var(--rd-r-md, 14px);
+  background: var(--paper);
+  box-shadow: var(--shadow-2);
+  text-align: left;
+}
+
+.card[data-compact] {
+  box-shadow: none;
+}
+
+.row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.text {
+  min-width: 0;
+}
+
+.text strong {
+  display: block;
+  font-size: 15px;
+  white-space: nowrap;
+}
+
+.text small {
+  display: block;
+  margin-top: 6px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chip {
+  flex: 0 0 auto;
+  border-radius: 99px;
+  padding: 5px 10px;
+  background: var(--paper-3);
+  color: var(--ink-soft);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.chip[data-tone="ok"] {
+  background: var(--ok-soft);
+  color: var(--rd-accent-text);
+}
+
+.chip[data-tone="warn"] {
+  background: var(--warn-soft);
+  color: var(--ink);
+}
+
+.addressRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.address {
+  flex: 1;
+  min-width: 0;
+  padding: 9px 12px;
+  border-radius: var(--rd-r-xs, 8px);
+  background: var(--paper-3);
+  color: var(--ink);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.meter {
+  height: 6px;
+  margin-top: 12px;
+  border-radius: 99px;
+  background: var(--paper-3);
+  overflow: hidden;
+}
+
+.meter > div {
+  height: 100%;
+  border-radius: 99px;
+  background: var(--black);
+}
+
+.meter[data-exhausted] > div {
+  background: var(--warn);
+}
+
+.note {
+  margin: 6px 0 0;
+  color: var(--muted-deep);
+  font-size: 11.5px;
+}
+
+.primary,
+.secondary,
+.ghost {
+  min-height: 36px;
+  padding: 0 16px;
+  border-radius: var(--rd-r-sm, 10px);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.primary,
+.secondary {
+  margin-top: 14px;
+}
+
+.primary {
+  border: 0;
+  background: var(--black);
+  color: var(--white);
+}
+
+.secondary {
+  border: 1px solid var(--paper-edge);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.ghost {
+  flex: none;
+  border: 1px solid var(--paper-edge);
+  background: transparent;
+  color: var(--ink);
+}
+
+.primary:disabled,
+.secondary:disabled {
+  opacity: 0.6;
+  cursor: progress;
+}

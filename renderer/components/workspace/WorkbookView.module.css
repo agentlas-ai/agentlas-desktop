@@ -1,0 +1,81 @@
+.workbook { display: flex; flex-direction: column; min-height: 0; height: 100%; }
+.bar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 10px 0 12px;
+  border-bottom: 1px solid var(--paper-edge);
+}
+.tabs { display: flex; gap: 2px; min-width: 0; overflow-x: auto; }
+.tabs button {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 12px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: transparent;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tabs button[data-active="true"] { color: #2a64c9; border-bottom-color: #2a64c9; font-weight: 500; }
+.tabs button:focus-visible { outline: 2px solid var(--ink-soft); outline-offset: -2px; }
+.count {
+  display: inline-grid;
+  place-items: center;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: color-mix(in srgb, #2a64c9 14%, transparent);
+  color: #2a64c9;
+  font-size: 11px;
+  font-weight: 500;
+}
+.close {
+  appearance: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  margin-bottom: 4px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-soft);
+  cursor: pointer;
+}
+.close:hover, .close:focus-visible { background: var(--paper-3); color: var(--ink); outline: none; }
+.body { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pane { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.pane[hidden] { display: none; }
+.charts { flex: 1; min-height: 0; overflow: auto; padding: 12px 14px 18px; display: grid; align-content: start; gap: 12px; }
+.chartTabs { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 4px; }
+.chartTabs button {
+  appearance: none;
+  display: grid;
+  gap: 1px;
+  flex: 0 0 auto;
+  max-width: 220px;
+  padding: 7px 12px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 9px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.chartTabs button[data-active="true"] { border-color: var(--ink-soft); background: var(--paper-3); }
+.chartTabs strong { font-size: 12.5px; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chartTabs span { font-size: 11px; color: var(--muted-deep, var(--ink-soft)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.chartStage { border: 1px solid var(--paper-edge-strong); border-radius: 12px; background: var(--paper); }
+.table { flex: 1; min-height: 0; overflow: auto; }
+.empty { margin: 8px 2px; font-size: 13px; color: var(--ink-soft); }
+.loading { height: 200px; border-radius: 12px; background: var(--paper-3); opacity: 0.6; }

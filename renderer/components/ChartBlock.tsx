@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { chartRejectMessage, chartThemeConfig, quietDefaultTitles, sanitizeChartSpec } from "@/lib/chart-spec";
 import {
   announceVisual,
+  copyPngDataUrl,
   documentIsKorean,
   downloadDataUrl,
   readVisualTheme,
@@ -14,6 +15,7 @@ import {
 } from "@/lib/visual-artifacts";
 import { useVisualThemeKey } from "./HtmlVisualBlock";
 import styles from "./VisualBlock.module.css";
+import { VisualMenu } from "./VisualMenu";
 
 interface ChartView {
   toImageURL(type: "png" | "svg", scale?: number): Promise<string>;
@@ -216,11 +218,16 @@ export function ChartBlock({
   };
   return (
     <figure className={styles.visual} data-size={size} data-visual-kind="chart" data-render-status={state} aria-label={title}>
-      {state === "ready" && size !== "thumb" && <div className={styles.tools} role="toolbar" aria-label={ko ? "차트 도구" : "Chart tools"}>
-        {visual && size === "inline" && <button type="button" onClick={() => requestVisualOpen(visual)}>{ko ? "패널에서 열기" : "Open in panel"}</button>}
-        <button type="button" onClick={() => void save("png")}>PNG</button>
-        <button type="button" onClick={() => void save("svg")}>SVG</button>
-      </div>}
+      {state === "ready" && size !== "thumb" && <VisualMenu ko={ko} label={ko ? "차트 메뉴" : "Chart menu"} items={[
+        { key: "copy", label: ko ? "클립보드에 복사" : "Copy to clipboard", run: async () => {
+          const view = viewRef.current;
+          if (!view) return false;
+          try { return await copyPngDataUrl(await view.toImageURL("png", 2)); } catch { return false; }
+        } },
+        { key: "download", label: ko ? "파일 다운로드 (PNG)" : "Download file (PNG)", run: () => void save("png") },
+        { key: "download-svg", label: ko ? "SVG 로 다운로드" : "Download as SVG", run: () => void save("svg") },
+        ...(visual && size === "inline" ? [{ key: "panel", label: ko ? "패널에서 열기" : "Open in panel", run: () => { requestVisualOpen(visual); } }] : []),
+      ]} />}
       {state === "loading" && <div className={styles.loading} aria-hidden="true" />}
       <div ref={hostRef} className={styles.chartHost} data-chart-host="true" />
     </figure>

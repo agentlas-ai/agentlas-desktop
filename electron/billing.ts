@@ -2,7 +2,7 @@
 // 과거 Hub 렌트 수익 전송은 마켓플레이스 정산 영구 폐쇄로 비활성화한다.
 // 인증은 auth.ts의 세션 쿠키를 사용한다.
 import { fetchWithHubSession, getSessionCookieHeader, webBaseUrl } from "./auth";
-import type { BillingPlanCatalog, BillingPlanOffer, EarningsTransferResult, HubCreditBalance } from "../shared/types";
+import type { BillingCheckoutReadiness, BillingPlanCatalog, BillingPlanOffer, EarningsTransferResult, HubCreditBalance } from "../shared/types";
 import { PROJECT_AGENT_POOL_MAX } from "../shared/project-agent-pool";
 
 const TIMEOUT_MS = 8000;
@@ -62,6 +62,34 @@ export async function getBillingPlans(): Promise<BillingPlanCatalog> {
       return { ok: false, error: "invalid" };
     }
     return { ok: true, plans: body.plans.map((plan) => ({ ...plan })), fetchedAt: Date.now() };
+  } catch {
+    return { ok: false, error: "network" };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * GET /api/billing/config?plan=&cycle= — asked only after the owner pressed
+ * "Upgrade" in the plan picker (the paywall itself is never gated on this,
+ * owner 2026-09-29). `configured` and `code` are the machine fields; the
+ * server's `reason` prose is never read. A failed read is its own state so the
+ * picker can say "try again" instead of pretending checkout is closed.
+ */
+export async function getBillingCheckoutReadiness(input: { plan?: unknown; cycle?: unknown }): Promise<BillingCheckoutReadiness> {
+  const plan = typeof input?.plan === "string" && /^[a-z]{2,16}$/.test(input.plan) ? input.plan : null;
+  const cycle = input?.cycle === "annual" ? "annual" : "monthly";
+  if (!plan) return { ok: false, error: "invalid" };
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  try {
+    const url = `${webBaseUrl()}/api/billing/config?plan=${encodeURIComponent(plan)}&cycle=${cycle}`;
+    const res = await fetch(url, { signal: controller.signal, headers: { Accept: "application/json" } });
+    if (!res.ok) return { ok: false, error: "http" };
+    const body = (await res.json()) as { configured?: unknown; code?: unknown };
+    if (typeof body.configured !== "boolean") return { ok: false, error: "invalid" };
+    const code = typeof body.code === "string" && /^[a-z0-9_]{1,64}$/.test(body.code) ? body.code : null;
+    return { ok: true, plan, cycle, open: body.configured, code: body.configured ? null : code ?? "checkout_not_configured" };
   } catch {
     return { ok: false, error: "network" };
   } finally {

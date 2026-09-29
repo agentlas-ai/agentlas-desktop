@@ -44,3 +44,16 @@ export function goalDisplayState(input: { status: string | null | undefined; pau
 
 /** long_runs statuses the sidebar comet spins for between turns (Main SQL list; host pauses are checked by reason). */
 export const GOAL_SPINNING_STATUSES = ["queued", "running", "waiting_worker", "waiting_tool", "verifying"] as const;
+
+/**
+ * May a local owner message reopen this stopped Goal? A task message may; a plain conversation turn may not —
+ * except the owner's reply to the Goal's own question, which is the resume however short it is ("승인").
+ * Soak 1.2.50 (Youtube launch): "승인" was classified a conversation turn and the Goal stayed blocked
+ * goal_owner_answer_required from 2026-09-28 11:51Z until a manual resume the next day.
+ */
+export function stoppedGoalMessageReopens(goal: { status: string; blockedReason?: string | null },
+  taskIntent: string | undefined): { reopens: boolean; ownerAnswer: boolean } {
+  if (goal.status !== "blocked" && goal.status !== "paused") return { reopens: false, ownerAnswer: false };
+  const ownerAnswer = goal.status === "blocked" && GOAL_OWNER_QUESTION_REASONS.has(goal.blockedReason ?? "");
+  return { reopens: taskIntent !== "conversation" || ownerAnswer, ownerAnswer };
+}

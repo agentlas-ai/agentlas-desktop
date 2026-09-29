@@ -31,6 +31,11 @@ export function registerBrowserUiIpc({ ipc, assertTrustedSender }: BrowserUiIpcD
     assertTrustedSender(event);
     return event.sender.id;
   };
+  ipc.handle("browser:probeSession", async (event, site: string) => {
+    trusted(event);
+    const { probeBrowserSession } = await import("./session-probe");
+    return probeBrowserSession(site);
+  });
   ipc.handle("browserUi:readiness", (event) => {
     trusted(event);
     return browserNativeSessionReadiness();
@@ -59,4 +64,13 @@ export function registerBrowserUiIpc({ ipc, assertTrustedSender }: BrowserUiIpcD
     actOnBrowserDownload(trusted(event), input));
   ipc.handle("browserUi:clearData", (event, input: Parameters<BrowserUiAPI["clearData"]>[0]) =>
     clearBrowserData(trusted(event), input));
+  // The fallback ladder's owner card has one button. Same trusted-sender check; the site is a bare domain.
+  ipc.handle("browserUi:ladderAction", async (event, input: Parameters<BrowserUiAPI["ladderAction"]>[0]) => {
+    trusted(event);
+    const action = input?.action;
+    if (action !== "retry" && action !== "open-browser" && action !== "fix") return { ok: false, code: "invalid-request" };
+    const site = typeof input?.site === "string" && /^[a-z0-9.-]{1,253}$/i.test(input.site) ? input.site : null;
+    const { browserLadderOwnerAction } = await import("./fallback-ladder-runtime");
+    return browserLadderOwnerAction({ action, site });
+  });
 }

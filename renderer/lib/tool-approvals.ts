@@ -159,6 +159,14 @@ function snapshot(): Snapshot {
   return current;
 }
 
+/** 훅 밖(전역 주의 저장소 lib/attention)에서 같은 큐를 구독한다. */
+export function subscribeToolApprovals(fn: () => void): () => void {
+  return subscribe(fn);
+}
+export function toolApprovalsSnapshot(): Snapshot {
+  return current;
+}
+
 /** 대기 중인 live 승인 요청 전부(렌더 순서 = 도착 순서) + 지금 보이는 대화 집합. */
 export function useToolApprovals(): Snapshot {
   return useSyncExternalStore(subscribe, snapshot, () => SERVER);

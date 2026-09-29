@@ -17,6 +17,7 @@ import {
   type NativeInputResult,
 } from "./native-driver";
 import { currentUiLocale } from "../ui-locale";
+import { checkComputerUseWindowScope } from "./window-scope";
 
 const MAX_REQUEST_BYTES = 64 * 1024;
 const MAX_AUDIT_ROWS = 200;
@@ -189,6 +190,8 @@ async function observeApp(body: Record<string, unknown>): Promise<Record<string,
   if (maxDepth === null || maxNodes === null) {
     return { ok: false, error: "invalid-arguments", message: "maxDepth or maxNodes is outside the supported range." };
   }
+  const denied = await checkComputerUseWindowScope({ route: "observe", app });
+  if (denied) { recordAudit("observeApp", denied as NativeInputResult); return denied; }
   const result = await invokeNativeInputDriver({ action: "observeApp", app, maxDepth, maxNodes });
   recordAudit("observeApp", result);
   if (!result.ok || !result.observation) return result as unknown as Record<string, unknown>;
@@ -242,6 +245,13 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
   const appName = body.app === undefined ? null : safeString(body.app, 160);
   if (body.app !== undefined && !appName) {
     return { ok: false, error: "invalid-app", message: "app must be under 160 characters." };
+  }
+  // The fallback ladder's "our Chrome window only" grant is checked before anything is dispatched, including
+  // the focusApp pre-step below (focusing another app is itself an effect).
+  {
+    const points = [mapPoint(body), mapPoint(body, "from_"), mapPoint(body, "to_")].filter((point): point is Point => point !== null);
+    const denied = await checkComputerUseWindowScope({ route: "action", action, app: body.app, points });
+    if (denied) { recordAudit(action, denied as NativeInputResult); return denied; }
   }
   let observedElement: { observationId: string; ref: NativeElementReference } | null = null;
   if (action === "elementAction") {

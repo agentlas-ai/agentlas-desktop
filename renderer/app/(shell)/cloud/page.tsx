@@ -3,6 +3,7 @@ import { useEffect, useState, useSyncExternalStore } from "react";
 import type { CSSProperties } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
+import { openPricing } from "@/components/UpgradeCta";
 import { IconCheck, IconFileUp } from "@/components/Icon";
 import { ElapsedClock } from "@/components/ElapsedClock";
 import type {
@@ -689,6 +690,7 @@ function CloudAction({
 }
 
 function IssueRow({ issue }: { issue: UploadIssue }) {
+  const { locale } = useT();
   return (
     <div style={issueRow}>
       <span style={severityDot(issue.severity)} />
@@ -699,6 +701,11 @@ function IssueRow({ issue }: { issue: UploadIssue }) {
         </div>
         <div style={{ marginTop: 3, fontSize: 13, color: "var(--ink-soft)", lineHeight: 1.45 }}>{issue.message}</div>
         {issue.remediation && <div style={{ marginTop: 4, fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.45 }}>{issue.remediation}</div>}
+        {issue.action === "choose-plan" && (
+          <button type="button" className="btn sm" style={{ marginTop: 8 }} onClick={() => openPricing("cloud-agent-limit")} data-cloud-choose-plan>
+            {locale !== "en" ? "플랜 선택" : "Choose a plan"}
+          </button>
+        )}
       </div>
     </div>
   );
@@ -1020,6 +1027,7 @@ function classifyUploadFailure(
         remediation: ko
           ? "쓰지 않는 Cloud 에이전트를 지우거나 요금제를 올린 뒤 다시 올리세요."
           : "Delete a Cloud agent you no longer need, or move to a larger plan, then upload again.",
+        action: "choose-plan",
       },
     };
   }

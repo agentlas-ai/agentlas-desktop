@@ -150,7 +150,7 @@ export function buildPosixCliInvocation(
   return `${pathPrefix}${[binary, ...args].map(shellQuote).join(" ")}`;
 }
 
-function augmentedEnv(): NodeJS.ProcessEnv {
+export function augmentedEnv(): NodeJS.ProcessEnv {
   // 번들 Node 는 기존 PATH **뒤**, 보충 경로 **앞** — 실행 경로(exec.ts withCliPath)와
   // 같은 순서다. 두 곳이 어긋나면 "검증은 통과했는데 실행은 죽는" 상태가 만들어진다.
   const bundledNode = managedNodeBinDir();
@@ -171,6 +171,29 @@ export interface CliActionResult {
   message: string;
   /** 실패 시 사용자가 직접 칠 수 있는 명령 */
   command?: string;
+  /** 기계가 읽는 실패 사유(연결 팝업이 문장을 파싱하지 않게). */
+  reasonCode?: "install_network" | "install_failed" | "install_timeout" | "install_cancelled" | "install_verify_failed";
+}
+
+/**
+ * 연결 팝업용 설치 옵션. onOutput 은 **가린** 줄만 받는다(홈 경로·URL 자격증명 제거) —
+ * npm 원문에는 프록시 주소·로컬 경로가 섞일 수 있다. signal 이 끊기면 npm 자식을 죽인다.
+ */
+export interface InstallCliOptions {
+  force?: boolean;
+  onOutput?: (line: string) => void;
+  signal?: AbortSignal;
+}
+
+const NETWORK_FAILURE = /\b(ENOTFOUND|ECONNREFUSED|ECONNRESET|ETIMEDOUT|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|ERR_SOCKET|network|proxy)\b/i;
+
+export function redactInstallLine(line: string): string {
+  const home = os.homedir();
+  let out = line.replace(/\u001b\[[0-9;]*[A-Za-z]/g, "");
+  out = out.replace(/(https?:\/\/)[^\s/@]+@/gi, "$1***@");
+  out = out.replace(/(_authToken|token|password|auth)=\S+/gi, "$1=***");
+  if (home && home.length > 1) out = out.split(home).join("~");
+  return out.slice(0, 300);
 }
 
 interface NpmRunner {
@@ -501,34 +524,54 @@ function appendTail(current: string, chunk: Buffer, limit = 65_536): string {
 
 async function installCliUnlocked(
   kind: InstallableCli,
-  opts?: { force?: boolean },
+  opts?: InstallCliOptions,
 ): Promise<CliActionResult> {
+  const emit = (text: string) => {
+    if (!opts?.onOutput) return;
+    for (const line of text.split(/\r?\n/)) {
+      const clean = redactInstallLine(line).trim();
+      if (clean) {
+        try { opts.onOutput(clean); } catch { /* 표시 실패가 설치를 막지 않는다 */ }
+      }
+    }
+  };
+  if (opts?.signal?.aborted) return { ok: false, message: "cancelled", reasonCode: "install_cancelled" };
   const plan = CLI_PLAN[kind];
   const spec = packageSpec(kind);
-  const fallbackCommand = safeManualInstallCommand(kind);
-
   const existing = resolveBinary(plan.bin);
   if (existing && !opts?.force) {
-    const verified = await runBinary(existing, ["--version"], 20_000);
+    const verified = await runBinary(existing, ["--version"], 20_000, augmentedEnv(), opts?.signal);
     if (verified.ok) return { ok: true, message: `already installed: ${existing}` };
   }
 
-  // ① 공식 네이티브 실행파일(윈도우) — npm·Node·.cmd·postinstall 이 전혀 끼지 않는 길.
+  // ① 공식 네이티브 실행파일(macOS·윈도우) — npm·Node·.cmd·postinstall 이 전혀 끼지 않는 길.
   //    실패해도 끝이 아니다. 사유만 남기고 ② npm 경로로 넘어간다.
   const trail: string[] = [];
   if (nativeCliSupported(kind)) {
-    const native = await installNativeCli(kind, plan.version);
+    emit(`official native package ${plan.version}`);
+    const native = await installNativeCli(kind, plan.version, { ...opts, onOutput: emit });
+    if (opts?.signal?.aborted || (!native.ok && native.reason === "install-cancelled")) {
+      return { ok: false, message: "cancelled", reasonCode: "install_cancelled" };
+    }
     trail.push(native.ok ? "native:installed" : `native:${native.reason}`, ...native.notes);
+    emit(native.ok ? "native: downloaded and pinned integrity verified" : `native: ${native.reason}`);
     if (native.ok) {
-      if (await verifyInstalledBinary(native.executable)) {
+      if (await verifyInstalledBinary(native.executable, opts?.signal, emit)) {
         retireManagedNpmShims(plan.bin);
         recordInstallTrail(kind, [...trail, "native:verified"]);
         return { ok: true, message: `installed and verified: ${native.executable}` };
       }
+      if (opts?.signal?.aborted) return { ok: false, message: "cancelled", reasonCode: "install_cancelled" };
       trail.push("native:verify-failed");
     }
   }
 
+  if (opts?.signal?.aborted) return { ok: false, message: "cancelled", reasonCode: "install_cancelled" };
+  if (kind === "kimi" && !nativeCliSupported(kind)) {
+    trail.push("native:platform-not-pinned");
+    emit("no verified native artifact for this platform in this Desktop release; using the official managed npm package");
+  }
+  const fallbackCommand = safeManualInstallCommand(kind);
   const npm = resolveNpmRunner();
   if (!npm.ok) {
     recordInstallTrail(kind, [...trail, "npm:runner-unavailable"]);
@@ -553,14 +596,17 @@ async function installCliUnlocked(
     "--no-fund",
   ];
 
+  emit(`npm install ${spec} (official registry)`);
   const runNpmInstall = () => new Promise<CliActionResult>((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
     let outputTail = "";
+    let onAbort: (() => void) | undefined;
     const done = (result: CliActionResult) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (onAbort) opts?.signal?.removeEventListener("abort", onAbort);
       resolve(result);
     };
     let child: ReturnType<typeof spawnCli>;
@@ -584,17 +630,34 @@ async function installCliUnlocked(
       } catch {
         // Process already exited.
       }
-      done({ ok: false, message: "CLI installation timed out after 5 minutes", command: fallbackCommand });
+      done({ ok: false, message: "CLI installation timed out after 5 minutes", command: fallbackCommand, reasonCode: "install_timeout" });
     }, 5 * 60 * 1_000);
-    child.stdout?.on("data", (chunk: Buffer) => { outputTail = appendTail(outputTail, chunk); });
-    child.stderr?.on("data", (chunk: Buffer) => { outputTail = appendTail(outputTail, chunk); });
+    onAbort = () => {
+      try {
+        if (process.platform === "win32" && child.pid) {
+          spawn("taskkill", ["/pid", String(child.pid), "/t", "/f"], { stdio: "ignore", windowsHide: true });
+        } else {
+          child.kill();
+        }
+      } catch {
+        // Process already exited.
+      }
+      done({ ok: false, message: "cancelled", command: fallbackCommand, reasonCode: "install_cancelled" });
+    };
+    opts?.signal?.addEventListener("abort", onAbort, { once: true });
+    child.stdout?.on("data", (chunk: Buffer) => { outputTail = appendTail(outputTail, chunk); emit(chunk.toString("utf8")); });
+    child.stderr?.on("data", (chunk: Buffer) => { outputTail = appendTail(outputTail, chunk); emit(chunk.toString("utf8")); });
     child.on("error", (error) => done({ ok: false, message: `CLI installer failed to start: ${error.message}`, command: fallbackCommand }));
     child.on("close", (code) => {
       // Do not expose raw npm output: proxy URLs and local paths can contain secrets.
-      void outputTail;
       done(code === 0
         ? { ok: true, message: "CLI package installed" }
-        : { ok: false, message: `CLI package installation failed (exit ${code ?? "unknown"})`, command: fallbackCommand });
+        : {
+          ok: false,
+          message: `CLI package installation failed (exit ${code ?? "unknown"})`,
+          command: fallbackCommand,
+          reasonCode: NETWORK_FAILURE.test(outputTail) ? "install_network" : "install_failed",
+        });
     });
   });
 
@@ -603,8 +666,10 @@ async function installCliUnlocked(
   //   지금까지는 단 한 번 시도하고 끝냈다. 사용자에게 "다시 눌러 보세요"를 시키는 대신
   //   앱이 스스로 두 번 더 해 본다. 상한이 있어 매달리지 않는다.
   let installed = await runNpmInstall();
-  for (let attempt = 1; !installed.ok && attempt <= NPM_INSTALL_RETRIES; attempt += 1) {
+  for (let attempt = 1; !installed.ok && installed.reasonCode !== "install_cancelled" && attempt <= NPM_INSTALL_RETRIES; attempt += 1) {
+    emit(`retry ${attempt}/${NPM_INSTALL_RETRIES}: ${installed.message}`);
     await new Promise((resolve) => setTimeout(resolve, NPM_INSTALL_RETRY_DELAY_MS * attempt));
+    if (opts?.signal?.aborted) return { ok: false, message: "cancelled", reasonCode: "install_cancelled" };
     installed = await runNpmInstall();
   }
   if (!installed.ok) {
@@ -628,7 +693,7 @@ async function installCliUnlocked(
   const verified = await runBinary(binary, ["--version"], 20_000, env);
   if (!verified.ok) {
     recordInstallTrail(kind, [...trail, "npm:verify-failed"]);
-    return { ok: false, message: "CLI launcher failed post-install verification", command: fallbackCommand };
+    return { ok: false, message: "CLI launcher failed post-install verification", command: fallbackCommand, reasonCode: "install_verify_failed" };
   }
   recordInstallTrail(kind, [...trail, "npm:verified"]);
   return { ok: true, message: `installed and verified: ${binary}` };
@@ -638,11 +703,18 @@ async function installCliUnlocked(
  * 갓 받은 exe 의 첫 실행은 백신 검사로 수십 초 걸리기도 한다. 짧은 타임아웃으로 멀쩡한 설치를
  * 실패로 판정하지 않도록 넉넉히 기다리고, 한 번 더 해 본다.
  */
-async function verifyInstalledBinary(binary: string): Promise<boolean> {
+async function verifyInstalledBinary(binary: string, signal?: AbortSignal, emit?: (line: string) => void): Promise<boolean> {
   for (let attempt = 0; attempt < 2; attempt += 1) {
-    const verified = await runBinary(binary, ["--version"], 90_000);
+    if (signal?.aborted) return false;
+    emit?.("native verify: running --version");
+    const verified = await runBinary(binary, ["--version"], 90_000, augmentedEnv(), signal);
     if (verified.ok) return true;
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    if (signal?.aborted) return false;
+    if (attempt === 0) await new Promise<void>((resolve) => {
+      const finish = () => { clearTimeout(timer); signal?.removeEventListener("abort", finish); resolve(); };
+      const timer = setTimeout(finish, 3_000);
+      signal?.addEventListener("abort", finish, { once: true });
+    });
   }
   return false;
 }
@@ -683,7 +755,7 @@ function recordInstallTrail(kind: InstallableCli, trail: string[]): void {
 /** Single-flight, no-admin install into Agentlas's private user prefix. */
 export function installCli(
   kind: InstallableCli,
-  opts?: { force?: boolean },
+  opts?: InstallCliOptions,
 ): Promise<CliActionResult> {
   const plan = CLI_PLAN[kind];
   if (!plan) return Promise.resolve({ ok: false, message: `Unknown CLI: ${kind}` });
@@ -712,15 +784,19 @@ function runBinary(
   args: string[],
   timeoutMs: number,
   env: NodeJS.ProcessEnv = augmentedEnv(),
+  signal?: AbortSignal,
 ): Promise<CliActionResult> {
+  if (signal?.aborted) return Promise.resolve({ ok: false, message: "cancelled", reasonCode: "install_cancelled" });
   const command = `${path.basename(bin)} ${args.join(" ")}`;
   return new Promise<CliActionResult>((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
     const done = (r: CliActionResult) => {
       if (settled) return;
       settled = true;
       if (timer) clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener("abort", onAbort);
       resolve(r);
     };
     let out = "";
@@ -732,6 +808,12 @@ function runBinary(
       done({ ok: false, message: e instanceof Error ? e.message : String(e), command });
       return;
     }
+    onAbort = () => {
+      try { child.kill(); } catch { /* already exited */ }
+      done({ ok: false, message: "cancelled", reasonCode: "install_cancelled" });
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    if (signal?.aborted) { onAbort(); return; }
     timer = setTimeout(() => {
       try {
         child.kill();
@@ -1062,4 +1144,9 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
         : posixFallback,
     };
   }
+}
+
+/** 연결 팝업·인증 확인용 — install-cli 와 같은 보강 PATH 로 바이너리를 찾는다. */
+export function resolveCliBinary(name: string): string | null {
+  return resolveBinary(name);
 }

@@ -124,3 +124,35 @@ export function downloadDataUrl(href: string, fileName: string): void {
 export function safeFileStem(title: string): string {
   return title.replace(/[\\/:*?"<>|\u0000-\u001f]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 80) || "visual";
 }
+
+/** 앱에 묶인 정적 자산 주소(public/…) — dev 서버·정적 빌드·file:// 셋 다에서 같은 파일. */
+export function appAssetUrl(path: string): string {
+  const current = new URL(window.location.href);
+  const root = current.protocol === "file:" ? new URL("./", document.baseURI) : new URL("/", current.origin);
+  return new URL(path.replace(/^\//, ""), root).href;
+}
+
+let chartJsSourcePromise: Promise<string | null> | null = null;
+/** Chart.js 4.4.1(MIT) 사본을 한 번만 읽는다. 못 읽으면 null — 위젯은 CSP 로 막힌 채 원래 모양으로 남는다. */
+export function loadChartJsSource(assetPath: string): Promise<string | null> {
+  if (!chartJsSourcePromise) {
+    chartJsSourcePromise = fetch(appAssetUrl(assetPath))
+      .then((response) => (response.ok ? response.text() : null))
+      .then((text) => (text && text.includes("Chart.js v4") ? text : null))
+      .catch(() => null);
+  }
+  return chartJsSourcePromise;
+}
+
+/** PNG 데이터 URL → 클립보드(그림). 안 되면 false — 화면에 "복사하지 못했어요" 를 보인다. */
+export async function copyPngDataUrl(dataUrl: string): Promise<boolean> {
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    const ClipboardItemCtor = (window as unknown as { ClipboardItem?: new (items: Record<string, Blob>) => unknown }).ClipboardItem;
+    if (!ClipboardItemCtor || !navigator.clipboard?.write) return false;
+    await navigator.clipboard.write([new ClipboardItemCtor({ "image/png": blob }) as never]);
+    return true;
+  } catch {
+    return false;
+  }
+}

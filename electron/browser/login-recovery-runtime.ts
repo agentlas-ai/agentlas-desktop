@@ -14,12 +14,14 @@ import { registrableDomain } from "../../shared/registrable-domain";
 import type { NativeBrowserRelayGrant } from "./native-cdp-relay";
 import type { BrowserCookieSurface, CookieMetadata } from "./login-wall";
 import { detectLoginWall, sessionCookieNamesFor } from "./login-wall";
+import { productionVaultSource, vaultFillSignIn } from "./vault-login";
 import {
   createLoginRecoveryLadder,
   type LoginRecoveryContext,
   type LoginRecoveryDeps,
   type LoginRecoveryEvent,
   type LoginRecoveryLadder,
+  type LoginRecoveryOutcome,
   type OwnerLoginCard,
   type TargetedImportReport,
 } from "./login-recovery";
@@ -167,6 +169,65 @@ async function reloadCdpPage(target: CdpPageTarget): Promise<string | null> {
   await new Promise((resolve) => setTimeout(resolve, 1_500));
   const page = (await cdpPages()).find((entry) => entry.id === target.id);
   return page?.url ?? null;
+}
+
+/** Main-only evaluation in a dedicated-Chrome page (vault fill, structural probes). Returns the JSON value. */
+export async function evaluateCdpPage(target: { webSocketDebuggerUrl: string }, expression: string): Promise<unknown> {
+  return cdpSession(target.webSocketDebuggerUrl, async (call) => {
+    const out = await call("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true }) as { result?: { value?: unknown }; exceptionDetails?: unknown };
+    if (out?.exceptionDetails) throw new Error("cdp-evaluate-exception");
+    return out?.result?.value ?? null;
+  });
+}
+
+/** The dedicated Chrome's page targets (loopback only), for the fallback ladder's structural checks. */
+export function dedicatedBrowserPages(): Promise<CdpPageTarget[]> {
+  return cdpPages().catch(() => []);
+}
+
+/**
+ * Screen rectangles of the dedicated Chrome's windows, measured from that browser itself (CDP
+ * Browser.getWindowForTarget). Used to enforce "computer use on our Chrome window only" (window-scope.ts).
+ */
+export async function dedicatedBrowserWindowBounds(): Promise<Array<{ x: number; y: number; width: number; height: number }>> {
+  const { browserCdpPort } = await import("../mcp-tools/browser-cdp-launcher");
+  const { fetchCdpJson } = await import("./native-session-cookie-import");
+  const port = browserCdpPort();
+  const version = await fetchCdpJson(port, "/json/version") as { webSocketDebuggerUrl?: unknown } | null;
+  const ws = loopbackWs(version?.webSocketDebuggerUrl, port);
+  if (!ws) return [];
+  const pages = await cdpPages();
+  return cdpSession(ws, async (call) => {
+    const seen = new Set<number>();
+    const out: Array<{ x: number; y: number; width: number; height: number }> = [];
+    for (const page of pages) {
+      const found = await call("Browser.getWindowForTarget", { targetId: page.id }).catch(() => null) as
+        { windowId?: number; bounds?: { left?: number; top?: number; width?: number; height?: number; windowState?: string } } | null;
+      const b = found?.bounds;
+      if (!found || typeof found.windowId !== "number" || seen.has(found.windowId) || !b || b.windowState === "minimized") continue;
+      if ([b.left, b.top, b.width, b.height].every((v) => typeof v === "number" && Number.isFinite(v)) && (b.width ?? 0) > 0 && (b.height ?? 0) > 0) {
+        seen.add(found.windowId);
+        out.push({ x: b.left!, y: b.top!, width: b.width!, height: b.height! });
+      }
+    }
+    return out;
+  });
+}
+
+/** Wait (bounded) for a dedicated-Chrome page to settle after a submit, then read where it is. */
+async function settledCdpPage(target: CdpPageTarget): Promise<string | null> {
+  const deadline = Date.now() + 15_000;
+  let last = target.url;
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  while (Date.now() < deadline) {
+    const page = (await cdpPages().catch(() => [] as CdpPageTarget[])).find((entry) => entry.id === target.id);
+    if (!page) return null;
+    const state = await evaluateCdpPage(page, "document.readyState").catch(() => null);
+    if (page.url === last && state === "complete") return page.url;
+    last = page.url;
+    await new Promise((resolve) => setTimeout(resolve, 750));
+  }
+  return last;
 }
 
 type CdpCookieParam = { name: string; value: string; domain: string; path: string; secure: boolean; httpOnly: boolean; sameSite?: "Strict" | "Lax" | "None"; expires?: number };
@@ -374,31 +435,55 @@ export function observeBrowserToolForLoginWall(input: {
   toolName: string;
   runId?: string;
   chatId?: string;
-  nativeGrant?: Pick<NativeBrowserRelayGrant, "pages">;
+  nativeGrant?: Pick<NativeBrowserRelayGrant, "pages" | "health">;
   notify?: (card: OwnerLoginCard) => void;
 }): void {
   const leaf = input.toolName.startsWith("agentlas-browser.") ? input.toolName.slice("agentlas-browser.".length) : null;
   if (!leaf || !PAGE_CHANGING_TOOLS.has(leaf)) return;
-  const resume = () => { try { resumeHandler?.("login-restored"); } catch { /* resume is best effort */ } };
-  void (async () => {
-    if (input.nativeGrant) {
-      for (const page of input.nativeGrant.pages()) {
-        if (detectLoginWall({ url: page.url }).kind !== "login-wall") continue;
-        await sharedLadder().observe(page.url, {
-          surface: "native-partition", reload: page.reload, runId: input.runId, chatId: input.chatId,
-          notify: input.notify, resume, openSignIn: (card) => page.navigate(card.signInUrl),
-        });
-      }
-      return;
-    }
-    for (const page of await cdpPages()) {
-      if (detectLoginWall({ url: page.url }).kind !== "login-wall") continue;
-      await sharedLadder().observe(page.url, {
-        surface: "cdp-profile", reload: () => reloadCdpPage(page), runId: input.runId, chatId: input.chatId,
-        notify: input.notify, resume,
-      });
-    }
-  })().catch((error: unknown) => {
+  void recoverLoginWallsNow(input).catch((error: unknown) => {
     console.warn("[login-recovery] observe failed", error instanceof Error ? error.name : "unknown");
   });
+}
+
+/** Ask Main's resume path (blocked-goal sweep) to continue goals after a recovery. Best effort. */
+export function triggerBrowserRecoveryResume(): void {
+  try { resumeHandler?.("login-restored"); } catch { /* resume is best effort */ }
+}
+
+/**
+ * The same ladder, awaited: the browser fallback ladder's login rung (fallback-ladder-runtime.ts) needs the
+ * outcome. Reads the pages of the surface the run is actually on (a failed-over grant is on the dedicated Chrome).
+ */
+export async function recoverLoginWallsNow(input: {
+  runId?: string;
+  chatId?: string;
+  nativeGrant?: Pick<NativeBrowserRelayGrant, "pages" | "health">;
+  notify?: (card: OwnerLoginCard) => void;
+}): Promise<LoginRecoveryOutcome[]> {
+  const resume = triggerBrowserRecoveryResume;
+  const outcomes: LoginRecoveryOutcome[] = [];
+  if (input.nativeGrant && input.nativeGrant.health?.().failedOver !== true) {
+    for (const page of input.nativeGrant.pages()) {
+      if (detectLoginWall({ url: page.url }).kind !== "login-wall") continue;
+      const evaluate = page.evaluate;
+      outcomes.push(await sharedLadder().observe(page.url, {
+        surface: "native-partition", reload: page.reload, runId: input.runId, chatId: input.chatId,
+        notify: input.notify, resume, openSignIn: (card) => page.navigate(card.signInUrl),
+        ...(evaluate ? { vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluate("location.href") || "") || null, evaluate,
+          settled: async () => { await new Promise((r) => setTimeout(r, 1_500)); return String(await evaluate("location.href").catch(() => "") || "") || null; } },
+        productionVaultSource()) } : {}),
+      }));
+    }
+    return outcomes;
+  }
+  for (const page of await cdpPages()) {
+    if (detectLoginWall({ url: page.url }).kind !== "login-wall") continue;
+    outcomes.push(await sharedLadder().observe(page.url, {
+      surface: "cdp-profile", reload: () => reloadCdpPage(page), runId: input.runId, chatId: input.chatId,
+      notify: input.notify, resume,
+      vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluateCdpPage(page, "location.href") || "") || null, evaluate: (expression) => evaluateCdpPage(page, expression),
+        settled: () => settledCdpPage(page) }, productionVaultSource()),
+    }));
+  }
+  return outcomes;
 }

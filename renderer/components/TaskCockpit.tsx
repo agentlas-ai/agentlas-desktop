@@ -4535,18 +4535,19 @@ function ChatPage() {
         try {
           defined = await api.chats.defineGoal(chat.id, userPrompt, locale);
         } catch (cause) {
-          if (!isCurrentChat()) return false;
+          // 화면을 떠났어도 실행은 이어 간다(아래 detached 경로). 알림만 이 화면이 있을 때.
           const why = failureMessage(cause);
-          setSessionNotice(locale === "ko"
+          if (isCurrentChat()) setSessionNotice(locale === "ko"
             ? `목표를 걸지 못했습니다${why ? `: ${why}` : ""}. 이번 실행은 목표 없이 진행됩니다 — 목표로 다시 걸려면 새 대화에서 시작해 주세요.`
             : `The goal could not be set${why ? `: ${why}` : ""}. This run continues without a goal — start a new conversation to set one again.`);
         }
-        if (!isCurrentChat()) return false;
-        if (defined) setGoalContext(defined);
-        else if (!goalContext?.objective) {
-          setSessionNotice(locale === "ko"
-            ? "목표가 걸리지 않았습니다. 이번 실행은 목표 없이 진행됩니다."
-            : "No goal was set. This run continues without one.");
+        if (isCurrentChat()) {
+          if (defined) setGoalContext(defined);
+          else if (!goalContext?.objective) {
+            setSessionNotice(locale === "ko"
+              ? "목표가 걸리지 않았습니다. 이번 실행은 목표 없이 진행됩니다."
+              : "No goal was set. This run continues without one.");
+          }
         }
       }
       let attachedChatFiles: ChatFileItem[] | undefined;
@@ -4559,7 +4560,6 @@ function ChatPage() {
         }
         try {
           const snapshot = await bridge.snapshot({ chatId: chat.id, files: opts.files });
-          if (!isCurrentChat()) return false;
           attachedChatFiles = snapshot.files.map((file) => chatFileItem(file, "user-attachment"));
           hydratedChatFileGroupsRef.current.set(snapshot.groupId, attachedChatFiles);
           boundUserPrompt = appendChatFileMarker(userPrompt, snapshot.groupId);
@@ -4578,9 +4578,10 @@ function ChatPage() {
         if (nextTitle) {
           try {
             const renamed = await api.chats.rename(chat.id, nextTitle);
-            if (!isCurrentChat()) return false;
-            setChat(renamed);
-            setTitleDraft(renamed.title);
+            if (isCurrentChat()) {
+              setChat(renamed);
+              setTitleDraft(renamed.title);
+            }
             window.dispatchEvent(new Event("agentlas:tasks-changed"));
           } catch {
             // Work can still start; main retries the same deterministic title
@@ -4588,7 +4589,6 @@ function ChatPage() {
           }
         }
       }
-      if (!isCurrentChat()) return false;
       const images = opts?.images;
       // Reserve the Main-owned run identity before painting the placeholder so
       // every live event and replacement snapshot has the same exact anchor.
@@ -4620,6 +4620,60 @@ function ChatPage() {
               : false)
         ));
         if (!duplicate) effectiveTaskForceTargets.push(target);
+      }
+      const effectiveBorrowAgents =
+        effectiveTaskForceTargets.length > 0
+          ? undefined
+          : (opts?.borrowAgents?.length ?? 0) > 0
+          ? opts?.borrowAgents
+          : undefined;
+      // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
+      const runRequest = {
+        runId,
+        chatId: chat.id,
+        userPrompt: invocationPrompt,
+        images,
+        locale,
+        permissions: opts?.permissions ?? DEFAULT_PERMISSION,
+        planMode: opts?.planMode,
+        goalMode: opts?.goalMode,
+        appsGenerateMode: opts?.appsGenerateMode,
+        borrowAgents: effectiveBorrowAgents,
+        taskForceTargets: effectiveTaskForceTargets.length > 0 ? effectiveTaskForceTargets : undefined,
+        pipelineStages: opts?.pipelineStages,
+        routerAgent: opts?.routerAgent,
+        // Project Work is orchestrated by default: attached tools first,
+        // Network recruitment only for a real capability/tool gap.
+        sessionRouting: project ? true : opts?.sessionRouting,
+        stormbreakerMode: opts?.stormbreakerMode,
+        runtimeSelection: chat.runtimeSelection ?? undefined,
+      };
+      /*
+       * ★보낸 요청은 화면을 떠나도 실행된다 (오너 2026-09-29 "다른 메뉴 가도 워크나 원
+       *   정상적으로 알아서 돌아가고 있어야 한다").
+       *   예전에는 목표 정의·첨부 스냅샷·제목 변경을 기다리는 사이 오너가 설정으로 가면
+       *   `if (!isCurrentChat()) return false` 로 invoke.run 을 **부르지도 않고** 끝났다 —
+       *   누른 전송이 조용히 사라졌다. 이제 화면 갱신만 건너뛰고 실행은 메인에 그대로 넘긴다.
+       *   돌아오면 대화는 attach/history 로 메인이 가진 실행을 다시 붙인다.
+       */
+      if (!isCurrentChat()) {
+        if (opts?.decisionContinuation) {
+          const continued = await api.confirm.continueAnswer({
+            chatId: chat.id,
+            sourceMessageId: opts.decisionContinuation.sourceMessageId,
+            reply: invocationPrompt,
+          }).catch(() => null);
+          return Boolean(continued && continued.status !== "rejected");
+        }
+        if (!writeWorkUncertainAdmission(chat.id, runId)) return false;
+        try {
+          await api.invoke.run(runRequest);
+          clearWorkUncertainAdmission(chat.id, runId);
+          return true;
+        } catch {
+          // The admission fence stays; the chat reconciles it on return (never a blind resend).
+          return false;
+        }
       }
       transcriptRevisionRef.current += 1;
       const userMessageId = uid();
@@ -4656,12 +4710,6 @@ function ChatPage() {
       ]);
       setBusy(true);
       setCancelPending(false);
-      const effectiveBorrowAgents =
-        effectiveTaskForceTargets.length > 0
-          ? undefined
-          : (opts?.borrowAgents?.length ?? 0) > 0
-          ? opts?.borrowAgents
-          : undefined;
       if ((effectiveBorrowAgents?.length ?? 0) > 0 || effectiveTaskForceTargets.length > 0 || (opts?.pipelineStages?.length ?? 0) > 1) {
         setNetworkOpenPersisted(true);
       }
@@ -4742,31 +4790,11 @@ function ChatPage() {
             return true;
           }
         } else {
-          // locale을 동봉 — main이 emit하는 상태/오류 메시지가 사용자 언어로 나오도록.
           if (!writeWorkUncertainAdmission(chat.id, runId)) {
             throw new Error("work_admission_fence_unavailable");
           }
           requestDispatched = true;
-          await api.invoke.run({
-            runId,
-            chatId: chat.id,
-            userPrompt: invocationPrompt,
-            images,
-            locale,
-            permissions: opts?.permissions ?? DEFAULT_PERMISSION,
-            planMode: opts?.planMode,
-            goalMode: opts?.goalMode,
-            appsGenerateMode: opts?.appsGenerateMode,
-            borrowAgents: effectiveBorrowAgents,
-            taskForceTargets: effectiveTaskForceTargets.length > 0 ? effectiveTaskForceTargets : undefined,
-            pipelineStages: opts?.pipelineStages,
-            routerAgent: opts?.routerAgent,
-            // Project Work is orchestrated by default: attached tools first,
-            // Network recruitment only for a real capability/tool gap.
-            sessionRouting: project ? true : opts?.sessionRouting,
-            stormbreakerMode: opts?.stormbreakerMode,
-            runtimeSelection: chat.runtimeSelection ?? undefined,
-          });
+          await api.invoke.run(runRequest);
           clearWorkUncertainAdmission(chat.id, runId);
         }
         if (!isCurrentChat()) return false;
@@ -5159,7 +5187,7 @@ function ChatPage() {
           }
         }
         window.dispatchEvent(new Event("agentlas:attention-refresh"));
-        if (!isCurrentChat()) return;
+        // 답은 저장됐다 — 오너가 곧바로 다른 메뉴로 가도 후속 실행은 시작한다(send 의 detached 경로).
         const sent = await send(reply, {
           permissions: perms ?? DEFAULT_PERMISSION,
           decisionContinuation: {

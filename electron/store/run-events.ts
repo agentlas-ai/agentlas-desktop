@@ -7,6 +7,7 @@ import { externalToolNames } from "../../shared/tool-activity";
 import { invocationHostStopCause, isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
 import { normalizeToolCall } from "../../shared/tool-call-detail";
 import { getDb } from "./db";
+import { recordChannelPublishReceipts } from "../publish-receipts";
 import {
   QUESTION_CONTINUATION_REPLY_MAX_BYTES,
   QUESTION_CONTINUATION_REPLY_MAX_LENGTH,
@@ -1276,6 +1277,14 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
           emitDesktopStoreChange({ entity: "task", id: projected.taskId });
         }
       }
+    }
+    // A successful Studio result that names the channel's own video is a durable publish receipt
+    // (electron/publish-receipts.ts). A receipt failure never fails the tool ledger row.
+    if (input.kind === "mcp_tool-use" && input.payload && typeof input.payload === "object") {
+      try {
+        recordChannelPublishReceipts({ runId: input.runId, chatId: input.chatId ?? null, payload: input.payload as Record<string, unknown> },
+          (receipt) => { recordRunEvent(receipt); });
+      } catch { /* supplementary */ }
     }
     return runRowToUi(row);
   })();

@@ -30,6 +30,7 @@ import {
   type AgentMailOriginRef,
   type AgentMailOutboundAttachment,
   type AgentMailResult,
+  type AgentMailWaitlistReceipt,
   type AgentMailSendInput,
   type AgentMailSendResult,
   type AgentMailStatus,
@@ -182,13 +183,27 @@ export async function agentMailStatus(): Promise<AgentMailStatus> {
   if (!res.ok) {
     if (res.code === "agent_mail_not_available") {
       rememberMailbox(null, null, null);
-      return { ok: true, signedIn: true, entitlement: null, mailbox: null, limits: null };
+      return { ok: true, signedIn: true, entitlement: null, mailbox: null, limits: null, unavailableCode: "agent_mail_not_available" };
     }
     if (res.code === "sign_in_required") return { ok: true, signedIn: false, entitlement: null, mailbox: null, limits: null };
+    // Machine code only (no body, no address): a failed read used to leave no trace, so
+    // "why did the mailbox card say 확인 필요" could not be answered from main.log.
+    console.warn(`[agent-mail] status read failed: code=${res.code} http=${res.status ?? "none"}`);
     return res;
   }
   rememberMailbox(res.json.mailbox ?? null, res.json.agentMail ?? null, res.json.limits ?? null);
   return { ok: true, signedIn: true, entitlement: lastKnown.entitlement, mailbox: lastKnown.mailbox, limits: lastKnown.limits };
+}
+
+/** The account email and plan are resolved on the server, never passed by renderer. */
+export async function agentMailJoinWaitlist(): Promise<AgentMailResult<AgentMailWaitlistReceipt>> {
+  const res = await call<{ ok?: unknown; plan?: unknown }>("POST", "/api/billing/waitlist", { source: "agent-mail" });
+  if (!res.ok) return res;
+  const plans: readonly string[] = ["free", "starter", "pro", "max", "wow"];
+  if (res.json.ok !== true || typeof res.json.plan !== "string" || !plans.includes(res.json.plan)) {
+    return err("waitlist_response_invalid", "The server did not confirm waitlist signup.", res.status);
+  }
+  return { ok: true, plan: res.json.plan as AgentMailWaitlistReceipt["plan"] };
 }
 
 function cleanLocalPart(value: unknown): string | undefined {

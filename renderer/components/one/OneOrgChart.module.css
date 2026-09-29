@@ -45,7 +45,7 @@
 .rowActions { display: flex; gap: 3px; opacity: 1; }
 .rowActions button, .rowActions select { border: 0; border-radius: 5px; background: var(--paper-2); color: var(--muted-deep); font-size: 8px; cursor: pointer; }
 .unreadDot, .failureDot { width: 6px; height: 6px; flex: 0 0 auto; margin-top: 3px; border-radius: 50%; }
-.unreadDot { background: var(--info); box-shadow: 0 0 0 2px rgba(47, 124, 246, .14); }
+.unreadDot { background: var(--attention); box-shadow: 0 0 0 2px var(--white); } /* 전환기 점(AttentionDot)과 같은 색·같은 뜻 */
 /* 이 점은 이제 단추다(누르면 실패한 대화가 열린다) — 기본 단추 스타일을 지워
    보이는 모양은 그대로 두고, 누를 수 있다는 것만 커서로 알린다. */
 .failureDot { background: var(--danger); box-shadow: 0 0 0 2px rgba(212, 81, 81, .12); }

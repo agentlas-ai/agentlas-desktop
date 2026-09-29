@@ -308,6 +308,10 @@
   --warn: #9c8430;           /* 주의(amber-deep) */
   --warn-soft: #fbf5df;
   --info: #5d7a76;           /* 정보(blue-deep) */
+  /* 주의 점 — 화면 밖에서 오너를 기다리는 것(승인·질문·안 본 결과). 팔레트의 blue-deep 은
+     회청록이라 눈에 안 띈다(오너 2026-09-29 "파란동그라미"). 진짜 파랑 하나만 따로 둔다.
+     사이드바 바탕(#f6f6f5) 대비 4.1:1, 흰 바탕 4.4:1. */
+  --attention: #2a78d6;
   --info-soft: #eaf0ef;
   --purple-soft: #eeefec;
   /* 랜딩 히어로 — 테마와 무관하게 고정된 브랜드 팔레트(캔버스에서도 이 값을 읽는다). */
@@ -514,6 +518,7 @@
   --warn: #d2b866;
   --warn-soft: rgba(210, 184, 102, 0.16);
   --info: #8fb3ae;
+  --attention: #5b9cf0;      /* 어두운 바탕 대비 ≈6.5:1 */
   --info-soft: rgba(143, 179, 174, 0.16);
   --purple-soft: rgba(124, 124, 255, 0.16);
   --landing-bg: #06080b;
@@ -4178,6 +4183,8 @@ button[data-toggle-state="on"] {
 .project-sidebar-list .project-sidebar-collapse:hover, .project-sidebar-list .project-sidebar-collapse:focus-visible { background: var(--rd-surface-2); color: var(--rd-ink); }
 .project-sidebar-list .project-sidebar-task { min-height: 30px; padding-left: 34px; color: var(--rd-ink-3); font-size: 11px; }
 .project-sidebar-list .project-sidebar-task::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: var(--rd-hair-2); margin-left: -14px; }
+/* 화면 밖에서 오너를 기다리는 대화 — 행 끝의 파란 점(AttentionDot, lib/attention). */
+.project-sidebar-list .project-sidebar-task .project-sidebar-task-dot { margin-left: auto; overflow: visible; }
 .project-sidebar-list .project-sidebar-empty { min-height: 74px; justify-content: center; border: 1px dashed var(--rd-hair); color: var(--rd-ink-3); text-align: center; }
 .project-sidebar-foot { padding: 12px; display: grid; gap: 8px; border-top: 1px solid var(--rd-hair); }
 .project-detail-back { min-height: 36px; display: inline-flex; align-items: center; gap: 7px; padding: 0 10px; border: 1px solid var(--rd-hair); border-radius: 9px; background: var(--rd-surface); color: var(--rd-ink-2); font: inherit; font-size: 12px; font-weight: 750; cursor: pointer; }

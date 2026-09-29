@@ -190,17 +190,20 @@ export function OneMailWorkspace({
 function MailSetup({ mail, locale, oneName }: { mail: OneMailState; locale: Locale; oneName: string }) {
   const copy = mail2(locale);
   const entitled = Boolean(mail.entitlement && mail.entitlement.addressLimit > 0);
+  // Signed in but no open entitlement = the server has not opened agent mail for this
+  // workspace (agent_mail_not_available). That is not a plan question: no paywall.
+  const notOpen = mail.signedIn && (!mail.entitlement || !mail.entitlement.available);
   return (
-    <div className={styles.setup} data-one-mail-setup={entitled ? "choose" : "plan"}>
+    <div className={styles.setup} data-one-mail-setup={entitled ? "choose" : notOpen ? "not-open" : "plan"}>
       <div className={styles.setupCard}>
         <span className={styles.setupIcon} aria-hidden="true"><IconMail size={22} /></span>
         <h2>{copy.emptyTitle}</h2>
-        <p>{entitled ? copy.emptyDesc : copy.emptyPlan}</p>
-        {entitled || !mail.signedIn ? (
+        <p>{entitled ? copy.emptyDesc : notOpen ? copy.emptyNotOpen : copy.emptyPlan}</p>
+        {notOpen ? null : entitled || !mail.signedIn ? (
           <OneMailSettings locale={locale} oneName={oneName} onChanged={() => void mail.refreshStatus()} />
         ) : (
           <div className={styles.formActions} style={{ marginLeft: 0 }}>
-            <button type="button" className={styles.primary} onClick={() => openPricing()} data-one-mail-upgrade>{copy.emptyUpgrade}</button>
+            <button type="button" className={styles.primary} onClick={() => openPricing("agent-mail")} data-one-mail-upgrade>{copy.emptyUpgrade}</button>
           </div>
         )}
       </div>

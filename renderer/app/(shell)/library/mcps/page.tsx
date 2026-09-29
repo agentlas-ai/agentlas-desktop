@@ -6,9 +6,9 @@
 // 키는 환경변수 vault에 저장되고 자동 주입 — LLM 무관.
 "use client";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import Link from "next/link";
-import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { ChipGrid, ConnectChip } from "@/components/connect/RuntimeConnect";
+import { ServiceConnectPopup, waitForConnectPoll, type ServiceConnectRun } from "@/components/connect/ServiceConnect";
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
 import { useT } from "@/lib/i18n";
@@ -18,12 +18,8 @@ import type {
   McpToolCatalogEntry,
 } from "@/lib/types";
 import {
-  IconCheck,
-  IconKey,
   IconLock,
-  IconRefresh,
   IconShield,
-  IconTrash,
   IconWand,
 } from "@/components/Icon";
 
@@ -31,7 +27,7 @@ type Tab = "installed" | "catalog";
 
 export default function LibraryMcpsPage() {
   const { t, locale } = useT();
-  const router = useRouter();
+  const ko = locale === "ko";
   const brandMap = usePluginBrandMap();
   const [tab, setTab] = useState<Tab>("installed");
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -47,7 +43,7 @@ export default function LibraryMcpsPage() {
   const [catalog, setCatalog] = useState<McpToolCatalogEntry[]>([]);
   const [installed, setInstalled] = useState<InstalledMcpServer[]>([]);
   const [statuses, setStatuses] = useState<Record<string, McpServerStatus>>({});
-  const [testing, setTesting] = useState<string | null>(null);
+  const [connecting, setConnecting] = useState<InstalledMcpServer | null>(null);
   // Without this the empty state renders on first paint and stays for the
   // 10-15s the initial listing takes, pixel-identical to "nothing is
   // connected" — a user checking plugin status in that window concludes the
@@ -172,17 +168,47 @@ export default function LibraryMcpsPage() {
     await refresh();
   }
 
-  async function test(server: InstalledMcpServer) {
+  const connectServer = useCallback<ServiceConnectRun>(async (signal, update) => {
     const api = ipc();
-    if (!api) return;
-    setTesting(server.id);
-    try {
-      const status = await api.mcpTools.test(server.id);
-      setStatuses((s) => ({ ...s, [server.id]: status }));
-    } finally {
-      setTesting(null);
+    if (!api || !connecting) throw new Error(ko ? "연결을 사용할 수 없어요. (bridge_unavailable)" : "Connection is unavailable. (bridge_unavailable)");
+    const assertActive = () => { if (signal.aborted) throw new Error("cancelled"); };
+    update({ step: "setup", note: ko ? "저장된 연결 설정을 확인하고 있어요." : "Checking the saved configuration." });
+    if (!connecting.enabled) { assertActive(); await api.mcpTools.setEnabled(connecting.id, true); assertActive(); }
+    const probe = async () => {
+      assertActive();
+      const result = await api.mcpTools.test(connecting.id);
+      assertActive();
+      setStatuses((previous) => ({ ...previous, [connecting.id]: result }));
+      return result;
+    };
+    let status = await probe();
+    if (status.missingEnv.length) throw new Error(`${ko ? "필수 키를 설정해 주세요" : "Set the required keys"}: ${status.missingEnv.join(", ")} (missing_env)`);
+    if (!status.connected) {
+      const auth = await api.mcpTools.oauthStatus(connecting.id);
+      assertActive();
+      if (auth.supported && !auth.connected) {
+        update({ step: "login", note: ko ? "공식 로그인·동의 페이지를 열고 있어요. 브라우저에서 마쳐 주세요." : "Opening official sign-in and consent. Finish in the browser." });
+        const result = await api.mcpTools.oauthConnect(connecting.id);
+        assertActive();
+        if (!result.ok) throw new Error(`${result.error} (oauth_failed)`);
+        if (result.manualUrl) {
+          update({ step: "login", note: ko ? "아래 공식 페이지를 열어 로그인을 마쳐 주세요." : "Open the official page below to finish sign-in.", manualUrl: result.manualUrl });
+          for (let attempt = 0; attempt < 60; attempt += 1) {
+            await waitForConnectPoll(signal);
+            const current = await api.mcpTools.oauthStatus(connecting.id);
+            assertActive();
+            if (current.supported && current.connected) break;
+            if (attempt === 59) throw new Error(ko ? "로그인을 제한 시간 안에 확인하지 못했어요. (login_timeout)" : "Sign-in was not verified in time. (login_timeout)");
+          }
+        }
+        update({ step: "verifying", note: ko ? "서버에 실제로 연결해 도구 목록을 확인하고 있어요." : "Connecting to the server to read its live tool list." });
+        status = await probe();
+      }
     }
-  }
+    if (!status.connected) throw new Error(`${status.error || (ko ? "서버에 연결하지 못했어요." : "Could not connect to the server.")} (probe_failed)`);
+    if (!status.tools.length) throw new Error(ko ? "서버 응답은 있지만 사용 가능한 도구가 없어요. (empty_tools)" : "The server responded but supplied no tools. (empty_tools)");
+    return { evidence: [`tools/list · ${status.tools.length} ${ko ? "개 도구" : "tools"}`, status.tools.slice(0, 3).map((tool) => tool.name).join(", "), new Date(status.checkedAt).toLocaleTimeString()] };
+  }, [connecting, ko]);
 
   return (
     <section style={{ padding: "24px 32px", maxWidth: 880, margin: "0 auto" }}>
@@ -228,7 +254,7 @@ export default function LibraryMcpsPage() {
           const active = tab === id;
           const label =
             id === "installed"
-              ? `${t("mcps.tab.installed")}${installed.length ? ` · ${installed.length}` : ""}`
+              ? `${ko ? "설치된 도구" : "Installed tools"}${installed.length ? ` · ${installed.length}` : ""}`
               : t("mcps.tab.catalog");
           return (
             <button
@@ -334,107 +360,19 @@ export default function LibraryMcpsPage() {
         ) : installed.length === 0 ? (
           <Empty text={t("mcps.installed_empty")} />
         ) : (
-          <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 10 }}>
+          <ChipGrid label={ko ? "MCP 연결" : "MCP connections"}>
             {installed.map((server) => {
               const name = locale === "en" ? server.nameEn || server.name : server.name;
               const status = statuses[server.id];
-              return (
-                <li
-                  key={server.id}
-                  style={{
-                    background: "var(--paper)",
-                    border: "1px solid var(--paper-edge)",
-                    borderRadius: "var(--radius-md)",
-                    padding: "14px 16px",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 8,
-                  }}
-                >
-                  <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-                    <PluginLogo
-                      catalogId={server.catalogId}
-                      name={server.name}
-                      size={26}
-                      brandColor={server.catalogId ? byCatalogId.get(server.catalogId)?.brandColor : undefined}
-                      mark={server.catalogId ? byCatalogId.get(server.catalogId)?.mark : undefined}
-                      brandMap={brandMap}
-                    />
-                    <strong style={{ fontSize: 14 }}>{name}</strong>
-                    <span
-                      style={{
-                        fontSize: 10,
-                        padding: "2px 8px",
-                        borderRadius: 999,
-                        background: "var(--paper-2)",
-                        color: "var(--muted-deep)",
-                        fontFamily: "var(--font-mono)",
-                      }}
-                    >
-                      {t(`mcps.transport.${server.transport}` as "mcps.transport.stdio")}
-                    </span>
-                    {server.envKeys.length > 0 && (
-                      <span style={{ fontSize: 11, color: "var(--muted-deep)", display: "inline-flex", alignItems: "center", gap: 3 }}>
-                        <IconKey size={11} /> {t("mcps.needs_env", { n: server.envKeys.length })}
-                      </span>
-                    )}
-                    <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
-                      <button
-                        onClick={() => void toggle(server)}
-                        style={{
-                          fontSize: 11,
-                          fontWeight: 600,
-                          padding: "4px 10px",
-                          borderRadius: 999,
-                          border: "1px solid var(--paper-edge)",
-                          background: server.enabled ? "rgba(86,161,74,0.16)" : "var(--paper-2)",
-                          color: server.enabled ? "var(--ok)" : "var(--ink-soft)",
-                        }}
-                      >
-                        {server.enabled ? t("mcps.on") : t("mcps.off")}
-                      </button>
-                      <button
-                        onClick={() => void test(server)}
-                        disabled={testing === server.id || !server.enabled}
-                        style={{
-                          fontSize: 11,
-                          fontWeight: 600,
-                          padding: "4px 10px",
-                          borderRadius: 999,
-                          border: "1px solid var(--paper-edge)",
-                          background: "transparent",
-                          color: "var(--accent)",
-                          display: "inline-flex",
-                          alignItems: "center",
-                          gap: 4,
-                          opacity: server.enabled ? 1 : 0.5,
-                        }}
-                      >
-                        <IconRefresh size={11} />
-                        {testing === server.id ? t("mcps.testing") : t("mcps.test")}
-                      </button>
-                      <button
-                        onClick={() => void remove(server)}
-                        aria-label={t("mcps.remove")}
-                        title={t("mcps.remove")}
-                        style={{
-                          color: "var(--red-deep)",
-                          background: "transparent",
-                          border: "1px solid var(--paper-edge)",
-                          borderRadius: 999,
-                          padding: "4px 8px",
-                        }}
-                      >
-                        <IconTrash size={12} />
-                      </button>
-                    </div>
-                  </div>
-
-                  <StatusLine status={status} testing={testing === server.id} t={t} />
-                </li>
-              );
+              const ready = server.enabled && Boolean(status?.connected && status.tools.length > 0 && status.missingEnv.length === 0);
+              const badge = !server.enabled ? (ko ? "꺼짐" : "Off") : ready ? (ko ? "연결됨" : "Connected") : status?.missingEnv.length ? (ko ? "키 필요" : "Keys needed") : status?.deferred ? (ko ? "확인 필요" : "Check needed") : (ko ? "연결 확인 필요" : "Unverified");
+              return <ConnectChip key={server.id} icon={<PluginLogo catalogId={server.catalogId} name={server.name} size={26} brandColor={server.catalogId ? byCatalogId.get(server.catalogId)?.brandColor : undefined} mark={server.catalogId ? byCatalogId.get(server.catalogId)?.mark : undefined} brandMap={brandMap} />}
+                name={name} sub={t(`mcps.transport.${server.transport}` as "mcps.transport.stdio")} ready={ready} badge={badge} badgeTone={ready ? "ok" : status?.missingEnv.length ? "warn" : undefined}
+                facts={ready && status ? [`tools/list · ${status.tools.length} ${ko ? "개 도구" : "tools"}`, status.tools.slice(0, 3).map((tool) => tool.name).join(", "), new Date(status.checkedAt).toLocaleTimeString()] : status?.missingEnv.length ? [status.missingEnv.join(", ")] : []}
+                action={{ label: ready ? (ko ? "다시 확인" : "Recheck") : (ko ? "연결" : "Connect"), onClick: () => setConnecting(server) }}
+                secondaryActions={[{ label: server.enabled ? t("mcps.off") : t("mcps.on"), onClick: () => void toggle(server) }, { label: t("mcps.remove"), onClick: () => void remove(server) }]} />;
             })}
-          </ul>
+          </ChipGrid>
         )
       ) : (
         <>
@@ -553,6 +491,10 @@ export default function LibraryMcpsPage() {
         </>
       )}
 
+      {connecting && <ServiceConnectPopup name={locale === "en" ? connecting.nameEn || connecting.name : connecting.name} icon={<PluginLogo catalogId={connecting.catalogId} name={connecting.name} size={28} brandMap={brandMap} />} ko={ko} run={connectServer}
+        setupLink={connecting.envKeys.length ? { label: ko ? "필수 키 설정" : "Set required keys", href: "/library/env" } : undefined}
+        onClose={() => { setConnecting(null); void refresh(); }} onDone={() => { setConnecting(null); void refresh(); }} />}
+
       {/* 보안 노트 */}
       <div
         className="glass-strong"
@@ -584,79 +526,6 @@ function isOpenCrabCredentialUrl(value: string): boolean {
   } catch {
     return false;
   }
-}
-
-function StatusLine({
-  status,
-  testing,
-  t,
-}: {
-  status: McpServerStatus | undefined;
-  testing: boolean;
-  t: ReturnType<typeof useT>["t"];
-}) {
-  if (testing) {
-    return <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>{t("mcps.testing")}</div>;
-  }
-  if (!status) {
-    return <div style={{ fontSize: 12, color: "var(--muted)" }}>{t("mcps.untested")}</div>;
-  }
-  if (status.missingEnv.length > 0) {
-    return (
-      <div style={{ fontSize: 12, color: "var(--peach-ink)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", minWidth: 0 }}>
-        <span style={{ overflowWrap: "anywhere", minWidth: 0 }}>{t("mcps.status.missing_env", { keys: status.missingEnv.join(", ") })}</span>
-        <Link href="/library/env" style={{ color: "var(--accent)", fontWeight: 600 }}>
-          {t("mcps.missing_env_cta")}
-        </Link>
-      </div>
-    );
-  }
-  if (status.connected) {
-    return (
-      <div style={{ fontSize: 12, color: "var(--green-deep)", display: "inline-flex", alignItems: "center", gap: 5 }}>
-        <IconCheck size={12} />
-        {t("mcps.status.ok", { n: status.tools.length })}
-        {status.tools.length > 0 && (
-          <span
-            style={{
-              color: "var(--muted-deep)",
-              fontFamily: "var(--font-mono)",
-              fontSize: 11,
-              maxWidth: 240,
-              minWidth: 0,
-              overflow: "hidden",
-              textOverflow: "ellipsis",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {" "}
-            · {status.tools.slice(0, 4).map((tool) => tool.name).join(", ")}
-            {status.tools.length > 4 ? " …" : ""}
-          </span>
-        )}
-      </div>
-    );
-  }
-  /*
-   * ★확인을 미룬 것은 실패가 아니다(2026-09-03 실측).
-   *
-   * 브라우저처럼 사람에게 보이는 창을 여는 서버는 수동 점검이 일부러 건너뛴다
-   * (statusAllServers → deferredInteractiveStatus). 그런데 화면은 그 표식을 안 읽고
-   * 빨간 "연결 실패: unknown" 으로 그렸다 — 원인도 해법도 없는 문구다. 실제로는 멀쩡한
-   * 플러그인 둘(Agentlas 브라우저 · Playwright)이 고장난 것처럼 보였다.
-   */
-  if (status.deferred === "interactive") {
-    return (
-      <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>
-        {t("mcps.status.deferred")}
-      </div>
-    );
-  }
-  return (
-    <div style={{ fontSize: 12, color: "var(--red-deep)" }}>
-      {t("mcps.status.error", { error: status.error ?? "unknown" })}
-    </div>
-  );
 }
 
 const customInput: React.CSSProperties = {

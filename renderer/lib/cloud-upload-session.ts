@@ -25,6 +25,8 @@ export interface CloudUploadIssue {
   message: string;
   file?: string;
   remediation?: string;
+  /** Machine marker for the one next step the row offers ("choose-plan" = the plan picker). */
+  action?: "choose-plan";
 }
 
 export interface CloudUploadCareerGraphProof {

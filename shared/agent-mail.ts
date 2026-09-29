@@ -28,7 +28,9 @@ export interface AgentMailSenderRule {
 export interface AgentMailMailbox {
   id: string;
   address: string;
-  status: "provisioning" | "active" | "deleted";
+  status: "provisioning" | "provisioning-failed" | "active" | "deleted";
+  /** Public projection of a typed provider failure; absent on older servers. */
+  provisioningFailure?: { code: "agent_mail_provision_failed"; failedAt: string } | null;
   provider: string;
   createdAt: string;
   /** From name. null = address only. Absent = server does not support it yet. */
@@ -285,6 +287,13 @@ export type AgentMailStatus = AgentMailResult<{
   entitlement: AgentMailEntitlement | null;
   mailbox: AgentMailMailbox | null;
   limits?: AgentMailLimits | null;
+  /**
+   * Machine reason the server gave for "no entitlement at all" while signed in.
+   * `agent_mail_not_available` = the server has not opened agent mail for this
+   * workspace yet (rollout flag / provider), which is NOT a plan question.
+   * Absent on a normal answer. Read this, never the message prose.
+   */
+  unavailableCode?: "agent_mail_not_available" | null;
 }>;
 
 export interface AgentMailMailboxPatch {
@@ -467,8 +476,15 @@ export interface AgentMailDelegateInput {
   locale?: "ko" | "en";
 }
 
+/** Server-confirmed signup; plan is derived from the authenticated account. */
+export interface AgentMailWaitlistReceipt {
+  plan: "free" | "starter" | "pro" | "max" | "wow";
+}
+
 export interface AgentMailIpc {
   status: () => Promise<AgentMailStatus>;
+  /** Explicit feature waitlist signup; Main supplies source, server supplies email and current plan. */
+  joinWaitlist: () => Promise<AgentMailResult<AgentMailWaitlistReceipt>>;
   /** New mailbox: localPart is required (native addresses are permanent). A deleted one comes back without it. */
   issue: (input?: { displayName?: string; localPart?: string }) => Promise<AgentMailResult<{ mailbox: AgentMailMailbox; created: boolean; revived: boolean; entitlement: AgentMailEntitlement | null }>>;
   updateMailbox: (patch: AgentMailMailboxPatch) => Promise<AgentMailResult<{ mailbox: AgentMailMailbox; entitlement: AgentMailEntitlement | null }>>;
@@ -510,6 +526,7 @@ export interface AgentMailIpc {
 
 export const AGENT_MAIL_IPC_CHANNELS = {
   status: "agentMail:status",
+  joinWaitlist: "agentMail:joinWaitlist",
   issue: "agentMail:issue",
   updateMailbox: "agentMail:updateMailbox",
   checkAddress: "agentMail:checkAddress",

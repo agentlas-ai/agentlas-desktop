@@ -46,6 +46,7 @@ export const LOGIN_RECOVERY_REIMPORT_INTERVAL_MS = 10 * 60 * 1000;
 export type LoginRecoveryStep =
   | "detected"
   | "targeted-reimport"
+  | "vault-autofill"
   | "store-check"
   | "source-check"
   | "owner-card"
@@ -65,7 +66,13 @@ export type LoginRecoveryReason =
   | "still-walled"
   | "cleared"
   | "card-already-open"
-  | "recovery-in-flight";
+  | "recovery-in-flight"
+  | "vault-no-credential"
+  | "vault-unavailable"
+  | "vault-submitted"
+  | "vault-origin-changed"
+  | "vault-page-unavailable"
+  | "second-factor-required";
 
 export interface LoginRecoveryEvent {
   schemaVersion: typeof LOGIN_RECOVERY_EVENT_SCHEMA;
@@ -81,6 +88,18 @@ export interface LoginRecoveryEvent {
   at: string;
 }
 
+/**
+ * Owner 2026-09-29: "유료작업 빼고 다 하셈". After the cookie import, the owner's own saved credential from the
+ * Agentlas autofill vault may complete the sign-in. The fill happens in Main (the model never sees or logs the
+ * value); only this state comes back. A one-time-code step is the owner's (second-factor → card).
+ */
+export interface VaultFillReport {
+  state: "submitted" | "no-credential" | "unavailable" | "second-factor" | "failed";
+  reason?: "vault-origin-changed" | "vault-page-unavailable";
+  /** Page URL after the submit settled (null when unknown). */
+  urlAfter?: string | null;
+}
+
 export interface TargetedImportReport {
   state: "imported" | "not-consented" | "failed" | "unsupported";
   /** 실제로 쓴 쿠키 수(값 없음). */
@@ -90,7 +109,7 @@ export interface TargetedImportReport {
 export interface OwnerLoginCard {
   site: string;
   surface: BrowserCookieSurface;
-  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site">;
+  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required">;
   signInUrl: string;
   /** 오너에게 보이는 한 줄. */
   message: { ko: string; en: string };
@@ -105,6 +124,8 @@ export interface LoginRecoveryContext {
   notify?: (card: OwnerLoginCard) => void;
   /** 세션이 돌아왔을 때 목표를 이어 간다. */
   resume?: () => void;
+  /** 저장된 자격증명으로 Main 에서 채우고 제출한다(값은 이 파일을 지나지 않는다). 없으면 이 단계는 건너뛴다. */
+  vaultFill?: (input: { site: string; domains: string[] }) => Promise<VaultFillReport>;
   /** 이 표면에서 로그인 창을 여는 방법(네이티브: 같은 탭에서 로그인 주소). 없으면 deps.openSignIn. */
   openSignIn?: (card: OwnerLoginCard) => Promise<void>;
   runId?: string;
@@ -134,7 +155,7 @@ export interface LoginRecoveryDeps {
 
 export type LoginRecoveryOutcome =
   | { state: "not-a-wall" }
-  | { state: "recovered"; via: "targeted-reimport" | "store-feed"; site: string }
+  | { state: "recovered"; via: "targeted-reimport" | "vault-autofill" | "store-feed"; site: string }
   | { state: "awaiting-owner"; site: string; card: OwnerLoginCard; newCard: boolean }
   | { state: "in-flight"; site: string };
 
@@ -181,12 +202,16 @@ export function ownerLoginCardFor(input: {
   returnUrl?: string | null;
 }): OwnerLoginCard {
   const name = siteDisplayName(input.site);
-  const ko = input.reason === "source-rejected-by-site"
-    ? `${name} 로그인이 크롬에서 가져온 세션으로도 열리지 않습니다 — 이 창에서 한 번 로그인해 주세요`
-    : `${name} 로그인이 크롬에도 없습니다 — 이 창에서 한 번 로그인해 주세요`;
-  const en = input.reason === "source-rejected-by-site"
-    ? `${name} rejected even the session imported from Chrome — please sign in once in this window`
-    : `${name} is not signed in in Chrome either — please sign in once in this window`;
+  const ko = input.reason === "second-factor-required"
+    ? `${name} 로그인에 2단계 인증 코드가 필요합니다 — 이 창에서 코드를 한 번 입력해 주세요`
+    : input.reason === "source-rejected-by-site"
+      ? `${name} 로그인이 크롬에서 가져온 세션으로도 열리지 않습니다 — 이 창에서 한 번 로그인해 주세요`
+      : `${name} 로그인이 크롬에도 없습니다 — 이 창에서 한 번 로그인해 주세요`;
+  const en = input.reason === "second-factor-required"
+    ? `${name} needs a one-time sign-in code — please enter it once in this window`
+    : input.reason === "source-rejected-by-site"
+      ? `${name} rejected even the session imported from Chrome — please sign in once in this window`
+      : `${name} is not signed in in Chrome either — please sign in once in this window`;
   return {
     site: input.site,
     surface: input.surface,
@@ -273,6 +298,27 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
         event(ctx, "recovered", wall, { reason: "cleared" });
         return { state: "recovered", via: "targeted-reimport", site: wall.site };
       }
+    }
+
+    // ── 1b) 저장된 자격증명(오너 금고) — Main 에서 채우고 제출, 모델은 값을 모른다 ──────────
+    if (ctx.vaultFill) {
+      let report: VaultFillReport;
+      try { report = await ctx.vaultFill({ site: wall.site, domains }); }
+      catch { report = { state: "failed" }; }
+      const cleared = report.state === "submitted" && typeof report.urlAfter === "string"
+        && detectLoginWall({ url: report.urlAfter }).kind !== "login-wall";
+      event(ctx, "vault-autofill", wall, {
+        reason: report.state === "no-credential" ? "vault-no-credential"
+          : report.state === "unavailable" ? "vault-unavailable"
+            : report.state === "second-factor" ? "second-factor-required"
+              : report.state === "failed" ? report.reason ?? "import-failed"
+                : cleared ? "cleared" : "vault-submitted",
+      });
+      if (cleared) {
+        event(ctx, "recovered", wall, { reason: "cleared" });
+        return { state: "recovered", via: "vault-autofill", site: wall.site };
+      }
+      if (report.state === "second-factor") return openCard(wall, ctx, "second-factor-required");
     }
 
     // ── 2) 저장소 대조 ───────────────────────────────────────────────

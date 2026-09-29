@@ -246,3 +246,55 @@
     transition: none;
   }
 }
+
+/* ── 화면 밖에서 오너를 기다리는 것 — 파란 점(AttentionDot) ── */
+.triggerDot {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  z-index: 1;
+}
+
+.compact .triggerDot {
+  top: 2px;
+  right: auto;
+  left: 36px;
+}
+
+.optionDot {
+  margin-left: 7px;
+}
+
+.attentionHead {
+  margin: 5px 4px 2px;
+  padding: 6px 5px 2px;
+  border-top: 1px solid var(--paper-edge);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 15px;
+}
+
+.attentionOption {
+  min-height: 34px;
+  grid-template-columns: 44px minmax(0, 1fr) 18px;
+}
+
+.attentionWhere {
+  color: var(--ink-soft);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.attentionTitle {
+  overflow: hidden;
+  font-size: 12.5px;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attentionEntryDot {
+  grid-column: 3;
+  justify-self: center;
+}

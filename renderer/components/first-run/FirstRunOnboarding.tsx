@@ -10,11 +10,13 @@
  * Each step writes to an existing store and re-reads it before it counts as done:
  *   name/prefs → One profile (displayName, profileContext, operatingPrinciples)
  *   Chrome     → CredentialImportDialog (consent ≠ import ≠ sign-in kept)
- *   AI         → runtime.installCli / openCliLogin / detect + usage (real data only)
- *   Pro        → web checkout, then billing.getCredits re-read before "Pro"
- *   mailbox    → agentMail.status() (server entitlement). Absent = "sign in to check";
- *                Pro+ may create an address via agentMail.issue(), shown only after
- *                status() returns it.
+ *   AI         → chip grid (components/connect/RuntimeConnect): green only after a live
+ *                auth probe; small "연결" → step popup (확인·설치·로그인·확인·완료);
+ *                Agentlas → "Upgrade" (plan picker); the black button is always "다음으로".
+ *   Pro        → the app-wide plan picker (PlanPickerHost); checkout is asked only after Upgrade
+ *   mailbox    → agentMail.status() → shared/agent-mail-offer.ts: sign-in / not open yet /
+ *                plan picker / choose address / preparing / active (address + allowance) /
+ *                error + retry. The address is shown only after status() returns it.
  *
  * Research (owner rule: look before building):
  *   - Apple HIG, Onboarding: keep it fast and optional; ask for access in context,
@@ -27,11 +29,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import type { AuthSession, BillingPlanOffer, HubCreditBalance, OneProfile, RuntimeStatus, UsageSnapshot } from "@/lib/types";
+import type { AuthSession, HubCreditBalance, OneProfile, RuntimeStatus } from "@/lib/types";
 import type { AgentMailStatus } from "@shared/agent-mail";
-import { openPricing, PRICING_URL } from "@/components/UpgradeCta";
+import { openPricing } from "@/components/UpgradeCta";
+import { PLAN_CHANGED_EVENT } from "@/components/billing/PlanPickerModal";
+import { agentMailOffer } from "@shared/agent-mail-offer";
 import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
-import { AI_CARDS, aiCardState, usageWindowLabel, type AiCardId, type AiCardSpec, type AiCardState } from "@/lib/ai-connection-state";
+import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 import {
   FIRST_RUN_OPEN_EVENT,
   FIRST_RUN_STEPS,
@@ -48,7 +52,7 @@ import {
   type FirstRunStep,
 } from "@/lib/first-run-state";
 import { setOnePersonaName } from "@/lib/one-persona-name";
-import { OneMailIdentityPicker } from "@/components/one/mail/OneMailIdentityPicker";
+import { AgentMailOfferCard } from "@/components/one/mail/AgentMailOfferCard";
 import styles from "./FirstRun.module.css";
 
 const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
@@ -56,8 +60,8 @@ const LEGACY_WORK_TOUR_KEY = "agentlas.work.firstRunOnboarding.v3";
 const PROFILE_CONTEXT_MAX = 4_000;
 const PRINCIPLE_MAX = 500;
 const PRINCIPLES_MAX = 128;
-const PAID_PLANS = new Set(["pro", "max", "wow"]);
-const ANTIGRAVITY_URL = "https://antigravity.google";
+/** 로컬 모델로 치는 감지 종류(ollama 는 이관용 투영이라 제외 — RuntimeReadiness 와 같은 규칙). */
+const LOCAL_MODEL_KINDS = new Set(["lmstudio", "mlx", "agentlas-local"]);
 
 /** Decide whether this account sees the flow, and keep that decision. */
 async function loadOrClassify(accountFingerprint: string | undefined): Promise<FirstRunRecord> {
@@ -155,7 +159,7 @@ type Copy = ReturnType<typeof makeCopy>;
 
 function makeCopy(ko: boolean, name: string) {
   return ko ? {
-    back: "이전", next: "계속", skip: "건너뛰기", saving: "저장하는 중…",
+    back: "이전", next: "다음으로", skip: "건너뛰기", saving: "저장하는 중…", checking: "확인하는 중…",
     nameTitle: "에이전트 이름을 정해주세요.", nameSub: "One 대신 이 이름으로 불리게 됩니다.",
     nameLabel: "에이전트 이름", namePlaceholder: "예: 루나", namePreview: (n: string) => `안녕하세요, ${n}입니다.`, namePreviewEmpty: "이름을 적으면 여기에서 첫인사를 미리 볼 수 있어요.",
     nameHint: "나중에 프로필에서 언제든 바꿀 수 있어요.",
@@ -167,48 +171,21 @@ function makeCopy(ko: boolean, name: string) {
     factConsent: "동의", factImport: "가져오기", factKept: "로그인 유지",
     yes: "했어요", notYet: "아직", sitesKept: (n: number) => `${n}개 사이트`, keptUnknown: "확인 불가",
     browserHint: "건너뛰어도 브라우저 화면에서 나중에 연결할 수 있어요.",
-    aiTitle: "어떤 AI를 자주 쓰세요?", aiSub: "이미 로그인된 AI는 자동으로 보여요. 여러 개를 함께 연결할 수 있어요.",
-    aiCaption: "사용량은 공급자가 알려준 값만 보여 드려요.",
-    aiName: { gpt: "GPT", claude: "Claude", gemini: "Gemini" } as Record<AiCardId, string>,
-    aiSub2: { gpt: "ChatGPT · Codex", claude: "Claude Code", gemini: "Google · Antigravity" } as Record<AiCardId, string>,
-    aiFullName: { gpt: "ChatGPT", claude: "Claude", gemini: "Gemini" } as Record<AiCardId, string>,
-    notInstalled: "설치 안 됨", noAutoInstall: "자동 설치 미지원", installed: "설치됨", loginUnknown: "로그인 확인 불가",
-    signInNeeded: "로그인 필요", signedIn: "로그인됨", usageUnknown: "사용량 확인 불가",
-    remaining: (pct: number, window: string) => `남은 ${pct}% · ${window}`,
-    loginCta: "로그인 하기", connectedCta: "연결됨", installGuide: "설치 페이지 열기", checking: "확인하는 중…",
-    installing: "설치하는 중…", loggingIn: "열린 창에서 로그인", verifying: "로그인 확인 중…",
-    notVerified: "로그인 창은 열렸지만 아직 확인되지 않았어요. 로그인을 마쳤다면 다시 눌러 확인하세요.",
-    neverUsed: "아무것도 써본 적 없어요", neverUsedSub: "Agentlas 하나로 시작해요.", seePlans: "Free · Pro 보기",
-    connectTitle: (n: string) => `${n}에 연결`,
-    connectBody: "이 기기에 필요한 도구를 설치하고 공식 로그인 창을 엽니다. 로그인이 확인되면 이 카드만 연결됨으로 바뀌어요. 비밀번호는 Agentlas에 저장되지 않아요.",
-    connectBodyInstalled: "공식 로그인 창을 엽니다. 로그인이 확인되면 이 카드만 연결됨으로 바뀌어요. 비밀번호는 Agentlas에 저장되지 않아요.",
-    connectGo: "로그인 진행", cancel: "취소", close: "닫기",
-    planTitle: "Agentlas로 시작하세요.", planSub: "다른 AI 구독이 없어도 Agentlas 구독 하나면 돼요.",
-    planDefault: "기본 선택", planCurrent: "지금 요금제", perMonth: "/ 월", perYear: (p: string) => `/ 월 · 연 ${p}`,
-    credits: (n: string) => `월 ${n} credits`, cloud: (n: string) => `비공개 Cloud 에이전트 ${n}개`,
-    alive: "Alive Agent 포함",
-    byo: "내 AI 연결 · 로컬 실행", planMail: (n: string) => `에이전트 전용 메일 · 월 ${n}명 발송`, planMailPlain: "에이전트 전용 메일",
-    freeCta: "Free로 시작", proCta: "구독하기", proActive: (p: string) => `${p} 사용 중`,
-    planNote: "가격과 혜택은 agentlas.cloud 상품 정보에서 불러왔어요. 결제는 웹에서 진행돼요.",
-    planLoadFailed: "요금 정보를 불러오지 못했어요.", retry: "다시 시도", openWeb: "웹에서 보기", loadingPlans: "요금 정보를 불러오는 중…",
-    checkoutOpened: "웹에서 결제를 마치면 여기서 다시 확인해요.", checkPlan: "결제 확인",
-    planConfirmed: (p: string) => `${p} 요금제가 확인됐어요.`, planStillFree: "아직 결제가 확인되지 않았어요. Free로 계속 쓸 수 있어요.",
-    planCheckFailed: "요금제를 확인하지 못했어요. 잠시 뒤 다시 확인해 주세요.",
+    aiTitle: "어떤 AI를 쓰세요?", aiSub: "이미 로그인된 AI는 설치됨으로 보여요. 필요한 것만 하나씩 연결하세요.",
+    aiCaption: "설치됨은 실제로 로그인 상태를 물어 확인한 뒤에만 표시돼요.",
+    aiNeedOne: "일을 맡기려면 AI가 하나 이상 필요해요. 지금 건너뛰어도 설정에서 언제든 연결할 수 있어요.",
+    localName: "로컬 모델", localSub: "이 기기에서 실행", localNone: "찾은 모델 없음", localHint: "로컬 모델은 앱의 로컬 모델 화면에서 받을 수 있어요.",
+    agentlasName: "Agentlas", agentlasSub: "플랜 크레딧으로 실행", agentlasFree: "플랜 없음",
     prefTitle: "에이전트가 지켜야 할 것이 있나요?", prefSub: "선호하는 성격과 말투를 적어 주세요. 비워 두어도 돼요.",
     prefLabel: "성격과 말투 · 선택", prefPlaceholder: "예: 짧고 차분하게, 근거를 먼저 보여줘.",
     principleLabel: "꼭 지켜야 할 원칙 · 한 줄에 하나", principlePlaceholder: "예: 외부로 보내기 전에 꼭 물어봐.",
     prefHint: "원칙은 적은 그대로만 지켜요. 언제든 프로필에서 고칠 수 있어요.",
     mailTitle: "에이전트에게 메일함을 줄까요?", mailSub: "에이전트만 쓰는 고유한 메일 주소예요.",
-    mailName: "에이전트 전용 메일", mailSoon: "확인 필요", mailSoonBody: "Agentlas에 로그인하면 요금제에 포함된 메일 주소를 확인하고 만들 수 있어요. 나중에 설정의 메일 탭에서도 할 수 있어요.",
-    mailIssued: "발급됨", mailPending: "주소 발급 전", mailPendingBody: `요금제에 포함돼 있어요. 아래에서 ${name}의 메일 주소를 정해 주세요.`,
-    mailPreparing: "준비 중", mailPreparingBody: "주소를 준비하고 있어요. 준비가 끝나면 설정에서 쓸 수 있어요.",
-    mailPlanOnly: "Pro 이상 요금제에서 쓸 수 있어요.", mailSeePlans: "Free · Pro 보기",
-    mailQuota: (left: string, limit: string) => `이번 달 보낼 수 있는 받는 사람 ${left}/${limit}명 (메일 1통을 3명에게 보내면 3명으로 셈)`,
     mailHint: "실제 주소는 서버에서 발급된 뒤에만 보여 드려요.",
     finish: `${name}에게 가기`, stepsLabel: "진행 단계",
     saveFailed: "저장하지 못했어요. 다시 시도해 주세요.",
   } : {
-    back: "Back", next: "Continue", skip: "Skip", saving: "Saving…",
+    back: "Back", next: "Next", skip: "Skip", saving: "Saving…", checking: "Checking…",
     nameTitle: "Name your agent.", nameSub: "Your agent goes by this name instead of One.",
     nameLabel: "Agent name", namePlaceholder: "e.g. Luna", namePreview: (n: string) => `Hi, I'm ${n}.`, namePreviewEmpty: "Type a name to preview its greeting here.",
     nameHint: "You can change it anytime in the profile.",
@@ -220,50 +197,21 @@ function makeCopy(ko: boolean, name: string) {
     factConsent: "Consent", factImport: "Import", factKept: "Signed in",
     yes: "Done", notYet: "Not yet", sitesKept: (n: number) => `${n} site${n === 1 ? "" : "s"}`, keptUnknown: "Unknown",
     browserHint: "You can connect later from the Browser screen.",
-    aiTitle: "Which AI do you use?", aiSub: "AI you're already signed in to shows up here. Connect as many as you like.",
-    aiCaption: "Usage is shown only when the provider reports it.",
-    aiName: { gpt: "GPT", claude: "Claude", gemini: "Gemini" } as Record<AiCardId, string>,
-    aiSub2: { gpt: "ChatGPT · Codex", claude: "Claude Code", gemini: "Google · Antigravity" } as Record<AiCardId, string>,
-    aiFullName: { gpt: "ChatGPT", claude: "Claude", gemini: "Gemini" } as Record<AiCardId, string>,
-    notInstalled: "Not installed", noAutoInstall: "No auto install", installed: "Installed", loginUnknown: "Sign-in unverified",
-    signInNeeded: "Sign-in needed", signedIn: "Signed in", usageUnknown: "Usage unavailable",
-    remaining: (pct: number, window: string) => `${pct}% left · ${window}`,
-    loginCta: "Sign in", connectedCta: "Connected", installGuide: "Open install page", checking: "Checking…",
-    installing: "Installing…", loggingIn: "Sign in in the window", verifying: "Verifying sign-in…",
-    notVerified: "The sign-in window opened but sign-in is not confirmed yet. If you finished, press it again to check.",
-    neverUsed: "I haven't used any", neverUsedSub: "Start with Agentlas alone.", seePlans: "See Free · Pro",
-    connectTitle: (n: string) => `Connect ${n}`,
-    connectBody: "We'll install the tool this computer needs and open the official sign-in. Only this card changes once sign-in is confirmed. Agentlas never stores your password.",
-    connectBodyInstalled: "We'll open the official sign-in. Only this card changes once sign-in is confirmed. Agentlas never stores your password.",
-    connectGo: "Continue to sign in", cancel: "Cancel", close: "Close",
-    planTitle: "Start with Agentlas.", planSub: "No other AI subscription needed — one Agentlas plan is enough.",
-    planDefault: "Selected", planCurrent: "Current plan", perMonth: "/ month", perYear: (p: string) => `/ month · ${p}/yr`,
-    credits: (n: string) => `${n} credits / month`, cloud: (n: string) => `${n} private Cloud agents`,
-    alive: "Alive Agent included",
-    byo: "Your own AI · local runs", planMail: (n: string) => `Agent mailbox · ${n} recipients / month`, planMailPlain: "Agent mailbox",
-    freeCta: "Start with Free", proCta: "Subscribe", proActive: (p: string) => `On ${p}`,
-    planNote: "Prices and benefits come from the agentlas.cloud catalog. Checkout happens on the web.",
-    planLoadFailed: "Could not load plans.", retry: "Retry", openWeb: "Open on the web", loadingPlans: "Loading plans…",
-    checkoutOpened: "Finish checkout on the web, then check here.", checkPlan: "Check payment",
-    planConfirmed: (p: string) => `Your ${p} plan is confirmed.`, planStillFree: "Payment isn't confirmed yet. You can keep using Free.",
-    planCheckFailed: "Could not check your plan. Try again shortly.",
+    aiTitle: "Which AI do you use?", aiSub: "AI you're already signed in to shows as Installed. Connect the ones you need, one at a time.",
+    aiCaption: "Installed appears only after we actually ask the AI whether you're signed in.",
+    aiNeedOne: "You need at least one AI to run work. You can skip now and connect anytime in Settings.",
+    localName: "Local models", localSub: "Runs on this computer", localNone: "No models found", localHint: "Get local models from the Local models screen in the app.",
+    agentlasName: "Agentlas", agentlasSub: "Runs on plan credits", agentlasFree: "No plan",
     prefTitle: "Anything your agent should keep in mind?", prefSub: "Describe the personality and tone you like. You can leave it blank.",
     prefLabel: "Personality and tone · optional", prefPlaceholder: "e.g. Short and calm. Show the evidence first.",
     principleLabel: "Must-keep principles · one per line", principlePlaceholder: "e.g. Always ask before sending anything out.",
     prefHint: "Principles are followed exactly as written. Edit them anytime in the profile.",
     mailTitle: "Give your agent a mailbox?", mailSub: "A unique email address only your agent uses.",
-    mailName: "Agent mailbox", mailSoon: "Sign in", mailSoonBody: "Sign in to Agentlas to see and create the mail address your plan includes. You can also do this later from the Mail tab in Settings.",
-    mailIssued: "Issued", mailPending: "Not issued yet", mailPendingBody: `Included in your plan. Choose ${name}'s mail address below.`,
-    mailPreparing: "Preparing", mailPreparingBody: "The address is being prepared. Use it from Settings once it's ready.",
-    mailPlanOnly: "Available on Pro and above.", mailSeePlans: "See Free · Pro",
-    mailQuota: (left: string, limit: string) => `Recipients left this month: ${left}/${limit} (one email to 3 people counts as 3)`,
     mailHint: "An address is shown only after the server issues it.",
     finish: `Go to ${name}`, stepsLabel: "Progress",
     saveFailed: "Could not save. Please try again.",
   };
 }
-
-type CardBusy = "installing" | "loggingIn" | "verifying";
 
 export function FirstRunOnboarding({
   fingerprint,
@@ -292,19 +240,13 @@ export function FirstRunOnboarding({
   const [importSummary, setImportSummary] = useState<string | null>(null);
   const [keptSites, setKeptSites] = useState<number | null | undefined>(undefined);
 
-  // AI
+  // AI — 칩 하나 = 연결할 것 하나. 초록은 살아 있는 확인(runtime.probeAuth) 뒤에만.
   const [runtimes, setRuntimes] = useState<RuntimeStatus[] | null>(null);
-  const [usage, setUsage] = useState<UsageSnapshot | null>(null);
-  const [cardBusy, setCardBusy] = useState<Partial<Record<AiCardId, CardBusy>>>({});
-  const [cardNote, setCardNote] = useState<Partial<Record<AiCardId, string>>>({});
-  const [connectFor, setConnectFor] = useState<AiCardSpec | null>(null);
-  const [plansOpen, setPlansOpen] = useState(false);
-
-  // Plans
-  const [plans, setPlans] = useState<BillingPlanOffer[] | null>(null);
-  const [plansError, setPlansError] = useState(false);
-  const [balance, setBalance] = useState<HubCreditBalance | null>(null);
-  const [checkoutState, setCheckoutState] = useState<"idle" | "opened" | "checking" | "confirmed" | "still-free" | "failed">("idle");
+  const [credits, setCredits] = useState<HubCreditBalance | null | undefined>(undefined);
+  const [connectFor, setConnectFor] = useState<RuntimeChipSpec | null>(null);
+  const [localNote, setLocalNote] = useState<string | null>(null);
+  const [localBusy, setLocalBusy] = useState(false);
+  const auth = useRuntimeAuth();
 
   // Preferences
   const [prefText, setPrefText] = useState("");
@@ -348,17 +290,6 @@ export function FirstRunOnboarding({
     }).catch(() => undefined);
   }, [reloadProfile]);
 
-  // Escape closes the top popup only; the flow itself is left with Back/Skip.
-  useEffect(() => {
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      if (connectFor) { event.stopPropagation(); setConnectFor(null); return; }
-      if (plansOpen) { event.stopPropagation(); setPlansOpen(false); }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [connectFor, plansOpen]);
-
   /* ── 02 name ───────────────────────────── */
   const saveName = async () => {
     const clean = name.trim();
@@ -394,119 +325,39 @@ export function FirstRunOnboarding({
   /* ── 04 AI ───────────────────────────── */
   const refreshAi = useCallback(async (force: boolean) => {
     if (!api) return;
-    const [nextRuntimes, nextUsage] = await Promise.all([
+    const [nextRuntimes, nextCredits] = await Promise.all([
       api.runtime.detect(force).catch(() => null),
-      api.usage.snapshot({ force }).catch(() => null),
+      api.billing?.getCredits().catch(() => null) ?? null,
     ]);
     if (nextRuntimes) setRuntimes(nextRuntimes);
-    if (nextUsage) setUsage(nextUsage);
-    return { runtimes: nextRuntimes, usage: nextUsage };
+    setCredits(nextCredits ?? null);
   }, [api]);
 
   useEffect(() => { if (step === "ai") void refreshAi(false); }, [step, refreshAi]);
+  useEffect(() => {
+    const onPlan = () => { if (step === "ai") void refreshAi(false); };
+    window.addEventListener(PLAN_CHANGED_EVENT, onPlan);
+    return () => window.removeEventListener(PLAN_CHANGED_EVENT, onPlan);
+  }, [step, refreshAi]);
 
-  const cardStates = useMemo(() => {
-    const out = {} as Record<AiCardId, AiCardState>;
-    for (const spec of AI_CARDS) out[spec.id] = aiCardState(spec, runtimes, usage);
-    return out;
-  }, [runtimes, usage]);
+  const localRuntimes = (runtimes ?? []).filter((r) => LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
+  const plan = credits?.authenticated && credits.plan && credits.plan.toLowerCase() !== "free" ? credits.plan : null;
+  const agentlasReady = Boolean(plan && (credits?.remainingCredits ?? 0) > 0);
 
-  const runConnect = async (spec: AiCardSpec) => {
-    setConnectFor(null);
+  const checkLocal = async () => {
     if (!api) return;
-    const id = spec.id;
-    const setBusyFor = (value: CardBusy | undefined) => setCardBusy((prev) => ({ ...prev, [id]: value }));
-    setCardNote((prev) => ({ ...prev, [id]: undefined }));
-    try {
-      if (cardStates[id].login === "not-installed") {
-        if (!spec.installable) return;
-        setBusyFor("installing");
-        const installed = await api.runtime.installCli(spec.runtime as "claude-code" | "codex");
-        if (!installed?.ok) throw new Error(installed?.message || "install failed");
-      }
-      setBusyFor("loggingIn");
-      const opened = await api.runtime.openCliLogin(spec.runtime);
-      if (!opened?.ok) throw new Error(opened?.message || "login failed");
-      setBusyFor("verifying");
-      // Poll the same facts the card shows. Only a real provider answer turns it green.
-      const deadline = Date.now() + 180_000;
-      let lastUsageAt = 0;
-      while (Date.now() < deadline) {
-        const detected = await api.runtime.detect(true).catch(() => null);
-        if (detected) setRuntimes(detected);
-        let snapshot: UsageSnapshot | null = null;
-        if (detected?.some((r) => r.kind === spec.runtime) && Date.now() - lastUsageAt > 6_000) {
-          lastUsageAt = Date.now();
-          snapshot = spec.usageProvider
-            ? await api.usage.retry(spec.usageProvider).then((r) => r.snapshot).catch(() => null)
-            : null;
-          if (snapshot) setUsage(snapshot);
-        }
-        const state = aiCardState(spec, detected, snapshot);
-        if (state.login === "signed-in") return;
-        // Gemini/Antigravity has no usage endpoint: once installed and not flagged, stop
-        // waiting — the card honestly stays "sign-in unverified".
-        if (!spec.usageProvider && state.login === "installed-unverified") return;
-        await new Promise((resolve) => window.setTimeout(resolve, 2_500));
-      }
-      setCardNote((prev) => ({ ...prev, [id]: copy.notVerified }));
-    } catch (err) {
-      setCardNote((prev) => ({ ...prev, [id]: err instanceof Error ? err.message : String(err) }));
-    } finally {
-      setBusyFor(undefined);
-    }
-  };
-
-  const onCardAction = (spec: AiCardSpec) => {
-    const state = cardStates[spec.id];
-    if (state.login === "signed-in" || cardBusy[spec.id]) return;
-    if (state.login === "not-installed" && !spec.installable) {
-      window.open(ANTIGRAVITY_URL, "_blank", "noopener,noreferrer");
-      return;
-    }
-    setConnectFor(spec);
+    setLocalBusy(true); setLocalNote(null);
+    const detected = await api.runtime.detect(true).catch(() => null);
+    if (detected) setRuntimes(detected);
+    const found = (detected ?? []).some((r) => LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
+    if (!found) setLocalNote(copy.localHint);
+    setLocalBusy(false);
   };
 
   /* ── 06 plans ───────────────────────────── */
-  const loadPlans = useCallback(async () => {
-    setPlansError(false);
-    setPlans(null);
-    const catalog = await api?.billing.getPlans?.().catch(() => null);
-    if (catalog && catalog.ok) setPlans(catalog.plans);
-    else setPlansError(true);
-  }, [api]);
-
-  const loadBalance = useCallback(async () => {
-    const next = await api?.billing.getCredits().catch(() => null);
-    if (next) setBalance(next);
-    return next ?? null;
-  }, [api]);
-
-  useEffect(() => {
-    if (!plansOpen) return;
-    void loadPlans();
-    void loadBalance();
-  }, [plansOpen, loadPlans, loadBalance]);
-
-  const checkPlan = useCallback(async () => {
-    setCheckoutState("checking");
-    const next = await loadBalance();
-    if (!next || !next.authenticated || next.error) { setCheckoutState("failed"); return; }
-    setCheckoutState(next.plan && PAID_PLANS.has(next.plan) ? "confirmed" : "still-free");
-  }, [loadBalance]);
-
-  // Coming back from the browser after checkout re-reads the entitlement.
-  useEffect(() => {
-    if (checkoutState !== "opened") return;
-    const onFocus = () => { void checkPlan(); };
-    window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
-  }, [checkoutState, checkPlan]);
-
-  const subscribePro = () => {
-    openPricing();
-    setCheckoutState("opened");
-  };
+  // The one app-wide paywall ("플랜 선택", PlanPickerHost) — owner 2026-09-29: every
+  // "see plans" opens the same modal; checkout availability is asked only after Upgrade.
+  const openPlans = () => openPricing("first-run");
 
   /* ── 07 preferences ───────────────────────────── */
   const savePreferences = async () => {
@@ -557,22 +408,22 @@ export function FirstRunOnboarding({
   };
 
   /* ── 08 mailbox ───────────────────────────── */
-  // The server owns entitlement and address (agentMail.status). Nothing is decided here,
-  // and "issued" is shown only after status() itself returns the address.
+  // The server owns entitlement and address (agentMail.status). Every machine state gets its
+  // own label and next action (AgentMailOfferCard / shared/agent-mail-offer.ts) — the old
+  // single "확인 필요" chip covered sign-out, server-not-open, failed read and no IPC alike.
   const [mail, setMail] = useState<AgentMailStatus | null>(null);
   const loadMail = useCallback(async () => {
     const next = await api?.agentMail?.status().catch(() => null);
-    setMail(next ?? { ok: false, code: "unavailable", message: "", status: null });
+    setMail(next ?? { ok: false, code: api?.agentMail ? "network" : "unavailable", message: "", status: null });
     return next ?? null;
   }, [api]);
   useEffect(() => { if (step === "mailbox") void loadMail(); }, [step, loadMail]);
-  const mailOk = mail && mail.ok ? mail : null;
-  const mailEntitlement = mailOk?.signedIn ? mailOk.entitlement : null;
-  const mailbox = mailOk?.mailbox ?? null;
-  const mailAddress = mailbox?.address ?? null;
-  const mailActive = mailbox?.status === "active" && Boolean(mailAddress);
-  // PLAN-2 4.1: the address is chosen here, once (OneMailIdentityPicker creates it
-  // with the chosen local part and says it is permanent). No random address.
+  useEffect(() => {
+    const onPlan = () => { if (step === "mailbox") void loadMail(); };
+    window.addEventListener(PLAN_CHANGED_EVENT, onPlan);
+    return () => window.removeEventListener(PLAN_CHANGED_EVENT, onPlan);
+  }, [step, loadMail]);
+  const mailActive = agentMailOffer(mail).kind === "active";
 
   const finish = () => {
     const withMail = recordStep(recordRef.current, "mailbox", mailActive ? "done" : "skipped");
@@ -585,8 +436,8 @@ export function FirstRunOnboarding({
     if (index > 0) { setError(null); setStep(FIRST_RUN_STEPS[index - 1]); }
   };
 
-  const anyAiConnected = AI_CARDS.some((spec) => cardStates[spec.id].login === "signed-in");
-  const aiBusy = Object.values(cardBusy).some(Boolean);
+  const anyAiConnected = RUNTIME_CHIPS.some((spec) => auth.probes[spec.kind]?.state === "signed-in") || localRuntimes.length > 0 || agentlasReady;
+  const cc = useMemo(() => connectCopy(ko), [ko]);
 
   const primary: { label: string; onClick: () => void; disabled?: boolean } = (() => {
     switch (step) {
@@ -594,7 +445,8 @@ export function FirstRunOnboarding({
       case "browser": return importSummary
         ? { label: copy.next, onClick: () => complete("browser", "done") }
         : { label: copy.skip, onClick: () => complete("browser", "skipped") };
-      case "ai": return { label: anyAiConnected ? copy.next : copy.skip, onClick: () => complete("ai", anyAiConnected ? "done" : "skipped"), disabled: aiBusy };
+      // 오너 2026-09-29: 큰 검정 버튼은 "다음으로" — 연결을 시작하지 않고, 몇 개를 연결했든(0개여도) 넘어간다.
+      case "ai": return { label: copy.next, onClick: () => complete("ai", anyAiConnected ? "done" : "skipped") };
       case "preferences": return {
         label: busy ? copy.saving : (prefText.trim() || principleText.trim() ? copy.next : copy.skip),
         onClick: () => void savePreferences(),
@@ -613,16 +465,7 @@ export function FirstRunOnboarding({
   }[step];
 
   const stepIndex = FIRST_RUN_STEPS.indexOf(step);
-  const popupOpen = Boolean(connectFor || plansOpen);
-  const freePlan = plans?.find((p) => p.id === "free");
-  const proPlan = plans?.find((p) => p.id === "pro");
-  const num = (n: number) => n.toLocaleString(ko ? "ko-KR" : "en-US");
-  const money = (n: number) => `$${Number.isInteger(n) ? n : n.toFixed(2)}`;
-  const currentPlanId = balance?.authenticated && !balance.error ? balance.plan : undefined;
-  const onPaid = Boolean(currentPlanId && PAID_PLANS.has(currentPlanId));
-  // Name the plan the server reports; fall back to the catalog name, never guess "Pro".
-  const planLabel = (id: string | undefined) => plans?.find((p) => p.id === id)?.name
-    ?? (id ? id.charAt(0).toUpperCase() + id.slice(1) : "Pro");
+  const popupOpen = Boolean(connectFor);
 
   return (
     <div className={styles.root} role="dialog" aria-modal="true" aria-labelledby="first-run-title">
@@ -692,56 +535,34 @@ export function FirstRunOnboarding({
 
             {step === "ai" && (
               <>
-                <div className={styles.cards}>
-                  {AI_CARDS.map((spec) => {
-                    const state = cardStates[spec.id];
-                    const busyNow = cardBusy[spec.id];
-                    const connected = state.login === "signed-in";
-                    const lines: string[] = runtimes === null
-                      ? [copy.checking]
-                      : state.login === "not-installed"
-                        ? [spec.installable ? copy.notInstalled : copy.noAutoInstall]
-                        : state.login === "sign-in-required"
-                          ? [copy.signInNeeded]
-                          : state.login === "installed-unverified"
-                            ? [copy.installed, spec.usageProvider ? copy.loginUnknown : copy.usageUnknown]
-                            : [copy.signedIn, state.usage ? copy.remaining(state.usage.remainingPercent, usageWindowLabel(state.usage, ko)) : copy.usageUnknown];
-                    const label = busyNow
-                      ? copy[busyNow]
-                      : connected
-                        ? copy.connectedCta
-                        : state.login === "not-installed" && !spec.installable
-                          ? copy.installGuide
-                          : copy.loginCta;
-                    return (
-                      <article key={spec.id} className={styles.aiCard} data-connected={connected}>
-                        <img src={spec.logo} alt="" />
-                        <strong>{copy.aiName[spec.id]}</strong>
-                        <span className={styles.sub}>{copy.aiSub2[spec.id]}</span>
-                        <div className={styles.status} data-tone={connected ? "ok" : state.login === "sign-in-required" ? "warn" : undefined} aria-live="polite">
-                          {lines.map((line) => <span key={line}>{line}</span>)}
-                        </div>
-                        <button
-                          type="button"
-                          data-connected={connected}
-                          aria-disabled={connected || undefined}
-                          disabled={Boolean(busyNow)}
-                          onClick={() => onCardAction(spec)}
-                          aria-label={`${copy.aiName[spec.id]} — ${label}`}
-                        >{label}</button>
-                      </article>
-                    );
-                  })}
-                  <article className={styles.aiCard}>
-                    <img src="/brand/agentlas-one-mark.png" alt="" />
-                    <strong>{copy.neverUsed}</strong>
-                    <span className={styles.sub}>{copy.neverUsedSub}</span>
-                    <div className={styles.status} />
-                    <button type="button" onClick={() => setPlansOpen(true)}>{copy.seePlans}</button>
-                  </article>
-                </div>
-                {AI_CARDS.map((spec) => cardNote[spec.id] ? <p key={spec.id} className={styles.error} role="status">{`${copy.aiName[spec.id]}: ${cardNote[spec.id]}`}</p> : null)}
-                <p className={styles.caption}>{copy.aiCaption}</p>
+                <ChipGrid label={copy.aiTitle}>
+                  {RUNTIME_CHIPS.map((spec) => (
+                    <RuntimeChip key={spec.kind} spec={spec} probe={auth.probes[spec.kind]} loaded={auth.loaded} copy={cc} onConnect={setConnectFor} />
+                  ))}
+                  <ConnectChip
+                    logo="/brand/llm/ollama.svg"
+                    name={copy.localName}
+                    sub={copy.localSub}
+                    ready={localRuntimes.length > 0}
+                    badge={runtimes === null ? cc.checking : localRuntimes.length > 0 ? cc.installed : copy.localNone}
+                    badgeTone={localRuntimes.length > 0 ? "ok" : undefined}
+                    facts={localRuntimes.length > 0 ? [localRuntimes.map((r) => r.label ?? r.kind).join(" · ")] : []}
+                    busy={localBusy}
+                    action={localRuntimes.length > 0 ? undefined : { label: localBusy ? cc.checking : cc.connect, onClick: () => void checkLocal() }}
+                  />
+                  <ConnectChip
+                    logo="/brand/agentlas-one-mark.png"
+                    name={copy.agentlasName}
+                    sub={copy.agentlasSub}
+                    ready={agentlasReady}
+                    badge={credits === undefined ? cc.checking : agentlasReady ? cc.available : copy.agentlasFree}
+                    badgeTone={agentlasReady ? "ok" : undefined}
+                    facts={agentlasReady && plan ? [plan] : []}
+                    action={agentlasReady ? undefined : { label: cc.upgrade, onClick: openPlans, variant: "upgrade" }}
+                  />
+                </ChipGrid>
+                {localNote && <p className={styles.hint} role="status">{localNote}</p>}
+                <p className={styles.caption}>{anyAiConnected ? copy.aiCaption : copy.aiNeedOne}</p>
               </>
             )}
 
@@ -761,38 +582,7 @@ export function FirstRunOnboarding({
 
             {step === "mailbox" && (
               <>
-                <div className={styles.mailCard}>
-                  <div className={styles.mailRow}>
-                    <div>
-                      <strong>{copy.mailName}</strong>
-                      <small>{mail === null
-                        ? copy.checking
-                        : !mailEntitlement
-                          ? copy.mailSoonBody
-                          : mailbox
-                            ? (mailActive ? copy.mailQuota(num(mailEntitlement.remainingThisMonth), num(mailEntitlement.monthlyRecipientLimit)) : copy.mailPreparingBody)
-                            : mailEntitlement.addressLimit > 0
-                              ? `${copy.mailPendingBody} ${copy.mailQuota(num(mailEntitlement.monthlyRecipientLimit), num(mailEntitlement.monthlyRecipientLimit))}`
-                              : copy.mailPlanOnly}</small>
-                    </div>
-                    <span className={styles.chip} data-tone={mailActive ? "ok" : undefined}>
-                      {mail === null ? copy.checking : !mailEntitlement ? copy.mailSoon : mailbox ? (mailActive ? copy.mailIssued : copy.mailPreparing) : copy.mailPending}
-                    </span>
-                  </div>
-                  {mailAddress && <div className={styles.mailAddress}>{mailAddress}</div>}
-                  {mailEntitlement && !mailActive && mailEntitlement.addressLimit > 0 && (
-                    <OneMailIdentityPicker
-                      locale={ko ? "ko" : "en"}
-                      oneName={displayName}
-                      limits={mailOk?.limits ?? null}
-                      onCreated={() => void loadMail()}
-                      compact
-                    />
-                  )}
-                  {mailEntitlement && !mailbox && mailEntitlement.addressLimit <= 0 && (
-                    <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} onClick={() => setPlansOpen(true)}>{copy.mailSeePlans}</button>
-                  )}
-                </div>
+                <AgentMailOfferCard locale={ko ? "ko" : "en"} oneName={displayName} status={mail} reload={async () => { await loadMail(); }} />
                 <p className={styles.hint}>{copy.mailHint}</p>
               </>
             )}
@@ -825,78 +615,14 @@ export function FirstRunOnboarding({
       )}
 
       {connectFor && (
-        <div className={styles.scrim} role="presentation" onClick={() => setConnectFor(null)}>
-          <div className={`${styles.glass} ${styles.connectModal}`} role="dialog" aria-modal="true" aria-labelledby="first-run-connect-title" onClick={(event) => event.stopPropagation()}>
-            <button type="button" className={styles.close} onClick={() => setConnectFor(null)} aria-label={copy.close}>×</button>
-            <img src={connectFor.logo} alt="" />
-            <h2 id="first-run-connect-title">{copy.connectTitle(copy.aiFullName[connectFor.id])}</h2>
-            <p>{cardStates[connectFor.id].login === "not-installed" ? copy.connectBody : copy.connectBodyInstalled}</p>
-            <div className={styles.modalActions}>
-              <button type="button" className={styles.secondary} onClick={() => setConnectFor(null)}>{copy.cancel}</button>
-              <button type="button" className={styles.primary} autoFocus onClick={() => void runConnect(connectFor)}>{copy.connectGo}</button>
-            </div>
-          </div>
-        </div>
+        <RuntimeConnectPopup
+          spec={connectFor}
+          copy={cc}
+          onClose={() => { setConnectFor(null); void auth.refresh(connectFor.kind); }}
+          onDone={() => { setConnectFor(null); void auth.refresh(connectFor.kind); }}
+        />
       )}
 
-      {plansOpen && (
-        <div className={styles.scrim} role="presentation">
-          <div className={`${styles.glass} ${styles.planModal}`} role="dialog" aria-modal="true" aria-labelledby="first-run-plan-title">
-            <button type="button" className={styles.close} onClick={() => setPlansOpen(false)} aria-label={copy.close}>×</button>
-            <h2 id="first-run-plan-title">{copy.planTitle}</h2>
-            <p>{copy.planSub}</p>
-            {!plans && !plansError && <p className={styles.hint} role="status">{copy.loadingPlans}</p>}
-            {plansError && (
-              <div className={styles.planStatus} role="alert">
-                {copy.planLoadFailed}
-                <button type="button" className={styles.secondary} onClick={() => void loadPlans()}>{copy.retry}</button>
-                <button type="button" className={styles.secondary} onClick={() => window.open(PRICING_URL, "_blank", "noopener,noreferrer")}>{copy.openWeb}</button>
-              </div>
-            )}
-            {freePlan && proPlan && (
-              <div className={styles.planGrid}>
-                <section className={styles.planCard} data-selected={!onPaid} aria-label={freePlan.name}>
-                  <h3>{freePlan.name}<span>{currentPlanId === "free" ? copy.planCurrent : copy.planDefault}</span></h3>
-                  <div className={styles.price}>{money(freePlan.priceMonthly)}<small>{copy.perMonth}</small></div>
-                  <ul>
-                    <li>{copy.credits(num(freePlan.monthlyCredits))}</li>
-                    <li>{copy.cloud(num(freePlan.cloudAgentLimit))}</li>
-                    {/* projectAgentLimit 는 적지 않는다 — Work 에이전트는 무료라 웹 카탈로그가 모든 요금제에 같은 상한(32)을 준다. 요금제 혜택이 아니다. */}
-                    <li>{copy.byo}</li>
-                  </ul>
-                  <button type="button" className={styles.secondary} autoFocus onClick={() => { setPlansOpen(false); if (step === "ai") complete("ai", anyAiConnected ? "done" : "skipped"); }}>{copy.freeCta}</button>
-                </section>
-                <section className={styles.planCard} data-kind="pro" data-selected={onPaid} aria-label={proPlan.name}>
-                  <h3>{proPlan.name}{currentPlanId && PAID_PLANS.has(currentPlanId) ? <span>{copy.planCurrent}</span> : null}</h3>
-                  <div className={styles.price}>{money(proPlan.priceMonthly)}<small>{copy.perYear(money(proPlan.priceAnnual))}</small></div>
-                  <ul>
-                    <li>{copy.credits(num(proPlan.monthlyCredits))}</li>
-                    <li>{copy.cloud(num(proPlan.cloudAgentLimit))}</li>
-                    {proPlan.aliveAgent && <li>{copy.alive}</li>}
-                    <li>{proPlan.agentMailMonthlyRecipients ? copy.planMail(num(proPlan.agentMailMonthlyRecipients)) : copy.planMailPlain}</li>
-                  </ul>
-                  {onPaid
-                    ? <button type="button" className={styles.secondary} disabled>{copy.proActive(planLabel(currentPlanId))}</button>
-                    : <button type="button" className={styles.primary} onClick={subscribePro}>{copy.proCta}</button>}
-                </section>
-              </div>
-            )}
-            {checkoutState !== "idle" && (
-              <div className={styles.planStatus} role="status">
-                {checkoutState === "opened" && copy.checkoutOpened}
-                {checkoutState === "checking" && copy.checking}
-                {checkoutState === "confirmed" && copy.planConfirmed(planLabel(currentPlanId))}
-                {checkoutState === "still-free" && copy.planStillFree}
-                {checkoutState === "failed" && copy.planCheckFailed}
-                {(checkoutState === "opened" || checkoutState === "still-free" || checkoutState === "failed") && (
-                  <button type="button" className={styles.secondary} onClick={() => void checkPlan()}>{copy.checkPlan}</button>
-                )}
-              </div>
-            )}
-            {freePlan && proPlan && <small className={styles.planNote}>{copy.planNote}</small>}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -2,6 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { performance } from "node:perf_hooks";
 import { ensureDaemonRunning, type EnsureDaemonOptions } from "../daemon/app-launcher";
 import { canonicalDaemonPath, daemonControlSocketPath, resolveDaemonServiceIdentity } from "../daemon/service-identity";
 import type { InstallIdentity } from "../install-identity";
@@ -44,7 +45,9 @@ export interface ScienceDaemonClientFailure {
 export class ScienceDaemonClientError extends Error {
   readonly code: string;
   constructor(readonly failure: ScienceDaemonClientFailure) {
-    super(failure.code);
+    // The code alone crosses IPC as the whole message, so a renderer saw only "science_daemon_remote_rejected" and never
+    // the daemon's reason (a missing module, an invalid render input). Carry the reason in the message; `code` is unchanged.
+    super(failure.remoteMessage ? `${failure.code}: ${String(failure.remoteMessage).slice(0, 600)}` : failure.code);
     this.name = "ScienceDaemonClientError";
     this.code = failure.code;
   }
@@ -136,6 +139,7 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
     catch { return Promise.reject(failure("science_daemon_request_invalid", "request", "not-dispatched")); }
     if (Buffer.byteLength(payload, "utf8") > MAX_REQUEST_BYTES) return Promise.reject(failure("science_daemon_request_too_large", "request", "not-dispatched"));
     return new Promise((resolve, reject) => {
+      const connectStartedAt = performance.now();
       const socket = net.connect(socketPath);
       socket.setEncoding("utf8");
       let finished = false;
@@ -167,12 +171,25 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
       pending.add(cancel);
       request.signal?.addEventListener("abort", abort, { once: true });
       socket.once("connect", () => {
+        const connectedAt = performance.now();
         clearTimeout(connectTimer);
         try { assertIdentity(); }
         catch (error) { done(error as ScienceDaemonClientError); return; }
         if (request.signal?.aborted) { abort(); return; }
         sent = true; // A disconnect from this point cannot prove non-execution.
-        if (timeoutMs) responseTimer = setTimeout(() => done(failure("science_daemon_reply_timeout", "request", "unknown")), timeoutMs);
+        if (timeoutMs) responseTimer = setTimeout(() => {
+          if (finished) return;
+          const replyElapsedMs = performance.now() - connectedAt;
+          try {
+            console.warn("[science-daemon-rpc] reply timeout", JSON.stringify({
+              method, requestId: id, phase: "reply", code: "science_daemon_reply_timeout",
+              connectElapsedMs: Math.round(connectedAt - connectStartedAt),
+              replyElapsedMs: Math.round(replyElapsedMs), deadlineMs: timeoutMs,
+              timerLatenessMs: Math.round(Math.max(0, replyElapsedMs - timeoutMs)),
+            }));
+          } catch { /* Diagnostics cannot change the request outcome. */ }
+          done(failure("science_daemon_reply_timeout", "request", "unknown"));
+        }, timeoutMs);
         socket.write(payload);
       });
       socket.on("data", (chunk: string) => {
@@ -310,14 +327,36 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
     return rpc("science.command", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId, command }, request);
   }
 
+  /*
+   * Heal before giving up (owner 2026-09-29: "if the daemon is gone, start it again"). The checks before dispatch --
+   * ping and status -- are reads: when one times out, the daemon is absent, or Science is not ready, nothing has been
+   * sent, so ensureStarted() (spawn the daemon if needed, start Science) and one more attempt are safe. A command that
+   * was already sent is never retried here: its effect is unknown.
+   */
+  async function readyDaemonForCommand(signal?: AbortSignal): Promise<VerifiedDaemon> {
+    const check = async (): Promise<VerifiedDaemon> => {
+      const daemon = await inspectDaemon();
+      const current = statusReply(await rpc("science.status", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId },
+        { signal, timeoutMs: 5_000 }), daemon);
+      if (current.state !== "ready") throw failure("science_daemon_science_unavailable", "identity", "not-dispatched", {
+        remoteMessage: current.errorCode ?? current.state,
+      });
+      return daemon;
+    };
+    try { return await check(); }
+    catch (error) {
+      const healable = error instanceof ScienceDaemonClientError && new Set(["science_daemon_reply_timeout", "science_daemon_connect_timeout",
+        "science_daemon_connection_failed", "science_daemon_connection_closed", "science_daemon_science_unavailable"]).has(error.code);
+      if (!healable || closed || signal?.aborted) throw error;
+      await ensureStarted().catch(() => undefined);
+      if (signal?.aborted) throw failure("science_daemon_wait_aborted", "request", "not-dispatched");
+      return check();
+    }
+  }
+
   async function commandObserved(command: DaemonScienceCommand, request: ScienceDaemonRequestOptions = {}): Promise<unknown> {
     if (request.signal?.aborted) throw failure("science_daemon_wait_aborted", "request", "not-dispatched");
-    const daemon = await inspectDaemon();
-    const current = statusReply(await rpc("science.status", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId },
-      { signal: request.signal, timeoutMs: 5_000 }), daemon);
-    if (current.state !== "ready") throw failure("science_daemon_science_unavailable", "identity", "not-dispatched", {
-      remoteMessage: current.errorCode ?? current.state,
-    });
+    const daemon = await readyDaemonForCommand(request.signal);
     // The server rejects a boot/identity mismatch before command admission. A
     // lost connection is unknown execution, never a reason to retry mutations.
     return rpc("science.command", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId, command }, request);

@@ -176,6 +176,19 @@ function evictableAgentBrowserTab(ownerId: number): ActiveWorkView | null {
  */
 function ensureBrowserTabCapacity(ownerId: number): boolean {
   reclaimOrphanAgentBrowserTabs(ownerId);
+  /*
+   * Reconcile before refusing: a tab whose page is gone (destroyed contents or window) or whose renderer
+   * crashed still counted against the cap, and a live run holding it made it unevictable, so the run hit
+   * "All 8 browser tabs are in use" with dead tabs. Only live pages count. Idea: ego-lite (MIT)
+   * page-ledger.ts reconcile() — entries whose target no longer exists are dropped; reimplemented here.
+   */
+  for (const active of [...activeViews.values()]) {
+    if (active.ownerId !== ownerId || active.mode !== "browser") continue;
+    const contents = active.view.webContents;
+    let crashed = false;
+    try { crashed = !contents.isDestroyed() && typeof contents.isCrashed === "function" && contents.isCrashed(); } catch { crashed = false; }
+    if (!isCurrent(active) || crashed) closeActive(active, isCurrent(active));
+  }
   while ([...activeViews.values()].filter((active) => active.ownerId === ownerId && active.mode === "browser").length
     >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
     const victim = evictableAgentBrowserTab(ownerId);

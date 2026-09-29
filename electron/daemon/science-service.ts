@@ -145,6 +145,10 @@ export function createDaemonScienceService(options: {
     options.assertOwner();
     if (state === "ready") return status();
     if (startPromise) return startPromise;
+    // A start that failed before claiming execution or opening the store left nothing behind (live 2026-09-27~29: the
+    // extension loader could not find 'electron' and Science stayed dead until the app was reinstalled). Such a start
+    // may simply run again; one that failed after acquiring anything still needs a fresh process.
+    if (state === "failed" && executionOwner === null && !runtimeOpened) { state = "idle"; lastError = null; }
     if (state === "closed" || state === "closing" || state === "failed") throw new Error("science_daemon_restart_requires_new_process");
     state = "starting";
     startPromise = (async () => {
@@ -209,6 +213,7 @@ export function createDaemonScienceService(options: {
       assertExecution();
       await adapter.recoverAndProjectAtStartup();
       assertExecution();
+      lastError = null;
       state = "ready";
       return status();
     })().catch(error => {
@@ -327,7 +332,13 @@ export function createDaemonScienceService(options: {
         return { schema: "agentlas.science.research-loop-inspection/v1",
           active: session !== null && ["queued", "running", "pausing", "paused"].includes(session.status), session,
           episodes: session ? store.listResearchEpisodes(command.input.projectId, session.id) : [],
-          events: session ? store.listLoopEvents(session.id, 0, 1_000) : [] };
+          events: session ? store.listLoopEvents(session.id, 0, 1_000) : [],
+          // Facts that split one lifecycle phase into the stages a researcher sees (data collection vs analysis, drafting
+          // vs peer review). Optional: an older pinned Science has no such export and the overview falls back to phases.
+          stageFacts: (() => {
+            const read = (api as { scienceStudyStageFacts?: (store: unknown, projectId: string) => unknown }).scienceStudyStageFacts;
+            try { return typeof read === "function" ? read(store, command.input.projectId) : null; } catch { return null; }
+          })() };
       }
       case "loops.start": {
         const runtimeSelection = await api.resolveScienceRuntimeSelection(store, command.input);

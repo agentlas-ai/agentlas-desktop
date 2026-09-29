@@ -742,11 +742,20 @@ async function runOne(
       } catch (error) {
         console.error("[automation] refused goal continuation could not be parked:", error);
       }
+      // A Run-now caller already holds the lease (preclaimed). Returning without releasing it left
+      // the continuation claimed forever (soak 1.2.50: claimed_at frozen at 12:53:14Z).
+      if (opts?.preclaimed) {
+        try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* owner CAS protects a peer lease */ }
+      }
+      console.info("[automation] goal continuation refused", JSON.stringify({ automationId: a.id, reason: goalDecision.reason }));
       return { accepted: false };
     }
   }
   // The goal-ledger read awaited: Quit or an update may have closed dispatch meanwhile.
-  if (dispatchPaused()) return { accepted: false };
+  if (dispatchPaused()) {
+    if (opts?.preclaimed) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
+    return { accepted: false };
+  }
   // 모든 실행 경로가 같은 크로스프로세스 리스를 사용한다. GUI의 Run now나 이벤트 트리거도
   // headless due 실행과 겹치면 외부 게시/결제 같은 부작용을 두 번 낼 수 있으므로 건너뛴다.
   if (

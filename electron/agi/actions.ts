@@ -312,7 +312,8 @@ export class AgiActionExecutor {
         if (!this.deps.recordMove) return no("agi.move.unavailable");
         const recorded = this.deps.recordMove(goal.goalId, goal.runId, "switch_runtime", { incidentId, reason: text(args.reason, 120) });
         if (recorded && recorded.ok === false) return no(recorded.code);
-        return ok("agi.move.switch-runtime-recorded");
+        // The owner line names why (soak 1.2.50: a bare "다음 실행은 다른 모델로 이어가요" with no reason).
+        return ok("agi.move.switch-runtime-recorded", { causeKind: this.incidents.get(incidentId)?.diagnosis.causeKind ?? null });
       }
       case "retry_node_with": {
         const nodeId = text(args.nodeId, 80);
@@ -444,6 +445,15 @@ function intentProposal(op: AgiPlanOp): AgiIntentProposal | null {
   return null;
 }
 
+const SWITCH_RUNTIME_WHY: Record<string, { ko: string; en: string }> = {
+  quota: { ko: "지금 모델의 사용 한도가 차서", en: "The current model hit its usage limit." },
+  auth: { ko: "지금 모델의 로그인이 풀려서", en: "The current model is signed out." },
+  runtime_unavailable: { ko: "지금 모델을 쓸 수 없어서", en: "The current model is unavailable." },
+  judge_unavailable: { ko: "결과를 판정할 모델이 응답하지 않아서", en: "The model that judges results did not answer." },
+  claimed_without_tools: { ko: "지금 모델이 도구 없이 끝났다고만 해서", en: "The current model claimed completion without using its tools." },
+  session_conflict: { ko: "지금 모델의 세션이 충돌해서", en: "The current model's session conflicted." },
+};
+
 function teammateLabel(detail: Record<string, unknown>): string {
   return typeof detail.memberName === "string" && detail.memberName.trim() ? detail.memberName.trim() : String(detail.member ?? "");
 }
@@ -458,7 +468,12 @@ export function noticeLine(action: AgiActionKind, receipt: AgiActionReceipt): { 
     // the resolved display name; the raw argument stays in the receipt.
     case "invite_teammate": return { ko: `AGI: ${teammateLabel(detail)} 팀원을 초대했어요`, en: `AGI: invited ${teammateLabel(detail)}` };
     case "dispatch_teammate": return { ko: `AGI: ${teammateLabel(detail)}에게 ${String(detail.nodeId ?? "")} 작업을 맡겼어요`, en: `AGI: handed ${String(detail.nodeId ?? "")} to ${teammateLabel(detail)}` };
-    case "switch_runtime": return { ko: "AGI: 다음 실행은 다른 모델로 이어가요", en: "AGI: the next run continues on another model" };
+    case "switch_runtime": {
+      const why = SWITCH_RUNTIME_WHY[String(detail.causeKind ?? "")];
+      return why
+        ? { ko: `AGI: ${why.ko} 다음 실행은 다른 모델로 이어가요`, en: `AGI: ${why.en} The next run continues on another model.` }
+        : { ko: "AGI: 지금 모델로는 진행이 막혀 다음 실행은 다른 모델로 이어가요", en: "AGI: progress is stuck on the current model, so the next run continues on another model." };
+    }
     case "retry_node_with": return { ko: `AGI: ${String(detail.nodeId ?? "")}를 다른 방법(${String(detail.path ?? "")})으로 다시 해요`, en: `AGI: retrying ${String(detail.nodeId ?? "")} another way (${String(detail.path ?? "")})` };
     case "replan_tree": return { ko: "AGI: 전술 목록을 정리했어요", en: "AGI: tidied the tactic list" };
     case "start_work_turn": return receipt.code === "agi.turn.started"

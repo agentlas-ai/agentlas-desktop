@@ -10,6 +10,8 @@ import { useT } from "@/lib/i18n";
 import { loadViewData, readViewData } from "@/lib/view-data-cache";
 import type { CanonicalTask, Project } from "@/lib/types";
 import { IconChevronDown, IconChevronRight, IconFolder, IconHome, IconPlus, IconSettings } from "./Icon";
+import { AttentionDot } from "./AttentionDot";
+import { useChatAttention } from "@/lib/attention";
 import { ProductModeMenu } from "./one/ProductModeMenu";
 import { AccountChip } from "./AccountChip";
 import { VersionChip } from "./VersionChip";
@@ -94,7 +96,7 @@ export function ProjectSidebar() {
               <button type="button" className="project-sidebar-collapse" onClick={() => openProjectSettings({ mode: "edit", projectId: project.id })} aria-label={ko ? `${project.name} 설정` : `Settings for ${project.name}`} title={ko ? "프로젝트 설정" : "Project settings"} aria-haspopup="dialog"><IconSettings size={14} /></button>
               {projectTasks.length > 0 ? <button type="button" className="project-sidebar-collapse" onClick={() => toggleProjectChats(project.id)} aria-label={chatsCollapsed ? (ko ? `${project.name}의 채팅 펼치기` : `Expand chats for ${project.name}`) : (ko ? `${project.name}의 채팅 접기` : `Collapse chats for ${project.name}`)} aria-expanded={!chatsCollapsed}>{chatsCollapsed ? <IconChevronRight size={14} /> : <IconChevronDown size={14} />}</button> : null}
             </div>
-            {!chatsCollapsed && projectTasks.map((task) => <button type="button" className="project-sidebar-task" key={task.id} onClick={() => navigate(`/workspace/task?id=${encodeURIComponent(task.originChatId ?? "")}&task=${encodeURIComponent(task.id)}&projectId=${encodeURIComponent(project.id)}`)}><span>{taskTitleForDisplay(task.title, ko)}</span></button>)}
+            {!chatsCollapsed && projectTasks.map((task) => <button type="button" className="project-sidebar-task" key={task.id} data-chat-id={task.originChatId ?? undefined} onClick={() => navigate(`/workspace/task?id=${encodeURIComponent(task.originChatId ?? "")}&task=${encodeURIComponent(task.id)}&projectId=${encodeURIComponent(project.id)}`)}><span>{taskTitleForDisplay(task.title, ko)}</span><ChatRowAttentionDot chatId={task.originChatId} locale={ko ? "ko" : "en"} /></button>)}
           </div>;
         })}
         {loadFailed ? <div className="project-sidebar-empty" role="alert">{ko ? "프로젝트 목록을 불러오지 못했습니다" : "Projects are temporarily unavailable"}</div> : null}
@@ -103,4 +105,10 @@ export function ProjectSidebar() {
       <div className="project-sidebar-foot"><AccountChip /><VersionChip /></div>
     </aside>
   );
+}
+
+/** 이 대화가 화면 밖에서 오너를 기다리면(승인·질문·안 본 결과) 행 끝에 파란 점. */
+function ChatRowAttentionDot({ chatId, locale }: { chatId: string | null | undefined; locale: "ko" | "en" }) {
+  const counts = useChatAttention(chatId);
+  return <AttentionDot counts={counts} locale={locale} className="project-sidebar-task-dot" />;
 }

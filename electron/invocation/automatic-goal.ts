@@ -1,4 +1,5 @@
 import { longRunMonetaryRefusal } from "../long-run/budget";
+import { channelPublishReceiptsPromptBlockFor } from "../publish-receipts";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
 import { getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, latestLongRunAttemptSafeEpoch, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount, unsettledLongRunAttemptCount, type LongRunAttemptReviewConfirmation } from "../store/long-runs";
@@ -275,7 +276,7 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
             // A model look can be wrong (owner Thread Marketing 2026-09-28 15:57Z: "not_done" from a follower
             // count, three minutes after the reply had been posted and verified). Never a licence to repeat blindly.
             ? ` A read-only check reported that the interrupted earlier action did not take effect (evidence: ${observation.evidence}). Before doing it again, look at the exact page it targeted and at this conversation's later messages; if either shows it already happened (a posted reply, a permalink, a sent message), do not repeat it.`
-            : ""}\n\n${revision.objective}` };
+            : ""}${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${revision.objective}` };
 }
 
 /** 사람이 누른 재개 — 인지 이벤트와 재개가 한 트랜잭션이라, 요청을 못 만들면 인지도 남지 않는다. */

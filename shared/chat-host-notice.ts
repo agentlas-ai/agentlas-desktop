@@ -87,3 +87,20 @@ export function parseChatHostNotice(role: string, json: unknown): ChatHostNotice
   if (typeof json !== "string" || json.length > 512) return undefined;
   try { return normalizeChatHostNotice(role, JSON.parse(json)); } catch { return undefined; }
 }
+
+/** automation-report rows written by the AGI unblocker (electron/agi/wiring.ts). One quiet line, never a report card. */
+export const AGI_ACTION_NOTICE_AUTOMATION_ID = "agi-unblocker";
+/** Alive orchestrator notices (electron/alive-organisms/action-notice.ts) — also AGI's own voice. */
+export const ALIVE_ACTION_NOTICE_AUTOMATION_ID_SHARED = "alive-orchestrator";
+
+/**
+ * An AGI/Alive action row is the host's own status, not a scheduled report. Soak 1.2.50 owner screenshot: it drew
+ * as a "예약 보고" card with a bare "AGI" name line above "AGI: 다음 실행은 다른 모델로 이어가요". Returns the one
+ * sentence to show, or null when the row is not an AGI action notice. Older rows carry an "AGI" name paragraph.
+ */
+export function agiActionNoticeLine(notice: { purpose?: string; automationId?: string } | null | undefined, text: string): string | null {
+  if (notice?.purpose !== "automation-report") return null;
+  if (notice.automationId !== AGI_ACTION_NOTICE_AUTOMATION_ID && notice.automationId !== ALIVE_ACTION_NOTICE_AUTOMATION_ID_SHARED) return null;
+  const body = String(text ?? "").replace(/^\s*AGI\s*\n\s*\n/, "").trim();
+  return body.replace(/^AGI\s*[:：]\s*/, "").replace(/^AGI(가|는)\s*/, "").trim() || null;
+}

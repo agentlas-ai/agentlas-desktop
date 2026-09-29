@@ -53,8 +53,10 @@ import {
   cookieIdentityColumns,
   decideCookieWrite,
   decideRuntimeCookieFeed,
+  planSessionGroupFeed,
   resolveCookieStoreLayout,
 } from "./cookie-merge";
+import { sessionCookieGroupOf, sessionCookieNamesFor } from "./login-wall";
 import { currentUiLocale } from "../ui-locale";
 
 /** 가져오기 거절·오류 문구는 화면 언어로 — 영어 화면에 한국어가 새지 않게(오너 2026-09-14). */
@@ -887,16 +889,23 @@ async function importMacCookiesThroughDedicatedRuntime(
     // cookie only when the runtime lacks it or the source expires later. An
     // explicit import the user just pressed still makes the source win.
     const runtimeExpires = new Map<string, number>();
-    if (!explicitImport) {
-      for (const cookie of await context.cookies(jobs.map((job) => `https://${job.domain}/`))) {
-        runtimeExpires.set(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`, cookie.expires);
-      }
+    const runtimeCookies = explicitImport ? [] : await context.cookies(jobs.map((job) => `https://${job.domain}/`));
+    for (const cookie of runtimeCookies) {
+      runtimeExpires.set(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`, cookie.expires);
     }
-    const feed = cookies.filter((cookie) => decideRuntimeCookieFeed({
+    // A login is fed or kept as one group, never mixed line by line (cookie-merge.ts planSessionGroupFeed).
+    const { feed } = planSessionGroupFeed({
       explicitImport,
-      existingExpires: runtimeExpires.get(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`) ?? null,
-      incomingExpires: cookie.expires,
-    }) === "feed");
+      incoming: cookies,
+      existing: runtimeCookies,
+      groupOf: sessionCookieGroupOf,
+      sessionNamesFor: sessionCookieNamesFor,
+      perCookie: (cookie) => decideRuntimeCookieFeed({
+        explicitImport,
+        existingExpires: runtimeExpires.get(`${cookie.domain}\u0000${cookie.name}\u0000${cookie.path}`) ?? null,
+        incomingExpires: cookie.expires,
+      }),
+    });
     if (feed.length > 0) await context.addCookies(feed);
     const observed = await context.cookies(jobs.map((job) => `https://${job.domain}/`));
     const acceptedDomains = new Set<string>();

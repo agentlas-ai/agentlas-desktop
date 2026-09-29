@@ -27,6 +27,7 @@ import { OfficeDocumentSessionBar } from "./OfficeDocumentSessionBar";
 import styles from "./LiveOutputViewer.module.css";
 
 const FILE_VIEWER_ASSET_ROOT = "file-viewer/";
+const SHEET_TYPES = new Set(["xlsx", "xlsm", "xls", "xlsb", "csv", "tsv", "ods", "numbers"]);
 
 function resolveFileViewerAssetRoot(): string {
   if (typeof document === "undefined") return `/${FILE_VIEWER_ASSET_ROOT}`;
@@ -186,8 +187,10 @@ export function UniversalFileViewerEngine({
     setViewerState("loading");
     setError(null);
   }, [viewDocument.source, viewDocument.name, viewDocument.mimeType]);
+  const isSheet = SHEET_TYPES.has(resolveViewerType(viewDocument.name, viewDocument.mimeType, viewDocument.signature) ?? "");
   const fitSelectedPage = useCallback(() => {
-    if (userZoomedRef.current) {
+    // 표는 맞춤을 하지 않는다 — 100% 격자에 스크롤(Claude 레퍼런스). 맞춤은 시트 전체를 37%·29% 로 욱여넣었다.
+    if (userZoomedRef.current || isSheet) {
       syncRenderedZoom();
       return;
     }
@@ -199,7 +202,7 @@ export function UniversalFileViewerEngine({
       if (!presentationFit) await handle?.fitToView();
       if (handle === viewerRef.current) syncRenderedZoom();
     })();
-  }, [syncRenderedZoom]);
+  }, [syncRenderedZoom, isSheet]);
   useEffect(() => {
     if (!hostRef.current) return undefined;
     const compatibility = installPresentationLayoutCompatibility(hostRef.current);
@@ -218,7 +221,8 @@ export function UniversalFileViewerEngine({
   const options = useMemo<ViewerOptions>(() => {
     const assetRoot = resolveFileViewerAssetRoot();
     return ({
-    theme: "system" as const,
+    // OS 가 아니라 앱 화면의 테마를 따른다 — 앱이 밝은데 OS 가 어두우면 표·문서만 어둡게 떴다(대화 차트와 같은 규칙).
+    theme: (typeof document !== "undefined" && document.documentElement.dataset.theme === "dark" ? "dark" : "light") as "dark" | "light",
     locale: locale === "ko" ? "ko-KR" : "en-US",
     styleIsolation: "shadow" as const,
     rendererMode: "replace" as const,
@@ -233,9 +237,13 @@ export function UniversalFileViewerEngine({
     ai: false,
     // Paged PPTX chrome fits the selected slide from its natural dimensions.
     // Generic auto-fit races that resize handler and measures scaled content.
-    fit: resolveViewerType(viewDocument.name, viewDocument.mimeType, viewDocument.signature) === "pptx" ? undefined
+    // 표는 100% 로 — "맞춤" 은 시트 전체(그림 포함)를 칸에 욱여넣어 37% 같은 읽을 수 없는 배율이 됐다
+    // (실측 2026-09-29, Claude 레퍼런스는 100% 격자에 스크롤). 발표자료는 자체 쪽 맞춤이 있다.
+    fit: resolveViewerType(viewDocument.name, viewDocument.mimeType, viewDocument.signature) === "pptx" || SHEET_TYPES.has(resolveViewerType(viewDocument.name, viewDocument.mimeType, viewDocument.signature) ?? "") ? undefined
       : { mode: "contain" as const, resize: "until-interaction" as const, padding: 18, minScale: 0.25, maxScale: 2 },
     ui: { density: "compact" as const, surfaceBackground: "#edf0f4" },
+    // 표 렌더러는 fit 이 없으면 스스로 "처음 맞춤" 을 한다 — 처음 배율을 100% 로 못박는다.
+    ...(SHEET_TYPES.has(resolveViewerType(viewDocument.name, viewDocument.mimeType, viewDocument.signature) ?? "") ? { initialViewState: { scale: 1 } } : {}),
     docx: {
       worker: true,
       workerUrl: runtimeAsset(assetRoot, "vendor/docx/docx.worker.js"),

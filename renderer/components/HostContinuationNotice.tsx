@@ -2,7 +2,7 @@
 import type { ChatHostNotice } from "../../shared/types";
 import { Markdown } from "./Markdown";
 import { automationReportDisplay } from "../lib/automation-report-display";
-import { hostStatusLabel } from "../../shared/chat-host-notice";
+import { agiActionNoticeLine, hostStatusLabel } from "../../shared/chat-host-notice";
 
 /** Historical host request, not a projection of the invocation's current state.
  * Keep the original text in the message ledger; internal resume instructions
@@ -75,6 +75,16 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat }: { t
       role="status"
       style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5, overflowWrap: "anywhere" }}
     ><strong style={{ fontWeight: 600 }}>{hostStatusLabel(notice, locale)}</strong> · {text}</p>;
+  }
+  const agiLine = agiActionNoticeLine(notice, text);
+  if (agiLine) {
+    // AGI's own action: one quiet host-status line, never a "예약 보고" card with a bare "AGI" name line.
+    return <p
+      data-host-notice="agi-action"
+      data-run-id={notice?.purpose === "automation-report" ? notice.runId : undefined}
+      role="status"
+      style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5, overflowWrap: "anywhere" }}
+    ><strong style={{ fontWeight: 600 }}>AGI</strong> · {agiLine}</p>;
   }
   if (notice?.purpose === "automation-report") {
     // 기록 원문은 기계 표식을 일부러 남긴다 — 그릴 때만 사람 첫머리로 바꾸고 코드는 칩으로.
