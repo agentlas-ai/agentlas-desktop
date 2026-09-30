@@ -26,7 +26,14 @@ import {
   sweepIdleAgentResidency,
 } from "../runtime/agent-residency";
 import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
-import { drainRunChildrenForHostShutdown } from "../runtime/exec";
+import { drainRunChildrenForHostShutdown, liveRunChildCount } from "../runtime/exec";
+import {
+  createIdleExitClock,
+  daemonActiveWorkReasons,
+  daemonResidencyReasons,
+  parseDaemonIdleExitMs,
+  type DaemonResidencyInput,
+} from "./idle-exit";
 import { startControlSocket, type ControlSocketHandle, type ControlSocketPeer } from "./control-socket";
 import { WarmProcessPool } from "./process-pool";
 import { DaemonDiagnosticLog, storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
@@ -85,6 +92,30 @@ function daemonVersion(): string { return runningVersion; }
 let controlSocket: ControlSocketHandle | null = null;
 let desktopParentPid: number | null = null;
 let serviceHeartbeat: NodeJS.Timeout | null = null;
+let idleExitWatch: NodeJS.Timeout | null = null;
+let graphRunsInFlight = 0;
+let loginContinuityReader: (() => boolean) | null = null;
+const idleExitGraceMs = parseDaemonIdleExitMs(process.env.AGENTLAS_DAEMON_IDLE_EXIT_MS);
+const idleExitClock = createIdleExitClock(idleExitGraceMs);
+let lastIdleObservation: ReturnType<typeof idleExitClock.observe> | null = null;
+
+function loginContinuityEnabled(): boolean {
+  // Unreadable preference fails toward staying up: never cut owner-chosen continuity.
+  try { return loginContinuityReader ? loginContinuityReader() : true; } catch { return true; }
+}
+
+function residencyInput(): DaemonResidencyInput {
+  const science = scienceService?.status() ?? null;
+  const local = localModelService?.status() ?? null;
+  return {
+    desktopAttached: desktopParentPid !== null,
+    loginContinuity: loginContinuityEnabled(),
+    graphRuns: graphRunsInFlight,
+    runChildren: liveRunChildCount(),
+    science: science ? { state: science.state, settled: science.settled, activeToolRequests: science.activeToolRequests } : null,
+    localModel: local ? { state: local.state, pendingOperations: local.pendingOperations, settled: local.settled } : null,
+  };
+}
 const bootId = randomUUID();
 const startedAtMs = Date.now();
 let lastHeartbeatAtMs = startedAtMs;
@@ -294,6 +325,9 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
       storeSchemaVersion: getDb().pragma("user_version", { simple: true }),
       science: scienceService?.status() ?? null,
       localModel: localModelService?.status() ?? null,
+      // Work that a stop would cut now. The GUI quit prompt counts it.
+      activeWork: daemonActiveWorkReasons(residencyInput()),
+      idleExit: { graceMs: idleExitGraceMs, dueAt: lastIdleObservation?.dueAt ? new Date(lastIdleObservation.dueAt).toISOString() : null },
       processRole: "desktop-daemon",
       startedAt: new Date(startedAtMs).toISOString(),
       lastHeartbeatAt: new Date(lastHeartbeatAtMs).toISOString(),
@@ -525,15 +559,20 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     const automation = stored ?? fallbackRow;
     if (!automation) throw new Error("graph.run requires automationId or an automation row");
     const { runGraph } = await import("../workflow/run-graph");
+    graphRunsInFlight += 1;
     // 데몬으로 들어온 그래프 실행은 정의상 무인 작업이다 — 실행 슬롯 2단 큐와 자식 nice
     // 차등이 이 문맥 표식으로 동작한다(사람이 기다리는 채팅 턴이 항상 앞선다).
-    return withRunPriority("background", () =>
-      runGraph(
-        { ...(automation as object), graph } as never,
-        graph as never,
-        { ...(initialVars ? { initialVars } : {}) } as never,
-      ),
-    );
+    try {
+      return await withRunPriority("background", () =>
+        runGraph(
+          { ...(automation as object), graph } as never,
+          graph as never,
+          { ...(initialVars ? { initialVars } : {}) } as never,
+        ),
+      );
+    } finally {
+      graphRunsInFlight -= 1;
+    }
   }
   throw new Error(`unknown method: ${method}`);
 }
@@ -564,6 +603,10 @@ function performShutdown(reason: string): Promise<void> {
   if (serviceHeartbeat) {
     clearInterval(serviceHeartbeat);
     serviceHeartbeat = null;
+  }
+  if (idleExitWatch) {
+    clearInterval(idleExitWatch);
+    idleExitWatch = null;
   }
   shutdownPromise = (async () => {
     let timeout: NodeJS.Timeout | null = null;
@@ -697,6 +740,8 @@ export async function startDaemon(): Promise<void> {
   }
   console.log("[agentlasd] store ready");
   recordServicePhase("store_ready");
+  const { getDaemonAutostartEnabled } = await import("../store/daemon-autostart");
+  loginContinuityReader = getDaemonAutostartEnabled;
 
   /*
    * ★모바일 브리지 — 서비스와 GUI가 단일 리스너를 교대 소유한다.
@@ -789,6 +834,31 @@ export async function startDaemon(): Promise<void> {
       .catch((error) => console.error("[agentlasd] orphan sweep failed:", error));
   }, SWEEP_INTERVAL_MS);
   // 부팅 직후 한 번은 빨리 돈다 — 직전 크래시의 고아를 10분씩 기다리게 하지 않는다.
+  /*
+   * ★Idle exit — nothing may keep an unattached service alive forever.
+   * With login continuity OFF, no attached GUI (detached, crashed or killed)
+   * and no owned work, the service stops itself after the grace period through
+   * the same performShutdown path as an explicit stop.
+   */
+  if (idleExitGraceMs !== null) {
+    idleExitWatch = setInterval(() => {
+      if (closing) return;
+      try {
+        const observation = idleExitClock.observe(daemonResidencyReasons(residencyInput()), Date.now());
+        if (observation.idleSince !== null && lastIdleObservation?.idleSince == null) {
+          console.log(`[agentlasd] idle — no GUI, no work, login continuity off; exiting in ${idleExitGraceMs}ms unless reattached`);
+        }
+        lastIdleObservation = observation;
+        if (observation.expired) {
+          recordServicePhase("idle_exit");
+          void performShutdown("idle exit (no GUI, no work, login continuity off)");
+        }
+      } catch (error) {
+        console.error("[agentlasd] idle exit check failed:", error);
+      }
+    }, Math.min(2_000, Math.max(250, Math.floor(idleExitGraceMs / 4))));
+    idleExitWatch.unref?.();
+  }
   const firstSweep = setTimeout(() => {
     void sweepOrphanedRunChildren().catch(() => { /* 다음 주기가 다시 시도한다 */ });
   }, 30_000);

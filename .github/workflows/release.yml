@@ -243,12 +243,12 @@ jobs:
       - name: Verify packaged Windows Python and Workforce MCP
         if: runner.os == 'Windows'
         shell: bash
-        run: node scripts/verify-packaged-workforce-runtime.cjs --resources=release/win-unpacked/resources
+        run: node scripts/fetch-release-verification.mjs --run verify-packaged-workforce-runtime.cjs --resources=release/win-unpacked/resources
 
       - name: Verify packaged Linux Python and Workforce MCP
         if: runner.os == 'Linux'
         shell: bash
-        run: node scripts/verify-packaged-workforce-runtime.cjs --resources=release/linux-unpacked/resources
+        run: node scripts/fetch-release-verification.mjs --run verify-packaged-workforce-runtime.cjs --resources=release/linux-unpacked/resources
 
       - name: Upload Windows/Linux package set for the release barrier
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -404,30 +404,18 @@ jobs:
           name: agentlas-release-${{ matrix.artifact_os }}
           path: release
 
-      # Keep the app, package metadata, and artifacts checked out from the exact
-      # immutable source commit while loading only the release verifier from the
-      # workflow commit that requested the run.
-      - name: Checkout immutable release verifier
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ inputs.harness_ref || github.sha }}
-          path: .release-harness
-          sparse-checkout: scripts/verify-packaged-updater-install-e2e.cjs
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
-      - name: Verify release verifier identity
+      # Verifier bytes are authenticated against an immutable predecessor and
+      # materialized only in OS temporary storage by the public fetcher.
+      - name: Verify immutable release harness identity
         shell: bash
         env:
-          EXPECTED_HARNESS_REF: ${{ inputs.harness_ref || github.sha }}
+          EXPECTED_HARNESS_REF: ${{ inputs.harness_ref }}
         run: |
-          expected="$(git rev-parse --verify "${EXPECTED_HARNESS_REF}^{commit}")"
-          actual="$(git -C .release-harness rev-parse HEAD)"
-          if [ "$actual" != "$expected" ]; then
-            echo "::error::Release verifier checkout $actual does not match immutable ref $expected."
+          if [[ ! "$EXPECTED_HARNESS_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Release harness must identify an immutable workflow commit."
             exit 1
           fi
-          test -f .release-harness/scripts/verify-packaged-updater-install-e2e.cjs
+          git cat-file -e "${EXPECTED_HARNESS_REF}^{commit}"
 
       - name: Run v0.8.32 to target native updater lifecycle
         shell: bash
@@ -437,7 +425,8 @@ jobs:
           CI: "true"
         run: |
           args=(
-            .release-harness/scripts/verify-packaged-updater-install-e2e.cjs
+            scripts/fetch-release-verification.mjs
+            --run verify-packaged-updater-install-e2e.cjs
             --platform="${{ matrix.platform }}"
             --artifact-dir=release
             --target-version="$RESOLVED_VERSION"

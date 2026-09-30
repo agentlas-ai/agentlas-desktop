@@ -6,6 +6,22 @@ const path = require("node:path");
 // Test suites and package-scoped exclusions: Iconify's emoji/test and
 // Playwright's mcp/test directories contain executable product features.
 const ASAR_VERIFICATION_RULES = [
+  ["**/node_modules/cytoscape-fcose/demo/**", /(?:^|\/)node_modules\/cytoscape-fcose\/demo(?:\/|$)/],
+  ["**/node_modules/**/styled-exceljs/docs/**", /(?:^|\/)node_modules\/(?:[^/]+\/)*styled-exceljs\/docs(?:\/|$)/],
+  ["**/node_modules/bignumber.js/doc/**", /(?:^|\/)node_modules\/bignumber\.js\/doc(?:\/|$)/],
+  ["**/node_modules/**/marked/{bin,man}/**", /(?:^|\/)node_modules\/(?:[^/]+\/)*marked\/(?:bin|man)(?:\/|$)/],
+  ["**/node_modules/**/{SECURITY,security}.md", /(?:^|\/)node_modules\/.*\/SECURITY\.md$/i],
+  ["**/node_modules/**/{.editorconfig,.eslintrc*,.travis*,.release-please*}", /(?:^|\/)node_modules\/.*\/(?:\.editorconfig|\.eslintrc[^/]*|\.travis[^/]*|\.release-please[^/]*)$/],
+  ["dist/plugins/agentlas-science-skills/skills/timesfm-forecasting/examples/**", /(?:^|\/)dist\/plugins\/agentlas-science-skills\/skills\/timesfm-forecasting\/examples(?:\/|$)/],
+  ["dist/plugins/agentlas-science-skills/skills/relsa-severity-assessment/assets/example_cohort.csv", /(?:^|\/)dist\/plugins\/agentlas-science-skills\/skills\/relsa-severity-assessment\/assets\/example_cohort\.csv$/],
+  ["dist/plugins/agentlas-science-skills/skills/{markdown-mermaid-writing,venue-templates}/assets/examples/**", /(?:^|\/)dist\/plugins\/agentlas-science-skills\/skills\/(?:markdown-mermaid-writing|venue-templates)\/assets\/examples(?:\/|$)/],
+  ["**/node_modules/molstar/lib/{examples,commonjs/examples}/**", /(?:^|\/)node_modules\/molstar\/lib\/(?:commonjs\/)?examples(?:\/|$)/],
+  ["**/node_modules/@modelcontextprotocol/sdk/dist/{cjs,esm}/examples/**", /(?:^|\/)node_modules\/@modelcontextprotocol\/sdk\/dist\/(?:cjs|esm)\/examples(?:\/|$)/],
+  ["**/node_modules/comlink/docs/**", /(?:^|\/)node_modules\/comlink\/docs(?:\/|$)/],
+  ["**/node_modules/complex-esm/dist/examples/**", /(?:^|\/)node_modules\/complex-esm\/dist\/examples(?:\/|$)/],
+  ["**/node_modules/protocol-buffers-schema/example.{js,proto}", /(?:^|\/)node_modules\/protocol-buffers-schema\/example\.(?:js|proto)$/],
+  ["**/node_modules/readable-stream/doc/wg-meetings/**", /(?:^|\/)node_modules\/readable-stream\/doc\/wg-meetings(?:\/|$)/],
+  ["**/node_modules/**/{CONTRIBUTING,contributing,Contributing}*", /(?:^|\/)node_modules\/.*\/CONTRIBUTING[^/]*$/i],
   ["**/node_modules/tinycolor2/deno_asserts*.mjs", /(?:^|\/)node_modules\/tinycolor2\/deno_asserts[^/]*\.mjs$/],
   ["**/node_modules/better-sqlite3/{build/Release/test_extension.node,deps/test_extension.c}", /(?:^|\/)node_modules\/better-sqlite3\/(?:build\/Release\/test_extension\.node|deps\/test_extension\.c)$/],
   ["**/node_modules/node-domexception/.history/**", /(?:^|\/)node_modules\/node-domexception\/\.history(?:\/|$)/],
@@ -36,7 +52,7 @@ const ASAR_VERIFICATION_RULES = [
   ["**/node_modules/cytoscape/AGENTS.md", /(?:^|\/)node_modules\/cytoscape\/AGENTS\.md$/],
 ];
 const PYTHON_PACKAGES = ["jsonschema", "jsonschema_specifications", "referencing", "mpmath", "sympy"];
-const PYTHON_VERIFICATION_DIRECTORIES = new Set(["test", "tests", "benchmark", "benchmarks", "fixture", "fixtures"]);
+const PYTHON_VERIFICATION_DIRECTORIES = new Set(["test", "tests", "test-examples", "benchmark", "benchmarks", "fixture", "fixtures"]);
 
 function findPythonVerificationDirectories(sitePackages) {
   const found = [];
@@ -68,12 +84,31 @@ function isAsarVerificationPath(relativePath) {
   return ASAR_VERIFICATION_RULES.some(([, pattern]) => pattern.test(relativePath.replaceAll("\\", "/")));
 }
 
+function findPythonNonruntimeArtifacts(runtimeRoot) {
+  const libraries = [path.join(runtimeRoot, "Lib")];
+  const lib = path.join(runtimeRoot, "lib");
+  if (fs.existsSync(lib)) for (const entry of fs.readdirSync(lib, { withFileTypes: true })) {
+    if (entry.isDirectory() && /^python\d+\.\d+$/.test(entry.name)) libraries.push(path.join(lib, entry.name));
+  }
+  return [path.join(runtimeRoot, "share", "man"), ...libraries.flatMap((library) => [
+    path.join(library, "site-packages", "share", "man"), path.join(library, "email", "architecture.rst"),
+  ])].filter((entry) => fs.existsSync(entry)).sort();
+}
+function prunePythonNonruntimeArtifacts(runtimeRoot) {
+  if (path.basename(runtimeRoot) !== "python-runtime") throw new Error("Python artifact pruning requires python-runtime");
+  const entries = findPythonNonruntimeArtifacts(runtimeRoot);
+  for (const entry of entries) fs.rmSync(entry, { recursive: true });
+  return entries.map((entry) => path.relative(runtimeRoot, entry));
+}
 function verifyPackagedVerificationBoundary(resourcesDir) {
   const asar = require("@electron/asar");
   const archive = path.join(resourcesDir, "app.asar");
+  const metadata = JSON.parse(asar.extractFile(archive, "package.json").toString("utf8"));
+  if (metadata.scripts && Object.keys(metadata.scripts).length) throw new Error("Packaged metadata contains source-only npm scripts");
   const excluded = asar.listPackage(archive)
     .filter((entry) => isAsarVerificationPath(entry) && !asar.statFile(archive, entry.replace(/^\//, "")).files);
   const pythonRoot = path.join(resourcesDir, "python-runtime");
+  excluded.push(...findPythonNonruntimeArtifacts(pythonRoot).map((entry) => path.relative(resourcesDir, entry)));
   const pythonLibraries = [path.join(pythonRoot, "Lib")];
   const posixLib = path.join(pythonRoot, "lib");
   if (fs.existsSync(posixLib)) {
@@ -89,4 +124,4 @@ function verifyPackagedVerificationBoundary(resourcesDir) {
   return { asarRules: ASAR_VERIFICATION_RULES.length, pythonPackages: PYTHON_PACKAGES.length };
 }
 
-module.exports = { ASAR_VERIFICATION_RULES, isAsarVerificationPath, findPythonVerificationDirectories, prunePythonVerificationDirectories, verifyPackagedVerificationBoundary };
+module.exports = { ASAR_VERIFICATION_RULES, isAsarVerificationPath, findPythonVerificationDirectories, prunePythonVerificationDirectories, verifyPackagedVerificationBoundary, findPythonNonruntimeArtifacts, prunePythonNonruntimeArtifacts };

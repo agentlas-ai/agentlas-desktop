@@ -256,6 +256,8 @@ console.log(`[fetch-python] bundling ${BUNDLED_PYTHON_PACKAGES.length} engine pa
 // Prune wheel verification suites before import checks and the tree receipt.
 // sympy.testing is runtime-coupled and remains; only known test-suite folders go.
 const prunedVerification = verificationBoundary.prunePythonVerificationDirectories(sitePackages);
+const prunedArtifacts = verificationBoundary.prunePythonNonruntimeArtifacts(outDir);
+console.log(`[fetch-python] excluded ${prunedArtifacts.length} nonruntime artifact paths.`);
 console.log(`[fetch-python] excluded ${prunedVerification.length} nonruntime verification directories.`);
 // 넣었다고 믿지 않고 실제로 불러 본다 — 없으면 그 기능은 사용자 손에서 죽는다.
 for (const moduleName of ["jsonschema", "referencing", "sympy", "mpmath"]) {

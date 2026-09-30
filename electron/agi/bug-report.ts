@@ -25,6 +25,8 @@ export const AGI_BUG_REPORT_LIMITS = {
 } as const;
 /** Retry backoff for 429/5xx/network: 1m → 5m → 30m → 2h → 6h (then stays at 6h). */
 export const AGI_BUG_REPORT_BACKOFF_MS = [60_000, 5 * 60_000, 30 * 60_000, 2 * 60 * 60_000, 6 * 60 * 60_000] as const;
+const DISPATCH_TIMEOUT_MS = 30_000;
+const DISPATCH_LEASE_MS = 60_000;
 
 export interface AgiBugReportDeps {
   db: Database.Database;
@@ -36,7 +38,7 @@ export interface AgiBugReportDeps {
   /** The desktop session value (agentlas_session cookie value), or null when signed out. */
   sessionToken(): string | null;
   baseUrl(): string;
-  fetch(url: string, init: { method: string; headers: Record<string, string>; body?: string }): Promise<{ status: number; json(): Promise<unknown> }>;
+  fetch(url: string, init: { method: string; headers: Record<string, string>; body?: string; signal?: AbortSignal }): Promise<{ status: number; json(): Promise<unknown> }>;
   /** Redacted, allow-listed main.log lines for a defect family (read-tools main_log_slice), or null. */
   logExcerpt?(input: { goalId: string; family: string; sinceMs: number }): string | null;
   /** Run ids of this goal (long run + its invocation runs) — log lines must name one of them or the defect code. */
@@ -56,6 +58,11 @@ export function ensureAgiBugReportSchema(db: Database.Database): void {
     created_at_ms INTEGER NOT NULL,
     updated_at_ms INTEGER NOT NULL)`);
   db.exec("CREATE INDEX IF NOT EXISTS idx_agi_bug_report_queue_due ON agi_bug_report_queue(status, next_attempt_at_ms)");
+  db.transaction(() => {
+    const columns = new Set((db.prepare("PRAGMA table_info(agi_bug_report_queue)").all() as Array<{ name: string }>).map((row) => row.name));
+    if (!columns.has("dispatch_token")) db.exec("ALTER TABLE agi_bug_report_queue ADD COLUMN dispatch_token TEXT");
+    if (!columns.has("dispatch_until_ms")) db.exec("ALTER TABLE agi_bug_report_queue ADD COLUMN dispatch_until_ms INTEGER");
+  }).immediate();
 }
 
 /** Replace secrets, the home path/user name and e-mail addresses. Returns the text and how many spans changed. */
@@ -95,8 +102,32 @@ export function agiChatRef(chatId: string): string {
 const DEFECT_FAMILY: Array<[RegExp, string]> = [[/browser|cdp/, "cdp"], [/login/, "login"], [/wait|effect|observation|sweep/, "wait"],
   [/blender|metal/, "blender"], [/update/, "updater"], [/run_failed|runtime|crash/, "runtime"]];
 
+function reportIdentity(payload: AgiBugReportPayload, defectId: string | null): string {
+  // One failed run can file multiple defect records or rebuild its log excerpt.
+  // Those previews still describe the same incident and must retain its wire id.
+  if (payload.source === "desktop-agi" && payload.runId && payload.failureCode) {
+    return JSON.stringify(["incident", payload.runId, payload.failureCode, payload.chatRef ?? null]);
+  }
+  if (defectId) return JSON.stringify(["defect", defectId]);
+  const { clientReportId: _id, ...content } = payload;
+  return JSON.stringify(Object.fromEntries(Object.entries(content).sort(([a], [b]) => a.localeCompare(b))));
+}
+
 export class AgiBugReports {
+  private readonly inFlight = new Map<string, Promise<void>>();
   constructor(private readonly deps: AgiBugReportDeps) { ensureAgiBugReportSchema(deps.db); }
+
+  private existing(payload: AgiBugReportPayload, defectId: string | null): QueueRow | undefined {
+    const identity = reportIdentity(payload, defectId);
+    const candidates = this.deps.db.prepare(`SELECT * FROM agi_bug_report_queue
+      WHERE defect_id = ? OR (json_extract(payload_json, '$.source') = ? AND
+        ((json_extract(payload_json, '$.runId') = ? AND json_extract(payload_json, '$.failureCode') = ?)
+          OR (json_extract(payload_json, '$.title') = ? AND json_extract(payload_json, '$.category') = ?)))
+      ORDER BY CASE status WHEN 'sent' THEN 0 WHEN 'queued' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END,
+        created_at_ms, client_report_id`).all(defectId, payload.source, payload.runId ?? null, payload.failureCode ?? null,
+          payload.title, payload.category) as QueueRow[];
+    return candidates.find((row) => reportIdentity(JSON.parse(row.payload_json) as AgiBugReportPayload, row.defect_id) === identity);
+  }
 
   /** Defects AGI filed for this chat (the chip), with the local state of any report the owner sent. */
   defectsForChat(chatId: string): AgiDefectChip[] {
@@ -177,17 +208,27 @@ export class AgiBugReports {
         evidence: evidence.map((ref) => clean(ref, 200)).filter(Boolean) };
     }
     const nowMs = this.deps.now();
-    this.deps.db.prepare(`INSERT INTO agi_bug_report_queue(client_report_id,defect_id,payload_json,status,created_at_ms,updated_at_ms)
-      VALUES (?,?,?,'draft',?,?)`).run(payload.clientReportId, defect?.id ?? null, JSON.stringify(payload), nowMs, nowMs);
-    return { clientReportId: payload.clientReportId, payload, redactions, signedIn };
+    // Serialize lookup+insert across DB connections/processes, including previews
+    // made before this update. Never mint another wire id for the same incident.
+    return this.deps.db.transaction(() => {
+      const existing = this.existing(payload, defect?.id ?? null);
+      if (existing) return { clientReportId: existing.client_report_id,
+        payload: JSON.parse(existing.payload_json) as AgiBugReportPayload, redactions, signedIn, report: toRow(existing) };
+      this.deps.db.prepare(`INSERT INTO agi_bug_report_queue(client_report_id,defect_id,payload_json,status,created_at_ms,updated_at_ms)
+        VALUES (?,?,?,'draft',?,?)`).run(payload.clientReportId, defect?.id ?? null, JSON.stringify(payload), nowMs, nowMs);
+      return { clientReportId: payload.clientReportId, payload, redactions, signedIn, report: this.row(payload.clientReportId)! };
+    }).immediate();
   }
 
   /** The owner pressed Send on this exact draft: queue it and try now. */
   async send(clientReportId: string): Promise<AgiBugReportRow> {
-    const row = this.row(clientReportId);
-    if (!row) throw new Error("agi.bug-report.unknown");
+    const stored = this.deps.db.prepare("SELECT * FROM agi_bug_report_queue WHERE client_report_id=?").get(clientReportId) as QueueRow | undefined;
+    if (!stored) throw new Error("agi.bug-report.unknown");
+    const canonical = this.existing(JSON.parse(stored.payload_json) as AgiBugReportPayload, stored.defect_id) ?? stored;
+    clientReportId = canonical.client_report_id;
+    const row = toRow(canonical);
     if (row.status === "draft" || row.status === "failed") {
-      this.deps.db.prepare("UPDATE agi_bug_report_queue SET status='queued', error=NULL, next_attempt_at_ms=?, updated_at_ms=? WHERE client_report_id=?")
+      this.deps.db.prepare("UPDATE agi_bug_report_queue SET status='queued', error=NULL, next_attempt_at_ms=?, updated_at_ms=? WHERE client_report_id=? AND status IN ('draft','failed')")
         .run(this.deps.now(), this.deps.now(), clientReportId);
     }
     if (this.row(clientReportId)?.status === "queued") await this.attempt(clientReportId);
@@ -203,9 +244,30 @@ export class AgiBugReports {
   }
 
   private async attempt(clientReportId: string): Promise<void> {
-    const record = this.deps.db.prepare("SELECT payload_json, attempts FROM agi_bug_report_queue WHERE client_report_id = ? AND status = 'queued'")
-      .get(clientReportId) as { payload_json: string; attempts: number } | undefined;
+    const pending = this.inFlight.get(clientReportId);
+    if (pending) return pending;
+    const token = randomUUID();
+    const nowMs = this.deps.now();
+    // The persisted lease excludes Send/flush/other processes, and survives a
+    // crash. Expired recovery always uses the same server-idempotent wire id.
+    const record = this.deps.db.prepare(`UPDATE agi_bug_report_queue SET dispatch_token=?, dispatch_until_ms=?, attempts=attempts+1
+      WHERE client_report_id=? AND status='queued' AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms<=?)
+        AND (dispatch_token IS NULL OR dispatch_until_ms<=?) RETURNING *`)
+      .get(token, nowMs + DISPATCH_LEASE_MS, clientReportId, nowMs, nowMs) as QueueRow | undefined;
     if (!record) return;
+    const canonical = this.existing(JSON.parse(record.payload_json) as AgiBugReportPayload, record.defect_id);
+    if (canonical && canonical.client_report_id !== clientReportId) {
+      this.deps.db.prepare(`UPDATE agi_bug_report_queue SET status='failed', error=?, dispatch_token=NULL, dispatch_until_ms=NULL
+        WHERE client_report_id=? AND dispatch_token=?`).run("agi.bug-report.duplicate-of:" + canonical.client_report_id, clientReportId, token);
+      return;
+    }
+    const dispatch = this.dispatch(record, token).finally(() => { this.inFlight.delete(clientReportId); });
+    this.inFlight.set(clientReportId, dispatch);
+    return dispatch;
+  }
+
+  private async dispatch(record: QueueRow, dispatchToken: string): Promise<void> {
+    const clientReportId = record.client_report_id;
     const payload = JSON.parse(record.payload_json) as AgiBugReportPayload;
     const token = this.deps.sessionToken();
     // Anonymous reports have tighter caps (server: summary 1500, log 4 KB); a draft made while signed in is trimmed.
@@ -216,31 +278,48 @@ export class AgiBugReports {
     const base = this.deps.baseUrl();
     const headers: Record<string, string> = { "content-type": "application/json", "x-agentlas-client": "desktop", origin: base };
     if (token) headers.authorization = `Bearer ${token}`;
-    const nowMs = this.deps.now();
-    const attempts = record.attempts + 1;
+    const attempts = record.attempts;
     const retry = (error: string) => {
       const delay = AGI_BUG_REPORT_BACKOFF_MS[Math.min(AGI_BUG_REPORT_BACKOFF_MS.length - 1, attempts - 1)]!;
-      this.deps.db.prepare("UPDATE agi_bug_report_queue SET attempts=?, next_attempt_at_ms=?, error=?, updated_at_ms=? WHERE client_report_id=?")
-        .run(attempts, nowMs + delay, error, nowMs, clientReportId);
+      this.deps.db.prepare(`UPDATE agi_bug_report_queue SET next_attempt_at_ms=?, error=?, updated_at_ms=?, dispatch_token=NULL, dispatch_until_ms=NULL
+        WHERE client_report_id=? AND dispatch_token=? AND status='queued'`)
+        .run(this.deps.now() + delay, error, this.deps.now(), clientReportId, dispatchToken);
     };
     let response: { status: number; json(): Promise<unknown> };
+    let body: Record<string, unknown> = {};
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error("agi.bug-report.send-timeout")), DISPATCH_TIMEOUT_MS);
+    timeout.unref?.();
     try {
-      response = await this.deps.fetch(`${base}/api/bug-reports`, { method: "POST", headers, body: JSON.stringify(payload) });
+      response = await Promise.race([
+        this.deps.fetch(`${base}/api/bug-reports`, { method: "POST", headers, body: JSON.stringify(payload), signal: controller.signal }),
+        new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true })),
+      ]);
+      try {
+        body = (await Promise.race([
+          response.json(),
+          new Promise<never>((_resolve, reject) => controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true })),
+        ])) as Record<string, unknown> ?? {};
+      } catch (error) {
+        if (controller.signal.aborted) throw error;
+      }
     } catch (error) {
       retry(`network:${error instanceof Error ? error.message.slice(0, 120) : "error"}`);
       return;
+    } finally {
+      clearTimeout(timeout);
     }
-    let body: Record<string, unknown> = {};
-    try { body = (await response.json()) as Record<string, unknown> ?? {}; } catch { body = {}; }
     if (response.status === 200 || response.status === 201) {
-      this.deps.db.prepare("UPDATE agi_bug_report_queue SET status='sent', attempts=?, server_id=?, error=NULL, next_attempt_at_ms=NULL, updated_at_ms=? WHERE client_report_id=?")
-        .run(attempts, typeof body.id === "string" ? body.id : null, nowMs, clientReportId);
+      this.deps.db.prepare(`UPDATE agi_bug_report_queue SET status='sent', server_id=?, error=NULL, next_attempt_at_ms=NULL, updated_at_ms=?, dispatch_token=NULL, dispatch_until_ms=NULL
+        WHERE client_report_id=? AND dispatch_token=? AND status='queued'`)
+        .run(typeof body.id === "string" ? body.id : null, this.deps.now(), clientReportId, dispatchToken);
       return;
     }
     if (response.status === 400 || response.status === 409 || response.status === 413 || response.status === 403) {
       const details = Array.isArray(body.details) ? `: ${(body.details as unknown[]).map(String).join("; ").slice(0, 300)}` : "";
-      this.deps.db.prepare("UPDATE agi_bug_report_queue SET status='failed', attempts=?, error=?, next_attempt_at_ms=NULL, updated_at_ms=? WHERE client_report_id=?")
-        .run(attempts, `${response.status} ${typeof body.code === "string" ? body.code : "refused"}${details}`, nowMs, clientReportId);
+      this.deps.db.prepare(`UPDATE agi_bug_report_queue SET status='failed', error=?, next_attempt_at_ms=NULL, updated_at_ms=?, dispatch_token=NULL, dispatch_until_ms=NULL
+        WHERE client_report_id=? AND dispatch_token=? AND status='queued'`)
+        .run(`${response.status} ${typeof body.code === "string" ? body.code : "refused"}${details}`, this.deps.now(), clientReportId, dispatchToken);
       return;
     }
     retry(`${response.status}`);
@@ -274,7 +353,7 @@ export class AgiBugReports {
 }
 
 interface QueueRow {
-  client_report_id: string; payload_json: string; status: AgiBugReportRow["status"]; attempts: number; next_attempt_at_ms: number | null;
+  client_report_id: string; defect_id: string | null; payload_json: string; status: AgiBugReportRow["status"]; attempts: number; next_attempt_at_ms: number | null;
   server_id: string | null; error: string | null; created_at_ms: number;
 }
 function toRow(row: QueueRow): AgiBugReportRow {

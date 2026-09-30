@@ -476,6 +476,13 @@ export function killCliTree(child: ChildProcess, graceMs = 4000): void {
 const liveRunChildren = new Set<ChildProcess>();
 let quitHookInstalled = false;
 
+/** Owned run children still alive in this host. The daemon's idle exit reads it. */
+export function liveRunChildCount(): number {
+  let count = 0;
+  for (const child of liveRunChildren) if (child.exitCode === null && child.signalCode === null) count += 1;
+  return count;
+}
+
 /** Snapshot before shutdown hooks clear registrations, then drain only owned
  * children/groups. A referenced poll keeps TERM -> KILL timers alive, while the
  * deadline prevents an unresponsive child from permanently blocking shutdown. */

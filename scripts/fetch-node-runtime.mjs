@@ -22,63 +22,10 @@ import { Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { fileURLToPath } from "node:url";
 
-const NODE_VERSION = "24.18.0";
+import nodePolicy from "../build-resources/node-runtime-policy.cjs";
+const { NODE_VERSION, OVERLAYS, ASSETS: LOCKED_ASSETS, pruneNonruntimeFiles, verifyRuntimeVersions } = nodePolicy;
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = path.join(repoRoot, "build-resources", "node-runtime");
-
-const LOCKED_ASSETS = {
-  "win32:x64": {
-    name: `node-v${NODE_VERSION}-win-x64.zip`,
-    sha256: "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
-    nodeSha256: "9a4eb5f1c29c6a2e93852ead46b999e284a6a5ca8bab4d4e241d587d025a52de",
-    npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
-    runtimeTreeSha256: "ced095085eece2e24bb5fe957ab94253b6983729f66df9e112b79d5144116eb6",
-  },
-  "win32:arm64": {
-    name: `node-v${NODE_VERSION}-win-arm64.zip`,
-    sha256: "f274669adb93b1fd0fbf8f21fd078609e9dcc84333d4f2718d2dde3f9a161a01",
-    nodeSha256: "c7225670c3f477778e18c43a55867f7a0d76468221245e5981ab80eb953c8102",
-    npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
-    runtimeTreeSha256: "893e18bdab084c0af59c27eb8573f2bd3d2917b76919336efe97f9440039fb97",
-  },
-  /*
-   * macOS — 2026-08-24 추가.
-   *
-   * 그전까지 이 표에는 윈도우만 있었고, 그래서 **맥 사용자는 Node 가 없으면 CLI 를 설치조차
-   * 못 했다**(설치 경로가 시스템 npm 만 찾았다). 개발용 맥에는 Node 가 있어서 그 구멍이
-   * 보이지 않았다. "설치 버튼을 누르면 알아서 받아야 한다"는 것이 제품 요구다.
-   */
-  "darwin:arm64": {
-    name: `node-v${NODE_VERSION}-darwin-arm64.tar.gz`,
-    sha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
-    nodeSha256: "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
-    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
-    runtimeTreeSha256: "26d8a5de52cfe628bb3763366380991f417137967bcc211098552026f6dfe92b",
-  },
-  /*
-   * Linux — 2026-08-24 추가.
-   *
-   * 맥을 넣으면서 릴리스 워크플로의 이 단계에서 `runner.os == 'Windows'` 조건을 뗐는데,
-   * 표에는 리눅스가 없어서 리눅스 빌드가 "unsupported Node bootstrap target: linux/x64"
-   * 로 죽었다(1.0.37 첫 시도). 번들 Node 는 최상위 extraResources 라 리눅스 배포판도
-   * 같이 싣는다 — 건너뛰면 그 배포판만 빈 폴더를 들고 나가고, Node 없는 리눅스 사용자는
-   * 맥이 방금 벗어난 그 막다른 길에 그대로 남는다.
-   */
-  "linux:x64": {
-    name: `node-v${NODE_VERSION}-linux-x64.tar.gz`,
-    sha256: "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
-    nodeSha256: "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c",
-    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
-    runtimeTreeSha256: "0cf5b57f8ee6e3adef701ba484b82921e6bbb65c17b7020a7bcdac72bbbc0488",
-  },
-  "darwin:x64": {
-    name: `node-v${NODE_VERSION}-darwin-x64.tar.gz`,
-    sha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
-    nodeSha256: "c5afe80c9fd47c0e1ba3a7221173d061dae04577acc67e21e945d16e34c696c8",
-    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
-    runtimeTreeSha256: "1e6949b832796ae46e994760086155fd3e7ee73ab7c03616c02748a5f17209c8",
-  },
-};
 
 /** 플랫폼별 실행 파일 위치. 윈도우는 루트에, 유닉스는 bin/ 과 lib/ 밑에 있다. */
 function layoutFor(platform) {
@@ -241,6 +188,30 @@ try {
   }
 
   const layout = layoutFor(targetPlatform);
+  // Replace the upstream npm tree using integrity-pinned registry archives,
+  // then normalize all platforms identically before calculating file/tree pins.
+  const npmRoot = path.join(outDir, targetPlatform === "win32" ? "node_modules/npm" : "lib/node_modules/npm");
+  for (const overlay of OVERLAYS) {
+    const filename = `${overlay.name}-${overlay.version}.tgz`;
+    const overlayArchive = path.join(tempRoot, filename);
+    const response = await fetch(`https://registry.npmjs.org/${overlay.name}/-/${filename}`, {
+      headers: { "User-Agent": "agentlas-desktop-build" }, signal: AbortSignal.timeout(120_000),
+    });
+    if (!response.ok || !response.body) fail(`npm overlay download failed: ${overlay.name} HTTP ${response.status}`);
+    await pipeline(Readable.fromWeb(response.body), createWriteStream(overlayArchive));
+    if (await sha256File(overlayArchive) !== overlay.sha256) fail(`npm overlay integrity mismatch: ${overlay.name}`);
+    const overlayExtract = path.join(tempRoot, `overlay-${overlay.name}`);
+    mkdirSync(overlayExtract, { recursive: true });
+    execFileSync("tar", ["-xzf", overlayArchive, "-C", overlayExtract], { stdio: "inherit", windowsHide: true });
+    const entries = readdirSync(overlayExtract);
+    if (entries.length !== 1 || entries[0] !== "package") fail(`unexpected npm overlay layout: ${overlay.name}`);
+    const destination = overlay.name === "npm" ? npmRoot : path.join(npmRoot, "node_modules", overlay.name);
+    rmSync(destination, { recursive: true, force: true });
+    cpSync(path.join(overlayExtract, "package"), destination, { recursive: true, force: true, verbatimSymlinks: true });
+  }
+  verifyRuntimeVersions(outDir, targetPlatform);
+  const removed = pruneNonruntimeFiles(outDir);
+  console.log(`[fetch-node] excluded ${removed.length} nonruntime paths; npm ${OVERLAYS[0].version}`);
   const nodeRelativePath = layout.node;
   const npmCliRelativePath = layout.npmCli;
   const nodePath = path.join(outDir, ...nodeRelativePath.split("/"));

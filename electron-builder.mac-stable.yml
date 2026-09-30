@@ -26,6 +26,7 @@ afterSign: build-resources/after-sign-trust.cjs
 # config. This standalone config intentionally does not inherit preview feed
 # settings, but it must keep the official install namespaces.
 extraMetadata:
+  scripts: null
   agentlasInstallIdentity:
     schemaVersion: 1
     channel: official
@@ -54,6 +55,24 @@ files:
   - dist/plugins/**/*
   - package.json
   - "!**/*.map"
+  - "!**/node_modules/**/{.editorconfig,.eslintrc*,.travis*,.release-please*}"
+  - "!dist/plugins/agentlas-science-skills/skills/timesfm-forecasting/examples/**"
+  - "!dist/plugins/agentlas-science-skills/skills/relsa-severity-assessment/assets/example_cohort.csv"
+  - "!dist/plugins/agentlas-science-skills/skills/{markdown-mermaid-writing,venue-templates}/assets/examples/**"
+
+  - "!**/node_modules/molstar/lib/{examples,commonjs/examples}/**"
+  - "!**/node_modules/@modelcontextprotocol/sdk/dist/{cjs,esm}/examples/**"
+  - "!**/node_modules/comlink/docs/**"
+  - "!**/node_modules/complex-esm/dist/examples/**"
+  - "!**/node_modules/protocol-buffers-schema/example.{js,proto}"
+  - "!**/node_modules/readable-stream/doc/wg-meetings/**"
+  - "!**/node_modules/**/{CONTRIBUTING,contributing,Contributing}*"
+  - "!**/node_modules/cytoscape-fcose/demo/**"
+  - "!**/node_modules/**/styled-exceljs/docs/**"
+  - "!**/node_modules/bignumber.js/doc/**"
+  - "!**/node_modules/**/marked/{bin,man}/**"
+  - "!**/node_modules/**/{SECURITY,security}.md"
+
   # Confirmed nonruntime suites; runtime-coupled Iconify/Playwright test paths stay.
   - "!**/node_modules/tinycolor2/deno_asserts*.mjs"
   - "!**/node_modules/better-sqlite3/{build/Release/test_extension.node,deps/test_extension.c}"
@@ -149,6 +168,12 @@ extraResources:
       - "!docs/**"
       - "!**/docs/**"
       - "!research/**"
+      - "!**/{ARCHITECTURE,CONTRIBUTING,PLUGIN_CONTRIBUTIONS,SECURITY}.md"
+      - "!memory.md"
+      - "!**/.github/**"
+      - "!**/.gitignore"
+      - "!**/.gitattributes"
+      - "!assets/*architecture.svg"
       - "!examples/**"
       # Mirror after-pack-clean.cjs isForbiddenRuntimePath: development-only
       # segments and test/benchmark/fixture basenames are forbidden at ANY

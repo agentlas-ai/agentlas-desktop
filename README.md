@@ -58,10 +58,6 @@
   <img alt="Runtime" src="https://img.shields.io/badge/runtime-Claude%20Code%20%7C%20Codex%20%7C%20Antigravity%20%7C%20Grok%20%7C%20Ollama%20%7C%20BYOK-black">
 </p>
 
-<p align="center">
-  <img alt="Agentlas Desktop running a CEO agent over a live org chart" src="docs/screenshot.png" width="960">
-</p>
-
 ## Agent Hub and billing
 
 The Agent Hub contract in this source is free: publishing, finding, installing,
@@ -82,7 +78,7 @@ published release and the installed version to check delivery.
 
 ## Release log
 
-- **2026-09-30 · v1.2.52 — research and browser recovery** — AI connection chips open installation and official-login steps, with Installed shown after a live runtime probe. Science 0.1.44 pairs with Research Director 1.25.0. Successful Science startup clears stale errors. macOS installs verified native Claude, Codex, Grok, and Kimi binaries with cancellation; connection checks preserve the selected CLI and mail provisioning failures remain recoverable. Browser recovery keeps login autofill within matching origins and requires an unambiguous upload target. Goal receipts and attention indicators keep runs visible across chats; charts and spreadsheets render in conversation. This release binds Agentlas OS v1.2.51 at 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448. Its public runtime asset `hephaestus-runtime-v1.2.51.tar.gz` is pinned at SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+- **2026-09-30 · v1.2.53 — browser recovery and runtime updates** — Improve browser recovery, vault autofill, uploads, Goal approvals, AI connection setup, and conversation file panels. Stop importing Google/YouTube sign-in cookies from Chrome and quarantine previously copied Agentlas cookies. API provider runs support approved MCP tools with catalog restrictions. Full quit stops the background service and owned children. Science 0.1.49 pairs with Research Director 1.25.0. Goal wait recovery and bug-report submission now preserve settled results and report receipts. Electron 43.7.6 and bundled Node 24.21.0/npm 11.20.0 include patched dependencies. This release binds Agentlas OS v1.2.51 at 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448. Its public runtime asset `hephaestus-runtime-v1.2.51.tar.gz` is pinned at SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`. Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
 
 - **2026-09-29 · v1.2.51 — 설치된 앱에서 Science 복구** — 1.2.4x 이후 설치된 앱의 백그라운드 서비스가 Science 를 불러오지 못해 Science 가 시작되지 않고 요청이 시간 초과되던 문제를 고쳤습니다. 이제 Science 가 정상적으로 시작되고, 다시 거절되면 앱 로그에 원인이 남습니다. One 팀원에게 맡긴 일은 읽기 전용이 아니라 맡긴 사람의 권한으로 실행되고, AGI 위임 안내는 내부 ID 대신 팀원 이름을 보여 줍니다. 실행 중인 에이전트의 질문은 그 대화에서만 뜨고 다른 화면에서는 대기 배지로 셉니다. 목표·팀원 실행은 항상 Agentlas 브라우저를 쓰므로 Codex 설정의 외부 Playwright 로 빠져 페이지마다 승인을 묻지 않고, 선택 도구 판정이 실행을 붙잡지 않습니다. Source readiness does not prove a public installer or installed update; the Releases page stays the authority. This release binds Agentlas OS v1.2.51 at 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448. Its public runtime asset `hephaestus-runtime-v1.2.51.tar.gz` is pinned at SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
 - **2026-09-29 · v1.2.50 — 목표 패널, 막히면 스스로 푸는 AGI, 대화 안 차트와 산출물 탭, 사람처럼 쓰는 브라우저** — One·Work 오른쪽 패널에 목표 탭이 생겨 목표·계획·진행을 한곳에서 보고, 목표 칩을 편집하면 열립니다. 강제 정지해도 대화의 목표 연결이 남고, 막힌 목표는 새 턴에 다시 붙으며, 떨어진 대화는 시작할 때 고쳐집니다. 작업 중에 업데이트하면 먼저 묻고 작업을 멈췄다가 다시 켜지면 한 번 이어서 진행하며, 목표 턴의 중지는 목표를 끝내지 않고 일시정지합니다. AGI 는 모든 목표를 지켜보다가 막히면 실행 기록을 읽고 팀원 만들기·초대, 모델 전환, 재계획, 다른 경로, 로그인 복구를 먼저 시도하고 오너만 할 수 있는 일만 묻습니다. 결함 보고 칩은 보낼 내용을 그대로 보여 주고 누를 때만 보냅니다. 자동화가 걸린 대화는 도는 동안 무엇을 하는지와 끝난 뒤 요약을 보여 주고 오른쪽 패널에 자동화 탭이 생기며, 바깥에 바꾼 것이 없는 실행은 채팅 줄 없이 그 탭에만 남습니다. 앱이 대화에 적는 상태 안내는 턴마다 조용한 한 줄로 접힙니다. 차트와 HTML 시각물이 대화 안에 Claude 스타일로 그려지고, 오른쪽 산출물 탭이 이를 파일·문서와 함께 모으며, 스프레드시트는 정렬·필터·빠른 차트가 되는 데이터 보기로 열립니다. Agentlas 브라우저에서 에이전트가 파일 선택·실행 폴더의 파일 업로드, 페이지 대화상자, 팝업, 다운로드를 사람처럼 다루고, 연 탭은 스스로 닫으며, 탭 한도가 실행을 막지 않고, 정리 작업이 쓰는 중인 브라우저를 건드리지 않습니다. 로그인 화면에 막히면 에이전트가 쓰는 브라우저에 그 사이트 로그인을 다시 가져와 풀고, 크롬도 로그아웃일 때만 묻습니다. Codex·Claude 하위 에이전트의 글과 오류가 답에 섞이거나 턴을 실패시키지 않고, 중지는 대기 중인 승인을 거두며, 권한 승인 뒤 이어가는 턴이 오너 언어를 지키고, 브리지를 지나는 긴 도구 호출이 5분 반마다 끊기지 않습니다. 휴대폰 앱에서 목표·AGI 조작, 지난 대화 넘겨 보기, One 결정 응답이 가능하고, 창을 확대해도 Agent Hub 프로필과 Science 화면이 제자리에 있습니다. Source readiness does not prove a public installer or installed update; the Releases page stays the authority. This release binds Agentlas OS v1.2.51 at 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448. Its public runtime asset `hephaestus-runtime-v1.2.51.tar.gz` is pinned at SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
@@ -1946,8 +1942,7 @@ npm run dist:mac:unsigned   # macOS: unsigned .dmg (no Apple cert needed)
 
 Output lands in `release/`. Releases for the public download page are built by
 the cross-platform GitHub Actions workflow (`.github/workflows/release.yml`) on a
-tag push — see [`docs/PUBLIC-RELEASE.md`](docs/PUBLIC-RELEASE.md). End users don't
-need any of that.
+tag push. End users can install the published downloads directly.
 
 ## Architecture
 
@@ -1974,12 +1969,6 @@ access — it talks to the main process through a typed preload bridge.
 
 | Document | Covers |
 |----------|--------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Process model, IPC bridge, runtime adapters, data flow. |
-| [docs/ARCHITECTURE_PLAYBOOK.md](docs/ARCHITECTURE_PLAYBOOK.md) | Built-in architecture, per-turn governed Memory/Experience recall, local Model2Vec hybrid, and safe extension invariants. |
-| [docs/M0-CHECKLIST.md](docs/M0-CHECKLIST.md) | The M0 spike scope and what's verified. |
-| [docs/PUBLIC-RELEASE.md](docs/PUBLIC-RELEASE.md) | Cross-platform CI release + the signed/notarized macOS path. |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to set up, what to test, and the public-safety rules. |
-| [SECURITY.md](SECURITY.md) | How to report a vulnerability. |
 | [Migrating from OpenClaw](#migrating-from-openclaw) | Bring a SOUL, keys, and automations over from OpenClaw / Hermes. |
 
 ## Security model
@@ -1991,12 +1980,11 @@ access — it talks to the main process through a typed preload bridge.
 - Signing material is git-ignored and injected only during release.
 - Auto-update assets are served from GitHub Releases.
 
-Security reports: see [SECURITY.md](SECURITY.md).
+Security reports can be sent through the project’s GitHub security advisory channel.
 
 ## Contributing
 
-Pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), run
-`npm run typecheck`, and keep public safety in mind: no credentials, no local
+Pull requests are welcome. Run `npm run typecheck`, and keep public safety in mind: no credentials, no local
 logs, no signing material. Windows/Linux testing and packaging feedback is
 especially appreciated.
 

@@ -16,6 +16,8 @@
 // the developer's checkout. Same answer as CI, no work destroyed.
 
 import { spawnSync } from "node:child_process";
+import { releaseVerificationFile, cleanupReleaseVerification } from "./fetch-release-verification.mjs";
+process.on("exit", cleanupReleaseVerification);
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
@@ -369,7 +371,7 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
       throw new Error(`${name} does not pin only runtime asset SHA-256 ${source.assetSha256}`);
     }
   }
-  if ((releaseWorkflow.match(/verify-packaged-workforce-runtime\.cjs/g) || []).length !== 2) {
+  if ((releaseWorkflow.match(/fetch-release-verification\.mjs --run verify-packaged-workforce-runtime\.cjs/g) || []).length !== 2) {
     throw new Error("cross-platform release must verify both packaged Workforce runtimes");
   }
   if (!releaseWorkflow.includes("npm run fetch:python")) {
@@ -389,7 +391,8 @@ function verifyReleaseSourceContract(runtimeRoot, manifestVersion) {
     throw new Error("signed release does not enforce the public artifact allowlist and exact web verification file");
   }
   const packageMac = readFileSync(join(root, "scripts", "package-mac.sh"), "utf8");
-  if (!/env -i[\s\S]*verify-packaged-workforce-runtime\.cjs/.test(packageMac)) {
+  if (!/cd "\$verification_root"[\s\S]*env -i[\s\S]*\.\/node_modules\/\.bin\/electron scripts\/verify-packaged-workforce-runtime\.cjs/.test(packageMac) ||
+      !packageMac.includes("node scripts/fetch-release-verification.mjs")) {
     throw new Error("macOS package verifier is not isolated from release credentials");
   }
   const assetVerifier = readFileSync(join(root, "scripts", "verify-release-assets.mjs"), "utf8");
@@ -476,7 +479,7 @@ if (!run("npm", ["run", "build:electron"], { cwd: root })) {
 // archive that lacks the current lab descriptor or host-compatibility contract.
 // Verify the actual catalog archives at promotion time, after dist/ has been
 // rebuilt, so this gate cannot accidentally attest to stale validation code.
-if (!run(process.execPath, [join(root, "scripts", "science-release-catalog-archive-gate.mjs")], { cwd: root })) {
+if (!run(process.execPath, [releaseVerificationFile("science-release-catalog-archive-gate.mjs")], { cwd: root })) {
   fail("Science release catalog failed archive, descriptor, or host-compatibility verification");
 }
 
@@ -548,7 +551,7 @@ if (!run(process.execPath, [join(root, "scripts", "verify-packaging-completeness
 // 두 번째 겹: 위 검사를 지나쳐 매니페스트가 빠진 빌드가 나가더라도, 앱은 켜져서
 // 스스로 업데이트로 고칠 수 있어야 한다. 1.0.31/1.0.32 는 그러지 못해서 받은
 // 사람이 전원 손으로 지우고 다시 깔아야 했다.
-const degradeGate = join(root, "scripts", "verify-builtin-plugins-degrade.mjs");
+const degradeGate = releaseVerificationFile("verify-builtin-plugins-degrade.mjs");
 if (!existsSync(degradeGate)) {
   fail("builtin-plugins degrade gate is missing — a release must not proceed without it");
 }
@@ -557,7 +560,7 @@ if (!run(process.execPath, [degradeGate], { cwd: root })) {
 }
 
 // 세 번째 겹: 철회된 릴리스가 이미 내려받아져 있어도 설치되지 않아야 한다.
-const withdrawnGate = join(root, "scripts", "verify-updater-withdrawn-release-guard.mjs");
+const withdrawnGate = releaseVerificationFile("verify-updater-withdrawn-release-guard.mjs");
 if (!existsSync(withdrawnGate)) {
   fail("updater withdrawn-release gate is missing — a release must not proceed without it");
 }
@@ -566,7 +569,7 @@ if (!run(process.execPath, [withdrawnGate], { cwd: root })) {
 }
 
 // 오너 규칙: 답할 수 없는 것은 보여주지 않는다.
-const unanswerableGate = join(root, "scripts", "verify-unanswerable-questions-hidden.mjs");
+const unanswerableGate = releaseVerificationFile("verify-unanswerable-questions-hidden.mjs");
 if (!existsSync(unanswerableGate)) {
   fail("unanswerable-questions gate is missing — a release must not proceed without it");
 }

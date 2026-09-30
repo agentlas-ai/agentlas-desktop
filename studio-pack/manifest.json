@@ -37,7 +37,5 @@
   ],
   "plugin_tools": ".agentlas/global-plugin-tools.json",
   "design_provider_mcp": ".agentlas/design-provider-mcp.json",
-  "design_concept": "docs/design.md",
-  "design_memory": ".agentlas/design-memory.md",
   "verification": "scripts/verify-package.sh"
 }

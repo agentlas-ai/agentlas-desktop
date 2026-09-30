@@ -25,7 +25,7 @@ export type RuntimeMcpDelivery =
   | "cli-mcp-config"
   /** ACP `session/new.mcpServers` (electron/runtime/acp.ts). */
   | "acp-session-new"
-  /** Our own in-process OpenAI tool loop (electron/runtime/local-tool-loop.ts). */
+  /** Main-owned tool admission and dispatch over provider HTTP protocols. */
   | "in-process-loop"
   /**
    * Per-run add/remove against the CLI's own persistent config (grok's
@@ -117,10 +117,11 @@ export const RUNTIME_MCP_SUPPORT: Record<RuntimeKind, RuntimeMcpSupport | null> 
     evidence:
       "probed 2026-08-18 (agy 1.1.14): a server added to ~/.gemini/config/mcp_config.json received initialize/tools/list at run start; electron/runtime/antigravity.ts reconcileAgyMcpServers stages approved servers per run (command and serverUrl forms, matching the live config's own entries)",
   },
-  // byok runners talk to a provider HTTP API directly (electron/runtime/byok.ts
-  // never reads mcpConfigPath) and have no tool loop of their own. When they
-  // grow one, this row — not a new hand-written list — is what changes.
-  byok: null,
+  byok: {
+    delivery: "in-process-loop",
+    extraTransports: ["sse", "http"],
+    evidence: "electron/runtime/byok.ts uses Main tool admission and approved dispatch for Anthropic, OpenAI-compatible and Gemini APIs; local-tool-loop.ts resolves the sealed MCP transport through the SDK client",
+  },
   // 서빙 실행은 Agentlas 서버의 대화 창구를 지나지만, 도구 왕복은 호스트(데스크탑)의
   // 도구 고리(local-tool-loop 의 prepareMainToolLoop·runMainToolDispatch)가 돈다 — codex CLI 가
   // Responses API 위에서 하는 일과 같은 모양이다. 예전엔 null 이라 One/Work 가 이 런타임에

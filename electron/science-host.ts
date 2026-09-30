@@ -1,3 +1,4 @@
+import { inspectScienceRuntimeSelectionAvailability } from "./science-host/runtime-selection-availability";
 import { installScienceSchemaRejectionReader } from "./invocation/science-schema-rejection";
 import { scienceCriterionReviewHost } from "./science-host/criterion-review";
 import { scienceAliveDesktopTools, scienceDesktopTools } from "./science-host/desktop-tool-bridge";
@@ -231,6 +232,9 @@ export function installDesktopScienceHost(): void {
     workspace: { captureInvocationBinding: captureScienceInvocationBinding },
     render: { renderManuscriptPdf, resolveTectonic, probePdfLatexProfile, listTypesetProfiles: listScienceTypesetProfileCatalog },
     runtimeCatalog: {
+      // Optional health facade also works while the installed Science declaration
+      // is older; the exact pinned package can consume it without a contract downgrade.
+      ...{ inspectSelectionAvailability: inspectScienceRuntimeSelectionAvailability },
       detectRuntimes: async () => (await (await import("./runtime/detect")).detectRuntimes()).map((runtime) => ({ ...runtime, availableModels: runtime.availableModels ?? [] })),
       listRuntimeModels: async (kind, backend, models, timestamp) => (await import("./runtime/providers")).listRuntimeModels(kind, backend, models, timestamp),
     },

@@ -18,20 +18,17 @@ This package is intentionally shipped as a lean Startup Studio GUI + parent orch
 
 ## Design Lane
 
-Reference design work is routed through `docs/design.md` and
-`.agentlas/global-plugin-tools.json`.
+Reference design work is routed to the relevant published HQ at runtime.
 
 - Product Design captures or validates URLs, screenshots, Figma frames, saved
   context, and source-to-implementation fidelity.
 - Creative Production creates visual territories, mood boards, positioning
   directions, and polished image assets when no single approved visual target
   exists.
-- PRD Maker owns reference-backed `design.md`, `ui-spec.md`, `ux-flow.md`, and
-  `wireframes.md`.
-- Product Development owns the build plan and requires visual/browser evidence
-  plus `design-qa.md` before UI completion.
-- `.agentlas/design-memory.md` keeps curated concept decisions across future
-  runs through the existing memory-ticket flow.
+- PRD Maker turns founder-provided references into a design brief, user flow,
+  and implementation requirements.
+- Product Development owns the build plan and checks the finished interface
+  against the agreed requirements with visual/browser evidence.
 
 ## Orchestrator
 
@@ -48,12 +45,6 @@ Raw idea
   -> Product Development HQ
   -> Pitch Deck / IR HQ
 ```
-
-## Research Basis
-
-The build plan is grounded in YC startup advice, Steve Blank Customer Development, Strategyzer Business Model Canvas and Value Proposition Canvas, Lean Product/PMF process, SBA business-plan structure, PRD templates, Playwright test-agent patterns, the copied Defect-Driven Slide Studio, and current GitHub founder-skill repositories.
-
-See `docs/research-synthesis.md` and `docs/agent-hq-build-plan.md`.
 
 ## Web Surface (Startup Studio)
 

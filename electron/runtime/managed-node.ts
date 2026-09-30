@@ -4,7 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-export const MANAGED_NODE_VERSION = "24.18.0";
+export const MANAGED_NODE_VERSION = "24.21.0";
 
 interface LockedNodeAsset {
   archiveName: string;
@@ -59,56 +59,45 @@ export function setMacReleaseNodeSignatureVerifierForTests(verifier: ((node: str
 
 const LOCKED_NODE_ASSETS: Record<string, LockedNodeAsset> = {
   "win32:x64": {
-    archiveName: "node-v24.18.0-win-x64.zip",
-    archiveSha256: "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
-    nodeSha256: "9a4eb5f1c29c6a2e93852ead46b999e284a6a5ca8bab4d4e241d587d025a52de",
-    npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
-    runtimeTreeSha256: "ced095085eece2e24bb5fe957ab94253b6983729f66df9e112b79d5144116eb6",
+    "archiveName": "node-v24.21.0-win-x64.zip",
+    "archiveSha256": "158f7685b44de51f6c0df1d153526cbcd3e1bc739a8dfc607721cef75de9e541",
+    "nodeSha256": "ba4e6d110e8c1592a1ecd390f6b05f3da124b13871a5be62b341a07a853c6c32",
+    "nodeByteLength": 93580104,
+    "npmCliSha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    "runtimeTreeSha256": "3498d14afd6f63a02db4f0d96c435c283697779689428dea30a47f66424ace85"
   },
   "win32:arm64": {
-    archiveName: "node-v24.18.0-win-arm64.zip",
-    archiveSha256: "f274669adb93b1fd0fbf8f21fd078609e9dcc84333d4f2718d2dde3f9a161a01",
-    nodeSha256: "c7225670c3f477778e18c43a55867f7a0d76468221245e5981ab80eb953c8102",
-    npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
-    runtimeTreeSha256: "893e18bdab084c0af59c27eb8573f2bd3d2917b76919336efe97f9440039fb97",
+    "archiveName": "node-v24.21.0-win-arm64.zip",
+    "archiveSha256": "8779b1bde1d39f8d420e3b57aa657b39891af434d3de44a919044cec06785921",
+    "nodeSha256": "dff59da18b6ffe1bf1ca99e1d2af4906080c481740619f5b5098c0fca28bd9b7",
+    "nodeByteLength": 81881416,
+    "npmCliSha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    "runtimeTreeSha256": "7e563ac4c0dbd09fb621394d0ea856e4d3aa597525cee7200103439eb8f26a8b"
   },
-  /*
-   * macOS — 2026-08-24 추가.
-   *
-   * 그전까지 이 표에는 윈도우만 있었다. 그래서 **Node 가 없는 맥에서는 CLI 설치 버튼이
-   * "npm 을 찾을 수 없습니다"로 끝났다** — 사용자가 할 수 있는 일이 없는 막다른 길이다.
-   * 설치 버튼을 누르면 앱이 알아서 준비하는 것이 제품 요구다.
-   */
   "darwin:arm64": {
-    archiveName: "node-v24.18.0-darwin-arm64.tar.gz",
-    archiveSha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
-    nodeSha256: "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
-    nodeByteLength: 120_965_360,
-    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
-    runtimeTreeSha256: "26d8a5de52cfe628bb3763366380991f417137967bcc211098552026f6dfe92b",
-  },
-  /*
-   * Linux — 2026-09-13 추가. fetch-node-runtime.mjs 는 2026-08-24 부터 리눅스 런타임을 싣고
-   * 있었지만 이 표에는 없어서, 리눅스 배포본(AppImage/deb)에서 내장 Node 검증이 "manifest does
-   * not match this app/platform" 으로 항상 실패했다 — 로컬 모델 엔진 설치도 함께. 값은 업스트림
-   * tarball 을 내려받아 다시 계산해 fetch 스크립트와 같음을 확인했다.
-   */
-  "linux:x64": {
-    archiveName: "node-v24.18.0-linux-x64.tar.gz",
-    archiveSha256: "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
-    nodeSha256: "41a74efb34cbde5c7632cdac0cf8bd1a14d0b8d73dc1e82755014d9a9ce70f5c",
-    nodeByteLength: 123_655_872,
-    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
-    runtimeTreeSha256: "0cf5b57f8ee6e3adef701ba484b82921e6bbb65c17b7020a7bcdac72bbbc0488",
+    "archiveName": "node-v24.21.0-darwin-arm64.tar.gz",
+    "archiveSha256": "bed7eea5325e1108f32ce5228ddd6a5f0f08a499ee42aa7442aea583702f6057",
+    "nodeSha256": "e4b5a3af0e05c75de2eae013904145f40fe7fc2a6e6f17510128bf45cca4e79b",
+    "nodeByteLength": 122129232,
+    "npmCliSha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    "runtimeTreeSha256": "7f0e52ed6d60913e3a099636664afdfdbd66c1dabf7f5aee1d6f20d0f9f6791a"
   },
   "darwin:x64": {
-    archiveName: "node-v24.18.0-darwin-x64.tar.gz",
-    archiveSha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
-    nodeSha256: "c5afe80c9fd47c0e1ba3a7221173d061dae04577acc67e21e945d16e34c696c8",
-    nodeByteLength: 123_320_000,
-    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
-    runtimeTreeSha256: "1e6949b832796ae46e994760086155fd3e7ee73ab7c03616c02748a5f17209c8",
+    "archiveName": "node-v24.21.0-darwin-x64.tar.gz",
+    "archiveSha256": "1462cb3b3046b815cf8ea436d3da450ec1a9f11dac7e5a46b0ada5305d7e8097",
+    "nodeSha256": "7abcf39bd37ab251015337ff75304d7555f0d8e88c6e0fbf04bce8ce34636f49",
+    "nodeByteLength": 125270960,
+    "npmCliSha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    "runtimeTreeSha256": "927b5cc6392dfffd2be72f5239afdaf4ffbb40d7c79bee82b956f9d0f90b7c14"
   },
+  "linux:x64": {
+    "archiveName": "node-v24.21.0-linux-x64.tar.gz",
+    "archiveSha256": "6e1db87ef58b8819e5d5402eff1536491b18edd8eb7bee5ef7897876e88dc5ff",
+    "nodeSha256": "7fde7b8afa198da66257f42ee2001d874c7355631e6d1579a5fb5ef1f246df4c",
+    "nodeByteLength": 126595440,
+    "npmCliSha256": "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
+    "runtimeTreeSha256": "bc3ffcbaeda6968d3da588121bd27117a802d1929b91b2de1e7b82c71f62cdbe"
+  }
 };
 
 /** 플랫폼별 실행 파일 위치. 윈도우는 루트에, 유닉스는 bin/·lib/ 밑에 있다. */

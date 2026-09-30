@@ -47,6 +47,16 @@ export function noteQuitIntent(code: QuitReasonCode, detail?: Record<string, unk
   intent = { code, ...(detail ? { detail } : {}), at: Date.now() };
 }
 
+/** The quit intent noted so far (null: none, e.g. a programmatic app.quit()). */
+export function currentQuitIntentCode(): QuitReasonCode | null {
+  return intent?.code ?? null;
+}
+
+/** A quit the person cancelled (quit prompt, background tray) is no longer the reason for a later quit. */
+export function clearQuitIntent(): void {
+  if (!recorded) intent = null;
+}
+
 export function noteSystemShutdown(active: boolean): void {
   systemShutdown = active;
 }

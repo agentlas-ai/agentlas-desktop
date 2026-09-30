@@ -81,6 +81,10 @@ function packageOmissionReason(relative) {
   const parts = normalized.toLowerCase().split("/").filter(Boolean);
   const base = parts.at(-1) || "";
   if (normalized === EMBEDDED_CORE_RECEIPT) return null;
+  if (parts.includes(".github") || [".gitignore", ".gitattributes"].includes(base)) return "development-only-metadata";
+  if (["architecture.md", "contributing.md", "plugin_contributions.md", "security.md"].includes(base)) return "internal-document";
+  if (parts.length === 1 && base === "memory.md") return "nonruntime-memory";
+  if (parts[0] === "assets" && base.endsWith("architecture.svg")) return "internal-design-image";
   if (parts.includes(".git")) return "vcs-metadata";
   if (parts.includes(".agentlas")) {
     return normalized === ".agentlas/product-runtime-contract.json" ? null : "private-agentlas-state";

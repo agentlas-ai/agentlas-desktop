@@ -245,8 +245,11 @@ export function claimCheckpointContinuation(goalId: string, checkpointId: string
       || checkpoint.sideEffects.state !== "settled" || !(decision?.continue || diagnosticClaim || observationClaim)) return false;
     try { prepareCheckpointContinuation(checkpoint); } catch { return false; }
     const db = getDb();
-    if (db.prepare("SELECT 1 FROM long_run_worker_attempts WHERE run_id = ? AND (state IN ('running','uncertain') OR side_effect_state = 'uncertain') LIMIT 1")
-      .get(checkpoint.capsule.runId) && !observationClaim) return false;
+    // An exact user or read-only observation safe epoch settles older uncertain
+    // attempts without rewriting their audit rows. Use the same adjudication as
+    // checkpoint creation; the raw attempt state would reject every later wait
+    // successor even after that durable settlement.
+    if (unsettledLongRunAttempts(checkpoint.capsule.runId).length && !observationClaim) return false;
     if (db.prepare("SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = 'run.checkpoint_continuation' AND json_extract(payload_json, '$.checkpointId') = ?")
       .get(checkpoint.capsule.runId, checkpointId)) return false;
     appendLongRunEvent({ runId: checkpoint.capsule.runId, kind: "run.checkpoint_continuation", actorKind: "host", payload: { checkpointId, invocationRunId } });

@@ -22,7 +22,7 @@ Always produce a founder-useful output, not a consultant essay. Prefer clear dec
 3. Require evidence for market, customer, competitor, and feasibility claims.
 4. Collapse long plans into 2-hour, 1-day, and 3-day execution windows.
 5. Hand product planning to the PRD Maker HQ.
-6. For UI work, load `docs/design.md`, `.agentlas/design-memory.md`, and
+6. For UI work, load the owner’s design references, `.agentlas/design-memory.md`, and
    `.agentlas/global-plugin-tools.json`; use Product Design for permitted
    URL/screenshot/reference capture and Creative Production for visual
    territories before build planning.

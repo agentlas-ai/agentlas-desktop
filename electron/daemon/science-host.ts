@@ -1,3 +1,4 @@
+import { inspectScienceRuntimeSelectionAvailability } from "../science-host/runtime-selection-availability";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
@@ -171,6 +172,9 @@ export function installDaemonScienceHost(input: {
     workspace: { captureInvocationBinding: captureScienceInvocationBinding },
     render: { renderManuscriptPdf, resolveTectonic, probePdfLatexProfile, listTypesetProfiles: listScienceTypesetProfileCatalog },
     runtimeCatalog: {
+      // Optional health facade also works while the installed Science declaration
+      // is older; the exact pinned package can consume it without a contract downgrade.
+      ...{ inspectSelectionAvailability: inspectScienceRuntimeSelectionAvailability },
       detectRuntimes: async () => (await (await import("../runtime/detect")).detectRuntimes()).map(runtime => ({ ...runtime, availableModels: runtime.availableModels ?? [] })),
       listRuntimeModels: async (...args) => (await import("../runtime/providers")).listRuntimeModels(...args),
     },

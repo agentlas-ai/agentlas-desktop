@@ -7,6 +7,7 @@ local_release="${TMPDIR:-/tmp}/agentlas-desktop-release-$$"
 source_package_snapshot="${TMPDIR:-/tmp}/agentlas-desktop-package-$$.json"
 source_package_snapshot_ready=0
 cleaner_pid=""
+verification_root=""
 dmg_signing_keychain=""
 dmg_signing_identity=""
 original_keychains=()
@@ -165,9 +166,11 @@ cleanup() {
   fi
   restore_source_package_metadata_if_builder_transform || true
   rm -f -- "$source_package_snapshot"
+  if [[ -n "$verification_root" ]]; then rm -rf -- "$verification_root"; fi
   remove_sealed_tree "$local_release"
 }
 trap cleanup EXIT
+verification_root="$(node scripts/fetch-release-verification.mjs)"
 
 cp -p "$project_dir/package.json" "$source_package_snapshot"
 source_package_snapshot_ready=1
@@ -322,6 +325,8 @@ exercise_signed_app_python_boundary() {
   codesign --verify --deep --strict --verbose=2 "$signed_app"
   # Release signing/notarization credentials exist in this shell. The embedded
   # Core must never inherit them merely because verification exercises Python.
+  (
+    cd "$verification_root"
   env -i \
     PATH="$PATH" \
     HOME="$HOME" \
@@ -329,6 +334,7 @@ exercise_signed_app_python_boundary() {
     LANG="${LANG:-en_US.UTF-8}" \
     CI="${CI:-1}" \
     ./node_modules/.bin/electron scripts/verify-packaged-workforce-runtime.cjs "--app=$signed_app"
+  )
   # The updater ZIP must stay owner-writable. The legacy signed-cache smoke
   # expects a read-only tree, so seal only this disposable local_release copy
   # after the public ZIP/DMG inputs were copied. Production Python launches are
@@ -336,6 +342,8 @@ exercise_signed_app_python_boundary() {
   seal_packaged_runtime_copy_for_execution "$signed_app"
   # Exercise an unguarded direct import too. This is the exact class of access
   # that wrote __pycache__ into v0.8.58 and broke its signed source-app seal.
+  (
+    cd "$verification_root"
   env -i \
     PATH="$PATH" \
     HOME="$HOME" \
@@ -343,6 +351,7 @@ exercise_signed_app_python_boundary() {
     LANG="${LANG:-en_US.UTF-8}" \
     CI="${CI:-1}" \
     ./node_modules/.bin/electron scripts/smoke-signed-mac-python-cache.cjs "--app=$signed_app"
+  )
   # The exercise imports the packaged bridge and real embedded Agentlas OS from
   # this exact signed app. Any new Resources/__pycache__ now invalidates the seal.
   codesign --verify --deep --strict --verbose=2 "$signed_app"

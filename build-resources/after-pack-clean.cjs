@@ -57,37 +57,12 @@ const PYTHON_RUNTIME_ASSETS = {
     executableRelativePath: "bin/python3",
   },
 };
-const NODE_RUNTIME_VERSION = "24.18.0";
-const NODE_RUNTIME_ASSETS = {
-  "win32:x64": {
-    archiveName: "node-v24.18.0-win-x64.zip",
-    archiveSha256: "0ae68406b42d7725661da979b1403ec9926da205c6770827f33aac9d8f26e821",
-    nodeSha256: "9a4eb5f1c29c6a2e93852ead46b999e284a6a5ca8bab4d4e241d587d025a52de",
-    npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
-    runtimeTreeSha256: "ced095085eece2e24bb5fe957ab94253b6983729f66df9e112b79d5144116eb6",
-  },
-  "win32:arm64": {
-    archiveName: "node-v24.18.0-win-arm64.zip",
-    archiveSha256: "f274669adb93b1fd0fbf8f21fd078609e9dcc84333d4f2718d2dde3f9a161a01",
-    nodeSha256: "c7225670c3f477778e18c43a55867f7a0d76468221245e5981ab80eb953c8102",
-    npmCliSha256: "3ce7cba6f5128dd5f54c98b6a5036b0f850496878cc2e21044b675fe3c594e3e",
-    runtimeTreeSha256: "893e18bdab084c0af59c27eb8573f2bd3d2917b76919336efe97f9440039fb97",
-  },
-  "darwin:arm64": {
-    archiveName: "node-v24.18.0-darwin-arm64.tar.gz",
-    archiveSha256: "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
-    nodeSha256: "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
-    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
-    runtimeTreeSha256: "26d8a5de52cfe628bb3763366380991f417137967bcc211098552026f6dfe92b",
-  },
-  "darwin:x64": {
-    archiveName: "node-v24.18.0-darwin-x64.tar.gz",
-    archiveSha256: "dfd0dbd3e721503434df7b7205e719f61b3a3a31b2bcf9729b8b91fea240f080",
-    nodeSha256: "c5afe80c9fd47c0e1ba3a7221173d061dae04577acc67e21e945d16e34c696c8",
-    npmCliSha256: "8e5f6f3429f8cdbe693cdc29904e9d5a7b127a494bd15c804bd54c7403bfcbe7",
-    runtimeTreeSha256: "1e6949b832796ae46e994760086155fd3e7ee73ab7c03616c02748a5f17209c8",
-  },
-};
+const nodeRuntimePolicy = require("./node-runtime-policy.cjs");
+const NODE_RUNTIME_VERSION = nodeRuntimePolicy.NODE_VERSION;
+const NODE_RUNTIME_ASSETS = Object.fromEntries(Object.entries(nodeRuntimePolicy.ASSETS).map(([target, asset]) => [target, {
+  archiveName: asset.name, archiveSha256: asset.sha256, nodeSha256: asset.nodeSha256,
+  npmCliSha256: asset.npmCliSha256, runtimeTreeSha256: asset.runtimeTreeSha256,
+}]));
 
 /** 플랫폼별 실행 파일 위치. 윈도우는 루트에, 맥은 bin/·lib/ 밑에 있다. */
 function nodeRuntimeLayout(platform) {
@@ -246,6 +221,10 @@ function isForbiddenRuntimePath(relativePath) {
   const base = lowerParts.at(-1) ?? "";
 
   if (base === ".env" || base.startsWith(".env.")) return true;
+  if (["architecture.md", "contributing.md", "plugin_contributions.md", "security.md"].includes(base)) return true;
+  if (lowerParts.length === 1 && base === "memory.md") return true;
+  if (lowerParts.includes(".github") || [".gitignore", ".gitattributes"].includes(base)) return true;
+  if (lowerParts[0] === "assets" && base.endsWith("architecture.svg")) return true;
   if (/\.(?:pem|key|p12|p8|mobileprovision|jks|keystore|log|pyc|pyo)$/.test(base)) return true;
   if (base.startsWith("._")) return true;
   if ([".git", "signing", "credentials", ".memory.local", ".ontology-runtime", ".codex", "__pycache__"]
@@ -469,10 +448,14 @@ async function verifyBundledNode(projectDir, resourcesDir, platform, builderArch
    *   번들 Node 를 아무도 검사하지 않았다** — 빠져도, 깨져도 초록불이었다. Node 가 없는
    *   맥 사용자에게 CLI 설치 버튼이 막다른 길이던 것과 같은 뿌리다.
    */
-  if (platform !== "win32" && platform !== "darwin") return null;
+  if (!["win32", "darwin", "linux"].includes(platform)) return null;
   const layout = nodeRuntimeLayout(platform);
   const sourceRoot = path.join(projectDir, "build-resources", "node-runtime");
   const packagedRoot = path.join(resourcesDir, "node-runtime");
+  nodeRuntimePolicy.verifyRuntimeVersions(sourceRoot, platform);
+  nodeRuntimePolicy.verifyRuntimeVersions(packagedRoot, platform);
+  nodeRuntimePolicy.verifyNonruntimeBoundary(sourceRoot);
+  nodeRuntimePolicy.verifyNonruntimeBoundary(packagedRoot);
   const manifestName = "agentlas-node-runtime.json";
   const [sourceManifestText, packagedManifestText] = await Promise.all([
     readFile(path.join(sourceRoot, manifestName), "utf8"),

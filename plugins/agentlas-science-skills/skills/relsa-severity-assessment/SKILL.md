@@ -61,11 +61,7 @@ for forecasting and matplotlib only for figures.
 
 One row per animal per time point, in a CSV:
 
-| id | treatment | condition | day | temp | weight | score | il6 |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| M01 | treated | endpoint | -1 | 37.15 | 25.17 | 0 | 35.1 |
-| M01 | treated | endpoint | 0 | 37.26 | 25.25 | 0 | 39.5 |
-| M01 | treated | endpoint | 1 | 35.83 | 23.12 | 4 | 162.0 |
+Required CSV columns: id, a time column, and the outcome variables being assessed. Optional treatment and condition columns can identify groups.
 
 - `id` and a time column (`day`, `time`, `hour`, …) are required; `treatment` and `condition`
   are optional labels used for grouping and for selecting the reference set.
@@ -76,9 +72,7 @@ One row per animal per time point, in a CSV:
 - Leave missing measurements empty. They are dropped from the score, never imputed — a
   missing value treated as "no deviation" biases severity downward.
 
-`assets/example_cohort.csv` is a small synthetic cohort (6 mice, 9 days, temperature, body
-weight, an 0–8 clinical score, and an IL-6-like biomarker) used by every command below, so
-each one is runnable as written.
+Supply your collected cohort as `input/cohort.csv`. Replace the variable names, group labels, animal IDs, and endpoint times below with values from your study. Set RELSA_REFERENCE_GROUP and RELSA_GROUP to COLUMN=VALUE selectors, RELSA_ANIMAL_IDS to your chosen IDs, and RELSA_ENDPOINT to one ID=TIME pair; repeat --endpoints for additional animals.
 
 ## The four decisions that determine the result
 
@@ -119,42 +113,25 @@ euthanasia — drops that animal's endpoint score from 0.93 to 0.83 for no biolo
 ### Step 1 — compute RELSA scores
 
 ```bash
-python scripts/relsa_score.py assets/example_cohort.csv \
+python scripts/relsa_score.py input/cohort.csv \
     --variables weight,temp,score,il6 \
     --normalize weight,temp,il6 \
     --turned il6 \
     --score-scale score=8 \
     --baseline-time -1 \
-    --reference-group condition=endpoint \
+    --reference-group "$RELSA_REFERENCE_GROUP" \
     --save-reference reference.json \
     --out relsa_scores.csv
 ```
 
 The reference model is echoed so the scale is auditable:
 
-```
-reference model: assets/example_cohort.csv [condition=endpoint]
-  animals=2  rows=18  baseline_time=-1.0
-  variable      turned   max reached   max delta
-  weight            no         82.40       17.60
-  temp              no         92.79        7.21
-  score            yes        187.50       87.50
-  il6              yes        797.72      697.72
-```
+The command reports values computed from your supplied cohort; retain those outputs with the reference model and methods.
 
 `relsa_scores.csv` holds each variable's weight alongside the score, which is what makes a
-score explainable — here M01 deteriorating to its endpoint, M03 peaking on day 3 and
-recovering:
+score explainable for each animal in the supplied cohort:
 
-```
- id  time  weight  temp  score  il6  n_vars  relsa
-M01     1    0.46  0.49   0.57 0.52       4   0.51
-M01     3    0.84  0.76   1.00 0.89       4   0.88
-M01     5    1.00  1.00   1.00 1.00       4   1.00
-M03     3    0.56  0.44   0.57 0.54       4   0.53
-M03     5    0.35  0.26   0.43 0.32       4   0.35
-M03     7    0.12  0.06   0.14 0.11       4   0.11
-```
+The command reports values computed from your supplied cohort; retain those outputs with the reference model and methods.
 
 A weight of 1.00 means that variable hit the reference maximum; `n_vars` is how many
 variables entered the score at that time point.
@@ -166,7 +143,7 @@ import sys; sys.path.insert(0, "scripts")
 from _common import read_relsa_table, score_to_percent
 from relsa_score import prepare, build_reference, relsa_scores
 
-frame = read_relsa_table("assets/example_cohort.csv")
+frame = read_relsa_table("input/cohort.csv")
 frame["score"] = score_to_percent(frame["score"], max_score=8)   # 0-8 clinical score
 VARS, TURNED = ["weight", "temp", "score", "il6"], ["score", "il6"]
 
@@ -184,21 +161,11 @@ endpoint, and score the prediction:
 
 ```bash
 python scripts/forecast_relsa.py relsa_scores.csv \
-    --animals M01,M02 --endpoints M01=5 --endpoints M02=6 \
+    --animals "$RELSA_ANIMAL_IDS" --endpoints "$RELSA_ENDPOINT" \
     --group-col condition --plot-dir figs --endpoint-line 1.0
 ```
 
-```
- id  time  predicted    lower    upper        model  actual
-M01   5.0   0.932585 0.670443 1.194728 ARIMA(1,1,0)    1.00
-M02   6.0   0.955696 0.748309 1.163084 ARIMA(1,1,0)    0.94
-
-   group             id        model  n   rmse  picp  mpiw
-endpoint            M01 ARIMA(1,1,0)  1 0.0674 100.0 0.524
-endpoint            M02 ARIMA(1,1,0)  1 0.0157 100.0 0.415
-endpoint -- endpoint --               2 0.0489 100.0 0.470
-                OVERALL               2 0.0489 100.0 0.470
-```
+The command reports values computed from your supplied cohort; retain those outputs with the reference model and methods.
 
 Report all three metrics together. **RMSE** is point accuracy, **PICP** the percentage of
 actual values inside the interval, and **MPIW** the mean interval width in RELSA units — a
@@ -209,7 +176,7 @@ shows.
 For live monitoring, forecast one step ahead at every time point instead:
 
 ```bash
-python scripts/forecast_relsa.py relsa_scores.csv --mode rolling --animals M03
+python scripts/forecast_relsa.py relsa_scores.csv --mode rolling --animals "$RELSA_ANIMAL_IDS"
 ```
 
 Two things to know before trusting a forecast:
@@ -227,16 +194,10 @@ Two things to know before trusting a forecast:
 
 ```bash
 python scripts/kde_thresholds.py relsa_scores.csv \
-    --group treatment=treated --n-thresholds 2 --plot zones.png --json zones.json
+    --group "$RELSA_GROUP" --n-thresholds 2 --plot zones.png --json zones.json
 ```
 
-```
-KDE on 33 RELSA scores  (bandwidth = 0.1502)
-  candidate thresholds (density minima): 0.703
-  density modes: 0.264, 0.866
-  normal    [0.000, 0.703)  n=25 (75.8%)
-  danger    >= 0.703  n=8 (24.2%)
-```
+The command reports values computed from your supplied cohort; retain those outputs with the reference model and methods.
 
 Thresholds are the *minima* of the score density — the sparse valleys between clusters of
 scores. Include endpoint animals, survivors, and shams: the zones are meant to separate
@@ -329,11 +290,6 @@ A severity analysis is reproducible only if all of this is stated:
   indirect prediction, the metrics, the published Table 1, and what this port reproduces.
 - `references/thresholds-and-zones.md` — KDE method, published thresholds, the bandwidth
   sensitivity sweep, the regulatory boundary, and alternatives when KDE gives nothing.
-
-### Assets
-
-- `assets/example_cohort.csv` — synthetic 6-mouse cohort with temperature, body weight, a
-  clinical score, and a biomarker; illustrative only, not real data.
 
 ### Related skills
 

@@ -2,7 +2,9 @@
 // installation and canonical store, not whichever GUI process is currently open.
 // Before GUI migrations, quiesceDaemonBeforeStoreMigration proves that an older
 // service has exited. After migrations, ensureDaemonRunning attaches or starts
-// the follower service. Ordinary GUI quit detaches; update/user stop is explicit.
+// the follower service. GUI quit stops the service unless the owner turned on
+// login continuity, in which case it only detaches (releaseDaemonForGuiQuit).
+// A service left with no GUI and no work exits on its own (daemon/idle-exit.ts).
 //
 // 이 모듈은 의도적으로 electron 을 import 하지 않는다 — 버전·경로를 인자로 받아
 // 게이트(scripts/test-daemon-autospawn.cjs)가 순수 Node(ELECTRON_RUN_AS_NODE)에서
@@ -82,6 +84,8 @@ interface DaemonPing {
   serviceIdentity?: string;
   serviceProtocolVersion?: number;
   storeSchemaVersion?: number;
+  /** Service-owned work a stop would cut now (daemon idle-exit reasons, minus attachment). */
+  activeWork?: string[];
 }
 
 function logDaemonIdentity(log: (line: string) => void, ping: DaemonPing): void {
@@ -209,8 +213,12 @@ function spawnDaemonForDesktop(
     parentPid: opts.parentPid ?? process.pid, restartCount, reason,
     appInstanceId: opts.appInstanceId,
   });
-  const child = spawn(opts.execPath ?? process.execPath, [entry], {
+  // `--user-data` repeats AGENTLAS_USER_DATA in argv so a process listing can
+  // attribute a service to its user-data directory (QA cleanup matches by it).
+  const child = spawn(opts.execPath ?? process.execPath, [entry, "--user-data", opts.userDataDir], {
     detached: true,
+    // Windows: a detached child gets its own console unless hidden.
+    windowsHide: true,
     // Raw runtime output can contain private tool arguments. The service writes
     // structured lifecycle diagnostics itself; no pipe depends on the GUI.
     stdio: "ignore",
@@ -487,7 +495,7 @@ export async function stopDaemonService(options: DaemonServiceOptions, timeoutMs
   return { stopped: await stopObservedDaemon(socketPath, ping, timeoutMs), pid: ping.pid ?? null };
 }
 
-/** Ordinary GUI quit releases its attachment, leaving autonomous work alive. */
+/** Releases this GUI's attachment, leaving autonomous work alive (login continuity ON). */
 export async function detachDaemonDesktop(userDataDir: string, parentPid: number): Promise<boolean> {
   const socketPath = daemonControlSocketPath(userDataDir);
   const ping = await pingDaemon(socketPath);
@@ -495,6 +503,43 @@ export async function detachDaemonDesktop(userDataDir: string, parentPid: number
   if (ping.serviceProtocolVersion !== 2) return false;
   const reply = await callControlSocket(socketPath, "daemon.detach", { ...serviceControlGuard(ping), parentPid }, 3_000) as { ok?: boolean };
   return reply?.ok === true;
+}
+
+export type DaemonGuiQuitOutcome = "stopped" | "detached" | "absent" | "left-for-other-desktop" | "stop-timeout" | "failed";
+
+/**
+ * GUI quit. Login continuity OFF (the default) stops the service through its
+ * single performShutdown path (Science, local model, run children, pool) and
+ * waits for the process to exit; continuity ON only detaches. A service that
+ * another live Desktop is attached to, or that belongs to another store, is
+ * only detached — never stopped from under its owner. If the stop cannot be
+ * proven, the service's own idle exit remains the safety net.
+ */
+export async function releaseDaemonForGuiQuit(options: DaemonServiceOptions & {
+  parentPid: number; mode: "stop" | "detach"; timeoutMs?: number;
+}): Promise<{ outcome: DaemonGuiQuitOutcome; pid: number | null }> {
+  try {
+    const identity = resolveDaemonServiceIdentity(options);
+    const socketPath = daemonControlSocketPath(identity.userDataDir);
+    const ping = await pingDaemon(socketPath);
+    if (!ping?.ok) return { outcome: await controlSocketIsAbsent(socketPath) ? "absent" : "failed", pid: null };
+    const pid = Number.isSafeInteger(ping.pid) && Number(ping.pid) > 1 ? Number(ping.pid) : null;
+    if (anotherDesktopIsAttached(ping, options.parentPid)) return { outcome: "left-for-other-desktop", pid };
+    if (options.mode === "stop" && ping.serviceProtocolVersion === 2 && matchesService(ping, identity)) {
+      recordDiagnostic(diagnosticLog(identity.userDataDir), "shutdown_requested", { pid, parentPid: options.parentPid });
+      return { outcome: await stopObservedDaemon(socketPath, ping, options.timeoutMs ?? 20_000) ? "stopped" : "stop-timeout", pid };
+    }
+    return { outcome: await detachDaemonDesktop(identity.userDataDir, options.parentPid) ? "detached" : "failed", pid };
+  } catch {
+    return { outcome: "failed", pid: null };
+  }
+}
+
+/** Service-owned work (Science turn, graph run, CLI child, local model op) a stop would cut. */
+export async function readDaemonActiveWork(userDataDir: string, timeoutMs = 1_500): Promise<string[]> {
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return [];
+  const ping = await pingDaemon(daemonControlSocketPath(userDataDir), timeoutMs);
+  return Array.isArray(ping?.activeWork) ? ping!.activeWork!.filter((reason) => typeof reason === "string") : [];
 }
 
 /**

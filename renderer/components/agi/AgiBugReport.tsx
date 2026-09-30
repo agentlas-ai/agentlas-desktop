@@ -8,7 +8,7 @@
  *    when the owner presses Send. The generic help-menu entry uses the same dialog with a short form first.
  *  - "보낸 결함 보고": the owner's sent reports with the server status, including "수리됨 (버전)".
  */
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { AGI_BUG_REPORT_CATEGORIES, type AgiBugReportCategory, type AgiBugReportDraftInput, type AgiBugReportPreview,
   type AgiBugReportRow, type AgiDefectChip as DefectChip } from "@shared/agi";
@@ -47,21 +47,52 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
   const [result, setResult] = useState<AgiBugReportRow | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [sending, setSending] = useState(false);
   const [sent, setSent] = useState<AgiBugReportRow[] | null>(null);
+  const operation = useRef<object | null>(null);
+  const context = useRef<string | null>(null);
+  const generation = useRef(0);
+  const currentPreview = useRef<AgiBugReportPreview | null>(null);
+  const lastInput = useRef<AgiBugReportDraftInput | null>(null);
+  const latestDraft = useRef(draft);
+  latestDraft.current = draft;
+  const draftKey = JSON.stringify(draft ?? {});
   const fromDefect = Boolean(draft?.defectId);
 
+  useEffect(() => () => { generation.current += 1; operation.current = null; }, []);
+
   const makePreview = useCallback(async (input: AgiBugReportDraftInput) => {
+    if (operation.current) return;
     const api = ipc()?.agi;
     if (!api) { setError(ko ? "이 버전에서는 결함 보고를 쓸 수 없어요." : "Defect reports are unavailable in this build."); return; }
+    const ticket = {};
+    const epoch = generation.current;
+    operation.current = ticket;
+    lastInput.current = input;
     setBusy(true); setError(null);
-    try { setPreview(await api.bugReportPreview(input)); } catch (e) { setError(codeOf(e)); } finally { setBusy(false); }
+    try {
+      const next = await api.bugReportPreview(input);
+      if (epoch !== generation.current) return;
+      currentPreview.current = next;
+      setPreview(next);
+      setResult(next.report && next.report.status !== "draft" ? next.report : null);
+    } catch (e) { if (epoch === generation.current) setError(codeOf(e)); }
+    finally { if (operation.current === ticket) { operation.current = null; setBusy(false); } }
   }, [ko]);
 
   useEffect(() => {
     if (!open) return;
-    setTab("new"); setTitle(""); setSummary(""); setCategory("other"); setPreview(null); setResult(null); setError(null); setSent(null);
-    if (draft?.defectId) void makePreview(draft);
-  }, [open, draft, makePreview]);
+    setTab("new"); setError(null); setSent(null);
+    if (context.current !== draftKey) {
+      context.current = draftKey; generation.current += 1; operation.current = null;
+      currentPreview.current = null; lastInput.current = null;
+      setTitle(""); setSummary(""); setCategory("other"); setPreview(null); setResult(null); setBusy(false); setSending(false);
+    }
+    // Reopening refreshes the same persisted report, including queued/sent state.
+    // A new parent object with the same draft fields does not recreate a draft.
+    if (latestDraft.current?.defectId) void makePreview(latestDraft.current);
+    else if (currentPreview.current && lastInput.current) void makePreview(lastInput.current);
+  }, [open, draftKey, makePreview]);
 
   useEffect(() => {
     if (!open || tab !== "sent") return;
@@ -71,9 +102,17 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
   if (!open) return null;
   const send = async () => {
     const api = ipc()?.agi;
-    if (!api || !preview) return;
-    setBusy(true); setError(null);
-    try { setResult(await api.bugReportSend({ clientReportId: preview.clientReportId })); } catch (e) { setError(codeOf(e)); } finally { setBusy(false); }
+    // React state renders later; claim synchronously before the first IPC await.
+    if (operation.current || !api || !preview || result?.status === "sent" || result?.status === "queued") return;
+    const ticket = {};
+    const epoch = generation.current;
+    operation.current = ticket;
+    setBusy(true); setSending(true); setError(null);
+    try {
+      const next = await api.bugReportSend({ clientReportId: preview.clientReportId });
+      if (epoch === generation.current) setResult(next);
+    } catch (e) { if (epoch === generation.current) setError(codeOf(e)); }
+    finally { if (operation.current === ticket) { operation.current = null; setBusy(false); setSending(false); } }
   };
 
   return <div className={styles.backdrop} role="presentation" onClick={onClose}>
@@ -117,14 +156,24 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
             : `Exactly this is sent. ${preview.redactions} secret/account/path spans were already masked on this computer.${preview.signedIn ? "" : " Not signed in: summary and log are sent shorter."}`}</p>
           <pre className={styles.preview} data-agi-bug-report-preview="true">{JSON.stringify(preview.payload, null, 2)}</pre>
         </>}
-        {result && <p className={styles.result} role="status" data-agi-bug-report-result={result.status}>{result.status === "sent"
+        {sending && <p className={styles.result} role="status">{ko ? "전송 중… 닫아도 계속 보내요." : "Sending… You can close while it continues."}</p>}
+        {!sending && result && <p className={styles.result} role="status" data-agi-bug-report-result={result.status}>{result.status === "sent"
           ? (ko ? `보냈어요 · 번호 ${result.serverId ?? "-"}` : `Sent · id ${result.serverId ?? "-"}`)
           : statusLabel(result, ko)}</p>}
         {error && <p className={styles.error} role="alert">{error}</p>}
         <footer className={styles.foot}>
-          <button type="button" onClick={onClose}>{result ? (ko ? "닫기" : "Close") : (ko ? "보내지 않기" : "Don't send")}</button>
-          {preview && !result && <button type="button" className={styles.primary} disabled={busy} onClick={() => { void send(); }}>
-            {busy ? (ko ? "보내는 중…" : "Sending…") : (ko ? "보내기" : "Send")}</button>}
+          {!sending && result?.status !== "sent" && result?.status !== "queued" && <button type="button" onClick={onClose}>
+            {result ? (ko ? "닫기" : "Close") : (ko ? "보내지 않기" : "Don't send")}</button>}
+          {!fromDefect && preview && <button type="button" disabled={busy} onClick={() => {
+            if (operation.current) return;
+            generation.current += 1; currentPreview.current = null; lastInput.current = null;
+            setPreview(null); setResult(null); setError(null); setTitle(""); setSummary(""); setCategory("other");
+          }}>{ko ? "새 보고 작성" : "Write a new report"}</button>}
+          {preview && <button type="button" className={styles.primary} disabled={busy && !sending}
+            onClick={() => { if (sending || result?.status === "sent" || result?.status === "queued") onClose(); else void send(); }}>
+            {sending || result?.status === "sent" || result?.status === "queued" ? (ko ? "닫기" : "Close")
+              : busy ? (ko ? "불러오는 중…" : "Loading…")
+              : result?.status === "failed" || error ? (ko ? "다시 보내기" : "Retry") : (ko ? "보내기" : "Send")}</button>}
         </footer>
       </div>}
     </div>

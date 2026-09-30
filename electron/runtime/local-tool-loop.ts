@@ -348,7 +348,10 @@ export async function prepareMainToolLoop(
   // grant's catalog only (it already bridges the Desktop tools it admits). An
   // ordinary One/Work run gets the same builtins as every host-loop runtime —
   // before 2026-09-24 serving in Work had no file/shell tools at all.
-  const servingMcpOnly = runtimeKind === "agentlas" && Boolean(req.mcpConfigPath) && req.mcpGrantCatalogOnly === true;
+  // BYOK adapters use this same Main loop. A signed Science catalog is the
+  // complete grant there too; API delivery must not add file/shell/download tools.
+  const catalogMcpOnly = (runtimeKind === "agentlas" || runtimeKind === "byok")
+    && Boolean(req.mcpConfigPath) && req.mcpGrantCatalogOnly === true;
   if (collection) {
     assertScienceCollectionCapability(collection, req.mcpConfigPath);
     if (!["byok", "ollama", "lmstudio", "mlx", "agentlas-local", "agentlas"].includes(runtimeKind)) {
@@ -368,13 +371,13 @@ export async function prepareMainToolLoop(
         const imageSlotDiagnosis = await multimodalImageSlotDiagnosis();
         return loadMainToolInventory(
           req.mcpConfigPath,
-          servingMcpOnly ? undefined : req.cwd,
+          catalogMcpOnly ? undefined : req.cwd,
           (req.permission ?? "read") as ToolPermission,
           req.unattended !== true && req.noSynchronousAsk !== true,
           imageSlotDiagnosis.state === "ready",
           req.signal,
           req.browserOnly === true,
-          servingMcpOnly ? false : await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
+          catalogMcpOnly ? false : await browserDownloadAvailable(req.approvalChatId ?? req.chatId, req.agentId),
         );
       })();
   // ★ 로컬 소형 모델(agentlas-local)에는 도구를 그대로 준다. 코드 모드(agentlas_code)와 지연 메뉴

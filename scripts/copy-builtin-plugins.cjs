@@ -164,6 +164,88 @@ function rewritePrivateVerificationReferences(pluginName, destination) {
   }
 }
 
+function projectScienceSkillRuntime(pluginName, destination) {
+  if (pluginName !== "agentlas-science-skills") return 0;
+  const root = path.join(destination, "skills");
+  const omitted = [
+    "timesfm-forecasting/examples",
+    "relsa-severity-assessment/assets/example_cohort.csv",
+    "markdown-mermaid-writing/assets/examples",
+    "venue-templates/assets/examples",
+  ];
+  let removed = 0;
+  for (const relative of omitted) {
+    const target = path.join(root, relative);
+    if (!fs.existsSync(target)) continue; // Already excluded from the public source projection.
+    removed += fs.statSync(target).isDirectory() ? countFiles(target) : 1;
+    fs.rmSync(target, { recursive: true, force: true });
+  }
+  const edit = (relative, transform) => {
+    const target = path.join(root, relative);
+    const before = fs.readFileSync(target, "utf8");
+    const after = transform(before);
+    if (after === before) {
+      // A public source checkout already contains the same cleaned procedures.
+      const markers = {
+        "timesfm-forecasting/SKILL.md": "input requirements, output checks, and common forecasting mistakes.",
+        "timesfm-forecasting/references/examples_and_validation.md": "# Forecast Input and Output Checks",
+        "relsa-severity-assessment/SKILL.md": "Supply your collected cohort as `input/cohort.csv`.",
+      };
+      const projected = relative === "markdown-mermaid-writing/SKILL.md"
+        ? !/^### Examples$/m.test(before) && !before.includes("assets/examples/")
+        : typeof markers[relative] === "string" && before.includes(markers[relative]);
+      if (!projected) throw new Error(`[copy-builtin-plugins] Science procedure projection did not apply: ${relative}`);
+      return;
+    }
+    fs.writeFileSync(target, after, { encoding: "utf8", mode: 0o644 });
+  };
+  edit("timesfm-forecasting/SKILL.md", (text) => text
+    .replace(/See the `examples\/anomaly-detection\/` directory for a full example\./g, "Use the prediction-interval procedure below with your observed series.")
+    .replace(/^> See `examples\/covariates-forecasting\/`[^\n]*$/gm, "> Use your observed series and matching covariate arrays with the API below.")
+    .replace(/^> See `examples\/anomaly-detection\/`[^\n]*$/gm, "> Compare prediction intervals with your held-out observations and plot the resulting flags.")
+    .replace("runnable examples, the quality checklist, common mistakes, and regression checks.", "input requirements, output checks, and common forecasting mistakes."));
+  edit("timesfm-forecasting/references/examples_and_validation.md", () => `# Forecast Input and Output Checks
+
+Run scripts/check_system.py before loading the model. Use scripts/forecast_csv.py with a CSV supplied by the user; select its value column and a horizon appropriate to the task.
+
+## Input checks
+
+- Confirm the observations are ordered in time and represent the same frequency.
+- Report missing values, the observed context length, units, and any transformation.
+- Use matched covariate arrays when calling forecast_with_covariates.
+
+## Output checks
+
+- Confirm the point forecast contains the requested horizon and the quantile array matches the model version.
+- Check for nonfinite values and use named quantile indices from references/output_and_config.md.
+- Keep historical observations separate from forecasts in every exported table and plot.
+- Compute accuracy and interval coverage only against held-out observations supplied for this task.
+- Record the model version and configuration with the user's output.
+
+For API configuration, plotting, and multi-series input, read references/output_and_config.md and references/workflows.md.
+`);
+  edit("relsa-severity-assessment/SKILL.md", (text) => text
+    .replace(/\| id \| treatment \| condition \| day \| temp \| weight \| score \| il6 \|\n(?:\|[^\n]*\|\n)+/g, "Required CSV columns: id, a time column, and the outcome variables being assessed. Optional treatment and condition columns can identify groups.\n")
+    .replace(/`assets\/example_cohort\.csv` is a small synthetic cohort[\s\S]*?each one is runnable as written\./, "Supply your collected cohort as `input/cohort.csv`. Replace the variable names, group labels, animal IDs, and endpoint times below with values from your study. Set RELSA_REFERENCE_GROUP and RELSA_GROUP to COLUMN=VALUE selectors, RELSA_ANIMAL_IDS to your chosen IDs, and RELSA_ENDPOINT to one ID=TIME pair; repeat --endpoints for additional animals.")
+    .replace(/### Assets[\s\S]*?(?=### Related skills)/, "")
+    .replace(/assets\/example_cohort\.csv/g, "input/cohort.csv")
+    .replace(/^```([^\n]*)\n([\s\S]*?)^```$/gm, (block, language) => language.trim() ? block : "The command reports values computed from your supplied cohort; retain those outputs with the reference model and methods.")
+    .replace(/score explainable — here[\s\S]*?recovering:/, "score explainable for each animal in the supplied cohort:")
+    .replace(/--animals [A-Za-z0-9,]+(?:\s+--endpoints [A-Za-z0-9=.,-]+)+/g, '--animals "$RELSA_ANIMAL_IDS" --endpoints "$RELSA_ENDPOINT"')
+    .replace(/--animals [A-Za-z0-9,]+/g, '--animals "$RELSA_ANIMAL_IDS"')
+    .replace("--reference-group condition=endpoint", '--reference-group "$RELSA_REFERENCE_GROUP"')
+    .replace("--group treatment=treated", '--group "$RELSA_GROUP"'));
+  edit("markdown-mermaid-writing/SKILL.md", (text) => text.replace(/### Examples\n[\s\S]*?(?=\n---)/, ""));
+  const excludedReference = /example_cohort\.csv|temperature_anomaly\.csv|examples\/(?:global-temperature|anomaly-detection|covariates-forecasting)|example-research-report\.md|cell_summary_example\.md|medical_structured_abstract\.md|nature_abstract_examples\.md|neurips_introduction_example\.md/;
+  for (const relative of allFiles(destination)) {
+    if (relative === "plugin.json" || !/\.(?:md|json|txt|py|cjs|js|mjs)$/.test(relative)) continue;
+    if (excludedReference.test(fs.readFileSync(path.join(destination, relative), "utf8"))) {
+      throw new Error(`[copy-builtin-plugins] excluded Science demonstration reference survived: ${relative}`);
+    }
+  }
+  return removed;
+}
+
 function rewritePublicIntegrity(destination) {
   const manifestPath = path.join(destination, "plugin.json");
   const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
@@ -244,6 +326,9 @@ for (const plugin of sourcePlugins) {
     if (fs.existsSync(source)) excluded += countFiles(source);
   }
   rewritePrivateVerificationReferences(plugin.name, destination);
+  const projectedOut = projectScienceSkillRuntime(plugin.name, destination);
+  count -= projectedOut;
+  excluded += projectedOut;
   rewritePublicIntegrity(destination);
 }
 // The packaged desktop runs the same canonical gate inside the builder flow.

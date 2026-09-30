@@ -226,7 +226,7 @@ Persona-swarm feedback is simulated unless backed by real interviews or market e
 When the founder gives a reference design website URL, screenshot, Figma frame,
 brand asset, or asks for the whole product concept:
 
-1. Load `.agentlas/design-memory.md` and `docs/design.md` as continuity context.
+1. Use references provided by the founder as context for the design brief.
 2. Route visual-source work to Product Planning PRD Maker before Product
    Development unless a complete design package already exists.
 3. Use Product Design for design brief confirmation, permitted URL/screenshot
@@ -239,7 +239,7 @@ brand asset, or asks for the whole product concept:
    include browser/app visual evidence before UI completion.
 7. Send selected concept decisions, rejected references, reusable UI patterns,
    and open design loops as `memory_events` so Memory Curator can update
-   `.agentlas/design-memory.md`.
+   future design decisions.
 
 ## Output Format
 

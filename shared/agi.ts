@@ -43,6 +43,8 @@ export interface AgiBugReportDraftInput {
 
 export interface AgiBugReportPreview {
   clientReportId: string;
+  /** Persisted state when reopening or reusing an already previewed report. */
+  report?: AgiBugReportRow;
   /** Exactly what Send will POST. */
   payload: AgiBugReportPayload;
   /** How many secret/path/email spans were replaced before this preview. */

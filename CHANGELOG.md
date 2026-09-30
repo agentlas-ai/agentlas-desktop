@@ -1,16 +1,18 @@
 # Changelog
 
-## 1.2.52 — 2026-09-30
+## 1.2.53 — 2026-09-30
 
-- This release binds Agentlas OS v1.2.51 at 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448. Its public runtime asset `hephaestus-runtime-v1.2.51.tar.gz` is pinned at SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`.
-- Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
-- AI connection chips open installation and official-login steps; Installed reflects a live runtime probe.
-- Pair Science 0.1.44 with Research Director 1.25.0; report daemon reasons, retry recovery, and show research stages.
-- Install verified native Claude, Codex, Grok, and Kimi binaries on macOS with progress and cancellation; preserve the selected CLI for login and runtime checks.
-- Clear stale Science startup errors only after recovery succeeds; retain later failures. Mail provisioning failures support retry and dismissal across client versions.
-- Keep vault autofill on matching origins, and refuse ambiguous chooser-less upload targets.
-- Record YouTube publication receipts, resume answered goals, and show attention across One and Work.
-- Render conversation charts and spreadsheets with the updated artifact panels.
+- Improve Agentlas Browser recovery, isolated browser connections, vault autofill, and file uploads. Stop importing Google and YouTube sign-in cookies from Chrome and quarantine previously copied cookies in Agentlas; existing Agentlas sessions may need one sign-in after the update.
+- Resume Goals after approval, improve recovery after a checked external result, improve automation handling, and record YouTube upload receipts.
+- Prevent repeated bug-report sends, keep the report receipt on reopen, and show retry reasons.
+- Improve AI connection onboarding, official CLI installation, and authentication status. Enable approved MCP tools in the API provider tool loop, with the same catalog restrictions used by hosted runs.
+- Improve team indicators and navigation, and conversation chart, HTML, workbook, and file panels.
+- Stop the background service and owned child processes on a full quit; show a tray indicator when work continues in the background and exit when that work finishes.
+- Pair Science 0.1.49 with Research Director 1.25.0, with citation, DOCX math, claim-context, referee runtime checks, and recovery improvements.
+- Update Electron to 43.7.6 and the bundled Node runtime to 24.21.0 with npm 11.20.0 and patched dependencies. Remove nonruntime verification and demonstration files from installers.
+- Keep Agentlas OS v1.2.51 pinned at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; its runtime asset remains `hephaestus-runtime-v1.2.51.tar.gz` (SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`).
+
+Source readiness does not prove a published installer or installed update; verify those separately.
 
 ## 1.2.51 — 2026-09-29
 

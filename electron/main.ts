@@ -1,3 +1,4 @@
+import { reviewScienceAnalysisPlanWithFreshness } from "agentlas-science";
 // Electron 진입점.
 // dev:  ELECTRON_START_URL = http://localhost:3100 (Next.js dev server)
 // prod: file://dist/renderer/index.html (next export 결과)
@@ -53,7 +54,7 @@ import { createAgentlasWindowVisualSessionControl } from "./mobile-bridge/visual
 import { listPendingAskUserRequests, submitAskUserAnswer } from "./confirm/ask-user";
 import { buildAppMenu } from "./menu";
 import { closeStore, getDb, initStore, openedStorePath, resolveStorePath, runPostContinuityStoreRepairs, STORE_SCHEMA_VERSION } from "./store/db";
-import { markDaemonAutostartStoreReady, readDaemonAutostartStoreReady, resolveDaemonAutostartPolicy } from "./store/daemon-autostart";
+import { getDaemonAutostartEnabled, markDaemonAutostartStoreReady, readDaemonAutostartStoreReady, resolveDaemonAutostartPolicy } from "./store/daemon-autostart";
 import { storeIdentityDigest } from "./daemon/diagnostic-log";
 import { startMemoryRevocationCleanup, stopMemoryRevocationCleanup } from "./memory/revocation-cleanup";
 import { emitDesktopStoreChange, onDesktopStoreChange } from "./store/change-bus";
@@ -137,7 +138,9 @@ import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, installStdioErrorGuard, mainLogFilePath } from "./logging";
-import { installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
+import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
+import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
+import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
 import { decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
 import { currentUiLocale, setCurrentUiLocale } from "./ui-locale";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
@@ -1148,6 +1151,9 @@ async function createWindow(options: { startupPlaceholder?: boolean } = {}): Pro
   // headless app the user cannot reach.
   const revealMainWindow = (): void => {
     if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isVisible()) return;
+    // A quit into background mode hid the window on purpose; the startup reveal
+    // fallback must not bring it back (measured: fired after the hide, ended the mode).
+    if (backgroundHoldActive()) return;
     mainWindow.show();
   };
   mainWindow.once("ready-to-show", revealMainWindow);
@@ -1247,6 +1253,10 @@ app.on("window-all-closed", () => {
 
 app.on("activate", () => {
   if (!shellReadyForWindows) return;
+  // Hiding the Dock icon for background mode re-activates the app on macOS;
+  // that is not the person asking for the window. The tray's "열기" and a second
+  // launch (second-instance) are the ways back.
+  if (backgroundHoldActive()) return;
   if (!mainWindow || mainWindow.isDestroyed()) {
     void createWindow();
     return;
@@ -1347,11 +1357,23 @@ function stopQuitServices(): Promise<void> {
     import("./agents/hephaestus-sync").then((module) => { module.stopHephaestusSync(); }).catch(() => {}),
     stopDesktopOwnedMobileBridge()
       .then(() => import("./daemon/app-launcher"))
-      .then((module) => module.detachDaemonDesktop(userDataDir(), process.pid))
-      .then((detached) => {
-        if (!detached) console.error("[daemon] Desktop attachment was not released");
+      .then(async (module) => {
+        // Close observers first so no reconnect can respawn the service mid-stop.
+        if (quitDaemonMode === "stop") {
+          scienceExecutionIpc?.close();
+          scienceDaemonClient?.close();
+          await localModelDaemonClient?.detach().catch(() => {});
+        }
+        const released = await module.releaseDaemonForGuiQuit({
+          userDataDir: userDataDir(), storePath: openedStorePath(), installIdentity,
+          parentPid: process.pid, mode: quitDaemonMode, timeoutMs: 20_000,
+        });
+        console.info("[daemon] GUI quit", { mode: quitDaemonMode, outcome: released.outcome, pid: released.pid });
+        if (released.outcome === "failed" || released.outcome === "stop-timeout") {
+          console.error("[daemon] service was not released on quit; its idle exit remains the safety net", released);
+        }
       })
-      .catch((error) => console.error("[daemon] Desktop detach failed", error)),
+      .catch((error) => console.error("[daemon] GUI quit release failed", error)),
   ]).then(() => undefined).finally(() => {
     scienceExecutionIpc?.close();
     scienceDaemonClient?.close();
@@ -1434,6 +1456,7 @@ configureUpdateResumeHost({
     // The checkpoint closed this process's admission. Never leave a live-looking app that can no
     // longer run anything: restart it; the ledger continues the paused work on the next launch.
     console.warn("[updater] update handoff was refused after work was paused; restarting to continue it");
+    quitRelaunching = true;
     app.relaunch();
     app.quit();
   },
@@ -1647,10 +1670,115 @@ function armMacNativeExitWatchdog(): boolean {
   }
 }
 
+// ── Quit policy (quit-policy.ts) ─────────────────────────────────────────────
+/** What stopQuitServices does to agentlasd: stop it (continuity OFF) or only detach. */
+let quitDaemonMode: "stop" | "detach" = "stop";
+let quitPlanCommitted = false;
+let quitFullConfirmed = false;
+let quitRelaunching = false;
+let quitResolving = false;
+
+async function countQuitWork(): Promise<number> {
+  let guiKinds: string[] = [];
+  try { guiKinds = collectUpdateWork().map((item) => item.kind); } catch { /* store closed */ }
+  let serviceReasons: string[] = [];
+  try {
+    const { readDaemonActiveWork } = await import("./daemon/app-launcher");
+    serviceReasons = await readDaemonActiveWork(userDataDir());
+  } catch { /* no service */ }
+  return quitWorkCount(guiKinds, serviceReasons);
+}
+
+function loginContinuityOn(): boolean {
+  try { return getDaemonAutostartEnabled(); } catch { return false; }
+}
+
+function commitQuit(plan: Extract<QuitPlan, { kind: "quit" }>): void {
+  quitDaemonMode = plan.daemon;
+  quitPlanCommitted = true;
+  if (backgroundHoldActive()) leaveBackgroundHold();
+  console.info("[quit] quitting", { daemon: plan.daemon });
+  app.quit();
+}
+
+function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>): void {
+  clearQuitIntent();
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.hide();
+  }
+  console.info("[quit] continuing in background", { activeWork: plan.activeWork, autoQuitWhenIdle: plan.autoQuitWhenIdle });
+  // Any way the window comes back (tray, second launch, notification) ends background mode.
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.once("show", () => leaveBackgroundHold());
+  enterBackgroundHold({
+    locale: () => (currentUiLocale() === "ko" ? "ko" : "en"),
+    activeWork: countQuitWork,
+    continuity: loginContinuityOn,
+    open: () => {
+      leaveBackgroundHold();
+      if (!mainWindow || mainWindow.isDestroyed()) { void createWindow(); return; }
+      mainWindow.show();
+      mainWindow.focus();
+    },
+    quitCompletely: () => {
+      quitFullConfirmed = true;
+      noteQuitIntent("menu-quit", { from: "background-tray" });
+      commitQuit({ kind: "quit", daemon: "stop" });
+    },
+  }, { autoQuitWhenIdle: plan.autoQuitWhenIdle });
+}
+
+async function resolveOrdinaryQuit(): Promise<void> {
+  if (quitResolving) return;
+  quitResolving = true;
+  try {
+    const intentCode = currentQuitIntentCode();
+    // Signals, OS logout/shutdown and headless surfaces never prompt or hide in the tray.
+    const nonInteractive = intentCode === "signal" || intentCode === "os-shutdown" || intentCode === "os-quit-request";
+    const headless = !shellReadyForWindows || intentCode === "headless-done"
+      || intentCode === "startup-failed" || intentCode === "startup-refused" || intentCode === "single-instance-rejected";
+    const relaunching = quitRelaunching || intentCode === "relaunch";
+    const continuity = loginContinuityOn();
+    const needsCensus = !quitFullConfirmed && !relaunching && !headless && !nonInteractive && !systemShutdownInProgress;
+    const activeWork = needsCensus ? await countQuitWork() : 0;
+    const plan = planGuiQuit({
+      continuity, activeWork, fullQuitConfirmed: quitFullConfirmed,
+      systemShutdown: systemShutdownInProgress || nonInteractive, relaunching, headless,
+      userQuit: intentCode === "menu-quit" || intentCode === "window-all-closed",
+    });
+    if (plan.kind === "quit") { commitQuit(plan); return; }
+    if (plan.kind === "background") { holdInBackground(plan); return; }
+    const text = quitPromptText(currentUiLocale() === "ko" ? "ko" : "en", plan.activeWork);
+    const parent = mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() ? mainWindow : undefined;
+    const options = {
+      type: "question" as const, message: text.message, detail: text.detail, buttons: text.buttons,
+      defaultId: 0, cancelId: QUIT_PROMPT_CHOICES.indexOf("cancel"), noLink: true,
+    };
+    const answer = parent ? await dialog.showMessageBox(parent, options) : await dialog.showMessageBox(options);
+    const choice = QUIT_PROMPT_CHOICES[answer.response] ?? "cancel";
+    const next = planAfterQuitPrompt(choice, plan.activeWork);
+    if (!next) { clearQuitIntent(); return; }
+    if (next.kind === "quit") { quitFullConfirmed = true; commitQuit(next); return; }
+    holdInBackground(next);
+  } catch (error) {
+    // The policy must never trap the person in an app that cannot quit.
+    console.error("[quit] quit policy failed; quitting and stopping the service", error);
+    commitQuit({ kind: "quit", daemon: "stop" });
+  } finally {
+    quitResolving = false;
+  }
+}
+
 // Start the hard boundary before Electron begins closing renderer and auxiliary
 // windows. On macOS, a native credential lookup can outlive every visible
 // window and prevent `will-quit` from being reached at all.
-app.on("before-quit", () => {
+app.on("before-quit", (event) => {
+  // Quit policy first (quit-policy.ts): decide once what this quit does to the
+  // service and to running work. Update installs own their own lifetime.
+  if (!quitPlanCommitted && automaticQuitInstaller.quitDisposition() === "ordinary") {
+    event.preventDefault();
+    void resolveOrdinaryQuit();
+    return;
+  }
   // First: say why this process is quitting, before any cleanup can hang or be cut off (see quit-reason.ts).
   recordQuitStarted();
   if (automaticQuitInstaller.quitDisposition() === "ordinary") {
@@ -3834,13 +3962,13 @@ app.whenReady().then(async () => {
   });
   // Analysis-plan approval is a human authorization boundary. The MCP-visible freeze route can
   // only verify an already approved/frozen exact version; it cannot manufacture this receipt.
-  ipcMain.handle("science:analysisSpecs:review", (event, envelope: unknown) => {
+  ipcMain.handle("science:analysisSpecs:review", async (event, envelope: unknown) => {
     assertScienceSender(event, envelope);
     const input = envelope && typeof envelope === "object" && "input" in envelope
       ? (envelope as { input?: unknown }).input
       : null;
     if (!input || typeof input !== "object") throw new Error("science-analysis-plan-review-input-invalid");
-    return scienceStore().reviewAnalysisPlan(input as ReviewScienceAnalysisPlanInput);
+    return reviewScienceAnalysisPlanWithFreshness(scienceStore(), input as ReviewScienceAnalysisPlanInput);
   });
   ipcMain.handle("science:decisions:list", (event, input: unknown) => {
     assertScienceSender(event, input);

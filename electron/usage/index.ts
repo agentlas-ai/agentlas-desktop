@@ -351,8 +351,9 @@ export function invalidateUsage(providerId?: string): void {
  * 역할 풀 선택용 동기 peek — 네트워크를 절대 치지 않는다. 마지막 정상
  * 스냅샷(메모리 → 디스크 last-good)에서 해당 프로바이더의 최대 사용률(%)을
  * 돌려주고, 자료가 없거나 너무 오래됐으면 null(= 판단 보류, 스킵 금지).
+ * model이 있으면 그 모델에 해당하는 창만 포함한다. 리셋된 창은 현재 한도의 증거가 아니다.
  */
-export function peekProviderUsedPercent(providerId: string, now = Date.now()): number | null {
+export function peekProviderUsedPercent(providerId: string, now = Date.now(), model?: string): number | null {
   if (developmentEffectsSuppressed()) return null;
   loadLastGood();
   const entry = lastResult.get(providerId) ?? lastGood.get(providerId);
@@ -360,7 +361,13 @@ export function peekProviderUsedPercent(providerId: string, now = Date.now()): n
   const windows = entry.usage?.windows ?? [];
   let max: number | null = null;
   for (const window of windows) {
-    if (typeof window.usedPercent !== "number") continue;
+    if (typeof window.usedPercent !== "number" || !Number.isFinite(window.usedPercent)) continue;
+    // An expired limit is no longer evidence of current exhaustion. Do not
+    // invent a fresh zero: a missing live observation remains unknown.
+    if (typeof window.resetAt === "number" && Number.isFinite(window.resetAt) && window.resetAt <= now) continue;
+    if (model && window.model && window.model !== model
+      && !(providerId === "claude-code" && ["opus", "sonnet", "haiku"].includes(window.model)
+        && (model === window.model || model.startsWith(`claude-${window.model}-`)))) continue;
     max = max === null ? window.usedPercent : Math.max(max, window.usedPercent);
   }
   return max;
