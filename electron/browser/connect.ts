@@ -1,3 +1,4 @@
+import { quarantineDedicatedGoogleSessions } from "./google-session-boundary";
 // Browser 기능 핸들러 (메인 프로세스).
 //
 // 범용 브라우저 조작(agentlas-browser CDP)을 위한: 사이트 목록, 전용 프로필 로그인,
@@ -263,7 +264,7 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
     }
     const child = spawn(
       exe,
-      browserLoginArgs(profile, url),
+      browserLoginArgs(profile, "chrome://version/"),
       { detached: true, stdio: "ignore" },
     );
     let spawnError: Error | null = null;
@@ -312,6 +313,9 @@ async function browserOpenLoginOnce(site: string): Promise<BrowserOpenLoginResul
         throw new Error(`Chrome CDP listener ownership could not be verified (${lastOwnershipReason}).`);
       }
     }
+    await quarantineDedicatedGoogleSessions(profile, browserCdpPort(), async () => (await reconcileBrowserCdpOwnerWithRetry()).state === "owned");
+    const navigation = spawn(exe, [`--user-data-dir=${profile}`, url], { detached: false, stdio: "ignore" });
+    navigation.on("error", () => { /* sign-in remains in the verified local window */ });
     });
     const ownershipAfterOpen = observedOwnership as BrowserCdpOwnership | null;
     if (ownershipAfterOpen?.state === "owned" && ownershipAfterOpen.pid) {

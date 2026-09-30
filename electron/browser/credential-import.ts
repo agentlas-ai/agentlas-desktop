@@ -1,3 +1,4 @@
+import { quarantineDedicatedGoogleSessions } from "./google-session-boundary";
 import { developmentEffectsSuppressed, assertDevelopmentEffectAllowed } from "../development-effect-policy";
 // 평소 쓰는 Chrome 계열 브라우저의 로그인 세션을 Agentlas 전용 CDP 프로필로 가져온다.
 //
@@ -21,6 +22,7 @@ import { developmentEffectsSuppressed, assertDevelopmentEffectAllowed } from "..
 //     빈 결과로 조용히 진행하지 않고 실패를 말한다.
 //  4) **덮어쓰지 않는다(merge).** 전용 프로필에 이미 있는 쿠키 행은 건드리지 않고, 없는 것만 넣는다.
 //     에이전트가 전용 창에서 새로 만든 세션을 평소 브라우저 상태가 지우면 안 된다.
+import { isProtectedBrowserSessionHost, PROTECTED_BROWSER_SESSION_TRANSFER } from "../../shared/browser-session-transfer";
 import Database from "better-sqlite3";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { createCipheriv, createDecipheriv, createHash, pbkdf2Sync, timingSafeEqual } from "node:crypto";
@@ -880,6 +882,10 @@ async function importMacCookiesThroughDedicatedRuntime(
       throw new Error(importCopy(`Agentlas 로그인 가져오기 브라우저 소유권 확인 실패 (${ownership.state}:${ownership.reason}).`, `Could not verify ownership of the Agentlas sign-in import browser (${ownership.state}:${ownership.reason}).`));
     }
 
+    await quarantineDedicatedGoogleSessions(browserCdpProfilePath(), browserCdpPort(), async () => {
+      const owner = await inspectBrowserCdpOwnership();
+      return owner.state === "owned" && owner.pid === child?.pid;
+    });
     connection = await chromium.connectOverCDP(`http://127.0.0.1:${browserCdpPort()}`);
     const context = connection.contexts()[0];
     if (!context) throw new Error(importCopy("Agentlas 로그인 가져오기 브라우저 컨텍스트가 없습니다.", "The Agentlas sign-in import browser has no context."));
@@ -988,7 +994,13 @@ export async function importBrowserCredentials(
   // 목록의 한 줄과 같은 단위(등록 가능 도메인)로 접는다. 예전 승인 기록이 서브도메인을
   // 담고 있어도 여기서 사이트 단위로 넓어진다 — 좁게 복사해 반쯤 깨진 로그인을 만드느니
   // 그 사이트 쿠키를 전부 옮기는 쪽이 옳다(오너 결정 2026-08-20).
-  const wanted = [...new Set(domains.map((d) => registrableDomain(d)).filter(Boolean))];
+  const requested = [...new Set(domains.map((d) => registrableDomain(d)).filter(Boolean))];
+  const protectedSites = requested.filter(isProtectedBrowserSessionHost);
+  for (const domain of protectedSites) skipped.push({ domain, reason: PROTECTED_BROWSER_SESSION_TRANSFER });
+  const wanted = requested.filter((domain) => !isProtectedBrowserSessionHost(domain));
+  if (wanted.length === 0 && protectedSites.length > 0) {
+    return { ok: true, cookiesAdded: 0, linkedSites: protectedSites, requiresLoginSites: protectedSites, skipped };
+  }
   if (wanted.length === 0) {
     return { ok: false, cookiesAdded: 0, linkedSites: [], skipped, error: importCopy("가져올 도메인을 하나 이상 골라 주세요.", "Choose at least one domain to import.") };
   }
@@ -1124,7 +1136,7 @@ export async function importBrowserCredentials(
     let added = 0;
     let refreshed = 0;
     let preserved = 0;
-    const linkedSites: string[] = [];
+    const linkedSites: string[] = [...protectedSites];
     const selectRows = src.prepare(
       `SELECT ${quoted} FROM cookies WHERE host_key = ? OR host_key = ? OR host_key LIKE ?`,
     );
@@ -1202,7 +1214,7 @@ export async function importBrowserCredentials(
     }
 
     const importedSites: string[] = [];
-    const requiresLoginSites: string[] = [];
+    const requiresLoginSites: string[] = [...protectedSites];
     const preservedSites: string[] = [];
     const acceptedJobDomains = runtimeImported
       ? jobs.map((job) => job.domain).filter((domain) => (
@@ -1390,13 +1402,15 @@ export function dedicatedCookieStoreFile(): string | null {
 export function readSourceSessionCookies(
   profileId: string,
   domains: readonly string[],
-): { ok: true; cookies: PortableSourceCookie[]; wipe: () => void } | { ok: false; reason: "unsupported-platform" | "no-profile" | "snapshot-failed" | "no-cookies" } {
+): { ok: true; cookies: PortableSourceCookie[]; wipe: () => void } | { ok: false; reason: "unsupported-platform" | "no-profile" | "snapshot-failed" | "no-cookies" | "protected-session-transfer" } {
   if (developmentEffectsSuppressed()) return { ok: false, reason: "unsupported-platform" };
   if (process.platform !== "darwin") return { ok: false, reason: "unsupported-platform" };
+  const permitted = domains.filter((domain) => !isProtectedBrowserSessionHost(domain));
+  if (!permitted.length) return { ok: false, reason: PROTECTED_BROWSER_SESSION_TRANSFER };
   const profile = resolveDiscoveredBrowserProfile(profileId);
   const store = profile ? cookieStorePath(profile.path) : null;
   if (!profile || !store) return { ok: false, reason: "no-profile" };
-  const wanted = [...new Set(domains.map((d) => registrableDomain(d)).filter(Boolean))];
+  const wanted = [...new Set(permitted.map((d) => registrableDomain(d)).filter(Boolean))];
   const workDir = makeBrowserProfileImportWorkDir();
   try {
     const snap = snapshotBrowserSqlite(store, workDir, "Cookies.recovery");

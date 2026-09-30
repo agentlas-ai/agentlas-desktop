@@ -1,3 +1,4 @@
+import { isProtectedBrowserSessionHost } from "../../shared/browser-session-transfer";
 /*
  * 로그인 복구 사다리 — 에이전트가 로그인 벽에 섰을 때 오너에게 묻기 전에 제품이 먼저 푼다.
  *
@@ -56,6 +57,7 @@ export type LoginRecoveryStep =
 export type LoginRecoveryReason =
   | "rate-limited"
   | "not-consented"
+  | "protected-session-transfer"
   | "source-unreadable"
   | "source-missing"
   | "source-expired"
@@ -109,7 +111,7 @@ export interface TargetedImportReport {
 export interface OwnerLoginCard {
   site: string;
   surface: BrowserCookieSurface;
-  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required">;
+  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required" | "protected-session-transfer">;
   signInUrl: string;
   /** 오너에게 보이는 한 줄. */
   message: { ko: string; en: string };
@@ -202,12 +204,16 @@ export function ownerLoginCardFor(input: {
   returnUrl?: string | null;
 }): OwnerLoginCard {
   const name = siteDisplayName(input.site);
-  const ko = input.reason === "second-factor-required"
+  const ko = input.reason === "protected-session-transfer"
+    ? `${name}은 이 창에서 별도로 로그인해 주세요 — 기존 Chrome 로그인은 가져오지 않습니다`
+    : input.reason === "second-factor-required"
     ? `${name} 로그인에 2단계 인증 코드가 필요합니다 — 이 창에서 코드를 한 번 입력해 주세요`
     : input.reason === "source-rejected-by-site"
       ? `${name} 로그인이 크롬에서 가져온 세션으로도 열리지 않습니다 — 이 창에서 한 번 로그인해 주세요`
       : `${name} 로그인이 크롬에도 없습니다 — 이 창에서 한 번 로그인해 주세요`;
-  const en = input.reason === "second-factor-required"
+  const en = input.reason === "protected-session-transfer"
+    ? `Sign in to ${name} in this window — Chrome account sessions are kept separate`
+    : input.reason === "second-factor-required"
     ? `${name} needs a one-time sign-in code — please enter it once in this window`
     : input.reason === "source-rejected-by-site"
       ? `${name} rejected even the session imported from Chrome — please sign in once in this window`
@@ -265,6 +271,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     ctx: LoginRecoveryContext,
   ): Promise<LoginRecoveryOutcome> => {
     const domains = wall.targetDomains;
+    const protectedSession = domains.some(isProtectedBrowserSessionHost);
 
     // ── 1) 겨냥 가져오기 ──────────────────────────────────────────────
     const now = deps.now();
@@ -274,9 +281,11 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     });
     let sourceCookies: CookieMetadata[] | null = null;
     let sourceState: SourceSessionState = "unknown";
-    try { sourceCookies = await deps.readSource(domains); } catch { sourceCookies = null; }
+    try { if (!protectedSession) sourceCookies = await deps.readSource(domains); } catch { sourceCookies = null; }
     sourceState = evaluateSourceSession(sourceCookies, domains, nowSeconds());
-    if (allowed.length === 0) {
+    if (protectedSession) {
+      event(ctx, "targeted-reimport", wall, { reason: "protected-session-transfer", sourceSession: "unknown" });
+    } else if (allowed.length === 0) {
       event(ctx, "targeted-reimport", wall, { reason: "rate-limited", sourceSession: sourceState });
     } else if (sourceState === "missing" || sourceState === "expired") {
       // 원본에 가져올 로그인이 없다 — 가져오기는 아무것도 못 고친다. 도메인 시계도 건드리지 않는다.
@@ -333,7 +342,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
       reason: feed.action === "feed" ? "store-mismatch" : "store-consistent",
       counts: { nativePartition: counts["native-partition"], cdpProfile: counts["cdp-profile"] },
     });
-    if (feed.action === "feed") {
+    if (!protectedSession && feed.action === "feed") {
       let report: TargetedImportReport;
       try { report = await deps.feedStore({ from: feed.from, to: feed.to, domains }); }
       catch { report = { state: "failed", written: 0 }; }
@@ -349,7 +358,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     }
 
     // ── 3) 원본 확인 ─────────────────────────────────────────────────
-    const reason: OwnerLoginCard["reason"] = sourceState === "missing" ? "source-missing"
+    const reason: OwnerLoginCard["reason"] = protectedSession ? "protected-session-transfer" : sourceState === "missing" ? "source-missing"
       : sourceState === "expired" ? "source-expired"
         : "source-rejected-by-site";
     event(ctx, "source-check", wall, {

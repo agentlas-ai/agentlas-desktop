@@ -3,9 +3,30 @@
 const fs = require("node:fs");
 const path = require("node:path");
 
-// Package-scoped exclusions only: Iconify's emoji/test and Playwright's
-// mcp/test directories contain executable product features.
+// Test suites and package-scoped exclusions: Iconify's emoji/test and
+// Playwright's mcp/test directories contain executable product features.
 const ASAR_VERIFICATION_RULES = [
+  ["**/node_modules/tinycolor2/deno_asserts*.mjs", /(?:^|\/)node_modules\/tinycolor2\/deno_asserts[^/]*\.mjs$/],
+  ["**/node_modules/better-sqlite3/{build/Release/test_extension.node,deps/test_extension.c}", /(?:^|\/)node_modules\/better-sqlite3\/(?:build\/Release\/test_extension\.node|deps\/test_extension\.c)$/],
+  ["**/node_modules/node-domexception/.history/**", /(?:^|\/)node_modules\/node-domexception\/\.history(?:\/|$)/],
+  ["**/node_modules/object-inspect/test-core-js.js", /(?:^|\/)node_modules\/object-inspect\/test-core-js\.js$/],
+  ["**/node_modules/pump/test-{browser,node}.js", /(?:^|\/)node_modules\/pump\/test-(?:browser|node)\.js$/],
+  ["**/node_modules/tinycolor2/{cjs,esm}/test{,_template}.js", /(?:^|\/)node_modules\/tinycolor2\/(?:cjs|esm)\/test(?:_template)?\.js$/],
+  ["**/node_modules/@types/benchmark/**", /(?:^|\/)node_modules\/@types\/benchmark(?:\/|$)/],
+  ["**/node_modules/@braintree/sanitize-url/vitest.config.ts", /(?:^|\/)node_modules\/@braintree\/sanitize-url\/vitest\.config\.ts$/],
+  ["**/node_modules/@maplibre/maplibre-gl-style-spec/src/**/*.test-d.ts", /(?:^|\/)node_modules\/@maplibre\/maplibre-gl-style-spec\/src\/.*\.test-d\.ts$/],
+  ["**/node_modules/gaxios/build/{cjs,esm}/{browser-test,system-test}/**", /(?:^|\/)node_modules\/gaxios\/build\/(?:cjs|esm)\/(?:browser-test|system-test)(?:\/|$)/],
+  ["**/node_modules/{buffer-equal-constant-time,expand-template,isarray}/test.js", /(?:^|\/)node_modules\/(?:buffer-equal-constant-time|expand-template|isarray)\/test\.js$/],
+  ["**/node_modules/molstar/lib/{examples/domain-annotation-server,servers/model}/test.js", /(?:^|\/)node_modules\/molstar\/lib\/(?:commonjs\/)?(?:examples\/domain-annotation-server|servers\/model)\/test\.js$/],
+  ["**/node_modules/molstar/lib/commonjs/{examples/domain-annotation-server,servers/model}/test.js", /(?:^|\/)node_modules\/molstar\/lib\/(?:commonjs\/)?(?:examples\/domain-annotation-server|servers\/model)\/test\.js$/],
+  ["**/node_modules/protobufjs/ext/descriptor/test.js", /(?:^|\/)node_modules\/protobufjs\/ext\/descriptor\/test\.js$/],
+  ["**/node_modules/safer-buffer/tests.js", /(?:^|\/)node_modules\/safer-buffer\/tests\.js$/],
+  ["**/node_modules/**/__tests__/**", /(?:^|\/)node_modules\/(?:[^/]+\/)*__tests__(?:\/|$)/],
+  ["**/node_modules/**/*.{test,spec}.*", /(?:^|\/)node_modules\/.*\.(?:test|spec)\.[^/]+$/],
+  ["**/node_modules/cytoscape/{playwright-tests,tests-examples,test-results}/**", /(?:^|\/)node_modules\/cytoscape\/(?:playwright-tests|tests-examples|test-results)(?:\/|$)/],
+  ["**/node_modules/cytoscape/src/test.mjs", /(?:^|\/)node_modules\/cytoscape\/src\/test\.mjs$/],
+  ["**/node_modules/khroma/tasks/benchmark.js", /(?:^|\/)node_modules\/khroma\/tasks\/benchmark\.js$/],
+  ["**/node_modules/node-pty/deps/winpty/misc/color-test.sh", /(?:^|\/)node_modules\/node-pty\/deps\/winpty\/misc\/color-test\.sh$/],
   ["**/node_modules/zod/src/**/{tests,benchmarks}/**", /(?:^|\/)node_modules\/zod\/src\/(?:[^/]+\/)*(?:tests|benchmarks)(?:\/|$)/],
   ["**/node_modules/fast-uri/benchmark/**", /(?:^|\/)node_modules\/fast-uri\/benchmark(?:\/|$)/],
   ["**/node_modules/gaxios/build/{cjs,esm}/test/**", /(?:^|\/)node_modules\/gaxios\/build\/(?:cjs|esm)\/test(?:\/|$)/],

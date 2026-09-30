@@ -1,7 +1,9 @@
+import { isProtectedBrowserSessionHost } from "../../shared/browser-session-transfer";
+import { quarantineNativeGoogleSessions } from "./google-session-boundary";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
-import { session, shell, type DownloadItem } from "electron";
+import { app, session, shell, type DownloadItem } from "electron";
 import { userDataPath } from "../runtime-paths";
 import type { BrowserDownloadState, BrowserDownloadSummary } from "../../shared/browser-ui";
 import { browserDownloadPathIsOwned, normalizeBrowserDownloadFileName } from "./download-paths";
@@ -172,12 +174,17 @@ export function ensureBrowserDownloadRegistry(resolveOwner: (webContentsId: numb
   // guests. Check each redirect before transport; a completed URL chain alone
   // would be too late to prevent a request to an unsupported origin.
   nativeSession.webRequest.onBeforeRequest((details, callback) => {
+    const proceed = () => {
     const ticket = details.webContentsId === undefined ? undefined : agentTickets.get(details.webContentsId);
     if (!ticket) { callback({}); return; }
     let permitted = false;
     try { permitted = !ticket.cancelled && ticket.current() && ticket.acceptUrls([details.url]); } catch { /* No authority. */ }
     callback({cancel: !permitted});
     if (!permitted) ticket.finish(null, "browser_download_origin_refused");
+    };
+    if (!isProtectedBrowserSessionHost(details.url)) { proceed(); return; }
+    const expected = path.join(app.getPath("sessionData"), "Partitions", "agentlas-browser-default");
+    void quarantineNativeGoogleSessions(nativeSession, expected).then(proceed, () => callback({ cancel: true }));
   });
   nativeSession.on("will-download", (event, item, webContents) => {
     // Chromium may deliver a retried/cancelled download after its initiating

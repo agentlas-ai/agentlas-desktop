@@ -14,6 +14,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
+import { dedicatedGoogleSessionsQuarantined } from "../browser/google-session-boundary";
 import type { AgiLoginRecoveryOutcome } from "./actions";
 
 const LADDER_WAIT_MS = 20_000;
@@ -67,7 +68,13 @@ export async function agiRestartAgentlasBrowser(): Promise<boolean> {
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
   const closed = await launcher.closeBrowserCdpIfIdle(0).catch(() => ({ closed: false, reason: "close-failed" as const, pid: null }));
   // Another run holds a lease: do not pull the browser out from under it; only make sure a host answers.
-  if (!closed.closed && closed.reason === "active-leases" && await launcher.browserCdpPortReady()) return true;
+  if (!closed.closed && closed.reason === "active-leases") {
+    try {
+      const ownership = await launcher.reconcileBrowserCdpOwnerWithRetry();
+      return ownership.state === "owned" && await launcher.browserCdpPortReady()
+        && dedicatedGoogleSessionsQuarantined(launcher.browserCdpProfilePath());
+    } catch { return false; }
+  }
   try { await launcher.ensureBrowserCdpHost(); } catch { return false; }
   return launcher.browserCdpPortReady();
 }

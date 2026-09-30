@@ -78,7 +78,10 @@ async function dedicatedPages(): Promise<LadderPage[]> {
     surface: "dedicated" as const,
     evaluate: (expression: string) => runtime.evaluateCdpPage(target, expression),
     reload: async () => {
-      await runtime.evaluateCdpPage(target, "location.reload(), true").catch(() => null);
+      // A blocked command must not be reported as a successful reload merely
+      // because the old target still has a non-error URL.
+      try { await runtime.evaluateCdpPage(target, "location.reload(), true"); }
+      catch { return null; }
       await new Promise((resolve) => setTimeout(resolve, 2_000));
       const next = (await runtime.dedicatedBrowserPages()).find((page) => page.id === target.id);
       return next?.url ?? null;
@@ -205,14 +208,16 @@ async function reestablish(code: BrowserFailureCode, scope: LadderScope): Promis
   const owned = await launcher.reconcileBrowserCdpOwnerWithRetry().catch(() => ({ state: "unverifiable" as const, pid: null, reason: "inspect-failed" }));
   // Never kill or drive a browser that is not ours.
   if (owned.state === "foreign") return { result: "failed", detail: { ownership: "foreign" } };
-  if (owned.state === "owned" && await launcher.browserCdpPortReady().catch(() => false)) return { result: "recovered", detail: { ownership: "owned" } };
+  let relaunched = false;
   try {
-    await launcher.ensureBrowserCdpHost();
+    // An answering owned port is not sufficient: ensure also verifies the
+    // isolation marker and quarantines legacy sessions before replaying tools.
+    relaunched = (await launcher.ensureBrowserCdpHost()).started;
   } catch (error) {
     const diagnostic = launcher.browserCdpHostFailureDiagnostic(error);
     return { result: "failed", detail: { stage: diagnostic.stage, host: diagnostic.code } };
   }
-  return await launcher.browserCdpPortReady().catch(() => false) ? { result: "recovered", detail: { relaunched: true } } : { result: "failed", detail: { relaunched: false } };
+  return await launcher.browserCdpPortReady().catch(() => false) ? { result: "recovered", detail: { relaunched } } : { result: "failed", detail: { relaunched: false } };
 }
 
 async function switchSurface(scope: LadderScope): Promise<RungOutcome> {

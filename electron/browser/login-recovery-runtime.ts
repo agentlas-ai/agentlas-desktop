@@ -1,3 +1,5 @@
+import { isProtectedBrowserSessionHost } from "../../shared/browser-session-transfer";
+import { dedicatedGoogleSessionsQuarantined } from "./google-session-boundary";
 /*
  * 로그인 복구 사다리의 실제 손발 — 저장소 측정, 겨냥 가져오기, 다시 읽기, 카드, 세션 감시.
  * 판정과 순서는 login-recovery.ts(순수)에 있고, 여기서는 그 결정을 실행만 한다.
@@ -47,7 +49,7 @@ function consentDomains(domains: readonly string[]): Promise<{ profileId: string
     const consent = getBrowserCredentialConsent();
     if (!consent.granted || !consent.profileId) return null;
     const allowed = new Set(consent.domains);
-    const scoped = [...new Set(domains.map((d) => registrableDomain(d)).filter((d) => d && allowed.has(d)))];
+    const scoped = [...new Set(domains.map((d) => registrableDomain(d)).filter((d) => d && !isProtectedBrowserSessionHost(d) && allowed.has(d)))];
     return scoped.length ? { profileId: consent.profileId, domains: scoped } : null;
   });
 }
@@ -74,6 +76,8 @@ async function readStore(surface: BrowserCookieSurface, domains: readonly string
 }
 
 async function readSource(domains: readonly string[]): Promise<CookieMetadata[] | null> {
+  domains = domains.filter((domain) => !isProtectedBrowserSessionHost(domain));
+  if (!domains.length) return null;
   const { getBrowserCredentialConsent } = await import("./credential-sync");
   const consent = getBrowserCredentialConsent();
   if (!consent.granted || !consent.profileId) return null;
@@ -109,7 +113,14 @@ async function cdpPages(): Promise<CdpPageTarget[]> {
 }
 
 /** One CDP session: send commands, optionally wait for one event, then close. */
-function cdpSession<T>(wsUrl: string, work: (call: (method: string, params?: Record<string, unknown>) => Promise<unknown>, waitFor: (event: string, timeoutMs: number) => Promise<boolean>) => Promise<T>): Promise<T> {
+async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params?: Record<string, unknown>) => Promise<unknown>, waitFor: (event: string, timeoutMs: number) => Promise<boolean>) => Promise<T>): Promise<T> {
+  const launcher = await import("../mcp-tools/browser-cdp-launcher");
+  const isolated = () => dedicatedGoogleSessionsQuarantined(launcher.browserCdpProfilePath());
+  // All recovery CDP commands (including evaluation, reload, and cookie feeds)
+  // share this boundary. An existing answering port is never sufficient proof.
+  if (!loopbackWs(wsUrl, launcher.browserCdpPort())
+    || (await launcher.reconcileBrowserCdpOwnerWithRetry()).state !== "owned"
+    || !isolated()) throw new Error("google-session-isolation-unconfirmed");
   return new Promise<T>((resolve, reject) => {
     const socket = new WebSocket(wsUrl, { perMessageDeflate: false, maxPayload: 8 * 1024 * 1024 });
     let seq = 0;
@@ -125,6 +136,9 @@ function cdpSession<T>(wsUrl: string, work: (call: (method: string, params?: Rec
       if (error) reject(error); else resolve(value as T);
     };
     const call = (method: string, params: Record<string, unknown> = {}) => new Promise<unknown>((res, rej) => {
+      try {
+        if (!isolated()) throw new Error("google-session-isolation-unconfirmed");
+      } catch (error) { rej(error instanceof Error ? error : new Error("google-session-isolation-unconfirmed")); return; }
       const id = ++seq;
       pending.set(id, { resolve: res, reject: rej });
       try { socket.send(JSON.stringify({ id, method, params })); } catch (error) { pending.delete(id); rej(error as Error); }
@@ -234,6 +248,8 @@ type CdpCookieParam = { name: string; value: string; domain: string; path: strin
 
 /** Feed cookies into the running, owned dedicated browser without closing it. */
 async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[]): Promise<number | null> {
+  cookies = cookies.filter((cookie) => !isProtectedBrowserSessionHost(cookie.domain));
+  if (!cookies.length) return 0;
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
   if (!(await launcher.browserCdpPortReady())) return null;
   const owned = await launcher.reconcileBrowserCdpOwnerWithRetry();

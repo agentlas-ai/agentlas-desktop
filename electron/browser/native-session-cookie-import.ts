@@ -1,3 +1,4 @@
+import { isProtectedBrowserSessionHost } from "../../shared/browser-session-transfer";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -347,6 +348,7 @@ export async function writeNativeBrowserCookies(
 ): Promise<CookieWriteSummary> {
   const counts = emptyCounts();
   counts.observed = cookies.length;
+  cookies = cookies.filter((cookie) => !isProtectedBrowserSessionHost(cookie.domain));
   let begun = false;
   /*
    * An automatic sync never mixes two logins: a login group the partition already holds in full is
@@ -515,7 +517,7 @@ async function connectSessionScope(requestedDomains?: readonly string[]): Promis
       || !consent.domains.every((domain) => typeof domain === "string" && domain.length <= 253
         && /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(domain))) return null;
     const sites = listBrowserSites();
-    const domains = [...new Set(consent.domains.filter((domain) => (!requestedDomains || requestedDomains.includes(domain)) && /^[a-z0-9.-]+$/u.test(domain)
+    const domains = [...new Set(consent.domains.filter((domain) => !isProtectedBrowserSessionHost(domain) && (!requestedDomains || requestedDomains.includes(domain)) && /^[a-z0-9.-]+$/u.test(domain)
       && !domain.startsWith(".") && sites.some((site) => site.site === domain && site.session.status === "valid")))].sort();
     if (!domains.length) return null;
     const revision = browserCredentialConsentRevision(), port = browserCdpPort();

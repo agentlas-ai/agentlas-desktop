@@ -1,3 +1,4 @@
+import { dedicatedGoogleSessionsQuarantined, googleCdpBoundaryRuntimeSource, quarantineDedicatedGoogleSessions } from "../browser/google-session-boundary";
 // Agentlas Browser (CDP) 플러그인 런처 소스.
 //
 // 범용 브라우저 MCP 플러그인 — 특정 사이트/계정과 무관하다. 사용자가 직접 로그인한 Agentlas
@@ -68,7 +69,13 @@ export function browserCdpLauncherPathForScope(scope: string): string {
 
 /** 전용 CDP 크롬 프로필 경로(MCP 런처와 로그인 창이 공유). */
 export function browserCdpProfilePath(): string {
-  return process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), ".agentlas", "chrome-cdp-profile");
+  const expected = path.join(os.homedir(), ".agentlas", "chrome-cdp-profile");
+  const configured = process.env.AGENTLAS_CDP_PROFILE || expected;
+  if (path.resolve(configured) !== path.resolve(expected)
+    || (fs.existsSync(configured) && fs.realpathSync(configured) !== path.resolve(expected))) {
+    throw new Error("google-session-relogin-required:ownership-unverified");
+  }
+  return expected;
 }
 
 /** Agentlas 전용 CDP Chrome 소유 표식. 임의의 기존 9222 프로세스에 붙지 않기 위한 로컬 증거. */
@@ -1498,6 +1505,11 @@ async function ensureBrowserCdpHostOnce(options: { headed?: boolean } = {}): Pro
     if (ownership.state !== "owned" || !ownership.pid) {
       throw new BrowserCdpHostError("existing-host", "ownership-unverified");
     }
+    if (!dedicatedGoogleSessionsQuarantined(browserCdpProfilePath())) {
+      await withBrowserCdpMaintenance(() => undefined);
+      return ensureBrowserCdpHostOnce(options);
+    }
+    await quarantineDedicatedGoogleSessions(browserCdpProfilePath(), browserCdpPort(), async () => (await reconcileBrowserCdpOwnerWithRetry()).state === "owned");
     if (!scheduleBrowserCdpGuardian(ownership.pid)) throw new BrowserCdpHostError("guardian", "guardian-unavailable");
     return { started: false, pid: ownership.pid };
   }
@@ -1547,17 +1559,25 @@ export async function ensureBrowserCdpHostHeaded(input: {
   ensure?: (options: { headed?: boolean }) => Promise<BrowserCdpHostEnsureResult>;
   ownership?: () => Promise<BrowserCdpOwnership>;
   portReady?: () => Promise<boolean>;
+  isolated?: () => boolean;
 } = {}): Promise<{ ok: true; pid: number; relaunched: boolean } | { ok: false; reason: "not-owned" | "shared-headless" | "relaunch-failed" }> {
   const portReady = input.portReady ?? browserCdpPortReady;
   const ownership = input.ownership ?? (() => reconcileBrowserCdpOwnerWithRetry());
   const processes = input.processes ?? (() => inspectBrowserCdpProcesses());
   const ensure = input.ensure ?? ((options) => ensureBrowserCdpHost(options));
   const close = input.close ?? ((max) => closeBrowserCdpIfIdle(max));
+  const isolated = input.isolated ?? (() => dedicatedGoogleSessionsQuarantined(browserCdpProfilePath()));
   if (await portReady()) {
     const owned = await ownership();
     if (owned.state !== "owned" || !owned.pid) return { ok: false, reason: "not-owned" };
     const row = (await processes().catch(() => [] as BrowserCdpProcessSnapshot[])).find((entry) => entry.pid === owned.pid);
-    if (row && !/--headless\b/.test(row.commandLine)) return { ok: true, pid: owned.pid, relaunched: false };
+    if (row && !/--headless\b/.test(row.commandLine)) {
+      try {
+        if (isolated()) return { ok: true, pid: owned.pid, relaunched: false };
+      } catch { return { ok: false, reason: "relaunch-failed" }; }
+      // A visible browser can still hold legacy copied tokens. Reuse requires
+      // the same durable isolation proof as a headless host.
+    }
     const closed = await close(1);
     if (!closed.closed) return { ok: false, reason: closed.reason === "active-leases" ? "shared-headless" : "relaunch-failed" };
   }
@@ -2632,7 +2652,7 @@ async function guardOwnedBrowser(browserPid, ownerPid) {
  * 그래서 파일이 자기 계약 번호와 writer를 들고 다닌다. 더 높은 계약과 같은 계약의 다른
  * writer는 보존한다. 같은 Desktop 계약은 현재 설치 앱의 런타임 경로로 다시 결합한다.
  */
-export const BROWSER_CDP_LAUNCHER_CONTRACT = 17;
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 18;
 export const BROWSER_CDP_LAUNCHER_WRITER = "agentlas-desktop";
 
 const UNIFIED_CUA_BOOTSTRAP_SOURCE = String.raw`
@@ -2847,7 +2867,11 @@ function nativeRequest(endpoint, method) {
     req.end();
   });
 }
-const CDP_PROFILE = process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), '.agentlas', 'chrome-cdp-profile');
+const EXPECTED_CDP_PROFILE = path.join(os.homedir(), '.agentlas', 'chrome-cdp-profile');
+const CDP_PROFILE = process.env.AGENTLAS_CDP_PROFILE || EXPECTED_CDP_PROFILE;
+if (path.resolve(CDP_PROFILE) !== path.resolve(EXPECTED_CDP_PROFILE)
+  || (fs.existsSync(CDP_PROFILE) && fs.realpathSync(CDP_PROFILE) !== path.resolve(EXPECTED_CDP_PROFILE)))
+  throw new Error('google-session-relogin-required:ownership-unverified');
 const OWNER_FILE = path.join(CDP_PROFILE, '.agentlas-cdp-owner.json');
 const LEASE_DIR = path.join(CDP_PROFILE, ${JSON.stringify(BROWSER_CDP_LEASE_DIRNAME)});
 const SHUTDOWN_LOCK = path.join(CDP_PROFILE, ${JSON.stringify(BROWSER_CDP_SHUTDOWN_LOCK_BASENAME)});
@@ -2889,6 +2913,7 @@ function portReady(port) {
 
 ${BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE}
 ${BROWSER_CDP_LIFECYCLE_RUNTIME_SOURCE}
+${googleCdpBoundaryRuntimeSource()}
 
 function resetSessionRestoreArtifacts() {
   for (const relative of [
@@ -2920,6 +2945,11 @@ async function ensureChromeUnlocked() {
   if (await portReady(PORT)) {
     const ownership = await reconcileOwnerWithRetry();
     if (ownership.state === 'owned') {
+      if (!markerCurrent(CDP_PROFILE, ownedSessionDirectory(CDP_PROFILE, EXPECTED_CDP_PROFILE))) {
+        if (!(await terminateAttestedBrowserRoot(ownership.pid))) throw new Error('google-session-relogin-required:quarantine-unavailable');
+        return ensureChromeUnlocked();
+      }
+      await quarantineGoogleCdp(CDP_PROFILE, PORT, async () => (await reconcileOwnerWithRetry()).state === 'owned');
       scheduleBrowserGuardian(ownership.pid);
       log('owned CDP already up on', PORT, ownership.adopted ? '(adopted)' : '');
       return;
@@ -2963,6 +2993,7 @@ async function ensureChromeUnlocked() {
     if (await portReady(PORT)) {
       const ownership = await reconcileOwnerWithRetry(2, 50);
       if (ownership.state === 'owned') {
+        await quarantineGoogleCdp(CDP_PROFILE, PORT, async () => (await reconcileOwnerWithRetry()).state === 'owned');
         scheduleBrowserGuardian(ownership.pid);
         log('CDP ready', ownership.pid);
         return;
