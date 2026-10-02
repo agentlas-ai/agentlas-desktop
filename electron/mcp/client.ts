@@ -12,8 +12,7 @@ import { beginAccountedInference } from "../long-run/accounting-context";
 import { createRuntimeUsageCollector } from "../../shared/observed-usage";
 import { runObservedRunner, observedRunnerUsage, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { withInvocationUsage, beginInvocationUsageAttempt, currentInvocationObservedUsage } from "../runtime/invocation-usage";
-import { createNoProgressGuard, noteNoProgressEvent, noProgressLoopError, noProgressLoopOwnerText, toolObservationDigest,
-  type NoProgressDecision } from "../automation-progress-guard";
+import { createNoProgressGuard, noteNoProgressEvent, toolObservationDigest } from "../automation-progress-guard";
 import { formatAutomationNextRun } from "../../shared/automation-next-run";
 import { runtimeQuotaFailureMessage } from "../../shared/runtime-quota";
 import { getOneProfile } from "../store/one-profile";
@@ -112,7 +111,7 @@ import {
 import { getProject, listProjects } from "../store/projects";
 import { getChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot } from "../store/chat-goals";
 import { goalDeadlineAt } from "../long-run/goal-deadline";
-import { getLongRunByGoalId, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
+import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
@@ -133,7 +132,7 @@ import { classifyTurnEscalation, decideProjectRosterTaskForce, describeTurnEscal
 import { hasPermissionEscalationMarker, stripPermissionEscalationMarker } from "../../shared/permission-escalation";
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { livePartialCommitBoundary } from "../../shared/interrupted-partial";
-import { EFFECT_OBSERVATION_SYSTEM_PROMPT } from "../../shared/effect-observation";
+import { EFFECT_OBSERVATION_SYSTEM_PROMPT, effectObservationOutputSchema, stripEffectObservationMarker } from "../../shared/effect-observation";
 import { effectObservationTicket } from "../long-run/effect-observation-tickets";
 import { goalExecutionDirectivePromptBlock } from "../long-run/goal-execution-context";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
@@ -205,7 +204,7 @@ import { harvestCompactionSummaries } from "../memory/compaction-harvest";
 import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
-import { AUTOMATION_PROTOCOL, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
+import { AUTOMATION_PROTOCOL, ONE_GRAPH_PROTOCOL, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { applyFinalDisplayBackstop } from "./final-display-backstop";
 import {
@@ -1888,8 +1887,7 @@ export function runMcpInvocation(
   // host pass. Guard completed outcomes here, including ordinary chats, rather
   // than relying on the scheduled Graph guard or on model-written progress.
   const progress = createNoProgressGuard({ observationMode: "completed" });
-  const progressController = new AbortController();
-  const ownerSignal = signal ? AbortSignal.any([signal, progressController.signal]) : progressController.signal;
+  const ownerSignal = signal ?? new AbortController().signal;
   const children: AttemptChildren = { children: new Set(), closing: false, stop: child => killCliTree(child, 500) };
   const login = createBrowserLoginPrerequisite({ runId: req.runId!, chatId: req.chatId,
     nodeId: executionContext?.nodeId, signal: ownerSignal,
@@ -1901,8 +1899,8 @@ export function runMcpInvocation(
     },
   });
   const invocationSignal = login.signal;
-  let stopped: NoProgressDecision | null = null;
-  let stopDelivered = false;
+  let progressAdvisory: string | null = null;
+  const reportedProgress = new Set<string>();
   let goalDispatchObserved = false;
   let admittedGoal: { goalId: string; runId: string; revision: number } | null = null;
   const bindDispatchedGoal = (goalId: string | null): void => {
@@ -1916,47 +1914,27 @@ export function runMcpInvocation(
       }
     } catch { /* Missing admission evidence cannot authorize a Goal transition. */ }
   };
-  const deliverStop = (): void => {
-    if (!stopped || stopDelivered) return;
-    stopDelivered = true;
-    sink({ kind: "error", error: req.agentAppMode ? untrustedRuntimeFailurePayload() : {
-      code: "invocation-no-progress", message: noProgressLoopOwnerText(stopped, pickLocale(req)),
-    } });
-  };
   const guardedSink: EventSink = (event) => {
     if (login.waiting) {
       if (event.kind !== "final" && event.kind !== "error") sink(event);
       return;
     }
-    if (stopped) { if (event.kind === "error" || event.kind === "final") deliverStop(); return; }
     const decision = signal?.aborted ? null : noteNoProgressEvent(progress, event);
-    sink(event); // Preserve the exact observation that triggered the stop.
-    if (!decision || signal?.aborted) return;
-    stopped = decision;
+    sink(event);
+    if (!decision || signal?.aborted || reportedProgress.has(decision.fingerprint)) return;
+    reportedProgress.add(decision.fingerprint);
+    progressAdvisory = `The host observed repeated unchanged results (${decision.rule}, ${decision.count} observations). Change strategy now: delegate diagnosis or read-only effect checks to a background worker, then perform a different independent task. Do not repeat an uncertain external action or claim an unverified result. Keep the overall goal active.`;
     if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: req.chatId,
-      kind: "invocation_no_progress", sourceEventId: "invocation-no-progress",
+      kind: "invocation_no_progress_advisory", sourceEventId: `invocation-no-progress:${decision.fingerprint}`,
       ...(decision.nodeId ? { nodeId: decision.nodeId } : {}),
-      payload: { rule: decision.rule, tool: decision.tool, fingerprint: decision.fingerprint, count: decision.count } });
-    // A cost/progress stop must not fall through to the terminal verifier or
-    // schedule another inference with the same unchanged evidence.
-    try {
-      const admitted = admittedGoal;
-      if (admitted) getDb().transaction(() => {
-        const run = getLongRunByGoalId(admitted.goalId);
-        if (getChat(req.chatId)?.goalId === admitted.goalId
-          && getChatGoalRevision(admitted.goalId)?.revision === admitted.revision
-          && run?.id === admitted.runId && run.surface !== "science"
-          && ["running", "waiting_worker", "waiting_tool"].includes(run.status)) {
-          transitionLongRun({ runId: run.id, to: "blocked", actorKind: "host",
-            expectedVersion: run.version, reason: "invocation_no_progress" });
-        }
-      })();
-    } catch { /* Preserve the terminal stop even if its secondary Goal projection fails. */ }
-    progressController.abort(new Error(noProgressLoopError(decision)));
-    deliverStop();
+      payload: { rule: decision.rule, tool: decision.tool, fingerprint: decision.fingerprint, count: decision.count,
+        goalId: admittedGoal?.goalId ?? null, action: "change_strategy", backgroundRepair: true } });
+    sink({ kind: "notice", notice: { level: "warning", code: "invocation-no-progress-advisory",
+      message: pickLocale(req) === "ko" ? "같은 결과가 반복돼 다음 단계에서 접근을 바꾸고 독립 작업을 이어갑니다."
+        : "Repeated results detected. The next step will change strategy and continue independent work." } });
   };
   return withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
-    req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login,
+    req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory,
   )).then(async result => {
     if (login.waiting && !ownerSignal.aborted) {
       const browserLoginWait = login.seal(await drainAttemptChildren(children));
@@ -1965,10 +1943,7 @@ export function runMcpInvocation(
         goalWaitRequest: undefined, goalPassStop: undefined };
     }
     login.cancel();
-    if (!stopped) return result;
-    deliverStop();
-    return { ...result, finalText: undefined, stormbreakerContinueRequested: false, goalCompletionClaim: undefined,
-      goalWaitRequest: undefined, goalPassStop: undefined };
+    return result;
   }).catch(async error => {
     if (login.waiting && !ownerSignal.aborted) {
       const browserLoginWait = login.seal(await drainAttemptChildren(children));
@@ -1976,9 +1951,7 @@ export function runMcpInvocation(
         stormbreakerContinueRequested: false };
     }
     login.cancel();
-    if (!stopped) throw error;
-    deliverStop();
-    return { stormbreakerContinueRequested: false };
+    throw error;
   }), () => bindDispatchedGoal(getChatGoalId(req.chatId) ?? null)));
 }
 
@@ -1997,6 +1970,7 @@ async function runMcpInvocationInContext(
   /** Capture Main's current Goal admission before the first provider dispatch. */
   onGoalDispatched?: (goalId: string | null) => void,
   login?: BrowserLoginPrerequisiteControl,
+  progressAdvisory?: () => string | null,
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
@@ -2302,9 +2276,10 @@ async function runMcpInvocationInContext(
   // so the next turn keeps the context, but it is written as a system turn:
   // replaying the conversation must never attribute our wording to the user,
   // and it must never become the conversation's title.
+  const effectObservationRun = Boolean(effectObservationTicket(req.runId));
   const promptIsSystemAuthored = req.promptOrigin === "system";
   const persistUserMessage = () => {
-    if (req.agentAppMode || userMessagePersisted) return;
+    if (effectObservationRun || req.agentAppMode || userMessagePersisted) return;
     if (promptIsSystemAuthored) {
       appendChatMessage(chat.id, "system", req.userPrompt, (hostNoticePurpose === "goal-continuation" || hostNoticePurpose === "one-dispatch-brief" || hostNoticePurpose === "update-resume") && req.runId
         ? { hostNotice: { purpose: hostNoticePurpose, runId: req.runId } } : undefined);
@@ -3284,7 +3259,6 @@ ${effectiveUserPrompt}`;
   const oneTeamAllowsStorm = !scienceRecovery && !isAliveControllerRun && !scienceCollectionCurrent && executionContext?.source !== "science" && (!oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked" || oneTeamExecutionPolicy === "native_one_staffing");
   // A Main-issued read-only effect observation is one look at the outside world,
   // never a Goal cycle, Stormbreaker loop or multi-pass continuation.
-  const effectObservationRun = Boolean(effectObservationTicket(req.runId));
   const stormbreakerEngaged = oneTeamAllowsStorm && !req.agentAppMode && !restrictedReadBoundary && !effectObservationRun && (
     chat.kind === "division" ||
     chat.continuousMode === true ||
@@ -3967,7 +3941,7 @@ ${effectiveUserPrompt}`;
       console.error("[mcp]", { code, diagnostic });
       tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_config_failure",
         payload: { schemaVersion: 1, code, stage: diagnostic.stage, reasonCode: diagnostic.code } });
-      // 진단이 { unknown, unknown } 뿐이면 원인을 알 길이 없다(격리 앱 실측 2026-09-13). 개발 진단용으로만 원문을 남긴다.
+
       if (process.env.AGENTLAS_MCP_CONFIG_DEBUG === "1") console.error("[mcp] config failure detail:", err instanceof Error ? `${err.name}: ${err.message}\n${err.stack ?? ""}` : String(err));
       sink({ kind: "error", error: {
         code,
@@ -5148,7 +5122,7 @@ ${effectiveUserPrompt}`;
       ? "[호스트 출력 언어 계약]\n현재 One 화면 언어는 한국어입니다. 이번 사용자 메시지·인용문·파일의 언어와 무관하게 한국어로 답변하세요. 사용자가 이번 메시지에서 다른 출력 언어를 명시적으로 요구할 때만 예외입니다. " + tStatus(locale, "sysReplyLanguageScope") + " 이 계약을 언급하거나 인용하지 마세요.\n[/호스트 출력 언어 계약]"
       : "[Host response-language contract]\nThe visible One interface language is English. Reply in English regardless of the language of this user message, quoted text, or files. Only an explicit request in this message for another output language is an exception. " + tStatus(locale, "sysReplyLanguageScope") + " Do not mention or quote this contract.\n[/Host response-language contract]");
     // The owner's global Codex AGENTS.md says "Start with: 사용 스킬: …". In One that line
-    // is an operator log, not an answer (X Marketing 2026-09-27: "Skills used:" opened an
+
     // English answer, "사용 스킬:"/"적용 스킬:" a Korean one). The team boundary already said
     // this; goal-owned and Mobile runs never received it.
     turnContextParts.push(locale === "ko"
@@ -5578,7 +5552,8 @@ ${effectiveUserPrompt}`;
     if (officeContext) {
       turnContextParts.push(officeContext);
     }
-    const lifecycleContext = automationLifecycleContext(chat.id, req.automationId);
+    const lifecycleContext = mcpIncludedServers.some(server => server.catalogId === "one-team")
+      ? null : automationLifecycleContext(chat.id, req.automationId);
     if (lifecycleContext) {
       turnContextParts.push(lifecycleContext);
     }
@@ -5593,7 +5568,8 @@ ${effectiveUserPrompt}`;
     // Fresh/sessionless requests already merge this into the system prompt;
     // resumed sessions receive it with their turn. Do not inject it twice.
     if (executionContext?.source !== "science") {
-      turnContextParts.push(AUTOMATION_PROTOCOL); stableTurnContextParts.push(AUTOMATION_PROTOCOL);
+      const automationProtocol = mcpIncludedServers.some(server => server.catalogId === "one-team") ? ONE_GRAPH_PROTOCOL : AUTOMATION_PROTOCOL;
+      turnContextParts.push(automationProtocol); stableTurnContextParts.push(automationProtocol);
     }
   }
   // One 실행 경계의 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유. 경계 블록 조립은
@@ -5895,26 +5871,40 @@ ${effectiveUserPrompt}`;
       }
       const sessionCapable = runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi" || runtime.kind === "antigravity";
       const checkpoint = activeGoalId ? latestTaskCheckpoint(activeGoalId) : null;
-      // Runtime resolution can await capability probes. Recheck after those
-      // awaits so edits or Stop cannot silently remove the promised capsule.
+      let checkpointAdvisory: string | null = null;
+      let checkpointAdmitted = false;
+      let continuationSession: ReturnType<typeof goalContinuationSessionIdentity> | null = null;
       if (continuationRuntimePinned) {
         if (signal?.aborted) throw new Error("checkpoint_dispatch_cancelled");
-        if (!checkpoint) throw new Error("checkpoint_dispatch_context_missing");
-        if (getLongRunByGoalId(checkpoint.goalId)?.status !== "running") throw new Error("checkpoint_dispatch_goal_not_running");
-        const admitted = prepareCheckpointContinuation(checkpoint, req.runId);
-        if (JSON.stringify(admitted.runtimeSelection) !== JSON.stringify(req.runtimeSelection))
-          throw new Error("checkpoint_dispatch_runtime_selection_changed");
-      }
-      const continuationSession = continuationRuntimePinned && checkpoint && req.runId && checkpoint.workspacePath
-        ? goalContinuationSessionIdentity({ chatId: chat.id, goalId: checkpoint.goalId,
+        const goal = activeGoalId ? getLongRunByGoalId(activeGoalId) : null;
+        if (goal && (longRunOwnerHold(goal.id) || ["pausing", "cancelling", "cancelled", "completed"].includes(goal.status)
+          || (goal.status === "paused" && goal.pauseReason === "user"))) {
+          throw new Error("checkpoint_dispatch_goal_stopped");
+        }
+        try {
+          if (!checkpoint) throw new Error("checkpoint_dispatch_context_missing");
+          const admitted = prepareCheckpointContinuation(checkpoint, req.runId);
+          if (JSON.stringify(admitted.runtimeSelection) !== JSON.stringify(req.runtimeSelection)) {
+            throw new Error("checkpoint_dispatch_runtime_selection_changed");
+          }
+          if (!req.runId || !checkpoint.workspacePath) throw new Error("checkpoint_session_identity_missing");
+          continuationSession = goalContinuationSessionIdentity({ chatId: chat.id, goalId: checkpoint.goalId,
             goalRevision: checkpoint.goalRevision!, workspacePath: checkpoint.workspacePath,
             runtime, permission: req.permissions ?? null, baseSeed: runnerReq.sessionFingerprintSeed ?? "",
-            invocationRunId: req.runId }) : null;
-      if (continuationRuntimePinned && !continuationSession) throw new Error("checkpoint_session_identity_missing");
+            invocationRunId: req.runId });
+          checkpointAdmitted = true;
+        } catch (error) {
+          if (signal?.aborted) throw error;
+          checkpointAdvisory = "The prior checkpoint could not authorize a replay. Start a fresh planning episode from the current goal and user constraints. Treat prior external effects as unknown, inspect them in parallel, and continue independent work without replaying those specific actions.";
+          if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "checkpoint_dispatch_advisory",
+            payload: { goalId: activeGoalId, action: "fresh_independent_episode",
+              reason: error instanceof Error ? error.message.slice(0, 160) : "checkpoint_unavailable" } });
+        }
+      }
       // Interactive model changes may follow a newer artifact/user-state edit.
       // Read one canonical snapshot without rewriting the stored checkpoint or
       // weakening the stricter automatic-continuation admission above.
-      const checkpointContext = checkpoint ? getDb().transaction(() => {
+      const checkpointContext = checkpoint && (!continuationRuntimePinned || checkpointAdmitted) ? getDb().transaction(() => {
         const artifacts = !continuationRuntimePinned && checkpoint.schemaVersion === "agentlas.task-checkpoint.v2"
           ? { chatId: chat.id, observedAt: new Date().toISOString(),
               artifacts: listAgentSurfaces(chat.id).map(surface => ({ artifactId: surface.id,
@@ -5950,7 +5940,7 @@ ${effectiveUserPrompt}`;
             reservedDecisionIds: goalPlanContextSlot.reservedDecisionIds ?? undefined });
       }
       const dispatchTurnContext = dispatchTurnContextParts.filter((part) => part && part.trim()).join("\n\n");
-      const runtimeTurnContext = [dispatchTurnContext, checkpointContext, ownerExecutionDirectives].filter(Boolean).join("\n\n");
+      const runtimeTurnContext = [dispatchTurnContext, checkpointContext, checkpointAdvisory, ownerExecutionDirectives, progressAdvisory?.()].filter(Boolean).join("\n\n");
       // Every runtime gets the minimal observation request; runners that support the mode (claude-code, codex, serving,
       // BYOK/local host loop) also shed their own headers, user setup and extra tool servers.
       if (effectObservationRun) {
@@ -5963,6 +5953,8 @@ ${effectiveUserPrompt}`;
           turnContextStable: undefined,
           history: [],
           minimalObservation: true as const,
+          outputSchema: { name: "agentlas_effect_observation_v1",
+            schema: effectObservationOutputSchema(effectObservationTicket(req.runId)!.attemptIds) },
           // A local effect (file, folder) is looked at with read built-ins only; the browser server's tool
           // schemas are loaded only when the interrupted work used a browser or a web page.
           ...(effectObservationTicket(req.runId)?.needsBrowser === false
@@ -5978,7 +5970,8 @@ ${effectiveUserPrompt}`;
       return {
         ...runnerReq,
         ...(continuationSession ? { runtimeSessionOwnerId: continuationSession.ownerId,
-          sessionFingerprintSeed: continuationSession.fingerprintSeed } : {}),
+          sessionFingerprintSeed: continuationSession.fingerprintSeed } : continuationRuntimePinned && req.runId
+          ? { runtimeSessionOwnerId: `goal-independent:${req.runId}`, sessionFingerprintSeed: `goal-independent:${req.runId}` } : {}),
         systemPrompt: sessionCapable || !runtimeTurnContext
           ? systemPrompt
           : systemPrompt + "\n\n" + runtimeTurnContext,
@@ -6605,7 +6598,7 @@ ${effectiveUserPrompt}`;
     // goal 원장(예산·무진전·명시 종료)이 내린다.
     const continuousMode = !scienceRecovery && !req.agentAppMode && !projectReadOnlyBoundary && chat.kind !== "division" && !effectObservationRun &&
       (chat.continuousMode === true || activeGoalId != null);
-    const maxPasses = req.agentAppMode || (req.oneMode && req.fastMode === true) || scienceRecovery
+    const maxPasses = effectObservationRun || req.agentAppMode || (req.oneMode && req.fastMode === true) || scienceRecovery
       ? 1
       : continuousMode
         ? CONTINUOUS_MODE_MAX_PASSES
@@ -6704,6 +6697,7 @@ ${effectiveUserPrompt}`;
     /** Runaway guard for the marker-driven path, which has no ledger to consult. */
     let lastPassFingerprint = "";
     let identicalPassStreak = 0;
+    let passRecoveryNote: string | null = null;
     /**
      * Set when a failed pass stopped the loop while leaving the goal open and resumable. Returned to the
      * invocation service, which writes it into the long-run ledger with a scheduled retry
@@ -6798,12 +6792,13 @@ ${effectiveUserPrompt}`;
               level: "warning",
               code: "continuation-no-progress",
               message: locale === "ko"
-                ? `${STORMBREAKER_MAX_IDENTICAL_PASSES}번 연속으로 같은 결과가 나와 계속 진행을 멈췄습니다. 무엇이 막혔는지 알려 주시면 이어서 하겠습니다.`
-                : `The last ${STORMBREAKER_MAX_IDENTICAL_PASSES} passes produced the same result, so continuation stopped. Tell me what is blocking and I will pick it up from there.`,
+                ? `${STORMBREAKER_MAX_IDENTICAL_PASSES}번 같은 결과가 반복돼 다음 단계에서 다른 접근으로 이어갑니다.`
+                : `The last ${STORMBREAKER_MAX_IDENTICAL_PASSES} passes repeated the same result. The next step will use a different approach.`,
             },
           });
-          result = { ...result, text: continuation.text };
-          break;
+          passRecoveryNote = "Previous passes repeated unchanged results. Delegate diagnosis to a background worker and select another useful independent step. Keep uncertain actions unresolved and do not replay them.";
+          identicalPassStreak = 0;
+          passShouldContinue = true;
         }
       }
       if (!passShouldContinue || signal?.aborted) {
@@ -6848,7 +6843,7 @@ ${effectiveUserPrompt}`;
           : "runner reported more safe Stormbreaker work remains",
       });
       const nextRunnerReq = runnerRequestForRuntime(active, picked!);
-      const continuationPrompt = goalDrivenPass
+      const baseContinuationPrompt = goalDrivenPass
         ? buildGoalDrivenContinuationPrompt({
             pass,
             objective: latestGoalDecision?.objective ?? null,
@@ -6856,6 +6851,7 @@ ${effectiveUserPrompt}`;
             previousOutput: result.text,
           })
         : buildStormbreakerContinuationPrompt(result.text, pass);
+      const continuationPrompt = [baseContinuationPrompt, passRecoveryNote].filter(Boolean).join("\n\n");
       const planNote = !goalPlanContextSlot && activeGoalId ? goalPlanContinuationNote(activeGoalId) : null;
       activeRunnerReq = {
         ...nextRunnerReq,
@@ -7118,10 +7114,10 @@ ${effectiveUserPrompt}`;
       sink({
         kind: "tool-use",
         tool: {
-          name: "Goal Loop · halt",
+          name: "Goal Loop · stopped",
           result: locale === "ko"
-            ? `목표 실행을 멈추고 확인을 요청합니다 (사유: ${goalHardStop.reason}${goalHardStop.blockedReason ? ` · ${goalHardStop.blockedReason}` : ""}). 목표 칩을 다시 켜면 새 캠페인으로 재개됩니다.`
-            : `Goal execution halted for review (reason: ${goalHardStop.reason}${goalHardStop.blockedReason ? ` · ${goalHardStop.blockedReason}` : ""}). Re-enabling the goal chip resumes as a fresh campaign.`,
+            ? `목표의 사용자 정지 또는 종료 상태를 따릅니다 (${goalHardStop.reason}).`
+            : `Respecting the goal’s owner stop or terminal state (${goalHardStop.reason}).`,
         },
       });
     }
@@ -7710,7 +7706,7 @@ ${effectiveUserPrompt}`;
           : curateReply(displayText, curationContext, semanticOptions);
         // Restricted cleanup may intentionally remove the entire response. Never
         // restore the raw control block through the ordinary empty-text fallback.
-        // 소형 로컬 모델은 답 전체를 Memory Events 봉투로만 내기도 한다(격리 앱 실측 2026-09-13, Qwen3-4B).
+
         // 그때 원문(봉투)을 되살리면 제어 블록이 화면에 그대로 뜬다. 봉투의 turn_summary 가 유일한 사람 말이면 그것을 답으로.
         const envelopeOnlySummary = !cleanedText.trim()
           ? (parseMemoryEvents(displayText).turnSummary?.trim() || /turn_summary\s*:\s*"([^"\n]{1,300})"/.exec(displayText)?.[1]?.trim() || "")
@@ -7868,7 +7864,7 @@ ${effectiveUserPrompt}`;
     const pendingFinalImages = !req.agentAppMode
       ? pendingWorkToolImages.splice(0, pendingWorkToolImages.length).map((item) => item.image)
       : [];
-    const promotedImages = !req.agentAppMode && req.runId
+    const promotedImages = !effectObservationRun && !req.agentAppMode && req.runId
       ? promoteBoundOneMarkdownImages({
           text: displayWithFloor, chatId: chat.id, runId: req.runId, images: pendingFinalImages,
         })
@@ -7883,7 +7879,8 @@ ${effectiveUserPrompt}`;
       locale: pickLocale(req),
       allowSurfaceRender: !req.agentAppMode,
     });
-    const persistedDisplay = stripStrayProtocolTokens(stripPermissionEscalationMarker(finalDisplay.durableText));
+    const persistedDisplay = stripStrayProtocolTokens(stripPermissionEscalationMarker(
+      effectObservationRun ? stripEffectObservationMarker(finalDisplay.durableText) : finalDisplay.durableText));
     const finalWorkImages = promotedImages.images;
     if (imageGenerationRequired && (!observedImageArtifactEvidence || finalWorkImages.length === 0) && !signal?.aborted) {
       throw new Error("image_tool_unavailable: the generated image was not durably bound");
@@ -7894,7 +7891,7 @@ ${effectiveUserPrompt}`;
     }
     const finalImageOptions = finalWorkImages.length > 0 ? { images: finalWorkImages } : undefined;
     let durableAssistantEntry: ReturnType<typeof appendChatMessage> | null = null;
-    if (!req.agentAppMode) {
+    if (!effectObservationRun && !req.agentAppMode) {
       /*
        * ★빈 답은 빈 말풍선으로 남기지 않는다 — 대화창 하단에 아무것도 안 적힌 잔해만
        * 쌓이고, 사용자는 그것을 "끝난 자리"로 읽는다(실측 2026-08-15: 다중 패스 루프의

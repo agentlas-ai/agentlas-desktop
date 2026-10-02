@@ -73,6 +73,10 @@ export class LightWakeRunner {
   private readonly active = new Map<string, AbortController>();
   private readonly listeners = new Set<(row: LightWakeRow) => void>();
   private readonly toolFacts = new Map<string, { count: () => number; names: () => string[] }>();
+  private readonly pendingSettlements = new Map<string, {
+    status: LightWakeRow["status"]; inputTokens: number | null; outputTokens: number | null;
+    toolCalls: number; toolNames: string[]; finalText: string | null; errorCode: string | null; settledAtMs: number;
+  }>();
   constructor(private readonly deps: LightWakeDeps) { ensureLightWakeSchema(deps.db); }
 
   isActive(wakeId: string): boolean { return this.active.has(wakeId); }
@@ -95,6 +99,9 @@ export class LightWakeRunner {
   }
 
   row(wakeId: string): LightWakeRow | null {
+    // A transient writer lock must not strand a settled provider call as running
+    // until app restart. Retry its exact receipt, never the provider call.
+    this.persistSettlement(wakeId);
     const r = this.deps.db.prepare("SELECT * FROM alive_light_wakes WHERE wake_id=?").get(wakeId) as Record<string, any> | undefined;
     return r ? { wakeId: r.wake_id, agentId: r.agent_id, status: r.status, inputTokens: r.input_tokens, outputTokens: r.output_tokens,
       toolCalls: r.tool_calls, finalText: r.final_text, errorCode: r.error_code, processStartedAtMs: r.process_started_at_ms,
@@ -150,7 +157,7 @@ export class LightWakeRunner {
         return;
       }
       if (result.failure) {
-        this.deps.noteFailure(input.status, result.failure);
+        try { this.deps.noteFailure(input.status, result.failure); } catch { /* telemetry cannot prevent settlement */ }
         this.settle(input.wakeId, "failed", observed, null, `runtime-${result.failure.kind}`);
       } else {
         if (!observed) this.learn(input.status, "usage-unmeasured");
@@ -180,13 +187,26 @@ export class LightWakeRunner {
     finalText: string | null, errorCode: string | null): void {
     const facts = this.toolFacts.get(wakeId);
     this.toolFacts.delete(wakeId);
+    this.pendingSettlements.set(wakeId, { status, inputTokens: usage?.inputTokens ?? null,
+      outputTokens: usage?.outputTokens ?? null, toolCalls: facts?.count() ?? 0, toolNames: facts?.names() ?? [],
+      finalText: finalText === null ? null : finalText.slice(0, 4_096), errorCode, settledAtMs: this.deps.now() });
+    if (!this.persistSettlement(wakeId)) return;
+    // A receipt read may also race with a writer; the terminal row remains
+    // authoritative and the lifetime service will read it on its next beat.
+    let row: LightWakeRow | null = null;
+    try { row = this.row(wakeId); } catch { return; }
+    if (row) for (const listener of [...this.listeners]) { try { listener(row); } catch { /* a listener cannot stop settlement */ } }
+  }
+
+  private persistSettlement(wakeId: string): boolean {
+    const receipt = this.pendingSettlements.get(wakeId);
+    if (!receipt) return true;
     try {
       this.deps.db.prepare(`UPDATE alive_light_wakes SET status=?,input_tokens=?,output_tokens=?,tool_calls=?,tool_names_json=?,final_text=?,error_code=?,settled_at_ms=?
-        WHERE wake_id=? AND status='running'`).run(status, usage?.inputTokens ?? null, usage?.outputTokens ?? null, facts?.count() ?? 0,
-        JSON.stringify(facts?.names() ?? []),
-        finalText === null ? null : finalText.slice(0, 4_096), errorCode, this.deps.now(), wakeId);
-    } catch { return; /* the DB closed under a quit: the next process reconciles this row as host-lost */ }
-    const row = this.row(wakeId);
-    if (row) for (const listener of [...this.listeners]) { try { listener(row); } catch { /* a listener cannot stop settlement */ } }
+        WHERE wake_id=? AND status='running'`).run(receipt.status, receipt.inputTokens, receipt.outputTokens, receipt.toolCalls,
+        JSON.stringify(receipt.toolNames), receipt.finalText, receipt.errorCode, receipt.settledAtMs, wakeId);
+    } catch { return false; /* keep the exact receipt for the next read; restart still uses host-lost recovery */ }
+    this.pendingSettlements.delete(wakeId);
+    return true;
   }
 }

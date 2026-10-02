@@ -4662,197 +4662,32 @@ export function registerIpcHandlers(): void {
     }
     return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
   });
-  ipcMain.handle("chats:getGoalResumeReview", (_e, id: string, expectedVersion: number, expectedGoalId: string): GoalResumeReview | null => {
+  ipcMain.handle("chats:getGoalResumeReview", (_e, id: string, _expectedVersion: number, expectedGoalId: string): GoalResumeReview | null => {
     assertTrustedSitePublishIpcSender(_e);
-    const chat = getChat(id);
-    if (typeof expectedGoalId !== "string" || !expectedGoalId || chat?.goalId !== expectedGoalId) {
-      throw new Error("goal_control_binding_changed");
-    }
-    if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
-      throw new TypeError("A current long-run version is required to review");
-    }
-    // While a read-only effect observation runs, there is nothing for the person to
-    // review yet: the chip shows the checking state and Resume just re-reads it.
-    if (isGoalObserving(expectedGoalId)) return null;
-    const run = getLongRunByGoalId(expectedGoalId);
-    if (!run || run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-    const review = getLongRunAttemptReview(run.id);
-    if (review.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-    const continuation = findAutomationByGoalId(expectedGoalId);
-    // A Goal predating revisions is adopted by the existing explicit Resume
-    // action first; that action returns a version conflict before dispatch so
-    // the next review describes the newly canonical contract.
-    const automationOwnership = continuation && getChatGoalRevision(expectedGoalId)
-      ? goalAutomationOwnershipReview(continuation.id, expectedGoalId, id, run.id, expectedVersion) : undefined;
-    const automationSetup = continuation ? goalAutomationSetup(continuation) : undefined;
-    if (!review.attempts.length && !automationOwnership && !automationSetup) return null;
-    // ★오너 지시(2026-09-22) "블락되는거 전부 치워". 재개는 불확실한 옛 시도를 **다시 실행하지
-    //   않고** 다음 작업부터 이어간다 — 중복의 원천이 없다. 그래서 사람을 막을 이유는 "아직 도는
-    //   시도가 있다" 하나뿐이다. 건수 상한·자동화 연결·활동 기록 없음은 사람에게 목록을 검사시키던
-    //   시절의 차단이었고, 그 검사는 없앴다(사람은 한 문장과 버튼 하나만 본다).
-    const blocker = review.attempts.some((attempt) => attempt.state === "running") ? "running"
-      : automationSetup ? "automation_setup" : null;
-    const attempts = review.attempts.map((attempt) => {
-      const recordedActivity = attempt.invocationRunId
-        ? listRunEvents(attempt.invocationRunId, 200)
-          .filter((event) => event.kind === "mcp_tool-use")
-          .slice(-3)
-          .map((event) => {
-            const tool = typeof event.payload.toolName === "string" ? event.payload.toolName : "";
-            const result = typeof event.payload.toolResultPreview === "string"
-              ? event.payload.toolResultPreview.replace(/\s+/g, " ").trim().slice(0, 180) : "";
-            return [tool, result].filter(Boolean).join(" · ");
-          }).filter(Boolean)
-        : [];
-      return { ...attempt, recordedActivity };
-    });
-    return { ...review, attempts, blocker, ...(automationOwnership ? { automationOwnership } : {}),
-      ...(automationSetup ? { automationSetup } : {}) };
+    if (getChat(id)?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
+    // Effects and automation repair are background work; Resume has no review gate.
+    return null;
   });
   ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string,
-    submittedConfirmation?: GoalResumeConfirmation) => {
+    _submittedConfirmation?: GoalResumeConfirmation) => {
     assertTrustedSitePublishIpcSender(_e);
     const chat = getChat(id);
-    if (typeof expectedGoalId !== "string" || !expectedGoalId || chat?.goalId !== expectedGoalId) {
-      throw new Error("goal_control_binding_changed");
-    }
-    if (!Number.isSafeInteger(expectedVersion) || expectedVersion <= 0) {
-      throw new TypeError("A current long-run version is required to resume");
-    }
-    // Resume pressed while the app is already looking: not an error (never
-    // auto_goal_resume_chat_busy). Return the checking state; the observation's
-    // own outcome continues the Goal or hands the one-sentence Resume back.
-    if (isGoalObserving(chat.goalId)) {
-      const checking = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
-      return checking ? { ...checking, effectObservation: "checking" as const } : checking;
-    }
-    // An explicit (goal-chip) Goal carries its grant in its recorded goal-mode turn. Adopt it on this click (the same
-    // helper the blocked-goal sweep uses) instead of refusing until the next sweep. Adopting appends one ledger
-    // event, so the version the owner confirmed advances by exactly that write; carry the confirmation along.
-    const beforeAdoption = getLongRunByGoalId(chat.goalId);
-    if (beforeAdoption && beforeAdoption.version === expectedVersion && !getChatGoalRevision(chat.goalId)
-      && adoptExplicitGoalGrant(chat.goalId)) {
-      const adopted = getLongRunByGoalId(chat.goalId);
-      if (adopted) {
-        if (findAutomationByGoalId(chat.goalId)) throw new Error("long_run_resume_version_conflict");
-        if (submittedConfirmation && submittedConfirmation.version === expectedVersion) {
-          submittedConfirmation = { ...submittedConfirmation, version: adopted.version };
-        }
-        expectedVersion = adopted.version;
-      }
-    }
-    const context = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
-    if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
-    if (!context || context.version !== expectedVersion) {
-      throw new Error("long_run_resume_version_conflict");
-    }
-    const recoveryBlocker = goalResumeRecoveryBlockerCode(context.blockedReason);
-    if (recoveryBlocker) throw new Error(recoveryBlocker);
-    if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
-    const run = getLongRunByGoalId(chat.goalId);
-    if (!run || !context.runId || run.id !== context.runId || run.version !== expectedVersion) {
-      throw new Error("long_run_resume_version_conflict");
-    }
-    const review = getLongRunAttemptReview(run.id);
-    if (review.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-    if (review.attempts.some((attempt) => attempt.state === "running")) {
-      throw new Error("auto_goal_resume_attempt_unsettled");
-    }
-    const continuation = findAutomationByGoalId(chat.goalId);
-    if (continuation && goalAutomationSetup(continuation)) throw new Error("automation_goal_execution_setup_required");
-    const automationOwnership = continuation
-      ? goalAutomationOwnershipReview(continuation.id, chat.goalId, id, run.id, expectedVersion) : undefined;
-    const restoringParkedAutomation = run.status === "running" && Boolean(automationOwnership)
-      && parkedGoalAutomationReview(chat.goalId)?.id === continuation?.id;
-    if (run.status === "running" && !restoringParkedAutomation) throw new Error("long_run_resume_not_allowed:running");
-    let confirmation: LongRunAttemptReviewConfirmation | undefined;
-    if (review.attempts.length || automationOwnership) {
-      if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) {
-        throw new Error("goal_resume_uncertain_review_too_large");
-      }
-      if (!submittedConfirmation) throw new Error(automationOwnership
-        ? "automation_goal_execution_review_required" : "goal_resume_uncertain_review_required");
-      if (!matchesGoalResumeReview({ ...review, automationOwnership }, submittedConfirmation)) {
-        throw new Error("goal_resume_uncertain_review_changed");
-      }
-      assertTrustedSitePublishIpcSender(_e);
-      if (review.attempts.length) confirmation = { runId: review.runId, version: review.version,
-        attemptIds: review.attemptIds, attemptSetDigest: review.attemptSetDigest };
-    } else if (submittedConfirmation) {
-      throw new Error("goal_resume_uncertain_review_changed");
-    }
-    if (!continuation) {
-      // 사람이 누른 재개다: 인지 이벤트·판번호 갱신·재개를 한 트랜잭션으로(queueAutomaticGoalResume).
-      const { request, queued } = await queueAutomaticGoalResume(id, expectedVersion, confirmation);
-      try {
-        const revision = getChatGoalRevision(chat.goalId);
-        if (revision) acknowledgeGoalExecutionResume({ goalId: chat.goalId, rootChatId: id, expectedRevision: revision.revision });
-        confirmDesktopLongRunResumeDispatched(queued.id);
-        invocationService.start(request, undefined, undefined, undefined, undefined,
-          admitMainInvocation(request.chatId, request.runId));
-      } catch (error) {
-        failDesktopLongRunResumeDispatch(queued.id, error instanceof Error ? error.message : String(error));
-        throw error;
-      }
-      return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
-    }
-    const { enqueueAutomationRunNow } = await import("./automation-scheduler");
-    const queued = getDb().transaction(() => {
-      const current = getLongRunByGoalId(chat.goalId!);
-      if (!current || current.id !== run.id || current.version !== expectedVersion || getChat(id)?.goalId !== chat.goalId) {
-        throw new Error("long_run_resume_version_conflict");
-      }
-      if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
-      const currentAutomation = getAutomation(continuation.id);
-      if (!currentAutomation || goalAutomationSetup(currentAutomation)) throw new Error("automation_goal_execution_setup_required");
-      if (restoringParkedAutomation) {
-        if (current.status !== "running" || parkedGoalAutomationReview(current.goalId)?.id !== continuation.id) {
-          throw new Error("automation_goal_execution_review_changed");
-        }
-        const exhausted = longRunBudgetExhaustion(current);
-        if (exhausted) throw new Error(`${LONG_RUN_BUDGET_EXHAUSTED_CODE}:${exhausted}`);
-      }
-      if (automationOwnership) acknowledgeAutomationGoalExecutionReview(submittedConfirmation!.automationOwnership!);
-      else if (!currentAutomationGoalExecutionOwnerMatches(continuation.id, current.goalId, id, current.id)) {
-        throw new Error("automation_goal_execution_owner_unverified");
-      }
-      // 자동화가 이어받는 Goal 도 일반 재개와 같은 사람 확인을 같은 트랜잭션에서 기록한다.
-      // 예전에는 이 기록 절차가 없어 불확실 시도가 하나라도 있으면 재개 자체를 거절했다 —
-      // 이어갈 방법이 없는 막다른 길. 재개는 옛 시도를 재실행하지 않으며, 자동화의 옛 발생분
-      // 재실행은 자동화 자신의 그래프 조정 관문이 따로 막는다.
-      const acknowledged = acknowledgeUncertainLongRunAttempts(current.id, confirmation);
-      // Same as queueAutomaticGoalResume: a person's resume returns a blocked contract to active.
-      // Soak 1.2.50 (Youtube launch 12:53Z): this path skipped it, the continuation's goal gate read
-      // goal_revision_pending, refused silently, and the goal sat "running" with nothing running.
-      getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
-        .run(new Date().toISOString(), current.goalId);
-      if (restoringParkedAutomation) {
-        appendLongRunEvent({ runId: current.id, kind: "run.user_control", actorKind: "user",
-          payload: { command: "resume", source: "automation-owner-review", automationId: continuation.id } });
-        const restored = getLongRunByGoalId(current.goalId);
-        if (!restored || restored.id !== current.id || restored.status !== "running") throw new Error("goal_control_binding_changed");
-        return restored;
-      }
-      return resumeDesktopLongRunManually(current.id, acknowledged.version);
-    })();
+    if (!expectedGoalId || chat?.goalId !== expectedGoalId) throw new Error("goal_control_binding_changed");
+    if (invocationService.activeChatIds().includes(id)) return getGoalLedgerGoal(expectedGoalId, getChatWorkingFolder(id));
+    if (!getChatGoalRevision(expectedGoalId)) adoptExplicitGoalGrant(expectedGoalId);
+    const run = getLongRunByGoalId(expectedGoalId);
+    if (!run) return getGoalLedgerGoal(expectedGoalId, getChatWorkingFolder(id));
+    const revision = getChatGoalRevision(expectedGoalId);
+    const { request, queued } = await queueAutomaticGoalResume(id, expectedVersion);
     try {
-      const current = getLongRunByGoalId(chat.goalId);
-      if (getChat(id)?.goalId !== chat.goalId || current?.id !== queued.id
-        || current.version !== queued.version || current.status !== (restoringParkedAutomation ? "running" : "queued")) {
-        throw new Error("goal_control_binding_changed");
-      }
-      const revision = getChatGoalRevision(chat.goalId);
-      if (!revision) throw new Error("automation_goal_execution_review_changed");
-      acknowledgeGoalExecutionResume({ goalId: chat.goalId, rootChatId: id, expectedRevision: revision.revision });
-      if (!continuation.enabled) toggleAutomation(continuation.id, true);
-      const accepted = enqueueAutomationRunNow(continuation.id, admitMainAutomation(continuation.id));
-      if (!accepted.accepted) throw new Error("long_run_resume_dispatch_rejected");
-      if (!restoringParkedAutomation) confirmDesktopLongRunResumeDispatched(queued.id);
+      if (revision) acknowledgeGoalExecutionResume({ goalId: expectedGoalId, rootChatId: id, expectedRevision: revision.revision });
+      confirmDesktopLongRunResumeDispatched(queued.id);
+      invocationService.start(request, undefined, undefined, undefined, "goal-continuation",
+        admitMainInvocation(request.chatId, request.runId));
     } catch (error) {
       failDesktopLongRunResumeDispatch(queued.id, error instanceof Error ? error.message : String(error));
-      throw error;
     }
-    return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
+    return getGoalLedgerGoal(expectedGoalId, getChatWorkingFolder(id));
   });
   ipcMain.handle("chats:setSwarmMode", (_e, id: string, enabled: boolean) => {
     setChatSwarmMode(id, enabled);

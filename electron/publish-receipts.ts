@@ -1,17 +1,17 @@
-/**
- * Durable channel publish receipts — what the host itself saw exist on the owner's channel.
- *
- * Soak 1.2.50 (Youtube launch, 2026-09-29): the Blender Animator teammate reported "두 Shorts 파일은 이미
- * 있으며 … 게시 여부는 공개 목록에서 확인하지 못했고 로컬 기록에는 미게시로 남아 있어, 중복 게시를 피하도록
- * 재업로드도 하지 않았습니다" — 90% forever. A run could not prove whether it had posted, so it neither posted
- * nor finished, and every later run re-asked the same question from prose.
- *
- * The receipt comes from the host ledger, never from prose: a successful browser tool result whose page is
- * YouTube Studio and that names one of the channel's own videos — a Studio video edit/analytics link (only the
- * channel owner can open those) or the upload dialog's "Video link". Each distinct video id is recorded once
- * (run_events kind `channel_publish_receipt`, indexed by kind). Later goal turns, automation runs and effect
- * checks read these receipts instead of guessing.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { getDb } from "./store/db";
 
 export const CHANNEL_PUBLISH_RECEIPT_KIND = "channel_publish_receipt";

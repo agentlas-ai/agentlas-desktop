@@ -2539,13 +2539,13 @@ export function selectLocalPlannerRepair(input: {
     : { selectedAttempt: 2, reason: "use_repair" };
 }
 
-/**
- * The owner-facing body when a task force run did not pass verification.
- * Owner Youtube launch 2026-09-28 13:24Z (run c50e8c87): four members worked, one
- * reported a blocker (blocking_remaining:metrics_prep), and the owner read only
- * "완료 검증이 통과하지 않아…" with nothing saying what was left. Each worker's own
- * blocker sentence is named here (the unverified synthesis stays hidden).
- */
+
+
+
+
+
+
+
 export function taskForceIncompleteMessage(input: {
   locale: "ko" | "en";
   incompleteWorkerNames: string[];
@@ -2584,22 +2584,22 @@ export function taskForceIncompleteMessage(input: {
       ].filter(Boolean).join("\n\n");
 }
 
-/**
- * Deterministic host decision for packets whose planner omitted or garbled
- * workspaceAccess even after the bounded same-model repair.
- *
- * workspaceAccess is filesystem intent, not authority: taskForceChildPermission
- * still applies the host ceiling, plan/pre-approval gates and Agent App limits.
- * So the host can always decide it from facts it owns — the chat's granted
- * permission and the member's role — and must never end the owner's turn
- * because a model forgot one enum field (2026-09-28 Thread Marketing room died
- * with local_planner_workspace_access_unresolved after two planner attempts).
- *
- * - host read / plan / runtime-default / Agent App  -> read
- * - host write|full and the packet produces work (implementation or writing
- *   input, declared tool use, or a nested team that runs its own workers) -> write
- * - otherwise (research, review, analysis) -> read
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function hostDerivedWorkspaceAccess(
   packet: Pick<BorrowedInputPacket, "inputType" | "allocation">,
   host: { permission: RunnerRequest["permission"]; agentAppMode?: boolean },
@@ -3296,20 +3296,20 @@ function buildPlannerPrompt(
   ].filter(Boolean).join("\n");
 }
 
-/** Closed allocation object for the ordinary planner envelope.
- *
- * OpenAI strict mode (codex --output-schema / app-server outputSchema) rejects
- * any open object, so `allocation` and `synthesis` used to be `{type:"object"}`
- * and codex refused the whole planner turn (400 invalid_json_schema,
- * 2026-09-27). The follow-up stopped sending that schema to codex at all, and
- * the planner then answered in free prose or dropped `workspaceAccess` (owner
- * Thread Marketing room, 2026-09-28: attempt 1 prose, attempt 2 two packets
- * with no workspaceAccess -> local_planner_workspace_access_unresolved).
- *
- * Every property is required and the object is closed so the schema is
- * strict-valid. Optional ideas are expressed as values the host normalizer
- * already ignores: an empty runtimeId/modelId, modelClass "auto". The field
- * names are exactly what normalizeWorkloadAllocation reads. */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 export function taskForceAllocationOutputSchema(phase: "delegate" | "synthesize"): Record<string, unknown> {
   return {
     type: "object",

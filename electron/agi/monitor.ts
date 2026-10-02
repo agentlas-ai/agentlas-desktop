@@ -104,9 +104,11 @@ export class AgiGoalMonitor {
     const seen = new Set<string>();
     for (const goalId of this.deps.listGoalIds()) {
       seen.add(goalId);
-      const result = this.reconcile(goalId, "monitor");
-      if (result.diagnosis) diagnoses.push(result.diagnosis);
-      if (result.attempted) attempts += 1;
+      try {
+        const result = this.reconcile(goalId, "monitor");
+        if (result.diagnosis) diagnoses.push(result.diagnosis);
+        if (result.attempted) attempts += 1;
+      } catch (error) { console.warn("[agi-monitor] goal reconcile failed:", goalId, error); }
     }
     for (const goalId of [...this.states.keys()]) if (!seen.has(goalId)) this.states.delete(goalId);
     return { goals: seen.size, attempts, diagnoses };
@@ -137,9 +139,11 @@ export class AgiGoalMonitor {
     let attempted = false;
     let result: AgiUnblockResult | null = null;
     if (incident && diagnosis.attemptDue) {
-      const prior = this.deps.db.prepare("SELECT outcome FROM agi_unblock_attempts WHERE goal_id = ? AND state_digest = ?")
-        .get(goalId, diagnosis.stateDigest) as { outcome: string } | undefined;
-      const due = !prior || (prior.outcome === "no-handler" && this.handler);
+      const prior = this.deps.db.prepare("SELECT outcome,code,at_ms FROM agi_unblock_attempts WHERE goal_id = ? AND state_digest = ?")
+        .get(goalId, diagnosis.stateDigest) as { outcome: string; code: string | null; at_ms: number } | undefined;
+      const retryable = prior && ["failed", "rested", "needs-human"].includes(prior.outcome)
+        && prior.code !== "agi.model-attempt-dispatched" && nowMs - prior.at_ms >= AGI_MONITOR_INTERVAL_MS;
+      const due = !prior || (prior.outcome === "no-handler" && this.handler) || retryable;
       if (due) {
         if (!this.handler) {
           this.record(goalId, diagnosis.stateDigest, incident.id, trigger, { outcome: "failed", code: "agi.no-handler" }, nowMs, "no-handler");

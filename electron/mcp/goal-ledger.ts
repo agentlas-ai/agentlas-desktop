@@ -1,3 +1,4 @@
+import { admitMainInvocation, MainInvocationLifetime, runMainBackgroundTask } from "../runtime/scheduled-root-context";
 import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
 import type { LongRunUsageInput } from "../long-run/budget";
 // Compatibility bridge from the existing Goal-mode loop to Desktop-owned
@@ -7,9 +8,11 @@ import type { LongRunUsageInput } from "../long-run/budget";
 import { createHash } from "node:crypto";
 import { normalizeProgressText } from "../../shared/progress-key";
 import {
+  appendLongRunEvent,
   ensureGoalLongRun,
   getLongRunByGoalId,
   listLongRunTasks,
+  longRunOwnerHold,
   longRunContinueDecision,
   recordLongRunCycle,
   recordLongRunUsage,
@@ -59,13 +62,8 @@ export interface GoalLedgerTask {
 }
 
 export const GOAL_HARD_STOP_REASONS: ReadonlySet<string> = new Set([
-  "goal_blocked",
   "goal_terminal",
   "goal_paused",
-  "budget_wallclock_exhausted",
-  "budget_cycles_exhausted",
-  "budget_cost_exhausted",
-  "budget_cost_unavailable",
 ]);
 
 function snapshotStatus(status: string): GoalLedgerSnapshot["status"] {
@@ -78,11 +76,14 @@ function snapshotStatus(status: string): GoalLedgerSnapshot["status"] {
 function decisionForGoal(goalId: string): GoalLedgerDecision | null {
   const decision = longRunContinueDecision(goalId);
   if (!decision) return null;
+  const run = getLongRunByGoalId(goalId);
+  const advisory = run && ownsHostGoalLoop(run.surface) && !longRunOwnerHold(run.id)
+    && (decision.reason === "goal_blocked" || decision.reason.startsWith("budget_"));
   return {
-    continue: decision.continue,
+    continue: advisory ? true : decision.continue,
     // The existing Goal loop uses no_open_tasks as its evidence-gated close
     // handshake. A completed long run has already passed that gate.
-    reason: decision.status === "completed" ? "no_open_tasks" : decision.reason,
+    reason: decision.status === "completed" ? "no_open_tasks" : advisory ? "open_tasks_remain" : decision.reason,
     status: decision.status,
     openTaskCount: decision.openTaskCount,
     cycleCount: decision.cycleCount,
@@ -160,7 +161,8 @@ export function ensureGoalLedgerGoal(input: {
       stallWindow: input.stallWindow,
     });
     lastFailure = null;
-    return !["blocked", "completed", "failed", "cancelled"].includes(run.status);
+    return !["completed", "failed", "cancelled"].includes(run.status)
+      && (run.status !== "blocked" || ownsHostGoalLoop(run.surface));
   } catch (error) {
     /*
      * ★목표가 조용히 안 만들어지고 있었다 (오너 실사용 2026-09-08:
@@ -320,6 +322,8 @@ export async function completeGoalLedgerTask(input: {
   }
 }
 
+const backgroundLedgerVerifications = new Map<string, Promise<unknown>>();
+
 /** Compatibility name: record the claim and move to verification, closing zero tasks. */
 export async function closeOpenGoalLedgerTasks(input: {
   goalId: string;
@@ -331,21 +335,37 @@ export async function closeOpenGoalLedgerTasks(input: {
   deferVerificationUntilTerminal?: boolean;
 }): Promise<number> {
   try {
-    const before = await listGoalLedgerTasks(input.goalId, input.projectDir);
     if (input.deferVerificationUntilTerminal) {
       requestLongRunVerification(input.goalId, input.evidence);
       return 0;
     }
-    const { verifyGoalCompletionClaim } = await import("../long-run/verifier");
-    await verifyGoalCompletionClaim({
-      goalId: input.goalId,
-      outcomeText: input.outcomeText?.trim() || input.evidence?.trim() || "Completion claimed without result text.",
-      evidence: input.evidence,
-      invocationRunId: input.invocationRunId,
-      projectDir: input.projectDir,
+    if (backgroundLedgerVerifications.has(input.goalId)) return 0;
+    const run = getLongRunByGoalId(input.goalId);
+    if (!run?.rootChatId || longRunOwnerHold(run.id)) return 0;
+    const verificationRunId = `background-ledger-verification:${input.invocationRunId ?? input.goalId}:${Date.now()}`;
+    const job = runMainBackgroundTask(() => {
+      const lifetime = new MainInvocationLifetime(admitMainInvocation(run.rootChatId!, verificationRunId), run.rootChatId!, verificationRunId);
+      return lifetime.run(async () => {
+        const { verifyGoalCompletionClaim } = await import("../long-run/verifier");
+        return verifyGoalCompletionClaim({
+          goalId: input.goalId,
+          outcomeText: input.outcomeText?.trim() || input.evidence?.trim() || "Completion claimed without result text.",
+          evidence: input.evidence, invocationRunId: input.invocationRunId,
+          projectDir: input.projectDir, background: true,
+        });
+      });
     });
-    const after = await listGoalLedgerTasks(input.goalId, input.projectDir);
-    return Math.max(0, (before?.length ?? 0) - (after?.length ?? 0));
+    const observed = job.catch((error: unknown) => {
+      try { appendLongRunEvent({ runId: run.id, kind: "verification.background_unavailable", actorKind: "host",
+        payload: { invocationRunId: input.invocationRunId ?? null,
+          reason: error instanceof Error ? error.message.slice(0, 200) : "verification_unavailable" } }); } catch { /* a removed goal cannot be mutated */ }
+    }).finally(() => {
+      if (backgroundLedgerVerifications.get(input.goalId) === observed) backgroundLedgerVerifications.delete(input.goalId);
+    });
+    backgroundLedgerVerifications.set(input.goalId, observed);
+    // Only the independent verifier closes tasks after its evidence succeeds.
+    // Dispatching that check is not a successful closure receipt.
+    return 0;
   } catch {
     return 0;
   }

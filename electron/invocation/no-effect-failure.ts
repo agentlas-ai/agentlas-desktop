@@ -1,25 +1,25 @@
-/**
- * A failed tool call that could not have changed anything outside is a settled effect.
- *
- * Measured 2026-09-27 on the owner's store (1.2.45, read-only copy), One goals "X Marketing" and
- * "Thread Marketing": every continuation wait was refused as goal_wait_effects_uncertain, and every
- * pending effect ref was `operation:root:root:item_N:failed` — a call whose typed failed result the
- * host had observed. What those calls were:
- *   - bash `wc -l <two skill files> && sed -n '1,320p' <file> && …` (one file did not exist, exit 1)
- *   - agentlas-browser.browser_navigate to a Threads permalink ("agentlas proxy reconnecting")
- *   - agentlas-browser.browser_tabs {"action":"new","url":"https://…"}, browser_wait_for {"text":…},
- *     browser_tabs {"action":"select","index":2} (tab not found)
- *   - hephaestus-network.context.verify / context.impact ("path is not in the map"),
- *     agentlas_tool_search, workforce.goal_context, hephaestus_cloud_search
- * None of them can post, click, type or write. Yet each one kept the whole episode "uncertain", so the
- * next cycle could not be scheduled, an extra read-only observation run had to be spent, and after two
- * such episodes the automatic-goal cap stopped the goal with "I checked twice and could not confirm".
- *
- * The decision uses only machine fields the host recorded before/at the call — the tool name and its
- * arguments — never the result text (a preview is truncated, redacted prose). A call whose arguments
- * cannot be proven observation-only (click, type, evaluate, run_code, python, unknown tools) stays
- * uncertain; that is the truly ambiguous case and goes to the existing read-only effect observation.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { canonicalAgentlasBrowserToolName } from "../../shared/graph-browser-observation";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 
@@ -64,11 +64,11 @@ function networkLeaf(name: string): string | null {
 
 const SHELL_TOOL_NAMES = new Set(["bash", "shell", "exec_command", "run_shell_command", "local_shell"]);
 
-/**
- * The bundled filesystem MCP server's read tools (its write tools — write_file, edit_file, create_directory,
- * move_file — are not here). Owner Thread Marketing 2026-09-28: an effect check listed two
- * filesystem.read_text_file calls as "calls in question" ahead of the turn's real outward calls.
- */
+
+
+
+
+
 const FILESYSTEM_SERVER = /^(?:mcp__)?filesystem(?:__|\.|\/|·)/;
 const READ_ONLY_FILESYSTEM_TOOLS = new Set([
   "read_file", "read_text_file", "read_media_file", "read_multiple_files", "list_directory",
@@ -163,11 +163,11 @@ function shellCommand(args: Record<string, unknown> | null): string | null {
   return null;
 }
 
-/**
- * The runtime's own web search (codex `web_search`, Claude `WebSearch`) returns search results to the model and
- * has no argument that can post, send or write. Recorded 0b8772c1 (Youtube launch, 2026-09-27): seven searches were
- * the "last recorded actions" of an interrupted attempt that three read-only looks could never settle.
- */
+
+
+
+
+
 const RUNTIME_WEB_SEARCH = new Set(["web_search", "WebSearch"]);
 
 /**

@@ -239,6 +239,9 @@ export interface UpdaterControllerDependencies {
   repairInstalledAppTrust?: (bundlePath: string, diagnostic: UpdaterDiagnostic) => Promise<boolean>;
   /** Stop mutable background writers and resolve only after their current work drains. */
   quiesceWriters?: () => Promise<void | (() => void)>;
+  /** Fence scheduler dispatch and await live effects before any native quit.
+   * Separate from optional backup writer quiescence; never abort active work. */
+  prepareAutomationInstall?: () => Promise<() => void>;
   captureContinuity: (targetVersion: string) => Promise<ContinuitySnapshot>;
   verifyContinuity: (snapshot: ContinuitySnapshot) => Promise<ContinuityVerification>;
   broadcast: (state: UpdaterState) => void;
@@ -1937,15 +1940,16 @@ export class DesktopUpdaterController {
       return { accepted: false, state: this.state };
     }
 
-    // Writer quiescence is retired (owner decision, 2026-08-03). Its only
-    // purpose was to make the continuity snapshot's row-identity hashes
-    // consistent, and those hashes are no longer computed or compared by
-    // anything. On a machine with live automations the drain reliably failed —
-    // "Active automation did not drain before update continuity capture" — so
-    // the product paid a stall and an alarming warning to tidy a fingerprint
-    // nobody reads. The app is about to be replaced and restarted either way,
-    // and SQLite's crash safety does not depend on us pausing writers.
-    const resumeWriters: (() => void) | undefined = undefined;
+    // A best-effort backup cannot protect a still-running external action from
+    // quitAndInstall killing its provider. Await that action's own settlement;
+    // a busy drain leaves the downloaded update retryable without a native quit.
+    let resumeWriters: (() => void) | undefined;
+    try {
+      resumeWriters = await this.deps.prepareAutomationInstall?.();
+    } catch (error) {
+      this.logger.warn("[updater] automation work is still settling; install deferred", error);
+      return { accepted: false, state: this.state, blockedBy: "active-runs" };
+    }
 
     this.armInstallWriterResume(resumeWriters);
     let installHandedOff = false;

@@ -27,12 +27,21 @@ export function isGoalResumeEffectBoundaryUncertainBlocker(reason: string | null
   return reason === GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN;
 }
 
-/** Shared admission guard for every user resume/reactivation surface. */
-export function goalResumeRecoveryBlockerCode(reason: string | null | undefined):
-  "goal_wait_claimed_reconciliation_required" | typeof GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN | null {
-  if (isClaimedWaitRecoveryBlocker(reason)) return "goal_wait_claimed_reconciliation_required";
-  if (isGoalResumeEffectBoundaryUncertainBlocker(reason)) return GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN;
+/** Uncertainty remains an audit fact; it never vetoes continuation of independent work. */
+export function goalResumeRecoveryBlockerCode(_reason: string | null | undefined): null {
   return null;
+}
+
+/** Internal failures and checks are advisory to the host-owned Goal lifecycle. */
+export function resolveNonBlockingGoalStatus(from: LongRunStatus, requested: LongRunStatus,
+  reason?: string | null, actorKind: string = "host"): LongRunStatus {
+  if (["completed", "cancelled", "failed", "cancelling", "pausing"].includes(from)) {
+    return ["blocked", "failed", "waiting_user"].includes(requested) ? from : requested;
+  }
+  const internalPause = actorKind !== "user" && (requested === "paused" || requested === "pausing")
+    && !["user", "app_closed", "crash_recovery"].includes(reason ?? "");
+  if (requested !== "blocked" && requested !== "failed" && requested !== "waiting_user" && !internalPause) return requested;
+  return ["draft", "queued", "paused", "blocked"].includes(from) ? "queued" : "running";
 }
 
 export const LONG_RUN_SURFACES = ["one", "work", "science"] as const;

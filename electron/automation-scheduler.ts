@@ -1,3 +1,4 @@
+import { withRunnerSettlementObserver } from "./runtime/observed-runner";
 import { withAutomationRunAccounting } from "./long-run/accounting-context";
 import { stopAutomationRun as stopExecutionAutomationRun, assertAutomationGoalExecutionOwner, automationGoalExecutionHeld, bindAutomationRunStop, captureAutomationGoalExecutionOwner, releaseAutomationRunStop } from "./automation-execution-control";
 import { goalContinuationSourceChat, settleGoalContinuationRun, settleRefusedGoalContinuation, type GoalContinuationSignals } from "./goal-continuation-hold";
@@ -6,6 +7,12 @@ import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
 import { deliverAutomationResult } from "./automation-delivery";
 import { claimAutomationNotification } from "./automation-notifications";
 import { getDb } from "./store/db";
+import { emitDesktopStoreChange } from "./store/change-bus";
+import { getLongRunByGoalId, longRunOwnerHold } from "./store/long-runs";
+import { decodeGraphCommandDelivery } from "../shared/graph-command";
+import { automationDefinitionDigest } from "./automation-lifecycle";
+import { validateOneGraphCommandScope } from "./one/graph-dispatch";
+import { nativeGraphSuccessNeedsReflection } from "../shared/automation-graph-definition";
 // 자동화 스케줄러 — 앱이 켜져 있는 동안 60초마다 due 자동화를 점검해 실행한다.
 // 실행 = 타깃(firm/agent)의 백그라운드(division) chat을 만들어 runMcpInvocation로 promptTemplate을 돌린다.
 // This is intentionally app-scoped: fully quitting Desktop stops local work.
@@ -71,6 +78,118 @@ function recordAutomationJudgeReceipt(
   tryRecordRunEvent({ runId, kind: "automation_judge_receipt", automationId, payload: { phase, ...classified.judge } });
 }
 
+// Classification owns a separate bounded lane; its answer never grants replay,
+// changes schedules, or holds an execution lease after the kernel has settled.
+const backgroundClassifications = new Map<string, { automationId: string; controller: AbortController }>();
+function classifyInBackground(input: {
+  automation: Automation; runId: string | null; phase: "outcome" | "failure" | "reflection";
+  sourceSignal: AbortSignal; assertCurrent: () => void;
+  classify: (signal: AbortSignal, isCurrent: () => boolean) => Promise<AutomationResultClassification | void>;
+}): void {
+  let ownedKey: string | undefined;
+  let ownedEntry: { automationId: string; controller: AbortController } | undefined;
+  try {
+  if (!input.runId || input.sourceSignal.aborted || shutdownDispatchClosed) return;
+  const { automation, runId, phase } = input;
+  const key = `${automation.id}:${phase}`;
+  if (backgroundClassifications.has(key)) return;
+  const db = getDb();
+  const source = db.prepare(`SELECT occurrence_id, graph_digest, checkpoint_json, status
+    FROM automation_runs WHERE id = ? AND automation_id = ?`).get(runId, automation.id) as {
+      occurrence_id: string | null; graph_digest: string | null; checkpoint_json: string | null; status: string;
+    } | undefined;
+  if (!source || source.status === "running" || !db.prepare(
+    "SELECT 1 FROM run_history WHERE id = ? AND automation_id = ?",
+  ).get(runId, automation.id)) {
+    tryRecordRunEvent({ runId, automationId: automation.id, kind: "automation_background_judgment_unanchored",
+      payload: { phase, reasonCode: "execution_not_sealed", pending: true, factOnly: true } });
+    return;
+  }
+  input.assertCurrent();
+  const canonical = getAutomation(automation.id);
+  if (!canonical) return;
+  const revision = automation.goalId ? getChatGoalRevision(automation.goalId)?.revision ?? null : null;
+  const definition = automationDefinitionDigest(canonical);
+  const controller = new AbortController();
+  const isCurrent = (): boolean => {
+    if (controller.signal.aborted || input.sourceSignal.aborted || shutdownDispatchClosed) return false;
+    try {
+      input.assertCurrent();
+      const current = getAutomation(automation.id);
+      if (!current || current.createdAt !== canonical.createdAt || current.enabled !== canonical.enabled
+        || automationDefinitionDigest(current) !== definition) return false;
+      if (automation.goalId) {
+        const goal = getLongRunByGoalId(automation.goalId);
+        if ((getChatGoalRevision(automation.goalId)?.revision ?? null) !== revision || !goal
+          || longRunOwnerHold(goal.id) || ["completed", "cancelled", "cancelling"].includes(goal.status)) return false;
+      }
+      return Boolean(db.prepare(`SELECT 1 FROM automation_runs
+        WHERE id = ? AND automation_id = ? AND occurrence_id IS ? AND graph_digest IS ?
+          AND checkpoint_json IS ? AND status = ?
+          AND rowid = (SELECT MAX(rowid) FROM automation_runs WHERE automation_id = ?)`)
+        .get(runId, automation.id, source.occurrence_id, source.graph_digest, source.checkpoint_json, source.status, automation.id));
+    } catch { return false; }
+  };
+  const entry = { automationId: automation.id, controller };
+  backgroundClassifications.set(key, entry);
+  ownedKey = key; ownedEntry = entry;
+  tryRecordRunEvent({ runId, automationId: automation.id, kind: phase === "reflection" ? "automation_background_reflection_started" : "automation_background_judgment_started",
+    sourceEventId: `automation-background-judgment:${runId}:${phase}:started`,
+    payload: { phase, occurrenceId: source.occurrence_id, pending: true } });
+  void runMainBackgroundTask(async () => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let abortListener: (() => void) | undefined;
+    try {
+      const aborted = new Promise<never>((_, reject) => {
+        abortListener = () => reject(controller.signal.reason ?? new Error("automation_judgment_cancelled"));
+        controller.signal.addEventListener("abort", abortListener, { once: true });
+      });
+      timer = setTimeout(() => controller.abort(new Error("automation_judgment_timeout")), AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS);
+      timer.unref?.();
+      const classified = await Promise.race([aborted, Promise.resolve().then(() =>
+        isCurrent() ? withAutomationRunAccounting({ runId, automationId: automation.id }, () => input.classify(controller.signal, isCurrent)) : undefined)]);
+      // All freshness reads and the fact receipt share one transaction. A late
+      // answer cannot revive an edited occurrence or a stopped owner Goal.
+      let historyChanged = false;
+      db.transaction(() => {
+        if (!isCurrent()) return;
+        if (classified && phase !== "reflection" && !isJudgmentUnavailable(classified)
+          && classified.reasonCode !== "automation_failure_unclassified") {
+          const verdict = classified.outcome;
+          const outcome: AutomationRunRecord["outcome"] = verdict === "ok" || verdict === "skipped" ? "accepted"
+            : verdict === "needs_input" ? "needs_input" : verdict === "blocked" ? "blocked" : "rejected";
+          historyChanged = db.prepare(`UPDATE run_history SET outcome = ?, outcome_reason = ?
+            WHERE id = ? AND automation_id = ? AND outcome = 'unjudged'`)
+            .run(outcome, classified.reason == null ? null : redactOperationalSecrets(classified.reason), runId, automation.id).changes === 1;
+        }
+        if (classified && phase !== "reflection") recordAutomationJudgeReceipt(runId, automation.id, phase, classified);
+        recordRunEvent({ runId, automationId: automation.id, kind: phase === "reflection" ? "automation_background_reflection_completed" : "automation_background_judgment_completed",
+          sourceEventId: `automation-background-judgment:${runId}:${phase}:completed`, payload: {
+            phase, occurrenceId: source.occurrence_id, factOnly: true,
+            ...(classified ? { status: classified.status, outcome: classified.outcome,
+              reasonCode: classified.reasonCode, reason: classified.reason == null ? null : redactOperationalSecrets(classified.reason),
+              judgmentUnavailable: isJudgmentUnavailable(classified) } : {}),
+          } });
+      }).immediate();
+      if (historyChanged) emitDesktopStoreChange({ entity: "automation", id: automation.id });
+    } catch (error) {
+      tryRecordRunEvent({ runId, automationId: automation.id, kind: phase === "reflection" ? "automation_background_reflection_unavailable" : "automation_background_judgment_unavailable",
+        payload: { phase, reasonCode: controller.signal.aborted ? "judgment_cancelled_or_timeout" : "judgment_failed_or_stale", pending: true } });
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (abortListener) controller.signal.removeEventListener("abort", abortListener);
+      if (backgroundClassifications.get(key) === entry) backgroundClassifications.delete(key);
+    }
+  });
+  } catch {
+    if (ownedKey && ownedEntry && backgroundClassifications.get(ownedKey) === ownedEntry) {
+      backgroundClassifications.delete(ownedKey);
+      ownedEntry.controller.abort(new Error("automation_judgment_admission_unavailable"));
+    }
+    // Advisory capture/storage failure must never change work admission or settlement.
+  }
+}
+
 /** Retain the exact attempt's machine reset hint before a semantic judge can
  * rewrite its error. This receipt is display evidence, never a retry grant. */
 function recordAutomationQuotaReset(runId: string, automationId: string, event: McpInvocationEvent): void {
@@ -83,6 +202,7 @@ function recordAutomationQuotaReset(runId: string, automationId: string, event: 
 }
 import { emitAutomationDone } from "./triggers/chain-bus";
 import {
+  AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS,
   classifyAutomationFailure,
   classifyAutomationOutcome,
   isJudgmentUnavailable,
@@ -122,7 +242,7 @@ import {
   type NoProgressDecision,
 } from "./automation-progress-guard";
 import { withRunPriority } from "./runtime/run-priority";
-import { captureMainRootContinuation, admitMainAutomation, withMainScheduledRoot, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "./runtime/scheduled-root-context";
+import { runMainBackgroundTask, captureMainRootContinuation, admitMainAutomation, withMainScheduledRoot, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "./runtime/scheduled-root-context";
 import { synthesizeLegacyGraph } from "./automation-emitter";
 import { recoverReadOnlySuspendedGraphs, suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
@@ -243,6 +363,8 @@ export function scheduledOccurrenceIdForDueRun(a: Automation): string {
 let timer: ReturnType<typeof setInterval> | null = null;
 let startupTimer: ReturnType<typeof setTimeout> | null = null;
 let installQuiescing = false;
+let installQuiesceHolds = 0;
+let restartSchedulerAfterInstall = false;
 /*
  * App quit closes dispatch for good. stopAutomationScheduler() only cleared the timers, so a tick
  * already past its guard, a runOne parked on the goal-ledger await, or a read-only resume could
@@ -289,6 +411,7 @@ function dispatchPaused(): boolean {
 const automationObservationRuntime: AutomationObservationRuntime = {
   isAutomationRunning: (id) => running.has(id),
   runHeadless: (id, request, signal) => {
+    if (dispatchPaused()) return Promise.reject(new Error("automation_dispatch_paused"));
     if (request.permissions !== "read") return Promise.reject(new Error("effect_observation_must_be_read_only"));
     const automation = getAutomation(id);
     if (!automation) return Promise.reject(new Error("automation_workspace_owner_changed"));
@@ -426,6 +549,24 @@ const AUTOMATION_LEASE_HEARTBEAT_MS = boundedIntegerEnv(
 );
 const lastOptimizerRunAt = new Map<string, number>();
 const optimizerControllers = new Map<string, AbortController>();
+// Cancellation can finish the visible optimizer slot before a broken adapter
+// finishes its provider Promise. Installation must wait for both lifetimes.
+const optimizerProviderPromises = new Set<object>();
+function observeOptimizerProviderSettlement(provider: PromiseLike<unknown>): void {
+  const token = {};
+  optimizerProviderPromises.add(token);
+  const release = () => { optimizerProviderPromises.delete(token); };
+  // Observe rejection without changing the provider result or making a detached
+  // finally chain that could become an unhandled rejection after owner Stop.
+  void Promise.resolve(provider).then(release, release);
+}
+function trackOptimizerProviderWork<T>(action: () => Promise<T>): Promise<T> {
+  const token = {};
+  optimizerProviderPromises.add(token);
+  return Promise.resolve()
+    .then(() => withRunnerSettlementObserver(observeOptimizerProviderSettlement, action))
+    .finally(() => { optimizerProviderPromises.delete(token); });
+}
 
 export class AutomationActiveRemovalError extends Error {
   readonly code = "automation_active_removal_blocked";
@@ -602,7 +743,7 @@ async function confirmOptimizerRestore(input: {
         runId: input.failedRunId ?? "", automationId: input.automation.id, chatId: input.chatId,
       }, () => {
         probeInvoked = true;
-        return callConnectedModelDetailed({
+        return trackOptimizerProviderWork(() => callConnectedModelDetailed({
         systemPrompt: "Runtime availability check. Do not use tools. Reply with the single word READY.",
         input: "READY?",
         runtimeSelection: probed,
@@ -610,7 +751,7 @@ async function confirmOptimizerRestore(input: {
         accept: (text) => text.trim() === "READY",
         timeoutMs: RESTORE_PROBE_TIMEOUT_MS,
         signal: input.signal,
-        });
+        }));
       });
       if (shutdownDispatchClosed || input.signal?.aborted) return false;
       confirmed = reply.text?.trim() === "READY" && !reply.failure;
@@ -789,7 +930,7 @@ async function handleAutomationFailure(a: Automation, error: string, failedRunId
       // Promise.resolve().then은 동기 throw까지 같은 실패 경로로 수렴시킨다. abortGate를
       // race에 넣어 runner가 AbortSignal을 무시해도 cancel/timeout 시 lifecycle은 끝난다.
       // System Optimizer 복구 런도 무인 배경 작업이다 — 채팅 턴을 밀어내면 안 된다.
-      const optimizerRun = Promise.resolve().then(() => {
+      const optimizerRun = trackOptimizerProviderWork(() => {
         if (shutdownDispatchClosed) throw new Error("app_closed");
         throwIfAutomationAborted(optimizerController);
         return withAutomationRunAccounting({
@@ -863,6 +1004,10 @@ async function handleAutomationFailure(a: Automation, error: string, failedRunId
 }
 
 export function stopAutomationRun(automationId: string): boolean {
+  let checking = false;
+  for (const entry of backgroundClassifications.values()) if (entry.automationId === automationId) {
+    entry.controller.abort(new Error("automation_stopped_by_user")); checking = true;
+  }
   let parked = false;
   let stopped = false;
   try {
@@ -871,7 +1016,7 @@ export function stopAutomationRun(automationId: string): boolean {
   } finally {
     stopped = stopExecutionAutomationRun(automationId);
   }
-  return parked || stopped;
+  return checking || parked || stopped;
 }
 
 async function runOne(
@@ -905,7 +1050,7 @@ async function runOne(
   const afterSettled = captureMainRootContinuation();
   if (dispatchPaused()) return { accepted: false };
   if (running.has(a.id)) return { accepted: false };
-  if (hasGraphLoginWait(a.id) && !opts?.resumeLoginWaitRunId) return { accepted: false }; // 직전 실행이 아직 진행 중이면 건너뜀
+  if (!a.graph && hasGraphLoginWait(a.id) && !opts?.resumeLoginWaitRunId) return { accepted: false }; // 직전 실행이 아직 진행 중이면 건너뜀
   // due[] may have waited behind another run. The controller must belong to
   // the same stored definition that this invocation will actually execute.
   const definitionSnapshot = (value: Automation) => JSON.stringify({
@@ -932,64 +1077,29 @@ async function runOne(
   let goalOwner: ReturnType<typeof captureAutomationGoalExecutionOwner>;
   try { assertDefinitionCurrent(); goalOwner = captureAutomationGoalExecutionOwner(a.id); }
   catch (error) {
-    let lifecycleHeld = false;
-    try {
-      assertDefinitionCurrent();
-      if (automationGoalExecutionHeld(a.id)) {
-        lifecycleHeld = true;
-        suspendAutomationForGraphReconciliation(a.id);
-        toggleAutomation(a.id, false);
-      }
-    } catch { /* Invalid authority cannot change this automation or its Goal. */ }
-    if (!lifecycleHeld && error && typeof error === "object" && "code" in error
-      && ["automation_goal_execution_owner_unverified", "automation_goal_execution_owner_changed",
-        "automation_goal_execution_review_changed"].includes(String(error.code))) {
-      try {
-        getDb().transaction(() => {
-          assertDefinitionCurrent();
-          if (getAutomation(a.id)?.enabled !== true) return;
-          // Park only this automation. Its mutable goalId is a review proposal,
-          // never authority to pause a Goal or write into its root conversation.
-          const needsNotice = unverifiedAutomationNotices.get(a.id) !== expectedDefinition;
-          if (needsNotice) markAutomationRun(a.id, new Date(), { status: "needs_input", outcome: "needs_input",
-            error: "automation_goal_execution_review_required", outcomeReason: "automation_goal_execution_review_required",
-            executionConsumed: false, advanceSchedule: false, suspendForReconciliation: true });
-          suspendAutomationForGraphReconciliation(a.id);
-          toggleAutomation(a.id, false);
-          if (!needsNotice) return;
-          const session = getOrCreateAutomationSession(automationSessionInput(a));
-          recordRunEvent({ runId: `automation-owner-review-required:${randomUUID()}`, automationId: a.id,
-            chatId: session.chat.id, kind: "automation_goal_execution_review_required",
-            payload: { automationId: a.id, automationCreatedAt: a.createdAt } });
-          appendChatMessage(session.chat.id, "system", L(
-            `자동화 '${a.name}' (${a.id})를 멈췄습니다. 목표와의 실행 연결을 검토하고 승인한 뒤 다시 이어가 주세요.`,
-            `Automation '${a.name}' (${a.id}) is stopped. Review and approve its Goal execution relationship before continuing.`,
-          ));
-        })();
-        unverifiedAutomationNotices.set(a.id, expectedDefinition);
-      } catch (noticeError) { console.error("[automation] owner review notice could not be parked:", noticeError); }
-    }
-    if (opts?.preclaimed) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
-    return { accepted: false };
+    // Keep the current automation alive while its Goal projection is checked.
+    // An unverified Goal relationship confers no authority over that Goal.
+    goalOwner = undefined;
+    tryRecordRunEvent({ runId: `automation-binding-check:${randomUUID()}`, automationId: a.id,
+      kind: "automation_goal_binding_check_pending", payload: {
+        reasonCode: error && typeof error === "object" && "code" in error ? String(error.code) : "automation_goal_execution_owner_unverified" } });
   }
+
   if (a.goalId) {
     const goalDecision = await goalLedgerShouldContinue(a.goalId);
-    if (goalDecision && !goalDecision.continue) {
-      // App-close/crash recovery is a durable pause. Merely starting the app,
-      // catching up a schedule, or receiving a trigger cannot resume it.
-      // A ledger stop also parks the row and tells the goal chat once.
-      try {
-        settleRefusedGoalContinuation({ automation: a, decision: goalDecision, locale: currentUiLocale() });
-      } catch (error) {
-        console.error("[automation] refused goal continuation could not be parked:", error);
-      }
-      // A Run-now caller already holds the lease (preclaimed). Returning without releasing it left
-      // the continuation claimed forever (soak 1.2.50: claimed_at frozen at 12:53:14Z).
-      if (opts?.preclaimed) {
-        try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* owner CAS protects a peer lease */ }
-      }
-      console.info("[automation] goal continuation refused", JSON.stringify({ automationId: a.id, reason: goalDecision.reason }));
+    const nativeGoal = getLongRunByGoalId(a.goalId);
+    const ownerHeld = nativeGoal && (longRunOwnerHold(nativeGoal.id)
+      || ["completed", "cancelled", "cancelling"].includes(nativeGoal.status));
+    if (ownerHeld) {
+      if (goalDecision) try { settleRefusedGoalContinuation({ automation: a, decision: goalDecision, locale: currentUiLocale() }); }
+      catch (error) { console.error("[automation] owner stop reconciliation pending:", error); }
+      if (opts?.preclaimed) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
       return { accepted: false };
+    }
+    if (!goalDecision || !goalDecision.continue) {
+      tryRecordRunEvent({ runId: `automation-goal-advisory:${randomUUID()}`, automationId: a.id,
+        kind: "automation_goal_continue_advisory", payload: { reasonCode: goalDecision?.reason ?? "goal_ledger_unavailable",
+          continuation: "independent-current-work" } });
     }
   }
   // The goal-ledger read awaited: Quit or an update may have closed dispatch meanwhile.
@@ -1071,6 +1181,7 @@ async function runOne(
       : null;
   let scheduledAttemptRecorded = false;
   let runLedgerRecorded = false;
+  const pendingClassifications: Array<() => void> = [];
   // 이번 실행 "이전"의 실패 스트릭 — 성공 시 복구 학습(recordAutomationRecovery) 판정에 쓴다.
   // markAutomationRun 이후에는 이번 결과가 이력에 섞여 사전 상태를 복원할 수 없다.
   let priorFailureContext: AutomationFailureContext = { streak: 0, recentErrors: [] };
@@ -1233,17 +1344,30 @@ async function runOne(
     }
     if (missingHubSlugs.size > 0) {
       const exactHashes: Record<string, string> = {};
-      for (const slug of [...missingHubSlugs].sort()) {
-        const listing = await getMarketSource().getListingBySlug(slug);
-        const packageHash = listing?.packageHash ?? listing?.cloudPackage?.packageHash;
-        if (
-          !listing || listing.slug !== slug || listing.callable !== true ||
-          typeof packageHash !== "string" || !/^[0-9a-f]{64}$/.test(packageHash)
-        ) {
-          throw new Error(`automation_hub_version_pin_unavailable: exact callable release unavailable for ${slug}`);
-        }
-        exactHashes[slug] = packageHash;
+      const lookups = await Promise.all([...missingHubSlugs].sort().map(async slug => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          const listing = await Promise.race([
+            Promise.resolve().then(() => getMarketSource().getListingBySlug(slug)),
+            new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), 5_000); timer.unref?.(); }),
+          ]);
+          const packageHash = listing?.packageHash ?? listing?.cloudPackage?.packageHash;
+          if (listing?.slug === slug && listing.callable === true && typeof packageHash === "string"
+            && /^[0-9a-f]{64}$/.test(packageHash)) return { slug, packageHash };
+        } catch { /* Lookup failure is a node-local missing version, never a run admission failure. */ }
+        finally { if (timer) clearTimeout(timer); }
+        return { slug, packageHash: null };
+      }));
+      for (const lookup of lookups) {
+        if (lookup.packageHash) exactHashes[lookup.slug] = lookup.packageHash;
+        else tryRecordRunEvent({ runId: currentRunId ?? `automation-hub-check:${a.id}:${randomUUID()}`,
+          automationId: a.id, kind: "automation_hub_pin_check_pending",
+          payload: { slug: lookup.slug, reasonCode: "automation_hub_version_pin_unavailable", continuation: "independent-nodes" } });
       }
+      // The existing pin transaction seals every missing version together.
+      // An incomplete batch leaves those nodes quarantined by runGraph; no
+      // unverified or partial hash is substituted into the saved definition.
+      if (lookups.every(lookup => lookup.packageHash !== null)) {
       assertGoalCurrent();
       const beforeMigration = getAutomation(a.id);
       const migrated = pinLegacyAutomationHubVersions(a.id, exactHashes);
@@ -1256,8 +1380,9 @@ async function runOne(
       if (!beforeMigration || definitionSnapshot(restored) !== expectedDefinition) {
         rejectDefinition();
       }
-      a = migrated.automation;
-      expectedDefinition = definitionSnapshot(a);
+      const executionRuntime = a.runtimeSelection;
+      expectedDefinition = definitionSnapshot(migrated.automation);
+      a = { ...migrated.automation, runtimeSelection: executionRuntime };
       if (migrated.pinned.length > 0) {
         tryRecordRunEvent({
           runId: currentRunId ?? `automation-hub-pin-${a.id}-${Date.now()}`,
@@ -1265,6 +1390,7 @@ async function runOne(
           automationId: a.id,
           payload: { pins: migrated.pinned },
         });
+      }
       }
     }
 
@@ -1279,7 +1405,7 @@ async function runOne(
     // (예전엔 권한 없이 실행돼 브라우저 자동화가 부분 실행 후 먹통/혼란. 이제 빠르게 감지 →
     //  다음 예약에 자동 재시도, false-fail도 false-success도 아님.)
     const cuaPerm = a.toolMode === "computer-use" ? checkComputerUsePermissions() : null;
-    if (cuaPerm && !cuaPerm.ok) {
+    if (cuaPerm && !cuaPerm.ok && !a.graph) {
       runStatus = "needs_input";
       runError = L(
         `macOS가 이 앱 실행본에 ${cuaPerm.missing.join(" · ")} 권한을 주지 않아 컴퓨터유즈 자동화를 건너뜁니다(먹통 방지). ` +
@@ -1290,7 +1416,7 @@ async function runOne(
         `Turn it on with the [Open Settings] button on the automation screen. Once it's on, this will auto-retry on the next scheduled run.`,
       );
       console.warn(`[automation] CUA preflight skip (${a.name}): missing ${cuaPerm.missing.join(", ")}`);
-    } else if (a.targetType === "hub" && !a.targetVersion) {
+    } else if (a.targetType === "hub" && !a.targetVersion && !a.graph) {
       runStatus = "needs_input";
       runError =
         "[hub_version_pin_required] automation_hub_version_pin_required: " +
@@ -1345,7 +1471,7 @@ async function runOne(
         if (decision.stalled) {
           graphStall = decision;
           watchdogStall = decision;
-          watchdogController.abort(new Error(automationWatchdogError(decision)));
+          // Each node owns its timeout. A Graph check cannot abort all siblings.
         }
       }, 30_000);
       let result;
@@ -1392,7 +1518,8 @@ async function runOne(
                       model: a.runtimeSelection?.model ?? null,
                     },
                   });
-                  noProgressController.abort(new Error(noProgressLoopError(loop)));
+                  // Repeating one tool is a node diagnosis. Other Graph branches
+                  // keep their own deadlines and continue independent work.
                 }
               }
               // ★실패가 아닌 **상태 변화**도 화면에 보낸다 (커넥터 C44).
@@ -1418,14 +1545,14 @@ async function runOne(
         if (graphStall) {
           throw new Error(automationWatchdogError(graphStall));
         }
-        if (noProgressLoop && !controller.signal.aborted) throw new Error(noProgressLoopError(noProgressLoop));
+        if (noProgressLoop && !controller.signal.aborted) console.warn("[automation] Graph no-progress remains advisory");
         throw err;
       } finally {
         acceptGraphEvents = false;
         clearInterval(graphStallTimer);
       }
       // 그래프가 중단 신호를 받고도 결과를 돌려준 경우 — 멈춘 이유는 호스트가 센 반복이다.
-      if (noProgressLoop) throw new Error(noProgressLoopError(noProgressLoop));
+      if (noProgressLoop) tryRecordRunEvent({ runId, automationId: a.id, kind: "graph_no_progress_advisory", payload: { code: AUTOMATION_NO_PROGRESS_LOOP } });
       const graphHasUnconfirmedMutation = Object.values(result.nodeFailures ?? {}).some((failure: unknown) =>
         failure && typeof failure === "object" && "code" in failure
         && (failure as { code?: unknown }).code === "MUTATION_UNVERIFIED",
@@ -1478,33 +1605,35 @@ async function runOne(
         //   outcome = 나온 결과물이 쓸 만한가 (판정이 본다)
         // ★판정에 **호스트가 센 도구 호출**을 함께 준다. 모델이 "게시했다"고 써도
         //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
-        const classified = await withAutomationRunAccounting({ runId: currentRunId!, automationId: a.id }, () => classifyAutomationOutcome(output, {
-          runtimeSelection: a.runtimeSelection,
-          signal: controller.signal,
-          ...(currentRunId ? { toolActivity: observedToolActivity(currentRunId) } : {}),
-          ...(runRecord.steps.length > 0 ? { runRecord } : {}),
-          // 사람이 승인한 목표 — 이것 없이는 "시킨 대로 한 것"과 "다 못 한 것"을 못 가른다.
-          declaredGoal: declaredGoalForAutomation(a),
-        }));
-        recordAutomationJudgeReceipt(currentRunId, a.id, "outcome", classified);
-        throwIfAutomationAborted(controller);
-        judgmentUnavailableRun = isJudgmentUnavailable(classified);
-        runOutcome = judgmentUnavailableRun ? "unjudged" : outcomeOf(classified.outcome);
-        runOutcomeReason = classified.reason ?? null;
-        runReasonCode = classified.reasonCode ?? null;
-        runError = classified.reasonCode && classified.reason
-          ? `[${classified.reasonCode}] ${classified.reason}`
-          : classified.reason;
+        try {
+          const evidenceOutput = output;
+          const evidenceActivity = currentRunId ? structuredClone(observedToolActivity(currentRunId)) : undefined;
+          const evidenceRecord = structuredClone(runRecord);
+          const evidenceGoal = structuredClone(declaredGoalForAutomation(a));
+          pendingClassifications.push(() => classifyInBackground({ automation: a, runId: currentRunId, phase: "outcome", sourceSignal: controller.signal,
+            assertCurrent: assertGoalCurrent, classify: signal => classifyAutomationOutcome(evidenceOutput, {
+              runtimeSelection: a.runtimeSelection, signal, toolActivity: evidenceActivity,
+              ...(evidenceRecord.steps.length > 0 ? { runRecord: evidenceRecord } : {}), declaredGoal: evidenceGoal,
+            }) }));
+        } catch {
+          tryRecordRunEvent({ runId: currentRunId ?? `automation-check-capture:${a.id}:${randomUUID()}`,
+            automationId: a.id, kind: "automation_background_judgment_capture_pending",
+            payload: { reasonCode: "automation_judgment_evidence_unavailable", pending: true, factOnly: true } });
+        }
+        judgmentUnavailableRun = true;
+        runOutcome = "unjudged";
+        runOutcomeReason = null;
+        runReasonCode = "automation_judgment_pending";
+        runError = null;
         // runStatus는 건드리지 않는다. 후속 정책은 아래에서 두 값을 함께 보고 정한다.
       } else {
-        const classified = await classifyAccountedAutomationFailure(a, currentRunId, graphError, controller.signal);
-        throwIfAutomationAborted(controller);
-        recordAutomationJudgeReceipt(currentRunId, a.id, "failure", classified);
-        runStatus = outVals.length > 0 ? "partial" : classified.status;
-        runReasonCode = classified.reasonCode ?? null;
-        runError = classified.reasonCode
-          ? `[${classified.reasonCode}] ${classified.reason ?? graphError ?? "automation failed"}`
-          : classified.reason ?? graphError;
+        pendingClassifications.push(() => classifyInBackground({ automation: a, runId: currentRunId, phase: "failure", sourceSignal: controller.signal,
+          assertCurrent: assertGoalCurrent, classify: signal => classifyAccountedAutomationFailure(a, currentRunId, graphError, signal) }));
+        runStatus = outVals.length > 0 ? "partial" : "error";
+        runOutcome = "unjudged";
+        runReasonCode = "automation_judgment_pending";
+        runError = graphError;
+
       }
     } else {
       // Unreachable: every row carries a graph by this point (synthesizeLegacyGraph above),
@@ -1522,7 +1651,7 @@ async function runOne(
     // 판정은 원문을 읽기 좋은 한 문장으로 **교체**하므로, 교체된 문장에서 다시 표식을 찾으면
     // 없다. 원문을 따로 붙들어 둔다.
     machineError = requiresGraphReconciliation(machineError) ? machineError : rawError;
-    const loopStopped = noProgressLoop !== null && !controller.signal.aborted;
+    const loopStopped = noProgressLoop !== null && !a.graph && !controller.signal.aborted;
     const watchdogStopped = watchdogStall !== null && !controller.signal.aborted;
     let classified = workspaceFailure
       ? { status: "needs_input" as const, reasonCode: workspaceFailure.code, reason: automationWorkspaceOwnerText(workspaceFailure, currentUiLocale()) }
@@ -1536,7 +1665,13 @@ async function runOne(
       : loopStopped
       // 판정 모델에게 묻지 않는다 — 호스트가 센 사실이고, 표식(reasonCode)이 다음 실행의 핸드오프를 연다.
       ? { status: "error" as const, reasonCode: AUTOMATION_NO_PROGRESS_LOOP, reason: noProgressLoopOwnerText(noProgressLoop!, currentUiLocale()) }
-      : await classifyAccountedAutomationFailure(a, currentRunId, rawError, controller.signal);
+      : { status: "error" as const, reasonCode: "automation_judgment_pending", reason: rawError };
+    if (!workspaceFailure && !controller.signal.aborted && !watchdogStopped && !loopStopped && !appClosedControllers.has(controller)) {
+      const failedRunId = currentRunId;
+      pendingClassifications.push(() => classifyInBackground({ automation: a, runId: failedRunId, phase: "failure", sourceSignal: controller.signal,
+        assertCurrent: assertGoalCurrent, classify: signal => classifyAccountedAutomationFailure(a, failedRunId, rawError, signal) }));
+      runOutcome = "unjudged";
+    }
     // A failure judge may have yielded while Main closed or the owner stopped.
     if (appClosedControllers.has(controller)) classified = appCloseClassification();
     else if (controller.signal.aborted) classified = { status: "partial", reasonCode: "automation_stopped_by_user",
@@ -1608,13 +1743,13 @@ async function runOne(
               // 판정이 "사람 손이 필요하다"고 본 실행은 지금까지처럼 발생을 소진하지 않는다
               // (max_runs 보존). status가 ok로 남아도 이 정책은 그대로다 — 정책은 판정을 본다.
               executionConsumed: (runStatus === "ok" || runStatus === "skipped")
-                && runOutcome !== "needs_input" && runOutcome !== "blocked",
+                && runOutcome !== "needs_input",
               finishedAt: new Date(),
               deferredRetryMs: SCHEDULE_RETRY_BASE_MS * 2 ** Math.max(0, occurrenceAttempt - 1),
               deferRetry: !graphLoginWait && occurrenceAttempt < MAX_SCHEDULE_OCCURRENCE_ATTEMPTS,
               outcome: runOutcome,
               outcomeReason: runOutcomeReason,
-              suspendForReconciliation: workspaceFailure !== null || requiresGraphReconciliation(machineError ?? runError),
+              suspendForReconciliation: false,
               sourceRunId: currentRunId,
               output,
             });
@@ -1632,25 +1767,33 @@ async function runOne(
           }
         }
       }
+      if (runLedgerRecorded && !parentMissing && !leaseOwnershipLost) {
+        for (const startClassification of pendingClassifications) {
+          try { startClassification(); } catch {
+            tryRecordRunEvent({ runId: currentRunId ?? `automation-check-start:${a.id}:${randomUUID()}`,
+              automationId: a.id, kind: "automation_background_judgment_capture_pending",
+              payload: { reasonCode: "automation_judgment_evidence_unavailable", pending: true, factOnly: true } });
+          }
+        }
+      }
+      pendingClassifications.length = 0;
       // Scheduled Graph runs pass their durable lease, run ledger, and
       // reconciliation decision through this single shared cycle. Direct Graph
       // runs use the same module from runGraph; keeping the scheduler's guard
       // here prevents reflection from observing an uncommitted or abandoned run.
       if (!graphLoginWait && !workspaceFailure && !shutdownDispatchClosed && !controller.signal.aborted && isGraphAutomation && graphRunAttempted && runLedgerRecorded && !opts?.dryRun
+        && nativeGraphSuccessNeedsReflection(a.graph, runStatus === "ok")
         && !parentMissing && !leaseOwnershipLost && currentRunId) {
         try {
-          await withAutomationJudgmentSignal(controller.signal, () => withAutomationRunAccounting({ runId: currentRunId!, automationId: a.id }, () => runAutomationStrategyCycle({
-            automationId: a.id,
-            sourceRunId: currentRunId!,
-            status: runStatus,
-            outcome: runOutcome,
-            reasonCode: runReasonCode,
-            output: output ?? null,
+          const reflectionInput = { automationId: a.id, sourceRunId: currentRunId,
+            status: runStatus, outcome: runOutcome, reasonCode: runReasonCode, output: output ?? null,
             effectsUnconfirmed: requiresGraphReconciliation(machineError ?? runError),
-            runError: machineError ?? runError,
-            runtimeSelection: a.runtimeSelection,
-            signal: controller.signal,
-          })));
+            runError: machineError ?? runError, runtimeSelection: a.runtimeSelection };
+          classifyInBackground({ automation: a, runId: currentRunId, phase: "reflection", sourceSignal: controller.signal,
+            assertCurrent: assertGoalCurrent, classify: (signal, isCurrent) =>
+              withAutomationJudgmentSignal(signal, () => runAutomationStrategyCycle({
+                ...reflectionInput, signal, backgroundAdvisory: true, isCurrent,
+              })) });
         } catch (strategyError) {
           // The Graph run is already settled and its ledger is durable. Strategy
           // review is advisory, so a temporary DB/model handoff failure cannot
@@ -1711,37 +1854,16 @@ async function runOne(
         } catch (error) { console.error("[automation] workspace suspension failed:", error); }
       }
       if (!parentMissing && !leaseOwnershipLost && requiresGraphReconciliation(machineError ?? runError)) {
-        try {
-          // 스케줄은 markAutomationRun이 이미 지웠을 수도 있다(같은 결정의 두 경로).
-          // 어느 쪽이 지웠든 사용자에게는 한 가지 사실만 남으면 된다 — 왜 멈췄고 무엇을 하면 되는가.
-          // 조용한 정지는 고장과 구분되지 않는다: "예약해 둔 자동화가 그냥 안 돈다"로만 보인다.
-          suspendAutomationForGraphReconciliation(a.id);
-          const chat = getOrCreateAutomationSession(automationSessionInput(a));
-          appendChatMessage(
-            chat.chat.id,
-            "system",
-            L(
-              [
-                "이전 실행이 외부에 무언가를 반영했는지 확인되지 않아 자동 재실행을 멈췄습니다.",
-                "같은 작업이 두 번 나가는 것을 막기 위한 조치이며, 자동화는 꺼지지 않았습니다.",
-                "자동화 상세에서 어떤 단계가 실제로 반영됐는지 확인해 주시면 그 지점부터 이어서 실행합니다.",
-              ].join(" "),
-              [
-                "The automatic rerun was stopped because it is unconfirmed whether the previous run affected anything external.",
-                "This is to prevent the same work from going out twice, and the automation has not been turned off.",
-                "Check the automation details for which step actually took effect, and it will continue from that point.",
-              ].join(" "),
-            ),
-          );
-        } catch (error) {
-          console.error("[automation] graph reconciliation suspension failed:", error);
-        }
+        if (currentRunId) tryRecordRunEvent({ runId: currentRunId, automationId: a.id,
+          kind: "graph_effect_check_pending", payload: { reasonCode: "MUTATION_UNVERIFIED", continuation: "independent-nodes" } });
+        // The kernel quarantines the uncertain node. Observation and repair run
+        // separately while the automation's remaining branches stay eligible.
       }
       // Goal-continuation settlement (complete / hard stop / needs owner / backoff /
       // cadence) — one function for every path. It used to live only inside the
       // legacy branch, which no row reaches (live 2026-09-27: every-10m re-wakes).
       if (
-        !graphLoginWait && !workspaceFailure && !shutdownDispatchClosed && currentRunId && isStormbreakerLongRunPrompt(a.promptTemplate)
+        !graphLoginWait && !shutdownDispatchClosed && currentRunId && isStormbreakerLongRunPrompt(a.promptTemplate)
         && !parentMissing && !leaseOwnershipLost && !controller.signal.aborted
         && getAutomation(a.id)?.enabled === true
       ) {
@@ -1766,7 +1888,7 @@ async function runOne(
       // 이벤트 + 메모리/경험 자동 승격 + (동일 실패 2회 복구 시) 프롬프트 진화 자동 적용.
       // 어떤 실패도 런 결과에 영향을 주지 않는다(모듈 내부에서 전부 격리).
       if (
-        !shutdownDispatchClosed && runStatus === "ok" && runOutcome !== "needs_input" && runOutcome !== "blocked" &&
+        !shutdownDispatchClosed && runStatus === "ok" && runOutcome !== "needs_input" &&
         !parentMissing && !leaseOwnershipLost &&
         priorFailureContext.streak >= 1 && currentRunId
       ) {
@@ -1793,14 +1915,13 @@ async function runOne(
       // System Optimizer를 띄우면, 그 에이전트가 독립적으로 같은 효과를 재시도할 수 있다.
       // 이 경우는 사용자가 실제 반영 여부를 조정할 때까지 모델 복구도 보류한다.
       if (
-        runStatus !== "ok" && runStatus !== "skipped" && runStatus !== "needs_input" &&
-        runOutcome !== "needs_input" &&
+        (runStatus !== "ok" && runStatus !== "skipped") &&
         !shutdownDispatchClosed && !controller.signal.aborted && getAutomation(a.id)?.enabled === true &&
-        !judgmentUnavailableRun && !parentMissing && !leaseOwnershipLost &&
-        !requiresGraphReconciliation(machineError ?? runError)
+        !parentMissing && !leaseOwnershipLost
       ) {
         try {
-          handleAutomationFailure(a, runError ?? "unknown error", currentRunId).catch((err) => {
+          const repairReason = `${runError ?? "Result check is pending"}. Continue independent work. Inspect unresolved results in the background; preserve unknown outcomes and do not repeat the specific uncertain external actions.`;
+          handleAutomationFailure(a, repairReason, currentRunId).catch((err) => {
             // Not awaited: the recovery run is background work and must not hold this run's settlement.
             console.error("[automation] handleAutomationFailure failed:", err);
           });
@@ -2172,6 +2293,15 @@ export async function runAutomationFromTrigger(
   if (dispatchPaused()) return { accepted: false };
   const a = getAutomation(id);
   if (!a) return { accepted: false };
+  const command = decodeGraphCommandDelivery(a, ctx,
+    ctx.source === "one-mcp" ? automationDefinitionDigest(a) : undefined);
+  if (command && !command.ok) return { accepted: false, status: "blocked", error: command.code };
+  if (command?.ok && ctx.source === "one-mcp") {
+    try { validateOneGraphCommandScope(a); }
+    catch (error) { return { accepted: false, status: "blocked", error: error instanceof Error ? error.message : "one_graph_scope_invalid" }; }
+  }
+  if (command?.ok) return runOne(a, { claim: true, advanceSchedule: false, triggerDelivery,
+    triggerContext: command.input, ...(command.dryRun ? { dryRun: true } : {}) });
   return runOne(a, { claim: true, advanceSchedule: false, triggerDelivery, triggerContext: ctx });
 }
 
@@ -2274,10 +2404,10 @@ export function closeAutomationDispatchForShutdown(): void {
  * so an interrupted run records its own outcome instead of losing it to "Store not initialized".
  */
 export function automationWorkInFlight(): number {
-  return running.size + optimizerControllers.size + automationObservationsInFlight();
+  return running.size + optimizerControllers.size + optimizerProviderPromises.size + automationObservationsInFlight();
 }
 
-export function stopAutomationScheduler(): void {
+function stopAutomationTimers(): void {
   if (timer) {
     clearInterval(timer);
     timer = null;
@@ -2286,6 +2416,10 @@ export function stopAutomationScheduler(): void {
     clearTimeout(startupTimer);
     startupTimer = null;
   }
+}
+
+export function stopAutomationScheduler(): void {
+  stopAutomationTimers();
   // 앱 종료/스케줄러 정지 시 보조 진단 런도 즉시 취소한다. runner가 신호를 무시해도
   // abortGate가 lifecycle을 settle하므로 optimizer 슬롯과 watchdog timer가 남지 않는다.
   for (const controller of optimizerControllers.values()) {
@@ -2301,25 +2435,32 @@ export function stopAutomationScheduler(): void {
  * cancelled or consumed; the install attempt fails closed and can be retried.
  */
 export async function quiesceAutomationSchedulerForUpdate(
-  timeoutMs = 12_000,
+  timeoutMs = 45_000,
 ): Promise<() => void> {
-  const shouldRestart = timer !== null || startupTimer !== null;
+  restartSchedulerAfterInstall ||= timer !== null || startupTimer !== null;
+  installQuiesceHolds += 1;
   installQuiescing = true;
-  stopAutomationScheduler();
+  // Installing pauses admission, not the active worker or its external action.
+  // stopAutomationScheduler also aborts optimizer workers and is reserved for Quit.
+  stopAutomationTimers();
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    installQuiesceHolds -= 1;
+    if (installQuiesceHolds > 0) return;
+    installQuiescing = false;
+    const restart = restartSchedulerAfterInstall;
+    restartSchedulerAfterInstall = false;
+    if (restart) startAutomationScheduler();
+  };
   const deadline = Date.now() + Math.max(0, timeoutMs);
-  while (running.size > 0 || optimizerControllers.size > 0) {
+  while (automationWorkInFlight() > 0) {
     if (Date.now() >= deadline) {
-      installQuiescing = false;
-      if (shouldRestart) startAutomationScheduler();
-      throw new Error("Active automation did not drain before update continuity capture");
+      release();
+      throw new Error("automation_update_drain_timed_out");
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
-  let resumed = false;
-  return () => {
-    if (resumed) return;
-    resumed = true;
-    installQuiescing = false;
-    if (shouldRestart) startAutomationScheduler();
-  };
+  return release;
 }

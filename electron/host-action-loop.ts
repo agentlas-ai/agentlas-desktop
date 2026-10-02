@@ -50,6 +50,8 @@ export interface HostModelSnapshot {
   readonly capabilities: readonly HostCapability[];
   readonly receipts: readonly HostActionReceipt[];
   readonly step: number;
+  /** Advisory failures from this episode; select another authorized independent step. */
+  readonly advisories?: readonly { readonly step: number; readonly reason: HostLoopReason | 'model_blocked'; readonly detail?: string }[];
 }
 
 export interface HostActionLoopOptions {
@@ -70,7 +72,7 @@ export interface HostActionLoopOptions {
 }
 
 export type HostActionLoopResult = Readonly<{
-  status: 'finished' | 'blocked';
+  status: 'finished' | 'deferred' | 'cancelled';
   reason?: HostLoopReason | 'model_blocked';
   detail?: string;
   output?: HostJson;
@@ -182,9 +184,10 @@ export function createHostActionLoop(options: HostActionLoopOptions): Readonly<{
   let started = false;
 
   return Object.freeze({ run: async (): Promise<HostActionLoopResult> => {
-    if (started) return Object.freeze({ status: 'blocked', reason: 'already_started', receipts: Object.freeze([]) });
+    if (started) return Object.freeze({ status: 'deferred', reason: 'already_started', receipts: Object.freeze([]) });
     started = true;
     const receipts: HostActionReceipt[] = [];
+    const advisories: { step: number; reason: HostLoopReason | 'model_blocked'; detail?: string }[] = [];
     const seenIds = new Set<string>();
     const seenInputs = new Set<string>();
     const controller = new AbortController();
@@ -224,56 +227,65 @@ export function createHostActionLoop(options: HostActionLoopOptions): Readonly<{
     try {
       for (let step = 1; step <= maxSteps; step++) {
         guard();
-        const modelInput = Object.freeze({ input, capabilities, receipts: Object.freeze([...receipts]), step });
-        const raw = await guardedAwait(() => modelStep(modelInput, controller.signal), 'model_failed');
-        let proposal: unknown;
-        try { proposal = snapshot(raw, maxBytes); } catch { throw new LoopFailure('invalid_proposal'); }
-        if (!record(proposal)) throw new LoopFailure('invalid_proposal');
-        if (proposal.kind === 'finish' && exactKeys(proposal, ['kind', 'output'])) {
-          guard();
-          return finish({ status: 'finished', output: proposal.output as HostJson });
-        }
-        if (proposal.kind === 'blocked' && exactKeys(proposal, ['kind', 'reason']) && typeof proposal.reason === 'string') {
-          guard();
-          return finish({ status: 'blocked', reason: 'model_blocked', detail: proposal.reason });
-        }
-        if (proposal.kind !== 'call' || !exactKeys(proposal, ['kind', 'callId', 'capabilityId', 'input'])
-          || typeof proposal.callId !== 'string' || !proposal.callId || proposal.callId.length > 256
-          || typeof proposal.capabilityId !== 'string') throw new LoopFailure('invalid_proposal');
-        const capability = catalogue.get(proposal.capabilityId);
-        if (!capability) throw new LoopFailure('unsupported_capability');
-        const callInput = proposal.input as HostJson;
-        if (!matches(capability.inputSchema, callInput)) throw new LoopFailure('invalid_input');
-        const fingerprint = createHash('sha256').update(canonical([capability.id, callInput])).digest('hex');
-        if (seenIds.has(proposal.callId) || (capability.replayPolicy === 'call-id-and-input' && seenInputs.has(fingerprint))) throw new LoopFailure('replay');
-        seenIds.add(proposal.callId);
-        seenInputs.add(fingerprint);
-        const base = { step, callId: proposal.callId, capabilityId: capability.id, input: callInput };
-        // Check immediately before dispatch, with no intervening await or untrusted callback.
-        guard();
-        let dispatched = false;
         try {
-          const rawOutput = await guardedAwait(() => {
-            dispatched = true;
-            return dispatch(Object.freeze({
-              callId: base.callId, capabilityId: base.capabilityId, input: callInput, scopeToken: token, epoch,
-            }), controller.signal);
-          }, 'provider_failed');
-          let output: HostJson;
-          try { output = snapshot(rawOutput, maxBytes); } catch { throw new LoopFailure('invalid_result'); }
+          const modelInput = Object.freeze({ input, capabilities, receipts: Object.freeze([...receipts]), step, advisories: Object.freeze([...advisories]) });
+          const raw = await guardedAwait(() => modelStep(modelInput, controller.signal), 'model_failed');
+          let proposal: unknown;
+          try { proposal = snapshot(raw, maxBytes); } catch { throw new LoopFailure('invalid_proposal'); }
+          if (!record(proposal)) throw new LoopFailure('invalid_proposal');
+          if (proposal.kind === 'finish' && exactKeys(proposal, ['kind', 'output'])) {
+            guard();
+            return finish({ status: 'finished', output: proposal.output as HostJson });
+          }
+          if (proposal.kind === 'blocked' && exactKeys(proposal, ['kind', 'reason']) && typeof proposal.reason === 'string') {
+            guard();
+            advisories.push(Object.freeze({ step, reason: 'model_blocked', detail: proposal.reason.slice(0, 500)
+              + ' Continue with a different authorized independent step; preserve uncertain effects and do not replay them.' }));
+            continue;
+          }
+          if (proposal.kind !== 'call' || !exactKeys(proposal, ['kind', 'callId', 'capabilityId', 'input'])
+            || typeof proposal.callId !== 'string' || !proposal.callId || proposal.callId.length > 256
+            || typeof proposal.capabilityId !== 'string') throw new LoopFailure('invalid_proposal');
+          const capability = catalogue.get(proposal.capabilityId);
+          if (!capability) throw new LoopFailure('unsupported_capability');
+          const callInput = proposal.input as HostJson;
+          if (!matches(capability.inputSchema, callInput)) throw new LoopFailure('invalid_input');
+          const fingerprint = createHash('sha256').update(canonical([capability.id, callInput])).digest('hex');
+          if (seenIds.has(proposal.callId) || (capability.replayPolicy === 'call-id-and-input' && seenInputs.has(fingerprint))) throw new LoopFailure('replay');
+          seenIds.add(proposal.callId);
+          seenInputs.add(fingerprint);
+          const base = { step, callId: proposal.callId, capabilityId: capability.id, input: callInput };
+          // Check immediately before dispatch, with no intervening await or untrusted callback.
           guard();
-          receipts.push(Object.freeze({ ...base, status: 'completed', output }));
+          let dispatched = false;
+          try {
+            const rawOutput = await guardedAwait(() => {
+              dispatched = true;
+              return dispatch(Object.freeze({
+                callId: base.callId, capabilityId: base.capabilityId, input: callInput, scopeToken: token, epoch,
+              }), controller.signal);
+            }, 'provider_failed');
+            let output: HostJson;
+            try { output = snapshot(rawOutput, maxBytes); } catch { throw new LoopFailure('invalid_result'); }
+            guard();
+            receipts.push(Object.freeze({ ...base, status: 'completed', output }));
+          } catch (error) {
+            const reason = error instanceof LoopFailure ? error.reason : 'provider_failed';
+            const invalidated = ['scope_changed', 'aborted', 'deadline'].includes(reason);
+            if (dispatched) receipts.push(Object.freeze({ ...base, status: invalidated ? 'invalidated' : 'error', reason }));
+            throw error;
+          }
         } catch (error) {
-          const reason = error instanceof LoopFailure ? error.reason : 'provider_failed';
-          const invalidated = ['scope_changed', 'aborted', 'deadline'].includes(reason);
-          if (dispatched) receipts.push(Object.freeze({ ...base, status: invalidated ? 'invalidated' : 'error', reason }));
-          throw error;
+          const reason = error instanceof LoopFailure ? error.reason : 'invalid_proposal';
+          if (['aborted', 'scope_changed', 'deadline'].includes(reason)) throw error;
+          advisories.push(Object.freeze({ step, reason, detail: 'Choose another authorized independent action. An error receipt does not authorize replay of that action.' }));
         }
       }
       guard();
-      return finish({ status: 'blocked', reason: 'step_limit' });
+      return finish({ status: 'deferred', reason: 'step_limit', detail: 'Episode limit reached; independent work may continue in a fresh host-authorized episode. Preserve these receipts.' });
     } catch (error) {
-      return finish({ status: 'blocked', reason: error instanceof LoopFailure ? error.reason : 'invalid_proposal' });
+      const reason = error instanceof LoopFailure ? error.reason : 'invalid_proposal';
+      return finish({ status: reason === 'aborted' ? 'cancelled' : 'deferred', reason });
     } finally {
       clearTimeout(timer);
       signal.removeEventListener('abort', abort);

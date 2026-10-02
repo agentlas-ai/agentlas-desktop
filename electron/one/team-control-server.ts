@@ -4,6 +4,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
+import { oneGraphDispatch } from "./graph-dispatch";
 import {
   oneTeamCreateMember,
   oneTeamComposeGroup,
@@ -80,6 +81,9 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
   switch (request.operation) {
+    case "graph": return oneGraphDispatch(binding, String(request.name ?? ""),
+      request.input && typeof request.input === "object" && !Array.isArray(request.input)
+        ? request.input as Record<string, unknown> : {});
     case "list": return oneTeamList(binding);
     case "start": return oneTeamStartSession(binding, { member: request.member, brief: request.brief, newSession: request.newSession });
     case "steer": return oneTeamSteer(binding, { sessionId: request.sessionId, message: request.message });

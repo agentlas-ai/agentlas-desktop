@@ -1,6 +1,6 @@
 import { receiptSettlesAttempts } from "../long-run/attempt-effect-receipt";
 import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
-import { normalizeLongRunUsage, readLongRunCostAccounting, longRunMonetaryRefusal, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
+import { normalizeLongRunUsage, readLongRunCostAccounting, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
 import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
 import { createHash, randomUUID } from "node:crypto";
 import { mcpEffectArgumentsDigest, mcpEffectOutputDigest } from "../mcp-tools/effect-receipts";
@@ -11,7 +11,7 @@ import {
   LONG_RUN_TERMINAL_STATUSES,
   assertLongRunTransition,
   isLongRunPauseReason,
-  goalResumeRecoveryBlockerCode,
+  resolveNonBlockingGoalStatus,
   isLongRunStatus,
   normalizeLongRunCriteria,
   type ContinuityCapsule,
@@ -707,14 +707,16 @@ export function settleUncertainAttemptsByObservation(runId: string, input: {
   return result!;
 }
 
-/** 자동 재개(재시작 체크포인트 등)가 보는 수 — 불확실한 부작용은 사람만 풀 수 있으므로 그것도 센다. */
+/** Factual unresolved attempt count for observation; never a continuation gate. */
 export function unsettledLongRunAttemptCount(runId: string): number {
   return unsettledLongRunAttempts(runId).length;
 }
 
-/** 아직 실제로 돌고 있는 시도 수 — 명시적 재개는 이것만 본다. */
+/** Live work only. Parallel verification and prior uncertainty do not own the controller. */
 export function liveLongRunAttemptCount(runId: string): number {
-  const row = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state = 'running'").get(runId) as { n: number };
+  const row = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_worker_attempts a
+    JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND a.state = 'running'
+    AND w.role != 'verifier'`).get(runId) as { n: number };
   return row.n;
 }
 
@@ -1071,8 +1073,7 @@ export function longRunOwnerHold(runId: string): boolean {
  * Host settlement of a system-admitted Goal at its retry cap (owner 2026-09-25). Two exits only:
  *  - "settled_with_evidence": every current criterion passed in the latest authorized verifier round,
  *    with resolvable host references. Completion revalidates that exact proof set atomically.
- *  - "owner_review_required": no such evidence. Parked as blocked with this code; the owner's next
- *    message or Resume continues it. Nothing automatic starts it again (the sweep skips the code).
+ *  - "owner_review_required": historical compatibility outcome; keeps independent work queued.
  */
 export const AUTO_GOAL_SETTLED_WITH_EVIDENCE = "auto_goal_settled_with_evidence";
 export const AUTO_GOAL_OWNER_REVIEW_REQUIRED = "auto_goal_owner_review_required";
@@ -1098,10 +1099,10 @@ export function settleAutomaticGoalAtRetryCap(input: {
       }
     }
     const now = new Date().toISOString();
-    const to = input.outcome === AUTO_GOAL_SETTLED_WITH_EVIDENCE ? "completed" : "blocked";
+    const to = input.outcome === AUTO_GOAL_SETTLED_WITH_EVIDENCE ? "completed" : "queued";
     const changed = db.prepare(`UPDATE long_runs SET status = ?, pause_reason = NULL, blocked_reason = ?, paused_at = NULL,
         completed_at = ?, updated_at = ?, version = version + 1 WHERE id = ? AND status = ? AND version = ?`)
-      .run(to, to === "blocked" ? input.outcome : null, to === "completed" ? now : null, now,
+      .run(to, null, to === "completed" ? now : null, now,
         current.id, current.status, current.version);
     if (changed.changes !== 1) throw new Error("auto_goal_retry_cap_state_changed");
     appendEventInDb({ runId: current.id, kind: "run.status_changed", actorKind: "host",
@@ -1132,8 +1133,12 @@ export function transitionLongRun(input: {
   if (input.to === "completed" && current.surface !== "science" && getChatGoalRevision(current.goalId)?.lifecycle === "ongoing") {
     throw new Error("ongoing_goal_requires_user_stop");
   }
-  assertLongRunTransition(current.status, input.to);
-  if (current.status === input.to) return current;
+  const requestedTo = input.to;
+  const resolvedTo = resolveNonBlockingGoalStatus(current.status, input.to, input.reason, input.actorKind);
+  const skipped = requestedTo !== resolvedTo;
+  input = { ...input, to: resolvedTo };
+  if (!skipped) assertLongRunTransition(current.status, input.to);
+  if (current.status === input.to && !skipped) return current;
   // Only the owner lifts an owner hold; every host/worker path that would start the goal again stops here.
   if ((input.actorKind ?? "host") !== "user" && ["queued", "running", "waiting_tool"].includes(input.to)
     && ["paused", "blocked", "waiting_tool"].includes(current.status) && longRunOwnerHold(current.id)) {
@@ -1175,6 +1180,9 @@ export function transitionLongRun(input: {
       payload: { from: current.status, to: input.to, reason: input.reason ?? null },
       at: now,
     });
+    if (skipped) appendEventInDb({ runId: current.id, kind: "run.block_skipped", actorKind: input.actorKind ?? "host",
+      payload: { requestedStatus: requestedTo, status: input.to, reason: input.reason ?? null,
+        outcome: "unknown", continueIndependentWork: true, replayUncertainEffects: false }, at: now });
     if (input.to === "cancelled" || input.to === "failed") closeOpenTasksOfEndedRun(current.id, now);
   })();
   emitDesktopStoreChange({ entity: "long-run", id: current.id });
@@ -1203,11 +1211,11 @@ function closeOpenTasksOfEndedRun(runId: string, now: string): void {
   }
 }
 
-/** Exceptional startup-only terminalization of a host pause after an
- * indeterminate wait dispatch. It does not emit fictitious queued/running
- * states or authorize any successor attempt. A user pause/Stop cannot match. */
+/** Queue independent recovery after an uncertain startup wait. Its specific
+ * external action stays unresolved; a user pause/Stop cannot match. */
 export function blockHostPausedClaimedGoalWait(runId: string, expectedVersion: number,
   reason: "goal_wait_claimed_dispatch_uncertain" | "goal_wait_claimed_binding_changed"): LongRunRecord {
+  if (longRunOwnerHold(runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
   const db = getDb();
   db.transaction(() => {
     const current = getLongRun(runId);
@@ -1215,12 +1223,12 @@ export function blockHostPausedClaimedGoalWait(runId: string, expectedVersion: n
       || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")
       || current.version !== expectedVersion) throw new Error("goal_wait_claimed_recovery_state_changed");
     const now = new Date().toISOString();
-    const changed = db.prepare(`UPDATE long_runs SET status='blocked', pause_reason=NULL, blocked_reason=?,
+    const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL,
       paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status='paused' AND version=? AND pause_reason IN ('app_closed','crash_recovery')`)
-      .run(reason, now, runId, expectedVersion);
+      .run(now, runId, expectedVersion);
     if (changed.changes !== 1) throw new Error("goal_wait_claimed_recovery_state_changed");
     appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
-      payload: { from: "paused", to: "blocked", reason }, at: now });
+      payload: { from: "paused", to: "queued", skippedStatus: "blocked", reason }, at: now });
   })();
   emitDesktopStoreChange({ entity: "long-run", id: runId });
   const blocked = getLongRun(runId);
@@ -1228,11 +1236,10 @@ export function blockHostPausedClaimedGoalWait(runId: string, expectedVersion: n
   return blocked;
 }
 
-/** Startup-only CAS for a host pause whose prior controller/effect boundary
- * cannot be proven. This intentionally does not use transitionLongRun: an
- * ordinary user pause or blocked run must never be converted by this repair
- * path, and no successor attempt is authorized by the write. */
+/** Startup-only CAS queues independent continuation and preserves uncertainty.
+ * An ordinary user pause is never converted by this recovery path. */
 export function blockHostPausedForEffectBoundaryUncertainty(runId: string, expectedVersion: number): LongRunRecord {
+  if (longRunOwnerHold(runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
   const db = getDb();
   db.transaction(() => {
     const current = getLongRun(runId);
@@ -1240,14 +1247,14 @@ export function blockHostPausedForEffectBoundaryUncertainty(runId: string, expec
       || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")
       || current.version !== expectedVersion) throw new Error("goal_resume_effect_boundary_uncertain_state_changed");
     const now = new Date().toISOString();
-    const changed = db.prepare(`UPDATE long_runs SET status='blocked', pause_reason=NULL, blocked_reason=?,
+    const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL,
       paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status='paused' AND version=?
       AND pause_reason IN ('app_closed','crash_recovery')`)
-      .run(GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, now, runId, expectedVersion);
+      .run(now, runId, expectedVersion);
     if (changed.changes !== 1) throw new Error("goal_resume_effect_boundary_uncertain_state_changed");
     appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
-      payload: { from: "paused", to: "blocked", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN,
-        reviewRequired: true, startupOnly: true }, at: now });
+      payload: { from: "paused", to: "queued", skippedStatus: "blocked", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN,
+        observationPending: true, continueIndependentWork: true, replayUncertainEffects: false, startupOnly: true }, at: now });
   })();
   emitDesktopStoreChange({ entity: "long-run", id: runId });
   const blocked = getLongRun(runId);
@@ -1319,10 +1326,11 @@ export function scheduleBlockedGoalRetry(input: {
     const current = getLongRun(input.runId);
     // A host-written dispatch failure pause (runtime_unavailable) is the same "try again later" fact:
     // accept it here so no failed dispatch is left waiting for a person.
-    const hostDispatchPause = current?.status === "paused" && current.pauseReason === "runtime_unavailable"
-      && input.trigger.startsWith("dispatch-failed");
+    const hostDispatchPause = current?.status === "paused"
+      && ["runtime_unavailable", "app_closed", "crash_recovery"].includes(current.pauseReason ?? "");
     if (!current || current.surface === "science" || current.version !== input.expectedVersion
-      || !(current.status === "blocked" || hostDispatchPause || pendingBlockedGoalRetry(current.id))) throw new Error("blocked_goal_retry_state_changed");
+      || !(["blocked", "queued", "running", "waiting_tool"].includes(current.status) || hostDispatchPause || pendingBlockedGoalRetry(current.id))) throw new Error("blocked_goal_retry_state_changed");
+    if (liveLongRunAttemptCount(input.runId)) throw new Error("blocked_goal_retry_controller_live");
     const now = new Date().toISOString();
     if (current.status !== "waiting_tool") {
       const changed = db.prepare(`UPDATE long_runs SET status='waiting_tool', pause_reason=NULL, blocked_reason=NULL,
@@ -1360,13 +1368,13 @@ export function nextBlockedGoalRetrySlot(runId: string, now = Date.now()): { ret
 /** Blocker put in place of an effect-uncertain retry that a later committed turn already answered. */
 export const EFFECT_BOUNDARY_SETTLED_BY_TURN = "effect_boundary_settled_by_turn";
 
-/**
- * A turn in this Goal's chat ran after the effect-uncertain retry was scheduled and finished committed
- * (worker.attempt_settled completed/committed, later than the retry). That turn saw the world as it is now;
- * the question "did the interrupted action take effect?" no longer blocks the next step. Returns the
- * settling attempt id, or null. Owner X Marketing 2026-09-28: the owner's 13:51Z turn committed at seq 195,
- * yet the Goal went back to blocked(goal_resume_effect_boundary_uncertain) and retry 4 (seq 196-198).
- */
+
+
+
+
+
+
+
 export function committedTurnSinceRetry(runId: string, retrySeq: number): string | null {
   const row = getDb().prepare(`SELECT json_extract(payload_json, '$.attemptId') AS attemptId FROM long_run_events
     WHERE run_id = ? AND seq > ? AND kind = 'worker.attempt_settled'
@@ -1384,15 +1392,15 @@ export function settleDueBoundaryRetryByTurn(runId: string, expectedVersion: num
     const retry = current ? pendingBlockedGoalRetry(runId) : null;
     if (!current || !retry || current.version !== expectedVersion) throw new Error("blocked_goal_retry_state_changed");
     const now = new Date().toISOString();
-    const changed = db.prepare(`UPDATE long_runs SET status='blocked', pause_reason=NULL, blocked_reason=?,
+    const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL,
       paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status=? AND version=?`)
-      .run(EFFECT_BOUNDARY_SETTLED_BY_TURN, now, runId, current.status, expectedVersion);
+      .run(now, runId, current.status, expectedVersion);
     if (changed.changes !== 1) throw new Error("blocked_goal_retry_state_changed");
     appendEventInDb({ runId, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
       payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "boundary_settled_by_turn", fromReason: retry.fromReason,
         retryIndex: retry.retryIndex, attemptId }, at: now });
     appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
-      payload: { from: current.status, to: "blocked", reason: EFFECT_BOUNDARY_SETTLED_BY_TURN, settledBy: attemptId }, at: now });
+      payload: { from: current.status, to: "queued", skippedStatus: "blocked", reason: EFFECT_BOUNDARY_SETTLED_BY_TURN, settledBy: attemptId }, at: now });
   })();
   emitDesktopStoreChange({ entity: "long-run", id: runId });
   const next = getLongRun(runId);
@@ -1410,12 +1418,12 @@ export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number
     if (!current || !retry || current.version !== expectedVersion) throw new Error("blocked_goal_retry_state_changed");
     const now = new Date().toISOString();
     const reason = retry.fromReason ?? "blocked_goal_retry_due";
-    const changed = db.prepare(`UPDATE long_runs SET status='blocked', pause_reason=NULL, blocked_reason=?,
+    const changed = db.prepare(`UPDATE long_runs SET status='queued', pause_reason=NULL, blocked_reason=NULL,
       paused_at=NULL, updated_at=?, version=version+1 WHERE id=? AND status=? AND version=?`)
-      .run(reason, now, runId, current.status, expectedVersion);
+      .run(now, runId, current.status, expectedVersion);
     if (changed.changes !== 1) throw new Error("blocked_goal_retry_state_changed");
     appendEventInDb({ runId, kind: "run.status_changed", actorKind: "host",
-      payload: { from: current.status, to: "blocked", reason, retryDue: true, retryIndex: retry.retryIndex }, at: now });
+      payload: { from: current.status, to: "queued", skippedStatus: "blocked", reason, retryDue: true, retryIndex: retry.retryIndex }, at: now });
   })();
   emitDesktopStoreChange({ entity: "long-run", id: runId });
   const next = getLongRun(runId);
@@ -1428,13 +1436,12 @@ export function reopenDueBlockedGoalRetry(runId: string, expectedVersion: number
  * (service.ts "budget" stall) — one answer for every way back in.
  */
 export function longRunBudgetExhaustion(run: LongRunRecord, now = Date.now()): string | null {
-  const deadline = run.budget.wallclockDeadline ? Date.parse(run.budget.wallclockDeadline) : Number.NaN;
-  if (Number.isFinite(deadline) && now >= deadline) return "budget_wallclock_exhausted";
-  if (run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles) return "budget_cycles_exhausted";
-  return longRunMonetaryRefusal(run);
+  // Limits remain available for accounting/UI; they do not stop the Goal loop.
+  void run; void now;
+  return null;
 }
 
-/** Resume refused because the run's budget is spent. The way out is a new Goal (the composer copy says so). */
+/** Historical diagnostic code retained for existing clients. Budget accounting is advisory. */
 export const LONG_RUN_BUDGET_EXHAUSTED_CODE = "long_run_budget_exhausted";
 
 export function resumeLongRunByUser(runId: string, appInstanceId: string, expectedVersion: number): LongRunRecord {
@@ -1442,22 +1449,13 @@ export function resumeLongRunByUser(runId: string, appInstanceId: string, expect
   if (!current) throw new Error(`long_run_not_found:${runId}`);
   if (current.surface === "science") throw new Error("science_projection_read_only");
   if (current.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-  const recoveryBlocker = goalResumeRecoveryBlockerCode(current.blockedReason);
-  if (recoveryBlocker) throw new Error(recoveryBlocker);
-  if (!["paused", "blocked"].includes(current.status)) {
+  if (!["paused", "blocked", "queued", "running", "waiting_tool", "verifying", "waiting_user"].includes(current.status)) {
     throw new Error(`long_run_resume_not_allowed:${current.status}`);
   }
-  /*
-   * A spent budget cannot be resumed into. Measured 2026-09-27 (run_9cad8ec0, paused 'budget' since
-   * 09-06): Resume queued the run, the invocation armed its wallclock timer with max(1, remaining)
-   * = 1 ms, and the Goal fell straight back to paused/budget — a button that could never work.
-   */
-  const exhausted = longRunBudgetExhaustion(current);
-  if (exhausted) throw new Error(`${LONG_RUN_BUDGET_EXHAUSTED_CODE}:${exhausted}`);
-  if (unsettledLongRunAttemptCount(runId)) throw new Error("auto_goal_resume_attempt_unsettled");
+  if (liveLongRunAttemptCount(runId)) throw new Error("auto_goal_resume_attempt_live");
   return transitionLongRun({
     runId,
-    to: "queued",
+    to: ["running", "waiting_tool", "verifying", "waiting_user"].includes(current.status) ? "running" : "queued",
     actorKind: "user",
     reason: "user-resume",
     appInstanceId,
@@ -1653,15 +1651,6 @@ export function bindLongRunWorker(input: Omit<LongRunWorkerBinding, "attempt" | 
     );
     return { ...input, workspaceBinding, attempt: existing.current_attempt, state: existing.state };
   }
-  if (run.budget.maxWorkers != null) {
-    const active = getDb().prepare(
-      `SELECT COUNT(*) AS count FROM long_run_workers
-       WHERE run_id = ? AND state IN ('provisioning','idle','running','waiting')`,
-    ).get(input.runId) as { count?: number } | undefined;
-    if (Number(active?.count ?? 0) >= run.budget.maxWorkers) {
-      throw new Error("long_run_worker_budget_exhausted");
-    }
-  }
   if (input.parentWorkerId) {
     const parent = getDb().prepare("SELECT run_id FROM long_run_workers WHERE id = ?")
       .get(input.parentWorkerId) as { run_id: string } | undefined;
@@ -1726,8 +1715,8 @@ export function startLongRunWorkerAttempt(input: {
   if (!run) throw new Error(`long_run_not_found:${input.runId}`);
   if (run.surface === "science") throw new Error("science_projection_read_only");
   const db = getDb();
-  const worker = db.prepare("SELECT run_id, current_attempt FROM long_run_workers WHERE id = ?")
-    .get(input.workerId) as { run_id: string; current_attempt: number } | undefined;
+  const worker = db.prepare("SELECT run_id, current_attempt, role FROM long_run_workers WHERE id = ?")
+    .get(input.workerId) as { run_id: string; current_attempt: number; role: string } | undefined;
   if (!worker || worker.run_id !== input.runId) throw new Error("long_run_worker_not_found");
   const attempt = worker.current_attempt + 1;
   const attemptId = `attempt_${randomUUID()}`;
@@ -1755,7 +1744,7 @@ export function startLongRunWorkerAttempt(input: {
        SET current_attempt = ?, state = 'running', last_heartbeat_at = ?, updated_at = ?
        WHERE id = ?`,
     ).run(attempt, now, now, input.workerId);
-    if (input.taskId) {
+    if (input.taskId && worker.role !== "verifier") {
       db.prepare(
         `UPDATE long_run_tasks
          SET state = 'doing', attempt_count = attempt_count + 1,
@@ -1786,8 +1775,8 @@ export function settleLongRunWorkerAttempt(input: {
 }): boolean {
   const db = getDb();
   const row = db.prepare(
-    "SELECT run_id, worker_id, task_id, state FROM long_run_worker_attempts WHERE id = ?",
-  ).get(input.attemptId) as { run_id: string; worker_id: string; task_id: string | null; state: string } | undefined;
+    "SELECT a.run_id, a.worker_id, a.task_id, a.state, w.role FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id=a.worker_id WHERE a.id = ?",
+  ).get(input.attemptId) as { run_id: string; worker_id: string; task_id: string | null; state: string; role: string } | undefined;
   if (!row) return false;
   if (row.state !== "running") return row.state === input.state;
   const now = new Date().toISOString();
@@ -1819,7 +1808,7 @@ export function settleLongRunWorkerAttempt(input: {
           : "failed";
     db.prepare("UPDATE long_run_workers SET state = ?, updated_at = ? WHERE id = ?")
       .run(workerState, now, row.worker_id);
-    if (row.task_id) {
+    if (row.task_id && row.role !== "verifier") {
       const taskState: LongRunTaskState = input.state === "completed"
         ? "verifying"
         : input.state === "cancelled"
@@ -2026,7 +2015,7 @@ export function currentCompleteGoalVerificationEvidence(runId: string): { refs: 
  * for a scheduled retry or wait is then at a turn boundary as much as a paused one: the next dispatched turn
  * reads the bound revision.
  */
-export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion: number, opts?: { allowIdleWaiting?: boolean }): LongRunRecord {
+export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion: number, opts?: { allowIdleWaiting?: boolean; allowIdleActive?: boolean }): LongRunRecord {
   const db = getDb();
   db.transaction(() => {
     const run = getLongRun(runId);
@@ -2037,12 +2026,10 @@ export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion:
     const binding = getLongRunGoalRevisionBinding(runId);
     if (binding?.revision === goal.revision) return;
     if (run.version !== expectedVersion) throw new Error("long_run_goal_binding_version_conflict");
-    const stops = opts?.allowIdleWaiting ? ["draft", "queued", "paused", "blocked", "waiting_user", "waiting_tool"]
+    const stops = opts?.allowIdleActive ? ["draft", "queued", "running", "verifying", "paused", "blocked", "waiting_user", "waiting_tool", "waiting_worker"] : opts?.allowIdleWaiting ? ["draft", "queued", "paused", "blocked", "waiting_user", "waiting_tool"]
       : ["draft", "queued", "paused", "blocked", "waiting_user"];
     if (!stops.includes(run.status)) throw new Error("long_run_goal_binding_requires_stop");
-    const active = db.prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')")
-      .get(runId) as { n: number };
-    if (active.n > 0) throw new Error("long_run_goal_binding_attempt_unsettled");
+    if (liveLongRunAttemptCount(runId) > 0) throw new Error("long_run_goal_binding_attempt_live");
     const objective = goal.objective.replace(/\s+/g, " ").trim();
     const criteria = goal.acceptanceCriteria.map((criterion) => criterion.text.replace(/\s+/g, " ").trim());
     const now = new Date().toISOString();
@@ -2266,6 +2253,7 @@ export function recordLongRunVerification(input: {
   summary: string;
   authority?: "generic" | "science-projection";
   goalRevision?: number;
+  background?: boolean;
 }): string {
   const run = getLongRun(input.runId);
   if (!run) throw new Error(`long_run_not_found:${input.runId}`);
@@ -2273,7 +2261,7 @@ export function recordLongRunVerification(input: {
   if (!goalRevisionIsCurrent(run) || (binding && input.goalRevision !== binding.revision)) {
     throw new Error("long_run_verification_goal_revision_conflict");
   }
-  if (binding && run.status !== "verifying") throw new Error("long_run_verification_not_active");
+  if (binding && run.status !== "verifying" && !(input.background && LONG_RUN_ACTIVE_STATUSES.has(run.status) && !longRunOwnerHold(run.id))) throw new Error("long_run_verification_not_active");
   if (run.surface === "science" && input.authority !== "science-projection") {
     throw new Error("science_projection_read_only");
   }
@@ -2291,7 +2279,7 @@ export function recordLongRunVerification(input: {
   db.transaction(() => {
     const current = getLongRun(input.runId)!;
     const currentBinding = getLongRunGoalRevisionBinding(input.runId);
-    if (!goalRevisionIsCurrent(current) || (currentBinding && (input.goalRevision !== currentBinding.revision || current.status !== "verifying"))) {
+    if (!goalRevisionIsCurrent(current) || (currentBinding && (input.goalRevision !== currentBinding.revision || (current.status !== "verifying" && !(input.background && LONG_RUN_ACTIVE_STATUSES.has(current.status) && !longRunOwnerHold(current.id)))))) {
       throw new Error("long_run_verification_goal_revision_conflict");
     }
     if (input.verdict === "passed" && !verificationReferencesResolve(current, { evidenceRefs, artifactRefs })) {
@@ -2344,7 +2332,14 @@ export function applyScienceLongRunProjectionStatus(input: {
 }): LongRunRecord {
   const current = getLongRun(input.runId);
   if (!current || current.surface !== "science") throw new Error("science_projection_run_invalid");
-  if (current.status === input.to) return current;
+  const requestedTo = input.to;
+  const resolvedTo = resolveNonBlockingGoalStatus(current.status, input.to, input.pauseReason, "system");
+  input = { ...input, to: resolvedTo as typeof input.to };
+  if (current.status === input.to) {
+    if (requestedTo !== input.to) appendLongRunEvent({ runId: current.id, kind: "run.block_skipped", actorKind: "system",
+      payload: { requestedStatus: requestedTo, status: input.to, outcome: "unknown", sourceVersion: input.sourceVersion } });
+    return getLongRun(current.id) ?? current;
+  }
   if (LONG_RUN_TERMINAL_STATUSES.has(current.status)) {
     throw new Error(`science_projection_terminal_conflict:${current.status}->${input.to}`);
   }
@@ -2390,6 +2385,7 @@ export function applyScienceLongRunProjectionStatus(input: {
         from: current.status,
         to: input.to,
         pauseReason,
+        ...(requestedTo !== input.to ? { skippedStatus: requestedTo, outcome: "unknown" } : {}),
         sourceVersion: input.sourceVersion,
         sourceStateSha256: input.sourceStateSha256,
       },
@@ -2410,10 +2406,11 @@ export function tryCompleteVerifiedLongRun(runId: string): boolean {
 
 /** An ongoing mandate verifies episodes, never its own termination. Only the
  * host verifier uses this path; ordinary completion requests remain false. */
-export function settleVerifiedLongRun(runId: string): "completed" | "cycle_completed" | null {
+export function settleVerifiedLongRun(runId: string, options?: { background?: boolean }): "completed" | "cycle_completed" | null {
   return getDb().transaction(() => {
     const run = getLongRun(runId);
-    if (!run || run.status !== "verifying") return null;
+    if (!run || (run.status !== "verifying" && !(options?.background && LONG_RUN_ACTIVE_STATUSES.has(run.status)))) return null;
+    if (longRunOwnerHold(run.id) || liveLongRunAttemptCount(run.id)) return null;
     if (run.surface === "science") return null;
     if (!goalRevisionIsCurrent(run)) return null;
     const latest = latestCriterionVerdicts(runId);
@@ -2453,6 +2450,7 @@ export function settleVerifiedLongRun(runId: string): "completed" | "cycle_compl
       transitionLongRun({ runId, to: "running", actorKind: "host", reason: "ongoing-cycle-verified" });
       return "cycle_completed";
     }
+    if (run.status !== "verifying") transitionLongRun({ runId, to: "verifying", actorKind: "host", reason: "background-verification-settled" });
     transitionLongRun({ runId, to: "completed", actorKind: "host", reason: "all-criteria-verified" });
     return "completed";
   })();
@@ -2475,25 +2473,14 @@ export function longRunContinueDecision(goalId: string, now: Date = new Date()):
     budget: { ...run.budget, costUsedUsd: run.costUsedUsd },
   });
   if (LONG_RUN_TERMINAL_STATUSES.has(run.status)) return decision(false, "goal_terminal");
-  if (run.status === "blocked") return decision(false, "goal_blocked");
-  if (["paused", "pausing", "cancelling"].includes(run.status)) {
+  if (["cancelling", "pausing"].includes(run.status) || longRunOwnerHold(run.id)
+    || (run.status === "paused" && ["user", "app_closed", "crash_recovery"].includes(run.pauseReason ?? ""))) {
     return decision(false, "goal_paused");
   }
-  if (!goalRevisionIsCurrent(run)) return decision(false, "goal_revision_pending");
-  if (["draft", "waiting_user", "waiting_worker", "waiting_tool", "verifying"].includes(run.status)) {
-    return decision(false, `goal_${run.status}`);
-  }
-  const deadline = run.budget.wallclockDeadline ? Date.parse(run.budget.wallclockDeadline) : Number.NaN;
-  if (Number.isFinite(deadline) && now.getTime() >= deadline) return decision(false, "budget_wallclock_exhausted");
-  if (run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles) {
-    return decision(false, "budget_cycles_exhausted");
-  }
-  const monetaryRefusal = longRunMonetaryRefusal(run);
-  if (monetaryRefusal) return decision(false, monetaryRefusal);
-  if (ownsHostGoalLoop(run.surface) && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing"
-    && run.stallStreak >= run.stallWindow) return decision(false, "stall_replan_required");
-  if (openTaskCount <= 0) return decision(false, "no_open_tasks");
-  return decision(true, "open_tasks_remain");
+  if (run.status === "draft") return decision(false, "goal_draft");
+  // A pending receipt, revision, wait, exhausted allowance or empty task list is
+  // context for the next planning turn, never proof the user's Goal is finished.
+  return decision(true, openTaskCount > 0 ? "open_tasks_remain" : "goal_continue_planning");
 }
 
 /** Usage survives failure/cancellation, but can never dispatch or change task success. */
@@ -2626,22 +2613,20 @@ export function recordLongRunCycle(input: {
     const replanRequired = stallStreak >= run.stallWindow && ownsHostGoalLoop(run.surface)
       && Boolean((input.verifiedCheckpointId || input.sourceInvocationId) && input.progressState)
       && getChatGoalRevision(run.goalId)?.lifecycle === "ongoing";
-    const shouldBlock = stallStreak >= run.stallWindow && !replanRequired;
+    const stalled = stallStreak >= run.stallWindow;
     db.prepare(
       `UPDATE long_runs
        SET cycle_count = cycle_count + 1,
            last_progress_key = COALESCE(?, last_progress_key), stall_streak = ?,
-           status = CASE WHEN ? THEN 'blocked' ELSE status END,
-           blocked_reason = CASE WHEN ? THEN 'stall_window_exhausted' ELSE blocked_reason END,
            updated_at = ?, version = version + 1
        WHERE id = ?`,
     ).run(input.progressState === "unknown" ? null : input.progressKey ?? null,
-      stallStreak, shouldBlock ? 1 : 0, shouldBlock ? 1 : 0, now, run.id);
+      stallStreak, now, run.id);
     appendEventInDb({
       runId: run.id, kind: "run.cycle_recorded", actorKind: "host", sourceEventId,
       payload: { progressKey: input.progressKey ?? null, ...(input.progressState ? { progressState: input.progressState } : {}),
         outcome: input.outcome?.slice(0, 240) ?? null,
-        stallStreak, blocked: shouldBlock, replanRequired, usage,
+        stallStreak, blocked: false, stalled, replanRequired, usage,
         ...(input.sourceInvocationId ? { invocationRunId: input.sourceInvocationId, verification: "unverified" } : {}),
         ...(usage ? { invocationRunId: usage.invocationRunId, attemptId: usage.attemptId } : {}) },
       at: now,
@@ -2652,11 +2637,17 @@ export function recordLongRunCycle(input: {
   return longRunContinueDecision(input.goalId);
 }
 
-export function requestLongRunVerification(goalId: string, evidence?: string | null): boolean {
+export function requestLongRunVerification(goalId: string, evidence?: string | null, options?: { background?: boolean }): boolean {
   return getDb().transaction(() => {
     const run = getLongRunByGoalId(goalId);
     if (!run || !goalRevisionIsCurrent(run)) return false;
     if (run.surface === "science") return false;
+    if (options?.background) {
+      if (!LONG_RUN_ACTIVE_STATUSES.has(run.status) || longRunOwnerHold(run.id)) return false;
+      appendLongRunEvent({ runId: run.id, kind: "verification.requested", actorKind: "host",
+        payload: { background: true, evidence: evidence?.slice(0, 500) ?? null } });
+      return true;
+    }
     if (run.status === "verifying") return true;
     if (!["running", "waiting_worker", "waiting_tool"].includes(run.status)) return false;
     transitionLongRun({

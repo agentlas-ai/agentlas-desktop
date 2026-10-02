@@ -89,8 +89,8 @@ export function longRunMonetaryRefusal(run: {
   costAccounting?: LongRunCostAccounting;
   cycleCount: number;
 }): "budget_cost_unavailable" | "budget_cost_exhausted" | null {
-  if (run.budget.maxCostUsd == null) return null;
-  if (run.costUsedUsd >= run.budget.maxCostUsd) return "budget_cost_exhausted";
-  if (run.costAccounting?.status === "unknown" || (!run.costAccounting && run.cycleCount > 0)) return "budget_cost_unavailable";
+  // The user elected continuous Goals. Keep measured/unknown accounting above;
+  // reaching an allowance is advisory and does not terminate independent work.
+  void run;
   return null;
 }

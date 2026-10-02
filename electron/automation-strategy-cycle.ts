@@ -63,6 +63,10 @@ export interface AutomationStrategyCycleInput {
    * ordinary post-run cycle and its original proposal receipt. */
   goalRecommendation?: GoalStrategyAutomationRecommendationV1;
   signal?: AbortSignal;
+  /** Host background review can draft observations but cannot adjudicate/apply them. */
+  backgroundAdvisory?: boolean;
+  /** Exact host occurrence fence, checked again after every model await. */
+  isCurrent?: () => boolean;
 }
 
 function readStrategyObservationEvents(runId: string): {
@@ -192,6 +196,8 @@ function outputObservation(input: AutomationStrategyCycleInput, metrics: ReturnT
  * execution failure.
  */
 export async function runAutomationStrategyCycle(input: AutomationStrategyCycleInput): Promise<void> {
+  const current = () => !input.signal?.aborted && (!input.isCurrent || input.isCurrent());
+  if (!current()) { unavailable(input, "reflection_source_changed"); return; }
   let strategyRunEvents: AutomationStrategyRunEventLike[] = [];
   let strategyActivity = { callCount: 0, toolNames: [] as string[] };
   let eventWindowCoverage: StrategyEventCoverage = "unavailable";
@@ -221,14 +227,11 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
   const observationCoverageIncomplete = strategyRunSummary.metrics.coverage !== "complete"
     || strategyRunSummary.metrics.toolActivityCoverage !== "complete";
 
-  if (effectsUnconfirmed) {
-    unavailable(input, "source_effects_unconfirmed");
-  } else if (observationCoverageIncomplete) {
-    unavailable(input, "observation_coverage_incomplete", {
-      coverage: strategyRunSummary.metrics.coverage,
-      toolActivityCoverage: strategyRunSummary.metrics.toolActivityCoverage,
-    });
-  } else {
+  const advisoryOnly = input.backgroundAdvisory === true || effectsUnconfirmed || observationCoverageIncomplete;
+  if (advisoryOnly) tryRecordRunEvent({ runId: input.sourceRunId, automationId: input.automationId,
+    kind: "automation_strategy_evidence_pending", payload: { effectsUnconfirmed,
+      coverage: strategyRunSummary.metrics.coverage, toolActivityCoverage: strategyRunSummary.metrics.toolActivityCoverage } });
+  {
     try {
       const reflectionAutomation = getAutomation(input.automationId);
       if (!reflectionAutomation?.graph) {
@@ -258,7 +261,9 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
           automationId: input.automationId,
           sourceRunId: input.sourceRunId,
           runtimeSelection: reflectionAutomation.runtimeSelection ?? input.runtimeSelection,
-          promptTemplate: reflectionAutomation.promptTemplate,
+          promptTemplate: reflectionAutomation.promptTemplate + (advisoryOnly
+            ? "\nBackground observation only: source effects or evidence coverage remain unknown. Never claim completion or replay an unconfirmed external action. Propose read-only checks and independent alternatives."
+            : ""),
           scheduleSpec: reflectionAutomation.scheduleSpec,
           timezone: reflectionAutomation.timezone,
           triggerType: reflectionAutomation.triggerType,
@@ -275,6 +280,7 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
           ...(input.goalRecommendation ? { goalRecommendation: input.goalRecommendation } : {}),
           signal: input.signal,
         });
+        if (!current()) { unavailable(input, "reflection_source_changed"); return; }
         if (reflection.status !== "proposal") {
           unavailable(input, reflection.reason);
         } else {
@@ -294,10 +300,11 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
             requiresPaymentApproval: reflection.envelope.requiresPaymentApproval,
             observation,
           });
-          const reviewed = await adjudicateAutomationStrategyProposal({
+          const reviewed = advisoryOnly ? proposal : await adjudicateAutomationStrategyProposal({
             automationId: input.automationId,
             proposalId: proposal.id,
           });
+          if (!current()) { unavailable(input, "reflection_source_changed"); return; }
           tryRecordRunEvent({
             runId: input.sourceRunId,
             kind: "automation_strategy_reflection_proposed",
@@ -342,6 +349,7 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
     }
   }
 
+  if (!current()) { unavailable(input, "reflection_source_changed"); return; }
   // One live proposal per automation (P0-5): retire older drafts and a live draft whose definition moved.
   // Receipt-only; never changes the graph, schedule, Goal, or authority.
   try {

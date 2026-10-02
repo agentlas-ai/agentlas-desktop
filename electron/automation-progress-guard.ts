@@ -227,13 +227,13 @@ export function noteNoProgressEvent(state: NoProgressGuardState, event: McpInvoc
   return null;
 }
 
-/**
- * The owner-facing sentence for the same decision, in the owner's language and
- * without the machine marker. noProgressLoopError() stays the machine string the
- * classifier and handoff read; this one is what the origin chat shows (owner
- * Thread Marketing 2026-09-28 10:16Z read "[automation_no_progress_loop] the run
- * repeated the same browser_find lookup 5 times…" in English).
- */
+
+
+
+
+
+
+
 export function noProgressLoopOwnerText(decision: NoProgressDecision, locale: "ko" | "en"): string {
   if (locale === "ko") {
     const where = decision.nodeId ? `"${decision.nodeId}" 단계에서 ` : "";

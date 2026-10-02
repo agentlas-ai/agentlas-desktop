@@ -8,6 +8,7 @@
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { navigate } from "@/lib/navigation";
 import { humanSchedule } from "@shared/graph-blueprint";
+import { resolveAutomationGraphForEditing } from "@shared/automation-graph-definition";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   ReactFlow,
@@ -145,40 +146,6 @@ export default function AutomationFlowWrapper() {
       </ReactFlowProvider>
     </Suspense>
   );
-}
-
-/** graph_json이 null인 레거시 자동화용 2노드 그래프 즉석 합성(백엔드 synthesizeLegacyGraph 미러). */
-function synthesizeLegacyGraph(a: Automation): WorkflowGraph {
-  return {
-    version: 1,
-    nodes: [
-      {
-        id: "n0",
-        type: "trigger",
-        position: { x: 0, y: 120 },
-        // scheduleSpec을 반드시 같이 실어야 한다. 폼으로 만든 자동화는 graph_json이 null이라
-        // 여기서 시드되는데, cron/once/manual/interval 스케줄의 scheduleHuman 토큰은 "spec"이라
-        // specFromLegacyToken이 복원하지 못한다(NodeConfigPanel §112). 그러면 ScheduleBuilder가
-        // value=null로 마운트해 daily-09:00 기본값을 즉시 방출하고, 트리거 노드를 클릭만 해도
-        // "*/30 9-18 * * 1-5" 같은 스케줄이 저장 시 하루 1회 09:00으로 조용히 덮어써졌다.
-        config: { schedule: a.scheduleHuman, ...(a.scheduleSpec ? { scheduleSpec: a.scheduleSpec } : {}) },
-        label: "Trigger",
-      },
-      {
-        id: "n1",
-        type: "agent",
-        position: { x: 280, y: 120 },
-        config: {
-          ref: a.targetId,
-          targetType: a.targetType,
-          prompt: a.promptTemplate,
-          ...(a.targetType === "hub" && a.targetVersion ? { targetVersion: a.targetVersion } : {}),
-        },
-        label: a.targetType === "firm" ? "Firm" : a.targetType === "hub" ? "Hub Agent" : "Agent",
-      },
-    ],
-    edges: [{ id: "e0-1", source: "n0", target: "n1" }],
-  };
 }
 
 function AutomationFlowPage() {
@@ -572,13 +539,13 @@ function AutomationFlowPage() {
     void load();
   }, [load]);
 
-  const isSynthesized = !!automation && !automation.graph;
+  const isSynthesized = !!automation && !automation.graph?.nodes.length;
 
   // 저장 그래프 or 합성 그래프 → 필요 시 결정적 재배치. 편집 상태는 rfNodes/rfEdges가 소유하므로
   // 이 그래프는 "초기 시드"로만 쓴다(automation이 새로 로드될 때만 하이드레이트).
   const seedGraph: WorkflowGraph | null = useMemo(() => {
     if (!automation) return null;
-    const g = automation.graph ?? synthesizeLegacyGraph(automation);
+    const g = resolveAutomationGraphForEditing(automation);
     if (needsLayout(g)) return { ...g, nodes: layoutGraph(g) };
     return g;
   }, [automation]);

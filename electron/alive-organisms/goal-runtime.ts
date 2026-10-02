@@ -91,6 +91,16 @@ export class GoalAliveRuntime implements AliveRuntimePort {
     if (!UUID.test(runId)) return null;
     const row = this.deps.light.row(runId);
     if (row && row.status !== "running") return this.convert(row);
+    if (!row && !this.deps.light.isActive(runId) && !this.hostLost(runId)) {
+      const agentId = this.store.wakeAgentId(runId);
+      // The light runner writes its attempt row synchronously before invoking
+      // the provider. A thrown pre-dispatch start can therefore be reconciled
+      // in this process as known zero usage, without waiting for an app restart.
+      if (agentId && this.store.owns(agentId)) {
+        const runtime = this.runtimeRecord(agentId, runId);
+        return { runId, status: "failed", tokensUsed: 0, errorCode: "alive-wake-not-started", ...(runtime ? { runtime } : {}) };
+      }
+    }
     if (!this.hostLost(runId)) return null;
     const agentId = row?.agentId ?? this.store.wakeAgentId(runId);
     if (!agentId || !this.store.owns(agentId)) return null;

@@ -1,12 +1,12 @@
-/**
- * Who may wait on a timer: an ongoing Goal, or a finite Goal that has a deadline — up to that deadline, never past it.
- *
- * Owner direction 2026-09-27 (after the "X Marketing" goal: "팔로워 1달안에 1000 넘기고…"): a deadline campaign must
- * be able to keep working until its deadline; at the deadline it is verified against its target. The deadline is not
- * read from the owner's words by the host: the goal-shape planner (goal-shaping.ts) reads it as a field of the plan it
- * already produces for the current Goal revision, and the host resolves and bounds it (shared/goal-shape.ts
- * resolveGoalDeadline / maxDeadlineDays). A finite Goal without such a deadline keeps the old rule (no timers).
- */
+
+
+
+
+
+
+
+
+
 import { getChatGoalRevision } from "../store/chat-goals";
 import { readGoalPlan } from "../store/goal-plans";
 

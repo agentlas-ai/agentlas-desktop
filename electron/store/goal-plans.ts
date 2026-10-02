@@ -50,7 +50,11 @@ export function ensureGoalPlanTables(db: Db = getDb()): void {
     );
     CREATE INDEX IF NOT EXISTS idx_goal_plan_decisions_goal ON goal_plan_decisions(goal_id, revision, plan_seq, kind, created_at);
   `);
-  ensuredFor = db;
+  // SQLite rolls DDL back with its enclosing transaction. A refused wait may
+  // first read a Goal plan inside that transaction, then throw; caching here
+  // would claim the rolled-back tables exist for the rest of the app lifetime.
+  // Cache only schema observed outside a transaction, where it is committed.
+  if (!db.inTransaction) ensuredFor = db;
 }
 
 export type GoalPlanDecisionKind =

@@ -1,35 +1,35 @@
 import { getGoalExecutionDirectiveReview, recordGoalExecutionDirective } from "./goal-execution-context";
-/**
- * Owner messages that change a Goal's targets become Goal revisions — ongoing and finite alike.
- *
- * Measured 2026-09-27 (owner's One "X Marketing" goal, finite): at 09:45Z the owner wrote "뭐함 팔로워 1달안에
- * 1000 넘기고 agentlas의 대박 통로로 만드셈" into the blocked goal. The turn resumed with it, but the review was
- * skipped (skipped:goal_not_ongoing), so verification would still judge the first request only. A finite Goal's
- * amendment now also becomes a revision; it adds a criterion for the owner's update (prior criteria are kept
- * unless explicitly replaced), and a finite turn that ends while an amendment is pending is not verified against
- * the old revision (holdFiniteGoalForPendingAmendment).
- *
- * Measured 2026-09-24: in an ongoing Goal chat the owner wrote "grow to 10k
- * followers and 1M total views within a month, redo the strategy". The chat
- * turn ran and even updated the automation, but no chat_goal_revisions row was
- * written - the Goal contract still carried only the first request. Every
- * judge, strategy reflection and effect observation kept reading the old goal,
- * so the new targets existed only as prose in one transcript.
- *
- * Flow (reuses the existing revision mechanism, nothing parallel):
- *  1. After an owner turn in a Goal chat, the resident judgment service answers
- *     one typed question: does this message change the Goal's objective,
- *     targets, deadline or success condition (amends_goal), or only steer the
- *     work (steering)? Unavailable or unsure = nothing is recorded.
- *  2. An amendment is recorded as a pending long-run event (durable, content
- *     free: the message id).
- *  3. It is applied only at a stop - the same boundary the Goal editor uses:
- *     reviseStoredAutomaticGoal + bindCurrentGoalRevisionToLongRun in one
- *     transaction. The objective gains the owner's update verbatim; existing
- *     acceptance criteria are retained unchanged (an episode of an ongoing Goal
- *     must stay verifiable). If the run is mid-episode it stays pending and the
- *     blocked-goal sweep applies it at the next stop.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
 import { getChatGoalContract, getChatGoalRevision, reviseStoredAutomaticGoal } from "../store/chat-goals";
@@ -38,8 +38,7 @@ import {
   bindCurrentGoalRevisionToLongRun,
   getLongRun,
   getLongRunByGoalId,
-  transitionLongRun,
-  unsettledLongRunAttemptCount,
+  liveLongRunAttemptCount,
 } from "../store/long-runs";
 import {
   configuredOrchestratorJudgmentPolicy,
@@ -48,7 +47,6 @@ import {
   type RequiredVerdict,
 } from "../system-agents/judgment";
 import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
-import { isGoalObserving } from "./effect-observation-tickets";
 
 export const OWNER_GOAL_AMENDMENT_PENDING_KIND = "run.owner_goal_amendment_pending";
 export const OWNER_GOAL_AMENDMENT_APPLIED_KIND = "run.owner_goal_amendment_applied";
@@ -213,9 +211,9 @@ export function applyPendingOwnerGoalAmendments(
   const contract = getChatGoalContract(goalId);
   if (!contract || !["active", "blocked"].includes(contract.status)) return { applied: false, reason: "goal_not_active" };
   const idleWaiting = run.status === "waiting_tool" && opts?.noLiveTurn === true;
-  if (!BINDABLE_STATUSES.has(run.status) && !idleWaiting) return { applied: false, reason: `not_at_stop:${run.status}` };
-  if (unsettledLongRunAttemptCount(run.id) > 0) return { applied: false, reason: "attempt_unsettled" };
-  if (idleWaiting && isGoalObserving(goalId)) return { applied: false, reason: "observation_in_flight" };
+  const idleActive = ["running", "queued"].includes(run.status) && opts?.noLiveTurn === true;
+  if (!BINDABLE_STATUSES.has(run.status) && !idleWaiting && !idleActive) return { applied: false, reason: `not_at_stop:${run.status}` };
+  if (liveLongRunAttemptCount(run.id) > 0) return { applied: false, reason: "attempt_running" };
   try {
     return getDb().transaction((): OwnerGoalAmendmentApplyResult => {
       const applied: string[] = [];
@@ -254,7 +252,7 @@ export function applyPendingOwnerGoalAmendments(
       if (applied.length === 0) return { applied: false, reason: "no_valid_source" };
       const latest = getLongRun(run.id);
       if (!latest) throw new Error("goal_amendment_run_missing");
-      bindCurrentGoalRevisionToLongRun(latest.id, latest.version, idleWaiting ? { allowIdleWaiting: true } : undefined);
+      bindCurrentGoalRevisionToLongRun(latest.id, latest.version, idleWaiting || idleActive ? { allowIdleWaiting: idleWaiting, allowIdleActive: idleActive } : undefined);
       return { applied: true, revision: revisionNumber, sourceMessageIds: applied };
     })();
   } catch (error) {
@@ -274,9 +272,13 @@ export function holdFiniteGoalForPendingAmendment(goalId: string): boolean {
   const run = getLongRunByGoalId(goalId);
   if (!run || run.status !== "running" || getChatGoalRevision(goalId)?.lifecycle !== "finite") return false;
   if (pendingSourceIds(run.id).length === 0) return false;
-  transitionLongRun({ runId: run.id, to: "blocked", actorKind: "host", reason: OWNER_GOAL_AMENDMENT_PENDING_BLOCK });
-  applyPendingOwnerGoalAmendments(goalId);
-  return true;
+  const amendment = applyPendingOwnerGoalAmendments(goalId, { noLiveTurn: true });
+  appendLongRunEvent({ runId: run.id, kind: "run.owner_goal_amendment_advisory", actorKind: "host",
+    payload: { reason: OWNER_GOAL_AMENDMENT_PENDING_BLOCK, applied: amendment.applied,
+      ...(amendment.applied ? { revision: amendment.revision } : { advisory: amendment.reason }) } });
+  // Verification must not close against an unapplied owner target, but the
+  // caller's normal fresh continuation keeps the Goal active independently.
+  return !amendment.applied;
 }
 
 /**

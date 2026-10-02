@@ -94,6 +94,14 @@ async function deliverClaimedEvent(event: TriggerEventRecord, run: TriggerEventR
 
     if (claimLost) throw new Error("trigger_event_claim_lost_during_execution");
     if (!result.accepted) {
+      // A typed pre-dispatch refusal (stale definition/owner/input) cannot heal
+      // by retrying this immutable command. Preserve it for explicit repair.
+      if (result.status === "blocked") {
+        if (!parkTriggerEventClaim(event.id, OWNER, result.error ?? "trigger_event_dispatch_blocked")) {
+          throw new Error("trigger_event_dispatch_blocked_park_conflict");
+        }
+        return;
+      }
       // Another GUI/headless path owns the automation lease. This was not an
       // execution attempt, so preserve retry budget and payload exactly.
       if (!deferTriggerEventClaim(event.id, OWNER, BUSY_RETRY_MS)) {

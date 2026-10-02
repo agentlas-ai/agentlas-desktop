@@ -252,7 +252,13 @@ export async function requestUpdaterInstall(options: { resumeWork?: boolean } | 
   if (state.status !== "downloaded" || !state.version) {
     return { accepted: false, state, blockedBy: "active-runs", activeRunCount: items.length };
   }
-  await host.checkpoint(items);
+  try {
+    await host.checkpoint(items);
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "automation_update_drain_timed_out") throw error;
+    return { accepted: false, state: host.state(), blockedBy: "active-runs",
+      activeRunCount: items.length, activeWorkLine: describeUpdateWork(items, host.locale()) };
+  }
   const result = await host.install();
   if (!result.accepted) host.restartAfterRefusedHandoff();
   return result;

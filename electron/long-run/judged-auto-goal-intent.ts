@@ -1,4 +1,8 @@
 import type { GoalIntakeDecision, GoalSourceMessage } from "../../shared/auto-goal";
+import { getChat } from "../store/chats";
+import { getDb } from "../store/db";
+import { getLongRunByGoalId, longRunOwnerHold } from "../store/long-runs";
+import { ownsHostGoalLoop } from "./host-goal-surface";
 import {
   judgeRequired,
   type JudgmentRuntimeAttempt,
@@ -12,13 +16,13 @@ const FINITE_EXECUTION: ReadonlySet<IntakeLabel> = new Set(["execute_single_turn
 export const AUTOMATIC_GOAL_INTENT_TIMEOUT_MS = 60_000;
 
 export interface AutomaticGoalIntentResolution extends GoalIntakeDecision {
-  classification: "classified" | "unavailable";
+  classification: "classified" | "unavailable" | "continued_existing";
   failureKind?: RequiredVerdict<IntakeLabel>["failureKind"];
   attempts?: JudgmentRuntimeAttempt[];
 }
 
-/** Reuses the resident judgment service. No lexical fallback, permission change
- * or task dispatch occurs when the judge is unavailable or the request is vague.
+/** A failed auxiliary classification cannot stop an already bound Goal. Its
+ * existing contract continues; this fallback never admits a new Goal.
  */
 export async function resolveAutomaticGoalIntent(
   source: GoalSourceMessage,
@@ -28,13 +32,23 @@ export async function resolveAutomaticGoalIntent(
     judgeFn?: (spec: RequiredJudgeSpec<IntakeLabel>) => Promise<RequiredVerdict<IntakeLabel>>;
   } = {},
 ): Promise<AutomaticGoalIntentResolution> {
-  const abstain = (diagnostic: Partial<Pick<AutomaticGoalIntentResolution, "failureKind" | "attempts">> = {}): AutomaticGoalIntentResolution => ({
-    messageId: source.messageId,
-    intent: "unknown",
-    commitment: "uncertain",
-    classification: "unavailable",
-    ...diagnostic,
-  });
+  const abstain = (diagnostic: Partial<Pick<AutomaticGoalIntentResolution, "failureKind" | "attempts">> = {}): AutomaticGoalIntentResolution => {
+    let continuesExisting = false;
+    if (!options.signal?.aborted && source.role === "user" && source.text.trim()) {
+      try {
+        const chat = getChat(source.chatId);
+        const run = chat?.goalId ? getLongRunByGoalId(chat.goalId) : null;
+        const stored = getDb().prepare("SELECT chat_id,role,text FROM chat_messages WHERE id=?")
+          .get(source.messageId) as { chat_id: string; role: string; text: string } | undefined;
+        continuesExisting = Boolean(run && ownsHostGoalLoop(run.surface) && run.rootChatId === source.chatId
+          && !["completed", "cancelled", "cancelling", "failed", "pausing"].includes(run.status)
+          && !longRunOwnerHold(run.id) && stored?.chat_id === source.chatId && stored.role === "user"
+          && stored.text === source.text);
+      } catch { /* A missing store cannot invent an existing Goal. */ }
+    }
+    return { messageId: source.messageId, intent: "unknown", commitment: "uncertain",
+      classification: continuesExisting ? "continued_existing" : "unavailable", ...diagnostic };
+  };
   if (source.role !== "user" || !source.text.trim() || options.signal?.aborted) return abstain();
   try {
     const result = await (options.judgeFn ?? judgeRequired)({

@@ -34,6 +34,8 @@ import {
   type ToolBrokerLevel,
 } from "../../shared/graph-tool-broker";
 import { runMcpInvocation } from "../mcp/client";
+import { runGraphMcpCall } from "./mcp-call";
+import { nativeGraphSuccessNeedsReflection } from "../../shared/automation-graph-definition";
 import { AutomationWorkspaceError, bindAutomationWorkspaceOccurrence, captureAutomationWorkspace, revalidateAutomationWorkspace } from "../automation-workspace";
 import { detectRuntimes } from "../runtime/detect";
 import { rolePriorityRuntimes } from "../runtime/selection";
@@ -269,6 +271,8 @@ function durableInitialVars(value: unknown): Record<string, unknown> {
 
 export interface RunGraphResult {
   ok: boolean;
+  /** Unresolved work stays in the durable checkpoint while independent branches run. */
+  pendingNodeIds?: string[];
   needsInput?: boolean;
   loginWaits?: Array<{ nodeId: string; handle: BrowserLoginWait; automaticResumeSafe: boolean }>;
   loginWaitSource?: { automationId: string; runId: string; occurrenceId: string; graphDigest: string };
@@ -316,10 +320,8 @@ export interface RunGraphResult {
 const MAX_SUBGRAPH_DEPTH = 5;
 
 const NON_ROUTABLE_FAILURES = new Set([
-  "APPROVAL_REQUIRED",
   "MUTATION_UNVERIFIED",
   "RESUME_CONFLICT",
-  "BUDGET_EXHAUSTED",
 ]);
 
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
@@ -333,6 +335,14 @@ type GraphToolReceipt = {
   resultDigest: string;
   readOnly: boolean;
   succeeded: boolean;
+};
+
+type GraphExecutionState = {
+  loopIterations: Record<string, number>;
+  tokensUsed: number;
+  maxObservedNodeTokens: number;
+  nodeTokensUsed: Record<string, number>;
+  budgetUnmeasured: boolean;
 };
 
 export type GraphCheckpoint = {
@@ -351,6 +361,8 @@ export type GraphCheckpoint = {
   toolReceipts: Record<string, GraphToolReceipt[]>;
   prepareReceipts: Record<string, WorkforcePrepareCheckpointReceipt[]>;
   loginWaits: Record<string, GraphLoginWaitEntry>;
+  /** Optional only for checkpoints written before durable occurrence accounting. */
+  executionState?: GraphExecutionState;
   updatedAt: string;
   checkpointDigest: string;
 };
@@ -365,6 +377,7 @@ function hubTargetForNode(
   automation: Automation,
   node: WorkflowNode,
 ): { slug: string; version: string | null } | null {
+  if (Object.hasOwn(node.config, "mcpCall")) return null;
   if (node.type === "agent") {
     const ref = str(node.config, "ref");
     const nodeTargetType = str(node.config, "targetType");
@@ -512,6 +525,7 @@ export function parseGraphCheckpoint(
   ];
   if (!legacy) exactKeys.push("prepareReceipts");
   if (!legacy && !previous) exactKeys.push("loginWaits");
+  if (Object.prototype.hasOwnProperty.call(row, "executionState")) exactKeys.push("executionState");
   if (Object.keys(row).sort().join("\u0000") !== exactKeys.sort().join("\u0000")) return null;
   if (
     row.graphDigest !== expectedGraphDigest ||
@@ -561,6 +575,19 @@ export function parseGraphCheckpoint(
         typeof receipt.readOnly !== "boolean" || typeof receipt.succeeded !== "boolean"
       ) return null;
     }
+  }
+  if (row.executionState !== undefined) {
+    const state = row.executionState;
+    if (!state || typeof state !== "object" || Array.isArray(state)) return null;
+    const counters = state as Record<string, unknown>;
+    if (Object.keys(counters).sort().join("\u0000") !==
+      ["loopIterations", "tokensUsed", "maxObservedNodeTokens", "nodeTokensUsed", "budgetUnmeasured"].sort().join("\u0000")) return null;
+    const count = (value: unknown): value is number => typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+    const counts = (value: unknown, ids: ReadonlySet<string>): boolean => !!value && typeof value === "object"
+      && !Array.isArray(value) && Object.entries(value).every(([id, n]) => ids.has(id) && count(n));
+    if (!count(counters.tokensUsed) || !count(counters.maxObservedNodeTokens)
+      || typeof counters.budgetUnmeasured !== "boolean"
+      || !counts(counters.loopIterations, edgeIds) || !counts(counters.nodeTokensUsed, nodeIds)) return null;
   }
   const originalPayload = { ...row };
   delete originalPayload.checkpointDigest;
@@ -1656,6 +1683,7 @@ export async function runGraph(
   const effectivePermission: "read" | "write" =
     automation.executionPermission === "write" ? "write" : requiredExecutionPermission(graph);
   const initialVars = durableInitialVars(opts.initialVars);
+  const admissionPending = new Map<string, GraphNodeFailure>();
   // 자율 전략 진화 — 이 자동화의 현재 실패 스트릭을 1회 수집해, 실패가 이어지는 동안
   // 모든 agent/action/output 노드 프롬프트에 "다른 방법 강제" 지시문을 주입한다.
   let strategyDirective = "";
@@ -1668,11 +1696,10 @@ export async function runGraph(
     .map((node) => ({ nodeId: node.id, target: hubTargetForNode(automation, node) }))
     .filter((row) => row.target && !/^[0-9a-f]{64}$/.test(row.target.version ?? ""));
   if (unpinnedHubTargets.length > 0) {
-    throw new Error(
-      `automation_hub_version_pin_required: exact Hub package version is missing for node(s) ${unpinnedHubTargets
-        .map((row) => row.nodeId)
-        .join(", ")}.`,
-    );
+    for (const row of unpinnedHubTargets) admissionPending.set(row.nodeId, {
+      code: "automation_hub_version_pin_required", reason: "The Hub package version is unresolved for this node.",
+      nextAction: "Resolve this package in the background while other branches continue.",
+    });
   }
   const graphDigest = graphExecutionDigest(automation, graph);
   const definitionDigest = getAutomationDefinitionDigest(automation.id);
@@ -1695,17 +1722,38 @@ export async function runGraph(
   );
   const loginSourceRunId = opts.resumeLoginWaitRunId ?? opts.loginResumeRunIds?.[automation.id];
   const waitingSource = getGraphLoginWaitCheckpoint(automation.id);
-  if (hasGraphLoginWait(automation.id) && !waitingSource) throw new Error("RESUME_CONFLICT: login checkpoint invalid");
+  let loginAdmissionConflict = false;
+  const quarantineLoginSource = (reason: string, unknownEffects = false): void => {
+    loginAdmissionConflict = true;
+    const raw = waitingSource?.checkpoint;
+    const saved = raw && typeof raw === "object" && !Array.isArray(raw) ? raw as Record<string, unknown> : null;
+    const loginIds = saved?.loginWaits && typeof saved.loginWaits === "object" && !Array.isArray(saved.loginWaits)
+      ? Object.keys(saved.loginWaits) : [];
+    const held = new Set([...loginIds,
+      ...[saved?.inFlightNodeIds, saved?.ambiguousNodeIds].flatMap((ids) => Array.isArray(ids)
+        ? ids.filter((id): id is string => typeof id === "string") : []),
+      ...Object.entries(waitingSource?.nodeStates ?? {}).filter(([id, state]) => state === "done" && effectNodeIds.has(id)).map(([id]) => id)]);
+    if (unknownEffects || held.size === 0) for (const id of effectNodeIds) held.add(id);
+    for (const nodeId of held) if (graphNodeIds.has(nodeId)) admissionPending.set(nodeId, {
+      code: "RESUME_CONFLICT", reason,
+      nextAction: "Reconcile this login or effect receipt in the background; independent nodes continue.",
+    });
+  };
+  if (hasGraphLoginWait(automation.id) && !waitingSource) quarantineLoginSource("Login checkpoint is invalid.", true);
   if (waitingSource && (!loginSourceRunId || waitingSource.runId !== loginSourceRunId
       || !graphLoginWaitReady((waitingSource.checkpoint as GraphCheckpoint).loginWaits))) {
-    return { ok: false, needsInput: true, outputs: (waitingSource.checkpoint as GraphCheckpoint).outputs,
-      vars: (waitingSource.checkpoint as GraphCheckpoint).vars, error: "browser_login_required",
-      loginWaitSource: { automationId: automation.id, runId: waitingSource.runId,
-        occurrenceId: waitingSource.occurrenceId!, graphDigest: waitingSource.graphDigest! } };
+    for (const nodeId of Object.keys((waitingSource.checkpoint as GraphCheckpoint).loginWaits)) admissionPending.set(nodeId, {
+      code: "browser_login_required", reason: "This node's login is still unresolved.",
+      nextAction: "Recover the login in the background while independent branches continue.",
+    });
   }
   if (waitingSource && (opts.fresh === true || waitingSource.graphDigest !== graphDigest
-    || (requestedOccurrenceId && requestedOccurrenceId !== waitingSource.occurrenceId))) throw new Error("RESUME_CONFLICT: login occurrence or graph changed");
-  if (loginSourceRunId && (!waitingSource || waitingSource.runId !== loginSourceRunId)) throw new Error("RESUME_CONFLICT: login source changed");
+    || (requestedOccurrenceId && requestedOccurrenceId !== waitingSource.occurrenceId))) {
+    quarantineLoginSource("Login occurrence or graph identity changed.", waitingSource.graphDigest !== graphDigest);
+  }
+  if (loginSourceRunId && (!waitingSource || waitingSource.runId !== loginSourceRunId)) {
+    quarantineLoginSource("Login source identity changed.", !waitingSource);
+  }
   const latestFailedCandidate = waitingSource ?? getLatestFailedGraphCheckpoint(automation.id);
   const previousLiveFailure = latestFailedCandidate && !latestFailedCandidate.simulation
     ? latestFailedCandidate
@@ -1736,7 +1784,7 @@ export async function runGraph(
           ? ` Unresolved step(s): ${affectedNodes.join(", ")}.`
           : " The previous run may have recorded an external action.",
       );
-      throw new GraphContractError({
+      const failure: GraphNodeFailure = {
         code: "automation_fresh_run_blocked",
         reason: L(
           `처음부터 새로 실행하면 이전 외부 동작을 다시 수행할 수 있어 새 실행을 시작하지 않았습니다.${nodeDetail}`,
@@ -1746,12 +1794,14 @@ export async function runGraph(
           "실행 기록에서 외부 상태를 확인하고 이 실행을 명시적으로 종결한 뒤, 처음부터 새 실행을 다시 선택하세요.",
           "Check the external state in the run history, explicitly close out this run, then choose to start fresh again.",
         ),
-      });
+      };
+      const held = affectedNodes.length ? affectedNodes : [...effectNodeIds];
+      for (const nodeId of held) if (graphNodeIds.has(nodeId)) admissionPending.set(nodeId, failure);
     }
   }
   // Trigger deliveries carry a stable event occurrence. Never resume the
   // latest failure from a different fs/chain/webhook/poll event.
-  const latestFailed = opts.fresh !== true && latestFailedCandidate &&
+  const latestFailed = !loginAdmissionConflict && opts.fresh !== true && latestFailedCandidate &&
       latestFailedCandidate.simulation === dryRun &&
       (!requestedOccurrenceId || latestFailedCandidate.occurrenceId === requestedOccurrenceId)
     ? latestFailedCandidate
@@ -1795,10 +1845,10 @@ export async function runGraph(
       // revised is closed: it cannot resume under the new graph, so this run starts fresh
       // (graph-reconciliation.ts loadRevisedGraphReconciliation).
       if (completedEffectFromSnapshot && !hasRevisedGraphReconciliationClose(latestFailed)) {
-        releaseCoordinateIfNotStarted();
-        throw new Error(
-          "automation_partial_graph_changed: a prior occurrence committed side effects under a different graph; reconciliation is required before replay.",
-        );
+        for (const nodeId of effectNodeIds) admissionPending.set(nodeId, {
+          code: "automation_partial_graph_changed", reason: "Prior external effects belong to a changed graph.",
+          nextAction: "Reconcile those effects in the background while independent branches continue.",
+        });
       }
     } else {
       checkpoint = parseGraphCheckpoint(
@@ -1809,12 +1859,15 @@ export async function runGraph(
         graphEdgeIds,
         effectNodeIds,
       );
-      if (!checkpoint && waitingSource) { releaseCoordinateIfNotStarted(); throw new Error("RESUME_CONFLICT: login checkpoint invalid"); }
-      if (!checkpoint && completedEffectFromSnapshot) {
+      if (!checkpoint && waitingSource) {
         releaseCoordinateIfNotStarted();
-        throw new Error(
-          "automation_partial_reconciliation_required: a legacy partial occurrence has committed nodes but no resumable output receipt.",
-        );
+        quarantineLoginSource("Login checkpoint cannot be resumed under its saved lifecycle.", true);
+      }
+      if (!checkpoint && completedEffectFromSnapshot) {
+        for (const nodeId of effectNodeIds) admissionPending.set(nodeId, {
+          code: "automation_partial_reconciliation_required", reason: "The prior effect has no resumable output receipt.",
+          nextAction: "Observe the effect in the background while independent branches continue.",
+        });
       }
       if (checkpoint) {
         reconcileReplaySafePreparedWorkforceNodes(checkpoint);
@@ -1825,13 +1878,13 @@ export async function runGraph(
           }));
         }
         if (checkpoint.inFlightNodeIds.length > 0 || checkpoint.ambiguousNodeIds.length > 0) {
-          releaseCoordinateIfNotStarted();
-          throw new Error(
-            `automation_ambiguous_side_effect: reconciliation required for node(s) ${[
-              ...checkpoint.inFlightNodeIds,
-              ...checkpoint.ambiguousNodeIds,
-            ].join(", ")}.`,
-          );
+          const held = [...new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds])];
+          for (const nodeId of held) admissionPending.set(nodeId, {
+            code: "MUTATION_UNVERIFIED", reason: "The previous attempt's outward effect is unconfirmed.",
+            nextAction: "Observe this effect in the background while independent branches continue.",
+          });
+          checkpoint.ambiguousNodeIds = held;
+          checkpoint.inFlightNodeIds = [];
         }
         resumeOfRunId = latestFailed.runId;
       }
@@ -1854,6 +1907,7 @@ export async function runGraph(
       toolReceipts: {},
       prepareReceipts: {},
       loginWaits: {},
+      executionState: { loopIterations: {}, tokensUsed: 0, maxObservedNodeTokens: 0, nodeTokensUsed: {}, budgetUnmeasured: false },
       updatedAt: new Date().toISOString(),
       checkpointDigest: "sha256:" + "0".repeat(64),
     });
@@ -1993,6 +2047,10 @@ export async function runGraph(
     checkpoint!.blockedEdgeIds = [...blockedEdges].sort();
     checkpoint!.outputs = { ...outputs };
     checkpoint!.vars = structuredClone(vars);
+    checkpoint!.executionState = {
+      loopIterations: Object.fromEntries(loopIterations), tokensUsed: runTokensUsed,
+      maxObservedNodeTokens, nodeTokensUsed: Object.fromEntries(nodeTokensUsed), budgetUnmeasured,
+    };
     return sealCheckpoint(checkpoint!);
   };
   const runController = new AbortController();
@@ -2005,6 +2063,7 @@ export async function runGraph(
     detachCallerAbort = () => opts.signal?.removeEventListener("abort", relayAbort);
   }
   const runSignal = runController.signal;
+  const backgroundCheckNodes = new Set<string>();
 
   // per-node 라이브 상태 — sink로 emit하고 automation_runs에 영속화(새로고침 후 재하이드레이트).
   const emitNodeState = (
@@ -2024,6 +2083,12 @@ export async function runGraph(
   };
 
   const checkpointNodeState = (nodeId: string, state: WorkflowNodeRunState): void => {
+    if (backgroundCheckNodes.has(nodeId)) {
+      tryRecordRunEvent({ runId: `${runId}:check:${nodeId}`, automationId: automation.id, nodeId,
+        kind: "workflow_background_check_state", payload: { sourceRunId: runId, state,
+          failure: nodeFailures[nodeId] ?? null, output: outputs[nodeId] ?? null } });
+      return;
+    }
     checkpointGraphRunNode(runId, nodeId, state, syncCheckpoint());
     emitNodeState(nodeId, state, false);
   };
@@ -2034,6 +2099,16 @@ export async function runGraph(
   const loopPlan = planGraphLoops(graph);
   const loops = loopPlan.ok ? loopPlan.loops : [];
   const backEdgeIds = new Set(loops.map((loop) => loop.edgeId));
+  // Older checkpoints preserve results but not counters. An unknown allowance
+  // cannot become a fresh allowance merely because the host restarted.
+  if (resumeOfRunId && !(checkpoint as unknown as Record<string, unknown>).executionState && loops.length > 0) {
+    for (const nodeId of new Set(loops.flatMap((loop) => loop.body))) admissionPending.set(nodeId, {
+      code: "LOOP_COUNTERS_UNCONFIRMED", reason: "The old checkpoint does not record this loop's iteration count.",
+      nextAction: "Reconcile loop counters in the background; independent nodes continue.",
+    });
+  }
+
+
   /**
    * 이 검증이 떨어졌을 때 **누가 그것을 받는가**.
    *
@@ -2060,11 +2135,14 @@ export async function runGraph(
       return needle.test(serialized) || serialized.includes(`"${producedVar}"`);
     });
   };
-  const loopIterations = new Map<string, number>(loops.map((loop) => [loop.edgeId, 0] as const));
+  const restoredExecution = checkpoint.executionState;
+  const loopIterations = new Map<string, number>(loops.map((loop) =>
+    [loop.edgeId, restoredExecution?.loopIterations[loop.edgeId] ?? 0] as const));
   let ok = true;
   let error: string | undefined;
   /** 노드 id → 실패 3요소(코드·사유 원문·지금 누를 행동). 실패 카드의 정본. */
-  const nodeFailures: Record<string, GraphNodeFailure> = {};
+  const nodeFailures: Record<string, GraphNodeFailure> = Object.fromEntries(admissionPending);
+  if (admissionPending.size) { ok = false; error = "graph_nodes_pending_background_repair"; }
   /** 선언 순서 인덱스 — append 리듀서의 결정론적 정렬 키(도착 순서 아님). */
   const declarationIndex = new Map<string, number>(graph.nodes.map((n, i) => [n.id, i] as const));
   /** 도달 가능성 — 같은 변수에 동시 overwrite하는 두 노드를 잡아내는 데 쓴다. */
@@ -2124,12 +2202,12 @@ export async function runGraph(
   // 커넥터 C38 — 노드별로 도구 중개가 **실제로** 어디까지 걸렸는지. 계획이 아니라 결과다.
   const toolBrokerByNode = new Map<string, { level: ToolBrokerLevel; reason: string }>();
   /** 런타임이 보고한 토큰 누계(실행 전체 / 노드별). 보고가 없으면 상한을 집행할 수 없다. */
-  let runTokensUsed = 0;
+  let runTokensUsed = restoredExecution?.tokensUsed ?? 0;
   /** 관측된 노드 1회 최대 사용량 — 다음 노드를 띄워도 되는지 판단하는 예약치. */
-  let maxObservedNodeTokens = 0;
-  const nodeTokensUsed = new Map<string, number>();
+  let maxObservedNodeTokens = restoredExecution?.maxObservedNodeTokens ?? 0;
+  const nodeTokensUsed = new Map<string, number>(Object.entries(restoredExecution?.nodeTokensUsed ?? {}));
   /** 상한이 선언됐는데 런타임이 사용량을 보고하지 않은 경우 — 집행한 척하지 않고 고지한다. */
-  let budgetUnmeasured = false;
+  let budgetUnmeasured = restoredExecution?.budgetUnmeasured ?? Boolean(resumeOfRunId);
   const runTokenCap = typeof graph.budget?.maxTokens === "number" && graph.budget.maxTokens > 0
     ? Math.floor(graph.budget.maxTokens)
     : null;
@@ -2299,6 +2377,7 @@ export async function runGraph(
    *   빈 id 를 "지워졌다"고 말해, 기본 대상으로 도는 멀쩡한 자동화를 죽였다
    *   (`쓰던 에이전트 ""을(를) 찾을 수 없습니다`). 이름을 댈 수 없으면 없어졌다고 말하지 않는다.
    */
+  let defaultTargetMissing = false;
   if (
     (automation.targetType === "agent" || automation.targetType === "firm")
     && String(automation.targetId ?? "").trim() !== ""
@@ -2315,17 +2394,17 @@ export async function runGraph(
       }
     })();
     if (!present) {
-      detachCallerAbort();
-      throw new Error(
-        "automation_target_missing: " + L(
-          `"${automation.name}"이(가) 쓰던 `
-          + `${automation.targetType === "firm" ? "회사" : "에이전트"} "${automation.targetId}"을(를) 찾을 수 없습니다. `
-          + "지워졌거나 다른 곳에 설치돼 있습니다. 자동화를 열어 대상을 다시 고르세요.",
-          `The ${automation.targetType === "firm" ? "company" : "agent"} "${automation.targetId}" that "${automation.name}" `
-          + "was using could not be found. "
-          + "It may have been deleted or installed elsewhere. Open the automation and choose the target again.",
-        ),
-      );
+      defaultTargetMissing = true;
+      for (const node of graph.nodes) {
+        if (!["agent", "action", "output", "eval"].includes(node.type)) continue;
+        const ref = str(node.config, "ref");
+        if (ref && ref !== automation.targetId) continue;
+        const failure = { code: "TARGET_PENDING", reason: `The default target ${automation.targetId} is unavailable.`,
+          nextAction: "Repair this target in the background while independent node targets continue." };
+        admissionPending.set(node.id, failure);
+        nodeFailures[node.id] = failure;
+      }
+      ok = false; error ??= "graph_target_pending_background_repair";
     }
   }
 
@@ -2335,17 +2414,23 @@ export async function runGraph(
     runId, occurrenceId: checkpoint.occurrenceId,
     unboundResume: !!resumeOfRunId,
   });
-  const rootSession = getOrCreateAutomationSession({
+  const createRootChat = () => getOrCreateAutomationSession({
     automationId: automation.id,
     projectId: automation.projectId ?? null,
     runtimeSelection: automation.runtimeSelection ?? null,
-    ...(automation.targetType === "firm"
+    ...(!defaultTargetMissing && automation.targetType === "firm"
       ? { firmId: automation.targetId }
-      : automation.targetType === "agent"
+      : !defaultTargetMissing && automation.targetType === "agent"
         ? { agentId: automation.targetId }
         : {}),
-  });
-  const chat = rootSession.chat;
+  }).chat;
+  // The unavailable default must not prevent an explicitly bound sibling from
+  // creating its own session. Only a node actually reading the default fails.
+  const chat = defaultTargetMissing
+    ? new Proxy({} as ReturnType<typeof createRootChat>, { get() {
+        throw new Error("automation_target_missing: the default target is pending background repair");
+      } })
+    : createRootChat();
 
   // 노드별 타깃 세션 — agent 노드의 config.ref(에이전트/회사/그룹 id)를 그 타깃에 바인딩된
   // division 세션으로 실행한다(설계 §4.4: agent(agent)→agent.id). ref 없음/미해석이면 자동화
@@ -2477,10 +2562,10 @@ export async function runGraph(
   // skipped: 실행하지 않기로 확정된 노드. blockedEdges: condition이 drop한 엣지 id.
   // A resumed occurrence restores both sets from its digest-bound checkpoint.
   // 노드별 inbound 엣지(엣지 id + source) — 스킵 전파 판정용.
-  const inbound = new Map<string, { edgeId: string; source: string }[]>();
+  const inbound = new Map<string, { edgeId: string; source: string; handle?: string }[]>();
   for (const e of graph.edges) {
     if (!inbound.has(e.target)) inbound.set(e.target, []);
-    inbound.get(e.target)!.push({ edgeId: e.id, source: e.source });
+    inbound.get(e.target)!.push({ edgeId: e.id, source: e.source, handle: e.sourceHandle });
   }
   // condition 노드의 소스 엣지(핸들별) — drop 판정용.
   const outByNode = new Map<string, { edgeId: string; handle?: string }[]>();
@@ -2517,7 +2602,8 @@ export async function runGraph(
   type NodeStatus = WorkflowNodeRunState;
   const status = new Map<string, NodeStatus>();
   for (const n of ordered) {
-    status.set(n.id, completed.has(n.id) ? "done" : skipped.has(n.id) ? "skipped" : "pending");
+    status.set(n.id, admissionPending.has(n.id) ? "failed" : completed.has(n.id) ? "done" : skipped.has(n.id) ? "skipped" : "pending");
+    if (admissionPending.has(n.id)) checkpointNodeState(n.id, "failed");
   }
   const settled = (id: string): boolean => {
     const s = status.get(id);
@@ -2527,7 +2613,8 @@ export async function runGraph(
   const inboundResolved = (nodeId: string): boolean =>
     (inbound.get(nodeId) ?? [])
       .filter((i) => !backEdgeIds.has(i.edgeId))
-      .every((i) => blockedEdges.has(i.edgeId) || settled(i.source));
+      .every((i) => blockedEdges.has(i.edgeId) || status.get(i.source) === "done" || status.get(i.source) === "skipped"
+        || (status.get(i.source) === "failed" && ["error", "timeout", "always"].includes(i.handle ?? "")));
 
   /**
    * 한 바퀴를 더 돈다 — 반복 몸통을 처음 상태로 되돌린다.
@@ -2538,8 +2625,7 @@ export async function runGraph(
       completed.delete(nodeId);
       skipped.delete(nodeId);
       status.set(nodeId, "pending");
-      // 캔버스도 다시 "대기"로 되돌려야 두 번째 바퀴가 도는 것이 보인다.
-      checkpointNodeState(nodeId, "pending");
+      checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== nodeId);
     }
     // 지난 바퀴에서 막아 둔 분기도 함께 푼다 — 안 그러면 이번 바퀴는 다른 길로 간다.
     for (const edge of graph.edges) {
@@ -2550,6 +2636,7 @@ export async function runGraph(
     //   영영 죽는다(실측: 첫 바퀴 성공 → 실패 경로가 닫히며 복구 단계가 skip 확정 →
     //   두 바퀴째 실제로 실패해도 복구가 안 돎).
     //   되감기는 지난 바퀴가 내린 결정을 되돌리는 일이므로, 건너뛰기 결정도 같이 되돌린다.
+    const revivedNodeIds: string[] = [];
     let revived = true;
     while (revived) {
       revived = false;
@@ -2557,10 +2644,14 @@ export async function runGraph(
         if (!skipped.has(candidate.id) || shouldSkip(candidate.id)) continue;
         skipped.delete(candidate.id);
         status.set(candidate.id, "pending");
-        checkpointNodeState(candidate.id, "pending");
+        revivedNodeIds.push(candidate.id);
         revived = true;
       }
     }
+    // Persist the complete rewind and its incremented counter together. A crash
+    // must expose either the previous iteration or the entire next iteration.
+    saveGraphRunCheckpoint(runId, syncCheckpoint());
+    for (const nodeId of [...loop.body, ...revivedNodeIds]) emitNodeState(nodeId, "pending");
   };
 
   const beginNode = (node: WorkflowNode, resolvedPrompt?: string): void => {
@@ -2579,6 +2670,7 @@ export async function runGraph(
   };
 
   const completeNode = (nodeId: string): void => {
+    if (backgroundCheckNodes.has(nodeId) && nodeFailures[nodeId]?.code === "VERIFICATION_PENDING") delete nodeFailures[nodeId];
     checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== nodeId);
     checkpoint!.ambiguousNodeIds = checkpoint!.ambiguousNodeIds.filter((id) => id !== nodeId);
     skipped.delete(nodeId);
@@ -2807,7 +2899,8 @@ export async function runGraph(
     ok = false;
   };
 
-  const runNode = async (node: (typeof ordered)[number]): Promise<void> => {
+  const runNode = async (node: (typeof ordered)[number], scopedSignal: AbortSignal): Promise<void> => {
+    const runSignal = scopedSignal;
     switch (node.type) {
       case "trigger":
         beginNode(node);
@@ -2887,8 +2980,7 @@ export async function runGraph(
           for (const edge of outgoing) {
             if (edge.handle === drop) blockedEdges.add(edge.edgeId);
           }
-          completeNode(node.id);
-          status.set(node.id, "done");
+          journal("node_settled", node.id);
           rewindLoop(loop);
           return;
         }
@@ -3628,6 +3720,7 @@ export async function runGraph(
       // eslint-disable-next-line no-fallthrough
       case "agent":
       case "action": {
+        const nativeMcpCall = Object.hasOwn(node.config, "mcpCall");
         // 시뮬레이션에서 부수효과 노드는 아예 호출하지 않는다. 읽기 권한으로 낮춰 돌리면
         // "성공했다"는 모양만 남고 실제로는 아무것도 반영되지 않아 결과를 오해하게 된다.
         const effect = nodeEffect(node);
@@ -3666,8 +3759,7 @@ export async function runGraph(
         // 예산은 노드를 띄우기 전에 확인한다 — 넘긴 뒤 정산하면 이미 돈이 나간 뒤다.
         const budgetStop = budgetGuard(node);
         if (budgetStop) {
-          failGraphNode(node, budgetStop);
-          return;
+          journal("node_intent", node.id, { advisory: budgetStop.code, reason: budgetStop.reason, continued: true });
         }
         // ★출력 노드의 `text`는 **내용**이지 지시문이 아니다. 감싸지 않고 그대로 넘기면
         //   모델이 그 내용을 "이렇게 써 달라는 요청"으로 읽고 다시 써 버린다(실측: 안쪽
@@ -3680,7 +3772,7 @@ export async function runGraph(
         // ★`prompt`가 함께 있으면 그건 **어디로 어떻게** 내보낼지다. 감싸면서 버리면
         //   "Slack #general에 올려라" 같은 유일한 목적지 지시가 조용히 사라진다.
         const outwardInstruction = node.type === "output" ? str(node.config, "prompt") : undefined;
-        const rawPrompt = isOutwardOutput
+        const rawPrompt = nativeMcpCall ? "Execute the saved MCP call." : isOutwardOutput
           ? [
               "아래 내용을 **그대로** 바깥으로 내보내라. 고치거나 요약하거나 다시 쓰지 마라.",
               ...(outwardInstruction ? ["", `어떻게 내보낼지: ${outwardInstruction}`] : []),
@@ -3823,6 +3915,8 @@ export async function runGraph(
         let checkpointPersistenceError: Error | null = null;
         let unsafeToolObserved = false;
         let unsafeToolRequested = false;
+        let nativeReadOnly = false;
+        let nativeOutput: unknown;
         const readOnlyToolCallIds = new Map<string, string>();
         const refreshUnsafeToolObservation = (): void => {
           unsafeToolObserved = (checkpoint!.toolReceipts[node.id] ?? []).some((receipt) => (
@@ -3890,7 +3984,7 @@ export async function runGraph(
            *   죽은 런타임으로 매 슬롯을 시작했다. 아직 아무 도구도 안 불렀으니 옮겨도 이중 실행이 없다.
            *   저장된 핀은 그대로 둔다 — 쿨다운(최대 1시간)이 지나면 다음 단계가 원래 모델로 간다.
            */
-          if (!quotaRuntimeOverrides.has(node.id)) {
+          if (!nativeMcpCall && !quotaRuntimeOverrides.has(node.id)) {
             const planned = runtimeSelectionForNode(node);
             const cooling = planned?.source ? runtimeCooldownForSelection(planned) : null;
             if (planned && cooling && (cooling.kind === "quota" || cooling.kind === "auth")) {
@@ -3927,9 +4021,20 @@ export async function runGraph(
             }
           }
           revalidateAutomationWorkspace(automationWorkspace);
+          const invokeNode: typeof runMcpInvocation = nativeMcpCall
+            ? async (_request, eventSink, signal, binding) => {
+              if (!signal || !binding) throw new Error("graph_mcp_scope_required");
+              const nativeResult = await runGraphMcpCall({ call: node.config.mcpCall, vars, runId, automationId: automation.id,
+                nodeId: node.id, chatId: nodeChat.id, effect, permission: effectivePermission, dryRun,
+                workspaceBinding: binding, signal, sink: eventSink,
+                onAdmission: readOnly => { nativeReadOnly = readOnly; } });
+              nativeOutput = nativeResult.output;
+              return nativeResult;
+            }
+            : runMcpInvocation;
           const result = await withAutomationNodeAccounting({
             runId, automationId: automation.id, nodeId: node.id, chatId: nodeChat.id,
-          }, () => runMcpInvocation(
+          }, () => invokeNode(
             {
               runId,
               chatId: nodeChat.id,
@@ -3993,6 +4098,7 @@ export async function runGraph(
               // 진짜 실행을 캡처 파일로만 구분해야 했다. 관측 없는 성공은
               // 성공이 아니라는 규칙(판정기·완주 루프)이 읽을 사실이 이 행이다.
               const eventReadOnly = ev.kind === "tool-use" && !!ev.tool?.name && (
+                (nativeMcpCall && nativeReadOnly) ||
                 isReadOnlyCheckpointTool(ev.tool.name, ev.tool.args) ||
                 (ev.tool.args === undefined && !!ev.tool.id &&
                   readOnlyToolCallIds.get(ev.tool.id) === ev.tool.name)
@@ -4124,7 +4230,9 @@ export async function runGraph(
           if (result.workforcePrepareReceipt) {
             persistWorkforcePrepareReceipt(result.workforcePrepareReceipt);
           }
-          settleBudget(node, measuredGraphTokenTotal(result.observedUsage));
+          // Direct Main tool dispatch makes no model request and consumes no
+          // model token allowance; absence of provider usage is not unknown usage.
+          if (!nativeMcpCall) settleBudget(node, measuredGraphTokenTotal(result.observedUsage));
           // ★바깥을 바꾸는 노드는 **도구를 부른 사실**이 있어야 성공일 수 있다.
           //
           // 실측 2026-08-19: X 자동화가 gemini 와 claude/opus 두 런타임에서 모두 4/4 로 끝나며
@@ -4209,7 +4317,10 @@ export async function runGraph(
               ...(result.goalCompletionClaim ? { goalCompletionClaim: result.goalCompletionClaim } : {}),
             });
           } catch { /* an observer must not change the node's result */ }
-          const envelope = makeNodeEnvelope({
+          const envelope = nativeMcpCall
+            ? { ...declaredEnvelope(node.id, node.label || node.id,
+              typeof nativeOutput === "string" ? nativeOutput : { json: nativeOutput }), notes }
+            : makeNodeEnvelope({
             nodeId: node.id,
             nodeLabel: node.label || node.id,
             finalText: result.finalText,
@@ -4275,6 +4386,9 @@ export async function runGraph(
             if (applied) {
               failGraphNode(node, applied);
               return;
+            }
+            if (nativeMcpCall && envelope.result.kind === "json" && reducerPolicyOf(node) === "overwrite") {
+              vars[produces] = envelope.result.json;
             }
           }
           completeNode(node.id);
@@ -4727,8 +4841,13 @@ export async function runGraph(
   const concurrency = Math.max(1, Math.floor(getAgentConcurrency()));
   const graphNodeById = new Map(graph.nodes.map((n) => [n.id, n] as const));
   /** A runtime step of a browser-mode graph drives the one shared Agentlas Browser. */
-  const holdsSharedBrowser = (node: { type: string }): boolean =>
-    graphToolMode === "browser" && (node.type === "agent" || node.type === "action" || node.type === "output");
+  const holdsSharedBrowser = (node: WorkflowNode): boolean => {
+    const call = node.config.mcpCall;
+    const nativeBrowser = call && typeof call === "object" && !Array.isArray(call)
+      && ["agentlas-browser", "playwright"].includes(String((call as Record<string, unknown>).catalogId));
+    return Boolean(nativeBrowser) || (graphToolMode === "browser"
+      && (node.type === "agent" || node.type === "action" || node.type === "output"));
+  };
   for (;;) {
     if (runSignal.aborted) {
       ok = false;
@@ -4765,10 +4884,8 @@ export async function runGraph(
     const isCleanupNode = (nodeId: string): boolean =>
       (inbound.get(nodeId) ?? []).some((i) => alwaysEdgeIds.has(i.edgeId));
     const ready = ordered.filter(
-      (n) => status.get(n.id) === "pending" && inboundResolved(n.id) && !shouldSkip(n.id)
-        && (ok || isCleanupNode(n.id)),
+      (n) => status.get(n.id) === "pending" && inboundResolved(n.id) && !shouldSkip(n.id),
     );
-    if (!ok && ready.length === 0 && running.size === 0) break;
     // ★브라우저 모드 그래프의 실행 단계는 브라우저 하나(같은 프로필·같은 탭)를 함께 쓴다.
     //   병렬로 띄우면 서로의 화면을 바꾼다 — 격리 후보 앱 E2E 2026-09-24(Threads 자동화):
     //   병렬 measure 가 publish 의 작성창에서 "취소"를 눌러 publish 의 ref 가 사라졌고(Ref not
@@ -4778,14 +4895,66 @@ export async function runGraph(
       return busy ? holdsSharedBrowser(busy) : false;
     });
     for (const node of ready) {
-      if (running.size >= concurrency) break;
+      // Verification gets its own slot and cannot occupy the last work slot.
+      const isCheck = node.type === "eval";
+      const checking = [...running.keys()].filter((id) => graphNodeById.get(id)?.type === "eval").length;
+      if (isCheck ? checking >= 1 : running.size - checking >= concurrency) continue;
       if (holdsSharedBrowser(node)) {
         if (sharedBrowserBusy) continue;
         sharedBrowserBusy = true;
       }
       status.set(node.id, "running");
-      const p = runNode(node).finally(() => running.delete(node.id));
+      const nodeController = new AbortController();
+      let timedOut = false;
+      const relayAbort = () => nodeController.abort(runSignal.reason);
+      if (runSignal.aborted) relayAbort();
+      else runSignal.addEventListener("abort", relayAbort, { once: true });
+      const timer = setTimeout(() => {
+        timedOut = true;
+        nodeController.abort(new Error("automation_node_timeout"));
+      }, nodeTimeoutMs(node));
+      const nodeWork = runNode(node, nodeController.signal);
+      const recordSettled = () => {
+        if (backgroundCheckNodes.has(node.id)) tryRecordRunEvent({ runId: `${runId}:check:${node.id}`,
+          automationId: automation.id, nodeId: node.id, kind: "workflow_background_check_settled",
+          payload: { sourceRunId: runId, state: status.get(node.id), output: outputs[node.id] ?? null,
+            failure: nodeFailures[node.id] ?? null } });
+      };
+      void nodeWork.then(recordSettled, recordSettled);
+      const p = awaitAutomationRunnerWithAbortGrace(nodeWork, nodeController.signal, opts.abortGraceMs)
+        .catch((unexpected: unknown) => {
+          const uncertain = timedOut && nodeEffect(node) === "mutation";
+          if (uncertain && !checkpoint!.ambiguousNodeIds.includes(node.id)) checkpoint!.ambiguousNodeIds.push(node.id);
+          failGraphNode(node, graphFailureOf(unexpected) ?? { code: uncertain ? "MUTATION_UNVERIFIED" : timedOut ? "NODE_TIMEOUT" : "NODE_FAILED",
+            reason: unexpected instanceof Error ? unexpected.message : String(unexpected),
+            nextAction: "Repair this node in the background while independent branches continue." });
+          if (timedOut) backgroundCheckNodes.add(node.id);
+        }).finally(() => {
+          clearTimeout(timer);
+          runSignal.removeEventListener("abort", relayAbort);
+          running.delete(node.id);
+        });
       running.set(node.id, p);
+    }
+    if (running.size > 0 && [...running.keys()].every((id) => graphNodeById.get(id)?.type === "eval")) {
+      const readyWork = ordered.some((node) => node.type !== "eval" && status.get(node.id) === "pending"
+        && inboundResolved(node.id) && !shouldSkip(node.id));
+      if (!readyWork) {
+        for (const nodeId of [...running.keys()]) {
+          backgroundCheckNodes.add(nodeId);
+          checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== nodeId);
+          status.set(nodeId, "pending");
+          // Persist pending now; the late check writes only its own child events.
+          checkpointGraphRunNode(runId, nodeId, "pending", syncCheckpoint());
+          running.delete(nodeId);
+          nodeFailures[nodeId] ??= { code: "VERIFICATION_PENDING", reason: "This result is being checked in the background.",
+            nextAction: "Consume the background check receipt on the next turn." };
+          tryRecordRunEvent({ runId: `${runId}:check:${nodeId}`, automationId: automation.id, nodeId,
+            kind: "workflow_background_check_started", payload: { sourceRunId: runId, pending: true } });
+        }
+        ok = false;
+        error ??= "graph_verification_pending";
+      }
     }
     if (running.size === 0) {
       if (Object.keys(checkpoint!.loginWaits).length > 0) break;
@@ -4796,8 +4965,7 @@ export async function runGraph(
       // 화면에는 "실패"만 뜨고 왜 멈췄는지도, 무엇을 고쳐야 하는지도 없었다.
       const stuck = ordered.filter((n) => status.get(n.id) === "pending");
       for (const n of stuck) {
-        status.set(n.id, "failed");
-        failNode(n.id, false);
+        checkpointNodeState(n.id, "pending");
         nodeFailures[n.id] ??= {
           code: "NODE_NEVER_REACHED",
           reason: L(
@@ -4824,7 +4992,7 @@ export async function runGraph(
         automationId: automation.id,
         errorCode: "graph_not_converged",
         errorMessage: error,
-        payload: { pendingNodeIds: ordered.filter((n) => status.get(n.id) === "failed").map((n) => n.id) },
+        payload: { pendingNodeIds: stuck.map((n) => n.id), continuedIndependentBranches: true },
       });
       break;
     }
@@ -4880,7 +5048,11 @@ export async function runGraph(
   } catch (persistError) {
     console.error("[workflow] node failure detail could not be persisted:", persistError);
   }
-  const failures = Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {};
+  const pendingNodeIds = ordered.filter((node) => nodeFailures[node.id]
+    || (!checkpoint!.completedNodeIds.includes(node.id) && !checkpoint!.skippedNodeIds.includes(node.id)))
+    .map((node) => node.id);
+  const failures = { ...(Object.keys(nodeFailures).length > 0 ? { nodeFailures } : {}),
+    ...(pendingNodeIds.length ? { pendingNodeIds } : {}) };
   // ★시뮬레이션이 사람에게 하는 약속은 **가장 약한 노드**에 맞춘다. 한 노드라도 못 막았으면
   //   그 실행은 "아무것도 바뀌지 않았다"고 말할 수 없다. 강한 쪽에 맞추면 정확히 그 한 노드가
   //   밤새 바깥을 바꿔 놓는다.
@@ -4915,14 +5087,20 @@ export async function runGraph(
     : ok
     ? { ok: true, outputs, vars, ...failures, ...simulation, ...budget, ...brokerage }
     : { ok: false, outputs, vars, error, ...failures, ...simulation, ...budget, ...brokerage };
+  // A late advisory check must not mutate the result already delivered to the
+  // scheduler. Its child events carry the eventual checked outcome instead.
+  result.outputs = { ...outputs };
+  result.vars = structuredClone(vars);
+  if (result.nodeFailures) result.nodeFailures = structuredClone(result.nodeFailures);
   // Scheduled automation runs defer this work to the scheduler, which has
   // the authoritative outcome/lease/reconciliation state. Direct Graph runs
   // (including the daemon and Terminal fallback) must still enter the same
   // generic strategy loop; otherwise a stored proposal can never be produced
   // from that path and the next run has no revision to consume.
-  if (!needsInput && !dryRun && opts.strategyCycle !== "defer" && (opts.depth ?? 0) === 0) {
+  if (!needsInput && !dryRun && opts.strategyCycle !== "defer" && (opts.depth ?? 0) === 0
+    && nativeGraphSuccessNeedsReflection(graph, ok)) {
     try {
-      await withAutomationRunAccounting({ runId, automationId: automation.id }, () => runAutomationStrategyCycle({
+      void withAutomationRunAccounting({ runId, automationId: automation.id }, () => runAutomationStrategyCycle({
         automationId: automation.id,
         sourceRunId: runId,
         status: ok ? "ok" : "error",
@@ -4941,7 +5119,7 @@ export async function runGraph(
         runError: error,
         runtimeSelection: automation.runtimeSelection ?? null,
         signal: opts.signal,
-      }));
+      })).catch((strategyError: unknown) => console.error("[workflow] background strategy repair failed:", strategyError));
     } catch (strategyError) {
       // Strategy evolution is advisory. A settled Graph result must remain
       // the result even if its optional reflection handoff cannot settle.

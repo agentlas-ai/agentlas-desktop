@@ -24,7 +24,7 @@ export const EFFECT_OBSERVATION_SYSTEM_PROMPT = [
   "Your answer is read by the app, not by a person.",
   "Only look: read files, list folders, search, or use the browser tools you are given to open or refresh pages.",
   "Never create, change, send, post, buy, delete or undo anything, and never retry the earlier action.",
-  "Follow the check request exactly and end your answer with the single verdict marker line it specifies.",
+  "Follow the check request exactly, including its final JSON or verdict marker response contract.",
 ].join(" ");
 
 export type EffectObservationVerdict = "done" | "not_done" | "unknown";
@@ -47,6 +47,22 @@ export type ParsedEffectObservation =
 
 const MAX_EVIDENCE = 500;
 const MAX_OUTPUT = 16_000;
+
+/** Main binds the whole target set before dispatch. Constrained runtimes must return every target,
+ * including unknown ones, rather than silently dropping an interrupted attempt from the verdict. */
+export function effectObservationOutputSchema(attemptIds: readonly string[]): Record<string, unknown> {
+  return {
+    type: "object", additionalProperties: false,
+    required: ["verdict", "attempts", "evidence", "summary"],
+    properties: {
+      verdict: { type: "string", enum: ["done", "not_done", "unknown"] },
+      attempts: { type: "array", items: { type: "string", enum: [...attemptIds] },
+        minItems: attemptIds.length, maxItems: attemptIds.length },
+      evidence: { type: "string" },
+      summary: { type: "string", description: "At most three sentences in the requested UI language about what you actually saw." },
+    },
+  };
+}
 
 /**
  * The marker line with presentation wrappers removed. Observers answering in a
@@ -72,16 +88,19 @@ function markerLines(text: string): string[] {
  * 전부 판정하거나, 모르는 시도를 끼워 넣은 보고는 무효다.
  */
 export function parseEffectObservationMarker(text: string, expectedAttemptIds: readonly string[]): ParsedEffectObservation {
-  if (typeof text !== "string" || !text.includes(EFFECT_OBSERVATION_MARKER)) return { status: "absent" };
-  const lines = markerLines(text);
-  if (lines.length !== 1) return { status: "invalid", reason: lines.length ? "effect_observation_ambiguous" : "effect_observation_not_on_own_line" };
-  const body = lines[0].trim().slice(EFFECT_OBSERVATION_MARKER.length).trim();
+  // Native structured-output runtimes return the JSON document directly. The same exact-set
+  // validation below still owns settlement; transport schema enforcement is never evidence.
+  const structured = typeof text === "string" && !text.includes(EFFECT_OBSERVATION_MARKER) && text.trim().startsWith("{");
+  if (typeof text !== "string" || (!structured && !text.includes(EFFECT_OBSERVATION_MARKER))) return { status: "absent" };
+  const lines = structured ? [] : markerLines(text);
+  if (!structured && lines.length !== 1) return { status: "invalid", reason: lines.length ? "effect_observation_ambiguous" : "effect_observation_not_on_own_line" };
+  const body = structured ? text.trim() : lines[0].trim().slice(EFFECT_OBSERVATION_MARKER.length).trim();
   if (body.length > 64_000) return { status: "invalid", reason: "effect_observation_too_large" };
   let value: unknown;
   try { value = JSON.parse(body); } catch { return { status: "invalid", reason: "effect_observation_malformed" }; }
   if (!value || typeof value !== "object" || Array.isArray(value)) return { status: "invalid", reason: "effect_observation_malformed" };
   const item = value as Record<string, unknown>;
-  if (Object.keys(item).some((key) => !["verdict", "attempts", "evidence", "outputs"].includes(key))) {
+  if (Object.keys(item).some((key) => !["verdict", "attempts", "evidence", "outputs", "summary"].includes(key))) {
     return { status: "invalid", reason: "effect_observation_unknown_field" };
   }
   if (item.verdict !== "done" && item.verdict !== "not_done" && item.verdict !== "unknown") {
@@ -97,6 +116,9 @@ export function parseEffectObservationMarker(text: string, expectedAttemptIds: r
     return { status: "invalid", reason: "effect_observation_attempts_mismatch" };
   }
   const outputs: Record<string, string> = {};
+  if (item.summary !== undefined && typeof item.summary !== "string") {
+    return { status: "invalid", reason: "effect_observation_summary_invalid" };
+  }
   if (item.outputs !== undefined) {
     if (!item.outputs || typeof item.outputs !== "object" || Array.isArray(item.outputs)) {
       return { status: "invalid", reason: "effect_observation_outputs_invalid" };
@@ -116,6 +138,14 @@ export function parseEffectObservationMarker(text: string, expectedAttemptIds: r
 
 /** 표식 줄을 본문에서 지운다. 표식이 없으면 원문 그대로. */
 export function stripEffectObservationMarker(text: string): string {
+  if (text?.trim().startsWith("{") && !text.includes(EFFECT_OBSERVATION_MARKER)) {
+    try {
+      const item = JSON.parse(text) as Record<string, unknown>;
+      if (Array.isArray(item.attempts) && parseEffectObservationMarker(text, item.attempts).status === "reported") {
+        return typeof item.summary === "string" ? item.summary.trim() : "";
+      }
+    } catch { /* Preserve unrelated JSON output. */ }
+  }
   if (!text || !text.includes(EFFECT_OBSERVATION_MARKER)) return text;
   return text.split("\n")
     .filter((line) => markerLine(line) === null)

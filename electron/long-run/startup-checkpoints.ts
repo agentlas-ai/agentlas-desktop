@@ -18,13 +18,12 @@ import { latestRuntimePlan } from "./plan";
 import { restoreExactDesktopRuntimeSelection } from "./exact-runtime-binding";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { appendLongRunEvent, getLongRun, getLongRunAttemptGoalRevision, getLongRunGoalRevisionBinding, transitionLongRun,
-  blockHostPausedForEffectBoundaryUncertainty, listLongRunTasks, pendingBlockedGoalRetry, recordLongRunCycle, unsettledLongRunAttemptCount } from "../store/long-runs";
+  listLongRunTasks, pendingBlockedGoalRetry, recordLongRunCycle, unsettledLongRunAttemptCount, scheduleBlockedGoalRetry, nextBlockedGoalRetrySlot, longRunOwnerHold } from "../store/long-runs";
 import { desktopAppInstanceId, assertDesktopLongRunAdmissionOpen } from "./app-runtime-coordinator";
 import { latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
 import { agentRunCwd } from "../runtime/exec";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
-import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN } from "../../shared/long-run";
 import { maybeDispatchEffectObservation } from "./effect-observation";
 
 export interface CheckpointStartupDispatcher {
@@ -36,6 +35,17 @@ export interface CheckpointStartupResult {
   runId: string;
   status: "started" | "scheduled" | "skipped";
   reason: string;
+}
+
+function scheduleStartupContinuation(runId: string, reason: string): boolean {
+  const run = getLongRun(runId);
+  if (!run || longRunOwnerHold(runId) || !["blocked", "queued", "running", "paused", "waiting_tool"].includes(run.status)
+    || (run.status === "paused" && !["app_closed", "crash_recovery", "runtime_unavailable"].includes(run.pauseReason ?? ""))) return false;
+  const slot = nextBlockedGoalRetrySlot(runId);
+  scheduleBlockedGoalRetry({ runId, expectedVersion: run.version, kind: "resume", fromReason: reason,
+    retryIndex: slot.retryIndex, nextAt: slot.nextAt, detail: "startup_advisory_fresh_context",
+    trigger: "startup-advisory", effectUncertain: true, appInstanceId: desktopAppInstanceId() });
+  return true;
 }
 
 /** A lost verifier or failed wait insertion is not a permanent stop for an
@@ -87,7 +97,8 @@ export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[]
         results.push(result);
       } catch (error) {
         const reason = error instanceof Error ? error.message : "ongoing_verification_recovery_unavailable";
-        results.push({ runId: id, status: "skipped", reason });
+        const scheduled = scheduleStartupContinuation(id, reason);
+        results.push({ runId: id, status: scheduled ? "scheduled" : "skipped", reason });
       }
     }
   }
@@ -330,7 +341,8 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
       const refuse = (reason: string): void => {
         appendLongRunEvent({ runId: id, kind: "run.legacy_lifecycle_startup", actorKind: "host",
           payload: { appInstanceId, status: "skipped", reason } });
-        results.push({ runId: id, status: "skipped", reason });
+        const scheduled = scheduleStartupContinuation(id, reason);
+        results.push({ runId: id, status: scheduled ? "scheduled" : "skipped", reason });
       };
       let successorRunId: string | null = null;
       try {
@@ -493,24 +505,19 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
     if (evaluated) continue;
     const refuse = (reason: string): void => {
       appendLongRunEvent({ runId: candidate.id, kind: "run.checkpoint_startup", actorKind: "host",
-        payload: { appInstanceId, status: "skipped", reason } });
-      results.push({ runId: candidate.id, status: "skipped", reason });
+        payload: { appInstanceId, status: "skipped", reason, advisory: true } });
+      let scheduled = false;
+      try { scheduled = scheduleStartupContinuation(candidate.id, reason); }
+      catch (error) { console.warn("[checkpoint-startup] fresh continuation scheduling unavailable:", error); }
+      results.push({ runId: candidate.id, status: scheduled ? "scheduled" : "skipped", reason });
     };
     const blockForReview = (diagnostic: string): boolean => {
-      if (failedBeforeContinuation) return false;
-      const current = getLongRun(candidate.id);
-      if (!current || current.status !== "paused" || !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")) return false;
-      try {
-        blockHostPausedForEffectBoundaryUncertainty(candidate.id, current.version);
-        appendLongRunEvent({ runId: candidate.id, kind: "run.checkpoint_startup", actorKind: "host",
-          payload: { appInstanceId, status: "blocked", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, diagnostic } });
-        results.push({ runId: candidate.id, status: "skipped", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN });
-        // Look before asking (owner 2026-09-23): the attempts left unsettled by the
-        // restart get one read-only observation instead of waiting for a person.
-        try { maybeDispatchEffectObservation(dispatcher, candidate.goalId, "startup"); }
-        catch (error) { console.warn("[effect-observation] startup dispatch failed:", error); }
-        return true;
-      } catch { return false; }
+      refuse(diagnostic);
+      // The independent observer is optional. A failed/unknown observation
+      // cannot take ownership away from the scheduled fresh Goal episode.
+      try { maybeDispatchEffectObservation(dispatcher, candidate.goalId, "startup-advisory"); }
+      catch (error) { console.warn("[effect-observation] startup advisory unavailable:", error); }
+      return true;
     };
     const nonBlockingRefusals = new Set([
       "newer_user_direction", "chat_busy", "budget-spent", "budget-cost-unavailable",

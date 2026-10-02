@@ -15,7 +15,9 @@ import { assertScienceCollectionCapability, assertScienceCollectionTool, SCIENCE
 // key만으로 레지스트리 원본에 되돌아가면 실행별 브라우저·승인 경계를 잃는다.
 import { preparedMcpBindings, preparedMcpTransport, preparedMcpConsentResource, type PreparedMcpBinding } from "../mcp-tools/prepared-transport";
 import { bindMainToolConsentResource } from "./tool-consent";
-import { planMcpToolIsMutating } from "../mcp-tools/proxy-server";
+import { mcpToolIsMutating, planMcpToolIsMutating } from "../mcp-tools/proxy-server";
+import { oneGraphToolTimeoutMs } from "../../shared/one-graph-tool-permission";
+import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
@@ -408,7 +410,7 @@ export async function prepareMainToolLoop(
         );
       })();
   // ★ 로컬 소형 모델(agentlas-local)에는 도구를 그대로 준다. 코드 모드(agentlas_code)와 지연 메뉴
-  //   (list→prepare→call 세 홉)는 큰 모델용 간접층인데, 격리 앱 실측(Qwen3-4B, 2026-09-13)에서 모델이
+
   //   agentlas_code 만 5번 부르다 브라우저에 닿지 못하고 사용자에게 되물었다. 같은 모델에 도구를
   //   직접 주면 브라우저·파일·셸 4/4 정확(엔진 직결 실측).
   // A Main-issued effect observation looks only: read built-ins and Main's browser server, offered directly (no code
@@ -477,13 +479,14 @@ async function approveLocalToolCall(
   toolName: string,
   consentMaterial: unknown,
   detail?: string,
-  admittedResultRead = false,
+  admittedReadPermission = false,
 ): Promise<RuntimeToolPermissionDecision> {
   // 내장 도구는 우리가 만든 것이라 성격을 안다 — 지어내는 게 아니라 아는 것을 싣는다.
-  // MCP 도구는 정의에 종류 칸이 없으므로 "other"에 머문다.
+  // MCP reads require Main's exact catalog/argument admission below; a remote
+  // tool's claimed annotations never grant read permission.
   const { builtinToolByName } = await import("../../shared/builtin-tools");
   const builtin = builtinToolByName(toolName);
-  const builtinKind = admittedResultRead ? "read" as const : builtin
+  const builtinKind = admittedReadPermission ? "read" as const : builtin
     ? builtin.minPerm === "read"
       ? ("read" as const)
       : builtin.name === "browser_download"
@@ -506,7 +509,7 @@ async function approveLocalToolCall(
     cwd: ctx.cwd,
     permission: ctx.permission,
     // 내장 read_file·list_dir 은 변이가 아니라는 것을 **증명할 수 있다**(우리 코드다).
-    // MCP 도구는 여전히 전부 변이로 본다 — 증명할 수 없는 무해함은 허용 근거가 못 된다.
+    // Unknown MCP calls remain mutating; only Main-admitted reads are exempt.
     mutating: builtinKind ? builtinKind !== "read" : true,
     ...(ctx.chatId ? { chatId: ctx.chatId } : {}),
     ...(ctx.agentId ? { agentId: ctx.agentId } : {}),
@@ -705,7 +708,11 @@ async function dispatchMainToolRawUnchecked(
   // these three Science actions, including the bounded source-record write.
   const collectionDecision = approval.scienceCollectionCapability ? "allow_once" as const : null;
   if (collectionDecision) actionApproval.onApprovalDecision?.(collectionDecision);
-  if ((collectionDecision ?? await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin)) === "deny") {
+  const admittedMcpRead = resolved.kind === "mcp" && !mcpToolIsMutating({
+    catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args,
+  }) && (resolved.server.catalogId !== "agentlas-browser"
+    || !readOnlyBrowserToolIsMutating({ toolName: resolved.serverToolName, args }));
+  if ((collectionDecision ?? await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin, admittedMcpRead)) === "deny") {
     if (actionId) broker?.finishAction(actionId, "denied");
     const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.`;
     events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true);
@@ -828,7 +835,8 @@ async function dispatchMainToolRawUnchecked(
       chatId: approval.chatId, cwd: approval.cwd, permission: approval.permission });
     const mcpFileProof = mcpFileCandidate ? beginNativeFileProof(mcpFileCandidate) : null;
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
-      timeoutMs: 30_000, signal: approval.signal, prepared: resolved.prepared,
+      timeoutMs: oneGraphToolTimeoutMs({ catalogId: resolved.server.catalogId, toolName: resolved.serverToolName, args }),
+      signal: approval.signal, prepared: resolved.prepared,
       ...(approval.retainMcpToolResult ? { retainFullResult: true as const } : {}),
       expectedToolSchemaDigest: resolved.schemaDigest, onToolSchemaInvalidated: () => invalidateToolMenu(byName),
       session: mcpToolCallSessions.get(byName),
@@ -1072,11 +1080,11 @@ async function streamChatTurn(
 }
 
 export interface RunLocalOpenAiChatOptions {
-  /**
-   * false = 이 런타임은 이미지를 입력으로 못 받는다(agentlas-local: 비전 프로젝터 없음). 스크린샷 도구 결과의
-   * 이미지를 대화에 넣지 않는다 — 넣으면 문맥 측정(/apply-template)이 깨져 local_context_measurement_unavailable
-   * 로 실행이 죽었다(격리 앱 실측 2026-09-13, cua-driver get_screen). 텍스트 결과(저장 경로·좌표)는 그대로 간다.
-   */
+
+
+
+
+
   acceptsImageResults?: boolean;
   /** Sampling temperature for the chat request. Small local tool agents need a low value (server default is 0.8). */
   temperature?: number;
@@ -1172,7 +1180,7 @@ export async function runLocalOpenAiChat(
   let tools = prepared.tools;
   if (opts.acceptsImageResults === false) {
     // 화면을 볼 수 없는 모델에게 컴퓨터 유즈를 주면 스크린샷 JSON 을 해석 못 해 같은 호출만 반복한다
-    // (격리 앱 실측 2026-09-13: get_screen 21회, 4분 타임아웃). 도구를 빼고 사람에게 이유를 말한다.
+
     // 브라우저 스크린샷도 같은 이유로 뺀다 — 3회 반복 실측(2026-09-13)에서 비전 없는 모델이
     // browser_take_screenshot 을 8번 부르고 screen_capture_unavailable 로 실패했다.
     const isBlindTool = (name: string) => name === "read_image" || name.startsWith("mcp__cua-driver__") || /^mcp__agentlas-browser__browser_(?:take_)?screenshot$/.test(name);
@@ -1471,7 +1479,7 @@ export async function runLocalOpenAiChat(
     // received no tools. In the untrusted boundary, treat that response as a
     // terminal text response; never hand it to the local dispatcher.
     if (result.toolCalls.length === 0 || req.untrustedNoTools) {
-      // 소형 로컬 모델은 도구를 다 쓴 뒤 빈 답으로 끝내기도 한다(격리 앱 실측 2026-09-13: 파일은 만들었는데
+
       // 화면엔 아무 말도 없음). CLI 래핑은 늘 말로 끝난다 — 한 번만 "사람에게 결과를 말하라" 고 다시 묻는다.
       // 소형 모델은 답 대신 시스템 프롬프트의 "## Memory Events" 봉투만 따라 쓰기도 한다(같은 실측). 그것도 빈 답이다.
       const envelopeOnly = /^\s*#{1,6}\s*Memory Events/i.test(result.text) || /^\s*\{\s*"?schema_version"?\s*:\s*"?agentlas\.memory-ticket/i.test(result.text);

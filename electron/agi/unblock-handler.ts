@@ -84,11 +84,18 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       });
       return acted;
     };
+    // Start independent work before advisory model checks; repair may time out
+    // or ask for a missing credential without holding the original controller.
+    const initialVersion = executor.currentVersion(input.goalId);
+    const work = initialVersion === null ? null : run("start_work_turn", { nodeId: d.eligibleTactics[0] ?? null }, 90,
+      { ...fence, runVersion: initialVersion });
+    const workStarted = work?.ok === true;
     if (model) {
       const pre = [...done];
-      const flight = model.run(input, pre).then((result) => {
+      const modelVersion = executor.currentVersion(input.goalId);
+      const flight = model.run({ ...input, runVersion: modelVersion ?? input.runVersion }, pre).then((result) => {
         let final: AgiUnblockResult = result;
-        if (result.outcome !== "acted" && result.outcome !== "needs-human") {
+        if (!workStarted && result.outcome !== "acted") {
           const version = executor.currentVersion(input.goalId);
           const acted = version !== null && deterministic({ ...fence, runVersion: version });
           final = { ...result, outcome: acted ? "acted" : result.outcome, code: acted ? "agi.model-fallback-acted" : result.code,
@@ -98,8 +105,9 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       }, () => executor.recordAttemptResult(input.goalId, input.stateDigest, { outcome: "failed", code: "agi.model-attempt-threw" }));
       inFlight.add(flight);
       void flight.finally(() => inFlight.delete(flight));
-      return { outcome: "rested", code: "agi.model-attempt-dispatched", actions: done };
+      return { outcome: workStarted ? "acted" : "rested", code: "agi.model-attempt-dispatched", actions: done };
     }
+    if (workStarted) return { outcome: "acted", code: "agi.work-continued", actions: done };
     if (deterministic()) return { outcome: "acted", actions: done };
     // A real boundary with no deterministic alternative: the model-backed attempt (P4) or the owner card handles it.
     if (d.ownerClass === "human_only" && d.boundary) return { outcome: "needs-human", code: `agi.boundary.${d.boundary}`, actions: done };

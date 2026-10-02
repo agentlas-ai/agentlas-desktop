@@ -23,6 +23,13 @@ export function admitMainAutomation(automationId: string): MainInvocationAdmissi
   return admitMainRoot("automation", automationId);
 }
 
+/** A Main-scheduled check has a separate lifetime. A native adapter/tool frame
+ * cannot use this seam to become a root or extend the user's permissions. */
+export function runMainBackgroundTask<T>(action: () => T): T {
+  if (ancestry.getStore()?.some((frame) => frame.active)) throw new Error("background_task_nested_dispatch");
+  return roots.run(undefined, () => ancestry.run([], action));
+}
+
 function admitMainRoot(domain: MainAdmissionDomain, ownerId: string, runId?: string): MainInvocationAdmission | undefined {
   if (!ownerId || roots.getStore() || ancestry.getStore()?.length) return undefined;
   const admission = Object.freeze({}) as MainInvocationAdmission;

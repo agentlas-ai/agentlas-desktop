@@ -17,7 +17,7 @@ export function invocationMatchesGoalRevision(invocationRunId: string, goalId: s
   return rows.length > 0 && rows.every(row => getLongRunAttemptGoalRevision(row.run_id, row.id) === revision);
 }
 
-export function captureGoalVerificationBoundary(goalId: string, invocationRunId: string): {
+export function captureGoalVerificationBoundary(goalId: string, invocationRunId: string, options: { background?: boolean } = {}): {
   digest: string; goalRevision: number; refs: string[]; snapshot: Record<string, unknown>;
 } {
   const run = getLongRunByGoalId(goalId), revision = getChatGoalRevision(goalId);
@@ -43,7 +43,7 @@ export function captureGoalVerificationBoundary(goalId: string, invocationRunId:
   const controller = getDb().prepare(`SELECT a.id, a.invocation_run_id FROM long_run_worker_attempts a
     JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND w.role = 'controller' ORDER BY a.rowid DESC LIMIT 1`)
     .get(run.id) as {id: string; invocation_run_id: string | null} | undefined;
-  if (controller?.invocation_run_id !== invocationRunId) throw new Error("verification_newer_controller_attempt");
+  if (!options.background && controller?.invocation_run_id !== invocationRunId) throw new Error("verification_newer_controller_attempt");
   if (hasPendingInvocationDirection(invocationRunId)) throw new Error("verification_pending_direction");
   const latestUser = getDb().prepare("SELECT id, text FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY rowid DESC LIMIT 1").get(chat.id);
   const workspace = getChatWorkingFolder(chat.id);
@@ -51,8 +51,10 @@ export function captureGoalVerificationBoundary(goalId: string, invocationRunId:
   const artifacts = listAgentSurfaces(chat.id).map(surface => ({artifactId: surface.id,
     artifactRevision: surface.artifactRevision ?? null, stateRevision: surface.stateRevision ?? null,
     artifactRef: surface.artifactRef ?? null})).sort((a,b) => a.artifactId.localeCompare(b.artifactId));
-  const digest = createHash("sha256").update(JSON.stringify({runId: run.id, status: run.status,
-    revision, controller, latestUser, workspace, instructions, artifacts, boundary})).digest("hex");
+  const digest = createHash("sha256").update(JSON.stringify({runId: run.id,
+    status: options.background ? "background" : run.status,
+    revision, controller: options.background ? invocationRunId : controller,
+    latestUser, workspace, instructions, artifacts, boundary})).digest("hex");
   return { digest,
     snapshot: {schemaVersion: "agentlas.goal-verification-boundary.v1", goalId, goalRevision: revision.revision,
       invocationRunId, digest, effectReceiptRef: `event:${boundary.receiptEventId}`, effectSnapshotDigest: boundary.snapshotDigest,

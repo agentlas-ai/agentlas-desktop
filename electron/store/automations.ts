@@ -1842,15 +1842,14 @@ export function markAutomationRun(
     deferredRetryMs?: number;
     /** Settlement clock; retry delays and future slots must not start at dispatch. */
     finishedAt?: Date;
-    /** False opens the occurrence circuit and advances only to the next real
-     * schedule slot. A one-shot becomes disabled once no future slot remains. */
+    /** For successful consumed occurrences, false preserves the next natural slot.
+     * Internal diagnostics always retain a bounded retry. */
     deferRetry?: boolean;
     /** Durable scheduler run receipt used for exactly-once chain fan-out. */
     sourceRunId?: string | null;
     /** Final source output carried into chain trigger variables. */
     output?: string;
-    /** Keep the automation enabled but atomically remove its next due slot
-     * when this occurrence needs explicit side-effect reconciliation. */
+    /** Historical reconciliation signal; now schedules a bounded advisory retry. */
     suspendForReconciliation?: boolean;
     /**
      * 판정의 답 — **결과물이 쓸 만한가**. status(끝까지 돌았는가)와 다른 질문이라
@@ -1904,25 +1903,23 @@ export function markAutomationRun(
   const noFuture = advance && computedNextRunAt == null;
   const deferredRetryMs = Math.max(60_000, Math.min(opts?.deferredRetryMs ?? 15 * 60_000, 24 * 60 * 60_000));
   const deferredRetryAt = new Date(settledAt.getTime() + deferredRetryMs).toISOString();
-  // Owner/input gates are not transient failures. Keep the next natural slot
-  // without multiplying this occurrence into 15/30-minute rechecks.
-  const needsIntervention = opts?.status === "blocked" || opts?.status === "needs_input"
-    || opts?.outcome === "blocked" || opts?.outcome === "needs_input";
-  const deferRetry = opts?.deferRetry !== false && !needsIntervention;
-  const nextRunAt = !executionConsumed && !pastEnd && advance
+  // Internal diagnostics cannot remove the next wake. Keep retries bounded and
+  // leave the uncertain node's receipt quarantine to the graph kernel.
+  const internalDiagnostic = ["error", "partial", "blocked", "needs_input"].includes(opts?.status ?? "ok")
+    || ["blocked", "needs_input", "rejected"].includes(opts?.outcome ?? "")
+    || opts?.suspendForReconciliation === true;
+  const deferRetry = internalDiagnostic || !executionConsumed || opts?.deferRetry !== false;
+  const retryNeeded = !executionConsumed || internalDiagnostic;
+  const nextRunAt = retryNeeded && !pastEnd && triggerType === "schedule" && (advance || internalDiagnostic)
     ? !deferRetry
       ? computedNextRunAt
       : computedNextRunAt == null || Date.parse(computedNextRunAt) > Date.parse(deferredRetryAt)
         ? deferredRetryAt
         : computedNextRunAt
     : computedNextRunAt;
-  // A one-shot has no natural slot after its scheduled time. Once its bounded
-  // retry circuit is exhausted, disabled+no-next-run is the coherent terminal
-  // state; enabled+no-next-run looked active while it could never fire again.
-  // Reconciliation suspension deliberately remains enabled for user recovery.
-  const exhaustedOneShot = noFuture && !executionConsumed && !deferRetry &&
-    opts?.suspendForReconciliation !== true;
-  const shouldDisable = reachedMax || pastEnd || (noFuture && executionConsumed) || exhaustedOneShot;
+  // Only completed one-shots and explicit owner schedule policies disable.
+  // An unresolved one-shot keeps a retry even after its old retry cap.
+  const shouldDisable = reachedMax || pastEnd || (noFuture && executionConsumed && !internalDiagnostic);
 
   const atIso = at.toISOString();
   const terminalStatus = opts?.status ?? "ok";
@@ -1934,9 +1931,7 @@ export function markAutomationRun(
   // chain occurrence are one commit. A crash can expose all of them or none of
   // them, never a successful source receipt without its fan-out.
   const commit = db.transaction(() => {
-    const persistedNextRunAt = opts?.suspendForReconciliation === true
-      ? null
-      : shouldDisable
+    const persistedNextRunAt = shouldDisable || row.enabled === 0
         ? null
         : nextRunAt;
     const updated = db.prepare(
@@ -1965,7 +1960,7 @@ export function dueAutomations(now: Date = new Date()): Automation[] {
   const rows = getDb()
     .prepare("SELECT * FROM automations WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC")
     .all(now.toISOString()) as AutomationRow[];
-  return rows.map(toAutomation).filter(a => !hasGraphLoginWait(a.id));
+  return rows.map(toAutomation);
 }
 
 /** 특정 트리거 종류의 enabled 자동화들(트리거 매니저가 리스너 등록에 사용). */

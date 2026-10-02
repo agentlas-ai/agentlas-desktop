@@ -44,7 +44,10 @@ export interface BlueprintStep {
    *   숫자 계산·엑셀·파싱은 말로 시키면 조용히 틀리므로 이쪽으로 온다.
    *   ★경계는 사람이 아니라 AI가 스텝마다 고른다(인터뷰 프롬프트가 가르친다).
    */
-  kind?: "agent" | "code" | "runGraph";
+  kind?: "agent" | "code" | "runGraph" | "mcp_call";
+  /** Exact installed tool observed through Main's inventory. This is an
+   * execution step, unlike the legacy adjacent tool connector node. */
+  mcpCall?: { catalogId: string; toolName: string; arguments: Record<string, unknown>; schemaDigest?: string };
   /**
    * kind가 "runGraph"일 때 부를 자동화의 **id**(이름 아님 — 이름은 바뀐다).
    * ★모델이 지어낼 수 없다: 인터뷰 지시문이 그 순간 실제로 저장된 목록만 보여 주고,
@@ -385,6 +388,18 @@ export function validateBlueprint(
       }
       if (step.codeLang && step.codeLang !== "python" && step.codeLang !== "js") {
         push(`${at}의 코드 언어 "${step.codeLang}"을(를) 이 제품이 모릅니다(python 또는 js).`);
+      }
+    }
+    if (step.kind === "mcp_call") {
+      const call = step.mcpCall;
+      if (!call || typeof call.catalogId !== "string" || !call.catalogId.trim()
+        || typeof call.toolName !== "string" || !call.toolName.trim()
+        || !call.arguments || typeof call.arguments !== "object" || Array.isArray(call.arguments)
+        || (call.schemaDigest !== undefined && !/^[a-f0-9]{64}$/.test(call.schemaDigest))) {
+        push(`${at}의 실제 MCP 도구와 구조화된 인수가 없습니다.`);
+      }
+      if (call?.catalogId === "one-team" && call.toolName.startsWith("one_graph_")) {
+        push(`${at}에서 그래프 관리 도구를 재귀 호출할 수 없습니다. 저장된 하위 그래프를 참조하세요.`);
       }
     }
     for (const name of step.consumes ?? []) {
@@ -816,6 +831,7 @@ function promptWithHandoffContract(
     const isCode = step.kind === "code";
     // 다른 자동화를 한 단계로 부른다(커넥터 C46). 캔버스엔 있는데 말로는 못 만들던 구멍.
     const isSub = step.kind === "runGraph";
+    const isMcp = step.kind === "mcp_call";
     nodes.push({
       id: stepId(index),
       // 코드 스텝은 code 노드로, 아니면 바깥 변경 여부에 따라 action/agent.
@@ -833,6 +849,7 @@ function promptWithHandoffContract(
               ? { packages: step.packages.map((v) => String(v).trim()).filter(Boolean) }
               : {}),
           }
+          : isMcp ? { mcpCall: structuredClone(step.mcpCall), note: step.instruction }
           : { prompt: promptWithHandoffContract(step, bp.steps, checkSubjects) }),
         effect: step.effect,
         /* ★승인 게이트 폐지(오너 이사회 결정 2026-08-10): 컴파일러는 approval 선언을

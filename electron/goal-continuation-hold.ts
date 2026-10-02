@@ -3,11 +3,10 @@ import { getDb } from "./store/db";
 import { appendChatMessage, clearChatGoalBindingByGoalId, getChat } from "./store/chats";
 import { emitDesktopStoreChange } from "./store/change-bus";
 import { completeChatGoalContract } from "./store/chat-goals";
-import { toggleAutomation, updateAutomation } from "./store/automations";
+import { getAutomation, toggleAutomation, updateAutomation } from "./store/automations";
 import {
   closeOpenGoalLedgerTasks,
   completeGoalLedgerGoal,
-  GOAL_HARD_STOP_REASONS,
   goalProgressKeyForText,
   recordGoalLedgerCycle,
 } from "./mcp/goal-ledger";
@@ -16,32 +15,13 @@ import {
   goalContinuationSchedule,
   isStormbreakerLongRunPrompt,
 } from "./hephaestus/loop-engineering";
+import { getLongRunByGoalId, longRunOwnerHold } from "./store/long-runs";
+import { tryRecordRunEvent } from "./store/run-events";
 import { goalStopReasonText } from "../shared/goal-stop-reason-text";
 
-/*
- * Settlement of a hidden goal continuation run — the ONE place that decides
- * whether the continuation completes, stops, parks, backs off or keeps going.
- *
- * Why here and not inside runOne's legacy branch (where it used to live): every
- * automation row runs through the graph path (synthesizeLegacyGraph), so that
- * branch was never reached and none of these rules ran. Live 2026-09-27 (One
- * chat "Youtube launch", every-10m): the continuation re-woke every 10 minutes
- * on the same needs_input blocker (~716k input tokens per wake) while the goal
- * chat showed nothing; "X Marketing" logged 7 identical needs_input wakes.
- *
- *   completed  = judge ok(accepted) + no continue marker + ledger has no open task
- *                → ledger/contract closed, this row off, goal chat told once
- *   hard stop  = ledger says budget / blocked / terminal / paused
- *                → row off, goal chat told the reason once; contract and chat
- *                binding stay (a blocked/paused goal is not over)
- *   needs owner= judge needs_input → goal chat told once, row off (the owner's
- *                next turn re-enables exactly this row, mcp/client.ts)
- *   backoff    = the run itself failed (error / graph partial) → every-2h, no
- *                ledger cycle (a failed pass is not a goal pass)
- *   continue   = ledger or model asks for more → cadence from the ledger
- *   no basis   = unfinished but nothing asks to continue → row off, goal stays
- * Goal-less stormbreaker rows are not touched (their schedule is the contract).
- */
+/* Goal continuation diagnostics never disable an authorized mandate. Independent
+ * work resumes from current state on a bounded cadence while checks remain in
+ * the background. Completion and explicit owner Stop are the terminal owners. */
 
 export type GoalContinuationSettlement =
   | "not-a-continuation" | "completed" | "hard-stop" | "needs-owner" | "backoff" | "continue" | "stopped-no-basis";
@@ -79,8 +59,8 @@ function noticeTail(kind: NoticeKind, locale: "ko" | "en"): string {
       : "The goal continuation stopped. Ask again in this conversation to pick it up.";
   }
   return locale === "ko"
-    ? "목표 이어가기를 멈춰 두었어요. 같은 확인을 10분마다 반복하지 않습니다. 필요한 일을 마치거나 답을 보내 주시면 이 대화에서 다시 이어갑니다."
-    : "The goal continuation is paused so it does not re-check the same thing every 10 minutes. Finish the step above or reply here and it continues from this conversation.";
+    ? "확인이 필요한 내용은 남겨 두고, 현재 상태에서 할 수 있는 독립 작업을 이어갑니다."
+    : "The pending question remains recorded while independent work continues from current state.";
 }
 
 /** Writes one owner-facing line for this run into the goal chat. Idempotent per run. */
@@ -112,6 +92,59 @@ export function surfaceGoalContinuationNotice(input: {
   return message.id;
 }
 
+const DIAGNOSTIC_EVENT = "goal_continuation_advisory_retry";
+const FRESH_CONTEXT_MARKER = "\n\n[Agentlas continuation advisory]\n";
+
+function ownerStoppedOrGoalEnded(goalId: string): boolean {
+  const run = getLongRunByGoalId(goalId);
+  return Boolean(run && (longRunOwnerHold(run.id) || ["completed", "cancelled", "cancelling"].includes(run.status)));
+}
+
+/** This CAS changes only retry timing/context, never enabled, grants, pins or the Goal binding. */
+function scheduleAdvisoryContinuation(a: {
+  id: string; goalId?: string | null; promptTemplate: string; scheduleHuman?: string;
+}, runId: string, reasonCode: string, progressKey: string): void {
+  if (!a.goalId) return;
+  getDb().transaction(() => {
+    const current = getAutomation(a.id);
+    if (!current?.enabled || current.goalId !== a.goalId || current.promptTemplate !== a.promptTemplate
+      || (a.scheduleHuman !== undefined && current.scheduleHuman !== a.scheduleHuman)
+      || ownerStoppedOrGoalEnded(a.goalId!)) return;
+    const fingerprint = createHash("sha256").update(`${reasonCode}\0${progressKey}`).digest("hex");
+    const prior = getDb().prepare(`SELECT COUNT(*) AS n FROM run_events WHERE automation_id=? AND kind=? AND ts>?
+      AND json_extract(payload_json,'$.fingerprint')=?`).get(a.id, DIAGNOSTIC_EVENT,
+        new Date(Date.now()-24*60*60_000).toISOString(), fingerprint) as { n: number } | undefined;
+    const retryIndex = Math.min(10, Math.max(0, Number(prior?.n ?? 0)));
+    const delayMs = Math.min(6*60*60_000, 15*60_000*2**retryIndex);
+    const nextAt = new Date(Date.now()+delayMs).toISOString();
+    const basePrompt = current.promptTemplate.split(FRESH_CONTEXT_MARKER)[0]!;
+    const prompt = basePrompt + FRESH_CONTEXT_MARKER +
+      "Start a fresh episode from the current authorized Goal, owner instructions and exact durable receipts. " +
+      "Keep the current runtime and action permissions. Previous action effects or result checks may still be unknown. " +
+      "Do not replay a pending or uncertain action, invent an owner answer, or re-check the same unchanged observation with a model. " +
+      "Choose the next independent useful task; delegate observation and repair in the background. " +
+      "If no independent step is due, record the limitation once and keep the bounded host retry. Honor explicit owner Stop.";
+    const updated = getDb().prepare(`UPDATE automations SET schedule=?, next_run_at=?, prompt_template=?
+      WHERE id=? AND enabled=1 AND goal_id=? AND prompt_template=? AND schedule=?`)
+      .run(GOAL_RUN_SCHEDULE_BACKOFF, nextAt, prompt, a.id, a.goalId, current.promptTemplate, current.scheduleHuman);
+    if (updated.changes !== 1) return;
+    tryRecordRunEvent({ runId, automationId: a.id, kind: DIAGNOSTIC_EVENT,
+      sourceEventId: `${DIAGNOSTIC_EVENT}:${runId}`, payload: { reasonCode, fingerprint, retryIndex,
+        nextAt, continuation: "fresh-independent-context", predecessorEffects: "unverified" } });
+    emitDesktopStoreChange({ entity: "automation", id: a.id });
+  })();
+}
+
+async function boundedLedgerRead<T>(operation: () => Promise<T>): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([Promise.resolve().then(operation), new Promise<null>(resolve => {
+      timer=setTimeout(() => resolve(null),5_000); timer.unref?.();
+    })]);
+  } catch { return null; }
+  finally { if (timer) clearTimeout(timer); }
+}
+
 export async function settleGoalContinuationRun(input: {
   automation: { id: string; name: string; goalId?: string | null; promptTemplate: string; scheduleHuman: string };
   runId: string;
@@ -129,6 +162,13 @@ export async function settleGoalContinuationRun(input: {
   // automation (scripts/test-automations-store.cjs "Storm Long Run").
   if (!isStormbreakerLongRunPrompt(a.promptTemplate) || !a.goalId) return "not-a-continuation";
   const goalId = a.goalId;
+  const current = getAutomation(a.id);
+  if (!current?.enabled || current.goalId !== goalId || ownerStoppedOrGoalEnded(goalId)) return "hard-stop";
+  const progressKey = goalProgressKeyForText(input.output ?? "");
+  const advisoryRetry = (reasonCode: string): GoalContinuationSettlement => {
+    scheduleAdvisoryContinuation(a, input.runId, reasonCode, progressKey);
+    return "backoff";
+  };
   const continueRequested = input.signals?.stormbreakerContinueRequested === true;
   const notice = (kind: NoticeKind, reason: string | null) => {
     surfaceGoalContinuationNotice({
@@ -138,43 +178,38 @@ export async function settleGoalContinuationRun(input: {
 
   // The run itself failed: not a goal pass. Keep the goal, retry later, never every 10 minutes.
   if (input.runStatus === "error" || input.runStatus === "partial") {
-    if (a.scheduleHuman !== GOAL_RUN_SCHEDULE_BACKOFF) updateAutomation(a.id, { scheduleHuman: GOAL_RUN_SCHEDULE_BACKOFF });
-    return "backoff";
+    return advisoryRetry("goal_continuation_run_incomplete");
   }
 
   // The model's completion claim reaches the ledger here only: this chat is a
   // division, excluded from client.ts's goal contract block.
-  if (input.signals?.goalCompletionClaim?.claimed) {
-    await closeOpenGoalLedgerTasks({
+  const completionClaim = input.signals?.goalCompletionClaim;
+  if (completionClaim?.claimed) {
+    await boundedLedgerRead(() => closeOpenGoalLedgerTasks({
       goalId,
-      evidence: input.signals.goalCompletionClaim.evidence ?? `automation:${a.id} ${goalProgressKeyForText(input.output ?? "")}`,
+      evidence: completionClaim.evidence ?? `automation:${a.id} ${goalProgressKeyForText(input.output ?? "")}`,
       outcomeText: input.output ?? "",
       invocationRunId: input.runId,
-    });
+    }));
   }
-  const decision = await recordGoalLedgerCycle({
+  const decision = await boundedLedgerRead(() => recordGoalLedgerCycle({
     goalId,
-    progressKey: goalProgressKeyForText(input.output ?? ""),
+    progressKey,
     outcome: `run-${input.runOutcome}`,
-  });
-  if (!decision) {
-    if (goalContinuationNeedsOwner(input)) {
-      notice("needs-owner", input.runOutcomeReason ?? input.runError ?? input.output);
-      toggleAutomation(a.id, false);
-      return "needs-owner";
-    }
-    if (!continueRequested) {
-      toggleAutomation(a.id, false);
-      return "stopped-no-basis";
-    }
-    return "continue";
-  }
-  const hardStop = !decision.continue && GOAL_HARD_STOP_REASONS.has(decision.reason);
+  }));
+  if (!decision) return advisoryRetry(goalContinuationNeedsOwner(input)
+    ? "goal_continuation_owner_input_pending" : "goal_continuation_ledger_unavailable");
+  const latest = getAutomation(a.id);
+  if (!latest?.enabled || latest.goalId !== goalId || latest.promptTemplate !== a.promptTemplate
+    || latest.scheduleHuman !== a.scheduleHuman) return "backoff";
+  const hardStop = ownerStoppedOrGoalEnded(goalId);
   const verifiedComplete = !continueRequested
     && input.runStatus === "ok" && input.runOutcome === "accepted"
     && decision.reason === "no_open_tasks";
   if (verifiedComplete) {
-    await completeGoalLedgerGoal({ goalId, status: "completed", reason: "judged-ok-no-open-tasks-no-marker" });
+    const completed = await boundedLedgerRead(() => completeGoalLedgerGoal({
+      goalId, status: "completed", reason: "judged-ok-no-open-tasks-no-marker" }));
+    if (completed !== true) return advisoryRetry("goal_continuation_completion_unverified");
     completeChatGoalContract(goalId, "completed");
     clearChatGoalBindingByGoalId(goalId);
     toggleAutomation(a.id, false);
@@ -182,42 +217,22 @@ export async function settleGoalContinuationRun(input: {
     return "completed";
   }
   if (hardStop) {
-    // Stop the continuation row only. A blocked / paused / budget-stopped goal is not over: its contract and its
-    // chat binding stay, so the goal chip, the owner's answer and the AGI room life still reach it. Before this the
-    // hard stop blocked the contract and cleared chats.goal_id — owner room "Youtube launch" 2026-09-28 11:46:19Z
-    // (goal_owner_answer_required) lost its goal on every surface. A goal that really ended is unbound by the next
-    // turn's terminal check (invocation/service.ts), which reads the long run, not this settlement.
     toggleAutomation(a.id, false);
     notice("hard-stop", goalStopReasonText(decision.reason, decision.blockedReason, input.locale));
     return "hard-stop";
   }
-  if (goalContinuationNeedsOwner(input)) {
-    notice("needs-owner", input.runOutcomeReason ?? input.runError ?? input.output);
-    toggleAutomation(a.id, false);
-    return "needs-owner";
-  }
+  if (goalContinuationNeedsOwner(input)) return advisoryRetry("goal_continuation_owner_input_pending");
+  if (!decision.continue) return advisoryRetry("goal_continuation_internal_diagnostic");
   if (decision.continue || continueRequested) {
     const cadence = goalContinuationSchedule(decision);
     if (a.scheduleHuman !== cadence) updateAutomation(a.id, { scheduleHuman: cadence });
     return "continue";
   }
-  // Unfinished but nothing asks to continue: stop re-running, claim nothing; the goal stays active.
-  toggleAutomation(a.id, false);
-  return "stopped-no-basis";
+  return advisoryRetry("goal_continuation_basis_pending");
 }
 
-/**
- * The pre-run gate refused this continuation because the ledger says stop
- * (blocked / terminal / paused / budget). Before this, the gate only returned
- * "not accepted": the row stayed enabled with a past next_run_at and the owner
- * was never told — live 2026-09-27 "X Marketing": ledger blocked
- * (auto_goal_owner_review_required) since 11:53Z, row still on every-10m.
- *
- * Disable the row and tell the goal chat once per ledger state. The goal
- * contract and the chat's goal binding stay as they are: the owner's next turn
- * (mcp/client.ts) or Resume (ipc.ts) re-enables exactly this row. Transient
- * refusals (waiting_*, verifying, revision pending, replan) are left alone.
- */
+/** A refused internal gate keeps a bounded fresh continuation; owner Stop stays authoritative. */
+
 export function settleRefusedGoalContinuation(input: {
   automation: { id: string; name: string; goalId?: string | null; promptTemplate: string; enabled?: boolean };
   decision: { continue: boolean; reason: string; status: string | null; blockedReason: string | null };
@@ -225,7 +240,15 @@ export function settleRefusedGoalContinuation(input: {
 }): boolean {
   const a = input.automation;
   if (!a.goalId || !isStormbreakerLongRunPrompt(a.promptTemplate)) return false;
-  if (input.decision.continue || !GOAL_HARD_STOP_REASONS.has(input.decision.reason)) return false;
+  if (input.decision.continue) return false;
+  const current = getAutomation(a.id);
+  if (!current?.enabled || current.goalId !== a.goalId || current.promptTemplate !== a.promptTemplate) return true;
+  if (!ownerStoppedOrGoalEnded(a.goalId)) {
+    const state = [a.goalId, input.decision.status ?? "", input.decision.reason, input.decision.blockedReason ?? ""].join("\0");
+    scheduleAdvisoryContinuation(a, `gate-${createHash("sha256").update(state).digest("hex").slice(0,32)}`,
+      "goal_continuation_gate_advisory", state);
+    return true;
+  }
   const state = [a.goalId, input.decision.status ?? "", input.decision.reason, input.decision.blockedReason ?? ""].join("\u0000");
   const noticeKey = `gate-${createHash("sha256").update(state, "utf8").digest("hex").slice(0, 32)}`;
   surfaceGoalContinuationNotice({

@@ -1,19 +1,19 @@
-/**
- * What the owner reads when a Goal's requested wait is refused, and whether a refusal ends the turn
- * instead of stopping the Goal.
- *
- * Measured 2026-09-27 (owner's One "X Marketing" goal, 1.2.45): a finite automatic Goal finished its
- * deliverables (signals brief, 30-account tracker, two verified replies, profile update) and asked for a
- * one-week follow-up timer. Timers need an ongoing Goal, so registration threw
- * goal_wait_ongoing_authority_required; the host blocked the Goal with "The wait was not registered.
- * Review the requested subject and the execution state.", the blocked sweep resumed it, the model asked
- * for the same timer, and the automatic-goal cap stopped it with "I checked twice and could not confirm
- * the result". Nothing was unconfirmed: the only problem was a timer on a one-time Goal.
- *
- * Rule: a finite Goal's refused timer is the end of that turn, not a blocker — the turn goes through the
- * ordinary end-of-turn verification (owner rule "only boundaries stop a run"). Every other refusal names
- * what went wrong and what the owner can do (owner rule "raised errors must have a way out").
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import type { GoalWaitIntent } from "./wait-emitter";
 import { getDb } from "../store/db";
 
@@ -53,7 +53,7 @@ export function finiteGoalTimerRefusalMessage(locale: "ko" | "en", intent: GoalW
       ? "목표 마감이 지나 더 기다리지 않고, 지금 결과를 목표치와 대조해 검증합니다."
       : "The goal's deadline has passed, so there is no further wait: the result is now verified against the target.";
   }
-  // Measured 2026-09-28 (Youtube launch, a 3-month finite goal whose plan predates the deadline field): the old copy
+
   // said "verifying the results so far to close the goal" for a goal that was far from done and kept running, and told
   // the owner to type a sentence. The refusal only ends this turn; say what was waiting and that the goal goes on.
   const date = followUpDate(intent);

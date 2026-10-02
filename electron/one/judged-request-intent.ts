@@ -25,7 +25,7 @@ const INTENT_LABELS = ["conversation", "task"] as const;
 
 export interface ResolvedOneRequestIntent {
   intent: OneRequestIntent | "undecided";
-  source: "llm" | "unavailable";
+  source: "llm" | "unavailable" | "existing_goal";
   reason: string;
 }
 
@@ -39,12 +39,17 @@ export type OneRequestIntentJudge = (
  */
 export async function resolveOneRequestIntent(
   prompt: string,
-  opts: { signal?: AbortSignal; timeoutMs?: number; judgeFn?: OneRequestIntentJudge; runtimeSelection?: RuntimeSelection } = {},
+  opts: { signal?: AbortSignal; timeoutMs?: number; judgeFn?: OneRequestIntentJudge; runtimeSelection?: RuntimeSelection;
+    boundExistingGoal?: boolean } = {},
 ): Promise<ResolvedOneRequestIntent> {
   const input = oneRequestIntentJudgmentInput(prompt);
   if (!input) return { intent: "undecided", source: "unavailable", reason: "empty prompt" };
   const run = opts.judgeFn ?? judgeRequired;
-  const verdict = await run({
+  const fallback = (reason: string): ResolvedOneRequestIntent => opts.boundExistingGoal && !opts.signal?.aborted
+    ? { intent: "task", source: "existing_goal", reason: `existing_goal_continues:${reason}` }
+    : { intent: "undecided", source: "unavailable", reason };
+  let verdict: RequiredVerdict<OneRequestIntent>;
+  try { verdict = await run({
     kind: ONE_REQUEST_INTENT_JUDGMENT_KIND,
     question: ONE_REQUEST_INTENT_JUDGMENT_QUESTION,
     labels: INTENT_LABELS,
@@ -53,10 +58,10 @@ export async function resolveOneRequestIntent(
     signal: opts.signal,
     timeoutMs: opts.timeoutMs,
     runtimeSelection: opts.runtimeSelection,
-  });
+  }); } catch { return fallback("judgment_failed"); }
   return verdict.source === "llm" && verdict.verdict !== null
     ? { intent: verdict.verdict, source: "llm", reason: verdict.reason }
-    : { intent: "undecided", source: "unavailable", reason: verdict.reason };
+    : fallback(verdict.reason);
 }
 
 /** Warm the cache for a One conversation-shaped turn before the sync start path runs. */
@@ -75,12 +80,12 @@ export async function prejudgeOneRequestIntent(
 }
 
 /** Synchronous read of an already-judged intent. null = not judged. */
-export function judgedOneRequestIntent(prompt: string, runtimeSelection?: RuntimeSelection): OneRequestIntent | null {
+export function judgedOneRequestIntent(prompt: string, runtimeSelection?: RuntimeSelection, boundExistingGoal = false): OneRequestIntent | null {
   const verdict = peekJudgment<OneRequestIntent>(
     ONE_REQUEST_INTENT_JUDGMENT_KIND,
     oneRequestIntentJudgmentInput(prompt),
     undefined,
     runtimeSelection,
   );
-  return verdict && verdict.source === "llm" ? verdict.verdict : null;
+  return verdict && verdict.source === "llm" ? verdict.verdict : boundExistingGoal ? "task" : null;
 }

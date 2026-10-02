@@ -65,13 +65,13 @@ export function automationOwnerReportBody(input: Pick<AutomationNotificationInpu
   return `${summary}\n${tools}${errors}${approval ? `\n${approval}` : ""}${body ? `\n\n${ko ? "마지막 단계 결과" : "Final step result"}:\n${body}` : ""}`;
 }
 
-/**
- * Owner decision 2026-09-28: an automation run that did nothing outward — no outward action in the
- * host ledger (the same count the 자동화 tab shows), a run that completed, and no owner question —
- * posts no chat row. Owner Thread Marketing: the hourly Threads automation posted a row every hour
- * saying nothing had changed ("23:00 전이라 안 했습니다", "not analytics hour").
- * Runs with actions, failures (any non-ok status) or owner-needed outcomes still post.
- */
+
+
+
+
+
+
+
 export function quietAutomationRun(input: Pick<AutomationNotificationInput, "runId" | "status" | "outcome">,
   digestOf: (runId: string) => { outwardTotal: number; outwardActivityCoverage?: AutomationRunDigest["outwardActivityCoverage"] } | null = automationRunDigest,
   approvalCountOf: (runId: string) => number = observedApprovalRequiredToolCount): boolean {

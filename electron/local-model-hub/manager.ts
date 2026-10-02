@@ -711,7 +711,7 @@ export class LocalModelHubManager {
   ): Promise<LocalModelLoadReceipt> {
     await this.readyForMutation();
     // 0 = 자동: 엔진이 모델의 학습 문맥(n_ctx_train)을 쓰되 장치 메모리에 맞춰 줄인다(--fit on 기본).
-    // 8192 고정은 오케스트레이터 프롬프트+도구 스키마만으로 넘쳐 4B 모델이 파일 과제조차 못 시작했다(격리 앱 실측 2026-09-13).
+
     if (!Number.isSafeInteger(contextTokens) || (contextTokens !== 0 && (contextTokens < 512 || contextTokens > 131_072))) {
       throw new Error("invalid_local_model_context_tokens");
     }

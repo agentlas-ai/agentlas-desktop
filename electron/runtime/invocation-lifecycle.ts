@@ -62,6 +62,8 @@ export interface InvocationLifecycleRecord {
   controller: AbortController;
   chatId: string;
   cancelRequestedAt: string | null;
+  /** Main-owned read-only checks use their own runner without occupying the chat. */
+  background?: boolean;
 }
 
 export type InvocationCancelResult = "requested" | "already-requested" | "not-found";
@@ -112,7 +114,9 @@ export class InvocationLifecycleRegistry<T extends InvocationLifecycleRecord> {
      * 경과 시간으로도 못 가른다 — 게이트가 과거 시각을 넘긴다).
      * 그래서 여기서는 잠그되, 아래 assertInvocationChatAvailable 이 **푸는 길을 말한다.**
      */
-    assertInvocationChatAvailable(record.chatId, this.active.values());
+    if (!record.background) {
+      assertInvocationChatAvailable(record.chatId, [...this.active.values()].filter((active) => !active.background));
+    }
     this.active.set(runId, record);
   }
 
@@ -163,7 +167,7 @@ export class InvocationLifecycleRegistry<T extends InvocationLifecycleRecord> {
   }
 
   activeChatIds(): string[] {
-    return [...new Set([...this.active.values()].map((record) => record.chatId))];
+    return [...new Set([...this.active.values()].filter((record) => !record.background).map((record) => record.chatId))];
   }
 }
 

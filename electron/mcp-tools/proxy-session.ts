@@ -62,7 +62,7 @@ type IdleUpstream = {
 type UpstreamInit = { paramsKey: string; result: unknown };
 type Frame = Record<string, any>;
 type Policy = {
-  mutating: (input: { catalogId?: string | null; toolName: string }) => boolean;
+  mutating: (input: { catalogId?: string | null; toolName: string; args?: unknown }) => boolean;
   planMutating: (input: { authority?: unknown; toolName: string; args?: unknown }) => boolean;
   readOnlyMutating?: (input: { toolName: string; args?: unknown }) => boolean;
 };
@@ -645,7 +645,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const tool = frame.params?.name, args = frame.params?.arguments ?? {};
       if (!initialized || typeof tool !== "string" || !tool || !args || typeof args !== "object" || Array.isArray(args)) throw new Error("mcp_proxy_call_invalid");
       if (!graphAllows(gate, tool)) { deny(wireId, "plan_denied"); return; }
-      const mutating = policy.mutating({ catalogId: gate.catalogId, toolName: tool });
+      const mutating = policy.mutating({ catalogId: gate.catalogId, toolName: tool, args });
       if ((gate.simulation && mutating) || (gate.planMode && policy.planMutating({ authority: gate.planReadAuthority, toolName: tool, args }))) { deny(wireId, "plan_denied"); return; }
       // Read-only observation profile: fail closed if the policy is missing, and deny before any
       // arbiter or durable consent rule can answer (a saved "always allow" never turns a look into a click).

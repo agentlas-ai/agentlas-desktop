@@ -1,22 +1,22 @@
-/**
- * A chat whose goal is still alive must stay bound to it.
- *
- * Owner 2026-09-28 ("단톡방들 목표가 다 날아갔네 안 보인다 … 그럼 AGI도 못하고"): the One room "Youtube launch" had
- * chats.goal_id = NULL while its goal was alive — contract `blocked`, long run `blocked · goal_owner_answer_required`
- * (the goal had asked the owner a question). The goal chip, the owner's answer path and the Alive/AGI room life all
- * read chats.goal_id, so the goal vanished from every surface although nothing had ended it. The writer was the
- * continuation hard-stop (goal-continuation-hold.ts, 11:46:19Z: contract → blocked + binding cleared); a new turn
- * could not rebind it either, because the orphan rebind only looked at `active` contracts.
- *
- * This module is the one rule for "which non-terminal goal belongs to this chat" when the binding is detached:
- *  - a contract for this chat that is not terminal (`active` or `blocked`), whose long run exists, is not terminal
- *    and is rooted in this chat (or has no root), and that no other chat is bound to. Latest activity wins.
- *  - the chat counts as detached when its goal_id is NULL, or points at a goal whose contract is completed/cancelled
- *    or whose long run is terminal. A chat bound to a live goal (or to an armed contract with no run yet) is never
- *    touched.
- * The repair only rewrites chats.goal_id. It never changes a contract, a long run status or a continuation row; it
- * records one typed long-run event per repair and is idempotent (a repaired chat no longer matches).
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import type Database from "better-sqlite3";
 
 export const GOAL_BINDING_REPAIR_EVENT_KIND = "run.chat_goal_binding_repaired";

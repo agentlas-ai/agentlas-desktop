@@ -1,10 +1,9 @@
-import { longRunMonetaryRefusal } from "./budget";
 /** Main-owned bridge from a judged user request to the existing durable ledger.
  * This module does not dispatch a provider, schedule work or grant permissions.
  */
 import type { GoalIntakeDecision, GoalCriterion, GoalSourceMessage } from "../../shared/auto-goal";
 import { admitsAutomaticGoal } from "../../shared/auto-goal";
-import { goalResumeRecoveryBlockerCode, LONG_RUN_TERMINAL_STATUSES, type LongRunBudget } from "../../shared/long-run";
+import { LONG_RUN_TERMINAL_STATUSES, type LongRunBudget } from "../../shared/long-run";
 import { getDb } from "../store/db";
 import { createStoredAutomaticGoal, completeChatGoalContract } from "../store/chat-goals";
 import { getChat, setChatGoalBinding } from "../store/chats";
@@ -104,20 +103,7 @@ export function controlAutomaticGoal(input: {
     if (LONG_RUN_TERMINAL_STATUSES.has(run.status)) return run;
     if (input.command === "resume") {
       if (input.expectedVersion === undefined) throw new Error("auto_goal_resume_version_required");
-      const recoveryBlocker = goalResumeRecoveryBlockerCode(run.blockedReason);
-      if (recoveryBlocker) throw new Error(recoveryBlocker);
-      finiteBudget(run.budget);
-      /*
-       * ★null 은 "무제한"이지 0 이 아니다. `run.cycleCount >= null` 은 자바스크립트에서
-       * `0 >= 0` 으로 풀려 **첫 주기부터 예산 소진**이 된다 — 무제한이 오히려 즉시 종료가
-       * 되는 자리라, 상한을 푸는 변경에서 반드시 함께 고쳐야 한다.
-       */
-      const cyclesExhausted = run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles;
-      const costExhausted = Boolean(longRunMonetaryRefusal(run));
-      if (cyclesExhausted || costExhausted) throw new Error(longRunMonetaryRefusal(run) ?? "auto_goal_budget_exhausted");
-      // The scheduler retains a blocked contract while stopping continuation.
-      // Only this explicit user resume may reactivate it, within the same CAS
-      // transaction and without resetting any consumed budget.
+      // Resume retains historical usage and uncertain effects without making either a stop gate.
       getDb().prepare(`UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ?
         WHERE goal_id = ? AND chat_id = ? AND status = 'blocked'`).run(new Date().toISOString(), run.goalId, run.rootChatId);
       run = resumeLongRunByUser(run.id, input.appInstanceId, input.expectedVersion);
@@ -127,7 +113,7 @@ export function controlAutomaticGoal(input: {
     } else if (!["paused", "pausing", "cancelling"].includes(run.status)) {
       run = transitionLongRun({ runId: run.id, to: ["draft", "queued", "blocked"].includes(run.status) ? "paused" : "pausing", actorKind: "user", reason: "user" });
     }
-    const unsettled = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')")
+    const unsettled = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state = 'running'")
       .get(run.id) as { n: number };
     if (unsettled.n === 0 && ["pausing", "cancelling"].includes(run.status)) {
       run = transitionLongRun({ runId: run.id, to: run.status === "pausing" ? "paused" : "cancelled", actorKind: "host", reason: "user" });

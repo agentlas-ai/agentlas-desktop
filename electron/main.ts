@@ -67,7 +67,7 @@ import { repairDetachedGoalBindings } from "./store/goal-binding-repair";
 import { appendLongRunEvent } from "./store/long-runs";
 import { settleInterruptedTasksOnBoot } from "./store/tasks";
 import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
-import { automationWorkInFlight, closeAutomationDispatchForShutdown, startAutomationScheduler } from "./automation-scheduler";
+import { automationWorkInFlight, closeAutomationDispatchForShutdown, quiesceAutomationSchedulerForUpdate, startAutomationScheduler } from "./automation-scheduler";
 import { setGoalWaitHost, pollGoalWaitSubscriptions, reconcileClaimedGoalWaitsAtStartup,
   interruptGoalWaitReplans, goalWaitReplansSettled } from "./long-run/wait-subscriptions";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
@@ -1426,11 +1426,15 @@ let updateWorkCheckpointed = false;
 /**
  * The person confirmed: arm the resume ledger, then stop the running turns FOR the update (typed
  * hostStopCause "update_restart", Goals paused app_closed as on any quit so their own startup
- * resume takes them), bounded by UPDATE_CHECKPOINT_CAP_MS. Leftovers are already in the ledger;
- * their receipts settle as the process exits.
+ * resume takes them). First let scheduler effects settle; only the remaining chat/Goal checkpoint
+ * is bounded by UPDATE_CHECKPOINT_CAP_MS. Those leftovers are already in the ledger.
  */
 async function checkpointWorkForUpdate(items: UpdateWorkItem[]): Promise<void> {
   if (updateWorkCheckpointed) return;
+  // Scheduler-owned model/tool turns are outside invocationService's chat census.
+  // Drain them before any Goal checkpoint, provider abort or native update quit.
+  // On timeout the scheduler reopens admission and the install is refused.
+  await quiesceAutomationSchedulerForUpdate();
   updateWorkCheckpointed = true;
   const startedAt = Date.now();
   try {
@@ -1460,6 +1464,7 @@ async function checkpointWorkForUpdate(items: UpdateWorkItem[]): Promise<void> {
     items: items.length,
     pausedGoals: report?.pausedRunIds.length ?? 0,
     leftoverTurns: invocationService.activeChatIds().length,
+    leftoverAutomations: automationWorkInFlight(),
     ms: Date.now() - startedAt,
   });
 }
@@ -1497,6 +1502,9 @@ async function prepareAutomaticUpdateQuit(): Promise<void> {
   // the work for the update first so it continues after the relaunch (owner brief rule 4).
   const deferredWork = updateInstallDeferredForVersion(getUpdaterState().version) ? collectUpdateWork() : [];
   if (deferredWork.length > 0) await checkpointWorkForUpdate(deferredWork);
+  // A dispatch may have entered after the idle census. Fence it before stopping
+  // services; the controller repeats this gate for direct install entry points.
+  await quiesceAutomationSchedulerForUpdate();
   // An update explicitly stops the execution service before replacing files.
   // Close observers first so no UI reconnect can respawn it during the handoff.
   const { buildDaemonAutostartCommand, reconcileDaemonAutostart, suspendDaemonAutostart, stopDaemonService } = await import("./daemon/app-launcher");
@@ -2175,7 +2183,7 @@ app.whenReady().then(async () => {
       if (closedGoals.length) console.info("[startup] closed goal contracts never backed by a run", closedGoals);
     } catch (error) { console.error("[startup] goal contract reconciliation failed", error); }
     // A chat detached from its still-live goal (contract active/blocked, run not ended) lost its goal chip, its
-    // answer path and its AGI room life. Rebind it; goal status is never changed (owner 2026-09-28 "Youtube launch").
+
     try {
       const rebound = repairDetachedGoalBindings({ db: getDb(), appendEvent: appendLongRunEvent,
         emitChatChanged: (chatId) => emitDesktopStoreChange({ entity: "chat", id: chatId }) });
@@ -4514,6 +4522,19 @@ app.whenReady().then(async () => {
   }
   if (!developmentEffectsSuppressed()) {
     try {
+      // Install durable retry ownership before optional classification or observation.
+      const { sweepBlockedGoals, BLOCKED_GOAL_SWEEP_INTERVAL_MS } = await import("./long-run/blocked-goal-sweep");
+      const sweep = (trigger: "startup" | "periodic") => {
+        try {
+          const swept = sweepBlockedGoals(invocationService, trigger).filter((entry) => entry.action !== "deferred");
+          if (swept.length) console.info("[long-run] blocked goal sweep", swept);
+        } catch (error) {
+          console.error("[long-run] blocked goal sweep failed", error);
+        }
+      };
+      const timer = setInterval(() => sweep("periodic"), BLOCKED_GOAL_SWEEP_INTERVAL_MS);
+      timer.unref?.();
+      sweep("startup");
       setGoalWaitHost({
         dispatch: (input) => invocationService.resumeGoalWait(input),
         isChatBusy: (chatId) => invocationService.activeChatIds().includes(chatId),
@@ -4533,41 +4554,16 @@ app.whenReady().then(async () => {
       });
       const uncertainClaims = reconcileClaimedGoalWaitsAtStartup();
       if (uncertainClaims.length) console.warn("[goal-wait] claimed dispatches require attention", uncertainClaims);
-      await pollGoalWaitSubscriptions();
+      void pollGoalWaitSubscriptions().catch((error) => console.error("[goal-wait] startup observation failed", error));
       const { resumeSettledGoalCheckpoints, resumeLegacyOngoingBlockedGoals,
         scheduleUnverifiedOngoingGoalCycles } = await import("./long-run/startup-checkpoints");
       const resumed = resumeSettledGoalCheckpoints(invocationService);
       if (resumed.length) console.info("[long-run] checkpoint startup reconciliation", resumed);
       const scheduled = scheduleUnverifiedOngoingGoalCycles();
       if (scheduled.length) console.info("[long-run] ongoing observation recovery", scheduled);
-      // A pinned-runtime classification may take time. Do not hold the UI or
-      // other startup recovery behind this narrow legacy metadata repair.
-      // Owner 2026-09-23: no Goal stays blocked or waits on a button. After the specific recovery
-      // passes above, sweep every remaining stop once (observe → continue/redo, resume with runtime
-      // fallback, scheduled retry, or a recorded cancel), then keep sweeping while the app runs.
-      const { sweepBlockedGoals, BLOCKED_GOAL_SWEEP_INTERVAL_MS } = await import("./long-run/blocked-goal-sweep");
       void resumeLegacyOngoingBlockedGoals(invocationService)
         .then((legacy) => { if (legacy.length) console.info("[long-run] legacy ongoing startup reconciliation", legacy); })
-        .catch((error) => console.error("[long-run] legacy ongoing startup reconciliation failed", error))
-        .finally(() => {
-          // Browser login restoration is consumed by its exact invocation/node
-          // wait handle. An unrelated session event cannot wake every Goal.
-          try {
-            const swept = sweepBlockedGoals(invocationService, "startup");
-            if (swept.length) console.info("[long-run] blocked goal sweep", swept);
-          } catch (error) {
-            console.error("[long-run] blocked goal sweep failed", error);
-          }
-          const timer = setInterval(() => {
-            try {
-              const swept = sweepBlockedGoals(invocationService, "periodic").filter((entry) => entry.action !== "deferred");
-              if (swept.length) console.info("[long-run] blocked goal sweep", swept);
-            } catch (error) {
-              console.error("[long-run] blocked goal sweep failed", error);
-            }
-          }, BLOCKED_GOAL_SWEEP_INTERVAL_MS);
-          timer.unref?.();
-        });
+        .catch((error) => console.error("[long-run] legacy ongoing startup reconciliation failed", error));
     } catch (error) {
       console.error("[long-run] checkpoint startup reconciliation failed", error);
     }

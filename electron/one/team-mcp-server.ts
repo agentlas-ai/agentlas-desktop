@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
+import { ONE_GRAPH_TOOLS, ONE_GRAPH_TOOL_NAMES } from "../../shared/graph-authoring";
 
 // Built-in inline MCP server: One starts and steers a teammate's own session.
 // The child holds no authority — each call is forwarded to Main's loopback
@@ -15,6 +16,7 @@ export const AGENTLAS_ONE_TEAM_TOOL_NAMES = [
   "one_team_create_member",
   "one_team_invite",
   "one_team_compose_group",
+  ...ONE_GRAPH_TOOL_NAMES,
 ] as const;
 
 const SOURCE = String.raw`"use strict";
@@ -54,6 +56,7 @@ const ro = { readOnlyHint: true, destructiveHint: false, openWorldHint: false };
 const act = { readOnlyHint: false, destructiveHint: false, openWorldHint: false };
 const session = { type: "string", minLength: 1, maxLength: 128, description: "session_id returned by one_team_start_session. It is an internal handle for these tools only: never show it to the owner (the conversation already shows an 'Open session' link)." };
 const tools = [
+  ...${JSON.stringify(ONE_GRAPH_TOOLS)},
   { name: "one_team_list", annotations: ro, description: "Your teammates (the owner's One team: name, member id, what they are doing now) and the teammate sessions this conversation already started with their status.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
   { name: "one_team_start_session", annotations: act, description: "Hand a piece of work to a teammate in the teammate's OWN session (it appears in the owner's team list, not inside this chat). Use when the owner asks you to give/assign/delegate work to a named teammate. Write the brief as intent: what to produce, why, and what 'done' looks like - not step-by-step instructions. It starts right away (no extra approval). The same brief to the same teammate is never started twice. After starting, call one_team_session_status with wait_seconds to get the result; if you end your turn instead, the result is reported back into this conversation when the teammate finishes. The conversation shows the owner an 'Open session' link on its own: do not print session ids. A started result has confirmed:true and owner_message (already in the owner's language): tell the owner that, do not guess. A refusal says exactly why and that nothing was started. Calling again with the same brief returns the existing session (already_started:true), never a duplicate: when unsure whether a handoff happened, call this again or one_team_list instead of doing the teammate's work yourself.", inputSchema: { type: "object", properties: { member: { type: "string", minLength: 1, maxLength: 200, description: "Teammate name or member id (see one_team_list)." }, brief: { type: "string", minLength: 1, maxLength: 8000 }, new_session: { type: "boolean", description: "Default true: a new session. false continues the teammate's latest session." } }, required: ["member", "brief"], additionalProperties: false } },
   { name: "one_team_steer", annotations: act, description: "Send a follow-up direction to a teammate session you started (queued after its current step if it is still working; reopens it if it had finished).", inputSchema: { type: "object", properties: { session_id: session, message: { type: "string", minLength: 1, maxLength: 8000 } }, required: ["session_id", "message"], additionalProperties: false } },
@@ -76,6 +79,7 @@ function handle(requestValue) {
   if (name === "one_team_create_member") return request("create", { name: args.name, role: args.role, personality: args.personality, invite: args.invite });
   if (name === "one_team_invite") return request("invite", { member: args.member });
   if (name === "one_team_compose_group") return request("compose_group", { members: args.members });
+  if (${JSON.stringify(ONE_GRAPH_TOOL_NAMES)}.includes(name)) return request("graph", { name, input: args });
   return Promise.resolve(error("Unknown One team tool."));
 }
 function line(value) {

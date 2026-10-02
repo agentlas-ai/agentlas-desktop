@@ -1,14 +1,6 @@
-/*
- * Retry cap for system-admitted Goals (owner decision 2026-09-25).
- *
- * A Goal the app admitted on its own (automatic intake) gets at most AUTOMATIC_GOAL_RETRY_CAP host
- * continuations — verifier retries and sweep resumes — counted since the latest owner action (effect observations
- * are reconciliation, not retries; see automaticGoalRetryCount). At the cap the host stops spending and settles:
- * done-with-evidence only when the latest authorized verification passed every current criterion
- * with resolvable host refs, otherwise it asks the owner once and waits (coded blocked reason; the owner's next message or
- * Resume continues it). Measured before: a one-line file write ran 17 invocations / 7 verifier attempts.
- * Explicit Goals (goal chip, owner-defined) keep their own unbounded-by-this-rule contract.
- */
+/** Historical retry counters remain available for diagnostics. As of 2026-10-02,
+ * no retry count stops a Goal or requires owner review before independent work.
+ * Evidence-backed completion remains the normal verifier's responsibility. */
 import { getDb } from "../store/db";
 import {
   AUTO_GOAL_OWNER_REVIEW_REQUIRED, AUTO_GOAL_SETTLED_WITH_EVIDENCE, settleAutomaticGoalAtRetryCap,
@@ -25,13 +17,13 @@ export function isAutomaticGoal(run: Pick<LongRunRecord, "goalId">): boolean {
   return run.goalId.startsWith("goal:auto-message:");
 }
 
-/**
- * Host continuations since the latest owner action (revision binding, user resume, resume with message).
- * Effect observations and the resume they authorize are NOT counted: they reconcile an uncertain effect by looking,
- * they do not retry the work (owner direction 2026-09-27). Measured that day (Thread Marketing goal): one observation
- * settled the effect as done, yet its dispatch + resume made the count 2, so the next uncertain episode skipped
- * observation and stopped at owner review ("I checked twice and could not confirm the result").
- */
+
+
+
+
+
+
+
 export function automaticGoalRetryCount(runId: string): number {
   const row = getDb().prepare(`WITH boundary AS (
       SELECT COALESCE(MAX(seq), 0) AS seq FROM long_run_events WHERE run_id = ? AND (
@@ -48,8 +40,9 @@ export function automaticGoalRetryCount(runId: string): number {
   return Number(row?.n ?? 0);
 }
 
-export function automaticGoalAtRetryCap(run: LongRunRecord): boolean {
-  return isAutomaticGoal(run) && automaticGoalRetryCount(run.id) >= AUTOMATIC_GOAL_RETRY_CAP;
+export function automaticGoalAtRetryCap(_run: LongRunRecord): boolean {
+  // Retry history remains measurable, but no count parks a Goal for owner review.
+  return false;
 }
 
 /** Latest complete, current, authorized verifier round with resolvable host refs. */

@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.2.53",
+  "version": "1.2.54",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -16,14 +16,14 @@
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
     "targetSchemaVersion": 127,
-    "bundledRuntimeVersion": "1.2.51"
+    "bundledRuntimeVersion": "1.2.54"
   },
   "agentlasBundledRuntimeSource": {
     "repository": "https://github.com/agentlas-ai/Agentlas-OS.git",
-    "ref": "v1.2.51",
-    "commit": "4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448",
-    "assetName": "hephaestus-runtime-v1.2.51.tar.gz",
-    "assetSha256": "0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3"
+    "ref": "v1.2.54",
+    "commit": "dfbb43695990791a9d147b80648d57d2739a7c48",
+    "assetName": "hephaestus-runtime-v1.2.54.tar.gz",
+    "assetSha256": "1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2"
   },
   "scripts": {
     "test:work-20-step-journey": "node scripts/qa-work-20-step-journey.cjs",
@@ -405,7 +405,7 @@
     "@playwright/mcp": "0.0.78",
     "@rive-app/canvas": "^2.40.1",
     "@xyflow/react": "^12.11.1",
-    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#824549dd57b4e8238e9ccad1e585d6026ca36afa",
+    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#a7267eec527885ee2d98ce8f65212f328eb389df",
     "beautiful-mermaid": "^1.1.3",
     "better-sqlite3": "^12.11.1",
     "croner": "^9.1.0",

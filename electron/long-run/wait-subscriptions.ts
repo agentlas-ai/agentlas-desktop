@@ -6,7 +6,7 @@ import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAgentSurface } from "../store/agent-surfaces";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { addLongRunTask, appendLongRunEvent, blockHostPausedClaimedGoalWait, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, unsettledLongRunAttempts } from "../store/long-runs";
+import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, unsettledLongRunAttempts, nextBlockedGoalRetrySlot, scheduleBlockedGoalRetry, longRunOwnerHold } from "../store/long-runs";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
 import { claimCheckpointContinuation, latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
@@ -82,7 +82,20 @@ export function latestGoalWaitSubscription(goalId: string): GoalWaitSubscription
   if (!run || run.surface === "science") return null;
   const row = getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
     .get(run.id) as { payload_json: string } | undefined;
-  return row ? JSON.parse(row.payload_json).subscription : null;
+  if (!row) return null;
+  try {
+    const value = JSON.parse(row.payload_json)?.subscription as GoalWaitSubscription | undefined;
+    if (!value || value.schemaVersion !== "agentlas.goal-wait-subscription.v1"
+      || value.runId !== run.id || value.goalId !== goalId || value.chatId !== run.rootChatId
+      || typeof value.waitId !== "string" || !value.waitId || !Number.isSafeInteger(value.revision) || value.revision < 1
+      || !Number.isSafeInteger(value.goalRevision) || value.goalRevision < 1
+      || !["pending", "claimed", "dispatched", "blocked", "expired", "cancelled"].includes(value.state)
+      || (value.nextCheckAt !== null && !Number.isFinite(Date.parse(value.nextCheckAt)))
+      || (value.deadline !== null && !Number.isFinite(Date.parse(value.deadline)))
+      || parseGoalWaitIntent("```agentlas-goal-wait\n" + JSON.stringify(value.intent) + "\n```").request?.status !== "requested") return null;
+    return value;
+  } catch { return null; } // Keep malformed bytes intact; never revive an older producer's wait.
+
 }
 /** An admitted new invocation supersedes the old wait. Delayed observers must
  * see this durable cancellation instead of dispatching a competing successor. */
@@ -94,6 +107,29 @@ export function supersedeGoalWaitForInvocation(goalId: string, invocationRunId: 
     if (run.status === "waiting_tool") transitionLongRun({ runId: run.id, to: "running", actorKind: "host", reason: "goal_wait_superseded" });
   })();
 }
+/** Retire only this wait/checkpoint. The next invocation uses current context
+ * and retains uncertain effect facts instead of replaying the old successor. */
+function scheduleFreshGoalWaitContinuation(wait: Pick<GoalWaitSubscription, "runId">, reason: string, now = Date.now()): void {
+  const run = getLongRun(wait.runId);
+  if (!run || longRunOwnerHold(run.id) || ["pausing", "cancelling", "cancelled", "completed"].includes(run.status)
+    || (run.status === "paused" && !["app_closed", "crash_recovery", "runtime_unavailable"].includes(run.pauseReason ?? ""))) return;
+  const slot = nextBlockedGoalRetrySlot(run.id, now);
+  scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
+    fromReason: reason, retryIndex: slot.retryIndex, nextAt: slot.nextAt,
+    detail: "wait_advisory_fresh_context", trigger: "wait-advisory", effectUncertain: true,
+    appInstanceId: desktopAppInstanceId() });
+}
+
+async function boundedWaitCheck<T>(operation: () => T | Promise<T>, timeoutMs = 30_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([Promise.resolve().then(operation), new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("goal_wait_check_timeout")), timeoutMs);
+      timer.unref?.();
+    })]);
+  } finally { if (timer) clearTimeout(timer); }
+}
+
 function persist(value: GoalWaitSubscription): void {
   appendLongRunEvent({ runId: value.runId, kind: "run.wait_subscription", actorKind: "host",
     sourceEventId: `wait:${value.waitId}:${value.revision}`, payload: { subscription: value } });
@@ -158,10 +194,12 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
       if (input.intent.subject.kind !== "timer") throw new Error("goal_wait_timer_invalid");
       let due = Date.parse(input.intent.subject.notBefore);
       // notBefore is the earliest time, so a too-soon timer is served at the minimum spacing instead of refused.
-      // Measured 2026-09-28 (Youtube launch 34e108bb): "wait for the app restart, then re-check the browser" asked for
+
       // notBefore 47 s after the turn; a refusal here blocked the Goal on a person ("reply with the time you want").
       if (Number.isFinite(due) && due < now + 60_000) {
-        due = now + 60_000;
+        // A finite Goal's last verification may be less than a minute away.
+        // Do not move its final wake past the very deadline we just enforced.
+        due = Math.min(now + 60_000, authority.deadlineAt ? Date.parse(authority.deadlineAt) : Infinity);
         input = { ...input, intent: { ...input.intent, subject: { kind: "timer", notBefore: new Date(due).toISOString() } } };
       }
       if (!Number.isFinite(due) || (authority.deadlineAt && due > Date.parse(authority.deadlineAt))
@@ -379,7 +417,7 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
         return;
       }
       const reason = bindingExact ? "goal_wait_claimed_dispatch_uncertain" : "goal_wait_claimed_binding_changed";
-      const next: GoalWaitSubscription = { ...wait, revision: wait.revision + 1, state: "blocked", nextCheckAt: null, wakeReason: reason };
+      const next: GoalWaitSubscription = { ...wait, revision: wait.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: reason };
       persist(next);
       appendLongRunEvent({ runId: current.id, kind: "run.wait_claim_reconciled", actorKind: "host",
         payload: { waitId: wait.waitId, goalId: wait.goalId, goalRevision: wait.goalRevision,
@@ -387,10 +425,10 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
           checkpointClaimEventSeq: claim?.seq ?? null, invokeStartedEventId: started?.id ?? null,
           terminalEventId: terminal?.id ?? null, effectBoundaryReceiptId: effect?.id ?? null, attemptId: attempt?.id ?? null,
           attemptState: attempt?.state ?? null, sideEffectState: attempt?.side_effect_state ?? null,
-          reason, outcome: "attention_required_no_replay" } });
+          reason, outcome: "advisory_fresh_context_no_replay" } });
       // A dedicated CAS blocks this exceptional host pause without inventing
       // queued/running states. A user Stop or pause never matches its predicate.
-      blockHostPausedClaimedGoalWait(current.id, getLongRun(current.id)!.version, reason);
+      scheduleFreshGoalWaitContinuation(next, reason);
       blocked = next;
     })();
     if (blocked) {
@@ -435,18 +473,27 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
   try { assertDesktopLongRunAdmissionOpen(); } catch { return; }
   const clock = options.clock ?? (() => options.now ?? Date.now());
   const now = clock();
-  for (const candidate of goalWaitPollingCandidates(owner, exactEpoch)) {
-    if (candidate.surface === "science") continue;
+  const pollCandidate = async (candidate: NonNullable<ReturnType<typeof getLongRun>>): Promise<void> => {
+    if (candidate.surface === "science") return;
     const ownsCandidate = (run: ReturnType<typeof getLongRun>) => ownsWaitRun(run, owner, exactEpoch)
-      && run?.appInstanceId === candidate.appInstanceId;
+      && run?.appInstanceId === candidate.appInstanceId && !longRunOwnerHold(candidate.id);
     const wait = latestGoalWaitSubscription(candidate.goalId);
-    if (!wait || wait.state !== "pending" || target.isChatBusy(wait.chatId)) continue;
-    if (candidate.status === "paused" && !["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")) continue;
+    if (!wait) {
+      // A missing or unreadable registration cannot reserve the Goal forever.
+      // Use only current Main authority, never fields from the damaged row.
+      if (ownsCandidate(getLongRun(candidate.id)) && candidate.rootChatId
+        && getChat(candidate.rootChatId)?.goalId === candidate.goalId && !target.isChatBusy(candidate.rootChatId)) {
+        scheduleFreshGoalWaitContinuation({ runId: candidate.id }, "goal_wait_registration_unavailable", clock());
+      }
+      return;
+    }
+    if (wait.state !== "pending" || target.isChatBusy(wait.chatId)) return;
+    if (candidate.status === "paused" && !["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")) return;
     const due = !wait.nextCheckAt || Date.parse(wait.nextCheckAt) <= now || (wait.deadline !== null && Date.parse(wait.deadline) <= now);
-    if (!due && candidate.status !== "paused") continue;
+    if (!due && candidate.status !== "paused") return;
     let observation: GoalWaitObservation | null = null, failure: string | null = null;
     let storageBusy = false;
-    try { if (due) observation = await (options.observe ? options.observe(wait) : observeGoalWaitSubject(wait, clock())); }
+    try { if (due) observation = await boundedWaitCheck(() => options.observe ? options.observe(wait) : observeGoalWaitSubject(wait, clock())); }
     catch (error) {
       const code = error && typeof error === "object" && "code" in error ? error.code : null;
       if (typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code)) storageBusy = true;
@@ -467,7 +514,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
             nextCheckAt: new Date(clock() + 30_000).toISOString(), wakeReason: "goal_wait_observation_retry" });
         }).immediate();
       } catch { /* The next poll may retry the still-due original wait. */ }
-      continue;
+      return;
     }
     let replan: StallReplanResult | null = null;
     if (due && !failure && wait.recoveryMode === "stall_replan") {
@@ -486,7 +533,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
           || target.isChatBusy(wait.chatId)) {
           // Another poll or user/app transition owns this snapshot. Do not
           // turn a stale read into a blocked Goal.
-          continue;
+          return;
         }
         const checkpoint = candidateCheckpoint(wait);
         prepareCheckpointContinuation(checkpoint);
@@ -521,22 +568,22 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       } catch { /* The transaction below owns the exact context refusal. */ }
     }
     if (due && !failure && wait.recoveryMode === "stall_replan") {
-      if (replanInFlight.has(wait.waitId)) continue;
+      if (replanInFlight.has(wait.waitId)) return;
       const controller = new AbortController();
       replanInFlight.set(wait.waitId, controller);
       try {
         const checkpoint = latestTaskCheckpoint(wait.goalId);
         replan = checkpoint?.checkpointId === wait.checkpointId
-          ? await withGoalWaitAccounting({ waitId: wait.waitId, goalId: wait.goalId,
+          ? await boundedWaitCheck(() => withGoalWaitAccounting({ waitId: wait.waitId, goalId: wait.goalId,
             goalRevision: wait.goalRevision, checkpointId: wait.checkpointId, chatId: wait.chatId },
             () => (options.reflect ?? reflectOngoingStall)({ checkpoint,
               progressKey: wait.recoveryProgressKey ?? "", stallStreak: candidate.stallStreak,
               previousAction: checkpoint.capsule.plan?.stallReplan?.action
                 ?? checkpoint.capsule.plan?.episodeStrategy?.nextAction ?? null,
               previousAlternative: checkpoint.capsule.plan?.stallReplan?.alternative ?? null,
-              signal: controller.signal }))
+              signal: controller.signal })), 5_000)
           : { status: "unavailable", reason: "stall_replan_checkpoint_changed" };
-      } catch { replan = { status: "unavailable", reason: "stall_replan_runtime_failed" }; }
+      } catch { controller.abort(); replan = { status: "unavailable", reason: "stall_replan_runtime_failed" }; }
       finally { replanInFlight.delete(wait.waitId); }
     }
     // Accounted inference legitimately appends Goal usage events while the
@@ -588,15 +635,20 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       }
       const next: GoalWaitSubscription = { ...wait, revision: wait.revision + 1 };
       if (failure || expired) {
-        next.state = expired ? "expired" : "blocked"; next.wakeReason = expired ? "goal_wait_deadline" : failure; next.nextCheckAt = null;
-        persist(next); transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: next.wakeReason! }); notice = next; return;
+        next.state = expired ? "expired" : "cancelled"; next.wakeReason = expired ? "goal_wait_deadline" : failure; next.nextCheckAt = null;
+        persist(next); scheduleFreshGoalWaitContinuation(next, next.wakeReason!, clock()); notice = next; return;
       }
       if (!observation || !checkpoint) return;
       if (wait.recoveryMode === "stall_replan") {
         if (!replan || replan.status === "unavailable") {
+          // An unavailable adviser cannot reserve the Goal indefinitely. Retire
+          // only this wait; the next episode uses current context and preserves
+          // the old producer's unverified effect records instead of replaying it.
+          next.state = "cancelled";
           next.wakeReason = replan?.reason ?? "stall_replan_unavailable";
-          next.nextCheckAt = new Date(clock() + 60 * 60_000).toISOString();
+          next.nextCheckAt = null;
           persist(next);
+          scheduleFreshGoalWaitContinuation(next, next.wakeReason, clock());
           notice = next;
           return;
         }
@@ -626,9 +678,9 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
             boundary: proposal.boundary ?? null, downgradedFrom: proposal.downgradedFrom ?? null,
             runtimeReceipt: proposal.runtimeReceipt } });
         if (proposal.action === "needs_person" && proposal.boundary) {
-          next.state = "blocked"; next.wakeReason = `stall_replan_needs_person:${proposal.boundary}`; next.nextCheckAt = null;
+          next.state = "cancelled"; next.wakeReason = `stall_replan_needs_person:${proposal.boundary}`; next.nextCheckAt = null;
           persist(next);
-          transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: next.wakeReason });
+          scheduleFreshGoalWaitContinuation(next, next.wakeReason, clock());
           notice = next;
           return;
         }
@@ -693,14 +745,14 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       const code = error && typeof error === "object" && "code" in error ? error.code : null;
       // A competing writer has not refused the Goal or its owner. Leave its
       // pending revision intact for a later observation instead of blocking it.
-      if (typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code)) continue;
+      if (typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code)) return;
       const reason = error instanceof Error && /^(goal_wait|checkpoint)_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_wake_unavailable";
       getDb().transaction(() => {
         const current = getLongRun(wait.runId), latest = latestGoalWaitSubscription(wait.goalId);
         if (!current || !ownsCandidate(current) || current.version !== expectedVersion || !latest || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending") return;
-        const blocked: GoalWaitSubscription = { ...latest, revision: latest.revision + 1, state: "blocked", nextCheckAt: null, wakeReason: reason };
+        const blocked: GoalWaitSubscription = { ...latest, revision: latest.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: reason };
         persist(blocked); notice = blocked;
-        if (current.status === "waiting_tool") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason });
+        scheduleFreshGoalWaitContinuation(blocked, reason, clock());
       }).immediate();
     }
     if (dispatch) {
@@ -710,11 +762,11 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       // may dispatch; an ownership mismatch is never permission to replay it.
       if (!current || current.status !== "running" || !ownsCandidate(current) || !latest || latest.state !== "claimed"
         || !claimOwnedBy(latest, owner) || latest.successorInvocationId !== claimed.invocationRunId
-        || current.appInstanceId !== latest.dispatchRunOwnerEpoch) continue;
-      try { assertDesktopLongRunAdmissionOpen(); } catch { continue; }
-      let state: "dispatched" | "blocked" = "dispatched", reason = "goal_wait_dispatched";
+        || current.appInstanceId !== latest.dispatchRunOwnerEpoch) return;
+      try { assertDesktopLongRunAdmissionOpen(); } catch { return; }
+      let state: "dispatched" | "cancelled" = "dispatched", reason = "goal_wait_dispatched";
       try { if (target.dispatch(claimed).runId !== claimed.invocationRunId) throw new Error("goal_wait_dispatch_identity_mismatch"); }
-      catch { state = "blocked"; reason = "goal_wait_dispatch_failed"; }
+      catch { state = "cancelled"; reason = "goal_wait_dispatch_failed"; }
       getDb().transaction(() => {
         const latest = latestGoalWaitSubscription(claimed.goalId), current = getLongRunByGoalId(claimed.goalId);
         if (!latest || latest.state !== "claimed" || !claimOwnedBy(latest, owner)
@@ -722,12 +774,18 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
           || !ownsWaitRun(current, owner, exactEpoch) || current.appInstanceId !== latest.dispatchRunOwnerEpoch) return;
         const final = { ...latest, revision: latest.revision + 1, state, wakeReason: reason };
         persist(final); notice = final;
-        if (state === "blocked" && current.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason });
+        if (state === "cancelled") scheduleFreshGoalWaitContinuation(final, reason, clock());
       }).immediate();
     }
     // Routine timed cycles are quiet; failures still ask for attention once.
     if (notice && ownsCandidate(getLongRun(candidate.id))
       && !(wait.intent.subject.kind === "timer" && (notice as GoalWaitSubscription).state === "dispatched")
       && !["paused", "pausing", "cancelling", "cancelled"].includes(getLongRun(candidate.id)?.status ?? "")) attention(notice, target);
+  };
+  let batch: Promise<void>[] = [];
+  for (const candidate of goalWaitPollingCandidates(owner, exactEpoch)) {
+    batch.push(pollCandidate(candidate));
+    if (batch.length === 4) { await Promise.allSettled(batch); batch = []; }
   }
+  await Promise.allSettled(batch);
 }

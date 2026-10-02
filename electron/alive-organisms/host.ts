@@ -268,6 +268,9 @@ export class AliveOrganismHost {
   }
 
   private emitChanges(kind: AliveOrganism, force?: string): void {
+    // An awaited beat or already-queued settlement notification can outlive
+    // stop(). The shutdown owner may have closed SQLite in the meantime.
+    if (!this.running) return;
     const organism = this.organisms[kind];
     for (const agent of organism.store.list()) {
       const digest = this.lifeDigest(organism, agent);
@@ -341,7 +344,9 @@ export class AliveOrganismHost {
   private statusOf(organism: Organism, agent: AliveAgent): { status: AliveStatus; code?: string } {
     if (organism.store.activeWakes().some((wake) => wake.agentId === agent.agentId)) return { status: "running", code: "wake.active" };
     if (organism.store.pendingActions().some((action) => action.agentId === agent.agentId)) return { status: "running", code: "action.pending" };
-    if (this.planAccess !== "allowed") return { status: "blocked", code: this.planAccess };
+    // The next beat rechecks access/model availability. Keep the life enabled
+    // and pending while preserving the actual dispatch authorization gate.
+    if (this.planAccess !== "allowed") return { status: "waiting", code: this.planAccess };
     const code = typeof agent.state.lastWaitCode === "string" ? agent.state.lastWaitCode : undefined;
     if (agent.budget.tokenLimit !== null && agent.budget.tokensUsed >= agent.budget.tokenLimit) return { status: "tokens-spent", code: "grant.tokens-spent" };
     if (agent.budget.tokenLimit !== null && agent.state.usageUnknown === true) return { status: "usage-unknown", code: "grant.usage-unavailable" };
@@ -350,7 +355,7 @@ export class AliveOrganismHost {
       return { status: "waiting", ...(review?.errorCode ? { code: review.errorCode } : {}) };
     }
     if (code === "agent.resting") return { status: "resting", code };
-    if (BLOCKED_WAITS.has(code) || (code.startsWith("goal.") && code !== "goal.none") || code.startsWith("work.")) return { status: "blocked", code };
+    if (BLOCKED_WAITS.has(code) || (code.startsWith("goal.") && code !== "goal.none") || code.startsWith("work.")) return { status: "waiting", code };
     return { status: "waiting", code };
   }
 
@@ -394,22 +399,23 @@ export class AliveOrganismHost {
   setEnabled(input: AliveSetEnabledInput): AliveState {
     const { surface, chatId, enabled } = input;
     const organism = this.organisms[surface];
-    const resolved = this.scopeFor(surface, chatId);
-    if (!resolved.available) throw new AliveHostError(resolved.reasonCode ?? "alive-unavailable");
-    const nowMs = this.deps.now();
     if (!enabled) {
-      if (!resolved.agentId) return this.getState(surface, chatId);
-      const agent = organism.store.get(resolved.agentId);
-      const attachment = agent ? organism.store.attachments(agent.agentId).find((row) => row.status === "attached") : undefined;
-      if (agent && (surface === "one" || attachment?.scope.chatId === chatId)) {
-        this.suspendLife(organism, agent.agentId, "owner.disabled");
+      // Stop follows durable ownership, not wake admission. The controller,
+      // chat or current Goal binding may have disappeared since enable, but
+      // none of those failures can revoke the owner's ability to stop a life.
+      for (const agent of organism.store.list()) {
+        if (!organism.store.attachments(agent.agentId).some((row) => row.status === "attached" && row.scope.chatId === chatId)) continue;
+        if (agent.status === "enabled") this.suspendLife(organism, agent.agentId, "owner.disabled");
         for (const wake of organism.store.activeWakes().filter((row) => row.agentId === agent.agentId)) {
           try { organism.runtime.cancel(wake.wakeId); } catch { /* the next reconcile cancels by epoch */ }
         }
+        this.emitChanges(surface, agent.agentId);
       }
-      this.emitChanges(surface, resolved.agentId);
       return this.getState(surface, chatId);
     }
+    const resolved = this.scopeFor(surface, chatId);
+    if (!resolved.available) throw new AliveHostError(resolved.reasonCode ?? "alive-unavailable");
+    const nowMs = this.deps.now();
     if (this.planAccess !== "allowed") throw new AliveHostError(this.planAccess);
     if (resolved.needsGoal || !resolved.goalId || !resolved.agentId || !resolved.key || !resolved.scopeId) {
       throw new AliveHostError("alive-goal-required", "Start a goal in this chat first.");

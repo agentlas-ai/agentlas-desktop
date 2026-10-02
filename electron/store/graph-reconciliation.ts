@@ -25,7 +25,7 @@ import { emitDesktopStoreChange } from "./change-bus";
 import { computeNextRun, getAutomation } from "./automations";
 import { getDb } from "./db";
 import { recordRunEvent, tryRecordRunEvent } from "./run-events";
-import { synthesizeLegacyGraph } from "../automation-emitter";
+import { resolveAutomationGraph } from "../../shared/automation-graph-definition";
 
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
@@ -119,9 +119,7 @@ function validId(value: unknown): value is string {
  * matches this reconstruction exactly; a mismatch still fails as graph drift.
  */
 function executionGraphAutomation(automation: Automation): Automation {
-  return automation.graph && automation.graph.nodes.length > 0
-    ? automation
-    : { ...automation, graph: synthesizeLegacyGraph(automation) };
+  return { ...automation, graph: resolveAutomationGraph(automation) };
 }
 
 function strictGraph(automation: Automation): WorkflowGraph {
@@ -579,10 +577,9 @@ export function suspendAutomationForGraphReconciliation(automationId: string): b
   if (!validId(automationId)) return false;
   const result = getDb().prepare(
     `UPDATE automations
-     SET next_run_at = NULL
-     WHERE id = ? AND enabled = 1 AND COALESCE(trigger_type, 'schedule') = 'schedule'
-       AND next_run_at IS NOT NULL`,
-  ).run(automationId);
+     SET next_run_at = CASE WHEN next_run_at IS NULL OR next_run_at > ? THEN ? ELSE next_run_at END
+     WHERE id = ? AND enabled = 1 AND COALESCE(trigger_type, 'schedule') = 'schedule'`,
+  ).run(new Date(Date.now() + 60_000).toISOString(), new Date(Date.now() + 60_000).toISOString(), automationId);
   if (result.changes > 0) emitDesktopStoreChange({ entity: "automation", id: automationId });
   return result.changes > 0;
 }
@@ -684,7 +681,8 @@ export function forgetStaleGraphCheckpoint(
 }
 
 export function reconcileAutomationGraph(
-  input: AutomationGraphReconcileInput & { now?: Date },
+  // Host effect observation settles checkpoint facts without taking scheduling authority.
+  input: AutomationGraphReconcileInput & { now?: Date; background?: boolean },
 ): AutomationGraphReconcileResult {
   if (
     !validId(input.automationId) || !validId(input.runId) || !validId(input.occurrenceId) ||
@@ -695,6 +693,7 @@ export function reconcileAutomationGraph(
   }
   const db = getDb();
   const now = input.now ?? new Date();
+  const background = input.background === true;
   let result: AutomationGraphReconcileResult | null = null;
   const commit = db.transaction(() => {
     const loaded = loadReconciliation(input.automationId, {
@@ -767,6 +766,7 @@ export function reconcileAutomationGraph(
         nodeId: node.id,
         payload: {
           resolution: decision.resolution,
+          ...(background ? { background: true } : {}),
           previousCheckpointDigest: loaded.checkpoint.checkpointDigest,
           priorOutputDigest: priorOutputEvidence.digest,
           priorOutputBytes: priorOutputEvidence.bytes,
@@ -825,7 +825,7 @@ export function reconcileAutomationGraph(
     const terminalNodeIds = new Set([...checkpoint.completedNodeIds, ...checkpoint.skippedNodeIds]);
     const allNodesTerminal = loaded.graph.nodes.every((node) => terminalNodeIds.has(node.id));
     let eventStatus: AutomationGraphReconcileResult["eventStatus"] = null;
-    if (loaded.boundEvent) {
+    if (loaded.boundEvent && !background) {
       eventStatus = allNodesTerminal ? "delivered" : "pending";
       const eventUpdated = allNodesTerminal
         ? db.prepare(
@@ -863,6 +863,7 @@ export function reconcileAutomationGraph(
 
     let restoredNextRunAt: string | null = null;
     if (
+      !background &&
       (loaded.automation.triggerType ?? "schedule") === "schedule" &&
       loaded.automation.enabled
     ) {
@@ -895,6 +896,7 @@ export function reconcileAutomationGraph(
         triggerEventStatus: eventStatus,
         restoredNextRunAt,
         simulation: loaded.run.dry_run === 1,
+        ...(background ? { background: true, observedTriggerEventStatus: loaded.boundEvent?.status ?? null } : {}),
         // The old occurrence cannot resume under the revised graph; this close
         // lets the next run start fresh (run-graph hasRevisedGraphReconciliationClose).
         ...(loaded.revisedGraph ? { graphRevised: true } : {}),

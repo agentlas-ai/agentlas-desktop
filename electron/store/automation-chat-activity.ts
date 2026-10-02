@@ -1,22 +1,22 @@
-/*
- * Which automations belong to a conversation, which of them are running right now, and what each run did
- * — read from the durable automation rows and the host's tool ledger (run_events).
- *
- * Owner 2026-09-28 (Thread Marketing): the hourly Threads automation was replying on Threads from its
- * hidden session chat (⟦automation⟧…) while the conversation it reports to showed only a failed turn. The
- * conversation had no live view of the work, because nothing mapped the hidden session back to the chat.
- *
- * A conversation owns an automation when
- *   - the automation was registered from it (trigger_json.monitor.originChatId — where its reports land), or
- *   - the automation is bound to the conversation's goal (automations.goal_id = chats.goal_id).
- * A Work conversation also sees its project's automations (automations.project_id = chats.project_id).
- * A hidden session chat maps to its automation through automation_sessions (node sessions use
- * "<automationId>::a:<ref>" style ids; the part before "::" is the owner automation).
- *
- * "Running" is the scheduler's own answer (getAutomationLiveRunState): a fresh `running` automation_runs row.
- * Every transition already emits store:changed {entity:"automation"}; tool activity already streams on
- * automations:liveRun:<id>. Nothing here polls.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { digestAutomationRun, type AutomationLedgerToolEvent, type AutomationRunDigest, type AutomationRunRuntime } from "../../shared/automation-activity";
 import type { AutomationChatActivityAutomation, AutomationChatActivityRunPage, AutomationChatActivitySnapshot } from "../../shared/automation-activity-ipc";
 import { getDb } from "./db";

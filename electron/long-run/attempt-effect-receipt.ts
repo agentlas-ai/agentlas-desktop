@@ -1,22 +1,22 @@
-/**
- * The interrupted attempt's own receipt — the first evidence for "did it change anything outside?".
- *
- * Measured 2026-09-28 on the owner's store (1.2.46, read-only): the One goal "Youtube launch" stopped with
- * "이전 작업이 반영됐는지 3번 직접 확인했지만 판단할 수 없어 … (effect_observation_exhausted)" — twice (22:13Z, 22:54Z).
- * The one uncertain attempt (attempt_5be774d9, invocation 0b8772c1) was a turn the owner interrupted at 10:58Z.
- * Its closed ledger held 20 operations, every one with an observed result: tool search, `cat`/`pwd`/`printenv`/
- * `git status`/`command -v`, seven web searches, Playwright tab list + a Studio page load, and two computer-use
- * getters (`cua.getState()`, `cua.getTab(…)`). Nothing that can post, upload, click or write. Yet the attempt was
- * "uncertain" only because the run ended by interruption, and four model looks (~1.3M input tokens) were asked
- * whether the whole goal ("get the silver button") had "taken effect" — a question no look can answer, so each
- * correctly said unknown and the host handed the check back to the owner.
- *
- * The host reads its own ledger first: when the invocation's effect boundary is closed (terminal recorded, receipt
- * after it, coverage and ledger complete, every operation's result observed, counts matching) and every recorded
- * call is provably observation-only by name and arguments (no-effect-failure.ts — never result prose), nothing
- * outside can have changed. That is a settled "not_done" by receipt; no look and no person. Anything unproven stays
- * a candidate and is exactly what the read-only look is asked about.
- */
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 import { getDb } from "../store/db";
 import { isEffectStatusOnlyTool } from "../invocation/effect-boundary";
 import { callLeftNoOutsideEffect } from "../invocation/no-effect-failure";
@@ -35,12 +35,12 @@ export interface AttemptEffectReceipt {
   readOnlyCalls: number;
   /** Recorded calls whose name/arguments do not prove observation-only: the only things a look must judge. */
   candidates: AttemptEffectCandidate[];
-  /**
-   * App registrations the host itself performed and recorded as completed (automation.create/update/pause/resume
-   * with a non-error result). Their effect is known — it is this app's own state — so a read-only look is never
-   * asked about them. Soak 1.2.50 (X Marketing 11:48Z): two such calls were "in question", the look could not
-   * read the app state folder, answered unknown, and the goal waited for another look.
-   */
+
+
+
+
+
+
   hostConfirmed: AttemptEffectCandidate[];
 }
 

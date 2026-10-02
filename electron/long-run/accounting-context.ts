@@ -178,7 +178,8 @@ export function beginAccountedInference(input: { kind: string; model?: string | 
       throw new Error("accounting_goal_terminal");
     }
     const refusal = longRunMonetaryRefusal(goal);
-    if (refusal) throw new Error(refusal);
+    if (refusal) appendLongRunEvent({ runId: goal.id, kind: "run.budget_advisory", actorKind: "host",
+      payload: { reason: refusal, continued: true, stage: "inference-accounting" } });
   }
   const sourceId = `${scope.automationId ? "automation" : "judgment"}:${scope.invocationRunId}:${randomUUID()}`;
   const usageIdentity = { sourceId, invocationRunId: scope.invocationRunId, scopeAnchorId: scope.anchorId,
@@ -195,11 +196,13 @@ export function beginAccountedInference(input: { kind: string; model?: string | 
       sourceEventId: `${sourceId}:started`, payload: { sourceId, invocationRunId: scope.invocationRunId, attemptId: owner.attemptId } });
   }).immediate();
   let settled = false;
-  return { sourceId, complete: (observedUsage, outcome) => {
-    // Timeout/Stop is a final observation. A late provider cannot replace it.
-    if (settled) return;
-    settled = true;
-    const tokens = normalizeLongRunUsage({ ...usageIdentity, observedUsage }).tokens;
+  let terminal: { tokens: ReturnType<typeof normalizeLongRunUsage>["tokens"];
+    outcome: Parameters<AccountedInferenceAttempt["complete"]>[1] } | null = null;
+  let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let retryCount = 0;
+  const persist = (): void => {
+    if (settled || !terminal) return;
+    const { tokens, outcome } = terminal;
     db.transaction(() => {
       if (owner) recordLongRunUsage(owner.goalId, { ...usageIdentity, observedUsage: tokens });
       recordRunEvent({ runId: scope.invocationRunId, chatId: scope.chatId, automationId: scope.automationId,
@@ -209,5 +212,32 @@ export function beginAccountedInference(input: { kind: string; model?: string | 
           goalId: owner?.goalId ?? null, attemptId: owner?.attemptId ?? null, outcome,
           tokens, cost: { status: "unknown", usd: null, reasonCode: "provider_cost_unavailable" } } });
     }).immediate();
+    settled = true;
+    if (retryTimer) clearTimeout(retryTimer);
+    retryTimer = null;
+  };
+  const retryStorageWrite = (error: unknown): boolean => {
+    const code = error && typeof error === "object" && "code" in error ? error.code : null;
+    if (typeof code !== "string" || !/^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code)) return false;
+    if (!retryTimer) {
+      const delay = [250, 1_000, 5_000, 30_000][Math.min(retryCount++, 3)];
+      retryTimer = setTimeout(() => {
+        retryTimer = null;
+        try { persist(); } catch (retryError) {
+          // Shutdown may have closed the DB. Its durable started row remains
+          // unknown; never invent usage or dispatch another provider call.
+          if (!retryStorageWrite(retryError) && db.open) console.warn("[inference-accounting] usage receipt persistence unavailable");
+        }
+      }, delay);
+      retryTimer.unref?.();
+    }
+    return true;
+  };
+  return { sourceId, complete: (observedUsage, outcome) => {
+    // Preserve the first terminal observation even if its write rolls back.
+    // A caller's catch/finally or a late provider cannot replace Timeout/Stop.
+    if (settled) return;
+    terminal ??= { tokens: normalizeLongRunUsage({ ...usageIdentity, observedUsage }).tokens, outcome };
+    try { persist(); } catch (error) { if (!retryStorageWrite(error)) throw error; }
   } };
 }

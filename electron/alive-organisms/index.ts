@@ -116,7 +116,7 @@ const playgroundDeps: GoalPlaygroundDeps = {
   chat: (chatId) => {
     const chat = getChat(chatId);
     // The goal comes from the contract table when the chat binding was detached from a still-live goal, so a
-    // cleared chats.goal_id can never hide a goal from AGI (owner room "Youtube launch" 2026-09-28).
+
     return chat ? { id: chat.id, title: chat.title, goalId: effectiveGoalIdForChat(getDb(), chat.id, chat.goalId ?? null), projectId: chat.projectId ?? null,
       originSurface: chat.originSurface ?? null } : null;
   },

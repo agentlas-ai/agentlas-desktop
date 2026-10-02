@@ -73,10 +73,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.51
-      HEPHAESTUS_COMMIT: 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.51.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3
+      HEPHAESTUS_REF: v1.2.54
+      HEPHAESTUS_COMMIT: dfbb43695990791a9d147b80648d57d2739a7c48
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.54.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -284,13 +284,8 @@ jobs:
           EOF
           GIT_CONFIG_GLOBAL="$git_config" npm ci --no-audit
 
-      # Private/local release audits own UI fixtures and native updater mutation
-      # scenarios. Public CI builds the exact production sources and enforces
-      # the end-user no-reinstall boundary without publishing those fixtures.
-      # Suites do not run here any more (owner decision, 2026-07-26): CI builds,
-      # signs, and publishes. release:preflight stays because it is not a suite —
-      # it proves this tag's pinned Core, schema version, README, and CHANGELOG
-      # agree, which is what makes the artifact a valid release at all.
+      # Verify that the release tag, pinned Core, schema version, README, and
+      # CHANGELOG agree before building and signing the production sources.
       - name: Verify deterministic release contracts
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -355,10 +350,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.51
-      HEPHAESTUS_COMMIT: 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.51.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3
+      HEPHAESTUS_REF: v1.2.54
+      HEPHAESTUS_COMMIT: dfbb43695990791a9d147b80648d57d2739a7c48
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.54.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -682,10 +677,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.51
-      HEPHAESTUS_COMMIT: 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.51.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3
+      HEPHAESTUS_REF: v1.2.54
+      HEPHAESTUS_COMMIT: dfbb43695990791a9d147b80648d57d2739a7c48
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.54.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

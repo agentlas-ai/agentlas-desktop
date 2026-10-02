@@ -53,10 +53,10 @@ jobs:
     env:
       # Public verification keys only; absence blocks packaging before release.
       AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON: ${{ vars.AGENTLAS_PRODUCT_EXTENSION_TRUSTED_KEYS_JSON }}
-      HEPHAESTUS_REF: v1.2.51
-      HEPHAESTUS_COMMIT: 4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.51.tar.gz
-      HEPHAESTUS_ASSET_SHA256: 0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3
+      HEPHAESTUS_REF: v1.2.54
+      HEPHAESTUS_COMMIT: dfbb43695990791a9d147b80648d57d2739a7c48
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.54.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -71,13 +71,8 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
-      # keytar links against libsecret on Linux.
-      # ★이 한 줄이 릴리스를 두 번 통째로 죽였다(실측 2026-08-19/20). Linux 잡이 45분
-      #   타임아웃에 걸려 취소되고, 그 취소가 "All OS release gate barrier" 를 실패시켜
-      #   서명 빌드가 아예 시작되지 않았다. 7월까지 이 잡은 10분이었으니 느려진 것이
-      #   아니라 **멈춘 것**이다(apt 가 프롬프트나 죽은 미러를 기다린다).
-      #   그래서 셋을 건다: 대화형 금지, 받기 재시도·상한, 그리고 이 단계 자체의 상한 —
-      #   막히면 45분을 먹지 않고 여기서 이유를 말하며 끝난다.
+      # keytar links against libsecret on Linux. Bound package installation
+      # retries and wait time so an unavailable mirror fails this stage.
       - name: Install Linux build deps
         if: runner.os == 'Linux'
         timeout-minutes: 10

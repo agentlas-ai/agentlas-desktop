@@ -27,7 +27,7 @@ export function goalActiveChatIds(): string[] {
        AND (lr.status IN (${GOAL_SPINNING_STATUSES.map(() => "?").join(",")})
          OR (lr.status = 'paused' AND lr.pause_reason IN (${hostPauses.map(() => "?").join(",")})))`,
   ).all(...GOAL_SPINNING_STATUSES, ...hostPauses) as Array<{ id: string }>;
-  // 오너 2026-09-28 (Thread Marketing): 이 대화의 자동화가 숨은 세션에서 지금 도는 중이면 이 대화도 돈다.
+
   // 바뀌는 순간은 store:changed {entity:"automation"} 가 알린다(실행 시작·리스 해제·종료 기록).
   let automationChats: string[] = [];
   try { automationChats = automationLiveChatIds(); } catch { automationChats = []; }

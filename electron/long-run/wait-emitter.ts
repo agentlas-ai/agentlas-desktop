@@ -48,13 +48,13 @@ export function parseGoalWaitIntent(text: string): { text: string; request: Pars
   } catch { return invalid("goal_wait_request_malformed"); }
 }
 
-/**
- * Timer waits are admitted only for ongoing Goals (wait-subscriptions: goal_wait_ongoing_authority_required).
- * Measured 2026-09-27 (owner's "X Marketing" One goal, lifecycle finite): the protocol advertised the timer
- * subject to every Goal, the model twice requested a one-week follow-up timer, the host refused it twice
- * ("The wait was not registered…") and the automatic-goal cap stopped the goal. A finite Goal is told the
- * truth instead: no timer; finish the turn and name the later check in the reply.
- */
+
+
+
+
+
+
+
 export function goalWaitProtocol(lifecycle?: "finite" | "ongoing" | null): string {
   return `When this Goal must wait for an already observed Desktop invocation or an existing artifact input to change, request a durable wait and end this turn. Do not repeatedly call a model to poll unchanged state. Waits are checked only while the app is running. Do not promise a wait was accepted; the host returns a durable registration receipt. Do not declare the Goal complete in the same response. Only use actual IDs already observed; never invent a subject. CI, arbitrary URLs and other external jobs currently need their own supported monitor and cannot be represented as an invocation ID.
 Emit at most one block:

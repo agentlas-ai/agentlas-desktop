@@ -174,9 +174,9 @@ export class AgiModelAttempt {
    */
   async run(input: AgiUnblockInput, preActions: Array<{ action: string; result: string }> = []): Promise<AgiUnblockResult & { attemptId: string }> {
     const d = this.deps;
-    const attemptId = `agi-model:${input.incidentId.slice(-24)}:${input.stateDigest.slice(-16)}`;
     const incident = d.executor.incidents.get(input.incidentId);
     const attemptNo = Math.max(1, incident?.attempts ?? 1);
+    const attemptId = `agi-model:${input.incidentId.slice(-24)}:${input.stateDigest.slice(-16)}:${attemptNo}`;
     const existing = d.db.prepare("SELECT status, code FROM agi_model_attempts WHERE id = ?").get(attemptId) as { status: string; code: string | null } | undefined;
     if (existing) return { attemptId, outcome: "failed", code: "agi.model.attempt-already-ran" };
     d.db.prepare("INSERT INTO agi_model_attempts(id,goal_id,incident_id,state_digest,status,created_at_ms) VALUES (?,?,?,?,'running',?)")

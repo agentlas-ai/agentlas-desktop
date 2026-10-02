@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.54 — 2026-10-03
+
+- Keep authorized Goal work and independent graph branches moving while result verification runs in the background. Preserve uncertain external-action records, observation retry limits, and explicit Stop and Cancel.
+- Let One inspect, revise, and run versioned automation graphs through typed MCP commands with validated inputs and request identities. Predefined tool steps run directly; reasoning steps use a model.
+- Settle active automation and underlying provider work before an update installs, and defer installation when that work cannot settle in time.
+- Preserve completion receipts across transient database contention and keep database backup retention bounded with recovery protection.
+- Bind Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.53 — 2026-10-02
 
 - Improve Agentlas Browser recovery, isolated browser connections, vault autofill, and file uploads. Keep Chrome sign-in imports available, including Google and YouTube.

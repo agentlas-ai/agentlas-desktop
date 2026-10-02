@@ -490,6 +490,7 @@ export async function initAutoUpdater(options: AutoUpdaterInitOptions = {}): Pro
       });
       return pythonRepaired || npmRepaired;
     },
+    prepareAutomationInstall: () => quiesceAutomationSchedulerForUpdate(),
     quiesceWriters: async () => {
       // Set both gates immediately, then wait for their current writes to
       // settle before continuity copies/hash counts are captured.

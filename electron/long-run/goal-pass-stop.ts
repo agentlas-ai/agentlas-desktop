@@ -117,12 +117,6 @@ export function parkGoalAfterPassStop(input: {
     payload: persistenceDecisionPayload(decision, { surface: "goal", sourceRunId: input.invocationRunId, ownerLayer: "goal_ledger" }),
   });
   const move = decision.move;
-  if (move.kind === "cancel_with_reason") {
-    // 예산 소진은 기존 스윕의 취소 규칙이 기록과 함께 닫는다(여기서 새 취소 경로를 만들지 않는다).
-    const blocked = transitionLongRun({ runId: run.id, to: "blocked", actorKind: "host", reason: "budget_wallclock_exhausted" });
-    appendStop(blocked.id, input, decision, null);
-    return { status: "skipped", detail: move.reason, decision };
-  }
   const blockedReason = `goal_pass_${input.stop.reason}`;
   const nextAtMs = move.kind === "retry_backoff"
     ? Date.parse(move.at)
@@ -139,7 +133,7 @@ export function parkGoalAfterPassStop(input: {
   scheduleBlockedGoalRetry({
     runId: blocked.id,
     expectedVersion: blocked.version,
-    kind: move.kind === "observe" || cause.kind === "effect_uncertain" ? "observe" : "resume",
+    kind: "resume",
     fromReason: blockedReason,
     retryIndex: slot.retryIndex,
     nextAt,

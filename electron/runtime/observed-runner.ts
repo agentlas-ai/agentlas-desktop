@@ -1,6 +1,20 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
 import { beginInvocationUsageAttempt } from "./invocation-usage";
+
+
+type RunnerSettlementObserver = (provider: PromiseLike<unknown>) => void;
+const settlementObservers = new AsyncLocalStorage<RunnerSettlementObserver>();
+/** Main callers can keep actual provider work visible after a UI cancellation
+ * boundary detaches. This scope changes neither runner results nor cancellation. */
+export function withRunnerSettlementObserver<T>(observer: RunnerSettlementObserver, action: () => T): T {
+  return settlementObservers.run(observer, action);
+}
+function observeRunnerSettlement<T>(provider: Promise<T>): Promise<T> {
+  settlementObservers.getStore()?.(provider);
+  return provider;
+}
 
 const usageOnError = new WeakMap<object, ReturnType<typeof createRuntimeUsageCollector>>();
 const nativeReceipts = new WeakMap<object, Map<string, ReturnType<typeof createRuntimeUsageCollector>>>();
@@ -27,7 +41,7 @@ export async function runObservedRunner(
   const receipts = new Map<string, ReturnType<typeof createRuntimeUsageCollector>>();
   const invocationAttempt = beginInvocationUsageAttempt();
   try {
-    const result = await runner(request, {
+    const result = await observeRunnerSettlement(runner(request, {
       ...events,
       onRuntimeAttemptStarted: (id) => {
         usage.start(id);
@@ -43,7 +57,7 @@ export async function runObservedRunner(
         if (id !== undefined) receipts.get(id)?.recordTerminal(receipt, id);
         events.onTerminalObservedUsage?.(receipt, id);
       },
-    });
+    }));
     const { observedUsage: returnedUsage, ...rest } = result;
     const observedUsage = usage.total(returnedUsage);
     invocationAttempt.complete(observedUsage);

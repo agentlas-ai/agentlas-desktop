@@ -296,15 +296,15 @@ function pendingQuestionMessage(chatId: string, sourceMessageId?: string): { id:
   return source;
 }
 
-/**
- * 지금 떠 있어야 할 질문 — 마지막 행이 아니라 "사용자 메시지가 나오기 전까지 거슬러 올라가 만난 질문".
- *
- * ★확정·미루기·모바일 접수·후속 실행은 이미 이 규칙(pendingQuestionMessage)을 쓰는데, 목록만
- *   "마지막 행이 질문"을 요구했다 (격리 앱 실측 2026-09-27): 질문 뒤에 앱이 "아직 답을 기다린다"
- *   말풍선을 붙이면 One 카드가 통째로 사라져 답할 길이 없었다. 목록도 같은 규칙으로 본다.
- *   후보 8행은 사용자 메시지와 실제 질문 fence가 있는 assistant 메시지만 센다.
- *   One의 설명 보완을 여러 번 주고받아도 일반 설명/시스템 말풍선이 대기 질문을 밀어내지 않는다.
- */
+
+
+
+
+
+
+
+
+
 function latestOpenQuestionMessage(chatId: string): { id: string; role: string; text: string; createdAt: string } | null {
   const rows = getDb()
     .prepare(`SELECT id, role, text, created_at FROM chat_messages
@@ -448,12 +448,12 @@ export function getCommittedQuestionContinuation(
 
 /** A not-yet-started intent may run only while its exact Decision is still current. */
 export function committedQuestionContinuationIsCurrent(chatId: string, sourceMessageId: string): boolean {
-  /*
-   * ★"마지막 메시지여야 한다" 규칙이 여기 하나 더 남아 있었다 (격리 앱 실측 2026-09-27, Work).
-   *   질문 뒤에 앱이 "아직 답을 기다린다" 같은 말풍선을 붙이면, 확정(commit)은 받아 주고
-   *   후속 실행은 invalid-intent 로 거절했다 — 답은 저장됐는데 에이전트는 영영 못 받았다.
-   *   확정·미루기·모바일 접수와 같은 규칙을 쓴다: 그 뒤에 사용자 메시지가 없는 질문이면 현재다.
-   */
+
+
+
+
+
+
   return Boolean(sourceMessageId && pendingQuestionMessage(chatId, sourceMessageId)?.id === sourceMessageId);
 }
 

@@ -3,7 +3,7 @@ import { canResumeInvocationBrowserLoginWait, claimInvocationBrowserLoginWait, r
 import { bindWorkAttachmentRun, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
 import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
-import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
+import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, runMainBackgroundTask, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
 import { goalVerificationReasonCode, TRANSIENT_GOAL_VERIFICATION_REASON_CODES } from "../long-run/verification-effects";
 import { withAdapterEffectContext } from "./adapter-effect-context";
@@ -54,7 +54,8 @@ import {
   resumeLongRunByUser,
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
-  transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount } from "../store/long-runs";
+  transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount,
+  longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
@@ -123,7 +124,7 @@ import {
 } from "../store/invocation-admissions";
 import { listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
-import { captureNativeGoalStopOwner, currentAutomationGoalExecutionOwnerMatches, nativeGoalStopOwnerMatches, snapshotAutomationGoalRunStops,
+import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAutomationGoalExecutionOwnerMatches, nativeGoalStopOwnerMatches, snapshotAutomationGoalRunStops,
   stopKnownAutomationGoalRuns, type NativeGoalStopOwner } from "../automation-execution-control";
 import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
 import {
@@ -286,6 +287,7 @@ export interface InvocationSettledEnvelope {
 
 interface RunRecord {
   mainLifetime?: MainInvocationLifetime;
+  background?: boolean;
   completion?: Promise<void>;
   controller: AbortController;
   chatId: string;
@@ -947,7 +949,7 @@ export class InvocationService {
   }
 
   activeChatIds(): string[] {
-    return [...new Set([...this.activeRuns.activeChatIds(), ...[...this.settlingRuns.values(), ...this.pendingGoalVerifications.values()].map((record) => record.chatId)])];
+    return [...new Set([...this.activeRuns.activeChatIds(), ...[...this.settlingRuns.values(), ].filter((record) => !record.background).map((record) => record.chatId)])];
   }
 
   /** 오너가 보낸 요청이 이 대화에서 차례를 기다린다 — 자동 재개는 그 뒤로 미룬다. */
@@ -1117,8 +1119,10 @@ export class InvocationService {
     workspaceSource: string | null;
     request: Pick<McpInvocationRequest, "taskIntent" | "permissions" | "onePermissionMode" | "runtimeSelection" | "locale" | "oneMode">;
   }> {
-    const records = new Map([...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()]);
-    return [...records].map(([runId, record]) => ({
+    // A completed producer retained only by its background judge is no longer
+    // foreground work. Actual transport drainage still belongs to settlingRuns.
+    const records = new Map([...this.settlingRuns, ...this.activeRuns.entries()]);
+    return [...records].filter(([, record]) => !record.background).map(([runId, record]) => ({
       runId,
       chatId: record.chatId,
       oneMode: record.oneMode,
@@ -1271,8 +1275,8 @@ export class InvocationService {
     }
     assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
     if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
-    if ([...this.settlingRuns.values()].some((record) => record.chatId === req.chatId)) throw new Error("invocation_cleanup_pending");
-    if ([...this.pendingGoalVerifications.values()].some((record) => record.chatId === req.chatId)) throw new Error("goal_verification_pending");
+    const backgroundObservation = Boolean(effectObservationTicket(req.runId));
+    if (!backgroundObservation && [...this.settlingRuns.values()].some((record) => !record.background && record.chatId === req.chatId)) throw new Error("invocation_cleanup_pending");
     const incoming = req as OneInvocationRequest;
     const {
       oneProfileContext: _untrustedOneProfileContext,
@@ -1292,21 +1296,21 @@ export class InvocationService {
     } = incoming;
     const storedChat = getChat(req.chatId);
     if (!storedChat) throw new Error("Chat not found");
-    const chat = repairRootChatSurfaceController(storedChat);
+    const chat = backgroundObservation ? { ...storedChat } : repairRootChatSurfaceController(storedChat);
     let boundGoal = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
-    if (chat.goalId && boundGoal && LONG_RUN_TERMINAL_STATUSES.has(boundGoal.status)) {
+    if (!backgroundObservation && chat.goalId && boundGoal && LONG_RUN_TERMINAL_STATUSES.has(boundGoal.status)) {
       completeChatGoalContract(chat.goalId, boundGoal.status === "completed" ? "completed" : "cancelled");
       setChatGoalBinding(chat.id, null);
       chat.goalId = null;
       boundGoal = null;
-    } else if (chat.goalId?.startsWith("goal:auto-message:") && !boundGoal) {
+    } else if (!backgroundObservation && chat.goalId?.startsWith("goal:auto-message:") && !boundGoal) {
       completeChatGoalContract(chat.goalId, "cancelled");
       setChatGoalBinding(chat.id, null);
       chat.goalId = null;
     }
-    if (!chat.goalId) {
+    if (!backgroundObservation && !chat.goalId) {
       // A `blocked` contract is a live goal too (it asked the owner a question, or a hard stop parked it): the
-      // owner's reply in this chat must reach it. Looking only at `active` left owner room "Youtube launch"
+
       // (2026-09-28) unbound through two owner messages while its goal waited for exactly that answer.
       const orphan = getDb().prepare(
         "SELECT goal_id FROM chat_goal_contracts WHERE chat_id = ? AND status IN ('active','blocked') ORDER BY updated_at DESC LIMIT 1",
@@ -1327,13 +1331,8 @@ export class InvocationService {
       && !workspaceBinding
       && !executionContext
       && req.agentAppMode !== true;
-    // A new message is not an attestation of prior external effects. Reject
-    // before this service claims attachments or dispatches the Goal runtime;
-    // renderer-side preflight can have occurred before this admission call.
-    if (boundGoal && ["paused", "blocked"].includes(boundGoal.status)
-      && localUserTurn && unsettledLongRunAttemptCount(boundGoal.id)) {
-      throw new Error("auto_goal_resume_attempt_unsettled");
-    }
+    // Historical uncertain effects are background reconciliation work;
+    // their unchanged records never refuse the owner's next message.
     // Sending a new local message is an explicit resume plus steering command.
     // Host retries and remote jobs cannot turn a paused Goal back on. A stop
     // still draining is not a paused Goal and must finish before a new start.
@@ -1652,8 +1651,8 @@ export class InvocationService {
     const judgedTaskIntent = requestedOneMode
       && invocationRequest.taskIntent === "conversation"
       && classifyOneRequestIntent(invocationRequest.userPrompt,
-        (prompt) => judgedOneRequestIntent(prompt, invocationRequest.runtimeSelection)) === "task";
-    const effectiveTaskIntent: McpInvocationRequest["taskIntent"] = resumesPausedGoal || requestedOneAttachmentRef
+        (prompt) => judgedOneRequestIntent(prompt, invocationRequest.runtimeSelection, Boolean(boundGoal))) === "task";
+    const effectiveTaskIntent: McpInvocationRequest["taskIntent"] = resumesPausedGoal || requestedOneAttachmentRef || (boundGoal && localUserTurn)
       ? "task"
       : judgedTaskIntent
         ? "task"
@@ -1747,7 +1746,7 @@ export class InvocationService {
     };
     if (effectObservation && runReq.permissions !== "read") throw new Error("effect_observation_must_be_read_only");
     // The owner's reply to the Goal's own question is the resume, however short it is ("승인"): soak 1.2.50,
-    // Youtube launch — the answer was classified a conversation turn, the Goal stayed blocked
+
     // goal_owner_answer_required from 2026-09-28 11:51Z until a manual resume the next day.
     const reopen = boundGoal ? stoppedGoalMessageReopens(boundGoal, runReq.taskIntent) : { reopens: false, ownerAnswer: false };
     const ownerAnswersGoalQuestion = reopen.ownerAnswer;
@@ -1755,24 +1754,17 @@ export class InvocationService {
       && localUserTurn && reopen.reopens) {
       // A new task message must not silently reactivate a claimed wait whose
       // successor may already have reached an external runtime before crash.
-      const recoveryBlocker = goalResumeRecoveryBlockerCode(boundGoal.blockedReason);
-      if (recoveryBlocker) throw new Error(recoveryBlocker);
       if (boundGoal.surface === "science" || boundGoal.rootChatId !== chat.id) {
         throw new Error("goal_control_scope_mismatch");
       }
       // Admission is read-only. The durable-message hook records the user's
       // resume authority atomically with the state transition, not before it.
-      if (unsettledLongRunAttemptCount(boundGoal.id)) throw new Error("auto_goal_resume_attempt_unsettled");
-      const budgetExhausted = (boundGoal.budget.maxCycles != null && boundGoal.cycleCount >= boundGoal.budget.maxCycles)
-        || Boolean(longRunMonetaryRefusal(boundGoal))
-        || (boundGoal.budget.wallclockDeadline != null
-          && Date.parse(boundGoal.budget.wallclockDeadline) <= Date.now());
-      if (budgetExhausted) throw new Error(longRunMonetaryRefusal(boundGoal) ?? "auto_goal_budget_exhausted");
       stoppedGoalReactivation = { runId: boundGoal.id, version: boundGoal.version, status: boundGoal.status,
         ...(ownerAnswersGoalQuestion ? { ownerAnswer: true } : {}) };
     }
     const record: RunRecord = {
       controller,
+      background: backgroundObservation,
       chatId: req.chatId,
       request: runReq,
       startedAt,
@@ -1805,7 +1797,8 @@ export class InvocationService {
     let mainSpeakerAgentId: string | null = null;
     const persistRecoverableAssistantPartial = (): void => {
       if (
-        recoverablePartialPersisted
+        record.background
+        || recoverablePartialPersisted
         || runReq.agentAppMode
         || remoteWorkspaceBinding
         || !record.partialText.trim()
@@ -1826,7 +1819,7 @@ export class InvocationService {
     let emptyFailureNoticePersisted = false;
     const persistEmptyFailureNotice = (terminalKind: string): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
-      if (emptyFailureNoticePersisted || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
+      if (record.background || emptyFailureNoticePersisted || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
         || runReq.promptOrigin === "system" || terminalKind === "invoke_cancelled"
         || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason)) return;
       try {
@@ -1905,6 +1898,7 @@ export class InvocationService {
           chatId: runReq.chatId,
           agentId: chat.agentId,
           payload: {
+            background: record.background === true,
             oneMode: runReq.oneMode,
             latestUserMessageRowId: (getDb().prepare("SELECT MAX(rowid) AS cursor FROM chat_messages WHERE chat_id=? AND role='user'")
               .get(runReq.chatId) as { cursor: number | null }).cursor ?? undefined,
@@ -2124,12 +2118,14 @@ export class InvocationService {
       : remoteWorkspaceBinding
         ? "mobile" as const
         : "work" as const;
+    const projectTaskStatus = (...args: Parameters<typeof trySetTaskStatus>): CanonicalTask | null =>
+      record.background ? null : trySetTaskStatus(...args);
     let canonicalTask: CanonicalTask | null;
     if (runReq.taskIntent !== "conversation") {
-      canonicalTask = trySetTaskStatus(req.chatId, "running", true, invocationOrigin);
+      canonicalTask = projectTaskStatus(req.chatId, "running", true, invocationOrigin);
     } else {
       // A previously promoted conversation stays a Task on later turns.
-      canonicalTask = trySetTaskStatus(req.chatId, "running", false, invocationOrigin);
+      canonicalTask = projectTaskStatus(req.chatId, "running", false, invocationOrigin);
     }
     let taskMaterialized = Boolean(canonicalTask);
     let taskRunStartedRecorded = false;
@@ -2257,7 +2253,7 @@ export class InvocationService {
     }
     let goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
     // An ongoing Goal's episode needs an open task, or no controller attempt is bound and its cycle wait is refused
-    // (goal_wait_attempt_missing; measured 2026-09-27, Thread Marketing — see ongoing-episode-task.ts).
+
     if (!goalLongRunTask && goalLongRun && !executionContext && goalLongRun.rootChatId === chat.id) {
       try { goalLongRunTask = ensureOngoingEpisodeTask({ longRunId: goalLongRun.id, invocationRunId: runId }); }
       catch (error) { console.warn("[long-run] ongoing episode task unavailable:", error); }
@@ -2287,8 +2283,6 @@ export class InvocationService {
       record.automaticGoalId = goalLongRun.goalId;
       if (goalLongRun.rootChatId === chat.id) record.goalStopOwner = captureNativeGoalStopOwner({ goalId: goalLongRun.goalId,
         rootChatId: chat.id, longRunId: goalLongRun.id });
-      const remaining = Date.parse(goalLongRun.budget.wallclockDeadline ?? "") - Date.now();
-      if (Number.isFinite(remaining)) record.automaticGoalDeadline = setTimeout(() => this.cancelWithReason(runId, new Error("automatic_goal_time_budget")), Math.max(1, remaining));
     }
     let goalControllerAttemptId: string | null = null;
     let goalControllerAttemptSettled = false;
@@ -2408,7 +2402,7 @@ export class InvocationService {
       && !runWorkspaceBinding
       && Boolean(runReq.chatId)
       && (runReq.permissions ?? "read") !== "full";
-    if (chat.originSurface === "work" && !requestedOneMode && !runReq.agentAppMode && !runWorkspaceBinding) {
+    if (!record.background && chat.originSurface === "work" && !requestedOneMode && !runReq.agentAppMode && !runWorkspaceBinding) {
       const pinnedRevision = goalLongRun ? getChatGoalRevision(goalLongRun.goalId) : null;
       bindWorkAttachmentRun({ runId, chatId: chat.id, signal: controller.signal, readGroups: () => {
         const groups = workAttachmentGroupIds(runReq.userPrompt);
@@ -2472,6 +2466,19 @@ export class InvocationService {
           runReq.agentAppMode && boundedEvent.kind === "error"
             ? { ...boundedEvent, error: untrustedRuntimeFailurePayload() }
             : boundedEvent;
+        if (record.background) {
+          if (!event.agentId && event.kind === "final" && typeof event.text === "string") {
+            effectObservationParsed = readEffectObservationFromFinal(runId, event.text);
+          }
+          const terminal = this.recordBackgroundRunEvent(runId, record, event, hostControl);
+          try { effectBoundary.recorded(event, hostControl); }
+          catch { effectBoundary.recordingFailed(); }
+          if (terminal) {
+            terminalObserved = true;
+            effectObservationFailed ||= event.kind === "error";
+          }
+          return;
+        }
         if (
           event.runtimeSelection
           && !event.agentId
@@ -2501,7 +2508,8 @@ export class InvocationService {
         if (effectObservation && !event.agentId && (event.kind === "final" || event.kind === "partial")
           && typeof event.text === "string") {
           if (event.kind === "final") effectObservationParsed = readEffectObservationFromFinal(runId, event.text);
-          event = { ...event, text: stripEffectObservationMarker(event.text) };
+          event = { ...event, text: event.kind === "partial" && event.text.trim().startsWith("{")
+            ? "" : stripEffectObservationMarker(event.text) };
         }
         if (
           permissionEscalationEligible
@@ -2615,7 +2623,7 @@ export class InvocationService {
               tier: event.tier,
             },
           });
-          canonicalTask = trySetTaskStatus(runReq.chatId, "running", true, invocationOrigin);
+          canonicalTask = projectTaskStatus(runReq.chatId, "running", true, invocationOrigin);
           taskMaterialized = Boolean(canonicalTask);
           if (canonicalTask && !taskRunStartedRecorded) {
             recordTaskRunStarted(canonicalTask, runId, requestedOneMode ? "one" : "system");
@@ -2638,7 +2646,7 @@ export class InvocationService {
           // before either surface is published, so a crash cannot expose a
           // Decision whose Task still says partial/running (or vice versa).
           const sealDecision = getDb().transaction(() => {
-            canonicalTask = trySetTaskStatus(
+            canonicalTask = projectTaskStatus(
               runReq.chatId,
               "waiting-decision",
               true,
@@ -2991,7 +2999,7 @@ export class InvocationService {
           const terminalKind = terminalDisposition!.terminalKind;
           if (event.kind === "error" && !event.agentId) persistEmptyFailureNotice(terminalKind);
           settleGoalControllerAttempt(terminalKind === "invoke_completed");
-          canonicalTask = trySetTaskStatus(
+          canonicalTask = projectTaskStatus(
             runReq.chatId,
             terminalTaskStatus({
               kind: event.kind,
@@ -3219,8 +3227,6 @@ export class InvocationService {
                 || current.status !== stoppedGoalReactivation!.status || current.version !== stoppedGoalReactivation!.version
                 || getChat(chat.id)?.goalId !== current.goalId || current.rootChatId !== chat.id
                 || source?.chat_id !== chat.id || source.role !== "user" || source.text !== runReq.userPrompt) return null;
-              const recoveryBlocker = goalResumeRecoveryBlockerCode(current.blockedReason);
-              if (recoveryBlocker) throw new Error(recoveryBlocker);
               const revision = getChatGoalRevision(current.goalId);
               const revisionBinding = getLongRunGoalRevisionBinding(current.id);
               stall.reason = "revision";
@@ -3234,13 +3240,8 @@ export class InvocationService {
                 || JSON.stringify(runReq.runtimeSelection) !== JSON.stringify(legacyRuntime))) return null;
               if (legacyLifecycle?.verdict === "ongoing" && !lifetime.ownsActiveRoot()) return null;
               // Never replay an old attempt; the new message owns a new turn.
-              stall.reason = "attempt-live";
-              if (unsettledLongRunAttemptCount(current.id)) return null;
-              stall.reason = "budget";
-              const budgetExhausted = (current.budget.maxCycles != null && current.cycleCount >= current.budget.maxCycles)
-                || Boolean(longRunMonetaryRefusal(current))
-                || (current.budget.wallclockDeadline != null && Date.parse(current.budget.wallclockDeadline) <= Date.now());
-              if (budgetExhausted) return null;
+              // Live controller concurrency is owned by the chat registry.
+              // Old uncertain effects and Goal budgets do not gate this turn.
               appendLongRunEvent({ runId: current.id, kind: "run.user_control", actorKind: "user",
                 payload: { action: "resume_with_message", sourceMessageId, invocationRunId: runId,
                   previousStatus: current.status } });
@@ -3280,6 +3281,13 @@ export class InvocationService {
               supersedeGoalWaitForInvocation(current.goalId, runId);
               return getLongRun(running.id);
             })();
+            // The exact human source and Goal revision are durable now. Release
+            // Main's unreadable-stop marker only through its typed Resume path.
+            if (resumed) {
+              const resumedRevision = getChatGoalRevision(resumed.goalId);
+              if (resumedRevision) acknowledgeGoalExecutionResume({ goalId: resumed.goalId,
+                rootChatId: chat.id, expectedRevision: resumedRevision.revision });
+            }
           } catch (error) {
             if (error instanceof Error && error.message === "goal_wait_claimed_reconciliation_required") stall.reason = "claimed-wait";
             if (error instanceof Error && error.message === GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN) stall.reason = "effect-boundary-uncertain";
@@ -3335,34 +3343,38 @@ export class InvocationService {
             attachmentOnly: attachmentDescriptors.length > 0 && !promptWithoutValidChatFileMarkers });
           if (controller.signal.aborted) {
             if (prepared.kind === "admitted") {
+              // Admission may finish after an abort. Only the owner's explicit
+              // stop closes this Goal; an internal abort retains its binding.
+              projectionGoalId = prepared.run.goalId;
+              record.automaticGoalId = prepared.run.goalId;
               try {
-                let cancelledGoal = getLongRunByGoalId(prepared.run.goalId);
-                if (cancelledGoal && !["completed", "failed", "cancelled"].includes(cancelledGoal.status)) {
-                  if (cancelledGoal.status !== "cancelling") {
-                    cancelledGoal = transitionLongRun({
-                      runId: cancelledGoal.id,
-                      to: "cancelling",
-                      actorKind: "host",
-                      reason: "automatic_goal_cancelled_before_execution",
-                    });
+                setChatGoalBinding(chat.id, prepared.run.goalId);
+                const stopReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : "internal_abort";
+                let goal = getLongRunByGoalId(prepared.run.goalId);
+                if (goal && !LONG_RUN_TERMINAL_STATUSES.has(goal.status)) {
+                  if (stopReason === "goal_deleted_by_user") {
+                    if (goal.status !== "cancelling") goal = transitionLongRun({ runId: goal.id, to: "cancelling", actorKind: "user", reason: "user" });
+                    transitionLongRun({ runId: goal.id, to: "cancelled", actorKind: "host", reason: "user" });
+                    completeChatGoalContract(goal.goalId, "cancelled");
+                    if (getChat(chat.id)?.goalId === goal.goalId) setChatGoalBinding(chat.id, null);
+                  } else if (stopReason === STOPPED_BY_USER || isOwnerGoalStopCause(stopReason)) {
+                    appendLongRunEvent({ runId: goal.id, kind: "run.user_control", actorKind: "user",
+                      payload: { action: "pause", source: "turn-stop", chatId: chat.id, goalId: goal.goalId, invocationRunId: runId } });
+                    if (["draft", "queued", "blocked"].includes(goal.status)) transitionLongRun({ runId: goal.id, to: "paused", actorKind: "user", reason: "user" });
+                    else if (!["paused", "pausing", "cancelling"].includes(goal.status)) {
+                      goal = transitionLongRun({ runId: goal.id, to: "pausing", actorKind: "user", reason: "user" });
+                      transitionLongRun({ runId: goal.id, to: "paused", actorKind: "host", reason: "user" });
+                    }
+                  } else {
+                    appendLongRunEvent({ runId: goal.id, kind: "run.internal_abort_deferred", actorKind: "host",
+                      payload: { invocationRunId: runId, reason: stopReason } });
+                    this.scheduleGoalContinuation(goal.goalId, record, "automatic-goal-admission-interrupted");
                   }
-                  transitionLongRun({
-                    runId: cancelledGoal.id,
-                    to: "cancelled",
-                    actorKind: "host",
-                    reason: "automatic_goal_cancelled_before_execution",
-                  });
                 }
-                completeChatGoalContract(prepared.run.goalId, "cancelled");
-                if (getChat(chat.id)?.goalId === prepared.run.goalId) setChatGoalBinding(chat.id, null);
               } catch (cleanupError) {
-                tryRecordRunEvent({
-                  runId,
-                  chatId: chat.id,
-                  kind: "automatic_goal_cancel_before_execution_cleanup_failed",
-                  payload: { goalId: prepared.run.goalId },
-                });
-                console.warn("[long-run] automatic Goal pre-execution cancellation cleanup failed:", cleanupError);
+                tryRecordRunEvent({ runId, chatId: chat.id, kind: "automatic_goal_abort_recovery_pending",
+                  payload: { goalId: prepared.run.goalId } });
+                console.warn("[long-run] automatic Goal abort recovery pending:", cleanupError);
               }
             }
             return;
@@ -3401,11 +3413,6 @@ export class InvocationService {
            * 이 줄은 무제한 목표를 시작하자마자 취소해 버린다 — 상한을 푸는 변경에서 가장
            * 조용히 반대로 도는 자리다(오너 지시 2026-09-08 주기·시간 무제한).
            */
-          const deadline = admitted.budget.wallclockDeadline;
-          const remaining = deadline == null ? Number.NaN : Date.parse(deadline) - Date.now();
-          if (Number.isFinite(remaining)) {
-            record.automaticGoalDeadline = setTimeout(() => this.cancelWithReason(runId, new Error("automatic_goal_time_budget")), Math.max(1, remaining));
-          }
         } catch {
           tryRecordRunEvent({ runId, chatId: chat.id, kind: "automatic_goal_binding_failed", payload: { sourceMessageId } });
           const failedGoalId = record.automaticGoalId;
@@ -3443,7 +3450,7 @@ export class InvocationService {
       // User-owned One/Work turns (including automatic Goal continuation) are
       // foreground work even when their system coordinator is inventory-hidden.
       // Background divisions and external job contexts keep quiet native grants.
-      chat.kind === "user" && !executionContext && !runReq.agentAppMode ? "foreground" : "background",
+      !record.background && chat.kind === "user" && !executionContext && !runReq.agentAppMode ? "foreground" : "background",
     ))
       .then((result) => {
         // The runner promise has settled. Persist host effect completeness
@@ -3477,6 +3484,18 @@ export class InvocationService {
             observedCachedInputTokens: result.observedUsage?.cachedInputTokens,
           },
         });
+        if (record.background) {
+          // An observer cannot acquire the owner's login wait or Task UI.
+          if (result.browserLoginWait) {
+            result.browserLoginWait.cancel();
+            effectObservationFailed = true;
+          }
+          if (effectObservationParsed?.status !== "reported" && typeof result.finalText === "string") {
+            const parsed = readEffectObservationFromFinal(runId, result.finalText);
+            if (parsed && (parsed.status !== "absent" || !effectObservationParsed)) effectObservationParsed = parsed;
+          }
+          return;
+        }
         if (result.browserLoginWait && (controller.signal.aborted || record.steeringInterruptRequested)) {
           result.browserLoginWait.cancel();
           return;
@@ -3516,7 +3535,7 @@ export class InvocationService {
             try { effectsSettled = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id }).effects === "settled"; } catch { /* preserve uncertainty */ }
             durable.effectsSettled = effectsSettled;
             registerInvocationBrowserLoginWait(durable);
-            canonicalTask = trySetTaskStatus(chat.id, "waiting-decision", true, invocationOrigin);
+            canonicalTask = projectTaskStatus(chat.id, "waiting-decision", true, invocationOrigin);
             if (waitingGoalId) {
               const current = getLongRunByGoalId(waitingGoalId);
               if (current?.status === "running") transitionLongRun({ runId: current.id, to: "waiting_user", actorKind: "host", reason: "authentication_required" });
@@ -3606,7 +3625,7 @@ export class InvocationService {
             const requestedIntent = result.goalWaitRequest.status === "requested" ? result.goalWaitRequest.intent : null;
             if (current && finiteGoalTimerRefusalEndsTurn({ reason, lifecycle: revision?.lifecycle, status: current.status,
               intent: requestedIntent, aborted: controller.signal.aborted })) {
-              // Measured 2026-09-27 (X Marketing): blocking here made the sweep resume the Goal, the model asked for
+
               // the same timer, and the retry cap stopped a Goal whose deliverables were done. Say what happened and
               // let the turn end through verification like any finite turn.
               finiteTimerEndsTurn = true;
@@ -3626,7 +3645,10 @@ export class InvocationService {
               let fallbackRegistered = false;
               try {
                 const boundary = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
-                if (boundary.effects !== "settled") throw new Error("goal_wait_effects_uncertain");
+                if (boundary.effects !== "settled") {
+                appendLongRunEvent({ runId: current.id, kind: "run.effect_check_pending", actorKind: "host",
+                  payload: { invocationRunId: runId, reason: "goal_wait_effects_uncertain" } });
+              }
                 const wait = getDb().transaction(() => {
                   recordLongRunCycle({ goalId: current.goalId, sourceInvocationId: runId,
                     progressState: "unknown", outcome: "ongoing-episode-unverified" });
@@ -3658,19 +3680,22 @@ export class InvocationService {
               tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason, errorMessage: reason });
               // Say what was refused and what the owner can do — the old sentence ("Review the requested subject
               // and the execution state") named neither (2026-09-27).
-              const message = goalWaitRefusalMessage(reason, pickLocale(runReq), requestedIntent);
+              const message = pickLocale(runReq) === "ko"
+                ? "대기 조건을 확인하지 못했습니다. 확인은 백그라운드에서 처리하며 가능한 다음 작업을 계속합니다."
+                : "The wait condition is unconfirmed. Its check runs in the background while the next available work continues.";
               // Only the uncertain-effect refusal resolves itself (the app re-checks read-only, then continues);
               // every other refused wait asks the owner for a time or a Resume and stays prominent.
-              const selfResolving = goalWaitRefusalResolvesItself(reason);
+              const selfResolving = true;
               appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId,
                 status: selfResolving ? "wait-not-scheduled" : "needs-owner" } });
               this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
                 notice: { code: reason, level: selfResolving ? "info" : "warning", message } } });
             }
           }
-          // An invalid/unsafe wait is a blocker, never permission for the
-          // ordinary completion/retry path to keep calling the model.
-          if (!finiteTimerEndsTurn) return;
+          if (!finiteTimerEndsTurn) {
+            this.scheduleGoalContinuation(goalLongRun?.goalId, record, "goal_wait_registration_failed");
+            return;
+          }
         }
         let completionClaim = result.goalCompletionClaim ?? (record.automaticGoalId && !record.pendingQuestion && !controller.signal.aborted
           ? { claimed: true, goalId: record.automaticGoalId, evidence: "Automatic Goal: verify the durable terminal result against all criteria." }
@@ -3698,10 +3723,11 @@ export class InvocationService {
         if (!completionClaim?.claimed && turnEndGoalId && !controller.signal.aborted && !executionContext) {
           const turnGoalId = turnEndGoalId;
           const current = getLongRunByGoalId(turnGoalId);
-          if (current && current.surface !== "science" && current.status === "running" && !unsettledLongRunAttemptCount(current.id)) {
+          if (current && current.surface !== "science" && current.status === "running" && !longRunOwnerHold(current.id)) {
             if (record.pendingQuestion) {
               // The turn asked the owner; the question card is the way out and answering resumes the Goal.
-              transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "goal_owner_answer_required" });
+              appendLongRunEvent({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host", payload: { reason: "goal_owner_answer_required" } });
+              this.scheduleGoalContinuation(current.goalId, record, "goal_owner_answer_required");
             } else if (findAutomationByGoalId(turnGoalId)?.enabled) {
               // Its hidden continuation owns the next step: say so instead of looking like a live turn.
               transitionLongRun({ runId: current.id, to: "waiting_tool", actorKind: "host", reason: "goal_continuation_scheduled" });
@@ -3723,7 +3749,11 @@ export class InvocationService {
               verificationScope: "episode", verificationState: "not_requested" });
             try {
               const boundary = readInvocationEffectBoundary({ invocationRunId: runId, expectedChatId: chat.id });
-              if (boundary.effects !== "settled") throw new Error("goal_wait_effects_uncertain");
+              if (boundary.effects !== "settled") {
+                const current = getLongRunByGoalId(completionClaim.goalId!);
+                if (current) appendLongRunEvent({ runId: current.id, kind: "run.effect_check_pending", actorKind: "host",
+                  payload: { invocationRunId: runId, reason: "goal_wait_effects_uncertain" } });
+              }
               getDb().transaction(() => {
                 recordLongRunCycle({ goalId: completionClaim.goalId!, sourceInvocationId: runId,
                   progressState: "unknown", outcome: "ongoing-episode-unverified" });
@@ -3743,10 +3773,10 @@ export class InvocationService {
                 to: "blocked", actorKind: "host", reason: error instanceof Error && /^goal_wait_[a-z_]+$/.test(error.message)
                   ? error.message : "goal_wait_registration_failed" });
             }
-            return;
+            this.scheduleGoalContinuation(completionClaim.goalId, record, "ongoing-cycle-check-pending");
           }
           // A finite Goal the owner re-targeted during this turn is verified against the new revision, never the
-          // replaced one (2026-09-27, X Marketing 09:45Z "팔로워 1달안에 1000"). goal-owner-amendment.ts.
+
           if (!controller.signal.aborted && holdFiniteGoalForPendingAmendment(completionClaim.goalId)) {
             settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId, runId, verified: false });
             const message = pickLocale(runReq) === "ko"
@@ -3755,15 +3785,20 @@ export class InvocationService {
             appendChatMessage(chat.id, "assistant", message);
             this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
               notice: { code: "goal-owner-amendment-pending", level: "info", message } } });
+            this.scheduleGoalContinuation(completionClaim.goalId, record, "goal_owner_amendment_pending");
             return;
           }
           let retryCheckpointId: string | null = null;
           // The client records only a verification request. The independent
           // judge starts here, after invoke_completed/mcp_final and the result
           // receipt are durable, so model prose can never outrun host evidence.
+          this.scheduleGoalContinuation(completionClaim.goalId, record, "verification_background");
+          if ([...this.pendingGoalVerifications.values()].some((pending) => pending.chatId === chat.id)) return;
           this.pendingGoalVerifications.set(runId, record);
-          this.publishActiveChats();
-          lifetime.retain(import("../long-run/verifier")
+          void runMainBackgroundTask(() => {
+            const verificationRunId = `background-verification:${runId}`;
+            const verificationLifetime = new MainInvocationLifetime(admitMainInvocation(chat.id, verificationRunId), chat.id, verificationRunId);
+            return verificationLifetime.run(() => import("../long-run/verifier")
             .then(({ verifyGoalCompletionClaim }) => retryTransientGoalVerification({
               signal: controller.signal,
               verify: () => verifyGoalCompletionClaim({
@@ -3774,10 +3809,11 @@ export class InvocationService {
                 invocationRunId: runId,
                 projectDir: executionCwd,
                 hasTransientAttachments: record.hasTransientAttachments,
+                background: true,
               }),
               onRetry: ({ attempt, delayMs, reasonCode }) => {
                 const current = getLongRunByGoalId(completionClaim.goalId!);
-                if (!current || current.status !== "verifying") throw new Error("verification_retry_state_changed");
+                if (!current || LONG_RUN_TERMINAL_STATUSES.has(current.status) || longRunOwnerHold(current.id)) throw new Error("verification_retry_state_changed");
                 appendLongRunEvent({
                   runId: current.id,
                   kind: "verification.transient_retry_scheduled",
@@ -3849,8 +3885,9 @@ export class InvocationService {
               this.drainSteerQueue(record.chatId);
               if (record.automaticGoalDeadline) clearTimeout(record.automaticGoalDeadline);
               this.settleAutomaticGoalInterruption(record);
-              if (retryCheckpointId) retryGoalCheckpoint = { goalId: completionClaim.goalId!, checkpointId: retryCheckpointId };
+              if (retryCheckpointId) this.scheduleGoalContinuation(completionClaim.goalId, record, "verification_retry_required");
             }));
+          });
         }
       })
       .catch((error: unknown) => {
@@ -3890,7 +3927,7 @@ export class InvocationService {
           agentId: record.actualAgentId,
           payload: { errorCode: safeFailure.code, errorMessage: message },
         });
-        if (!terminalDisposition.errorCode) {
+        if (!record.background && !terminalDisposition.errorCode) {
           tryRecordFailureEvent({
             runId,
             source: "invoke",
@@ -3902,7 +3939,7 @@ export class InvocationService {
         }
         if (!terminalObserved) {
           terminalObserved = true;
-          canonicalTask = trySetTaskStatus(
+          canonicalTask = projectTaskStatus(
             runReq.chatId,
             terminalTaskStatus({
               kind: "error",
@@ -3964,7 +4001,7 @@ export class InvocationService {
             signalAborted: controller.signal.aborted,
             abortReason: controller.signal.reason,
           });
-          canonicalTask = trySetTaskStatus(
+          canonicalTask = projectTaskStatus(
             runReq.chatId,
             terminalTaskStatus({
               kind: "error",
@@ -4026,6 +4063,8 @@ export class InvocationService {
             catch (error) { console.warn("[blocked-goal-sweep] project release resume failed:", error); }
           }, 1_500).unref?.();
         }
+        if (!effectObservation && !hasQueuedSteer) this.scheduleGoalContinuation(record.automaticGoalId ?? projectionGoalId ?? undefined, record,
+          observedRuntimeErrorCode ?? "goal_turn_settled");
         if (retryGoalCheckpoint && !hasQueuedSteer) this.continueGoalCheckpoint({
           ...retryGoalCheckpoint, record, executionContext,
         });
@@ -4079,14 +4118,15 @@ export class InvocationService {
     const current = () => {
       if (!this.acceptingStarts || record.controller.signal.aborted || record.cancelRequestedAt
         || this.browserLoginWaitingRuns.get(runId) !== record || this.activeChatIds().includes(record.chatId)
-        || this.steerQueues.get(record.chatId)?.length || this.pendingGoalVerifications.has(runId)) return false;
+        || this.steerQueues.get(record.chatId)?.length) return false;
       const latest = getLatestInvocationRunReceipt(record.chatId);
       if (latest?.runId !== runId || latest.status !== "waiting_input") return false;
       const goalId = parked.durable.goalId;
       if (goalId) {
         const goal = getLongRunByGoalId(goalId);
         if (getChat(record.chatId)?.goalId !== goalId || getChatGoalRevision(goalId)?.revision !== parked.durable.goalRevision
-          || !goal || goal.status !== "waiting_user") return false;
+          || !goal || LONG_RUN_TERMINAL_STATUSES.has(goal.status) || longRunOwnerHold(goal.id)
+          || !["waiting_user", "queued", "running", "waiting_tool"].includes(goal.status)) return false;
       } else if (!record.executionContext && getChat(record.chatId)?.goalId) return false;
       return true;
     };
@@ -4100,16 +4140,16 @@ export class InvocationService {
       if (record.mainLifetime && !successorAdmission) throw new Error("browser_login_continuation_scope_changed");
       const goalId = parked.durable.goalId;
       if (goalId && !parked.durable.effectsSettled) {
-        const goal = getLongRunByGoalId(goalId);
-        if (goal?.status === "waiting_user") transitionLongRun({ runId: goal.id, to: "blocked", actorKind: "host", reason: GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN });
-        const observation = maybeDispatchEffectObservation(this, goalId, "browser-login-restored");
-        settleInvocationBrowserLoginWait(runId, observation.status === "dispatched" ? "dispatched" : "blocked",
-          observation.status === "skipped" ? observation.reason : null, observation.status === "dispatched" ? observation.runId : undefined);
-        return;
+        // Reconcile the old operation independently while the fresh, read-only
+        // continuation inspects other current work under the exact login claim.
+        setTimeout(() => {
+          try { runMainBackgroundTask(() => maybeDispatchEffectObservation(this, goalId, "browser-login-restored")); }
+          catch (error) { console.warn("[effect-observation] login background check unavailable:", error); }
+        }, 0).unref?.();
       }
       if (goalId) {
         const goal = getLongRunByGoalId(goalId);
-        if (goal?.status === "waiting_user") transitionLongRun({ runId: goal.id, to: "running", actorKind: "host", reason: "authentication_restored" });
+        if (goal && ["waiting_user", "queued", "waiting_tool"].includes(goal.status)) transitionLongRun({ runId: goal.id, to: "running", actorKind: "host", reason: "authentication_restored" });
       }
       // Consumed single-use capabilities and the original action prompt cannot be replayed.
       const { runId: _old, images: _images, oneUserAuthoredPrompt: _authored, oneMemoryUseOnceRef: _memory,
@@ -4126,6 +4166,7 @@ export class InvocationService {
       settleInvocationBrowserLoginWait(runId, "blocked", "browser_login_resume_refused");
       const goal = parked.durable.goalId ? getLongRunByGoalId(parked.durable.goalId) : null;
       if (goal?.status === "running") transitionLongRun({ runId: goal.id, to: "blocked", actorKind: "host", reason: "browser_login_resume_refused" });
+      this.scheduleGoalContinuation(goal?.goalId, record, "browser-login-resume-refused");
       console.warn("[browser-login-wait] resume refused", error instanceof Error ? error.name : "unknown");
     } finally {
       parked.handle.cancel();
@@ -4150,69 +4191,38 @@ export class InvocationService {
       admitMainInvocation(wait.chatId, input.invocationRunId));
   }
 
+  /** Durable continuation and read-only reconciliation have independent owners. */
+  private scheduleGoalContinuation(goalId: string | null | undefined, record: RunRecord, reason: string): void {
+    const stop = record.controller.signal.reason;
+    const ownerStop = record.controller.signal.aborted && stop instanceof Error
+      && (stop.message === STOPPED_BY_USER || isOwnerGoalStopCause(stop.message) || Boolean(invocationHostStopCause(stop.message)));
+    if (!goalId || record.background || ownerStop || record.steeringInterruptRequested) return;
+    try {
+      const run = getLongRunByGoalId(goalId);
+      if (!run || run.surface === "science" || LONG_RUN_TERMINAL_STATUSES.has(run.status)
+        || longRunOwnerHold(run.id) || getChat(record.chatId)?.goalId !== goalId) return;
+      const wait = latestGoalWaitSubscription(goalId);
+      if (wait && ["pending", "claimed"].includes(wait.state)) return;
+      if (pendingBlockedGoalRetry(run.id)) return;
+      scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
+        fromReason: reason, retryIndex: 0, nextAt: new Date(Date.now() + 30_000).toISOString(),
+        detail: reason, trigger: "goal-turn-background", effectUncertain: unsettledLongRunAttemptCount(run.id) > 0,
+        appInstanceId: desktopAppInstanceId() });
+      setTimeout(() => {
+        try { runMainBackgroundTask(() => maybeDispatchEffectObservation(this, goalId, "goal-turn-background")); }
+        catch (error) { console.warn("[effect-observation] background check unavailable:", error); }
+      }, 0).unref?.();
+    } catch (error) {
+      console.warn("[long-run] continuation scheduling will retry:", error);
+    }
+  }
+
   private continueGoalCheckpoint(input: {
     goalId: string; checkpointId: string; record: RunRecord; executionContext?: InvocationExecutionContext;
   }): void {
-    const { record } = input;
-    const successorRunId = randomUUID();
-    try {
-      if (!this.acceptingStarts || record.controller.signal.aborted || record.steeringInterruptRequested
-        || this.activeChatIds().includes(record.chatId) || this.steerQueues.get(record.chatId)?.length
-        || getChat(record.chatId)?.goalId !== input.goalId) return;
-      const checkpoint = latestTaskCheckpoint(input.goalId);
-      if (!checkpoint || checkpoint.checkpointId !== input.checkpointId) return;
-      if (record.hasTransientAttachments) {
-        const current = getLongRunByGoalId(input.goalId);
-        if (current?.status === "running") transitionLongRun({
-          runId: current.id,
-          to: "blocked",
-          actorKind: "host",
-          reason: "goal_attachment_refresh_required",
-        });
-        const locale = pickLocale(record.request);
-        appendChatMessage(record.chatId, "assistant", locale === "ko"
-          ? "첨부파일이 필요한 후속 검증 단계가 남아 있습니다. 원본 첨부를 자동으로 재사용하지 않도록 목표를 멈췄습니다. 같은 대화에 파일을 다시 첨부하고 이어서 실행해 주세요."
-          : "A follow-up verification step still needs the attachment. The Goal was paused instead of silently reusing a one-turn file grant. Reattach the file in this conversation to continue.");
-        return;
-      }
-      const noEffects = checkpoint.sideEffects.state === "uncertain" && !checkpoint.sideEffects.attemptRefs.length
-        ? checkpointProducerHadNoEffects(input.goalId, checkpoint.invocationRunId) : null;
-      if (noEffects) {
-        // The producer turn failed before touching anything: not an effect question. The blocked-goal
-        // sweep resumes it through the ordinary resume path (no model observation). A turn refused because
-        // another turn holds the Work project waits for that turn (resumeGoalsWaitingOnProject).
-        const current = getLongRunByGoalId(input.goalId);
-        if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host",
-          reason: noEffects.errorCode === WORK_PROJECT_RESIDENCY_BUSY_CODE ? WORK_PROJECT_RESIDENCY_BUSY_CODE : "checkpoint_producer_no_effects" });
-        return;
-      }
-      if (checkpoint.sideEffects.state === "uncertain") {
-        const current = getLongRunByGoalId(input.goalId);
-        if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "checkpoint_side_effects_uncertain" });
-        // Look before asking: one read-only observation of the interrupted
-        // attempts' external outcome (at most once per attempt set).
-        try { maybeDispatchEffectObservation(this, input.goalId, "checkpoint"); }
-        catch (error) { console.warn("[effect-observation] dispatch failed:", error); }
-        return;
-      }
-      const continuation = prepareCheckpointContinuation(checkpoint);
-      if (!claimCheckpointContinuation(input.goalId, input.checkpointId, successorRunId)) return;
-      // Reusing single-use attachment/memory/preflight capabilities would replay
-      // a consumed grant. Stable chat bindings are resolved by Main on start.
-      const { runId: _oldRunId, images: _images, oneUserAuthoredPrompt: _authored,
-        oneMemoryUseOnceRef: _memory, oneBriefingActionRef: _briefing,
-        oneTeamPreflightRef: _team, oneAttachmentRef: _attachment,
-        oneRecurrenceSelection: _recurrence, ...request } = record.request;
-      this.start({ ...request, runId: successorRunId, promptOrigin: "system", taskIntent: "task",
-        runtimeSelection: continuation.runtimeSelection, userPrompt: continuation.userPrompt,
-      }, record.workspaceBinding, input.executionContext, undefined, "goal-continuation",
-        record.mainLifetime?.successor(record.chatId, successorRunId));
-    } catch (error) {
-      const current = getLongRunByGoalId(input.goalId);
-      if (current?.status === "running") transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "checkpoint_continuation_failed" });
-      tryRecordFailureEvent({ runId: successorRunId, chatId: record.chatId, source: "invoke",
-        errorCode: "checkpoint_continuation_failed", errorMessage: error instanceof Error ? error.message : String(error) });
-    }
+    // A stale/uncertain checkpoint is evidence to reconcile, never an old
+    // action prompt to replay. The sweep dispatches from current Goal context.
+    this.scheduleGoalContinuation(input.goalId, input.record, "checkpoint-follow-up");
   }
 
   /**
@@ -4294,7 +4304,8 @@ export class InvocationService {
       const current = getLongRunByGoalId(record.automaticGoalId);
       if (current && ["pausing", "cancelling"].includes(current.status)) {
         const next = transitionLongRun({ runId: current.id, to: current.status === "cancelling" ? "cancelled" : "paused", actorKind: "host",
-          reason: record.controller.signal.reason instanceof Error && record.controller.signal.reason.message === "automatic_goal_time_budget" ? "budget" : "user" });
+          reason: record.controller.signal.reason instanceof Error && ["app_closed", "app_shutdown", "update_restart"].includes(record.controller.signal.reason.message)
+            ? "app_closed" : "user" });
         if (next.status === "cancelled") {
           completeChatGoalContract(next.goalId, "cancelled");
           if (getChat(record.chatId)?.goalId === next.goalId) setChatGoalBinding(record.chatId, null);
@@ -4409,23 +4420,28 @@ export class InvocationService {
       try {
         const goal = getLongRunByGoalId(record.automaticGoalId);
         if (goal && !["completed", "failed", "cancelled", "cancelling", "paused"].includes(goal.status)) {
-          /*
-           * [중지] on a Goal's turn stops THIS turn and pauses the Goal — it never deletes it.
-           * Owner store 2026-09-28 ("Thread Marketing", 1.2.48): the owner stopped the running turn to
-           * let an update install; the stop moved the run to cancelling → cancelled, cancelled the
-           * contract and unbound the chat, so after the update "계속" ran with no Goal ("업데이트하면
-           * 골이 사라짐"). Deleting a Goal has its own control (deleteGoal). The pause is recorded as the
-           * owner's own control so app quit keeps it paused(user) and never auto-resumes it; the next
-           * message in the chat resumes the same Goal (resumesPausedGoal).
-           */
+
+
+
+
+
+
+
+
+
           if (reason.message === STOPPED_BY_USER) {
             appendLongRunEvent({ runId: goal.id, kind: "run.user_control", actorKind: "user",
               payload: { action: "pause", source: "turn-stop", chatId: record.chatId, goalId: goal.goalId, invocationRunId: runId } });
           }
-          transitionLongRun({ runId: goal.id,
-            to: "pausing",
-            actorKind: reason.message === STOPPED_BY_USER ? "user" : "host",
-            reason: reason.message === "automatic_goal_time_budget" ? "budget" : "user" });
+          const explicitStop = reason.message === STOPPED_BY_USER || isOwnerGoalStopCause(reason.message);
+          const shutdown = reason.message === "app_closed" || reason.message === "app_shutdown" || reason.message === "update_restart";
+          if (explicitStop || shutdown) {
+            transitionLongRun({ runId: goal.id, to: "pausing", actorKind: explicitStop ? "user" : "host",
+              reason: explicitStop ? "user" : "app_closed" });
+          } else {
+            appendLongRunEvent({ runId: goal.id, kind: "run.internal_abort_deferred", actorKind: "host",
+              payload: { invocationRunId: runId, reason: reason.message } });
+          }
         }
       } catch { /* Always abort the actual invocation even if persistence fails. */ }
     }
@@ -4525,7 +4541,7 @@ export class InvocationService {
     // 목표 턴이 끝나고 검증을 기다리는 동안에도 대화는 아직 "진행 중"이다. 그 사이 오너가 보낸 요청은
     // 거절(invocation_cleanup_pending·goal_verification_pending)하지 않고 줄 세워, 검증이 끝나는 즉시 돌린다
     // (Codex 의 Tab 대기열·Claude Code 의 작업 중 입력 대기열과 같은 규칙).
-    const active = [...new Map([...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()])].find(([, record]) => record.chatId === req.chatId);
+    const active = [...new Map([...this.settlingRuns, ...this.activeRuns.entries()])].filter(([, record]) => !record.background).find(([, record]) => record.chatId === req.chatId);
     if (expectedRunId && active?.[0] !== expectedRunId && this.browserLoginWaitingRuns.get(expectedRunId)?.chatId !== req.chatId) {
       throw new Error("Steering target is stale; attach to the current Desktop run and retry");
     }
@@ -4646,8 +4662,8 @@ export class InvocationService {
 
   attach(chatId: string, options?: { includeEvents?: boolean }): InvocationAttachResult | null {
     let found: InvocationAttachResult | null = null;
-    for (const [runId, record] of new Map([...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()])) {
-      if (record.chatId === chatId) {
+    for (const [runId, record] of new Map([...this.settlingRuns, ...this.activeRuns.entries()])) {
+      if (!record.background && record.chatId === chatId) {
         found = {
           runId,
           events: options?.includeEvents === false ? [] : record.events.slice(),
@@ -4690,7 +4706,9 @@ export class InvocationService {
   }
 
   receipt(runId: string): InvocationRunReceipt | null {
-    const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId) ?? this.settlingRuns.get(runId);
+    // Verification retains the old record for cancellation and evidence, not
+    // permission to overwrite its durable terminal receipt with "running".
+    const record = this.activeRuns.get(runId) ?? this.settlingRuns.get(runId);
     const durable = getInvocationRunReceipt(runId);
     if (!record) return this.withSteeringRecovery(durable);
     return this.withSteeringRecovery({
@@ -4709,10 +4727,16 @@ export class InvocationService {
   }
 
   latestReceipt(chatId: string): InvocationRunReceipt | null {
-    for (const [runId, record] of new Map([...this.browserLoginWaitingRuns, ...this.settlingRuns, ...this.pendingGoalVerifications, ...this.activeRuns.entries()])) {
-      if (record.chatId === chatId) return this.receipt(runId);
+    for (const [runId, record] of new Map([...this.activeRuns.entries(), ...this.settlingRuns, ...this.browserLoginWaitingRuns])) {
+      if (!record.background && record.chatId === chatId) return this.receipt(runId);
     }
-    return this.withSteeringRecovery(getLatestInvocationRunReceipt(chatId));
+    // A newer observation receipt must not replace the owner's foreground run,
+    // including after restart when the in-memory registry is empty.
+    const row = getDb().prepare(`SELECT run_id FROM run_events
+      WHERE chat_id = ? AND kind = 'invoke_started'
+        AND COALESCE(json_extract(payload_json, '$.background'), 0) != 1
+      ORDER BY ts DESC, rowid DESC LIMIT 1`).get(chatId) as { run_id: string } | undefined;
+    return this.withSteeringRecovery(row ? getInvocationRunReceipt(row.run_id) : null);
   }
 
   latestOneSurface(input: { runId: string; chatId: string; taskId: string }) {
@@ -4726,7 +4750,7 @@ export class InvocationService {
   private publishAgentResidencyChange(change: AgentResidencyChange): void {
     if (!change.chatId || !change.agentId) return;
     for (const [runId, record] of this.activeRuns.entries()) {
-      if (record.chatId !== change.chatId) continue;
+      if (record.background || record.chatId !== change.chatId) continue;
       const locale = pickLocale(record.request);
       if (record.oneMode) {
         // PRD §3.5 — `closed` 는 프로세스 실패만 뜻하지 않는다. 유휴 회수(reaped)·풀 축출(evicted)·
@@ -4800,11 +4824,51 @@ export class InvocationService {
     }
   }
 
+  /** Observer evidence owns its run ledger, never the shared Task or chat UI. */
+  private recordBackgroundRunEvent(
+    runId: string,
+    record: RunRecord,
+    input: McpInvocationEvent,
+    hostControl: ReturnType<typeof mainHostControlForEvent>,
+  ): boolean {
+    const terminal = !input.agentId && (input.kind === "final" || input.kind === "error");
+    const disposition = terminal ? classifyMainOwnedTerminal({
+      eventKind: input.kind as "final" | "error",
+      steeringInterruptRequested: record.steeringInterruptRequested,
+      signalAborted: record.controller.signal.aborted,
+      abortReason: record.controller.signal.reason,
+    }) : null;
+    const event: McpInvocationEvent = {
+      ...input,
+      ...(input.kind === "error" && input.error && disposition?.errorCode
+        ? { error: { ...input.error, code: disposition.errorCode } } : {}),
+      sequence: nextObservableSequence(record),
+      observedAt: new Date().toISOString(),
+    };
+    recordMcpInvocationEvent(runId, record.request, event, { requireDurable: true, hostControl });
+    if (disposition) {
+      recordRunEvent({ runId, chatId: record.chatId, agentId: record.actualAgentId,
+        kind: disposition.terminalKind,
+        payload: { background: true, resultFolder: record.resultFolder,
+          errorCode: event.error?.code, errorMessage: event.error?.message,
+          ...(record.controller.signal.aborted && record.controller.signal.reason instanceof Error
+            && invocationHostStopCause(record.controller.signal.reason.message)
+            ? { hostStopCause: invocationHostStopCause(record.controller.signal.reason.message) } : {}) },
+      });
+    }
+    if (event.kind === "partial" && !event.agentId && typeof event.text === "string") record.partialText = event.text;
+    record.events.push(event);
+    if (record.events.length > MAX_BUFFERED_EVENTS) record.events.splice(0, record.events.length - MAX_BUFFERED_EVENTS);
+    this.publishRunEvent(record, { runId, chatId: record.chatId, event });
+    return terminal;
+  }
+
   private publishRunEvent(record: RunRecord, envelope: InvocationEventEnvelope): void {
-    const scienceDelivery = record.executionSource === "science"
+    const scienceDelivery = !record.background && record.executionSource === "science"
       ? recordScienceRuntimeOutboxEvent({ runId: envelope.runId, chatId: envelope.chatId, event: envelope.event })
       : undefined;
     const event = this.deliveryJournal.publish(envelope.runId, envelope.chatId, envelope.event, ++record.deliveryOrdinal);
+    if (record.background) return;
     this.publishEvent(scienceDelivery ? { ...envelope, event, scienceDelivery } : { ...envelope, event });
   }
 
@@ -4824,6 +4888,7 @@ export class InvocationService {
     const receipt = getInvocationRunReceipt(runId);
     if (!receipt || receipt.status === "running" || receipt.status === "cancelling") return;
     record.settlementPublished = true;
+    if (record.background) return;
     const envelope: InvocationSettledEnvelope = {
       runId,
       chatId: record.chatId,

@@ -1,8 +1,7 @@
-import { longRunMonetaryRefusal } from "../long-run/budget";
 import { channelPublishReceiptsPromptBlockFor } from "../publish-receipts";
 import { resumeDesktopLongRunManually } from "../long-run/app-runtime-coordinator";
-import { getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, latestLongRunAttemptSafeEpoch, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount, unsettledLongRunAttemptCount, type LongRunAttemptReviewConfirmation } from "../store/long-runs";
+import { getChatGoalRevision } from "../store/chat-goals";
+import { appendLongRunEvent, getLongRun, getLongRunByGoalId, latestLongRunAttemptSafeEpoch, acknowledgeUncertainLongRunAttempts, liveLongRunAttemptCount, type LongRunAttemptReviewConfirmation } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { tryRecordRunEvent } from "../store/run-events";
 import { admitJudgedAutomaticGoal } from "../long-run/auto-goal-controller";
@@ -12,12 +11,10 @@ import {
   type AutomaticGoalIntentResolution,
 } from "../long-run/judged-auto-goal-intent";
 import type { GoalIntakeDecision, GoalSourceMessage } from "../../shared/auto-goal";
-import type { RuntimeSelection } from "../../shared/types";
 import { resolveGoalLifecycle } from "../../shared/auto-goal";
 import type { LongRunRecord } from "../store/long-runs";
 import { buildAutomaticGoalCriteria } from "../../shared/automatic-goal-criteria";
-import { exactLegacyGoalLifecycleRuntimeSelection, prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
-import { goalResumeRecoveryBlockerCode, isGoalResumeEffectBoundaryUncertainBlocker } from "../../shared/long-run";
+import { goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { currentUiLocale } from "../ui-locale";
 
 /** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
@@ -230,32 +227,8 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   const run = getLongRunByGoalId(chat.goal_id);
   if (!run || run.surface === "science" || run.rootChatId !== chatId || revision.chatId !== chatId) throw new Error("auto_goal_resume_surface_mismatch");
   if (run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-  if (!["paused", "blocked"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
-  const recoveryBlocker = goalResumeRecoveryBlockerCode(run.blockedReason);
-  // The startup effect-boundary blocker is written only when attempts were left
-  // unsettled (startup-checkpoints blockForReview). A settled observation of those
-  // exact attempts is the proof that blocker was waiting for. A claimed-wait
-  // blocker is a different question and is never lifted here.
-  if (recoveryBlocker && !(observation && actor === "host" && isGoalResumeEffectBoundaryUncertainBlocker(run.blockedReason))) {
-    throw new Error(recoveryBlocker);
-  }
-  if (getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision) throw new Error("auto_goal_resume_revision_pending");
-  if (actor === "user" ? liveLongRunAttemptCount(run.id) : unsettledLongRunAttemptCount(run.id)) {
-    throw new Error("auto_goal_resume_attempt_unsettled");
-  }
-  /*
-   * An absent limit is no limit, not a spent one.
-   *
-   * `maxCycles == null` and `wallclockDeadline == null` mean the goal was admitted without that
-   * bound -- which is exactly what the explicit Goal path does. Reading them as exhausted made the
-   * resume button throw `auto_goal_budget_exhausted` for precisely the runs the person had asked to
-   * run without a limit, so the only goals that could be resumed were the ones that needed it least.
-   */
-  const cyclesSpent = run.budget.maxCycles != null && run.cycleCount >= run.budget.maxCycles;
-  const deadlinePassed = run.budget.wallclockDeadline != null
-    && Date.parse(run.budget.wallclockDeadline) <= Date.now();
-  const costSpent = Boolean(longRunMonetaryRefusal(run));
-  if (cyclesSpent || deadlinePassed || costSpent) throw new Error(longRunMonetaryRefusal(run) ?? "auto_goal_budget_exhausted");
+  if (!["paused", "blocked", "queued", "running", "waiting_tool", "waiting_user", "verifying"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
+  if (liveLongRunAttemptCount(run.id)) throw new Error("auto_goal_resume_attempt_live");
   const authority = revision.authorityRefs.map((ref) => /^invocation:([^:]+):permission:(read|write|full)$/.exec(ref)).find(Boolean);
   if (!authority) throw new Error("auto_goal_resume_authority_missing");
   return { chatId, promptOrigin: "system", taskIntent: "task", permissions: authority[2] as "read" | "write" | "full",
@@ -265,15 +238,15 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),
-    userPrompt: `Resume the existing goal within its remaining budget and original permissions. Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${actor === "user" && latestLongRunAttemptSafeEpoch(run.id)
-      ? " The user acknowledged interrupted attempts, but the host did not prove their external outcomes. First inspect Activity and the external state read-only; do not repeat previous side effects or make a new external change until the prior outcomes are reconciled. If evidence is absent, report them as unknown."
+    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. Preserve uncertainty as unknown, do not repeat a specific uncertain external action, and choose other useful work while its outcome is unresolved. Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${actor === "user" && latestLongRunAttemptSafeEpoch(run.id)
+      ? " The user acknowledged interrupted attempts, but the host did not prove their external outcomes. Inspect Activity and the external state read-only in parallel; do not repeat the specific uncertain actions. Continue independent work. If evidence is absent, report the prior outcomes as unknown."
       : observation?.verdict === "done"
         ? ` A read-only check just observed that the interrupted earlier action already took effect (evidence: ${observation.evidence}). Do not repeat it; continue with the next remaining step.`
         : observation?.proof === "receipt"
           // The host's own record: the interrupted turn only read. There is nothing to repeat.
           ? ` The host's record shows the interrupted turn only searched, read or loaded pages (${observation.evidence}); nothing outside changed and there is nothing to repeat. Continue with the next remaining step.`
           : observation?.verdict === "not_done"
-            // A model look can be wrong (owner Thread Marketing 2026-09-28 15:57Z: "not_done" from a follower
+
             // count, three minutes after the reply had been posted and verified). Never a licence to repeat blindly.
             ? ` A read-only check reported that the interrupted earlier action did not take effect (evidence: ${observation.evidence}). Before doing it again, look at the exact page it targeted and at this conversation's later messages; if either shows it already happened (a posted reply, a permalink, a sent message), do not repeat it.`
             : ""}${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${revision.objective}` };
@@ -287,78 +260,25 @@ export async function queueAutomaticGoalResume(
   const initialRun = initialChat?.goal_id ? getLongRunByGoalId(initialChat.goal_id) : null;
   if (!initialRun) throw new Error("long_run_resume_dispatch_unavailable");
   if (initialRun.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-  if (initialRun.status !== "paused" && initialRun.status !== "blocked") {
+  if (!["paused", "blocked", "queued", "running", "waiting_tool", "verifying", "waiting_user"].includes(initialRun.status)) {
     throw new Error("long_run_resume_dispatch_unavailable");
   }
   const initialRecoveryBlocker = goalResumeRecoveryBlockerCode(initialRun.blockedReason);
   if (initialRecoveryBlocker) throw new Error(initialRecoveryBlocker);
-  let preparedLegacy: LegacyGoalLifecyclePreparation | null = null;
-  let preparedLegacyRuntime: RuntimeSelection | null = null;
-  // Only the timer-wait refusal needs missing lifetime metadata resolved.
-  // Ordinary legacy pause/block resumes keep their prior finite semantics and
-  // must not acquire a new model/runtime dependency from the Resume button.
-  const legacy = initialRun.blockedReason === "goal_wait_ongoing_authority_required"
-    ? getLegacyGoalLifecycleSnapshot(initialRun.goalId)
-    : null;
-  if (legacy) {
-    const runtimeSelection = exactLegacyGoalLifecycleRuntimeSelection({ longRunId: initialRun.id, chatId });
-    if (!runtimeSelection) throw new Error("goal_legacy_lifecycle_confirmation_unavailable");
-    preparedLegacyRuntime = runtimeSelection;
-    preparedLegacy = await prepareLegacyGoalLifecycle({
-      goalId: initialRun.goalId,
-      longRunId: initialRun.id,
-      expectedVersion,
-      expectedStatus: initialRun.status,
-      source: { ...legacy.revision.sourceMessage },
-      runtimeSelection,
-      signal: new AbortController().signal,
-      nativeUserResume: true,
-    });
-    if (!preparedLegacy || preparedLegacy.verdict === "unavailable") {
-      throw new Error("goal_legacy_lifecycle_confirmation_unavailable");
-    }
-    if (preparedLegacy.verdict !== "ongoing") {
-      throw new Error("goal_legacy_lifecycle_not_ongoing");
-    }
-  }
   return getDb().transaction(() => {
     const chat = getDb().prepare("SELECT goal_id FROM chats WHERE id = ?").get(chatId) as { goal_id: string | null } | undefined;
     const before = chat?.goal_id ? getLongRunByGoalId(chat.goal_id) : null;
     if (!before) throw new Error("long_run_resume_dispatch_unavailable");
     if (before.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-    const recoveryBlocker = goalResumeRecoveryBlockerCode(before.blockedReason);
-    if (recoveryBlocker) throw new Error(recoveryBlocker);
-    // A separate Main-owned user attestation is required for the exact
-    // unsettled attempt set. A plain Resume never implies external proof.
-    const acknowledged = acknowledgeUncertainLongRunAttempts(before.id, confirmation);
-    if (preparedLegacy) {
-      const current = getLongRun(before.id);
-      const currentSnapshot = getLegacyGoalLifecycleSnapshot(before.goalId);
-      const currentRuntime = exactLegacyGoalLifecycleRuntimeSelection({ longRunId: before.id, chatId });
-      if (!current || !currentSnapshot || currentSnapshot.payloadJson !== preparedLegacy.snapshot.payloadJson
-        || current.status !== before.status || getLongRunGoalRevisionBinding(current.id)?.revision !== currentSnapshot.revision.revision
-        || !preparedLegacyRuntime || JSON.stringify(currentRuntime) !== JSON.stringify(preparedLegacyRuntime)) {
-        throw new Error("goal_legacy_lifecycle_conflict");
-      }
-      if (preparedLegacy.verdict === "ongoing") {
-        migrateLegacyGoalLifecycle({ goalId: before.goalId,
-          expectedPayloadJson: preparedLegacy.snapshot.payloadJson, source: preparedLegacy.source, preserveRevision: true });
-      }
-      appendLongRunEvent({ runId: before.id, kind: "run.legacy_lifecycle_classified", actorKind: "host",
-        payload: { schemaVersion: "agentlas.legacy-goal-lifecycle.v1", sourceMessageId: preparedLegacy.source.messageId,
-          previousRevision: preparedLegacy.snapshot.revision.revision, revision: preparedLegacy.snapshot.revision.revision,
-          lifecycle: preparedLegacy.verdict === "ongoing" ? "ongoing" : "unchanged",
-          previousPayloadDigest: preparedLegacy.snapshotDigest, runtimeReceipt: preparedLegacy.runtimeReceipt,
-          verdict: preparedLegacy.verdict, reasonCode: preparedLegacy.reasonCode, trigger: "native-user-resume",
-          acknowledgedAttemptIds: acknowledged.attemptIds } });
-    }
+    // Optional explicit review is recorded as an attestation, never fabricated by Resume.
+    if (confirmation) acknowledgeUncertainLongRunAttempts(before.id, confirmation);
     const version = getLongRun(before.id)?.version;
     if (!version) throw new Error("long_run_resume_dispatch_unavailable");
     const request = automaticGoalResumeRequest(chatId, version, "user");
     if (!request) throw new Error("long_run_resume_dispatch_unavailable");
     getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
       .run(new Date().toISOString(), before.goalId);
-    return { request: preparedLegacyRuntime ? { ...request, runtimeSelection: preparedLegacyRuntime } : request,
+    return { request,
       queued: resumeDesktopLongRunManually(before.id, version) };
   })();
 }

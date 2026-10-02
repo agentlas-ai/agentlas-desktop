@@ -386,14 +386,14 @@ function finalizeDispatch(id: string, receiptStatus: string, runId: string): voi
   reportToOne(settled);
 }
 
-/**
- * The report turn queued for a dispatch while One was busy. One report per settled result: when the
- * session is continued, or One reads the result itself, or a newer result settles, the older queued
- * report is withdrawn. Owner Thread Marketing 2026-09-28: session dispatch-c00a11bd settled at 14:53Z
- * (run 9fc97318) while One's turn ran; One read it and asked for a revision (run eb2a0e42, settled
- * 15:00Z). Both queued reports ran after the long turn (15:54Z and 15:56Z), so One answered the
- * 30-draft bank twice (c8054bc6, e166a6d8).
- */
+
+
+
+
+
+
+
+
 const queuedReports = new Map<string, { chatId: string; queuedRequestId: string }>();
 
 export function withdrawQueuedOneTeamReport(dispatchId: string): boolean {
@@ -670,16 +670,16 @@ export async function oneTeamSessionStatus(caller: OneTeamCaller, input: { sessi
 }
 
 // ── Roster: create a teammate / invite one into this group chat ─────────────
-/*
- * Live 2026-09-27 (chat "Youtube launch", a One group chat with 0 members): the
- * owner said "단톡방에 에이전트 만들던지 팀원 초대하던지 해서 …" with Full access.
- * One read one_team_list and then had no way to act — the only creation path
- * was the renderer's "New Agent" dialog and the only membership path the
- * group-settings sheet. These two operations call the SAME product functions
- * (org.createOneTeamAgent, taskforces.updateOneTaskforce): no parallel store
- * write, the same slot limit and the same group size limit, each refusal says
- * exactly why and that nothing changed.
- */
+
+
+
+
+
+
+
+
+
+
 
 /** The owner's own six base characters; a teammate One creates gets one of them, stable per name. */
 const DEFAULT_CHARACTERS = ["orange-dino", "blue-wave", "green-cloud", "purple-beacon", "amber-pod", "orange-sprout"] as const;

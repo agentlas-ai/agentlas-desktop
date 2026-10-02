@@ -250,8 +250,12 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
       altPaths = eligibleTactics.length ? ["start_work_turn", ...altPaths] : ["replan_tree", ...altPaths];
     }
     if ((ownerClass === "our_defect" || defects.length) && !altPaths.includes("file_defect")) altPaths.push("file_defect");
+    // An unresolved action is an incident, not a stop for the whole Goal.
+    // The work controller can pick another tactic while this incident is repaired.
+    if (rest.attemptDue && boundary !== "owner_stop" && !altPaths.includes("start_work_turn")) altPaths.unshift("start_work_turn");
     return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, defects, evidenceRefs,
-      ...rest, ownerClass, boundary, altPaths };
+      ...rest, display: rest.attemptDue && boundary !== "owner_stop" ? "running" : rest.display,
+      ownerClass, boundary, altPaths };
   };
   const branchWork: AgiActionKind[] = eligibleTactics.length ? ["start_work_turn", "dispatch_teammate", "create_teammate"] : [];
 

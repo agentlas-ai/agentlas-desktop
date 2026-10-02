@@ -14,6 +14,7 @@ import { MAX_AUTOMATION_ACTIVE_TOOL_STALL_MS } from "../automation-watchdog";
 import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-member-cells";
 import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-projection";
 import { currentUiLocale } from "../ui-locale";
+import { pruneLegacyDatabaseBackups } from "./backup-retention";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -6937,6 +6938,7 @@ export function initStore(options: StoreInitOptions = {}): void {
 
   if (userVersion < SCHEMA_VERSION) _db.pragma(`user_version = ${SCHEMA_VERSION}`);
   _openedStoreMigrationRole = migrationRole;
+  pruneLegacyDatabaseBackups({ db: _db, schemaVersion: SCHEMA_VERSION, recoveryProfilePaths: [userDataPath()] });
   } catch (error) {
     try { _db?.close(); } catch {}
     _db = null;

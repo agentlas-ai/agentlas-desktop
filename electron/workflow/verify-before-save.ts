@@ -27,7 +27,7 @@ import { currentUiLocale } from "../ui-locale";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
-export type PreSaveStepState = "ran" | "repaired" | "blocked" | "skipped";
+export type PreSaveStepState = "ran" | "repaired" | "blocked" | "pending" | "skipped";
 
 export interface PreSaveStepResult {
   nodeId: string;
@@ -64,6 +64,8 @@ export interface PreSaveStepResult {
 export interface PreSaveVerification {
   /** 돌려 본 것 중 막힌 것이 없다. skipped 는 실패가 아니다(못 잰 것이다). */
   ok: boolean;
+  /** Outcome verification is separate from permission to save or continue. */
+  passed?: boolean;
   steps: PreSaveStepResult[];
 }
 
@@ -167,11 +169,20 @@ export async function verifyGraphBeforeSave(
    *   그러니 안 돌린 단계의 값을 기다리는 단계도 **skipped** 여야 한다.
    */
   const notRunProduces = new Set<string>();
+  const tasks = new Map<string, Promise<void>>();
+  const preceding: WorkflowNode[] = [];
   for (const node of graph.nodes) {
+    const dependencies = preceding.filter((upstream) => {
+      const produced = str(upstream.config, "produces");
+      return (produced && stepReads(node, produced))
+        || graph.edges.some((edge) => edge.source === upstream.id && edge.target === node.id);
+    }).map((upstream) => tasks.get(upstream.id)!);
+    const task = (async () => {
+    await Promise.all(dependencies);
     if (!isCheapAndSafeToRun(node)) {
       const produces = str(node.config, "produces");
       if (produces) notRunProduces.add(produces);
-      continue;
+      return;
     }
     const waitsFor = [...notRunProduces].filter((name) => stepReads(node, name));
     if (waitsFor.length > 0) {
@@ -185,7 +196,7 @@ export async function verifyGraphBeforeSave(
           L(`이 단계는 "${waitsFor.join(", ")}" 값을 기다리는데, 그 값을 만드는 단계는 바깥을 바꾸는 단계라 저장 전에는 돌리지 않습니다. 실제 실행에서 확인됩니다.`,
             `This step waits for "${waitsFor.join(", ")}", which comes from a step that changes things outside, so it is not run before saving. It is checked in the real run.`),
       });
-      continue;
+      return;
     }
     const code = str(node.config, "code");
     if (!code) {
@@ -195,11 +206,15 @@ export async function verifyGraphBeforeSave(
         state: "skipped",
         skippedBecause: L("이 단계에는 아직 스크립트가 없습니다.", "This step has no script yet."),
       });
-      continue;
+      return;
     }
     const lang = str(node.config, "codeLang") === "js" ? "js" : "python";
 
-    let run = await deps.runCode({ code, lang, vars });
+    const attemptCode = async (script: string) => {
+      try { return await deps.runCode({ code: script, lang, vars }); }
+      catch (error) { return { ok: false, reason: error instanceof Error ? error.message : String(error) }; }
+    };
+    let run = await attemptCode(code);
     let repairedCode: string | undefined;
 
     if (!run.ok && deps.rewrite) {
@@ -214,9 +229,9 @@ export async function verifyGraphBeforeSave(
           k,
           `${typeof v === "string" ? "text" : typeof v}: ${String(typeof v === "string" ? v : JSON.stringify(v)).slice(0, 300)}`,
         ])),
-      });
+      }).catch(() => null);
       if (rewritten && rewritten.trim() && rewritten.trim() !== code.trim()) {
-        const second = await deps.runCode({ code: rewritten, lang, vars });
+        const second = await attemptCode(rewritten);
         if (second.ok) {
           run = second;
           repairedCode = rewritten;
@@ -235,13 +250,13 @@ export async function verifyGraphBeforeSave(
         state: repairedCode ? "repaired" : "ran",
         ...(repairedCode ? { repairedCode } : {}),
       });
-      continue;
+      return;
     }
 
     steps.push({
       nodeId: node.id,
       label: node.label || node.id,
-      state: "blocked",
+      state: "pending",
       cause: humanCauseOf(run.reason),
       facts: {
         availableVars: Object.keys(vars).sort(),
@@ -249,14 +264,15 @@ export async function verifyGraphBeforeSave(
         varsSnapshot: snapshotOf(vars),
       },
     });
-    /*
-     * ★막힌 뒤로는 더 돌리지 않는다. 뒤 단계는 이 단계의 값을 기다리므로, 값 없이 돌리면
-     *   "값이 없다"는 가짜 실패가 줄줄이 나온다 — 사람에게 에러 목록을 안기는 짓이다.
-     */
-    break;
+    const produces = str(node.config, "produces");
+    if (produces) notRunProduces.add(produces);
+    })();
+    tasks.set(node.id, task);
+    preceding.push(node);
   }
-
-  return { ok: !steps.some((s) => s.state === "blocked"), steps };
+  await Promise.all(tasks.values());
+  steps.sort((a, b) => graph.nodes.findIndex((node) => node.id === a.nodeId) - graph.nodes.findIndex((node) => node.id === b.nodeId));
+  return { ok: true, passed: !steps.some((s) => s.state === "pending" || s.state === "blocked"), steps };
 }
 
 /**
@@ -266,7 +282,7 @@ export async function verifyGraphBeforeSave(
 export function renderPreSaveVerification(v: PreSaveVerification): string[] {
   const out: string[] = [];
   const repaired = v.steps.filter((s) => s.state === "repaired");
-  const blocked = v.steps.filter((s) => s.state === "blocked");
+  const blocked = v.steps.filter((s) => s.state === "blocked" || s.state === "pending");
 
   for (const step of repaired) out.push(L(`"${step.label}" 단계가 처음엔 안 돌아서 한 번 고쳤습니다.`, `"${step.label}" did not run at first, so it was fixed once.`));
   for (const step of blocked) out.push(L(`"${step.label}" 단계는 아직 안 됩니다 — ${step.cause}`, `"${step.label}" does not work yet — ${step.cause}`));

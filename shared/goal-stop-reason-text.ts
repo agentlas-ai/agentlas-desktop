@@ -1,16 +1,16 @@
 import { GOAL_OWNER_QUESTION_REASONS, GOAL_OWNER_REVIEW_REASONS } from "./goal-display-state";
 
-/**
- * The owner-facing sentence for why a goal continuation hard-stopped.
- *
- * The goal ledger decides with typed codes (goal_blocked, budget_*, …) and a
- * typed blocked reason. Those codes used to be pasted into the goal chat as
- * the notice body: owner Youtube launch 2026-09-28 11:46Z and X Marketing
- * 2026-09-27 21:46Z both read "goal_blocked · goal_owner_answer_required".
- * The codes stay in the ledger and run events; the chat gets a sentence that
- * says what happened and what the owner can do. Unknown codes get a neutral
- * sentence instead of the raw code.
- */
+
+
+
+
+
+
+
+
+
+
+
 export function goalStopReasonText(
   reason: string | null | undefined,
   blockedReason: string | null | undefined,

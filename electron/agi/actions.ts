@@ -122,7 +122,7 @@ const ACTION_ID = /^[A-Za-z0-9._:-]{8,160}$/;
 function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
   return Boolean(value && typeof (value as { then?: unknown }).then === "function");
 }
-const OWNER_BOUNDARY_PAUSES = new Set(["user", "approval_required", "budget"]);
+const OWNER_BOUNDARY_PAUSES = new Set(["user"]);
 
 function text(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;
@@ -190,11 +190,11 @@ export class AgiActionExecutor {
     // 4. per-attempt action cap, circuit breaker, ruled-out actions
     const history = this.history(incident.id);
     const counted = history.filter((entry) => entry.attempt === request.attempt && entry.action !== "file_defect");
-    if (request.action !== "file_defect" && counted.length >= AGI_MAX_ACTIONS_PER_ATTEMPT) return refuse("agi.budget.actions-per-attempt");
-    if (history.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE && request.action !== "file_defect") {
+    if (!["file_defect", "start_work_turn"].includes(request.action) && counted.length >= AGI_MAX_ACTIONS_PER_ATTEMPT) return refuse("agi.budget.actions-per-attempt");
+    if (history.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE && !["file_defect", "start_work_turn"].includes(request.action)) {
       return refuse("agi.action.circuit-open");
     }
-    if (this.incidents.ruledOut(incident.id).has(request.action)) return refuse("agi.action.ruled-out");
+    if (request.action !== "start_work_turn" && this.incidents.ruledOut(incident.id).has(request.action)) return refuse("agi.action.ruled-out");
     // 5. Tokens (D1): the AGI caps govern the unblocker's own model calls (model-attempt.ts admits each one). A work turn
     // or a teammate session this action starts is goal work, governed by the goal's own budget and permission — the
     // same turn the sweep would start — so it is not refused by the AGI cap (that would stall the goal on AGI's bill).

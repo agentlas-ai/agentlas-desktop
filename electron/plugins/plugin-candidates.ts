@@ -205,16 +205,16 @@ function contentTokens(text: string): string {
   return text.split(/\s+/u).filter((word) => !STOP.has(word.toLowerCase().replace(/[^a-z']/gu, ""))).join(" ");
 }
 
-/**
- * The text the local fallback ranks: the owner's words (the prompt and the goal
- * objective) — never the goal's acceptance criteria. For an automatic goal those
- * are host-written verifier boilerplate ("Every deliverable in this request is
- * complete…", "This run has full permission…"); embedded with a Korean request
- * they lifted agentlas-astronomy over the semantic floor (0.406) for "grow a
- * YouTube channel with Blender Shorts" (live 2026-09-27, chat "Youtube launch"),
- * so every turn of that goal ran with an astronomy plugin attached. Host
- * markers (<!-- … -->) are not task text either.
- */
+
+
+
+
+
+
+
+
+
+
 export function localRelevanceQuery(input: { userPrompt: string; objective?: string | null }): string {
   return [input.userPrompt, input.objective ?? ""]
     .map((part) => part.replace(/<!--[\s\S]*?-->/gu, " ").trim())

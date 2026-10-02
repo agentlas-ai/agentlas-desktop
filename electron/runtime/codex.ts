@@ -1573,14 +1573,14 @@ async function runCodexResidentTurn(input: {
     settleTurn?.("completed");
   };
 
-  /*
-   * A Codex sub-agent (spawn_agent, depth 1) runs as its own thread on this same
-   * app-server connection, and its item notifications carry the child threadId.
-   * Its messages are delivered to the parent as an inter-agent message — they are
-   * not this turn's answer. Live 2026-09-27 (One chat "Youtube launch"): the
-   * sub-agent's "**[Hope]** … 부모 에이전트에 전달했습니다" landed in One's reply
-   * to the owner. A notification without threadId (older CLIs) stays ours.
-   */
+
+
+
+
+
+
+
+
   const fromOtherThread = (params: any): boolean =>
     typeof params?.threadId === "string" && typeof session.threadId === "string" && session.threadId !== ""
     && params.threadId !== session.threadId;
@@ -2277,7 +2277,10 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
   try {
     await fs.symlink(path.join(realHome, "auth.json"), path.join(home, "auth.json")).catch(() => {});
     const instructions = path.join(home, "observation-instructions.md");
-    await fs.writeFile(instructions, req.systemPrompt, { encoding: "utf8", mode: 0o600 });
+    await fs.writeFile(instructions, codexSystemPromptWithSchemaFallback(req), { encoding: "utf8", mode: 0o600 });
+    const schema = req.outputSchema ? openAiStrictSchemaOrNull(req.outputSchema.schema) : null;
+    const schemaFile = path.join(home, "observation-output-schema.json");
+    if (schema) await fs.writeFile(schemaFile, JSON.stringify(schema), { encoding: "utf8", mode: 0o600 });
     // Only Main's browser server survives (the client already drops MCP when the look needs no browser).
     const browserOnlyMcp: string[] = [];
     const source = req.mcpCodexConfigArgs ?? [];
@@ -2292,6 +2295,7 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
       "-c", 'web_search="disabled"', "-c", "include_apply_patch_tool=false",
       ...OBSERVATION_DISABLED_CODEX_FEATURES.flatMap((name) => ["-c", `features.${name}=false`]),
       ...browserOnlyMcp,
+      ...(schema ? ["--output-schema", schemaFile] : []),
       ...(req.model ? ["--model", req.model] : []),
       "-",
     ];

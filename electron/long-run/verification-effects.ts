@@ -32,6 +32,7 @@ export interface VerificationSessionBinding {
   chatId: string;
   boundaryDigest: string;
   signal: AbortSignal;
+  background?: boolean;
 }
 export interface VerificationSession {
   readonly executionId: string;
@@ -251,7 +252,7 @@ class EffectSession implements VerificationSession {
     if (!this.dispatches.length) this.fail("verification_effects_dispatch_missing");
     if (this.dispatches.some(dispatch => !dispatch.settled)) this.fail("verification_effects_runner_pending");
     try {
-      const boundary = captureGoalVerificationBoundary(this.binding.goalId, this.binding.invocationRunId);
+      const boundary = captureGoalVerificationBoundary(this.binding.goalId, this.binding.invocationRunId, { background: this.binding.background });
       if (boundary.digest !== this.binding.boundaryDigest || boundary.goalRevision !== this.binding.goalRevision) {
         this.fail("verification_effects_boundary_changed");
       }
@@ -313,7 +314,7 @@ export function createVerificationSession(input: VerificationSessionBinding): Ve
     || db.prepare("SELECT 1 FROM run_events WHERE run_id=? LIMIT 1").get(binding.executionId)) {
     throw new VerificationEffectsError("verification_effects_attempt_unbound");
   }
-  const boundary = captureGoalVerificationBoundary(binding.goalId, binding.invocationRunId);
+  const boundary = captureGoalVerificationBoundary(binding.goalId, binding.invocationRunId, { background: binding.background });
   if (boundary.digest !== binding.boundaryDigest || boundary.goalRevision !== binding.goalRevision) {
     throw new VerificationEffectsError("verification_effects_boundary_changed");
   }

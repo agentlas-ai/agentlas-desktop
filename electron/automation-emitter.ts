@@ -120,7 +120,18 @@ export interface ParseAutomationsResult {
   errors: string[];
 }
 
-// 시스템 프롬프트에 동봉 — 에이전트가 언제/어떻게 자동화를 만들지 알려준다.
+/** Native One needs stable tool guidance, not the entire text-emission grammar.
+ * The detailed fallback can be fetched on demand for typed monitor sources. */
+export const ONE_GRAPH_PROTOCOL = [
+  "[Agentlas graph tools]",
+  "You own the goal, judgment and strategy. Graph is your execution tool: save reusable collection, action, reasoning or code steps, call by graph_id and inputs, inspect actual results, and patch instructions as strategy changes.",
+  "Use one_graph_save/run/result/inspect/patch/set_enabled with the schemas provided by the connected tools. Save enables when dependencies are connected; no extra owner confirmation. Do not claim a queued or pending request completed.",
+  "The host retains definitions. Cache schema-qualified cacheKey; pass expected_revision for changes, stable request_id for retries, and changed node instructions instead of repeating the whole graph.",
+  "For a typed zero-model monitor source beyond the blueprint schema, fetch one_graph_schema with include_registration_protocol:true. Execution is app-scoped; future waiting, unavailable credentials or unknown effects are typed state, not evidence of completion.",
+  "[/Agentlas graph tools]",
+].join("\n");
+
+// Fallback for runtimes without the native host authoring tool.
 export const AUTOMATION_PROTOCOL = [
   "## Setting up automations",
   "",
@@ -132,15 +143,15 @@ export const AUTOMATION_PROTOCOL = [
   "Typed source polling uses no model while unchanged. If no supported scalar source exists, omit source and supply an explicit schedule: that mode re-runs the prompt and only exact duplicate results are suppressed; do not promise zero-model checks.",
   "Keep unchanged/non-actionable runs quiet in the saved prompt; notify on meaningful change, completion, failure or required user action. Use every_run only when explicitly requested.",
   'When editing an existing registration include its exact "automationId" from the receipt, never infer identity from a global name.',
-  "For regular schedules (every day, each morning, weekly, monthly…),",
-  "register it as an automation that re-runs YOU on that schedule. End your reply with exactly this",
-  "block (omit it entirely otherwise):",
+  "One owns the goal and strategy. When repeated execution is useful, use the built-in one_graph tools if available: save a structured blueprint, run by identity, inspect results and patch the changed instructions as strategy evolves. A graph may collect data for your own judgment or contain reasoning/check/code steps itself.",
+  "Saved graph definitions stay in the host; pass revision, inputs and node patches instead of copying full instructions on every run. A returned queue identity proves a request, and only its execution result proves completion.",
+  "For regular schedules without those built-in tools, end your reply with this registration block (omit it otherwise):",
   "",
-  "CRITICAL: This block is the ONLY way to schedule recurring work in Agentlas. It registers the job",
+  "The built-in graph tools and this fallback block register recurring work in Agentlas. The job is visible",
   "in the Agentlas Automation tab where the user can see, edit, pause and delete it. Do NOT create",
   "OS-level schedulers instead — never write launchd/launchctl plists, cron jobs, systemd timers, or",
   "any system daemon, and never call a devops/automation skill to do so. Those are invisible to the",
-  "user and unmanageable from the app. Always use THIS block.",
+  "user and unmanageable from the app. Use the built-in graph tools when available; otherwise use this block.",
   "",
   "Before the block, always write at least one concise user-visible sentence about what you are setting up.",
   "Do not make the JSON block the only assistant content; the visible sentence is what the live chat stream shows.",
@@ -431,41 +442,7 @@ function defaultNodeLabel(type: WorkflowNodeType, step: EmittedStep): string {
  * graph_json이 null인 레거시 자동화를 위한 2노드 그래프 합성(trigger→executor).
  * 편집/렌더 표면이 항상 그래프를 가질 수 있게 즉석에서 만든다(저장하지 않음).
  */
-export function synthesizeLegacyGraph(automation: {
-  scheduleHuman: string;
-  promptTemplate: string;
-  targetType: "agent" | "firm" | "hub";
-  targetId: string;
-  targetVersion?: string;
-}): WorkflowGraph {
-  return {
-    version: 1,
-    nodes: [
-      {
-        id: "n0",
-        type: "trigger",
-        position: { x: 0, y: 120 },
-        config: { schedule: automation.scheduleHuman },
-        label: "Trigger",
-      },
-      {
-        id: "n1",
-        type: "agent",
-        position: { x: 280, y: 120 },
-        config: {
-          ref: automation.targetId,
-          targetType: automation.targetType,
-          prompt: automation.promptTemplate,
-          ...(automation.targetType === "hub" && automation.targetVersion
-            ? { targetVersion: automation.targetVersion }
-            : {}),
-        },
-        label: automation.targetType === "firm" ? "Firm" : automation.targetType === "hub" ? "Hub Agent" : "Agent",
-      },
-    ],
-    edges: [{ id: "e0-1", source: "n0", target: "n1" }],
-  };
-}
+export { synthesizeLegacyGraph } from "../shared/automation-graph-definition";
 
 export function parseAutomations(text: string): ParseAutomationsResult {
   const idx = text.lastIndexOf(AUTOMATION_HEADING);

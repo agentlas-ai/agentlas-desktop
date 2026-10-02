@@ -13,6 +13,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { mcpProxyControlInfoPath } from "./proxy-channel";
 import { readOnlyBrowserToolIsMutating } from "../../shared/read-only-browser-tools";
+import { oneGraphReadPermissionCall } from "../../shared/one-graph-tool-permission";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -89,12 +90,13 @@ const AGENTLAS_COMPUTER_USE_READ_TOOLS = new Set([
 export function mcpToolIsMutating(input: {
   catalogId?: string | null;
   toolName: string;
+  args?: unknown;
 }): boolean {
   const browserRead = input.catalogId === "agentlas-browser"
     && AGENTLAS_BROWSER_READ_TOOLS.has(input.toolName);
   const nativeRead = input.catalogId === "cua-driver"
     && AGENTLAS_COMPUTER_USE_READ_TOOLS.has(input.toolName);
-  return !(browserRead || nativeRead);
+  return !(browserRead || nativeRead || oneGraphReadPermissionCall(input));
 }
 
 /** Plan observation authority is minted from the actual host launcher, not a
