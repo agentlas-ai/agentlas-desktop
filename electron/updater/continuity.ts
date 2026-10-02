@@ -370,13 +370,30 @@ function quickCheck(databasePath: string): boolean {
 
 function pruneOldRecoveryCopies(root: string, keepPath: string): void {
   try {
+    // A journal (including a quarantined corrupt one) still owns its recovery
+    // copies. Never infer that an old directory is disposable from its age.
+    const updaterRoot = path.dirname(root);
+    if (fs.existsSync(path.join(updaterRoot, "install-journal.v1.json"))
+      || fs.existsSync(path.join(updaterRoot, "install-journal-corrupt.v1.json"))) return;
+    const realRoot = fs.realpathSync(root);
     const directories = fs
       .readdirSync(root, { withFileTypes: true })
-      .filter((entry) => entry.isDirectory())
+      .filter((entry) => entry.isDirectory() && /^[0-9][0-9A-Za-z._-]*-\d{13}$/.test(entry.name))
       .map((entry) => {
         const fullPath = path.join(root, entry.name);
+        const manifestPath = path.join(fullPath, "continuity.json");
+        try {
+          const manifestStat = fs.lstatSync(manifestPath);
+          if (!manifestStat.isFile() || manifestStat.isSymbolicLink() || manifestStat.size > 4 * 1024 * 1024) return null;
+          const manifest: unknown = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+          if (!isValidContinuitySnapshot(manifest)) return null;
+          if (path.resolve(manifest.backupPath) !== path.join(fullPath, "agentlas.sqlite")
+            || path.resolve(manifest.agentsBackupPath) !== path.join(fullPath, "agents")
+            || fs.realpathSync(fullPath) !== path.join(realRoot, entry.name)) return null;
+        } catch { return null; }
         return { fullPath, mtimeMs: fs.statSync(fullPath).mtimeMs };
       })
+      .filter((entry): entry is { fullPath: string; mtimeMs: number } => entry !== null)
       .sort((left, right) => right.mtimeMs - left.mtimeMs);
     let kept = 0;
     for (const directory of directories) {

@@ -5,16 +5,17 @@ type Authority = {
   owner: NonNullable<BrowserApprovalRequestEvent["owner"]>;
   permission: "read" | "write" | "full";
   signal: AbortSignal;
+  unattended: boolean;
 };
 const authorities = new Map<string, Authority>();
 
 /** Only the Main MCP builder can mint authority; request bodies carry an opaque handle. */
 export function registerBrowserApprovalAuthority(
-  owner: Authority["owner"], permission: Authority["permission"],
+  owner: Authority["owner"], permission: Authority["permission"], options: { unattended?: boolean } = {},
 ): { token: string; revoke: () => void } {
   const token = randomUUID();
   const controller = new AbortController();
-  authorities.set(token, { owner: Object.freeze({ ...owner }), permission, signal: controller.signal });
+  authorities.set(token, Object.freeze({ owner: Object.freeze({ ...owner }), permission, signal: controller.signal, unattended: options.unattended === true }));
   return { token, revoke: () => { authorities.delete(token); controller.abort(); } };
 }
 

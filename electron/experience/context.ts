@@ -1,6 +1,8 @@
 import type { ExperienceContextSelection, ExperienceEnvironment } from "../../shared/types";
 import {
+  currentExperienceBaseHash,
   experienceEnvironmentKey,
+  experienceProjectScopeKey,
   listPromotedExperienceProjection,
   type PromotedExperienceProjection,
 } from "./store";
@@ -11,6 +13,7 @@ import {
 } from "./taxonomy";
 import { localEmbeddingTokens, rankHybridLocal } from "../memory/local-embedding";
 import { nativeRecallFor } from "../memory/native-text";
+import { createExperienceApplicationSnapshot } from "./application";
 
 export const EXPERIENCE_CORE = [
   "## Experience",
@@ -84,7 +87,7 @@ function listRuntimeBoundExperienceProjection(input: {
 }
 
 /**
- * Pre-route evidence from reviewed, exact-base-bound Experience items. This is
+ * Pre-route evidence from reviewed Experience owned by the current actor. This is
  * deliberately narrower than prompt injection: only canonical task relations
  * may influence agent choice, and an unverified/foreign-base chip contributes
  * nothing.
@@ -97,7 +100,10 @@ export function buildExperienceRoutingPrior(input: {
   basePackageHash: string | null;
   task: string;
 }): ExperienceRoutingPrior | null {
-  if (!input.basePackageHash || !/^[a-f0-9]{64}$/.test(input.basePackageHash)) return null;
+  // Intake already binds built-in and unpackaged local agents to their stable
+  // installed identity. Reuse that same basis when the runtime has no package.
+  const basePackageHash = input.basePackageHash ?? currentExperienceBaseHash(input.agentId);
+  if (!basePackageHash || !/^[a-f0-9]{64}$/.test(basePackageHash)) return null;
   const environmentProfile = canonicalEnvironmentProfile(input.environment);
   if (!isRuntimeEligibleExperienceEnvironmentProfile(environmentProfile)) return null;
   const taskTerms = classifyCanonicalTaskIds(input.task);
@@ -107,7 +113,7 @@ export function buildExperienceRoutingPrior(input: {
     projectId: input.projectId,
     projectPath: input.projectPath,
     environment: input.environment,
-    basePackageHash: input.basePackageHash,
+    basePackageHash,
     taskTerms,
   });
   const related = candidates
@@ -133,7 +139,7 @@ export function buildExperienceRoutingPrior(input: {
     prior: confidencePrior(candidate),
   })))[0]?.score ?? 0;
   return {
-    // Promoted + attested/verified + exact base + exact environment + canonical
+    // Promoted + attested/verified + current actor + exact environment + canonical
     // relation is equivalent to a curated routing hint, not a mere word match.
     // Bounded query fit breaks ties between several equally governed agents;
     // it can refine a valid relation but can never create one.
@@ -153,7 +159,8 @@ export function buildExperienceContext(input: {
   /** Tokens already occupied by the separate exact Taste session snapshot. */
   reservedApproxTokens?: number;
 }): ExperienceContextSelection {
-  if (!input.basePackageHash || !/^[a-f0-9]{64}$/.test(input.basePackageHash)) {
+  const basePackageHash = input.basePackageHash ?? currentExperienceBaseHash(input.agentId);
+  if (!basePackageHash || !/^[a-f0-9]{64}$/.test(basePackageHash)) {
     return { prompt: "", selectedCandidateIds: [], approximateTokens: 0 };
   }
   const environmentProfile = canonicalEnvironmentProfile(input.environment);
@@ -169,7 +176,7 @@ export function buildExperienceContext(input: {
     projectId: input.projectId,
     projectPath: input.projectPath,
     environment: input.environment,
-    basePackageHash: input.basePackageHash,
+    basePackageHash,
     taskTerms: [...terms],
   });
   // English summary is the capsule; the original wording is a second ranking
@@ -191,12 +198,21 @@ export function buildExperienceContext(input: {
     entry.lexicalScore > 0 || entry.semanticEligible || entry.item.experience.relationScore > 0);
 
   const selectedCandidateIds: string[] = [];
+  const selectedItems: PromotedExperienceProjection[] = [];
   const lines: string[] = [];
   const dynamicTokenBudget = Math.max(
     0,
     EXPERIENCE_SELECTED_MAX_APPROX_TOKENS - Math.max(0, Math.floor(input.reservedApproxTokens ?? 0)),
   );
-  const candidateLines = ranked.map(({ item }) =>
+  const applicationFor = (items: PromotedExperienceProjection[]) => createExperienceApplicationSnapshot({
+    agentId: input.agentId,
+    projectScopeKey: experienceProjectScopeKey(input),
+    currentBaseHash: basePackageHash,
+    environmentKey: experienceEnvironmentKey(input.environment),
+    taskIds: [...terms],
+  }, items);
+  const fittingItems = ranked.slice(0, EXPERIENCE_SELECTED_MAX_ITEMS);
+  const candidateLines = fittingItems.map(({ item }) =>
     `- [experience:${item.experience.id}] ${item.experience.summary.replace(/\s+/g, " ").trim()}`);
   const allPrompt = candidateLines.length > 0
     ? `${EXPERIENCE_CORE}\n\n### Task-selected reviewed items\n${candidateLines.join("\n")}`
@@ -204,8 +220,9 @@ export function buildExperienceContext(input: {
   if (allPrompt && approximateExperienceTokens(allPrompt) <= dynamicTokenBudget) {
     return {
       prompt: allPrompt,
-      selectedCandidateIds: ranked.map(({ item }) => item.experience.id),
+      selectedCandidateIds: fittingItems.map(({ item }) => item.experience.id),
       approximateTokens: approximateExperienceTokens(allPrompt),
+      application: applicationFor(fittingItems.map(({ item }) => item.experience)),
     };
   }
   for (const { item: rankedItem } of ranked) {
@@ -216,6 +233,7 @@ export function buildExperienceContext(input: {
     if (approximateExperienceTokens(proposed) > dynamicTokenBudget) continue;
     lines.push(line);
     selectedCandidateIds.push(item.id);
+    selectedItems.push(item);
   }
 
   const prompt = lines.length > 0
@@ -225,5 +243,6 @@ export function buildExperienceContext(input: {
     prompt,
     selectedCandidateIds,
     approximateTokens: approximateExperienceTokens(prompt),
+    application: applicationFor(selectedItems),
   };
 }

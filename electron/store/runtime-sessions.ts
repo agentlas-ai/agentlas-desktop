@@ -103,12 +103,15 @@ export function saveRuntimeSession(
 ): boolean {
   const agent = normalizeAgentId(options?.agentId);
   const now = new Date().toISOString();
-  const previous = memSessions.get(memKey(chatId, kind, agent)) ?? null;
+  const previous = getRuntimeSession(chatId, kind, agent, options);
   const sameSession = previous?.sessionId === sessionId && previous.fingerprint === fingerprint;
   const carry = (
     next: number | null | undefined,
     kept: number | null | undefined,
-  ): number | null => next ?? (sameSession ? kept ?? null : null);
+  // Omitted metadata preserves a known watermark. An explicit null instead
+  // records missing coverage at this boundary; carrying an older value would
+  // attribute intervening turns to the next measured native turn.
+  ): number | null => next === undefined ? (sameSession ? kept ?? null : null) : next;
   const reportedOutputTokens = carry(options?.reportedOutputTokens, previous?.reportedOutputTokens);
   const reportedInputTokens = carry(options?.reportedInputTokens, previous?.reportedInputTokens);
   const reportedCachedInputTokens = carry(options?.reportedCachedInputTokens, previous?.reportedCachedInputTokens);

@@ -1,4 +1,3 @@
-import { dedicatedGoogleSessionsQuarantined, googleCdpBoundaryRuntimeSource, quarantineDedicatedGoogleSessions } from "../browser/google-session-boundary";
 // Agentlas Browser (CDP) 플러그인 런처 소스.
 //
 // 범용 브라우저 MCP 플러그인 — 특정 사이트/계정과 무관하다. 사용자가 직접 로그인한 Agentlas
@@ -20,6 +19,8 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
 import { BROWSER_APPROVAL_FILE_ENV } from "../browser/approval-channel";
+import { assertDedicatedBrowserProfilePath } from "../browser/profile-path-boundary";
+import { assertInstallBrowserPath, assertInstallBrowserTarget, installBrowserBoundary } from "../browser/install-browser-boundary";
 import { userDataPath } from "../runtime-paths";
 import {
   legacySystemBrowserExecutableCandidates,
@@ -43,6 +44,8 @@ export function playwrightMcpCliPath(): string {
 
 /** 기본 런처 또는 명시한 격리 개발 런처의 절대 경로. */
 export function browserCdpLauncherPath(): string {
+  const isolated = installBrowserBoundary();
+  if (isolated) return isolated.launcher;
   const configured = process.env[BROWSER_CDP_LAUNCHER_PATH_ENV]?.trim();
   if (configured) {
     if (!path.isAbsolute(configured)) throw new Error("Agentlas browser launcher override must be absolute.");
@@ -60,22 +63,27 @@ export function browserCdpLauncherPathForScope(scope: string): string {
   const normalized = scope.trim();
   if (!normalized) throw new Error("Agentlas browser launcher scope must not be empty.");
   const digest = createHash("sha256").update(normalized, "utf8").digest("hex").slice(0, 32);
-  return userDataPath(
+  const target = userDataPath(
     "mcp",
     BROWSER_CDP_SCOPED_LAUNCHER_DIRNAME,
     `agentlas-browser-cdp-${digest}.mjs`,
   );
+  assertInstallBrowserTarget(target);
+  return target;
 }
 
 /** 전용 CDP 크롬 프로필 경로(MCP 런처와 로그인 창이 공유). */
 export function browserCdpProfilePath(): string {
-  const expected = path.join(os.homedir(), ".agentlas", "chrome-cdp-profile");
-  const configured = process.env.AGENTLAS_CDP_PROFILE || expected;
-  if (path.resolve(configured) !== path.resolve(expected)
-    || (fs.existsSync(configured) && fs.realpathSync(configured) !== path.resolve(expected))) {
-    throw new Error("google-session-relogin-required:ownership-unverified");
-  }
-  return expected;
+  const profile = installBrowserBoundary()?.profile || process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), ".agentlas", "chrome-cdp-profile");
+  assertDedicatedBrowserProfilePath(profile, { platform: process.platform, home: os.homedir(), env: process.env, fs, path });
+  return profile;
+}
+
+/** Recheck an exact state destination immediately before touching it. */
+export function assertBrowserCdpProfileTarget(target: string, profile = browserCdpProfilePath()): void {
+  assertInstallBrowserTarget(profile);
+  assertInstallBrowserTarget(target);
+  assertDedicatedBrowserProfilePath(profile, { platform: process.platform, home: os.homedir(), env: process.env, fs, path }, [target]);
 }
 
 /** Agentlas 전용 CDP Chrome 소유 표식. 임의의 기존 9222 프로세스에 붙지 않기 위한 로컬 증거. */
@@ -1095,6 +1103,8 @@ function clearBrowserCdpSingletonArtifacts(): number {
 export function resetBrowserCdpSessionRestoreArtifacts(
   profile = browserCdpProfilePath(),
 ): { sessionArtifactsRemoved: number; preferencesUpdated: boolean } {
+  assertInstallBrowserTarget(profile);
+  assertDedicatedBrowserProfilePath(profile, { platform: process.platform, home: os.homedir(), env: process.env, fs, path });
   let sessionArtifactsRemoved = 0;
   const defaultProfile = path.join(profile, "Default");
   for (const relative of [
@@ -1105,6 +1115,7 @@ export function resetBrowserCdpSessionRestoreArtifacts(
     path.join("Default", "Last Tabs"),
   ]) {
     const candidate = path.join(profile, relative);
+    assertBrowserCdpProfileTarget(candidate, profile);
     try {
       if (!fs.existsSync(candidate)) continue;
       fs.rmSync(candidate, { recursive: true, force: true });
@@ -1114,6 +1125,7 @@ export function resetBrowserCdpSessionRestoreArtifacts(
 
   let preferencesUpdated = false;
   const preferencesPath = path.join(defaultProfile, "Preferences");
+  assertBrowserCdpProfileTarget(preferencesPath, profile);
   try {
     if (fs.existsSync(preferencesPath)) {
       const parsed = JSON.parse(fs.readFileSync(preferencesPath, "utf8")) as Record<string, unknown>;
@@ -1129,6 +1141,7 @@ export function resetBrowserCdpSessionRestoreArtifacts(
       sessionPreferences.startup_urls = [];
       parsed.profile = profilePreferences;
       parsed.session = sessionPreferences;
+      assertBrowserCdpProfileTarget(preferencesPath, profile);
       fs.writeFileSync(preferencesPath, JSON.stringify(parsed), { encoding: "utf8", mode: 0o600 });
       try { fs.chmodSync(preferencesPath, 0o600); } catch { /* best-effort */ }
       preferencesUpdated = true;
@@ -1334,7 +1347,7 @@ export function browserCdpPortReady(): Promise<boolean> {
 
 /** 기본 CDP 포트(MCP 런처와 동일 기본값). */
 export function browserCdpPort(): number {
-  return Number(process.env.AGENTLAS_CDP_PORT || 9222);
+  return installBrowserBoundary()?.port ?? Number(process.env.AGENTLAS_CDP_PORT || 9222);
 }
 
 /** Agentlas에 번들된 Playwright Chrome for Testing 경로만 해석한다. */
@@ -1505,11 +1518,6 @@ async function ensureBrowserCdpHostOnce(options: { headed?: boolean } = {}): Pro
     if (ownership.state !== "owned" || !ownership.pid) {
       throw new BrowserCdpHostError("existing-host", "ownership-unverified");
     }
-    if (!dedicatedGoogleSessionsQuarantined(browserCdpProfilePath())) {
-      await withBrowserCdpMaintenance(() => undefined);
-      return ensureBrowserCdpHostOnce(options);
-    }
-    await quarantineDedicatedGoogleSessions(browserCdpProfilePath(), browserCdpPort(), async () => (await reconcileBrowserCdpOwnerWithRetry()).state === "owned");
     if (!scheduleBrowserCdpGuardian(ownership.pid)) throw new BrowserCdpHostError("guardian", "guardian-unavailable");
     return { started: false, pid: ownership.pid };
   }
@@ -1559,24 +1567,18 @@ export async function ensureBrowserCdpHostHeaded(input: {
   ensure?: (options: { headed?: boolean }) => Promise<BrowserCdpHostEnsureResult>;
   ownership?: () => Promise<BrowserCdpOwnership>;
   portReady?: () => Promise<boolean>;
-  isolated?: () => boolean;
 } = {}): Promise<{ ok: true; pid: number; relaunched: boolean } | { ok: false; reason: "not-owned" | "shared-headless" | "relaunch-failed" }> {
   const portReady = input.portReady ?? browserCdpPortReady;
   const ownership = input.ownership ?? (() => reconcileBrowserCdpOwnerWithRetry());
   const processes = input.processes ?? (() => inspectBrowserCdpProcesses());
   const ensure = input.ensure ?? ((options) => ensureBrowserCdpHost(options));
   const close = input.close ?? ((max) => closeBrowserCdpIfIdle(max));
-  const isolated = input.isolated ?? (() => dedicatedGoogleSessionsQuarantined(browserCdpProfilePath()));
   if (await portReady()) {
     const owned = await ownership();
     if (owned.state !== "owned" || !owned.pid) return { ok: false, reason: "not-owned" };
     const row = (await processes().catch(() => [] as BrowserCdpProcessSnapshot[])).find((entry) => entry.pid === owned.pid);
     if (row && !/--headless\b/.test(row.commandLine)) {
-      try {
-        if (isolated()) return { ok: true, pid: owned.pid, relaunched: false };
-      } catch { return { ok: false, reason: "relaunch-failed" }; }
-      // A visible browser can still hold legacy copied tokens. Reuse requires
-      // the same durable isolation proof as a headless host.
+      return { ok: true, pid: owned.pid, relaunched: false };
     }
     const closed = await close(1);
     if (!closed.closed) return { ok: false, reason: closed.reason === "active-leases" ? "shared-headless" : "relaunch-failed" };
@@ -1942,6 +1944,7 @@ function allowedExecutablePaths() {
   return [BROWSER_RUNTIME_EXE, ...LEGACY_BROWSER_EXES].filter(Boolean);
 }
 function processMatches(snapshot) {
+  assertSafeProfile();
   if (!snapshot || !Number.isInteger(snapshot.pid) || snapshot.pid <= 0) return false;
   if (snapshot.loopbackOnly !== true) return false;
   const actualExecutable = canonicalProfile(snapshot.executable || '');
@@ -1960,6 +1963,7 @@ function processMatches(snapshot) {
   );
 }
 function readOwner() {
+  assertSafeProfile();
   try {
     const owner = JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8'));
     if (!Number.isInteger(owner.pid) || owner.pid <= 0 || !Number.isInteger(owner.port) || typeof owner.profile !== 'string') return null;
@@ -1967,6 +1971,7 @@ function readOwner() {
   } catch (e) { return null; }
 }
 function writeOwner(pid) {
+  assertSafeProfile();
   if (!Number.isInteger(pid) || pid <= 0) return;
   fs.mkdirSync(path.dirname(OWNER_FILE), { recursive: true });
   const temp = OWNER_FILE + '.' + process.pid + '.' + Date.now() + '.' + Math.random().toString(36).slice(2) + '.tmp';
@@ -1977,6 +1982,7 @@ function writeOwner(pid) {
   } finally { try { fs.rmSync(temp, { force: true }); } catch (e) {} }
 }
 function ensurePrivateProfile() {
+  assertSafeProfile();
   fs.mkdirSync(CDP_PROFILE, { recursive: true, mode: 0o700 });
   try { fs.chmodSync(CDP_PROFILE, 0o700); } catch (e) {}
 }
@@ -2154,6 +2160,7 @@ function processIsLive(pid) {
   catch (error) { return error && error.code === 'EPERM'; }
 }
 function readActiveBackoff() {
+  assertSafeProfile();
   try {
     const record = JSON.parse(fs.readFileSync(BACKOFF_FILE, 'utf8'));
     const until = Number(record.until);
@@ -2163,6 +2170,7 @@ function readActiveBackoff() {
   return null;
 }
 function writeBackoff(reason) {
+  assertSafeProfile();
   const temp = BACKOFF_FILE + '.' + process.pid + '.tmp';
   try {
     fs.writeFileSync(temp, JSON.stringify({ until: Date.now() + BACKOFF_MS, reason }), { encoding: 'utf8', mode: 0o600 });
@@ -2170,6 +2178,7 @@ function writeBackoff(reason) {
   } finally { try { fs.rmSync(temp, { force: true }); } catch (e) {} }
 }
 function clearStaleShutdownLock() {
+  assertSafeProfile();
   if (!fs.existsSync(SHUTDOWN_LOCK)) return true;
   try {
     const record = JSON.parse(fs.readFileSync(path.join(SHUTDOWN_LOCK, 'owner.json'), 'utf8'));
@@ -2193,6 +2202,7 @@ async function waitForShutdownLock(timeoutMs = 15000) {
   }
 }
 function pruneLeases() {
+  assertSafeProfile();
   let entries = [];
   try { entries = fs.readdirSync(LEASE_DIR); } catch (e) { return 0; }
   let live = 0;
@@ -2239,6 +2249,7 @@ async function acquireLease(kind) {
   return file;
 }
 function releaseLease(file) {
+  assertSafeProfile();
   if (!file || path.dirname(path.resolve(file)) !== path.resolve(LEASE_DIR)) return;
   try {
     const record = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -2289,10 +2300,12 @@ function tryAcquireShutdownLock() {
   return false;
 }
 function releaseShutdownLock() {
+  assertSafeProfile();
   try { fs.rmSync(path.join(SHUTDOWN_LOCK, 'owner.json'), { force: true }); } catch (e) {}
   try { fs.rmdirSync(SHUTDOWN_LOCK); } catch (e) {}
 }
 function clearStaleLaunchLock() {
+  assertSafeProfile();
   if (!fs.existsSync(LAUNCH_LOCK)) return true;
   try {
     const record = JSON.parse(fs.readFileSync(path.join(LAUNCH_LOCK, 'owner.json'), 'utf8'));
@@ -2305,6 +2318,7 @@ function clearStaleLaunchLock() {
   return !fs.existsSync(LAUNCH_LOCK);
 }
 async function acquireLaunchLock(timeoutMs = 15000) {
+  assertSafeProfile();
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -2320,6 +2334,7 @@ async function acquireLaunchLock(timeoutMs = 15000) {
   throw new Error('Agentlas dedicated browser launch is still in progress.');
 }
 function releaseLaunchLock() {
+  assertSafeProfile();
   try {
     const record = JSON.parse(fs.readFileSync(path.join(LAUNCH_LOCK, 'owner.json'), 'utf8'));
     if (Number(record.pid) !== process.pid) return;
@@ -2327,6 +2342,7 @@ function releaseLaunchLock() {
   try { fs.rmSync(LAUNCH_LOCK, { recursive: true, force: true }); } catch (e) {}
 }
 function clearOwner(pid) {
+  assertSafeProfile();
   try {
     const owner = JSON.parse(fs.readFileSync(OWNER_FILE, 'utf8'));
     if (Number(owner.pid) === pid) fs.rmSync(OWNER_FILE, { force: true });
@@ -2652,7 +2668,7 @@ async function guardOwnedBrowser(browserPid, ownerPid) {
  * 그래서 파일이 자기 계약 번호와 writer를 들고 다닌다. 더 높은 계약과 같은 계약의 다른
  * writer는 보존한다. 같은 Desktop 계약은 현재 설치 앱의 런타임 경로로 다시 결합한다.
  */
-export const BROWSER_CDP_LAUNCHER_CONTRACT = 18;
+export const BROWSER_CDP_LAUNCHER_CONTRACT = 22;
 export const BROWSER_CDP_LAUNCHER_WRITER = "agentlas-desktop";
 
 const UNIFIED_CUA_BOOTSTRAP_SOURCE = String.raw`
@@ -2809,6 +2825,7 @@ function runNativeBrowserMcp() {
 function createLauncherSource(
   CURRENT_BROWSER_RUNTIME: ReturnType<typeof resolveAgentlasBrowserRuntime>,
 ): string {
+  const installBoundary = installBrowserBoundary();
   const externalRuntimeModule = (relativeFromMcpTools: string): string => {
     const compiled = path.join(__dirname, relativeFromMcpTools);
     return compiled.split(path.sep).map((segment) => segment === "app.asar" ? "app.asar.unpacked" : segment).join(path.sep);
@@ -2830,7 +2847,22 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createRequire } from 'node:module';
 import { createHash } from 'node:crypto';
 
-const PORT = Number(process.env.AGENTLAS_CDP_PORT || 9222);
+const INSTALL_BROWSER_BOUNDARY = ${JSON.stringify(installBoundary)};
+${assertInstallBrowserPath.toString()}
+if (INSTALL_BROWSER_BOUNDARY) {
+  const bound = INSTALL_BROWSER_BOUNDARY;
+  for (const target of [bound.profile, bound.launcher, process.argv[1]]) assertInstallBrowserPath(bound.root, target, { fs, path, canonicalRoot: bound.canonicalRoot });
+  if ((process.env.AGENTLAS_CDP_PROFILE && path.resolve(process.env.AGENTLAS_CDP_PROFILE) !== bound.profile)
+    || (process.env.AGENTLAS_CDP_PORT && process.env.AGENTLAS_CDP_PORT !== String(bound.port))
+    || (process.env.AGENTLAS_CDP_LAUNCHER && path.resolve(process.env.AGENTLAS_CDP_LAUNCHER) !== bound.launcher)
+    || bound.port === 9222 || !Number.isInteger(bound.port) || bound.port < 1024 || bound.port > 65535) {
+    throw new Error('browser-install-boundary-refused');
+  }
+  process.env.AGENTLAS_CDP_PROFILE = bound.profile;
+  process.env.AGENTLAS_CDP_PORT = String(bound.port);
+  process.env.AGENTLAS_CDP_LAUNCHER = bound.launcher;
+}
+const PORT = INSTALL_BROWSER_BOUNDARY?.port ?? Number(process.env.AGENTLAS_CDP_PORT || 9222);
 const NATIVE_ENDPOINT = process.env.AGENTLAS_NATIVE_BROWSER_ENDPOINT || '';
 const NATIVE_TOKEN = process.env.AGENTLAS_NATIVE_BROWSER_TOKEN || '';
 let nativeLeaseEndpoint = '';
@@ -2867,11 +2899,17 @@ function nativeRequest(endpoint, method) {
     req.end();
   });
 }
-const EXPECTED_CDP_PROFILE = path.join(os.homedir(), '.agentlas', 'chrome-cdp-profile');
-const CDP_PROFILE = process.env.AGENTLAS_CDP_PROFILE || EXPECTED_CDP_PROFILE;
-if (path.resolve(CDP_PROFILE) !== path.resolve(EXPECTED_CDP_PROFILE)
-  || (fs.existsSync(CDP_PROFILE) && fs.realpathSync(CDP_PROFILE) !== path.resolve(EXPECTED_CDP_PROFILE)))
-  throw new Error('google-session-relogin-required:ownership-unverified');
+const CDP_PROFILE = INSTALL_BROWSER_BOUNDARY?.profile || process.env.AGENTLAS_CDP_PROFILE || path.join(os.homedir(), '.agentlas', 'chrome-cdp-profile');
+${assertDedicatedBrowserProfilePath.toString()}
+function assertSafeProfile(targets = []) {
+  if (INSTALL_BROWSER_BOUNDARY) {
+    const canonicalRoot = INSTALL_BROWSER_BOUNDARY.canonicalRoot;
+    assertInstallBrowserPath(INSTALL_BROWSER_BOUNDARY.root, CDP_PROFILE, { fs, path, canonicalRoot });
+    for (const target of targets) assertInstallBrowserPath(INSTALL_BROWSER_BOUNDARY.root, target, { fs, path, canonicalRoot });
+  }
+  assertDedicatedBrowserProfilePath(CDP_PROFILE, { platform: process.platform, home: os.homedir(), env: process.env, fs, path }, targets);
+}
+assertSafeProfile();
 const OWNER_FILE = path.join(CDP_PROFILE, '.agentlas-cdp-owner.json');
 const LEASE_DIR = path.join(CDP_PROFILE, ${JSON.stringify(BROWSER_CDP_LEASE_DIRNAME)});
 const SHUTDOWN_LOCK = path.join(CDP_PROFILE, ${JSON.stringify(BROWSER_CDP_SHUTDOWN_LOCK_BASENAME)});
@@ -2913,9 +2951,9 @@ function portReady(port) {
 
 ${BROWSER_CDP_OWNERSHIP_RUNTIME_SOURCE}
 ${BROWSER_CDP_LIFECYCLE_RUNTIME_SOURCE}
-${googleCdpBoundaryRuntimeSource()}
 
 function resetSessionRestoreArtifacts() {
+  assertSafeProfile();
   for (const relative of [
     path.join('Default', 'Sessions'),
     path.join('Default', 'Current Session'),
@@ -2923,9 +2961,11 @@ function resetSessionRestoreArtifacts() {
     path.join('Default', 'Last Session'),
     path.join('Default', 'Last Tabs'),
   ]) {
+    assertSafeProfile([path.join(CDP_PROFILE, relative)]);
     try { fs.rmSync(path.join(CDP_PROFILE, relative), { recursive: true, force: true }); } catch (e) {}
   }
   const preferencesPath = path.join(CDP_PROFILE, 'Default', 'Preferences');
+  assertSafeProfile([preferencesPath]);
   try {
     if (!fs.existsSync(preferencesPath)) return;
     const parsed = JSON.parse(fs.readFileSync(preferencesPath, 'utf8'));
@@ -2935,6 +2975,7 @@ function resetSessionRestoreArtifacts() {
     parsed.profile.exited_cleanly = true;
     parsed.session.restore_on_startup = 5;
     parsed.session.startup_urls = [];
+    assertSafeProfile([preferencesPath]);
     fs.writeFileSync(preferencesPath, JSON.stringify(parsed), { encoding: 'utf8', mode: 0o600 });
     try { fs.chmodSync(preferencesPath, 0o600); } catch (e) {}
   } catch (e) {}
@@ -2945,11 +2986,6 @@ async function ensureChromeUnlocked() {
   if (await portReady(PORT)) {
     const ownership = await reconcileOwnerWithRetry();
     if (ownership.state === 'owned') {
-      if (!markerCurrent(CDP_PROFILE, ownedSessionDirectory(CDP_PROFILE, EXPECTED_CDP_PROFILE))) {
-        if (!(await terminateAttestedBrowserRoot(ownership.pid))) throw new Error('google-session-relogin-required:quarantine-unavailable');
-        return ensureChromeUnlocked();
-      }
-      await quarantineGoogleCdp(CDP_PROFILE, PORT, async () => (await reconcileOwnerWithRetry()).state === 'owned');
       scheduleBrowserGuardian(ownership.pid);
       log('owned CDP already up on', PORT, ownership.adopted ? '(adopted)' : '');
       return;
@@ -2993,7 +3029,6 @@ async function ensureChromeUnlocked() {
     if (await portReady(PORT)) {
       const ownership = await reconcileOwnerWithRetry(2, 50);
       if (ownership.state === 'owned') {
-        await quarantineGoogleCdp(CDP_PROFILE, PORT, async () => (await reconcileOwnerWithRetry()).state === 'owned');
         scheduleBrowserGuardian(ownership.pid);
         log('CDP ready', ownership.pid);
         return;
@@ -3055,9 +3090,10 @@ function reportSocialEngage(report) {
 function browserApprovalFailure(denied) {
               const code = denied === 'approval-expired' ? 'approval_expired'
                 : denied === 'approval-cancelled' ? 'cancelled'
-                : denied === 'approval-unavailable' || denied === 'unverified-site' ? 'approval_required' : 'approval_declined';
+                : denied === 'approval-required' || denied === 'approval-unavailable' || denied === 'unverified-site' ? 'approval_required' : 'approval_declined';
               const message = code === 'approval_expired' ? 'APPROVAL_EXPIRED: The approval deadline elapsed without a decision. The action was not executed; the user did not decline it.'
                 : code === 'cancelled' ? 'CANCELLED: This browser approval request was cancelled. The action was not executed.'
+                : denied === 'approval-required' ? 'APPROVAL_REQUIRED: This unattended run needs an explicit browser approval. The action was not executed. Continue in an interactive chat to approve it.'
                 : code === 'approval_required' ? 'APPROVAL_REQUIRED: The approval service or current site could not be verified. The action was not executed.'
                 : 'DENIED: The user declined this ' + denied + ' browser action. The action was not executed. Do not say approval is still pending and do not retry it in this run.';
   return { code, content: [{ type: 'text', text: message }], isError: true };
@@ -3087,7 +3123,7 @@ function requestApproval(site, actionType, summary, signal) {
     if (!info || !info.port) { log('no approver (app not running); autonomy=' + autonomy + ' action=' + actionType); return finish('unavailable'); }
     const payload = JSON.stringify({ site, actionType, summary, authority: process.env.AGENTLAS_BROWSER_APPROVAL_AUTHORITY });
     req = http.request({ host: '127.0.0.1', port: info.port, path: '/approve', method: 'POST', headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload), 'authorization': 'Bearer ' + info.token }, timeout: 125000 }, (res) => {
-      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { const decision = JSON.parse(b).decision; finish(['approved', 'denied', 'expired', 'cancelled'].includes(decision) ? decision : 'unavailable'); } catch (e) { finish('unavailable'); } });
+      let b = ''; res.on('data', (d) => { b += d; }); res.on('end', () => { try { const decision = JSON.parse(b).decision; finish(['approved', 'denied', 'expired', 'cancelled', 'required'].includes(decision) ? decision : 'unavailable'); } catch (e) { finish('unavailable'); } });
     });
     req.on('error', () => finish(signal && signal.aborted ? 'cancelled' : 'unavailable'));
     req.on('timeout', () => { finish('expired'); req.destroy(); });
@@ -3426,18 +3462,32 @@ async function main() {
   let unifiedCuaApi = null;
   const unifiedSignalContext = new AsyncLocalStorage();
   let unifiedNativeGate = null;
+  const nativeGuestCaptureSources = new Map();
   const unifiedEvaluations = new Map();
   const unifiedTabTargets = new Map();
   const unifiedAppTargets = new Map();
   const nativeControlRequest = (route, body, signal) => new Promise((resolve, reject) => {
     const file = process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE || '';
-    if (!file || !path.isAbsolute(file)) { reject(new Error('unified-cua-native-not-selected')); return; }
+    const nativeTarget = typeof body.app === 'string' && body.app.startsWith('native-guest:');
+    const nativeSource = typeof body.sourceId === 'string' && body.sourceId.startsWith('native-guest:');
+    const wantsNative = nativeTarget || nativeSource || body.nativeScope === true || (!file && process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE !== undefined);
+    if (!wantsNative && (!file || !path.isAbsolute(file))) { reject(new Error('unified-cua-native-not-selected')); return; }
     let info;
     try {
+      if (wantsNative) {
+        const capability = JSON.parse(process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE);
+        if (!capability || typeof capability.endpoint !== 'string' || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(capability.endpoint)
+          || typeof capability.token !== 'string' || !/^[a-f0-9]{64}$/.test(capability.token)
+          || typeof capability.scopeId !== 'string' || !/^[a-f0-9-]{36}$/i.test(capability.scopeId)) throw new Error();
+        info = { port: Number(new URL(capability.endpoint).port), token: capability.token };
+        if (info.port < 1 || info.port > 65535) throw new Error();
+        route = '/native-guest' + route; body = { ...body, scopeId: capability.scopeId, ...(nativeTarget && !body.sourceId && nativeGuestCaptureSources.has(body.app) ? { sourceId: nativeGuestCaptureSources.get(body.app) } : {}) };
+      } else {
       const stat = fs.lstatSync(file);
       if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > 8192 || (process.platform !== 'win32' && ((stat.mode & 0o077) !== 0 || (typeof process.getuid === 'function' && stat.uid !== process.getuid())))) throw new Error();
       info = JSON.parse(fs.readFileSync(file, 'utf8'));
       if (!info || info.schemaVersion !== 1 || !Number.isInteger(info.port) || info.port < 1 || info.port > 65535 || typeof info.token !== 'string' || !/^[0-9a-f-]{36}$/i.test(info.token)) throw new Error();
+      }
     } catch { reject(new Error('unified-cua-native-capability-invalid')); return; }
     const bytes = Buffer.from(JSON.stringify(body), 'utf8');
     let response = null;
@@ -3446,7 +3496,7 @@ async function main() {
     }, timeout: 12000 }, (res) => {
       response = res; let data = '';
       res.on('data', (chunk) => { data += chunk; if (data.length > 6 * 1024 * 1024) req.destroy(new Error('unified-cua-native-response-limit')); });
-      res.on('end', () => { try { const value = JSON.parse(data); value && value.ok ? resolve(value) : reject(new Error(String(value && (value.message || value.error) || 'unified-cua-native-failed'))); } catch { reject(new Error('unified-cua-native-response-invalid')); } });
+      res.on('end', () => { try { const value = JSON.parse(data); if (nativeTarget && route === '/native-guest/action' && !['focusApp', 'listApps'].includes(body.action)) nativeGuestCaptureSources.delete(body.app); value && value.ok ? resolve(value) : reject(new Error(String(value && (value.message || value.error) || 'unified-cua-native-failed'))); } catch { reject(new Error('unified-cua-native-response-invalid')); } });
     });
     const cancel = () => req.destroy(new Error('unified-cua-cancelled'));
     signal?.addEventListener('abort', cancel, { once: true });
@@ -3457,12 +3507,20 @@ async function main() {
     if (signal?.aborted) throw new Error('unified-cua-cancelled');
     if (!unifiedNativeGate) throw new Error('unified-cua-native-gate-unavailable');
     await unifiedNativeGate.authorize(name, signal);
-    if (name === 'list_apps') return nativeControlRequest('/action', { action: 'listApps' }, signal);
+    if (name === 'list_apps') {
+      const os = await nativeControlRequest('/action', { action: 'listApps' }, signal);
+      if (process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE && process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) {
+        const native = await nativeControlRequest('/action', { action: 'listApps', nativeScope: true }, signal);
+        return { ...os, apps: [...(os.apps || []), ...(native.apps || [])], nativeGuestAvailable: native.ok === true };
+      }
+      return os;
+    }
     if (name === 'focus_app') return nativeControlRequest('/action', { action: 'focusApp', app: args.app }, signal);
     if (name === 'get_screen') {
-      const capture = await nativeControlRequest('/capture', args.source_id ? { sourceId: args.source_id } : {}, signal);
+      const capture = await nativeControlRequest('/capture', { ...(args.source_id ? { sourceId: args.source_id } : {}), ...(args.app ? { app: args.app } : {}) }, signal);
       if (capture && capture.preview && typeof capture.preview === 'object') {
         const preview = { ...capture.preview };
+        if (typeof args.app === 'string' && args.app.startsWith('native-guest:') && typeof preview.selectedSourceId === 'string') nativeGuestCaptureSources.set(args.app, preview.selectedSourceId);
         const match = typeof preview.dataUrl === 'string' ? preview.dataUrl.match(/^data:image\/(png|jpeg);base64,([A-Za-z0-9+/=]+)$/) : null;
         const images = unifiedSignalContext.getStore()?.images;
         if (match && images && images.length < 2) images.push({ type: 'image', mimeType: 'image/' + match[1], data: match[2] });
@@ -3505,7 +3563,7 @@ async function main() {
     const [{ QuickJsEngine }, { createUnifiedComputerUse }, { createNativeCuaToolGate }] = await Promise.all([
       import(pathToFileURL(QUICKJS_ENGINE_MODULE).href), import(pathToFileURL(UNIFIED_CUA_ADAPTER_MODULE).href), import(pathToFileURL(UNIFIED_CUA_NATIVE_GATE_MODULE).href),
     ]);
-    if (process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) {
+    if (process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE || process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) {
       let session;
       try { session = JSON.parse(process.env.AGENTLAS_UNIFIED_CUA_GATE_SESSION || ''); } catch { throw new Error('unified-cua-native-gate-unavailable'); }
       unifiedNativeGate = createNativeCuaToolGate({ controlFile: process.env.AGENTLAS_UNIFIED_CUA_GATE_CONTROL || '',
@@ -3529,7 +3587,7 @@ async function main() {
         }
         return response && response.result;
       } },
-      ...(process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE ? { native: { platform: process.platform, call: nativeToolCall } } : {}),
+      ...((process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE || process.env.AGENTLAS_COMPUTER_USE_CONTROL_FILE) ? { native: { platform: process.platform, call: nativeToolCall } } : {}),
       signal: () => unifiedSignalContext.getStore()?.signal,
     });
     const invoke = async (target, method, args, signal) => {
@@ -3844,6 +3902,7 @@ export function shouldReplaceBrowserCdpLauncher(
 export function materializeBrowserCdpLauncher(scope?: string): string {
   const normalizedScope = scope?.trim() || null;
   const dest = normalizedScope ? browserCdpLauncherPathForScope(normalizedScope) : browserCdpLauncherPath();
+  assertInstallBrowserTarget(dest);
   try {
     const context = resolveLauncherContext();
     const LAUNCHER_SOURCE = context.source;
@@ -3865,6 +3924,7 @@ export function materializeBrowserCdpLauncher(scope?: string): string {
     const shouldReplaceBrowserCdpLauncher = (existing: string | null): boolean =>
       shouldReplaceBrowserCdpLauncherWithContext(existing, context.isPackaged, LAUNCHER_SOURCE);
     fs.mkdirSync(path.dirname(dest), { recursive: true });
+    assertInstallBrowserTarget(dest);
     const existing = fs.existsSync(dest) ? fs.readFileSync(dest, "utf8") : null;
     if (existing === LAUNCHER_SOURCE) return dest;
     // An explicitly isolated host launcher is owned by this build. Applying

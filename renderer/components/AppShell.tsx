@@ -272,7 +272,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         jobs={multimodalJobs}
         avoidComposer={pathname.startsWith("/workspace/task")}
         locale={locale}
-        onOpen={() => router.push("/work")}
+        onOpen={() => router.push("/dashboard")}
       />
       <ImportAgentsModal
         open={importOpen}

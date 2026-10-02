@@ -1892,6 +1892,8 @@ export interface ChatGoalContext {
   executionLocation?: "desktop-local" | "web-hosted";
   /** Main-owned: a read-only effect observation is running for this Goal (look before asking). */
   effectObservation?: "checking" | null;
+  /** Main observed an exact parked automation awaiting execution ownership review. */
+  automationOwnershipReviewRequired?: boolean;
   wait?: {
     waitId: string;
     state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";
@@ -1902,13 +1904,31 @@ export interface ChatGoalContext {
   };
 }
 
+/** Exact Main-owned candidate for restoring a legacy automation's Goal controls.
+ * This is a review snapshot, not execution or workspace authority. */
+export interface GoalAutomationExecutionReview {
+  automationId: string;
+  title: string;
+  automationCreatedAt: string;
+  definitionDigest: string;
+  goalId: string;
+  rootChatId: string;
+  longRunId: string;
+  revision: number;
+  version: number;
+  canonicalGoalDigest: string;
+  snapshotDigest: string;
+}
+
 /** Main-owned snapshot for an in-place review before manually resuming a Goal. */
 export interface GoalResumeReview {
   runId: string;
   version: number;
   attemptIds: string[];
   attemptSetDigest: string;
-  blocker: "running" | "too_many" | "automation" | "missing_activity" | null;
+  blocker: "running" | "too_many" | "automation" | "missing_activity" | "automation_setup" | null;
+  automationOwnership?: GoalAutomationExecutionReview;
+  automationSetup?: { automationId: string; reason: "runtime" | "hub" };
   attempts: Array<{
     id: string;
     invocationRunId: string | null;
@@ -1925,6 +1945,7 @@ export interface GoalResumeReview {
 export type GoalResumeConfirmation = Pick<GoalResumeReview,
   "runId" | "version" | "attemptIds" | "attemptSetDigest"> & {
     reviewedAttemptIds: string[];
+    automationOwnership?: GoalAutomationExecutionReview & { acknowledged: true };
   };
 
 export type CanonicalTaskStatus =
@@ -2676,6 +2697,8 @@ export interface BrowserApprovalRequestEvent {
 }
 
 // ── 자동화 — SQLite 영속 + 앱 실행 중 백그라운드 스케줄러 ────────────
+/** Closed owner choice only. Local paths and invocation capabilities never cross this DTO. */
+export type AutomationWorkspaceMode = "follow_goal" | "project" | "standalone";
 export interface Automation {
   monitor?: AutomationMonitorContract;
   executionAvailability?: "app-running";
@@ -2689,6 +2712,13 @@ export interface Automation {
   targetId: string;
   /** Explicit project grounding for this automation session. null means no project context. */
   projectId?: string | null;
+  /** Main projection of the workspace choice, stored separately as an owner-intent receipt. */
+  workspaceMode?: AutomationWorkspaceMode;
+  /** Main-only ownership check projected as a boolean; no source path or grant is exposed. */
+  workspaceCanFollowGoal?: boolean;
+  workspaceNeedsReview?: boolean;
+  /** Identified review candidate only; confers no workspace authority. */
+  workspaceGoalCandidate?: { goalId: string; label: string };
   /** 실행 시 사용자 입력 대신 들어갈 프롬프트 템플릿 */
   promptTemplate: string;
   /** 자동화가 웹/화면 조작을 해야 할 때 선호하는 실행 도구. */
@@ -2736,7 +2766,7 @@ export interface Automation {
  */
 export type AutomationCreateInput = Omit<
   Automation,
-  "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy" | "executionPermission"
+  "id" | "createdAt" | "lastRunAt" | "enabled" | "nextRunAt" | "createdBy" | "executionPermission" | "goalId" | "workspaceCanFollowGoal" | "workspaceNeedsReview" | "workspaceGoalCandidate"
 > & {
   executionPermission?: AutomationExecutionPermission;
 };
@@ -2747,12 +2777,16 @@ export interface AutomationUpdatePatch {
   name?: string;
   /** 목적 문장. 빈 문자열 = 지움, undefined = 미변경. */
   goal?: string;
-  /** persistent goal 조인 키. null = 해제, undefined = 미변경. */
+  /** Trusted Main store association only. Desktop IPC rejects this field. */
   goalId?: string | null;
   scheduleHuman?: string;
   targetType?: AutomationTargetType;
   targetId?: string;
   projectId?: string | null;
+  /** Omitted preserves intent; explicit standalone revokes inheritance even for null -> null project. */
+  workspaceMode?: AutomationWorkspaceMode;
+  /** Explicit identified Goal workspace choice; never the automation goal association. */
+  workspaceGoalId?: string;
   promptTemplate?: string;
   toolMode?: AutomationToolMode;
   hubMode?: AutomationHubMode;
@@ -4967,6 +5001,8 @@ export interface McpInvocationEvent {
     result?: string;
     id?: string;
     isError?: boolean;
+    /** Main-computed digest of returned media/artifact metadata, for repetition checks only. */
+    observationDigest?: string;
     /** Closed cause shared by live Activity, durable failure rows, and replay. */
     failureCode?: ToolFailureCode;
     /** Verified public URLs observed in this tool's own input or result. */
@@ -4977,7 +5013,7 @@ export interface McpInvocationEvent {
   /** 생성 토큰 수 — final에 동봉. kind:"usage"면 실행 중 라이브 누적치(단조 증가, 추정 포함). */
   tokens?: number;
   /** Runner-observed input+output for this exact turn; absent means unknown, never zero. */
-  observedUsage?: { inputTokens: number; outputTokens: number };
+  observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
   /** reasoning(thinking) 구간 신호(kind:"reasoning") — 상태줄 "생각 중…" 회전과
    *  종료 후 "N초 동안 생각함" 표시의 근거. durationMs는 end에만 동봉.
    *
@@ -5032,7 +5068,7 @@ export interface InvocationRuntimeFailure {
 }
 
 /** 워크플로우 그래프 노드의 라이브 실행 상태(설계 §5 P2 — 캔버스 오버레이). */
-export type WorkflowNodeRunState = "pending" | "running" | "done" | "failed" | "skipped";
+export type WorkflowNodeRunState = "pending" | "running" | "done" | "failed" | "skipped" | "needs_input";
 
 /** Main-confirmed runtime actually used by one graph run. */
 export interface WorkflowRunRuntimeFact {
@@ -5048,7 +5084,7 @@ export interface WorkflowRunSnapshot {
   runId: string;
   automationId: string;
   startedAt: string;
-  status: "running" | "ok" | "error";
+  status: "running" | "ok" | "error" | "needs_input";
   /** Durable run mode; a simulation checkpoint must never resume live. */
   simulation: boolean;
   /** 노드 id → 마지막 상태. */
@@ -6551,6 +6587,7 @@ export interface FailureEventUi {
 }
 
 export type InvocationRunStatus =
+  | "waiting_input"
   | "running"
   | "cancelling"
   | "completed"
@@ -8129,7 +8166,7 @@ export interface AgentlasIpc {
   };
   /** Main-owned semantic decision used before a new One conversation starts. */
   oneRequestIntent: {
-    resolve: (prompt: string) => Promise<{
+    resolve: (prompt: string, runtimeSelection?: RuntimeSelection) => Promise<{
       intent: "conversation" | "task" | "undecided";
       source: "llm" | "unavailable";
     }>;

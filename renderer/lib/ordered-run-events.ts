@@ -2,23 +2,30 @@ import type { McpInvocationEvent } from "@shared/types";
 import type { RunEventReplay, RunEventReplayInput } from "@shared/run-event-delivery";
 import { isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 
+interface RecoveryCheckpoint {
+  throughOrdinal: number;
+  /** Check immediately before applying asynchronous hydration, outside queued state updaters. */
+  isCurrent: () => boolean;
+}
 interface Options {
   runId: string; chatId: string;
   listen: (listener: (event: McpInvocationEvent) => void) => () => void;
   replay: (input: RunEventReplayInput) => Promise<RunEventReplay>;
   consume: (event: McpInvocationEvent) => void;
   /** Canonical transcript/activity hydration, not replay of evicted side effects. */
-  recover: (snapshot: RunEventReplay) => Promise<void>;
+  recover: (snapshot: RunEventReplay, checkpoint: RecoveryCheckpoint) => Promise<boolean>;
   schedule?: (callback: () => void) => () => void;
   pollMs?: number;
 }
 /** One gate before every projection and legacy effect; reducer-only dedupe is too late. */
 export function subscribeOrderedRunEvents(options: Options): () => void {
   let disposed = false, cursor = 0, querying = false, cancelFlush: (() => void) | null = null;
+  let projectionRevision = 0;
   const pending = new Map<number, McpInvocationEvent>();
   const sizes = new Map<number, number>();
   let pendingBytes = 0, needsHydration = false;
   const schedule = options.schedule ?? (callback => { const id = requestAnimationFrame(callback); return () => cancelAnimationFrame(id); });
+  const consume = (event: McpInvocationEvent) => { projectionRevision++; options.consume(event); };
   const owns = (event: McpInvocationEvent) => event.delivery?.schemaVersion === "agentlas.run-event-delivery.v1"
     && event.delivery.runId === options.runId && event.delivery.chatId === options.chatId
     && Number.isSafeInteger(event.delivery.ordinal) && event.delivery.ordinal > 0;
@@ -33,9 +40,9 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
   };
   const flush = () => {
     cancelFlush = null;
-    if (disposed || querying) return;
+    if (disposed) return;
     let partial: McpInvocationEvent | null = null;
-    const emitPartial = () => { if (partial && !disposed) options.consume(partial); partial = null; };
+    const emitPartial = () => { if (partial && !disposed) consume(partial); partial = null; };
     let count = 0;
     const deadline = performance.now() + 8;
     while (!disposed && pending.has(cursor + 1) && count++ < 20_000 && performance.now() < deadline) {
@@ -52,27 +59,34 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
             ? { ...projected, delta: undefined, text: partial.text + event.delta }
             : { ...projected, delta: (partial.delta ?? "") + event.delta };
         } else partial = projected;
-      } else { emitPartial(); if (!disposed) options.consume(projected); }
+      } else { emitPartial(); if (!disposed) consume(projected); }
     }
     emitPartial();
     if (disposed) return;
     if (pending.has(cursor + 1)) armFlush();
     else if (pending.size) void query();
   };
-  const armFlush = () => { if (!disposed && !querying && !cancelFlush) cancelFlush = schedule(flush); };
+  // Replay owns only its request, never delivery of an already available live prefix.
+  const armFlush = () => { if (!disposed && pending.has(cursor + 1) && !cancelFlush) cancelFlush = schedule(flush); };
   const query = async (forceHydration = false) => {
     if (disposed || querying) return;
     querying = true;
+    const queryCursor = cursor, queryRevision = projectionRevision;
+    const isCurrent = () => !disposed && cursor === queryCursor && projectionRevision === queryRevision;
     try {
-      const snapshot = await options.replay({ runId: options.runId, chatId: options.chatId, afterOrdinal: cursor });
+      const snapshot = await options.replay({ runId: options.runId, chatId: options.chatId, afterOrdinal: queryCursor });
       if (disposed || snapshot.runId !== options.runId || snapshot.chatId !== options.chatId) return;
       if (snapshot.status === "complete" && !forceHydration && !needsHydration) {
         for (const event of snapshot.events) enqueue(event);
       } else if (snapshot.receipt) {
-        await options.recover(snapshot);
-        if (disposed) return;
+        // An unavailable journal has no known wire cursor. Its canonical recovery
+        // must retain our cursor, and no recovery may overwrite newer live/legacy UI.
+        if (!isCurrent() || (snapshot.status !== "unavailable" && snapshot.latestOrdinal < cursor)) return;
+        const throughOrdinal = Math.max(cursor, snapshot.latestOrdinal);
+        const applied = await options.recover(snapshot, { throughOrdinal, isCurrent });
+        if (!applied || !isCurrent()) return;
         needsHydration = false;
-        cursor = Math.max(cursor, snapshot.latestOrdinal);
+        cursor = throughOrdinal;
         for (const ordinal of pending.keys()) if (ordinal <= cursor) {
           pending.delete(ordinal); pendingBytes -= sizes.get(ordinal) ?? 0; sizes.delete(ordinal);
         }
@@ -83,7 +97,7 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
   const stopListening = options.listen(event => {
     if (disposed) return;
     // Older hosts retain their legacy path; a forged/mismatched typed identity is never accepted.
-    if (!event.delivery) { options.consume(event); return; }
+    if (!event.delivery) { consume(event); return; }
     enqueue(event);
     if (pending.has(cursor + 1)) armFlush();
     else if (pending.size) void query();

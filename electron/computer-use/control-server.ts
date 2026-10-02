@@ -1,3 +1,4 @@
+import { handleNativeGuestComputerUse, revokeNativeGuestComputerUseScopes } from "./native-guest";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -39,6 +40,8 @@ interface Point {
 
 let server: http.Server | null = null;
 let boundPort = 0;
+let starting: Promise<number> | null = null;
+let generation = 0;
 let token = "";
 let actionQueue: Promise<unknown> = Promise.resolve();
 const auditRows: AuditRow[] = [];
@@ -421,10 +424,25 @@ function writePrivateInfoFile(): void {
 
 export function startComputerUseControlServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
-  if (process.platform !== "darwin") return Promise.resolve(0);
+
+  if (starting) return starting;
+  const ownedGeneration = ++generation;
   token = randomUUID();
-  return new Promise((resolve) => {
+  const pending = new Promise<number>((resolve) => {
     const srv = http.createServer((req, res) => {
+      // Separate authority namespace. Invalid scoped requests never reach OS routes.
+      if (req.url?.startsWith("/native-guest/")) {
+        if (req.method !== "POST" || req.headers.origin) { req.resume(); writeJson(res, 403, { ok: false, error: "native-guest-route-denied" }); return; }
+        const deadline = setTimeout(() => { req.destroy(); }, 5_000);
+        void readJsonBody(req).then(async body => {
+          clearTimeout(deadline);
+          if (!body) return writeJson(res, 400, { ok: false, error: "native-guest-input-invalid" });
+          const result = await handleNativeGuestComputerUse(req.url!.slice("/native-guest/".length), req.headers.authorization, body);
+          writeJson(res, 200, result);
+        }).catch(() => { clearTimeout(deadline); writeJson(res, 500, { ok: false, error: "native-guest-operation-failed" }); });
+        return;
+      }
+      if (process.platform !== "darwin") { req.resume(); writeJson(res, 403, { ok: false, error: "native-os-driver-unavailable" }); return; }
       if ((req.headers.authorization ?? "") !== `Bearer ${token}`) {
         writeJson(res, 401, { ok: false, error: "unauthorized" });
         return;
@@ -526,11 +544,12 @@ export function startComputerUseControlServer(): Promise<number> {
     });
 
     srv.on("error", () => {
-      server = null;
-      boundPort = 0;
+      if (ownedGeneration === generation && (!server || server === srv)) { server = null; boundPort = 0; }
+      try { srv.close(); } catch {}
       resolve(0);
     });
     srv.listen(0, "127.0.0.1", () => {
+      if (ownedGeneration !== generation) { srv.close(); resolve(0); return; }
       const address = srv.address();
       boundPort = typeof address === "object" && address ? address.port : 0;
       server = srv;
@@ -545,9 +564,13 @@ export function startComputerUseControlServer(): Promise<number> {
       resolve(boundPort);
     });
   });
+  starting = pending;
+  void pending.then(() => { if (starting === pending) starting = null; });
+  return pending;
 }
 
 export function stopComputerUseControlServer(): void {
+  generation++; starting = null; revokeNativeGuestComputerUseScopes();
   if (server) {
     try { server.close(); } catch { /* ignore */ }
   }

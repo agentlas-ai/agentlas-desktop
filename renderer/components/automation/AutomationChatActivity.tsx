@@ -295,6 +295,10 @@ function statusWord(status: string, locale: Locale): string {
   if (status === "ok") return ko ? "완료" : "Done";
   if (status === "error") return ko ? "실패" : "Failed";
   if (status === "cancelled") return ko ? "취소됨" : "Cancelled";
+  if (status === "partial") return ko ? "일부 완료" : "Partly done";
+  if (status === "blocked") return ko ? "진행 불가" : "Blocked";
+  if (status === "needs_input") return ko ? "입력 필요" : "Needs input";
+  if (status === "skipped") return ko ? "건너뜀" : "Skipped";
   return status;
 }
 
@@ -381,7 +385,7 @@ export function AutomationReportSummary({ runId, text, locale, fallback }: { run
     <p className={styles.reportHeadline}>
       <AutomationLogos digest={digest} locale={locale} />
       <strong data-automation-report-headline="true">{headline}</strong>
-      {digest.failures > 0 && <span className={styles.reportFailures}>{ko ? ` · 실패 ${digest.failures}건` : ` · ${digest.failures} failed`}</span>}
+      {digest.failures > 0 && <span className={styles.reportFailures}>{ko ? ` · 도구 오류 ${digest.failures}건` : ` · ${digest.failures} tool errors`}</span>}
     </p>
     {outwardRows.length > 0 && !open && <ul className={styles.actions}>
       {outwardRows.slice(-3).map((row) => <ActionLine key={row.id} row={row} locale={locale} />)}

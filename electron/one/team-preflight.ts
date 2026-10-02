@@ -18,8 +18,9 @@ import {
 import { hasInvocationRunReceipt } from "../store/run-events";
 import { tryRecordOneDomainEvent } from "./domain-events";
 import { oneOrgExecutionGuidance } from "./org";
-import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight } from "./taskforces";
+import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight, listOneTaskforces } from "./taskforces";
 import { inspectOneAttachmentInput } from "./attachments";
+import { oneTeamDispatchOwnerChat } from "./team-dispatch";
 import { isGoalOwnedOneChat } from "./preflight-admission";
 import type {
   CanonicalTask,
@@ -33,6 +34,8 @@ import {
   ONE_TEAM_PREFLIGHT_CONTRACT_VERSION,
   ONE_TEAM_PREFLIGHT_EXPIRABLE_STATUSES,
   isOneTeamPreflightProposal,
+  isOneTeamStaffingScope,
+  oneTeamUsesNativeStaffing,
   type AcknowledgeOneTeamPreflightInput,
   type AcknowledgeOneTeamPreflightResult,
   type AutoResolveOneTeamPreflightInput,
@@ -42,6 +45,9 @@ import {
   type OneTeamPreflightRef,
   type OneTeamPreflightRole,
   type OneTeamPreflightStatus,
+  type OneTeamStaffingIntent,
+  type OneTeamStaffingAuthority,
+  type OneTeamStaffingScope,
   type PrepareOneTeamPreflightInput,
   type PrepareOneTeamPreflightResult,
   type ResolveOneTeamPreflightInput,
@@ -56,7 +62,7 @@ const MAX_PROPOSALS = 100;
 const PROPOSAL_TTL_MS = 30 * 60 * 1_000;
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 const PROCESS_INSTANCE_ID = randomUUID();
-const PROCESS_PROMPTS = new Map<string, { original: string; execution: string; requestedAgentIds: string[]; runtimeSelection?: RuntimeSelection }>();
+const PROCESS_PROMPTS = new Map<string, { original: string; execution: string; requestedAgentIds: string[]; requestRosterDigest: string; allowAutomaticRosterSelection: boolean; room?: { id: string; revision: number; memberAgentIds: string[] }; runtimeSelection?: RuntimeSelection }>();
 
 export interface OneTeamRuntimeBinding {
   kind: RuntimeStatus["kind"];
@@ -110,6 +116,8 @@ export interface OneTeamPreflightDependencies {
   getAgentById?: typeof getAgentById;
   listInstalledAgents?: typeof listInstalledAgents;
   listFirms?: typeof listFirms;
+  listOneTaskforces?: typeof listOneTaskforces;
+  oneTeamDispatchOwnerChat?: typeof oneTeamDispatchOwnerChat;
   findTaskForChat?: typeof findCanonicalTaskForChat;
   ensureTaskForChat?: typeof ensureCanonicalTaskForChat;
   getTask?: typeof getCanonicalTask;
@@ -132,6 +140,7 @@ export interface PreparedOneTeamPreflightClaim {
   mode: "team" | "workforce" | "solo";
   userPrompt: string;
   userAuthoredPrompt: string;
+  staffingAuthority?: OneTeamStaffingAuthority;
   permission: "read" | "write";
   runtime: OneTeamRuntimeBinding;
   taskForceTargets: OrchestrationTarget[];
@@ -277,6 +286,7 @@ export function oneTeamRuntimeBindingMatches(
 function goalSummary(reasons: OneTeamPreflightComplexityReason[]): string {
   const labels: Record<OneTeamPreflightComplexityReason, string> = {
     explicit_team_request: "explicit team request",
+    explicit_solo_request: "explicit solo request",
     parallel_work_requested: "parallel work",
     independent_verification_requested: "independent verification",
     multiple_distinct_deliverables: "multiple deliverables",
@@ -290,37 +300,58 @@ export interface OneTeamNeedResolution {
   needed: boolean;
   reasons: OneTeamPreflightComplexityReason[];
   source: "llm" | "explicit" | "unavailable";
+  staffingIntent?: OneTeamStaffingIntent;
+  staffingScope?: OneTeamStaffingScope;
 }
 
 export type OneTeamNeedJudge = (input: {
   prompt: string;
   runtimeSelection?: RuntimeSelection;
-}) => Promise<{ needed: boolean; source: "llm" | "unavailable"; reason: string }>;
+}) => Promise<{
+  needed: boolean;
+  source: "llm" | "unavailable";
+  reason: string;
+  /** Missing on older judge seams: team benefit never implies recruitment. */
+  staffingIntent?: OneTeamStaffingIntent;
+  staffingScope?: OneTeamStaffingScope;
+}>;
+
+type OneTeamStaffingVerdict = OneTeamStaffingIntent
+  | "owner_recruitment_hub_only";
+
+function staffingVerdictScope(verdict: OneTeamStaffingVerdict): OneTeamStaffingScope | undefined {
+  if (!["owner_recruitment", "owner_recruitment_hub_only"].includes(verdict)) return undefined;
+  return {
+    schemaVersion: "agentlas.one-staffing-scope.v1",
+    candidateSources: verdict === "owner_recruitment_hub_only" ? "hub_only" : "network",
+  };
+}
 
 async function defaultJudgeTeamNeed(input: {
   prompt: string;
   runtimeSelection?: RuntimeSelection;
-}): Promise<{ needed: boolean; source: "llm" | "unavailable"; reason: string }> {
+}): ReturnType<OneTeamNeedJudge> {
   const { judgeRequired } = await import("../system-agents/judgment");
-  const verdict = await judgeRequired<"yes" | "no">({
-    // v2 corrects the prior meaning contract. The old judge could call an
-    // explicit plain-language request to add one specialist "single-focus"
-    // and silently run One alone; a new kind also prevents that cached verdict
-    // from surviving the corrected instructions.
-    kind: "one-team-preflight-need-v2",
-    question:
-      "Would completing this request genuinely benefit from a small team of multiple specialist agents (parallel work, independent verification, or multiple distinct deliverables) instead of one agent?",
-    labels: ["yes", "no"] as const,
+  const verdict = await judgeRequired<OneTeamStaffingVerdict>({
+    // Separate explicit owner authority from a model's opinion that help is useful.
+    // The new cache identity prevents old yes/no decisions granting authority.
+    kind: "one-team-preflight-authority-v5",
+    question: "What staffing instruction does the owner authorize for this request?",
+    labels: ["owner_recruitment", "owner_recruitment_hub_only", "owner_native_team", "owner_existing_team", "owner_solo", "team_beneficial", "solo_sufficient"] as const,
     input: input.prompt,
     maxInputChars: null,
     ...(input.runtimeSelection ? { runtimeSelection: input.runtimeSelection } : {}),
     guidance:
-      "Judge the actual work in any language. Say yes when multiple specialist agents add real value through independent contributions, parallel execution, or verification. An explicit semantic request to add, attach, bring in, or work with an expert/collaborator is itself a team request even when the person names only the one additional specialist or phrases it as a short follow-up. Do not require tool names, agent IDs, UI toggles, or a repeated description of the earlier task. Do not infer from isolated keywords or phrasing templates; decide the request's meaning.",
+      "Judge the owner's actual instruction semantically in any language, never by keywords. owner_native_team means the owner asks One to operate its own team: create role agents, invite members into the conversation, or delegate work through teammate sessions. This includes delegated choices to create or invite collaborators. Existing room members are context, not a prohibition on additions. owner_recruitment means explicit acquisition or selection of external Workforce experts/candidates, rather than operating One members and their sessions. A generic request to create or invite a teammate belongs to owner_native_team; do not force it into external candidate acquisition. It permits free candidates from registered local, owner Cloud and public Hub sources. owner_recruitment_hub_only applies only when the owner explicitly restricts collaborators to public Hub candidates; merely mentioning Hub or having no installed roster is not a Hub-only restriction. owner_existing_team means use only already selected or existing collaborators without recruiting others. owner_solo means the owner explicitly requires working alone or forbids delegation; this restriction wins over inferred team benefit. team_beneficial means independent contributions, parallel work or verification would help but the owner did not explicitly authorize recruiting collaborators. solo_sufficient means neither team work nor a staffing instruction is needed. Complexity, broad permission to do the task, and hypothetical or quoted staffing language do not themselves authorize recruitment. Respect explicit limits; if recruitment authority is ambiguous choose team_beneficial or solo_sufficient. The native label preserves existing One member tools and their permission checks; it does not claim new tools or checked expertise. No label grants payment, capability-package installation, publication or broader data access. Explicit solo, existing-only, and Hub-only restrictions take precedence over native staffing.",
   });
+  const scope = verdict.source === "llm" && verdict.verdict ? staffingVerdictScope(verdict.verdict) : undefined;
   return {
-    needed: verdict.verdict === "yes",
+    needed: verdict.verdict !== "solo_sufficient",
     source: verdict.source,
     reason: verdict.reason,
+    ...(verdict.source === "llm" && verdict.verdict
+      ? { staffingIntent: scope ? "owner_recruitment" as const : verdict.verdict as OneTeamStaffingIntent,
+        ...(scope ? { staffingScope: scope } : {}) } : {}),
   };
 }
 
@@ -340,6 +371,7 @@ async function resolveOneTeamNeed(
       needed: true,
       reasons: ["explicit_team_request"],
       source: "explicit",
+      staffingIntent: "owner_existing_team",
     };
   }
   const judgeTeamNeed = deps.judgeTeamNeed ?? defaultJudgeTeamNeed;
@@ -349,14 +381,25 @@ async function resolveOneTeamNeed(
   } catch {
     return { needed: false, reasons: [], source: "unavailable" };
   }
-  if (judged.source !== "llm") {
+  if (!judged || judged.source !== "llm" || typeof judged.needed !== "boolean") {
     return { needed: false, reasons: [], source: "unavailable" };
   }
-  if (!judged.needed) return { needed: false, reasons: [], source: "llm" };
+  const intent = judged.staffingIntent === undefined
+    ? (judged.needed ? "team_beneficial" : "solo_sufficient") : judged.staffingIntent;
+  if (!["owner_recruitment", "owner_native_team", "owner_existing_team", "owner_solo", "team_beneficial", "solo_sufficient"].includes(intent)
+    || judged.needed !== (intent !== "solo_sufficient")
+    || (judged.staffingScope !== undefined && (intent !== "owner_recruitment" || !isOneTeamStaffingScope(judged.staffingScope)))) {
+    return { needed: false, reasons: [], source: "unavailable" };
+  }
+  if (!judged.needed) return { needed: false, reasons: [], source: "llm", staffingIntent: intent };
   return {
     needed: true,
-    reasons: ["model_assessed_team_benefit"],
+    reasons: [intent === "owner_solo" ? "explicit_solo_request"
+      : intent === "owner_recruitment" || intent === "owner_native_team" || intent === "owner_existing_team" ? "explicit_team_request"
+      : "model_assessed_team_benefit"],
     source: "llm",
+    staffingIntent: intent,
+    ...(judged.staffingScope ? { staffingScope: judged.staffingScope } : {}),
   };
 }
 
@@ -1043,7 +1086,7 @@ export async function prepareOneTeamPreflight(
   deps: OneTeamPreflightDependencies = {},
 ): Promise<PrepareOneTeamPreflightResult> {
   const inputKeys = Object.keys((input ?? {}) as unknown as Record<string, unknown>);
-  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "dynamicTeamRequested", "permission", "runtimeSelection", "attachmentRef"]);
+  const allowedInputKeys = new Set(["chatId", "expectedTaskId", "expectedTaskVersion", "userPrompt", "requestedAgentIds", "requestedAgentIdsSource", "dynamicTeamRequested", "permission", "runtimeSelection", "attachmentRef"]);
   if (
     !input || typeof input !== "object"
     // Electron IPC keeps undefined-valued keys; an undefined key is an absent key.
@@ -1059,6 +1102,7 @@ export async function prepareOneTeamPreflight(
       || input.requestedAgentIds.some((agentId) => typeof agentId !== "string" || !ID_RE.test(agentId))
       || new Set(input.requestedAgentIds).size !== input.requestedAgentIds.length
     ))
+    || (input.requestedAgentIdsSource !== undefined && !["turn", "room"].includes(input.requestedAgentIdsSource))
     || (input.dynamicTeamRequested !== undefined && input.dynamicTeamRequested !== true)
     || (input.permission !== undefined && input.permission !== "read" && input.permission !== "write")
     || (input.runtimeSelection !== undefined && !validRuntimeSelection(input.runtimeSelection))
@@ -1103,6 +1147,21 @@ export async function prepareOneTeamPreflight(
     }));
     return { kind: "not_required" };
   }
+  // Room membership supplies context, never an explicit "existing members only" decision.
+  const room = input.requestedAgentIdsSource === "room"
+    ? (deps.listOneTaskforces ?? listOneTaskforces)().find(group => group.chatId === input.chatId)
+    : undefined;
+  if (input.requestedAgentIdsSource === "room" && (!room || initialChat.originSurface !== "one"
+    || requestedAgentIds.some(id => !room.memberAgentIds.includes(id)))) {
+    throw new OneTeamPreflightError("stale_binding", "The inherited One room roster changed");
+  }
+  const roomSnapshot = room ? { id: room.id, revision: room.revision, memberAgentIds: [...room.memberAgentIds] } : undefined;
+  const requestRosterDigest = sha256({
+    requestedAgentIds: [...requestedAgentIds].sort(),
+    source: input.requestedAgentIdsSource ?? "turn",
+    dynamicTeamRequested: input.dynamicTeamRequested === true,
+    room: roomSnapshot ?? null,
+  });
   const pinnedRuntime = input.runtimeSelection || attachmentInput ? await liveRuntime(deps, input.runtimeSelection) : null;
   // Managed Local currently loads text GGUFs without a vision projector. This
   // known limitation precedes staffing inference; no team or substitute model
@@ -1110,12 +1169,18 @@ export async function prepareOneTeamPreflight(
   if (attachmentInput?.hasImages && pinnedRuntime?.kind === "agentlas-local") {
     return { kind: "input_unsupported", code: "local_model_image_input_unsupported" };
   }
-  const teamNeed = await resolveOneTeamNeed(
+  let teamNeed = await resolveOneTeamNeed(
     input.userPrompt,
     deps,
-    requestedAgentIds.length > 0 || input.dynamicTeamRequested === true,
+    (requestedAgentIds.length > 0 && input.requestedAgentIdsSource !== "room") || input.dynamicTeamRequested === true,
     input.runtimeSelection,
   );
+  // A room already has participating members. Ordinary/offline judgments must
+  // not discard that roster; only a recognized owner instruction changes its route.
+  if (roomSnapshot && requestedAgentIds.length > 0
+    && (teamNeed.source === "unavailable" || !teamNeed.needed)) {
+    teamNeed = { needed: true, reasons: ["explicit_team_request"], source: "explicit", staffingIntent: "owner_existing_team" };
+  }
   // ★2026-09-23 오너 규칙 "막다른 길 금지": the staffing judge being unreachable
   // is not a reason to drop the user's message. Continue on the ordinary One
   // route (the chat's bound runtime and seats, no new team proposal) and leave a
@@ -1128,6 +1193,10 @@ export async function prepareOneTeamPreflight(
     return { kind: "not_required" };
   }
   if (!teamNeed.needed) return { kind: "not_required" };
+  if (teamNeed.staffingIntent === "owner_native_team"
+    && (deps.oneTeamDispatchOwnerChat ?? oneTeamDispatchOwnerChat)(initialChat.id) !== initialChat.id) {
+    throw new OneTeamPreflightError("invalid_request", "Native One staffing requires a One owner conversation");
+  }
   const reasons = teamNeed.reasons;
   recoverReservations(deps);
   const chat = readChat(input.chatId);
@@ -1160,13 +1229,24 @@ export async function prepareOneTeamPreflight(
   );
   if (existing) {
     const current = expireIfNeeded(existing, deps);
-    if (current.proposal.status !== "expired") return { kind: "proposal", proposal: current.proposal };
+    if (current.proposal.status !== "expired") {
+      if (PROCESS_PROMPTS.get(current.proposal.proposalId)?.requestRosterDigest !== requestRosterDigest) {
+        throw new OneTeamPreflightError("stale_binding", "The prepared One roster selection changed");
+      }
+      return { kind: "proposal", proposal: current.proposal };
+    }
   }
 
   const runtime = pinnedRuntime ?? await liveRuntime(deps, input.runtimeSelection);
-  if (requestedAgentIds.length === 0) await prejudgeRosterAutoRoute(chat, input.userPrompt, deps, input.runtimeSelection);
+  const allowAutomaticRosterSelection = teamNeed.staffingIntent !== "owner_native_team";
+  if (roomSnapshot && !sameRoomSnapshot(chat.id, roomSnapshot, deps)) {
+    throw new OneTeamPreflightError("stale_binding", "The inherited One room roster changed during judgment");
+  }
+  if (allowAutomaticRosterSelection && requestedAgentIds.length === 0 && teamNeed.staffingIntent !== "owner_solo") {
+    await prejudgeRosterAutoRoute(chat, input.userPrompt, deps, input.runtimeSelection);
+  }
   const permission = input.permission ?? "write";
-  const roster = exactInstalledRoster(chat, deps, input.userPrompt, true, requestedAgentIds, permission, input.runtimeSelection);
+  const roster = exactInstalledRoster(chat, deps, input.userPrompt, allowAutomaticRosterSelection, requestedAgentIds, permission, input.runtimeSelection);
   /*
    * 한 명이 못 오면 나머지도 버리던 자리(오너 지적 2026-08-24 "one만 일하냐?").
    * 실측: 방 팀원 둘 중 하나는 원본 폴더가 사라져 부를 수 없었는데, 그 한 명
@@ -1198,12 +1278,21 @@ export async function prepareOneTeamPreflight(
     if (currentChat && goalOwnsChat(currentChat, deps.getGoalStatus)) {
       return { skipForGoal: true as const };
     }
+    if (teamNeed.staffingIntent === "owner_native_team"
+      && (!currentChat || (deps.oneTeamDispatchOwnerChat ?? oneTeamDispatchOwnerChat)(currentChat.id) !== currentChat.id)) {
+      throw new OneTeamPreflightError("stale_binding", "The One owner conversation changed during judgment");
+    }
     const duplicate = state.proposals.find((item) =>
       item.proposal.binding.chatId === chat.id
       && item.proposal.binding.promptDigest === promptDigest
       && ["proposed", "blocked", "deferred", "team_reserved", "workforce_reserved", "solo_reserved"].includes(item.proposal.status),
     );
-    if (duplicate) return { proposal: duplicate.proposal, waitingTask: task, created: false as const };
+    if (duplicate) {
+      if (PROCESS_PROMPTS.get(duplicate.proposal.proposalId)?.requestRosterDigest !== requestRosterDigest) {
+        throw new OneTeamPreflightError("stale_binding", "The prepared One roster selection changed");
+      }
+      return { proposal: duplicate.proposal, waitingTask: task, created: false as const };
+    }
     // The waiting Task and the proposal are one visible decision. Previously
     // the Task was committed first; if role normalization or proposal storage
     // then failed, One showed "Preparing" forever with no card and no run.
@@ -1224,6 +1313,12 @@ export async function prepareOneTeamPreflight(
         promptDigest,
         runtimeDigest: runtime.digest,
         permission,
+      },
+      staffingAuthority: {
+        intent: teamNeed.staffingIntent!,
+        source: teamNeed.source === "explicit" ? "structured" : "llm",
+        promptDigest,
+        ...(teamNeed.staffingScope ? { scope: teamNeed.staffingScope } : {}),
       },
       complexityReasons: reasons,
       roles: canConfirmTeam ? roster.roles : roster.roles.slice(0, 1),
@@ -1295,6 +1390,9 @@ export async function prepareOneTeamPreflight(
     original: input.userPrompt,
     execution: standingStaffGuidance ? `${input.userPrompt}\n\n${standingStaffGuidance}` : input.userPrompt,
     requestedAgentIds,
+    requestRosterDigest,
+    allowAutomaticRosterSelection,
+    ...(roomSnapshot ? { room: roomSnapshot } : {}),
     runtimeSelection: input.runtimeSelection,
   });
 
@@ -1368,14 +1466,24 @@ function exactCandidateSnapshots(
   });
 }
 
+function sameRoomSnapshot(
+  chatId: string,
+  expected: { id: string; revision: number; memberAgentIds: string[] },
+  deps: OneTeamPreflightDependencies,
+): boolean {
+  const room = (deps.listOneTaskforces ?? listOneTaskforces)().find(group => group.chatId === chatId);
+  return !!room && room.id === expected.id && room.revision === expected.revision
+    && canonicalJson([...room.memberAgentIds].sort()) === canonicalJson([...expected.memberAgentIds].sort());
+}
+
 function exactRosterBinding(
   record: InternalOneTeamPreflight,
   chat: Chat,
   deps: OneTeamPreflightDependencies,
 ): boolean {
   const prompt = PROCESS_PROMPTS.get(record.proposal.proposalId);
-  if (!prompt) return false;
-  const current = exactInstalledRoster(chat, deps, prompt.original, true, prompt.requestedAgentIds, record.proposal.binding.permission, prompt.runtimeSelection);
+  if (!prompt || (prompt.room && !sameRoomSnapshot(chat.id, prompt.room, deps))) return false;
+  const current = exactInstalledRoster(chat, deps, prompt.original, prompt.allowAutomaticRosterSelection, prompt.requestedAgentIds, record.proposal.binding.permission, prompt.runtimeSelection);
   return sha256({
     candidates: current.candidates,
     targets: current.targets,
@@ -1396,6 +1504,8 @@ function exactTaskAndChat(
   ) return null;
   const prompt = PROCESS_PROMPTS.get(record.proposal.proposalId);
   if (!prompt || sha256(prompt.original) !== record.proposal.binding.promptDigest) return null;
+  if (oneTeamUsesNativeStaffing(record.proposal.staffingAuthority)
+    && (deps.oneTeamDispatchOwnerChat ?? oneTeamDispatchOwnerChat)(chat.id) !== chat.id) return null;
   return { chat, task };
 }
 
@@ -1562,6 +1672,13 @@ export async function resolveOneTeamPreflight(
       ? ensureOneTaskforceForPreflight({ chatId: live.proposal.binding.chatId, memberAgentIds: live.main.candidates.slice(1).map(candidate => candidate.installedAgentId) })
       : undefined;
     const proposal = mutateProposal(live.proposal, reservedStatus, now, {
+      // A manual execution choice supersedes automatic native staffing authority.
+      ...(actor === "user" && oneTeamUsesNativeStaffing(live.proposal.staffingAuthority)
+        ? { staffingAuthority: undefined } : {}),
+      // Preserve the source policy of the existing public-Hub UI action.
+      ...(requestedMode === "workforce" && actor === "user" && live.proposal.staffingAuthority
+        && !oneTeamUsesNativeStaffing(live.proposal.staffingAuthority)
+        ? { staffingAuthority: { ...live.proposal.staffingAuthority, scope: undefined } } : {}),
       ...(taskforce ? { taskforce } : {}),
       reservedRun: { mode: requestedMode as "team" | "workforce" | "solo", runId, reservedAt },
       startedRun: null,
@@ -1602,9 +1719,9 @@ export async function resolveOneTeamPreflight(
 
 /**
  * Resolve adaptive staffing without exposing an operational choice to the
- * user. Only a verified installed roster may be selected automatically. When
- * that proof is absent, One runs alone; this capability can never authorize
- * Hub discovery, borrowing, payment, or broader access.
+ * user. Recruitment requires explicit semantic owner authority for the exact
+ * bound prompt and the existing free Workforce capability. Inferred benefit
+ * alone never authorizes recruitment, payment, installation or broader access.
  */
 export async function autoResolveOneTeamPreflight(
   input: AutoResolveOneTeamPreflightInput,
@@ -1647,12 +1764,38 @@ export async function autoResolveOneTeamPreflight(
     };
   }
 
-  // autoResolve is the no-user-approval path. External staffing can borrow paid
-  // Hub agents, so it must never be entered automatically — One asks in plain
-  // language first and the answer arrives through resolveOneTeamPreflight.
-  const resolution: ResolveOneTeamPreflightInput["resolution"] = record.proposal.canConfirmTeam
-    ? "confirm_team"
-    : "continue_solo";
+  // A deferred manual decision is stronger than the automatic default.
+  if (record.proposal.status === "deferred") {
+    throw new OneTeamPreflightError("already_resolved", "The owner deferred this team proposal");
+  }
+  const authority = record.proposal.staffingAuthority;
+  const prompt = PROCESS_PROMPTS.get(record.proposal.proposalId);
+  const ownerRecruitment = authority?.intent === "owner_recruitment"
+    && authority.source === "llm"
+    && authority.promptDigest === record.proposal.binding.promptDigest
+    && !!prompt && sha256(prompt.original) === authority.promptDigest;
+  const nativeStaffing = oneTeamUsesNativeStaffing(authority)
+    && authority!.promptDigest === record.proposal.binding.promptDigest
+    && !!prompt && sha256(prompt.original) === authority!.promptDigest;
+  const freeWorkforceAvailable = record.proposal.canConfirmWorkforce
+    && record.proposal.selectionBoundary === "external_selection_requires_work_review"
+    && record.proposal.cost.hubBorrowing === "none";
+  const resolution: ResolveOneTeamPreflightInput["resolution"] = nativeStaffing || authority?.intent === "owner_solo"
+    ? "continue_solo"
+    : record.proposal.canConfirmTeam
+      ? "confirm_team"
+      : ownerRecruitment && freeWorkforceAvailable
+        ? "confirm_workforce"
+        : "continue_solo";
+  console.info("[one-team-preflight] automatic_staffing_resolution", JSON.stringify({
+    proposalId: record.proposal.proposalId,
+    resolution,
+    reason: nativeStaffing ? "owner_native_one_staffing"
+      : authority?.intent === "owner_solo" ? "owner_explicit_solo"
+      : record.proposal.canConfirmTeam ? "exact_existing_roster"
+      : ownerRecruitment && freeWorkforceAvailable ? "owner_explicit_free_recruitment"
+      : ownerRecruitment ? "free_workforce_unavailable" : "recruitment_authority_absent",
+  }));
   return resolveOneTeamPreflight({
     proposalId: input.proposalId,
     expectedProposalVersion: input.expectedProposalVersion,
@@ -1798,6 +1941,10 @@ export function prepareOneTeamPreflightClaim(
     // mode travels separately in the closed ref; prompt text never carries it.
     userPrompt: prompt.execution,
     userAuthoredPrompt: prompt.original,
+    ...((ref.mode === "workforce" || (ref.mode === "solo" && oneTeamUsesNativeStaffing(record.proposal.staffingAuthority))) && record.proposal.staffingAuthority
+      && record.proposal.staffingAuthority.promptDigest === sha256(prompt.original)
+      ? { staffingAuthority: { ...record.proposal.staffingAuthority,
+        ...(record.proposal.staffingAuthority.scope ? { scope: { ...record.proposal.staffingAuthority.scope } } : {}) } } : {}),
     permission: record.proposal.binding.permission,
     runtime: record.main.runtime,
     taskForceTargets: ref.mode === "team" ? record.main.taskForceTargets.map((target) => ({ ...target })) : [],

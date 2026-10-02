@@ -22,12 +22,12 @@ interface RelaySocketServer {
 const { WebSocketServer } = require("ws") as { WebSocketServer: new (options: { noServer: true; maxPayload: number }) => RelaySocketServer };
 import type { WebContents } from "electron";
 import { onHostShutdown } from "../host-lifecycle";
-import { createWorkBrowserTab, listWorkBrowserTabs, nativeBrowserGuest, nativeBrowserTaskOwner,
+import { createWorkBrowserTab, listWorkBrowserTabs, nativeBrowserGuest, acquireNativeBrowserTask, focusNativeBrowserTask,
   closeWorkLiveView, sanitizeWorkLiveUrl, captureNativeBrowserGuest, nativeBrowserGuestViewport, presentNativeBrowserGuest,
-  openAgentBrowserHold, claimNativeBrowserGuest, settleAgentBrowserHold, onAgentBrowserPopup, nativeBrowserGuestLayoutAge, agentBrowserTabsOfHold } from "../work-live-view";
+  openAgentBrowserHold, claimNativeBrowserGuest, settleAgentBrowserHold, onAgentBrowserPopup, nativeBrowserGuestLayoutAge, agentBrowserTabsOfHold, reclaimOrphanAgentBrowserTabs } from "../work-live-view";
 import { observeNativeBrowserDownloads } from "./download-registry";
 
-type GrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal; presentation?: "foreground" | "background"; onScreenshot?: (capture: { png: Buffer; isCurrent: () => boolean }) => void | Promise<void> };
+export type CanonicalNativeBrowserGrantInput = { chatId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal; presentation?: "foreground" | "background"; onScreenshot?: (capture: { png: Buffer; isCurrent: () => boolean }) => void | Promise<void> };
 type Guest = { viewId: string; wc: WebContents; targetId: string; browserContextId: string; sessionId: string; children: Set<string>; lastPresentationAt?: number; detach: () => void;
   /** Re-attach the debugger to the same live page (lost CDP session); false when the page is gone or held by another client. */
   reattach: () => boolean;
@@ -125,7 +125,14 @@ async function waitForStableNativeBrowserViewport(
 const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
 
 /** One page an agent is currently driving through this grant. URL is read from the guest itself. */
+export interface LoginVerificationLease {
+  reload: () => Promise<string | null>;
+  current: () => boolean;
+  release: () => void;
+}
 export interface NativeBrowserRelayPage {
+  /** Stable native view identity; optional for older observers/mocks. */
+  id?: string;
   url: string;
   /** Reload and resolve with the URL the page settled on (null if it went away). */
   reload: () => Promise<string | null>;
@@ -134,12 +141,14 @@ export interface NativeBrowserRelayPage {
   /** Main-only script evaluation in the page (vault autofill, structural checks). Never reachable by the agent. */
   evaluate?: (expression: string) => Promise<unknown>;
   /** Bring this page in front of the owner (human-check card). */
-  present?: () => void;
+  present?: () => boolean | void | Promise<boolean | void>;
+  /** Main-only, read-only exact guest verification; survives ordinary MCP grant release. */
+  retainLoginVerification?: (signal: AbortSignal) => LoginVerificationLease;
 }
 
 /** Machine state of the relay for the fallback ladder (electron/browser/fallback-ladder.ts). */
 export interface NativeBrowserRelayHealth {
-  /** The grant still has its window/guest owner and was not released. */
+  /** The grant still has its Main task lease and was not released. */
   current: boolean;
   /** The last refusal this relay answered, by our own code (never parsed prose). */
   lastRefusal: "session-ended" | "tab-limit" | "session-unavailable" | "grant-revoked" | null;
@@ -161,6 +170,9 @@ export interface NativeBrowserRelayFailover {
 }
 
 export interface NativeBrowserRelayGrant {
+  /** Opaque Main owner-action identity, valid only for this exact live grant. */
+  ownerScopeId?: string;
+  nativeComputerUse?: import("../computer-use/native-guest").NativeGuestComputerUseCapability;
   endpoint: string;
   token: string;
   release: () => void;
@@ -169,7 +181,11 @@ export interface NativeBrowserRelayGrant {
   /** Fallback ladder: measured relay state. */
   health?: () => NativeBrowserRelayHealth;
   /** Fallback ladder rung 1: drop dead sockets and clear the last refusal so the next connect starts clean. */
-  reestablish?: () => NativeBrowserRelayHealth;
+  reestablish?: () => NativeBrowserRelayHealth | Promise<NativeBrowserRelayHealth>;
+  /** Remote Main broker refreshes its structural page/health snapshot. */
+  refresh?: () => Promise<void>;
+  /** Scoped Main broker recovery; the acquisition context owns its authority. */
+  recoverLoginWalls?: (input: { nodeId?: string; onPrerequisiteRestored?: (prerequisite: import("./login-recovery").LoginPrerequisiteRef) => void }) => Promise<import("./login-recovery").LoginRecoveryOutcome[]>;
   /**
    * Fallback ladder rung 2 (switch surface): serve this run's CDP connects from the dedicated Agentlas Chrome.
    * The launcher's endpoint stays the same, so no MCP process is rebuilt; open agent sockets are closed so
@@ -179,17 +195,54 @@ export interface NativeBrowserRelayGrant {
 }
 
 /** Live grants by endpoint, so Main-side observers (MCP bridge) can find the grant a launcher is bound to. */
+const nativeInputOwners = new Map<WebContents, string>();
 const liveGrants = new Map<string, NativeBrowserRelayGrant>();
 export function nativeBrowserRelayGrantForEndpoint(endpoint: string | null | undefined): NativeBrowserRelayGrant | null {
   return endpoint ? liveGrants.get(endpoint) ?? null : null;
 }
 
-/** Visible iframe sources and the top URL, read structurally (no page wording). */
-export const PAGE_FRAME_PROBE_SOURCE = `(() => {
-  const visible = (el) => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
-    return r.width >= 20 && r.height >= 20 && s.visibility !== 'hidden' && s.display !== 'none' && Number(s.opacity || '1') > 0.05; };
-  return { url: location.href, frames: [...document.querySelectorAll('iframe')].filter(visible).map((f) => String(f.src || '')).filter(Boolean).slice(0, 32) };
-})()`;
+export { PAGE_FRAME_PROBE_SOURCE } from "./page-frame-probe";
+
+export interface NativeBrowserRelayOwnerScope {
+  ownerScopeId: string;
+  chatId: string;
+  runId: string;
+  grant: NativeBrowserRelayGrant;
+}
+const liveOwnerScopes = new Map<string, NativeBrowserRelayOwnerScope>();
+/** Main-only owner actions cannot select another session by an endpoint or profile path. */
+export function nativeBrowserRelayOwnerScopeForId(id: string): NativeBrowserRelayOwnerScope | null {
+  const scope = liveOwnerScopes.get(id);
+  return scope && scope.grant.health?.().current ? scope : null;
+}
+
+/** Login restoration requires a successful main-frame load, not a timeout/stop-loading URL. */
+export function settledLoginVerificationUrl(wc: WebContents, signal: AbortSignal, timeoutMs = 20_000): Promise<string | null> {
+  return new Promise(resolve => {
+    if (wc.isDestroyed() || signal.aborted) { resolve(null); return; }
+    let done = false;
+    const finish = (successful: boolean) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      wc.removeListener("did-finish-load", loaded);
+      wc.removeListener("did-fail-load", failed);
+      wc.removeListener("destroyed", destroyed);
+      signal.removeEventListener("abort", destroyed);
+      resolve(successful && !signal.aborted && !wc.isDestroyed() ? wc.getURL() : null);
+    };
+    const loaded = () => finish(true);
+    const failed = (_event: unknown, _code: number, _description: string, _url: string, isMainFrame: boolean) => {
+      if (isMainFrame !== false) finish(false);
+    };
+    const destroyed = () => finish(false);
+    const timer = setTimeout(destroyed, timeoutMs);
+    wc.once("did-finish-load", loaded);
+    wc.on("did-fail-load", failed);
+    wc.once("destroyed", destroyed);
+    signal.addEventListener("abort", destroyed, { once: true });
+  });
+}
 
 function settledUrl(wc: WebContents, timeoutMs = 20_000): Promise<string | null> {
   return new Promise((resolve) => {
@@ -209,11 +262,15 @@ function settledUrl(wc: WebContents, timeoutMs = 20_000): Promise<string | null>
   });
 }
 
-export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<NativeBrowserRelayGrant> {
-  const owner = nativeBrowserTaskOwner(input.chatId);
-  if (!owner || input.signal.aborted || !input.runId || !["read", "write", "full"].includes(input.permission)) throw new Error("native-browser-task-unbound");
+export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowserGrantInput): Promise<NativeBrowserRelayGrant> {
+  const taskLease = acquireNativeBrowserTask({ taskScopeId: input.chatId, runId: input.runId,
+    permission: input.permission, signal: input.signal });
+  const owner = { ownerId: taskLease.ownerId };
+  const ownerScopeId = randomUUID();
   const secret = randomBytes(32).toString("hex");
   const leases = new Map<string, Lease>();
+  const nativeInputGuests = new Map<string, WebContents>();
+  let releaseNativeInput: (() => void) | null = null;
   const pdfStreams = new Map<string, { data: Buffer; offset: number }>();
   let closed = false;
   // Assigned below; addGuest's owner-input listener needs it before the helpers.
@@ -236,11 +293,11 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
   let lastRefusal: NativeBrowserRelayHealth["lastRefusal"] = null;
   let failoverTarget: NativeBrowserRelayFailover | null = null;
   const holdId = openAgentBrowserHold({ runId: input.runId, isLive: () => !closed && !input.signal.aborted
-    && ([...leases.values()].some((lease) => lease.socket?.readyState === 1 || lease.connecting) || Date.now() - lastActivity < HOLD_IDLE_MS) });
+    && (Boolean(releaseNativeInput) || [...leases.values()].some((lease) => lease.socket?.readyState === 1 || lease.connecting) || Date.now() - lastActivity < HOLD_IDLE_MS) });
   const server = http.createServer();
   const websocket = new WebSocketServer({ noServer: true, maxPayload: MAX_MESSAGE_BYTES });
-  const current = () => !closed && !input.signal.aborted && nativeBrowserTaskOwner(input.chatId)?.ownerId === owner.ownerId
-    && !owner.window.isDestroyed();
+  const current = () => !closed && taskLease.current() && taskLease.taskScopeId === input.chatId
+    && taskLease.runId === input.runId && taskLease.permission === input.permission;
   const authorized = (request: http.IncomingMessage) => {
     const value = request.headers.authorization;
     if (!current() || typeof value !== "string") return false;
@@ -280,9 +337,11 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     if (!current()) throw new Error("native-browser-grant-revoked");
     const reservation = `${owner.ownerId}:${viewId}`;
     const wc = nativeBrowserGuest(owner.ownerId, input.chatId, viewId);
-    if (!wc || reservedGuests.has(reservation)) throw new Error("native-browser-guest-busy");
+    if (!wc || reservedGuests.has(reservation) || (nativeInputOwners.has(wc) && nativeInputOwners.get(wc) !== ownerScopeId)) throw new Error("native-browser-guest-busy");
     reservedGuests.add(reservation);
     claimNativeBrowserGuest(owner.ownerId, input.chatId, viewId, holdId);
+    // The task already owns this guest. Coordinate recovery must survive a first CDP attach failure.
+    nativeInputGuests.set(viewId, wc); nativeInputOwners.set(wc, ownerScopeId);
     if (wc.debugger.isAttached()) { reservedGuests.delete(reservation); throw new Error("native-browser-debugger-busy"); }
     try { wc.debugger.attach("1.3"); }
     catch { reservedGuests.delete(reservation); throw new Error("native-browser-debugger-unavailable"); }
@@ -474,7 +533,11 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       if (!current() || !leases.has(lease.id)) throw new Error("native-browser-grant-revoked");
       return await addGuest(lease, created.tab.viewId);
     } catch (error) {
-      closeWorkLiveView(owner.ownerId, created.tab.viewId, input.chatId);
+      // A CDP attach failure does not end this Main-owned task. Keep its exact
+      // guest for coordinate recovery; unclaimed/revoked creation still closes.
+      if (!current() || !releaseNativeInput || !nativeInputGuests.has(created.tab.viewId)) {
+        closeWorkLiveView(owner.ownerId, created.tab.viewId, input.chatId);
+      }
       throw error;
     }
   };
@@ -501,7 +564,7 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     else if (own) await addGuest(lease, own);
     else await createGuest(lease);
   };
-  const presentAction = (guest: Guest) => {
+  const presentAction = (guest: Pick<Guest, "wc" | "viewId" | "lastPresentationAt">) => {
     if (!current() || input.presentation === "background") return;
     const now = Date.now(), previous = guest.lastPresentationAt;
     guest.lastPresentationAt = now;
@@ -906,28 +969,35 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       if (opener) { void addGuest(lease, viewId, opener.targetId).catch(() => undefined); return; }
     }
   });
+  let offTaskRevoke: () => void = () => {};
+  let unregisterShutdown: () => void = () => {};
   const release = () => {
     if (closed) return;
     closed = true;
+    releaseNativeInput?.(); releaseNativeInput = null;
+    for (const wc of nativeInputGuests.values()) if (nativeInputOwners.get(wc) === ownerScopeId) nativeInputOwners.delete(wc);
+    nativeInputGuests.clear();
     offPopup();
     offDownloads();
     input.signal.removeEventListener("abort", release);
-    owner.window.removeListener("closed", release);
+    offTaskRevoke();
     unregisterShutdown();
     for (const lease of [...leases.values()]) releaseLease(lease);
     if (port) liveGrants.delete(`http://127.0.0.1:${port}`);
+    liveOwnerScopes.delete(ownerScopeId);
     try { failoverTarget?.release?.(); } catch { /* lease already gone */ }
     failoverTarget = null;
     websocket.close();
     server.close();
-    // The run settled (success, failure, cancel, interrupt, window or host
+    // The run settled (success, failure, cancel, interrupt, terminal task or host
     // shutdown all end here): close the tabs it opened unless the owner is
     // watching one right now.
     settleAgentBrowserHold(holdId);
+    taskLease.release();
   };
-  const unregisterShutdown = onHostShutdown(release);
+  unregisterShutdown = onHostShutdown(release);
   input.signal.addEventListener("abort", release, { once: true });
-  owner.window.once("closed", release);
+  offTaskRevoke = taskLease.onRevoke(release);
   try {
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(0, "127.0.0.1", () => resolve()); });
   } catch { release(); throw new Error("native-browser-relay-unavailable"); }
@@ -938,13 +1008,47 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
     if (!current()) return [];
     const seen = new Set<WebContents>();
     const out: NativeBrowserRelayPage[] = [];
-    for (const lease of leases.values()) {
-      for (const guest of lease.guests.values()) {
-        const wc = guest.wc;
-        if (seen.has(wc) || wc.isDestroyed() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== wc) continue;
+    for (const [viewId, wc] of nativeInputGuests) {
+        const guest = { viewId, wc };
+        if (nativeInputOwners.get(wc) !== ownerScopeId || seen.has(wc) || wc.isDestroyed() || nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) !== wc) continue;
         seen.add(wc);
         out.push({
+          id: guest.viewId,
           url: wc.getURL(),
+          retainLoginVerification: (signal) => {
+            if (!current() || signal.aborted || wc.isDestroyed()) throw new Error("native-browser-grant-revoked");
+            const lease = acquireNativeBrowserTask({ taskScopeId: input.chatId, runId: input.runId, permission: "read", signal });
+            let ended = false;
+            const valid = () => !ended && !signal.aborted && lease.current() && lease.ownerId === owner.ownerId
+              && !wc.isDestroyed() && nativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId) === wc;
+            const verificationHold = openAgentBrowserHold({ runId: input.runId, isLive: valid });
+            let offRevoke = () => {}, offShutdown = () => {};
+            const timeout = setTimeout(() => cleanup(), 6 * 60 * 60 * 1000);
+            timeout.unref?.();
+            const cleanup = () => {
+              if (ended) return;
+              ended = true;
+              clearTimeout(timeout);
+              signal.removeEventListener("abort", cleanup);
+              offRevoke(); offShutdown();
+              settleAgentBrowserHold(verificationHold);
+              reclaimOrphanAgentBrowserTabs(owner.ownerId);
+              lease.release();
+            };
+            if (!claimNativeBrowserGuest(owner.ownerId, input.chatId, guest.viewId, verificationHold)) {
+              cleanup(); throw new Error("native-browser-target-missing");
+            }
+            signal.addEventListener("abort", cleanup, { once: true });
+            offRevoke = lease.onRevoke(cleanup);
+            offShutdown = onHostShutdown(cleanup);
+            return { current: valid, release: cleanup, reload: async () => {
+              if (!valid()) return null;
+              const settled = settledLoginVerificationUrl(wc, signal);
+              wc.reload();
+              const url = await settled;
+              return valid() ? url : null;
+            } };
+          },
           reload: async () => {
             if (wc.isDestroyed()) return null;
             const settled = settledUrl(wc);
@@ -962,13 +1066,12 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
             return wc.executeJavaScript(expression, true);
           },
           present: () => {
-            if (wc.isDestroyed() || !current()) return;
-            try { if (owner.window.isMinimized()) owner.window.restore(); owner.window.show(); owner.window.focus(); } catch { /* window gone */ }
+            if (wc.isDestroyed() || !current() || !focusNativeBrowserTask(input.chatId)) return false;
             // The owner asked to be shown this page: present even a background run's guest.
             presentNativeBrowserGuest(owner.ownerId, input.chatId, input.runId, guest.viewId);
+            return current() && !wc.isDestroyed();
           },
         });
-      }
     }
     return out;
   };
@@ -1005,7 +1108,22 @@ export async function createNativeBrowserRelayGrant(input: GrantInput): Promise<
       try { socket?.close(); } catch { /* already closed */ }
     }
   };
-  const grant: NativeBrowserRelayGrant = { endpoint: `http://127.0.0.1:${port}`, token: secret, release, pages, health, reestablish, failover };
+  const grant: NativeBrowserRelayGrant = { ownerScopeId, endpoint: `http://127.0.0.1:${port}`, token: secret, release, pages, health, reestablish, failover };
+  try {
+    const [{ registerNativeGuestComputerUseScope }, { startComputerUseControlServer }] = await Promise.all([
+      import("../computer-use/native-guest"), import("../computer-use/control-server"),
+    ]);
+    const controlPort = await startComputerUseControlServer();
+    if (!controlPort || !current()) throw new Error("native-guest-host-unavailable");
+    const native = registerNativeGuestComputerUseScope({ ownerId: owner.ownerId, chatId: input.chatId,
+      runId: input.runId, permission: input.permission, signal: input.signal, current,
+      pages: () => [...nativeInputGuests].filter(([id, wc]) => !wc.isDestroyed()
+        && nativeInputOwners.get(wc) === ownerScopeId && nativeBrowserGuest(owner.ownerId, input.chatId, id) === wc).map(([id, wc]) => ({ id, wc })) });
+    releaseNativeInput = native.release;
+    grant.nativeComputerUse = { endpoint: `http://127.0.0.1:${controlPort}`, token: native.token, scopeId: native.scopeId };
+  } catch { /* Browser tools remain available; this optional recovery path fails closed. */ }
+  if (!current()) { release(); throw new Error("native-browser-grant-revoked"); }
   liveGrants.set(grant.endpoint, grant);
+  liveOwnerScopes.set(ownerScopeId, { ownerScopeId, chatId: input.chatId, runId: input.runId, grant });
   return grant;
 }

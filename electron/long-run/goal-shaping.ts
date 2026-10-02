@@ -283,10 +283,11 @@ export function ownerPausedOpen(plan: LiveGoalPlan): LiveTactic[] {
 
 function utcDay(iso: string): string { return iso.slice(0, 10); }
 
-function dispatchesToday(plan: LiveGoalPlan, nowMs: number): Record<string, number> {
+function dispatchesToday(plan: LiveGoalPlan, nowMs: number, reservedDecisionIds?: ReadonlySet<string>): Record<string, number> {
   const today = utcDay(new Date(nowMs).toISOString());
   const counts: Record<string, number> = {};
   for (const row of listGoalPlanDecisions(plan.goalId, { revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", limit: 500 })) {
+    if (reservedDecisionIds?.has(row.id)) continue;
     if (utcDay(row.createdAt) !== today) continue;
     for (const id of Array.isArray(row.payload.strategyIds) ? row.payload.strategyIds as string[] : []) counts[id] = (counts[id] ?? 0) + 1;
   }
@@ -299,9 +300,10 @@ export function missionPaces(plan: LiveGoalPlan, nowMs: number): Array<{ krId: s
     pace: missionPace({ target: kr.target, baseline: kr.baseline, startAt: plan.createdAt, deadlineAt: kr.deadline_at, nowMs, samples: [] }) }));
 }
 
-function reviewDue(plan: LiveGoalPlan, nowMs: number): boolean {
+function reviewDue(plan: LiveGoalPlan, nowMs: number, reservedDecisionIds?: ReadonlySet<string>): boolean {
   if (plan.shape !== "mission_tree" || !plan.review_every_hours) return false;
-  const last = listGoalPlanDecisions(plan.goalId, { revision: plan.revision, planSeq: plan.planSeq, kind: "strategy_review", limit: 1 })[0];
+  const last = listGoalPlanDecisions(plan.goalId, { revision: plan.revision, planSeq: plan.planSeq, kind: "strategy_review",
+    limit: 1 + (reservedDecisionIds?.size ?? 0) }).find((row) => !reservedDecisionIds?.has(row.id));
   const since = Date.parse(last?.createdAt ?? plan.createdAt);
   return nowMs - since >= plan.review_every_hours * 3_600_000;
 }
@@ -324,11 +326,18 @@ function guidanceLine(tactic: LiveTactic): string | null {
 /**
  * 계획을 턴 문맥 한 절로(R9: 활성 전술만). 선택한 전술의 발송 영수증과, 트리면 리뷰 영수증을 남긴다.
  */
-export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: number; runId?: string | null; record?: boolean; locale?: "ko" | "en" } = {}): string {
+export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
+  nowMs?: number; runId?: string | null; record?: boolean; locale?: "ko" | "en";
+  /** Exact receipts already booked for the still-pending first pass, never a run-wide exclusion. */
+  reservedDecisionIds?: ReadonlySet<string>;
+  onDecisionRecorded?: (id: string) => void;
+} = {}): string {
   const nowMs = input.nowMs ?? Date.now();
-  const tactics = selectActiveTactics(plan, { nowMs, dispatchesToday: dispatchesToday(plan, nowMs) });
+  const reservedDecisionIds = input.record === false ? input.reservedDecisionIds : undefined;
+  const tactics = selectActiveTactics(plan, { nowMs, dispatchesToday: dispatchesToday(plan, nowMs, reservedDecisionIds) });
   const strategyOf = (id: string | null) => plan.strategies.find((s) => s.id === id) ?? null;
   const lines: string[] = ["## Goal plan (host-owned shape decision · agentlas.goal-shape.v1)"];
+  lines.push(`Current plan identity: goal ${plan.goalId} · revision ${plan.revision} · planSeq ${plan.planSeq}. This is the current projection for this Goal revision; earlier plan projections are historical.`);
   lines.push(`Shape: ${plan.shape} (problem: ${plan.problem_nature}${plan.fallback ? "; provisional — the planner was unavailable" : ""}). ${plan.rationale}`);
   const paces = missionPaces(plan, nowMs);
   if (plan.shape === "mission_tree" && plan.mission) {
@@ -358,7 +367,9 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: nu
     // (실측 2026-09-24 E2E: 한 패스에 t1~t3 을 다 했는데 t1 만 알아서 t1 만 표식했다.) 트리는 활성 전술만(R9).
     if (plan.shape === "tactic_list") {
       const current = new Set(tactics.map((t) => t.id));
-      const later = [...plan.tactics].filter((t) => (t.status === "active" || t.status === "proposed") && !current.has(t.id)).sort((a, b) => a.ord - b.ord);
+      const pausedStrategies = new Set(plan.strategies.filter((strategy) => strategy.ownerPaused).map((strategy) => strategy.id));
+      const later = [...plan.tactics].filter((t) => (t.status === "active" || t.status === "proposed") && !current.has(t.id)
+        && !t.ownerPaused && !(t.strategy_id && pausedStrategies.has(t.strategy_id))).sort((a, b) => a.ord - b.ord);
       // A tool path the AGI unblocker chose applies whenever the tactic is reached in this turn, not only when current.
       if (later.length) lines.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})${t.guidance?.move === "switch_tool" && t.guidance.path
         ? ` [host: use the installed alternative "${t.guidance.path}" for this tactic; the previous path failed]` : ""}`).join(" | ")}`);
@@ -366,10 +377,12 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: nu
   } else if (ownerPausedOpen(plan).length) {
     // Only the owner's explicit branch pause holds these; they are open leaves, so the goal is not done.
     lines.push(`The remaining sub-goals (${ownerPausedOpen(plan).map((t) => t.id).join(", ")}) are paused by the owner. Do not work on them and do not claim the goal is complete; report briefly and end this turn.`);
+  } else if (plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")) {
+    lines.push("Open tactics remain, but none is currently eligible under the plan's strategy state or dispatch limits. Do not claim completion or add tactics to bypass those limits; report the current hold and end this turn.");
   } else {
     lines.push("Every planned tactic is done or retired. Verify the goal's acceptance criteria; if work remains, add a tactic with an add_tactic plan-op.");
   }
-  const review = reviewDue(plan, nowMs);
+  const review = reviewDue(plan, nowMs, reservedDecisionIds);
   if (review) {
     lines.push("Strategy review is due: compare each active strategy against the key-result pace above. You may retire a strategy whose timebox has elapsed (cite evidence) or add a strategy that cites a key result. Missing sensor data is an infrastructure state, not a reason to retire a strategy.");
   }
@@ -382,15 +395,17 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: { nowMs?: nu
   lines.push(`Plan-op text (description, done_when, hypothesis, kpi, evidence) is shown to the owner: write it in ${(input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en")) === "ko" ? "Korean" : "English"}; ids and op names stay as above.`);
   if (input.record !== false) {
     if (tactics.length) {
-      recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", createdAt: new Date(nowMs).toISOString(),
+      const receipt = recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", createdAt: new Date(nowMs).toISOString(),
         payload: { runId: input.runId ?? null, tacticIds: tactics.map((t) => t.id),
           strategyIds: [...new Set(tactics.map((t) => t.strategy_id).filter((id): id is string => Boolean(id)))] } });
+      input.onDecisionRecorded?.(receipt.id);
     }
     if (review) {
-      recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "strategy_review", createdAt: new Date(nowMs).toISOString(),
+      const receipt = recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "strategy_review", createdAt: new Date(nowMs).toISOString(),
         payload: { runId: input.runId ?? null, sensor: "none", sensorState: "infra_no_sensor",
           paces: paces.map(({ krId, pace }) => ({ krId, ...pace })),
           activeStrategies: plan.strategies.filter((s) => s.status === "active").map((s) => s.id) } });
+      input.onDecisionRecorded?.(receipt.id);
     }
   }
   return lines.join("\n");

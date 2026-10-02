@@ -1,19 +1,21 @@
 ---
 name: direct-study
-description: Drive one scientific study end to end, from prior literature through falsifiable hypotheses, a frozen design, data, analysis, robustness, and conclusions to a journal-validated manuscript, through explicit gated phases while preserving exact source, run, artifact, decision, analysis-plan, manuscript, and journal-validation lineage.
+description: Drive a scientific study with data-first experiments and hypothesis revision, parallel literature, evidence-supported analysis and conclusions, then an appropriate manuscript, using phases as evidence milestones while preserving exact source, run, artifact, decision, analysis-plan, manuscript, and journal-validation lineage.
 ---
 
 # Direct One Study
 
-Read `../../agent/agent.md` as the operating contract, `../../agent/soul.md` as the persona, and
-`../../contracts/research-state.schema.json` as the durable state shape. Hand the manuscript stage
-to `../write-manuscript/SKILL.md`.
+Consult `../../agent/agent.md`, `../../agent/soul.md`, the durable state schema and
+`../write-manuscript/SKILL.md` when useful. Reading or acknowledging a manual is never an execution
+prerequisite. The steps below are references to tools and evidence bindings, not a required order.
 
 ## Default operating mode
 
-Run the whole arc autonomously: problem framing -> literature synthesis -> hypotheses -> design and
-power -> data acquisition -> analysis -> robustness -> conclusions -> manuscript -> journal profile ->
-submission validation. Open each result as it is produced and continue. Do not stop between stages
+Run autonomously: question -> acquire available data -> exploratory test -> inspect the result ->
+revise the hypothesis -> next experiment. Search literature in parallel, guided by the results.
+Data collection, feasibility scripts and exploration need no completed literature review or approved
+analysis plan. Keep exploration distinct from confirmatory inference; formal plans and journal
+validation apply only where the actual operation or final claim needs them. Open each result as it is produced and continue. Do not stop between stages
 for confirmation. Stop only for a host-required human receipt that is actually pending under the
 project's approval policy, a journal manual attestation, a Research Contract that Main returned
 as a draft/checkpoint, or a genuine fork: two or more materially different directions, an ambiguous
@@ -36,10 +38,10 @@ a materially different evidence-bound action or persist the concrete blocker.
 
 ## Steps
 
-1. Call `inspect_research_workspace`, then load the latest study state. Use the returned bounded
+1. When an operation needs existing study identities, use `inspect_research_workspace` and the latest study state. Use the returned bounded
    SourceVersion, ResearchRun, Lab, and artifact identities as the starting inventory. If none exists,
    create `intake` revision 1; never infer completed work or an artifact ID from prose alone.
-   Immediately call `inspect_evidence_graph` for the current question or next gate. Treat its exact
+   Query `inspect_evidence_graph` when existing support or a contradiction matters to the current operation. Treat its exact
    traversal, review, evidence-scope, and missing-requirement fields as active planning input, not as
    a decorative network. Rejected candidates stay out of later work; accepted candidates authorize
    only the exact reviewed content. Use `materialize_evidence_graph_inference` for an accepted
@@ -62,8 +64,8 @@ a materially different evidence-bound action or persist the concrete blocker.
    call `start_research_loop` before ending the turn. Never approve a draft yourself or infer approval
    from chat prose or a policy name alone. A draft or unresolved checkpoint must wait for the exact
    human decision surface receipt.
-4. Before each tool call, record its intended capability, bound inputs, and expected receipt kinds.
-   Afterward, retain the exact IDs and hashes returned by the host.
+4. Execute the next useful measurement without a preparatory checklist. Retain the exact IDs,
+   hashes and provenance returned by the host; its tool log already records execution.
 5. Ask a bottom-sheet decision only when the answer changes the estimand, design, frozen plan,
    execution authority, interpretation, or target-journal package. Continue independent work while
    a non-blocking decision is pending. Before presenting any method, table, figure, or result,
@@ -85,7 +87,7 @@ a materially different evidence-bound action or persist the concrete blocker.
    falsification criteria) and at least one evidence-bound alternative, append approval as
    immutable successor revisions, and use the host-computed hypothesis manifest at the
    analysis-plan gate.
-8. Draft the design with `propose_analysis_plan` (estimand, units, design, definitions, exclusions,
+8. For a confirmatory analysis that needs a frozen design, use `propose_analysis_plan` (estimand, units, design, definitions, exclusions,
    missing data, model, multiplicity, diagnostics, sensitivity analyses, expected artifacts) and
    record power or precision planning where the live coverage supports it, or an explicit gap
    where it does not. For paired statistics sourced from two World Bank chart artifacts, first call
@@ -95,7 +97,8 @@ a materially different evidence-bound action or persist the concrete blocker.
    tokens. Never present two chart inputs or `model: null` as executable. Freeze with
    `freeze_analysis_plan` before confirmatory execution. Once the exact approved contract and Main
    approval receipt exist, the authoritative Research Loop must already have been inspected or
-   started; do this immediately after contract admission rather than waiting for a provider response,
+   started for the admitted persistent objective; this does not block independent data retrieval or exploration,
+   and is not contingent on waiting for a provider response,
    page, or manuscript. Persist and start an exact Research Episode before Lab execution; after
    execution, settle it exactly once with terminal run IDs, run-backed artifact versions/hashes, and
    committed evidence spans. Revise a hypothesis only after that result exists, binding its exact

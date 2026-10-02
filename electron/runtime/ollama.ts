@@ -87,6 +87,9 @@ export const runOllama: Runner = async (
       undefined,
       undefined,
       req.surfaceGate,
+      undefined,
+      undefined,
+      req.judgmentOnly === true ? "host-judgment" : undefined,
     ),
   }];
   for (const m of recent) {

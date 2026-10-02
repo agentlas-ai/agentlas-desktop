@@ -34,6 +34,7 @@ import {
 } from "../install-identity";
 import { DaemonDiagnosticLog, type DaemonDiagnosticFields, validAppInstanceId } from "./diagnostic-log";
 import { serializeRuntimeAppMetadata } from "../runtime-paths";
+import type { NativeBrowserDaemonBinding, NativeBrowserMainCapability } from "../browser/main-browser-channel";
 import {
   canonicalDaemonPath,
   daemonControlSocketPath,
@@ -62,6 +63,8 @@ export interface EnsureDaemonOptions extends DaemonServiceOptions {
   appInstanceId?: string;
   /** Legacy per-GUI diagnostic digest; never the service ownership identity. */
   expectedStoreIdentity?: string | null;
+  /** Main-only capability delivered via the fenced attach socket, never env/argv. */
+  browserCapability?: (binding: NativeBrowserDaemonBinding) => Promise<NativeBrowserMainCapability>;
 }
 
 export type EnsureDaemonStatus =
@@ -385,11 +388,14 @@ async function stopObservedDaemon(socketPath: string, ping: DaemonPing, timeoutM
 }
 
 async function attachDesktop(socketPath: string, ping: DaemonPing, opts: EnsureDaemonOptions): Promise<void> {
+  const browserCapability = opts.browserCapability && Number.isSafeInteger(ping.pid) && ping.bootId && ping.serviceIdentity
+    ? await opts.browserCapability({ daemonPid: Number(ping.pid), bootId: ping.bootId, serviceIdentity: ping.serviceIdentity }) : undefined;
   await callControlSocket(socketPath, "daemon.attach", {
     ...serviceControlGuard(ping),
     parentPid: opts.parentPid ?? process.pid,
     appInstanceId: opts.appInstanceId ?? null,
     expectedStoreIdentity: opts.expectedStoreIdentity ?? null,
+    ...(browserCapability ? { browserCapability } : {}),
   }, 3_000);
 }
 
@@ -540,6 +546,28 @@ export async function readDaemonActiveWork(userDataDir: string, timeoutMs = 1_50
   if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return [];
   const ping = await pingDaemon(daemonControlSocketPath(userDataDir), timeoutMs);
   return Array.isArray(ping?.activeWork) ? ping!.activeWork!.filter((reason) => typeof reason === "string") : [];
+}
+
+/** An automatic update needs proof of an idle service before stopping it.
+ * A failed/foreign/older ping is not an empty work census. Ordinary owner Quit
+ * keeps its own policy; this stricter check applies only to automatic install. */
+export async function readDaemonActiveWorkForUpdate(
+  options: DaemonServiceOptions,
+  timeoutMs = 1_500,
+): Promise<string[]> {
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return [];
+  const identity = resolveDaemonServiceIdentity(options);
+  const socketPath = daemonControlSocketPath(identity.userDataDir);
+  const ping = await pingDaemon(socketPath, timeoutMs);
+  if (!ping?.ok) {
+    if (await controlSocketIsAbsent(socketPath)) return [];
+    throw new Error("automatic_update_service_state_unknown");
+  }
+  if (ping.serviceProtocolVersion !== 2 || !matchesService(ping, identity)
+    || !Array.isArray(ping.activeWork) || !ping.activeWork.every((reason) => typeof reason === "string")) {
+    throw new Error("automatic_update_service_state_unknown");
+  }
+  return [...ping.activeWork];
 }
 
 /**

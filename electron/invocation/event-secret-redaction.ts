@@ -16,9 +16,12 @@ const AUTH_SCHEME_RE = /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+\/=:-]{4,}/gi;
 const SECRET_FLAG_RE =
   /(^|[\s"'=:,\[{(])(--(?:cookie|session|session-id|authorization|proxy-authorization))(?:=|\s+)(?:\\?["'][\s\S]*?\\?["']|[^\s,"'}\]]+)/gim;
 const URL_USERINFO_RE = /\bhttps?:\/\/[^\s/@:]+(?::[^\s/@]*)?@/gi;
+// Provider errors sometimes echo only a key's prefix and suffix. Scrub the
+// entire fragment before the ordinary full-key rule can leave the suffix.
+const MASKED_PROVIDER_KEY_RE = /(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{2,}(?:\*{2,}|\.{3,}|…)+[A-Za-z0-9_-]*/gi;
 
 export function redactOperationalSecrets(value: string): string {
-  return redactSecrets(value, REDACTED)
+  return redactSecrets(value.replace(MASKED_PROVIDER_KEY_RE, REDACTED), REDACTED)
     .replace(HEADER_SECRET_RE, (match) => {
       const splitAt = match.search(/[:=]/);
       return splitAt < 0 ? REDACTED : `${match.slice(0, splitAt + 1)} ${REDACTED}`;

@@ -109,33 +109,102 @@ export function composeResumeTurnPrompt(
  * 20턴 세션이면 같은 규약 사본 20벌이 기록에 쌓였다(턴당 3~4KB). 모델은 앞 턴의 사본을 이미 갖고 있다.
  * 다만 CLI 가 긴 세션을 압축(compact)하면 옛 사본이 요약으로 뭉개질 수 있어 STABLE_RESEND_EVERY 턴마다 다시 보낸다.
  * 기억은 프로세스 메모리뿐이라 앱을 다시 켜면 한 번 더 보낼 뿐이다(손해 없음).
+ * Prompt preparation is read-only. Only a native protocol acknowledgement may
+ * commit delivery or advance the resend cadence; process/thread init is not delivery.
+ * This cache governs stable host text only, never history replay or external effects.
  */
 const STABLE_RESEND_EVERY = 8;
 const STABLE_SESSIONS_MAX = 500;
-const stableSent = new Map<string, { turn: number; sent: Map<string, number> }>();
+const stableSent = new Map<string, { turn: number; sent: Map<string, number>; acknowledgementId: string; generation: number }>();
+const stableInvalidations = new Map<string, number>();
+let stableInvalidationSerial = 0;
+let forgottenInvalidationGeneration = 0;
+
+export interface StableTurnContextIdentity {
+  chatId?: string | null;
+  runtimeKind: string;
+  sessionId: string;
+  /** Exact owner/config identity, separate from the continuity fingerprint. */
+  contextFingerprint: string;
+}
+export interface StableTurnContextDelivery {
+  readonly identity: StableTurnContextIdentity;
+  readonly key: string;
+  readonly generation: number;
+  readonly confirmedTurns: number;
+  readonly includedHashes: readonly string[];
+}
+function stableContextKey(input: StableTurnContextIdentity): string {
+  return JSON.stringify([input.chatId ?? "", input.runtimeKind, input.sessionId, input.contextFingerprint]);
+}
+function stableContextScope(input: Omit<StableTurnContextIdentity, "contextFingerprint">): string {
+  return JSON.stringify([input.chatId ?? "", input.runtimeKind, input.sessionId]);
+}
+function stableContextGeneration(input: Omit<StableTurnContextIdentity, "contextFingerprint">): number {
+  return stableInvalidations.get(stableContextScope(input)) ?? forgottenInvalidationGeneration;
+}
 export function dedupeStableTurnContext(input: {
-  chatId?: string | null; runtimeKind: string; sessionId: string; turnContext?: string; stableBlocks?: readonly string[];
-}): { text: string; skipped: number; savedBytes: number } {
+  chatId?: string | null; runtimeKind: string; sessionId: string; contextFingerprint?: string;
+  turnContext?: string; stableBlocks?: readonly string[];
+}): { text: string; skipped: number; savedBytes: number; delivery?: StableTurnContextDelivery } {
   const text = input.turnContext ?? "";
-  if (!text.trim() || !input.stableBlocks?.length || !input.sessionId) return { text, skipped: 0, savedBytes: 0 };
-  const key = `${input.chatId ?? ""}\0${input.runtimeKind}\0${input.sessionId}`;
-  let record = stableSent.get(key);
-  if (!record) {
-    if (stableSent.size >= STABLE_SESSIONS_MAX) { const oldest = stableSent.keys().next(); if (!oldest.done) stableSent.delete(oldest.value); }
-    record = { turn: 0, sent: new Map() }; stableSent.set(key, record);
-  }
-  record.turn += 1;
+  if (!text.trim() || !input.stableBlocks?.length || !input.sessionId || !input.contextFingerprint) return { text, skipped: 0, savedBytes: 0 };
+  const identity: StableTurnContextIdentity = { chatId: input.chatId, runtimeKind: input.runtimeKind,
+    sessionId: input.sessionId, contextFingerprint: input.contextFingerprint };
+  const key = stableContextKey(identity);
+  const generation = stableContextGeneration(identity);
+  const storedRecord = stableSent.get(key);
+  const record = storedRecord?.generation === generation ? storedRecord : undefined;
+  const turn = (record?.turn ?? 0) + 1;
+  const includedHashes: string[] = [];
   let out = text, skipped = 0, savedBytes = 0;
   for (const block of input.stableBlocks) {
     const b = block.trim();
     if (!b || !out.includes(b)) continue;
     const hash = createHash("sha256").update(b).digest("hex").slice(0, 24);
-    const last = record.sent.get(hash);
-    if (last !== undefined && record.turn - last < STABLE_RESEND_EVERY) {
+    const last = record?.sent.get(hash);
+    if (last !== undefined && turn - last < STABLE_RESEND_EVERY) {
       out = out.replace(b, ""); skipped += 1; savedBytes += Buffer.byteLength(b);
     } else {
-      record.sent.set(hash, record.turn);
+      includedHashes.push(hash);
     }
   }
-  return { text: out.replace(/\n{3,}/g, "\n\n").trim(), skipped, savedBytes };
+  return { text: out.replace(/\n{3,}/g, "\n\n").trim(), skipped, savedBytes,
+    delivery: { identity, key, generation, confirmedTurns: record?.turn ?? 0, includedHashes } };
+}
+
+/** Called only after the adapter binds a native turn receipt to this dispatched prompt. */
+export function acknowledgeStableTurnContext(delivery: StableTurnContextDelivery | undefined,
+  receipt: { sessionId: string; acknowledgementId: string }): boolean {
+  if (!delivery || receipt.sessionId !== delivery.identity.sessionId || !receipt.acknowledgementId.trim()
+    || delivery.generation !== stableContextGeneration(delivery.identity)) return false;
+  let record = stableSent.get(delivery.key);
+  if (record?.generation !== delivery.generation) record = undefined;
+  if (record?.acknowledgementId === receipt.acknowledgementId) return false;
+  if ((record?.turn ?? 0) !== delivery.confirmedTurns) return false;
+  if (!record) {
+    if (stableSent.size >= STABLE_SESSIONS_MAX) { const oldest = stableSent.keys().next(); if (!oldest.done) stableSent.delete(oldest.value); }
+    record = { turn: 0, sent: new Map(), acknowledgementId: "", generation: delivery.generation }; stableSent.set(delivery.key, record);
+  }
+  record.turn += 1;
+  record.acknowledgementId = receipt.acknowledgementId;
+  for (const hash of delivery.includedHashes) record.sent.set(hash, record.turn);
+  return true;
+}
+
+/** Typed compaction/replacement invalidates every config view of this native identity. */
+export function invalidateStableTurnContext(input: Omit<StableTurnContextIdentity, "contextFingerprint">): void {
+  const scope = stableContextScope(input);
+  if (!stableInvalidations.has(scope) && stableInvalidations.size >= STABLE_SESSIONS_MAX) {
+    const oldest = stableInvalidations.keys().next();
+    if (!oldest.done) stableInvalidations.delete(oldest.value);
+    // Forgotten invalidations must not allow an old pending acknowledgement to
+    // resurrect delivery. Only scopes without retained generation evidence resend.
+    forgottenInvalidationGeneration = ++stableInvalidationSerial;
+  }
+  stableInvalidations.set(scope, ++stableInvalidationSerial);
+  for (const key of stableSent.keys()) {
+    const [chatId, runtimeKind, sessionId] = JSON.parse(key) as string[];
+    if (chatId === (input.chatId ?? "") && runtimeKind === input.runtimeKind && sessionId === input.sessionId) stableSent.delete(key);
+  }
 }

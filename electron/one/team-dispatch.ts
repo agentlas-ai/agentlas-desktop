@@ -466,7 +466,8 @@ export interface OneTeamCaller {
 }
 
 export function oneTeamList(caller: OneTeamCaller) {
-  assertCaller(caller.chatId);
+  const ownerChatId = assertCaller(caller.chatId);
+  const group = groupOf(ownerChatId);
   recoverOneTeamDispatches();
   const { invocationService } = runtime();
   const active = new Set(invocationService.activeChatIds());
@@ -475,11 +476,19 @@ export function oneTeamList(caller: OneTeamCaller) {
     "SELECT * FROM one_team_dispatches WHERE parent_chat_id = ? ORDER BY created_at DESC LIMIT 20",
   ).all(caller.chatId) as OneDispatchRow[];
   return {
+    conversation: {
+      chat_id: ownerChatId,
+      is_group: group !== null,
+      group: group ? { id: group.id, revision: group.revision, member_agent_ids: [...group.memberAgentIds] } : null,
+    },
     teammates: activeMembers().map((member) => ({
       member_id: member.id,
       name: member.displayName,
       name_en: member.nameEn,
       status: member.statusLineEn || member.statusLine,
+      installed_agent_id: member.installedAgentId,
+      source: member.source,
+      in_current_group: group?.memberAgentIds.includes(member.installedAgentId) ?? false,
     })),
     sessions_from_this_conversation: open.map((dispatch) => ({
       ...view(dispatch),
@@ -768,6 +777,55 @@ export function oneTeamInvite(caller: OneTeamCaller, input: { member?: unknown }
       ? ownerMessage(`팀원 ${member.displayName}${particle(member.displayName, "object")} 이 단톡방에 초대했어요.`, `Invited teammate ${member.displayName} to this group chat.`)
       : ownerMessage(`팀원 ${member.displayName}${particle(member.displayName, "topic")} 이미 이 단톡방에 있어요.`, `Teammate ${member.displayName} is already in this group chat.`),
     note: "To hand this teammate work, call one_team_start_session with this name.",
+  };
+}
+
+/** Explicit composition, distinct from invitation into an already existing room. */
+export interface OneTeamComposeGroupInput { members: string[] }
+
+function isOneTeamComposeGroupInput(input: unknown): input is OneTeamComposeGroupInput {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const value = input as Record<string, unknown>;
+  return Object.keys(value).every(key => key === "members")
+    && Array.isArray(value.members) && value.members.length >= 1 && value.members.length <= 16
+    && value.members.every(id => typeof id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(id))
+    && new Set(value.members).size === value.members.length;
+}
+
+export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
+  const chatId = assertCaller(caller.chatId);
+  assertRosterPermission(caller);
+  if (caller.permission !== "write" && caller.permission !== "full") throw new Error("one-team-permission-required");
+  if (!isOneTeamComposeGroupInput(input)) {
+    throw new Error("one-team-group-invalid-members: supply one to sixteen distinct exact member_id values; the group is unchanged.");
+  }
+  const roster = activeMembers();
+  const members = input.members.map(id => {
+    const matches = roster.filter(member => member.id === id);
+    const member = matches.length === 1 ? matches[0] : null;
+    if (!member || member.source !== "local" || member.statusKind === "locked") {
+      throw new Error("one-team-group-member-unavailable: only existing active local One members can compose this group; the group is unchanged.");
+    }
+    return member;
+  });
+  let result: ReturnType<ReturnType<typeof taskforceStore>["composeOneTaskforceForChat"]>;
+  try {
+    result = taskforceStore().composeOneTaskforceForChat({ chatId, memberAgentIds: members.map(member => member.installedAgentId) });
+  } catch (error) {
+    throw new Error(`one-team-group-compose-refused: ${error instanceof Error ? error.message : "one-team-group-failed"}; the group is unchanged.`);
+  }
+  return {
+    confirmed: true,
+    created: result.created,
+    already_composed: !result.created && result.addedMemberAgentIds.length === 0,
+    added_member_ids: members.filter(member => result.addedMemberAgentIds.includes(member.installedAgentId)).map(member => member.id),
+    conversation: { chat_id: chatId, is_group: true, group: { id: result.group.id, revision: result.group.revision, member_agent_ids: [...result.group.memberAgentIds] } },
+    owner_message: result.created
+      ? ownerMessage("이 대화를 요청한 팀원들과 함께하는 단톡방으로 만들었어요.", "Made this conversation a group with the requested teammates.")
+      : result.addedMemberAgentIds.length > 0
+        ? ownerMessage("요청한 팀원을 이 단톡방에 추가했어요. 기존 팀원은 그대로 있어요.", "Added the requested teammates to this group, keeping its current members.")
+        : ownerMessage("요청한 팀원이 모두 이미 이 단톡방에 있어요.", "All requested teammates are already in this group."),
+    note: "No work was started. Hand work separately with one_team_start_session.",
   };
 }
 

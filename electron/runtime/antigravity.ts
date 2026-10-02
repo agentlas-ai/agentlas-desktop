@@ -284,6 +284,8 @@ export function buildAntigravityPrompt(req: RunnerRequest, maxPromptBytes = AGY_
     undefined,
     req.surfaceGate,
     "antigravity",
+    req.sciencePromptProfile,
+    req.judgmentOnly === true ? "host-judgment" : undefined,
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
@@ -1124,6 +1126,37 @@ interface AgyMcpReplacement {
 // using the canonical key, then restore it when the last local reference ends.
 const AGY_MCP_REPLACEMENTS = new Map<string, AgyMcpReplacement>();
 
+interface AgyGlobalMcpConfig {
+  mcpServers?: Record<string, AgyMcpServerEntry>;
+  [key: string]: unknown;
+}
+
+// Some fresh vendor installs create an empty file. Treat only blank bytes as
+// empty config, and preserve those bytes until the final local binding ends.
+const AGY_MCP_BLANK_CONFIGS = new Map<string, { raw: string; mode: number }>();
+
+function parseAgyGlobalMcpConfig(raw: string): AgyGlobalMcpConfig {
+  if (!raw.trim()) return { mcpServers: {} };
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error();
+    return parsed as AgyGlobalMcpConfig;
+  } catch {
+    // Never expose config contents or a JSON parser's input excerpt.
+    throw new Error("agy_mcp_global_config_unavailable");
+  }
+}
+
+async function readAgyGlobalMcpConfig(): Promise<AgyGlobalMcpConfig> {
+  let raw: string;
+  try { raw = await fs.readFile(agyMcpConfigPath(), "utf8"); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { mcpServers: {} };
+    throw new Error("agy_mcp_global_config_unavailable");
+  }
+  return parseAgyGlobalMcpConfig(raw);
+}
+
 function isAgyMcpEntryEqual(left: AgyMcpServerEntry | undefined, right: AgyMcpServerEntry | undefined): boolean {
   return Boolean(left && right && JSON.stringify(left) === JSON.stringify(right));
 }
@@ -1407,10 +1440,7 @@ async function reconcileAgyMcpServersAttempt(
   let bound: Awaited<ReturnType<typeof reconcileAgyMcpServersUnderLease>> | undefined;
   try {
     signal?.throwIfAborted();
-    const global = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch((error) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "{}";
-      throw error;
-    }));
+    const global = await readAgyGlobalMcpConfig();
     const requested = mcpConfigPath ? JSON.parse(await fs.readFile(mcpConfigPath, "utf8")) : {};
     const browser = global.mcpServers?.["agentlas-browser"];
     if (browser && isAgentlasOwnedBrowserMcpEntry(browser)) {
@@ -1442,22 +1472,16 @@ async function reconcileAgyMcpServersAttempt(
     }
     bound = await reconcileAgyMcpServersUnderLease(mcpConfigPath, onStatus, runtimeEnv, lease.generation, signal);
     if (bound.failure) { await lease.release(); return bound; }
-    const stagedConfig = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch((error) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return "{}";
-      throw error;
-    }));
+    const stagedConfig = await readAgyGlobalMcpConfig();
     signal?.throwIfAborted();
-    const guardedKeys = Object.keys(stagedConfig.mcpServers ?? {}).filter((key) => stagedConfig.mcpServers[key]?.env?.AGENTLAS_AGY_MCP_GENERATION === lease.generation);
+    const guardedKeys = Object.keys(stagedConfig.mcpServers ?? {}).filter((key) => stagedConfig.mcpServers?.[key]?.env?.AGENTLAS_AGY_MCP_GENERATION === lease.generation);
     const assertReady = async () => {
       signal?.throwIfAborted();
       await lease.assertOwned();
-      const current = JSON.parse(await fs.readFile(agyMcpConfigPath(), "utf8").catch((error) => {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT") return "{}";
-        throw error;
-      }));
+      const current = await readAgyGlobalMcpConfig();
       for (const key of guardedKeys) {
         const entry = current.mcpServers?.[key];
-        if (!isAgyMcpEntryEqual(entry, stagedConfig.mcpServers[key])) {
+        if (!isAgyMcpEntryEqual(entry, stagedConfig.mcpServers?.[key])) {
           throw new Error("agy_mcp_configuration_drift");
         }
       }
@@ -1533,9 +1557,12 @@ async function reconcileAgyMcpServersUnderLease(
   return withAgyMcpMutationLock(async () => {
     signal?.throwIfAborted();
     const globalPath = agyMcpConfigPath();
-    let parsed: { mcpServers?: Record<string, AgyMcpServerEntry>; [key: string]: unknown };
+    let parsed: AgyGlobalMcpConfig;
+    let blankOriginal: { raw: string; mode: number } | undefined;
     try {
-      parsed = JSON.parse(await fs.readFile(globalPath, "utf8"));
+      const raw = await fs.readFile(globalPath, "utf8");
+      parsed = parseAgyGlobalMcpConfig(raw);
+      if (!raw.trim()) blankOriginal = { raw, mode: (await fs.stat(globalPath)).mode & 0o777 };
     } catch (error) {
       if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
         parsed = { mcpServers: {} };
@@ -1613,7 +1640,9 @@ async function reconcileAgyMcpServersUnderLease(
     // 임시 파일 + rename — 시작 중인 다른 agy 가 반쯤 쓰인 파일을 읽지 않게 한다.
     const tmp = `${globalPath}.agentlas-${process.pid}-${randomUUID()}.tmp`;
     await fs.mkdir(path.dirname(globalPath), { recursive: true });
-    await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, "utf8");
+    const blank = blankOriginal ?? AGY_MCP_BLANK_CONFIGS.get(globalPath);
+    await fs.writeFile(tmp, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", ...(blank ? { mode: blank.mode } : {}) });
+    if (blank) await fs.chmod(tmp, blank.mode);
     await fs.rename(tmp, globalPath);
   };
 
@@ -1719,6 +1748,7 @@ async function reconcileAgyMcpServersUnderLease(
   if (added.length === 0 && !globalDirty) return noop;
   try {
     await writeGlobal(parsed);
+    if (blankOriginal) AGY_MCP_BLANK_CONFIGS.set(globalPath, blankOriginal);
   } catch (error) {
     for (const key of previousRefcounts.keys()) {
       const previousRefcount = previousRefcounts.get(key);
@@ -1790,6 +1820,21 @@ async function reconcileAgyMcpServersUnderLease(
         if (quarantinedBrowser && current && !current.mcpServers![BROWSER_KEY]) {
           current.mcpServers![BROWSER_KEY] = quarantinedBrowser;
           dirty = true;
+        }
+        const blank = AGY_MCP_BLANK_CONFIGS.get(globalPath);
+        if (blank && AGY_MCP_REFCOUNT.size === 0) {
+          // Restore only when removing our last exact entry leaves no foreign
+          // servers or metadata. Drift must never authorize a blank overwrite.
+          const empty = current && Object.keys(current).length === 1
+            && current.mcpServers && Object.keys(current.mcpServers).length === 0;
+          if (dirty && empty) {
+            const tmp = `${globalPath}.agentlas-${process.pid}-${randomUUID()}.tmp`;
+            await fs.writeFile(tmp, blank.raw, { encoding: "utf8", mode: blank.mode });
+            await fs.chmod(tmp, blank.mode);
+            await fs.rename(tmp, globalPath);
+            dirty = false;
+          }
+          AGY_MCP_BLANK_CONFIGS.delete(globalPath);
         }
         if (dirty && current) await writeGlobal(current);
       } catch (error) {

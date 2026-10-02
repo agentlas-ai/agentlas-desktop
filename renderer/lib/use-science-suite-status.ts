@@ -10,6 +10,16 @@ let statusRequest: Promise<ScienceSuiteStatus | null> | null = null;
 let extensionEventsConnected = false;
 const subscribers = new Set<() => void>();
 
+export function scienceCoreInstalled(suite: ScienceSuiteStatus | null): boolean {
+  return Boolean(suite?.components.find(component => component.id === "agentlas-science")?.status.installed);
+}
+
+/** Optional molecule renderers do not prevent opening the installed research workbench. */
+export function scienceCoreReady(suite: ScienceSuiteStatus | null): boolean {
+  const core = suite?.components.find(component => component.id === "agentlas-science")?.status;
+  return Boolean(suite?.phase !== "repair-required" && core?.installed && core.enabled && core.phase === "installed");
+}
+
 function publish(next: ScienceSuiteStatus | null): void {
   if (statusSnapshot === next) return;
   statusSnapshot = next;

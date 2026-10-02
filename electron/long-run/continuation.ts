@@ -1,3 +1,4 @@
+import { hasPendingInvocationDirection } from "./pending-directions";
 import { statSync } from "node:fs";
 import type { RuntimeSelection } from "../../shared/types";
 import { compileLongRunCheckpoint, hostEpisodeRoute, type LongRunTaskCheckpoint } from "../../shared/long-run-checkpoint";
@@ -50,8 +51,7 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
     .get(history.lastMessageId, chat.id) as { cursor: number } | undefined : undefined;
   if (!history || history.chatId !== chat.id || !cursor) throw new Error("checkpoint_history_cursor_missing");
   if (getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND rowid > ? LIMIT 1").get(chat.id, cursor.cursor)
-    || getDb().prepare("SELECT 1 FROM invocation_steers WHERE original_run_id = ? AND status IN ('queued','draining','cancelled','failed') LIMIT 1")
-      .get(checkpoint.invocationRunId ?? "")) throw new Error("checkpoint_newer_user_direction");
+    || hasPendingInvocationDirection(checkpoint.invocationRunId ?? "")) throw new Error("checkpoint_newer_user_direction");
   // The same Main-owned folder order the executor froze for the producer (service.ts executionCwd):
   // saved chat folder, then the chat's Project folder. Reading only the chat folder refused every
   // Project Work Goal once its checkpoint could be settled (isolated live run 2026-09-24:

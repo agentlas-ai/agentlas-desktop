@@ -1,4 +1,3 @@
-import { isProtectedBrowserSessionHost } from "../../shared/browser-session-transfer";
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -84,6 +83,8 @@ interface CdpCookie {
 interface CookieWriteSummary {
   observed: number;
   imported: number;
+  added?: number;
+  updated?: number;
   skipped: NativeBrowserCookieImportResult["skipped"];
   preserved?: number;
 }
@@ -348,7 +349,6 @@ export async function writeNativeBrowserCookies(
 ): Promise<CookieWriteSummary> {
   const counts = emptyCounts();
   counts.observed = cookies.length;
-  cookies = cookies.filter((cookie) => !isProtectedBrowserSessionHost(cookie.domain));
   let begun = false;
   /*
    * An automatic sync never mixes two logins: a login group the partition already holds in full is
@@ -382,6 +382,7 @@ export async function writeNativeBrowserCookies(
       counts.skipped[converted.reason] += 1;
       continue;
     }
+    let replacing = false;
     try {
       if (connect) {
         if (!(await connect.isCurrent())) throw new CookieImportError("authorization-required", counts);
@@ -390,6 +391,7 @@ export async function writeNativeBrowserCookies(
         const host = (value: string) => value.replace(/^\./u, "").toLowerCase();
         const domain = host(String(cookie.domain));
         const hasExisting = existing.some((item) => host(item.domain ?? "") === domain && item.path === converted.details.path);
+        replacing = hasExisting;
         /*
          * 자동 갱신은 살아 있는 세션을 덮지 않는다(그 창에서 직접 로그인했을 수 있다).
          * 그러나 사용자가 방금 가져오기를 눌렀다면 가져온 값이 이겨야 한다 — 그러지 않으면
@@ -407,6 +409,8 @@ export async function writeNativeBrowserCookies(
       }
       await destination.cookies.set(converted.details);
       counts.imported += 1;
+      if (replacing) counts.updated = (counts.updated ?? 0) + 1;
+      else counts.added = (counts.added ?? 0) + 1;
     } catch (error) {
       if (error instanceof CookieImportError) throw error;
       counts.skipped.writeFailed += 1;
@@ -517,7 +521,7 @@ async function connectSessionScope(requestedDomains?: readonly string[]): Promis
       || !consent.domains.every((domain) => typeof domain === "string" && domain.length <= 253
         && /^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/u.test(domain))) return null;
     const sites = listBrowserSites();
-    const domains = [...new Set(consent.domains.filter((domain) => !isProtectedBrowserSessionHost(domain) && (!requestedDomains || requestedDomains.includes(domain)) && /^[a-z0-9.-]+$/u.test(domain)
+    const domains = [...new Set(consent.domains.filter((domain) => (!requestedDomains || requestedDomains.includes(domain)) && /^[a-z0-9.-]+$/u.test(domain)
       && !domain.startsWith(".") && sites.some((site) => site.site === domain && site.session.status === "valid")))].sort();
     if (!domains.length) return null;
     const revision = browserCredentialConsentRevision(), port = browserCdpPort();

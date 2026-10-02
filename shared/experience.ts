@@ -285,6 +285,16 @@ export interface ExperienceOntologySummary {
   updateRelationCount: number;
   localReceiptCount: number;
   autoIntake: ExperienceAutoIntakeSummary;
+  /** Bounded, observed run outcomes; no item usefulness is inferred. Optional for older hosts. */
+  applicationOutcomes?: {
+    sampledApplications: number;
+    completed: number;
+    failed: number;
+    cancelled: number;
+    interrupted: number;
+    unknown: number;
+    attributedItems: 0;
+  };
 }
 
 /**
@@ -667,4 +677,20 @@ export interface ExperienceContextSelection {
   prompt: string;
   selectedCandidateIds: string[];
   approximateTokens: number;
+  /** Host-only, content-free snapshot; absent on legacy selections. */
+  application?: ExperienceApplicationSnapshot;
+}
+
+export interface ExperienceApplicationSnapshot {
+  schemaVersion: "agentlas.experience-application.v1";
+  agentId: string;
+  scopeHash: string;
+  currentBaseHash: string;
+  environmentKey: string;
+  taskKey: string;
+  candidateIds: string[];
+  candidateContentHashes: string[];
+  measuredBaseHashes: string[];
+  measuredEnvironmentKeys: string[];
+  packIds: string[];
 }

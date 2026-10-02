@@ -41,12 +41,15 @@ export const APP_BUILDER_SLUG = "agentlas-app-builder";
 export const CORE_META_AGENT_SLUG = "agentlas-core-engine-meta-agent-builtin";
 export const SCIENCE_RESEARCH_DIRECTOR_SLUG = "agentlas-science-research-director";
 export const ALIVE_CONTROLLER_SLUG = "agentlas-alive-controller";
-export const RESEARCH_DIRECTOR_PLUGIN_VERSION = "1.25.0";
-// Hash of the canonical prompt assembled from agent/soul.md, agent/agent.md,
-// skills/direct-study/SKILL.md and skills/write-manuscript/SKILL.md (persona -> contract -> workflows).
-// The Science runtime refuses to dispatch when the installed package differs.
-// Regenerate from composeResearchDirectorSystemPrompt and the four prompt assets declared in plugin.json.
-export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "6b69b74525feaf3ecfe1a8f1d6614dee6d0e6bbbf3c0a18c517f761c9ea341b4";
+export const RESEARCH_DIRECTOR_PLUGIN_VERSION = "1.27.0";
+// Immutable compact runtime core and lossless instruction catalog/bundle.
+// Science verifies these compiled pins independently of mutable install metadata.
+// Full original instructions have a separate archival pin; details never rewrite the core.
+export const RESEARCH_DIRECTOR_SYSTEM_PROMPT_SHA256 = "ca34009c7674dfce2ce06934a343802cd79f8bb2f7537156a413a913d2007777";
+
+export const RESEARCH_DIRECTOR_CATALOG_SHA256 = "79ab73c540ae3da0f1ff42a9a1df7a1305d5ff236424bd770d5f550cfa6ab3a9";
+export const RESEARCH_DIRECTOR_BUNDLE_SHA256 = "220b56310f4032df45e95d852bcf811b25dccda20328d56c53aa51ffe9f16c92";
+export const RESEARCH_DIRECTOR_ARCHIVED_PROMPT_SHA256 = "b6b01a83aabea2f77a5b157b7736c212488f71919e25aeb3c6f33567deab2953";
 
 // ── Memory contract ────────────────────────────────────────────────────────
 // Mirrors agent_memory_curator_agent/docs/integration-contract.md + memory-taxonomy.md.
@@ -142,6 +145,9 @@ Rules:
   "Local Credential Index" section of ${PROJECT_MEMORY_DIR}/${PROJECT_SOUL_FILE}
   before saying a credential is missing.
 - One candidate per durable item. Keep "content" to one or two sentences.
+- Write turn_summary and every candidate content in English, regardless of the
+  conversation or display language. Preserve non-English original wording in
+  content_native; it is the authoritative wording for owner decisions and quotes.
 - "memory_kind": fact | decision | preference | risk | procedure | hypothesis | evidence | deprecation | conflict
 - "suggested_scope": user_identity | team_memory | project (this folder) | agent_repo | session (temporary) | discard
 - Use user_identity for a stable operator preference or personal fact (their name, role, language, tone,
@@ -149,6 +155,8 @@ Rules:
   when you label it so with "confidence": "high"; it never promotes into that scope, so a preference emitted
   at lower confidence is demoted to a throwaway session note.
 - "agent_team" is accepted only as a legacy alias for team_memory.
+- When replacing a recalled item, add "supersedes": "h:16hex" using its observed
+  block key. Never invent a key; replacement stays within the curator's owner.
 - Add "request_context" when it improves future recall: user_intent, trigger_terms,
   cwd_at_request, target_project, target_path, cross_context, outcome.
 - Never put the raw user prompt or transcript in request_context.

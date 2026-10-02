@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isSafeOneMemoryText, type OneMemoryProposalBasis } from "../../shared/one-memory";
 import { judgeRequired, peekJudgment } from "../system-agents/judgment";
+import type { RuntimeSelection } from "../../shared/types";
 
 export interface ExplicitOneMemoryIntent {
   normalizedPreview: string;
@@ -86,17 +87,19 @@ export function detectExplicitOneMemoryIntent(
 }
 
 /** Synchronous read of an already-judged explicit-memory verdict. */
-export function judgedOneMemoryIntent(prompt: string): boolean | null {
+export function judgedOneMemoryIntent(prompt: string, runtimeSelection?: RuntimeSelection): boolean | null {
   const verdict = peekJudgment<"yes" | "no">(
     ONE_MEMORY_INTENT_JUDGMENT_KIND,
     memoryIntentJudgmentInput(prompt),
+    undefined,
+    runtimeSelection,
   );
   return verdict && verdict.source === "llm" ? verdict.verdict === "yes" : null;
 }
 
 /** Warm the judgment cache before the synchronous invocation start path peeks it. */
 export async function prejudgeOneMemoryIntent(
-  request: { oneMode?: boolean; userPrompt?: string },
+  request: { oneMode?: boolean; userPrompt?: string; runtimeSelection?: RuntimeSelection },
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<void> {
   if (request.oneMode !== true) return;
@@ -111,6 +114,7 @@ export async function prejudgeOneMemoryIntent(
       guidance: ONE_MEMORY_INTENT_GUIDANCE,
       signal: opts.signal,
       timeoutMs: opts.timeoutMs,
+      runtimeSelection: request.runtimeSelection,
     });
   } catch {
     // Best-effort warm; the sync site remains undecided.

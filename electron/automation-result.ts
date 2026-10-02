@@ -2,6 +2,8 @@ import { judgeRequired, type RequiredVerdict } from "./system-agents/judgment";
 import { currentUiLocale } from "./ui-locale";
 import { GRAPH_VERBATIM_CODES } from "../shared/graph-vocabulary.generated";
 import type { RuntimeSelection } from "../shared/types";
+import type { ToolFailureCode } from "../shared/tool-failure";
+import { extractAskFences } from "../shared/ask-fence-flatten";
 
 /**
  * 판정 이유는 그대로 사용자 화면에 실린다. 언어와 어휘를 지정하지 않으면 영어 기술 문장이
@@ -111,8 +113,15 @@ export const JUDGMENT_UNAVAILABLE_REASON_CODE = "judgment_unavailable";
 const STRUCTURED_BLOCKED_CODES = ["agent_not_found", "owner_only", "no_cloud_package", "insufficient_credits"] as const;
 
 function structuredOutcome(value: string): AutomationResultClassification | null {
-  if (/<<\s*agentlas-ask\s*>>/u.test(value)) {
-    return { status: "needs_input", outcome: "needs_input", reasonCode: "unattended_question", reason: null, evidence: null };
+  // The runner emits this exact prefix for unattended owner questions. Strip
+  // only its optional persona wrapper. Full validated question fences can
+  // follow explanatory prose, as in the ordinary question renderer.
+  const questions = extractAskFences(value).questions;
+  const prefix = /^(?:(?:\*\*)?\[Hope\](?:\*\*)?\s*)?NEEDS-INPUT:\s*/u;
+  if (questions.length > 0 || prefix.test(value.trim())) {
+    return { status: "needs_input", outcome: "needs_input", reasonCode: "unattended_question",
+      reason: (questions.length ? questions.map(question => question.question).join("\n") : value.trim().replace(prefix, "").trim()).slice(0, 800) || null,
+      evidence: null };
   }
   const code = STRUCTURED_BLOCKED_CODES.find((candidate) => new RegExp(`\\b${candidate}\\b`, "u").test(value));
   return code ? { status: "blocked", outcome: "blocked", reasonCode: code, reason: null, evidence: null } : null;
@@ -170,6 +179,11 @@ export interface ObservedToolActivity {
   callCount: number;
   /** 실제로 불린 도구 이름(중복 제거, 상한 있음). 판정 근거로 그대로 보인다. */
   toolNames: string[];
+  /** Bounded ledger observations, not a claim that an outside effect happened. */
+  results?: Array<{ toolName: string; state: "completed" | "failed" | "pending"; failureCode?: ToolFailureCode }>;
+  resultsTruncated?: boolean;
+  /** Main's closed failure code across this run, independent of the detail cap. */
+  approvalRequiredCount?: number;
 }
 
 /**
@@ -251,6 +265,12 @@ function toolActivityBlock(activity: ObservedToolActivity | undefined): string {
     "[HOST-OBSERVED TOOL ACTIVITY — this is measured by the host, not claimed by the model]",
     `tool calls: ${activity.callCount}`,
     activity.toolNames.length > 0 ? `tools used: ${activity.toolNames.slice(0, 20).join(", ")}` : "tools used: (none)",
+    ...(activity.approvalRequiredCount ? [`tool requests recorded as requiring approval: ${activity.approvalRequiredCount}`] : []),
+    ...(activity.results?.length ? [
+      `recent tool observations: ${JSON.stringify(activity.results.slice(-40))}`,
+      "Completed means a tool result was observed, not that the intended outside effect was verified. Failed approval requests may have been superseded by another successful route; assess the whole record.",
+    ] : []),
+    ...(activity.resultsTruncated ? ["Tool observations are truncated; omitted calls are not evidence of success or failure."] : []),
     "[/HOST-OBSERVED TOOL ACTIVITY]",
   ].join("\n");
 }
@@ -283,6 +303,13 @@ export async function classifyAutomationOutcome(
   } = {},
 ): Promise<AutomationResultClassification> {
   const value = text?.trim() ?? "";
+  // A final verification/no-op step must not hide an explicit owner question
+  // emitted by an earlier step. The prefix must lead; question fences must
+  // pass the same complete-question parser as the question renderer.
+  for (const step of opts.runRecord?.steps ?? []) {
+    const question = structuredOutcome(String(step.output ?? ""));
+    if (question?.outcome === "needs_input") return question;
+  }
   if (!value) return unresolved("missing_result", null);
   const structured = structuredOutcome(value);
   if (structured) return structured;

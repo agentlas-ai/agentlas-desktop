@@ -142,6 +142,24 @@ export type OneRecoveryOutcomeDecision =
   | { verified: false; retry: true; attempt: number }
   | { verified: false; retry: false; reason: OneAutoRecoveryStop };
 
+/** Main-recorded terminal boundaries apply before any automatic judgment or
+ * read-only observation turn. Read authority cannot settle an uncertain turn. */
+export function oneAutoRecoveryTerminalStop(
+  receipt: Pick<InvocationRunReceipt, "status" | "errorCode" | "interruptionCause" | "hostStopCause">,
+): Extract<OneAutoRecoveryDecision, { retry: false }> | null {
+  if (receipt.interruptionCause === "steering") {
+    return { retry: false, reason: "settled" };
+  }
+  if (receipt.status === "cancelled") return { retry: false, reason: "stopped-by-user" };
+  if (receipt.hostStopCause) return { retry: false, reason: "settled" };
+  if (receipt.status !== "failed" && receipt.status !== "interrupted") return null;
+  if (receipt.errorCode === "automation_no_progress_loop") return { retry: false, reason: "no-progress" };
+  if (receipt.errorCode === "runtime_turn_unsettled" || receipt.errorCode === "serving_reconciliation_required") {
+    return { retry: false, reason: "unsafe-to-repeat" };
+  }
+  return null;
+}
+
 export type OneRunFailureFingerprint = string;
 
 /**
@@ -164,23 +182,15 @@ export function oneRunFailureFingerprint(
  * `null` means "nothing decidable from form alone — ask the judge".
  */
 export function oneAutoRecoveryFormGate(input: {
-  receipt: Pick<InvocationRunReceipt, "status" | "executionPermission" | "interruptionCause" | "hostStopCause">;
+  receipt: Pick<InvocationRunReceipt, "status" | "executionPermission" | "errorCode" | "interruptionCause" | "hostStopCause">;
   attemptsSpent: number;
   previousFingerprint?: OneRunFailureFingerprint | null;
   currentFingerprint: OneRunFailureFingerprint;
   maxAttempts?: number;
 }): OneAutoRecoveryDecision | null {
   const status = input.receipt.status;
-  // Steering is a deliberate replacement, not a failed attempt to route
-  // around. The receipt is set only from the exact ledger sequence above.
-  if (input.receipt.interruptionCause === "steering") {
-    return { retry: false, reason: "settled" };
-  }
-  // An explicit stop is an instruction, not a failure to route around.
-  if (status === "cancelled") return { retry: false, reason: "stopped-by-user" };
-  // 앱 종료로 끊긴 실행은 실패가 아니다 — 자동 복구가 다시 돌리지 않는다. 목표는 재시작 체크포인트가,
-  // 그 밖의 턴은 오너의 재개/다시 시도가 잇는다(Main 표식 hostStopCause, shared/invocation-host-stop.ts).
-  if (input.receipt.hostStopCause) return { retry: false, reason: "settled" };
+  const terminalStop = oneAutoRecoveryTerminalStop(input.receipt);
+  if (terminalStop) return terminalStop;
   if (status !== "failed" && status !== "interrupted") {
     return { retry: false, reason: "settled" };
   }

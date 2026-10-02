@@ -1508,6 +1508,8 @@ export function rankExperienceCandidatesByRelations(input: {
   environmentKey: string;
   basePackageHash: string;
   taskTerms: string[];
+  /** Same-actor historical assets; omitted by legacy exact-release callers. */
+  agentId?: string;
 }): Map<string, number> {
   ensureExperienceRelationIndex();
   const queryTags = new Set(
@@ -1528,8 +1530,10 @@ export function rankExperienceCandidatesByRelations(input: {
         AND candidate.status = 'promoted' AND candidate.outcome_status IN ('attested','verified')
       WHERE edge.edge_type = 'applies_to_task'
         AND edge.project_scope_key = ? AND edge.environment_key = ?
-        AND edge.base_package_hash = ?`,
-  ).all(input.projectScopeKey, input.environmentKey, input.basePackageHash) as Array<{
+        AND ${input.agentId
+          ? "pack.agent_id = ? AND candidate.agent_id = pack.agent_id AND edge.base_package_hash = pack.base_package_hash"
+          : "edge.base_package_hash = ?"}`,
+  ).all(input.projectScopeKey, input.environmentKey, input.agentId ?? input.basePackageHash) as Array<{
     item_node: string;
     candidate_id: string;
     tag: string;
@@ -1545,10 +1549,14 @@ export function rankExperienceCandidatesByRelations(input: {
     if (score > 0) scoreByCandidate.set(candidateByNode.get(node)!, score);
   }
   const similar = getDb().prepare(
-    `SELECT from_node, to_node FROM experience_relation_edges
-      WHERE edge_type IN ('similar_to', 'similar_by_tag') AND project_scope_key = ?
-        AND environment_key = ? AND base_package_hash = ?`,
-  ).all(input.projectScopeKey, input.environmentKey, input.basePackageHash) as Array<{
+    `SELECT edge.from_node, edge.to_node FROM experience_relation_edges edge
+       JOIN experience_packs pack ON pack.id = edge.pack_id AND pack.status = 'active'
+      WHERE edge.edge_type IN ('similar_to', 'similar_by_tag') AND edge.project_scope_key = ?
+        AND edge.environment_key = ?
+        AND ${input.agentId
+          ? "pack.agent_id = ? AND edge.base_package_hash = pack.base_package_hash"
+          : "edge.base_package_hash = ?"}`,
+  ).all(input.projectScopeKey, input.environmentKey, input.agentId ?? input.basePackageHash) as Array<{
     from_node: string;
     to_node: string;
   }>;

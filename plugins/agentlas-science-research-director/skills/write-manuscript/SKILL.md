@@ -5,8 +5,8 @@ description: Compose a journal-quality, article-family-appropriate manuscript in
 
 # Write the Manuscript
 
-Read `../../agent/agent.md` for the operating contract and `../direct-study/SKILL.md` for the
-phases that precede this one. This skill covers the `manuscript`, `journal_profile`, and
+Consult `../../agent/agent.md` and `../direct-study/SKILL.md` when useful; neither manual
+reading nor completing earlier literature/plan stages is an admission gate for independent writing. This skill covers the `manuscript`, `journal_profile`, and
 `submission_validation` phases. It never invents a result, a citation, or a journal rule.
 
 ## Preconditions
@@ -15,8 +15,9 @@ phases that precede this one. This skill covers the `manuscript`, `journal_profi
   a durable drafting session and evidence-supported body sections before `conclusions`; a bounded-
   conclusions gate is not a prerequisite for saving draft prose. This does not advance the
   lifecycle, authorize unsupported Results, or satisfy any study-completion gate.
-- `inspect_research_workspace` and `inspect_evidence_graph` have been called this turn; every claim
-  you intend to write has a non-invalidated support path, or is known to be unsupported.
+- Inspect current workspace or evidence paths when a binding needs them; each claim has exact
+  non-invalidated support or remains explicitly unsupported. A repeated inventory is not a
+  prerequisite for saving independent prose.
 - Every figure to be placed has an exact run-backed export artifact (SVG via
   `export_statistics_figure_svg`, PNG via `export_statistics_figure_png`, or a domain renderer's
   run-backed image artifact) that passed `validate_artifact_for_manuscript`.
@@ -24,7 +25,9 @@ phases that precede this one. This skill covers the `manuscript`, `journal_profi
 - Every source to be cited is an exact `sourceId + sourceVersionId` from the committed evidence
   ledger (`list_project_evidence`).
 
-Start with substantive sections supported by the evidence already held. Missing evidence blocks
+Start with substantive sections supported by the evidence already held. Literature searches and
+comparable-paper calibration never block data collection, experiments or independent working notes;
+use available material and record limitations rather than waiting for a quota of papers. Missing evidence blocks
 the dependent claims or sections, not independent writing. Do not wait for all experiments or all
 sections to finish before saving supported prose. Keep unresolved gaps explicit, retrieve missing
 sources lawfully, and preserve the host's current Blueprint, binding, abstract-last, and assembly
@@ -38,12 +41,14 @@ unmet success criteria, robustness, conclusions, journal profiling, or validatio
 only through the canonical loop criterion receipts and lifecycle gates; never stop because one
 provider turn or manuscript pass ended.
 
-## Build the manuscript blueprint before prose
+## Optional manuscript blueprint calibration
 
 Do not start by filling an IMRaD skeleton. A heading-only document or one sentence under each
 heading is an editor scaffold, not a manuscript, and must never be described as journal-ready.
-Before `create_science_manuscript`, build a durable manuscript blueprint from the project's already
-retrieved literature and the target article type. This is not a prose-only checklist:
+A durable manuscript blueprint can help calibrate a complete article from retrieved literature
+and its article type. It is optional for saving working drafts, partial sections, an outline or
+independent prose; do not wait for a corpus, word/paragraph floor or override ceremony. When you
+choose this calibration tool, preserve its exact measurements and source eligibility:
 
 - Call `inspect_source_text_structure` for every candidate exact SourceVersion. Only candidates
   whose returned index has `evidenceScope: full-text` are eligible. Map the returned stable source
@@ -96,7 +101,8 @@ Then construct the blueprint content as follows:
    its lower-confidence limitation and continue drafting while searching for additional eligible
    full texts. Five is a calibration-confidence target, not an admission or drafting requirement.
    Re-read the actual Blueprint status; never infer `collecting` from a count below five. With no
-   eligible full text, the Blueprint prerequisite remains open. Never pretend an abstract reveals
+   eligible full text, calibration is unavailable; save the working draft directly and keep its
+   limitations visible. Never pretend an abstract reveals
    the paper's section flow.
 3. Inspect the host-derived structure profile for every comparable paper: observed section order,
    words per section, paragraph count, abstract/reference/appendix depth, explicit
@@ -244,18 +250,20 @@ Write the manuscript in passes so that completeness is inspectable:
    every prespecified method has a result or an explained failure, every headline result is
    interpreted in Discussion, and every limitation changes the stated conclusion or next study.
 5. **Depth preflight.** Compare observed words, paragraphs, visuals, equations, references, and
-   rhetorical moves with the blueprint. Block manuscript closeout when a core section is empty,
-   consists of a single placeholder sentence, has no evidence-bearing paragraph, or falls outside
-   the blueprint without an explicit journal- or study-specific reason.
+   rhetorical moves with the blueprint. Identify incompleteness when a core section is empty,
+   consists of placeholders, lacks evidence-bearing prose or falls outside the blueprint. Report
+   these as editorial advice and draft limitations; they never refuse saving real partial work.
 
 Never use a fixed global word count as a substitute for this preflight. Length is article-family,
 field, and journal dependent; shallow structure and unsupported filler are both failures.
 
 ## Durable section drafting
 
-For a new full manuscript, `start_manuscript_drafting_session` is the only normal creation path.
-The direct `create_science_manuscript` tool is a compatibility/import boundary for an already
-complete externally authored draft; never use it to bypass section planning or to save an outline.
+Use `start_manuscript_drafting_session` when structured section persistence is useful.
+`create_science_manuscript` and version updates also save genuine working drafts, outlines or
+partial manuscripts directly. Section planning, corpus sizes, length floors and duplicate-paragraph
+diagnostics are editorial advice, not prerequisites for saving a draft. Mark incompleteness honestly
+and preserve exact citation, artifact, template and version bindings.
 
 1. Start the session with the exact current Blueprint and complete binding manifest, then call
    `inspect_manuscript_drafting_session` before writing. The returned plan is host-derived and is
@@ -268,14 +276,15 @@ complete externally authored draft; never use it to bypass section planning or t
 3. Treat `status: draft` as a saved, unfinished section, not a refusal or a reason to pause the
    whole study. Inspect the host-measured word and substantive-paragraph counts and revise the
    same section into a new immutable revision. Independent supported body sections may proceed
-   while this section still needs work; all required sections must be `ready` before assembly.
-   Readiness is structural depth, not truth or publication approval.
-4. Draft the Abstract last. It may synthesize only claims, estimates, uncertainty, scope, and
-   limitations already present in ready body sections. The host rejects an early Abstract.
-5. After every required section is ready, call `assemble_manuscript_drafting_session`. The host
-   assembles the latest section heads in Blueprint order and reruns the whole-document gate before
-   creating manuscript v1. A stale Blueprint, stale session CAS, missing section, shallow section,
-   short document, or duplicate-paragraph padding blocks assembly.
+   while this section still needs work. Returned readiness describes structure, not truth or
+   publication approval; use independent direct-draft saving when a session condition is unresolved.
+4. Prefer drafting the Abstract after the results are clear. A provisional early Abstract is a
+   working draft, not proof that its claims have been tested; retain its unresolved limitations.
+5. Use `assemble_manuscript_drafting_session` to combine saved section heads in Blueprint order.
+   Preserve current Blueprint/session/version bindings. Depth and completeness diagnostics remain
+   visible as advice; do not perform an override ceremony or wait for a global length target.
+   If a structured-session prerequisite is genuinely missing, continue independent writing and
+   save a direct working draft rather than blocking the research.
 6. After restart, never infer progress from the chat transcript. Inspect the durable session and
    resume from the returned section heads. Cancelled and assembled sessions are terminal.
 
@@ -393,16 +402,13 @@ positive one.
 2. Assemble the binding manifest: locator -> exact artifact version + content hash (figures,
    tables), locator -> exact source version (citations). Only host-returned IDs and hashes enter
    it; equation labels are declared in Markdown, not as invented binding targets.
-3. Build and inspect the manuscript blueprint, then write the front matter and article-family
-   sections in the dialect above, in the researcher's language unless the target journal requires
-   another. Do not create version 1 while any section card lacks its evidence path or an explicit
-   unresolved marker. An outline stays in planning/chat: never send a heading scaffold, one-line
-   section, or visually padded placeholder prose to `create_science_manuscript`. Prefer five or more
-   eligible comparable full texts; with fewer, proceed and state the limitation.
-   The global anti-stub floor is only a rejection floor, never the writing target; the host-derived
-   section and document ranges in the exact Blueprint are the target.
-4. Create version 1 through the durable section session and
-   `assemble_manuscript_drafting_session`. For every later change, call
+3. Write the available supported content in the manuscript dialect and output language. A
+   Blueprint is optional calibration; missing comparable papers never block a working draft.
+   Save partial sections or an outline when that is the useful next artifact, clearly labelled
+   unfinished. Word/paragraph ranges and anti-stub diagnostics are advice, never refusal floors
+   or writing targets. Retain unsupported claims as explicit unresolved markers, not invented facts.
+4. Save version 1 directly with `create_science_manuscript`, or use a durable section session and
+   `assemble_manuscript_drafting_session` when helpful. For every later change, call
    `inspect_science_manuscript` for the current version and
    content hash, then `save_science_manuscript_version` with the complete Markdown and manifest.
    After every created or revised version, call `inspect_science_manuscript` and read its host-made

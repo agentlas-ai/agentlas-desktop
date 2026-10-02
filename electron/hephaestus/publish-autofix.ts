@@ -1,3 +1,6 @@
+import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { runnerFailureFromError } from "../runtime/runner";
+import { runtimeFailureBlocksReplay } from "../runtime/selection";
 // Publish auto-fix — before a Hub/Cloud publish, the user's strongest connected
 // model reviews the package and remediates it so "any agent" can publish:
 //   - artifacts and secrets the model marks are excluded from the published copy
@@ -256,9 +259,12 @@ async function runModelReview(
     locale,
   } as RunnerRequest;
   try {
-    const result = await runner(req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
+    const result = await runObservedRunner(runner, req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
+    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
+    if (timeout.signal.aborted) return { exclude: [], localized: null, acknowledgeWarns: [] };
     return safeModelJson(result.text ?? "");
-  } catch {
+  } catch (error) {
+    if (runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, runtime.kind))) throw error;
     return { exclude: [], localized: null, acknowledgeWarns: [] };
   } finally {
     clearTimeout(timer);
@@ -539,9 +545,12 @@ async function llmFixFile(
     locale,
   } as RunnerRequest;
   try {
-    const result = await runner(req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
+    const result = await runObservedRunner(runner, req, { onPartial: () => {}, onStatus: () => {}, onTool: () => {} });
+    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
+    if (timeout.signal.aborted) return { action: "keep", reason: "model unavailable" };
     return safeFixJson(result.text ?? "");
-  } catch {
+  } catch (error) {
+    if (runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, runtime.kind))) throw error;
     return { action: "keep", reason: "model unavailable" };
   } finally {
     clearTimeout(timer);

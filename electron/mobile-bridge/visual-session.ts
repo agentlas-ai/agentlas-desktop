@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { screen, type BrowserWindow } from "electron";
+import type { BrowserWindow } from "electron";
 
 import {
   MOBILE_BRIDGE_VISUAL_FRAME_MAX_BYTES,
@@ -494,6 +494,9 @@ export function createAgentlasWindowVisualSessionControl(
     const bounds = window.getContentBounds();
     if (bounds.width < 1 || bounds.height < 1) return null;
     const webContents = window.webContents;
+    // The daemon also imports the session manager without an Electron GUI.
+    // Resolve display APIs only for an actual window supplied by Main.
+    const { screen } = require("electron") as typeof import("electron");
     const scaleFactor = screen.getDisplayMatching(window.getBounds()).scaleFactor || 1;
     const sourceGeneration = shortHash(
       "vg",

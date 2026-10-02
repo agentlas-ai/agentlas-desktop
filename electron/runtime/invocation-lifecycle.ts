@@ -1,5 +1,5 @@
 import { assertInvocationChatAvailable } from "./run-id";
-import { isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
+import { invocationHostStopCause, isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
 
 /**
  * Production invocation state boundary.
@@ -36,9 +36,6 @@ export function classifyMainOwnedTerminal(input: {
   signalAborted: boolean;
   abortReason: unknown;
 }): MainOwnedTerminalDisposition {
-  if (input.eventKind === "final") {
-    return { errorCode: null, terminalKind: "invoke_completed" };
-  }
   if (input.steeringInterruptRequested) {
     return { errorCode: "interrupted", terminalKind: "invoke_interrupted" };
   }
@@ -51,6 +48,12 @@ export function classifyMainOwnedTerminal(input: {
       || isOwnerGoalStopCause(input.abortReason.message))
   ) {
     return { errorCode: "cancelled", terminalKind: "invoke_cancelled" };
+  }
+  if (input.signalAborted && input.abortReason instanceof Error && invocationHostStopCause(input.abortReason.message)) {
+    return { errorCode: "interrupted", terminalKind: "invoke_interrupted" };
+  }
+  if (input.eventKind === "final") {
+    return { errorCode: null, terminalKind: "invoke_completed" };
   }
   return { errorCode: null, terminalKind: "invoke_failed" };
 }

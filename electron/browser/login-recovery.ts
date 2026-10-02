@@ -1,4 +1,3 @@
-import { isProtectedBrowserSessionHost } from "../../shared/browser-session-transfer";
 /*
  * 로그인 복구 사다리 — 에이전트가 로그인 벽에 섰을 때 오너에게 묻기 전에 제품이 먼저 푼다.
  *
@@ -39,6 +38,7 @@ import type {
   SourceSessionState,
 } from "./login-wall";
 import { detectLoginWall, evaluateSessionCookies, evaluateSourceSession, signInUrlFor, siteDisplayName } from "./login-wall";
+import { createHash, randomUUID } from "node:crypto";
 
 export const LOGIN_RECOVERY_EVENT_SCHEMA = "agentlas.login-recovery.v1" as const;
 /** 도메인당 겨냥 가져오기 간격. 벽이 계속 서도 가져오기가 폭주하지 않게(1.2.47 의 교훈). */
@@ -57,7 +57,6 @@ export type LoginRecoveryStep =
 export type LoginRecoveryReason =
   | "rate-limited"
   | "not-consented"
-  | "protected-session-transfer"
   | "source-unreadable"
   | "source-missing"
   | "source-expired"
@@ -87,6 +86,7 @@ export interface LoginRecoveryEvent {
   counts?: Record<string, number>;
   sessionCookies?: SessionCookieEvidence;
   sourceSession?: SourceSessionState;
+  prerequisite?: LoginPrerequisiteRef;
   at: string;
 }
 
@@ -111,13 +111,23 @@ export interface TargetedImportReport {
 export interface OwnerLoginCard {
   site: string;
   surface: BrowserCookieSurface;
-  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required" | "protected-session-transfer">;
+  reason: Extract<LoginRecoveryReason, "source-missing" | "source-expired" | "source-rejected-by-site" | "second-factor-required">;
   signInUrl: string;
   /** 오너에게 보이는 한 줄. */
   message: { ko: string; en: string };
 }
 
 /** 한 번의 벽 — 호출자(실행)가 준다. */
+/** Main-owned prerequisite identity. No page URL or credential is an identity. */
+export interface LoginPrerequisiteRef {
+  prerequisiteId: string;
+  runId: string;
+  chatId: string;
+  nodeId?: string;
+  sessionId: string;
+  generation: string;
+}
+
 export interface LoginRecoveryContext {
   surface: BrowserCookieSurface;
   /** 에이전트가 서 있는 페이지를 다시 읽고, 다시 읽은 뒤의 주소를 돌려준다. */
@@ -125,13 +135,27 @@ export interface LoginRecoveryContext {
   /** 이 실행에 알림을 붙인다(카드 포함). 실행이 끝났으면 아무것도 안 해도 된다. */
   notify?: (card: OwnerLoginCard) => void;
   /** 세션이 돌아왔을 때 목표를 이어 간다. */
-  resume?: () => void;
+  resume?: (prerequisite?: LoginPrerequisiteRef) => void;
+  onPrerequisiteRestored?: (prerequisite: LoginPrerequisiteRef) => void;
+  retainVerification?: () => { reload: () => Promise<string | null>; current: () => boolean; release: () => void };
   /** 저장된 자격증명으로 Main 에서 채우고 제출한다(값은 이 파일을 지나지 않는다). 없으면 이 단계는 건너뛴다. */
   vaultFill?: (input: { site: string; domains: string[] }) => Promise<VaultFillReport>;
   /** 이 표면에서 로그인 창을 여는 방법(네이티브: 같은 탭에서 로그인 주소). 없으면 deps.openSignIn. */
   openSignIn?: (card: OwnerLoginCard) => Promise<void>;
   runId?: string;
   chatId?: string;
+  nodeId?: string;
+  /** Main-owned opaque browser/runtime identities, never URLs or cookie values. */
+  slotId?: string;
+  profileId?: string;
+  consentGeneration?: string;
+  signal?: AbortSignal;
+  isCurrent?: () => boolean;
+  /** An owner card's host watcher can outlive its invocation's live browser grant. */
+  isPendingCurrent?: () => boolean;
+  onPendingScopeReleased?: () => void;
+  /** Main's native session is authoritative; never feed it from an alternate CDP profile. */
+  canonicalSession?: boolean;
   returnUrl?: string | null;
 }
 
@@ -142,7 +166,7 @@ export interface LoginRecoveryDeps {
   /** 원본(평소 크롬) 쿠키 메타데이터. 값은 읽지 않는다. 못 읽으면 null. */
   readSource: (domains: readonly string[]) => Promise<CookieMetadata[] | null>;
   /** 승인 범위 안의 도메인만, 원본이 이기게, 지정한 저장소에 넣는다. */
-  targetedImport: (input: { domains: string[]; surface: BrowserCookieSurface }) => Promise<TargetedImportReport>;
+  targetedImport: (input: { domains: string[]; surface: BrowserCookieSurface; isCurrent?: () => boolean }) => Promise<TargetedImportReport>;
   /** 한 저장소의 쿠키를 다른 저장소로 옮긴다(가져온 쪽이 이긴다). */
   feedStore: (input: { from: BrowserCookieSurface; to: BrowserCookieSurface; domains: string[] }) => Promise<TargetedImportReport>;
   /** 로그인 창을 연다(카드의 동작). */
@@ -158,7 +182,7 @@ export interface LoginRecoveryDeps {
 export type LoginRecoveryOutcome =
   | { state: "not-a-wall" }
   | { state: "recovered"; via: "targeted-reimport" | "vault-autofill" | "store-feed"; site: string }
-  | { state: "awaiting-owner"; site: string; card: OwnerLoginCard; newCard: boolean }
+  | { state: "awaiting-owner"; site: string; card: OwnerLoginCard; newCard: boolean; prerequisite?: LoginPrerequisiteRef }
   | { state: "in-flight"; site: string };
 
 const STORES: readonly BrowserCookieSurface[] = ["native-partition", "cdp-profile"];
@@ -204,16 +228,12 @@ export function ownerLoginCardFor(input: {
   returnUrl?: string | null;
 }): OwnerLoginCard {
   const name = siteDisplayName(input.site);
-  const ko = input.reason === "protected-session-transfer"
-    ? `${name}은 이 창에서 별도로 로그인해 주세요 — 기존 Chrome 로그인은 가져오지 않습니다`
-    : input.reason === "second-factor-required"
+  const ko = input.reason === "second-factor-required"
     ? `${name} 로그인에 2단계 인증 코드가 필요합니다 — 이 창에서 코드를 한 번 입력해 주세요`
     : input.reason === "source-rejected-by-site"
       ? `${name} 로그인이 크롬에서 가져온 세션으로도 열리지 않습니다 — 이 창에서 한 번 로그인해 주세요`
       : `${name} 로그인이 크롬에도 없습니다 — 이 창에서 한 번 로그인해 주세요`;
-  const en = input.reason === "protected-session-transfer"
-    ? `Sign in to ${name} in this window — Chrome account sessions are kept separate`
-    : input.reason === "second-factor-required"
+  const en = input.reason === "second-factor-required"
     ? `${name} needs a one-time sign-in code — please enter it once in this window`
     : input.reason === "source-rejected-by-site"
       ? `${name} rejected even the session imported from Chrome — please sign in once in this window`
@@ -230,15 +250,79 @@ export function ownerLoginCardFor(input: {
 export interface LoginRecoveryLadder {
   /** 에이전트가 방금 도착한 주소를 알려 준다. 벽이 아니면 아무것도 하지 않는다. */
   observe: (url: string | null | undefined, ctx: LoginRecoveryContext) => Promise<LoginRecoveryOutcome>;
-  /** 열려 있는 카드(사이트 → 카드). 진단용. */
+  /** 열려 있는 실행/브라우저 범위별 카드. 진단용. */
   openCards: () => OwnerLoginCard[];
+  /** Invocation settlement/revocation removes its cards, watchers and observations. */
+  releaseScope: (scope: { runId: string; nodeId?: string }) => void;
   dispose: () => void;
 }
 
 export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecoveryLadder {
   const lastImportAt = new Map<string, number>();
-  const pendingCards = new Map<string, { card: OwnerLoginCard; stop: () => void; resumers: Set<() => void> }>();
+  const pendingCards = new Map<string, { card: OwnerLoginCard; stop: () => void; resumers: Set<(prerequisite?: LoginPrerequisiteRef) => void> }>();
   const inFlight = new Map<string, Promise<LoginRecoveryOutcome>>();
+  type Scope = { key: string; base: string; ctx: LoginRecoveryContext; createdAt: number;
+    verification?: { reload: () => Promise<string | null>; current: () => boolean; release: () => void }; prerequisite?: LoginPrerequisiteRef; signature?: string; pending: boolean; releasePending?: () => void; closed: boolean; stopAbort: () => void; stopExpiration: () => void };
+  const scopes = new Map<string, Scope>();
+  type ScopedContext = LoginRecoveryContext & { recoveryScope: Scope };
+  const current = (ctx: LoginRecoveryContext) => !ctx.signal?.aborted && (ctx.isCurrent?.() ?? true);
+  const pendingCurrent = (ctx: LoginRecoveryContext) => !ctx.signal?.aborted
+    && (ctx.isPendingCurrent?.() ?? ctx.isCurrent?.() ?? true);
+  const closeScope = (scope: Scope) => {
+    scope.closed = true;
+    scope.stopAbort();
+    scope.stopExpiration();
+    try { scope.verification?.release(); } catch { /* cleanup remains unconditional */ }
+    scope.verification = undefined;
+    if (scopes.get(scope.key) !== scope) return;
+    try { pendingCards.get(scope.key)?.stop(); } catch { /* cleanup must remain unconditional */ }
+    pendingCards.delete(scope.key);
+    inFlight.delete(scope.key);
+    scopes.delete(scope.key);
+    if (scope.pending) {
+      scope.pending = false;
+      try { scope.releasePending?.(); } catch { /* host cleanup cannot block scope cleanup */ }
+    }
+  };
+  const scopeFor = (wall: Extract<LoginWallDetection, { kind: "login-wall" }>, ctx: LoginRecoveryContext): Scope => {
+    const base = JSON.stringify([ctx.surface, ctx.slotId ?? "default", ctx.profileId ?? "default",
+      wall.site, ctx.runId ?? "", ctx.chatId ?? "", ctx.nodeId ?? ""]);
+    const key = JSON.stringify([base, ctx.consentGeneration ?? "legacy"]);
+    for (const scope of scopes.values()) {
+      if (!(pendingCards.has(scope.key) ? pendingCurrent(scope.ctx) : current(scope.ctx))
+        || deps.now() - scope.createdAt >= 6 * 60 * 60 * 1000
+        || (scope.base === base && scope.key !== key)) closeScope(scope);
+    }
+    let scope = scopes.get(key);
+    if (!scope) {
+      // Callers without an invocation signal still cannot accumulate unbounded watchers.
+      while (scopes.size >= 128) closeScope(scopes.values().next().value!);
+      const generation = randomUUID();
+      const prerequisite: LoginPrerequisiteRef | undefined = ctx.runId && ctx.chatId ? {
+        prerequisiteId: randomUUID(), runId: ctx.runId, chatId: ctx.chatId,
+        ...(ctx.nodeId ? { nodeId: ctx.nodeId } : {}),
+        sessionId: createHash("sha256").update(JSON.stringify([ctx.surface, ctx.profileId ?? "default", ctx.consentGeneration ?? "legacy"])).digest("hex"),
+        generation,
+      } : undefined;
+      scope = { key, base, ctx, prerequisite, createdAt: deps.now(), pending: false,
+        releasePending: ctx.onPendingScopeReleased, closed: false, stopAbort: () => {}, stopExpiration: () => {} };
+      scopes.set(key, scope);
+      const owned = scope;
+      const expiration = setTimeout(() => closeScope(owned), 6 * 60 * 60 * 1000);
+      expiration.unref?.();
+      scope.stopExpiration = () => clearTimeout(expiration);
+      const abort = () => closeScope(owned);
+      ctx.signal?.addEventListener("abort", abort, { once: true });
+      scope.stopAbort = () => ctx.signal?.removeEventListener("abort", abort);
+    }
+    if (ctx.onPendingScopeReleased) scope.releasePending = ctx.onPendingScopeReleased;
+    scope.ctx = ctx;
+    return scope;
+  };
+  const observationSignature = (wall: Extract<LoginWallDetection, { kind: "login-wall" }>, rows: CookieMetadata[] | null) =>
+    createHash("sha256").update(JSON.stringify([wall.rule, wall.sessionCookies,
+      rows === null ? null : rows.map((row) => [row.domain, row.name, row.expires, row.updatedAt ?? null])
+        .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))])).digest("hex");
 
   const nowSeconds = () => deps.now() / 1_000;
   const event = (
@@ -247,6 +331,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     wall: Extract<LoginWallDetection, { kind: "login-wall" }>,
     extra: Partial<LoginRecoveryEvent> = {},
   ) => {
+    if (!current(ctx)) return;
     try {
       deps.record({
         schemaVersion: LOGIN_RECOVERY_EVENT_SCHEMA,
@@ -255,23 +340,28 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
         surface: ctx.surface,
         targetDomains: wall.targetDomains,
         at: new Date(deps.now()).toISOString(),
+        ...((ctx as Partial<ScopedContext>).recoveryScope?.prerequisite ? { prerequisite: (ctx as ScopedContext).recoveryScope.prerequisite } : {}),
         ...extra,
       }, ctx);
     } catch { /* 기록 실패가 복구를 막지 않는다 */ }
   };
 
-  const recheck = async (ctx: LoginRecoveryContext): Promise<boolean> => {
+  const recheck = async (ctx: LoginRecoveryContext, domains: readonly string[]): Promise<boolean> => {
     let url: string | null = null;
     try { url = await ctx.reload(); } catch { return false; }
+    if (typeof url !== "string" || !url.trim()) return false;
+    try {
+      const measured = new URL(url);
+      if (!["http:", "https:"].includes(measured.protocol) || !domains.some(domain => sameSite(measured.hostname, domain))) return false;
+    } catch { return false; }
     return detectLoginWall({ url }).kind !== "login-wall";
   };
 
   const run = async (
     wall: Extract<LoginWallDetection, { kind: "login-wall" }>,
-    ctx: LoginRecoveryContext,
+    ctx: ScopedContext,
   ): Promise<LoginRecoveryOutcome> => {
     const domains = wall.targetDomains;
-    const protectedSession = domains.some(isProtectedBrowserSessionHost);
 
     // ── 1) 겨냥 가져오기 ──────────────────────────────────────────────
     const now = deps.now();
@@ -281,11 +371,10 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     });
     let sourceCookies: CookieMetadata[] | null = null;
     let sourceState: SourceSessionState = "unknown";
-    try { if (!protectedSession) sourceCookies = await deps.readSource(domains); } catch { sourceCookies = null; }
+    try { sourceCookies = await deps.readSource(domains); } catch { sourceCookies = null; }
+    if (!current(ctx)) return { state: "not-a-wall" };
     sourceState = evaluateSourceSession(sourceCookies, domains, nowSeconds());
-    if (protectedSession) {
-      event(ctx, "targeted-reimport", wall, { reason: "protected-session-transfer", sourceSession: "unknown" });
-    } else if (allowed.length === 0) {
+    if (allowed.length === 0) {
       event(ctx, "targeted-reimport", wall, { reason: "rate-limited", sourceSession: sourceState });
     } else if (sourceState === "missing" || sourceState === "expired") {
       // 원본에 가져올 로그인이 없다 — 가져오기는 아무것도 못 고친다. 도메인 시계도 건드리지 않는다.
@@ -293,9 +382,10 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     } else {
       for (const domain of allowed) lastImportAt.set(domain, now);
       let report: TargetedImportReport;
-      try { report = await deps.targetedImport({ domains: allowed, surface: ctx.surface }); }
+      try { report = await deps.targetedImport({ domains: allowed, surface: ctx.surface, isCurrent: () => current(ctx) }); }
       catch { report = { state: "failed", written: 0 }; }
-      const cleared = report.state === "imported" && await recheck(ctx);
+      if (!current(ctx)) return { state: "not-a-wall" };
+      const cleared = report.state === "imported" && await recheck(ctx, wall.targetDomains);
       event(ctx, "targeted-reimport", wall, {
         reason: report.state === "not-consented" ? "not-consented"
           : report.state !== "imported" ? "import-failed"
@@ -303,6 +393,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
         counts: { domains: allowed.length, written: report.written },
         sourceSession: sourceState,
       });
+      if (!current(ctx)) return { state: "not-a-wall" };
       if (cleared) {
         event(ctx, "recovered", wall, { reason: "cleared" });
         return { state: "recovered", via: "targeted-reimport", site: wall.site };
@@ -311,9 +402,11 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
 
     // ── 1b) 저장된 자격증명(오너 금고) — Main 에서 채우고 제출, 모델은 값을 모른다 ──────────
     if (ctx.vaultFill) {
+      if (!current(ctx)) return { state: "not-a-wall" };
       let report: VaultFillReport;
       try { report = await ctx.vaultFill({ site: wall.site, domains }); }
       catch { report = { state: "failed" }; }
+      if (!current(ctx)) return { state: "not-a-wall" };
       const cleared = report.state === "submitted" && typeof report.urlAfter === "string"
         && detectLoginWall({ url: report.urlAfter }).kind !== "login-wall";
       event(ctx, "vault-autofill", wall, {
@@ -323,6 +416,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
               : report.state === "failed" ? report.reason ?? "import-failed"
                 : cleared ? "cleared" : "vault-submitted",
       });
+      if (!current(ctx)) return { state: "not-a-wall" };
       if (cleared) {
         event(ctx, "recovered", wall, { reason: "cleared" });
         return { state: "recovered", via: "vault-autofill", site: wall.site };
@@ -333,24 +427,30 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     // ── 2) 저장소 대조 ───────────────────────────────────────────────
     const counts = {} as Record<BrowserCookieSurface, number>;
     for (const store of STORES) {
+      if (!current(ctx)) return { state: "not-a-wall" };
+      if (ctx.canonicalSession && store !== ctx.surface) { counts[store] = 0; continue; }
       let cookies: CookieMetadata[] | null = null;
       try { cookies = await deps.readStore(store, domains); } catch { cookies = null; }
       counts[store] = sessionCookieCount(cookies, domains, nowSeconds());
     }
-    const feed = decideStoreFeed({ surface: ctx.surface, counts });
+    const feed = ctx.canonicalSession ? { action: "none" as const } : decideStoreFeed({ surface: ctx.surface, counts });
     event(ctx, "store-check", wall, {
       reason: feed.action === "feed" ? "store-mismatch" : "store-consistent",
-      counts: { nativePartition: counts["native-partition"], cdpProfile: counts["cdp-profile"] },
+      counts: ctx.canonicalSession ? { nativePartition: counts["native-partition"] }
+        : { nativePartition: counts["native-partition"], cdpProfile: counts["cdp-profile"] },
     });
-    if (!protectedSession && feed.action === "feed") {
+    if (feed.action === "feed") {
+      if (!current(ctx)) return { state: "not-a-wall" };
       let report: TargetedImportReport;
       try { report = await deps.feedStore({ from: feed.from, to: feed.to, domains }); }
       catch { report = { state: "failed", written: 0 }; }
-      const cleared = report.state === "imported" && await recheck(ctx);
+      if (!current(ctx)) return { state: "not-a-wall" };
+      const cleared = report.state === "imported" && await recheck(ctx, wall.targetDomains);
       event(ctx, "store-check", wall, {
         reason: cleared ? "cleared" : report.state === "imported" ? "still-walled" : "import-failed",
         counts: { written: report.written },
       });
+      if (!current(ctx)) return { state: "not-a-wall" };
       if (cleared) {
         event(ctx, "recovered", wall, { reason: "cleared" });
         return { state: "recovered", via: "store-feed", site: wall.site };
@@ -358,7 +458,7 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
     }
 
     // ── 3) 원본 확인 ─────────────────────────────────────────────────
-    const reason: OwnerLoginCard["reason"] = protectedSession ? "protected-session-transfer" : sourceState === "missing" ? "source-missing"
+    const reason: OwnerLoginCard["reason"] = sourceState === "missing" ? "source-missing"
       : sourceState === "expired" ? "source-expired"
         : "source-rejected-by-site";
     event(ctx, "source-check", wall, {
@@ -372,71 +472,136 @@ export function createLoginRecoveryLadder(deps: LoginRecoveryDeps): LoginRecover
 
   const openCard = async (
     wall: Extract<LoginWallDetection, { kind: "login-wall" }>,
-    ctx: LoginRecoveryContext,
+    ctx: ScopedContext,
     reason: OwnerLoginCard["reason"],
   ): Promise<LoginRecoveryOutcome> => {
-    const existing = pendingCards.get(wall.site);
+    if (!current(ctx)) return { state: "not-a-wall" };
+    const key = ctx.recoveryScope.key;
+    const existing = pendingCards.get(key);
     if (existing) {
-      if (ctx.resume) existing.resumers.add(ctx.resume);
+      if (ctx.resume) { existing.resumers.clear(); existing.resumers.add(ctx.resume); }
       event(ctx, "owner-card", wall, { reason: "card-already-open" });
-      return { state: "awaiting-owner", site: wall.site, card: existing.card, newCard: false };
+      return { state: "awaiting-owner", site: wall.site, card: existing.card, newCard: false, ...(ctx.recoveryScope.prerequisite ? { prerequisite: ctx.recoveryScope.prerequisite } : {}) };
     }
     const card = ownerLoginCardFor({ site: wall.site, surface: ctx.surface, reason, returnUrl: ctx.returnUrl });
-    const resumers = new Set<() => void>();
+    const resumers = new Set<(prerequisite?: LoginPrerequisiteRef) => void>();
     if (ctx.resume) resumers.add(ctx.resume);
     const since = deps.now();
+    if (ctx.retainVerification) {
+      try { ctx.recoveryScope.verification = ctx.retainVerification(); } catch { /* unavailable verification cannot claim restoration */ }
+    }
     let done = false;
     const entry = { card, resumers, stop: () => { /* replaced below */ } };
-    pendingCards.set(wall.site, entry);
-    entry.stop = deps.watchSession({
-      surface: ctx.surface,
-      domains: wall.targetDomains,
-      since,
-      onRestored: () => {
-        if (done) return;
-        done = true;
-        entry.stop();
-        if (pendingCards.get(wall.site) === entry) pendingCards.delete(wall.site);
-        event(ctx, "session-restored", wall, { counts: { resumers: entry.resumers.size } });
-        for (const resume of entry.resumers) {
-          try { resume(); } catch { /* 한 목표의 재개 실패가 다른 목표를 막지 않는다 */ }
-        }
-      },
-    });
+    ctx.recoveryScope.pending = true;
+    pendingCards.set(key, entry);
+    let checking: Promise<void> | null = null;
+    const arm = () => {
+      if (done || !pendingCurrent(ctx)) return;
+      entry.stop();
+      entry.stop = deps.watchSession({ surface: ctx.surface, domains: wall.targetDomains, since,
+        onRestored: () => {
+          if (done) return;
+          if (checking) return;
+          checking = (async () => {
+            if (!pendingCurrent(ctx)) { closeScope(ctx.recoveryScope); return; }
+            const verification = ctx.recoveryScope.verification;
+            if (ctx.retainVerification && (!verification || !verification.current())) { closeScope(ctx.recoveryScope); return; }
+            const cleared = await recheck(verification ? { ...ctx, reload: verification.reload } : ctx, wall.targetDomains);
+            if (verification && !verification.current()) { closeScope(ctx.recoveryScope); return; }
+            if (!pendingCurrent(ctx)) { closeScope(ctx.recoveryScope); return; }
+            if (!cleared) return;
+            done = true;
+            entry.stop();
+            if (pendingCards.get(key) === entry) pendingCards.delete(key);
+            event({ ...ctx, isCurrent: () => pendingCurrent(ctx) }, "session-restored", wall,
+              { counts: { resumers: entry.resumers.size } });
+            const prerequisite = ctx.recoveryScope.prerequisite;
+            if (prerequisite) {
+              try { ctx.recoveryScope.ctx.onPrerequisiteRestored?.(prerequisite); } catch { /* consumers cannot invalidate restoration */ }
+            }
+            for (const resume of entry.resumers) {
+              try { resume(prerequisite); } catch { /* one goal cannot strand another */ }
+            }
+            closeScope(ctx.recoveryScope);
+          })().finally(() => {
+            checking = null;
+            // Re-arm once after a failed verification, disposing the previous watcher.
+            if (!done && pendingCurrent(ctx)) arm();
+          });
+        },
+      });
+      if (done) entry.stop();
+    };
+    arm();
+    if (done) entry.stop();
+    if (!current(ctx)) return { state: "not-a-wall" };
     event(ctx, "owner-card", wall, { reason });
     try { ctx.notify?.(card); } catch { /* 알림 실패가 카드를 없애지 않는다 */ }
     try { await (ctx.openSignIn ?? deps.openSignIn)(card); } catch { /* 창 열기 실패 — 카드는 남는다 */ }
-    return { state: "awaiting-owner", site: wall.site, card, newCard: true };
+    return done || !pendingCurrent(ctx) ? { state: "not-a-wall" }
+      : { state: "awaiting-owner", site: wall.site, card, newCard: true, ...(ctx.recoveryScope.prerequisite ? { prerequisite: ctx.recoveryScope.prerequisite } : {}) };
   };
 
   return {
     observe: async (url, ctx) => {
+      if (!current(ctx)) {
+        for (const scope of scopes.values()) {
+          if (!(pendingCards.has(scope.key) ? pendingCurrent(scope.ctx) : current(scope.ctx))) closeScope(scope);
+        }
+        return { state: "not-a-wall" };
+      }
       let storeCookies: CookieMetadata[] | null = null;
       const probe = detectLoginWall({ url });
-      if (probe.kind !== "login-wall") return { state: "not-a-wall" };
+      if (probe.kind !== "login-wall") {
+        for (const scope of scopes.values()) {
+          if (scope.ctx.surface === ctx.surface && scope.ctx.slotId === ctx.slotId && scope.ctx.profileId === ctx.profileId
+            && scope.ctx.runId === ctx.runId && scope.ctx.chatId === ctx.chatId && scope.ctx.nodeId === ctx.nodeId) closeScope(scope);
+        }
+        return { state: "not-a-wall" };
+      }
+      const scope = scopeFor(probe, ctx);
+      const scoped: ScopedContext = { ...ctx, recoveryScope: scope,
+        isCurrent: () => !scope.closed && current(ctx),
+        isPendingCurrent: () => !scope.closed && pendingCurrent(ctx) };
       try { storeCookies = await deps.readStore(ctx.surface, probe.targetDomains); } catch { storeCookies = null; }
+      if (!current(scoped)) { closeScope(scope); return { state: "not-a-wall" }; }
       const wall = detectLoginWall({ url, storeCookies, nowSeconds: nowSeconds() }) as Extract<LoginWallDetection, { kind: "login-wall" }>;
-      event(ctx, "detected", wall, { sessionCookies: wall.sessionCookies, counts: { rule: wall.rule === "identity-provider" ? 1 : 2 } });
-      const card = pendingCards.get(wall.site);
+      const signature = observationSignature(wall, storeCookies);
+      const unchanged = scope.signature === signature;
+      scope.signature = signature;
+      const card = pendingCards.get(scope.key);
       if (card) {
-        if (ctx.resume) card.resumers.add(ctx.resume);
-        event(ctx, "owner-card", wall, { reason: "card-already-open" });
-        return { state: "awaiting-owner", site: wall.site, card: card.card, newCard: false };
+        if (ctx.resume) { card.resumers.clear(); card.resumers.add(ctx.resume); }
+        if (!unchanged) {
+          event(scoped, "detected", wall, { sessionCookies: wall.sessionCookies, counts: { rule: wall.rule === "identity-provider" ? 1 : 2 } });
+          event(scoped, "owner-card", wall, { reason: "card-already-open" });
+        }
+        return { state: "awaiting-owner", site: wall.site, card: card.card, newCard: false, ...(scope.prerequisite ? { prerequisite: scope.prerequisite } : {}) };
       }
-      const flight = inFlight.get(wall.site);
+      const flight = inFlight.get(scope.key);
       if (flight) {
-        event(ctx, "detected", wall, { reason: "recovery-in-flight" });
-        return { state: "in-flight", site: wall.site };
+        if (ctx.onPendingScopeReleased) scope.pending = true;
+        if (!unchanged) event(scoped, "detected", wall, { reason: "recovery-in-flight" });
+        const outcome = await flight;
+        return outcome.state === "awaiting-owner" ? { ...outcome, newCard: false } : outcome;
       }
-      const next = run(wall, { ...ctx, returnUrl: ctx.returnUrl ?? url ?? null })
-        .finally(() => { if (inFlight.get(wall.site) === next) inFlight.delete(wall.site); });
-      inFlight.set(wall.site, next);
+      event(scoped, "detected", wall, { sessionCookies: wall.sessionCookies, counts: { rule: wall.rule === "identity-provider" ? 1 : 2 } });
+      const next = run(wall, { ...scoped, returnUrl: ctx.returnUrl ?? url ?? null })
+        .finally(() => {
+          if (inFlight.get(scope.key) === next) inFlight.delete(scope.key);
+          if (!pendingCards.has(scope.key)) closeScope(scope);
+        });
+      inFlight.set(scope.key, next);
       return next;
     },
     openCards: () => [...pendingCards.values()].map((entry) => entry.card),
+    releaseScope: (input) => {
+      for (const scope of scopes.values()) if (scope.ctx.runId === input.runId
+        && (input.nodeId === undefined || scope.ctx.nodeId === input.nodeId)) closeScope(scope);
+    },
     dispose: () => {
-      for (const entry of pendingCards.values()) entry.stop();
-      pendingCards.clear();
+      for (const scope of scopes.values()) closeScope(scope);
+      lastImportAt.clear();
     },
   };
 }

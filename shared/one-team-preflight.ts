@@ -61,6 +61,7 @@ export function isOneTeamPreflightExpired(
 
 export type OneTeamPreflightComplexityReason =
   | "explicit_team_request"
+  | "explicit_solo_request"
   | "parallel_work_requested"
   | "independent_verification_requested"
   | "multiple_distinct_deliverables"
@@ -119,12 +120,56 @@ export const ONE_TEAM_MEMBER_UNAVAILABLE_REASONS: ReadonlySet<string> = new Set(
   "not_installed", "source_missing", "call_only", "hidden", "ineligible",
 ]);
 
+/** Semantic authority for this exact owner turn, issued only by Main. */
+export type OneTeamStaffingIntent =
+  | "owner_recruitment"
+  | "owner_native_team"
+  | "owner_existing_team"
+  | "owner_solo"
+  | "team_beneficial"
+  | "solo_sufficient";
+
+export interface OneTeamStaffingAuthority {
+  intent: OneTeamStaffingIntent;
+  source: "llm" | "structured";
+  promptDigest: string;
+  /** Absent on legacy proposals; absence preserves the existing source policy. */
+  scope?: OneTeamStaffingScope;
+}
+
+export interface OneTeamStaffingScope {
+  schemaVersion: "agentlas.one-staffing-scope.v1";
+  candidateSources: "network" | "hub_only";
+}
+
+export function isOneTeamStaffingScope(value: unknown): value is OneTeamStaffingScope {
+  const scope = objectValue(value);
+  return !!scope && exactKeys(scope, ["schemaVersion", "candidateSources"])
+    && scope.schemaVersion === "agentlas.one-staffing-scope.v1"
+    && (scope.candidateSources === "network" || scope.candidateSources === "hub_only");
+}
+
+/** Shape check only: callers must also verify Main's claim and exact owner prompt. */
+export function oneTeamUsesNativeStaffing(authority?: OneTeamStaffingAuthority): boolean {
+  return authority?.intent === "owner_native_team" && authority.source === "llm"
+    && HASH_RE.test(authority.promptDigest) && authority.scope === undefined;
+}
+
+/** Consume only Main's digest-bound authority; legacy/manual workforce remains Hub-only. */
+export function oneTeamWorkforceHubMode(authority?: OneTeamStaffingAuthority): "hub-allowed" | "hub-first" {
+  return authority?.intent === "owner_recruitment" && authority.source === "llm"
+    && HASH_RE.test(authority.promptDigest) && isOneTeamStaffingScope(authority.scope)
+    && authority.scope.candidateSources === "network" ? "hub-allowed" : "hub-first";
+}
+
 export interface OneTeamPreflightProposal {
   contractVersion: typeof ONE_TEAM_PREFLIGHT_CONTRACT_VERSION;
   proposalId: string;
   version: number;
   status: OneTeamPreflightStatus;
   goalSummary: string;
+  /** Legacy proposals have no inferred authority to recruit. */
+  staffingAuthority?: OneTeamStaffingAuthority;
   taskforce?: OneTaskforceReceipt;
   /**
    * 사람이 부른 팀원 중 이번에 올 수 없는 사람과 그 사유. 조용히 빠지면
@@ -185,8 +230,10 @@ export interface PrepareOneTeamPreflightInput {
   expectedTaskVersion: number | null;
   /** Exact authority for this turn; omission preserves the Desktop default. */
   permission?: OneTeamPreflightPermission;
-  /** Explicit turn-only local sub-agents selected with @. */
+  /** Exact selected agents, or inherited room context when marked below. */
   requestedAgentIds?: string[];
+  /** Omission preserves legacy explicit-turn semantics. Room context is Main-validated. */
+  requestedAgentIdsSource?: "turn" | "room";
   /** Explicit optional override; omission leaves team need to One's judgment. */
   dynamicTeamRequested?: true;
   /**
@@ -244,9 +291,9 @@ export interface AcknowledgeOneTeamPreflightResult {
 
 /**
  * Main-owned safe default. The renderer cannot choose a mode: Main uses the
- * exact installed roster when it is already verified and free, otherwise it
- * continues with One alone. External search, borrowing, payment, or broader
- * access is never authorized by this capability.
+ * exact installed roster when verified, or free Workforce selection when the
+ * bound owner turn explicitly delegated recruitment. Payment and broader
+ * access are never authorized by this capability.
  */
 export interface AutoResolveOneTeamPreflightInput {
   proposalId: string;
@@ -337,7 +384,7 @@ const STATUSES = new Set<OneTeamPreflightStatus>([
   "expired",
 ]);
 const COMPLEXITY_REASONS = new Set<OneTeamPreflightComplexityReason>([
-  "explicit_team_request", "parallel_work_requested", "independent_verification_requested",
+  "explicit_team_request", "explicit_solo_request", "parallel_work_requested", "independent_verification_requested",
   "multiple_distinct_deliverables", "constrained_research_decision", "model_assessed_team_benefit",
 ]);
 const INPUT_SCOPES = new Set<OneTeamPreflightInputScope>([
@@ -378,7 +425,7 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
     "contractVersion", "proposalId", "version", "status", "goalSummary", "binding",
     "complexityReasons", "roles", "cost", "selectionBoundary", "limitation", "canConfirmTeam",
     "canConfirmWorkforce", "reservedRun", "startedRun", "createdAt", "updatedAt", "expiresAt",
-  ], ["unavailableMembers", "taskforce"])) return false;
+  ], ["unavailableMembers", "taskforce", "staffingAuthority"])) return false;
   if (proposal.contractVersion !== ONE_TEAM_PREFLIGHT_CONTRACT_VERSION || !safeId(proposal.proposalId)) return false;
   if (!Number.isSafeInteger(proposal.version) || Number(proposal.version) < 1 || !STATUSES.has(proposal.status as OneTeamPreflightStatus)) return false;
   if (proposal.taskforce !== undefined) {
@@ -398,7 +445,7 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
   }
   if (!safeText(proposal.goalSummary, 240) || !safeIso(proposal.createdAt) || !safeIso(proposal.updatedAt) || !safeIso(proposal.expiresAt)) return false;
   if (Date.parse(proposal.expiresAt as string) <= Date.parse(proposal.createdAt as string)) return false;
-  if (!stringEnumArray<OneTeamPreflightComplexityReason>(proposal.complexityReasons, COMPLEXITY_REASONS, 6)) return false;
+  if (!stringEnumArray<OneTeamPreflightComplexityReason>(proposal.complexityReasons, COMPLEXITY_REASONS, 7)) return false;
   if (!Array.isArray(proposal.roles) || proposal.roles.length > 16 || !proposal.roles.every(isOneTeamPreflightRole)) return false;
   const roleIds = (proposal.roles as OneTeamPreflightRole[]).map((role) => role.roleId);
   if (new Set(roleIds).size !== roleIds.length) return false;
@@ -412,6 +459,16 @@ export function isOneTeamPreflightProposal(value: unknown): value is OneTeamPref
   if (typeof binding.promptDigest !== "string" || !HASH_RE.test(binding.promptDigest)) return false;
   if (typeof binding.runtimeDigest !== "string" || !HASH_RE.test(binding.runtimeDigest)) return false;
   if (!["read", "write"].includes(String(binding.permission))) return false;
+  if (proposal.staffingAuthority !== undefined) {
+    const authority = objectValue(proposal.staffingAuthority);
+    if (!authority || !keysWithin(authority, ["intent", "source", "promptDigest"], ["scope"])) return false;
+    if (!["owner_recruitment", "owner_native_team", "owner_existing_team", "owner_solo", "team_beneficial", "solo_sufficient"].includes(String(authority.intent))) return false;
+    if (authority.source !== "llm" && authority.source !== "structured") return false;
+    if (authority.source === "structured" && authority.intent !== "owner_existing_team") return false;
+    if (authority.promptDigest !== binding.promptDigest) return false;
+    if (authority.scope !== undefined && (authority.source !== "llm"
+      || authority.intent !== "owner_recruitment" || !isOneTeamStaffingScope(authority.scope))) return false;
+  }
 
   const cost = objectValue(proposal.cost);
   if (!cost || !exactKeys(cost, ["hubBorrowing", "runtimeUsage", "currency", "authoritativeQuoteRef"])) return false;

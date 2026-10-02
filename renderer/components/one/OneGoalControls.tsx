@@ -2,9 +2,12 @@
 
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { AgentlasIpc, ChatContinuitySnapshot, ChatGoalContext, GoalResumeConfirmation, GoalResumeReview, GoalRuntimeSelectionReceipt } from "../../../shared/types";
+import { goalObjectiveText } from "../../../shared/auto-goal";
+import { confirmGoalResumeReview } from "../../../shared/goal-resume-review";
 import { IconEdit, IconTarget, IconTrash } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { failureMessage } from "@/lib/invocation-failure";
+import { navigate } from "@/lib/navigation";
 import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-surface-status";
 import { GoalStrategyStatus } from "./GoalStrategyStatus";
 import { GoalPlanSummary, goalPlanOf } from "@/components/goal/GoalPlanSummary";
@@ -267,8 +270,10 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
   // mapping changes explanation only; Main alone decides whether resume runs.
   const uncertainResume = /(?:^|:\s*)auto_goal_resume_attempt_unsettled$/.test(view.error ?? "");
   const reviewCancelled = /(?:^|:\s*)goal_resume_uncertain_review_cancelled$/.test(view.error ?? "");
-  const reviewChanged = /(?:^|:\s*)goal_resume_uncertain_review_changed$/.test(view.error ?? "");
-  const reviewRequired = /(?:^|:\s*)goal_resume_uncertain_review_required$/.test(view.error ?? "");
+  const reviewChanged = /(?:^|:\s*)(?:goal_resume_uncertain_review_changed|automation_goal_execution_review_changed)$/.test(view.error ?? "");
+  const reviewRequired = /(?:^|:\s*)(?:goal_resume_uncertain_review_required|automation_goal_execution_review_required)$/.test(view.error ?? "");
+  const ownershipReviewUnavailable = /(?:^|:\s*)automation_goal_execution_review_unavailable$/.test(view.error ?? "");
+  const automationSetupRequired = /(?:^|:\s*)automation_goal_execution_setup_required$/.test(view.error ?? "");
   const reviewUnverifiable = /(?:^|:\s*)goal_resume_uncertain_review_unverifiable$/.test(view.error ?? "");
   const reviewTooLarge = /(?:^|:\s*)goal_resume_uncertain_review_too_large$/.test(view.error ?? "");
   const automationReviewRequired = /(?:^|:\s*)goal_resume_uncertain_automation_reconciliation_required$/.test(view.error ?? "");
@@ -297,7 +302,8 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     effectObservationChecking: view.context?.effectObservation === "checking"
       || view.continuity?.goal?.effectObservation === "checking",
   });
-  const resumable = observationFresh && (status === "paused" || status === "blocked") && !claimedWaitNeedsReview;
+  const ownershipReviewPending = status === "running" && view.context?.automationOwnershipReviewRequired === true;
+  const resumable = observationFresh && (status === "paused" || status === "blocked" || ownershipReviewPending) && !claimedWaitNeedsReview;
   const pausable = observationFresh && Boolean(status && !["paused", "pausing", "blocked", "completed", "failed", "cancelled", "cancelling"].includes(status));
   const editable = observationFresh && Boolean(view.context?.goalRevision && view.context?.version && (status === "paused" || status === "blocked" || status === "queued" || status === "waiting_user" || status === "draft"));
   const ongoing = view.context?.lifecycle === "ongoing";
@@ -357,6 +363,10 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
   const reviewSentence = !review ? null
     : review.blocker === "running"
       ? (ko ? "아직 끝나지 않은 작업이 있어요. 끝나면 다시 눌러 주세요." : "A task is still finishing. Try again once it is done.")
+    : review.blocker === "automation_setup"
+      ? review.automationSetup?.reason === "runtime"
+        ? (ko ? "자동화가 사용할 모델을 선택해 저장한 뒤 다시 연결을 확인해 주세요." : "Choose and save the automation's model, then return to review its connection.")
+        : (ko ? "자동화가 실행할 Hub 버전과 설정을 저장한 뒤 다시 연결을 확인해 주세요." : "Save the automation's Hub version and settings, then return to review its connection.")
     : review.blocker === "automation"
       ? (ko ? "예약 자동화가 붙은 목표라, 같은 게시가 두 번 나가지 않도록 여기서는 이어가지 않았어요."
         : "This goal has a scheduled automation, so it was not continued here to avoid posting the same thing twice.")
@@ -366,6 +376,8 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     : review.blocker === "missing_activity"
       ? (ko ? "일부 작업의 기록이 없어 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다."
         : "Some tasks have no record, so it is not safe to continue. The goal stays paused.")
+    : !review.attempts.length && review.automationOwnership
+      ? (ko ? "이 Goal과 함께 재개하고 멈출 자동화를 확인해 주세요." : "Confirm the automation that will resume and stop with this Goal.")
     : (ko ? `멈추기 전 작업 ${review.attempts.length}건은 이미 처리됐을 수 있어 다시 하지 않고, 다음 작업부터 이어갑니다.`
       : `The ${review.attempts.length} interrupted task(s) may already have gone through, so they will not be redone — work continues from the next step.`);
   const plainAutomationNote = surface.automation.reconciliationHold > 0
@@ -392,19 +404,20 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
       {pausable && <button type="button" aria-label={ko ? "목표 일시정지" : "Pause goal"}
         onClick={() => { void session.current?.act("pause"); }}>{ko ? "일시정지" : "Pause"}</button>}
       {resumable && <button type="button" disabled={view.pending === "resume" || !view.context?.version}
-        aria-label={needsOngoingConfirmation
+        aria-label={ownershipReviewPending ? (ko ? "자동화 연결 확인" : "Review automation connection") : needsOngoingConfirmation
           ? ongoing
             ? (ko ? "저장된 지속 목표 확인 후 재개" : "Confirm saved ongoing goal and resume")
             : (ko ? "저장된 목표 검토 후 재개" : "Review saved goal before resuming")
           : (ko ? "목표 수동 재개" : "Resume goal manually")}
         onClick={() => { void session.current?.act("resume"); }}>{view.pending === "resume" ? (ko ? "확인 중" : "Checking")
+          : ownershipReviewPending ? (ko ? "자동화 연결 확인" : "Review automation connection")
           : needsOngoingConfirmation && ongoing ? (ko ? "지속 목표 확인 후 재개" : "Confirm ongoing goal")
           : needsOngoingConfirmation ? (ko ? "목표 검토 후 재개" : "Review goal before resuming")
           : ko ? "재개" : "Resume"}</button>}
       {/* 편집 = 오른쪽 "목표" 탭(목표 전용 패널, 오너 2026-09-28). 패널이 없는 화면에서만 예전 편집기. */}
       <button type="button" disabled={view.pending !== null} aria-label={ko ? "목표 편집" : "Edit goal"} data-goal-chip-edit="true"
         title={ko ? "목표 패널에서 편집" : "Edit in the goal panel"}
-        onClick={() => { if (!requestGoalPanelOpen(chatId)) { setDraft(view.context?.objective ?? ""); setEditing(true); } }}><IconEdit size={13} /></button>
+        onClick={() => { if (!requestGoalPanelOpen(chatId)) { setDraft(goalObjectiveText(view.context?.objective ?? "")); setEditing(true); } }}><IconEdit size={13} /></button>
       <button type="button" aria-label={ko ? "목표 삭제" : "Delete goal"}
         title={ko ? "목표를 삭제합니다. 대화와 작업 파일은 유지됩니다" : "Delete the goal; keep the conversation and files"}
         onClick={() => { void session.current?.act("delete"); }}><IconTrash size={13} /></button>
@@ -436,15 +449,24 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
     {review && <div className={styles.review} role="region" data-goal-review={review.blocker ?? "ready"}
       aria-label={ko ? "멈춘 작업 이어가기" : "Continue interrupted work"}>
       <p className={styles.reviewText}>{reviewSentence}</p>
+      {review.automationOwnership && <div style={{ flexBasis: "100%", minWidth: 0, overflowWrap: "anywhere" }} data-goal-automation-owner-review={review.automationOwnership.automationId}>
+        <p>{ko ? `‘${review.automationOwnership.title}’ 자동화를 이 Goal에 연결합니다. Goal을 멈추면 이 자동화의 실행도 멈춥니다.`
+          : `Connect “${review.automationOwnership.title}” to this Goal. Stopping the Goal will also stop this automation's execution.`}</p>
+        <small>{review.automationOwnership.automationId} · {new Date(review.automationOwnership.automationCreatedAt).toLocaleString(locale)}</small>
+      </div>}
       <div className={styles.reviewActions}>
         <button type="button" onClick={closeReview}>{review.blocker ? (ko ? "닫기" : "Close") : (ko ? "나중에" : "Not now")}</button>
+        {review.blocker === "automation_setup" && review.automationSetup && <button type="button"
+          data-goal-automation-setup="true" onClick={() => navigate(review.automationSetup!.reason === "runtime"
+            ? `/automation/new?id=${encodeURIComponent(review.automationSetup!.automationId)}#execution-ai`
+            : `/automation/flow?id=${encodeURIComponent(review.automationSetup!.automationId)}`)}>
+          {ko ? "자동화 설정 열기" : "Open automation settings"}
+        </button>}
         {!review.blocker && <button type="button" className={styles.reviewPrimary} data-goal-review-primary="true"
           disabled={view.pending !== null}
-          onClick={() => { void session.current?.act("resume", {
-            runId: review.runId, version: review.version, attemptIds: review.attemptIds,
-            attemptSetDigest: review.attemptSetDigest, reviewedAttemptIds: review.attemptIds,
-          }); }}>
-          {view.pending === "resume" ? (ko ? "이어가는 중" : "Continuing") : ko ? "이어가기" : "Continue"}
+          onClick={() => { void session.current?.act("resume", confirmGoalResumeReview(review)); }}>
+          {view.pending === "resume" ? (ko ? "이어가는 중" : "Continuing") : review.automationOwnership
+            ? (ko ? "연결 확인 후 이어가기" : "Confirm connection and continue") : ko ? "이어가기" : "Continue"}
         </button>}
       </div>
     </div>}
@@ -467,6 +489,12 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
         ? (ko ? "그사이 작업 상태가 바뀌었어요. 다시 눌러 주세요." : "The work changed in the meantime. Press it again.")
       : reviewRequired
         ? (ko ? "멈춘 작업을 먼저 정리해야 해요. 재개를 다시 눌러 주세요." : "The interrupted work needs settling first. Press Resume again.")
+      : ownershipReviewUnavailable
+        ? (ko ? "자동화와 Goal의 연결을 확인할 수 없습니다. 최신 목표와 자동화 설정을 확인한 뒤 다시 이어가 주세요."
+          : "The automation's connection to this Goal could not be verified. Check the current Goal and automation settings, then continue again.")
+      : automationSetupRequired
+        ? (ko ? "자동화 모델과 실행 대상 설정이 필요합니다. 다시 재개를 누르면 설정 화면을 열 수 있습니다."
+          : "The automation's model or target needs configuration. Press Resume again to open its settings.")
       : reviewUnverifiable
         ? (ko ? "일부 작업의 기록이 없어 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다." : "Some tasks have no record, so it is not safe to continue. The goal stays paused.")
       : reviewTooLarge

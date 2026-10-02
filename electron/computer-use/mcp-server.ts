@@ -28,6 +28,7 @@ const CONTROL_FILE_ENV = "AGENTLAS_COMPUTER_USE_CONTROL_FILE";
 const MAX_REQUEST_BYTES = 128 * 1024;
 const MAX_RESPONSE_BYTES = 6 * 1024 * 1024;
 let activeSourceId = null;
+const nativeSources = new Map();
 
 const point = {
   x: { type: "number", minimum: 0, maximum: 8192 },
@@ -58,7 +59,7 @@ const tools = [
     name: "get_screen",
     description: "Capture the current macOS display. Coordinates returned by this image are the coordinate space used by mouse tools. The capture is also saved to disk; the JSON metadata's savedPath is its absolute file path. To show the capture in your chat answer, embed exactly that path as a markdown image: ![screen](savedPath). Never invent a screenshot file path.",
     annotations: READ_ONLY,
-    inputSchema: exact({ source_id: point.source_id }, []),
+    inputSchema: exact({ source_id: point.source_id, app: point.app }, []),
   },
   {
     name: "get_app_state",
@@ -140,7 +141,18 @@ const tools = [
   },
 ];
 
-function readControlInfo() {
+function readControlInfo(wantsNative = false) {
+  const native = process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE;
+  if (wantsNative || (native !== undefined && !process.env[CONTROL_FILE_ENV])) {
+    let parsed;
+    try { parsed = JSON.parse(native); } catch { throw new Error("native-guest-capability-invalid"); }
+    if (!parsed || typeof parsed.endpoint !== "string" || !/^http:\/\/127\.0\.0\.1:[1-9][0-9]{0,4}$/.test(parsed.endpoint)
+      || typeof parsed.token !== "string" || !/^[a-f0-9]{64}$/.test(parsed.token)
+      || typeof parsed.scopeId !== "string" || !/^[a-f0-9-]{36}$/i.test(parsed.scopeId)) throw new Error("native-guest-capability-invalid");
+    const port = Number(new URL(parsed.endpoint).port);
+    if (port < 1 || port > 65535) throw new Error("native-guest-capability-invalid");
+    return { port, token: parsed.token, scopeId: parsed.scopeId };
+  }
   const file = process.env[CONTROL_FILE_ENV];
   if (!file || file.length > 4096) throw new Error("Agentlas Computer Use control capability is unavailable.");
   const stat = fs.lstatSync(file);
@@ -159,7 +171,10 @@ function readControlInfo() {
 }
 
 function controlRequest(route, body, timeoutMs = 8000) {
-  const info = readControlInfo();
+  const nativeTarget = typeof body.app === "string" && body.app.startsWith("native-guest:");
+  const nativeSource = typeof body.sourceId === "string" && body.sourceId.startsWith("native-guest:");
+  const info = readControlInfo(nativeTarget || nativeSource || body.nativeScope === true);
+  if (info.scopeId) { route = "/native-guest" + route; body = { ...body, scopeId: info.scopeId }; }
   const bytes = Buffer.from(JSON.stringify(body), "utf8");
   if (bytes.length > 64 * 1024) return Promise.reject(new Error("Computer Use request is too large."));
   return new Promise((resolve, reject) => {
@@ -194,6 +209,7 @@ function controlRequest(route, body, timeoutMs = 8000) {
 
 function textResult(value) { return { content: [{ type: "text", text: JSON.stringify(value) }] }; }
 function errorResult(value) {
+  if (value && typeof value === "object" && typeof value.error === "string" && value.error.startsWith("native-guest-")) return { content: [{ type: "text", text: JSON.stringify(value) }], isError: true };
   const message = value && typeof value.message === "string" ? value.message :
     value && typeof value.error === "string" ? value.error : "Computer Use action failed.";
   return { content: [{ type: "text", text: message.slice(0, 500) }], isError: true };
@@ -202,7 +218,7 @@ function actionBody(action, args) {
   return {
     action,
     ...(args.app ? { app: args.app } : {}),
-    ...(args.source_id || activeSourceId ? { sourceId: args.source_id || activeSourceId } : {}),
+    ...((args.source_id || (args.app && args.app.startsWith("native-guest:") ? nativeSources.get(args.app) : activeSourceId)) ? { sourceId: args.source_id || (args.app && args.app.startsWith("native-guest:") ? nativeSources.get(args.app) : activeSourceId) } : {}),
   };
 }
 // ★신원 없는 입력 금지 — 서버측 강제.
@@ -222,14 +238,17 @@ async function callAction(body) {
     });
   }
   const result = await controlRequest("/action", body, body.action === "drag" ? 12000 : 8000);
+  if (body.app && body.app.startsWith("native-guest:") && !["focusApp", "listApps"].includes(body.action)) nativeSources.delete(body.app);
   return result && result.ok ? textResult(result) : errorResult(result);
 }
 async function capture(args) {
-  const sourceId = args.source_id || activeSourceId || undefined;
-  const result = await controlRequest("/capture", sourceId ? { sourceId } : {});
+  const nativeApp = typeof args.app === "string" && args.app.startsWith("native-guest:");
+  const sourceId = args.source_id || (nativeApp ? nativeSources.get(args.app) : activeSourceId) || undefined;
+  const result = await controlRequest("/capture", { ...(sourceId ? { sourceId } : {}), ...(args.app ? { app: args.app } : {}) });
   if (!result || !result.ok || !result.preview) return errorResult(result);
   const preview = result.preview;
-  activeSourceId = preview.selectedSourceId || activeSourceId;
+  if (nativeApp) nativeSources.set(args.app, preview.selectedSourceId);
+  else activeSourceId = preview.selectedSourceId || activeSourceId;
   const metadata = { ...preview };
   delete metadata.dataUrl;
   const content = [{ type: "text", text: JSON.stringify(metadata) }];
@@ -240,18 +259,39 @@ async function capture(args) {
 
 async function handle(request) {
   if (request.method === "initialize") {
-    const status = await controlRequest("/status", {});
+    const status = await controlRequest("/status", process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE ? { nativeScope: true } : {});
     if (!status || status.available !== true) throw new Error("Agentlas native Computer Use driver is unavailable.");
     return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-computer-use", version: "1.0.0" } };
   }
   if (request.method === "notifications/initialized") return undefined;
   if (request.method === "ping") return {};
-  if (request.method === "tools/list") return { tools };
+  if (request.method === "tools/list") {
+    if (!process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE || process.env[CONTROL_FILE_ENV]) return { tools };
+    const unavailable = new Set(["select_text", "set_value"]);
+    return { tools: tools.filter(tool => !unavailable.has(tool.name)).map(tool => ({ ...tool,
+      description: tool.name === "get_screen" ? "Capture the exact same-run native browser guest named by app. Use the image pixels and returned source_id for the next input; capture again after each mutation. savedPath is the measured screenshot artifact."
+        : tool.name === "list_apps" ? "List only this run’s native browser guest targets. No OS apps are exposed."
+        : tool.name === "get_app_state" ? "Read the native guest target identity; set screenshot=true for its actual pixels. OS accessibility elements are unavailable."
+        : tool.name === "computer_status" ? "Check this run’s native guest control capability."
+        : "Act only on the same-run native browser guest named by app using the latest capture source_id. No OS apps, clipboard, file upload or global shortcuts. " + tool.name,
+      ...(tool.name === "get_screen" ? { inputSchema: exact({ source_id: point.source_id, app: point.app }, ["app"]) } : {}) })) };
+  }
   if (request.method !== "tools/call") throw Object.assign(new Error("Method not found"), { code: -32601 });
   const name = request.params && request.params.name;
   const args = request.params && request.params.arguments && typeof request.params.arguments === "object" ? request.params.arguments : {};
-  if (name === "computer_status") return textResult(await controlRequest("/status", {}));
-  if (name === "list_apps") return callAction({ action: "listApps" });
+  if (name === "computer_status") {
+    const status = await controlRequest("/status", {});
+    if (process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE && process.env[CONTROL_FILE_ENV]) return textResult({ ...status, nativeGuest: await controlRequest("/status", { nativeScope: true }) });
+    return textResult(status);
+  }
+  if (name === "list_apps") {
+    if (process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE && process.env[CONTROL_FILE_ENV]) {
+      const os = await controlRequest("/action", { action: "listApps" });
+      const native = await controlRequest("/action", { action: "listApps", nativeScope: true });
+      return textResult({ ...os, apps: [...(os.apps || []), ...(native.apps || [])], nativeGuestAvailable: native.ok === true });
+    }
+    return callAction({ action: "listApps" });
+  }
   if (name === "get_screen") return capture(args);
   if (name === "get_app_state") {
     if (args.screenshot) {

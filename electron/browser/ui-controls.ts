@@ -8,7 +8,7 @@ import {
   listWorkBrowserTabs,
   nativeBrowserGuest,
   nativeBrowserGuestDocument,
-  nativeBrowserTaskOwner,
+  nativeBrowserTaskExecutionOwner,
 } from "../work-live-view";
 import {
   browserDownloadAction,
@@ -43,7 +43,7 @@ const deviceStates = new Map<string, {
 }>();
 
 function targetKey(ownerId: number, target: BrowserUiTarget): string {
-  return `${ownerId}:${target.taskScopeId}:${target.viewId}`;
+  return `${nativeBrowserTaskExecutionOwner(ownerId, target.taskScopeId) ?? ownerId}:${target.taskScopeId}:${target.viewId}`;
 }
 
 function guest(ownerId: number, target: BrowserUiTarget): WebContents | null {
@@ -308,17 +308,18 @@ export function browserTabHistory(ownerId: number, input: BrowserUiTarget & { li
 
 export function browserAllTabHistory(ownerId: number, input: { taskScopeId: string; query?: string; limit?: number }): BrowserUiResult & { entries: import("../../shared/browser-ui").BrowserDurableHistoryEntry[] } {
   if (!/^[A-Za-z0-9_:.-]{8,200}$/u.test(String(input?.taskScopeId ?? ""))) return { ok: false, reason: "invalid-request", entries: [] };
-  if (nativeBrowserTaskOwner(input.taskScopeId)?.ownerId !== ownerId) return { ok: false, reason: "guest-unavailable", entries: [] };
+  if (nativeBrowserTaskExecutionOwner(ownerId, input.taskScopeId) === null) return { ok: false, reason: "guest-unavailable", entries: [] };
   const entries = listBrowserHistory(input.taskScopeId, input.query, input.limit);
   return entries ? { ok: true, entries } : { ok: false, reason: "history-unavailable", entries: [] };
 }
 
 export function browserDownloads(ownerId: number, input: { taskScopeId: string; limit?: number }) {
   if (!/^[A-Za-z0-9_:.-]{8,200}$/u.test(String(input?.taskScopeId ?? ""))) return { ok: false as const, reason: "invalid-request" as const, items: [] };
-  if (nativeBrowserTaskOwner(input.taskScopeId)?.ownerId !== ownerId) {
+  const executionOwnerId = nativeBrowserTaskExecutionOwner(ownerId, input.taskScopeId);
+  if (executionOwnerId === null) {
     return { ok: false as const, reason: "guest-unavailable" as const, items: [] };
   }
-  return { ok: true as const, items: listBrowserDownloads(ownerId, input.taskScopeId, input.limit) };
+  return { ok: true as const, items: listBrowserDownloads(executionOwnerId, input.taskScopeId, input.limit) };
 }
 
 export function actOnBrowserDownload(ownerId: number, input: {
@@ -331,10 +332,11 @@ export function actOnBrowserDownload(ownerId: number, input: {
     || !["cancel", "open", "show-in-folder", "remove"].includes(input.action)) {
     return Promise.resolve({ ok: false as const, reason: "invalid-request" as const });
   }
-  if (nativeBrowserTaskOwner(input.taskScopeId)?.ownerId !== ownerId) {
+  const executionOwnerId = nativeBrowserTaskExecutionOwner(ownerId, input.taskScopeId);
+  if (executionOwnerId === null) {
     return Promise.resolve({ ok: false as const, reason: "guest-unavailable" as const });
   }
-  return browserDownloadAction(ownerId, input.taskScopeId, input.id, input.action);
+  return browserDownloadAction(executionOwnerId, input.taskScopeId, input.id, input.action);
 }
 
 export async function clearBrowserData(ownerId: number, input: BrowserUiTarget & {
@@ -359,7 +361,11 @@ export async function clearBrowserData(ownerId: number, input: BrowserUiTarget &
       }
       if (clearBrowserHistory(input.taskScopeId) === null) return { ok: false, reason: "history-unavailable" };
     }
-    if (categories.includes("downloads")) clearBrowserDownloadHistory(ownerId, input.taskScopeId);
+    if (categories.includes("downloads")) {
+      const executionOwnerId = nativeBrowserTaskExecutionOwner(ownerId, input.taskScopeId);
+      if (executionOwnerId === null) return { ok: false, reason: "guest-unavailable" };
+      clearBrowserDownloadHistory(executionOwnerId, input.taskScopeId);
+    }
     if (categories.includes("cache")) await contents.session.clearCache();
     if (categories.includes("cookies")) await contents.session.clearStorageData({ storages: ["cookies"] });
     return { ok: true, cleared: categories };

@@ -95,5 +95,5 @@ export interface BrowserUiAPI {
   downloadAction: (input: { taskScopeId: string; id: string; action: "cancel" | "open" | "show-in-folder" | "remove" }) => Promise<BrowserUiResult>;
   clearData: (input: BrowserUiTarget & { categories: Array<"history" | "downloads" | "cache" | "cookies"> }) => Promise<BrowserClearDataResult>;
   /** The browser fallback ladder's owner card button (retry / open the browser for a human check / fix). */
-  ladderAction: (input: { action: "retry" | "open-browser" | "fix"; site?: string | null }) => Promise<{ ok: boolean; code: string }>;
+  ladderAction: (input: { action: "retry" | "open-browser" | "fix"; site?: string | null; ownerScopeId?: string | null; browserSurface?: "native" | "dedicated" }) => Promise<{ ok: boolean; code: string }>;
 }

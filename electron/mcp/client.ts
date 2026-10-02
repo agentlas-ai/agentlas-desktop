@@ -8,8 +8,20 @@ import { bindScienceAliveDesktopToolWake, bindScienceDesktopToolTurn,
 import { ALIVE_DECISION_OUTPUT_SCHEMA } from "../alive-decision-schema";
 import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "../runtime/judgment-context";
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
+import { beginAccountedInference } from "../long-run/accounting-context";
+import { createRuntimeUsageCollector } from "../../shared/observed-usage";
+import { runObservedRunner, observedRunnerUsage, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { withInvocationUsage, beginInvocationUsageAttempt, currentInvocationObservedUsage } from "../runtime/invocation-usage";
+import { createNoProgressGuard, noteNoProgressEvent, noProgressLoopError, noProgressLoopOwnerText, toolObservationDigest,
+  type NoProgressDecision } from "../automation-progress-guard";
+import { formatAutomationNextRun } from "../../shared/automation-next-run";
+import { runtimeQuotaFailureMessage } from "../../shared/runtime-quota";
+import { getOneProfile } from "../store/one-profile";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
 import { recordAutomationPinProvenance } from "../automation-runtime-provenance";
+import { AutomationWorkspaceError, bindCreatedGoalContinuationWorkspace } from "../automation-workspace";
+import { assertFiniteGoalLifecycleCurrent } from "../automation-execution-control";
+import { selectionForRuntime } from "../../shared/runtime-selection";
 import { officeTaskContextForInvocation } from "../office-task-context";
 import { goalDeadlineWaitClause, goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
@@ -18,6 +30,10 @@ import { recordInvocationInstructionSnapshot, compileProjectInstructionSnapshot 
 import { renderInstructionSnapshot } from "../../shared/runtime-instructions";
 import { createNativeCapturePublisher } from "../browser/native-capture-artifacts";
 import type { NativeBrowserRelayGrant } from "../browser/native-cdp-relay";
+import { createBrowserLoginPrerequisite, type BrowserLoginPrerequisiteControl,
+  type BrowserLoginWait } from "../browser/login-prerequisite";
+import { withAttemptChildren, type AttemptChildren } from "../runtime/attempt-children";
+import { drainAttemptChildren, killCliTree } from "../runtime/exec";
 import { OwnerCloudShelfIncompleteError } from "../marketplace/mcp-source";
 import type { ChatHostNotice } from "../../shared/types";
 // 활성 백엔드 → 실제 러너로 라우팅하는 invocation runner.
@@ -30,6 +46,7 @@ import { parseHubReleasePin, assertHubReleasePin } from "../../shared/hub-releas
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
 import { detectRuntimes } from "../runtime/detect";
 import { ONE_AGENT_ID } from "../runtime/agent-residency";
 // Stormbreaker Loop — 목표 분해/연속 실행/검증 가능한 오류 repair를 감독(비차단·실패-무해).
@@ -66,6 +83,7 @@ import {
 } from "./goal-ledger";
 import { getAgentById, listInstalledAgents } from "./registry";
 import { applyGoalPlanMarkers, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, recordGoalPlanPassStop } from "../long-run/goal-shaping";
+import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
@@ -94,7 +112,7 @@ import {
 import { getProject, listProjects } from "../store/projects";
 import { getChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot } from "../store/chat-goals";
 import { goalDeadlineAt } from "../long-run/goal-deadline";
-import { getLongRunByGoalId, recordLongRunUsage } from "../store/long-runs";
+import { getLongRunByGoalId, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
@@ -105,7 +123,7 @@ import { bindCreatedAutomationToOngoingGoal } from "../long-run/automation-prove
 import { compileLongRunCheckpoint } from "../../shared/long-run-checkpoint";
 import { getInterviewMode } from "../store/interview-mode";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
-import { oneConfirmedRosterTargetsAreExact } from "../../shared/one-team-preflight";
+import { oneConfirmedRosterTargetsAreExact, oneTeamWorkforceHubMode, oneTeamUsesNativeStaffing, type OneTeamStaffingAuthority } from "../../shared/one-team-preflight";
 import { projectRosterSpecs } from "../../shared/project-roster-specs";
 import { getCargoSource } from "../marketplace";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
@@ -117,6 +135,7 @@ import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { livePartialCommitBoundary } from "../../shared/interrupted-partial";
 import { EFFECT_OBSERVATION_SYSTEM_PROMPT } from "../../shared/effect-observation";
 import { effectObservationTicket } from "../long-run/effect-observation-tickets";
+import { goalExecutionDirectivePromptBlock } from "../long-run/goal-execution-context";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
 import { getFirm, listFirms } from "../store/firms";
 import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
@@ -128,6 +147,7 @@ import { getResolvedOrg } from "../store/org-spec";
 import { runFirmInvocation } from "./firm-orchestrator";
 import {
   BorrowedAgentUnavailableError,
+  TaskForceRuntimeFailureError,
   requireBorrowedAgentSpecs,
   runBorrowedTaskForceInvocation,
   type BorrowedAgentSpec,
@@ -137,7 +157,9 @@ import {
   emitWorkforceBenchmarkSelectionArtifacts,
   isWorkforceLeaderRuntimeAllowed,
   parseWorkforceCommand,
+  preparedWorkforceSpecSource,
   runWorkforceSelection,
+  installedWorkforceHubMcp,
   type WorkforcePrepareCheckpointReceipt,
   type WorkforceSelectionReceipt,
   workforceFailureCode,
@@ -163,6 +185,7 @@ import {
   buildExperienceContext,
 } from "../experience/context";
 import { promoteExperienceCandidatesForRun, promoteWaitingExperienceCandidates } from "../experience/store";
+import { prepareExperienceDispatch, recordExperienceApplication } from "../experience/application";
 import { writeEvolutionProposalsForProject, evolutionSessionContextLine } from "../agents/evolution-hep";
 import { resolveDesktopOperationalRuntimeSession } from "../ontology/operational-runtime-session";
 import { operationalRuntimeOverlayMatchesTask } from "../ontology/operational-runtime-contract";
@@ -196,7 +219,7 @@ import { classifyToolFailure, toolFailureCopy } from "../../shared/tool-failure"
 import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
-import { createAutomation, findAutomationByGoalId, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
+import { createAutomation, findAutomationByGoalId, getAutomation, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
 import { previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
@@ -242,6 +265,9 @@ import {
 } from "../invocation/workspace-binding";
 import {
   runnerFailureFromError,
+  RuntimeTurnUnsettledError,
+  RuntimeNoProgressError,
+  RUNTIME_TURN_UNSETTLED_CODE,
   type Runner,
   type RunnerFailure,
   type RunnerEvents,
@@ -258,6 +284,7 @@ import {
   pickRunner,
   pinnedRuntimeCredentialOrModelUnavailable,
   rolePriorityRuntimes,
+  runtimeFailureBlocksReplay,
   runtimeDisplayName,
   selectInvocationRuntime,
 } from "../runtime/selection";
@@ -450,7 +477,8 @@ function mainOneProfileContext(req: McpInvocationRequest): string {
 }
 
 type MainBoundOneInvocationRequest = McpInvocationRequest & {
-  oneTeamExecutionPolicy?: "solo_locked" | "confirmed_existing_roster" | "confirmed_external_workforce";
+  oneTeamExecutionPolicy?: "solo_locked" | "confirmed_existing_roster" | "confirmed_external_workforce" | "native_one_staffing";
+  oneTeamStaffingAuthority?: OneTeamStaffingAuthority;
   oneTeamRuntimeBinding?: OneTeamRuntimeBinding;
   oneParticipantExecutionSnapshot?: OneParticipantExecutionSnapshot;
 };
@@ -462,6 +490,7 @@ function mainOneTeamExecutionPolicy(
   return value === "solo_locked"
     || value === "confirmed_existing_roster"
     || value === "confirmed_external_workforce"
+    || value === "native_one_staffing"
     ? value
     : undefined;
 }
@@ -575,6 +604,54 @@ function buildOneRecoveryDecisionPrompt(previousText: string, locale: "ko" | "en
 
 function hasOneRecoveryDecision(text: unknown): boolean {
   return extractBuildInterviewQuestions(text).length > 0;
+}
+
+/** Never omit state just because a runtime advertises session support. */
+
+
+/** Requests are not successes. An exact successful retry resolves that failed operation. */
+function createOneToolFailureTracker(): { note: (tool: NonNullable<McpInvocationEvent["tool"]>) => boolean; unresolved: () => boolean } {
+  const pending = new Map<string, string>();
+  const completed = new Set<string>();
+  const failed = new Set<string>();
+  let overflowFailure = false;
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+    if (value && typeof value === "object") return `{${Object.keys(value).sort()
+      .map(key => `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`).join(",")}}`;
+    return JSON.stringify(value) ?? "null";
+  };
+  return {
+    note(tool): boolean {
+      const id = tool.id?.trim();
+      if (id && completed.has(id)) return false;
+      let key: string | undefined;
+      if (tool.args !== undefined) {
+        let args: unknown = tool.args;
+        try { args = JSON.parse(tool.args); } catch { /* Keep non-JSON arguments exact. */ }
+        key = createHash("sha256").update(`${tool.name.trim().toLowerCase()}\0${canonical(args)}`).digest("hex");
+      } else if (id) key = pending.get(id);
+      if (tool.result === undefined && tool.isError !== true) {
+        if (id && key) {
+          if (pending.size >= 4096 && !pending.has(id)) pending.delete(pending.keys().next().value!);
+          pending.set(id, key);
+        }
+        return false;
+      }
+      if (id) {
+        pending.delete(id);
+        if (completed.size >= 4096) completed.delete(completed.values().next().value!);
+        completed.add(id);
+      }
+      if (!key) { if (tool.isError === true) overflowFailure = true; return true; }
+      if (tool.isError === true) {
+        if (failed.size >= 4096 && !failed.has(key)) overflowFailure = true;
+        else failed.add(key);
+      } else if (tool.result !== undefined && tool.isError === false) failed.delete(key);
+      return true;
+    },
+    unresolved: () => overflowFailure || failed.size > 0,
+  };
 }
 
 /**
@@ -694,12 +771,17 @@ class InvocationRunnerFailureError extends Error {
   }
 
   static isMarkedQuota(error: unknown): boolean {
-    return error instanceof InvocationRunnerFailureError && (#failure in error)
-      && error.#failure.kind === "quota" && error.#failure.source === "marker";
+    const failure = InvocationRunnerFailureError.providerFailure(error);
+    return failure?.kind === "quota" && failure.source === "marker";
   }
 
   static providerFailure(error: unknown): Readonly<RunnerFailure> | null {
-    return error instanceof InvocationRunnerFailureError && (#failure in error) ? error.#failure : null;
+    if (error instanceof InvocationRunnerFailureError && (#failure in error)) return error.#failure;
+    if (error instanceof RuntimeTurnUnsettledError || error instanceof RuntimeNoProgressError) {
+      return runnerFailureFromError(error, error.runtimeKind);
+    }
+    return ObservedRunnerFailureError.providerFailure(error)
+      ?? TaskForceRuntimeFailureError.providerFailure(error);
   }
 
   static imageInputFailure(error: unknown): { code: string; message: string } | null {
@@ -763,9 +845,15 @@ function invocationFailure(
   req: McpInvocationRequest,
   fallbackCode: string,
   error: unknown,
+  executionContext?: InvocationExecutionContext,
 ): { code: string; message: string; runtimeFailure?: InvocationRuntimeFailure } {
   if (req.agentAppMode) return untrustedRuntimeFailurePayload();
   const runtimeFailure = invocationRuntimeFailure(error);
+  const typedFailure = InvocationRunnerFailureError.providerFailure(error);
+  if (typedFailure?.source === "marker" && runtimeFailureBlocksReplay(typedFailure)) {
+    return { code: typedFailure.providerCode!, message: error instanceof Error ? error.message : String(error),
+      ...(runtimeFailure ? { runtimeFailure } : {}) };
+  }
   const projectResidencyFailure = InvocationRunnerFailureError.projectResidencyBusyFailure(error);
   if (projectResidencyFailure) {
     const ko = "이 Work 프로젝트의 다른 채팅에서 에이전트가 아직 실행 중이라 새 CLI를 시작하지 않았습니다. 현재 실행이 끝난 뒤 다시 보내 주세요. 기존 대화와 입력은 보존됩니다.";
@@ -790,12 +878,17 @@ function invocationFailure(
   if (quota !== undefined) {
     const who = quota === "quota" ? InvocationRunnerFailureError.providerFailure(error)?.runtime ?? "this model"
       : quota ?? (pickLocale(req) === "ko" ? "이 모델" : "this model");
+    let timeZone: string | undefined;
+    try {
+      timeZone = (executionContext?.source === "automation" && req.automationId
+        ? getAutomation(req.automationId)?.timezone
+        : getOneProfile().timeZone) ?? undefined;
+    } catch { /* Display-only fallback uses the local time zone. */ }
     return {
       code: "runtime_quota",
       ...(runtimeFailure ? { runtimeFailure } : {}),
-      message: pickLocale(req) === "ko"
-        ? `${who} 사용 한도가 찼습니다. 다른 모델로 바꾸거나 한도가 풀린 뒤 다시 보내세요. 이미 도착한 팀원 답변은 위에 그대로 있습니다. (${raw})`
-        : `${who} has hit its usage limit. Switch models or send again after it resets. Any teammate replies that already arrived are still above. (${raw})`,
+      message: runtimeQuotaFailureMessage({ runtime: who, locale: pickLocale(req),
+        retryAfterAt: runtimeFailure?.retryAfterAt, unattended: isUnattendedExecution(executionContext), timeZone }),
     };
   }
   const toolFailureCode = classifyToolFailure({ result: raw });
@@ -807,6 +900,27 @@ function invocationFailure(
     };
   }
   return { code: fallbackCode, message: raw };
+}
+
+/** Planning can execute tools on the pinned runtime; account it and keep its typed terminal cause. */
+async function runInvocationPlanningRunner(
+  runner: Runner,
+  request: RunnerRequest,
+  events: RunnerEvents,
+  runtime: RuntimeStatus,
+): Promise<Awaited<ReturnType<Runner>>> {
+  const accounting = beginAccountedInference({ kind: runtime.kind, model: runtime.model, source: runtime.source });
+  try {
+    const result = await runObservedRunner(runner, request, events);
+    accounting?.complete(result.observedUsage,
+      request.signal?.aborted ? "cancelled" : result.failure ? "failed" : "returned");
+    if (request.signal?.aborted) throw request.signal.reason ?? new Error("invocation_cancelled");
+    if (result.failure) throw new InvocationRunnerFailureError(result.failure);
+    return result;
+  } catch (error) {
+    accounting?.complete(observedRunnerUsage(error), request.signal?.aborted ? "cancelled" : "failed");
+    throw error;
+  }
 }
 
 function throwIfInvocationAborted(signal: AbortSignal | undefined, locale: "ko" | "en"): void {
@@ -1371,9 +1485,9 @@ function automationFinalSummary(items: AutomationRegistrationResult[], locale: "
     const action = automationActionLabel(item.action, locale);
     const nextRun =
       item.enabled && item.nextRunAt && locale === "ko"
-        ? ` · 다음 실행 ${item.nextRunAt}`
+        ? ` · 다음 실행 ${formatAutomationNextRun(item.nextRunAt, item.timezone, locale)}`
         : item.enabled && item.nextRunAt
-          ? ` · next run ${item.nextRunAt}`
+          ? ` · next run ${formatAutomationNextRun(item.nextRunAt, item.timezone, locale)}`
           : "";
     return `- ${item.name} · ${action} · ${item.schedule}${nextRun}`;
   });
@@ -1419,7 +1533,11 @@ async function gateHubSpecsByProjectRentPolicy(input: {
   sink: (event: McpInvocationEvent) => void;
 }): Promise<BorrowedAgentSpec[]> {
   const { specs, projectId, userPrompt, locale, sink } = input;
-  if (!projectId || !specs.some((s) => s.source === "hub")) return specs;
+  const needsHubConsent = (spec: BorrowedAgentSpec): boolean => {
+    const preparedSource = preparedWorkforceSpecSource(spec);
+    return preparedSource ? preparedSource === "hub" : spec.source === "hub";
+  };
+  if (!projectId || !specs.some(needsHubConsent)) return specs;
   let allowed: Set<string>;
   try {
     allowed = new Set(listRentAllowedSlugs(projectId).map((s) => s.toLowerCase()));
@@ -1435,7 +1553,7 @@ async function gateHubSpecsByProjectRentPolicy(input: {
   const kept: BorrowedAgentSpec[] = [];
   const dropped: BorrowedAgentSpec[] = [];
   for (const s of specs) {
-    if (s.source !== "hub") {
+    if (!needsHubConsent(s)) {
       kept.push(s);
       continue;
     }
@@ -1529,8 +1647,12 @@ export interface InvocationExecutionContext {
 }
 
 export interface McpInvocationResult {
+  /** Host-owned waiting custody; never serialized as a tool/model result. */
+  browserLoginWait?: BrowserLoginWait;
   finalText?: string;
   tokens?: number;
+  /** Sum of measured invocation attempts, including planning and workers; absent if any attempt is unknown. */
+  observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
   /** Host-created structured quota marker; never inferred from error prose. */
   markedQuotaFailure?: true;
   stormbreakerContinueRequested: boolean;
@@ -1594,6 +1716,7 @@ function parseDesktopWorkforceTurnDecision(
 function isUnattendedExecution(executionContext?: InvocationExecutionContext): boolean {
   return (
     executionContext?.source === "automation" ||
+    executionContext?.source === "science" ||
     executionContext?.source === "site-studio" ||
     executionContext?.source === "trex" ||
     executionContext?.source === "alive" ||
@@ -1760,9 +1883,103 @@ export function runMcpInvocation(
   hostNoticePurpose?: ChatHostNotice["purpose"],
   browserPresentation: "foreground" | "background" = "background",
 ): Promise<McpInvocationResult> {
-  return withInvocationJudgmentContext(req.runtimeSelection, signal, () => runMcpInvocationInContext(
-    req, sink, signal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation,
-  ));
+  if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
+  // Native CLI tool loops can make hundreds of provider requests inside one
+  // host pass. Guard completed outcomes here, including ordinary chats, rather
+  // than relying on the scheduled Graph guard or on model-written progress.
+  const progress = createNoProgressGuard({ observationMode: "completed" });
+  const progressController = new AbortController();
+  const ownerSignal = signal ? AbortSignal.any([signal, progressController.signal]) : progressController.signal;
+  const children: AttemptChildren = { children: new Set(), closing: false, stop: child => killCliTree(child, 500) };
+  const login = createBrowserLoginPrerequisite({ runId: req.runId!, chatId: req.chatId,
+    nodeId: executionContext?.nodeId, signal: ownerSignal,
+    onWaiting: prerequisite => {
+      children.closing = true;
+      recordRunEvent({ runId: req.runId!, chatId: req.chatId, nodeId: executionContext?.nodeId,
+        kind: "browser_login_wait_requested", sourceEventId: `browser-login-wait:${prerequisite.prerequisiteId}`,
+        payload: { prerequisite } });
+    },
+  });
+  const invocationSignal = login.signal;
+  let stopped: NoProgressDecision | null = null;
+  let stopDelivered = false;
+  let goalDispatchObserved = false;
+  let admittedGoal: { goalId: string; runId: string; revision: number } | null = null;
+  const bindDispatchedGoal = (goalId: string | null): void => {
+    if (goalDispatchObserved) return;
+    goalDispatchObserved = true;
+    try {
+      const run = goalId ? getLongRunByGoalId(goalId) : null;
+      const revision = goalId ? getChatGoalRevision(goalId) : null;
+      if (goalId && run && run.surface !== "science" && revision) {
+        admittedGoal = { goalId, runId: run.id, revision: revision.revision };
+      }
+    } catch { /* Missing admission evidence cannot authorize a Goal transition. */ }
+  };
+  const deliverStop = (): void => {
+    if (!stopped || stopDelivered) return;
+    stopDelivered = true;
+    sink({ kind: "error", error: req.agentAppMode ? untrustedRuntimeFailurePayload() : {
+      code: "invocation-no-progress", message: noProgressLoopOwnerText(stopped, pickLocale(req)),
+    } });
+  };
+  const guardedSink: EventSink = (event) => {
+    if (login.waiting) {
+      if (event.kind !== "final" && event.kind !== "error") sink(event);
+      return;
+    }
+    if (stopped) { if (event.kind === "error" || event.kind === "final") deliverStop(); return; }
+    const decision = signal?.aborted ? null : noteNoProgressEvent(progress, event);
+    sink(event); // Preserve the exact observation that triggered the stop.
+    if (!decision || signal?.aborted) return;
+    stopped = decision;
+    if (req.runId) tryRecordRunEvent({ runId: req.runId, chatId: req.chatId,
+      kind: "invocation_no_progress", sourceEventId: "invocation-no-progress",
+      ...(decision.nodeId ? { nodeId: decision.nodeId } : {}),
+      payload: { rule: decision.rule, tool: decision.tool, fingerprint: decision.fingerprint, count: decision.count } });
+    // A cost/progress stop must not fall through to the terminal verifier or
+    // schedule another inference with the same unchanged evidence.
+    try {
+      const admitted = admittedGoal;
+      if (admitted) getDb().transaction(() => {
+        const run = getLongRunByGoalId(admitted.goalId);
+        if (getChat(req.chatId)?.goalId === admitted.goalId
+          && getChatGoalRevision(admitted.goalId)?.revision === admitted.revision
+          && run?.id === admitted.runId && run.surface !== "science"
+          && ["running", "waiting_worker", "waiting_tool"].includes(run.status)) {
+          transitionLongRun({ runId: run.id, to: "blocked", actorKind: "host",
+            expectedVersion: run.version, reason: "invocation_no_progress" });
+        }
+      })();
+    } catch { /* Preserve the terminal stop even if its secondary Goal projection fails. */ }
+    progressController.abort(new Error(noProgressLoopError(decision)));
+    deliverStop();
+  };
+  return withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
+    req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login,
+  )).then(async result => {
+    if (login.waiting && !ownerSignal.aborted) {
+      const browserLoginWait = login.seal(await drainAttemptChildren(children));
+      if (browserLoginWait) return { ...result, browserLoginWait, finalText: undefined,
+        stormbreakerContinueRequested: false, goalCompletionClaim: undefined,
+        goalWaitRequest: undefined, goalPassStop: undefined };
+    }
+    login.cancel();
+    if (!stopped) return result;
+    deliverStop();
+    return { ...result, finalText: undefined, stormbreakerContinueRequested: false, goalCompletionClaim: undefined,
+      goalWaitRequest: undefined, goalPassStop: undefined };
+  }).catch(async error => {
+    if (login.waiting && !ownerSignal.aborted) {
+      const browserLoginWait = login.seal(await drainAttemptChildren(children));
+      if (browserLoginWait) return { browserLoginWait, observedUsage: currentInvocationObservedUsage(),
+        stormbreakerContinueRequested: false };
+    }
+    login.cancel();
+    if (!stopped) throw error;
+    deliverStop();
+    return { stormbreakerContinueRequested: false };
+  }), () => bindDispatchedGoal(getChatGoalId(req.chatId) ?? null)));
 }
 
 async function runMcpInvocationInContext(
@@ -1777,6 +1994,9 @@ async function runMcpInvocationInContext(
   hostNoticePurpose?: ChatHostNotice["purpose"],
   /** Main-owned invocation surface, independent of the coordinator's inventory visibility. */
   browserPresentation: "foreground" | "background" = "background",
+  /** Capture Main's current Goal admission before the first provider dispatch. */
+  onGoalDispatched?: (goalId: string | null) => void,
+  login?: BrowserLoginPrerequisiteControl,
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
@@ -1906,6 +2126,7 @@ async function runMcpInvocationInContext(
       ev = {
         ...ev,
         text: hygiene.text,
+        ...(ev.agentId ? {} : { observedUsage: currentInvocationObservedUsage() }),
         ...(rawEscalation ? { permissionEscalationMarkerForVerification: true } : {}),
         durableTextForVerification: ev.durableTextForVerification ?? hygiene.durableText,
         userDecisionRequest: hygiene.userDecisionRequest
@@ -1926,11 +2147,15 @@ async function runMcpInvocationInContext(
     const browserTool = ev.kind === "tool-use" && ev.tool?.result !== undefined && !ev.tool.isError
       && ev.tool.name.startsWith("agentlas-browser.") ? ev.tool.name : null;
     if (browserTool) {
+      // Canonical native calls are observed at the awaited transport boundary.
+      // Legacy isolated AgentApp callers retain their existing observer only.
+      if (!nativeBrowserGrant) {
       void import("../browser/login-recovery-runtime").then(({ observeBrowserToolForLoginWall, ownerLoginCardNotice }) =>
         observeBrowserToolForLoginWall({
-          toolName: browserTool, runId: req.runId, chatId: req.chatId, nativeGrant: nativeBrowserGrant,
+          toolName: browserTool, runId: req.runId, chatId: req.chatId, nodeId: executionContext?.nodeId, signal, nativeGrant: nativeBrowserGrant,
           notify: (card) => { try { emit({ kind: "notice", notice: ownerLoginCardNotice(card, pickLocale(req)) }); } catch { /* run ended */ } },
         })).catch(() => undefined);
+      }
       // A site's human check (CAPTCHA/anti-bot) is not solved or bypassed: one card, browser in front, auto-resume.
       void import("../browser/fallback-ladder-runtime").then(({ observeBrowserToolForHumanCheck }) =>
         observeBrowserToolForHumanCheck({ toolName: browserTool, ...(req.chatId ? { chatId: req.chatId } : {}), nativeGrant: nativeBrowserGrant ?? null }))
@@ -1940,13 +2165,40 @@ async function runMcpInvocationInContext(
   };
   const earlyResult = () => ({
     finalText: finalTextFromSink || undefined,
+    observedUsage: currentInvocationObservedUsage(),
     stormbreakerContinueRequested: false,
     resultFolder: resolvedResultFolder,
     workforcePrepareReceipt,
   });
+  const beforeMcpToolResult = async (input: { catalogId: string | null; toolName: string; isError: boolean }): Promise<void> => {
+    login?.assertRunnable();
+    if (!login || !nativeBrowserGrant || !["agentlas-browser", "cua-driver"].includes(input.catalogId ?? "")) return;
+    const observed = login.beginObservation();
+    try {
+    const { recoverLoginWallsNow, ownerLoginCardNotice } = await import("../browser/login-recovery-runtime");
+    const outcomes = await recoverLoginWallsNow({ runId: req.runId, chatId: req.chatId,
+      nodeId: executionContext?.nodeId, signal: login.ownerSignal, nativeGrant: nativeBrowserGrant,
+      onPrerequisiteRestored: ref => login.restored(ref),
+      notify: card => sink({ kind: "notice", notice: ownerLoginCardNotice(card, pickLocale(req)) }),
+    });
+    login.observe(outcomes);
+    login.assertRunnable();
+    } finally { observed(); }
+  };
   const locale = pickLocale(req);
   const oneTeamExecutionPolicy = mainOneTeamExecutionPolicy(req);
   const boundOneTeamRuntime = mainOneTeamRuntimeBinding(req);
+  if (oneTeamExecutionPolicy === "native_one_staffing") {
+    const authority = (req as MainBoundOneInvocationRequest).oneTeamStaffingAuthority;
+    if (!boundOneTeamRuntime || !oneTeamUsesNativeStaffing(authority)
+      || !req.oneUserAuthoredPrompt
+      || authority!.promptDigest !== `sha256:${createHash("sha256").update(req.oneUserAuthoredPrompt).digest("hex")}`) {
+      sink({ kind: "error", error: { code: "one-native-staffing-binding-invalid",
+        message: locale === "ko" ? "One 팀 운영 요청의 실행 바인딩이 달라 시작하지 않았습니다."
+          : "The One staffing request binding changed, so execution did not start." } });
+      return earlyResult();
+    }
+  }
   if (oneTeamExecutionPolicy) {
     /*
      * 여기서 묻는 것은 "Main 이 만든 모양인가"이지 "로컬 설치본인가"가 아니다 —
@@ -2003,7 +2255,7 @@ async function runMcpInvocationInContext(
       ...req,
       sessionRouting: false,
       hubMode: oneTeamExecutionPolicy === "confirmed_external_workforce"
-        ? "hub-first"
+        ? oneTeamWorkforceHubMode((req as MainBoundOneInvocationRequest).oneTeamStaffingAuthority)
         : confirmedRosterBorrowSlugs.length > 0
           ? "hub-allowed"
           : "local-only",
@@ -2227,22 +2479,30 @@ async function runMcpInvocationInContext(
         : req.userPrompt;
   if (oneTeamExecutionPolicy) {
     const taskSurfaceRecipe = oneTaskSurfaceRecipe(req.userPrompt, locale === "ko");
-    const lockedBoundary = locale === "ko"
+    // Output presentation and optional follow-ups do not constrain the current
+    // task's execution authority. Keep them outside the Main-owned team boundary.
+    const oneInvocationInstructions = locale === "ko"
       ? [
           "[Agentlas One 실행 경계]",
           oneTeamExecutionPolicy === "confirmed_existing_roster"
             ? "Main이 확정한 기존 설치 로스터만 사용하세요. 다른 에이전트나 팀을 검색하거나 추가하지 마세요."
             : oneTeamExecutionPolicy === "confirmed_external_workforce"
               ? "사용자가 이 요청에 필요한 Hub Workforce 편성과 실행을 확인했습니다. Hub가 검증하고 고정한 정확한 릴리스만 사용하고, 대체 후보를 조용히 끼워 넣지 마세요."
-              : "이 요청은 단일 에이전트 실행입니다. 다른 에이전트나 팀을 검색하거나 추가하지 마세요.",
-          "최종 답변에 '사용 에이전트:', '사용 스킬:' 같은 라우팅 보고를 쓰지 말고 사용자에게 필요한 답부터 바로 시작하세요.",
+              : oneTeamExecutionPolicy === "native_one_staffing"
+                ? "사용자가 요청한 팀원 생성·초대·위임은 기존 One 팀 도구로 실행하세요. 현재 방의 팀원과 세션을 먼저 확인하고 재사용하며, 사용자 요청의 범위와 도구의 권한 검사를 따르세요."
+                : "이 요청은 단일 에이전트 실행입니다. 다른 에이전트나 팀을 검색하거나 추가하지 마세요.",
           "이 경계를 넓혀야 한다면 실행하지 말고 One에서 새 팀 검토가 필요하다고 알리세요.",
+          "[/Agentlas One 실행 경계]",
+          "",
+          "[Agentlas One 결과 표시 형식]",
+          "아래는 현재 요청의 결과와 선택적 후속 제안을 표시하는 형식입니다. 현재 요청의 실행 범위와 완료 조건은 위의 실행 경계 및 사용자 요청을 따릅니다.",
+          "최종 답변에 '사용 에이전트:', '사용 스킬:' 같은 라우팅 보고를 쓰지 말고 사용자에게 필요한 답부터 바로 시작하세요.",
           `조사·비교·일정·문서·미디어처럼 구조화할 수 있는 최종 결과는 긴 평문으로 끝내지 말고, 검증한 사실과 출처를 담은 정확히 하나의 기계 판독 Surface를 답변 맨 끝에 ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE} 형식으로 반환하세요. "Agentlas Surface"라는 Markdown 제목이나 가짜 표로 대신하지 마세요. 비교는 data.table·widgets.table/source-matrix, 날짜별 일정은 data.timeline·widgets.timeline, 좌표가 확인된 이동 경로는 data.routes·widgets.map, 예산은 data.pricing의 currency·limit·items(label, amount, verificationStatus), 실제로 만든 파일만 data.artifacts를 사용하세요. 좌표·금액·파일을 추측해 채우지 마세요.`,
           "Surface의 제목·요약·data.summary에는 사용자가 받을 완성된 결론만 쓰세요. '이제 검색하겠습니다', 도구 호출 계획, 진행 상황, 메모리나 작업 폴더를 확인한 과정은 넣지 마세요. 반환 전에 추천 제목·설명·표의 제품명과 숫자가 서로 모순되지 않는지 다시 확인하세요.",
           oneFriendlyFollowupProtocol("ko"),
           "비교 표에는 choice 열을 두고 정확히 한 행만 recommended로 표시하세요. 추천 행을 포함한 모든 행은 사용자가 결정할 핵심 열을 구체적인 값이나 '확인하지 못함' 같은 정직한 상태로 채우세요. 대시(—), 빈칸, 임시 문구로 채우지 말고, 근거가 부족하면 추천을 단정하지 마세요. Surface 문자열 안에는 URL이나 Markdown 링크 문법을 넣지 말고 출처는 evidence에만 넣으세요.",
           ...(taskSurfaceRecipe ? [taskSurfaceRecipe] : []),
-          "[/Agentlas One 실행 경계]",
+          "[/Agentlas One 결과 표시 형식]",
         ].join("\n")
       : [
           "[Agentlas One execution boundary]",
@@ -2250,17 +2510,23 @@ async function runMcpInvocationInContext(
             ? "Use only the exact existing installed roster confirmed by Main. Do not search for or add another agent or team."
             : oneTeamExecutionPolicy === "confirmed_external_workforce"
               ? "The user confirmed Hub Workforce selection and execution for this request. Use only the exact releases validated and pinned by Hub, and never silently substitute another candidate."
-              : "This is a single-agent run. Do not search for or add another agent or team.",
-          "Never include routing reports such as 'Agents used:' or 'Skills used:' in the final answer. Start directly with the answer the user needs.",
+              : oneTeamExecutionPolicy === "native_one_staffing"
+                ? "Use the existing One team tools for the owner-requested member creation, invitation, or delegation. First inspect and reuse current room members and sessions, respecting the owner request and tool permission checks."
+                : "This is a single-agent run. Do not search for or add another agent or team.",
           "If the boundary is insufficient, stop and say that a new One team review is required.",
+          "[/Agentlas One execution boundary]",
+          "",
+          "[Agentlas One result format]",
+          "The following formats the current result and optional follow-up proposals. The execution boundary above and the user request govern the current task's execution scope and completion criteria.",
+          "Never include routing reports such as 'Agents used:' or 'Skills used:' in the final answer. Start directly with the answer the user needs.",
           `For a structured final result such as research, comparison, schedule, document, or media work, do not end with a long plain-text answer. Return exactly one machine-readable Surface at the very end in the form ${SURFACE_OPEN_FENCE} JSON ${SURFACE_CLOSE_FENCE}. Do not substitute a Markdown heading named "Agentlas Surface" or a fake text table. Use data.table with widgets.table/source-matrix for comparisons, data.timeline with widgets.timeline for dated plans, data.routes with widgets.map only for verified coordinates, data.pricing with currency, limit, and items(label, amount, verificationStatus) for budgets, and data.artifacts only for files that were actually created. Never invent coordinates, prices, or files to fill a Surface.`,
           "Write only the finished user-facing conclusion in the Surface title, summary, and data.summary. Never include future tool plans, progress narration, or checks of memory and work folders. Before returning, verify that the recommendation title, explanation, product names, and numbers in every table do not contradict one another.",
           oneFriendlyFollowupProtocol("en"),
           "For a comparison table, include a choice column and mark exactly one row recommended. Fill every decision-critical cell in every row, including the recommended row, with a concrete value or an honest state such as 'not verified'. Never use dashes, blanks, or placeholder copy. If the evidence is insufficient, do not make a definitive recommendation. Put no URL or Markdown link syntax inside Surface strings; keep sources only in evidence.",
           ...(taskSurfaceRecipe ? [taskSurfaceRecipe] : []),
-          "[/Agentlas One execution boundary]",
+          "[/Agentlas One result format]",
         ].join("\n");
-    effectiveUserPrompt = `${lockedBoundary}\n\n${effectiveUserPrompt}`;
+    effectiveUserPrompt = `${oneInvocationInstructions}\n\n${effectiveUserPrompt}`;
   }
   // 자동화 세션에서 온 사용자 채팅: 이 자동화의 실시간 수정 계약을 앞에 세운다.
   // 오너 결정 2026-08-19: 채팅 리얼타임 수정이 본선이고 편집 버튼은 보조다. 실측:
@@ -2614,7 +2880,7 @@ ${effectiveUserPrompt}`;
       });
     } catch (error) {
       throwIfInvocationAborted(signal, locale);
-      sink({ kind: "error", error: invocationFailure(req, "hep-network-route-failed", error) });
+      sink({ kind: "error", error: invocationFailure(req, "hep-network-route-failed", error, executionContext) });
       return earlyResult();
     }
   }
@@ -2861,14 +3127,9 @@ ${effectiveUserPrompt}`;
     return earlyResult();
   }
   const pickedForWorkforceLeader = picked;
-  const confirmedRuntime: RuntimeSelection = {
-    kind: active.kind,
-    backend: active.backend,
-    source: active.source,
-    model: active.model ?? undefined,
-    longContext: active.longContextEnabled,
-    effort: active.effort ?? undefined,
-  };
+  const confirmedRuntime: RuntimeSelection = selectionForRuntime(active, {
+    longContext: active.longContextEnabled ?? undefined,
+  });
   if (continuationRuntimePinned && req.runtimeSelection && (
     confirmedRuntime.kind !== req.runtimeSelection.kind
     || confirmedRuntime.backend !== req.runtimeSelection.backend
@@ -3020,7 +3281,7 @@ ${effectiveUserPrompt}`;
   const explicitStormbreakerGoal = explicitStormbreakerRequest
     ? req.userPrompt.replace(stormbreakerPrefix, "").trim() || req.userPrompt
     : req.userPrompt;
-  const oneTeamAllowsStorm = !scienceRecovery && !isAliveControllerRun && !scienceCollectionCurrent && (!oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked");
+  const oneTeamAllowsStorm = !scienceRecovery && !isAliveControllerRun && !scienceCollectionCurrent && executionContext?.source !== "science" && (!oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked" || oneTeamExecutionPolicy === "native_one_staffing");
   // A Main-issued read-only effect observation is one look at the outside world,
   // never a Goal cycle, Stormbreaker loop or multi-pass continuation.
   const effectObservationRun = Boolean(effectObservationTicket(req.runId));
@@ -3503,33 +3764,17 @@ ${effectiveUserPrompt}`;
       // Hub/credential setup may await user or network work. Re-check the
       // selected server bindings before materializing their runtime config.
       assertMcpGoalSelectionCurrent();
-      // Interactive One/Work browser tools and the shared sidebar use the same
-      // Main-registered chat guest. Unattended and Agent App browser profiles
-      // keep their existing independent lifecycle.
-      if (req.chatId && !executionContext && !req.agentAppMode &&
+      // Every owner task uses the same native login session. Visibility and
+      // executionContext choose presentation/authority, never another cookie store.
+      // AgentApp sessions retain their explicitly separate runtime boundary.
+      if (!req.agentAppMode &&
         (installedTools.some((tool) => tool.id === "agentlas-browser") || req.requiredToolCatalogIds?.includes("agentlas-browser"))) {
-        // The daemon imports this client too. Load Electron's native views only
-        // for a real interactive browser grant, never during headless startup.
         mcpPrepStage = "native-browser-grant";
-        const { createNativeBrowserRelayGrant } = await import("../browser/native-cdp-relay");
-        try {
-          nativeBrowserGrant = await createNativeBrowserRelayGrant({ chatId: req.chatId, runId: req.runId!,
-            presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture),
-            permission: normalizedPermission, signal: signal ?? new AbortController().signal });
-        } catch (grantError) {
-          /*
-           * ★A chat that is not open in a window has no native guest owner. Background goal
-           * cycles and sweep-dispatched effect observations are exactly those chats, and every
-           * one of them died here before the runner started (production 1.2.37, 2026-09-23:
-           * 8 runs `mcp-runtime-config-unavailable` "(unknown)" ~2s after start). Without a
-           * window the browser still exists: the dedicated persistent profile that unattended
-           * runs already use. Bind that instead and record the machine reason.
-           */
-          if (signal?.aborted || !(grantError instanceof Error) || grantError.message !== "native-browser-task-unbound") throw grantError;
-          nativeBrowserGrant = undefined;
-          tryRecordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "browser_binding",
-            payload: { schemaVersion: 1, binding: "dedicated-profile", reasonCode: "native-browser-task-unbound" } });
-        }
+        const { createCanonicalNativeBrowserGrant } = await import("../browser/main-browser-channel");
+        nativeBrowserGrant = await createCanonicalNativeBrowserGrant({ chatId: chat.id, runId: req.runId!,
+          presentation: executionContext ? "background" : browserPresentation,
+          onScreenshot: (capture) => publishNativeCapture(capture),
+          permission: normalizedPermission, signal: login?.ownerSignal ?? signal ?? new AbortController().signal });
       }
       mcpPrepStage = "config-build";
       const cfg = await buildMcpConfigFile({
@@ -3563,6 +3808,7 @@ ${effectiveUserPrompt}`;
          * 그 차이가 사라진다(mcp-config.ts mcpProxySpec → proxy-child.cjs).
          */
         toolGate: {
+          beforeMcpToolResult,
           ...(planReadOnly ? { planMode: true as const } : {}),
           runtime: active.kind,
           // 승인 세션 키는 러너들과 같은 규칙이라야 "이번 세션 동안 허용"이 이어진다.
@@ -3596,17 +3842,20 @@ ${effectiveUserPrompt}`;
       }
       // Browser fallback ladder: lend this run's ids and notice sink; a browser run without the browser MCP
       // attached is recorded as a typed ladder stop (one card) instead of silently using another browser.
-      if (req.chatId && req.runId) {
+      if (chat.id && req.runId) {
         const browserAttached = mcpIncludedServers.some((row) => row.catalogId === "agentlas-browser" || row.serverId === "agentlas-browser");
         const browserNeeded = req.toolMode === "browser" || Boolean(req.requiredToolCatalogIds?.includes("agentlas-browser"));
-        const ladderChatId = req.chatId, ladderRunId = req.runId;
+        const ladderChatId = chat.id, ladderRunId = req.runId;
         const ladderNotify = (notice: NonNullable<McpInvocationEvent["notice"]>) => { try { sink({ kind: "notice", notice }); } catch { /* run ended */ } };
         void import("../browser/fallback-ladder-runtime").then((ladder) => {
           if (browserAttached) {
-            const unbind = ladder.bindBrowserLadderRun({ chatId: ladderChatId, runId: ladderRunId, locale: pickLocale(req), notify: ladderNotify });
+            const unbind = ladder.bindBrowserLadderRun({ chatId: ladderChatId, runId: ladderRunId, locale: pickLocale(req), notify: ladderNotify,
+              nativeGrant: nativeBrowserGrant ?? null, nativeRequired: !req.agentAppMode,
+              nativeComputerUseAvailable: cfg?.nativeComputerUseBound === true });
             if (browserLadderSettled) unbind(); else unbindBrowserLadder = unbind;
           } else if (browserNeeded) {
-            ladder.recordBrowserMcpNotAttached({ chatId: ladderChatId, runId: ladderRunId, locale: pickLocale(req), notify: ladderNotify });
+            ladder.recordBrowserMcpNotAttached({ chatId: ladderChatId, runId: ladderRunId, locale: pickLocale(req), notify: ladderNotify,
+              nativeRequired: !req.agentAppMode });
           }
         }).catch(() => undefined);
       }
@@ -3656,17 +3905,13 @@ ${effectiveUserPrompt}`;
               try { grant?.release(); } finally { childConfig?.cleanup?.(); }
             };
             try {
-              if (ids.includes("agentlas-browser")) {
-                const { createNativeBrowserRelayGrant } = await import("../browser/native-cdp-relay");
+              if (ids.includes("agentlas-browser") && !req.agentAppMode) {
+                const { createCanonicalNativeBrowserGrant } = await import("../browser/main-browser-channel");
                 const grantSignal = input.signal ?? signal ?? new AbortController().signal;
-                grant = await createNativeBrowserRelayGrant({ chatId: chat.id, runId: req.runId!,
+                grant = await createCanonicalNativeBrowserGrant({ chatId: chat.id, runId: req.runId!,
                   permission: input.permission!, signal: grantSignal,
-                  presentation: browserPresentation, onScreenshot: (capture) => publishNativeCapture(capture) })
-                  // Same rule as the root run: no window owner → the dedicated persistent profile.
-                  .catch((grantError: unknown) => {
-                    if (grantSignal.aborted || !(grantError instanceof Error) || grantError.message !== "native-browser-task-unbound") throw grantError;
-                    return undefined;
-                  });
+                  presentation: executionContext ? "background" : browserPresentation,
+                  onScreenshot: (capture) => publishNativeCapture(capture) });
               }
               childConfig = await buildMcpConfigFile({ configKey: `worker-${generation}-${randomUUID()}`,
                 skipDefaultSeed: true, catalogIds: ids, ...(grant ? { nativeBrowser: grant } : {}),
@@ -4053,7 +4298,7 @@ ${effectiveUserPrompt}`;
         };
       } else {
         assertMcpGoalSelectionCurrent();
-        const decisionResult = await picked.runner(
+        const decisionResult = await runInvocationPlanningRunner(picked.runner,
           {
             ...(planReadOnly ? { planMode: true as const } : {}),
             systemPrompt: [
@@ -4109,7 +4354,11 @@ ${effectiveUserPrompt}`;
             chatId: `workforce-goal-turn:${req.runId}`,
             locale,
           },
-          { onStatus: () => {}, onPartial: () => {}, onTool: () => {} },
+          { onStatus: () => {}, onPartial: () => {},
+            onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl) => sink({ kind: "tool-use",
+              tool: { name, args, result, id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
+              agentId: "workforce:staffing", phase: "plan" }) },
+          active,
         );
         durableTurnDecision = parseDesktopWorkforceTurnDecision(decisionResult.text, readyPlans);
         if (durableTurnDecision.decision === "reuse") {
@@ -4118,7 +4367,7 @@ ${effectiveUserPrompt}`;
       }
     }
     } catch (error) {
-      if (explicitWorkforceGoal) throw error;
+      if (explicitWorkforceGoal || runtimeFailureBlocksReplay(InvocationRunnerFailureError.providerFailure(error))) throw error;
       // A chat with no binding or no signed-in account remains an ordinary local
       // turn. Once the user explicitly invokes Workforce, the same failure is
       // surfaced instead of silently falling back.
@@ -4240,6 +4489,9 @@ ${effectiveUserPrompt}`;
   if (explicitWorkforceGoal) {
     try {
       const workforceLeaderRunnerEvidence: WorkforceLeaderRunnerEvidence[] = [];
+      const hostOperations = createMainHostOperationBridge(sink, "main-hub", chat.id, "workforce:leader");
+      const hostControls = createMainHostControlSink(hostOperations.sink);
+      const hub = installedWorkforceHubMcp();
       const workforce = await runWorkforceSelection({
         goal: explicitWorkforceGoal,
         projectDir: workforceProjectDir,
@@ -4250,51 +4502,52 @@ ${effectiveUserPrompt}`;
         benchmarkMode: workforceBenchmarkMode,
         sourcePolicy: req.hubMode === "hub-first" ? "hub-required" : "network",
         signal,
-        sink,
-        auditSchemaAttempt: (attempt) => tryRecordRunEvent({
+        sink: hostControls.sink,
+        hubMcp: { call: (tool, args, abortSignal) => hostOperations.call(tool, args, () => hub.call(tool, args, abortSignal)) },
+        auditSchemaAttempt: (attempt) => hostControls.audit("validation", { name: "agentlas.workforce.schema_attempt", agentId: "workforce:leader", role: "workforce-leader", phase: "plan", tier: 1, id: attempt.invocationId, result: JSON.stringify(attempt), isError: attempt.status === "rejected" }, () => recordRunEvent({
           runId: req.runId ?? `task-force:${chat.id}`,
           kind: "workforce_schema_attempt",
           chatId: chat.id,
           nodeId: "workforce:leader",
           agentId: agent.id,
           payload: { ...attempt },
-        }),
-        auditHubToolObservation: (observation) => tryRecordRunEvent({
+        })),
+        auditHubToolObservation: (observation) => hostControls.audit("selection-observation", { name: "agentlas.workforce.hub_tool_observation", agentId: "workforce:leader", role: "workforce-leader", phase: "plan", tier: 1, id: observation.invocationId, result: JSON.stringify(observation), isError: observation.status === "failed" }, () => recordRunEvent({
           runId: req.runId ?? `task-force:${chat.id}`,
           kind: "workforce_hub_tool_observation",
           chatId: chat.id,
           nodeId: "workforce:leader",
           agentId: agent.id,
           payload: { ...observation },
-        }),
-        auditHubToolSupersession: (supersession) => tryRecordRunEvent({
+        })),
+        auditHubToolSupersession: (supersession) => hostControls.audit("authority-supersession", { name: "agentlas.workforce.hub_tool_supersession", agentId: "workforce:leader", role: "workforce-leader", phase: "plan", tier: 1, id: supersession.supersessionId, result: JSON.stringify(supersession) }, () => recordRunEvent({
           runId: req.runId ?? `task-force:${chat.id}`,
           kind: "workforce_hub_tool_supersession",
           chatId: chat.id,
           nodeId: "workforce:leader",
           agentId: agent.id,
           payload: { ...supersession },
-        }),
-        auditLeaderDecisionSupersession: (supersession) => tryRecordRunEvent({
+        })),
+        auditLeaderDecisionSupersession: (supersession) => hostControls.audit("authority-supersession", { name: "agentlas.workforce.leader_decision_supersession", agentId: "workforce:leader", role: "workforce-leader", phase: "plan", tier: 1, id: supersession.supersessionId, result: JSON.stringify(supersession) }, () => recordRunEvent({
           runId: req.runId ?? `task-force:${chat.id}`,
           kind: "workforce_leader_decision_supersession",
           chatId: chat.id,
           nodeId: "workforce:leader",
           agentId: agent.id,
           payload: { ...supersession },
-        }),
-        auditWorkOrderRefinement: (refinement) => tryRecordRunEvent({
+        })),
+        auditWorkOrderRefinement: (refinement) => hostControls.audit("contract-refinement", { name: "agentlas.workforce.work_order_refinement", agentId: "workforce:leader", role: "workforce-leader", phase: "plan", tier: 1, id: refinement.invocationId ?? `workforce-refinement:${refinement.refinement}`, result: JSON.stringify(refinement), isError: refinement.status === "failed" }, () => recordRunEvent({
           runId: req.runId ?? `task-force:${chat.id}`,
           kind: "workforce_work_order_refinement",
           chatId: chat.id,
           nodeId: "workforce:leader",
           agentId: agent.id,
           payload: { ...refinement },
-        }),
+        })),
         leader: async (turn) => {
           throwIfInvocationAborted(signal, locale);
           assertMcpGoalSelectionCurrent();
-          const result = await pickedForWorkforceLeader.runner(
+          const result = await withAdapterEffectChildDispatch(turn.invocationId, () => runInvocationPlanningRunner(pickedForWorkforceLeader.runner,
             {
               ...(planReadOnly ? { planMode: true as const } : {}),
               systemPrompt: turn.systemPrompt,
@@ -4328,9 +4581,9 @@ ${effectiveUserPrompt}`;
                 phase: "plan",
               }),
               onPartial: () => {},
-              onTool: (name, args, resultText, id, isError) => sink({
+              onTool: (name, args, resultText, id, isError, artifactPaths, imageDataUrl) => sink({
                 kind: "tool-use",
-                tool: { name, args, result: resultText, id, isError },
+                tool: { name, args, result: resultText, id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
                 agentId: "workforce:leader",
                 agentName: "Agentlas Workforce Leader",
                 role: "workforce-leader",
@@ -4338,7 +4591,8 @@ ${effectiveUserPrompt}`;
                 phase: "plan",
               }),
             },
-          );
+            active,
+          ));
           workforceLeaderRunnerEvidence.push({
             invocationId: turn.invocationId,
             runtime: { ...active },
@@ -4480,7 +4734,7 @@ ${effectiveUserPrompt}`;
               code: failureCode,
               message: error instanceof Error ? error.message : String(error),
             }
-          : invocationFailure(req, "workforce-execution-failed", error),
+          : invocationFailure(req, "workforce-execution-failed", error, executionContext),
       });
     }
     return earlyResult();
@@ -4538,7 +4792,7 @@ ${effectiveUserPrompt}`;
         signal,
       });
     } catch (err) {
-      sink({ kind: "error", error: invocationFailure(req, "task-force-failed", err) });
+      sink({ kind: "error", error: invocationFailure(req, "task-force-failed", err, executionContext) });
     }
     return earlyResult();
   }
@@ -4671,7 +4925,7 @@ ${effectiveUserPrompt}`;
           kind: "error",
           error: err instanceof ProjectCloudRosterError || err instanceof OwnerCloudShelfIncompleteError
             ? { code: err.code, message: err.message }
-            : invocationFailure(req, "project-roster-task-force-failed", err),
+            : invocationFailure(req, "project-roster-task-force-failed", err, executionContext),
         });
         return earlyResult();
       }
@@ -4722,7 +4976,7 @@ ${effectiveUserPrompt}`;
         signal,
       });
     } catch (err) {
-      sink({ kind: "error", error: invocationFailure(req, "borrowed-team-failed", err) });
+      sink({ kind: "error", error: invocationFailure(req, "borrowed-team-failed", err, executionContext) });
     }
     return earlyResult();
   }
@@ -4757,7 +5011,7 @@ ${effectiveUserPrompt}`;
         signal,
       });
     } catch (err) {
-      sink({ kind: "error", error: invocationFailure(req, "borrowed-task-force-failed", err) });
+      sink({ kind: "error", error: invocationFailure(req, "borrowed-task-force-failed", err, executionContext) });
     }
     return earlyResult();
   }
@@ -4818,7 +5072,7 @@ ${effectiveUserPrompt}`;
         stormbreakerHarness: coreHarness,
       });
     } catch (err) {
-      sink({ kind: "error", error: invocationFailure(req, "swarm-failed", err) });
+      sink({ kind: "error", error: invocationFailure(req, "swarm-failed", err, executionContext) });
     }
     return earlyResult();
   }
@@ -4866,7 +5120,7 @@ ${effectiveUserPrompt}`;
           });
         } catch (err) {
           // 오케스트레이션 실패 → 무한 스피너 방지: 에러 이벤트 emit
-          sink({ kind: "error", error: invocationFailure(req, "firm-failed", err) });
+          sink({ kind: "error", error: invocationFailure(req, "firm-failed", err, executionContext) });
         }
         return earlyResult();
       }
@@ -4929,7 +5183,7 @@ ${effectiveUserPrompt}`;
    * ```visual(독립 HTML)을 그 자리에서 그린다 — 모델이 그 사실을 모르면 영원히 표만 쓴다. 세션 내내
    * 같은 문장이라 stable 블록(resume 턴에서는 러너가 생략).
    */
-  if (!req.agentAppMode) {
+  if (!req.agentAppMode && executionContext?.source !== "science") {
     turnContextParts.push(locale === "ko"
       ? "[차트·시각물 블록]\n이 대화 화면은 두 가지를 테두리 없이 그 자리에 그립니다. 비교·추이·분포처럼 그림이 글보다 빠를 때 쓰세요. 여러 개면 제목에 1. 2. 번호를 붙이세요.\n1) 차트(우선): ```chart 펜스에 Vega-Lite JSON 하나. title 은 {text, subtitle}(부제 한 줄), 데이터는 data.values 에 직접(5,000행 이하), 눈금에 단위(axis.format 예: \".1%\", \"+d\"). 보조 계열은 strokeDash 로 점선+작은 점, 막대는 xOffset 으로 묶음. 색·폰트·격자는 화면이 정하니 넣지 마세요. url·expr·calculate·문자열 filter·href·image 는 그려지지 않습니다.\n2) 맞춤 시각물: ```visual title=파일_이름 펜스에 HTML 조각(doctype·html·body 없이, 인라인 <svg>·<style>·<script>만, 외부 자원·네트워크 불가). 배경은 투명, 색은 CSS 변수만: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)~(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). sendPrompt(text) 를 부르면 사람의 입력창에 문장이 채워집니다(보내지는 않음).\n큰 표 자료는 .xlsx/.csv 로 저장하고 경로를 적으세요 — 오른쪽 패널에서 열립니다. 이 안내를 언급하지 마세요.\n[/차트·시각물 블록]"
       : "[Chart and visual blocks]\nThis chat draws two things in place, borderless. Use them when a picture beats prose — comparisons, trends, distributions. Number the titles (1. 2.) when there are several.\n1) Charts (preferred): one Vega-Lite JSON object in a ```chart fence. Use title {text, subtitle} (one-line subtitle), inline data.values (at most 5,000 rows), and units on ticks (axis.format such as \".1%\" or \"+d\"). Draw a secondary series dashed with small points via strokeDash; group bars with xOffset. Colors, fonts and gridlines come from the app — do not set them. url, expr, calculate, string filters, href and image are not drawn.\n2) Custom visuals: an HTML fragment in a ```visual title=file_name fence (no doctype/html/body; inline <svg>, <style>, <script> only; no external resources or network). Transparent background; colors only through CSS variables: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)…(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). Calling sendPrompt(text) fills the person's composer (it does not send).\nSave large tabular data as .xlsx/.csv and mention its path — it opens in the right panel. Do not mention these instructions.\n[/Chart and visual blocks]");
@@ -5002,6 +5256,7 @@ ${effectiveUserPrompt}`;
    * 목표·제약·완료기준. 두 표면이 같은 것을 보고 판정해야 사용자가 같은 기준을 만난다. */
   if (
     !req.agentAppMode &&
+    executionContext?.source !== "science" &&
     getInterviewMode() === "smart" &&
     chat.kind !== "division"
   ) {
@@ -5181,6 +5436,9 @@ ${effectiveUserPrompt}`;
     }
     throwIfInvocationAborted(signal, locale);
   }
+  let experienceApplication: ReturnType<typeof buildExperienceContext>["application"];
+  let experienceContextPartIndex = -1;
+  let experienceStablePartIndex = -1;
   let remoteOperationalSnapshot: Awaited<ReturnType<typeof resolveDesktopOperationalRuntimeSession>> = null;
   if (!req.agentAppMode && !isAliveControllerRun) {
     try {
@@ -5235,7 +5493,10 @@ ${effectiveUserPrompt}`;
           reservedApproxTokens: applicableTasteSnapshot?.overlay.estimatedTokens ?? 0,
         }) : null;
         if (experienceContext?.prompt) {
+          experienceContextPartIndex = turnContextParts.length;
+          experienceStablePartIndex = stableTurnContextParts.length;
           turnContextParts.push(experienceContext.prompt); stableTurnContextParts.push(experienceContext.prompt);
+          experienceApplication = experienceContext.application;
           if (req.runId) {
             recordContextSourceMarker({
               runId: req.runId,
@@ -5268,7 +5529,7 @@ ${effectiveUserPrompt}`;
   }
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
-  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary) {
+  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science") {
     turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
@@ -5331,7 +5592,9 @@ ${effectiveUserPrompt}`;
     // 모델이 스스로 판단해 ## Automation 블록을 낼지 결정한다. 단어장 판정은 없다.
     // Fresh/sessionless requests already merge this into the system prompt;
     // resumed sessions receive it with their turn. Do not inject it twice.
-    turnContextParts.push(AUTOMATION_PROTOCOL); stableTurnContextParts.push(AUTOMATION_PROTOCOL);
+    if (executionContext?.source !== "science") {
+      turnContextParts.push(AUTOMATION_PROTOCOL); stableTurnContextParts.push(AUTOMATION_PROTOCOL);
+    }
   }
   // One 실행 경계의 태스크 Surface 레시피 — 선택은 판정기(LLM) 경유. 경계 블록 조립은
   // 동기라 캐시 peek만 가능했으므로, 여기(비동기)에서 판정을 확정해 같은 턴의 턴
@@ -5389,6 +5652,8 @@ ${effectiveUserPrompt}`;
     // execution guidance and therefore cannot upsert the objective.
     let activeGoalId: string | null = null;
     let activeGoal: GoalLedgerSnapshot | null = null;
+    let activeGoalRevision: number | null = null;
+    let goalPlanContextSlot: { index: number; goalId: string; revision: number; reservedDecisionIds: Set<string> | null } | null = null;
     if (!scienceRecovery && !req.agentAppMode && chat.kind !== "division" && !effectObservationRun) {
       activeGoalId = getChatGoalId(chat.id);
       if (!activeGoalId && req.goalMode && canWrite) {
@@ -5400,6 +5665,10 @@ ${effectiveUserPrompt}`;
         }
       }
       if (activeGoalId) {
+        // Capture the admitted revision before the first ledger/model await.
+        // A later revision or owner stop cannot authorize this turn's factory.
+        const admittedRevision = getChatGoalRevision(activeGoalId);
+        activeGoalRevision = admittedRevision?.chatId === chat.id ? admittedRevision.revision : null;
         activeGoal = await getGoalLedgerGoal(activeGoalId, workforceProjectDir);
         // A missing/terminal ledger means this is the first turn of a newly
         // enabled Goal campaign. An already-active ledger is immutable even
@@ -5436,7 +5705,15 @@ ${effectiveUserPrompt}`;
             runtimeSelection: confirmedRuntime, locale,
             onJudging: () => sink({ kind: "tool-use", status: locale === "ko" ? "목표의 계획 구조를 먼저 정하는 중…" : "Deciding the goal's plan shape first…" }),
           }).catch((error: unknown) => { console.warn("[goal-plan] shape decision failed:", error instanceof Error ? error.message : error); return null; });
-          if (goalPlan) turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null, locale }));
+          if (goalPlan) {
+            // Keep the initial dispatch/review bookkeeping exactly once. The
+            // typed slot is refreshed without rewriting unrelated owner text.
+            const reservedDecisionIds = new Set<string>();
+            goalPlanContextSlot = { index: turnContextParts.length, goalId: activeGoalId,
+              revision: activeGoalRevision ?? goalPlan.revision, reservedDecisionIds };
+            turnContextParts.push(buildGoalPlanTurnContext(goalPlan, { runId: req.runId ?? null, locale,
+              onDecisionRecorded: (id) => { reservedDecisionIds.add(id); } }));
+          }
           // A finite Goal with a deadline may wait for its next cycle up to that deadline (goal-deadline.ts).
           if (!executionContext && getChatGoalRevision(activeGoalId)?.lifecycle === "finite") {
             const deadlineAt = goalDeadlineAt(activeGoalId);
@@ -5448,6 +5725,7 @@ ${effectiveUserPrompt}`;
     // 세션 지원 러너(claude-code/codex/kimi)는 턴 컨텍스트를 분리 전달해 러너가
     // 새 세션/resume에 맞게 배치한다. 그 외 stateless 러너는 기존처럼 시스템 프롬프트에 합친다.
     const turnContext = turnContextParts.filter((part) => part && part.trim()).join("\n\n");
+    const frozenTurnContextParts = [...turnContextParts];
     // A settled Goal checkpoint is the authoritative handoff packet. When no
     // valid checkpoint exists yet (for example on the first or a failed Goal
     // turn), preserve the bounded frozen transcript so a fresh model session
@@ -5456,6 +5734,8 @@ ${effectiveUserPrompt}`;
     const sessionCapableRuntime =
       active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity";
     const runnerReq = {
+      beforeMcpToolResult,
+      ...(executionContext?.source === "science" ? { sciencePromptProfile: true as const } : {}),
       systemPrompt: sessionCapableRuntime || !turnContext
         ? systemPrompt
         : `${systemPrompt}\n\n${turnContext}`,
@@ -5483,6 +5763,7 @@ ${effectiveUserPrompt}`;
       backendLabel: picked.label,
       ...(scienceCollectionCapability ? { scienceCollectionCapability, unattended: true as const, noSynchronousAsk: true as const } : {}),
       model: active.model ?? undefined,
+      runtimeSource: active.source ?? undefined,
       ...(isAliveControllerRun ? { outputSchema: { name: "agentlas_alive_decision_v2", schema: ALIVE_DECISION_OUTPUT_SCHEMA } } : {}),
       longContext: active.longContextEnabled ?? false,
       effort: req.oneMode && req.fastMode === true && active.kind === "codex"
@@ -5604,6 +5885,7 @@ ${effectiveUserPrompt}`;
         if (signal?.aborted) throw new Error("science_recovery_dispatch_cancelled");
         resolveScienceRecoveryAuthority(executionContext, req.runId!, req.chatId, runtime);
         return freshScienceRecoveryRequest({ ...runnerReq, backendLabel: runtimePicked.label,
+          runtimeSource: runtime.source ?? undefined,
           model: runtime.model ?? undefined, effort: runtime.effort ?? undefined }, scienceRecovery);
       }
       if (scienceCollectionCurrent) {
@@ -5643,7 +5925,32 @@ ${effectiveUserPrompt}`;
           : undefined;
         return compileLongRunCheckpoint(checkpoint, runtime.kind, artifacts);
       })() : "";
-      const runtimeTurnContext = [turnContext, checkpointContext].filter(Boolean).join("\n\n");
+      // Owner method/constraint changes are execution context, not new success
+      // criteria or a new native session. Re-read their source-backed projection
+      // for every dispatch, including checkpoint recovery and runtime fallback.
+      const ownerExecutionDirectives = activeGoalId ? goalExecutionDirectivePromptBlock(activeGoalId) : null;
+      const dispatchTurnContextParts = [...frozenTurnContextParts];
+      if (goalPlanContextSlot) {
+        if (signal?.aborted) {
+          throw Object.assign(new Error("goal_plan_dispatch_cancelled"), { code: "goal_plan_dispatch_cancelled" });
+        }
+        const currentGoalRevision = getChatGoalRevision(goalPlanContextSlot.goalId);
+        // Legacy first turns may have no canonical revision yet. Once one is
+        // admitted, its absence or replacement cannot authorize this projection.
+        if ((activeGoalRevision !== null && !currentGoalRevision)
+          || (currentGoalRevision && (currentGoalRevision.chatId !== chat.id || currentGoalRevision.revision !== goalPlanContextSlot.revision))) {
+          throw Object.assign(new Error("goal_plan_dispatch_revision_changed"), { code: "goal_plan_dispatch_revision_changed" });
+        }
+        const currentPlan = readGoalPlan(goalPlanContextSlot.goalId, goalPlanContextSlot.revision);
+        if (!currentPlan || currentPlan.goalId !== goalPlanContextSlot.goalId || currentPlan.revision !== goalPlanContextSlot.revision) {
+          throw Object.assign(new Error("goal_plan_dispatch_context_missing"), { code: "goal_plan_dispatch_context_missing" });
+        }
+        dispatchTurnContextParts[goalPlanContextSlot.index] = buildGoalPlanTurnContext(currentPlan,
+          { runId: req.runId ?? null, locale, record: false,
+            reservedDecisionIds: goalPlanContextSlot.reservedDecisionIds ?? undefined });
+      }
+      const dispatchTurnContext = dispatchTurnContextParts.filter((part) => part && part.trim()).join("\n\n");
+      const runtimeTurnContext = [dispatchTurnContext, checkpointContext, ownerExecutionDirectives].filter(Boolean).join("\n\n");
       // Every runtime gets the minimal observation request; runners that support the mode (claude-code, codex, serving,
       // BYOK/local host loop) also shed their own headers, user setup and extra tool servers.
       if (effectObservationRun) {
@@ -5662,6 +5969,7 @@ ${effectiveUserPrompt}`;
             ? { mcpConfigPath: undefined, mcpAllowedTools: [], mcpCodexConfigArgs: [] } : {}),
           userPrompt,
           backendLabel: runtimePicked.label,
+          runtimeSource: runtime.source ?? undefined,
           model: runtime.model ?? undefined,
           longContext: false,
           effort: runtime.effort ?? undefined,
@@ -5678,6 +5986,7 @@ ${effectiveUserPrompt}`;
         ...(sessionCapable && runtimeTurnContext ? { turnContextStable: stableTurnContextParts } : {}),
         userPrompt,
         backendLabel: runtimePicked.label,
+        runtimeSource: runtime.source ?? undefined,
         model: runtime.model ?? undefined,
         longContext: runtime.longContextEnabled ?? false,
         effort: req.oneMode && req.fastMode === true && runtime.kind === "codex"
@@ -5702,6 +6011,7 @@ ${effectiveUserPrompt}`;
     const observedOneSourceUrls = new Set<string>();
     let observedOneToolEvidence = false;
     let observedOneToolFailure = false;
+    const oneToolFailures = createOneToolFailureTracker();
     let oneRecoveryDecisionPending = false;
     // 복구 패스 판정용 패스 단위 계수 — 복구 패스가 "도구 성공 증거 있음 + 무오류"로
     // 끝났을 때에만 실패 흔적을 지운다(도구 없이 말로만 끝내는 가짜 성공 방지).
@@ -5802,7 +6112,7 @@ ${effectiveUserPrompt}`;
         }
       },
       // Claude Code식 tool-use 블록 — 이름 + 인자 JSON
-      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], _imageDataUrl?: string, dispatchedOrigin?: ToolInvocationOrigin) => {
+      onTool: (name: string, args?: string, result?: string, id?: string, isError?: boolean, artifactPaths?: readonly string[], imageDataUrl?: string, dispatchedOrigin?: ToolInvocationOrigin) => {
         let sourceUrls: string[] | undefined;
         if (!isError && req.runId && !req.agentAppMode) {
           try {
@@ -5813,11 +6123,12 @@ ${effectiveUserPrompt}`;
             }
           } catch { /* Optional routing hint; never breaks the run. */ }
         }
-        if (isError) {
-          observedOneToolFailure = true;
+        const completedToolOutcome = oneToolFailures.note({ name, args, result, id, isError });
+        observedOneToolFailure = oneToolFailures.unresolved();
+        if (completedToolOutcome && isError === true) {
           passToolFailures += 1;
         }
-        if (!isError) {
+        if (completedToolOutcome && isError === false && result !== undefined) {
           passToolSuccesses += 1;
           // The Codex runtime uses this generic wrapper only for an MCP call.
           // Shell/read tools can echo arbitrary URLs from local documents (for
@@ -5867,6 +6178,7 @@ ${effectiveUserPrompt}`;
             result,
             id,
             isError,
+            observationDigest: toolObservationDigest(artifactPaths, imageDataUrl),
             ...(isError ? { failureCode: classifyToolFailure({ result }) } : {}),
             ...(sourceUrls?.length ? { sourceUrls } : {}),
           },
@@ -5946,18 +6258,16 @@ ${effectiveUserPrompt}`;
     // A CLI can resolve its promise before a buffered stream callback arrives.
     // Seal each runner's callbacks to its own generation so a late callback
     // cannot mutate the next runtime's counters, artifacts, or transcript.
-    const createAttemptRunnerEvents = (aliveUsageAttempt: number | null): { events: RunnerEvents; settle: () => void } => {
+    const createAttemptRunnerEvents = (): {
+      events: RunnerEvents; settle: () => void;
+      observedUsage: (returnedUsage?: LongRunUsageInput["observedUsage"]) => LongRunUsageInput["observedUsage"];
+    } => {
       const generation = ++runnerEventGeneration;
       let settled = false;
-      const recordTerminalUsage = (usage: { inputTokens: number; outputTokens: number }): void => {
-        if (settled || generation !== runnerEventGeneration || aliveUsageAttempt === null || !req.runId
-          || !Number.isSafeInteger(usage.inputTokens) || usage.inputTokens < 0
-          || !Number.isSafeInteger(usage.outputTokens) || usage.outputTokens < 0
-          || usage.inputTokens + usage.outputTokens > Number.MAX_SAFE_INTEGER) return;
-        tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "alive_provider_usage_observed",
-          sourceEventId: `alive-provider-usage:${aliveUsageAttempt}`,
-          payload: { schemaVersion: "agentlas.alive-provider-usage.v1", attempt: aliveUsageAttempt,
-            observedInputTokens: usage.inputTokens, observedOutputTokens: usage.outputTokens } });
+      const usageCollector = createRuntimeUsageCollector();
+      const recordTerminalUsage: NonNullable<RunnerEvents["onTerminalObservedUsage"]> = (usage, attemptId): void => {
+        if (settled || generation !== runnerEventGeneration) return;
+        usageCollector.recordTerminal(usage, attemptId);
       };
       const forward = <T extends unknown[]>(handler: (...args: T) => void) => (...args: T): void => {
         if (settled || generation !== runnerEventGeneration || signal?.aborted) return;
@@ -5972,6 +6282,9 @@ ${effectiveUserPrompt}`;
           // A provider can send its terminal usage after cancellation. The
           // display callbacks stop then, but this exact accounting fact may
           // still settle the already-dispatched wake without replaying it.
+          onRuntimeAttemptStarted: (attemptId) => {
+            if (!settled && generation === runnerEventGeneration) usageCollector.start(attemptId);
+          },
           onTerminalObservedUsage: recordTerminalUsage,
           onThinking: forward(runnerEvents.onThinking),
           onNotice: forward(runnerEvents.onNotice),
@@ -5979,6 +6292,7 @@ ${effectiveUserPrompt}`;
         settle: () => {
           settled = true;
         },
+        observedUsage: (returnedUsage) => usageCollector.total(returnedUsage),
       };
     };
     const directRuntimeFallbackAllowed =
@@ -6071,8 +6385,8 @@ ${effectiveUserPrompt}`;
           });
           return result;
         }
-        const koMessage = "실행 환경 복구 후보를 모두 확인했지만 실행을 끝내지 못했습니다. 원래 실패 원인은 자세히에서 확인하세요.";
-        const enMessage = "All bounded runtime recovery candidates were checked, but the run could not complete. See details for the original failure.";
+        const koMessage = `실행 ${attemptCount}회 시도 후 복구를 멈췄습니다. 중단 이유와 원래 실패 원인은 자세히에서 확인하세요.`;
+        const enMessage = `Recovery stopped after ${attemptCount} execution attempt${attemptCount === 1 ? "" : "s"}. See details for the stopping reason and original failure.`;
         sink({
           kind: "notice",
           model: failure.runtime,
@@ -6116,27 +6430,76 @@ ${effectiveUserPrompt}`;
             sourceEventId: `alive-provider-attempt:${aliveUsageAttempt}`,
             payload: { schemaVersion: "agentlas.alive-provider-usage.v1", attempt: aliveUsageAttempt } });
         }
-        const attemptEvents = createAttemptRunnerEvents(aliveUsageAttempt);
+        const attemptEvents = createAttemptRunnerEvents();
         let result: Awaited<ReturnType<Runner>>;
         const usageSourceId = `${goalUsageInvocationId}:provider-result:${++goalResultOrdinal}`;
+        const automationAccounting = picked && executionContext?.source === "automation"
+          ? beginAccountedInference({ kind: selectedRuntime.kind, model: selectedRuntime.model, source: selectedRuntime.source })
+          : null;
+        let invocationUsageAttempt: ReturnType<typeof beginInvocationUsageAttempt> | undefined;
+        let attemptUsageRecorded = false;
+        const persistAttemptUsage = (usage: LongRunUsageInput["observedUsage"], outcome: "returned" | "failed" | "cancelled"): void => {
+          if (attemptUsageRecorded) return;
+          attemptUsageRecorded = true;
+          invocationUsageAttempt?.complete(usage);
+          automationAccounting?.complete(usage, outcome);
+          // Persist only the complete runner scope. An early native receipt
+          // cannot stand for a later retry whose usage is missing.
+          if (aliveUsageAttempt !== null && req.runId && usage) {
+            tryRecordRunEvent({ runId: req.runId, chatId: chat.id, kind: "alive_provider_usage_observed",
+              sourceEventId: `alive-provider-usage:${aliveUsageAttempt}`,
+              payload: { schemaVersion: "agentlas.alive-provider-usage.v1", attempt: aliveUsageAttempt,
+                observedInputTokens: usage.inputTokens, observedOutputTokens: usage.outputTokens,
+                ...(usage.cachedInputTokens !== undefined ? { observedCachedInputTokens: usage.cachedInputTokens } : {}) } });
+          }
+        };
         const persistGoalUsage = (observedUsage?: LongRunUsageInput["observedUsage"]): void => {
-          if (!activeGoalId || !goalBudget || goalBudget.surface === "science" || req.agentAppMode) return;
+          // Automated calls use the captured schedule owner and its single
+          // accounting receipt, even if a legacy worker chat is Goal-bound.
+          if (executionContext?.source === "automation"
+            || !activeGoalId || !goalBudget || goalBudget.surface === "science" || req.agentAppMode) return;
           lastGoalUsage = { sourceId: usageSourceId, invocationRunId: goalUsageInvocationId, observedUsage };
           recordLongRunUsage(activeGoalId, lastGoalUsage);
         };
         try {
           const selected = picked;
           if (!selected) throw new Error("no-runner");
+          const experienceDispatch = prepareExperienceDispatch({
+            request: requestForRuntime, snapshot: experienceApplication,
+            contextParts: turnContextParts, partIndex: experienceContextPartIndex,
+            stablePartIndex: experienceStablePartIndex, baseSystemPrompt: systemPrompt,
+            runId: req.runId,
+          });
+          requestForRuntime = experienceDispatch.request;
+          onGoalDispatched?.(activeGoalId ?? null);
           directRuntimeDispatched = true;
+          if (req.runId && experienceDispatch.application) {
+            recordExperienceApplication({
+              runId: req.runId, chatId: chat.id, executionAgentId: agent.id,
+              snapshot: experienceDispatch.application,
+              runtime: { kind: selectedRuntime.kind, backend: selectedRuntime.backend,
+                model: selectedRuntime.model, effort: selectedRuntime.effort },
+            });
+          }
+          invocationUsageAttempt = beginInvocationUsageAttempt();
           result = await selected.runner(requestForRuntime, attemptEvents.events);
+          const observedUsage = attemptEvents.observedUsage(result.observedUsage);
+          result = { ...result, observedUsage: observedUsage ?? undefined };
+          persistAttemptUsage(observedUsage,
+            result.failure ? "failed" : "returned");
+          // A transport may settle with success after abort. Keep its measured
+          // usage, but never persist completion or enter recovery/verification.
+          if (signal?.aborted) throw signal.reason ?? new Error(tStatus(locale, "aborted"));
         } catch (error) {
+          persistAttemptUsage(attemptEvents.observedUsage(), signal?.aborted ? "cancelled" : "failed");
           if (!directRuntimeFallbackAllowed || signal?.aborted) {
-            persistGoalUsage();
+            persistGoalUsage(attemptEvents.observedUsage());
             throw error;
           }
           result = {
             text: "",
             failure: runnerFailureFromError(error, active.kind),
+            observedUsage: attemptEvents.observedUsage() ?? undefined,
           };
         } finally {
           attemptEvents.settle();
@@ -6152,9 +6515,13 @@ ${effectiveUserPrompt}`;
         // admission result, not a provider outage that may fall back to a
         // second runtime and create another CLI for the same project.
         if (result.failure?.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) return result;
+        if (result.failure?.source === "marker" && runtimeFailureBlocksReplay(result.failure)) {
+          throw new InvocationRunnerFailureError(result.failure);
+        }
         // A measured context refusal must retain the user's exact local binding.
         if (result.failure?.kind === "refused" && result.failure.runtime === "agentlas-local" && result.failure.source === "marker"
-          && (result.failure.providerCode === "local_context_limit_exceeded" || result.failure.providerCode === "local_context_measurement_unavailable")) return result;
+          && (result.failure.providerCode === "local_context_limit_exceeded" || result.failure.providerCode === "local_context_measurement_unavailable"
+            || result.failure.providerCode === "local_model_remote_mcp_admission_refused")) return result;
         // A pinned Goal continuation cannot retry inside this invocation, but
         // its next settled checkpoint still needs the typed quota signal to
         // choose another connected provider before dispatch.
@@ -6312,6 +6679,9 @@ ${effectiveUserPrompt}`;
     if (result.failure) {
       throw new InvocationRunnerFailureError(result.failure, true);
     }
+    // The first pass (including its predispatch runtime fallbacks) has consumed
+    // its booked plan receipts. Later passes observe their normal budget/cadence.
+    if (goalPlanContextSlot) goalPlanContextSlot.reservedDecisionIds = null;
     result = sanitizeRestrictedPass(result);
     advanceUsageFloor();
     // persistent goal 사이클 회계 — 매 패스를 원장에 기록하고(무진전·예산 감시),
@@ -6396,13 +6766,17 @@ ${effectiveUserPrompt}`;
           if (!latestGoalDecision.continue) {
             passShouldContinue = false;
             if (GOAL_HARD_STOP_REASONS.has(latestGoalDecision.reason)) goalHardStop = latestGoalDecision;
-          } else if (!passShouldContinue && latestGoalDecision.continue) {
+          } else if (!passClaim.claimed && !passShouldContinue && latestGoalDecision.continue) {
             // Codex 동형: 모델이 마커를 안 붙여도 goal이 미달이면 계속한다.
             passShouldContinue = true;
             goalDrivenPass = true;
           }
         }
       }
+      // A completion claim belongs to terminal verification. An open Goal can
+      // keep its mandate after that verification; it does not justify asking
+      // this same native turn to complete the claimed work again.
+      if (passClaim.claimed) passShouldContinue = false;
       /*
        * A marker-driven loop has no ledger to tell it that nothing is happening, so this is its only
        * runaway guard: output that has not changed at all for three passes running is not work.
@@ -6473,6 +6847,7 @@ ${effectiveUserPrompt}`;
           ? "goal ledger reports the goal is not achieved yet"
           : "runner reported more safe Stormbreaker work remains",
       });
+      const nextRunnerReq = runnerRequestForRuntime(active, picked!);
       const continuationPrompt = goalDrivenPass
         ? buildGoalDrivenContinuationPrompt({
             pass,
@@ -6481,9 +6856,9 @@ ${effectiveUserPrompt}`;
             previousOutput: result.text,
           })
         : buildStormbreakerContinuationPrompt(result.text, pass);
-      const planNote = activeGoalId ? goalPlanContinuationNote(activeGoalId) : null;
+      const planNote = !goalPlanContextSlot && activeGoalId ? goalPlanContinuationNote(activeGoalId) : null;
       activeRunnerReq = {
-        ...runnerReq,
+        ...nextRunnerReq,
         // Remote Hub instructions stay at user authority. Reattach the exact
         // verified preamble for stateless BYOK passes without promoting it into
         // the local system prompt.
@@ -6580,9 +6955,10 @@ ${effectiveUserPrompt}`;
         }
         passToolFailures = 0;
         passToolSuccesses = 0;
+        const nextRunnerReq = runnerRequestForRuntime(active, picked!);
         const recoveryPrompt = buildOneRecoveryPrompt(result.text, attempt, locale);
         activeRunnerReq = {
-          ...runnerReq,
+          ...nextRunnerReq,
           userPrompt: explicitBorrowUserPreamble
             ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${recoveryPrompt}`
             : recoveryPrompt,
@@ -6598,18 +6974,20 @@ ${effectiveUserPrompt}`;
           oneRecoveryDecisionPending = true;
           break;
         }
-        if (passToolFailures === 0 && passToolSuccesses > 0) observedOneToolFailure = false;
+        observedOneToolFailure = oneToolFailures.unresolved();
       }
       if (observedOneToolFailure && !oneRecoveryDecisionPending && !signal?.aborted) {
         sink({
           kind: "tool-use",
           status: locale === "ko" ? "실행 가능한 해결안을 준비하는 중…" : "Preparing an actionable solution…",
         });
+        const nextRunnerReq = runnerRequestForRuntime(active, picked!);
+        const recoveryDecisionPrompt = buildOneRecoveryDecisionPrompt(result.text, locale);
         activeRunnerReq = {
-          ...runnerReq,
+          ...nextRunnerReq,
           userPrompt: explicitBorrowUserPreamble
-            ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${buildOneRecoveryDecisionPrompt(result.text, locale)}`
-            : buildOneRecoveryDecisionPrompt(result.text, locale),
+            ? `${explicitBorrowUserPreamble}\n\nContinuation request:\n${recoveryDecisionPrompt}`
+            : recoveryDecisionPrompt,
           images: undefined,
         };
         result = await invokeCurrentRuntime(activeRunnerReq);
@@ -6753,6 +7131,16 @@ ${effectiveUserPrompt}`;
     // (마커 없이) 여기로 들어와 앱 재시작·크래시 뒤에도 목표가 계속 돈다.
     if (!req.agentAppMode && stormbreakerContinueRequested && chat.kind !== "division" && canWrite
       && (!activeGoalId || getChatGoalRevision(activeGoalId)?.lifecycle !== "ongoing")) {
+      const assertContinuationGoalCurrent = (): void => {
+        throwIfInvocationAborted(signal, locale);
+        if (!activeGoalId) return;
+        if (activeGoalRevision == null) {
+          throw new AutomationWorkspaceError("automation_workspace_creation_source_unverified");
+        }
+        assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId, rootChatId: chat.id,
+          expectedRevision: activeGoalRevision });
+      };
+      assertContinuationGoalCurrent();
       const marker = `Source chat: ${chat.id}`;
       // goal_id 1급 조회가 먼저다 — 프롬프트 마커 문자열 검색은 goal_id 없는 레거시
       // 연속실행의 폴백으로만 남는다. goal당 연속실행은 정확히 한 행이다.
@@ -6765,46 +7153,74 @@ ${effectiveUserPrompt}`;
       // of the current process. Pin an explicit single Hub hire as a Hub target
       // so the scheduler performs a fresh authoritative hepCall on every run.
       const continuationHubSlug = borrowedAgentSlugs.length === 1 ? borrowedAgentSlugs[0] : null;
-      if (
-        existingContinuation &&
-        continuationHubSlug &&
-        (existingContinuation.targetType !== "hub" || existingContinuation.targetId !== continuationHubSlug)
-      ) {
-        // Upgrade a continuation created by an older build instead of letting its
-        // stale local agent/firm target bypass Hub revalidation on the next tick.
-        updateAutomation(existingContinuation.id, {
-          targetType: "hub",
-          targetId: continuationHubSlug,
+      const continuationHubVersion = continuationHubSlug
+        ? explicitBorrowSpecs.find((spec) => spec.slug === continuationHubSlug)?.packageHash
+        : undefined;
+      if (continuationHubSlug && !continuationHubVersion) {
+        throw Object.assign(new Error("automation_hub_release_pin_missing"), {
+          code: "automation_hub_release_pin_missing",
         });
       }
-      if (existingContinuation && activeGoalId) {
-        // 레거시(마커로 찾은) 행에 goal 축을 심고, 목표가 다시 살아났는데 꺼진 행이면
-        // 새 행을 만들지 않고 정확히 그 행을 재가동한다.
-        if (existingContinuation.goalId !== activeGoalId) {
-          updateAutomation(existingContinuation.id, { goalId: activeGoalId });
-        }
-        if (!existingContinuation.enabled) toggleAutomation(existingContinuation.id, true);
+      if (existingContinuation) {
+        getDb().transaction(() => {
+          assertContinuationGoalCurrent();
+          if (continuationHubSlug &&
+            (existingContinuation.targetType !== "hub" || existingContinuation.targetId !== continuationHubSlug
+              || existingContinuation.targetVersion !== continuationHubVersion)) {
+            // A changed definition still requires its normal execution-owner
+            // review; this update never issues an ownership receipt.
+            updateAutomation(existingContinuation.id, {
+              targetType: "hub",
+              targetId: continuationHubSlug,
+              ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
+            });
+          }
+          if (activeGoalId) {
+            if (existingContinuation.goalId !== activeGoalId) {
+              updateAutomation(existingContinuation.id, { goalId: activeGoalId });
+            }
+            if (!existingContinuation.enabled) toggleAutomation(existingContinuation.id, true);
+          }
+        })();
       }
       if (!existingContinuation) {
         const continuationSchedule = activeGoalId
           ? goalContinuationSchedule(latestGoalDecision)
           : STORMBREAKER_LONG_RUN_SCHEDULE;
-        createAutomation({
-          name: activeGoalId
-            ? `Goal continuation · ${chat.title || agent.name}`
-            : `Stormbreaker continuation · ${chat.title || agent.name}`,
-          scheduleHuman: continuationSchedule,
-          targetType: continuationHubSlug ? "hub" : chat.firmId ? "firm" : "agent",
-          targetId: continuationHubSlug ?? chat.firmId ?? chat.agentId,
-          promptTemplate: buildStormbreakerLongRunPrompt({
+        getDb().transaction(() => {
+          assertContinuationGoalCurrent();
+          if (activeGoalId && !req.runId) {
+            throw new AutomationWorkspaceError("automation_workspace_creation_source_unverified");
+          }
+          const continuation = createAutomation({
+            name: activeGoalId
+              ? `Goal continuation · ${chat.title || agent.name}`
+              : `Stormbreaker continuation · ${chat.title || agent.name}`,
+            scheduleHuman: continuationSchedule,
+            targetType: continuationHubSlug ? "hub" : chat.firmId ? "firm" : "agent",
+            targetId: continuationHubSlug ?? chat.firmId ?? chat.agentId,
+            // Main recovery may have selected another connected engine. Copy
+            // that final validated engine before sealing the creation receipt.
+            runtimeSelection: selectionForRuntime(active, {
+              longContext: active.longContextEnabled ?? undefined,
+            }),
+            ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
+            promptTemplate: buildStormbreakerLongRunPrompt({
+              sourceChatId: chat.id,
+              previousOutput: result.text,
+              userPrompt: req.userPrompt,
+              workingFolder,
+            }),
+            createdBy: "agent",
+            ...(activeGoalId ? { goalId: activeGoalId } : {}),
+          });
+          if (activeGoalId) bindCreatedGoalContinuationWorkspace({
+            automationId: continuation.id,
+            goalId: activeGoalId,
             sourceChatId: chat.id,
-            previousOutput: result.text,
-            userPrompt: req.userPrompt,
-            workingFolder,
-          }),
-          createdBy: "agent",
-          ...(activeGoalId ? { goalId: activeGoalId } : {}),
-        });
+            invocationRunId: req.runId!,
+          });
+        })();
         sink({
           kind: "tool-use",
           tool: {
@@ -7539,6 +7955,7 @@ ${effectiveUserPrompt}`;
       }
     }
     const finalObservedTokens = Math.max(result.tokens ?? 0, liveUsageHigh);
+    const invocationObservedUsage = currentInvocationObservedUsage();
     if (finalObservedTokens > 0) {
       // A runner-owned `null` is authoritative: it means no explicit effort
       // reached the provider. Only runners that predate `appliedEffort` may
@@ -7592,6 +8009,7 @@ ${effectiveUserPrompt}`;
       return {
         finalText: boundImageDisplayWithFloor,
         tokens: result.tokens,
+        observedUsage: invocationObservedUsage,
         stormbreakerContinueRequested,
         ...(goalWaitRequest ? { goalWaitRequest } : {}),
         goalCompletionClaim: {
@@ -7615,7 +8033,7 @@ ${effectiveUserPrompt}`;
         ? { durableAssistantMessageIdForVerification: durableAssistantEntry.id }
         : {}),
       tokens: finalObservedTokens || undefined,
-      ...(result.observedUsage ? { observedUsage: result.observedUsage } : {}),
+      ...(invocationObservedUsage ? { observedUsage: invocationObservedUsage } : {}),
       model: active.model ?? active.kind,
       observedModel: result.observedModel,
       modelRole: invocationModelRole,
@@ -7626,6 +8044,7 @@ ${effectiveUserPrompt}`;
     return {
       finalText: boundImageDisplayWithFloor,
       tokens: result.tokens,
+      observedUsage: invocationObservedUsage,
       stormbreakerContinueRequested,
       ...(goalWaitRequest ? { goalWaitRequest } : {}),
       goalCompletionClaim: {
@@ -7652,6 +8071,7 @@ ${effectiveUserPrompt}`;
   } catch (err) {
     for (const sourcePath of generatedImageSourcePaths) removeGeneratedImageArtifact(sourcePath);
     generatedImageSourcePaths.clear();
+    if (login?.waiting) return earlyResult();
     if (modelTurnStarted) {
       try {
         recordTerminalMemoryTurn({
@@ -7671,7 +8091,7 @@ ${effectiveUserPrompt}`;
         console.error("[memory] terminal turn receipt failed:", ticketError);
       }
     }
-    sink({ kind: "error", error: invocationFailure(req, "runner-failed", err) });
+    sink({ kind: "error", error: invocationFailure(req, "runner-failed", err, executionContext) });
     return InvocationRunnerFailureError.isMarkedQuota(err)
       ? { ...earlyResult(), markedQuotaFailure: true }
       : earlyResult();

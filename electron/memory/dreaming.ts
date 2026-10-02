@@ -1,9 +1,10 @@
+import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // 유휴 드리밍 큐레이션 — Claude Code/Codex의 "드리밍"처럼, 사용자가 자리를 비운 유휴 시간에
 // 큐레이터가 쌓아둔 durable 메모리를 정리한다. 1단계는 결정론 dedup(무LLM), 2단계는 메모리가
 // 많이 쌓인 에이전트에 한해 LLM 1회 호출로 규칙 통합.
 //
 // 과부하 금지 가드(전부 만족해야 발화):
-//   · 옵트인 — 설정 기본 OFF (meta "memory_dreaming_enabled")
+//   · 기본 ON — 저장된 ON/OFF 선택은 유지 (meta "memory_dreaming_enabled")
 //   · 시스템 유휴 ≥ 10분(powerMonitor) · 실행 슬롯 완전 유휴(inUse=0, queued=0)
 //   · 쿨다운 6시간 · 동시 1패스 · 사용자가 돌아오면(유휴 리셋) 즉시 abort
 //   · LLM 호출은 selection의 슬롯 래핑 러너 경유 → 전역 동시성 예산 + nice 5 상속
@@ -38,22 +39,21 @@ const MAX_AGENTS_PER_PASS = 2; // 한 번의 드리밍에서 LLM 통합할 에�
 const LLM_TIMEOUT_MS = 180_000;
 
 export function getDreamingEnabled(): boolean {
-  return getMeta(ENABLED_KEY) === "1";
+  const stored = getMeta(ENABLED_KEY);
+  return stored === null || stored === "1";
 }
 
 const ENABLED_SET_BY_KEY = "memory_dreaming_enabled_set_by";
 
 /**
- * M-step recovery for the measured "never ran" state: the opt-in default was
- * OFF and no install had ever flipped it, so decay never happened anywhere.
- * A stored value only counts as the user's choice if the user could have made
- * it — when the key is ABSENT we enable with a provenance marker; when the key
- * EXISTS (either value) the user decided and we never touch it.
+ * New installations default to ON. Preserve every stored choice: older UI
+ * toggles did not update provenance, so even an automatic marker cannot prove
+ * that a legacy OFF was not the user's decision.
  */
 export function ensureDreamingDefault(): void {
-  if (getMeta(ENABLED_KEY) !== null) return; // explicit user choice — untouched
+  if (getMeta(ENABLED_KEY) !== null) return;
   setMeta(ENABLED_KEY, "1");
-  setMeta(ENABLED_SET_BY_KEY, "auto-migration-2026-08-11");
+  setMeta(ENABLED_SET_BY_KEY, "default-on");
 }
 
 export function setDreamingEnabled(enabled: boolean): void {
@@ -188,7 +188,7 @@ async function dreamOnce(): Promise<void> {
         .map((e, i) => `${i + 1}. [${e.kind}/${e.confidence}] ${e.content.replace(/\s+/g, " ").slice(0, 400)}`)
         .join("\n");
       const intakeEpoch = currentMemoryForgetEpoch();
-      const result = await picked.runner(
+      const result = await runObservedRunner(picked.runner,
         {
           systemPrompt: [
             "You are a memory consolidation pass for an AI agent. Merge redundant or fragmentary memory entries into a few durable rules.",
@@ -206,6 +206,8 @@ async function dreamOnce(): Promise<void> {
         },
         { onPartial: () => {}, onStatus: () => {} },
       );
+      if (controller.signal.aborted) return;
+      if (result.failure) throw new ObservedRunnerFailureError(result.failure);
       const parsed = extractJson(result.text);
       if (!parsed) continue;
       const rules = (Array.isArray(parsed.rules) ? parsed.rules : []).filter(

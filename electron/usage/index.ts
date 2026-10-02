@@ -129,15 +129,15 @@ export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
            ELSE 0
          END), 0) AS observed_tokens,
          COALESCE(SUM(CASE
-           WHEN json_extract(payload_json, '$.measurement') = 'output-only' THEN 1
+           WHEN json_extract(payload_json, '$.measurement') IN ('output-only', 'output-delta-or-visible-estimate') THEN 1
            ELSE 0
          END), 0) AS output_only_rows
        FROM run_events
        WHERE kind = 'invoke_result'
-         AND ts >= ?
+         AND ts >= ? AND ts <= ?
          AND json_extract(payload_json, '$.modelRole') IN ('orchestrator', 'worker')
        GROUP BY json_extract(payload_json, '$.modelRole')`,
-    ).all(since) as Array<{
+    ).all(since, until) as Array<{
       role: "orchestrator" | "worker";
       invocation_count: number;
       observed_tokens: number;

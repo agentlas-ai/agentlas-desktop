@@ -110,6 +110,14 @@ function validateAmendment(amendment: GoalAmendment | undefined): void {
   }
 }
 
+/** Remove host attachment metadata and command syntax from derived goal text only.
+ * Original/source messages remain exact authority evidence, including attachment bindings. */
+export function goalObjectiveText(text: string): string {
+  const visible = text.replace(/<!--\s*agentlas-chat-files:v1:([0-9a-f-]{36})\s*-->/giu, "");
+  const objective = /^\s*\/goal(?:\s+|$)/.test(visible) ? visible.replace(/^\s*\/goal(?:\s+|$)/, "").trim() : visible;
+  return visible === text ? objective : objective.trim();
+}
+
 /** Conservative admission: uncertainty never arms a background campaign. */
 export function admitsAutomaticGoal(source: GoalSourceMessage, decision: GoalIntakeDecision): boolean {
   validateSource(source);
@@ -128,6 +136,7 @@ export function createAutomaticGoalRevision(input: {
 }): GoalRevision | null {
   if (!admitsAutomaticGoal(input.source, input.decision)) return null;
   required(input.goalId, "goal_id_required");
+  required(goalObjectiveText(input.source.text), "goal_objective_required");
   validateTime(input.createdAt);
   input.authorityRefs.forEach((ref) => required(ref, "goal_authority_ref_invalid"));
   return {
@@ -138,7 +147,7 @@ export function createAutomaticGoalRevision(input: {
     parentRevision: null,
     originalRequest: { ...input.source },
     sourceMessage: { ...input.source },
-    objective: input.source.text,
+    objective: goalObjectiveText(input.source.text),
     reason: "initial_execution_request",
     lifecycle: resolveGoalLifecycle(input.decision.lifecycle),
     acceptanceCriteria: criteriaCopy(input.acceptanceCriteria),
@@ -170,7 +179,7 @@ export function reviseAutomaticGoal(input: {
   if (input.expectedRevision !== current.revision) throw new Error("goal_revision_conflict");
   if (source.messageId === current.sourceMessage.messageId) throw new Error("goal_message_already_applied");
   if (Date.parse(input.createdAt) < Date.parse(current.createdAt)) throw new Error("goal_timestamp_regression");
-  required(input.objective, "goal_objective_required");
+  required(goalObjectiveText(input.objective), "goal_objective_required");
   required(input.reason, "goal_revision_reason_required");
   validateAmendment(input.amendment);
   const removed = new Set(input.explicitlyRemovedCriterionIds);
@@ -191,7 +200,7 @@ export function reviseAutomaticGoal(input: {
     parentRevision: current.revision,
     originalRequest: { ...current.originalRequest },
     sourceMessage: { ...source },
-    objective: input.objective,
+    objective: goalObjectiveText(input.objective),
     reason: input.reason,
     // An ordinary amendment cannot silently change an ongoing mandate's lifetime.
     lifecycle: resolveGoalLifecycle(current.lifecycle),

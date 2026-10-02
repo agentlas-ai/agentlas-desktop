@@ -313,6 +313,7 @@ export type {
   AutomationGraphReconcileInput,
   AutomationGraphReconcileResult,
   AutomationToolMode,
+  AutomationWorkspaceMode,
   AutomationUpdatePatch,
   LaunchdStatus,
   ScheduleSpec,

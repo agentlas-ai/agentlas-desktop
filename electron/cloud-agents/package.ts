@@ -1,3 +1,6 @@
+import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { runnerFailureFromError } from "../runtime/runner";
+import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { app } from "electron";
 import fs from "node:fs";
 import os from "node:os";
@@ -999,7 +1002,8 @@ export async function packageAndReviewCloudAgent(
       } else {
         autofix.cleanup();
       }
-    } catch {
+    } catch (error) {
+      if (runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, "unknown"))) throw error;
       /* fall back to publishing the original folder unchanged */
     }
   }
@@ -2375,7 +2379,7 @@ async function runSubmitterRuntimeReview(
     JSON.stringify({ manifest, staticFindings }, null, 2),
   ].join("\n");
 
-  const result = await picked.runner(
+  const result = await runObservedRunner(picked.runner,
     {
       systemPrompt,
       history: [],
@@ -2394,6 +2398,7 @@ async function runSubmitterRuntimeReview(
       onTool: () => {},
     },
   );
+  if (result.failure) throw new ObservedRunnerFailureError(result.failure);
   const parsed = parseReviewJson(result.text);
   const llmFindings: CloudAgentSecurityFinding[] = parsed.findings.map((finding, index) => ({
     id: typeof finding.id === "string" && finding.id.trim()
@@ -3032,7 +3037,7 @@ async function generateLocalizedListingWithRunner(
   tagline: string,
 ): Promise<CloudAgentLocalizedListing | undefined> {
   try {
-    const result = await picked.runner(
+    const result = await runObservedRunner(picked.runner,
       {
         systemPrompt: [
           "Translate public Agentlas Hub listing metadata.",
@@ -3056,12 +3061,14 @@ async function generateLocalizedListingWithRunner(
         onTool: () => {},
       },
     );
+    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     const candidate = result.text.match(/\{[\s\S]*\}/)?.[0];
     const localized = candidate
       ? normalizeLocalizedListing(JSON.parse(candidate) as unknown)
       : undefined;
     return localizedListingProblems(localized).length === 0 ? localized : undefined;
-  } catch {
+  } catch (error) {
+    if (runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, picked.active.kind))) throw error;
     return undefined;
   }
 }
@@ -3080,7 +3087,7 @@ async function normalizePurposeAnswerWithSubmitterRuntime(
     const { pickActiveRunner } = await import("../mcp/client");
     const picked = await pickActiveRunner();
     if (!picked) return deterministic;
-    const result = await picked.runner(
+    const result = await runObservedRunner(picked.runner,
       {
         systemPrompt: [
           "Convert one ordinary-language answer into internal Agentlas routing metadata.",
@@ -3104,6 +3111,7 @@ async function normalizePurposeAnswerWithSubmitterRuntime(
         onTool: () => {},
       },
     );
+    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     const candidate = result.text.match(/\{[\s\S]*\}/)?.[0];
     const parsed = candidate ? JSON.parse(candidate) as unknown : null;
     if (!isRecord(parsed)) return deterministic;
@@ -3119,7 +3127,8 @@ async function normalizePurposeAnswerWithSubmitterRuntime(
       : [];
     if (!summary || /[가-힣]/.test(summary) || capabilities.length === 0) return deterministic;
     return { summary, capabilities };
-  } catch {
+  } catch (error) {
+    if (runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, "unknown"))) throw error;
     return deterministic;
   }
 }

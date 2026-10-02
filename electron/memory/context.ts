@@ -29,6 +29,7 @@ import {
 import { autoLocalEmbedding, localEmbeddingTokens, rankHybridLocal } from "./local-embedding";
 import { listMemoryEpisodesForContext } from "./tickets";
 import { nativeRecallFor } from "./native-text";
+import { filterSupersededProjectSoul, memoryBlockKey } from "./graph";
 import { filterRevokedProjectSoul } from "./revocations";
 import { readDiscoveredProjectPmTextFiles } from "./project-artifacts";
 import { looksSecret } from "../../shared/secret-patterns";
@@ -464,7 +465,7 @@ function entryLines(entries: MemoryEntry[], frame?: RecallFrame): string {
           ? ` (context: ${parts.join("; ").slice(0, CONTEXT_MAX_CHARS)})`
           : "";
       const label = heuristicLabel(e, frame);
-      return `- [${e.kind}${label ? ` · ${label}` : ""}] ${e.content}${suffix}`;
+      return `- [${e.kind}${label ? ` · ${label}` : ""}] ${e.content}${suffix} ${memoryBlockKey(e.content)}`;
     })
     .join("\n");
 }
@@ -796,7 +797,9 @@ export async function buildMemoryContext(
       return formatMemorySections(globalMemorySections(agentId, options.taskPrompt, options));
     }
     const rawSoul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
-    const soul = rawSoul ? filterRevokedProjectSoul(rawSoul, options.projectId, projectPath) : null;
+    const soul = rawSoul ? filterRevokedProjectSoul(
+      filterSupersededProjectSoul(rawSoul, options.projectId, projectPath), options.projectId, projectPath,
+    ) : null;
     if (soul && soul.trim()) {
       const soulSection = `### Project memory (${projectPath})\n${selectSoulText(soul, options.taskPrompt, projectPath)}`;
       sections.push(soulSection);

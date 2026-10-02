@@ -627,7 +627,7 @@ function handoverNote(value: string | null | undefined, row: Row): string | null
  * Existing leased seats are reused only while current; this never recruits or
  * renews a remote asset and never restores an archived identity implicitly.
  */
-export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true): void {
+export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true, options: { allowPriorTaskFailure?: boolean } = {}): void {
   const db = getDb();
   if (!db.inTransaction) throw new Error("one_group_transaction_required");
   for (const id of [...new Set(agentIds)]) {
@@ -635,7 +635,9 @@ export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true)
     if (agent.sourceMissingSince || agent.visibility === "private" || agent.visibility === "background") throw new Error("one_group_member_unavailable");
     const prior = db.prepare("SELECT * FROM one_org_members WHERE installed_agent_id = ? ORDER BY archived_at IS NULL DESC LIMIT 1").get(id) as Row | undefined;
     if (prior) {
-      if (prior.archived_at || prior.status_kind === "failed" || (prior.status_kind === "locked" && prior.source !== "hub")
+      // Explicit room composition can reuse a valid identity after a failed task;
+      // it does not clear the failure or relax package, lock or lease checks.
+      if (prior.archived_at || (prior.status_kind === "failed" && !options.allowPriorTaskFailure) || (prior.status_kind === "locked" && prior.source !== "hub")
         || (prior.source !== "hub" && isExpired(prior.lease_expires_at))
         || (prior.source !== "hub" && prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at)))) throw new Error("one_group_member_unavailable");
       continue;

@@ -6,8 +6,8 @@
 //   · 구조적(프로토콜·아키텍처): 버전이 올라도 안 바뀐다.
 //   · 정책적(벤더 제품 결정): 분기~연 단위로 바뀐다.
 //   · 표면적(CLI 플래그·경로): **마이너 버전마다 바뀔 수 있다.**
-// 표면적 항목은 설치된 CLI 의 --help 로 확인한다.
-// probedVersion 이 낡은 값은 확신처럼 쓰지 말 것.
+// 표면적 항목은 scripts/probe-runtime-capabilities.mjs 가 설치된 CLI 의 --help 로
+// 실측해 어긋나면 알린다. probedVersion 이 낡은 값은 확신처럼 쓰지 말 것.
 import type { RuntimeKind } from "./types";
 
 /** 커스텀 슬래시 명령/스킬이 사는 곳 (홈 디렉터리 기준 세그먼트). */

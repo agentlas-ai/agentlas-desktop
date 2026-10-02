@@ -6,7 +6,11 @@ import { isAgentlasServingModel } from "../../shared/agentlas-serving";
 
 /** Main-only future Science writer contract. No IPC/preload mint endpoint. */
 export interface ScienceRecoveryScope {
-  science: NonNullable<InvocationExecutionContext["science"]>;
+  science: NonNullable<InvocationExecutionContext["science"]> & Readonly<{
+    /** Exact optional workflow identities supplied by current Science packages. */
+    researchDirectorCatalogSha256?: string;
+    researchDirectorBundleSha256?: string;
+  }>;
   chatId: string;
   recoveryId: string;
   runtimeSelection: RuntimeSelection;
@@ -35,11 +39,13 @@ function selectionMatches(actual: Selection, expected: RuntimeSelection): boolea
 const scienceKey = (s: ScienceRecoveryScope["science"]) => JSON.stringify([
   s.projectId, s.conversationId, s.turnId, s.originUserMessageId, s.invocationRunId,
   s.researchDirectorAgentId, s.researchDirectorAgentSlug, s.researchDirectorPackageVersion,
-  s.researchDirectorPackageDigest, s.researchDirectorSystemPromptSha256, s.workflowRoute ?? null,
+  s.researchDirectorPackageDigest, s.researchDirectorSystemPromptSha256,
+  s.researchDirectorCatalogSha256 ?? null, s.researchDirectorBundleSha256 ?? null, s.workflowRoute ?? null,
 ]);
 const scienceFields = new Set(["projectId", "conversationId", "turnId", "originUserMessageId", "invocationRunId",
   "researchDirectorAgentId", "researchDirectorAgentSlug", "researchDirectorPackageVersion",
-  "researchDirectorPackageDigest", "researchDirectorSystemPromptSha256", "workflowRoute"]);
+  "researchDirectorPackageDigest", "researchDirectorSystemPromptSha256",
+  "researchDirectorCatalogSha256", "researchDirectorBundleSha256", "workflowRoute"]);
 function onlyScienceScopeFields(s: ScienceRecoveryScope["science"]): boolean {
   return Object.keys(s).every(key => scienceFields.has(key));
 }
@@ -53,6 +59,10 @@ export function issueScienceRecoveryCapability(scope: ScienceRecoveryScope, asse
       scope.science.originUserMessageId, scope.science.researchDirectorAgentId, scope.science.researchDirectorAgentSlug,
       scope.science.researchDirectorPackageVersion, scope.science.researchDirectorPackageDigest,
       scope.science.researchDirectorSystemPromptSha256].every(value => typeof value === "string" && value.trim())
+    // Older bindings omit these fields. Present package/catalog identities are
+    // exact hashes and remain part of every subsequent scope comparison.
+    || ![scope.science.researchDirectorCatalogSha256, scope.science.researchDirectorBundleSha256]
+      .every(value => value === undefined || (typeof value === "string" && /^[a-f0-9]{64}$/.test(value)))
     || !supported.has(scope.runtimeSelection?.kind) || !scope.runtimeSelection.model?.trim()
     || (scope.runtimeSelection.kind === "byok" && !supportedByok.has(scope.runtimeSelection.backend ?? ""))
     || (scope.runtimeSelection.kind === "agentlas" && !isAgentlasServingModel(scope.runtimeSelection.model))

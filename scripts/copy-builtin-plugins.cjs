@@ -130,6 +130,9 @@ function privateVerificationRefs(pluginName) {
 }
 
 function rewritePrivateVerificationReferences(pluginName, destination) {
+  // The compiled RD bundle authenticates every content asset, including README.
+  // Rewriting one reference invalidates its fixed manifest/bundle pins.
+  if (pluginName === "agentlas-science-research-director") return;
   const refs = privateVerificationRefs(pluginName);
   if (!refs.length) return;
   for (const relative of allFiles(destination)) {

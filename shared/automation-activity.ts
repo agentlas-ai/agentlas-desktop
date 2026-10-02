@@ -36,6 +36,9 @@ export interface AutomationLedgerToolEvent {
   toolArgs?: string | null;
   isError?: boolean | null;
   failureCode?: string | null;
+  /** Host completion receipt, including an empty successful result. Requests
+   * alone cannot establish that a click or text entry actually happened. */
+  completed?: boolean;
 }
 
 export interface AutomationActionRow {
@@ -69,6 +72,8 @@ export interface AutomationRunDigest {
   outwardTotal: number;
   failures: number;
   toolCalls: number;
+  /** Missing legacy/request-only receipts cannot establish that nothing happened. */
+  outwardActivityCoverage?: "complete" | "incomplete" | "unknown";
   sites: Array<{ domain: string; count: number }>;
   families: Array<{ family: AutomationToolFamily; count: number }>;
   /** Grouped, oldest first. Long runs keep the newest rows; `actionsTruncated` says so. */
@@ -136,19 +141,22 @@ export function automationToolFamily(toolName: string): AutomationToolFamily {
 
 // Browser click labels. A reply/post needs a submit verb so "답글 필터" (a filter tab) is not a reply.
 const NOT_OUTWARD_LABEL = /필터|filter|탭\b|\btab\b|메뉴|menu|더\s*보기|see more|more options|닫기|close|검색|search|알림|notification|정렬|sort/i;
-const SUBMIT_VERB = /게시|올리기|보내기|전송|등록|\bpost\b|\bsend\b|\bsubmit\b|\bpublish\b|\breply\b/i;
+const SUBMIT_VERB = /게시|올리기|보내기|전송|등록|\bpost\b|\bsend\b|\bsubmit\b|\bpublish\b/i;
 const OUTWARD_LABEL_RULES: Array<[AutomationOutwardKind, (label: string) => boolean]> = [
   ["repost", (label) => /리포스트|재게시|\brepost\b|\bretweet\b/i.test(label)],
   ["like", (label) => /좋아요|\blike\b|\bheart\b/i.test(label) && !/좋아요\s*\d|likes?\s*\(\d/i.test(label)],
   ["follow", (label) => /팔로우|\bfollow\b/i.test(label) && !/팔로잉|following|팔로워|followers/i.test(label)],
   ["message", (label) => /메시지|\bmessage\b|\bdm\b/i.test(label) && /보내기|전송|\bsend\b/i.test(label)],
   ["reply", (label) => /답글|댓글|\breply\b|\bcomment\b/i.test(label) && SUBMIT_VERB.test(label)],
-  ["post", (label) => /게시|올리기|\bpost\b|\bpublish\b|\bshare\b|공유/i.test(label)],
+  ["post", (label) => /^(?:(?:작성한|새)\s*)?(?:게시|올리기)(?:\s*버튼)?$|^(?:post|publish)\s+(?:button|now|this post)$/i.test(label)],
 ];
 
 export function outwardKindForClickLabel(label: string | null | undefined): AutomationOutwardKind | null {
   const text = String(label ?? "").trim();
   if (!text || text.length > 120) return null;
+  // A post URL, quoted post text, or a reply composer control is navigation,
+  // even when the label contains the English noun "post" or "reply".
+  if (/https?:\/\/|답글\s*(?:남기기|작성)|댓글\s*(?:남기기|작성)|\b(?:reply|comment)\s+(?:to|on)\b/i.test(text)) return null;
   if (NOT_OUTWARD_LABEL.test(text) && !/리포스트|repost|좋아요|\blike\b/i.test(text)) return null;
   for (const [kind, matches] of OUTWARD_LABEL_RULES) if (matches(text)) return kind;
   return null;
@@ -217,9 +225,14 @@ function uniqueCalls(events: readonly AutomationLedgerToolEvent[]): CallRecord[]
     const existing = calls.get(key);
     if (existing) {
       existing.lastAt = event.ts;
-      existing.event = { ...existing.event, toolArgs: event.toolArgs ?? existing.event.toolArgs };
-      existing.isError = event.isError === true;
-      existing.failureCode = event.isError === true ? (event.failureCode ?? existing.failureCode) : null;
+      existing.event = { ...existing.event, toolArgs: event.toolArgs ?? existing.event.toolArgs,
+        completed: event.completed === true || existing.event.completed === true };
+      // A repeated request is not a recovery receipt. Only a completed result
+      // may clear an earlier terminal error; an explicit error always survives.
+      if (event.completed === true || event.isError === true) {
+        existing.isError = event.isError === true;
+        existing.failureCode = event.isError === true ? (event.failureCode ?? existing.failureCode) : null;
+      }
     } else {
       calls.set(key, { firstAt: event.ts, lastAt: event.ts, event, isError: event.isError === true, failureCode: event.isError === true ? (event.failureCode ?? null) : null });
     }
@@ -241,6 +254,7 @@ export interface DigestAutomationRunInput {
 export function digestAutomationRun(input: DigestAutomationRunInput): AutomationRunDigest {
   const calls = uniqueCalls(input.events);
   const currentUrlByNode = new Map<string, string>();
+  const pendingDraftByNode = new Set<string>();
   // One run drives one browser profile: a step that did not navigate itself is still on the last page.
   let lastUrl: string | null = null;
   const rows: AutomationActionRow[] = [];
@@ -255,15 +269,29 @@ export function digestAutomationRun(input: DigestAutomationRunInput): Automation
     const args = parseArgs(event.toolArgs);
     let kind = actionKindFor(event.toolName, family);
     const explicitUrl = argString(args, "url", "href", "link");
-    if (kind === "navigate" && explicitUrl && publicHostOf(explicitUrl)) { currentUrlByNode.set(nodeKey, explicitUrl); lastUrl = explicitUrl; }
+    if (!call.isError && event.completed === true && kind === "navigate" && explicitUrl && publicHostOf(explicitUrl)) {
+      currentUrlByNode.set(nodeKey, explicitUrl); lastUrl = explicitUrl;
+      pendingDraftByNode.delete(nodeKey);
+    }
     const url = explicitUrl && publicHostOf(explicitUrl)
       ? explicitUrl
       : (family === "browser" || family === "computer") ? currentUrlByNode.get(nodeKey) ?? lastUrl : null;
     const domain = publicHostOf(url);
     const elementLabel = argString(args, "element", "label", "name", "description");
+    const typed = kind === "type" ? argString(args, "text", "value") : null;
+    if (!call.isError && event.completed === true && typed && family === "browser") pendingDraftByNode.add(nodeKey);
     let outwardKind: AutomationOutwardKind | null = null;
-    if (!call.isError) {
-      if (kind === "click") outwardKind = outwardKindForClickLabel(elementLabel);
+    if (!call.isError && event.completed === true) {
+      if (kind === "click") {
+        outwardKind = outwardKindForClickLabel(elementLabel);
+        // Bare English labels are also nouns/navigation. A preceding draft in
+        // this same node supplies the missing submit context; a link does not.
+        if (!outwardKind && pendingDraftByNode.has(nodeKey)) {
+          if (/^(?:post|publish)$/i.test(elementLabel ?? "")) outwardKind = "post";
+          else if (/^(?:reply|comment)$/i.test(elementLabel ?? "")) outwardKind = "reply";
+        }
+        if (outwardKind === "post" || outwardKind === "reply" || outwardKind === "message") pendingDraftByNode.delete(nodeKey);
+      }
       else if (kind === "upload") outwardKind = "upload";
       else outwardKind = outwardKindForToolName(event.toolName, family);
     } else if (kind === "upload") {
@@ -274,7 +302,6 @@ export function digestAutomationRun(input: DigestAutomationRunInput): Automation
     if (outwardKind) outward[outwardKind] = (outward[outwardKind] ?? 0) + 1;
     if (domain) siteCounts.set(domain, (siteCounts.get(domain) ?? 0) + 1);
     familyCounts.set(family, (familyCounts.get(family) ?? 0) + 1);
-    const typed = kind === "type" ? argString(args, "text", "value") : null;
     const row: AutomationActionRow = {
       id: `${input.runId}:${event.seq}`,
       firstAt: call.firstAt,
@@ -315,6 +342,12 @@ export function digestAutomationRun(input: DigestAutomationRunInput): Automation
     outwardTotal,
     failures,
     toolCalls: calls.length,
+    outwardActivityCoverage: calls.length === 0 ? "unknown"
+      : !calls.every((call) => call.event.completed === true) ? "incomplete"
+        // Display grouping defaults unknown browser tools to "read". That
+        // label cannot prove an evaluator/script/tab mutation was read-only.
+        : calls.every((call) => rows.some((row) => row.outward && row.id === `${input.runId}:${call.event.seq}`)
+          || /^(?:browser_)?(?:navigate|snapshot|screenshot|read_file|read|search|web_search|web_fetch|get_current_time|current_time|get_url)$/.test(leafOf(call.event.toolName))) ? "complete" : "unknown",
     sites: [...siteCounts].map(([domain, count]) => ({ domain, count })).sort((a, b) => b.count - a.count),
     families: [...familyCounts].map(([family, count]) => ({ family, count })).sort((a, b) => b.count - a.count),
     actions: rows.length > MAX_ACTION_ROWS ? rows.slice(-MAX_ACTION_ROWS) : rows,
@@ -404,15 +437,15 @@ export function automationActionLine(row: AutomationActionRow, locale: "ko" | "e
 }
 
 /** Headline for a finished run: "Threads 답글 3회, 리포스트 2회" or "Threads 확인만 함". */
-export function automationRunHeadline(digest: Pick<AutomationRunDigest, "outward" | "outwardTotal" | "sites" | "toolCalls"> & { status?: string }, locale: "ko" | "en"): string {
+export function automationRunHeadline(digest: Pick<AutomationRunDigest, "outward" | "outwardTotal" | "sites" | "toolCalls" | "outwardActivityCoverage"> & { status?: string }, locale: "ko" | "en"): string {
   const site = digest.sites[0] ? siteDisplayName(digest.sites[0].domain) : "";
   if (digest.outwardTotal > 0) return `${site ? `${site} ` : ""}${automationOutwardSummary(digest.outward, locale)}`;
   if (digest.status === "running") return locale === "ko" ? `${site ? `${site} ` : ""}진행 중 · 도구 ${digest.toolCalls}회` : `${site ? `${site} ` : ""}in progress · ${digest.toolCalls} tool calls`;
-  // A completed run with no outward action is the quiet "변화 없음" entry (it posts no chat row).
   if (digest.status === "ok") {
+    if (digest.outwardActivityCoverage !== "complete") return locale === "ko" ? "외부 동작 측정 불가" : "Outward activity unknown";
     return locale === "ko"
-      ? `변화 없음${digest.toolCalls > 0 ? ` · ${site ? `${site} ` : ""}확인 ${digest.toolCalls}회` : ""}`
-      : `No change${digest.toolCalls > 0 ? ` · ${site ? `${site} ` : ""}checked ${digest.toolCalls}×` : ""}`;
+      ? `기록된 외부 동작 없음 · 도구 ${digest.toolCalls}회`
+      : `No outward activity recorded · ${digest.toolCalls} tool calls`;
   }
   if (digest.toolCalls === 0) return locale === "ko" ? "도구 사용 없음" : "No tool activity";
   return locale === "ko" ? `${site ? `${site} ` : ""}확인만 함 · 도구 ${digest.toolCalls}회` : `${site ? `${site} ` : ""}checked only · ${digest.toolCalls} tool calls`;

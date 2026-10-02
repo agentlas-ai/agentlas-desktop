@@ -527,6 +527,13 @@ export function runtimeForOwnerSelection(
   return candidate;
 }
 
+/** Only host/provider machine markers block replay; diagnostic prose is not authority. */
+export function runtimeFailureBlocksReplay(failure: Pick<RunnerFailure, "providerCode"> | null | undefined): boolean {
+  return failure?.providerCode === "serving_reconciliation_required"
+    || failure?.providerCode === "runtime_turn_unsettled"
+    || failure?.providerCode === "automation_no_progress_loop";
+}
+
 /**
  * Returns live runtimes in the exact order stored in model_role_members.
  *
@@ -547,7 +554,7 @@ export function rolePriorityRuntimes(
   // The serving provider may already have generated billable tokens. An
   // unresolved settlement must stop this invocation, not replay the prompt on
   // another configured runtime.
-  if (options.failure?.providerCode === "serving_reconciliation_required") return [];
+  if (runtimeFailureBlocksReplay(options.failure)) return [];
   // The managed local runner has not processed these images. Team/controller
   // recovery must not forward them to another provider as an outage retry.
   if (options.failure?.kind === "unsupported"

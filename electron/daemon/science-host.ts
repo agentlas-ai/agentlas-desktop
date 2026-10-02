@@ -1,3 +1,4 @@
+import { scienceLocalEmbeddingHost } from "../science-host/local-embedding";
 import { inspectScienceRuntimeSelectionAvailability } from "../science-host/runtime-selection-availability";
 import fs from "node:fs";
 import path from "node:path";
@@ -169,6 +170,7 @@ export function installDaemonScienceHost(input: {
         { hostLost: (runId) => { const receipt = invocationService.receipt(runId); return receipt === null || receipt.status === "interrupted"; } }),
       inspectLegacyForwardRecoveryBoundary: boundary => inspectLegacyForwardRecoveryBoundary({ ...boundary, expectedRuntimeChatId: boundRuntimeChat(boundary) }),
     },
+    ...{ localEmbedding: scienceLocalEmbeddingHost },
     workspace: { captureInvocationBinding: captureScienceInvocationBinding },
     render: { renderManuscriptPdf, resolveTectonic, probePdfLatexProfile, listTypesetProfiles: listScienceTypesetProfileCatalog },
     runtimeCatalog: {

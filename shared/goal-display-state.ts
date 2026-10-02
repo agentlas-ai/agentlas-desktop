@@ -9,7 +9,7 @@
  *                 (app_closed, crash_recovery, runtime_unavailable, agent_paused) and will continue it. Same look.
  *  - paused       only an explicit owner pause (pauseReason "user", or a paused row with no recorded reason).
  *  - needs_owner  explicit owner-needed states: an approval or budget stop, waiting_user, or the goal asked the
- *                 owner a question (goal_owner_answer_required / auto_goal_owner_review_required).
+ *                 owner a question, or a host review requires a decision.
  *  - blocked      an explicit blocked status with its typed reason.
  *  - terminal     completed / failed / cancelled / cancelling.
  * Nothing here reads a clock.
@@ -21,7 +21,23 @@ export const GOAL_HOST_PAUSE_REASONS: ReadonlySet<string> = new Set(["app_closed
 /** Pauses that need the owner's consent or grant. */
 export const GOAL_OWNER_NEEDED_PAUSE_REASONS: ReadonlySet<string> = new Set(["approval_required", "budget"]);
 /** Blocked reasons that are a question to the owner. */
-export const GOAL_OWNER_QUESTION_REASONS: ReadonlySet<string> = new Set(["goal_owner_answer_required", "auto_goal_owner_review_required"]);
+export const GOAL_OWNER_QUESTION_REASONS: ReadonlySet<string> = new Set(["goal_owner_answer_required"]);
+
+/** A host review has no implied pending question. */
+export const GOAL_OWNER_REVIEW_REASONS: ReadonlySet<string> = new Set(["auto_goal_owner_review_required"]);
+export type GoalOwnerAttention = "question" | "review" | "approval" | "budget";
+export function goalOwnerAttention(input: { status: string | null | undefined; pauseReason?: string | null; blockedReason?: string | null }): GoalOwnerAttention | null {
+  if (input.status === "waiting_user") return "question";
+  if (input.status === "blocked") {
+    if (GOAL_OWNER_QUESTION_REASONS.has(input.blockedReason ?? "")) return "question";
+    if (GOAL_OWNER_REVIEW_REASONS.has(input.blockedReason ?? "")) return "review";
+  }
+  if (input.status === "paused" || input.status === "pausing") {
+    if (input.pauseReason === "approval_required") return "approval";
+    if (input.pauseReason === "budget" || input.pauseReason?.startsWith("budget_")) return "budget";
+  }
+  return null;
+}
 
 const RUNNING_STATUSES: ReadonlySet<string> = new Set(["queued", "running", "waiting_worker", "waiting_tool", "verifying"]);
 const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled", "cancelling"]);
@@ -36,7 +52,7 @@ export function goalDisplayState(input: { status: string | null | undefined; pau
     if (pauseReason && (GOAL_OWNER_NEEDED_PAUSE_REASONS.has(pauseReason) || pauseReason.startsWith("budget_"))) return "needs_owner";
     return status === "pausing" && pauseReason !== "user" ? "running" : "paused";
   }
-  if (status === "blocked") return GOAL_OWNER_QUESTION_REASONS.has(input.blockedReason ?? "") ? "needs_owner" : "blocked";
+  if (status === "blocked") return goalOwnerAttention(input) ? "needs_owner" : "blocked";
   if (status === "waiting_user") return "needs_owner";
   if (RUNNING_STATUSES.has(status)) return "running";
   return "none";

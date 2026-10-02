@@ -320,10 +320,15 @@ export function recordMemoryDecision(input: MemoryDecisionInput): void {
        confidence, sensitivity, curator_mode, created_at
      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(ticket_id, candidate_index) DO UPDATE SET
+       content_hash = excluded.content_hash,
+       memory_kind = excluded.memory_kind,
+       proposed_scope = excluded.proposed_scope,
        resolved_scope = excluded.resolved_scope,
        action = excluded.action,
        reason_code = excluded.reason_code,
        target_memory_id = excluded.target_memory_id,
+       confidence = excluded.confidence,
+       sensitivity = excluded.sensitivity,
        curator_mode = excluded.curator_mode`,
   ).run(
     `mdc_${randomUUID()}`,

@@ -9,11 +9,13 @@ import { RuntimeJudgmentRefusal } from "./judgment-refusal";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
+import { ToolRequestReplayGuard } from "../../shared/tool-request-replay";
+import type { ObservedTokenUsage } from "../../shared/observed-usage";
 import { StringDecoder } from "node:string_decoder";
 import { codexSystemPromptWithSchemaFallback, openAiStrictSchemaOrNull } from "./strict-output-schema";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
@@ -22,7 +24,8 @@ import {
   composeResumeTurnPrompt,
   renderConversationContext,
   renderGapContext,
-  unseenHistoryGap, dedupeStableTurnContext } from "./continuity";
+  unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext, invalidateStableTurnContext,
+  type StableTurnContextDelivery } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { nativeCliCandidates } from "./native-cli";
@@ -79,7 +82,7 @@ import { generateImage } from "../multimodal/image";
 import { multimodalImageSlot, multimodalImageSlotDiagnosis } from "../multimodal/slot";
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { bindNativeFileProofObserver, mcpFileProofCandidate } from "../long-run/file-proof";
-import { bindScienceNativeToolObserver, bindScienceNativeFailureObserver } from "../invocation/adapter-effect-context";
+import { bindScienceNativeToolObserver, bindScienceNativeFailureObserver, createAdapterEffectLedger } from "../invocation/adapter-effect-context";
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
@@ -93,16 +96,6 @@ const CODEX_IMAGE_TOOL_VERSION = "agentlas.generate-image.v1";
 type NativeFileProofObserver = ReturnType<typeof bindNativeFileProofObserver>;
 type NativeFileProofInput = Parameters<NativeFileProofObserver>[0];
 type NativeFileProofTicket = Exclude<ReturnType<NativeFileProofObserver>, null>;
-
-/**
- * A Science controller session runs many turns of ~80 tool calls, and every call re-sends the whole context. Measured
- * 2026-09-26 on one session: 1,197 calls, 191M input tokens, median 163k per call, compacting only near 250k. Compacting
- * at 150k keeps the working context and roughly halves what each call re-reads; canonical state lives in Science, not in
- * the transcript. Scoped to root Science controller runs only (Main sets scienceController).
- */
-function scienceCompactionArgs(req: { scienceController?: true }): string[] {
-  return req.scienceController === true ? ["-c", "model_auto_compact_token_limit=150000"] : [];
-}
 
 /** Admit only paths that Codex included in a structured FileChange start. */
 export function codexNativeFileProofCandidates(
@@ -253,6 +246,8 @@ function buildPrompt(req: RunnerRequest): string {
     undefined,
     req.surfaceGate,
     KIND,
+    req.sciencePromptProfile,
+    req.judgmentOnly === true ? "host-judgment" : undefined,
   );
   // 새 세션 시드: 턴 컨텍스트는 시스템 섹션 뒤에, 히스토리는 연속성 프레이밍+압축과 함께.
   const turnContext = req.turnContext?.trim();
@@ -286,6 +281,8 @@ function buildDeveloperInstructions(req: RunnerRequest): string {
     undefined,
     req.surfaceGate,
     KIND,
+    req.sciencePromptProfile,
+    req.judgmentOnly === true ? "host-judgment" : undefined,
   );
 }
 
@@ -464,6 +461,14 @@ function systemFingerprint(req: RunnerRequest): string {
     .digest("hex");
 }
 
+/** Context delivery is narrower than native conversation continuity (which survives model changes). */
+function stableContextFingerprint(req: RunnerRequest, fingerprint: string | null, configuration: unknown): string {
+  return crypto.createHash("sha256").update(JSON.stringify([fingerprint, req.runtimeSessionOwnerId ?? req.agentId ?? null,
+    req.runtimeSessionOwnerId != null, req.systemPrompt, req.locale, req.permission, req.approvalsReviewer,
+    req.model, req.effort, req.forceSurface, req.browserOnly, req.isolatedMcpConfig,
+    req.mcpAllowedTools, req.mcpConfigPath, req.toolBrokerSettingsPath, req.env?.CODEX_HOME, configuration])).digest("hex");
+}
+
 interface CodexRunResult {
   code: number | null;
   stderr: string;
@@ -475,15 +480,13 @@ interface CodexRunResult {
   reportedInputTokens?: number;
   reportedCachedInputTokens?: number;
   /** This turn's real usage (cumulative counters minus the session baseline). */
-  observedUsage?: { inputTokens: number; outputTokens: number };
+  observedUsage?: ObservedTokenUsage;
   /** 스트림 표식(또는 exit0 휴리스틱)이 말한 실패 — 있으면 text는 답이 아니다. */
   failure?: RunnerFailure;
-  /**
-   * The CLI emitted any stream event past `thread.started` (a turn, an item, a
-   * tool). False means the process ended before the model ran — nothing it could
-   * have done externally, so an unattended resume failure may continue fresh.
-   */
+  /** Stream activity is diagnostic only; missing events do not prove no dispatch. */
   turnStarted: boolean;
+  turnCompleted: boolean;
+  terminalObserved: boolean;
 }
 
 /**
@@ -502,15 +505,29 @@ interface CodexUsageBaseline {
 /**
  * 누적 카운터 한 칸에서 이번 턴 몫을 뽑는다 — 순수 함수(게이트가 직접 시험한다).
  * baseline 을 모르면 null(=usage 를 비운다). 카운터가 줄었으면 누적의 연속일 수 없으므로
- * (세션이 새로 시작됐다는 뜻) 보고값을 그대로 이번 턴 값으로 읽는다.
+ * 새 epoch의 typed proof 없이는 이번 턴으로 귀속하지 않고 null을 반환한다.
  */
 export function deltaFromBaseline(reported: number | undefined, baseline: number | null): number | null {
-  if (reported == null || !Number.isFinite(reported) || reported < 0) return null;
-  if (baseline == null) return null;
-  return reported >= baseline ? reported - baseline : reported;
+  if (reported == null || !Number.isSafeInteger(reported) || reported < 0) return null;
+  if (baseline == null || !Number.isSafeInteger(baseline) || baseline < 0) return null;
+  return reported >= baseline ? reported - baseline : null;
 }
 
-/** 다음 턴의 기준선이 될 원시 누적치. 이번 실행이 말하지 않은 칸은 저장 측이 이전 값을 유지한다. */
+/** Native `last` is one response, not the whole tool loop. Subtract only a
+ * known baseline belonging to this exact thread; missing fields stay unknown. */
+export function codexObservedTurnUsage(
+  total: { inputTokens?: number; outputTokens?: number; cachedInputTokens?: number } | null,
+  baseline: CodexUsageBaseline,
+): ObservedTokenUsage | undefined {
+  const inputTokens = deltaFromBaseline(total?.inputTokens, baseline.input);
+  const outputTokens = deltaFromBaseline(total?.outputTokens, baseline.output);
+  const cachedInputTokens = deltaFromBaseline(total?.cachedInputTokens, baseline.cachedInput);
+  if (inputTokens === null || outputTokens === null) return undefined;
+  return { inputTokens, outputTokens,
+    ...(cachedInputTokens !== null && cachedInputTokens <= inputTokens ? { cachedInputTokens } : {}) };
+}
+
+/** Raw counters at this settled turn boundary. Missing fields invalidate the next baseline. */
 function codexUsageCounters(run: CodexRunResult): {
   reportedOutputTokens: number | null;
   reportedInputTokens: number | null;
@@ -628,11 +645,14 @@ function runCodexProcess(
   events: RunnerEvents,
   usageBaseline: CodexUsageBaseline,
   observeNativeFile: NativeFileProofObserver,
+  stableContextDelivery?: StableTurnContextDelivery,
 ): Promise<CodexRunResult> {
-  const observeScienceTool = bindScienceNativeToolObserver(req);
-  const observeScienceFailure = bindScienceNativeFailureObserver(req);
+  const effects = createAdapterEffectLedger({ adapterKind: KIND, chatId: req.chatId, agentId: req.agentId }, events);
+  events = effects.events;
+  const observeScienceTool = bindScienceNativeToolObserver(req, effects.qualify);
+  const observeScienceFailure = bindScienceNativeFailureObserver(req, effects.qualify);
   const reportedOutputTokenBaseline = usageBaseline.output;
-  return new Promise((resolve, reject) => {
+  return effects.withScope(() => new Promise((resolve, reject) => {
     let terminalFailure: RunnerFailure | null = null;
     let itemFailure: RunnerFailure | null = null;
     const child = spawnCli(bin, args, {
@@ -655,6 +675,8 @@ function runCodexProcess(
       if (req.signal.aborted) killCliTree(child);
       else req.signal.addEventListener("abort", onAbort, { once: true });
     }
+    const runtimeAttemptId = crypto.randomUUID();
+    events.onRuntimeAttemptStarted?.(runtimeAttemptId);
     writeStdin(child, stdinPayload);
 
     let buffer = "";
@@ -664,10 +686,11 @@ function runCodexProcess(
     let reportedOutputTokens: number | undefined;
     let reportedInputTokens: number | undefined;
     let reportedCachedInputTokens: number | undefined;
-    let observedUsage: { inputTokens: number; outputTokens: number } | undefined;
+    let observedUsage: ObservedTokenUsage | undefined;
     let stderr = "";
     let lastEmit = 0;
     let turnCompleted = false;
+    let terminalObserved = false;
     let turnStarted = false;
     // Newer Codex runtimes send native tool calls as response items instead of
     // the older `item.started` / `item.completed` command events. Dropping that
@@ -675,6 +698,7 @@ function runCodexProcess(
     // run in One even though the tool had succeeded. Keep the provider call id
     // so the started and completed notifications update one Activity row.
     const responseTools = new Map<string, { name: string; args?: string }>();
+    const toolRequestReplay = new ToolRequestReplayGuard();
     const settledResponseToolIds = new Set<string>();
     const itemCapturePaths = new Map<string, string[]>();
     const nativeFileProofById = new Map<string, NativeFileProofTicket[]>();
@@ -791,13 +815,28 @@ function runCodexProcess(
     }): void => {
       if (typeof ev.type === "string" && ev.type !== "thread.started") turnStarted = true;
       const payload = record(ev.payload);
+      if (stableContextDelivery && (ev.type === "compacted" || ev.type === "thread.compacted"
+      || payload?.type === "context_compaction" || payload?.type === "context_compacted" || payload?.type === "compacted"
+        || ["contextCompaction", "context_compaction", "compaction"].includes(String(ev.item?.type ?? "")))) {
+        invalidateStableTurnContext(stableContextDelivery.identity);
+      }
+      if ((ev.type === "item.started" || ev.type === "item.completed") && ev.item) {
+        effects.frame(String(ev.item.type ?? "unknown"), codexNativeItemEffectCoverage(ev.item), codexNativeOperationalItemId(ev.item));
+        if (ev.type === "item.completed" && codexNativeItemMayOutliveTurn(ev.item)) effects.uncertain("native-background-operation");
+      }
+      if (ev.type === "event_msg" && payload?.type === "item_completed") {
+        const item = record(payload.item);
+        if (item) effects.frame(String(item.type ?? "unknown"), codexNativeItemEffectCoverage(item), codexNativeOperationalItemId(item));
+      }
       if (ev.type === "response_item" && payload?.type === "custom_tool_call") {
         const rawName = nonEmptyText(payload.name);
         const id = nonEmptyText(payload.call_id) ?? nonEmptyText(payload.id);
+        effects.frame("custom_tool_call", Boolean(rawName && id), id ?? undefined);
         if (rawName && id) {
           closeThinking();
           const input = nonEmptyText(payload.input);
           const name = responseToolName(rawName, input ?? undefined);
+          if (!toolRequestReplay.accept(id, name, JSON.stringify(payload))) return;
           responseTools.set(id, { name, ...(input ? { args: input } : {}) });
           events.onTool?.(name, input ?? undefined, undefined, id, false);
         }
@@ -831,6 +870,9 @@ function runCodexProcess(
         return;
       }
       if (ev.type === "thread.started" && typeof ev.thread_id === "string") {
+        if (stableContextDelivery && ev.thread_id !== stableContextDelivery.identity.sessionId) {
+          invalidateStableTurnContext(stableContextDelivery.identity);
+        }
         threadId = ev.thread_id;
       } else if (ev.type === "turn.started") {
         // codex 0.145 emits NO `reasoning` item events (verified against the
@@ -852,6 +894,7 @@ function runCodexProcess(
           itemFailure = itemFailure ?? codexFailureFromEvent(ev);
         }
       } else if (ev.type === "turn.failed") {
+        terminalObserved = true;
         // ★핸들러가 아예 없던 이벤트 — 프로토콜이 턴 실패를 선언하는 자리다.
         terminalFailure = codexFailureFromEvent(ev as { type?: string; error?: { message?: unknown } }) ?? terminalFailure;
       } else if (ev.type === "item.started" && ev.item?.type === "reasoning") {
@@ -958,6 +1001,7 @@ function runCodexProcess(
             }
           }
         }
+        if (ev.type === "item.started" && !toolRequestReplay.accept(item.id, toolName, JSON.stringify(item))) return;
         // 도구 이벤트 전에 본문을 플러시 — 렌더러 인터리브 앵커가 최신 좌표를 본다.
         if (text) {
           events.onPartial(text);
@@ -974,11 +1018,11 @@ function runCodexProcess(
         );
         if (ev.type === "item.started" && item.id) {
           const mcpCandidate = item.type === "mcp_tool_call" && item.server && item.tool
-            ? mcpFileProofCandidate({ toolId: item.id, toolName, serverToolName: item.tool,
+            ? mcpFileProofCandidate({ toolId: effects.qualify(item.id), toolName, serverToolName: item.tool,
               args: item.arguments ?? item.args ?? item.input, chatId: req.chatId, cwd: req.cwd,
               permission: req.permission, mcpConfigPath: req.mcpConfigPath, configKey: item.server })
             : null;
-          const tickets = [...codexNativeFileProofCandidates(item.id, item, req), ...(mcpCandidate ? [mcpCandidate] : [])]
+          const tickets = [...codexNativeFileProofCandidates(effects.qualify(item.id), item, req), ...(mcpCandidate ? [mcpCandidate] : [])]
             .map((candidate) => observeNativeFile(candidate))
             .filter((ticket): ticket is NativeFileProofTicket => Boolean(ticket));
           if (tickets.length > 0 && !nativeFileProofById.has(item.id)) nativeFileProofById.set(item.id, tickets);
@@ -988,6 +1032,7 @@ function runCodexProcess(
       } else if (ev.type === "turn.completed") {
         closeThinking();
         turnCompleted = true;
+        terminalObserved = true;
         if (ev.usage?.input_tokens != null) reportedInputTokens = ev.usage.input_tokens;
         if (ev.usage?.cached_input_tokens != null) reportedCachedInputTokens = ev.usage.cached_input_tokens;
         if (ev.usage?.output_tokens != null) {
@@ -1012,14 +1057,12 @@ function runCodexProcess(
          * 더하지 않는다(claude-code·byok 러너와 같은 규칙, 이중계상 금지).
          */
         const turnInput = deltaFromBaseline(reportedInputTokens, usageBaseline.input);
-        const turnOutput = deltaFromBaseline(reportedOutputTokens, usageBaseline.output);
-        if (turnInput != null && turnOutput != null) {
-          observedUsage = { inputTokens: turnInput, outputTokens: turnOutput };
-          events.onTerminalObservedUsage?.(observedUsage);
-        }
+        observedUsage = codexObservedTurnUsage({ inputTokens: reportedInputTokens,
+          outputTokens: reportedOutputTokens, cachedInputTokens: reportedCachedInputTokens }, usageBaseline);
+        if (observedUsage) events.onTerminalObservedUsage?.(observedUsage, runtimeAttemptId);
         const turnCached = deltaFromBaseline(reportedCachedInputTokens, usageBaseline.cachedInput);
         if (turnInput != null && turnInput > 0 && turnCached != null) {
-          // 캐시 히트율은 비용 판단의 절반이다 — 영수증 칸이 없으니 상태줄로 남긴다(byok 러너와 동일).
+          // Cached input is a measured subset of input and is retained in the receipt.
           events.onStatus(`[cache] read=${turnCached} fresh=${turnInput - turnCached} hit=${Math.round((turnCached / turnInput) * 100)}%`);
         }
       }
@@ -1038,6 +1081,7 @@ function runCodexProcess(
           handle(JSON.parse(line));
         } catch {
           // 비-JSON 라인(헤더 등) 무시
+          effects.uncertain("native-json-frame-invalid");
         }
       }
     };
@@ -1052,7 +1096,9 @@ function runCodexProcess(
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
-      reject(err);
+      if (stableContextDelivery) invalidateStableTurnContext(stableContextDelivery.identity);
+      effects.complete("process_error", false);
+      reject(req.signal?.aborted ? abortReasonError(req) : new RuntimeTurnUnsettledError(KIND, req.locale));
     });
     child.on("close", (code) => {
       // Pipe chunks can split a Korean UTF-8 code point. Decoding them
@@ -1064,6 +1110,8 @@ function runCodexProcess(
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
+      if (buffer.trim()) effects.uncertain("native-trailing-frame-unparsed");
+      effects.complete("process_closed", terminalObserved && code !== null && !req.signal?.aborted);
       let runnerFailure = resolveCodexRunFailure({
         code,
         text,
@@ -1082,6 +1130,14 @@ function runCodexProcess(
           runnerFailure = { kind: refusal.kind, message: refusal.message, runtime: "codex", source: "heuristic" };
         }
       }
+      // Exec owns one stdin request. Its completed native turn and exact thread
+      // identity acknowledge that request; spawn/write/thread.started alone do not.
+      if (code === 0 && !runnerFailure && turnCompleted && threadId && !req.signal?.aborted) {
+        acknowledgeStableTurnContext(stableContextDelivery,
+          { sessionId: threadId, acknowledgementId: `exec-turn-completed:${runtimeAttemptId}` });
+      } else if (stableContextDelivery) {
+        invalidateStableTurnContext(stableContextDelivery.identity);
+      }
       resolve({
         code,
         stderr,
@@ -1094,9 +1150,11 @@ function runCodexProcess(
         ...(observedUsage ? { observedUsage } : {}),
         ...(runnerFailure ? { failure: runnerFailure } : {}),
         turnStarted,
+        turnCompleted,
+        terminalObserved,
       });
     });
-  });
+  }));
 }
 
 /* ───────────────────────── 상주 경로 (`codex app-server`) ───────────────────────── */
@@ -1216,6 +1274,11 @@ export function codexToolEventFromItem(item: any, completed: boolean): {
     return [...paths];
   };
   switch (item.type) {
+    case "imageView":
+    case "ImageView":
+    case "image_view":
+      return { name: "view_image", args: asText({ path: item.path }), result: completed ? "completed" : undefined,
+        isError: completed && (item.status === "failed" || item.error != null) };
     case "commandExecution": {
       const failed = item.status === "failed" || item.status === "declined"
         || (typeof item.exitCode === "number" && item.exitCode !== 0);
@@ -1295,6 +1358,29 @@ export function codexToolEventFromItem(item: any, completed: boolean): {
   }
 }
 
+/** Native protocol types, not display-name allowlists. New item types leave coverage open. */
+export function codexNativeItemEffectCoverage(item: any): boolean {
+  if (!item || typeof item.type !== "string") return false;
+  if (["reasoning", "Reasoning", "agentMessage", "AgentMessage", "agent_message", "userMessage", "UserMessage", "plan", "contextCompaction", "error"].includes(item.type)) return true;
+  return Boolean(codexNativeOperationalItemId(item)) && (codexToolEventFromItem(item, false) !== null
+    || ["command_execution", "mcp_tool_call", "function_call", "file_change", "web_search"].includes(item.type));
+}
+export function codexNativeOperationalItemId(item: any): string | undefined {
+  if (!item || ["reasoning", "Reasoning", "agentMessage", "AgentMessage", "agent_message", "userMessage", "UserMessage", "plan", "contextCompaction", "error"].includes(item.type)) return undefined;
+  return typeof item.id === "string" && item.id.trim() ? item.id : undefined;
+}
+export function codexNativeOperationProgressCovered(params: any, threadId: string | null | undefined, turnId: string, operationStarted: (id: string) => boolean): boolean {
+  return typeof params?.threadId === "string" && params.threadId === threadId
+    && typeof params?.turnId === "string" && params.turnId === turnId && Boolean(turnId)
+    && typeof params?.itemId === "string" && Boolean(params.itemId) && operationStarted(params.itemId);
+}
+export function codexNativeItemMayOutliveTurn(item: any): boolean {
+  if (!item || !["commandExecution", "command_execution"].includes(item.type)) return false;
+  return item.background === true || item.sessionId != null || item.terminalSessionId != null
+    || item.status === "inProgress" || item.status === "in_progress"
+    || (typeof item.command === "string" && /(^|[^&])&([^&]|$)/.test(item.command));
+}
+
 interface ResidentTurnOutcome {
   /** 완주했다 — 이 결과를 그대로 돌려준다(성공이든 표식 실패든). */
   result?: RunnerResult;
@@ -1303,8 +1389,8 @@ interface ResidentTurnOutcome {
 }
 
 /**
- * 상주 턴 하나. 실패하면 세션을 버리고 `retryOneShot` 을 돌려준다 — 바깥은 기존 exec
- * 경로로 **한 번** 더 간다(그 경로는 상주를 쓰지 않으므로 무한 재시도가 불가능하다).
+ * A native turn may fall back to exec only before dispatch. A missing terminal
+ * receipt after dispatch is held for reconciliation, including tool-only turns.
  *
  * ★사용자에게는 아무 차이도 없어야 한다: 상태줄 문구는 기존 `[runtime-session]` 영수증과
  * 기존 resume/created 문구 그대로다. 상주는 속도·비용 최적화이지 연속성의 근거가 아니다
@@ -1324,10 +1410,9 @@ async function runCodexResidentTurn(input: {
   appliedEffort: string | null;
   observeNativeFile: NativeFileProofObserver;
 }): Promise<ResidentTurnOutcome> {
-  const { bin, req, events, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
+  const { bin, req, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
+  let events = input.events;
   const surfaceArgs = input.surfaceArgs ?? [];
-  const observeScienceTool = bindScienceNativeToolObserver(req);
-  const observeScienceFailure = bindScienceNativeFailureObserver(req);
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
   const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
   const cwd = req.cwd ?? agentRunCwd();
@@ -1344,7 +1429,7 @@ async function runCodexResidentTurn(input: {
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
    * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
    */
-  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...scienceCompactionArgs(req), ...surfaceArgs, ...mcpArgs];
+  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...(req.scienceController ? ["-c", "model_auto_compact_token_limit=150000"] : []), ...surfaceArgs, ...mcpArgs];
   const pool = codexSessionPool();
   const poolKey = codexPoolKey({
     chatId: req.approvalChatId ?? chatId,
@@ -1388,6 +1473,10 @@ async function runCodexResidentTurn(input: {
   }
 
   const session = lease.session;
+  const effects = createAdapterEffectLedger({ adapterKind: KIND, chatId: req.chatId, agentId: req.agentId }, events);
+  events = effects.events;
+  const observeScienceTool = bindScienceNativeToolObserver(req, effects.qualify);
+  const observeScienceFailure = bindScienceNativeFailureObserver(req, effects.qualify);
   const reusing = !lease.fresh && Boolean(session.threadId);
   const explicitResume = Boolean(req.runtimeSessionId);
   const modelChanged = Boolean(req.model && session.modelAcknowledgement?.requestedModel !== req.model);
@@ -1399,6 +1488,7 @@ async function runCodexResidentTurn(input: {
   const messageOrder: string[] = [];
   const messages = new Map<string, string>();
   const startedTools = new Set<string>();
+  const toolRequestReplay = new ToolRequestReplayGuard();
   const nativeFileProofById = new Map<string, NativeFileProofTicket[]>();
   const settleNativeFileProof = (toolId: string, isError: boolean): void => {
     const tickets = nativeFileProofById.get(toolId) ?? [];
@@ -1416,16 +1506,32 @@ async function runCodexResidentTurn(input: {
   let lastEmit = 0;
   let turnId = "";
   let confirmedTurnId = "";
+  let stableContextDelivery: StableTurnContextDelivery | undefined;
   let turnRequestInFlight = false;
+  let turnDispatchAttempted = false;
+  let terminalObserved = false;
+  const runtimeAttemptId = crypto.randomUUID();
+  let nativeThreadCreated = false;
+  let turnUsageBaseline: CodexUsageBaseline = { input: null, output: null, cachedInput: null };
   const pendingModelReroutes = new Map<string, { fromModel: string; toModel: string }>();
   /*
    * 사용량은 알림 콜백에서 채워진다 — 홀더 객체에 담는다(let 변수는 TS 흐름 분석이
    * 콜백 대입을 못 봐서 항상 null 로 좁혀진다).
    */
   const usage: {
-    last: { inputTokens: number; outputTokens: number } | null;
-    total: { outputTokens: number; inputTokens: number; cachedInputTokens: number } | null;
-  } = { last: null, total: null };
+    observed: ObservedTokenUsage | undefined;
+    total: { outputTokens: number; inputTokens?: number; cachedInputTokens?: number } | null;
+  } = { observed: undefined, total: null };
+  const persistTurnCounters = (): void => {
+    if (!session.threadId) return;
+    const total = terminalObserved ? usage.total : null;
+    if (!saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, {
+      agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
+      reportedOutputTokens: total?.outputTokens ?? null,
+      reportedInputTokens: total?.inputTokens ?? null,
+      reportedCachedInputTokens: total?.cachedInputTokens ?? null,
+    })) events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
+  };
   let failure: RunnerFailure | null = null;
   let interrupted = false;
   let settleTurn: ((reason: "completed" | "closed") => void) | null = null;
@@ -1480,6 +1586,25 @@ async function runCodexResidentTurn(input: {
     && params.threadId !== session.threadId;
 
   const onNotification = (method: string, params: any): void => {
+    if (params?.threadId === session.threadId && (method === "thread/compacted"
+      || ["thread/closed", "thread/deleted", "thread/archived"].includes(method)
+      || ((method === "item/started" || method === "item/completed")
+        && ["contextCompaction", "context_compaction", "compaction"].includes(String(params?.item?.type ?? ""))))) {
+      invalidateStableTurnContext({ chatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
+    }
+    if (method === "item/started" || method === "item/completed") {
+      if (fromOtherThread(params) || (confirmedTurnId && params?.turnId && params.turnId !== confirmedTurnId)) {
+        effects.uncertain("native-child-or-other-turn-uncovered"); return;
+      }
+      effects.frame(String(params?.item?.type ?? "unknown"), codexNativeItemEffectCoverage(params?.item), codexNativeOperationalItemId(params?.item));
+      if (method === "item/completed" && codexNativeItemMayOutliveTurn(params?.item)) effects.uncertain("native-background-operation");
+    } else if (["item/commandExecution/outputDelta", "item/fileChange/outputDelta", "item/mcpToolCall/progress"].includes(method)) {
+      const id = typeof params?.itemId === "string" ? params.itemId : undefined;
+      effects.frame(method, codexNativeOperationProgressCovered(params, session.threadId, confirmedTurnId, effects.operationStarted), id);
+    } else if (method.startsWith("item/") && !["item/agentMessage/delta", "item/reasoning/summaryTextDelta", "item/reasoning/textDelta",
+      "item/reasoning/summaryPartAdded", "item/plan/delta"].includes(method)) {
+      effects.frame(method, false);
+    }
     switch (method) {
       case "model/rerouted": {
         const reroutedTurnId = params?.turnId;
@@ -1505,6 +1630,8 @@ async function runCodexResidentTurn(input: {
         // 이 자리는 exec 경로와 같은 의미다 — 모델이 생각을 시작했다는 가장 이른 신호.
         if (typeof params?.turn?.id === "string" && params?.threadId === session.threadId
           && ((confirmedTurnId && params.turn.id === confirmedTurnId) || (!confirmedTurnId && turnRequestInFlight))) {
+          turnId = params.turn.id;
+          confirmedTurnId = params.turn.id;
           openThinking();
         }
         break;
@@ -1514,12 +1641,14 @@ async function runCodexResidentTurn(input: {
         if (item?.type === "reasoning") { if (!fromOtherThread(params)) openThinking(); break; }
         const tool = codexToolEventFromItem(item, false);
         if (tool) {
+          if (!toolRequestReplay.accept(String(item.id ?? ""), tool.name,
+            JSON.stringify(item), JSON.stringify([params?.threadId ?? null, params?.turnId ?? confirmedTurnId ?? null]))) break;
           closeThinking();
           if (bodyText()) emitPartial(true);
           startedTools.add(String(item.id ?? ""));
           events.onTool?.(tool.name, tool.args, undefined, String(item.id ?? ""), false);
           const itemId = String(item.id ?? "");
-          const tickets = codexNativeFileProofCandidates(itemId, item, req)
+          const tickets = codexNativeFileProofCandidates(effects.qualify(itemId), item, req)
             .map((candidate) => observeNativeFile(candidate))
             .filter((ticket): ticket is NativeFileProofTicket => Boolean(ticket));
           if (itemId && tickets.length > 0 && !nativeFileProofById.has(itemId)) nativeFileProofById.set(itemId, tickets);
@@ -1605,24 +1734,20 @@ async function runCodexResidentTurn(input: {
         break;
       }
       case "thread/tokenUsage/updated": {
-        // A sub-agent thread reports its own usage on this connection. Taking it
-        // would overwrite this turn's observed usage (the allocation receipt and
-        // serving admission read usage.last) with the child's numbers.
+        // The notification's total is thread cumulative. `last` is only the
+        // latest response inside that turn, including its tool loop.
         if (fromOtherThread(params)) break;
-        // `last` 는 **이번 턴**, `total` 은 스레드 누적이다(실측). exec 경로가 누적에서
-        // 빼서 구하던 값을 프로토콜이 직접 준다 — baseline 산수가 필요 없다.
+        if (confirmedTurnId && typeof params?.turnId === "string" && params.turnId !== confirmedTurnId) break;
         const last = params?.tokenUsage?.last;
         const total = params?.tokenUsage?.total;
-        if (last && typeof last.inputTokens === "number" && typeof last.outputTokens === "number") {
-          usage.last = { inputTokens: last.inputTokens, outputTokens: last.outputTokens };
-          events.onUsage?.(last.outputTokens);
-        }
-        if (total && typeof total.outputTokens === "number") {
+        if (total && Number.isSafeInteger(total.outputTokens) && total.outputTokens >= 0) {
           usage.total = {
             outputTokens: total.outputTokens,
-            inputTokens: typeof total.inputTokens === "number" ? total.inputTokens : 0,
-            cachedInputTokens: typeof total.cachedInputTokens === "number" ? total.cachedInputTokens : 0,
+            ...(Number.isSafeInteger(total.inputTokens) && total.inputTokens >= 0 ? { inputTokens: total.inputTokens } : {}),
+            ...(Number.isSafeInteger(total.cachedInputTokens) && total.cachedInputTokens >= 0 ? { cachedInputTokens: total.cachedInputTokens } : {}),
           };
+          usage.observed = codexObservedTurnUsage(usage.total, turnUsageBaseline);
+          if (usage.observed) events.onUsage?.(usage.observed.outputTokens);
         }
         if (last && typeof last.inputTokens === "number" && typeof last.cachedInputTokens === "number" && last.inputTokens > 0) {
           events.onStatus(`[cache] read=${last.cachedInputTokens} fresh=${last.inputTokens - last.cachedInputTokens} hit=${Math.round((last.cachedInputTokens / last.inputTokens) * 100)}%`);
@@ -1655,10 +1780,8 @@ async function runCodexResidentTurn(input: {
       case "turn/completed": {
         const turn = params?.turn;
         if (!turn || fromOtherThread(params) || (turnId && String(turn.id ?? "") !== turnId)) break;
-        if (usage.last && Number.isSafeInteger(usage.last.inputTokens) && usage.last.inputTokens >= 0
-          && Number.isSafeInteger(usage.last.outputTokens) && usage.last.outputTokens >= 0) {
-          events.onTerminalObservedUsage?.(usage.last);
-        }
+        terminalObserved = true;
+        if (usage.observed) events.onTerminalObservedUsage?.(usage.observed, runtimeAttemptId);
         workforceObservation?.completeTurn(params);
         if (turn.status === "interrupted") interrupted = true;
         failure = codexFailureFromTurn(turn) ?? failure;
@@ -1854,6 +1977,7 @@ async function runCodexResidentTurn(input: {
   };
   req.signal?.addEventListener("abort", onAbort, { once: true });
 
+  return effects.withScope(async () => {
   try {
     session.active = sink;
     if (req.workforceRuntimeToolGrant) workforceObservation = new CodexWorkforceObservation(req, session.init, req.workforceRuntimeToolGrant.canonicalConfigSha256);
@@ -1939,6 +2063,7 @@ async function runCodexResidentTurn(input: {
         const id = started.thread.id as string;
         workforceObservation?.acknowledgeThread(started, modelAcknowledgement, policy, cwd, approvalsReviewer);
         session.threadId = id;
+        nativeThreadCreated = true;
         session.modelAcknowledgement = modelAcknowledgement;
       }
       // 버전 스큐 관측 — 이 세션이 어떤 app-server 였는지 영수증에 남긴다.
@@ -1955,13 +2080,27 @@ async function runCodexResidentTurn(input: {
     }
     if (modelSelectionError) throw modelSelectionError;
 
+    const storedUsageSession = getRuntimeSession(chatId, KIND, runtimeSessionOwnerId,
+      { isolateOwner: isolateRuntimeSessionOwner });
+    turnUsageBaseline = nativeThreadCreated ? { input: 0, output: 0, cachedInput: 0 }
+      : storedUsageSession?.sessionId === session.threadId && storedUsageSession.fingerprint === fingerprint
+        ? { input: storedUsageSession.reportedInputTokens, output: storedUsageSession.reportedOutputTokens,
+            cachedInput: storedUsageSession.reportedCachedInputTokens }
+        : { input: null, output: null, cachedInput: null };
+
     /* ── 턴 ── */
     // 새 스레드면 시스템+히스토리 시드, 이어가는 스레드면 사용자 턴만(+gap/turn 컨텍스트).
     const continuing = reusing || Boolean(resumeThreadId && session.threadId === resumeThreadId);
+    // Fresh seeding remains untracked: a completed turn/session id alone cannot
+    // prove retention of the initial context through native compaction.
+    const resumeContext = continuing ? dedupeStableTurnContext({ chatId: req.chatId, runtimeKind: KIND,
+      sessionId: session.threadId, contextFingerprint: stableContextFingerprint(req, fingerprint, [bin, cwd, mcpArgs, surfaceArgs, appliedEffort]),
+      turnContext: req.turnContext, stableBlocks: req.turnContextStable }) : undefined;
+    stableContextDelivery = resumeContext?.delivery;
     const promptText = continuing
       ? composeResumeTurnPrompt(
         req.userPrompt,
-        [gapContext, dedupeStableTurnContext({ chatId: req.chatId, runtimeKind: "codex", sessionId: String(session.threadId ?? resumeThreadId ?? ""), turnContext: req.turnContext, stableBlocks: req.turnContextStable }).text].filter(Boolean).join("\n\n"),
+        [gapContext, resumeContext?.text].filter(Boolean).join("\n\n"),
         req.locale,
       )
       : buildResidentInitialTurnPrompt(req);
@@ -1984,6 +2123,8 @@ async function runCodexResidentTurn(input: {
       settleTurn = (reason) => { settleTurn = null; resolve(reason); };
     });
     let started: any;
+    turnDispatchAttempted = true;
+    events.onRuntimeAttemptStarted?.(runtimeAttemptId);
     turnRequestInFlight = true;
     try {
       started = await session.conn.request("turn/start", turnParams, { timeoutMs: 120_000, signal: req.signal });
@@ -1991,9 +2132,10 @@ async function runCodexResidentTurn(input: {
       turnRequestInFlight = false;
     }
     workforceObservation?.startTurn(started);
-    if (typeof started?.turn?.id === "string") {
+    if (typeof started?.turn?.id === "string" && started.turn.id.trim()) {
       turnId = started.turn.id;
       confirmedTurnId = started.turn.id;
+      acknowledgeStableTurnContext(stableContextDelivery, { sessionId: session.threadId, acknowledgementId: started.turn.id });
     }
     const bufferedReroute = confirmedTurnId ? pendingModelReroutes.get(confirmedTurnId) : undefined;
     pendingModelReroutes.clear();
@@ -2009,38 +2151,18 @@ async function runCodexResidentTurn(input: {
 
     if (req.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → 이어지는 steering 메시지가 문맥을 유지한다.
-      saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
-        ...(usage.total ? {
-          reportedOutputTokens: usage.total.outputTokens,
-          reportedInputTokens: usage.total.inputTokens,
-          reportedCachedInputTokens: usage.total.cachedInputTokens,
-        } : {}),
-      });
+      persistTurnCounters();
       broken = true;
       throw abortReasonError(req);
     }
     if (reason === "closed") {
-      // 전송이 죽었다 — 우리가 물려준 세션의 문제다. 조용히 버리고 1회성으로 한 번 더.
+      // A closed transport cannot prove that a dispatched tool-only turn did nothing.
       broken = true;
       if (looksLikeMissingAppServer(session.conn.lastStderr, new Error(closedReason))) {
         markCodexAppServerUnsupported(closedReason || session.conn.lastStderr);
         events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
       }
-      if (workforceObservation) throw new Error("workforce_codex_observation_transport_closed");
-      if (!emitted && !bodyText()) return { retryOneShot: true };
-      return {
-        result: {
-          text: bodyText().trim(),
-          failure: failure ?? {
-            kind: "empty",
-            message: (closedReason || session.conn.lastStderr.slice(-500) || "codex app-server closed mid-turn"),
-            runtime: KIND,
-            source: "marker",
-          },
-          sessionId: session.threadId,
-          appliedEffort,
-        },
-      };
+      throw new RuntimeTurnUnsettledError(KIND, req.locale);
     }
     if (interrupted) {
       broken = true;
@@ -2069,15 +2191,7 @@ async function runCodexResidentTurn(input: {
       const refusal = detectRuntimeRefusal(text);
       if (refusal) failure = { kind: refusal.kind, message: refusal.message, runtime: KIND, source: "heuristic" };
     }
-    if (!saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
-      ...(usage.total ? {
-        reportedOutputTokens: usage.total.outputTokens,
-        reportedInputTokens: usage.total.inputTokens,
-        reportedCachedInputTokens: usage.total.cachedInputTokens,
-      } : {}),
-    })) {
-      events.onStatus(`[runtime-session] store_failed kind=${KIND}`);
-    }
+    persistTurnCounters();
     if (!text && !failure) {
       // 빈 답은 실패다 — 표식으로 말한다(텍스트 길이로 판정하는 소비자를 만들지 않는다).
       return {
@@ -2094,21 +2208,26 @@ async function runCodexResidentTurn(input: {
         text,
         ...(failure ? { failure } : {}),
         sessionId: session.threadId,
-        ...(usage.last ? { tokens: usage.last.outputTokens, observedUsage: usage.last } : {}),
+        tokens: usage.observed?.outputTokens ?? Math.ceil(estChars / 4),
+        ...(usage.observed ? { observedUsage: usage.observed } : {}),
         ...(workforcePermissionEnforcement ? { workforcePermissionEnforcement } : {}),
         appliedEffort,
       },
     };
   } catch (err) {
     broken = true;
-    if (req.signal?.aborted || req.workforceRuntimeToolGrant) throw err;
+    if (turnDispatchAttempted) persistTurnCounters();
+    if (req.signal?.aborted) throw err;
+    if (turnDispatchAttempted && !terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale);
+    if (req.workforceRuntimeToolGrant) throw err;
     if (err instanceof CodexModelSelectionError) throw err;
     if (err instanceof CodexSessionContinuityError) throw err;
     if (looksLikeMissingAppServer(session.conn?.lastStderr ?? "", err)) {
       markCodexAppServerUnsupported(err instanceof Error ? err.message : String(err));
       events.onStatus(`[residency] disabled kind=${KIND} reason=app-server-unsupported`);
     }
-    // 프로토콜 이상 — 화면에 아무것도 안 나갔으면 1회성 경로로 한 번 더(사용자에겐 무차이).
+    // Empty visible text is not evidence of no dispatch or no external action.
+    if (turnDispatchAttempted) throw err;
     if (!emitted && !bodyText()) return { retryOneShot: true };
     throw err;
   } finally {
@@ -2124,9 +2243,14 @@ async function runCodexResidentTurn(input: {
     }
     // 수신자를 먼저 뗀다 — 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다.
     session.active = null;
+    if (broken || req.signal?.aborted || failure || interrupted || (turnDispatchAttempted && !terminalObserved)) {
+      invalidateStableTurnContext({ chatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
+    }
+    effects.complete(turnDispatchAttempted ? "resident_turn_closed" : "not_dispatched", (!turnDispatchAttempted || terminalObserved) && !req.signal?.aborted && (!turnDispatchAttempted || !broken));
     if (broken || req.signal?.aborted) pool.discard(lease);
     else pool.release(lease);
   }
+  });
 }
 
 /**
@@ -2175,6 +2299,7 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
     const run = await runCodexProcess(bin, args, req.userPrompt, { ...req, env: { ...(req.env ?? process.env), CODEX_HOME: home } },
       events, { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
     if (req.signal?.aborted) throw abortReasonError(req);
+    if (!run.terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale);
     if (run.code !== 0 && !run.text.trim()) throw new Error(`codex CLI exit ${run.code}${run.stderr ? `\n${run.stderr.slice(0, 500)}` : ""}`);
     return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
       ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}) };
@@ -2305,7 +2430,7 @@ export const runCodex: Runner = async (
   // reasoning summary 아이템을 켠다 — 실측(codex 0.147): 이 설정 없이는 `--json`에
   // reasoning 아이템이 0건이라 화면이 "생각 중" 외에 아무것도 말할 수 없었다. 켜면
   // 모델이 낸 헤드라인("**Preparing file count command execution**")이 아이템으로 온다.
-  modelArgs.push("-c", "model_reasoning_summary=auto", ...scienceCompactionArgs(runReq));
+  modelArgs.push("-c", "model_reasoning_summary=auto", ...(runReq.scienceController ? ["-c", "model_auto_compact_token_limit=150000"] : []));
   let appliedEffort: string | null = null;
   if (runReq.model) modelArgs.push("--model", runReq.model);
   // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를
@@ -2377,8 +2502,8 @@ export const runCodex: Runner = async (
    *
    * 대화에 속한(= chatId·지문이 있는) 실행만 풀에서 빌린다. chatId 없는 일회성 실행
    * (Build 등)은 이어 쓸 다음 턴이 정의상 없으므로 예전 그대로 `codex exec` 로 간다.
-   * 상주 경로가 열리지 않거나 프로토콜 이상으로 실패하면 **조용히** 아래 exec 경로가
-   * 이 턴을 한 번 처리한다 — 사용자 화면에는 아무 차이도 남지 않아야 한다.
+   * A startup failure before dispatch may use exec. A dispatched turn without
+   * a terminal receipt stays uncertain and must not be replayed automatically.
    */
   if (
     !freshReason &&
@@ -2475,26 +2600,51 @@ export const runCodex: Runner = async (
     const gapContext = !runReq.runtimeSessionId && storedSessionId && existing
       ? renderGapContext(unseenHistoryGap(runReq.history, existing.updatedAt), runReq.locale)
       : "";
+    const resumeContext = dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND,
+      sessionId: resumeSessionId!, contextFingerprint: stableContextFingerprint(runReq, fingerprint,
+        [bin, runReq.cwd ?? agentRunCwd(), mcpArgs, browserOnlyConfigArgs, appliedEffort]),
+      turnContext: runReq.turnContext, stableBlocks: runReq.turnContextStable });
     // resume 턴: 시스템 프롬프트가 재전송되지 않으므로 gap+턴 컨텍스트를 사용자 메시지에 싣는다.
-    const r = await runCodexProcess(
+    let r: CodexRunResult;
+    try {
+      r = await runCodexProcess(
       bin,
       args,
       composeResumeTurnPrompt(
         runReq.userPrompt,
-        [gapContext, dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: "codex", sessionId: String(resumeSessionId ?? ""), turnContext: runReq.turnContext, stableBlocks: runReq.turnContextStable }).text].filter(Boolean).join("\n\n"),
+        [gapContext, resumeContext.text].filter(Boolean).join("\n\n"),
         runReq.locale,
       ),
       runReq,
       events,
       usageBaseline,
       observeNativeFile,
-    );
+      resumeContext.delivery,
+      );
+    } catch (error) {
+      if (runReq.chatId && fingerprint && persistSession()) {
+        saveRuntimeSession(runReq.chatId, KIND, resumeSessionId!, fingerprint, {
+          agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
+          reportedOutputTokens: null, reportedInputTokens: null, reportedCachedInputTokens: null,
+        });
+      }
+      throw error;
+    }
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.
       if (runReq.chatId && fingerprint && r.threadId && persistSession()) {
         saveRuntimeSession(runReq.chatId, KIND, r.threadId, fingerprint, { ...codexUsageCounters(r), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
       }
       throw abortReasonError(runReq);
+    }
+    if (!r.terminalObserved) {
+      if (runReq.chatId && fingerprint && persistSession()) {
+        saveRuntimeSession(runReq.chatId, KIND, r.threadId ?? resumeSessionId!, fingerprint, {
+          agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
+          reportedOutputTokens: null, reportedInputTokens: null, reportedCachedInputTokens: null,
+        });
+      }
+      throw new RuntimeTurnUnsettledError(KIND, runReq.locale);
     }
     if (r.code === 0) {
       if (runReq.chatId && fingerprint && r.threadId && persistSession()) {
@@ -2523,33 +2673,17 @@ export const runCodex: Runner = async (
       throw new Error(`codex CLI exit ${r.code}${r.stderr ? `\n${r.stderr.slice(0, 500)}` : ""}`);
     }
     events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${r.code}`);
-    if (runReq.unattended) {
-      // A turn that started may already have acted; replaying it in a fresh
-      // session could repeat an external action. Report what the turn said.
-      if (r.turnStarted) {
-        if (r.failure) {
-          return {
-            text: r.text.trim(),
-            failure: r.failure,
-            sessionId: r.threadId ?? resumeSessionId,
-            tokens: r.tokens,
-            ...(r.observedUsage ? { observedUsage: r.observedUsage } : {}),
-            appliedEffort,
-          };
-        }
-        throw new Error(`codex CLI exit ${r.code} after the resumed turn started; not replaying it in a fresh session${r.stderr ? `\n${r.stderr.slice(0, 500)}` : ""}`);
-      }
-      // Nothing ran. Continue in a fresh session; the automation prompt already
-      // carries the host-recorded continuity capsule, so no human is asked.
-      freshReason = classifyCodexResumeFailure(r.stderr);
-      events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
-      if (runReq.chatId && freshSessionReplacesStored(freshReason)) {
-        clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
-      }
-    } else if (runReq.chatId) {
-      // Interactive chat may recover with the full durable history after an explicit receipt.
-      clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
-    }
+    // stdin was dispatched. Neither an empty answer nor a missing started event
+    // proves that the failed process made no model/tool call. Preserve the
+    // original session and let Main reconcile instead of replaying it fresh.
+    return {
+      text: r.text.trim(),
+      failure: r.failure ?? { kind: "exit", message: `codex CLI exit ${r.code}`, runtime: KIND, source: "exit", ...(r.code != null ? { exitCode: r.code } : {}) },
+      sessionId: r.threadId ?? resumeSessionId,
+      tokens: r.tokens,
+      ...(r.observedUsage ? { observedUsage: r.observedUsage } : {}),
+      appliedEffort,
+    };
   }
 
   // CREATE: 시스템 프롬프트 + 히스토리 + user를 stdin으로 보내 새 세션을 시드한다.
@@ -2572,6 +2706,15 @@ export const runCodex: Runner = async (
       saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, { ...codexUsageCounters(created), agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
     }
     throw abortReasonError(runReq);
+  }
+  if (!created.terminalObserved) {
+    if (runReq.chatId && fingerprint && created.threadId && persistSession()) {
+      saveRuntimeSession(runReq.chatId, KIND, created.threadId, fingerprint, {
+        agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
+        reportedOutputTokens: null, reportedInputTokens: null, reportedCachedInputTokens: null,
+      });
+    }
+    throw new RuntimeTurnUnsettledError(KIND, runReq.locale);
   }
   if (created.code === 0) {
     if (runReq.chatId && fingerprint && created.threadId && persistSession()) {

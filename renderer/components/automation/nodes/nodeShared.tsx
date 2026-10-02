@@ -10,6 +10,7 @@ export const NODE_WIDTH = 216;
 /** 노드 라이브 실행 상태별 테두리/글로우 색(설계 §5 P2 캔버스 오버레이). */
 export const RUN_STATE_COLOR: Record<string, string> = {
   running: "var(--accent)",
+  needs_input: "var(--warn)",
   done: "var(--ok, var(--ok))",
   failed: "var(--danger, var(--danger))",
   skipped: "var(--muted-deep)",
@@ -154,6 +155,9 @@ export function NodeCard(props: {
     >
       {/* ★"실행 중"만 보이면 사람은 멈춘 걸로 읽는다. 지금 무엇을 하는 중인지를 그 자리에 쓴다.
           실패가 아니라 상태 변화이므로 색을 쓰지 않고 조용히 둔다(커넥터 C44). */}
+      {props.runState === "needs_input" ? <div data-testid="node-login-wait" style={{ fontSize: 10, color: "var(--warn)", marginBottom: 6 }}>
+        {locale === "ko" ? "로그인 복원 대기" : "Waiting for login"}
+      </div> : null}
       {isRunning && props.progress ? (
         <div
           data-testid="node-progress"

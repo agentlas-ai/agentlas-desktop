@@ -4,7 +4,8 @@ import { buildMcpConfigFile, type BrowserApprovalScope, type McpConfigResult } f
 import { listInstalledServers } from "../mcp-tools/registry";
 import { getCatalogEntry } from "../mcp-tools/catalog";
 import { mcpServerConfigurationDigest } from "../mcp-tools/prepared-transport";
-import { loadMainToolInventory, runMainToolDispatch, type ResolvedTool } from "../runtime/local-tool-loop";
+import { loadMainToolInventory, runMainToolDispatch, type ResolvedTool, type MainToolDispatchResult } from "../runtime/local-tool-loop";
+import { TOOL_RESULT_READ, installToolResultContext, projectToolResult, clearToolResultContext } from "../runtime/tool-result-context";
 import { getEnvConfigurationRevision } from "../secrets/vault";
 import { getDb } from "../store/db";
 import { recordRunEvent } from "../store/run-events";
@@ -75,7 +76,53 @@ interface Binding {
   serverInventories: Map<string, string>;
   preparations: Map<string, Promise<Inventory>>;
   pages: Map<string, { inventoryId: string; offset: number }>;
-  calls: Map<string, { signature: string; result: Promise<{ content: unknown; isError?: boolean }> }>;
+  resultContext?: Map<string, ResolvedTool>;
+  calls: Map<string, { signature: string; result: Promise<ScienceDesktopResult> }>;
+}
+
+interface ScienceDesktopResult {
+  content: unknown; isError?: boolean;
+  visualProjection?: { shown: number; observed: number; incomplete: boolean; byteLimit: number;
+    references: Array<{ mimeType: string; contentSha256: string; bytes: number }>; omittedReferences: number };
+  visualResults?: Array<{ mimeType: "image/png" | "image/jpeg" | "image/webp" | "image/gif"; dataBase64: string; contentSha256: string }>;
+}
+const resultScope = (binding: Binding) => ({ runtimeKind: binding.runtimeKind, sessionKey: `science:${runId(binding.scope)}`,
+  permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId, agentId: binding.agentId });
+function resultTools(binding: Binding, loaded: Awaited<ReturnType<typeof loadMainToolInventory>>) {
+  const tools = installToolResultContext(loaded.tools, loaded.byName, resultScope(binding), true, binding.resultContext);
+  binding.resultContext ??= loaded.byName;
+  return tools;
+}
+/** Preserve exact decoded producer JSON and Main artifact paths; preview only bounded image bytes. */
+function projectDesktopResult(binding: Binding, inventory: Inventory, dispatched: MainToolDispatchResult, toolCallId: string): ScienceDesktopResult {
+  const visuals: NonNullable<ScienceDesktopResult["visualResults"]> = [];
+  const references: NonNullable<ScienceDesktopResult["visualProjection"]>["references"] = []; let bytes = 0, observed = 0;
+  const addImage = (mimeType: unknown, dataBase64: unknown) => {
+    if (typeof mimeType !== "string" || !mimeType.startsWith("image/") || typeof dataBase64 !== "string" || !/^[A-Za-z0-9+/=]+$/.test(dataBase64)) return;
+    observed++;
+    const buffer = Buffer.from(dataBase64, "base64");
+    const contentSha256 = createHash("sha256").update(buffer).digest("hex");
+    if (references.length < 16) references.push({ mimeType, contentSha256, bytes: buffer.length });
+    if (mimeType !== "image/png" && mimeType !== "image/jpeg" && mimeType !== "image/webp" && mimeType !== "image/gif") return;
+    if (visuals.length >= 4 || bytes + buffer.length > 1024 * 1024) return;
+    bytes += buffer.length; visuals.push({ mimeType, dataBase64, contentSha256 });
+  };
+  if (dispatched.rawMcpResult) {
+    const blocks = dispatched.rawMcpResult.content;
+    if (Array.isArray(blocks)) for (const block of blocks) if (block?.type === "image") addImage(block.mimeType, block.data);
+  } else if (dispatched.visionMessage && Array.isArray(dispatched.visionMessage.content)) {
+    for (const block of dispatched.visionMessage.content) if (block.type === "image_url") {
+      const match = /^data:(image\/[^;,]+);base64,([A-Za-z0-9+/=]+)$/.exec(block.image_url.url); if (match) addImage(match[1], match[2]);
+    }
+  }
+  const exact = { schema: "agentlas.science-desktop-result.v1", isError: dispatched.isError,
+    result: dispatched.rawMcpResult ?? { content: [{ type: "text", text: dispatched.content }], isError: dispatched.isError,
+      ...(dispatched.visionMessage ? { visionMessage: dispatched.visionMessage } : {}) },
+    artifactPaths: dispatched.artifactPaths ?? [], semanticSupport: "unchecked" };
+  const projected = projectToolResult(inventory.byName, resultScope(binding), JSON.stringify(exact), toolCallId, dispatched.isError, true);
+  return { content: JSON.parse(projected), isError: dispatched.isError, visualProjection: { shown: visuals.length, observed, incomplete: observed !== visuals.length, byteLimit: 1024 * 1024,
+    references, omittedReferences: observed - references.length },
+    ...(visuals.length ? { visualResults: visuals } : {}) };
 }
 
 const bindings = new Map<string, Binding>();
@@ -201,6 +248,7 @@ function bindDesktopToolScope(scope: DesktopToolScope, options: {
     binding.closed = true;
     bindings.delete(key);
     for (const inventory of binding.inventories.values()) inventory.config?.cleanup?.();
+    if (binding.resultContext) clearToolResultContext(binding.resultContext);
     binding.inventories.clear();
     binding.preparations.clear();
     binding.pages.clear();
@@ -252,11 +300,11 @@ export const scienceDesktopTools = {
       if (!builtin) {
         const loaded = await loadMainToolInventory(undefined, binding.cwd, binding.permission, false, false, binding.signal);
         current(scope);
-        const tools = loaded.tools.map(tool => ({ name: tool.function.name,
+        const tools = resultTools(binding, loaded).map(tool => ({ name: tool.function.name,
           description: (tool.function.description ?? "").slice(0, 2_000),
           inputSchema: tool.function.parameters as Record<string, unknown> }));
-        if (tools.some(tool => loaded.byName.get(tool.name)?.kind !== "builtin"
-          || JSON.stringify(tool.inputSchema).length > 32_768)) throw new Error("science_desktop_tool_schema_invalid");
+        if (tools.some(tool => tool.name !== TOOL_RESULT_READ && (loaded.byName.get(tool.name)?.kind !== "builtin"
+          || JSON.stringify(tool.inputSchema).length > 32_768))) throw new Error("science_desktop_tool_schema_invalid");
         builtin = { id: randomUUID(), kind: "builtin", serverId: BUILTIN_SERVER_ID,
           serverDigest: "", envRevision: 0, tools, byName: loaded.byName };
         binding.inventories.set(builtin.id, builtin);
@@ -289,11 +337,11 @@ export const scienceDesktopTools = {
             current(scope);
             const loaded = await loadMainToolInventory(config.configPath, undefined, "read", false, false, binding.signal);
             current(scope);
-            const tools = loaded.tools.map(tool => ({ name: tool.function.name,
+            const tools = resultTools(binding, loaded).map(tool => ({ name: tool.function.name,
               description: (tool.function.description ?? "").slice(0, 2_000),
               inputSchema: tool.function.parameters as Record<string, unknown> }));
             if (tools.some(tool => !/^[A-Za-z0-9_-]{1,128}$/.test(tool.name)
-              || !loaded.byName.has(tool.name) || loaded.byName.get(tool.name)?.kind !== "mcp"
+              || tool.name !== TOOL_RESULT_READ && (!loaded.byName.has(tool.name) || loaded.byName.get(tool.name)?.kind !== "mcp")
               || !tool.inputSchema || Array.isArray(tool.inputSchema) || typeof tool.inputSchema !== "object"
               || JSON.stringify(tool.inputSchema).length > 32_768))
               throw new Error("science_desktop_tool_schema_invalid");
@@ -321,11 +369,12 @@ export const scienceDesktopTools = {
 
   async call(scope: DesktopToolScope, input: {
     inventoryId: string; name: string; arguments: Record<string, unknown>; toolCallId: string;
-  }): Promise<{ content: unknown; isError?: boolean }> {
+  }): Promise<ScienceDesktopResult> {
     const binding = current(scope);
     const inventory = binding.inventories.get(input.inventoryId);
-    if (!inventory || !inventory.byName.has(input.name)
-      || inventory.byName.get(input.name)?.kind !== inventory.kind
+    const reader = input.name === TOOL_RESULT_READ;
+    if (!inventory || (!reader && (!inventory.byName.has(input.name)
+      || inventory.byName.get(input.name)?.kind !== inventory.kind))
       || !inventory.tools.some(tool => tool.name === input.name))
       throw new Error("science_desktop_tool_inventory_stale");
     assertInventoryCurrent(scope, inventory);
@@ -335,6 +384,14 @@ export const scienceDesktopTools = {
       throw new Error("science_desktop_tool_call_id_invalid");
     const argumentsJson = JSON.stringify(input.arguments);
     if (argumentsJson.length > 131_072) throw new Error("science_desktop_tool_arguments_too_large");
+    if (reader) {
+      // Observation only: same approval/current scope checks, no external-effect marker or replay cache.
+      const page = await runMainToolDispatch(inventory.byName,
+        { providerCallId: input.toolCallId, toolName: input.name, arguments: argumentsJson }, { onPartial: () => {}, onStatus: () => {} },
+        { ...resultScope(binding), unattended: true, signal: binding.signal,
+          assertCurrent: () => { assertInventoryCurrent(scope, inventory); } });
+      return { content: page.isError ? page.content : JSON.parse(page.content), isError: page.isError };
+    }
     const signature = JSON.stringify([input.inventoryId, input.name, argumentsJson]);
     const prior = binding.calls.get(input.toolCallId);
     if (prior) {
@@ -368,11 +425,18 @@ export const scienceDesktopTools = {
         { onStatus: () => {}, onPartial: () => {} },
         { runtimeKind: binding.runtimeKind, sessionKey: `science:${runId(scope)}`,
           permission: binding.permission, cwd: binding.cwd, chatId: binding.chatId,
-          agentId: binding.agentId, unattended: true, signal: binding.signal,
+          agentId: binding.agentId, unattended: true, signal: binding.signal, retainMcpToolResult: true,
           assertCurrent: () => { assertInventoryCurrent(scope, inventory); } });
-      return { content: dispatched.content, isError: dispatched.isError };
+      const projected = projectDesktopResult(binding, inventory, dispatched, input.toolCallId);
+      recordRunEvent({ runId: runId(scope), chatId: binding.chatId,
+        kind: "science_desktop_tool_result_received", sourceEventId: `science-desktop-tool:${input.toolCallId}:result`,
+        payload: { toolCallId: input.toolCallId, signatureSha256, producerIsError: dispatched.isError,
+          delivery: (projected.content as { retained?: boolean }).retained === false ? "retention-unavailable" : "projected",
+          producerResponseSha256: createHash("sha256").update(JSON.stringify(dispatched.rawMcpResult ?? { content: dispatched.content, artifactPaths: dispatched.artifactPaths ?? [] })).digest("hex") } });
+      return projected;
     })();
     binding.calls.set(input.toolCallId, { signature, result });
+    if (binding.calls.size > 128) binding.calls.delete(binding.calls.keys().next().value!);
     return result;
   },
 };

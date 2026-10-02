@@ -22,3 +22,42 @@ export const QUOTA_EXHAUSTED_PERCENT = 100;
 export function quotaExhausted(usedPercent: number | null | undefined): boolean {
   return typeof usedPercent === "number" && Number.isFinite(usedPercent) && usedPercent >= QUOTA_EXHAUSTED_PERCENT;
 }
+
+/** Accept only the normalized timestamp carried by Main's typed failure. No
+ * provider prose or elapsed-time guess may establish a reset time. */
+export function quotaRetryAfterAt(value: unknown): string | null {
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/u.test(value)) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) && new Date(ms).toISOString() === value ? value : null;
+}
+
+/** Display-only provider observation. It never changes cooldowns, schedules,
+ * or permission to resume an action whose outside effect is unresolved. */
+export function formatRuntimeQuotaReset(
+  retryAfterAt: unknown, locale: "ko" | "en", timeZone?: string, now = Date.now(),
+): string | null {
+  const at = quotaRetryAfterAt(retryAfterAt);
+  if (!at) return null;
+  let zone = timeZone || Intl.DateTimeFormat().resolvedOptions().timeZone;
+  let formatted: string;
+  const options: Intl.DateTimeFormatOptions = { year: "numeric", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" };
+  try { formatted = new Intl.DateTimeFormat(locale === "ko" ? "ko-KR" : "en-US", { ...options, timeZone: zone }).format(new Date(at)); }
+  catch { zone = "UTC"; formatted = new Intl.DateTimeFormat(locale === "ko" ? "ko-KR" : "en-US", { ...options, timeZone: zone }).format(new Date(at)); }
+  const elapsed = Date.parse(at) <= now;
+  return locale === "ko"
+    ? `제공자가 안내한 한도 재개 시각: ${formatted} (${zone}).${elapsed ? " 이 시각은 지났으며 현재 사용 가능 여부는 확인되지 않았습니다." : ""}`
+    : `Provider-reported quota reset: ${formatted} (${zone}).${elapsed ? " That time has passed; current availability has not been verified." : ""}`;
+}
+
+export function runtimeQuotaFailureMessage(input: {
+  runtime: string; locale: "ko" | "en"; retryAfterAt?: unknown; unattended: boolean; timeZone?: string; now?: number;
+}): string {
+  const ko = input.locale === "ko";
+  const reset = formatRuntimeQuotaReset(input.retryAfterAt, input.locale, input.timeZone, input.now);
+  const message = input.unattended
+    ? ko ? `${input.runtime} 사용 한도로 백그라운드 실행이 멈췄습니다. 이번 실행의 결과와 실행 모델 상태를 확인하세요.`
+      : `This background run stopped at ${input.runtime}'s usage limit. Review this run's recorded results and runtime status.`
+    : ko ? `${input.runtime} 사용 한도가 찼습니다. 다른 모델을 선택하거나 한도 상태를 확인하세요.`
+      : `${input.runtime} has hit its usage limit. Choose another model or check its quota status.`;
+  return [message, reset].filter(Boolean).join(" ");
+}

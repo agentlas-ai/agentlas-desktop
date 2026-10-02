@@ -1,3 +1,5 @@
+import { receiptSettlesAttempts } from "../long-run/attempt-effect-receipt";
+import { isPredispatchApprovalRefusal } from "../../shared/tool-failure";
 import { verifyScienceSchemaRejection, type ScienceSchemaRejectionSettlement } from "./science-schema-rejection";
 import type { ScienceNativeFailureObservation } from "./science-native-failure";
 import { isEffectStatusOnlyTool, isSettledPreparationScope } from "./effect-boundary";
@@ -5,7 +7,7 @@ import type { RuntimeEffectBoundaryReceipt } from "./effect-boundary";
 import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
 import { decodeRuntimeEvidence } from "../../shared/runtime-evidence";
-import { parseEffectMetadata } from "./effect-metadata";
+import { parseEffectMetadata, MAIN_TOOL_PREDISPATCH_PROTOCOL, isMainToolPreDispatchRejectionReport, isMainLinkedAdapterScope, hasClosedScopedEffects, type MainHostControlObservation } from "./effect-metadata";
 import { failedCallLeftNoOutsideEffect } from "./no-effect-failure";
 
 export interface InvocationEffectBoundaryInput {
@@ -27,8 +29,8 @@ export interface InvocationEffectBoundary {
   /** Ledger ref of the read-only observation whose done/not_done verdict settled a quiesced boundary. */
   settledByObservation?: string;
 }
-interface EventRow { id: string; seq: number; kind: string; chat_id: string | null; payload_json: string }
-const terminalKinds = new Set(["invoke_completed", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"]);
+interface EventRow { id: string; seq: number; kind: string; chat_id: string | null; agent_id?: string | null; node_id?: string | null; payload_json: string }
+const terminalKinds = new Set(["invoke_completed", "invoke_waiting", "invoke_failed", "invoke_threw", "invoke_cancelled", "invoke_interrupted"]);
 function payload(row: EventRow): Record<string, unknown> {
   const value: unknown = JSON.parse(row.payload_json);
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("runtime_effect_boundary_event_invalid");
@@ -40,7 +42,7 @@ function payload(row: EventRow): Record<string, unknown> {
 export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInput): InvocationEffectBoundary {
   for (const value of Object.values(input).filter(value => value !== undefined)) if (typeof value !== "string" || !value.trim() || value.length > 512) throw new Error("runtime_effect_boundary_identity_invalid");
   return getDb().transaction(() => {
-    const rows = getDb().prepare("SELECT id, seq, kind, chat_id, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC")
+    const rows = getDb().prepare("SELECT id, seq, kind, chat_id, agent_id, node_id, payload_json FROM run_events WHERE run_id = ? ORDER BY seq ASC")
       .all(input.invocationRunId) as EventRow[];
     const start = rows.find((row) => row.kind === "invoke_started");
     if (!start || start.chat_id !== input.expectedChatId || (input.expectedSource !== undefined && payload(start).invocationSource !== input.expectedSource)) {
@@ -48,6 +50,8 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     }
     if (rows.some((row) => row.chat_id !== null && row.chat_id !== input.expectedChatId)) throw new Error("runtime_effect_boundary_event_binding_mismatch");
     const terminal = [...rows].reverse().find((row) => terminalKinds.has(row.kind));
+    let runtimeQuiesced = terminal?.kind === "invoke_completed"
+      || (terminal?.kind === "invoke_waiting" && payload(terminal).runtimeQuiesced === true);
     const effectRow = [...rows].reverse().find(row => row.kind === "runtime_effect_boundary");
     const boundary = effectRow ? payload(effectRow) : null;
     const attemptRows = getDb().prepare("SELECT id, run_id, state, side_effect_state FROM long_run_worker_attempts WHERE invocation_run_id = ? ORDER BY id")
@@ -59,6 +63,10 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     try {
       if (boundary) { const { runtimeEvidence: _evidence, ...metadata } = boundary; exactBoundary = parseEffectMetadata("runtime_effect_boundary", metadata, input.invocationRunId); }
     } catch { pending.add("runtime-effect-metadata-invalid"); }
+    const controls = (exactBoundary?.hostControls ?? []) as MainHostControlObservation[];
+    const controlById = new Map(controls.map(control => [control.controlId, control]));
+    const projectedControls = new Set<string>();
+    if (controlById.size !== controls.length) pending.add("runtime-effect-host-control-reused");
     const scopeProofs = exactBoundary?.adapterScopes as Array<{ rootBound: boolean; chatId: string | null; report: { complete: boolean; settledFailureIds?: string[] } | null }> | undefined;
     const settledFailures = new Set((scopeProofs ?? []).filter(scope => scope.rootBound && scope.chatId === input.expectedChatId && scope.report?.complete)
       .flatMap(scope => scope.report?.settledFailureIds ?? []));
@@ -91,7 +99,7 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       } catch { pending.add("science-schema-rejection-proof-unconfirmed"); }
     }
     if (!terminal) pending.add(`invocation:${input.invocationRunId}:terminal-pending`);
-    if (terminal && terminal.kind !== "invoke_completed") pending.add(`event:${terminal.id}:effects-unconfirmed`);
+    if (terminal && !runtimeQuiesced) pending.add(`event:${terminal.id}:effects-unconfirmed`);
     for (const attempt of attempts) if (attempt.state === "running" || attempt.state === "uncertain" || attempt.side_effect_state === "uncertain") pending.add(`attempt:${attempt.id}`);
     if (!effectRow || !boundary || boundary.schemaVersion !== "agentlas.runtime-effect-boundary.v1"
       || boundary.terminalEventId !== terminal?.id || boundary.terminalSeq !== terminal?.seq
@@ -113,6 +121,21 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       const evidence = decodeRuntimeEvidence(data.runtimeEvidence);
       if (evidence?.correlation.artifactVersionRef) artifactRefs.add(evidence.correlation.artifactVersionRef);
       if (Array.isArray(data.toolSourceUrls)) for (const ref of data.toolSourceUrls) if (typeof ref === "string" && /^https?:\/\//.test(ref)) sourceRefs.add(ref);
+      if (row.kind === "mcp_tool-use" && data.toolHostControl !== undefined) {
+        try {
+          const control = parseEffectMetadata("runtime_host_control_observed", data.toolHostControl, input.invocationRunId) as unknown as MainHostControlObservation;
+          const audit = rows.find(candidate => candidate.id === control.auditEventId);
+          if (projectedControls.has(control.controlId) || JSON.stringify(controlById.get(control.controlId)) !== JSON.stringify(control)
+            || !audit || audit.kind !== control.auditKind || audit.seq >= row.seq || !terminal || row.seq >= terminal.seq
+            || !effectRow || row.seq >= effectRow.seq) throw new Error("binding");
+          const { runtimeEvidence: _evidence, ...auditPayload } = payload(audit);
+          const auditDigest = createHash("sha256").update(JSON.stringify(auditPayload)).digest("hex");
+          const projectionDigest = createHash("sha256").update(JSON.stringify([data.toolName ?? null, data.toolId ?? null, data.toolArgs ?? null, data.toolResultPreview ?? null, data.toolIsError ?? null, data.toolOrigin ?? null, data.role ?? null, data.phase ?? null, data.tier ?? null, row.agent_id ?? null, row.node_id ?? null])).digest("hex");
+          if (control.auditPayloadSha256 !== auditDigest || control.storedProjectionSha256 !== projectionDigest) throw new Error("projection");
+          projectedControls.add(control.controlId);
+          continue;
+        } catch { pending.add("runtime-effect-host-control-witness-invalid"); }
+      }
       if (row.kind !== "mcp_tool-use" || typeof data.toolName !== "string" || isEffectStatusOnlyTool({name:data.toolName,id:data.toolId,args:data.toolArgs,isError:data.toolIsError})) continue;
       toolEventCount++;
       if (effectRow && row.seq > effectRow.seq) pending.add(`event:${row.id}:after-effect-boundary`);
@@ -133,12 +156,13 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       tools.set(toolId, { row, started: !hasResult || previous?.started === true, result: hasResult || previous?.result === true,
         outcome: previous?.outcome === "failed" || previous?.outcome === "unknown" ? previous.outcome : hasResult ? outcome : previous?.outcome ?? "pending" });
     }
+    if (projectedControls.size !== controls.length) pending.add("runtime-effect-host-control-snapshot-incomplete");
     // The observer never upgrades previews into receipts. The service's complete
     // operation snapshot, produced after runner settlement, is mandatory.
     if (boundary?.observedToolEventCount !== toolEventCount) pending.add("runtime-effect-event-count-mismatch");
     for (const [id, tool] of tools) if (!tool.started || !tool.result || tool.outcome !== (settledFailures.has(id) ? "failed" : "succeeded")) pending.add(`tool:${id}:outcome-pending`);
     // Require the durable closed snapshot, not merely its old truncated summary flags.
-    const operations = exactBoundary?.operations as Array<{ toolId: string | null; startObserved: boolean; resultObserved: boolean; outcome: string }> | undefined;
+    const operations = exactBoundary?.operations as RuntimeEffectBoundaryReceipt["operations"] | undefined;
     if (!operations || operations.length !== tools.size || new Set(operations.map(operation => operation.toolId)).size !== tools.size || operations.some(operation => !operation.toolId || !tools.has(operation.toolId)
       || !operation.startObserved || !operation.resultObserved || operation.outcome !== tools.get(operation.toolId)?.outcome
       || operation.outcome !== (settledFailures.has(operation.toolId) ? "failed" : "succeeded"))) pending.add("runtime-effect-operation-snapshot-incomplete");
@@ -163,22 +187,46 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
       scopeIds.add(scope.scopeId);
       const startScope = startedScopes.get(scope.scopeId), completedScope = completedScopes.get(scope.scopeId);
       const { report, ...admission } = scope;
-      if ((!scope.rootBound && !isSettledPreparationScope(scope, input.expectedChatId)) || scope.chatId !== input.expectedChatId || report?.complete !== true
+      if (report?.protocol === MAIN_TOOL_PREDISPATCH_PROTOCOL) {
+        const operationRows = rowsByTool.get(report.operationIds[0]) ?? [];
+        if (!isMainToolPreDispatchRejectionReport(report) || operationRows.length !== 2
+          || typeof operationRows[0].toolResultPreview === "string"
+          || typeof operationRows[1].toolResultPreview !== "string" || operationRows[1].toolIsError !== true) {
+          pending.add(`adapter:${scope.scopeId}:predispatch-proof-unconfirmed`);
+        }
+      }
+      if ((!scope.rootBound && !isMainLinkedAdapterScope(scope, input.invocationRunId, input.expectedChatId, scopes ?? []) && !isSettledPreparationScope(scope, input.expectedChatId)) || scope.chatId !== input.expectedChatId || report?.complete !== true
         || JSON.stringify(startScope) !== JSON.stringify(admission) || JSON.stringify(completedScope) !== JSON.stringify(scope)
         || report.operationIds.some(id => !tools.has(id))) pending.add(`adapter:${scope.scopeId}:durable-receipt-mismatch`);
       if (!scope.rootBound && isSettledPreparationScope(scope, input.expectedChatId)
         && !(scopes ?? []).some(root => root.adapterKind === scope.adapterKind && root.rootBound
-          && root.chatId === input.expectedChatId && root.report?.complete === true)) pending.add(`adapter:${scope.scopeId}:root-execution-unconfirmed`);
+          && root.chatId === input.expectedChatId && root.report?.complete === true
+          && root.report.protocol !== MAIN_TOOL_PREDISPATCH_PROTOCOL)) pending.add(`adapter:${scope.scopeId}:root-execution-unconfirmed`);
+      if (scope.parentScopeId && report?.operationIds.some(id => !id.startsWith(`${scope.scopeId}:tool:`))) pending.add("runtime-effect-child-operation-unbound");
       for (const id of report?.operationIds ?? []) {
         if (reportedOperationIds.has(id)) pending.add("runtime-effect-adapter-operation-reused");
         reportedOperationIds.add(id);
       }
+      if (scope.parentScopeId && scope.parentScopeId !== `${input.invocationRunId}:root`) {
+        const parentStart = rows.find(row => row.kind === "runtime_adapter_effect_started" && payload(row).scopeId === scope.parentScopeId);
+        const parentEnd = rows.find(row => row.kind === "runtime_adapter_effect_completed" && payload(row).scopeId === scope.parentScopeId);
+        const ownStart = rows.find(row => row.kind === "runtime_adapter_effect_started" && payload(row).scopeId === scope.scopeId);
+        const ownEnd = rows.find(row => row.kind === "runtime_adapter_effect_completed" && payload(row).scopeId === scope.scopeId);
+        if (!parentStart || !parentEnd || !ownStart || !ownEnd || parentStart.seq >= ownStart.seq || parentEnd.seq <= ownEnd.seq) pending.add(`adapter:${scope.scopeId}:parent-lifetime-mismatch`);
+      }
     }
     for (const kind of (exactBoundary?.adapterKinds ?? []) as string[]) if (["antigravity", "acp"].includes(kind)
       && !(scopes ?? []).some(scope => scope.adapterKind === kind && scope.rootBound
-        && scope.chatId === input.expectedChatId && scope.report?.complete === true)) pending.add("runtime-effect-adapter-receipt-missing");
+        && scope.chatId === input.expectedChatId && scope.report?.complete === true
+        && scope.report.protocol !== MAIN_TOOL_PREDISPATCH_PROTOCOL)) pending.add("runtime-effect-adapter-receipt-missing");
     if (((exactBoundary?.adapterKinds ?? []) as string[]).some(kind => ["antigravity", "acp"].includes(kind))) {
       for (const id of tools.keys()) if (!reportedOperationIds.has(id)) pending.add("runtime-effect-adapter-operation-missing");
+    }
+    if (terminal?.kind === "invoke_failed" && exactBoundary?.runtimeQuiesced === true && boundary?.effects === "settled"
+      && hasClosedScopedEffects(scopes ?? [], operations ?? [], input.invocationRunId, input.expectedChatId)
+      && [...pending].every(ref => ref === `event:${terminal.id}:effects-unconfirmed`)) {
+      runtimeQuiesced = true;
+      pending.delete(`event:${terminal.id}:effects-unconfirmed`);
     }
     const pendingEffectRefs = [...pending].sort();
     // Failed-but-resolved tool calls: started, result observed, typed failure, and in the closed snapshot.
@@ -200,7 +248,7 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     const explainedByFailure = (ref: string): boolean => (ref === "runtime-effect-boundary-unconfirmed" && boundaryOnlyFailed)
       || (ref === "runtime-effect-operation-snapshot-incomplete" && snapshotOnlyFailed)
       || [...failedIds].some(id => ref === `tool:${id}:outcome-pending` || (ref.startsWith("operation:") && ref.endsWith(`:${id}:failed`)));
-    const quiesced = terminal?.kind === "invoke_completed" && failedIds.size > 0 && pendingEffectRefs.every(explainedByFailure);
+    const quiesced = runtimeQuiesced && failedIds.size > 0 && pendingEffectRefs.every(explainedByFailure);
     // A failed call that provably could not change anything outside (read-only browser profile, read-only
     // shell command, network query tool — judged from its recorded name and arguments, never its result text)
     // is a settled effect. Measured 2026-09-27: failed `wc -l`, a failed Threads page load and failed
@@ -208,10 +256,11 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     // Failed clicks, typing, page JavaScript and unknown tools stay open: that is the truly ambiguous case.
     // Judge every failed/unknown result row recorded under the id (a reused id may also hold successful calls,
     // whose own result is their receipt).
-    const noEffectFailedIds = terminal?.kind === "invoke_completed" ? [...failedIds].filter((id) => {
+    const noEffectFailedIds = runtimeQuiesced ? [...failedIds].filter((id) => {
       const failedResults = (rowsByTool.get(id) ?? []).filter((data) => typeof data.toolResultPreview === "string"
         && !(data.toolIsError === false && !data.toolFailureCode));
-      return failedResults.length > 0 && failedResults.every((data) => failedCallLeftNoOutsideEffect({ toolName: data.toolName, toolArgs: data.toolArgs }));
+      return failedResults.length > 0 && failedResults.every((data) => failedCallLeftNoOutsideEffect({ toolName: data.toolName, toolArgs: data.toolArgs })
+        || (data.toolIsError === true && isPredispatchApprovalRefusal({ failureCode: data.toolFailureCode, result: data.toolResultPreview })));
     }) : [];
     const explainedByNoEffectFailure = (ref: string): boolean => (ref === "runtime-effect-boundary-unconfirmed" && boundaryOnlyFailed)
       || (ref === "runtime-effect-operation-snapshot-incomplete" && snapshotOnlyFailed)
@@ -225,11 +274,14 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
     if (openEffectRefs.length && quiesced) {
       const runIds = [...new Set(attemptRows.map((row) => row.run_id))];
       for (const runId of runIds) {
-        const row = getDb().prepare(`SELECT seq, json_extract(payload_json, '$.verdict') AS verdict FROM long_run_events
+        const row = getDb().prepare(`SELECT seq, json_extract(payload_json, '$.verdict') AS verdict,
+          json_extract(payload_json, '$.externalOutcomeProof') AS proof FROM long_run_events
           WHERE run_id = ? AND kind = 'run.effect_observation' AND json_extract(payload_json, '$.action') = 'settle_boundary'
             AND EXISTS (SELECT 1 FROM json_each(payload_json, '$.targetIds') WHERE value = ?)
-          ORDER BY seq DESC LIMIT 1`).get(runId, `invocation:${input.invocationRunId}`) as { seq: number; verdict: string | null } | undefined;
-        if (row && (row.verdict === "done" || row.verdict === "not_done")) { settledByObservation = `long-run:${runId}:event:${row.seq}`; break; }
+          ORDER BY seq DESC LIMIT 1`).get(runId, `invocation:${input.invocationRunId}`) as { seq: number; verdict: string | null; proof: string | null } | undefined;
+        if (row && (row.verdict === "done" || (row.verdict === "not_done"
+          && row.proof === "host_receipt_closed_ledger"
+          && receiptSettlesAttempts([{ id: `invocation:${input.invocationRunId}`, invocationRunId: input.invocationRunId }])))) { settledByObservation = `long-run:${runId}:event:${row.seq}`; break; }
       }
       if (settledByObservation) openEffectRefs = [];
     }

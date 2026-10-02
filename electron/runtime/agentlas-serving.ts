@@ -38,11 +38,10 @@ import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult }
 import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
-import { prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
+import { createToolLoopProgress, createToolLoopUsage, prepareMainToolLoop, runMainToolDispatch } from "./local-tool-loop";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 
 const TOOL_PROTOCOL = "agentlas-serving-tools-v1";
-const MAX_TOOL_RESULT_CHARS = 20_000;
 
 /** 세기별 답 길이 상한. 서버도 같은 상한을 다시 건다 — 여기 값은 요청이지 보장이 아니다. */
 const MAX_TOKENS: Record<string, number> = {
@@ -74,8 +73,8 @@ type ServingTurn = { role: "user" | "assistant"; text: string };
 
 /** Vision models bill a high-detail image at roughly 1–2k input tokens; count the upper end. */
 const IMAGE_TOKEN_ESTIMATE = 2_000;
-function imageTokenEstimate(req: RunnerRequest): number {
-  return (req.images?.length ?? 0) * IMAGE_TOKEN_ESTIMATE;
+function imageTokenEstimate(req: RunnerRequest, toolImageCount = 0): number {
+  return ((req.images?.length ?? 0) + toolImageCount) * IMAGE_TOKEN_ESTIMATE;
 }
 
 function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: number): { turns: ServingTurn[]; system: string } | null {
@@ -92,6 +91,9 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
       undefined,
       undefined,
       req.surfaceGate,
+      undefined,
+      req.sciencePromptProfile,
+      req.judgmentOnly === true ? "host-judgment" : undefined,
     );
   // The server enforces req.outputSchema by constrained decoding when it can; the
   // instruction is the honest floor for a server that cannot (status line says which).
@@ -164,7 +166,24 @@ async function* iterServingEvents(response: Response): AsyncGenerator<{ event: s
 }
 
 type ServingToolCall = { id: string; name: string; input: Record<string, unknown> };
-type ServingToolExchange = { text: string; calls: ServingToolCall[]; results: Array<{ id: string; text: string; isError: boolean }> };
+type ServingImage = { mediaType: string; data: string };
+type ServingToolExchange = { text: string; calls: ServingToolCall[]; results: Array<{ id: string; text: string; isError: boolean }>; images?: ServingImage[] };
+
+/** Host-dispatched visual content only; never interpret a model's text as an image. */
+function servingToolImages(message: { content: unknown } | null): ServingImage[] {
+  if (!message) return [];
+  if (!Array.isArray(message.content)) throw new Error("serving_tool_image_invalid");
+  const images: ServingImage[] = [];
+  for (const part of message.content) {
+    if (part?.type === "text") continue;
+    const match = part?.type === "image_url" && typeof part.image_url?.url === "string"
+      ? /^data:(image\/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+={0,2})$/.exec(part.image_url.url) : null;
+    if (!match || match[2].length > 8_000_000) throw new Error("serving_tool_image_invalid");
+    images.push({ mediaType: match[1], data: match[2] });
+    if (images.length > 8) throw new Error("serving_tool_image_capacity_exceeded");
+  }
+  return images;
+}
 type ServingDone = {
   text?: unknown; stopReason?: unknown; toolUses?: unknown;
   /** Token counts the server measured for this call (not the model name). Absent on older servers. */
@@ -204,7 +223,9 @@ async function servingHttpFailure(response: Response, locale: RunnerRequest["loc
     return { kind: "auth", runtime: "agentlas", source: "marker", providerCode: "sign_in_required",
       message: signInRequired(locale).message };
   }
-  if (code === "insufficient_credits" || response.status === 402) {
+  // Preserve the service's typed refusal. A proxy or reconciliation gate can
+  // return 402 without declaring an exhausted credit balance.
+  if (code === "insufficient_credits") {
     return { kind: "quota", runtime: "agentlas", source: "marker", providerCode: "insufficient_credits",
       message: locale === "ko" ? "크레딧이 부족합니다. 크레딧을 보충한 뒤 다시 시도해 주세요."
         : "You are out of credits. Top up and try again." };
@@ -245,27 +266,20 @@ function servingRequestFields(req: RunnerRequest): Record<string, unknown> {
   };
 }
 
-/** 서버가 잰 토큰을 왕복마다 더한다. 한 번이라도 빠지면 합계는 없는 것이다(0 으로 채우지 않는다). */
+/** Missing or invalid dispatch receipts never become measured zero. */
 class ServingUsage {
-  private input = 0;
-  private output = 0;
-  private complete = true;
-  add(done: ServingDone): void {
-    const usage = done.usage;
-    const input = usage && typeof usage.inputTokens === "number" ? usage.inputTokens : null;
-    const output = usage && typeof usage.outputTokens === "number" ? usage.outputTokens : null;
-    if (input === null || output === null || !Number.isFinite(input) || !Number.isFinite(output)) {
-      this.complete = false;
-      return;
-    }
-    this.input += Math.max(0, input);
-    this.output += Math.max(0, output);
+  private readonly usage;
+  constructor(events: RunnerEvents) { this.usage = createToolLoopUsage(events); }
+  start(): string { return this.usage.start(); }
+  add(id: string, done: ServingDone): void {
+    const input = done.usage?.inputTokens;
+    const output = done.usage?.outputTokens;
+    this.usage.complete(id, typeof input === "number" && typeof output === "number"
+      ? { inputTokens: input, outputTokens: output } : undefined);
   }
-  settle(events: RunnerEvents): { observedUsage?: { inputTokens: number; outputTokens: number } } {
-    if (!this.complete) return {};
-    const observedUsage = { inputTokens: this.input, outputTokens: this.output };
-    events.onTerminalObservedUsage?.(observedUsage);
-    return { observedUsage };
+  settle(): { observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } } {
+    const observedUsage = this.usage.total();
+    return observedUsage ? { observedUsage } : {};
   }
 }
 
@@ -328,26 +342,31 @@ async function runAgentlasServingWithTools(
   const admitted = new Set(originalByAlias.keys());
   const toolExchanges: ServingToolExchange[] = [];
   const seenCallIds = new Set<string>();
-  const usage = new ServingUsage();
-  let previousToolOutcomeDigest = "";
-  let identicalToolOutcomes = 0;
+  const usage = new ServingUsage(events);
+  const progress = createToolLoopProgress("agentlas", req, events);
   let accumulatedText = "";
   let firstRound = true;
   for (;;) {
     req.signal?.throwIfAborted();
     const textPayload = { model, system: context.system, messages: context.turns, maxTokens: outputReserve,
       toolProtocol: TOOL_PROTOCOL, tools: definitions, toolExchanges };
+    const toolImageCount = toolExchanges.reduce((count, exchange) => count + (exchange.images?.length ?? 0), 0);
+    const sentImageCount = (req.images?.length ?? 0) + toolImageCount;
+    if (sentImageCount > 8) throw new Error("serving_tool_image_capacity_exceeded");
     const requestBody = JSON.stringify({ ...textPayload, ...servingRequestFields(req) });
+    // Image bytes have a visual admission estimate, not a text-token estimate.
+    const admissionPayload = { ...textPayload, toolExchanges: toolExchanges.map(({ images: _images, ...exchange }) => exchange) };
     // The serving tier exposes a conservative 128k window. Count the full
     // growing tool transcript and schemas before another charged model call.
-    if (servingAdmissionTokens(JSON.stringify(textPayload)) + imageTokenEstimate(req) + outputReserve + 256
+    if (servingAdmissionTokens(JSON.stringify(admissionPayload)) + imageTokenEstimate(req, toolImageCount) + outputReserve + 256
       > AGENTLAS_SERVING_CONTEXT_WINDOW) {
       return { text: accumulatedText, failure: { kind: "refused", runtime: "agentlas", source: "marker",
         providerCode: "model_context_capacity_exceeded",
         message: "The Agentlas serving tool transcript exceeds the conservative context budget." } };
     }
+    const usageAttempt = usage.start();
     const response = await postServing(requestBody, cookie, req);
-    if (!response.ok) return { text: accumulatedText, failure: await servingHttpFailure(response, req.locale), ...usage.settle(events) };
+    if (!response.ok) return { text: accumulatedText, failure: await servingHttpFailure(response, req.locale), ...usage.settle() };
     let text = "";
     let done: ServingDone | null = null;
     try {
@@ -361,14 +380,23 @@ async function runAgentlasServingWithTools(
         } else if (frame.event === "done") {
           done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
         } else if (frame.event === "error") {
-          return { text: accumulatedText, failure: streamFailure(frame.data, req.locale), ...usage.settle(events) };
+          return { text: accumulatedText, failure: streamFailure(frame.data, req.locale), ...usage.settle() };
         }
       }
     } catch {
-      return { text: accumulatedText, failure: servingReconciliationFailure(req.locale), ...usage.settle(events) };
+      return { text: accumulatedText, failure: servingReconciliationFailure(req.locale), ...usage.settle() };
     }
-    if (!done) return { text: accumulatedText, failure: servingReconciliationFailure(req.locale), ...usage.settle(events) };
-    usage.add(done);
+    if (!done) return { text: accumulatedText, failure: servingReconciliationFailure(req.locale), ...usage.settle() };
+    usage.add(usageAttempt, done);
+    // A stateless round gets new tool images once. Preserve the textual exchanges,
+    // but do not carry base64 screenshots through every later charged call.
+    for (const exchange of toolExchanges) delete exchange.images;
+    if (toolImageCount > 0 && done.imagesAccepted !== sentImageCount) {
+      return { text: accumulatedText, failure: { kind: "unsupported", runtime: "agentlas", source: "marker",
+        providerCode: "serving_tool_images_not_delivered",
+        message: req.locale === "ko" ? "Agentlas 서버가 도구 이미지를 모델에 전달하지 않았습니다."
+          : "The Agentlas server did not forward tool images to the model." }, ...usage.settle() };
+    }
     if (firstRound) { reportDeliveredCapabilities(req, events, done); firstRound = false; }
     if (typeof done.text === "string" && done.text.length >= text.length) text = done.text;
     if (done.stopReason !== "tool_use") {
@@ -378,7 +406,7 @@ async function runAgentlasServingWithTools(
       accumulatedText += text;
       if (!accumulatedText.trim()) throw new Error("agentlas_serving_empty_answer");
       events.onPartial(accumulatedText);
-      return { text: accumulatedText, ...usage.settle(events) };
+      return { text: accumulatedText, ...usage.settle() };
     }
     const calls = servingToolCalls(done.toolUses, admitted);
     for (const call of calls) {
@@ -386,22 +414,17 @@ async function runAgentlasServingWithTools(
       seenCallIds.add(call.id);
     }
     const results: ServingToolExchange["results"] = [];
+    const images: ServingImage[] = [];
     for (const call of calls) {
       const result = await runMainToolDispatch(byName,
         { providerCallId: call.id, toolName: originalByAlias.get(call.name)!, arguments: JSON.stringify(call.input) },
-        events, approval, broker);
-      results.push({ id: call.id, text: result.content.slice(0, MAX_TOOL_RESULT_CHARS), isError: result.isError });
+        progress.events, approval, broker);
+      progress.assertProgress();
+      results.push({ id: call.id, text: result.content, isError: result.isError });
+      if (!result.isError) images.push(...servingToolImages(result.visionMessage));
+      if (images.length + (req.images?.length ?? 0) > 8) throw new Error("serving_tool_image_capacity_exceeded");
     }
-    // Call IDs change on every provider round and cannot prove progress. An
-    // identical structured call set with identical observable results can.
-    const outcomeDigest = createHash("sha256").update(JSON.stringify({
-      calls: calls.map((call) => ({ name: call.name, input: call.input })),
-      results: results.map((result) => ({ text: result.text, isError: result.isError })),
-    })).digest("hex");
-    identicalToolOutcomes = outcomeDigest === previousToolOutcomeDigest ? identicalToolOutcomes + 1 : 0;
-    previousToolOutcomeDigest = outcomeDigest;
-    if (identicalToolOutcomes >= 3) throw new Error("agentlas_serving_tool_loop_stalled");
-    toolExchanges.push({ text, calls, results });
+    toolExchanges.push({ text, calls, results, ...(images.length ? { images } : {}) });
     accumulatedText += text;
   }
 }
@@ -435,6 +458,8 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
     const withTools = await runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie);
     if (withTools) return withTools;
   }
+  const usage = new ServingUsage(events);
+  const usageAttempt = usage.start();
   const response = await postServing(JSON.stringify({
     model,
     system,
@@ -444,7 +469,6 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
   }), cookie, req);
   if (!response.ok) return { text: "", failure: await servingHttpFailure(response, req.locale) };
 
-  const usage = new ServingUsage();
   let text = "";
   let done: ServingDone | null = null;
   try {
@@ -468,7 +492,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
   }
   if (!done) return { text: "", failure: servingReconciliationFailure(req.locale) };
   if (done) {
-    usage.add(done);
+    usage.add(usageAttempt, done);
     reportDeliveredCapabilities(req, events, done);
   }
   if (!text.trim()) {
@@ -477,7 +501,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
         ? "Agentlas 모델이 빈 답을 돌려주었습니다. 다시 시도해 주세요."
         : "The Agentlas model returned an empty answer. Try again." } };
   }
-  return { text, ...usage.settle(events) };
+  return { text, ...usage.settle() };
 };
 
 /** 화면에 그릴 러너 이름. 세기까지 붙여 무엇으로 돌았는지 알 수 있게 한다. */

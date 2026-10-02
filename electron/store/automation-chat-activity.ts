@@ -136,6 +136,7 @@ function ledgerToolEvents(runId: string): AutomationLedgerToolEvent[] {
       toolArgs: typeof payload.toolArgs === "string" ? payload.toolArgs : null,
       isError: payload.toolIsError === true,
       failureCode: typeof payload.toolFailureCode === "string" ? payload.toolFailureCode : null,
+      completed: payload.toolCompleted === true || typeof payload.toolResultPreview === "string",
     });
   }
   return out;

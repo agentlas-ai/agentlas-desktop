@@ -25,7 +25,8 @@ import type {
 } from "@/lib/types";
 import { useRouter } from "next/navigation";
 import { CONTEXT_MANAGED_BY, runtimeUsesEngineModelSetting } from "@shared/models";
-import { goalDisplayState } from "@shared/goal-display-state";
+import { goalObjectiveText } from "@shared/auto-goal";
+import { goalDisplayState, GOAL_OWNER_REVIEW_REASONS } from "@shared/goal-display-state";
 import { runtimeModelFallbackLabel } from "./dashboard/RuntimeModelPicker";
 import type { OrchestrationTarget, Recommendation, RecExecChoice, RecRouterAgent } from "@shared/types";
 import { buildAppRoutePrompt, parseAppSlashRoute, type AgentlasAppDefinition } from "@/lib/apps";
@@ -2094,9 +2095,14 @@ function ComposerGoalBar({
   const paused = observed && runStatus === "paused" && goalDisplayState({ status: runStatus, pauseReason, blockedReason }) !== "running";
   const pausing = observed && runStatus === "pausing";
   const blocked = observed && (runStatus === "blocked" || runStatus === "failed");
+  const ownerReview = observed && runStatus === "blocked" && GOAL_OWNER_REVIEW_REASONS.has(blockedReason ?? "");
   const budgetPause = paused && Boolean(pauseReason && (pauseReason === "budget" || pauseReason.startsWith("budget_")));
   const knownReason = (reason: string | null | undefined): string | null => {
     if (!reason) return null;
+    if (GOAL_OWNER_REVIEW_REASONS.has(reason)) return locale === "ko"
+      ? "완료 근거 부족 · 목표 패널에서 조건 검토 후 근거를 보내거나 목표를 수정하고 재개해 주세요"
+      : "Completion evidence needed · review criteria in the Goal panel, send evidence or edit the goal, then Resume";
+    if (reason === "goal_owner_answer_required") return locale === "ko" ? "질문에 대한 답변 대기" : "Waiting for your answer to the question";
     if (reason === "app_closed") return locale === "ko" ? "앱이 종료되어 멈춤" : "Stopped when the app closed";
     if (reason === "crash_recovery") return locale === "ko" ? "이전 실행 중단을 감지해 멈춤" : "Stopped after recovering an interrupted run";
     if (reason === "budget" || reason.startsWith("budget_")) return locale === "ko" ? "정해 둔 예산·횟수를 다 써서 멈춤 — 새 목표로 이어가 주세요" : "Stopped after using the set budget — continue as a new goal";
@@ -2154,7 +2160,7 @@ function ComposerGoalBar({
     ? stoppedCopy
     : runStatus === "verifying"
       ? (locale === "ko" ? "결과를 성공 기준과 대조하는 중" : "Checking the result against acceptance criteria")
-    : label?.replace(/\s+/g, " ").trim() || (locale === "ko"
+    : goalObjectiveText(label ?? "").replace(/\s+/g, " ").trim() || (locale === "ko"
       ? "다음 요청으로 목표와 성공 기준을 확정합니다"
       : "Your next request will define the goal and its acceptance criteria");
   const criteriaTitle = (criteria ?? []).join("\n");
@@ -2179,7 +2185,7 @@ function ComposerGoalBar({
       )}
       {/* A budget pause cannot be resumed (Main refuses long_run_budget_exhausted; before that the
           button re-paused the Goal within 1 ms). Its copy already names the way out: a new Goal. */}
-      {observed && ((paused && !budgetPause) || (blocked && blockedReason === "goal_wait_ongoing_authority_required")) && onResume && (
+      {observed && ((paused && !budgetPause) || (blocked && blockedReason === "goal_wait_ongoing_authority_required") || ownerReview) && onResume && (
         <button
           type="button"
           onClick={onResume}

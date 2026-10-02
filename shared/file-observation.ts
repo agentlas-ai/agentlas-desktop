@@ -16,7 +16,7 @@ const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex")
 /** A bounded observation of regular bytes, never a model-supplied digest.
  * Proof is intentionally narrower than general tools: all symlink components
  * are refused, including links whose current target happens to be in scope. */
-export function observeWorkspaceFile(root: string, relativePath: string, action: FileObservationAction, expectedText?: string): FileObservation | null {
+export function observeWorkspaceFile(root: string, relativePath: string, action: FileObservationAction, expectedContent?: string | Uint8Array): FileObservation | null {
   let fd: number | undefined;
   try {
     if (!["read", "write", "edit"].includes(action) || !root || root.length > 700 || !relativePath || relativePath.length > 700
@@ -53,7 +53,8 @@ export function observeWorkspaceFile(root: string, relativePath: string, action:
     if (after.dev !== opened.dev || after.ino !== opened.ino || after.size !== opened.size || after.mtimeMs !== opened.mtimeMs
       || after.ctimeMs !== opened.ctimeMs || linked.dev !== after.dev || linked.ino !== after.ino
       || linked.size !== after.size || linked.mtimeMs !== after.mtimeMs || linked.ctimeMs !== after.ctimeMs) return null;
-    if (expectedText !== undefined && !bytes.equals(Buffer.from(expectedText, "utf8"))) return null;
+    if (expectedContent !== undefined && !bytes.equals(typeof expectedContent === "string"
+      ? Buffer.from(expectedContent, "utf8") : Buffer.from(expectedContent))) return null;
     return { root: canonicalRoot, relativePath: relative, action, sha256: hash(bytes), bytes: bytes.length };
   } catch { return null; }
   finally { if (fd !== undefined) fs.closeSync(fd); }

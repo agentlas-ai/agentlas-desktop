@@ -3,7 +3,7 @@ import type { OneArtifactBindingRequestV1 } from "@shared/one-artifacts";
 import { classifyToolFailure, isToolFailureCode, type ToolFailureCode } from "@shared/tool-failure";
 import { decodeToolInvocationOrigin, type ToolInvocationOrigin } from "@shared/tool-invocation-origin";
 
-export type OneActivityStatus = "running" | "cancelling" | "completed" | "failed" | "cancelled" | "info";
+export type OneActivityStatus = "running" | "cancelling" | "waiting_input" | "completed" | "failed" | "cancelled" | "info";
 export type OneActivityKind = "run" | "reasoning" | "tool" | "agent" | "notice" | "result" | "terminal";
 export type OneActivityCode = "runtime_wait" | "queue_wait" | "recovery_retry" | "session_resume" | "goal_pass_retry";
 
@@ -1023,6 +1023,13 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
   const cancelledRun = events.some((row) => row.kind === "invoke_cancelled" || row.kind === "invoke_interrupted");
   for (const row of events) {
     const payload = row.payload ?? {};
+    if (row.kind === "invoke_waiting") {
+      const { terminalStatus: _terminalStatus, ...waiting } = state;
+      const previous = state.items.find(item => item.kind === "run");
+      state = { ...waiting, items: [...state.items.filter(item => item.kind !== "run" && item.kind !== "terminal"),
+        { id: "run:lifecycle", kind: "run", status: "waiting_input", observedAt: previous?.observedAt ?? row.ts }] };
+      continue;
+    }
     if (row.kind.startsWith("task_force_model_call_") && row.nodeId) {
       const callPhase = ledgerString(payload, "phase");
       const phase = callPhase === "planner" ? "plan" : callPhase === "worker" ? "delegate" : undefined;
@@ -1281,7 +1288,9 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
         ...detail, id: "run:lifecycle", kind: "run", status, observedAt: receipt.startedAt,
         ...(measured ? { completedAt: receipt.finishedAt, durationMs: finishedMs - startedMs } : {}),
       };
-      state = { ...state, items: [...state.items.filter((item) => item.kind !== "run"), lifecycle] };
+      const { terminalStatus: _terminalStatus, ...waiting } = state;
+      state = { ...(status === "waiting_input" ? waiting : state),
+        items: [...state.items.filter((item) => item.kind !== "run" && (status !== "waiting_input" || item.kind !== "terminal")), lifecycle] };
     }
   }
   return state;

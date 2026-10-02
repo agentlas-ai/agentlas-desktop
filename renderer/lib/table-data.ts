@@ -8,7 +8,14 @@
 import { entryText, readZip, writeZip, type ZipEntry } from "./zip-lite";
 
 export type TableCell = string | number | boolean | null | { formula: string };
-export interface TableSheet { name: string; rows: TableCell[][] }
+export interface StructuredTable {
+  name: string;
+  ref: string;
+  headerRowCount: number;
+  totalsRowCount: number;
+  columns: string[];
+}
+export interface TableSheet { name: string; rows: TableCell[][]; tables?: StructuredTable[] }
 
 export const TABLE_LIMITS = { maxRows: 20_000, maxColumns: 200, chartRows: 400 } as const;
 
@@ -29,8 +36,20 @@ function escapeXml(text: string): string {
 }
 
 function attr(attrs: string, name: string): string | undefined {
-  const match = attrs.match(new RegExp(`(?:^|\\s)${name}\\s*=\\s*"([^"]*)"`));
+  const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = attrs.match(new RegExp(`(?:^|\\s)${escapedName}\\s*=\\s*"([^"]*)"`));
   return match ? decodeXml(match[1]) : undefined;
+}
+
+// OOXML element names may use a default namespace or a producer-chosen prefix.
+function xmlTag(name: string): string { return `(?:[A-Za-z_][\\w.-]*:)?${name}`; }
+
+function relationshipId(attrs: string, xml: string): string | undefined {
+  for (const match of xml.matchAll(/xmlns:([A-Za-z_][\w.-]*)\s*=\s*"http:\/\/schemas\.openxmlformats\.org\/officeDocument\/2006\/relationships"/g)) {
+    const id = attr(attrs, `${match[1]}:id`);
+    if (id) return id;
+  }
+  return attr(attrs, "r:id");
 }
 
 function columnIndex(ref: string): number {
@@ -42,19 +61,19 @@ function columnIndex(ref: string): number {
 
 function textRuns(xml: string): string {
   const parts: string[] = [];
-  for (const match of xml.matchAll(/<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g)) parts.push(decodeXml(match[1]));
+  for (const match of xml.matchAll(/<(?:[A-Za-z_][\w.-]*:)?t(?:\s[^>]*)?>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?t>/g)) parts.push(decodeXml(match[1]));
   return parts.join("");
 }
 
-const CELL_RE = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
-const ROW_RE = /<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g;
+const CELL_RE = /<(?:[A-Za-z_][\w.-]*:)?c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?c>)/g;
+const ROW_RE = /<(?:[A-Za-z_][\w.-]*:)?row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?row>)/g;
 
 async function workbookSheets(entries: ZipEntry[]): Promise<Array<{ name: string; path: string }>> {
   const workbook = await entryText(entries, "xl/workbook.xml");
   const rels = await entryText(entries, "xl/_rels/workbook.xml.rels");
   if (!workbook || !rels) throw new Error("not an xlsx workbook");
   const targetById = new Map<string, string>();
-  for (const match of rels.matchAll(/<Relationship\b([^>]*)\/?>/g)) {
+  for (const match of rels.matchAll(/<(?:[A-Za-z_][\w.-]*:)?Relationship\b([^>]*)\/?>/g)) {
     const id = attr(match[1], "Id");
     const target = attr(match[1], "Target");
     if (!id || !target || /TargetMode\s*=\s*"External"/i.test(match[1])) continue;
@@ -62,9 +81,9 @@ async function workbookSheets(entries: ZipEntry[]): Promise<Array<{ name: string
     if (!path.includes("..")) targetById.set(id, path);
   }
   const sheets: Array<{ name: string; path: string }> = [];
-  for (const match of workbook.matchAll(/<sheet\b([^>]*)\/?>/g)) {
+  for (const match of workbook.matchAll(/<(?:[A-Za-z_][\w.-]*:)?sheet\b([^>]*)\/?>/g)) {
     const name = attr(match[1], "name");
-    const id = attr(match[1], "r:id");
+    const id = relationshipId(match[1], workbook);
     const path = id ? targetById.get(id) : undefined;
     if (name && path) sheets.push({ name, path });
   }
@@ -76,7 +95,7 @@ async function dateStyleFlags(entries: ZipEntry[]): Promise<boolean[]> {
   const xml = await entryText(entries, "xl/styles.xml");
   if (!xml) return [];
   const custom = new Map<number, string>();
-  for (const match of xml.matchAll(/<numFmt\b([^>]*)\/?>/g)) {
+  for (const match of xml.matchAll(/<(?:[A-Za-z_][\w.-]*:)?numFmt\b([^>]*)\/?>/g)) {
     const id = Number(attr(match[1], "numFmtId"));
     const code = attr(match[1], "formatCode") ?? "";
     if (Number.isFinite(id)) custom.set(id, code);
@@ -85,9 +104,9 @@ async function dateStyleFlags(entries: ZipEntry[]): Promise<boolean[]> {
     const bare = code.replace(/"[^"]*"|\[[^\]]*\]|\\./g, "");
     return /[ymd]/i.test(bare) && !/^[#0.,%\s+-]*$/.test(bare);
   };
-  const cellXfs = xml.match(/<cellXfs\b[^>]*>([\s\S]*?)<\/cellXfs>/)?.[1] ?? "";
+  const cellXfs = xml.match(/<(?:[A-Za-z_][\w.-]*:)?cellXfs\b[^>]*>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?cellXfs>/)?.[1] ?? "";
   const flags: boolean[] = [];
-  for (const match of cellXfs.matchAll(/<xf\b([^>]*)\/?>/g)) {
+  for (const match of cellXfs.matchAll(/<(?:[A-Za-z_][\w.-]*:)?xf\b([^>]*)\/?>/g)) {
     const id = Number(attr(match[1], "numFmtId") ?? 0);
     flags.push((id >= 14 && id <= 22) || (id >= 45 && id <= 47) || (custom.has(id) && isDateCode(custom.get(id) ?? "")));
   }
@@ -107,7 +126,7 @@ export async function readXlsxTables(buffer: ArrayBuffer | Uint8Array, limits = 
   const entries = readZip(buffer);
   const sharedXml = await entryText(entries, "xl/sharedStrings.xml");
   const shared: string[] = [];
-  if (sharedXml) for (const match of sharedXml.matchAll(/<si>([\s\S]*?)<\/si>/g)) shared.push(textRuns(match[1]));
+  if (sharedXml) for (const match of sharedXml.matchAll(/<(?:[A-Za-z_][\w.-]*:)?si>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?si>/g)) shared.push(textRuns(match[1]));
   const dateStyles = await dateStyleFlags(entries);
   const sheets: TableSheet[] = [];
   for (const sheet of await workbookSheets(entries)) {
@@ -125,8 +144,8 @@ export async function readXlsxTables(buffer: ArrayBuffer | Uint8Array, limits = 
         const col = columnIndex(attr(attrs, "r") ?? "A");
         if (col >= limits.maxColumns) continue;
         const type = attr(attrs, "t") ?? "n";
-        const formulaMatch = inner.match(/<f\b([^>]*?)(?:\/>|>([\s\S]*?)<\/f>)/);
-        const valueMatch = inner.match(/<v>([\s\S]*?)<\/v>/);
+        const formulaMatch = inner.match(/<(?:[A-Za-z_][\w.-]*:)?f\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?f>)/);
+        const valueMatch = inner.match(/<(?:[A-Za-z_][\w.-]*:)?v>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?v>/);
         const raw = valueMatch ? decodeXml(valueMatch[1]) : undefined;
         let value: TableCell = null;
         if (formulaMatch && (raw === undefined || raw === "")) {
@@ -150,7 +169,29 @@ export async function readXlsxTables(buffer: ArrayBuffer | Uint8Array, limits = 
       while (rows.length < rowNumber - 1 && rows.length < limits.maxRows) rows.push([]);
       rows.push(row);
     }
-    sheets.push({ name: sheet.name, rows });
+    const tableIds = new Set<string>();
+    for (const part of xml.matchAll(/<(?:[A-Za-z_][\w.-]*:)?tablePart\b([^>]*)\/?>/g)) {
+      const id = relationshipId(part[1], xml);
+      if (id) tableIds.add(id);
+    }
+    const tables: StructuredTable[] = [];
+    for (const target of await relationTargets(entries, sheet.path, "/table", tableIds)) {
+      const tableXml = await entryText(entries, target);
+      const attrs = tableXml?.match(/<(?:[A-Za-z_][\w.-]*:)?table\b([^>]*)>/)?.[1];
+      if (!attrs || !tableXml) continue;
+      const ref = attr(attrs, "ref") ?? "";
+      const range = /^\$?[A-Z]+\$?\d+(?::\$?[A-Z]+\$?\d+)?$/i.test(ref) ? parseRef(ref) : null;
+      const headerRowCount = Number(attr(attrs, "headerRowCount") ?? 1);
+      const totalsRowCount = Number(attr(attrs, "totalsRowCount") ?? 0);
+      if (!range || range.r1 < 0 || range.r2 >= limits.maxRows || range.c2 >= limits.maxColumns
+        || !Number.isInteger(headerRowCount) || headerRowCount < 0
+        || !Number.isInteger(totalsRowCount) || totalsRowCount < 0
+        || headerRowCount + totalsRowCount > range.r2 - range.r1 + 1) continue;
+      const columns = [...tableXml.matchAll(/<(?:[A-Za-z_][\w.-]*:)?tableColumn\b([^>]*)\/?>/g)]
+        .map((column) => attr(column[1], "name") ?? "");
+      tables.push({ name: attr(attrs, "displayName") ?? attr(attrs, "name") ?? ref, ref, headerRowCount, totalsRowCount, columns });
+    }
+    sheets.push({ name: sheet.name, rows, ...(tables.length ? { tables } : {}) });
   }
   return sheets;
 }
@@ -165,14 +206,14 @@ export async function markUncachedFormulas(buffer: ArrayBuffer, ko: boolean): Pr
   const encoder = new TextEncoder();
   for (const sheet of await workbookSheets(entries)) {
     const xml = await entryText(entries, sheet.path);
-    if (!xml || !/<f\b/.test(xml)) continue;
+    if (!xml || !/<(?:[A-Za-z_][\w.-]*:)?f\b/.test(xml)) continue;
     const sharedFormulas = new Map<string, string>();
     let changed = false;
     const next = xml.replace(CELL_RE, (whole, attrs: string, inner: string | undefined) => {
       if (!inner) return whole;
-      const formulaMatch = inner.match(/<f\b([^>]*?)(?:\/>|>([\s\S]*?)<\/f>)/);
+      const formulaMatch = inner.match(/<(?:[A-Za-z_][\w.-]*:)?f\b([^>]*?)(?:\/>|>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?f>)/);
       if (!formulaMatch) return whole;
-      const valueMatch = inner.match(/<v>([\s\S]*?)<\/v>/);
+      const valueMatch = inner.match(/<(?:[A-Za-z_][\w.-]*:)?v>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?v>/);
       if (valueMatch && valueMatch[1] !== "") return whole;
       const text = formulaMatch[2] ? decodeXml(formulaMatch[2]).trim() : "";
       const si = attr(formulaMatch[1], "si");
@@ -183,7 +224,8 @@ export async function markUncachedFormulas(buffer: ArrayBuffer, ko: boolean): Pr
       void formula;
       changed = true;
       const keptAttrs = attrs.replace(/\s+t\s*=\s*"[^"]*"/, "");
-      return `<c${keptAttrs} t="inlineStr"><is><t>${escapeXml(shown)}</t></is></c>`;
+      const prefix = whole.match(/^<([A-Za-z_][\w.-]*:)?c\b/)?.[1] ?? "";
+      return `<${prefix}c${keptAttrs} t="inlineStr"><${prefix}is><${prefix}t>${escapeXml(shown)}</${prefix}t></${prefix}is></${prefix}c>`;
     });
     if (changed) replacements.set(sheet.path, encoder.encode(next));
   }
@@ -254,6 +296,21 @@ export function splitHeader(rows: TableCell[][]): { columns: string[]; body: Tab
   });
   const body = rows.slice(1).filter((row) => row.some((cell) => cell !== null && cell !== ""));
   return { columns, body: body.map((row) => Array.from({ length: width }, (_, index) => row[index] ?? null)) };
+}
+
+/** Explicit Excel tables define their own header and data range; worksheet coordinates stay intact. */
+export function tableDataForSheet(sheet: TableSheet | null, tableIndex = 0): { columns: string[]; body: TableCell[][] } {
+  const table = sheet?.tables?.[tableIndex];
+  if (!sheet || !table) return splitHeader(sheet?.rows ?? []);
+  const range = parseRef(table.ref);
+  if (!range) return splitHeader(sheet.rows);
+  const width = range.c2 - range.c1 + 1;
+  const header = table.headerRowCount ? sheet.rows[range.r1]?.slice(range.c1, range.c2 + 1) ?? [] : [];
+  const fallback = splitHeader([header]).columns;
+  const columns = Array.from({ length: width }, (_, index) => table.columns[index] || fallback[index] || String.fromCharCode(65 + index % 26));
+  const body = sheet.rows.slice(range.r1 + table.headerRowCount, range.r2 + 1 - table.totalsRowCount)
+    .map((row) => Array.from({ length: width }, (_, index) => row[range.c1 + index] ?? null));
+  return { columns, body };
 }
 
 export function isNumericColumn(body: TableCell[][], index: number): boolean {
@@ -368,16 +425,17 @@ function resolveRelative(base: string, target: string): string {
   return parts.join("/");
 }
 
-async function relationTargets(entries: ZipEntry[], partPath: string, typeSuffix: string): Promise<string[]> {
+async function relationTargets(entries: ZipEntry[], partPath: string, typeSuffix: string, allowedIds?: Set<string>): Promise<string[]> {
   const slash = partPath.lastIndexOf("/");
   const relsPath = `${partPath.slice(0, slash)}/_rels/${partPath.slice(slash + 1)}.rels`;
   const xml = await entryText(entries, relsPath);
   if (!xml) return [];
   const out: string[] = [];
-  for (const match of xml.matchAll(/<Relationship\b([^>]*)\/?>/g)) {
+  for (const match of xml.matchAll(/<(?:[A-Za-z_][\w.-]*:)?Relationship\b([^>]*)\/?>/g)) {
     const type = attr(match[1], "Type") ?? "";
     const target = attr(match[1], "Target");
     if (!target || !type.endsWith(typeSuffix) || /TargetMode\s*=\s*"External"/i.test(match[1])) continue;
+    if (allowedIds && !allowedIds.has(attr(match[1], "Id") ?? "")) continue;
     const resolved = resolveRelative(partPath, target);
     if (!resolved.includes("..")) out.push(resolved);
   }
@@ -411,27 +469,27 @@ function refCells(formula: string | undefined, sheets: TableSheet[], fallbackShe
 function cachePoints(xml: string | undefined): string[] {
   if (!xml) return [];
   const points: Array<[number, string]> = [];
-  for (const match of xml.matchAll(/<pt\b[^>]*idx="(\d+)"[^>]*>\s*<v>([\s\S]*?)<\/v>/g)) points.push([Number(match[1]), decodeXml(match[2])]);
+  for (const match of xml.matchAll(/<(?:[A-Za-z_][\w.-]*:)?pt\b[^>]*idx="(\d+)"[^>]*>\s*<(?:[A-Za-z_][\w.-]*:)?v>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?v>/g)) points.push([Number(match[1]), decodeXml(match[2])]);
   const out: string[] = [];
   for (const [idx, value] of points) out[idx] = value;
   return out;
 }
 
 function refPart(xml: string, tag: string): { formula?: string; cache: string[] } | null {
-  const block = xml.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`))?.[1];
+  const block = xml.match(new RegExp(`<${xmlTag(tag)}>([\\s\\S]*?)<\\/${xmlTag(tag)}>`))?.[1];
   if (!block) return null;
-  const formula = block.match(/<f>([\s\S]*?)<\/f>/)?.[1];
-  const literal = block.match(/<v>([\s\S]*?)<\/v>/)?.[1];
+  const formula = block.match(/<(?:[A-Za-z_][\w.-]*:)?f>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?f>/)?.[1];
+  const literal = block.match(/<(?:[A-Za-z_][\w.-]*:)?v>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?v>/)?.[1];
   const cache = cachePoints(block);
   return { formula: formula ? decodeXml(formula) : undefined, cache: cache.length ? cache : literal ? [decodeXml(literal)] : [] };
 }
 
 function textOfTitle(xml: string): string {
-  const title = xml.match(/<title>([\s\S]*?)<\/title>/)?.[1];
+  const title = xml.match(/<(?:[A-Za-z_][\w.-]*:)?title>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?title>/)?.[1];
   if (!title) return "";
-  const runs = [...title.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)].map((match) => decodeXml(match[1]));
+  const runs = [...title.matchAll(/<(?:[A-Za-z_][\w.-]*:)?t>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?t>/g)].map((match) => decodeXml(match[1]));
   if (runs.length) return runs.join("").trim();
-  return decodeXml(title.match(/<v>([\s\S]*?)<\/v>/)?.[1] ?? "").trim();
+  return decodeXml(title.match(/<(?:[A-Za-z_][\w.-]*:)?v>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?v>/)?.[1] ?? "").trim();
 }
 
 /** 통합문서의 모든 시트에 붙은 차트를 시트 순서대로. 계열 값은 시트 칸에서 다시 찾고, 없으면 캐시. */
@@ -444,22 +502,21 @@ export async function readXlsxCharts(buffer: ArrayBuffer | Uint8Array, sheetsIn?
       for (const chartPath of await relationTargets(entries, drawing, "/chart")) {
         const raw = await entryText(entries, chartPath);
         if (!raw) continue;
-        // Excel 은 c: 접두사, openpyxl 은 기본 네임스페이스로 쓴다 — 차트 네임스페이스 접두사를 걷고 읽는다.
-        const xml = raw.replace(/<(\/?)c:/g, "<$1");
-        const chartBody = xml.match(/<chart>([\s\S]*)<\/chart>/)?.[1] ?? xml;
-        const plotIndex = chartBody.indexOf("<plotArea");
+        const xml = raw;
+        const chartBody = xml.match(/<(?:[A-Za-z_][\w.-]*:)?chart>([\s\S]*)<\/(?:[A-Za-z_][\w.-]*:)?chart>/)?.[1] ?? xml;
+        const plotIndex = chartBody.search(/<(?:[A-Za-z_][\w.-]*:)?plotArea\b/);
         const title = textOfTitle(plotIndex > 0 ? chartBody.slice(0, plotIndex) : "") || sheet.name;
         const plot = chartBody.slice(Math.max(0, plotIndex));
-        const kindMatch = plot.match(/<(bar3DChart|barChart|line3DChart|lineChart|area3DChart|areaChart|pie3DChart|pieChart|doughnutChart|scatterChart)>([\s\S]*?)<\/\1>/);
+        const kindMatch = plot.match(/<(?:[A-Za-z_][\w.-]*:)?(bar3DChart|barChart|line3DChart|lineChart|area3DChart|areaChart|pie3DChart|pieChart|doughnutChart|scatterChart)>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?\1>/);
         if (!kindMatch) continue;
         const kind = kindMatch[1];
         const body = kindMatch[2];
         const type: XlsxChart["type"] = kind.startsWith("bar") ? "bar" : kind.startsWith("line") ? "line" : kind.startsWith("area") ? "area"
           : kind === "doughnutChart" ? "doughnut" : kind.startsWith("pie") ? "pie" : "scatter";
-        const horizontal = /<barDir val="bar"\/>/.test(body);
-        const stacked = /<grouping val="(?:stacked|percentStacked)"\/>/.test(body);
+        const horizontal = /<(?:[A-Za-z_][\w.-]*:)?barDir val="bar"\/>/.test(body);
+        const stacked = /<(?:[A-Za-z_][\w.-]*:)?grouping val="(?:stacked|percentStacked)"\/>/.test(body);
         const series: XlsxChartSeries[] = [];
-        for (const ser of body.matchAll(/<ser>([\s\S]*?)<\/ser>/g)) {
+        for (const ser of body.matchAll(/<(?:[A-Za-z_][\w.-]*:)?ser>([\s\S]*?)<\/(?:[A-Za-z_][\w.-]*:)?ser>/g)) {
           const s = ser[1];
           const nameRef = refPart(s, "tx");
           const nameCells = refCells(nameRef?.formula, sheets, sheet.name);

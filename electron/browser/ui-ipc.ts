@@ -66,11 +66,26 @@ export function registerBrowserUiIpc({ ipc, assertTrustedSender }: BrowserUiIpcD
     clearBrowserData(trusted(event), input));
   // The fallback ladder's owner card has one button. Same trusted-sender check; the site is a bare domain.
   ipc.handle("browserUi:ladderAction", async (event, input: Parameters<BrowserUiAPI["ladderAction"]>[0]) => {
-    trusted(event);
+    const window = assertTrustedSender(event);
     const action = input?.action;
     if (action !== "retry" && action !== "open-browser" && action !== "fix") return { ok: false, code: "invalid-request" };
     const site = typeof input?.site === "string" && /^[a-z0-9.-]{1,253}$/i.test(input.site) ? input.site : null;
     const { browserLadderOwnerAction } = await import("./fallback-ladder-runtime");
-    return browserLadderOwnerAction({ action, site });
+    if (input?.ownerScopeId !== undefined && input.ownerScopeId !== null && typeof input.ownerScopeId !== "string") {
+      return { ok: false, code: "invalid-request" };
+    }
+    const ownerScopeId = typeof input?.ownerScopeId === "string" ? input.ownerScopeId : null;
+    const browserSurface = input?.browserSurface === "native" || input?.browserSurface === "dedicated" ? input.browserSurface : undefined;
+    if (ownerScopeId && action === "open-browser" && browserSurface !== "dedicated") {
+      const scope = (await import("./native-cdp-relay")).nativeBrowserRelayOwnerScopeForId(ownerScopeId);
+      if (scope) {
+        try {
+          const { registerNativeBrowserTask } = await import("../work-live-view");
+          registerNativeBrowserTask({ ownerId: event.sender.id, window, taskScopeId: scope.chatId,
+            send: (status) => { if (!event.sender.isDestroyed()) event.sender.send("workLiveView:status", status); } });
+        } catch { return { ok: false, code: "native-browser-owner-presentation-unavailable" }; }
+      }
+    }
+    return browserLadderOwnerAction({ action, site, ownerScopeId, browserSurface });
   });
 }

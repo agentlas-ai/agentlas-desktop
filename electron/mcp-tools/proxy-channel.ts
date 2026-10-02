@@ -30,7 +30,7 @@ export const MCP_PROXY_SESSION_ENV = "AGENTLAS_MCP_PROXY_SESSION";
 export const MCP_PROXY_PLAN_ENV = "AGENTLAS_MCP_PROXY_PLAN";
 
 export function mcpProxyControlInfoPath(): string {
-  return userDataPath("mcp", "proxy-control.json");
+  return userDataPath("mcp", `proxy-control-${process.pid}.json`);
 }
 
 /** Opaque Main-registered launch, not caller-supplied policy or target JSON. */

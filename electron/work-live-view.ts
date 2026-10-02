@@ -5,7 +5,7 @@ import { nativeSessionForUrl } from "./browser/native-session-status";
 // frame-ancestors/X-Frame-Options still run in-app. The loaded page receives no
 // Agentlas preload, no Node integration or Desktop IPC. Browser tabs share only
 // the persistent Agentlas native-browser session; app previews remain isolated.
-import { BaseWindow, BrowserWindow, WebContentsView, nativeImage } from "electron";
+import { app, BaseWindow, BrowserWindow, WebContentsView, nativeImage } from "electron";
 import { measuringZoomFactor, ownerCssBoundsToWindow } from "./native-view-bounds";
 import { randomUUID } from "node:crypto";
 import type { WebContents, NativeImage, Rectangle } from "electron";
@@ -15,7 +15,8 @@ type ActiveWorkView = {
   ownerId: number;
   viewId: string;
   view: WebContentsView;
-  window: BrowserWindow;
+  window: BaseWindow;
+  presentationWindow?: BrowserWindow;
   origin: string;
   loopbackPort: string | null;
   send: (status: WorkLiveViewStatus) => void;
@@ -47,7 +48,22 @@ type ActiveWorkView = {
 const activeViews = new Map<string, ActiveWorkView>();
 export const NATIVE_BROWSER_PARTITION = "persist:agentlas-browser-default";
 export const MAX_NATIVE_BROWSER_TABS_PER_OWNER = 8;
-type NativeTaskOwner = { ownerId: number; window: BrowserWindow; taskScopeId: string; send: (status: WorkLiveViewStatus) => void };
+type NativeTaskPresentation = { ownerId: number; window: BrowserWindow; taskScopeId: string; send: (status: WorkLiveViewStatus) => void };
+type NativeTaskOwner = { ownerId: number; window: BaseWindow; taskScopeId: string; send: (status: WorkLiveViewStatus) => void;
+  presentation?: NativeTaskPresentation; leases: Set<NativeBrowserTaskLease> };
+export interface NativeBrowserTaskLease {
+  readonly ownerId: number;
+  readonly taskScopeId: string;
+  readonly runId: string;
+  readonly permission: "read" | "write" | "full";
+  current: () => boolean;
+  release: () => void;
+  onRevoke: (listener: () => void) => () => void;
+  /** Main-only terminal task removal. */
+  revoke: () => void;
+}
+// Reserved Main-only identity space; renderer IDs are never accepted as execution ownership.
+let nextNativeTaskOwnerId = 1_000_000_000;
 const nativeTaskOwners = new Map<string, NativeTaskOwner>();
 const ownerCleanup = new Map<number, { window: BrowserWindow; listener: () => void }>();
 const MAX_NATIVE_TASK_BINDINGS_PER_OWNER = 64;
@@ -62,7 +78,7 @@ const MAX_NATIVE_TASK_BINDINGS_PER_OWNER = 64;
  *
  * A hold is one agent run's claim on the native browser. The CDP relay opens a
  * hold per run grant and settles it from the grant's single release path (run
- * success, failure, cancel, interrupt, window close, host shutdown). Settlement
+ * success, failure, cancel, interrupt, terminal task removal, host shutdown). Settlement
  * closes the tabs that run opened, except a tab the owner is looking at right
  * now; that one is handed to the owner and follows the owner's lifecycle.
  */
@@ -162,7 +178,7 @@ function evictableAgentBrowserTab(ownerId: number): ActiveWorkView | null {
     : (active.view.webContents.getURL() || active.pendingUrl) === "about:blank" ? 1 : 2;
   let victim: ActiveWorkView | null = null;
   for (const active of activeViews.values()) {
-    if (active.ownerId !== ownerId || active.mode !== "browser") continue;
+    if (browserCapacityGroup(active.ownerId) !== browserCapacityGroup(ownerId) || active.mode !== "browser") continue;
     if (ownerViewing(active) || hasLiveHold(active)) continue;
     if (!victim || rank(active) < rank(victim) || (rank(active) === rank(victim) && active.lastUsedAt < victim.lastUsedAt)) victim = active;
   }
@@ -175,7 +191,7 @@ function evictableAgentBrowserTab(ownerId: number): ActiveWorkView | null {
  * Synchronous so a page's window.open can be answered before it returns.
  */
 function ensureBrowserTabCapacity(ownerId: number): boolean {
-  reclaimOrphanAgentBrowserTabs(ownerId);
+  reclaimOrphanAgentBrowserTabs();
   /*
    * Reconcile before refusing: a tab whose page is gone (destroyed contents or window) or whose renderer
    * crashed still counted against the cap, and a live run holding it made it unevictable, so the run hit
@@ -183,13 +199,13 @@ function ensureBrowserTabCapacity(ownerId: number): boolean {
    * page-ledger.ts reconcile() — entries whose target no longer exists are dropped; reimplemented here.
    */
   for (const active of [...activeViews.values()]) {
-    if (active.ownerId !== ownerId || active.mode !== "browser") continue;
+    if (browserCapacityGroup(active.ownerId) !== browserCapacityGroup(ownerId) || active.mode !== "browser") continue;
     const contents = active.view.webContents;
     let crashed = false;
     try { crashed = !contents.isDestroyed() && typeof contents.isCrashed === "function" && contents.isCrashed(); } catch { crashed = false; }
     if (!isCurrent(active) || crashed) closeActive(active, isCurrent(active));
   }
-  while ([...activeViews.values()].filter((active) => active.ownerId === ownerId && active.mode === "browser").length
+  while ([...activeViews.values()].filter((active) => browserCapacityGroup(active.ownerId) === browserCapacityGroup(ownerId) && active.mode === "browser").length
     >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
     const victim = evictableAgentBrowserTab(ownerId);
     if (!victim) return false;
@@ -215,30 +231,129 @@ function ensureOwnerCleanup(ownerId: number, window: BrowserWindow): void {
   if (ownerCleanup.has(ownerId)) return;
   const listener = () => closeWorkLiveViewsForOwner(ownerId);
   ownerCleanup.set(ownerId, { window, listener });
-  window.once("closed", listener);
+  // Detach guests before BaseWindow tears down its attached children.
+  window.once("close", listener);
 }
 
-/** Main calls only after verifying an actual chat and its trusted Desktop sender. */
-export function registerNativeBrowserTask(owner: NativeTaskOwner): void {
-  if (owner.window.isDestroyed()) throw new Error("native-browser-owner-closed");
-  ensureOwnerCleanup(owner.ownerId, owner.window);
-  const ownerKey = key(owner.ownerId, owner.taskScopeId);
-  if (!nativeTaskOwners.has(ownerKey)) {
-    const bindings = [...nativeTaskOwners.entries()].filter(([, entry]) => entry.ownerId === owner.ownerId);
-    if (bindings.length >= MAX_NATIVE_TASK_BINDINGS_PER_OWNER) {
-      const unused = bindings.find(([, entry]) => ![...activeViews.values()].some((active) =>
-        active.ownerId === owner.ownerId && active.taskScopeId === entry.taskScopeId));
-      if (!unused) throw new Error("native-browser-task-binding-limit");
-      nativeTaskOwners.delete(unused[0]);
-    }
+function taskFor(ownerId: number, taskScopeId: string | undefined): NativeTaskOwner | undefined {
+  if (!taskScopeId) return undefined;
+  const task = nativeTaskOwners.get(taskScopeId);
+  if (!task || task.window.isDestroyed()) return undefined;
+  if (task.ownerId === ownerId) return task;
+  const presentation = task.presentation;
+  return presentation?.ownerId === ownerId && !presentation.window.isDestroyed() ? task : undefined;
+}
+
+/** Trusted IPC resolves its sender alias before addressing task-owned downloads. */
+export function nativeBrowserTaskExecutionOwner(ownerId: number, taskScopeId: string): number | null {
+  return taskFor(ownerId, taskScopeId)?.ownerId ?? null;
+}
+
+function browserCapacityGroup(ownerId: number): number {
+  const task = [...nativeTaskOwners.values()].find((entry) => entry.ownerId === ownerId);
+  return task ? task.presentation?.ownerId ?? 0 : ownerId;
+}
+
+function removeNativeTask(task: NativeTaskOwner): void {
+  if (nativeTaskOwners.get(task.taskScopeId) !== task) return;
+  nativeTaskOwners.delete(task.taskScopeId);
+  for (const lease of [...task.leases]) lease.revoke();
+  for (const active of [...activeViews.values()]) {
+    if (active.mode === "browser" && active.ownerId === task.ownerId) closeActive(active);
   }
-  nativeTaskOwners.set(ownerKey, owner);
+  try { task.window.destroy(); } catch {}
+}
+
+function ensureTaskBindingCapacity(presentationOwnerId?: number, except?: NativeTaskOwner): void {
+  const bindings = [...nativeTaskOwners.values()].filter((task) => task !== except
+    && task.presentation?.ownerId === presentationOwnerId);
+  if (bindings.length < MAX_NATIVE_TASK_BINDINGS_PER_OWNER) return;
+  const unused = bindings.find((task) => !task.leases.size
+    && ![...activeViews.values()].some((active) => active.ownerId === task.ownerId));
+  if (!unused) throw new Error("native-browser-task-binding-limit");
+  removeNativeTask(unused);
+}
+
+function ensureNativeTask(taskScopeId: string, presentationOwnerId?: number): NativeTaskOwner {
+  if (!/^[A-Za-z0-9_:.-]{8,200}$/.test(taskScopeId)) throw new Error("native-browser-task-scope-invalid");
+  const existing = nativeTaskOwners.get(taskScopeId);
+  if (existing && !existing.window.isDestroyed()) return existing;
+  if (existing) removeNativeTask(existing);
+  if (!app.isReady()) throw new Error("native-browser-host-unavailable");
+  // Preserve the per-presentation binding limit, with a separate bounded background pool.
+  ensureTaskBindingCapacity(presentationOwnerId);
+  let window: BaseWindow;
+  try { window = new BaseWindow({ show: false, width: 1000, height: 750, focusable: false }); }
+  catch { throw new Error("native-browser-host-unavailable"); }
+  const task: NativeTaskOwner = { ownerId: nextNativeTaskOwnerId++, window, taskScopeId, leases: new Set(),
+    send: (status) => { const p = task.presentation; if (p && !p.window.isDestroyed()) p.send(status); } };
+  nativeTaskOwners.set(taskScopeId, task);
+  window.once("closed", () => removeNativeTask(task));
+  return task;
+}
+
+/** Main calls only after verifying an actual chat and its trusted Desktop sender.
+ * This attaches presentation to an existing execution task; it never changes its identity. */
+export function registerNativeBrowserTask(presentation: NativeTaskPresentation): void {
+  if (presentation.window.isDestroyed()) throw new Error("native-browser-owner-closed");
+  const task = ensureNativeTask(presentation.taskScopeId, presentation.ownerId);
+  const previous = task.presentation;
+  if (previous && !previous.window.isDestroyed() && previous.ownerId !== presentation.ownerId) {
+    throw new Error("native-browser-task-presentation-bound");
+  }
+  ensureTaskBindingCapacity(presentation.ownerId, task);
+  ensureOwnerCleanup(presentation.ownerId, presentation.window);
+  task.presentation = presentation;
+  for (const active of activeViews.values()) {
+    if (active.mode !== "browser" || active.ownerId !== task.ownerId) continue;
+    active.presentationWindow = presentation.window;
+  }
+}
+
+/** Main-only: execution lifetime is independent of renderer/window presentation. */
+export function acquireNativeBrowserTask(input: {
+  taskScopeId: string; runId: string; permission: "read" | "write" | "full"; signal: AbortSignal;
+}): NativeBrowserTaskLease {
+  if (!input.runId || input.signal.aborted || !["read", "write", "full"].includes(input.permission)) {
+    throw new Error("native-browser-task-unbound");
+  }
+  const task = ensureNativeTask(input.taskScopeId);
+  const taskScopeId = input.taskScopeId, runId = input.runId, permission = input.permission;
+  const listeners = new Set<() => void>();
+  let released = false;
+  const release = () => {
+    if (released) return;
+    released = true;
+    input.signal.removeEventListener("abort", revoke);
+    task.leases.delete(lease);
+    listeners.clear();
+    if (!task.leases.size && !task.presentation) removeNativeTask(task);
+  };
+  const revoke = () => {
+    const callbacks = [...listeners];
+    release();
+    for (const callback of callbacks) { try { callback(); } catch { /* Terminal cleanup remains unconditional. */ } }
+  };
+  const lease: NativeBrowserTaskLease = { ownerId: task.ownerId, taskScopeId, runId, permission,
+    current: () => !released && !input.signal.aborted && nativeTaskOwners.get(taskScopeId) === task
+      && task.leases.has(lease) && !task.window.isDestroyed(), release, revoke,
+    onRevoke: (listener) => { if (released) { listener(); return () => {}; } listeners.add(listener); return () => { listeners.delete(listener); }; } };
+  task.leases.add(lease);
+  input.signal.addEventListener("abort", revoke, { once: true });
+  return lease;
 }
 
 export function nativeBrowserTaskOwner(taskScopeId: string): NativeTaskOwner | null {
-  const matches = [...nativeTaskOwners.values()].filter((owner) => owner.taskScopeId === taskScopeId && !owner.window.isDestroyed());
-  // An unattended or ambiguous window binding cannot select a guest on the model's behalf.
-  return matches.length === 1 ? matches[0] : null;
+  const task = nativeTaskOwners.get(taskScopeId);
+  return task && !task.window.isDestroyed() ? task : null;
+}
+
+/** Main-only presentation. A hidden execution anchor is never shown or focused. */
+export function focusNativeBrowserTask(taskScopeId: string): boolean {
+  const window = nativeTaskOwners.get(taskScopeId)?.presentation?.window;
+  if (!window || window.isDestroyed()) return false;
+  try { if (window.isMinimized()) window.restore(); window.show(); window.focus(); return !window.isDestroyed(); }
+  catch { return false; }
 }
 
 function browserTab(active: ActiveWorkView): WorkLiveBrowserTab {
@@ -250,26 +365,24 @@ function browserTab(active: ActiveWorkView): WorkLiveBrowserTab {
 }
 
 export function listWorkBrowserTabs(ownerId: number, taskScopeId: string): WorkLiveBrowserTab[] {
-  return [...activeViews.values()].filter((active) => active.ownerId === ownerId
-    && active.mode === "browser" && active.taskScopeId === taskScopeId && isCurrent(active)).map(browserTab);
+  const task = taskFor(ownerId, taskScopeId);
+  return task ? [...activeViews.values()].filter((active) => active.ownerId === task.ownerId
+    && active.mode === "browser" && active.taskScopeId === taskScopeId && isCurrent(active)).map(browserTab) : [];
 }
 
 export async function createWorkBrowserTab(ownerId: number, taskScopeId: string, url = "about:blank", opener?: { holdId: string }):
   Promise<{ ok: boolean; tab?: WorkLiveBrowserTab; reason?: string; message?: string }> {
   if (opener && !holdLive(opener.holdId)) return { ok: false, reason: "native-browser-grant-revoked" };
-  const owner = nativeTaskOwners.get(key(ownerId, taskScopeId));
-  if (!owner || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
-  const nativeSessions = await (await import("./browser/native-session-cookie-import")).syncConnectBrowserSessionsByDomain();
-  const currentOwner = nativeTaskOwners.get(key(ownerId, taskScopeId));
-  if (!currentOwner || currentOwner.window !== owner.window || owner.window.isDestroyed()) return { ok: false, reason: "task-not-bound" };
+  const owner = taskFor(ownerId, taskScopeId);
+  if (!owner) return { ok: false, reason: "task-not-bound" };
+  // The native partition is canonical. Opening a guest never imports or overwrites its session.
   const viewId = `browser_${randomUUID().replace(/-/g, "")}`;
   const result = await openWorkLiveView({ ...owner, viewId, url, mode: "browser", visible: false,
     bounds: { x: 0, y: 0, width: 1000, height: 750 }, ...(opener ? { agentHoldId: opener.holdId } : {}) });
-  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  const active = registeredGuest(owner.ownerId, viewId, taskScopeId);
   // The run ended while its tab was loading: it must not outlive the run.
   if (active && opener && !holdLive(opener.holdId)) { closeActive(active); return { ok: false, reason: "native-browser-grant-revoked" }; }
   if (active) {
-    active.nativeSessions = nativeSessions;
     emit(active, { state: active.state, url: active.view.webContents.getURL() || active.pendingUrl });
   }
   return result.ok && active ? { ok: true, tab: browserTab(active) }
@@ -332,8 +445,9 @@ function isCurrent(active: ActiveWorkView): boolean {
 /** Exact registered guest only. Main's renderer and unrelated CDP targets never qualify. */
 function registeredGuest(ownerId: number, viewId: unknown, taskScopeId?: string): ActiveWorkView | null {
   const id = sanitizeViewId(viewId);
-  const active = id ? activeViews.get(key(ownerId, id)) : undefined;
-  return active && isCurrent(active) && (active.mode !== "browser" || active.taskScopeId === taskScopeId) ? active : null;
+  const task = taskFor(ownerId, taskScopeId);
+  const active = id ? activeViews.get(key(task?.ownerId ?? ownerId, id)) : undefined;
+  return active && (active.mode !== "browser" || Boolean(task)) && isCurrent(active) && (active.mode !== "browser" || active.taskScopeId === taskScopeId) ? active : null;
 }
 
 /** Hidden native views must leave the owner's native/AX tree, not merely stop
@@ -360,10 +474,12 @@ export function nativeBrowserGuestLayoutAge(ownerId: number, taskScopeId: string
 }
 
 function setOwnerGuestVisibleNow(active: ActiveWorkView, visible: boolean): void {
+  const window = active.mode === "browser" ? active.presentationWindow : active.window;
+  if (!window || window.isDestroyed()) visible = false;
   if (!visible) {
     active.view.setVisible(false);
-    if (active.ownerAttached && !active.window.isDestroyed()) {
-      active.window.contentView.removeChildView(active.view);
+    if (active.ownerAttached && window && !window.isDestroyed()) {
+      window.contentView.removeChildView(active.view);
     }
     active.ownerAttached = false;
     // An unattached view loads with a zero DOM viewport even when its native
@@ -378,13 +494,16 @@ function setOwnerGuestVisibleNow(active: ActiveWorkView, visible: boolean): void
       active.view.setBounds({ x: 0, y: 0, width: bounds.width, height: bounds.height });
       active.hiddenHost.setContentSize(bounds.width, bounds.height);
       active.view.setVisible(true);
+      // Construction preferences alone leave a never-shown guest without frames.
+      // Reapply after attachment, including load completion and panel rehosting.
+      active.view.webContents.setBackgroundThrottling(false);
     } else releaseHiddenGuestHost(active);
     return;
   }
   releaseHiddenGuestHost(active);
   if (active.ownerBounds) active.view.setBounds(active.ownerBounds);
   if (!active.ownerAttached) {
-    active.window.contentView.addChildView(active.view);
+    window!.contentView.addChildView(active.view);
     active.ownerAttached = true;
   }
   active.view.setVisible(true);
@@ -400,7 +519,9 @@ function releaseHiddenGuestHost(active: ActiveWorkView): void {
 
 function showOnly(active: ActiveWorkView): void {
   for (const other of activeViews.values()) {
-    if (other.ownerId !== active.ownerId || other === active) continue;
+    const ownerGroup = active.mode === "browser" ? browserCapacityGroup(active.ownerId) : active.ownerId;
+    const otherGroup = other.mode === "browser" ? browserCapacityGroup(other.ownerId) : other.ownerId;
+    if (otherGroup !== ownerGroup || other === active) continue;
     other.captureRestore?.();
     other.visible = false;
     try { setOwnerGuestVisible(other, false); } catch {}
@@ -457,7 +578,7 @@ function permittedNavigation(active: ActiveWorkView, target: string): boolean {
 }
 
 // The owner renderer sends CSS pixels; see native-view-bounds.ts.
-function sanitizeBounds(cssBounds: WorkLiveViewBounds, window: BrowserWindow, ownerId: number): WorkLiveViewBounds {
+function sanitizeBounds(cssBounds: WorkLiveViewBounds, window: BaseWindow, ownerId: number): WorkLiveViewBounds {
   const bounds = ownerCssBoundsToWindow(cssBounds, measuringZoomFactor(ownerId));
   const round = (value: unknown) => {
     const number = Math.round(Number(value));
@@ -535,12 +656,23 @@ export function releaseWorkLiveViewLease(ownerId: number, input: {
 export function closeWorkLiveViewsForOwner(ownerId: number): void {
   const cleanup = ownerCleanup.get(ownerId);
   if (cleanup) {
-    cleanup.window.removeListener("closed", cleanup.listener);
+    cleanup.window.removeListener("close", cleanup.listener);
     ownerCleanup.delete(ownerId);
   }
-  for (const [id, owner] of nativeTaskOwners) if (owner.ownerId === ownerId) nativeTaskOwners.delete(id);
+  for (const task of [...nativeTaskOwners.values()]) {
+    if (task.presentation?.ownerId !== ownerId) continue;
+    // Move the same guest to its hidden host before the presentation window closes.
+    for (const active of activeViews.values()) {
+      if (active.mode !== "browser" || active.ownerId !== task.ownerId) continue;
+      active.visible = false;
+      try { setOwnerGuestVisible(active, false); } catch { closeActive(active); }
+      active.presentationWindow = undefined;
+    }
+    task.presentation = undefined;
+    if (!task.leases.size) removeNativeTask(task);
+  }
   for (const active of [...activeViews.values()]) {
-    if (active.ownerId === ownerId) closeActive(active, false);
+    if (active.mode === "app" && active.ownerId === ownerId) closeActive(active, false);
   }
 }
 
@@ -551,12 +683,8 @@ export function closeWorkLiveViewsForOwner(ownerId: number): void {
  */
 export function closeWorkLiveViewsForTaskScope(taskScopeId: string): void {
   if (!taskScopeId) return;
-  for (const [id, owner] of nativeTaskOwners) {
-    if (owner.taskScopeId === taskScopeId) nativeTaskOwners.delete(id);
-  }
-  for (const active of [...activeViews.values()]) {
-    if (active.mode === "browser" && active.taskScopeId === taskScopeId) closeActive(active);
-  }
+  const task = nativeTaskOwners.get(taskScopeId);
+  if (task) removeNativeTask(task);
 }
 
 export function setWorkLiveViewBounds(
@@ -573,7 +701,7 @@ export function setWorkLiveViewBounds(
     active.visible = input.visible !== false;
     if (active.visible) { showOnly(active); active.lastUsedAt = Date.now(); }
     const previous = active.view.getBounds();
-    active.ownerBounds = sanitizeBounds(input.bounds, active.window, ownerId);
+    active.ownerBounds = sanitizeBounds(input.bounds, active.presentationWindow ?? active.window, ownerId);
     active.view.setBounds(active.ownerBounds);
     if (previous.width !== active.ownerBounds.width || previous.height !== active.ownerBounds.height) active.layoutChangedAt = Date.now();
     setOwnerGuestVisible(active, active.visible && active.state !== "error");
@@ -637,7 +765,7 @@ export function goForwardWorkLiveView(ownerId: number, viewId: string, taskScope
 
 export async function openWorkLiveView(input: {
   ownerId: number;
-  window: BrowserWindow;
+  window: BaseWindow;
   viewId: string;
   url: string;
   bounds: WorkLiveViewBounds;
@@ -659,6 +787,11 @@ export async function openWorkLiveView(input: {
   if (input.window.isDestroyed()) return { ok: false, viewId, reason: "window-closed" };
 
   const mode = input.mode === "browser" ? "browser" : "app";
+  if (mode === "browser") {
+    const task = taskFor(input.ownerId, input.taskScopeId);
+    if (!task) return { ok: false, viewId, reason: "task-not-bound" };
+    input = { ...input, ownerId: task.ownerId, window: task.window, send: task.send };
+  }
   if (input.viewLeaseId !== undefined && (mode !== "app" || !/^[A-Za-z0-9_-]{8,128}$/.test(input.viewLeaseId))) {
     return { ok: false, viewId, reason: "invalid-view-lease" };
   }
@@ -675,7 +808,7 @@ export async function openWorkLiveView(input: {
     existing.viewLeaseId = input.viewLeaseId;
     // Remounting the same tab preserves its document, history and storage.
     existing.send = input.send;
-    setWorkLiveViewBounds(input.ownerId, input);
+    setWorkLiveViewBounds(mode === "browser" ? nativeTaskOwners.get(input.taskScopeId!)?.presentation?.ownerId ?? input.ownerId : input.ownerId, input);
     emit(existing, { state: existing.state, url: existing.view.webContents.getURL(),
       title: existing.view.webContents.getTitle(), error: existing.error });
     return { ok: true, viewId, url: existing.view.webContents.getURL() };
@@ -717,6 +850,7 @@ export async function openWorkLiveView(input: {
     viewId,
     view,
     window: input.window,
+    presentationWindow: mode === "browser" ? nativeTaskOwners.get(input.taskScopeId!)?.presentation?.window : undefined,
     origin: url.origin,
     loopbackPort: loopbackHost(url.hostname) ? url.port || (url.protocol === "https:" ? "443" : "80") : null,
     send: input.send,
@@ -825,7 +959,7 @@ export async function openWorkLiveView(input: {
       // their result back to the page that opened them, and the agent's CDP
       // client never saw the popup at all (measured 2026-09-29).
       const opener = [...active.holds].find(holdLive);
-      const taskOwner = nativeTaskOwners.get(key(active.ownerId, active.taskScopeId));
+      const taskOwner = taskFor(active.ownerId, active.taskScopeId);
       if (!taskOwner || taskOwner.window.isDestroyed() || !ensureBrowserTabCapacity(active.ownerId)) return { action: "deny" };
       const taskScopeId = active.taskScopeId;
       return { action: "allow", outlivesOpener: true, createWindow: (options) => {
@@ -845,11 +979,12 @@ export async function openWorkLiveView(input: {
   });
 
   if (active.visible) showOnly(active);
-  active.ownerBounds = sanitizeBounds(input.bounds, input.window, input.ownerId);
+  active.ownerBounds = sanitizeBounds(input.bounds, active.presentationWindow ?? input.window,
+    mode === "browser" ? nativeTaskOwners.get(input.taskScopeId!)?.presentation?.ownerId ?? input.ownerId : input.ownerId);
   view.setBounds(active.ownerBounds);
   setOwnerGuestVisible(active, active.visible);
   emit(active, { state: "opening", url: url.toString() });
-  ensureOwnerCleanup(input.ownerId, input.window);
+  if (mode === "app") ensureOwnerCleanup(input.ownerId, input.window as BrowserWindow);
   view.webContents.once("destroyed", () => {
     if (activeViews.get(key(input.ownerId, viewId)) === active) closeActive(active);
   });
@@ -905,6 +1040,50 @@ export async function dispatchWorkLiveViewInput(ownerId: number, value: { viewId
 }
 
 const guestCaptureQueues = new WeakMap<WebContents, Promise<void>>();
+/** Main-only measured identity for direct guest input, independent of CDP. */
+export function nativeBrowserGuestInputFrame(ownerId: number, taskScopeId: string, viewId: string): {
+  webContentsId: number; navigationEpoch: number; width: number; height: number; zoom: number; layoutEpoch: number;
+} | null {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (!active || active.mode !== "browser" || active.state !== "ready" || active.view.webContents.isDestroyed()) return null;
+  const bounds = active.view.getBounds();
+  return { webContentsId: active.view.webContents.id, navigationEpoch: active.navigationEpoch,
+    width: bounds.width, height: bounds.height, zoom: active.view.webContents.getZoomFactor(), layoutEpoch: active.layoutChangedAt ?? 0 };
+}
+
+export type NativeGuestDirectInput =
+  | { kind: "pointer"; phase: "move" | "down" | "up"; x: number; y: number; button: "left" | "right" | "middle"; clickCount?: number; dragging?: boolean }
+  | { kind: "wheel"; deltaX: number; deltaY: number; x: number; y: number }
+  | { kind: "key"; phase: "down" | "up"; key: string; modifiers?: string[] }
+  | { kind: "text"; text: string };
+
+/** Never renderer IPC: caller must own a live run lease and a measured frame. */
+export async function dispatchNativeBrowserGuestInput(ownerId: number, taskScopeId: string, viewId: string,
+  input: NativeGuestDirectInput, authorized: () => boolean): Promise<void> {
+  const active = registeredGuest(ownerId, viewId, taskScopeId);
+  if (!authorized() || !active || active.mode !== "browser" || active.state !== "ready" || active.view.webContents.isDestroyed()) {
+    throw new Error("native-guest-input-stale");
+  }
+  const wc = active.view.webContents;
+  if (input.kind === "text") await wc.insertText(input.text);
+  else if (input.kind === "key") {
+    wc.setIgnoreMenuShortcuts(true);
+    try { wc.sendInputEvent({ type: input.phase === "down" ? "keyDown" : "keyUp", keyCode: input.key, modifiers: input.modifiers as ("shift")[] | undefined }); }
+    finally { wc.setIgnoreMenuShortcuts(false); }
+  }
+  else {
+    const bounds = active.view.getBounds();
+    if (!Number.isFinite(input.x) || !Number.isFinite(input.y) || input.x < 0 || input.y < 0 || input.x >= bounds.width || input.y >= bounds.height) throw new Error("native-guest-input-outside-frame");
+    if (input.kind === "wheel") wc.sendInputEvent({ type: "mouseWheel", x: Math.round(input.x), y: Math.round(input.y), deltaX: input.deltaX, deltaY: input.deltaY, canScroll: true });
+    else wc.sendInputEvent({ type: input.phase === "move" ? "mouseMove" : input.phase === "down" ? "mouseDown" : "mouseUp", x: Math.round(input.x), y: Math.round(input.y), button: input.button, clickCount: input.clickCount ?? 1, ...(input.dragging ? { modifiers: [input.button === "left" ? "leftbuttondown" : input.button === "right" ? "rightbuttondown" : "middlebuttondown"] as ("leftbuttondown" | "rightbuttondown" | "middlebuttondown")[] } : {}) });
+  }
+}
+/** Terminal cleanup of an already-dispatched press on the exact original guest only. */
+export function releaseNativeBrowserGuestPressedInput(wc: WebContents, input: NativeGuestDirectInput): void {
+  if (wc.isDestroyed()) return;
+  if (input.kind === "pointer" && input.phase === "down") wc.sendInputEvent({ type: "mouseUp", x: Math.round(input.x), y: Math.round(input.y), button: input.button, clickCount: input.clickCount ?? 1 });
+  else if (input.kind === "key" && input.phase === "down") wc.sendInputEvent({ type: "keyUp", keyCode: input.key, modifiers: input.modifiers as ("shift")[] | undefined });
+}
 const guestCaptureCounts = new WeakMap<WebContents, number>();
 const pendingDocumentCaptures = new WeakSet<WebContents>();
 

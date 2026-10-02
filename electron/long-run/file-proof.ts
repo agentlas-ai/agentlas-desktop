@@ -34,7 +34,7 @@ const mcpSchemaVersion = "agentlas.mcp-file-proof.v1";
 const MCP_FILE_ACTIONS: Record<string, Record<string, FileObservationAction>> = {
   filesystem: { write_file: "write", edit_file: "edit", read_text_file: "read", read_file: "read" },
 };
-const actionForTool: Record<string, FileObservationAction> = { read_file: "read", write_file: "write", edit_file: "edit" };
+const actionForTool: Record<string, FileObservationAction> = { read_file: "read", read_image: "read", write_file: "write", edit_file: "edit" };
 interface Event { id: string; seq: number; kind: string; payload_json: string }
 function toolReceipts(runId: string, chatId: string, toolId: string, toolName: string) {
   const rows = getDb().prepare("SELECT id,seq,kind,payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind='mcp_tool-use' AND json_extract(payload_json,'$.toolId')=? ORDER BY seq")

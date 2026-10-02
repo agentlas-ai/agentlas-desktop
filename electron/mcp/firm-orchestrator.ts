@@ -1,3 +1,5 @@
+import { toolObservationDigest } from "../automation-progress-guard";
+import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 import { withoutMcpTransportEnv } from "../runtime/runner";
@@ -50,7 +52,7 @@ import { parseSurfaces } from "../surface-emitter";
 import { stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
 import { buildDelegateProtocol, parseDelegations, type Delegation } from "./delegate";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
-import { pickRunner, rolePriorityRuntimes, selectRuntimeForTargets } from "../runtime/selection";
+import { runtimeFailureBlocksReplay, pickRunner, rolePriorityRuntimes, selectRuntimeForTargets } from "../runtime/selection";
 import { getAgentConcurrency } from "../store/concurrency";
 import { tryRecordRunEvent } from "../store/run-events";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
@@ -720,7 +722,8 @@ async function runNodeTurnSafe(
     } catch (ticketError) {
       console.error("[memory] firm terminal turn receipt failed:", ticketError);
     }
-    if (p.signal?.aborted) throw err; // 사용자 취소는 전파
+    if (p.signal?.aborted) throw err;
+    const replayBlocked = err instanceof ObservedRunnerFailureError && runtimeFailureBlocksReplay(err.failure);
     // 실패/타임아웃 노드도 per-node 완료 신호 → UI에서 ▶ 가 멈추고 정리된다(스턱 방지).
     p.sink({
       kind: "tool-use",
@@ -731,6 +734,8 @@ async function runNodeTurnSafe(
       role: turn.node.role,
       tier: turn.tier,
     });
+    // Always close the visible node before preserving its typed terminal boundary.
+    if (replayBlocked) throw err;
     if (p.req.agentAppMode) {
       return {
         text: UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
@@ -1111,14 +1116,28 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     runtime: RuntimeStatus,
     runtimePicked: { runner: Runner; label: string },
   ): Promise<RunnerResult> => {
+    const usageInvocationId = `firm-model-call:${randomUUID()}`;
+    let runnerCalled = false;
+    const recordUsage = (usage: RunnerResult["observedUsage"], status: string, value: unknown): void => {
+      if (!runnerCalled) return;
+      tryRecordRunEvent({ runId: p.req.runId ?? `firm:${p.chat.id}`, chatId: p.chat.id,
+        nodeId: node.id, agentId: nodeRuntimeId, kind: usage ? "invoke_result" : "runtime_usage_unmeasured",
+        payload: { invocationId: usageInvocationId, modelRole: phase === "delegate" ? "worker" : "orchestrator",
+          provider: runtime.backend ?? runtime.kind, model: runtime.model ?? null, effort: runtime.effort ?? null,
+          phase, status, nativeAttempts: observedRunnerUsageEvidence(value),
+          ...(usage ? { ...usage, tokens: usage.inputTokens + usage.outputTokens, measurement: "total" } : { measurement: "unknown" }) } });
+    };
     try {
       const capabilityAttemptId = `firm-worker:${node.id}:${randomUUID()}`;
       // Reapply the host ceiling after prepared capability fields are merged,
       // including retries on another runtime. A child cannot lower Plan mode.
-      const boundedRunner: Runner = (request, events) => runtimePicked.runner(
-        p.req.planMode === true ? { ...request, permission: "read", planMode: true } : request,
-        events,
-      );
+      const boundedRunner: Runner = (request, events) => {
+        runnerCalled = true;
+        return runObservedRunner(runtimePicked.runner,
+          p.req.planMode === true ? { ...request, permission: "read", planMode: true } : request,
+          events,
+        );
+      };
       const workerRunner = turn.runtimeToolsDisabled || controlPlaneTurn ? boundedRunner
         : workerCapabilityRunner(p.prepareWorkerCapabilities, {
           workerId: node.id, attemptId: capabilityAttemptId, agentId: node.agentId ?? undefined, agentName: node.name,
@@ -1128,7 +1147,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
           tryRecordRunEvent({ runId: p.req.runId ?? p.chat.id, chatId: p.chat.id, agentId: node.id,
             kind: "worker_capability_preparation", payload: { code, attemptId: capabilityAttemptId } });
         });
-      return await workerRunner(
+      const measuredResult = await workerRunner(
         {
           systemPrompt,
           ...firmRunnerConversation(p, turn, runtime),
@@ -1213,15 +1232,18 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
               if (turn.toMainBubble) p.sink({ kind: "partial", text });
             }
           },
-          onTool: (name, args, result, id, isError, artifactPaths) => {
+          onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl) => {
             executionEvidence.recordTool(name, args, result, id, isError, artifactPaths);
-            const tool = { name, args, result, id, isError };
+            const tool = { name, args, result, id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) };
             emit({ kind: "tool-use", tool });
             if (turn.toMainBubble) p.sink({ kind: "tool-use", tool });
           },
         },
       );
+      recordUsage(measuredResult.observedUsage, measuredResult.failure ? "failed" : "completed", measuredResult);
+      return measuredResult;
     } catch (error) {
+      recordUsage(observedRunnerUsage(error), (turn.signal ?? p.signal)?.aborted ? "cancelled" : "failed", error);
       if (error instanceof WorkerCapabilityError || (turn.signal ?? p.signal)?.aborted) throw error;
       return { text: "", failure: runnerFailureFromError(error, runtime.kind) };
     }
@@ -1265,6 +1287,7 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
     result = await runNodeOn(executedRuntime, executedPicked);
   }
   if (result.failure) {
+    if (runtimeFailureBlocksReplay(result.failure)) throw new ObservedRunnerFailureError(result.failure);
     if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
       throw new ProjectResidencyBusyError(p.chat.projectId ?? "unknown");
     }

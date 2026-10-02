@@ -1,3 +1,6 @@
+import { getRuntimeToolPermissionArbiter, type RuntimeToolPermissionAsk, type RuntimeToolPermissionDecision } from "../runtime/tool-approval";
+import { bindMainToolConsentResource } from "../runtime/tool-consent";
+import { markAttemptQuiescenceUnconfirmed } from "../runtime/attempt-children";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -8,6 +11,7 @@ import type { InstallIdentity } from "../install-identity";
 import type { DaemonLocalModelStatus } from "../daemon/local-model-service";
 import type { RunnerEvents, RunnerResult } from "../runtime/runner";
 import type { LocalModelHubControlPort, LocalModelHubRuntimePort } from "./ports";
+import { exportPreparedMcpAdmission, preparedMcpProxyScope, preparedMcpProxyScopeMatchesAsk } from "../mcp-tools/prepared-transport";
 import { assertLocalModelWireValue, localModelRemoteError, remoteLocalModelRequest,
   type LocalModelControlCommand, type LocalModelControlPage, type LocalModelRpcCommand,
   type RemoteLocalModelRunPage, type RemoteLocalModelRunTransport } from "./remote-contract";
@@ -159,10 +163,10 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
     })().finally(() => { starting = null; });
     return starting;
   }
-  async function command(command: LocalModelRpcCommand, ownerEpoch?: string): Promise<unknown> {
+  async function command(command: LocalModelRpcCommand, ownerEpoch?: string, timeoutMs?: number): Promise<unknown> {
     if (!daemon) await ensureStarted();
     if (ownerEpoch !== undefined && daemon!.bootId !== ownerEpoch) throw failure("local_model_daemon_boot_changed", "not-dispatched");
-    const reply = record(await rpc("localModel.command", { ...daemon!, command }));
+    const reply = record(await rpc("localModel.command", { ...daemon!, command }, timeoutMs));
     if (reply?.ok === true && Object.prototype.hasOwnProperty.call(reply, "value")) return reply.value;
     const error = record(reply?.error);
     if (reply?.ok === false && typeof error?.code === "string") {
@@ -211,7 +215,9 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
   const runs: RemoteLocalModelRunTransport = {
     start: async input => {
       const request = remoteLocalModelRequest(input.request);
-      return checkPage(await command({ op: "run.start", clientId, runId: input.runId, request }, input.ownerEpoch), input.runId, "run") as unknown as RemoteLocalModelRunPage;
+      return checkPage(await command({ op: "run.start", clientId, runId: input.runId, request,
+        ...(input.resultBoundaryGeneration ? { resultBoundaryGeneration: input.resultBoundaryGeneration } : {}),
+        ...(input.mcpAdmission ? { mcpAdmission: input.mcpAdmission } : {}) }, input.ownerEpoch), input.runId, "run") as unknown as RemoteLocalModelRunPage;
     },
     read: async input => checkPage(await command({ op: "run.read", clientId, runId: input.runId,
       afterSequence: input.afterSequence, limit: input.limit, waitMs: 25_000 }, input.ownerEpoch), input.runId, "run") as unknown as RemoteLocalModelRunPage,
@@ -222,10 +228,32 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
     snapshot: control.snapshot,
     run: async (request, events) => {
       // Validate opaque fields before any daemon startup or request dispatch.
-      const wire = remoteLocalModelRequest(request);
+      const mcpAdmission = request.mcpConfigPath ? exportPreparedMcpAdmission(request.mcpConfigPath) : undefined;
+      const proxyScope = request.mcpConfigPath ? preparedMcpProxyScope(request.mcpConfigPath) : undefined;
+      // Move an opaque, validated host admission through the dedicated native
+      // envelope. The ordinary wire contract still refuses any raw MCP path.
+      const resultBoundaryGeneration = request.beforeMcpToolResult ? randomUUID() : undefined;
+      const wire = remoteLocalModelRequest({ ...request, mcpConfigPath: undefined },
+        resultBoundaryGeneration ? { mcpResultRelay: true } : undefined);
       request.signal?.throwIfAborted();
       const status = await ensureStarted(); request.signal?.throwIfAborted();
       const scope = { ownerEpoch: status.ownerEpoch, runId: randomUUID() };
+      if (resultBoundaryGeneration) {
+        // Same version/protocol does not prove this daemon implements the new
+        // boundary. Negotiate before provider dispatch; no silent downgrade.
+        let capability: Record<string, unknown> | null;
+        try {
+          capability = record(await command({ op: "run.result-capability", clientId,
+            runId: scope.runId, generation: resultBoundaryGeneration }, scope.ownerEpoch, 5_000));
+        } catch { throw failure("local_model_daemon_result_boundary_unsupported", "not-dispatched", scope); }
+        if (!capability || capability.schema !== "agentlas.local-model-result-boundary.v1"
+          || capability.supported !== true || capability.ownerEpoch !== scope.ownerEpoch
+          || capability.clientId !== clientId || capability.runId !== scope.runId
+          || capability.generation !== resultBoundaryGeneration) {
+          throw failure("local_model_daemon_result_boundary_unsupported", "not-dispatched", scope);
+        }
+        request.signal?.throwIfAborted();
+      }
       let cancelled = false;
       const abort = () => {
         if (detaching || closed || cancelled) return;
@@ -233,24 +261,152 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
         void runs.cancel(scope).catch(() => { /* Read/reconciliation reports the actual remote state. */ });
       };
       request.signal?.addEventListener("abort", abort, { once: true });
+      let cursor = 0;
+      const consumeEvents = async (page: RemoteLocalModelRunPage, deadline?: number): Promise<void> => {
+        if (!Array.isArray(page.events) || !Number.isSafeInteger(page.nextSequence)
+          || !Number.isSafeInteger(page.truncatedBeforeSequence) || page.truncatedBeforeSequence > cursor) {
+          throw failure("local_model_daemon_stream_gap", "unknown", scope);
+        }
+        for (const row of page.events) {
+          if (row.sequence !== cursor + 1 || !row.event || !Array.isArray(row.event.args)) throw failure("local_model_daemon_stream_invalid", "unknown", scope);
+          const handler = events[row.event.kind] as ((...args: unknown[]) => void) | undefined;
+          if (!["onPartial", "onStatus", "onTool", "onUsage", "onThinking", "onNotice"].includes(row.event.kind)) throw failure("local_model_daemon_stream_invalid", "unknown", scope);
+          handler?.(...row.event.args.map(value => value === null ? undefined : value));
+          cursor = row.sequence;
+        }
+        if (cursor !== page.nextSequence) throw failure("local_model_daemon_stream_invalid", "unknown", scope);
+        if (page.events.length) {
+          if (deadline !== undefined && Date.now() >= deadline) throw failure("local_model_daemon_quiescence_unconfirmed", "unknown", scope);
+          await command({ op: "run.ack", clientId, runId: scope.runId, throughSequence: cursor }, scope.ownerEpoch,
+            deadline === undefined ? undefined : Math.max(1, deadline - Date.now()));
+        }
+      };
+      const cancelAndDrain = async (): Promise<void> => {
+        const deadline = Date.now() + 6_000;
+        try {
+          await command({ op: "run.cancel", clientId, runId: scope.runId }, scope.ownerEpoch, 6_000);
+          while (Date.now() < deadline) {
+            const remaining = Math.max(1, deadline - Date.now());
+            const page = checkPage(await command({ op: "run.read", clientId, runId: scope.runId,
+              afterSequence: cursor, limit: 128, waitMs: Math.min(1_000, remaining) }, scope.ownerEpoch, remaining), scope.runId, "run") as unknown as RemoteLocalModelRunPage;
+            await consumeEvents(page, deadline);
+            if (page.state !== "running" && page.events.length === 0) {
+              if (page.runtimeQuiesced !== true) markAttemptQuiescenceUnconfirmed();
+              return;
+            }
+          }
+        } catch { /* Preserve the original host rejection, but never infer termination. */ }
+        markAttemptQuiescenceUnconfirmed();
+      };
       try {
         if (request.signal?.aborted) abort();
-        let page = await runs.start({ ...scope, request: wire });
-        let cursor = 0;
+        let page = await runs.start({ ...scope, request: wire, mcpAdmission, resultBoundaryGeneration });
+        const answeredPermissions = new Set<string>();
+        const answeredResults = new Set<string>();
         for (;;) {
-          if (!Array.isArray(page.events) || !Number.isSafeInteger(page.nextSequence)
-            || !Number.isSafeInteger(page.truncatedBeforeSequence) || page.truncatedBeforeSequence > cursor) {
-            throw failure("local_model_daemon_stream_gap", "unknown", scope);
+          if (!Array.isArray(page.permissionRequests ?? []) || (page.permissionRequests?.length ?? 0) > 16) {
+            throw failure("local_model_daemon_permission_invalid", "unknown", scope);
           }
-          for (const row of page.events) {
-            if (row.sequence !== cursor + 1 || !row.event || !Array.isArray(row.event.args)) throw failure("local_model_daemon_stream_invalid", "unknown", scope);
-            const handler = events[row.event.kind] as ((...args: unknown[]) => void) | undefined;
-            if (!["onPartial", "onStatus", "onTool", "onUsage", "onThinking", "onNotice"].includes(row.event.kind)) throw failure("local_model_daemon_stream_invalid", "unknown", scope);
-            handler?.(...row.event.args.map(value => value === null ? undefined : value));
-            cursor = row.sequence;
+          for (const pending of page.permissionRequests ?? []) {
+            if (!pending || !UUID.test(pending.id) || !/^[0-9a-f]{64}$/.test(pending.resourceDigest)
+              || !pending.ask || typeof pending.ask !== "object") throw failure("local_model_daemon_permission_invalid", "unknown", scope);
+            if (answeredPermissions.has(pending.id)) continue;
+            const wireAsk = pending.ask;
+            const proxy = pending.family === "prepared-mcp-proxy";
+            const matchesScope = proxy ? Boolean(proxyScope && preparedMcpProxyScopeMatchesAsk(proxyScope, wireAsk)
+                && wireAsk.kind === "other" && typeof wireAsk.tool === "string" && mcpAdmission?.servers.some(server =>
+                  wireAsk.tool.startsWith(`mcp__${server.configKey}__`)))
+              : pending.family === "direct" && wireAsk.runtime === "agentlas-local"
+                && wireAsk.sessionKey === `agentlas-local:${request.sessionFingerprintSeed ?? request.cwd ?? "default"}`
+                && wireAsk.permission === request.permission && wireAsk.cwd === request.cwd
+                && wireAsk.chatId === (request.approvalChatId ?? request.chatId)
+                && Boolean(wireAsk.planMode) === Boolean(request.planMode)
+                && Boolean(wireAsk.unattended) === Boolean(request.unattended);
+            if (typeof wireAsk.tool !== "string" || !wireAsk.tool || wireAsk.tool.length > 512
+              || typeof wireAsk.kind !== "string" || typeof wireAsk.sessionKey !== "string"
+              || typeof wireAsk.runtime !== "string" || typeof wireAsk.mutating !== "boolean"
+              || !matchesScope
+              || Object.prototype.hasOwnProperty.call(wireAsk, "consentBinding")
+              || Object.prototype.hasOwnProperty.call(wireAsk, "signal")) {
+              throw failure("local_model_daemon_permission_scope_mismatch", "unknown", scope);
+            }
+            let decision: RuntimeToolPermissionDecision = "deny";
+            try {
+              request.signal?.throwIfAborted();
+              // Only this native client can mint the request object. Revalidate
+              // the sender's original opaque seal before accepting a receiver
+              // resource; a renderer JSON ask has no entry into this path.
+              const assertPreparedCurrent = () => {
+                if (request.mcpConfigPath) {
+                  exportPreparedMcpAdmission(request.mcpConfigPath);
+                  if (preparedMcpProxyScope(request.mcpConfigPath) !== proxyScope) throw new Error("mcp_prepared_scope_changed");
+                }
+              };
+              assertPreparedCurrent();
+              const ask: RuntimeToolPermissionAsk = { ...wireAsk,
+                ...(request.signal ? { signal: request.signal } : {}) };
+              bindMainToolConsentResource(ask, { nativeService: identity.serviceIdentity,
+                resource: pending.resourceDigest, tool: ask.tool });
+              const arbiter = getRuntimeToolPermissionArbiter();
+              if (arbiter) {
+                const signal = request.signal;
+                if (!signal) decision = await arbiter(ask);
+                else decision = await new Promise<RuntimeToolPermissionDecision>((resolve) => {
+                  let done = false;
+                  const finish = (value: RuntimeToolPermissionDecision) => {
+                    if (done) return; done = true; signal.removeEventListener("abort", abort); resolve(value);
+                  };
+                  const abort = () => finish("deny");
+                  signal.addEventListener("abort", abort, { once: true });
+                  if (signal.aborted) abort();
+                  else void arbiter(ask).then(finish, abort);
+                });
+              }
+              request.signal?.throwIfAborted();
+              assertPreparedCurrent();
+            } catch { decision = "deny"; }
+            answeredPermissions.add(pending.id);
+            await command({ op: "run.permission", clientId, runId: scope.runId,
+              approvalId: pending.id, resourceDigest: pending.resourceDigest, decision }, scope.ownerEpoch);
           }
-          if (cursor !== page.nextSequence) throw failure("local_model_daemon_stream_invalid", "unknown", scope);
-          if (page.events.length) await runs.acknowledge({ ...scope, throughSequence: cursor });
+          await consumeEvents(page);
+          if (!Array.isArray(page.mcpToolResults ?? []) || (page.mcpToolResults?.length ?? 0) > 16) {
+            throw failure("local_model_daemon_result_boundary_invalid", "unknown", scope);
+          }
+          for (const pending of page.mcpToolResults ?? []) {
+            if (!pending || !UUID.test(pending.id) || pending.ownerEpoch !== scope.ownerEpoch
+              || pending.clientId !== clientId || pending.runId !== scope.runId
+              || !resultBoundaryGeneration || pending.generation !== resultBoundaryGeneration
+              || !Number.isSafeInteger(pending.afterSequence) || pending.afterSequence < 0
+              || !pending.input || (pending.input.catalogId !== null && (typeof pending.input.catalogId !== "string" || pending.input.catalogId.length > 512))
+              || typeof pending.input.toolName !== "string" || !pending.input.toolName || pending.input.toolName.length > 512
+              || typeof pending.input.isError !== "boolean" || !request.beforeMcpToolResult) {
+              throw failure("local_model_daemon_result_boundary_scope_mismatch", "unknown", scope);
+            }
+            if (answeredResults.has(pending.id) || pending.afterSequence > cursor) continue;
+            request.signal?.throwIfAborted();
+            if (request.mcpConfigPath) {
+              exportPreparedMcpAdmission(request.mcpConfigPath);
+              if (preparedMcpProxyScope(request.mcpConfigPath) !== proxyScope) throw new Error("mcp_prepared_scope_changed");
+            }
+            try {
+              await request.beforeMcpToolResult(pending.input);
+              request.signal?.throwIfAborted();
+              if (request.mcpConfigPath) {
+                exportPreparedMcpAdmission(request.mcpConfigPath);
+                if (preparedMcpProxyScope(request.mcpConfigPath) !== proxyScope) throw new Error("mcp_prepared_scope_changed");
+              }
+            } catch (error) {
+              await command({ op: "run.result", clientId, ownerEpoch: scope.ownerEpoch, runId: scope.runId,
+                generation: resultBoundaryGeneration, resultId: pending.id, allow: false }, scope.ownerEpoch, 1_000).catch(() => {});
+              throw error;
+            }
+            await command({ op: "run.result", clientId, ownerEpoch: scope.ownerEpoch, runId: scope.runId,
+              generation: resultBoundaryGeneration, resultId: pending.id, allow: true }, scope.ownerEpoch);
+            answeredResults.add(pending.id);
+            // Only current/recent page IDs are needed for replay coalescing.
+            if (answeredResults.size > 32) answeredResults.delete(answeredResults.values().next().value!);
+          }
           // A final page may still have a backlog. Read until an empty final
           // page before returning, so batching never drops the last tool/text.
           if (page.state !== "running" && page.events.length === 0) {
@@ -269,6 +425,7 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
           }
         }
       } catch (error) {
+        if (resultBoundaryGeneration) await cancelAndDrain();
         if (error instanceof LocalModelDaemonClientError) throw new LocalModelDaemonClientError({ ...error.failure, ...scope });
         throw error;
       } finally { request.signal?.removeEventListener("abort", abort); }

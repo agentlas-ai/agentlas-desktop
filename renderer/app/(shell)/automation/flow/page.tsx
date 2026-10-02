@@ -276,6 +276,7 @@ function AutomationFlowPage() {
   const [rfEdges, setRfEdges, onEdgesChangeBase] = useEdgesState<Edge>([]);
   // 노드 id → 라이브 실행 상태(설계 §5 P2). 라이브 채널 이벤트 + latestRun 하이드레이트로 채움.
   const [runStates, setRunStates] = useState<Record<string, WorkflowNodeRunState>>({});
+  const [runAggregateStatus, setRunAggregateStatus] = useState<WorkflowRunSnapshot["status"] | null>(null);
   /** 노드가 지금 무엇을 하는 중인가 — 실패가 아닌 상태 변화(C44). */
   const [nodeProgress, setNodeProgress] = useState<Record<string, string>>({});
   /* ★[로그] 탭은 실제 진행을 시간순으로 다 적는다(오너 지시 2026-08-09:
@@ -301,6 +302,7 @@ function AutomationFlowPage() {
   );
   const clearRunSnapshot = useCallback(() => {
     setRunStates({});
+    setRunAggregateStatus(null);
     setNodeProgress({});
     setNodeFailures({});
     setRunStartedAt(null);
@@ -391,6 +393,7 @@ function AutomationFlowPage() {
       return true;
     }
     if (!isCurrentAutomationRunSnapshot(snap, owner.id)) return false;
+    setRunAggregateStatus(snap.status);
     const next = snap.nodeStates ?? {};
     // Keep the current object when a poll observes no state change so the
     // React Flow overlay does not rebuild on every tick.
@@ -446,7 +449,7 @@ function AutomationFlowPage() {
    * `running`(내가 방금 눌렀나)만 보면 앱을 껐다 켰거나 스케줄러가 시작한 실행에는
    * 중지 버튼이 안 나온다. 정작 멈추고 싶은 건 **내가 안 보는 사이 시작된 것**이다.
    */
-  const liveRunning = Object.values(runStates).some((st) => st === "running");
+  const liveRunning = runAggregateStatus === "running" || Object.values(runStates).some((st) => st === "running");
 
   // 하단 검증 로그 패널(항목 6) — VS Code 터미널처럼 크기를 끌어서 조절한다.
   // ★기본은 접힘(카운트 줄만). 편집 중 문제가 생길 때마다 패널이 펴지며 캔버스를
@@ -701,6 +704,7 @@ function AutomationFlowPage() {
       };
       if (ev.nodeId && ev.nodeState) {
         noteLiveRunStateArrival(automation, ev.nodeId as string, ev.nodeState as WorkflowNodeRunState);
+        if (ev.nodeState === "running") setRunAggregateStatus("running");
         setRunStates((prev) => ({ ...prev, [ev.nodeId as string]: ev.nodeState as WorkflowNodeRunState }));
         const stateText: Record<string, string> = {
           running: locale === "en" ? "started" : "시작",
@@ -957,8 +961,10 @@ function AutomationFlowPage() {
   const detailsShown = rightOpen;
   // 멈췄는가 — 사유가 아직 안 실렸어도 노드가 failed 면 멈춘 것이다. 사유가 없다고
   // "정상 종료"처럼 말하면, 빨간 노드를 보고 있는 사람에게 화면이 거짓말을 한다.
-  const stopped = errorCount > 0 || Object.values(runStates).some((st) => st === "failed");
-  const freshStartable = !editing && !liveRunning && stopped;
+  // Host preflight may fail before any node starts. Aggregate error is durable
+  // even when every node remains pending/done and no node failure exists.
+  const stopped = runAggregateStatus === "error" || errorCount > 0 || Object.values(runStates).some((st) => st === "failed");
+  const freshStartable = !editing && !running && !liveRunning && stopped;
 
   const selectedNode: WorkflowNode | null = useMemo(() => {
     if (!selectedNodeId) return null;
@@ -1466,6 +1472,7 @@ function AutomationFlowPage() {
       // back into this view instead of hiding that record.
       invalidateRunSnapshotReads(automation);
       setRunStates(Object.fromEntries((automation.graph?.nodes ?? []).map((node) => [node.id, "pending" as const])));
+      setRunAggregateStatus(null);
       setNodeProgress({});
       setNodeFailures({});
       setActivity([]);

@@ -1276,6 +1276,9 @@ export function enforceMobileInvocationPermissionBoundary(
   return {
     ...invocation,
     permissions: normalizeRemoteInvocationPermission(invocation.permissions),
+    // This value comes from the paired device's validated permission chip. One
+    // derives execution permission from this field, not the generic field above.
+    onePermissionMode: normalizeRemoteInvocationPermission(invocation.permissions),
   };
 }
 
@@ -3188,6 +3191,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               taskIntent: "conversation",
               oneMode: true,
               permissions: input.permissions,
+              onePermissionMode: input.permissions,
               ...(input.planMode ? { planMode: true } : {}),
               ...(input.goalMode ? { goalMode: true } : {}),
               // Network is an explicit structured override. The invocation

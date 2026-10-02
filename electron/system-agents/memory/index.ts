@@ -11,10 +11,10 @@ import { MEMORY_EMITTER_BLOCK } from "../../architecture/manifest";
 /** 항상-켜진 최소 코어 — 모든 완료 턴이 관찰 영수증을 남기고, 후보만 선택적으로 제안한다. */
 export const MEMORY_CORE = [
   "## Memory",
-  "End EVERY completed normal reply with exactly one hidden `## Memory Events` fenced JSON envelope: `{schema_version:\"agentlas.memory-ticket.v1\",turn_summary:\"one safe English sentence\",candidates:[]}`. Never omit it; use [] when nothing durable was learned.",
-  // Budget (2026-09-23): the English/content_native rule pushed the core to ~240 of 220 tokens.
-  // Same fields and boundaries, shorter wording; the Curator's authority is stated in the full block.
-  "Add candidates only for a durable decision or reusable fact. Each has memory_kind, content (English), content_native (original wording if not English), suggested_scope, confidence, sensitivity, evidence_refs. Scopes: user_identity, team_memory, agent_repo, agent_team, project, session, discard. Never include secrets, credentials, raw logs, prompts, transcripts, or absolute paths.",
+  "End EVERY completed normal reply with a hidden `## Memory Events` fenced JSON envelope: `{schema_version:\"agentlas.memory-ticket.v1\",turn_summary:\"safe English outcome\",candidates:[]}`. Always emit; use [] when nothing durable was learned.",
+  // Keep the bilingual and replacement contracts inside the existing core budget.
+  "Durable candidates: memory_kind, content (English), content_native (authoritative original), suggested_scope, confidence, sensitivity, evidence_refs. Scopes: user_identity, team_memory, agent_repo, agent_team, project, session, discard. Never emit secrets, credentials, logs, prompts, transcripts or absolute paths.",
+  "To replace recalled memory, add supersedes with its observed h:16hex; never invent a key.",
 ].join("\n");
 
 export const MEMORY_CORE_MAX_APPROX_TOKENS = 220;
@@ -34,15 +34,12 @@ const PREFERENCE_SIGNAL_RE =
   /\b(?:call me|from now on|prefer|please use|i am|i'm|my name is|my role)\b|앞으로|불러|말투|반말|존댓말|내 이름|선호/i;
 
 /** Full schema is loaded when the task is about memory, or states a durable preference/identity. */
-export function memoryEmitterPromptFor(request: string, locale?: "ko" | "en"): string {
-  const block = MEMORY_DETAIL_RE.test(request) || PREFERENCE_SIGNAL_RE.test(request)
+export function memoryEmitterPromptFor(request: string, _locale?: "ko" | "en"): string {
+  // Display locale never changes the canonical English memory contract.
+  // Non-English owner wording is preserved separately in content_native.
+  return MEMORY_DETAIL_RE.test(request) || PREFERENCE_SIGNAL_RE.test(request)
     ? MEMORY_EMITTER_BLOCK
     : MEMORY_CORE;
-  // turn_summary 는 프로젝트 기억란에 사람에게 그대로 보이는 한 줄이다 — 화면 언어로(페르소나 루프 라운드 2 실측:
-  // 한국어 화면의 기억란에 모델이 영어로 쓴 요약이 계속 쌓였다). 후보 content 도 같은 언어.
-  return locale === "ko"
-    ? `${block}\nWrite turn_summary and every candidate content in Korean — the user reads them verbatim in the app's project memory.`
-    : block;
 }
 
 /** 온디맨드 — 전체 스키마(kinds/scopes enum, request_context 필드, JSON 포맷 예시). emit 시점에만 필요. */

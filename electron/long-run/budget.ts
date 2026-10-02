@@ -7,7 +7,7 @@ export interface LongRunUsageInput {
   invocationRunId: string;
   scopeAnchorId?: string;
   attemptId?: string;
-  observedUsage?: { inputTokens: number; outputTokens: number } | null;
+  observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null;
   costUsd?: number;
   /** Actual billing receipt reference; model names or estimated tokens are not prices. */
   costSourceRef?: string;
@@ -19,7 +19,7 @@ export interface LongRunUsageReceipt {
   invocationRunId: string;
   scopeAnchorId?: string;
   attemptId: string | null;
-  tokens: { inputTokens: number; outputTokens: number } | null;
+  tokens: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null;
   cost: { status: "measured" | "unknown"; usd: number | null; sourceRef: string | null; reasonCode: string | null };
   digest: string;
 }
@@ -35,7 +35,10 @@ export function normalizeLongRunUsage(input: LongRunUsageInput): LongRunUsageRec
   const tokens = input.observedUsage
     && Number.isSafeInteger(input.observedUsage.inputTokens) && input.observedUsage.inputTokens >= 0
     && Number.isSafeInteger(input.observedUsage.outputTokens) && input.observedUsage.outputTokens >= 0
-    ? { inputTokens: input.observedUsage.inputTokens, outputTokens: input.observedUsage.outputTokens } : null;
+    ? { inputTokens: input.observedUsage.inputTokens, outputTokens: input.observedUsage.outputTokens,
+      ...(Number.isSafeInteger(input.observedUsage.cachedInputTokens) && input.observedUsage.cachedInputTokens! >= 0
+        && input.observedUsage.cachedInputTokens! <= input.observedUsage.inputTokens
+        ? { cachedInputTokens: input.observedUsage.cachedInputTokens } : {}) } : null;
   const receipt = {
     schemaVersion: "agentlas.long-run-usage.v1" as const,
     sourceId: input.sourceId,

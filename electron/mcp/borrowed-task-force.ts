@@ -1,3 +1,5 @@
+import { toolObservationDigest } from "../automation-progress-guard";
+import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
@@ -83,6 +85,7 @@ import {
   pickActive,
   pickRunner,
   rolePriorityRuntimes,
+  runtimeFailureBlocksReplay,
   selectRuntimeForTargets,
 } from "../runtime/selection";
 import { getAgentById } from "./registry";
@@ -231,13 +234,18 @@ export class WorkerHandoffContractError extends Error {
  */
 export class TaskForceRuntimeFailureError extends Error {
   readonly code = "task_force_runtime_failure";
-  readonly failure: RunnerFailure;
+  readonly #failure: Readonly<RunnerFailure>;
   readonly runtime: RuntimeStatus;
+  get failure(): Readonly<RunnerFailure> { return this.#failure; }
+
+  static providerFailure(error: unknown): Readonly<RunnerFailure> | null {
+    return error instanceof TaskForceRuntimeFailureError && (#failure in error) ? error.#failure : null;
+  }
 
   constructor(failure: RunnerFailure, runtime: RuntimeStatus) {
     super(`${failure.runtime} runtime ${failure.kind}: ${failure.message}`);
     this.name = "TaskForceRuntimeFailureError";
-    this.failure = { ...failure };
+    this.#failure = Object.freeze({ ...failure });
     this.runtime = { ...runtime };
   }
 }
@@ -735,7 +743,7 @@ function taskForceRecoveryRuntime(
   role: RuntimeRole = "worker",
   attempted: RuntimeStatus[] = [],
 ): RuntimeStatus | null {
-  if (failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) return null;
+  if (runtimeFailureBlocksReplay(failure) || failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) return null;
   // Exact prepared Workforce, benchmarks, and Agent Apps are fail-closed
   // contracts. Ordinary One Team model choices are preferences with an
   // explicit product fallback chain (selected model -> worker -> connected),
@@ -763,7 +771,7 @@ export function taskForcePlannerRecoveryRuntime(
   failure: RunnerFailure,
   attempted: RuntimeStatus[],
 ): RuntimeStatus | null {
-  if (failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) return null;
+  if (runtimeFailureBlocksReplay(failure) || failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) return null;
   if (p.signal?.aborted || p.benchmarkMode || p.req.agentAppMode || oneControllerRuntimePreferred(p)) return null;
   if (p.workforceSelectionReceipt) {
     if (failure.kind !== "refused" || failure.source !== "marker"
@@ -1128,41 +1136,28 @@ async function observeTaskForceModelCall<T>(
     agentId: canonicalAgentId,
     payload: { ...receiptBase, status: "started" },
   });
+  let measuredResult: (T & RunnerResult) | undefined;
+  const recordUsage = (usage: RunnerResult["observedUsage"], status: string, value: unknown): void => {
+    const outputTokens = Number(measuredResult?.tokens);
+    const outputOnly = !usage && Number.isSafeInteger(outputTokens) && outputTokens > 0;
+    tryRecordRunEvent({ runId: p.req.runId ?? `task-force:${p.chat.id}`, chatId: p.chat.id,
+      nodeId: input.nodeId, agentId: canonicalAgentId,
+      kind: usage || outputOnly ? "invoke_result" : "runtime_usage_unmeasured",
+      payload: { invocationId: callRef, modelRole: input.phase === "worker" ? "worker" : "orchestrator",
+        provider: input.runtime.backend ?? input.runtime.kind, model: taskForceObservedModel(measuredResult) ?? input.runtime.model ?? null,
+        requestedModel: input.runtime.model ?? null, observedModel: taskForceObservedModel(measuredResult),
+        effort: measuredResult && Object.prototype.hasOwnProperty.call(measuredResult, "appliedEffort")
+          ? measuredResult.appliedEffort ?? null : input.runtime.effort ?? null,
+        phase: input.phase, status, nativeAttempts: observedRunnerUsageEvidence(value),
+        ...(usage ? { ...usage, tokens: usage.inputTokens + usage.outputTokens, measurement: "total" }
+          : outputOnly ? { tokens: outputTokens, measurement: "output-only" } : { measurement: "unknown" }) } });
+  };
   try {
-    const result = requireTaskForceRunnerSuccess(
-      await withRuntimeCapabilityReceipt({ runId: p.req.runId ?? `task-force:${p.chat.id}`,
-        chatId: p.chat.id, nodeId: input.nodeId, callRef, agentId: canonicalAgentId }, call) as T & { failure?: RunnerFailure },
-      input.runtime,
-    ) as T;
+    measuredResult = await withRuntimeCapabilityReceipt({ runId: p.req.runId ?? `task-force:${p.chat.id}`,
+      chatId: p.chat.id, nodeId: input.nodeId, callRef, agentId: canonicalAgentId }, call) as T & RunnerResult;
+    const result = requireTaskForceRunnerSuccess(measuredResult, input.runtime) as T;
     const observedModel = taskForceObservedModel(result);
-    const outputTokens = Number((result as { tokens?: unknown })?.tokens);
-    if (Number.isInteger(outputTokens) && outputTokens > 0) {
-      const modelRole = input.phase === "worker" ? "worker" : "orchestrator";
-      // Preserve an explicit runner `null`; only an old runner with no
-      // `appliedEffort` field may fall back to the selected runtime value.
-      const recordedEffort = Object.prototype.hasOwnProperty.call(result, "appliedEffort")
-        ? (result as { appliedEffort?: unknown }).appliedEffort ?? null
-        : input.runtime.effort ?? null;
-      tryRecordRunEvent({
-        runId: p.req.runId ?? `task-force:${p.chat.id}`,
-        kind: "invoke_result",
-        chatId: p.chat.id,
-        nodeId: input.nodeId,
-        agentId: canonicalAgentId,
-        payload: {
-          invocationId: callRef,
-          modelRole,
-          provider: input.runtime.backend ?? input.runtime.kind,
-          model: observedModel ?? input.runtime.model ?? null,
-          requestedModel: input.runtime.model ?? null,
-          observedModel,
-          effort: recordedEffort,
-          tokens: outputTokens,
-          measurement: "output-only",
-          phase: input.phase,
-        },
-      });
-    }
+    recordUsage(measuredResult.observedUsage, "completed", measuredResult);
     tryRecordRunEvent({
       runId: p.req.runId ?? `task-force:${p.chat.id}`,
       kind: "task_force_model_call_completed",
@@ -1173,8 +1168,10 @@ async function observeTaskForceModelCall<T>(
     });
     return result;
   } catch (error) {
+    recordUsage(measuredResult?.observedUsage ?? observedRunnerUsage(error), p.signal?.aborted ? "cancelled" : "failed", measuredResult ?? error);
+    const normalized = taskForceFailureFromError(error, input.runtime);
     const failure = error instanceof TaskForceRuntimeFailureError
-      ? error.failure : isJudgmentRefusal(error) ? taskForceFailureFromError(error, input.runtime) : null;
+      ? error.failure : normalized.source === "marker" ? normalized : null;
     tryRecordRunEvent({
       runId: p.req.runId ?? `task-force:${p.chat.id}`,
       kind: "task_force_model_call_failed",
@@ -2898,7 +2895,7 @@ function workforceImagesForResponsibility(
 ): McpInvocationRequest["images"] | undefined {
   if (p.req.agentAppMode) return undefined;
   if (!p.workforceSelectionReceipt) return p.req.images;
-  return responsibility?.slot.modalities.includes("modality:image") ? p.req.images : undefined;
+  return responsibility?.slot.modalities.some((modality) => modality === "image" || modality === "modality:image") ? p.req.images : undefined;
 }
 
 function assertWorkforceContextRoster(
@@ -4279,7 +4276,7 @@ async function runBorrowedAgentTurn(
               attempt,
               agentId: null,
               runtime: managerPlanActive,
-            }, () => managerPlanPicked.runner(
+            }, () => runObservedRunner(managerPlanPicked.runner,
           taskForceRunnerRequest(p, {
             systemPrompt: [
               buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
@@ -4317,11 +4314,11 @@ async function runBorrowedAgentTurn(
           {
             onStatus: (status) => p.sink(teamEvent("manager", spec.name, { kind: "tool-use", status: redactSensitiveText(status) })),
             onPartial: () => {},
-            onTool: (name, args, result, toolId, isError, artifactPaths) => {
+            onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
               const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
               p.sink(teamEvent("manager", spec.name, {
                 kind: "tool-use",
-                tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
+                tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
                 ...(oneArtifacts ? { oneArtifacts } : {}),
               }));
             },
@@ -4446,7 +4443,7 @@ async function runBorrowedAgentTurn(
               attempt,
               agentId: null,
               runtime: observedWorkerRuntime,
-            }, () => observedWorkerPicked.runner(taskForceRunnerRequest(p, request), events)), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
+            }, () => runObservedRunner(observedWorkerPicked.runner, taskForceRunnerRequest(p, request), events)), capabilityEvidence(`${id}:hub-team:${worker.id}`, observedWorkerInvocationId))(
               {
                 systemPrompt: [
                   buildBorrowedAgentSystemPrompt(workerSpec, packagePermission, materializedWorkerMcpTools),
@@ -4483,11 +4480,11 @@ async function runBorrowedAgentTurn(
               {
                 onStatus: (status) => p.sink(teamEvent(worker.id, worker.id, { kind: "tool-use", status: redactSensitiveText(status) })),
                 onPartial: () => {},
-                onTool: (name, args, toolResult, toolId, isError, artifactPaths) => {
+                onTool: (name, args, toolResult, toolId, isError, artifactPaths, imageDataUrl) => {
                   const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
                   p.sink(teamEvent(worker.id, worker.id, {
                     kind: "tool-use",
-                    tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError },
+                    tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
                     ...(oneArtifacts ? { oneArtifacts } : {}),
                   }));
                 },
@@ -4614,6 +4611,7 @@ async function runBorrowedAgentTurn(
           };
         } catch (error) {
           const typedRuntimeFailure = error instanceof TaskForceRuntimeFailureError ? error : null;
+          if (typedRuntimeFailure && runtimeFailureBlocksReplay(typedRuntimeFailure.failure)) throw error;
           return {
             worker,
             ok: false,
@@ -4673,7 +4671,7 @@ async function runBorrowedAgentTurn(
         phase: "manager-synthesis",
         agentId: null,
         runtime: managerSynthesisActive,
-          }, () => managerSynthesisPicked.runner(
+          }, () => runObservedRunner(managerSynthesisPicked.runner,
         taskForceRunnerRequest(p, {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(managerSpec, packagePermission),
@@ -4711,11 +4709,11 @@ async function runBorrowedAgentTurn(
         {
           onStatus: (status) => p.sink(teamEvent("manager", spec.name, { kind: "tool-use", status: redactSensitiveText(status) })),
           onPartial: () => {},
-          onTool: (name, args, result, toolId, isError, artifactPaths) => {
+          onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
             const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
             p.sink(teamEvent("manager", spec.name, {
               kind: "tool-use",
-              tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
+              tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
               ...(oneArtifacts ? { oneArtifacts } : {}),
             }));
           },
@@ -4904,7 +4902,7 @@ async function runBorrowedAgentTurn(
         attempt,
         agentId: installedAgent?.id ?? p.chat.agentId,
         runtime: observedDirectRuntime,
-      }, () => observedDirectPicked.runner(taskForceRunnerRequest(p, request), events)), capabilityEvidence(id, observedDirectInvocationId))(
+      }, () => runObservedRunner(observedDirectPicked.runner, taskForceRunnerRequest(p, request), events)), capabilityEvidence(id, observedDirectInvocationId))(
         {
           systemPrompt: [
             buildBorrowedAgentSystemPrompt(spec, packagePermission, materializedWorkerMcpTools),
@@ -4947,12 +4945,12 @@ async function runBorrowedAgentTurn(
             ...(activity ? { activity } : {}),
           })),
           onPartial: () => {},
-          onTool: (name, args, result, toolId, isError, artifactPaths) => {
+          onTool: (name, args, result, toolId, isError, artifactPaths, imageDataUrl) => {
             if (typeof name === "string" && name && !observedTools.includes(name)) observedTools.push(name);
             const oneArtifacts = taskForceOneArtifacts(p, toolId, isError, artifactPaths);
             p.sink(tag({
               kind: "tool-use",
-              tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError },
+              tool: { name, args: redactEventValue(args), result: redactEventValue(result), id: toolId, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
               ...(oneArtifacts ? { oneArtifacts } : {}),
             }));
           },
@@ -5089,6 +5087,12 @@ async function runBorrowedAgentTurn(
     };
   } catch (err) {
     if (p.signal?.aborted) throw err;
+    if ((err instanceof ObservedRunnerFailureError || err instanceof TaskForceRuntimeFailureError)
+      && runtimeFailureBlocksReplay(err.failure)) {
+      p.sink(tag({ kind: "tool-use", done: true,
+        status: p.locale === "ko" ? "실행 중단 — 작업 기록을 확인하세요." : "Execution stopped — review the work history." }));
+      throw err;
+    }
     const typedRuntimeFailure = err instanceof TaskForceRuntimeFailureError ? err : null;
     // Agent App 실패는 원인을 남기지 않기로 한 자리다 — 관측한 도구 이름도 여기서는
     // 싣지 않는다(고정 실패 한 벌이라는 계약).
@@ -5335,7 +5339,7 @@ async function runPlanner(
     validationError = "",
   ): Promise<RunnerResult> => {
     const admission = taskForcePlannerAdmission(plannerRuntime, specs.length);
-    return plannerPicked.runner(
+    return runObservedRunner(plannerPicked.runner,
       taskForceRunnerRequest(p, {
       systemPrompt,
       history: boundedTaskForceHistory(history),
@@ -5381,11 +5385,11 @@ async function runPlanner(
         phase: "plan",
       }),
       onPartial: () => {},
-      onTool: (name, args, toolResult, id, isError, artifactPaths) => {
+      onTool: (name, args, toolResult, id, isError, artifactPaths, imageDataUrl) => {
         const oneArtifacts = taskForceOneArtifacts(p, id, isError, artifactPaths);
         p.sink({
           kind: "tool-use",
-          tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id, isError },
+          tool: { name, args: redactEventValue(args), result: redactEventValue(toolResult), id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
           ...(oneArtifacts ? { oneArtifacts } : {}),
           agentId: orchestratorId,
           agentName: orchestratorName,
@@ -6141,6 +6145,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     let responseRuntime: RuntimeStatus | undefined;
     const runWithRecovery = async (nextPacket: typeof packet, delegationId?: string) => {
       let result = await runPacket(nextPacket, peerResults, responseRuntime, delegationId);
+      if (result.runtimeFailure && result.failedRuntime && runtimeFailureBlocksReplay(result.runtimeFailure)) {
+        throw new TaskForceRuntimeFailureError(result.runtimeFailure, result.failedRuntime);
+      }
       if (result.ok || p.signal?.aborted) return result;
       // A typed provider refusal is never an output-format problem. Walk the
       // remaining worker pool in DB priority order, once per configured member,
@@ -6172,6 +6179,9 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         };
         responseRuntime = recoveryRuntime;
         result = await runPacket(recoveryPacket, peerResults, responseRuntime);
+        if (result.runtimeFailure && result.failedRuntime && runtimeFailureBlocksReplay(result.runtimeFailure)) {
+          throw new TaskForceRuntimeFailureError(result.runtimeFailure, result.failedRuntime);
+        }
         if (result.ok) return result;
       }
       return result;
@@ -6365,7 +6375,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   const synthesisImages = p.req.agentAppMode
     ? undefined
     : p.workforceSelectionReceipt
-      ? results.some((result) => result.workforceResponsibility?.slot.modalities.includes("modality:image"))
+      ? results.some((result) => result.workforceResponsibility?.slot.modalities.some((modality) => modality === "image" || modality === "modality:image"))
         ? p.req.images
         : undefined
       : p.req.images;
@@ -6403,7 +6413,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
     phase: "synthesis",
     agentId: p.orchestratorAgent.id,
     runtime: runtimeForCall,
-  }, () => pickedForCall.runner(
+  }, () => runObservedRunner(pickedForCall.runner,
     taskForceRunnerRequest(p, {
       systemPrompt: [
         buildSynthesisSystemPrompt(
@@ -6462,11 +6472,11 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
           p.sink({ kind: "partial", text: redactSensitiveText(text) });
         }
       },
-      onTool: (name, args, result, id, isError, artifactPaths) => {
+      onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl) => {
         const oneArtifacts = taskForceOneArtifacts(p, id, isError, artifactPaths);
         p.sink({
           kind: "tool-use",
-          tool: { name, args: redactEventValue(args), result: redactEventValue(result), id, isError },
+          tool: { name, args: redactEventValue(args), result: redactEventValue(result), id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
           ...(oneArtifacts ? { oneArtifacts } : {}),
           agentId: orchestratorId,
           agentName: orchestratorName,
@@ -6497,6 +6507,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
       // Fixed contracts or an exhausted ordered pool fail honestly. Ordinary
       // One/Work runs continue on the next configured orchestrator member.
       if (!recovery || failedSynthesisRuntimes.some((runtime) => sameRuntimeModel(runtime, recovery))) {
+        if (runtimeFailureBlocksReplay(typed.failure)) throw typed;
         throw new TaskForceRuntimeFailureError({ kind: "refused", runtime: typed.runtime.kind,
           source: "marker", providerCode: "synthesis_runtime_pool_exhausted",
           message: "No permitted untried synthesis runtime remains." }, typed.runtime);

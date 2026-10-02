@@ -1,3 +1,6 @@
+import type { LoginPrerequisiteRef } from "../browser/login-prerequisite";
+import { sha256Value } from "../../shared/graph-execution-digest";
+import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { decodeAutomationMonitor, decodeAutomationPollState, type AutomationMonitorContract } from "../../shared/automation-monitor";
 // 자동화 — SQLite 영속 + 스케줄 next-run 계산. (이전 M0 in-memory stub 대체)
 // targetType: agent(개별 에이전트) | firm(CEO 호출). createdBy: user(폼) | agent(채팅 emitter).
@@ -623,6 +626,16 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
 }
 
 export function toggleAutomation(id: string, enabled: boolean): Automation {
+  if (!enabled) {
+    // Revoke durable authority before waking any callbacks. Stop itself is unconditional.
+    try {
+      const waiting = getGraphLoginWaitCheckpoint(id);
+      if (waiting) cancelGraphLoginWait(id, waiting.runId);
+    } finally {
+      const { stopAutomationRun } = require("../automation-execution-control") as typeof import("../automation-execution-control");
+      stopAutomationRun(id);
+    }
+  }
   const existing = getAutomation(id);
   if (!existing) throw new Error(`Automation not found: ${id}`);
   // 다시 켤 때는 과거 시각으로 즉시 발화하지 않도록 next_run_at을 지금 기준으로 재계산.
@@ -860,6 +873,106 @@ export interface FailedGraphCheckpoint {
   checkpoint: unknown;
   nodeStates: Record<string, WorkflowNodeRunState>;
   simulation: boolean;
+}
+
+/** Durable authority only: callbacks and browser capabilities never enter SQLite. */
+export interface GraphLoginWaitEntry {
+  prerequisites: Array<{ ref: LoginPrerequisiteRef; sourceRunId: string; sourceAutomationId: string; sourceNodeId: string }>;
+  runtimeQuiesced: boolean;
+  automaticResumeSafe: boolean;
+  restored: string[];
+}
+export function graphLoginPrerequisiteKey(ref: LoginPrerequisiteRef): string {
+  return JSON.stringify([ref.prerequisiteId, ref.runId, ref.chatId, ref.nodeId ?? null, ref.sessionId, ref.generation]);
+}
+export function validGraphLoginWaitEntry(value: unknown): value is GraphLoginWaitEntry {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as GraphLoginWaitEntry;
+  if (Object.keys(v).sort().join() !== ["prerequisites", "runtimeQuiesced", "automaticResumeSafe", "restored"].sort().join()
+    || typeof v.runtimeQuiesced !== "boolean" || typeof v.automaticResumeSafe !== "boolean"
+    || !Array.isArray(v.prerequisites) || v.prerequisites.length < 1 || v.prerequisites.length > 128
+    || !Array.isArray(v.restored) || v.restored.some(k => typeof k !== "string")) return false;
+  const keys: string[] = [];
+  for (const p of v.prerequisites) {
+    if (!p || typeof p !== "object" || Object.keys(p).sort().join() !== ["ref", "sourceRunId", "sourceAutomationId", "sourceNodeId"].sort().join()
+      || [p.sourceRunId, p.sourceAutomationId, p.sourceNodeId].some(x => typeof x !== "string" || !x || x.length > 1024)) return false;
+    const f = p.ref;
+    if (!f || typeof f !== "object" || Array.isArray(f)
+      || Object.keys(f).some(k => !["prerequisiteId", "runId", "chatId", "nodeId", "sessionId", "generation"].includes(k))
+      || [f.prerequisiteId, f.runId, f.chatId, f.sessionId, f.generation].some(x => typeof x !== "string" || !x || x.length > 1024)
+      || (f.nodeId !== undefined && (typeof f.nodeId !== "string" || !f.nodeId || f.nodeId.length > 1024))
+      || f.runId !== p.sourceRunId || f.nodeId !== p.sourceNodeId) return false;
+    keys.push(graphLoginPrerequisiteKey(f));
+  }
+  return new Set(keys).size === keys.length && new Set(v.restored).size === v.restored.length
+    && v.restored.every(k => keys.includes(k)) && (!v.automaticResumeSafe || v.runtimeQuiesced);
+}
+export function graphLoginWaitReady(waits: Record<string, GraphLoginWaitEntry>): boolean {
+  const entries = Object.values(waits);
+  return entries.length > 0 && entries.every(w => validGraphLoginWaitEntry(w) && w.runtimeQuiesced && w.automaticResumeSafe
+    && w.prerequisites.every(p => w.restored.includes(graphLoginPrerequisiteKey(p.ref))));
+}
+export function hasGraphLoginWait(automationId: string): boolean {
+  const row = getDb().prepare("SELECT status FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC LIMIT 1")
+    .get(automationId) as { status: string } | undefined;
+  return row?.status === "needs_input";
+}
+export function getGraphLoginWaitCheckpoint(automationId: string, runId?: string): FailedGraphCheckpoint | null {
+  const row = getDb().prepare("SELECT * FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC LIMIT 1")
+    .get(automationId) as AutomationRunSnapshotRow | undefined;
+  if (!row || row.status !== "needs_input" || (runId && row.id !== runId)) return null;
+  try {
+    const checkpoint = JSON.parse(row.checkpoint_json ?? "null");
+    const payload = { ...checkpoint }; delete payload.checkpointDigest;
+    if (!checkpoint || checkpoint.schemaVersion !== "agentlas.automation-graph-checkpoint.v4"
+      || checkpoint.checkpointDigest !== sha256Value(payload) || checkpoint.graphDigest !== row.graph_digest
+      || checkpoint.occurrenceId !== row.occurrence_id || !checkpoint.loginWaits
+      || !Object.values(checkpoint.loginWaits).length || !Object.values(checkpoint.loginWaits).every(validGraphLoginWaitEntry)) return null;
+    return { runId: row.id, automationId, occurrenceId: row.occurrence_id, graphDigest: row.graph_digest,
+      checkpoint, nodeStates: JSON.parse(row.node_states_json ?? "{}"), simulation: row.dry_run === 1 };
+  } catch { return null; }
+}
+/** Generation/ref and exact sealed source are re-read within one writer transaction. */
+export function restoreGraphLoginPrerequisite(automationId: string, runId: string, nodeId: string, ref: LoginPrerequisiteRef): boolean {
+  const db = getDb();
+  return db.transaction(() => {
+    const source = getGraphLoginWaitCheckpoint(automationId, runId);
+    if (!source || source.simulation) return false;
+    const checkpoint = source.checkpoint as { loginWaits: Record<string, GraphLoginWaitEntry>; updatedAt: string; checkpointDigest: string };
+    const originalJson = JSON.stringify(source.checkpoint);
+    const entry = checkpoint.loginWaits[nodeId]; const key = graphLoginPrerequisiteKey(ref);
+    if (!entry || !entry.prerequisites.some(p => graphLoginPrerequisiteKey(p.ref) === key) || entry.restored.includes(key)) return false;
+    entry.restored.push(key); checkpoint.updatedAt = new Date().toISOString();
+    const payload = { ...checkpoint }; delete (payload as Partial<typeof checkpoint>).checkpointDigest;
+    checkpoint.checkpointDigest = sha256Value(payload);
+    return db.prepare("UPDATE automation_runs SET checkpoint_json = ?, last_activity_at = ? WHERE id = ? AND status = 'needs_input' AND checkpoint_json = ?")
+      .run(JSON.stringify(checkpoint), checkpoint.updatedAt, runId, originalJson).changes === 1;
+  }).immediate();
+}
+/** Stop is terminal for this parked coordinate; it never marks pending work done. */
+export function cancelGraphLoginWait(automationId: string, runId: string): void {
+  const db = getDb();
+  db.transaction(() => {
+    const source = getGraphLoginWaitCheckpoint(automationId, runId);
+    if (!source) return;
+    const checkpoint = source.checkpoint as { loginWaits: Record<string, GraphLoginWaitEntry>; ambiguousNodeIds: string[]; updatedAt: string; checkpointDigest: string };
+    const nodeStates = { ...source.nodeStates };
+    for (const entry of Object.values(checkpoint.loginWaits)) for (const p of entry.prerequisites) {
+      if (p.sourceRunId !== runId) cancelGraphLoginWait(p.sourceAutomationId, p.sourceRunId);
+    }
+    for (const nodeId of Object.keys(checkpoint.loginWaits)) {
+      nodeStates[nodeId] = "failed";
+      // A Stop revokes automatic replay even when the old attempt was read-only.
+      if (!checkpoint.ambiguousNodeIds.includes(nodeId)) checkpoint.ambiguousNodeIds.push(nodeId);
+      checkpoint.loginWaits[nodeId].automaticResumeSafe = false;
+    }
+    checkpoint.updatedAt = new Date().toISOString();
+    const payload = { ...checkpoint }; delete (payload as Partial<typeof checkpoint>).checkpointDigest;
+    checkpoint.checkpointDigest = sha256Value(payload);
+    db.prepare("UPDATE automation_runs SET status = 'error', checkpoint_json = ?, node_states_json = ?, last_activity_at = ? WHERE id = ? AND automation_id = ? AND status = 'needs_input'")
+      .run(JSON.stringify(checkpoint), JSON.stringify(nodeStates), checkpoint.updatedAt, runId, automationId);
+  }).immediate();
+  emitDesktopStoreChange({ entity: "automation", id: automationId });
 }
 
 export class AutomationRunParentMissingError extends Error {
@@ -1128,7 +1241,7 @@ export function touchGraphRun(runId: string, at: Date = new Date()): boolean {
 }
 
 /** 실행 종료 시 최종 상태(ok/error) 기록. */
-export function finishGraphRun(runId: string, status: "ok" | "error"): void {
+export function finishGraphRun(runId: string, status: "ok" | "error" | "needs_input"): void {
   const db = getDb();
   let finishedAutomationId = null as string | null;
   const finish = db.transaction(() => {
@@ -1182,7 +1295,7 @@ export function getLatestGraphRun(automationId: string): WorkflowRunSnapshot | n
   let nodeFailures: Record<string, { code: string; reason: string; nextAction: string }> = {};
   try {
     const raw = (row as { node_failures_json?: string | null }).node_failures_json;
-    nodeFailures = raw ? (JSON.parse(raw) as typeof nodeFailures) : {};
+    nodeFailures = raw ? redactGraphRunFailures(JSON.parse(raw)) : {};
   } catch {
     nodeFailures = {};
   }
@@ -1649,9 +1762,9 @@ export function listRunHistory(automationId: string, limit = 50): AutomationRunR
     // ★모르는 것을 accepted로 메꾸지 않는다. 옛 행은 outcome이 없다 — 그때는 이 두 답이
     //   한 칸에 섞여 있었고, 지금 와서 어느 쪽이었는지 복원할 방법이 없다.
     outcome: (r.outcome as AutomationRunRecord["outcome"]) ?? null,
-    outcomeReason: r.outcome_reason ?? null,
+    outcomeReason: r.outcome_reason == null ? null : redactOperationalSecrets(r.outcome_reason),
     skippedCount: r.skipped_count ?? 0,
-    error: r.error,
+    error: r.error == null ? null : redactOperationalSecrets(r.error),
     acknowledgedAt: (r as { acknowledged_at?: string | null }).acknowledged_at ?? null,
   }));
 }
@@ -1727,8 +1840,10 @@ export function markAutomationRun(
     executionConsumed?: boolean;
     /** One-shot failures remain retryable instead of silently disabling. */
     deferredRetryMs?: number;
+    /** Settlement clock; retry delays and future slots must not start at dispatch. */
+    finishedAt?: Date;
     /** False opens the occurrence circuit and advances only to the next real
-     * schedule slot. A one-shot remains enabled/manual-runnable with no due slot. */
+     * schedule slot. A one-shot becomes disabled once no future slot remains. */
     deferRetry?: boolean;
     /** Durable scheduler run receipt used for exactly-once chain fan-out. */
     sourceRunId?: string | null;
@@ -1750,6 +1865,7 @@ export function markAutomationRun(
   const row = db.prepare("SELECT * FROM automations WHERE id = ?").get(id) as AutomationRow | undefined;
   if (!row) return;
 
+  const settledAt = new Date(Math.max(at.getTime(), opts?.finishedAt?.getTime() ?? at.getTime()));
   const tz = row.timezone || defaultTz();
   const spec = specFromStored(row.schedule_json ?? row.schedule, tz);
   const triggerType = (row.trigger_type as TriggerKind) || "schedule";
@@ -1768,7 +1884,7 @@ export function markAutomationRun(
       const nextIso = nextRun(spec, cursor);
       if (!nextIso) break;
       const nextDate = new Date(nextIso);
-      if (nextDate.getTime() > at.getTime()) break;
+      if (nextDate.getTime() > settledAt.getTime()) break;
       skipped += 1;
       cursor = nextDate;
     }
@@ -1779,17 +1895,22 @@ export function markAutomationRun(
   const runCount = (row.run_count ?? 0) + (executionConsumed ? 1 : 0);
   // 전진하지 않으면 next_run_at은 그대로 둔다(이벤트=null 유지, 시계=다음 예약 슬롯 유지).
   const computedNextRunAt = advance
-    ? computeNextRun(row.schedule, at, { scheduleJson: row.schedule_json, timezone: tz })
+    ? computeNextRun(row.schedule, settledAt, { scheduleJson: row.schedule_json, timezone: tz })
     : row.next_run_at;
 
   // 종료 조건 판정. reachedMax/pastEnd는 트리거 종류 무관하게 적용(N회/기한 후 자동 비활성).
   const reachedMax = executionConsumed && row.max_runs != null && runCount >= row.max_runs;
-  const pastEnd = row.end_at != null && Date.parse(row.end_at) <= at.getTime();
+  const pastEnd = row.end_at != null && Date.parse(row.end_at) <= settledAt.getTime();
   const noFuture = advance && computedNextRunAt == null;
   const deferredRetryMs = Math.max(60_000, Math.min(opts?.deferredRetryMs ?? 15 * 60_000, 24 * 60 * 60_000));
-  const deferredRetryAt = new Date(at.getTime() + deferredRetryMs).toISOString();
+  const deferredRetryAt = new Date(settledAt.getTime() + deferredRetryMs).toISOString();
+  // Owner/input gates are not transient failures. Keep the next natural slot
+  // without multiplying this occurrence into 15/30-minute rechecks.
+  const needsIntervention = opts?.status === "blocked" || opts?.status === "needs_input"
+    || opts?.outcome === "blocked" || opts?.outcome === "needs_input";
+  const deferRetry = opts?.deferRetry !== false && !needsIntervention;
   const nextRunAt = !executionConsumed && !pastEnd && advance
-    ? opts?.deferRetry === false
+    ? !deferRetry
       ? computedNextRunAt
       : computedNextRunAt == null || Date.parse(computedNextRunAt) > Date.parse(deferredRetryAt)
         ? deferredRetryAt
@@ -1799,7 +1920,7 @@ export function markAutomationRun(
   // retry circuit is exhausted, disabled+no-next-run is the coherent terminal
   // state; enabled+no-next-run looked active while it could never fire again.
   // Reconciliation suspension deliberately remains enabled for user recovery.
-  const exhaustedOneShot = noFuture && !executionConsumed && opts?.deferRetry === false &&
+  const exhaustedOneShot = noFuture && !executionConsumed && !deferRetry &&
     opts?.suspendForReconciliation !== true;
   const shouldDisable = reachedMax || pastEnd || (noFuture && executionConsumed) || exhaustedOneShot;
 
@@ -1828,8 +1949,8 @@ export function markAutomationRun(
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       sourceRunId ?? randomUUID(), id, row.next_run_at, atIso, terminalStatus,
-      skipped > 0 ? skipped : 0, opts?.error ?? null,
-      opts?.outcome ?? null, opts?.outcomeReason ?? null,
+      skipped > 0 ? skipped : 0, opts?.error == null ? null : redactOperationalSecrets(opts.error),
+      opts?.outcome ?? null, opts?.outcomeReason == null ? null : redactOperationalSecrets(opts.outcomeReason),
     );
     if (sourceRunId) {
       recordAutomationTerminalReceipt(id, sourceRunId, terminalStatus, opts?.output, atIso);
@@ -1844,7 +1965,7 @@ export function dueAutomations(now: Date = new Date()): Automation[] {
   const rows = getDb()
     .prepare("SELECT * FROM automations WHERE enabled = 1 AND next_run_at IS NOT NULL AND next_run_at <= ? ORDER BY next_run_at ASC")
     .all(now.toISOString()) as AutomationRow[];
-  return rows.map(toAutomation);
+  return rows.map(toAutomation).filter(a => !hasGraphLoginWait(a.id));
 }
 
 /** 특정 트리거 종류의 enabled 자동화들(트리거 매니저가 리스너 등록에 사용). */
@@ -2231,11 +2352,25 @@ export function clearGraphRunFailureForNode(automationId: string, nodeId: string
 }
 
 /** 실패 3요소를 실행 스냅샷에 남긴다. 화면 실패 카드가 읽는 유일한 출처다. */
+function redactGraphRunFailures(value: unknown): Record<string, { code: string; reason: string; nextAction: string }> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const entries = Object.entries(value).flatMap(([nodeId, item]) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const failure = item as Record<string, unknown>;
+    if (typeof failure.code !== "string" || typeof failure.reason !== "string" || typeof failure.nextAction !== "string") return [];
+    return [[nodeId, { ...failure, code: failure.code,
+      reason: redactOperationalSecrets(failure.reason),
+      nextAction: redactOperationalSecrets(failure.nextAction) }]] as const;
+  });
+  return Object.fromEntries(entries);
+}
+
 export function saveGraphRunFailures(
   runId: string,
   failures: Record<string, { code: string; reason: string; nextAction: string }>,
 ): void {
-  const payload = Object.keys(failures).length > 0 ? JSON.stringify(failures) : null;
+  const safe = redactGraphRunFailures(failures);
+  const payload = Object.keys(safe).length > 0 ? JSON.stringify(safe) : null;
   getDb().prepare("UPDATE automation_runs SET node_failures_json = ? WHERE id = ?").run(payload, runId);
 }
 

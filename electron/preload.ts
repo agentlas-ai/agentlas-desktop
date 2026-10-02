@@ -968,7 +968,7 @@ const api: AgentlasIpc = {
     feedback: (input) => ipcRenderer.invoke("oneBriefing:feedback", input),
   },
   oneRequestIntent: {
-    resolve: (prompt) => ipcRenderer.invoke("oneRequestIntent:resolve", prompt),
+    resolve: (prompt, runtimeSelection) => ipcRenderer.invoke("oneRequestIntent:resolve", prompt, runtimeSelection),
   },
   oneTeamPreflight: {
     prepare: (input) => ipcRenderer.invoke("oneTeamPreflight:prepare", input),

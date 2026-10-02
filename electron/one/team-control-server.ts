@@ -6,6 +6,7 @@ import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import {
   oneTeamCreateMember,
+  oneTeamComposeGroup,
   oneTeamInvite,
   oneTeamList,
   oneTeamSessionStatus,
@@ -85,6 +86,7 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
     case "status": return oneTeamSessionStatus(binding, { sessionId: request.sessionId, waitSeconds: request.waitSeconds });
     case "create": return oneTeamCreateMember(binding, { name: request.name, role: request.role, personality: request.personality, invite: request.invite });
     case "invite": return oneTeamInvite(binding, { member: request.member });
+    case "compose_group": return oneTeamComposeGroup(binding, { members: request.members });
     default: throw new Error("one-team-unknown-operation");
   }
 }

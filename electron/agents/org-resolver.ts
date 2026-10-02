@@ -1,3 +1,4 @@
+import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // LLM 팀 구조 리졸버 — 임의의 에이전트-팀 폴더를 사용자의 활성 런타임(BYOK/CLI)으로
 // "읽기 전용" 스캔해 CEO → 본부 → 전문가 3-tier ResolvedOrg를 생성한다.
 // 하드코딩 파서가 아니라 LLM이 임의 구조를 이해한다(폴더 레이아웃이 천차만별이므로).
@@ -171,7 +172,7 @@ export async function resolveTeamOrg(
 
   let text = "";
   try {
-    const result = await picked.runner(
+    const result = await runObservedRunner(picked.runner,
       {
         systemPrompt: RESOLVER_SYSTEM,
         history: [],
@@ -182,6 +183,7 @@ export async function resolveTeamOrg(
       },
       { onPartial: () => {}, onStatus: () => {} },
     );
+    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     text = result.text;
   } catch (err) {
     return { ok: false, error: err instanceof Error ? err.message : String(err) };
@@ -274,7 +276,7 @@ export async function analyzeFolder(
   if (!picked) return null;
   let text = "";
   try {
-    const result = await picked.runner(
+    const result = await runObservedRunner(picked.runner,
       {
         systemPrompt: ANALYZE_SYSTEM,
         history: [],
@@ -285,6 +287,7 @@ export async function analyzeFolder(
       },
       { onPartial: () => {}, onStatus: () => {} },
     );
+    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     text = result.text;
   } catch {
     return null;

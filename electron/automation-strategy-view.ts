@@ -35,19 +35,22 @@ function runtimeView(
 function consumptionTime(proposal: AutomationStrategyProposalReceipt): string | null {
   const revision = proposal.revisionReceipt;
   if (!revision) return null;
-  const rows = getDb().prepare(`SELECT e.ts, e.payload_json FROM run_events e
+  const rows = getDb().prepare(`SELECT e.ts, e.payload_json, r.graph_digest FROM run_events e
     JOIN automation_runs r ON r.id = e.run_id AND r.automation_id = e.automation_id
     WHERE e.automation_id = ? AND e.kind = 'automation_strategy_revision_consumed'
       AND r.dry_run = 0 AND e.ts >= ?
       AND json_extract(CASE WHEN json_valid(e.payload_json) THEN e.payload_json ELSE '{}' END, '$.revision') = ?
       ORDER BY e.ts DESC LIMIT 128`)
-    .all(proposal.automationId, revision.appliedAt, revision.revision) as Array<{ ts: string; payload_json: string }>;
+    .all(proposal.automationId, revision.appliedAt, revision.revision) as Array<{
+      ts: string; payload_json: string; graph_digest: string | null;
+    }>;
   for (const row of rows) {
     try {
       const value = JSON.parse(row.payload_json);
       if (value.status === "consumed" && value.revision === revision.revision
         && value.sourceRunId === revision.sourceRunId
-        && value.runGraphDigest === revision.graphDigest
+        && value.runGraphDigest === row.graph_digest
+        && (value.runStrategyGraphDigest === undefined ? value.runGraphDigest : value.runStrategyGraphDigest) === revision.graphDigest
         && value.revisionGraphDigest === revision.graphDigest
         && value.runDefinitionDigest === revision.definitionDigest
         && value.revisionDefinitionDigest === revision.definitionDigest

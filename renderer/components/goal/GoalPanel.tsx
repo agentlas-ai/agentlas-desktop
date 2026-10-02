@@ -55,7 +55,10 @@ function stateLabel(view: GoalPanelView, locale: Locale): string {
   switch (view.state) {
     case "running": return ko ? "실행 중" : "Running";
     case "paused": return ko ? "일시정지" : "Paused";
-    case "needs_owner": return ko ? "확인 필요" : "Needs you";
+    case "needs_owner": return view.ownerAttention === "review" ? (ko ? "완료 조건 검토" : "Review criteria")
+      : view.ownerAttention === "question" ? (ko ? "답변 대기" : "Waiting for your answer")
+      : view.ownerAttention === "approval" ? (ko ? "승인 대기" : "Waiting for approval")
+      : view.ownerAttention === "budget" ? (ko ? "예산 한도" : "Budget limit") : (ko ? "확인 필요" : "Needs you");
     case "blocked": return ko ? "막힘" : "Blocked";
     case "terminal": return t(view.stateReason, locale) || (ko ? "끝남" : "Ended");
     default: return ko ? "준비 중" : "Not started";

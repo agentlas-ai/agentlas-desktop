@@ -3,7 +3,18 @@ import { getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js
 import { ReadBuffer, serializeMessage } from "@modelcontextprotocol/sdk/shared/stdio.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "../runtime/exec";
+import { detachedSpawnOpts, envForCli, killCliTree, spawnCli, trackRunChild } from "../runtime/exec";
+
+/** Only SDK-safe defaults and OS temp locations are inherited; configured
+ * credentials/locations retain precedence. Capture this before MCP consent. */
+export function ownedStdioEnvironment(command: string, configured: Record<string, string> = {}): Record<string, string> {
+  const temporary: Record<string, string> = {};
+  for (const key of ["TMPDIR", "TMP", "TEMP"]) {
+    const value = process.env[key];
+    if (typeof value === "string") temporary[key] = value;
+  }
+  return envForCli(command, { ...getDefaultEnvironment(), ...temporary, ...configured }) as Record<string, string>;
+}
 
 interface OwnedStdioParameters {
   command: string;
@@ -11,6 +22,9 @@ interface OwnedStdioParameters {
   env?: Record<string, string>;
   cwd?: string;
   stderr?: "overlapped" | "pipe" | "ignore" | "inherit";
+  /** Prepared authority already captured the complete environment. */
+  environmentResolved?: boolean;
+  validatePrepared?: () => void;
 }
 
 /** SDK framing with host-owned process groups: npm/uv wrappers may leave
@@ -33,9 +47,11 @@ export class OwnedStdioClientTransport implements Transport {
 
   async start(): Promise<void> {
     if (this.started || this.closed) throw new Error("Owned stdio transport already started or closed");
+    this.parameters.validatePrepared?.();
     this.started = true;
     const child = this.child = spawnCli(this.parameters.command, this.parameters.args ?? [], {
-      env: { ...getDefaultEnvironment(), ...this.parameters.env },
+      env: this.parameters.environmentResolved ? { ...this.parameters.env }
+        : ownedStdioEnvironment(this.parameters.command, this.parameters.env),
       stdio: ["pipe", "pipe", this.parameters.stderr ?? "inherit"],
       cwd: this.parameters.cwd,
       windowsHide: true,

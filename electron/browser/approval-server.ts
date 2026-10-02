@@ -131,6 +131,7 @@ export function startBrowserApprovalServer(): Promise<number> {
             signal: AbortSignal.any([controller.signal, authority.signal]),
             owner: authority.owner,
             permission: authority.permission,
+            unattended: authority.unattended,
           });
           if (controller.signal.aborted || res.destroyed) return;
           res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ decision }));

@@ -6,14 +6,17 @@ import { setMaxListeners } from "node:events";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { createPreparedMcpTargetTransport, listCompleteToolInventory } from "./client";
-import { preparedMcpConsentResource, preparedMcpTargetTransport, PreparedMcpScopeChangedError, type PreparedMcpBinding } from "./prepared-transport";
+import { bindPreparedMcpProxyAsk, preparedMcpConsentResource, preparedMcpTargetTransport, PreparedMcpScopeChangedError, type PreparedMcpBinding, type PreparedMcpProxyScope } from "./prepared-transport";
 import { mcpToolSchemaDigest } from "./tool-schema";
 import { bindMainToolConsentResource } from "../runtime/tool-consent";
 import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, type RuntimeToolPermissionAsk } from "../runtime/tool-approval";
 import { beginMainMcpEffect } from "./effect-receipts";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
+import type { BeforeMcpToolResult } from "../runtime/runner";
 
 export type McpProxyGate = {
+  /** Main-owned closure; not part of the serialized approval scope. */
+  beforeMcpToolResult?: BeforeMcpToolResult;
   serverKey: string; runtime: string; sessionKey: string; permission?: "read" | "write" | "full";
   cwd?: string; chatId?: string; unattended?: boolean; simulation?: boolean; planMode?: boolean;
   catalogId: string | null; planReadAuthority?: "agentlas-browser" | "cua-driver"; planPath?: string;
@@ -307,6 +310,17 @@ export function activateMcpProxyLaunch(handle: string, binding: PreparedMcpBindi
   entry.generation = entry.pendingGeneration ?? randomUUID();
   entry.pendingGeneration = undefined;
 }
+/** Builder-only capture of the launch actually prepared, including canonical
+ * cwd identity. A resident transaction captures its pending gate. */
+export function preparedMcpProxyLaunchScope(handle: string): PreparedMcpProxyScope {
+  const entry = launches.get(handle);
+  if (!entry) throw new Error("mcp_proxy_launch_unapproved");
+  validateLaunchCwd(entry.cwd);
+  const gate = entry.pendingGate ?? entry.gate;
+  return Object.freeze({ runtime: gate.runtime, sessionKey: gate.sessionKey, permission: gate.permission,
+    cwd: entry.cwd.path, cwdDev: entry.cwd.dev, cwdIno: entry.cwd.ino, chatId: gate.chatId,
+    planMode: Boolean(gate.planMode), unattended: Boolean(gate.unattended) });
+}
 /** Revoke only this Main-minted launch, including its attached wires. */
 export function revokeMcpProxyLaunch(handle: string): void {
   const entry = launches.get(handle);
@@ -456,6 +470,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   setMaxListeners(0, lifetime.signal); // A lifetime can own any number of concurrent RPC waiters.
   const hostPrefix = `host:${randomUUID()}:`; let hostSequence = 0;
   const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean; effect?: ReturnType<typeof beginMainMcpEffect>; initParamsKey?: string | null;
+    toolName?: string; resultFinishing?: boolean;
     /** agentlas-browser tools/call only: the call as sent, for one bounded ladder replay. */
     browserCall?: { frame: Frame; mutating: boolean; laddered: boolean } }>();
   const external = new Map<string, string>();
@@ -530,7 +545,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     await transport.send(frame as JSONRPCMessage);
   };
   const finish = (wireId: string, frame: Frame) => {
-    const pending = native.get(wireId); if (!pending) return;
+    const pending = native.get(wireId); if (!pending || pending.resultFinishing) return;
     // Browser fallback ladder (electron/browser/fallback-ladder.ts): a failed agentlas-browser call waits for the
     // bounded ladder, which may bring the surface back (then a read-only call is replayed once) or annotate the
     // error with a machine block and one line for the agent. Never more than one ladder per call.
@@ -562,10 +577,29 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       resultText: browserFailureText(frame) }), bounded]);
   };
   const finishNow = (wireId: string, frame: Frame) => {
-    const pending = native.get(wireId); if (!pending) return;
+    const pending = native.get(wireId); if (!pending || pending.resultFinishing) return;
+    pending.resultFinishing = true;
+    // The operation already happened. Preserve its receipt even when Main parks
+    // this exact run instead of releasing the result to the native provider.
     pending.effect?.finish(frame);
-    pending.detach?.(); native.delete(wireId); external.delete(idKey(pending.id));
-    down({ ...frame, id: pending.id });
+    pending.effect = undefined;
+    const deliver = () => {
+      if (closed || native.get(wireId) !== pending) return;
+      validate();
+      pending.controller?.signal.throwIfAborted();
+      pending.detach?.(); native.delete(wireId); external.delete(idKey(pending.id));
+      down({ ...frame, id: pending.id });
+    };
+    if (pending.method === "tools/call" && pending.toolName && gate.beforeMcpToolResult) {
+      void (async () => {
+        try {
+          await gate.beforeMcpToolResult!({ catalogId: gate.catalogId, toolName: pending.toolName!, isError: browserCallFailed(frame) });
+          deliver();
+        } catch (error) { close(error); }
+      })();
+    } else {
+      try { deliver(); } catch (error) { close(error); }
+    }
   };
   const deny = (wireId: string, code: string) => finish(wireId, { jsonrpc: "2.0", result: { isError: true,
     _meta: { agentlasProxyFailure: code }, content: [{ type: "text", text: `MCP_PROXY_${code.toUpperCase()}: Tool execution was not authorized.` }] } });
@@ -621,6 +655,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
         tool: `mcp__${gate.serverKey}__${tool}`, kind: "other", cwd: gate.cwd, permission: gate.permission,
         chatId: gate.chatId, unattended: gate.unattended, mutating, signal, ...(gate.planMode ? { planMode: true as const } : {}) };
       bindMainToolConsentResource(ask, { tool: ask.tool, target: preparedMcpConsentResource(binding, binding.server), schema: digest, arguments: args });
+      bindPreparedMcpProxyAsk(ask, binding);
       const arbiter = getRuntimeToolPermissionArbiter();
       const decision = arbiter ? await arbiter(ask) : defaultRuntimeToolPermission(ask);
       signal.throwIfAborted(); validate();
@@ -681,6 +716,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       ? beginMainMcpEffect(binding, tool, args, isCanonicalSystemTimeMcpServer(binding.server) ? "time"
         : gate.planReadAuthority === "agentlas-browser" ? "native-browser" : null) : undefined;
     native.set(wireId, { id: frame.id, method: frame.method, controller, sent: !controller, effect,
+      ...(controller && typeof tool === "string" ? { toolName: tool } : {}),
       ...(frame.method === "initialize" ? { initParamsKey: stableKey(frame.params) } : {}),
       ...(controller ? { detach: () => lifetime.signal.removeEventListener("abort", abort) } : {}) });
     external.set(idKey(frame.id), wireId);

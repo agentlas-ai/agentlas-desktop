@@ -1,14 +1,15 @@
 # Changelog
 
-## 1.2.53 — 2026-09-30
+## 1.2.53 — 2026-10-02
 
-- Improve Agentlas Browser recovery, isolated browser connections, vault autofill, and file uploads. Stop importing Google and YouTube sign-in cookies from Chrome and quarantine previously copied cookies in Agentlas; existing Agentlas sessions may need one sign-in after the update.
+- Improve Agentlas Browser recovery, isolated browser connections, vault autofill, and file uploads. Keep Chrome sign-in imports available, including Google and YouTube.
 - Resume Goals after approval, improve recovery after a checked external result, improve automation handling, and record YouTube upload receipts.
+- Give resumed Goal runs the latest plan, preserve acknowledged native conversation context, and reduce database work when updating conversation activity.
 - Prevent repeated bug-report sends, keep the report receipt on reopen, and show retry reasons.
 - Improve AI connection onboarding, official CLI installation, and authentication status. Enable approved MCP tools in the API provider tool loop, with the same catalog restrictions used by hosted runs.
 - Improve team indicators and navigation, and conversation chart, HTML, workbook, and file panels.
 - Stop the background service and owned child processes on a full quit; show a tray indicator when work continues in the background and exit when that work finishes.
-- Pair Science 0.1.49 with Research Director 1.25.0, with citation, DOCX math, claim-context, referee runtime checks, and recovery improvements.
+- Pair Science 0.1.61 with Research Director 1.27.0, with citation, DOCX math, claim-context, referee runtime checks, and recovery improvements.
 - Update Electron to 43.7.6 and the bundled Node runtime to 24.21.0 with npm 11.20.0 and patched dependencies. Remove nonruntime verification and demonstration files from installers.
 - Keep Agentlas OS v1.2.51 pinned at `4ca8fd28d5ad9a92cbe33b39d05bcff8febe7448`; its runtime asset remains `hephaestus-runtime-v1.2.51.tar.gz` (SHA-256 `0f95c8844fd9793285ac41031eea1ed4f98dba3a10707918f7cdcd74230bc1f3`).
 

@@ -39,11 +39,47 @@ function stripLeadTags(line: string): string {
   return current;
 }
 
+function readableLocalPaths(text: string): string {
+  return text.replace(/(?<![\w:/])(?:file:\/\/)?\/(?:Users|home|private|tmp|var)\/[^\s<>`"'()\[\]]+/g,
+    (value) => value.split("/").filter(Boolean).pop() ?? "file")
+    .replace(/(?<![\w:/])[A-Za-z]:[\\/][^\s<>`"'()\[\]]+/g,
+      (value) => value.split(/[\\/]/).filter(Boolean).pop() ?? "file");
+}
+
+function readableResultParagraph(paragraph: string): string {
+  const value = paragraph.trim();
+  const finalStep = /^(마지막 단계 결과|Final step result):\n([\s\S]*)$/.exec(value);
+  if (finalStep) return `${finalStep[1]}:\n${readableResultParagraph(finalStep[2])}`;
+  if (!value.startsWith("{") || !value.endsWith("}")) return paragraph;
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return paragraph;
+    const rows: string[] = [];
+    let omitted = false;
+    const visit = (item: unknown, label: string, depth: number): void => {
+      if (rows.length >= 30) { omitted = true; return; }
+      if (item && typeof item === "object" && depth < 4) {
+        for (const [key, nested] of Object.entries(item)) visit(nested, label ? `${label} · ${key}` : key, depth + 1);
+      } else if (item === null || ["string", "boolean", "number"].includes(typeof item)) {
+        rows.push(`- ${label.replace(/_/g, " ")}: ${String(item ?? "—").replace(/\n/g, " ")}`);
+      } else omitted = true;
+    };
+    visit(parsed, "", 0);
+    return rows.length ? [...rows, ...(omitted ? ["- …"] : [])].join("\n") : paragraph;
+  } catch { return paragraph; }
+}
+
 export function automationReportDisplay(text: string, locale: "ko" | "en"): AutomationReportDisplay {
   const raw = String(text ?? "").replace(/\r\n/g, "\n").trim();
   const split = raw.indexOf("\n\n");
   const name = split > 0 ? raw.slice(0, split).trim() : null;
-  const rest = split > 0 ? raw.slice(split + 2).replace(/^\n+/, "") : raw;
+  const rest = (split > 0 ? raw.slice(split + 2).replace(/^\n+/, "") : raw)
+    // Skill announcements describe the worker, not the owner's result.
+    .replace(/^\s*(?:\*\*\[Hope\]\*\*\s*)?사용 스킬:[^\n]*(?:\n|$)/gm, "")
+    // Keep artifact names readable without leaking a workstation path in an
+    // automation report. The durable message and artifact pane retain links.
+    .replace(/\[([^\]\n]+)\]\((?:<)?(?:file:\/\/)?\/(?:Users|home|private|tmp|var)\/[^)\n]*\)/g, "$1")
+    .replace(/\[([^\]\n]+)\]\((?:<)?[A-Za-z]:[\\/][^)\n]*\)/g, "$1");
   const lines = rest.split("\n");
   const first = lines.findIndex((line) => line.trim().length > 0);
   if (first < 0) return { name, body: rest, code: null };
@@ -61,5 +97,31 @@ export function automationReportDisplay(text: string, locale: "ko" | "en"): Auto
   }
   const next = [...lines];
   next[first] = lead;
-  return { name, body: next.join("\n").trim(), code };
+  let fence: string | null = /^\s*(`{3,}|~{3,})/.exec(next[first])?.[1][0] ?? null;
+  for (let i = first + 1; i < next.length; i += 1) {
+    const fenceMatch = /^\s*(`{3,}|~{3,})/.exec(next[i]);
+    if (fenceMatch) {
+      if (!fence) fence = fenceMatch[1][0];
+      else if (fence === fenceMatch[1][0]) fence = null;
+      continue;
+    }
+    if (fence) continue;
+    const startsResult = !next[i - 1].trim() || /^(마지막 단계 결과|Final step result):\s*$/.test(next[i - 1].trim());
+    const hasHostPrefix = /^\s*(?:\*\*)?\[(?:controller_judged|Hope)\](?:\*\*)?\s*/.test(next[i]);
+    if (!startsResult && !hasHostPrefix) continue;
+    // Later result paragraphs can carry the same host prefix as the lead.
+    // Restrict later code handling to known result markers; ordinary prose
+    // and fenced examples retain their brackets and labels.
+    let line = next[i].replace(/^\s*(?:\*\*)?\[controller_judged\](?:\*\*)?\s*/, "")
+      .replace(/^\s*(?:\*\*)?\[Hope\](?:\*\*)?\s*/, "");
+    const marker = /^\s*(NODE_CLAIMED_WITHOUT_TOOLS|NEEDS-INPUT|NEEDS_INPUT):\s*/.exec(line);
+    if (marker) {
+      line = line.slice(marker[0].length);
+      if (NEEDS_INPUT_CODES.has(marker[1])) line = `${locale === "ko" ? "입력이 필요합니다" : "Needs your input"}: ${line}`;
+      else code ??= marker[1];
+    }
+    next[i] = line;
+  }
+  const body = readableLocalPaths(next.join("\n").trim().split(/\n\s*\n/).map(readableResultParagraph).join("\n\n"));
+  return { name, body, code };
 }

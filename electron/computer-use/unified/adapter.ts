@@ -250,7 +250,7 @@ export function createUnifiedComputerUse(options: UnifiedComputerUseOptions): Un
         return snapshot("native-app", name, value, now);
       },
       observe,
-      async screenshot(input = {}) { await scopedCall(options.native, "focus_app", { app: name }); return scopedCall(options.native, "get_screen", input.sourceId ? { source_id: input.sourceId } : {}); },
+      async screenshot(input = {}) { await scopedCall(options.native, "focus_app", { app: name }); return scopedCall(options.native, "get_screen", { app: name, ...(input.sourceId ? { source_id: input.sourceId } : {}) }); },
       focus: () => scopedCall(options.native, "focus_app", { app: name }),
       click: (point, input = {}) => scopedCall(options.native, input.count === 2 ? "double_click" : "click", { app: name, ...pointArgs(point), ...(input.button ? { button: input.button } : {}) }),
       drag: (from, to, input = {}) => scopedCall(options.native, "drag", { app: name, from_x: from.x, from_y: from.y, to_x: to.x, to_y: to.y,

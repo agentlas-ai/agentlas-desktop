@@ -8,7 +8,7 @@ import fs from "node:fs";
  * Desktop has already bound to that chat.
  */
 /** Science binds its own selected directory without becoming a remote surface. */
-export type InvocationWorkspaceBindingSource = "mobile" | "mobile-one" | "telegram-one" | "science";
+export type InvocationWorkspaceBindingSource = "mobile" | "mobile-one" | "telegram-one" | "science" | "automation";
 
 const REMOTE_BINDING_SOURCES: readonly InvocationWorkspaceBindingSource[] = [
   "mobile",
@@ -21,7 +21,7 @@ export function isRemoteInvocationWorkspaceBindingSource(value: string): boolean
 }
 
 function isWorkspaceBindingSource(value: string): value is InvocationWorkspaceBindingSource {
-  return value === "science" || isRemoteInvocationWorkspaceBindingSource(value);
+  return value === "science" || value === "automation" || isRemoteInvocationWorkspaceBindingSource(value);
 }
 
 export interface InvocationWorkspaceBinding {
@@ -41,6 +41,9 @@ export function assertInvocationWorkspaceSourceContext(
 ): void {
   if (binding && (binding.source === "science") !== (executionSource === "science")) {
     throw new Error("science-workspace-context-mismatch");
+  }
+  if (binding && (binding.source === "automation") !== (executionSource === "automation")) {
+    throw new Error("automation-workspace-context-mismatch");
   }
 }
 
@@ -136,13 +139,23 @@ export function captureMobileOneInvocationBinding(): InvocationWorkspaceBinding 
 }
 
 /** Capture only the canonical directory already selected and validated by Science Main. */
-export function captureScienceInvocationBinding(canonicalPath: string): InvocationWorkspaceBinding {
+export function captureScienceInvocationBinding(canonicalPath: string): InvocationWorkspaceBinding & { readonly source: "science" } {
   const directory = canonicalDirectory(canonicalPath);
   if (directory.canonicalPath !== canonicalPath) throw replacedWorkspaceError();
   return Object.freeze({
     source: "science",
     canonicalPath: directory.canonicalPath,
     directoryIdentity: directory.directoryIdentity,
+  });
+}
+
+/** Main resolves the automation's owner contract; neither a prompt nor a wire DTO supplies this path. */
+export function captureAutomationInvocationBinding(workingFolder: string | null): InvocationWorkspaceBinding {
+  const directory = workingFolder === null ? null : canonicalDirectory(workingFolder);
+  return Object.freeze({
+    source: "automation",
+    canonicalPath: directory?.canonicalPath ?? null,
+    directoryIdentity: directory?.directoryIdentity ?? null,
   });
 }
 

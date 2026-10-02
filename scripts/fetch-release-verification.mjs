@@ -9,6 +9,12 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+// A source archive has no Git metadata. Its caller may provide the original
+// repository only for these immutable predecessor reads; nested runtime Git
+// commands must continue to use their own repositories.
+const verificationRepository = process.env.AGENTLAS_RELEASE_VERIFICATION_REPOSITORY
+  ? resolve(process.env.AGENTLAS_RELEASE_VERIFICATION_REPOSITORY)
+  : root;
 const predecessor = "f0050cfd6202d922ff1aeb0d0e4040a88b6ed2c3";
 const pins = {
   "verify-packaged-workforce-runtime.cjs": "320d4548374d4419234d68a1e6dcb672313ba065e789eb6864d8f20cc118ee37",
@@ -26,7 +32,7 @@ export function prepareReleaseVerification() {
   if (harness) return harness;
   // Read and authenticate every byte before any verifier is executable.
   const files = Object.entries(pins).map(([name, digest]) => {
-    const bytes = execFileSync("git", ["show", `${predecessor}:scripts/${name}`], {
+    const bytes = execFileSync("git", ["-C", verificationRepository, "show", `${predecessor}:scripts/${name}`], {
       cwd: root, maxBuffer: 4 * 1024 * 1024, stdio: ["ignore", "pipe", "pipe"],
     });
     if (createHash("sha256").update(bytes).digest("hex") !== digest) {

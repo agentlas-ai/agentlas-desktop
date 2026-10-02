@@ -149,6 +149,9 @@ function promptFor(req: RunnerRequest): string {
       undefined,
       undefined,
       req.surfaceGate,
+      undefined,
+      undefined,
+      req.judgmentOnly === true ? "host-judgment" : undefined,
     )}`,
     "",
   ];

@@ -209,6 +209,9 @@ function buildPrompt(req: RunnerRequest): string {
     undefined,
     undefined,
     req.surfaceGate,
+      undefined,
+    req.sciencePromptProfile,
+    req.judgmentOnly === true ? "host-judgment" : undefined,
   );
   const turnContext = req.turnContext?.trim();
   const parts = [`[SYSTEM]\n${system}${turnContext ? `\n\n${turnContext}` : ""}`, ""];

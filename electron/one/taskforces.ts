@@ -247,6 +247,10 @@ export function oneTaskforceRemovalPreview(input: { id: string }): { sessionCoun
  * The caller owns the reservation transaction; no provider runs here.
  */
 export function ensureOneTaskforceForPreflight(input: { chatId: string; memberAgentIds: string[] }): OneTaskforceReceipt {
+  return ensureOneTaskforceForChat(input);
+}
+
+function ensureOneTaskforceForChat(input: { chatId: string; memberAgentIds: string[] }, allowPriorTaskFailure = false): OneTaskforceReceipt {
   const db = getDb();
   if (!db.inTransaction) throw new Error("one_group_transaction_required");
   const chatId = assertId(input.chatId, "chatId");
@@ -258,11 +262,11 @@ export function ensureOneTaskforceForPreflight(input: { chatId: string; memberAg
   // A task-scoped extra participant does not rewrite an existing standing group.
   const memberAgentIds = normalizeMemberIds(input.memberAgentIds, { allowUnavailable: true });
   if (existing) {
-    ensureOneGroupLocalStaff(memberAgentIds, false);
+    ensureOneGroupLocalStaff(memberAgentIds, false, { allowPriorTaskFailure });
     return { id: existing.id, chatId, revision: existing.revision, memberAgentIds: readMemberIds(existing.member_agent_ids_json) };
   }
   if (!memberAgentIds.length) throw new Error("one_group_members_required");
-  ensureOneGroupLocalStaff(memberAgentIds);
+  ensureOneGroupLocalStaff(memberAgentIds, true, { allowPriorTaskFailure });
   const id = randomUUID();
   const now = new Date().toISOString();
   const title = normalizeTitle(Array.from(chat.title.trim() || "One Team").slice(0, 80).join(""));
@@ -277,4 +281,56 @@ export function ensureOneTaskforceForPreflight(input: { chatId: string; memberAg
 export function notifyOneTaskforceFromPreflight(receipt: OneTaskforceReceipt): void {
   emitTaskforceChanged(receipt.id);
   emitDesktopStoreChange({ entity: "one-org" });
+}
+
+/** Additive composition of the caller's canonical room; no new chat or run. */
+export function composeOneTaskforceForChat(input: { chatId: string; memberAgentIds: string[] }): {
+  group: OneTaskforceReceipt; created: boolean; addedMemberAgentIds: string[];
+} {
+  const db = getDb();
+  const result = db.transaction(() => {
+    const chatId = assertId(input.chatId, "chatId");
+    const chat = db.prepare("SELECT title, kind, origin_surface, archived_at, seat_id FROM chats WHERE id = ?").get(chatId) as
+      { title: string; kind: string; origin_surface: string; archived_at: string | null; seat_id: string | null } | undefined;
+    if (!chat || chat.kind !== "user" || chat.origin_surface !== "one" || chat.archived_at) throw new Error("one-team-group-chat-unavailable");
+    const existing = db.prepare("SELECT * FROM one_taskforces WHERE chat_id = ?").get(chatId) as Row | undefined;
+    if ([chat.seat_id, existing ? `seat_tf_${existing.id}` : null].some(id => id
+      && db.prepare("SELECT 1 FROM one_seats WHERE id = ? AND dissolved_at IS NOT NULL").get(id))) throw new Error("one-team-group-chat-unavailable");
+    const requested = normalizeMemberIds(input.memberAgentIds, { allowUnavailable: false });
+    if (!requested.length) throw new Error("one-team-group-invalid-members");
+    // Require a pre-existing local org identity, then reuse its package/lease checks.
+    const placeholders = requested.map(() => "?").join(",");
+    const local = db.prepare(`SELECT installed_agent_id FROM one_org_members
+      WHERE archived_at IS NULL AND source = 'local' AND status_kind != 'locked'
+      AND installed_agent_id IN (${placeholders})`).all(...requested) as Array<{ installed_agent_id: string }>;
+    const localIds = new Set(local.map(row => row.installed_agent_id));
+    if (requested.some(id => !localIds.has(id))) throw new Error("one-team-group-member-unavailable");
+    ensureOneGroupLocalStaff(requested, false, { allowPriorTaskFailure: true });
+    let prior: string[] = [];
+    if (existing) {
+      try { prior = normalizeMemberIds(JSON.parse(existing.member_agent_ids_json), { allowUnavailable: true }); }
+      catch { throw new Error("one-team-group-roster-invalid"); }
+    }
+    const additions = requested.filter(id => !prior.includes(id));
+    if (prior.length + additions.length > MAX_MEMBERS) throw new Error("one-team-group-over-limit");
+    const members = normalizeMemberIds([...prior, ...additions], { allowUnavailable: true });
+    if (!existing) {
+      return { group: ensureOneTaskforceForChat({ chatId, memberAgentIds: members }, true), created: true, addedMemberAgentIds: additions };
+    }
+    if (!additions.length) return { group: { id: existing.id, chatId, revision: existing.revision, memberAgentIds: prior }, created: false, addedMemberAgentIds: [] };
+    const now = new Date().toISOString();
+    db.prepare("UPDATE one_taskforces SET member_agent_ids_json = ?, updated_at = ?, revision = revision + 1 WHERE id = ?")
+      .run(JSON.stringify(members), now, existing.id);
+    const seatId = ensureGroupSeatForTaskforce({ taskforceId: existing.id, title: existing.title, memberAgentIds: members, createdAt: existing.created_at });
+    db.prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chatId);
+    applySeatSnapshotToChats(seatId);
+    return { group: { id: existing.id, chatId, revision: existing.revision + 1, memberAgentIds: members }, created: false, addedMemberAgentIds: additions };
+  })();
+  if (result.created || result.addedMemberAgentIds.length) {
+    try { notifyOneTaskforceFromPreflight(result.group); }
+    catch (error) { console.warn("[one-team] group_notification_failed", error instanceof Error ? error.message : String(error)); }
+    try { emitDesktopStoreChange({ entity: "chat", id: result.group.chatId }); }
+    catch (error) { console.warn("[one-team] group_chat_notification_failed", error instanceof Error ? error.message : String(error)); }
+  }
+  return result;
 }

@@ -4,7 +4,7 @@ import type { McpInvocationEvent } from "../../shared/types";
 import { getDb } from "../store/db";
 import { recordRunEvent } from "../store/run-events";
 import type { AdapterEffectAdmission, AdapterEffectReport } from "./adapter-effect-context";
-import { boundEffectBoundary } from "./effect-metadata";
+import { boundEffectBoundary, MAIN_TOOL_PREDISPATCH_PROTOCOL, isMainToolPreDispatchRejectionReport, mainHostControlForEvent, isMainLinkedAdapterScope, hasClosedScopedEffects, type MainHostControlObservation } from "./effect-metadata";
 import { verifyScienceFailureSettlement, type ScienceToolCorrelation } from "./science-failure-settlement";
 import { createHash } from "node:crypto";
 import { parseScienceNativeFailureObservation, type ScienceNativeFailureObservation } from "./science-native-failure";
@@ -46,12 +46,15 @@ export interface RuntimeEffectBoundaryReceipt {
   operations: Operation[]; pendingEffectRefs: string[];
   adapterScopes?: Array<AdapterEffectAdmission & { report: AdapterEffectReport | null }>;
   scienceSchemaRejections?: ScienceSchemaRejectionSettlement[];
+  hostControls?: MainHostControlObservation[];
+  runtimeQuiesced?: boolean;
 }
 /** Main owns this instance from invocation start until the runner promise
  * settles. Tool text is never interpreted. Result arrival + typed provider error
  * status confirms dispatch settlement, not domain correctness or verification. */
 export class InvocationEffectBoundaryTracker {
   private readonly operations = new Map<string, Operation>();
+  private readonly operationEventCounts = new Map<string, { starts: number; results: number }>();
   private readonly adapters = new Set<string>();
   private readonly uncertainties = new Set<string>();
   private ledgerComplete = true;
@@ -61,6 +64,8 @@ export class InvocationEffectBoundaryTracker {
   private readonly scienceCorrelations = new Map<string, ScienceToolCorrelation>();
   private readonly scienceFailureObservations = new Map<string, Set<string>>();
   private readonly scienceFailureValues = new Map<string, ScienceNativeFailureObservation>();
+  private readonly hostControls = new Map<string, MainHostControlObservation>();
+  private readonly durableControls = new Set<string>();
   constructor(private readonly runId: string, private readonly chatId: string) {}
   nativeScienceTool(binding: ScienceToolCorrelation): void {
     if (binding.invocationRunId !== this.runId || binding.chatId !== this.chatId) { this.uncertainties.add("science-native-binding-mismatch"); return; }
@@ -96,6 +101,8 @@ export class InvocationEffectBoundaryTracker {
   }
   adapterStarted(admission: AdapterEffectAdmission): void {
     if (this.adapterScopes.has(admission.scopeId)) { this.uncertainties.add("adapter-scope-duplicate"); return; }
+    if (admission.parentScopeId && admission.parentScopeId !== `${this.runId}:root`
+      && (!this.adapterScopes.has(admission.parentScopeId) || this.adapterScopes.get(admission.parentScopeId)?.report)) this.uncertainties.add("adapter-parent-lifetime-unconfirmed");
     this.adapterScopes.set(admission.scopeId, { ...admission, report: null });
     try { recordRunEvent({ runId: this.runId, chatId: this.chatId, kind: "runtime_adapter_effect_started", sourceEventId: `adapter-effect:${admission.scopeId}:started`, payload: { ...admission } }); }
     catch { this.recordingFailed(); }
@@ -103,11 +110,20 @@ export class InvocationEffectBoundaryTracker {
   adapterFinished(scopeId: string, report: AdapterEffectReport): void {
     const scope = this.adapterScopes.get(scopeId);
     if (!scope || scope.report) { this.uncertainties.add("adapter-scope-unbound-result"); return; }
+    if ([...this.adapterScopes.values()].some(child => child.parentScopeId === scopeId && !child.report)) this.uncertainties.add("adapter-child-lifetime-unconfirmed");
+    if (scope.parentScopeId && report.operationIds.some(id => !id.startsWith(`${scope.scopeId}:tool:`))) this.uncertainties.add("adapter-child-operation-unbound");
     scope.report = structuredClone(report);
     try { recordRunEvent({ runId: this.runId, chatId: this.chatId, kind: "runtime_adapter_effect_completed", sourceEventId: `adapter-effect:${scopeId}:result`, payload: { ...scope } }); }
     catch { this.recordingFailed(); }
   }
+  hostControl(observation: MainHostControlObservation): void {
+    if (this.hostControls.size >= 512) { this.recordingFailed(); this.uncertainties.add("host-control-overflow"); return; }
+    if (this.hostControls.has(observation.controlId)) { this.uncertainties.add("host-control-identity-reused"); return; }
+    this.hostControls.set(observation.controlId, observation);
+  }
   observe(event: McpInvocationEvent): void {
+    const control = mainHostControlForEvent(event);
+    if (control && this.hostControls.get(control.controlId)?.projectionSha256 === control.projectionSha256) return;
     if (event.notice?.code === "runtime-selected" && event.runtimeSelection) this.adapters.add(event.runtimeSelection.kind);
     if (event.kind === "error" || event.nodeState === "failed") this.uncertainties.add("runtime_reported_failure");
     if (event.kind !== "tool-use" || !event.tool || isEffectStatusOnlyTool(event.tool)) return;
@@ -116,6 +132,9 @@ export class InvocationEffectBoundaryTracker {
     const key = `${event.agentId ?? "root"}:${event.nodeId ?? "root"}:${tool.id || `unidentified-${this.observedTools}`}`;
     const prior = this.operations.get(key);
     const hasResult = typeof tool.result === "string";
+    const counts = this.operationEventCounts.get(key) ?? { starts: 0, results: 0 };
+    if (hasResult) counts.results++; else counts.starts++;
+    this.operationEventCounts.set(key, counts);
     const outcome = hasResult ? (tool.isError === false && !tool.failureCode ? "succeeded" : tool.isError === true ? "failed" : "unknown") : "pending";
     // A failed/unknown outcome is never erased by a later successful-looking
     // duplicate. A new attempt must carry a different provider operation ID.
@@ -124,7 +143,8 @@ export class InvocationEffectBoundaryTracker {
       resultObserved:prior?.resultObserved === true || hasResult,
       outcome: prior?.outcome === "failed" || prior?.outcome === "unknown" ? prior.outcome : hasResult ? outcome : prior?.outcome ?? "pending" });
     if (!tool.id) this.uncertainties.add(`operation:${key}:identity-missing`);
-    if (event.agentId || event.nodeId) this.uncertainties.add(`operation:${key}:nested-adapter-coverage-unconfirmed`);
+    if ((event.agentId || event.nodeId) && ![...this.adapterScopes.values()].some(scope => isMainLinkedAdapterScope(scope, this.runId, this.chatId, [...this.adapterScopes.values()])
+      && tool.id?.startsWith(`${scope.scopeId}:tool:`))) this.uncertainties.add(`operation:${key}:nested-adapter-coverage-unconfirmed`);
   }
   /**
    * Nothing could have left the machine: a result-covered adapter was selected and not one tool
@@ -136,14 +156,17 @@ export class InvocationEffectBoundaryTracker {
       && this.operations.size === 0 && this.adapterScopes.size === 0 && this.observedTools === 0
       && this.scienceCorrelations.size === 0;
   }
-  recorded(event: McpInvocationEvent): void { if (event.kind === "tool-use" && event.tool && !isEffectStatusOnlyTool(event.tool)) this.durableTools++; }
+  recorded(event: McpInvocationEvent, control?: MainHostControlObservation): void {
+    if (control && this.hostControls.get(control.controlId)?.projectionSha256 === control.projectionSha256) { this.durableControls.add(control.controlId); return; }
+    if (event.kind === "tool-use" && event.tool && !isEffectStatusOnlyTool(event.tool)) this.durableTools++;
+  }
   recordingFailed(): void { this.ledgerComplete = false; }
   /** Called only after the whole runtime promise settles, not on model final. */
   persist(): RuntimeEffectBoundaryReceipt | null {
     const db=getDb();
     return db.transaction(() => {
-      const terminal=db.prepare("SELECT id, seq, kind FROM run_events WHERE run_id=? AND chat_id=? AND kind IN ('invoke_completed','invoke_failed','invoke_threw','invoke_cancelled','invoke_interrupted') ORDER BY seq DESC LIMIT 1")
-        .get(this.runId,this.chatId) as {id:string;seq:number;kind:string}|undefined;
+      const terminal=db.prepare("SELECT id, seq, kind, payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind IN ('invoke_completed','invoke_waiting','invoke_failed','invoke_threw','invoke_cancelled','invoke_interrupted') ORDER BY seq DESC LIMIT 1")
+        .get(this.runId,this.chatId) as {id:string;seq:number;kind:string;payload_json:string}|undefined;
       if (!terminal) return null;
       const pending=new Set(this.uncertainties);
       const settledFailures = new Set([...this.adapterScopes.values()].filter(scope => scope.rootBound && scope.chatId === this.chatId && scope.report?.complete)
@@ -170,7 +193,8 @@ export class InvocationEffectBoundaryTracker {
       }
       const dynamicCovered = (kind: string): boolean => {
         const scopes = [...this.adapterScopes.values()].filter(scope => scope.adapterKind === kind);
-        return scopes.some(scope => scope.rootBound && scope.chatId === this.chatId && scope.report?.complete === true)
+        return scopes.some(scope => scope.rootBound && scope.chatId === this.chatId && scope.report?.complete === true
+          && scope.report.protocol !== MAIN_TOOL_PREDISPATCH_PROTOCOL)
           && scopes.every(scope => scope.chatId === this.chatId && scope.report?.complete === true
             && (scope.rootBound || isSettledPreparationScope(scope, this.chatId)));
       };
@@ -178,7 +202,13 @@ export class InvocationEffectBoundaryTracker {
       if (coverage === "unknown") pending.add("adapter-result-coverage-unconfirmed");
       const reportedIds = new Set<string>();
       for (const scope of this.adapterScopes.values()) {
-        if (!scope.rootBound && !isSettledPreparationScope(scope, this.chatId)) pending.add(`adapter:${scope.scopeId}:nested-or-unbound`);
+        if (scope.report?.protocol === MAIN_TOOL_PREDISPATCH_PROTOCOL) {
+          const id = scope.report.operationIds[0];
+          const counts = this.operationEventCounts.get(`root:root:${id}`);
+          if (!isMainToolPreDispatchRejectionReport(scope.report) || counts?.starts !== 1 || counts.results !== 1
+            || this.operations.get(`root:root:${id}`)?.outcome !== "failed") pending.add(`adapter:${scope.scopeId}:predispatch-proof-unconfirmed`);
+        }
+        if (!scope.rootBound && !isMainLinkedAdapterScope(scope, this.runId, this.chatId, [...this.adapterScopes.values()]) && !isSettledPreparationScope(scope, this.chatId)) pending.add(`adapter:${scope.scopeId}:nested-or-unbound`);
         if (!scope.rootBound && isSettledPreparationScope(scope, this.chatId) && !dynamicCovered(scope.adapterKind)) pending.add(`adapter:${scope.scopeId}:root-execution-unconfirmed`);
         if (scope.chatId !== this.chatId) pending.add(`adapter:${scope.scopeId}:chat-binding-mismatch`);
         if (!scope.report?.complete) pending.add(`adapter:${scope.scopeId}:incomplete`);
@@ -186,15 +216,25 @@ export class InvocationEffectBoundaryTracker {
         for (const id of scope.report?.operationIds ?? []) {
           if (reportedIds.has(id)) pending.add(`adapter-operation:${id}:reused-across-dispatches`);
           reportedIds.add(id);
-          const observed = this.operations.get(`root:root:${id}`);
+          const matching = [...this.operations.values()].filter(operation => operation.toolId === id);
+          const observed = matching.length === 1 ? matching[0] : undefined;
           if (!observed?.startObserved || !observed.resultObserved || observed.outcome !== (settledFailures.has(id) ? "failed" : "succeeded")) pending.add(`adapter-operation:${id}:ledger-mismatch`);
         }
       }
       if ([...this.adapters].some(kind => !RESULT_COVERAGE.has(kind))) {
         for (const operation of this.operations.values()) if (!operation.toolId || !reportedIds.has(operation.toolId)) pending.add(`operation:${operation.key}:adapter-receipt-missing`);
       }
-      if (terminal.kind !== "invoke_completed") pending.add(`terminal:${terminal.id}:not-successful`);
-      const ledgerComplete=this.ledgerComplete && this.observedTools===this.durableTools;
+      // Ending an inference to wait is not task completion. It can nevertheless
+      // have fully settled effects if the native drain and every tool receipt
+      // independently prove that. All coverage/operation checks still apply.
+      let waitingQuiesced = false;
+      if (terminal.kind === "invoke_waiting") {
+        try { waitingQuiesced = JSON.parse(terminal.payload_json).runtimeQuiesced === true; } catch { /* no proof */ }
+      }
+      const scopedQuiesced = terminal.kind === "invoke_failed" && hasClosedScopedEffects([...this.adapterScopes.values()], [...this.operations.values()], this.runId, this.chatId);
+      if (scopedQuiesced) pending.delete("runtime_reported_failure");
+      if (terminal.kind !== "invoke_completed" && !waitingQuiesced && !scopedQuiesced) pending.add(`terminal:${terminal.id}:not-successful`);
+      const ledgerComplete=this.ledgerComplete && this.observedTools===this.durableTools && this.hostControls.size===this.durableControls.size;
       if (!ledgerComplete) pending.add("runtime-effect-ledger-incomplete");
       for (const operation of this.operations.values()) {
         const correlation = operation.toolId && this.scienceCorrelations.get(operation.toolId);
@@ -208,6 +248,7 @@ export class InvocationEffectBoundaryTracker {
       const receipt=boundEffectBoundary({schemaVersion:"agentlas.runtime-effect-boundary.v1",terminalEventId:terminal.id,terminalSeq:terminal.seq,
         adapterKinds:[...this.adapters].sort(),coverage,effects:pending.size?"uncertain":"settled",ledgerComplete,observedToolEventCount:this.observedTools,
         operations:[...this.operations.values()].sort((a,b)=>a.key.localeCompare(b.key)),pendingEffectRefs:[...pending].sort(),adapterScopes:[...this.adapterScopes.values()],
+        hostControls: [...this.hostControls.values()], runtimeQuiesced: scopedQuiesced,
         ...(scienceSchemaRejections.length ? { scienceSchemaRejections } : {})},this.runId);
       recordRunEvent({runId:this.runId,chatId:this.chatId,kind:"runtime_effect_boundary",sourceEventId:`runtime-effect-boundary:${this.runId}:${terminal.id}`,
         evidencePhase:receipt.effects==="settled"?"executed":"uncertain",payload:{...receipt}});

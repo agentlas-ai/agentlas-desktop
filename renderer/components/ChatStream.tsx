@@ -2505,9 +2505,11 @@ function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
   const ladderAction = (() => {
     if ((notice.code !== "browser-ladder-stopped" && notice.code !== "browser-human-check") || !notice.details) return null;
     try {
-      const parsed = JSON.parse(notice.details) as { action?: unknown; site?: unknown };
+      const parsed = JSON.parse(notice.details) as { action?: unknown; site?: unknown; ownerScopeId?: unknown; browserSurface?: unknown };
       const action: "retry" | "open-browser" | "fix" | null = parsed.action === "retry" || parsed.action === "open-browser" || parsed.action === "fix" ? parsed.action : null;
-      return action ? { action, site: typeof parsed.site === "string" ? parsed.site : null } : null;
+      const browserSurface: "native" | "dedicated" | undefined = parsed.browserSurface === "native" || parsed.browserSurface === "dedicated" ? parsed.browserSurface : undefined;
+      return action ? { action, site: typeof parsed.site === "string" ? parsed.site : null,
+        ownerScopeId: typeof parsed.ownerScopeId === "string" ? parsed.ownerScopeId : null, browserSurface } : null;
     } catch {
       return null;
     }
@@ -2585,7 +2587,7 @@ function ChatNoticeRow({ notice }: { notice: ChatNotice }) {
             disabled={ladderBusy}
             onClick={() => {
               setLadderBusy(true);
-              void (window.agentlas?.browserUi?.ladderAction?.({ action: ladderAction.action, site: ladderAction.site }) ?? Promise.resolve(null))
+              void (window.agentlas?.browserUi?.ladderAction?.({ action: ladderAction.action, site: ladderAction.site, ownerScopeId: ladderAction.ownerScopeId, browserSurface: ladderAction.browserSurface }) ?? Promise.resolve(null))
                 .catch(() => null)
                 .finally(() => setLadderBusy(false));
             }}

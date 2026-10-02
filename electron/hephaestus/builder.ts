@@ -1,3 +1,7 @@
+import { withInvocationUsageIfAbsent, currentInvocationObservedUsage, currentInvocationRunnerScopeCount } from "../runtime/invocation-usage";
+import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { runnerFailureFromError } from "../runtime/runner";
+import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // Hephaestus 빌더(hep-build) 구동기.
 //
 // hep-build 는 프로그래matic 함수가 아니라 "LLM 빌더 에이전트 라우팅" surface 다(bin/hephaestus
@@ -140,7 +144,7 @@ export async function allocateBuildRuntime(input: {
   } else {
     const bootstrapRuntime = resolveHostControlPlaneRuntime(input.picked.active, "low");
     try {
-      const selector = await input.picked.runner(
+      const selector = await runObservedRunner(input.picked.runner,
         {
           systemPrompt: [
             "You are the upper-level workload allocator for one Agentlas Desktop Build turn.",
@@ -168,8 +172,11 @@ export async function allocateBuildRuntime(input: {
         },
         { onPartial: () => {}, onStatus: () => {}, onTool: () => {} },
       );
+      if (input.signal.aborted) throw input.signal.reason ?? new Error("Build cancelled");
+      if (selector.failure) throw new ObservedRunnerFailureError(selector.failure);
       allocation = normalizeWorkloadAllocation(buildAllocationJson(selector.text), phase);
-    } catch {
+    } catch (error) {
+      if (input.signal.aborted || runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, input.picked.active.kind))) throw error;
       allocation = normalizeWorkloadAllocation(null, phase);
     }
   }
@@ -867,6 +874,33 @@ export async function runHephaestusBuild(
   signal: AbortSignal,
   locale: RuntimeLocale = "en",
 ): Promise<void> {
+  return withInvocationUsageIfAbsent(async (ownsScope) => {
+    try {
+      await runHephaestusBuildInScope(runId, req, sink, signal, locale);
+    } finally {
+      const runnerScopeCount = currentInvocationRunnerScopeCount();
+      if (ownsScope && runnerScopeCount > 0) {
+        const usage = currentInvocationObservedUsage();
+        // Summary only: provider-attempt accounting must not add this aggregate again.
+        tryRecordRunEvent({
+          runId, kind: "runtime_usage_summary", nodeId: "hephaestus-builder",
+          payload: { schema: "agentlas.build-usage-summary.v1", accountingRole: "summary", runnerScopeCount,
+            usageState: usage ? "measured" : "unknown",
+            ...(usage ? { observedInputTokens: usage.inputTokens, observedOutputTokens: usage.outputTokens,
+              ...(usage.cachedInputTokens !== undefined ? { observedCachedInputTokens: usage.cachedInputTokens } : {}) } : {}) },
+        });
+      }
+    }
+  });
+}
+
+async function runHephaestusBuildInScope(
+  runId: string,
+  req: ResolvedHephaestusBuildRequest,
+  sink: BuildSink,
+  signal: AbortSignal,
+  locale: RuntimeLocale = "en",
+): Promise<void> {
   const ko = locale === "ko";
   const root = resolveBuilderPromptRoot(hephaestusRoot());
   if (!root) {
@@ -901,7 +935,15 @@ export async function runHephaestusBuild(
     stage: "model-allocation",
     text: ko ? "빌드 난이도와 모델 배정 확인" : "Assessing Build workload and model allocation",
   });
-  const workload = await allocateBuildRuntime({ picked, request: req, originalRequest, signal, locale });
+  let workload: WorkloadResolution;
+  try {
+    workload = await allocateBuildRuntime({ picked, request: req, originalRequest, signal, locale });
+  } catch (error) {
+    sink({ runId, kind: "error", text: signal.aborted
+      ? (ko ? "빌드 취소됨" : "Build cancelled")
+      : (ko ? `빌드 실패: ${(error as Error).message}` : `Build failed: ${(error as Error).message}`) });
+    return;
+  }
   const buildActive = workload.runtime;
   const buildPicked = (
     buildActive.kind === picked.active.kind &&
@@ -1262,7 +1304,7 @@ export async function runHephaestusBuild(
     let runnerOutcome;
     try {
       runnerOutcome = await runBuildRunnerWithMcpRecovery({
-      runner: buildPicked.runner,
+      runner: (request, events) => runObservedRunner(buildPicked.runner, request, events),
       attachment: req.mcpAttachment,
       makeRequest: makeRunnerRequest,
       events: runnerEvents,
@@ -1299,6 +1341,8 @@ export async function runHephaestusBuild(
       stopThinkingHeartbeat();
     }
     const result = runnerOutcome.result;
+    if (signal.aborted) throw signal.reason ?? new Error("Build cancelled");
+    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     const finalMcpAttachment = runnerOutcome.attachment;
     const executedWorkload = reconcileWorkloadRunnerResult(workload, result);
     tryRecordRunEvent({
@@ -1342,7 +1386,7 @@ export async function runHephaestusBuild(
           : "The builder declared completion without asking. Sent back: the interview gate runs before generation.",
       });
       try {
-        const sendBack = await buildPicked.runner(
+        const sendBack = await runObservedRunner(buildPicked.runner,
           {
             ...makeRunnerRequest(finalMcpAttachment),
             history: [
@@ -1368,8 +1412,11 @@ export async function runHephaestusBuild(
         );
         // 되돌린 답이 실제로 질문을 담았을 때만 채택한다. 또 완료를 선언하면
         // 원래 결과를 그대로 두고 진행한다 — 사용자를 무한 루프에 가두지 않는다.
+        if (signal.aborted) throw signal.reason ?? new Error("Build cancelled");
+        if (sendBack.failure) throw new ObservedRunnerFailureError(sendBack.failure);
         if (hasValidBuilderInterviewQuestion(sendBack.text)) resultText = sendBack.text;
-      } catch {
+      } catch (error) {
+        if (signal.aborted || runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, buildActive.kind))) throw error;
         // 되돌리기 자체가 실패하면 원래 결과로 진행한다 — 빌드를 잃지 않는다.
       }
     }
@@ -1528,7 +1575,7 @@ export async function runHephaestusBuild(
             : []),
         ].join("\n");
         try {
-          const repairResult = await buildPicked.runner(
+          const repairResult = await runObservedRunner(buildPicked.runner,
             {
               ...makeRunnerRequest(finalMcpAttachment),
               userPrompt: repairPrompt,
@@ -1541,9 +1588,12 @@ export async function runHephaestusBuild(
             },
             runnerEvents,
           );
+          if (signal.aborted) throw signal.reason ?? new Error("Build cancelled");
+          if (repairResult.failure) throw new ObservedRunnerFailureError(repairResult.failure);
           finalSessionId = repairResult.sessionId ?? finalSessionId;
           if (repairResult.text.trim()) finalResultText = repairResult.text;
-        } catch {
+        } catch (error) {
+          if (signal.aborted || runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, buildActive.kind))) throw error;
           break; // 수리 턴 실패 — 마지막 verify 결과를 그대로 보고한다.
         }
         contractReport = await runContractVerify();

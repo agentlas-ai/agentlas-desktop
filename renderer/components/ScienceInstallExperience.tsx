@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { IconCheck, IconClose } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { OPEN_SCIENCE_INSTALL_EVENT } from "@/lib/science-install-entry";
+import { scienceCoreInstalled, scienceCoreReady } from "@/lib/use-science-suite-status";
 import type {
   ScienceSuiteInstallProgress,
   ScienceSuiteStatus,
@@ -196,7 +197,7 @@ export function ScienceInstallExperience({
   useEffect(() => {
     if (!eligible || suite === null || accountScope === null || autoOfferScopeRef.current === accountScope) return;
     autoOfferScopeRef.current = accountScope;
-    if (suite.installed) return;
+    if (scienceCoreInstalled(suite)) return;
     let dismissed = false;
     try {
       dismissed = window.localStorage.getItem(promoDismissedKey(accountScope)) === "1";
@@ -210,7 +211,7 @@ export function ScienceInstallExperience({
   }, [accountScope, eligible, suite]);
 
   useEffect(() => {
-    if (!suite?.installed || !suite.enabled || surface === "closed" || surface === "installing") return;
+    if (!scienceCoreReady(suite) || surface === "closed" || surface === "installing") return;
     setSurface("closed");
   }, [suite, surface]);
 

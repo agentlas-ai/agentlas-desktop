@@ -1,14 +1,16 @@
 import type { RunnerEvents, RunnerRequest, RunnerResult } from "../runtime/runner";
 import type { LocalModelHubControlPort } from "./ports";
+import type { RuntimeToolPermissionAsk, RuntimeToolPermissionDecision } from "../runtime/tool-approval";
+import type { PreparedMcpAdmission } from "../mcp-tools/prepared-transport";
 
 /** An authenticated Desktop host sends this, never a renderer or model tool.
  * Opaque Science capabilities cannot be JSON-cloned. Such runs must enter the
  * daemon's invocation service, which mints/binds its own process-local grants.
  * Prepared MCP transports likewise require admission in the receiving host. */
 export type RemoteLocalModelRunRequest = Omit<RunnerRequest,
-  "signal" | "scienceRecoveryCapability" | "scienceCollectionCapability" | "onAgentAppMcpRuntimeUnavailable">
+  "signal" | "scienceRecoveryCapability" | "scienceCollectionCapability" | "onAgentAppMcpRuntimeUnavailable" | "beforeMcpToolResult">
   & { signal?: never; scienceRecoveryCapability?: never; scienceCollectionCapability?: never;
-    onAgentAppMcpRuntimeUnavailable?: never };
+    onAgentAppMcpRuntimeUnavailable?: never; beforeMcpToolResult?: never };
 
 export type RemoteLocalModelRunEvent = {
   [K in keyof RunnerEvents]-?: { kind: K; args: Parameters<NonNullable<RunnerEvents[K]>> }
@@ -17,11 +19,26 @@ export type RemoteLocalModelRunEvent = {
 /** The service boot fences IDs and replay cursors across reconnects. A new
  * boot is not permission to restart a lost run; reconcile its durable receipt. */
 export interface RemoteLocalModelRunScope { ownerEpoch: string; runId: string }
+export interface RemoteMcpToolResultRequest extends RemoteLocalModelRunScope {
+  clientId: string; generation: string; id: string; afterSequence: number;
+  input: Parameters<NonNullable<RunnerRequest["beforeMcpToolResult"]>>[0];
+}
+export interface RemoteLocalModelPermissionRequest {
+  id: string;
+  /** Authenticated receiver-authored family, never a field of the caller ask. */
+  family: "direct" | "prepared-mcp-proxy";
+  resourceDigest: string;
+  ask: Omit<RuntimeToolPermissionAsk, "signal" | "consentBinding">;
+}
 export interface RemoteLocalModelRunPage extends RemoteLocalModelRunScope {
   schema: "agentlas.local-model-run-page.v1";
   state: "running" | "completed" | "cancelled" | "failed";
   events: Array<{ sequence: number; event: RemoteLocalModelRunEvent }>;
   nextSequence: number;
+  permissionRequests?: RemoteLocalModelPermissionRequest[];
+  mcpToolResults?: RemoteMcpToolResultRequest[];
+  /** Receipt from the execution host after cancellation/rejected delivery. */
+  runtimeQuiesced?: boolean;
   /** Never silently render a truncated stream as complete. */
   truncatedBeforeSequence: number;
   result: RunnerResult | null;
@@ -52,9 +69,13 @@ export type LocalModelRpcCommand = { clientId: string } & (
   | { op: "control.start"; operationId: string; command: LocalModelControlCommand }
   | { op: "control.read"; operationId: string; waitMs?: number }
   | { op: "control.cancel"; operationId: string }
-  | { op: "run.start"; runId: string; request: RemoteLocalModelRunRequest }
+  | { op: "run.start"; runId: string; request: RemoteLocalModelRunRequest; mcpAdmission?: PreparedMcpAdmission; resultBoundaryGeneration?: string }
+  /** Probe before run.start: old daemons must not silently ignore the result hook. */
+  | { op: "run.result-capability"; runId: string; generation: string }
   | { op: "run.read"; runId: string; afterSequence: number; limit?: number; waitMs?: number }
   | { op: "run.cancel"; runId: string }
+  | { op: "run.permission"; runId: string; approvalId: string; resourceDigest: string; decision: RuntimeToolPermissionDecision }
+  | { op: "run.result"; ownerEpoch: string; runId: string; generation: string; resultId: string; allow: boolean }
   | { op: "run.ack"; runId: string; throughSequence: number }
   | { op: "client.detach" }
 );
@@ -68,8 +89,12 @@ export function localModelRemoteError(code: string, message = code): Error & { c
 /** Reject lost authority/callbacks before JSON serialization can silently erase
  * them. Ordinary GUI MCP configurations also have process-local seals: their
  * preparation must move to the receiving invocation host, not be JSON-minted. */
-export function remoteLocalModelRequest(request: RunnerRequest | RemoteLocalModelRunRequest): RemoteLocalModelRunRequest {
-  const { signal: _signal, ...wire } = request;
+export function remoteLocalModelRequest(request: RunnerRequest | RemoteLocalModelRunRequest,
+  options?: { mcpResultRelay: true }): RemoteLocalModelRunRequest {
+  const { signal: _signal, beforeMcpToolResult, ...wire } = request;
+  if (beforeMcpToolResult !== undefined && (typeof beforeMcpToolResult !== "function" || !options?.mcpResultRelay)) {
+    throw localModelRemoteError("local_model_remote_result_relay_required");
+  }
   for (const key of ["scienceRecoveryCapability", "scienceCollectionCapability", "onAgentAppMcpRuntimeUnavailable"] as const) {
     if (Object.prototype.hasOwnProperty.call(wire, key) && wire[key] !== undefined) {
       throw localModelRemoteError("local_model_remote_process_binding_required", `Cannot transfer process-local binding: ${key}`);
@@ -105,7 +130,7 @@ export function assertLocalModelWireValue(value: unknown, depth = 0, seen = new 
  * never resumes the agent or starts another inference. GUI detach must not
  * unload the daemon-owned engine. */
 export interface RemoteLocalModelRunTransport {
-  start(input: RemoteLocalModelRunScope & { request: RemoteLocalModelRunRequest }): Promise<RemoteLocalModelRunPage>;
+  start(input: RemoteLocalModelRunScope & { request: RemoteLocalModelRunRequest; mcpAdmission?: PreparedMcpAdmission; resultBoundaryGeneration?: string }): Promise<RemoteLocalModelRunPage>;
   read(input: RemoteLocalModelRunScope & { afterSequence: number; limit: number }): Promise<RemoteLocalModelRunPage>;
   cancel(input: RemoteLocalModelRunScope): Promise<{ requested: boolean }>;
   acknowledge(input: RemoteLocalModelRunScope & { throughSequence: number }): Promise<void>;

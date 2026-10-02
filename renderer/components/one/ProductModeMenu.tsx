@@ -7,7 +7,7 @@ import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { OneBrandMark } from "./OneBrand";
 import { IconApps, IconBrain, IconChevronDown, IconDownload, IconPower } from "@/components/Icon";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
-import { useScienceSuiteStatus } from "@/lib/use-science-suite-status";
+import { scienceCoreInstalled, scienceCoreReady, useScienceSuiteStatus } from "@/lib/use-science-suite-status";
 import { AttentionDot } from "@/components/AttentionDot";
 import { attentionLabel, openAttentionEntry, useAttention, type AttentionChatEntry } from "@/lib/attention";
 import styles from "./ProductModeMenu.module.css";
@@ -54,10 +54,8 @@ export function ProductModeMenu({
   const [open, setOpen] = useState(false);
   const [oneHref, setOneHref] = useState("/one");
   const scienceSuite = useScienceSuiteStatus();
-  const scienceAvailable = current === "science" || Boolean(
-    scienceSuite?.installed && scienceSuite.enabled && scienceSuite.phase === "installed",
-  );
-  const scienceInstalled = current === "science" || Boolean(scienceSuite?.installed);
+  const scienceAvailable = current === "science" || scienceCoreReady(scienceSuite);
+  const scienceInstalled = current === "science" || scienceCoreInstalled(scienceSuite);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const keyboardOpenRef = useRef(false);

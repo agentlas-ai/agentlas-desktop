@@ -9,7 +9,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, RuntimeTurnUnsettledError } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
 import { tStatus } from "./status-i18n";
@@ -341,6 +341,9 @@ function buildSystemText(req: RunnerRequest): string {
     undefined,
     undefined,
     req.surfaceGate,
+    undefined,
+    undefined,
+    req.judgmentOnly === true ? "host-judgment" : undefined,
   );
   const turnContext = req.turnContext?.trim();
   return `${sys}${turnContext ? `\n\n${turnContext}` : ""}`;
@@ -551,6 +554,24 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     let sessionId: string | undefined = resumeSessionId ?? undefined;
     const stdoutDecoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
+    let settled = false;
+    let spawned = Number.isSafeInteger(child.pid) && Number(child.pid) > 0;
+    child.once("spawn", () => { spawned = true; });
+    const failedResult = (code?: number | null, quota = false): RunnerResult => ({
+      text: text.trim(), tokens, sessionId,
+      failure: {
+        kind: quota ? "quota" : "refused", runtime: KIND, source: "marker",
+        providerCode: "runtime_turn_unsettled",
+        ...(typeof code === "number" ? { exitCode: code } : {}),
+        message: [
+          new RuntimeTurnUnsettledError(KIND, req.locale).message,
+          quota ? (req.locale === "ko"
+            ? "Grok 사용량 잔액 소진(HTTP 402)도 확인됐습니다. Grok Settings > Usage에서 확인해 주세요."
+            : "Grok quota exhaustion (HTTP 402) was also observed. Check Grok Settings > Usage.") : "",
+          stderr.slice(0, 500),
+        ].filter(Boolean).join("\n"),
+      },
+    });
 
     const handle = (ev: GrokEvent): void => {
       const nested = ev.data && typeof ev.data === "object" ? ev.data as Record<string, unknown> : null;
@@ -652,20 +673,46 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     child.stderr?.on("data", (chunk: Buffer) => {
       stderr += stderrDecoder.write(chunk);
     });
+    const flushOutputTail = () => {
+      buffer += stdoutDecoder.end();
+      stderr += stderrDecoder.end();
+      if (buffer.trim()) {
+        const line = buffer.trim();
+        try { handle(JSON.parse(line) as GrokEvent); }
+        catch { text += (text ? "\n" : "") + line; }
+      }
+      buffer = "";
+    };
+    const finishFailed = (code?: number | null) => {
+      const quota = isGrokQuotaExhausted(stderr);
+      if (quota) {
+        recordProviderHealth("grok", "grok_quota_exhausted");
+        invalidateUsage("grok");
+      }
+      // A quota response cannot prove that earlier tools had no effect.
+      resolve(failedResult(code, quota));
+    };
 
     child.on("error", (err) => {
+      if (settled) return;
+      settled = true;
       stopHeartbeat();
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
       req.signal?.removeEventListener("abort", onAbort);
       void fs.rm(promptFile, { force: true });
-      reject(err);
+      if (req.signal?.aborted) reject(abortReasonError(req));
+      else if (spawned) {
+        flushOutputTail();
+        finishFailed();
+      }
+      else reject(err); // Failed spawn is not evidence that the request ran.
     });
     child.on("close", (code) => {
+      if (settled) return;
+      settled = true;
       stopHeartbeat();
-      buffer += stdoutDecoder.end();
-      stderr += stderrDecoder.end();
       // 프로세스 종료 시 stdout/stderr data 리스너를 제거해 누수 방지.
       child.stdout?.removeAllListeners("data");
       child.stderr?.removeAllListeners("data");
@@ -675,37 +722,19 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         reject(abortReasonError(req));
         return;
       }
-      if (buffer.trim()) {
-        const line = buffer.trim();
-        try {
-          handle(JSON.parse(line) as GrokEvent);
-        } catch {
-          text += (text ? "\n" : "") + line;
-        }
-      }
+      flushOutputTail();
       // assistant text는 오류 증거가 아니다. streaming-json `type:error`와 실제 stderr만
       // handle()이 stderr에 모으므로, 답변이 같은 문구를 인용해도 상태를 오염시키지 않는다.
-      if (code !== 0 && isGrokQuotaExhausted(stderr)) {
-        recordProviderHealth("grok", "grok_quota_exhausted");
-        invalidateUsage("grok");
-        reject(
-          new Error(
-            req.locale === "ko"
-              ? "Grok Build 사용량 잔액이 소진되었습니다(HTTP 402). Grok Settings > Usage에서 리셋 또는 추가 크레딧을 확인해 주세요."
-              : "Grok Build usage balance is exhausted (HTTP 402). Check reset or extra credits in Grok Settings > Usage.",
-          ),
-        );
-        return;
-      }
-      // 텍스트를 받았으면 비정상 종료여도 부분 성공으로 처리.
-      if (code === 0 || text.trim()) {
+      if (code === 0) {
         clearProviderHealth("grok");
         invalidateUsage("grok");
         if (req.chatId && fingerprint && sessionId) saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
         resolve({ text: text.trim(), tokens, sessionId });
         return;
       }
-      reject(new Error(`grok CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
+      // Partial output is evidence, not a successful terminal receipt. Keep it
+      // beside the failure while the host blocks automatic provider replay.
+      finishFailed(code);
     });
   });
   }

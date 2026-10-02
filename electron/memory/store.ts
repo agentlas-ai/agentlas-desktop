@@ -210,7 +210,7 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
   let now = "";
   const embedding = autoLocalEmbedding(e.content);
   const insert = getDb().transaction(() => {
-    assertMemoryWriteAllowed({
+    const authority = {
       scope: e.scope,
       kind: e.kind,
       content: e.content,
@@ -220,7 +220,14 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
       chatId: e.chatId,
       intakeRunId: e.intakeRunId,
       intakeEpoch: e.intakeEpoch,
-    });
+    };
+    assertMemoryWriteAllowed(authority);
+    const native = e.contentNative?.trim().slice(0, 4_000);
+    if (native && native !== e.content.trim()) {
+      // Forget tombstones both wordings. A new English rendering must not
+      // restore the same revoked original under this owner/run authority.
+      assertMemoryWriteAllowed({ ...authority, content: native });
+    }
     // Startup reconciliation uses this timestamp plus id as its durable logical
     // cursor. Advance it inside the write transaction so other Desktop/headless
     // writers cannot insert behind that cursor in the same millisecond.
@@ -254,12 +261,11 @@ export function insertMemoryEntry(e: NewMemoryEntry): MemoryEntry {
       JSON.stringify(embedding.vector),
       now,
     );
-    const native = e.contentNative?.trim();
     if (native && native !== e.content.trim()) {
       ensureMemoryNativeTable();
       getDb().prepare(
         "INSERT OR REPLACE INTO memory_entry_native (entry_id, content_native, created_at) VALUES (?, ?, ?)",
-      ).run(id, native.slice(0, 4_000), now);
+      ).run(id, native, now);
     }
   });
   insert.immediate();

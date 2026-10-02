@@ -604,6 +604,8 @@ export function OneTurnWork({
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
   const automationRegistrations = useMemo(() => extractAutomationRegistrations(state), [state]);
   const active = busy || preparing;
+  const loginWaiting = !active && (runStatus === "waiting_input"
+    || state.items.some(item => item.kind === "run" && item.status === "waiting_input"));
   // Show actual tool actions during a run on both One and Work. Raw results
   // stay collapsed inside each row; the user may still fold the process.
   const [expanded, setExpanded] = useState(active);
@@ -655,7 +657,7 @@ export function OneTurnWork({
   const quietNotes = useMemo(() => inlineCells.filter(isQuietHostNote), [inlineCells]);
   const firstQuietNote = quietNotes[0]?.id;
 
-  if (!active && !hasRows && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !state.artifacts.length) {
+  if (!active && !loginWaiting && !hasRows && !presentation.terminalMessage && !interrupted && !steeringInterrupted && !state.artifacts.length) {
     // Nothing happened beyond the answer itself (no thought, no tool). Codex
     // shows no work line for such a turn.
     return null;
@@ -678,7 +680,7 @@ export function OneTurnWork({
     <section
       className={styles.work}
       data-one-turn-work="true"
-      data-state={preparing ? "preparing" : active ? "running" : "settled"}
+      data-state={preparing ? "preparing" : active ? "running" : loginWaiting ? "waiting_input" : "settled"}
       aria-busy={active}
     >
       {active ? (
@@ -705,9 +707,9 @@ export function OneTurnWork({
           className={styles.header}
           onClick={() => setExpanded((current) => !current)}
           aria-expanded={expanded}
-          data-terminal={steeringInterrupted ? "steered" : terminal ?? "completed"}
+          data-terminal={loginWaiting ? "waiting_input" : steeringInterrupted ? "steered" : terminal ?? "completed"}
         >
-          <span>{workedFor}</span>
+          <span>{loginWaiting ? (ko ? "로그인 대기" : "Waiting for sign-in") : workedFor}</span>
           {/* 표시=실행 (C-D-1): 이 턴이 실제로 돈 모델을 실행 기록 표면에 남긴다. */}
           {presentation.model && <span className={styles.muted} data-run-model="true">· {presentation.model}</span>}
           {steeringInterrupted && (

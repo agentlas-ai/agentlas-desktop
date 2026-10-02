@@ -27,7 +27,7 @@ import { getDb } from "./db";
 import { recordRunEvent, tryRecordRunEvent } from "./run-events";
 import { synthesizeLegacyGraph } from "../automation-emitter";
 
-const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
+const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
 const SHA256_RE = /^sha256:[0-9a-f]{64}$/;
 const MAX_CHECKPOINT_BYTES = 1024 * 1024;
 const MAX_RECONCILED_OUTPUT_BYTES = 256 * 1024;
@@ -216,6 +216,7 @@ function synthesizeLegacyCheckpoint(
     nodeInputDigests: {},
     toolReceipts: {},
     prepareReceipts: {},
+    loginWaits: {},
     updatedAt: durableTimestamp(run),
     checkpointDigest: "sha256:" + "0".repeat(64),
   };
@@ -781,6 +782,7 @@ export function reconcileAutomationGraph(
       });
     }
 
+    for (const nodeId of unresolved) delete checkpoint.loginWaits[nodeId];
     checkpoint.completedNodeIds = [...completed].sort();
     checkpoint.skippedNodeIds = [...skipped].sort();
     checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((nodeId) => !unresolved.has(nodeId));
@@ -938,6 +940,7 @@ export function recoverReadOnlySuspendedGraphs(): AutomationGraphReconcileResult
       const loaded = loadReconciliation(candidate.id);
       if (!loaded || loaded.run.dry_run === 1 || loaded.boundEvent ||
           loaded.checkpoint.schemaVersion !== GRAPH_CHECKPOINT_SCHEMA ||
+          Object.keys(loaded.checkpoint.loginWaits).length > 0 ||
           loaded.checkpoint.inFlightNodeIds.length > 0 ||
           loaded.checkpoint.ambiguousNodeIds.length === 0 ||
           loaded.view.nodes.some((node) => node.uncertainty !== "ambiguous")) continue;

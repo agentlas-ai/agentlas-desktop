@@ -2,7 +2,7 @@
   "schema": "agentlas.plugin/v2",
   "slug": "agentlas-science-research-director",
   "name": "Agentlas Science Research Director",
-  "version": "1.25.0",
+  "version": "1.27.0",
   "builtin": true,
   "publisher": {
     "name": "Agentlas",
@@ -34,8 +34,14 @@
     "agentContract": "agent/agent.md",
     "workflowContract": "skills/direct-study/SKILL.md",
     "manuscriptContract": "skills/write-manuscript/SKILL.md",
-    "promptSha256": "6b69b74525feaf3ecfe1a8f1d6614dee6d0e6bbbf3c0a18c517f761c9ea341b4",
-    "failClosed": true
+    "promptSha256": "ca34009c7674dfce2ce06934a343802cd79f8bb2f7537156a413a913d2007777",
+    "failClosed": true,
+    "core": "agent/runtime-core.md",
+    "manualCatalog": "contracts/runtime-manual-catalog.json",
+    "bundle": "contracts/runtime-bundle.json",
+    "catalogSha256": "79ab73c540ae3da0f1ff42a9a1df7a1305d5ff236424bd770d5f550cfa6ab3a9",
+    "bundleSha256": "220b56310f4032df45e95d852bcf811b25dccda20328d56c53aa51ffe9f16c92",
+    "archivedPromptSha256": "b6b01a83aabea2f77a5b157b7736c212488f71919e25aeb3c6f33567deab2953"
   },
   "provides": {
     "skills": {
@@ -75,9 +81,14 @@
     "algo": "sha256",
     "files": [
       {
+        "path": "README.md",
+        "sha256": "eade56ed5974800a51713b8243fc52299c022059e77eeeb6a411c785973cf07e",
+        "bytes": 4659
+      },
+      {
         "path": "agent/agent.md",
-        "sha256": "44b2a31c36cf8515345ab7706df5dee3ce6d2d4e6109f6bfa03996056d1fad0d",
-        "bytes": 20310
+        "sha256": "99350b4e680ff529de897905d991a08cc36785db22dcff8d5bc5b38ca0e51e48",
+        "bytes": 21966
       },
       {
         "path": "agent/routing-card.json",
@@ -85,9 +96,14 @@
         "bytes": 6380
       },
       {
+        "path": "agent/runtime-core.md",
+        "sha256": "ca34009c7674dfce2ce06934a343802cd79f8bb2f7537156a413a913d2007777",
+        "bytes": 1680
+      },
+      {
         "path": "agent/soul.md",
-        "sha256": "f39df8ad0aeb1d29f8455cd7aa38ceb92cec9ba5830c76bb43652dece39b84f8",
-        "bytes": 4648
+        "sha256": "6060787c466fb954be131467cd1b8882ee37330c28884471bcbde3884d8a23e6",
+        "bytes": 5006
       },
       {
         "path": "contracts/decision.schema.json",
@@ -105,14 +121,19 @@
         "bytes": 5569
       },
       {
-        "path": "README.md",
-        "sha256": "eade56ed5974800a51713b8243fc52299c022059e77eeeb6a411c785973cf07e",
-        "bytes": 4659
+        "path": "contracts/runtime-bundle.json",
+        "sha256": "220b56310f4032df45e95d852bcf811b25dccda20328d56c53aa51ffe9f16c92",
+        "bytes": 5012
+      },
+      {
+        "path": "contracts/runtime-manual-catalog.json",
+        "sha256": "79ab73c540ae3da0f1ff42a9a1df7a1305d5ff236424bd770d5f550cfa6ab3a9",
+        "bytes": 20343
       },
       {
         "path": "skills/direct-study/SKILL.md",
-        "sha256": "a39d52ee1733a4283f3a4be677d8ce68fcc16025330941de1352d29a9f6ef284",
-        "bytes": 19692
+        "sha256": "b7c7644122aec72a612ff723f9114b5bf401f9b8c61b23838dd070bd18ff2c1a",
+        "bytes": 20168
       },
       {
         "path": "skills/index/SKILL.md",
@@ -121,13 +142,13 @@
       },
       {
         "path": "skills/reference/SKILL.md",
-        "sha256": "28f546287d28b416d6dfaf7fcd816286390bfd3362271171cc1b999151f0e2fd",
-        "bytes": 53394
+        "sha256": "c962db26d35f1c86e48cefa18829373e264188df5fd78ab9af1d7f5d9ccf9a36",
+        "bytes": 53753
       },
       {
         "path": "skills/write-manuscript/SKILL.md",
-        "sha256": "2dda2a9d9f2463cc5d17c3e1b158b0a70dd7a5d912c498f01e6f58c653c8a45a",
-        "bytes": 38215
+        "sha256": "f03af817bd8bc8566998c419d2f753507b3a06e764bc56287e6dc1544d873a04",
+        "bytes": 38873
       }
     ]
   }

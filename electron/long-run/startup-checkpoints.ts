@@ -1,3 +1,4 @@
+import { hasPendingInvocationDirection } from "./pending-directions";
 import { latestGoalWaitSubscription, registerOngoingGoalCycle, type GoalWaitSubscription } from "./wait-subscriptions";
 import { randomUUID } from "node:crypto";
 import { statSync } from "node:fs";
@@ -245,8 +246,7 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
     if (!intakeSourceMessageId) startupReplayRefusal("history_missing");
     if (intakeSourceMessageId !== revision.sourceMessage.messageId) startupReplayRefusal("history_changed");
   }
-  if (getDb().prepare("SELECT 1 FROM invocation_steers WHERE original_run_id = ? AND status IN ('queued','draining','cancelled','failed') LIMIT 1")
-    .get(producer.invocation_run_id)) startupReplayRefusal("newer_user_direction");
+  if (hasPendingInvocationDirection(producer.invocation_run_id)) startupReplayRefusal("newer_user_direction");
   const attemptRuntime = parsedRuntimeSelection(producer.runtime_selection_json);
   const workerRuntime = parsedRuntimeSelection(producer.worker_runtime_selection_json);
   if (!attemptRuntime || !workerRuntime || !sameJson(attemptRuntime, workerRuntime)) startupReplayRefusal("runtime_binding_changed");
@@ -370,8 +370,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
           || getLongRunAttemptGoalRevision(id, producer.id) !== snapshot.revision.revision) {
           refuse("producer_not_settled"); continue;
         }
-        const pendingDirection = getDb().prepare(`SELECT 1 FROM invocation_steers WHERE original_run_id = ?
-          AND status IN ('queued','draining','cancelled','failed') LIMIT 1`).get(producer.invocation_run_id);
+        const pendingDirection = hasPendingInvocationDirection(producer.invocation_run_id);
         if (pendingDirection) { refuse("newer_user_direction"); continue; }
         const effect = readInvocationEffectBoundary({ invocationRunId: producer.invocation_run_id, expectedChatId: chat.id });
         if (effect.effects !== "settled") { refuse("effect_boundary_uncertain"); continue; }
@@ -397,9 +396,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
             || dispatcher.activeChatIds().includes(chat.id)) throw new Error("legacy_lifecycle_startup_conflict");
           const latestUser = getDb().prepare(`SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user'
             ORDER BY rowid DESC LIMIT 1`).get(chat.id) as { id: string } | undefined;
-          if (latestUser?.id !== prepared.source.messageId || getDb().prepare(`SELECT 1 FROM invocation_steers
-            WHERE original_run_id = ? AND status IN ('queued','draining','cancelled','failed') LIMIT 1`)
-              .get(producer.invocation_run_id)) throw new Error("legacy_lifecycle_newer_direction");
+          if (latestUser?.id !== prepared.source.messageId || hasPendingInvocationDirection(producer.invocation_run_id ?? "")) throw new Error("legacy_lifecycle_newer_direction");
           const currentEffect = readInvocationEffectBoundary({ invocationRunId: producer.invocation_run_id!, expectedChatId: chat.id });
           if (currentEffect.effects !== "settled" || currentEffect.receiptEventId !== effect.receiptEventId
             || currentEffect.snapshotDigest !== effect.snapshotDigest) throw new Error("legacy_lifecycle_effect_changed");
@@ -603,8 +600,7 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       }
       // A human direction queued during the old invocation must not disappear
       // merely because boot recovery changed its delivery state to cancelled.
-      const pendingDirection = getDb().prepare("SELECT 1 FROM invocation_steers WHERE original_run_id = ? AND status IN ('queued','draining','cancelled','failed') LIMIT 1")
-        .get(checkpoint.invocationRunId ?? "");
+      const pendingDirection = hasPendingInvocationDirection(checkpoint.invocationRunId ?? "");
       const newerMessage = getDb().prepare("SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND created_at > ? LIMIT 1")
         .get(chat.id, checkpoint.createdAt);
       if (pendingDirection || newerMessage) { refuse("newer_user_direction"); continue; }
@@ -639,8 +635,7 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
         const latestUser = getDb().prepare("SELECT id FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY rowid DESC LIMIT 1")
           .get(chat.id) as { id: string } | undefined;
         if (!currentRevision || currentRevision.chatId !== chat.id || latestUser?.id !== currentRevision.sourceMessage.messageId
-          || getDb().prepare("SELECT 1 FROM invocation_steers WHERE original_run_id = ? AND status IN ('queued','draining','cancelled','failed') LIMIT 1")
-            .get(checkpoint.invocationRunId ?? "")) throw new Error("checkpoint_newer_user_direction");
+          || hasPendingInvocationDirection(checkpoint.invocationRunId ?? "")) throw new Error("checkpoint_newer_user_direction");
         transitionLongRun({ runId: current.id, to: "queued", actorKind: "host",
           reason: "checkpoint-startup-resume", expectedVersion: current.version, appInstanceId });
         appendLongRunEvent({ runId: current.id, kind: "run.checkpoint_startup", actorKind: "host",

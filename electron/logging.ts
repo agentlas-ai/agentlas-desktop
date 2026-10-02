@@ -1,6 +1,7 @@
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
+import { redactOperationalSecrets } from "./invocation/event-secret-redaction";
 
 /**
  * Durable main-process log file.
@@ -22,6 +23,7 @@ import path from "node:path";
 const MAX_LOG_BYTES = 5 * 1024 * 1024;
 const LOG_FILE = "main.log";
 const PREVIOUS_LOG_FILE = "main.previous.log";
+const LOG_GENERATIONS = 4;
 const LAUNCH_TRACE_FILE = "launches.log";
 const PREVIOUS_LAUNCH_TRACE_FILE = "launches.previous.log";
 const MAX_LAUNCH_TRACE_BYTES = 512 * 1024;
@@ -128,9 +130,14 @@ function formatArgument(value: unknown): string {
   }
 }
 
+function safeDiagnosticText(value: string): string {
+  return redactOperationalSecrets(value).replace(/\/(?:Users|home)\/[^/\s"']+/g, "~");
+}
+
 function safeLaunchArgs(): string[] {
   const sensitiveFlags = new Set([
     "--prompt", "-p", "--message", "--system-prompt", "--api-key", "--token", "--cookie",
+    "-e", "--eval",
   ]);
   const result: string[] = [];
   let redactNext = false;
@@ -151,6 +158,8 @@ function safeLaunchArgs(): string[] {
       redactNext = true;
       continue;
     }
+    const inlineFlag = [...sensitiveFlags].find((flag) => value.startsWith(`${flag}=`));
+    if (inlineFlag) { result.push(`${inlineFlag}=<redacted>`); continue; }
     if (value.startsWith("agentlas://")) {
       result.push("agentlas://<redacted>");
       continue;
@@ -197,7 +206,7 @@ function writeLaunchTrace(directory: string): string | null {
     }
     fs.appendFileSync(
       file,
-      `${new Date().toISOString()} [launch] ${JSON.stringify(launchTraceSnapshot())}\n`,
+      `${new Date().toISOString()} [launch] ${safeDiagnosticText(JSON.stringify(launchTraceSnapshot()))}\n`,
       { encoding: "utf8", mode: 0o600 },
     );
     return file;
@@ -206,12 +215,21 @@ function writeLaunchTrace(directory: string): string | null {
   }
 }
 
-/** Keeps exactly one previous log so a long-running install cannot fill the disk. */
+/** Bounded diagnostic history: active + four 5MB generations. */
+function rotateLogGenerations(file: string, previous: string): void {
+  for (let generation = LOG_GENERATIONS; generation >= 2; generation -= 1) {
+    const older = `${previous}.${generation}`;
+    const newer = generation === 2 ? previous : `${previous}.${generation - 1}`;
+    fs.rmSync(older, { force: true });
+    if (fs.existsSync(newer)) fs.renameSync(newer, older);
+  }
+  fs.renameSync(file, previous);
+}
+
 function rotateIfOversized(file: string, previous: string): void {
   try {
     if (fs.statSync(file).size < MAX_LOG_BYTES) return;
-    fs.rmSync(previous, { force: true });
-    fs.renameSync(file, previous);
+    rotateLogGenerations(file, previous);
   } catch {
     // A missing or unreadable log is not a startup failure.
   }
@@ -219,11 +237,17 @@ function rotateIfOversized(file: string, previous: string): void {
 
 /** Opens the log stream and arms the error handler. Returns false when it could not. */
 function openLogStream(file: string): boolean {
+  let descriptor: number | null = null;
   try {
-    const stream = fs.createWriteStream(file, { flags: "a", mode: 0o600 });
+    // Bind the descriptor before a burst can rotate the pathname. An async
+    // open may otherwise attach an older stream to the newly recreated log,
+    // mixing generations and exceeding the byte counter's bound.
+    descriptor = fs.openSync(file, "a", 0o600);
+    const stream = fs.createWriteStream(file, { fd: descriptor, autoClose: true });
+    descriptor = null;
     stream.on("error", () => {
       // 스트림을 버리되 **영구히 끄지는 않는다.** 다음 줄이 다시 열어 본다.
-      logStream = null;
+      if (logStream === stream) logStream = null;
     });
     logStream = stream;
     bytesSinceOpen = (() => {
@@ -231,6 +255,7 @@ function openLogStream(file: string): boolean {
     })();
     return true;
   } catch {
+    if (descriptor !== null) { try { fs.closeSync(descriptor); } catch { /* best effort */ } }
     logStream = null;
     return false;
   }
@@ -259,8 +284,7 @@ function streamForWrite(byteLength: number): fs.WriteStream | null {
     const closing = logStream;
     logStream = null;
     try {
-      fs.rmSync(previous, { force: true });
-      fs.renameSync(file, previous);
+      rotateLogGenerations(file, previous);
       rotateFailures = 0;
       try { closing.end(); } catch { /* 닫기 실패는 회전을 막지 않는다 */ }
     } catch {
@@ -322,7 +346,8 @@ export function initFileLogging(): string | null {
       console[method] = (...args: unknown[]) => {
         writeOriginalConsoleSafely(original, args);
         try {
-          const line = `${new Date().toISOString()} [${method}] ${args.map(formatArgument).join(" ")}\n`;
+          const safeText = safeDiagnosticText(args.map(formatArgument).join(" "));
+          const line = `${new Date().toISOString()} [${method}] ${safeText}\n`;
           const bytes = Buffer.byteLength(line);
           const stream = streamForWrite(bytes);
           if (!stream) return;
@@ -352,7 +377,7 @@ export function appendLaunchTrace(kind: string, payload: Record<string, unknown>
   try {
     fs.appendFileSync(
       path.join(path.dirname(activeLogPath), LAUNCH_TRACE_FILE),
-      `${new Date().toISOString()} [${kind}] ${JSON.stringify({ pid: process.pid, ...payload })}\n`,
+      `${new Date().toISOString()} [${kind}] ${safeDiagnosticText(JSON.stringify({ pid: process.pid, ...payload }))}\n`,
       { encoding: "utf8", mode: 0o600 },
     );
     return true;

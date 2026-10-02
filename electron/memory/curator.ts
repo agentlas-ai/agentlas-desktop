@@ -8,7 +8,7 @@ import {
   appendSoulMemory,
 } from "./project-files";
 import { findEquivalentMemoryId, insertMemoryEntry, type RequestContext } from "./store";
-import { supersedeRestatedMemories } from "./graph";
+import { supersedeExplicitMemory, supersedeRestatedMemories } from "./graph";
 import { isAutomationLedgerChat } from "./automation-surface";
 import {
   beginMemoryProjectionWrite,
@@ -502,7 +502,8 @@ export function curateEvents(
   const nestExperienceItems: AgentNestExperienceItem[] = [];
 
   for (const [index, ev] of events.entries()) {
-    if (ev.sensitivity === "secret" || looksSecret(ev.content)) {
+    if (ev.sensitivity === "secret" || looksSecret(ev.content)
+      || looksSecret(ev.content_native ?? "")) {
       report.redacted += 1;
       recordCandidateDecision({
         options,
@@ -707,6 +708,12 @@ export function curateEvents(
         reason: "policy-exact-duplicate",
         targetMemoryId: equivalentMemoryId,
       });
+      // A repeated admitted successor can repair an interrupted explicit relation.
+      // Resolve its identity from storage, never from this model's scope fields.
+      if (ev.supersedes) {
+        try { supersedeExplicitMemory({ id: equivalentMemoryId }, ev.supersedes); }
+        catch { console.warn("[memory] explicit replacement retry deferred"); }
+      }
       continue;
     }
 
@@ -764,7 +771,8 @@ export function curateEvents(
     // Latest wins for a restated rule under the same owner boundary. The old
     // row is superseded (recoverable) with a `supersedes` edge as provenance.
     try {
-      supersedeRestatedMemories(entry);
+      if (ev.supersedes) supersedeExplicitMemory(entry, ev.supersedes);
+      else supersedeRestatedMemories(entry);
     } catch (error) {
       console.warn(`[memory] restatement supersede deferred: ${error instanceof Error ? error.message : "unknown"}`);
     }
@@ -814,7 +822,7 @@ export function curateEvents(
           at: new Date().toISOString(),
         },
         soulLine: SOUL_KINDS.has(ev.memory_kind) && effectiveScope === "project"
-          ? `(${ev.memory_kind}) ${ev.content}`
+          ? `(${ev.memory_kind}) ${ev.content}\n<!-- agentlas-memory:${entry.id} -->`
           : null,
       });
     }

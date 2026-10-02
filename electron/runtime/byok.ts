@@ -17,7 +17,8 @@ import {
   runLocalOpenAiChat,
   runMainToolDispatch,
   runOneToolCall,
-  trackToolTurnProgress,
+  createToolLoopProgress,
+  createToolLoopUsage,
   type ChatMessage,
   type LocalChatContent,
 } from "./local-tool-loop";
@@ -37,10 +38,9 @@ import {
 /**
  * 도구 왕복 상한은 **일의 크기를 재는 숫자가 아니라** 폭주를 세우는 마지막 방벽이다.
  * 8 이었을 때는 사용자 키로 도는 정상적인 긴 작업이 여기에 먼저 닿아 통째로 버려졌다.
- * 진짜 막힘("같은 도구를 같은 인자로 반복")은 local-tool-loop 과 **같은 판정 함수**가 잡는다.
+ * 진짜 막힘은 완료된 호출과 결과가 그대로 반복되는지 local-tool-loop 과 같은 판정으로 잡는다.
  */
 const MAX_BYOK_TOOL_TURNS = 200;
-const MAX_BYOK_TOOL_RESULT_CHARS = 20_000;
 
 function byokFailure(
   kind: RunnerFailure["kind"],
@@ -96,6 +96,9 @@ function prepareContext(
       undefined,
       undefined,
       req.surfaceGate,
+      undefined,
+      req.sciencePromptProfile,
+      req.judgmentOnly === true ? "host-judgment" : undefined,
     ),
   };
 }
@@ -313,13 +316,13 @@ async function runAnthropicMessages(
   let outputTokens = 0;
   let cacheRead = 0;
   let cacheWrite = 0;
-  let usageComplete = true;
+  const measuredUsage = createToolLoopUsage(events);
+  const progress = createToolLoopProgress("byok", req, events);
   let reachedAnswer = false;
 
   // ★도구 왕복. 모델이 tool_use 로 멈추면 실행하고 tool_result 로 답한 뒤 다시 부른다.
   // 상한을 두는 이유는 로컬/저가 모델이 같은 도구를 무한 반복하는 실측 때문이다.
   let toolTurnsTaken = 0;
-  let toolProgress = { signature: "", identicalTurns: 0 };
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
     const outgoingBody = () => ({ model, max_tokens: outputLimit, stream: true, system: systemField,
       messages: backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages,
@@ -340,6 +343,9 @@ async function runAnthropicMessages(
       },
     })) return { text: "", failure: byokContextFailure(req) };
     assertScienceRecoveryRequest(req, "byok", backend);
+    const usageAttempt = measuredUsage.start();
+    const beforeInput = inputTokens + cacheRead + cacheWrite;
+    const beforeCacheRead = cacheRead;
     const resp = await fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
       headers,
@@ -356,6 +362,7 @@ async function runAnthropicMessages(
     const pendingToolUse = new Map<number, { id: string; name: string; json: string }>();
     let stopReason: string | null = null;
     let turnInputObserved = false;
+    let turnCacheReadObserved = false;
     let turnOutputObserved = false;
     let turnOutputTokens = 0;
     let messageStopped = false;
@@ -391,12 +398,12 @@ async function runAnthropicMessages(
           }
         } else if (event.type === "message_start" && event.message?.usage) {
           const usage = event.message.usage;
-          turnInputObserved = [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
-            .some((value) => value != null)
+          turnInputObserved = Number.isSafeInteger(usage.input_tokens) && Number(usage.input_tokens) >= 0
             && [usage.input_tokens, usage.cache_read_input_tokens, usage.cache_creation_input_tokens]
               .every((value) => value == null || (Number.isSafeInteger(value) && value >= 0));
           // ★누적한다. 왕복이 여러 번이면 각 턴의 입력이 전부 실제 비용이다 —
           // 마지막 턴만 싣던 방식은 도구를 쓸수록 영수증이 작아진다.
+          turnCacheReadObserved = Number.isSafeInteger(usage.cache_read_input_tokens) && Number(usage.cache_read_input_tokens) >= 0;
           inputTokens += usage.input_tokens ?? 0;
           cacheRead += usage.cache_read_input_tokens ?? 0;
           cacheWrite += usage.cache_creation_input_tokens ?? 0;
@@ -415,8 +422,11 @@ async function runAnthropicMessages(
       }
     }
     outputTokens += turnOutputTokens;
-    usageComplete = usageComplete && turnInputObserved && turnOutputObserved && messageStopped
-      && Number.isSafeInteger(inputTokens + cacheRead + cacheWrite + outputTokens);
+    const turnInput = inputTokens + cacheRead + cacheWrite - beforeInput;
+    measuredUsage.complete(usageAttempt, turnInputObserved && turnOutputObserved && messageStopped
+      ? { inputTokens: turnInput, outputTokens: turnOutputTokens,
+          ...(turnCacheReadObserved ? { cachedInputTokens: cacheRead - beforeCacheRead } : {}) }
+      : undefined);
 
     if (req.scienceCollectionCapability && stopReason === "tool_use" && pendingToolUse.size === 0) {
       throw new Error("science_collection_tool_frame_invalid");
@@ -446,14 +456,6 @@ async function runAnthropicMessages(
       }
     }
     toolTurnsTaken += 1;
-    const progress = trackToolTurnProgress(
-      toolProgress,
-      orderedToolUse.map(([, entry]) => ({ name: entry.name, arguments: entry.json })),
-    );
-    toolProgress = { signature: progress.signature, identicalTurns: progress.identicalTurns };
-    // 같은 호출을 같은 인자로 반복하고 있다 — 더 돌아도 새 사실이 오지 않는다.
-    if (progress.stalled) break;
-
     // 어시스턴트 턴을 그대로 되돌려 넣는다(텍스트 + tool_use). 그래야 다음 호출에서
     // tool_result 가 짝을 찾는다.
     const assistantContent: AnthropicContent[] = [];
@@ -472,14 +474,15 @@ async function runAnthropicMessages(
       const outcome = await runOneToolCall(
         byName,
         { id: entry.id, type: "function", function: { name: entry.name, arguments: entry.json } },
-        events,
+        progress.events,
         approval,
         broker,
       );
+      progress.assertProgress();
       resultContent.push({
         type: "tool_result",
         tool_use_id: entry.id,
-        content: outcome.toolMessage.content.slice(0, MAX_BYOK_TOOL_RESULT_CHARS),
+        content: outcome.toolMessage.content,
         ...(outcome.isError ? { is_error: true } : {}),
       });
     }
@@ -507,15 +510,11 @@ async function runAnthropicMessages(
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
-  if (usageComplete) {
-    events.onTerminalObservedUsage?.({ inputTokens: totalInput, outputTokens });
-  }
+  const observedUsage = measuredUsage.total();
   return {
     text: answer || (failure ? failure.message : ""),
     ...(failure ? { failure } : {}),
-    ...(totalInput > 0 || outputTokens > 0
-      ? { observedUsage: { inputTokens: totalInput, outputTokens } }
-      : {}),
+    ...(observedUsage ? { observedUsage } : {}),
     ...(outputTokens > 0 ? { tokens: outputTokens } : {}),
     /*
      * ★"이 실행에서 무엇이 꺼져 있는가"는 실제 능력을 따라야 한다.
@@ -814,9 +813,8 @@ export const runGoogleByok: Runner = async (
   let lastEmit = 0;
   let reachedAnswer = false;
   let includeTools = functionDeclarations.length > 0;
-  let observedInputTokens = 0;
-  let observedOutputTokens = 0;
-  let usageComplete = true;
+  const measuredUsage = createToolLoopUsage(events);
+  const progress = createToolLoopProgress("byok", req, events);
   /** Monotonic across every SSE event in this provider invocation. */
   let responseIndex = 0;
 
@@ -842,6 +840,7 @@ export const runGoogleByok: Runner = async (
     })) return { text: "", failure: byokContextFailure(req) };
     const requestBody = outgoingBody();
     assertScienceRecoveryRequest(req, "byok", "google");
+    let usageAttempt = measuredUsage.start();
     let resp = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -856,6 +855,7 @@ export const runGoogleByok: Runner = async (
       includeTools = false;
       events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
       assertScienceRecoveryRequest(req, "byok", "google");
+      usageAttempt = measuredUsage.start();
       resp = await fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -940,15 +940,7 @@ export const runGoogleByok: Runner = async (
         // authority, so ignore them just as the previous text-only adapter did.
       }
     }
-    if (!terminalUsage || !sawFinishReason || !usageComplete
-      || observedInputTokens + terminalUsage.inputTokens > Number.MAX_SAFE_INTEGER
-      || observedOutputTokens + terminalUsage.outputTokens > Number.MAX_SAFE_INTEGER
-      || observedInputTokens + observedOutputTokens + terminalUsage.inputTokens + terminalUsage.outputTokens > Number.MAX_SAFE_INTEGER) {
-      usageComplete = false;
-    } else {
-      observedInputTokens += terminalUsage.inputTokens;
-      observedOutputTokens += terminalUsage.outputTokens;
-    }
+    measuredUsage.complete(usageAttempt, sawFinishReason ? terminalUsage : undefined);
     if (functionCalls.length === 0 || req.untrustedNoTools) {
       reachedAnswer = true;
       break;
@@ -965,17 +957,18 @@ export const runGoogleByok: Runner = async (
           toolName: call.name,
           arguments: JSON.stringify(call.args),
         },
-        events,
+        progress.events,
         approval,
         broker,
       );
+      progress.assertProgress();
       resultParts.push({
         functionResponse: {
           ...(call.providerCallId ? { id: call.providerCallId } : {}),
           name: call.name,
           response: outcome.isError
-            ? { error: outcome.content.slice(0, MAX_BYOK_TOOL_RESULT_CHARS) }
-            : { output: outcome.content.slice(0, MAX_BYOK_TOOL_RESULT_CHARS) },
+            ? { error: outcome.content }
+            : { output: outcome.content },
         },
       });
     }
@@ -992,9 +985,7 @@ export const runGoogleByok: Runner = async (
     const refusal = detectRuntimeRefusal(answer);
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
-  const observedUsage = usageComplete
-    ? { inputTokens: observedInputTokens, outputTokens: observedOutputTokens } : undefined;
-  if (observedUsage) events.onTerminalObservedUsage?.(observedUsage);
+  const observedUsage = measuredUsage.total();
   return {
     text: answer || (failure ? failure.message : ""),
     ...(failure ? { failure } : {}),

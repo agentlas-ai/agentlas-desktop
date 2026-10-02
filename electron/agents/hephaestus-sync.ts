@@ -241,33 +241,85 @@ async function drainOnce(): Promise<HephaestusSyncResult> {
 
 let watcher: fs.FSWatcher | null = null;
 let debounceTimer: NodeJS.Timeout | null = null;
+let retryTimer: NodeJS.Timeout | null = null;
+let syncStarted = false;
+let syncGeneration = 0;
+let retryCount = 0;
+const MAX_WATCH_RETRIES = 3;
 
-/** 시작 시 1회 드레인 + pending 감시. 실패해도 앱 시작을 막지 않는다. */
-export function startHephaestusSync(): void {
-  void drainHephaestusSync().catch((err) => console.error("[hephaestus-sync] initial drain failed:", err));
+function clearWatchDebounce(): void {
+  if (debounceTimer) clearTimeout(debounceTimer);
+  debounceTimer = null;
+}
+
+function scheduleWatchRetry(generation: number): void {
+  if (!syncStarted || generation !== syncGeneration || retryTimer || retryCount >= MAX_WATCH_RETRIES) return;
+  const delay = WATCH_DEBOUNCE_MS * 2 ** retryCount++;
+  retryTimer = setTimeout(() => {
+    if (!syncStarted || generation !== syncGeneration) return;
+    retryTimer = null;
+    connectSyncWatcher(generation);
+  }, delay);
+  retryTimer.unref();
+}
+
+function connectSyncWatcher(generation: number): void {
+  if (!syncStarted || generation !== syncGeneration || watcher) return;
   try {
     fs.mkdirSync(pendingDir(), { recursive: true });
-    watcher = fs.watch(pendingDir(), () => {
-      if (debounceTimer) clearTimeout(debounceTimer);
+    const current = fs.watch(pendingDir(), () => {
+      if (!syncStarted || generation !== syncGeneration || watcher !== current) return;
+      clearWatchDebounce();
       debounceTimer = setTimeout(() => {
+        if (!syncStarted || generation !== syncGeneration || watcher !== current) return;
         debounceTimer = null;
         void drainHephaestusSync().catch((err) => console.error("[hephaestus-sync] drain failed:", err));
       }, WATCH_DEBOUNCE_MS);
     });
+    watcher = current;
+    // fs.watch can fail asynchronously after construction (e.g. EMFILE).
+    // A synchronous try/catch cannot prevent that error from reaching Main.
+    current.on("error", (err) => {
+      if (watcher !== current) return;
+      watcher = null;
+      clearWatchDebounce();
+      try { current.close(); } catch { /* already closed by the OS */ }
+      console.error("[hephaestus-sync] watch failed (startup drain still ran):", err);
+      scheduleWatchRetry(generation);
+    });
+    current.on("close", () => {
+      if (watcher !== current) return;
+      watcher = null;
+      clearWatchDebounce();
+      scheduleWatchRetry(generation);
+    });
+    if (retryCount > 0) {
+      // Replay items queued while the watcher was unavailable.
+      void drainHephaestusSync().catch((err) => console.error("[hephaestus-sync] retry drain failed:", err));
+    }
   } catch (err) {
     console.error("[hephaestus-sync] watch failed (startup drain still ran):", err);
+    scheduleWatchRetry(generation);
   }
 }
 
+/** 시작 시 1회 드레인 + pending 감시. 실패해도 앱 시작을 막지 않는다. */
+export function startHephaestusSync(): void {
+  if (syncStarted) return;
+  syncStarted = true;
+  retryCount = 0;
+  const generation = ++syncGeneration;
+  void drainHephaestusSync().catch((err) => console.error("[hephaestus-sync] initial drain failed:", err));
+  connectSyncWatcher(generation);
+}
+
 export function stopHephaestusSync(): void {
-  if (debounceTimer) {
-    clearTimeout(debounceTimer);
-    debounceTimer = null;
-  }
-  try {
-    watcher?.close();
-  } catch {
-    // ignore
-  }
+  syncStarted = false;
+  ++syncGeneration;
+  clearWatchDebounce();
+  if (retryTimer) clearTimeout(retryTimer);
+  retryTimer = null;
+  const current = watcher;
   watcher = null;
+  try { current?.close(); } catch { /* already closed */ }
 }

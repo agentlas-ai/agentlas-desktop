@@ -10,7 +10,7 @@ import {
   quickChartSpec,
   readXlsxTables,
   sortAndFilter,
-  splitHeader,
+  tableDataForSheet,
   uncachedFormulaLabel,
   type SortState,
   type TableSheet,
@@ -58,6 +58,7 @@ export function SheetDataView({
   const [sheets, setSheets] = useState<TableSheet[] | null>(null);
   const [error, setError] = useState(false);
   const [sheetIndex, setSheetIndex] = useState(0);
+  const [tableIndex, setTableIndex] = useState(0);
   const [sort, setSort] = useState<SortState>(null);
   const [query, setQuery] = useState("");
   const [picked, setPicked] = useState<number[]>([]);
@@ -68,12 +69,14 @@ export function SheetDataView({
     let cancelled = false;
     setSheets(null);
     setError(false);
+    setSheetIndex(0);
+    setTableIndex(0);
     void loadSheets(name, fileUrl).then((next) => { if (!cancelled) setSheets(next); }).catch(() => { if (!cancelled) setError(true); });
     return () => { cancelled = true; };
   }, [name, fileUrl]);
 
   const sheet = sheets?.[sheetIndex] ?? null;
-  const { columns, body } = useMemo(() => splitHeader(sheet?.rows ?? []), [sheet]);
+  const { columns, body } = useMemo(() => tableDataForSheet(sheet, tableIndex), [sheet, tableIndex]);
   const numeric = useMemo(() => columns.map((_, index) => isNumericColumn(body, index)), [columns, body]);
   useEffect(() => {
     setSort(null);
@@ -95,7 +98,7 @@ export function SheetDataView({
   const togglePick = (column: number) => setPicked((current) => (current.includes(column) ? current.filter((value) => value !== column) : [...current, column].slice(-6)));
   const makeChart = () => {
     const spec = quickChartSpec({ title: `${sheet?.name ?? name}`, columns, body: rows, category, values: picked, ko });
-    const id = `quick:${name}:${sheetIndex}:${picked.join(",")}:${category}:${rows.length}`;
+    const id = `quick:${name}:${sheetIndex}:${tableIndex}:${picked.join(",")}:${category}:${rows.length}`;
     setChart({ id, spec });
     if (chatId) {
       const visual: VisualArtifact = { id, chatId, kind: "chart", title: `${sheet?.name ?? name} · ${picked.map((index) => columns[index]).join(", ")}`, spec };
@@ -108,9 +111,15 @@ export function SheetDataView({
       {sheets.length > 1 && <div className={styles.tabs} role="tablist" aria-label={ko ? "시트" : "Sheets"}>
         {sheets.map((item, index) => (
           <button key={item.name} type="button" role="tab" aria-selected={index === sheetIndex} data-active={index === sheetIndex ? "true" : "false"}
-            onClick={() => setSheetIndex(index)}>{item.name}</button>
+            onClick={() => { setSheetIndex(index); setTableIndex(0); }}>{item.name}</button>
         ))}
       </div>}
+      {(sheet?.tables?.length ?? 0) > 1 && <label>
+        <span>{ko ? "표" : "Table"}</span>
+        <select value={tableIndex} onChange={(event) => setTableIndex(Number(event.target.value))} aria-label={ko ? "표 선택" : "Select table"} data-sheet-table-select="true">
+          {sheet?.tables?.map((table, index) => <option key={`${table.name}:${table.ref}`} value={index}>{table.name} · {table.ref}</option>)}
+        </select>
+      </label>}
       <input className={styles.filter} type="search" value={query} onChange={(event) => setQuery(event.target.value)}
         placeholder={ko ? "필터 — 모든 열에서 찾기" : "Filter — search all columns"} aria-label={ko ? "행 필터" : "Filter rows"} data-sheet-filter="true" />
       <span className={styles.count} data-sheet-count={rows.length}>

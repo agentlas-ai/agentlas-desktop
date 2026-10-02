@@ -6,6 +6,7 @@ import { normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
+import { getChatGoalRevision } from "./chat-goals";
 import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-result";
 import { emitDesktopStoreChange } from "./change-bus";
 import { getFirm } from "./firms";
@@ -1162,17 +1163,64 @@ export function appendInvocationAssistantResult(p: {
     : entry;
 }
 
+/** A presentation can name an episode pass only from the Main cycle receipt
+ * and its same-producer checkpoint. A generic model completion is insufficient. */
+function hasCurrentVerifiedGoalEpisode(p: { chatId: string; goalId: string; runId: string }): boolean {
+  const goal = getChatGoalRevision(p.goalId);
+  if (!goal || goal.chatId !== p.chatId || goal.lifecycle !== "ongoing") return false;
+  const db = getDb();
+  const run = db.prepare("SELECT id FROM long_runs WHERE goal_id = ? AND root_chat_id = ? ORDER BY created_at DESC LIMIT 1")
+    .get(p.goalId, p.chatId) as { id: string } | undefined;
+  if (!run) return false;
+  const row = db.prepare(`SELECT seq, payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.task_checkpoint'
+    AND actor_kind = 'host' AND json_extract(payload_json, '$.checkpoint.invocationRunId') = ? ORDER BY seq DESC LIMIT 1`)
+    .get(run.id, p.runId) as { seq: number; payload_json: string } | undefined;
+  if (!row) return false;
+  try {
+    const checkpoint = JSON.parse(row.payload_json).checkpoint;
+    if (checkpoint.goalId !== p.goalId || checkpoint.goalRevision !== goal.revision || checkpoint.lifecycle !== "ongoing"
+      || checkpoint.invocationRunId !== p.runId || checkpoint.disposition !== "cycle_completed"
+      || checkpoint.capsule?.runId !== run.id) return false;
+    const cycle = db.prepare(`SELECT seq, payload_json FROM long_run_events WHERE run_id = ?
+      AND kind = 'run.ongoing_cycle_verified' AND actor_kind = 'host' AND seq < ? ORDER BY seq DESC LIMIT 1`)
+      .get(run.id, row.seq) as { seq: number; payload_json: string } | undefined;
+    if (!cycle) return false;
+    const proof = JSON.parse(cycle.payload_json);
+    const binding = db.prepare(`SELECT payload_json FROM long_run_events WHERE run_id = ?
+      AND kind = 'run.goal_revision_bound' ORDER BY seq DESC LIMIT 1`).get(run.id) as { payload_json: string } | undefined;
+    if (!binding || JSON.parse(binding.payload_json).revision !== goal.revision || proof.goalRevision !== goal.revision
+      || !Number.isSafeInteger(proof.receiptCursor) || proof.receiptCursor < 1
+      || !Number.isSafeInteger(checkpoint.capsule.lastCommittedEventSeq)
+      || checkpoint.capsule.lastCommittedEventSeq < cycle.seq || checkpoint.capsule.lastCommittedEventSeq >= row.seq) return false;
+    return !db.prepare(`SELECT 1 FROM long_run_events WHERE run_id = ? AND kind = 'run.task_checkpoint'
+      AND seq > ? AND seq < ? LIMIT 1`).get(run.id, cycle.seq, row.seq);
+  } catch { return false; }
+}
+
 /** Promotion is scoped to the exact host verification and its bound message. */
-export function settleGoalResultMessages(p: { chatId: string; goalId: string; runId: string; verified: boolean }): void {
+export function settleGoalResultMessages(p: { chatId: string; goalId: string; runId: string; verified: boolean;
+  verificationScope?: GoalResultPresentation["verificationScope"];
+  verificationState?: GoalResultPresentation["verificationState"];
+}): void {
   const db = getDb();
   let changed = false;
   db.transaction(() => {
+    const status = p.verified ? "verified" : p.verificationState === "pending" ? "pending" : "unverified";
+    const phase = parseGoalResult({ goalId: p.goalId, runId: p.runId, status,
+      verificationScope: p.verificationScope, verificationState: p.verificationState });
+    if (!phase || (p.verificationScope === "episode" && p.verified && !hasCurrentVerifiedGoalEpisode(p))) {
+      throw new Error("goal_result_verification_phase_unproven");
+    }
     const ids = db.prepare(`SELECT DISTINCT json_extract(payload_json, '$.messageId') AS id FROM run_events
       WHERE run_id = ? AND chat_id = ? AND kind = 'goal_result_presentation'`).all(p.runId, p.chatId) as {id: string}[];
     const states = storedGoalResults(p.chatId, ids.map((row) => row.id));
     for (const [id, current] of states) {
       if (current.goalId !== p.goalId || current.runId !== p.runId || current.status === "verified") continue;
-      persistGoalResult(p.chatId, id, { ...current, status: p.verified ? "verified" : "unverified" });
+      if (current.verificationScope === "episode" && p.verified && !hasCurrentVerifiedGoalEpisode(p)) {
+        throw new Error("goal_result_verification_phase_unproven");
+      }
+      persistGoalResult(p.chatId, id, current.verificationScope === "episode" && p.verified
+        ? { ...phase, verificationScope: "episode", verificationState: "passed" } : phase);
       changed = true;
     }
   })();

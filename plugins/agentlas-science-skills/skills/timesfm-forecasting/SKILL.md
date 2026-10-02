@@ -46,7 +46,7 @@ Do **not** use this skill when:
 
 > **Note on Anomaly Detection**: TimesFM does not have built-in anomaly detection, but you can
 > use the **quantile forecasts as prediction intervals** — values outside the 90% CI (q10–q90)
-> are statistically unusual. Use the prediction-interval procedure below with your observed series.
+> are statistically unusual. See the `examples/anomaly-detection/` directory for a full example.
 
 ## ⚠️ Mandatory Preflight: System Requirements Check
 
@@ -226,7 +226,7 @@ point, quantiles = model.forecast_with_covariates(
 - `"xreg + timesfm"` (default): TimesFM forecasts first, then XReg adjusts residuals
 - `"timesfm + xreg"`: XReg fits first, then TimesFM forecasts residuals
 
-> Use your observed series and matching covariate arrays with the API below.
+> See `examples/covariates-forecasting/` for a complete example with synthetic retail data.
 
 ### Anomaly Detection (via Quantile Intervals)
 
@@ -255,7 +255,7 @@ is_critical = anomalies  # outside 90% CI
 | **Warning** | Outside 80% CI | Unusual but possible |
 | **Critical** | Outside 90% CI | Statistically rare (< 10% probability) |
 
-> Compare prediction intervals with your held-out observations and plot the resulting flags.
+> See `examples/anomaly-detection/` for a complete example with visualization.
 
 ```python
 # Requires: uv pip install timesfm[xreg]
@@ -278,7 +278,7 @@ point, quantiles = model.forecast_with_covariates(
 - [references/performance_tuning.md](references/performance_tuning.md): GPU and TF32
   setup, `per_core_batch_size` by available memory, and memory management.
 - [references/examples_and_validation.md](references/examples_and_validation.md):
-  input requirements, output checks, and common forecasting mistakes.
+  runnable examples, the quality checklist, common mistakes, and regression checks.
 
 ## 🔗 Integration with Other Skills
 

@@ -14,7 +14,8 @@
  *    change methods only (electron/agi/actions.ts refuses intent edits as purpose_change); a refused AGI intent edit is
  *    listed as a suggestion the owner can accept.
  */
-import { goalDisplayState, type GoalDisplayState } from "./goal-display-state";
+import { goalDisplayState, goalOwnerAttention, type GoalOwnerAttention, type GoalDisplayState } from "./goal-display-state";
+import { goalObjectiveText } from "./auto-goal";
 import { goalStopReasonText } from "./goal-stop-reason-text";
 import { GOAL_SHAPE_LIMITS, selectActiveTactics, type GoalShapeKind, type LiveGoalPlan, type LiveStrategy, type LiveTactic } from "./goal-shape";
 
@@ -75,6 +76,7 @@ export interface GoalPanelView {
   shape: GoalShapeKind | null;
   provisional: boolean;
   state: GoalDisplayState;
+  ownerAttention?: GoalOwnerAttention | null;
   stateReason: GoalPanelText | null;
   root: {
     /** The owner's latest statement of the goal (after the last "[Owner update …]" the amendment path appends). */
@@ -250,12 +252,12 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
   const planCurrent = plan && revision ? plan.revision === revision.revision : Boolean(plan);
   // The final goal's intent: the current revision's own objective (the owner's words). A plan's mission objective is
   // the planner's restatement — shown only when the plan is for the current revision and no revision is recorded.
-  const objective = revision?.objective ?? plan?.mission?.objective ?? run?.objective ?? "";
+  const objective = goalObjectiveText(revision?.objective ?? plan?.mission?.objective ?? run?.objective ?? "");
   const statement = latestOwnerStatement(objective);
   const krLines = (plan?.mission?.key_results ?? []).map((kr) =>
     `${kr.metric} ${kr.target_text || `${kr.target}${kr.unit ? ` ${kr.unit}` : ""}`}${kr.deadline_at ? ` · ${kr.deadline_at.slice(0, 10)}` : ""}`);
   const doneWhen = krLines.length ? krLines
-    : plan ? [] : (revision?.acceptanceCriteria ?? []).slice(0, 1).map((line) => oneLine(line));
+    : plan && goalOwnerAttention(run ?? { status: null }) !== "review" ? [] : (revision?.acceptanceCriteria ?? []).map((line) => oneLine(line));
   return {
     schemaVersion: GOAL_PANEL_SCHEMA,
     chatId: input.chatId,
@@ -268,6 +270,7 @@ export function buildGoalPanelView(input: GoalPanelBuildInput): GoalPanelView {
     provisional: plan?.fallback === true,
     state,
     stateReason: goalStateReason(state, run),
+    ownerAttention: goalOwnerAttention(run ?? { status: null }),
     root: {
       intent: oneLine(statement.latest, 4_000),
       intentFull: String(objective).trim().slice(0, 12_000),

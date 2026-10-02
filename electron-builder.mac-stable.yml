@@ -113,6 +113,8 @@ asarUnpack:
   - "**/node_modules/quickjs-emscripten-core/**/*"
   - "**/node_modules/@jitl/quickjs-ffi-types/**/*"
   - "**/node_modules/@jitl/quickjs-wasmfile-release-sync/**/*"
+  # Research verification starts a Node worker from a real filesystem path.
+  - "**/node_modules/agentlas-science/dist/workers/**/*"
   - "**/node_modules/better-sqlite3/**/*"
   - "**/node_modules/keytar/**/*"
   # Science image rendering needs the native addon and its adjacent libvips libraries.

@@ -1,2 +1,5 @@
+# Keep release source bytes reproducible across Windows and Unix checkouts.
+* text=auto eol=lf
+
 # Rive files are exported binaries; preserve their exact bytes across hosts.
 *.riv binary

@@ -5,6 +5,7 @@ import type { InvocationService, InvocationSettledEnvelope } from "../invocation
 import { judgeOneAutoRecovery } from "./auto-recovery";
 import { verifyOneRecoveryOutcome } from "./recovery-verification";
 import { getMeta, setMeta } from "../store/meta";
+import { oneAutoRecoveryTerminalStop } from "../../shared/one-auto-recovery";
 
 interface MobileRecoveryState {
   originalRunId: string;
@@ -106,6 +107,17 @@ async function handleSettled(
   envelope: InvocationSettledEnvelope,
 ): Promise<void> {
   if (!envelope.oneMode || envelope.workspaceBinding?.source !== "mobile-one") return;
+  const terminalStop = oneAutoRecoveryTerminalStop(envelope.receipt);
+  if (terminalStop) {
+    states.delete(envelope.chatId);
+    // The ordinary terminal receipt remains authoritative. Surface the same
+    // stopped explanation without buying a judge call or a read-only retry.
+    if (terminalStop.reason === "no-progress" || terminalStop.reason === "unsafe-to-repeat") {
+      const stopped = await judgeOneAutoRecovery({ receipt: envelope.receipt, goal: envelope.goal, attemptsSpent: 0 });
+      presentJudgedDiagnosis(envelope.chatId, stopped.diagnosis);
+    }
+    return;
+  }
   let state = states.get(envelope.chatId);
   const isKnownRecovery = state?.recoveryRunIds.has(envelope.runId) === true;
 
@@ -144,6 +156,7 @@ async function handleSettled(
         goal: activeState.goal,
         attemptsSpent: activeState.attemptsSpent,
       });
+      if (states.get(envelope.chatId) !== activeState) return;
       if (!verification) return;
       if (verification.verified) {
         states.delete(envelope.chatId);
@@ -183,6 +196,7 @@ async function handleSettled(
       attemptsSpent: activeState.attemptsSpent,
       previousFingerprint: activeState.previousFingerprint,
     });
+    if (states.get(envelope.chatId) !== activeState) return;
     activeState.previousFingerprint = judgement.fingerprint;
     if (!judgement.decision.retry) {
       presentJudgedDiagnosis(envelope.chatId, judgement.diagnosis);

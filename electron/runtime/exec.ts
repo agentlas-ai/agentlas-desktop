@@ -19,6 +19,7 @@ import {
 } from "./spawn-registry";
 import { resolveManagedNodeRuntime } from "./managed-node";
 import { nativeCliBinDirs } from "./native-cli";
+import { claimAttemptChild, type AttemptChildren } from "./attempt-children";
 
 /**
  * 패키지된 GUI 앱(Finder/Dock 실행)은 로그인 셸의 PATH를 상속받지 못해 PATH가
@@ -152,6 +153,9 @@ export function envForCli(command: string, base: NodeJS.ProcessEnv = process.env
 }
 
 /** child_process.spawn 대체 — Windows `.cmd`/`.bat` 심 해석 + GUI용 PATH 보강. */
+let lastSelfSpawnDiagnosticAt: number | null = null;
+let suppressedSelfSpawnDiagnostics = 0;
+
 export function spawnCli(
   command: string,
   args: string[],
@@ -159,12 +163,18 @@ export function spawnCli(
 ): ChildProcess {
   const env = envForCli(command, options.env ?? process.env);
   if (isCurrentElectronExecutable(command)) {
-    console.info("[runtime-spawn-self]", JSON.stringify({
-      parentPid: process.pid,
-      command: path.basename(command),
-      electronRunAsNode: env.ELECTRON_RUN_AS_NODE === "1",
-      argsCount: args.length,
-    }));
+    const now = Date.now();
+    if (lastSelfSpawnDiagnosticAt === null || now - lastSelfSpawnDiagnosticAt >= 60_000) {
+      console.info("[runtime-spawn-self]", JSON.stringify({
+        parentPid: process.pid,
+        command: path.basename(command),
+        electronRunAsNode: env.ELECTRON_RUN_AS_NODE === "1",
+        argsCount: args.length,
+        repeatedSpawns: suppressedSelfSpawnDiagnostics,
+      }));
+      lastSelfSpawnDiagnosticAt = now;
+      suppressedSelfSpawnDiagnostics = 0;
+    } else suppressedSelfSpawnDiagnostics += 1;
   }
   const child = crossSpawn(command, args, {
     ...options,
@@ -520,6 +530,39 @@ export async function drainRunChildrenForHostShutdown(
   }
 }
 
+/** Quiesce one invocation, never the host's global child set. Group liveness
+ * matters: an exited CLI leader can leave a tool worker running. */
+export async function drainAttemptChildren(scope: AttemptChildren, timeoutMs = 6_000): Promise<boolean> {
+  scope.closing = true;
+  const targets = new Map<ChildProcess, { groupId: number | null; settled: boolean }>();
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  for (;;) {
+    for (const child of scope.children) {
+      if (targets.has(child)) continue;
+      let groupId: number | null = null;
+      if (process.platform !== "win32" && child.pid) {
+        try { process.kill(-child.pid, 0); groupId = child.pid; } catch { /* no live owned group */ }
+      }
+      targets.set(child, { groupId, settled: false });
+      killCliTree(child, 500);
+    }
+    let remaining = 0;
+    for (const [child, target] of targets) {
+      if (target.settled) continue;
+      if (target.groupId !== null) {
+        try { process.kill(-target.groupId, 0); }
+        catch (error) { if ((error as NodeJS.ErrnoException).code === "ESRCH") target.settled = true; }
+      } else target.settled = child.exitCode !== null || child.signalCode !== null;
+      if (!target.settled) remaining += 1;
+    }
+    // Windows taskkill's root exit is not a descendant-exit receipt. Keep the
+    // wait actionable, but do not authorize automatic replay from that fact.
+    if (!remaining) return !scope.unconfirmed && (process.platform !== "win32" || targets.size === 0);
+    if (Date.now() >= deadline) return false;
+    await new Promise<void>(resolve => setTimeout(resolve, 25));
+  }
+}
+
 /**
  * LLM 실행 자식 등록: 종료 시 자동 해제 + 앱 will-quit 일괄 트리킬 + 차등 nice.
  * 우선순위는 손자(빌드/MCP)에도 상속돼 장시간 에이전트 작업 중에도 UI가 응답성을 유지한다.
@@ -533,6 +576,7 @@ export async function drainRunChildrenForHostShutdown(
  * 수거한다.
  */
 export function trackRunChild(child: ChildProcess): void {
+  claimAttemptChild(child);
   liveRunChildren.add(child);
   child.once("close", () => liveRunChildren.delete(child));
   child.once("error", () => liveRunChildren.delete(child));

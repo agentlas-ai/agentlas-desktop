@@ -110,6 +110,25 @@ export class MainInvocationLifetime {
   }
 }
 
+/** Capture at the authenticated root before entering an adapter. Only a
+ * host-validated wait claim may use this continuation. A nested tool call or
+ * an expired/absent root cannot mint it by calling the scheduler. */
+export function captureMainRootContinuation(): (<T>(action: () => T | Promise<T>) => Promise<T>) | undefined {
+  const root = roots.getStore();
+  if (!root || root.lifetime.signal.aborted || (ancestry.getStore()?.length ?? 0) !== 0) return undefined;
+  return async <T>(action: () => T | Promise<T>): Promise<T> => {
+    if (!root.lifetime.signal.aborted) await new Promise<void>(resolve => {
+      root.lifetime.signal.addEventListener("abort", () => resolve(), { once: true });
+    });
+    const frames = ancestry.getStore() ?? [];
+    const current = roots.getStore();
+    if ((current && current !== root) || frames.some(frame => frame.active || frame.root !== root) || frames.length > 1) {
+      throw new Error("main_wait_continuation_scope_changed");
+    }
+    return roots.run(undefined, () => ancestry.run([], action));
+  };
+}
+
 /** Only the scheduler's native due callback enters a fresh independent root.
  * Re-entry cannot launder inherited/expired authority or an AGY ancestor. */
 export async function withMainScheduledRoot<T>(action: () => Promise<T>): Promise<T> {

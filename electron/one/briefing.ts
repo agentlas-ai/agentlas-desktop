@@ -447,7 +447,10 @@ function taskCandidate(
       taskStatus: task.status as "waiting-decision" | "running" | "failed" | "partial",
       originChatId: task.originChatId,
       runReceiptRef: receipt?.runId ?? null,
-      runReceiptStatus: receipt?.status ?? null,
+      // This briefing schema predates invocation input waits. The canonical
+      // Task already carries waiting-decision; never project it as failed or
+      // completed through the older optional receipt-status vocabulary.
+      runReceiptStatus: receipt?.status === "waiting_input" ? null : receipt?.status ?? null,
       activeRunPresent,
     },
     detectedAt: observedAt,

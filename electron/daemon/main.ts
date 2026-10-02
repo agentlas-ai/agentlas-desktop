@@ -13,11 +13,14 @@
 //   `ELECTRON_RUN_AS_NODE` 는 창도 app 객체도 없는 순수 Node 런타임이므로,
 //   "GUI 없이 돈다" 는 목표는 그대로 달성된다(app 이 없으니 위 주입 경로가 쓰인다).
 //   네이티브 모듈을 두 ABI 로 빌드하는 것은 별건이고, 그 전까지 이 명령이 정본이다.
+import { startMcpProxyApprovalServer, stopMcpProxyApprovalServer } from "../mcp-tools/proxy-server";
+import { installLocalModelPermissionRelay } from "./local-model-approval";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { runHostShutdownHooks } from "../host-lifecycle";
+import { configureCanonicalNativeBrowserCapability, clearCanonicalNativeBrowserCapability } from "../browser/main-browser-channel";
 import { setUserDataDir, userDataDir, runtimeResourcesPath } from "../runtime-paths";
 import { withRunPriority } from "../runtime/run-priority";
 import {
@@ -27,6 +30,7 @@ import {
 } from "../runtime/agent-residency";
 import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
 import { drainRunChildrenForHostShutdown, liveRunChildCount } from "../runtime/exec";
+import { MainInvocationLifetime, admitMainAutomation, captureMainRootContinuation } from "../runtime/scheduled-root-context";
 import {
   createIdleExitClock,
   daemonActiveWorkReasons,
@@ -94,6 +98,7 @@ let desktopParentPid: number | null = null;
 let serviceHeartbeat: NodeJS.Timeout | null = null;
 let idleExitWatch: NodeJS.Timeout | null = null;
 let graphRunsInFlight = 0;
+const graphLoginWaits = new Map<string, AbortController>();
 let loginContinuityReader: (() => boolean) | null = null;
 const idleExitGraceMs = parseDaemonIdleExitMs(process.env.AGENTLAS_DAEMON_IDLE_EXIT_MS);
 const idleExitClock = createIdleExitClock(idleExitGraceMs);
@@ -110,7 +115,7 @@ function residencyInput(): DaemonResidencyInput {
   return {
     desktopAttached: desktopParentPid !== null,
     loginContinuity: loginContinuityEnabled(),
-    graphRuns: graphRunsInFlight,
+    graphRuns: graphRunsInFlight + graphLoginWaits.size,
     runChildren: liveRunChildCount(),
     science: science ? { state: science.state, settled: science.settled, activeToolRequests: science.activeToolRequests } : null,
     localModel: local ? { state: local.state, pendingOperations: local.pendingOperations, settled: local.settled } : null,
@@ -162,6 +167,11 @@ function getLocalModelService(): Promise<import("./local-model-service").DaemonL
     ]);
     if (closing) throw new Error("daemon_shutting_down");
     assertServiceOwner();
+    installLocalModelPermissionRelay();
+    if (await startMcpProxyApprovalServer() <= 0) throw Object.assign(new Error("local_model_remote_mcp_admission_proxy_unavailable"),
+      { code: "local_model_remote_mcp_admission_proxy_unavailable" });
+    assertServiceOwner();
+    if (closing) throw new Error("daemon_shutting_down");
     const resources = runtimeResourcesPath();
     const service = createDaemonLocalModelService({
       rootPath: path.join(userDataDir(), "local-model-hub"), ownerEpoch: bootId,
@@ -359,7 +369,7 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
   }
   if (method === "daemon.attach") {
     assertServiceControl(params);
-    const request = params as { parentPid?: unknown; appInstanceId?: unknown; expectedStoreIdentity?: unknown };
+    const request = params as { parentPid?: unknown; appInstanceId?: unknown; expectedStoreIdentity?: unknown; browserCapability?: unknown };
     const pid = Number(request.parentPid);
     if (!Number.isSafeInteger(pid) || pid <= 1 || !processIsAlive(pid)) throw new Error("daemon_desktop_client_not_alive");
     const nextAppInstanceId = validAppInstanceId(request.appInstanceId) ? request.appInstanceId : null;
@@ -369,6 +379,11 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     if (expected && storeIdentityDigest(openedStorePath(), nextAppInstanceId) !== expected) {
       throw new Error("daemon_diagnostics_store_identity_mismatch");
     }
+    // A client without a broker capability must not erase an already attached
+    // Main capability when a science/local-model observer repeats attach.
+    if (request.browserCapability !== undefined) configureCanonicalNativeBrowserCapability(request.browserCapability,
+      { daemonPid: process.pid, mainPid: pid, bootId });
+    else if (desktopParentPid !== pid) clearCanonicalNativeBrowserCapability();
     desktopParentPid = pid;
     appInstanceId = nextAppInstanceId;
     attachedExpectedStoreIdentity = typeof expected === "string" ? expected : null;
@@ -378,6 +393,7 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     assertServiceControl(params);
     const pid = Number((params as { parentPid?: unknown }).parentPid);
     if (desktopParentPid !== pid) return { ok: true, detached: false };
+    clearCanonicalNativeBrowserCapability();
     desktopParentPid = null;
     appInstanceId = null;
     attachedExpectedStoreIdentity = null;
@@ -559,17 +575,47 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     const automation = stored ?? fallbackRow;
     if (!automation) throw new Error("graph.run requires automationId or an automation row");
     const { runGraph } = await import("../workflow/run-graph");
+    const controller = new AbortController();
+    const ownerId = typeof (automation as { id?: unknown }).id === "string" ? (automation as { id: string }).id : "";
+    const lifetime = new MainInvocationLifetime(admitMainAutomation(ownerId), ownerId, ownerId, "automation");
+    let afterSettled: ReturnType<typeof captureMainRootContinuation>;
     graphRunsInFlight += 1;
     // 데몬으로 들어온 그래프 실행은 정의상 무인 작업이다 — 실행 슬롯 2단 큐와 자식 nice
     // 차등이 이 문맥 표식으로 동작한다(사람이 기다리는 채팅 턴이 항상 앞선다).
     try {
-      return await withRunPriority("background", () =>
+      const result = await lifetime.run(() => {
+        afterSettled = captureMainRootContinuation();
+        return withRunPriority("background", () =>
         runGraph(
           { ...(automation as object), graph } as never,
           graph as never,
-          { ...(initialVars ? { initialVars } : {}) } as never,
+          { signal: controller.signal, ...(initialVars ? { initialVars } : {}) } as never,
         ),
-      );
+        );
+      });
+      if (result.needsInput && result.loginWaitSource && result.loginWaits?.length) {
+        if (stored) {
+          const source = result.loginWaitSource;
+          const { graphExecutionDigest } = await import("../../shared/graph-execution-digest");
+          const { subscribeGraphLoginWait } = await import("../automation-scheduler");
+          graphLoginWaits.set(source.runId, controller);
+          subscribeGraphLoginWait(result, controller, () => graphLoginWaits.delete(source.runId), {
+            allowDisabledLease: true, expectedEnabled: stored.enabled, afterSettled,
+            isCurrent: () => {
+              const current = getAutomation(stored.id);
+              return !closing && Boolean(current?.graph) && current?.enabled === stored.enabled
+                && graphExecutionDigest(current!, current!.graph!) === source.graphDigest;
+            },
+          });
+        } else {
+          // A transient graph has no stored owner definition from which to
+          // authorize a successor. Keep its durable input wait for explicit
+          // continuation; do not leak process-local handles onto the RPC wire.
+          result.loginWaits.forEach(wait => wait.handle.cancel());
+        }
+      }
+      const { loginWaits: _handles, ...wireResult } = result;
+      return wireResult;
     } finally {
       graphRunsInFlight -= 1;
     }
@@ -590,6 +636,8 @@ let shutdownPromise: Promise<void> | null = null;
 function performShutdown(reason: string): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   closing = true;
+  for (const controller of graphLoginWaits.values()) controller.abort(new Error("app_closed"));
+  graphLoginWaits.clear();
   console.log(`[agentlasd] ${reason} — running shutdown hooks`);
   recordServicePhase("shutdown_started");
   if (keepAlive) {
@@ -634,6 +682,7 @@ function performShutdown(reason: string): Promise<void> {
       } catch (error) { console.error("[agentlasd] local model shutdown failed:", error); }
       finally { if (localTimeout) clearTimeout(localTimeout); }
     }
+    stopMcpProxyApprovalServer();
     const childrenDrained = drainRunChildrenForHostShutdown(processPool.shutdownChildren());
     try { runHostShutdownHooks(); }
     catch (error) { console.error("[agentlasd] shutdown hooks failed:", error); }

@@ -19,6 +19,7 @@ import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import type { Runner, RunnerFailure } from "../runtime/runner";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
+import { createRuntimeUsageCollector } from "../../shared/observed-usage";
 
 /**
  * What a light wake taught about a runtime (durable, keyed by kind + source + CLI version so an upgrade re-tests):
@@ -47,9 +48,6 @@ export interface LightWakeDeps {
   now(): number;
   timeoutMs?: number;
 }
-
-/** Provider refusals that arrive before any generation: the charge is a known 0. */
-const PRE_GENERATION_FAILURES = new Set(["quota", "auth", "unsupported"]);
 
 export function ensureLightWakeSchema(db: Database.Database): void {
   db.exec(`CREATE TABLE IF NOT EXISTS alive_light_wakes (
@@ -120,7 +118,9 @@ export class LightWakeRunner {
     const timer = setTimeout(() => controller.abort(new Error("alive-wake-timeout")), this.deps.timeoutMs ?? 180_000);
     timer.unref?.();
     const toolIds = new Map<string, string>();
-    let usage: { inputTokens: number; outputTokens: number } | null = null;
+    const usage = createRuntimeUsageCollector();
+    let nativeEvidence = false;
+    let settled = false;
     void Promise.resolve().then(() => picked.runner({
       systemPrompt: input.systemPrompt, history: [], userPrompt: input.userPrompt, backendLabel: picked.label,
       runtimeSource: input.status.source, model: input.selection.model, effort: "low",
@@ -131,21 +131,34 @@ export class LightWakeRunner {
       // tokens per wake measured 2026-09-24. Other runners already exclude user config on this path.
       ...(input.status.kind === "codex" ? { isolatedMcpConfig: true as const } : {}),
     }, {
-      onPartial: () => {}, onStatus: () => {},
-      onTool: (name, _args, _result, id) => { toolIds.set(id ?? `${name}:${toolIds.size}`, String(name).slice(0, 80)); },
-      onTerminalObservedUsage: (observed) => { usage = observed; },
+      onPartial: (text) => { if (!settled && text) nativeEvidence = true; }, onStatus: () => {},
+      onTool: (name, _args, _result, id) => {
+        if (settled) return;
+        nativeEvidence = true;
+        toolIds.set(id ?? `${name}:${toolIds.size}`, String(name).slice(0, 80));
+      },
+      onRuntimeAttemptStarted: (id) => { if (!settled) { nativeEvidence = true; usage.start(id); } },
+      onTerminalObservedUsage: (observed, id) => { if (!settled) { nativeEvidence = true; usage.recordTerminal(observed, id); } },
     })).then((result) => {
-      const observed = result.observedUsage ?? usage;
+      settled = true;
+      const observed = usage.total(result.observedUsage) ?? null;
+      if (controller.signal.aborted) {
+        const reason = String((controller.signal.reason as Error)?.message ?? "");
+        const cancelled = reason === "alive-wake-cancelled" || reason === "alive-wake-shutdown";
+        this.settle(input.wakeId, cancelled ? "cancelled" : "failed", observed, null,
+          cancelled ? reason : "alive-wake-timeout");
+        return;
+      }
       if (result.failure) {
         this.deps.noteFailure(input.status, result.failure);
-        const known = observed ?? (PRE_GENERATION_FAILURES.has(result.failure.kind) ? { inputTokens: 0, outputTokens: 0 } : null);
-        this.settle(input.wakeId, "failed", known, null, `runtime-${result.failure.kind}`);
+        this.settle(input.wakeId, "failed", observed, null, `runtime-${result.failure.kind}`);
       } else {
         if (!observed) this.learn(input.status, "usage-unmeasured");
         this.settle(input.wakeId, "completed", observed, result.text ?? "", null);
       }
     }, (error: unknown) => {
-      if (isJudgmentRefusal(error)) {
+      settled = true;
+      if (isJudgmentRefusal(error) && !nativeEvidence && !controller.signal.aborted) {
         // Typed refusal before discovery/spawn: nothing reached a provider, a known 0.
         this.learn(input.status, "cannot-judge");
         this.settle(input.wakeId, "failed", { inputTokens: 0, outputTokens: 0 }, null, "runtime-cannot-judge");
@@ -153,7 +166,7 @@ export class LightWakeRunner {
       }
       const reason = controller.signal.aborted ? String((controller.signal.reason as Error)?.message ?? "") : "";
       const cancelled = reason === "alive-wake-cancelled" || reason === "alive-wake-shutdown";
-      this.settle(input.wakeId, cancelled ? "cancelled" : "failed", usage, null,
+      this.settle(input.wakeId, cancelled ? "cancelled" : "failed", usage.total() ?? null, null,
         reason === "alive-wake-timeout" ? "alive-wake-timeout" : cancelled ? reason : "alive-runner-threw");
       void error;
     }).finally(() => { clearTimeout(timer); this.active.delete(input.wakeId); });

@@ -20,6 +20,8 @@ export interface RawMemoryEvent {
   evidence_refs: string[];
   /** Original-language wording; `content` is English (plan §9-8). */
   content_native?: string;
+  /** Exact recalled block key; the Curator resolves it under its final owner. */
+  supersedes?: string;
   request_context?: RequestContext;
 }
 
@@ -96,9 +98,14 @@ function normalize(raw: unknown): RawMemoryEvent | null {
   const o = raw as Record<string, unknown>;
   const content = typeof o.content === "string" ? o.content.trim() : "";
   if (!content) return null;
-  const evidence = Array.isArray(o.evidence_refs)
-    ? o.evidence_refs.filter((x): x is string => typeof x === "string")
-    : [];
+  const evidence = [...new Set([o.evidence_refs, o.evidence].flatMap((values) =>
+    Array.isArray(values) ? values.slice(0, 20).flatMap((value) => {
+      const ref = coerceString(value, 500);
+      return ref ? [ref] : [];
+    }) : []))].slice(0, 20);
+  // A malformed explicit replacement cannot fall through to inferred replacement.
+  const supersedes = o.supersedes === undefined ? undefined : coerceString(o.supersedes, 32);
+  if (o.supersedes !== undefined && (!supersedes || !/^h:[0-9a-f]{16}$/.test(supersedes))) return null;
   const event: RawMemoryEvent = {
     memory_kind: coerceKind(o.memory_kind),
     content,
@@ -107,6 +114,7 @@ function normalize(raw: unknown): RawMemoryEvent | null {
     sensitivity: coerceSensitivity(o.sensitivity),
     evidence_refs: evidence,
   };
+  if (supersedes) event.supersedes = supersedes;
   const native = typeof o.content_native === "string" ? o.content_native.trim().slice(0, 4_000) : "";
   if (native && native !== content) event.content_native = native;
   const requestContext = coerceRequestContext(o.request_context);
@@ -168,7 +176,10 @@ export function parseMemoryEvents(text: string): ParsedMemory {
       } else if (data && typeof data === "object") {
         const envelope = data as Record<string, unknown>;
         const candidates = Array.isArray(envelope.candidates) ? envelope.candidates : null;
-        if (candidates) {
+        if (candidates) candidateCount = candidates.length;
+        // Arrays and versionless envelopes are deliberate legacy contracts.
+        // An explicitly versioned future contract must not become v1 memory.
+        if (candidates && (envelope.schema_version === undefined || envelope.schema_version === "agentlas.memory-ticket.v1")) {
           candidateCount = candidates.length;
           events = candidates.map(normalize).filter((e): e is RawMemoryEvent => e !== null);
           const summary = coerceString(envelope.turn_summary, 360);

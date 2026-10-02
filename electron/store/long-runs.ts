@@ -1,3 +1,4 @@
+import { receiptSettlesAttempts } from "../long-run/attempt-effect-receipt";
 import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
 import { normalizeLongRunUsage, readLongRunCostAccounting, longRunMonetaryRefusal, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
 import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
@@ -436,14 +437,14 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
     // their audit records, but do not let those legacy events authorize new
     // automatic work without the explicit, exact user-review attestation.
     const attestation = payload.attestation;
-    // Two attestation kinds may settle an attempt set: the person's one-sentence
-    // statement, or a Main-dispatched read-only observation that looked at the
-    // external system and returned an exact machine verdict (done / not_done).
+    // Owner review and observed completion remain distinct from replay authority.
+    // Absence requires a revalidated host no-effect receipt; old model not_done
+    // reports remain audit data without authorizing another outward attempt.
     const userAttested = attestation?.schemaVersion === "agentlas.uncertain-attempt-user-attestation.v1"
       && attestation.statement === "user_says_external_outcomes_reviewed_before_new_work"
       && attestation.externalOutcomeProof === "not_observed_by_host";
     const observed = attestation?.schemaVersion === EFFECT_OBSERVATION_ATTESTATION_SCHEMA
-      && (((attestation.statement === "observed_external_outcome_done" || attestation.statement === "observed_external_outcome_not_done")
+      && ((attestation.statement === "observed_external_outcome_done"
         && attestation.externalOutcomeProof === "observed_read_only_by_model")
         || (attestation.statement === EFFECT_RECEIPT_STATEMENT && attestation.externalOutcomeProof === EFFECT_RECEIPT_PROOF));
     if (!attestation || (!userAttested && !observed)
@@ -489,6 +490,12 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
       || attempt.updated_at !== receiptById.get(attempt.id)?.updatedAt
       || attempt.completed_at !== receiptById.get(attempt.id)?.completedAt
       || attempt.last_attempt_event_seq !== receiptById.get(attempt.id)?.lastAttemptEventSeq)) return null;
+    if (attestation.statement === EFFECT_RECEIPT_STATEMENT) {
+      const targets = getDb().prepare(`SELECT id, invocation_run_id AS invocationRunId FROM long_run_worker_attempts
+        WHERE run_id = ? AND id IN (${attemptIds.map(() => "?").join(",") || "NULL"})`).all(runId, ...attemptIds) as
+        Array<{ id: string; invocationRunId: string | null }>;
+      if (targets.length !== attemptIds.length || !receiptSettlesAttempts(targets)) return null;
+    }
     return { schemaVersion: safeEpoch.schemaVersion, throughEventSeq: Number(safeEpoch.throughEventSeq),
       attemptSetDigest: safeEpoch.attemptSetDigest, eventSeq: row.seq, attemptIds };
   } catch {
@@ -652,7 +659,11 @@ export function settleUncertainAttemptsByObservation(runId: string, input: {
     if (JSON.stringify([...review.attemptIds].sort()) !== JSON.stringify([...input.attemptIds].sort())) {
       throw new Error("effect_observation_attempt_set_changed");
     }
-    const evidence = input.evidence.replace(/\s+/g, " ").trim().slice(0, 500);
+    // A model's absence report is not permission to repeat a possible effect.
+    // Resolve the exact current attempt set again under this write transaction.
+    const noEffect = input.verdict === "not_done" ? receiptSettlesAttempts(review.attempts) : null;
+    if (input.verdict === "not_done" && !noEffect) throw new Error("effect_observation_target_absence_unproven");
+    const evidence = (noEffect?.evidence ?? input.evidence).replace(/\s+/g, " ").trim().slice(0, 500);
     if (!evidence) throw new Error("effect_observation_evidence_missing");
     const receipts = db.prepare(
       `SELECT a.id AS attempt_id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
@@ -682,7 +693,7 @@ export function settleUncertainAttemptsByObservation(runId: string, input: {
         observationInvocationRunId: input.observationInvocationRunId, observationDigest: input.observationDigest,
         attestation: { schemaVersion: EFFECT_OBSERVATION_ATTESTATION_SCHEMA,
           reviewedAttemptIds: review.attemptIds, reviewedAttemptSetDigest: review.attemptSetDigest,
-          ...(input.proof === "receipt"
+          ...(noEffect
             ? { statement: EFFECT_RECEIPT_STATEMENT, externalOutcomeProof: EFFECT_RECEIPT_PROOF }
             : { statement: input.verdict === "done" ? "observed_external_outcome_done" : "observed_external_outcome_not_done",
               externalOutcomeProof: "observed_read_only_by_model" }),
@@ -1058,8 +1069,8 @@ export function longRunOwnerHold(runId: string): boolean {
 
 /**
  * Host settlement of a system-admitted Goal at its retry cap (owner 2026-09-25). Two exits only:
- *  - "settled_with_evidence": host-verified evidence exists (passed criteria with admitted refs, none
- *    failed). Recorded as completed with this reason and the evidence refs — distinct from a verifier pass.
+ *  - "settled_with_evidence": every current criterion passed in the latest authorized verifier round,
+ *    with resolvable host references. Completion revalidates that exact proof set atomically.
  *  - "owner_review_required": no such evidence. Parked as blocked with this code; the owner's next
  *    message or Resume continues it. Nothing automatic starts it again (the sweep skips the code).
  */
@@ -1076,9 +1087,15 @@ export function settleAutomaticGoalAtRetryCap(input: {
     const current = getLongRun(input.runId);
     if (!current || current.version !== input.expectedVersion || current.surface === "science"
       || !["blocked", "paused", "waiting_tool"].includes(current.status)) throw new Error("auto_goal_retry_cap_state_changed");
-    if (input.outcome === AUTO_GOAL_SETTLED_WITH_EVIDENCE
-      && (getChatGoalRevision(current.goalId)?.lifecycle === "ongoing" || input.evidenceRefs.length === 0)) {
-      throw new Error("auto_goal_retry_cap_settlement_not_admissible");
+    if (input.outcome === AUTO_GOAL_SETTLED_WITH_EVIDENCE) {
+      const proof = currentCompleteGoalVerificationEvidence(current.id);
+      const sameSet = (actual: readonly string[], expected: readonly string[]) => {
+        const values = new Set(actual);
+        return values.size === expected.length && expected.every(value => values.has(value));
+      };
+      if (!proof || !sameSet(input.evidenceRefs, proof.refs) || !sameSet(input.receiptIds, proof.receiptIds)) {
+        throw new Error("auto_goal_retry_cap_settlement_not_admissible");
+      }
     }
     const now = new Date().toISOString();
     const to = input.outcome === AUTO_GOAL_SETTLED_WITH_EVIDENCE ? "completed" : "blocked";
@@ -1943,6 +1960,63 @@ function goalRevisionIsCurrent(run: LongRunRecord): boolean {
   return goal ? getChatGoalContract(run.goalId)?.status === "active" && binding?.revision === goal.revision : binding === null;
 }
 
+/** Complete proof for a finite Goal, never a partial or earlier verifier round.
+ * Read again inside any settlement transaction: revision bindings, receipts and
+ * canonical reference ownership can change after a caller prepares its input. */
+export function currentCompleteGoalVerificationEvidence(runId: string): { refs: string[]; receiptIds: string[] } | null {
+  const run = getLongRun(runId);
+  if (!run || run.surface === "science" || !goalRevisionIsCurrent(run) || !run.acceptanceCriteria.length) return null;
+  const goal = getChatGoalRevision(run.goalId), binding = getLongRunGoalRevisionBinding(runId);
+  if (!goal || !binding || goal.lifecycle === "ongoing" || goal.chatId !== run.rootChatId) return null;
+  const normalize = (text: string) => text.replace(/\s+/g, " ").trim();
+  if (normalize(goal.objective) !== normalize(run.objective)
+    || goal.acceptanceCriteria.length !== run.acceptanceCriteria.length
+    || goal.acceptanceCriteria.some((criterion, index) => normalize(criterion.text) !== normalize(run.acceptanceCriteria[index]))) return null;
+  if (listLongRunTasks(runId, true).length > 0) return null;
+  const db = getDb();
+  const newest = db.prepare(`SELECT verifier_worker_id FROM long_run_verification_receipts
+    WHERE run_id = ? AND rowid > ? ORDER BY rowid DESC LIMIT 1`).get(runId, binding.receiptCursor) as
+    { verifier_worker_id: string | null } | undefined;
+  if (!newest?.verifier_worker_id) return null;
+  const latestVerifier = db.prepare(`SELECT a.worker_id FROM long_run_worker_attempts a
+    JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND w.role = 'verifier'
+    ORDER BY a.rowid DESC LIMIT 1`).get(runId) as { worker_id: string } | undefined;
+  const unsettled = db.prepare("SELECT COUNT(*) AS n FROM long_run_worker_attempts WHERE run_id = ? AND state IN ('running','uncertain')")
+    .get(runId) as { n: number };
+  if (latestVerifier?.worker_id !== newest.verifier_worker_id || unsettled.n > 0) return null;
+  const worker = db.prepare("SELECT run_id, role, permission_profile FROM long_run_workers WHERE id = ?")
+    .get(newest.verifier_worker_id) as { run_id: string; role: string; permission_profile: string } | undefined;
+  const attempt = db.prepare(`SELECT id, state FROM long_run_worker_attempts
+    WHERE run_id = ? AND worker_id = ? ORDER BY rowid DESC LIMIT 1`).get(runId, newest.verifier_worker_id) as
+    { id: string; state: string } | undefined;
+  if (worker?.run_id !== runId || worker.role !== "verifier" || worker.permission_profile !== "read-only-verification"
+    || attempt?.state !== "completed" || getLongRunAttemptGoalRevision(runId, attempt.id) !== binding.revision) return null;
+  const rows = db.prepare(`SELECT id, criterion_index, verdict, evidence_refs_json, artifact_refs_json
+    FROM long_run_verification_receipts WHERE run_id = ? AND rowid > ? AND verifier_worker_id = ? ORDER BY rowid DESC`)
+    .all(runId, binding.receiptCursor, newest.verifier_worker_id) as Array<{
+      id: string; criterion_index: number; verdict: string; evidence_refs_json: string; artifact_refs_json: string;
+    }>;
+  const latest = new Map<number, typeof rows[number]>();
+  for (const row of rows) {
+    if (!Number.isSafeInteger(row.criterion_index) || row.criterion_index < 0 || row.criterion_index >= run.acceptanceCriteria.length) return null;
+    if (!latest.has(row.criterion_index)) latest.set(row.criterion_index, row);
+  }
+  const refs = new Set<string>(), receiptIds: string[] = [];
+  for (let index = 0; index < run.acceptanceCriteria.length; index += 1) {
+    const row = latest.get(index);
+    if (!row || row.verdict !== "passed") return null;
+    let evidenceRefs: unknown, artifactRefs: unknown;
+    try { evidenceRefs = JSON.parse(row.evidence_refs_json); artifactRefs = JSON.parse(row.artifact_refs_json); }
+    catch { return null; }
+    if (!Array.isArray(evidenceRefs) || !Array.isArray(artifactRefs)
+      || [...evidenceRefs, ...artifactRefs].some(ref => typeof ref !== "string" || !ref.trim())) return null;
+    if (!verificationReferencesResolve(run, { evidenceRefs, artifactRefs })) return null;
+    for (const ref of [...evidenceRefs, ...artifactRefs] as string[]) refs.add(ref);
+    receiptIds.push(row.id);
+  }
+  return { refs: [...refs], receiptIds };
+}
+
 /** Apply a user-authored revision only after work has stopped. Old tasks and
  * receipts remain audit records; none count toward the new contract.
  */
@@ -2431,11 +2505,26 @@ export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): vo
     const run = getLongRunByGoalId(goalId);
     if (!run || run.surface === "science") throw new Error("long_run_usage_scope_invalid");
     const invocation = (usage.scopeAnchorId
-      ? db.prepare("SELECT chat_id,kind,payload_json FROM run_events WHERE run_id=? AND id=? AND kind IN ('invoke_started','invoke_preflight_started','verifier_execution_started','goal_wait_replan_started')")
+      ? db.prepare("SELECT chat_id,kind,payload_json,automation_id,node_id FROM run_events WHERE run_id=? AND id=? AND kind IN ('invoke_started','invoke_preflight_started','verifier_execution_started','goal_wait_replan_started','automation_usage_scope_started','automation_run_accounting_started')")
         .get(usage.invocationRunId, usage.scopeAnchorId)
       : db.prepare("SELECT chat_id,kind,payload_json FROM run_events WHERE run_id = ? AND kind = 'invoke_started' LIMIT 1")
-        .get(usage.invocationRunId)) as { chat_id: string | null; kind: string; payload_json: string } | undefined;
-    if (usage.scopeAnchorId && (!invocation || invocation.chat_id !== run.rootChatId
+        .get(usage.invocationRunId)) as { chat_id: string | null; kind: string; payload_json: string;
+          automation_id?: string | null; node_id?: string | null } | undefined;
+    const automationScoped = invocation?.kind === "automation_usage_scope_started"
+      || invocation?.kind === "automation_run_accounting_started";
+    if (automationScoped) {
+      const identity = JSON.parse(invocation!.payload_json);
+      // Main minted this anchor after checking the stored graph/schedule or
+      // read-only observation receipt. A division chat is not the Goal's root
+      // chat; retain the captured owner even if its schedule is later unbound.
+      if (identity.schemaVersion !== "agentlas.automation-accounting.v1" || identity.goalId !== goalId
+        || !invocation!.automation_id || usage.attemptId
+        || (invocation!.kind === "automation_usage_scope_started" && !invocation!.node_id)
+        || !db.prepare("SELECT 1 FROM automations WHERE id=?").get(invocation!.automation_id)) {
+        throw new Error("long_run_usage_automation_mismatch");
+      }
+    }
+    if (usage.scopeAnchorId && (!invocation || (!automationScoped && invocation.chat_id !== run.rootChatId)
       || (invocation.kind === "invoke_preflight_started" && JSON.parse(invocation.payload_json).goalId !== goalId))) {
       throw new Error("long_run_usage_anchor_mismatch");
     }
@@ -2470,7 +2559,7 @@ export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): vo
         .get(run.id, usage.invocationRunId, usage.attemptId)
       : db.prepare("SELECT a.id AS attempt_id FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND a.invocation_run_id = ? AND w.role = 'controller' ORDER BY a.attempt DESC LIMIT 1")
         .get(run.id, usage.invocationRunId)) as { attempt_id: string } | undefined;
-    if ((!invocation || invocation.chat_id !== run.rootChatId) && !child) throw new Error("long_run_usage_invocation_mismatch");
+    if ((!invocation || invocation.chat_id !== run.rootChatId) && !child && !automationScoped) throw new Error("long_run_usage_invocation_mismatch");
     if (usage.attemptId && child?.attempt_id !== usage.attemptId) throw new Error("long_run_usage_attempt_mismatch");
     const sourceEventId = `usage:${usage.sourceId}`;
     const prior = db.prepare("SELECT kind, payload_json FROM long_run_events WHERE run_id = ? AND json_extract(payload_json, '$.runtimeEvidence.sourceEventId') = ? LIMIT 1")

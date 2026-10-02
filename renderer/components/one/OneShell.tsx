@@ -3135,8 +3135,8 @@ export function OneShell() {
       listen: listener => events.on(api.invoke.eventChannel(runId), listener),
       replay: input => api.invoke.replay(input),
       consume: event => { if (owns()) consumeRunEventRef.current(event, runId); },
-      recover: async snapshot => {
-        if (!owns() || !snapshot.receipt) return;
+      recover: async (snapshot, checkpoint) => {
+        if (!owns() || !checkpoint.isCurrent() || !snapshot.receipt) return false;
         if (snapshot.receipt.status !== "running" && snapshot.receipt.status !== "cancelling") {
           if (uncertainAdmissionRef.current.get(chatId) === runId) uncertainAdmissionRef.current.delete(chatId);
           clearOneUncertainAdmission(chatId, runId);
@@ -3144,17 +3144,18 @@ export function OneShell() {
           unsubscribeRunRef.current?.(); unsubscribeRunRef.current = null;
           setBusy(false); setKeyRequestSheet(null);
           await settleOrderedRunRef.current(chatId, runTaskIdRef.current, runId);
-          return;
+          return true;
         }
         const ledger = await api.runLedger.events(runId, 500);
-        if (!owns()) return;
-        const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: snapshot.latestOrdinal };
+        if (!owns() || !checkpoint.isCurrent()) return false;
+        const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: checkpoint.throughOrdinal };
         activityEventRunIdRef.current = runId;
         setActivityStateRunId(current => owns() ? runId : current); setActivity(current => owns() ? state : current); cacheOneActivity(chatId, state);
         if (snapshot.partialText !== undefined) {
           streamTextRef.current = snapshot.partialText;
           setMessages(current => owns() ? upsertLiveMessage(current, snapshot.partialText!, true) : current);
         }
+        return true;
       },
     });
   }, []);
@@ -5586,7 +5587,7 @@ export function OneShell() {
       // miss the fast judgment budget, in which case the explicitly labeled
       // undecided result keeps the safe conversational default.
       const requestIntentPromise = taskIntent === "conversation" && attachmentSnapshot.length === 0
-        ? api.oneRequestIntent.resolve(runPrompt).catch(() => null)
+        ? api.oneRequestIntent.resolve(runPrompt, submissionRuntimeSelection).catch(() => null)
         : Promise.resolve(null);
       try {
         if (attachmentSnapshot.length > 0) {
@@ -5701,7 +5702,9 @@ export function OneShell() {
               })
               .filter(Boolean);
             const requestedAgentIds = chipIds.length > 0 ? chipIds : taskforceMemberIds;
-            return requestedAgentIds.length > 0 ? { requestedAgentIds } : {};
+            return requestedAgentIds.length > 0
+              ? { requestedAgentIds, requestedAgentIdsSource: chipIds.length > 0 ? "turn" as const : "room" as const }
+              : {};
           })()),
           ...(overrideSnapshot.sessionRouting ? { dynamicTeamRequested: true } : {}),
         });
@@ -8856,7 +8859,7 @@ export function OneShell() {
             </div>}
             {turnAgentIds.length > 0 && (
               <details className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>
-                <summary>{appLocale === "ko" ? `이번 턴 지정 ${turnAgentIds.length}명` : `${turnAgentIds.length} agents this turn`}</summary>
+                <summary>{appLocale === "ko" ? `${activeTaskforce ? "참여 예정" : "이번 턴 지정"} ${turnAgentIds.length}명` : `${turnAgentIds.length} ${activeTaskforce ? "planned participants" : "agents this turn"}`}</summary>
                 <div className={styles.oneTurnAgentChoices}>
                 {turnAgentIds.map((agentId) => {
                   const candidate = availableAgents.find((item) => item.id === agentId);
@@ -9820,7 +9823,7 @@ export function OneShell() {
             else openPricing("agent-mail");
           } else if (action === "newSession") startNewConversation();
           else if (action === "addTeammate") openCreateAgentDialog();
-          else if (action === "work") router.push("/work");
+          else if (action === "work") router.push("/dashboard");
           else if (action === "mobile") router.push("/settings");
         }}
       />

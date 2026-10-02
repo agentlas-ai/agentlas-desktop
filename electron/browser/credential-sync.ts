@@ -190,7 +190,7 @@ export function refreshBrowserCredentialsIfDue(opts?: { force?: boolean }): Prom
         };
       }
       writeConsent({ ...current, lastSyncedAt: new Date().toISOString() });
-      await (await import("./native-session-cookie-import")).syncConnectBrowserSession({
+      if (!result.nativeSession) await (await import("./native-session-cookie-import")).syncConnectBrowserSession({
         domains: result.linkedSites.filter((site) => !result.requiresLoginSites?.includes(site)),
       });
       if (result.cookiesAdded > 0) {

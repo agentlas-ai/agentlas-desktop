@@ -19,6 +19,10 @@ import type {
 import { getAgentById } from "../mcp/registry";
 import { getDb } from "../store/db";
 import { hasDurableRunStartReceipt } from "../store/run-events";
+import { assertMemoryWriteAllowed, revokedMemorySourceIds } from "../memory/revocations";
+import { nativeTextsFor } from "../memory/native-text";
+import type { MemoryKind, MemoryScope } from "../architecture/manifest";
+import { summarizeExperienceApplicationOutcomes } from "./application";
 import {
   normalizeExperienceMcpRequirements,
   rankExperienceCandidatesByRelations,
@@ -1037,6 +1041,39 @@ function ensureAutoExperiencePack(input: AutoExperienceIntakeInput): PackRow {
   return getPackRow(id);
 }
 
+function propagateSafeExperienceNative(input: AutoExperienceIntakeInput, candidateId: string): void {
+  const source = getDb().prepare(`SELECT scope, kind, content, agent_id, project_id, project_path, chat_id,
+      sensitivity, superseded_at FROM memory_entries WHERE id = ?`).get(input.memory.id) as {
+    scope: MemoryScope; kind: MemoryKind; content: string; agent_id: string | null;
+    project_id: string | null; project_path: string | null; chat_id: string | null;
+    sensitivity: string; superseded_at: string | null;
+  } | undefined;
+  if (!source || source.agent_id !== input.agentId || source.superseded_at
+    || source.content !== input.memory.content || !["public", "internal", "private"].includes(source.sensitivity)
+    || !experienceCandidateSourceIsLive({ sourceMemoryId: input.memory.id, agentId: input.agentId,
+      projectScopeKey: experienceProjectScopeKey(input), candidateId })) return;
+  const native = nativeTextsFor("memory_entry", [input.memory.id]).get(input.memory.id);
+  if (!native) return;
+  if (!getDb().prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'experience_candidate_native'").get()) return;
+  const issues = publicExperienceSafetyIssues(native);
+  if (issues.some((code) => !REDACTABLE_PRIVACY_CODES.has(code))) return;
+  const safeNative = issues.length ? redactExperiencePrivacySpans(native).text : native;
+  if (publicExperienceSafetyIssues(safeNative).length) return;
+  if (!safeNative.trim() || safeNative.trim().length > 1_200) return;
+  const summaryNative = cleanText(safeNative, "Auto Experience native candidate", 1_200);
+  const authority = { scope: source.scope, kind: source.kind, projectId: source.project_id,
+    projectPath: source.project_path, agentId: source.agent_id, chatId: source.chat_id, intakeRunId: input.runId };
+  try {
+    // Check the original as well as every derived form: redaction must never
+    // turn forgotten native wording into a new recallable projection.
+    for (const content of new Set([native, safeNative, summaryNative])) {
+      assertMemoryWriteAllowed({ ...authority, content });
+    }
+  } catch { return; }
+  getDb().prepare(`INSERT OR REPLACE INTO experience_candidate_native
+    (candidate_id, summary_native, created_at) VALUES (?, ?, ?)`).run(candidateId, summaryNative, new Date().toISOString());
+}
+
 /**
  * Fail-safe runtime intake. It records only a value-free receipt when content
  * is unsafe or exact taxonomy/base context is unavailable. Safe content stops
@@ -1116,7 +1153,16 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
   const duplicate = getDb().prepare(
     "SELECT 1 FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
   ).get(input.agentId, sourceMemoryHash);
-  if (duplicate) return;
+  if (duplicate) {
+    let environmentKey: string;
+    try { environmentKey = experienceEnvironmentKey(input.environment); } catch { return; }
+    const existing = getDb().prepare(`SELECT id FROM experience_candidates
+      WHERE agent_id = ? AND source_memory_id = ? AND auto_managed = 1
+        AND project_scope_key = ? AND environment_key = ? ORDER BY created_at ASC, id ASC LIMIT 1`)
+      .get(input.agentId, input.memory.id, experienceProjectScopeKey(input), environmentKey) as { id: string } | undefined;
+    if (existing) getDb().transaction(() => propagateSafeExperienceNative(input, existing.id))();
+    return;
+  }
 
   const operationalKinds = new Set(["procedure", "decision", "risk"]);
   if (!operationalKinds.has(input.memory.kind)) {
@@ -1192,6 +1238,7 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       ORDER BY created_at ASC, id ASC LIMIT 1`,
   ).get(input.agentId, input.memory.id, pack.project_scope_key, pack.environment_key) as CandidateRow | undefined;
   if (existingCandidate) {
+    getDb().transaction(() => propagateSafeExperienceNative(input, existingCandidate.id))();
     recordAutoIntakeReceipt({
       agentId: input.agentId,
       sourceMemoryHash,
@@ -1245,6 +1292,7 @@ export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void 
       now,
       now,
     );
+    propagateSafeExperienceNative(input, candidateId);
     recordAutoIntakeReceipt({
       agentId: input.agentId,
       sourceMemoryHash,
@@ -2203,17 +2251,66 @@ export function getExperienceOntologySummary(agentIdValue: string): ExperienceOn
         .map(([code, count]) => ({ code, count }))
         .sort((left, right) => right.count - left.count || left.code.localeCompare(right.code)),
     },
+    applicationOutcomes: summarizeExperienceApplicationOutcomes(agentId),
   };
 }
 
 export interface PromotedExperienceProjection {
   id: string;
+  packId: string;
+  measuredBaseHash: string;
+  measuredEnvironmentKey: string;
   summary: string;
   confidence: "high" | "medium" | "low";
   taskTerms: string[];
   updatedAt: string;
   relationScore: number;
   embedding: number[];
+}
+
+/**
+ * Source-backed overlays cannot outlive their admitted Memory. No provenance
+ * on a genuinely manual/legacy row preserves its previous admission behavior.
+ * The intake dedup hash is an identity key, not a source-content fingerprint:
+ * independent English translation and privacy redaction may legitimately make
+ * a candidate's summary differ from its live source text.
+ */
+export function experienceCandidateSourceIsLive(input: {
+  sourceMemoryId: string | null | undefined;
+  candidateId?: string;
+  agentId: string;
+  projectScopeKey: string;
+  autoManaged?: boolean;
+}): boolean {
+  if (input.sourceMemoryId == null || input.sourceMemoryId === "") return !input.autoManaged;
+  const sourceId = input.sourceMemoryId;
+  if (revokedMemorySourceIds([sourceId]).has(sourceId)) return false;
+  const memory = getDb().prepare(
+    `SELECT agent_id, scope, project_id, project_path, chat_id, kind, content, sensitivity, superseded_at
+       FROM memory_entries WHERE id = ?`,
+  ).get(sourceId) as {
+    agent_id: string | null; scope: MemoryScope; project_id: string | null; project_path: string | null;
+    chat_id: string | null; kind: MemoryKind; content: string; sensitivity: string; superseded_at: string | null;
+  } | undefined;
+  if (!memory || memory.superseded_at || memory.agent_id !== input.agentId
+    || !["procedure", "decision", "risk"].includes(memory.kind)
+    || !["public", "internal", "private"].includes(memory.sensitivity)
+    || !["agent_repo", "project", "team_memory", "agent_team"].includes(memory.scope)) return false;
+  try {
+    const authority = { scope: memory.scope, kind: memory.kind, agentId: memory.agent_id,
+      projectId: memory.project_id, projectPath: memory.project_path, chatId: memory.chat_id };
+    assertMemoryWriteAllowed({ ...authority, content: memory.content });
+    const native = nativeTextsFor("memory_entry", [sourceId]).get(sourceId);
+    if (native) assertMemoryWriteAllowed({ ...authority, content: native });
+    const candidateNative = input.candidateId
+      ? nativeTextsFor("experience_candidate", [input.candidateId]).get(input.candidateId) : undefined;
+    if (candidateNative) assertMemoryWriteAllowed({ ...authority, content: candidateNative });
+  } catch { return false; }
+  // An actor-wide source may be narrowed into a contextual auto Pack. A
+  // contextual source may never cross into another project or an actor-wide Pack.
+  if (memory.scope === "agent_repo" && !memory.project_id && !memory.project_path) return true;
+  return experienceProjectScopeKey({ projectId: memory.project_id, projectPath: memory.project_path })
+    === input.projectScopeKey;
 }
 
 export function listPromotedExperienceProjection(input: {
@@ -2224,9 +2321,15 @@ export function listPromotedExperienceProjection(input: {
   basePackageHash: string;
   taskTerms?: string[];
 }): PromotedExperienceProjection[] {
-  if (!/^[a-f0-9]{64}$/.test(input.basePackageHash)) return [];
+  // The caller must be bound to the currently installed actor. Pack hashes
+  // retain measurement provenance; same-actor assets survive republish/rename,
+  // matching assertPackBaseCurrent without rewriting historical rows.
+  if (!/^[a-f0-9]{64}$/.test(input.basePackageHash)
+    || currentExperienceBaseHash(input.agentId) !== input.basePackageHash) return [];
   const rows = getDb().prepare(
-    `SELECT c.id, c.summary, c.confidence, c.task_terms_json, c.updated_at,
+    `SELECT c.id, c.pack_id, c.source_memory_id, c.project_scope_key, c.auto_managed,
+            p.base_package_hash AS measured_base_hash, c.environment_key,
+            c.summary, c.confidence, c.task_terms_json, c.updated_at,
             c.embedding_model, c.embedding_adapter, c.embedding_model_sha256,
             c.embedding_content_hash, c.embedding_dimensions, c.embedding_json
        FROM experience_candidates c
@@ -2234,7 +2337,8 @@ export function listPromotedExperienceProjection(input: {
       WHERE c.agent_id = ? AND c.project_scope_key = ? AND c.environment_key = ?
         AND p.project_scope_key = c.project_scope_key
         AND p.environment_key = c.environment_key
-        AND p.status = 'active' AND p.base_package_hash = ?
+        AND p.status = 'active' AND length(p.base_package_hash) = 64
+        AND p.base_package_hash NOT GLOB '*[^a-f0-9]*'
         AND c.status = 'promoted' AND c.outcome_status IN ('attested','verified')
         AND NOT EXISTS (
           SELECT 1
@@ -2255,9 +2359,14 @@ export function listPromotedExperienceProjection(input: {
     input.agentId,
     experienceProjectScopeKey(input),
     input.environmentKey,
-    input.basePackageHash,
   ) as Array<{
     id: string;
+    pack_id: string;
+    source_memory_id: string | null;
+    project_scope_key: string;
+    auto_managed: number;
+    measured_base_hash: string;
+    environment_key: string;
     summary: string;
     confidence: "high" | "medium" | "low";
     task_terms_json: string;
@@ -2275,12 +2384,19 @@ export function listPromotedExperienceProjection(input: {
       projectScopeKey: experienceProjectScopeKey(input),
       environmentKey: input.environmentKey,
       basePackageHash: input.basePackageHash,
+      agentId: input.agentId,
       taskTerms: input.taskTerms ?? [],
     });
   } catch (error) {
     console.warn(`[experience-relations] relation ranking unavailable: ${error instanceof Error ? error.message : "unknown"}`);
   }
-  return rows.map((row) => {
+  return rows.filter((row) => experienceCandidateSourceIsLive({
+    sourceMemoryId: row.source_memory_id,
+    candidateId: row.id,
+    agentId: input.agentId,
+    projectScopeKey: row.project_scope_key,
+    autoManaged: row.auto_managed === 1,
+  })).map((row) => {
     let terms: string[] = [];
     try {
       const parsed = JSON.parse(row.task_terms_json) as unknown;
@@ -2317,6 +2433,9 @@ export function listPromotedExperienceProjection(input: {
     }
     return {
       id: row.id,
+      packId: row.pack_id,
+      measuredBaseHash: row.measured_base_hash,
+      measuredEnvironmentKey: row.environment_key,
       summary: row.summary,
       confidence: row.confidence,
       taskTerms: terms,

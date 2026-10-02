@@ -12,6 +12,7 @@ import { AutomationMonitorStrip } from "./AutomationMonitorStrip";
 import { ContinuityStatus } from "./ContinuityStatus";
 import { mergeGoalResults, type GoalResultPresentation } from "../../shared/goal-result";
 import type { ChatHostNotice, GoalResumeConfirmation, GoalResumeReview } from "../../shared/types";
+import { confirmGoalResumeReview } from "../../shared/goal-resume-review";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
 import { invocationHostStopCopy } from "../../shared/invocation-host-stop";
 // ProjectTask cockpit — 프로젝트 소유 작업의 대화, 실행, inspector.
@@ -233,7 +234,9 @@ function receiptRecoveryMessage(
   // Main 이 직접 끊은 실행(앱 종료·Goal 일시정지/삭제)은 실행 오류가 아니다 — 붉은 실패 줄 대신 이유를 적는다.
   const hostStop = receipt.hostStopCause ? invocationHostStopCopy(receipt.hostStopCause, locale) : null;
   const isFailure = !hostStop && (receipt.status === "failed" || receipt.status === "interrupted");
-  const baseText = hostStop ? hostStop.detail : receipt.status === "cancelled"
+  const baseText = receipt.status === "waiting_input"
+    ? (locale === "ko" ? "로그인이 필요해 작업을 기다리고 있습니다. 로그인 후 계속할 수 있습니다." : "This task is waiting for sign-in. It can continue after login.")
+    : hostStop ? hostStop.detail : receipt.status === "cancelled"
     ? (locale === "ko"
       ? "작업이 취소되었습니다."
       : "The task was cancelled.")
@@ -276,6 +279,7 @@ function appendReceiptRecovery(messages: StreamMessage[], recovery: StreamMessag
 
 function receiptRecoveryStatus(receipt: InvocationRunReceipt | null, locale: "ko" | "en"): string {
   if (!receipt) return locale === "ko" ? "종료됨" : "Ended";
+  if (receipt.status === "waiting_input") return locale === "ko" ? "로그인 대기" : "Waiting for sign-in";
   if (receipt.status === "completed") return locale === "ko" ? "완료" : "Completed";
   if (receipt.status === "cancelled") return locale === "ko" ? "취소됨" : "Cancelled";
   if (receipt.status === "interrupted") return locale === "ko" ? "중단됨" : "Interrupted";
@@ -3618,15 +3622,15 @@ function ChatPage() {
       subRef.current = subscribeOrderedRunEvents({ runId, chatId,
         listen: listener => events.on(channel, listener), replay: input => api.invoke.replay(input),
         consume: ev => { if (owns()) consumeEventRef.current(ev, placeholderId, lastStatusRef, runId); },
-        recover: async snapshot => {
-          if (!owns() || !snapshot.receipt) return;
+        recover: async (snapshot, checkpoint) => {
+          if (!owns() || !checkpoint.isCurrent() || !snapshot.receipt) return false;
           const terminal = snapshot.receipt.status !== "running" && snapshot.receipt.status !== "cancelling";
           const [ledger, history] = await Promise.all([
             api.runLedger.events(runId, 500),
             terminal ? api.invoke.history(chatId) : Promise.resolve(null),
           ]);
-          if (!owns()) return;
-          const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: snapshot.latestOrdinal };
+          if (!owns() || !checkpoint.isCurrent()) return false;
+          const state = { ...projectOneActivityFromLedger(ledger, snapshot.receipt), lastSequence: checkpoint.throughOrdinal };
           if (terminal && history) {
             const next = attachMcpStepsToLatestAgent(history.map(historyEntryToStreamMessage), mcpStepsFromLedger(ledger));
             lastFinalRunIdRef.current = runId;
@@ -3636,7 +3640,7 @@ function ChatPage() {
             runIdRef.current = null;
             subRef.current?.(); subRef.current = null;
             setBusy(false); setCancelPending(false); setKeyRequestSheet(null);
-            return;
+            return true;
           }
           const partial = snapshot.partialText === undefined ? undefined : stripMultimodalSetup(extractQuestions(snapshot.partialText, placeholderId).text).text;
           if (snapshot.partialText !== undefined) partialTextRef.current = snapshot.partialText;
@@ -3644,6 +3648,7 @@ function ChatPage() {
             activityState: state, steps: mcpStepsFromLedger(ledger), ...(partial !== undefined ? { text: partial } : {}),
             ...(message.activityRuns?.length ? { activityRuns: message.activityRuns.map(run => run.runId === runId ? { ...run, state } : run) } : {}),
           } : message) : current);
+          return true;
         },
       });
     },
@@ -6170,7 +6175,13 @@ function ChatPage() {
          */
         const raw = failureMessage(cause);
         const ko = locale === "ko";
-        const explained = /auto_goal_resume_attempt_unsettled/.test(raw)
+        const explained = /automation_goal_execution_setup_required/.test(raw)
+          ? (ko ? "자동화 모델과 실행 대상 설정이 필요합니다. 다시 이어가기를 누르면 설정 화면을 열 수 있습니다."
+            : "The automation's model or target needs configuration. Select Continue again to open its settings.")
+          : /automation_goal_execution_review_(?:required|changed|unavailable)/.test(raw)
+          ? (ko ? "자동화와 Goal의 연결을 다시 확인해야 합니다. 최신 목표를 확인한 뒤 이어가기를 눌러 주세요."
+            : "The automation's connection to this Goal needs review. Refresh the Goal and select Continue again.")
+          : /auto_goal_resume_attempt_unsettled/.test(raw)
           ? (ko ? "중단된 작업의 결과를 먼저 확인해야 합니다. 목표와 작업 기록은 보존되어 있습니다." : "The interrupted action's outcome needs confirmation first. Your goal and work history are preserved.")
           : /goal_resume_uncertain_review_cancelled/.test(raw)
             ? (ko ? "결과 확인을 취소했습니다. 목표는 중단 상태이며 기록은 보존됩니다." : "Outcome review was cancelled. The goal remains paused and its history is preserved.")
@@ -6989,6 +7000,14 @@ function ChatPage() {
           {sessionNotice}
         </div>
       )}
+      {goalContext?.automationOwnershipReviewRequired && goalContext.runStatus === "running" && !goalResumeReview && (
+        <div style={{ width: "min(calc(100% - 32px), 740px)", margin: "7px auto 0" }}>
+          <button type="button" className="btn" data-goal-automation-review-entry="true"
+            disabled={busy || goalContextStale || !goalContext.version} onClick={() => handleResumeGoal()}>
+            {locale === "ko" ? "자동화 연결 확인" : "Review automation connection"}
+          </button>
+        </div>
+      )}
       {goalResumeReview && (
         <div
           role="region"
@@ -7002,21 +7021,38 @@ function ChatPage() {
         >
           <span style={{ flex: "1 1 260px" }}>{goalResumeReview.blocker === "running"
             ? (locale === "ko" ? "아직 끝나지 않은 작업이 있어요. 끝나면 다시 눌러 주세요." : "A task is still finishing. Try again once it is done.")
+            : goalResumeReview.blocker === "automation_setup"
+              ? goalResumeReview.automationSetup?.reason === "runtime"
+                ? (locale === "ko" ? "자동화가 사용할 모델을 선택해 저장한 뒤 다시 연결을 확인해 주세요." : "Choose and save the automation's model, then return to review its connection.")
+                : (locale === "ko" ? "자동화가 실행할 Hub 버전과 설정을 저장한 뒤 다시 연결을 확인해 주세요." : "Save the automation's Hub version and settings, then return to review its connection.")
             : goalResumeReview.blocker
               ? (locale === "ko" ? "이 목표는 여기서 안전하게 이어갈 수 없어요. 목표는 멈춘 채로 둡니다." : "This goal cannot be continued safely here. The goal stays paused.")
+              : !goalResumeReview.attempts.length && goalResumeReview.automationOwnership
+                ? (locale === "ko" ? "이 Goal과 함께 재개하고 멈출 자동화를 확인해 주세요." : "Confirm the automation that will resume and stop with this Goal.")
               : (locale === "ko"
                 ? `멈추기 전 작업 ${goalResumeReview.attempts.length}건은 이미 처리됐을 수 있어 다시 하지 않고, 다음 작업부터 이어갑니다.`
                 : `The ${goalResumeReview.attempts.length} interrupted task(s) may already have gone through, so they will not be redone — work continues from the next step.`)}</span>
+          {goalResumeReview.automationOwnership && <div style={{ flexBasis: "100%", minWidth: 0, overflowWrap: "anywhere" }} data-goal-automation-owner-review={goalResumeReview.automationOwnership.automationId}>
+            <p>{locale === "ko" ? `‘${goalResumeReview.automationOwnership.title}’ 자동화를 이 Goal에 연결합니다. Goal을 멈추면 이 자동화의 실행도 멈춥니다.`
+              : `Connect “${goalResumeReview.automationOwnership.title}” to this Goal. Stopping the Goal will also stop this automation's execution.`}</p>
+            <small>{goalResumeReview.automationOwnership.automationId} · {new Date(goalResumeReview.automationOwnership.automationCreatedAt).toLocaleString(locale)}</small>
+          </div>}
           <button type="button" className="btn" onClick={() => setGoalResumeReview(null)}>
             {goalResumeReview.blocker ? (locale === "ko" ? "닫기" : "Close") : (locale === "ko" ? "나중에" : "Not now")}
           </button>
+          {goalResumeReview.blocker === "automation_setup" && goalResumeReview.automationSetup && (
+            <button type="button" className="btn" data-goal-automation-setup="true"
+              onClick={() => router.push(goalResumeReview.automationSetup!.reason === "runtime"
+                ? `/automation/new?id=${encodeURIComponent(goalResumeReview.automationSetup!.automationId)}#execution-ai`
+                : `/automation/flow?id=${encodeURIComponent(goalResumeReview.automationSetup!.automationId)}`)}>
+              {locale === "ko" ? "자동화 설정 열기" : "Open automation settings"}
+            </button>
+          )}
           {!goalResumeReview.blocker && (
             <button type="button" className="btn btn-primary" data-goal-review-primary="true"
-              onClick={() => handleResumeGoal({
-                runId: goalResumeReview.runId, version: goalResumeReview.version, attemptIds: goalResumeReview.attemptIds,
-                attemptSetDigest: goalResumeReview.attemptSetDigest, reviewedAttemptIds: goalResumeReview.attemptIds,
-              })}>
-              {locale === "ko" ? "이어가기" : "Continue"}
+              onClick={() => handleResumeGoal(confirmGoalResumeReview(goalResumeReview))}>
+              {goalResumeReview.automationOwnership ? (locale === "ko" ? "연결 확인 후 이어가기" : "Confirm connection and continue")
+                : locale === "ko" ? "이어가기" : "Continue"}
             </button>
           )}
         </div>

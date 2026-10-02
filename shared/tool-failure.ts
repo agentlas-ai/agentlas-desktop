@@ -38,7 +38,7 @@ function explicitFailureCode(value: unknown): ToolFailureCode | undefined {
   if (code === "approval_declined" || code === "user_rejected" || code === "user_denied") {
     return "approval_declined";
   }
-  if (code === "approval_required" || code === "approval_needed") return "approval_required";
+  if (code === "approval_required" || code === "approval_needed" || code === "permission_denied" || code === "policy_denied") return "approval_required";
   if (code === "cancelled" || code === "canceled" || code === "aborted_by_user") return "cancelled";
   if (code === "approval_expired") return "approval_expired";
   if (code === "tool_failed") return "tool_failed";
@@ -57,6 +57,9 @@ export function classifyToolFailure(input: {
   const raw = [normalizedText(input.result), normalizedText(input.status)]
     .filter(Boolean)
     .join("\n");
+  // The native browser launcher uses this exact marker when an unattended
+  // action needs approval. Classification does not attest replay safety.
+  if (/^APPROVAL_REQUIRED:/m.test(raw)) return "approval_required";
   if (/^APPROVAL_EXPIRED:/m.test(raw)) return "approval_expired";
   if (/^MCP_PROXY_APPROVAL_EXPIRED:/m.test(raw)) return "approval_expired";
   if (/^MCP_PROXY_USER_DECLINED:/m.test(raw)) return "approval_declined";
@@ -70,7 +73,8 @@ export function classifyToolFailure(input: {
     return "approval_declined";
   }
   if (
-    /\brequires?\s+approval\b/i.test(raw)
+    /\bContains\s+simple_expansion\b/.test(raw)
+    || /\brequires?\s+approval\b/i.test(raw)
     || /\bapproval\s+(?:is\s+)?required\b/i.test(raw)
     || /\brequested\s+permissions?\b/i.test(raw)
     || /\bhaven'?t\s+granted\b/i.test(raw)
@@ -112,4 +116,15 @@ export function toolFailureCopy(value: unknown, locale: "ko" | "en"): string | n
     case "tool_failed":
       return "The connected tool returned an error. Check the tool and try again.";
   }
+}
+
+/** A UI classification alone cannot authorize replay. Only these Main proxy
+ * refusals attest that dispatch never happened; cancellation and arbitrary
+ * provider error prose remain uncertain, including shell expansion warnings. */
+export function isPredispatchApprovalRefusal(input: { failureCode: unknown; result: unknown }): boolean {
+  if (typeof input.result !== "string") return false;
+  const marker = input.result.trimStart().match(/^(MCP_PROXY_POLICY_DENIED|MCP_PROXY_USER_DECLINED|MCP_PROXY_APPROVAL_EXPIRED|APPROVAL_EXPIRED):/u)?.[1];
+  return (marker === "MCP_PROXY_POLICY_DENIED" && input.failureCode === "approval_required")
+    || (marker === "MCP_PROXY_USER_DECLINED" && input.failureCode === "approval_declined")
+    || ((marker === "MCP_PROXY_APPROVAL_EXPIRED" || marker === "APPROVAL_EXPIRED") && input.failureCode === "approval_expired");
 }

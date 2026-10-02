@@ -4,7 +4,7 @@ import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import { runHephaestus } from "../hephaestus/engine";
-import type { WorkforceSelectionResult } from "./workforce-orchestrator";
+import { restorePreparedWorkforceSpecSources, type WorkforceSelectionResult } from "./workforce-orchestrator";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 
@@ -162,7 +162,17 @@ export async function loadDesktopWorkforceGoal(
 ): Promise<DesktopWorkforceRuntimeContext> {
   const args = ["workforce", "goal-runtime", "--project", path.resolve(projectDir), ...await accountArgs()];
   if (goalId) args.push("--goal-id", goalId);
-  return coreJson<DesktopWorkforceRuntimeContext>(args, projectDir);
+  const context = await coreJson<DesktopWorkforceRuntimeContext>(args, projectDir);
+  // Only this Main-issued Core read may restore serialized source authority.
+  for (const goal of context.goals ?? []) {
+    if (!goal.executionAllowed) continue;
+    for (const plan of goal.plans ?? []) {
+      if (plan.status === "ready" && plan.preparation) {
+        restorePreparedWorkforceSpecSources(plan.preparation);
+      }
+    }
+  }
+  return context;
 }
 
 function executionPlan(workforce: WorkforceSelectionResult): JsonRecord {
@@ -192,11 +202,7 @@ export async function bindDesktopWorkforceGoal(input: {
   const continuation = {
     schemaVersion: "agentlas.workforce-desktop-continuation.v1",
     status: "prepared",
-    runtimeSourcePins: input.workforce.receipt.preparedReleases.map((row) => ({
-      slotId: row.slotId,
-      agentReleaseId: row.agentReleaseId,
-      source: "hub",
-    })),
+    runtimeSourcePins: input.workforce.runtimeSourcePins,
     specs: input.workforce.specs,
     workOrder: input.workforce.workOrder,
     candidateSet: input.workforce.candidateSet,

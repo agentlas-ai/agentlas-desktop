@@ -145,6 +145,7 @@ function phaseLabel(phase: OneActivityItem["phase"], locale: "ko" | "en"): strin
 }
 
 function agentStateLabel(item: OneActivityItem, locale: "ko" | "en"): string {
+  if (item.status === "waiting_input") return locale === "ko" ? "로그인 대기" : "Waiting for sign-in";
   if (item.status === "completed") return locale === "ko" ? "완료" : "Completed";
   if (item.status === "cancelled") return locale === "ko" ? "취소됨" : "Cancelled";
   if (item.status === "failed") return locale === "ko" ? "중단" : "Stopped";
@@ -182,6 +183,7 @@ function localeSafeRuntimeText(
 }
 
 function itemIcon(item: OneActivityItem) {
+  if (item.status === "waiting_input") return <IconClock size={13} />;
   if (item.status === "completed") return <IconCheck size={13} />;
   if (item.kind === "tool") return <IconCode size={13} />;
   if (item.kind === "notice") return <IconShield size={13} />;
@@ -200,7 +202,7 @@ function toolPresentation(item: OneActivityItem, locale: "ko" | "en", workspaceP
   return buildToolCallDisplay({
     name: tool.name,
     detail,
-    status: item.status === "info"
+    status: item.status === "info" || item.status === "waiting_input"
       ? undefined
       : item.status === "cancelled"
         ? "canceled"
@@ -284,7 +286,9 @@ function ActivityRow({
   const typedActivityMessage = activityCodeLabel(item.activityCode, locale);
   const primary = activityToolPrimary(item, tool, locale)
     || (item.kind === "run"
-      ? item.status === "running"
+      ? item.status === "waiting_input"
+        ? (locale === "ko" ? "로그인 대기" : "Waiting for sign-in")
+        : item.status === "running"
         ? item.activityCode === "queue_wait"
           ? (locale === "ko" ? "차례를 기다리는 중" : "Waiting in queue")
           : (locale === "ko" ? "작업 중" : "Working")
@@ -454,6 +458,8 @@ export function OneActivityTimeline({
     ? (locale === "ko" ? "실행 준비 중" : "Preparing execution")
     : busy
     ? (locale === "ko" ? "작업 진행 중" : "Run in progress")
+    : state.items.some(item => item.kind === "run" && item.status === "waiting_input")
+      ? (locale === "ko" ? "로그인 대기" : "Waiting for sign-in")
     : state.terminalStatus === "cancelled"
       ? (locale === "ko" ? "작업 취소됨" : "Run cancelled")
       : state.terminalStatus === "failed"
@@ -471,7 +477,7 @@ export function OneActivityTimeline({
     <section
       {...designOutputSurfaceProps("report", styles.activity)}
       data-one-activity="true"
-      data-state={preparing ? "preparing" : busy ? "running" : "settled"}
+      data-state={preparing ? "preparing" : busy ? "running" : state.items.some(item => item.kind === "run" && item.status === "waiting_input") ? "waiting_input" : "settled"}
       data-permission={state.selectedPermissionMode ?? permission}
       aria-busy={active}
     >

@@ -10,12 +10,13 @@
 // (앱+데몬)가 동시에 append/rewrite 하다 서로의 레코드를 지운다 — 파일 단위면 쓰기가
 // 원자적이고(임시파일+rename 불필요, 내용이 한 JSON), 삭제 경합도 무해하다.
 //
-// 식별 방어: PID 는 재사용된다. 죽이기 전에 (1) 호스트 PID 가 정말 죽었는지,
-// (2) 그 PID 의 현재 커맨드라인에 우리가 기록한 실행 파일 이름이 들어 있는지 확인한다.
+// 식별 방어: PID 는 재사용된다. POSIX는 스폰 직후 실제 실행 파일·생성 식별자·PGID를
+// 기록하고 종료 직전에 재확인한다. 이전 원장/조회 실패는 종료 권한이 아니다.
 // spawnCli 가 심는 AGENTLAS_SPAWN_MARKER env 는 사람이 ps 로 볼 때의 표식이고,
-// 기계 판정은 위 두 검사로 한다(macOS ps 는 남의 env 를 안 보여 주므로 env 는
+// 기계 판정은 OS 생성 정체로 한다(macOS ps 는 남의 env 를 안 보여 주므로 env 는
 // 교차검증 수단이 못 된다 — 있다고 가정하고 안 보이면 죽이는 쪽이 더 위험하다).
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { ChildProcess } from "node:child_process";
@@ -30,6 +31,8 @@ export interface SpawnRecord {
   /** 스폰한 실행 파일 — 죽이기 전 PID 재사용 방어에 쓴다. */
   spawnfile: string;
   at: string;
+  recordId?: string;
+  posixIdentity?: PosixProcessIdentity;
   /** 스위퍼가 SIGTERM 을 이미 보냈다면 그 시각(ms epoch) — 다음 패스에 SIGKILL 승격. */
   termSignaledAt?: number;
 }
@@ -57,30 +60,47 @@ export function rememberSpawnedRunChildCommand(child: ChildProcess, command: str
 export function recordSpawnedRunChild(child: ChildProcess): void {
   const pid = child.pid;
   if (pid == null) return;
+  let record: SpawnRecord;
   try {
-    fs.mkdirSync(registryDir(), { recursive: true });
-    const record: SpawnRecord = {
+    record = {
       pid,
       hostPid: process.pid,
-      // cross-spawn's Windows child.spawnfile is often cmd.exe for a .cmd shim;
-      // the requested command is the identity the sweeper must attest instead.
+      // Requested command differs from cmd.exe for Windows .cmd shims.
       spawnfile: intendedSpawnCommands.get(child) ?? child.spawnfile ?? "",
       at: new Date().toISOString(),
+      recordId: randomUUID(),
     };
+    fs.mkdirSync(registryDir(), { recursive: true });
     fs.writeFileSync(recordPath(pid), JSON.stringify(record), "utf8");
   } catch {
     // userDataDir 미주입(순수 단위 테스트) 또는 디스크 문제 — 안전망만 빠질 뿐이다.
     return;
   }
-  const forget = (): void => {
+  let closed = false;
+  const stillOwnsRecord = (): boolean => {
     try {
-      fs.rmSync(recordPath(pid), { force: true });
+      return JSON.parse(fs.readFileSync(recordPath(pid), "utf8")).recordId === record.recordId;
+    } catch { return false; }
+  };
+  const forget = (): void => {
+    closed = true;
+    try {
+      if (stillOwnsRecord()) fs.rmSync(recordPath(pid), { force: true });
     } catch {
       /* best-effort */
     }
   };
   child.once("close", forget);
   child.once("error", forget);
+  if (process.platform !== "win32") {
+    // One bounded metadata lookup per spawn; never persist prompts or argv.
+    void posixProcessIdentityOf(pid).then((identity) => {
+      if (closed || !identity || identity.parentProcessId !== process.pid || !stillOwnsRecord()) return;
+      try {
+        fs.writeFileSync(recordPath(pid), JSON.stringify({ ...record, posixIdentity: identity }), "utf8");
+      } catch { /* Missing attestation deliberately leaves a non-signallable record. */ }
+    }).catch(() => { /* Fail closed; the run itself remains usable. */ });
+  }
 }
 
 function processAlive(pid: number): boolean {
@@ -95,14 +115,88 @@ function processAlive(pid: number): boolean {
   }
 }
 
-function psCommandOf(pid: number): Promise<string | null> {
+interface PosixProcessIdentity {
+  processId: number;
+  parentProcessId: number;
+  processGroupId: number;
+  executablePath: string;
+  birthIdentity: string;
+}
+
+function validPosixIdentity(value: PosixProcessIdentity | undefined): value is PosixProcessIdentity {
+  return Boolean(value && Number.isInteger(value.processId) && value.processId > 1
+    && Number.isInteger(value.parentProcessId) && value.parentProcessId >= 0
+    && Number.isInteger(value.processGroupId) && value.processGroupId > 1
+    && typeof value.executablePath === "string" && path.isAbsolute(value.executablePath)
+    && typeof value.birthIdentity === "string" && value.birthIdentity.length > 0);
+}
+
+function metadataPs(args: string[]): Promise<string | null> {
   return new Promise((resolve) => {
-    execFile("ps", ["-o", "command=", "-p", String(pid)], { timeout: 3_000 }, (error, stdout) => {
-      if (error) return resolve(null);
-      const line = stdout.trim();
-      resolve(line || null);
-    });
+    execFile("ps", args, { timeout: 3_000, maxBuffer: 1024 * 1024, env: { ...process.env, LC_ALL: "C" } },
+      (error, stdout) => resolve(error ? null : stdout));
   });
+}
+
+async function posixProcessIdentityOf(pid: number): Promise<PosixProcessIdentity | null> {
+  if (!Number.isInteger(pid) || pid <= 1) return null;
+  if (process.platform === "linux") {
+    try {
+      // /proc start ticks plus boot UUID distinguish PID reuse across restarts.
+      const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+      const fields = stat.slice(stat.lastIndexOf(")") + 2).trim().split(/\s+/);
+      const bootId = fs.readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      if (!/^[a-f0-9-]{36}$/i.test(bootId) || !/^\d+$/.test(fields[19] ?? "")) return null;
+      const identity: PosixProcessIdentity = {
+        processId: pid, parentProcessId: Number(fields[1]), processGroupId: Number(fields[2]),
+        executablePath: fs.readlinkSync(`/proc/${pid}/exe`), birthIdentity: `linux:${bootId}:${fields[19]}`,
+      };
+      return validPosixIdentity(identity) ? identity : null;
+    } catch { return null; }
+  }
+  if (process.platform !== "darwin") return null;
+  // macOS comm is the executable path, not command/argv; lstart has second precision.
+  const stdout = await metadataPs(["-ww", "-p", String(pid), "-o", "pid=,ppid=,pgid=,lstart=,comm="]);
+  const match = stdout?.trim().match(/^(\d+)\s+(\d+)\s+(\d+)\s+([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
+  if (!match || Number(match[1]) !== pid) return null;
+  const identity: PosixProcessIdentity = {
+    processId: pid, parentProcessId: Number(match[2]), processGroupId: Number(match[3]),
+    birthIdentity: `darwin:${match[4].replace(/\s+/g, " ")}`, executablePath: match[5],
+  };
+  return validPosixIdentity(identity) ? identity : null;
+}
+
+function posixIdentityMatches(record: SpawnRecord, identity: PosixProcessIdentity): boolean {
+  const captured = record.posixIdentity;
+  return validPosixIdentity(captured) && validPosixIdentity(identity)
+    && captured.processId === record.pid && identity.processId === record.pid
+    && captured.parentProcessId === record.hostPid
+    && captured.executablePath === identity.executablePath
+    && captured.birthIdentity === identity.birthIdentity
+    && captured.processGroupId === record.pid && identity.processGroupId === record.pid;
+}
+
+async function protectedPosixProcesses(): Promise<{ pids: Set<number>; groups: Set<number> } | null> {
+  // Query only numeric metadata, once per nonempty orphan sweep, never argv/env.
+  const stdout = await metadataPs(["-axo", "pid=,ppid=,pgid="]);
+  if (stdout == null) return null;
+  const rows = new Map<number, { parent: number; group: number }>();
+  for (const line of stdout.split("\n")) {
+    const match = line.trim().match(/^(\d+)\s+(\d+)\s+(\d+)$/);
+    if (match) rows.set(Number(match[1]), { parent: Number(match[2]), group: Number(match[3]) });
+  }
+  const pids = new Set<number>(), groups = new Set<number>();
+  let pid = process.pid;
+  for (let depth = 0; pid > 0 && depth < 128; depth += 1) {
+    if (pids.has(pid)) return null;
+    pids.add(pid);
+    const row = rows.get(pid);
+    if (!row) return null;
+    groups.add(row.group);
+    if (pid === 1 || row.parent === 0) return { pids, groups };
+    pid = row.parent;
+  }
+  return null;
 }
 
 export interface WindowsProcessIdentity {
@@ -286,7 +380,7 @@ export interface OrphanSweepResult {
   keptLive: number;
   /** PID 재사용 의심으로 죽이지 않고 지운 수. */
   prunedMismatched: number;
-  /** CIM 자체 실패로 정체를 확인하지 못해 다음 패스로 보존한 수. */
+  /** 조회 실패/이전 POSIX 원장 등 종료 정체를 증명하지 못해 보존한 수. */
   identityLookupFailed: number;
 }
 
@@ -296,8 +390,8 @@ export interface OrphanSweepResult {
  * 규칙:
  *  - 자식 PID 가 죽었으면 레코드만 지운다.
  *  - 호스트 PID 가 살아 있으면 손대지 않는다(그 호스트의 host-lifecycle 이 주인이다).
- *  - 호스트가 죽었고 자식이 살아 있으면, 현재 커맨드라인이 기록된 실행 파일과 일치할
- *    때만 프로세스 그룹 SIGTERM. 다음 패스에도 남아 있으면 SIGKILL 로 승격.
+ *  - POSIX는 스폰 때 기록한 실행 파일·생성 식별자·독립 PGID를 종료 직전에 확인한다.
+ *    self/조상 프로세스·그 그룹은 제외한다. 다음 패스에도 동일 정체면 SIGKILL 로 승격.
  *  - 판정 불가(ps 실패 등)면 죽이지 않는다 — 오폭보다 고아가 낫다.
  *
  * Windows 는 CIM으로 실행 파일·커맨드라인·생성 시각을 다시 증명한 뒤 taskkill /T,
@@ -336,6 +430,10 @@ export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
       continue;
     }
     result.scanned += 1;
+    if (record.pid === process.pid || record.pid === process.ppid || record.pid === record.hostPid) {
+      result.keptLive += 1;
+      continue;
+    }
     if (!processAlive(record.pid)) {
       result.prunedDead += 1;
       try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
@@ -353,6 +451,8 @@ export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
   const windowsIdentities = process.platform === "win32"
     ? await windowsProcessIdentitiesOf(orphanCandidates.map(({ record }) => record.pid))
     : { identities: new Map<number, WindowsProcessIdentity>(), failedPids: new Set<number>() };
+  const protectedPosix = process.platform !== "win32" && orphanCandidates.length > 0
+    ? await protectedPosixProcesses() : null;
 
   for (const { file, record } of orphanCandidates) {
     // 호스트는 죽었고 자식 PID 는 살아 있다 — 죽이기 전에 정체를 확인한다.
@@ -370,12 +470,8 @@ export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
       try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
       continue;
     }
-    const command = process.platform === "win32" ? null : await psCommandOf(record.pid);
-    const expected = path.basename(record.spawnfile || "");
-    const identityMatches = process.platform === "win32"
-      ? Boolean(windowsLookup?.status === "found" && windowsProcessIdentityMatches(record, windowsLookup.identity))
-      : Boolean(command && expected && command.includes(expected));
-    if (!identityMatches) {
+    if (process.platform === "win32"
+      && !(windowsLookup?.status === "found" && windowsProcessIdentityMatches(record, windowsLookup.identity))) {
       // 실행 정체 불일치(PID 재사용) — 절대 죽이지 않고 레코드만 정리.
       result.prunedMismatched += 1;
       try { fs.rmSync(file, { force: true }); } catch { /* best-effort */ }
@@ -386,17 +482,41 @@ export async function sweepOrphanedRunChildren(): Promise<OrphanSweepResult> {
     if (process.platform === "win32") {
       signaled = await taskkillWindowsTree(record.pid, escalate);
     } else {
+      if (!validPosixIdentity(record.posixIdentity) || !protectedPosix) {
+        result.identityLookupFailed += 1;
+        continue; // Legacy records cannot acquire kill authority after the host died.
+      }
+      if (protectedPosix.pids.has(record.pid) || protectedPosix.groups.has(record.pid)) {
+        result.keptLive += 1;
+        continue;
+      }
+      // Fresh OS identity for each TERM/KILL; do not reuse registration/sweep snapshots.
+      const identity = await posixProcessIdentityOf(record.pid);
+      if (!identity || !posixIdentityMatches(record, identity)) {
+        result.identityLookupFailed += 1;
+        continue;
+      }
+      if (record.pid === process.pid || record.pid === process.ppid || processAlive(record.hostPid)) {
+        result.keptLive += 1;
+        continue;
+      }
+      try {
+        // Another host may have replaced this PID's ledger while metadata was awaited.
+        const latest = JSON.parse(fs.readFileSync(file, "utf8")) as SpawnRecord;
+        if (!record.recordId || JSON.stringify(latest) !== JSON.stringify(record)) {
+          result.identityLookupFailed += 1;
+          continue;
+        }
+      } catch {
+        result.identityLookupFailed += 1;
+        continue;
+      }
       const signal: NodeJS.Signals = escalate ? "SIGKILL" : "SIGTERM";
       try {
-        // detachedSpawnOpts 로 뜬 자식은 자기 PID 가 곧 프로세스 그룹이다 — 손자까지 함께.
+        // Both snapshots attest pgid === pid; never fall back to a new/unverified PID.
         process.kill(-record.pid, signal);
         signaled = true;
-      } catch {
-        try {
-          process.kill(record.pid, signal);
-          signaled = true;
-        } catch { /* 이미 죽었을 수 있다 */ }
-      }
+      } catch { /* A failed group signal grants no authority for a second target. */ }
     }
     if (!signaled && processAlive(record.pid)) continue;
     result.signaled += signaled ? 1 : 0;

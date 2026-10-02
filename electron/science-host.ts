@@ -1,3 +1,4 @@
+import { scienceLocalEmbeddingHost } from "./science-host/local-embedding";
 import { inspectScienceRuntimeSelectionAvailability } from "./science-host/runtime-selection-availability";
 import { installScienceSchemaRejectionReader } from "./invocation/science-schema-rejection";
 import { scienceCriterionReviewHost } from "./science-host/criterion-review";
@@ -229,6 +230,7 @@ export function installDesktopScienceHost(): void {
       ...{ inspectLegacyForwardRecoveryBoundary: async (input: Omit<ScienceRuntimeBoundaryInput, "expectedRuntimeChatId">) =>
         inspectLegacyForwardRecoveryBoundary({ ...input, expectedRuntimeChatId: boundScienceRuntimeChatId(input) }) },
     },
+    ...{ localEmbedding: scienceLocalEmbeddingHost },
     workspace: { captureInvocationBinding: captureScienceInvocationBinding },
     render: { renderManuscriptPdf, resolveTectonic, probePdfLatexProfile, listTypesetProfiles: listScienceTypesetProfileCatalog },
     runtimeCatalog: {

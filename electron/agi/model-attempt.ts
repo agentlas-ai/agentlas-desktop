@@ -8,7 +8,7 @@
  * executes through the executor with every structural guard (fence, G1, purpose_change, circuit breaker, budget).
  *
  * Model order (D4): the goal's own runtime first (the runtime its latest controller attempt ran on), then the owner's
- * role-pool order. A pre-generation refusal (quota/auth/cannot-judge) falls to the next candidate. Budget (D1): the
+ * role-pool order. Eligible refusals fall to the next candidate without erasing unknown usage. Budget (D1): the
  * attempt cap and the goal's daily cap are admitted before each call with a size estimate and charged with the
  * measured usage afterwards, also against the goal's Alive grant.
  */
@@ -16,6 +16,8 @@ import { currentUiLocale } from "../ui-locale";
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import type { Runner, RunnerFailure } from "../runtime/runner";
+import { isJudgmentRefusal } from "../runtime/judgment-refusal";
+import { createObservedUsageAccumulator, createRuntimeUsageCollector } from "../../shared/observed-usage";
 import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind } from "./blocker";
 import { AGI_ACTION_SCHEMA, AGI_MAX_ACTIONS_PER_ATTEMPT, type AgiActionExecutor, type AgiActionReceipt } from "./actions";
 import { admitAgiTokens, chargeAgiTokens, readAgiTokenLimits } from "./budget";
@@ -26,7 +28,7 @@ export const AGI_MODEL_ATTEMPT_SCHEMA = "agentlas.agi-unblock-decision.v1" as co
 export const AGI_MAX_EXTRA_READS = 4;
 export const AGI_MODEL_OUTPUT_TOKENS = 4_000;
 export const AGI_MODEL_TIME_LIMIT_MS = 5 * 60_000;
-/** Pre-generation refusals: the next candidate may try; the charge is a known 0. */
+/** Candidate failover does not prove that the prior provider charged zero. */
 const NEXT_CANDIDATE_FAILURES = new Set(["quota", "auth", "unsupported"]);
 
 export interface AgiModelCandidate { selection: RuntimeSelection; status: RuntimeStatus; label: string; source: "goal" | "pool" }
@@ -179,9 +181,11 @@ export class AgiModelAttempt {
     if (existing) return { attemptId, outcome: "failed", code: "agi.model.attempt-already-ran" };
     d.db.prepare("INSERT INTO agi_model_attempts(id,goal_id,incident_id,state_digest,status,created_at_ms) VALUES (?,?,?,?,'running',?)")
       .run(attemptId, input.goalId, input.incidentId, input.stateDigest, d.now());
+    let usageComplete = true;
     const settle = (status: string, code: string, extra: { runtime?: unknown; rounds?: number; input?: number; output?: number; actions?: unknown[] } = {}) => {
       d.db.prepare(`UPDATE agi_model_attempts SET status=?, code=?, runtime_json=?, rounds=?, input_tokens=?, output_tokens=?, actions_json=?, settled_at_ms=?
-        WHERE id=?`).run(status, code, extra.runtime ? JSON.stringify(extra.runtime) : null, extra.rounds ?? 0, extra.input ?? null, extra.output ?? null,
+        WHERE id=?`).run(status, code, extra.runtime ? JSON.stringify(extra.runtime) : null, extra.rounds ?? 0,
+        usageComplete ? extra.input ?? null : null, usageComplete ? extra.output ?? null : null,
         JSON.stringify(extra.actions ?? []), d.now(), attemptId);
     };
     const limits = readAgiTokenLimits(d.db);
@@ -222,6 +226,7 @@ export class AgiModelAttempt {
         tokensUsed += spent;
         chargeAgiTokens(d.db, input.goalId, spent, d.now());
       } else if (answer.started) {
+        usageComplete = false;
         // A provider call that reported no usage is charged at the admission estimate (never zero on a started call).
         tokensUsed += estimate;
         chargeAgiTokens(d.db, input.goalId, estimate, d.now());
@@ -270,13 +275,24 @@ export class AgiModelAttempt {
   private async call(candidates: AgiModelCandidate[], userPrompt: string): Promise<{ text: string | null; usage: { inputTokens: number; outputTokens: number } | null;
     candidate: AgiModelCandidate | null; started: boolean; code?: string }> {
     let lastCode = "agi.model.runner-unavailable";
+    const candidateUsage = createObservedUsageAccumulator();
+    let started = false;
     for (const candidate of candidates) {
       const picked = this.deps.pickRunner(candidate.status);
       if (!picked) { lastCode = "agi.model.runner-unavailable"; continue; }
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(new Error("agi-model-timeout")), this.deps.timeoutMs ?? AGI_MODEL_TIME_LIMIT_MS);
       timer.unref?.();
-      let usage: { inputTokens: number; outputTokens: number } | null = null;
+      const usage = createRuntimeUsageCollector();
+      let nativeEvidence = false;
+      let settled = false;
+      let recorded = false;
+      const recordUsage = (returnedUsage?: Parameters<typeof usage.total>[0]): void => {
+        if (recorded) return;
+        recorded = true;
+        started = true;
+        candidateUsage.record(usage.total(returnedUsage));
+      };
       try {
         const result = await picked.runner({
           systemPrompt: SYSTEM_PROMPT, history: [], userPrompt, backendLabel: picked.label, runtimeSource: candidate.status.source,
@@ -285,24 +301,36 @@ export class AgiModelAttempt {
           outputSchema: { name: "agentlas_agi_unblock_decision_v1", schema: AGI_DECISION_JSON_SCHEMA },
           signal: controller.signal, locale: "en",
           ...(candidate.status.kind === "codex" ? { isolatedMcpConfig: true as const } : {}),
-        }, { onPartial: () => {}, onStatus: () => {}, onTool: () => {}, onTerminalObservedUsage: (observed) => { usage = observed; } });
-        const observed = result.observedUsage ?? usage;
+        }, {
+          onPartial: (text) => { if (!settled && text) nativeEvidence = true; }, onStatus: () => {},
+          onTool: () => { if (!settled) nativeEvidence = true; },
+          onRuntimeAttemptStarted: (id) => { if (!settled) { nativeEvidence = true; usage.start(id); } },
+          onTerminalObservedUsage: (observed, id) => { if (!settled) { nativeEvidence = true; usage.recordTerminal(observed, id); } },
+        });
+        settled = true;
+        const observed = usage.total(result.observedUsage);
+        recordUsage(result.observedUsage);
+        if (controller.signal.aborted) {
+          return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: "agi.model.timeout" };
+        }
         if (result.failure) {
           this.deps.noteFailure?.(candidate.status, result.failure);
           lastCode = `agi.model.runtime-${result.failure.kind}`;
           if (NEXT_CANDIDATE_FAILURES.has(result.failure.kind) && !observed) continue;
-          return { text: null, usage: observed, candidate, started: true, code: lastCode };
+          return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: lastCode };
         }
-        return { text: result.text ?? "", usage: observed, candidate, started: true };
+        return { text: result.text ?? "", usage: candidateUsage.total() ?? null, candidate, started: true };
       } catch (error) {
+        settled = true;
         const aborted = controller.signal.aborted;
         lastCode = aborted ? "agi.model.timeout" : "agi.model.runner-threw";
-        if (!aborted && error && typeof error === "object" && (error as { code?: string }).code === "runtime_cannot_judge") continue;
-        return { text: null, usage, candidate, started: true, code: lastCode };
+        if (!aborted && !nativeEvidence && isJudgmentRefusal(error)) continue;
+        recordUsage();
+        return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: lastCode };
       } finally {
         clearTimeout(timer);
       }
     }
-    return { text: null, usage: null, candidate: null, started: false, code: lastCode };
+    return { text: null, usage: candidateUsage.total() ?? null, candidate: null, started, code: lastCode };
   }
 }

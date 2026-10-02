@@ -1,3 +1,4 @@
+import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 // Claude Code 상주 세션 — 턴마다 스폰-종료하던 `-p` 호출을 붙들어 여러 턴이 이어 쓴다.
 //
 // ★왜 claude 가 남아 있었나. ACP 런타임(cursor·grok·kimi·github-copilot-cli)은
@@ -340,12 +341,14 @@ export function claudeSessionPool(): AcpSessionPool<ClaudeResidentSession> {
        * 영영 안 끝난다(ACP 구현에서 실제로 나온 함정 — 같은 처방을 그대로 쓴다).
        */
       unref: (session) => {
+        releaseAttemptChild(session.child);
         session.child.unref?.();
         for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
           (pipe as unknown as { unref?: () => void } | null)?.unref?.();
         }
       },
       ref: (session) => {
+        claimAttemptChild(session.child);
         session.child.ref?.();
         for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
           (pipe as unknown as { ref?: () => void } | null)?.ref?.();

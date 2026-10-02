@@ -118,10 +118,10 @@ export function cappedGoalOwnerReviewMessage(blockedReason: string | null | unde
   }
   if (blockedReason && EFFECT_UNKNOWN_BLOCKERS.has(blockedReason)) {
     return ko
-      ? "이전 실행에서 바깥에 한 작업(클릭·입력 등)이 실제로 반영됐는지 자동으로 두 번 확인했지만 확정하지 못해 멈췄어요. 해당 페이지에서 결과를 확인한 뒤 재개를 누르거나, 본 내용을 답장으로 알려 주시면 그 상태에서 반복 없이 이어갈게요."
-      : "I checked twice, automatically, whether an earlier outside action (a click or typed input) took effect and could not settle it, so I stopped here. Check the page, then press Resume or reply with what you saw, and I will continue from that state without repeating it.";
+      ? "이전 실행에서 바깥에 한 작업(클릭·입력 등)이 실제로 반영됐는지 확정하지 못했고, 자동 재시도 한도에 도달해 멈췄어요. 해당 페이지에서 결과를 확인한 뒤 재개를 누르거나, 본 내용을 답장으로 알려 주시면 그 상태에서 반복 없이 이어갈게요."
+      : "The effect of an earlier outside action (a click or typed input) remains unconfirmed, and the automatic retry limit was reached, so I stopped here. Check the page, then press Resume or reply with what you saw, and I will continue from that state without repeating it.";
   }
   return ko
-    ? "자동으로 두 번 더 진행했지만 아직 검증을 통과한 결과가 없어 여기서 멈췄어요. 부족한 점이나 방향을 답장으로 알려 주거나 재개를 누르면 이어서 할게요."
-    : "I continued twice more automatically, but no result has passed verification yet, so I stopped here. Reply with what is missing or which way to go, or press Resume, and I will continue.";
+    ? "자동 재시도 한도에 도달했고 아직 검증을 통과한 결과가 없어 여기서 멈췄어요. 부족한 점이나 방향을 답장으로 알려 주거나 재개를 누르면 이어서 할게요."
+    : "The automatic retry limit was reached and no result has passed verification yet, so I stopped here. Reply with what is missing or which way to go, or press Resume, and I will continue.";
 }

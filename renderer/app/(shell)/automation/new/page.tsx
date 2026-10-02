@@ -15,6 +15,7 @@ import type {
   Automation,
   AutomationHubMode,
   AutomationToolMode,
+  AutomationWorkspaceMode,
   InstalledAgent,
   InstalledFirm,
   MarketplaceListing,
@@ -105,6 +106,9 @@ function NewAutomationPage() {
   const [targetType, setTargetType] = useState<TargetType>("firm");
   const [targetId, setTargetId] = useState<string>("");
   const [projectContextChoice, setProjectContextChoice] = useState<string>("");
+  const [projectContextTouched, setProjectContextTouched] = useState(false);
+  const [canFollowGoalWorkspace, setCanFollowGoalWorkspace] = useState(false);
+  const [workspaceGoalCandidate, setWorkspaceGoalCandidate] = useState<{ goalId: string; label: string } | null>(null);
   const [projects, setProjects] = useState<Project[]>([]);
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
@@ -204,7 +208,10 @@ function NewAutomationPage() {
           setPrompt(existing.promptTemplate);
           setTargetType(existing.targetType);
           setTargetId(existing.targetId);
-          setProjectContextChoice(existing.projectId ?? "__none__");
+          setProjectContextChoice(existing.workspaceNeedsReview ? "" : existing.workspaceMode === "follow_goal" ? "__goal__" : existing.projectId ?? "__none__");
+          setCanFollowGoalWorkspace(existing.workspaceCanFollowGoal === true);
+          setWorkspaceGoalCandidate(existing.workspaceGoalCandidate ?? null);
+          setProjectContextTouched(false);
           setTriggerType(existing.triggerType ?? "schedule");
           setToolMode(existing.toolMode ?? "auto");
           const sel = existing.runtimeSelection;
@@ -318,7 +325,12 @@ function NewAutomationPage() {
         targetType,
         targetId,
         targetVersion: targetType === "hub" ? selectedHubVersion : "",
-        projectId: projectContextChoice === "__none__" ? null : projectContextChoice,
+        ...(!editId || projectContextTouched ? {
+          projectId: projectContextChoice === "__none__" || projectContextChoice === "__goal__" ? null : projectContextChoice,
+          ...(projectContextChoice === "__goal__" && workspaceGoalCandidate ? { workspaceGoalId: workspaceGoalCandidate.goalId } : {}),
+          workspaceMode: (projectContextChoice === "__goal__" ? "follow_goal"
+            : projectContextChoice === "__none__" ? "standalone" : "project") as AutomationWorkspaceMode,
+        } : {}),
         promptTemplate: prompt.trim() || (locale === "ko" ? "오늘 할 일 요약해줘" : "Summarize today's tasks"),
         toolMode,
         hubMode,
@@ -591,8 +603,14 @@ function NewAutomationPage() {
         )}
 
         <Field label={locale === "ko" ? "작업 컨텍스트" : "Work context"}>
-          <select value={projectContextChoice} onChange={(event) => setProjectContextChoice(event.target.value)} style={inputStyle}>
-            <option value="" disabled>{locale === "ko" ? "프로젝트 사용 여부를 선택하세요" : "Choose whether this automation uses a project"}</option>
+          <select value={projectContextChoice} onChange={(event) => {
+            setProjectContextChoice(event.target.value);
+            setProjectContextTouched(true);
+          }} style={inputStyle}>
+            <option value="" disabled>{locale === "ko" ? "작업 범위를 확인하고 선택하세요" : "Review and choose this automation’s workspace"}</option>
+            {(canFollowGoalWorkspace || projectContextChoice === "__goal__") && <option value="__goal__" disabled={!canFollowGoalWorkspace}>
+              {workspaceGoalCandidate ? `Goal: ${workspaceGoalCandidate.label}` : locale === "ko" ? "Goal 작업 범위 확인 필요" : "Goal workspace needs review"}
+            </option>}
             <option value="__none__">{locale === "ko" ? "프로젝트 없음 · 독립 작업" : "No project · standalone work"}</option>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
           </select>

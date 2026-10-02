@@ -2,13 +2,15 @@ import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./brow
 import { goalActiveChatIds } from "./store/goal-active-chats";
 import { registerAutomationChatActivityIpc } from "./automation-chat-activity-ipc";
 import { registerGoalPanelIpc } from "./goal-panel-ipc";
-import { acknowledgeUncertainLongRunAttempts, getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
+import { acknowledgeUncertainLongRunAttempts, appendLongRunEvent, getLongRunByGoalId, getLongRunAttemptReview, bindCurrentGoalRevisionToLongRun, longRunBudgetExhaustion, longRunOwnerHold, LONG_RUN_BUDGET_EXHAUSTED_CODE, MAX_GOAL_RESUME_REVIEW_ATTEMPTS, type LongRunAttemptReviewConfirmation } from "./store/long-runs";
 import { getChatGoalRevision, reauthorizeStoredAutomaticGoal, reviseStoredAutomaticGoal } from "./store/chat-goals";
 import { adoptExplicitGoalGrant } from "./long-run/explicit-goal-authority";
 import { latestGoalWaitSubscription } from "./long-run/wait-subscriptions";
 import { ONE_DECISION_JUDGE_TIMEOUT_MS } from "../shared/one-decision";
 import { goalResumeRecoveryBlockerCode } from "../shared/long-run";
 import { matchesGoalResumeReview } from "../shared/goal-resume-review";
+import { acknowledgeAutomationGoalExecutionReview, getAutomationGoalExecutionReview } from "./automation-goal-owner-review";
+import { acknowledgeGoalExecutionResume, currentAutomationGoalExecutionOwnerMatches } from "./automation-execution-control";
 import { getGoalRuntimeSelection, requestGoalRuntimeSelection } from "./long-run/runtime-handoff";
 import { getChatContinuitySnapshot } from "./long-run/continuity-snapshot";
 // IPC 핸들러 일괄 등록. main.ts 앱 ready 직후 호출.
@@ -192,6 +194,7 @@ import {
 import { getRoute } from "./agents/routes";
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
+import { AutomationWorkspaceError, automationWorkspaceView, withOwnerAutomationWorkspaceIntent } from "./automation-workspace";
 import {
   canonicalInvocationRequestJson,
   createInvocationAdmission,
@@ -511,7 +514,10 @@ import { judge, judgeSubset } from "./system-agents/judgment";
 import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "../shared/project-hub-recommendation";
 import { PROJECT_TEAM_ROLES_JUDGMENT, PROJECT_TEAM_ROLE_FILL_JUDGMENT } from "../shared/project-team-recommendation";
 import { prejudgeOneMemoryIntent } from "./one/memory-detector";
-import { withInvocationPreflightAccounting } from "./long-run/accounting-context";
+import { normalizeRuntimeSelectionInput } from "../shared/runtime-selection";
+import { withInvocationAccounting, withInvocationPreflightAccounting } from "./long-run/accounting-context";
+import { forgetOneRecoveryJudgment, judgeOneAutoRecovery, oneRecoveryRuntimeSelection } from "./one/auto-recovery";
+import { oneRunFailureFingerprint } from "../shared/one-auto-recovery";
 import { registerWorkStartIpc } from "./work-start";
 import { registerBrowserAutofillIpc } from "./browser/autofill-ipc";
 import { registerBrowserProfileImportIpc } from "./browser/profile-import-ipc";
@@ -641,6 +647,7 @@ import { getInterviewMode, setInterviewMode, type InterviewMode } from "./store/
 import {
   createAutomation,
   getAutomation,
+  getAutomationExecutionContractState,
   listAutomations,
   toggleAutomation,
   updateAutomation,
@@ -1495,6 +1502,8 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
     // Closed enum: anything but the exact system marker is the person's own turn.
     promptOrigin: rendererFields.promptOrigin === "system" ? "system" : undefined,
     oneMode: rendererFields.oneMode === true,
+    runtimeSelection: rendererFields.runtimeSelection === undefined ? undefined
+      : normalizeRuntimeSelectionInput(rendererFields.runtimeSelection, { roles: ["orchestrator"], allowInherit: false }),
     steeringMode: rendererFields.steeringMode === "interrupt" ? "interrupt" : undefined,
     // One's exact team roster is minted from an opaque Main capability. A
     // renderer may carry the ref, never candidate identities themselves.
@@ -1560,6 +1569,46 @@ async function desktopRuntimeRolePoolState(): Promise<RuntimeRolePoolState> {
       ...(multimodal ? { multimodal } : {}),
     },
   };
+}
+
+/** A mutable legacy goal_id is only a candidate for an explicit owner review. */
+function parkedGoalAutomationReview(goalId: string) {
+  const automation = findAutomationByGoalId(goalId);
+  if (!automation || automation.enabled) return null;
+  const latest = getDb().prepare(`SELECT kind, payload_json FROM run_events WHERE automation_id = ?
+    AND kind IN ('automation_goal_execution_review_required', 'automation_goal_execution_owner_reviewed')
+    ORDER BY rowid DESC LIMIT 1`).get(automation.id) as { kind: string; payload_json: string } | undefined;
+  if (latest?.kind !== "automation_goal_execution_review_required") return null;
+  try {
+    const value = JSON.parse(latest.payload_json);
+    return value?.automationId === automation.id && value.automationCreatedAt === automation.createdAt ? automation : null;
+  } catch { return null; }
+}
+
+function goalAutomationSetup(automation: Automation): GoalResumeReview["automationSetup"] {
+  const stored = getAutomationExecutionContractState(automation.id);
+  if (!stored || stored.runtimeSelection !== "valid") return { automationId: automation.id, reason: "runtime" };
+  if (stored.hubMode === "invalid" || (automation.targetType === "hub" && !automation.targetVersion)
+    || automation.graph?.nodes.some((node) => node.type === "agent" && node.config?.targetType === "hub"
+      && typeof node.config.ref === "string" && node.config.ref.trim() && typeof node.config.targetVersion !== "string")) {
+    return { automationId: automation.id, reason: "hub" };
+  }
+  return undefined;
+}
+
+function goalAutomationOwnershipReview(automationId: string, goalId: string, rootChatId: string, longRunId: string, version: number) {
+  // A new parked notice requires a fresh explicit review even when its prior
+  // receipt still describes the same relationship.
+  if (parkedGoalAutomationReview(goalId)?.id === automationId) {
+    return getAutomationGoalExecutionReview({ automationId, goalId, rootChatId, expectedVersion: version });
+  }
+  try {
+    if (currentAutomationGoalExecutionOwnerMatches(automationId, goalId, rootChatId, longRunId)) return undefined;
+  } catch (error) {
+    if (!(error instanceof Error) || !["automation_goal_execution_owner_unverified", "automation_goal_execution_owner_changed",
+      "automation_goal_execution_review_changed"].includes(error.message)) throw error;
+  }
+  return getAutomationGoalExecutionReview({ automationId, goalId, rootChatId, expectedVersion: version });
 }
 
 export function registerIpcHandlers(): void {
@@ -3864,7 +3913,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("browser:scanCredentials", (_e, profileId?: string | null) =>
     scanBrowserCredentials(typeof profileId === "string" ? profileId : null),
   );
-  ipcMain.handle("browser:importCredentials", async (_e, profileId: string, domains: string[]) => {
+  ipcMain.handle("browser:importCredentials", async (event, profileId: string, domains: string[]) => {
+    assertTrustedSitePublishIpcSender(event);
     const id = String(profileId || "");
     const list = Array.isArray(domains) ? domains.map(String) : [];
     const consentRevision = browserCredentialConsentRevision();
@@ -3895,7 +3945,8 @@ export function registerIpcHandlers(): void {
         importedDomains = granted;
       }
     }
-    return result.ok ? { ...result, nativeSession: await syncConnectBrowserSession({ domains: importedDomains, reason: "connect-import" }) } : result;
+    return result.ok && !result.nativeSession
+      ? { ...result, nativeSession: await syncConnectBrowserSession({ domains: importedDomains, reason: "connect-import" }) } : result;
   });
   ipcMain.handle("browser:credentialConsent", () => ({
     consent: getBrowserCredentialConsent(),
@@ -4421,6 +4472,7 @@ export function registerIpcHandlers(): void {
     // 때까지 채팅 행을 보존해, 실행 결과가 사라진 대화에 기록되는 race를 막는다.
     assertChatRemovalAllowed(id, invocationService.activeChatIds());
     removeChat(id);
+    forgetOneRecoveryJudgment(id);
     closeWorkLiveViewsForTaskScope(id);
   });
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null).
@@ -4485,7 +4537,10 @@ export function registerIpcHandlers(): void {
     catch (error) { console.warn("[effect-observation] dispatch failed:", error); }
     const loaded = await getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     if (getChat(id)?.goalId !== chat.goalId) throw new Error("goal_control_binding_changed");
-    const context = loaded && isGoalObserving(chat.goalId) ? { ...loaded, effectObservation: "checking" as const } : loaded;
+    const context = loaded ? { ...loaded,
+      ...(isGoalObserving(chat.goalId) ? { effectObservation: "checking" as const } : {}),
+      ...(loaded.runStatus === "running" && parkedGoalAutomationReview(chat.goalId)
+        ? { automationOwnershipReviewRequired: true } : {}) } : loaded;
     const wait = latestGoalWaitSubscription(chat.goalId);
     if (!context || !wait || wait.chatId !== id) return context;
     return { ...context, wait: { waitId: wait.waitId, state: wait.state, subjectKind: wait.intent.subject.kind,
@@ -4623,12 +4678,20 @@ export function registerIpcHandlers(): void {
     if (!run || run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
     const review = getLongRunAttemptReview(run.id);
     if (review.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
-    if (!review.attempts.length) return null;
+    const continuation = findAutomationByGoalId(expectedGoalId);
+    // A Goal predating revisions is adopted by the existing explicit Resume
+    // action first; that action returns a version conflict before dispatch so
+    // the next review describes the newly canonical contract.
+    const automationOwnership = continuation && getChatGoalRevision(expectedGoalId)
+      ? goalAutomationOwnershipReview(continuation.id, expectedGoalId, id, run.id, expectedVersion) : undefined;
+    const automationSetup = continuation ? goalAutomationSetup(continuation) : undefined;
+    if (!review.attempts.length && !automationOwnership && !automationSetup) return null;
     // ★오너 지시(2026-09-22) "블락되는거 전부 치워". 재개는 불확실한 옛 시도를 **다시 실행하지
     //   않고** 다음 작업부터 이어간다 — 중복의 원천이 없다. 그래서 사람을 막을 이유는 "아직 도는
     //   시도가 있다" 하나뿐이다. 건수 상한·자동화 연결·활동 기록 없음은 사람에게 목록을 검사시키던
     //   시절의 차단이었고, 그 검사는 없앴다(사람은 한 문장과 버튼 하나만 본다).
-    const blocker = review.attempts.some((attempt) => attempt.state === "running") ? "running" : null;
+    const blocker = review.attempts.some((attempt) => attempt.state === "running") ? "running"
+      : automationSetup ? "automation_setup" : null;
     const attempts = review.attempts.map((attempt) => {
       const recordedActivity = attempt.invocationRunId
         ? listRunEvents(attempt.invocationRunId, 200)
@@ -4643,7 +4706,8 @@ export function registerIpcHandlers(): void {
         : [];
       return { ...attempt, recordedActivity };
     });
-    return { ...review, attempts, blocker };
+    return { ...review, attempts, blocker, ...(automationOwnership ? { automationOwnership } : {}),
+      ...(automationSetup ? { automationSetup } : {}) };
   });
   ipcMain.handle("chats:resumeGoal", async (_e, id: string, expectedVersion: number, expectedGoalId: string,
     submittedConfirmation?: GoalResumeConfirmation) => {
@@ -4670,6 +4734,7 @@ export function registerIpcHandlers(): void {
       && adoptExplicitGoalGrant(chat.goalId)) {
       const adopted = getLongRunByGoalId(chat.goalId);
       if (adopted) {
+        if (findAutomationByGoalId(chat.goalId)) throw new Error("long_run_resume_version_conflict");
         if (submittedConfirmation && submittedConfirmation.version === expectedVersion) {
           submittedConfirmation = { ...submittedConfirmation, version: adopted.version };
         }
@@ -4694,17 +4759,24 @@ export function registerIpcHandlers(): void {
       throw new Error("auto_goal_resume_attempt_unsettled");
     }
     const continuation = findAutomationByGoalId(chat.goalId);
+    if (continuation && goalAutomationSetup(continuation)) throw new Error("automation_goal_execution_setup_required");
+    const automationOwnership = continuation
+      ? goalAutomationOwnershipReview(continuation.id, chat.goalId, id, run.id, expectedVersion) : undefined;
+    const restoringParkedAutomation = run.status === "running" && Boolean(automationOwnership)
+      && parkedGoalAutomationReview(chat.goalId)?.id === continuation?.id;
+    if (run.status === "running" && !restoringParkedAutomation) throw new Error("long_run_resume_not_allowed:running");
     let confirmation: LongRunAttemptReviewConfirmation | undefined;
-    if (review.attempts.length) {
+    if (review.attempts.length || automationOwnership) {
       if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) {
         throw new Error("goal_resume_uncertain_review_too_large");
       }
-      if (!submittedConfirmation) throw new Error("goal_resume_uncertain_review_required");
-      if (!matchesGoalResumeReview(review, submittedConfirmation)) {
+      if (!submittedConfirmation) throw new Error(automationOwnership
+        ? "automation_goal_execution_review_required" : "goal_resume_uncertain_review_required");
+      if (!matchesGoalResumeReview({ ...review, automationOwnership }, submittedConfirmation)) {
         throw new Error("goal_resume_uncertain_review_changed");
       }
       assertTrustedSitePublishIpcSender(_e);
-      confirmation = { runId: review.runId, version: review.version,
+      if (review.attempts.length) confirmation = { runId: review.runId, version: review.version,
         attemptIds: review.attemptIds, attemptSetDigest: review.attemptSetDigest };
     } else if (submittedConfirmation) {
       throw new Error("goal_resume_uncertain_review_changed");
@@ -4713,6 +4785,8 @@ export function registerIpcHandlers(): void {
       // 사람이 누른 재개다: 인지 이벤트·판번호 갱신·재개를 한 트랜잭션으로(queueAutomaticGoalResume).
       const { request, queued } = await queueAutomaticGoalResume(id, expectedVersion, confirmation);
       try {
+        const revision = getChatGoalRevision(chat.goalId);
+        if (revision) acknowledgeGoalExecutionResume({ goalId: chat.goalId, rootChatId: id, expectedRevision: revision.revision });
         confirmDesktopLongRunResumeDispatched(queued.id);
         invocationService.start(request, undefined, undefined, undefined, undefined,
           admitMainInvocation(request.chatId, request.runId));
@@ -4722,10 +4796,25 @@ export function registerIpcHandlers(): void {
       }
       return getGoalLedgerGoal(chat.goalId, getChatWorkingFolder(id));
     }
+    const { enqueueAutomationRunNow } = await import("./automation-scheduler");
     const queued = getDb().transaction(() => {
       const current = getLongRunByGoalId(chat.goalId!);
       if (!current || current.id !== run.id || current.version !== expectedVersion || getChat(id)?.goalId !== chat.goalId) {
         throw new Error("long_run_resume_version_conflict");
+      }
+      if (invocationService.activeChatIds().includes(id)) throw new Error("auto_goal_resume_chat_busy");
+      const currentAutomation = getAutomation(continuation.id);
+      if (!currentAutomation || goalAutomationSetup(currentAutomation)) throw new Error("automation_goal_execution_setup_required");
+      if (restoringParkedAutomation) {
+        if (current.status !== "running" || parkedGoalAutomationReview(current.goalId)?.id !== continuation.id) {
+          throw new Error("automation_goal_execution_review_changed");
+        }
+        const exhausted = longRunBudgetExhaustion(current);
+        if (exhausted) throw new Error(`${LONG_RUN_BUDGET_EXHAUSTED_CODE}:${exhausted}`);
+      }
+      if (automationOwnership) acknowledgeAutomationGoalExecutionReview(submittedConfirmation!.automationOwnership!);
+      else if (!currentAutomationGoalExecutionOwnerMatches(continuation.id, current.goalId, id, current.id)) {
+        throw new Error("automation_goal_execution_owner_unverified");
       }
       // 자동화가 이어받는 Goal 도 일반 재개와 같은 사람 확인을 같은 트랜잭션에서 기록한다.
       // 예전에는 이 기록 절차가 없어 불확실 시도가 하나라도 있으면 재개 자체를 거절했다 —
@@ -4737,19 +4826,28 @@ export function registerIpcHandlers(): void {
       // goal_revision_pending, refused silently, and the goal sat "running" with nothing running.
       getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
         .run(new Date().toISOString(), current.goalId);
+      if (restoringParkedAutomation) {
+        appendLongRunEvent({ runId: current.id, kind: "run.user_control", actorKind: "user",
+          payload: { command: "resume", source: "automation-owner-review", automationId: continuation.id } });
+        const restored = getLongRunByGoalId(current.goalId);
+        if (!restored || restored.id !== current.id || restored.status !== "running") throw new Error("goal_control_binding_changed");
+        return restored;
+      }
       return resumeDesktopLongRunManually(current.id, acknowledged.version);
     })();
     try {
-      if (!continuation.enabled) toggleAutomation(continuation.id, true);
-      const { enqueueAutomationRunNow } = await import("./automation-scheduler");
       const current = getLongRunByGoalId(chat.goalId);
       if (getChat(id)?.goalId !== chat.goalId || current?.id !== queued.id
-        || current.version !== queued.version || current.status !== "queued") {
+        || current.version !== queued.version || current.status !== (restoringParkedAutomation ? "running" : "queued")) {
         throw new Error("goal_control_binding_changed");
       }
+      const revision = getChatGoalRevision(chat.goalId);
+      if (!revision) throw new Error("automation_goal_execution_review_changed");
+      acknowledgeGoalExecutionResume({ goalId: chat.goalId, rootChatId: id, expectedRevision: revision.revision });
+      if (!continuation.enabled) toggleAutomation(continuation.id, true);
       const accepted = enqueueAutomationRunNow(continuation.id, admitMainAutomation(continuation.id));
       if (!accepted.accepted) throw new Error("long_run_resume_dispatch_rejected");
-      confirmDesktopLongRunResumeDispatched(queued.id);
+      if (!restoringParkedAutomation) confirmDesktopLongRunResumeDispatched(queued.id);
     } catch (error) {
       failDesktopLongRunResumeDispatch(queued.id, error instanceof Error ? error.message : String(error));
       throw error;
@@ -5088,15 +5186,70 @@ export function registerIpcHandlers(): void {
       // Main owns the receipt. Bind the judgment to the thread the renderer is
       // displaying so a run id from another conversation cannot expose its
       // failure evidence or spend a recovery judgment.
-      const receipt = invocationService.receipt(runId);
-      if (!receipt || receipt.chatId !== chatId) return null;
-      const { judgeOneAutoRecovery } = await import("./one/auto-recovery");
-      const result = await judgeOneAutoRecovery({
-        receipt,
+      const readScope = () => {
+        const chat = getChat(chatId);
+        const observedReceipt = invocationService.receipt(runId);
+        if (!chat || !observedReceipt || observedReceipt.chatId !== chatId
+          || invocationService.latestReceipt(chatId)?.runId !== runId) return null;
+        // Auxiliary bookkeeping is not new task evidence. Counting its own
+        // usage rows here would make every presentation invalidate itself.
+        const facts = getDb().prepare(`SELECT COUNT(*) AS event_count FROM run_events
+          WHERE run_id = ? AND kind NOT IN ('runtime_usage_started','runtime_usage_recorded')`)
+          .get(runId) as { event_count: number };
+        const receipt = { ...observedReceipt, eventCount: facts.event_count };
+        const anchor = getDb().prepare("SELECT id,chat_id FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1")
+          .get(runId) as { id: string; chat_id: string | null } | undefined;
+        const longRun = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
+        const revision = chat.goalId ? getChatGoalRevision(chat.goalId) : null;
+        const control = longRun ? getDb().prepare(`SELECT MAX(seq) AS seq FROM long_run_events
+          WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user'`)
+          .get(longRun.id) as { seq: number | null } : null;
+        const rows = getDb().prepare(`SELECT payload_json FROM run_events
+          WHERE run_id = ? AND chat_id = ? AND kind = 'runtime_selection' ORDER BY seq`)
+          .all(runId, chatId) as Array<{ payload_json: string }>;
+        const runtimeSelection = oneRecoveryRuntimeSelection(receipt, rows.map((row) => ({
+          runId, chatId, kind: "runtime_selection", payload: JSON.parse(row.payload_json),
+        })), chat.runtimeSelection);
+        const controlScope = JSON.stringify([chat.goalId, revision?.revision, revision?.lifecycle,
+          longRun?.id, longRun?.status, control?.seq, runtimeSelection, currentUiLocale()]);
+        const stopped = longRun && (longRunOwnerHold(longRun.id)
+          || ["completed", "cancelled", "cancelling", "failed", "pausing"].includes(longRun.status));
+        return { receipt, longRun, runtimeSelection, controlScope, stopped, anchored: anchor?.chat_id === chatId };
+      };
+      const scope = readScope();
+      if (!scope) { forgetOneRecoveryJudgment(chatId); return null; }
+      if (!scope.anchored) {
+        forgetOneRecoveryJudgment(chatId);
+        return { retry: false, reason: "undecided", fingerprint: oneRunFailureFingerprint(scope.receipt),
+          diagnosis: "", decidedBy: "unavailable" };
+      }
+      if (scope.stopped) {
+        forgetOneRecoveryJudgment(chatId);
+        return { retry: false, reason: "settled", fingerprint: oneRunFailureFingerprint(scope.receipt),
+          diagnosis: "", decidedBy: "form" };
+      }
+      const result = await withInvocationAccounting({ runId, chatId,
+        readOwner: () => scope.longRun && scope.longRun.surface !== "science"
+          ? { goalId: scope.longRun.goalId, attemptId: null } : null }, () => judgeOneAutoRecovery({
+        receipt: scope.receipt,
+        runtimeSelection: scope.runtimeSelection,
+        controlScope: scope.controlScope,
+        locale: currentUiLocale(),
         goal: typeof input?.goal === "string" ? input.goal.slice(0, 4_000) : "",
         attemptsSpent: Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0,
         previousFingerprint: typeof input?.previousFingerprint === "string" ? input.previousFingerprint : null,
-      });
+      }));
+      // A result is advice for the captured authority, never a grant that can
+      // survive a newer run, owner pause/resume, or Goal/runtime change.
+      const current = readScope();
+      if (!current || !current.anchored || current.stopped || current.controlScope !== scope.controlScope
+        || current.receipt.status !== scope.receipt.status
+        || current.receipt.eventCount !== scope.receipt.eventCount
+        || current.receipt.errorCode !== scope.receipt.errorCode
+        || current.receipt.errorMessage !== scope.receipt.errorMessage
+        || current.receipt.hostStopCause !== scope.receipt.hostStopCause
+        || current.receipt.executionPermission !== scope.receipt.executionPermission
+        || current.receipt.interruptionCause !== scope.receipt.interruptionCause) return null;
       return {
         ...(result.decision.retry
           ? { retry: true as const, attempt: result.decision.attempt }
@@ -5182,11 +5335,13 @@ export function registerIpcHandlers(): void {
     oneBriefingSnapshotCache = null;
     return resolveOneBriefingTaskNavigation(input);
   });
-  ipcMain.handle("oneRequestIntent:resolve", async (_e, prompt: unknown) => {
+  ipcMain.handle("oneRequestIntent:resolve", async (_e, prompt: unknown, selection: unknown) => {
     if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 4_000) {
       throw new TypeError("Invalid One request-intent prompt");
     }
-    const resolved = await resolveOneRequestIntent(prompt, { timeoutMs: 4_000 });
+    const runtimeSelection = selection === undefined ? undefined
+      : normalizeRuntimeSelectionInput(selection, { roles: ["orchestrator"], allowInherit: false });
+    const resolved = await resolveOneRequestIntent(prompt, { timeoutMs: 4_000, runtimeSelection });
     return { intent: resolved.intent, source: resolved.source };
   });
   ipcMain.handle("oneTeamPreflight:prepare", async (_e, input: PrepareOneTeamPreflightInput) => {
@@ -5295,19 +5450,22 @@ export function registerIpcHandlers(): void {
       /* 매니저 미기동(헤드리스 등)이면 무시 */
     }
   };
-  ipcMain.handle("automations:list", () => listAutomations());
+  ipcMain.handle("automations:list", () => listAutomations().map(automationWorkspaceView));
   ipcMain.handle(
     "automations:create",
     async (_e, input: AutomationCreateInput) => {
+      if (Object.hasOwn(input, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted");
       // The connected model decides the tool mode at creation; warm it before the
       // synchronous store write peeks the verdict (see prejudgeAutomationComputerUse).
       await prejudgeAutomationComputerUse(
         { toolMode: input.toolMode, name: input.name, promptTemplate: input.promptTemplate, targetLabel: input.targetType },
         { timeoutMs: 6_000 },
       );
-      const created = createAutomation(input);
+      const { workspaceMode, ...storedInput } = input;
+      const created = withOwnerAutomationWorkspaceIntent(workspaceMode, null,
+        () => createAutomation({ ...storedInput, createdBy: "user" }));
       await resyncTriggers();
-      return created;
+      return automationWorkspaceView(created);
     },
   );
   ipcMain.handle("automations:toggle", async (_e, id: string, enabled: boolean) => {
@@ -5339,23 +5497,29 @@ export function registerIpcHandlers(): void {
     return next;
   });
   ipcMain.handle("automations:update", async (_e, id: string, patch: AutomationUpdatePatch) => {
+    if (Object.hasOwn(patch, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted");
     await prejudgeAutomationComputerUse(
       { toolMode: patch.toolMode, name: patch.name, promptTemplate: patch.promptTemplate, targetLabel: patch.targetType },
       { timeoutMs: 6_000 },
     );
-    const before = getAutomation(id)?.runtimeSelection ?? null;
-    const next = updateAutomation(id, patch);
+    const before = getAutomation(id);
+    const { workspaceMode, workspaceGoalId, ...storedPatch } = patch;
+    const next = withOwnerAutomationWorkspaceIntent(workspaceMode, before,
+      () => updateAutomation(id, storedPatch), workspaceGoalId);
     // 오너가 핀을 실제로 바꾼 경우만 "오너의 선택"으로 적는다 — 그 뒤로는 복사본 추종을 멈춘다.
-    noteOwnerAutomationPinEdit(id, before, patch, "desktop_editor");
+    noteOwnerAutomationPinEdit(id, before?.runtimeSelection ?? null, patch, "desktop_editor");
     await resyncTriggers();
-    return next;
+    return automationWorkspaceView(next);
   });
   ipcMain.handle("automations:remove", async (_e, id: string) => {
     const { removeAutomationSafely } = await import("./automation-removal");
     removeAutomationSafely(id);
     await resyncTriggers();
   });
-  ipcMain.handle("automations:get", (_e, id: string) => getAutomation(id));
+  ipcMain.handle("automations:get", (_e, id: string) => {
+    const a = getAutomation(id);
+    return a ? automationWorkspaceView(a) : null;
+  });
   ipcMain.handle("automations:listRuns", (_e, id: string, limit?: number) => listRunHistory(id, limit ?? 50));
   // ★실패의 물증 — 실행 창(ranAt±10분)에 cua-driver가 저장한 화면 캡처를 그 실행의
   // 증거로 돌려준다. 실측 2026-08-19: 모델이 "글자수 초과"를 지어내는 동안 진짜
@@ -7052,6 +7216,14 @@ export function registerIpcHandlers(): void {
             },
           });
         }
+        // Surface the proven start refusal beside the saved request. A
+        // secondary display write must not replace the original start error.
+        try {
+          appendChatMessage(request.chatId, "assistant", pickLocale(request) === "ko"
+            ? "실행을 시작하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 시작이 거절된 원인을 확인할 수 있습니다."
+            : "The run could not start. Your request is saved; run history shows why the start was refused.",
+          { hostNotice: { purpose: "host-status", runId: request.runId, status: "needs-owner" } });
+        } catch { /* The durable request and rejected-start receipt remain authoritative. */ }
       }
       throw cause;
     }

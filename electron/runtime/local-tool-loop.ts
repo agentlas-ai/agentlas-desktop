@@ -19,9 +19,12 @@ import { planMcpToolIsMutating } from "../mcp-tools/proxy-server";
 import { mcpToolSchemaDigest } from "../mcp-tools/tool-schema";
 import { installLazyToolMenu, invalidateToolMenu, resolveToolMenu } from "./tool-menu";
 import { CODE_MODE_TOOL, installMainCodeMode, runMainCodeMode } from "./code-mode";
-import { createHash } from "node:crypto";
+import { TOOL_RESULT_READ, hasToolResultContext, installToolResultContext, projectToolResult, readToolResult, toolResultReadRequest } from "./tool-result-context";
+import { createHash, randomUUID } from "node:crypto";
+import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
+import { createNoProgressGuard, noteNoProgressEvent } from "../automation-progress-guard";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
-import { workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
+import { RuntimeNoProgressError, workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
 import {
   MainWorkforceBroker,
   workforceBrokerDigest,
@@ -31,6 +34,8 @@ import {
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
+import { builtinShellEnv } from "./builtin-shell-env";
+import { attestMainToolPreDispatchRejection } from "../invocation/adapter-effect-context";
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import {
@@ -72,6 +77,9 @@ export interface MainToolDispatchCall {
 }
 
 export interface MainToolDispatchResult {
+  /** Main-owned Science result preservation; never a new dispatch authority. */
+  rawMcpResult?: Record<string, unknown>;
+  artifactPaths?: readonly string[];
   content: string;
   visionMessage: ChatMessage | null;
   isError: boolean;
@@ -111,35 +119,49 @@ export type ResolvedTool =
  * 도구 왕복 상한은 **일의 크기를 재는 숫자가 아니라** 폭주를 세우는 마지막 방벽이다.
  * 8 이었을 때는 정상적인 긴 작업이 여기에 먼저 닿아 "답에 도달하지 못했습니다"로 버려졌다
  * (읽고·고치고·확인만 해도 서너 번이다). 진짜 막힘은 횟수가 아니라 **진전이 없는 것**이라
- * 아래 동일 호출 반복으로 잡고, 이 숫자는 그것도 못 잡는 경우를 위한 방벽으로만 남긴다.
+ * 완료된 호출·결과의 반복으로 잡고, 이 숫자는 그것도 못 잡는 경우를 위한 방벽으로만 남긴다.
  * 사용자는 언제든 중지할 수 있고(req.signal), 각 왕복은 사용자가 보는 중에 일어난다.
  */
 const MAX_TOOL_LOOP_TURNS = 200;
-/** 같은 도구를 같은 인자로 이만큼 연속 부르면 진전이 없는 것으로 본다. */
-const MAX_IDENTICAL_TOOL_TURNS = 3;
-
-/** 이번 턴이 요청한 도구 호출의 지문 — 이름과 인자가 같으면 같은 지문이다.
- * 프로바이더 형식(OpenAI function_call / Anthropic tool_use)과 무관하게 이름·인자만 본다. */
-export function toolTurnSignature(calls: { name: string; arguments: string }[]): string {
-  return JSON.stringify(calls.map((call) => [call.name, call.arguments]));
+/** Shared host-loop progress consumes completed outcomes, never a request alone. */
+export function createToolLoopProgress(runtimeKind: string, req: RunnerRequest, target: RunnerEvents): {
+  events: RunnerEvents;
+  assertProgress(): void;
+} {
+  const guard = createNoProgressGuard({ observationMode: "completed" });
+  return {
+    events: { ...target, onTool: (name, args, result, id, isError, artifactPaths, imageDataUrl, origin) => {
+      const observedResult = imageDataUrl || artifactPaths?.length
+        ? JSON.stringify({ result, artifactPaths,
+            imageDigest: imageDataUrl ? createHash("sha256").update(imageDataUrl).digest("hex") : undefined })
+        : result;
+      noteNoProgressEvent(guard, { kind: "tool-use", tool: { name, args, result: observedResult, id, isError } });
+      target.onTool?.(name, args, result, id, isError, artifactPaths, imageDataUrl, origin);
+    } },
+    assertProgress(): void {
+      if (guard.tripped) throw new RuntimeNoProgressError(runtimeKind, req.locale);
+    },
+  };
 }
 
-export type ToolTurnProgress = { signature: string; identicalTurns: number; stalled: boolean };
-
-/**
- * 이번 도구 턴이 '진전 없음'인지 판정한다 — 루프는 이 함수 하나만 부른다.
- * 진전의 정의: 부르는 도구나 인자가 달라지는 것. 같은 호출을 같은 인자로 반복하면
- * 더 돌아도 새 사실이 오지 않는다. 횟수가 아니라 이것이 '막힘'이다.
- */
-export function trackToolTurnProgress(
-  previous: { signature: string; identicalTurns: number },
-  calls: { name: string; arguments: string }[],
-): ToolTurnProgress {
-  const signature = toolTurnSignature(calls);
-  const identicalTurns = signature === previous.signature ? previous.identicalTurns + 1 : 1;
-  return { signature, identicalTurns, stalled: identicalTurns >= MAX_IDENTICAL_TOOL_TURNS };
+/** Every actual HTTP model dispatch is a distinct measured scope. Missing
+ * terminals stay unknown, including failed retries before a later success. */
+export function createToolLoopUsage(events: RunnerEvents) {
+  const usage = createRuntimeUsageCollector();
+  return {
+    start(): string {
+      const id = randomUUID();
+      usage.start(id);
+      events.onRuntimeAttemptStarted?.(id);
+      return id;
+    },
+    complete(id: string, receipt: ObservedTokenUsage | undefined): void {
+      usage.recordTerminal(receipt, id);
+      if (receipt) events.onTerminalObservedUsage?.(receipt, id);
+    },
+    total(): ObservedTokenUsage | undefined { return usage.total(); },
+  };
 }
-const MAX_TOOL_RESULT_CHARS = 20_000;
 
 /**
  * ★로컬 런타임의 실패 표식 — CLI 러너와 같은 계약(RunnerResult.failure).
@@ -306,6 +328,11 @@ export function mainToolBrokerInventory(
  * (acp.ts answerPermission 과 같은 규칙).
  */
 export interface LocalToolApprovalContext {
+  /** Science bridge only: project the exact response envelope after this approved dispatch. */
+  retainMcpToolResult?: true;
+  beforeMcpToolResult?: RunnerRequest["beforeMcpToolResult"];
+  /** Shared by nested code-mode approval clones; a delivery rejection is terminal. */
+  mcpResultDeliveryState?: { blocked: boolean; reason?: unknown; pending: Set<Promise<void>> };
   scienceCollectionCapability?: object;
   /** Main-owned dynamic authority checked again after an asynchronous approval. */
   assertCurrent?: () => void;
@@ -397,7 +424,17 @@ export async function prepareMainToolLoop(
   }
   const indirectToolSurface = !collection && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local"
     && !req.minimalObservation;
-  const tools = installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, indirectToolSurface);
+  // Small managed local models keep their ordinary Browser/file/shell tools
+  // direct. A single large MCP contract still needs on-demand schema discovery:
+  // the statistics server alone has 180 alternatives (>300 KB).
+  const menuAllowed = !collection && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation;
+  const sessionKey = `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`;
+  const tools = installToolResultContext(
+    installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, menuAllowed, runtimeKind === "agentlas-local"),
+    byName, { runtimeKind, sessionKey, cwd: req.cwd || undefined,
+      chatId: (req.approvalChatId ?? req.chatId) || undefined, agentId: req.agentId || undefined },
+    !collection && !req.mcpGrantCatalogOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation,
+  );
   if (collection) {
     const admitted = [...byName.values()].filter((tool) => tool.kind === "mcp")
       .map((tool) => tool.serverToolName);
@@ -420,10 +457,11 @@ export async function prepareMainToolLoop(
       ? { broker: new MainWorkforceBroker(req, runtimeKind, mainToolBrokerInventory(tools, byName)) }
       : {}),
     approval: {
+      ...(req.beforeMcpToolResult ? { beforeMcpToolResult: req.beforeMcpToolResult } : {}),
       ...(collection ? { scienceCollectionCapability: collection } : {}),
       ...(req.planMode ? { planMode: true as const } : {}),
       runtimeKind,
-      sessionKey: `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`,
+      sessionKey,
       permission: req.permission,
       ...(req.cwd ? { cwd: req.cwd } : {}),
       ...(req.approvalChatId ?? req.chatId ? { chatId: req.approvalChatId ?? req.chatId } : {}),
@@ -439,12 +477,13 @@ async function approveLocalToolCall(
   toolName: string,
   consentMaterial: unknown,
   detail?: string,
+  admittedResultRead = false,
 ): Promise<RuntimeToolPermissionDecision> {
   // 내장 도구는 우리가 만든 것이라 성격을 안다 — 지어내는 게 아니라 아는 것을 싣는다.
   // MCP 도구는 정의에 종류 칸이 없으므로 "other"에 머문다.
   const { builtinToolByName } = await import("../../shared/builtin-tools");
   const builtin = builtinToolByName(toolName);
-  const builtinKind = builtin
+  const builtinKind = admittedResultRead ? "read" as const : builtin
     ? builtin.minPerm === "read"
       ? ("read" as const)
       : builtin.name === "browser_download"
@@ -500,14 +539,63 @@ export async function runMainToolDispatch(
   approval: LocalToolApprovalContext,
   broker?: MainWorkforceBroker,
 ): Promise<MainToolDispatchResult> {
+  const result = await dispatchMainToolRaw(byName, call, events, approval, broker);
+  // Pages already have their own bounded, exact range protocol. Do not replace
+  // a page with another reference or duplicate the screenshot channel.
+  return call.toolName === TOOL_RESULT_READ || approval.retainMcpToolResult ? result : {
+    ...result, content: projectToolResult(byName, approval, result.content, call.providerCallId, result.isError),
+  };
+}
+
+/** Nested code-mode calls consume actual values, not provider projections. */
+async function dispatchMainToolRaw(
+  byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents,
+  approval: LocalToolApprovalContext, broker?: MainWorkforceBroker,
+): Promise<MainToolDispatchResult> {
+  if (approval.beforeMcpToolResult) approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
+  assertMcpResultDelivery(approval);
+  const result = await dispatchMainToolRawUnchecked(byName, call, events, approval, broker);
+  // A timed-out code guest can return while its detached host calls are still
+  // awaiting Main. Its bounded cleanup must not release a provider response.
+  while (approval.mcpResultDeliveryState?.pending.size) {
+    await Promise.all([...approval.mcpResultDeliveryState.pending]);
+  }
+  // Code mode may catch a nested rejection as guest data. It cannot turn that
+  // host decision into a provider-visible error or dispatch another host tool.
+  assertMcpResultDelivery(approval);
+  approval.signal?.throwIfAborted();
+  approval.assertCurrent?.();
+  return result;
+}
+
+function assertMcpResultDelivery(approval: LocalToolApprovalContext): void {
+  if (approval.mcpResultDeliveryState?.blocked) throw approval.mcpResultDeliveryState.reason;
+}
+
+async function dispatchMainToolRawUnchecked(
+  byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents,
+  approval: LocalToolApprovalContext, broker?: MainWorkforceBroker,
+): Promise<MainToolDispatchResult> {
   approval.signal?.throwIfAborted();
   try {
+    if (call.toolName === TOOL_RESULT_READ && hasToolResultContext(byName)) {
+      if (broker || approval.scienceCollectionCapability) throw new Error("tool_result_read_not_admitted");
+      const request = toolResultReadRequest(byName, approval, call.arguments);
+      const decision = await approveLocalToolCall(approval, call.toolName,
+        { kind: "tool-result-range", ...request }, call.toolName, true);
+      if (decision === "deny") throw new Error("tool_result_read_permission_denied");
+      approval.signal?.throwIfAborted(); approval.assertCurrent?.();
+      const content = readToolResult(byName, approval, request);
+      events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+      events.onTool?.(call.toolName, call.arguments, content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+      return { content, visionMessage: null, isError: false };
+    }
     if (approval.scienceCollectionCapability) assertScienceCollectionTool(approval.scienceCollectionCapability, byName.get(call.toolName));
     if (call.toolName === CODE_MODE_TOOL) {
       if (broker) throw new Error("code_mode_broker_not_supported");
       // Start receipt for the host-owned wrapper operation (see the dispatch start below).
       events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
-      const result = await runMainCodeMode(byName, call.arguments, events, approval, runMainToolDispatch);
+      const result = await runMainCodeMode(byName, call.arguments, events, approval, dispatchMainToolRaw);
       events.onTool?.(call.toolName, call.arguments, result.content, call.providerCallId ?? undefined, result.isError, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
       return result;
     }
@@ -585,7 +673,7 @@ export async function runMainToolDispatch(
   // judgment-exempt: 관측된 런타임 도구 이름을 분류하는 게 아니다 — Main 이 직접 구현한
   // 로컬 루프 내장 도구(resolved.kind === "builtin")의 닫힌 집합에서 계획 모드 승인 대상을 고른다.
   const planMutation = resolved.kind === "builtin"
-    ? !["list_dir", "read_file", "ask_user"].includes(resolved.builtinName)
+    ? !["list_dir", "read_file", "read_image", "ask_user"].includes(resolved.builtinName)
     : planMcpToolIsMutating({ authority: planReadAuthority, toolName: resolved.serverToolName, args });
   if (approval.planMode && planMutation) {
     const content = "Error: plan_mode_mutation_denied";
@@ -649,10 +737,30 @@ export async function runMainToolDispatch(
     const downloadProof = resolved.builtinName === "browser_download"
       ? beginBrowserDownloadProof({...approval,toolId:eventCallId,toolName:call.toolName}) : null;
     const fileProof = beginBuiltinFileProof({ ...approval, toolId: eventCallId, toolName: call.toolName, builtinName: resolved.builtinName });
+    let shellEnv: NodeJS.ProcessEnv | undefined;
+    if (resolved.builtinName === "bash") {
+      try {
+        shellEnv = builtinShellEnv();
+      } catch (error) {
+        const marker = error instanceof Error ? error.message : "";
+        const code = /^builtin_python_[a-z_]+$/.test(marker) ? marker : "builtin_shell_runtime_unavailable";
+        const content = JSON.stringify({ error: { code } });
+        attestMainToolPreDispatchRejection({ adapterKind: approval.runtimeKind, chatId: approval.chatId,
+          agentId: approval.agentId, toolId: eventCallId });
+        events.onTool?.(call.toolName, call.arguments, content, eventCallId, true,
+          undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+        if (actionId) {
+          if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
+          broker?.finishAction(actionId, "failed");
+        }
+        return { content: `Error: ${content}`, visionMessage: null, isError: true };
+      }
+    }
     const outcome = await runBuiltinTool(resolved.builtinName, args, {
       cwd: approval.cwd ?? process.cwd(),
       permission: (approval.permission ?? "read") as ToolPermission,
       signal: approval.signal,
+      ...(shellEnv ? { env: shellEnv } : {}),
       ...(downloadProof ? {browserDownload:downloadProof.download} : {}),
       askUser: (input) =>
         askUser(
@@ -692,7 +800,8 @@ export async function runMainToolDispatch(
       broker?.finishAction(actionId, outcome.ok ? "succeeded" : "failed");
     }
     return {
-      content: (outcome.ok ? outcome.content : `Error: ${outcome.content}`).slice(0, MAX_TOOL_RESULT_CHARS),
+      content: outcome.ok ? outcome.content : `Error: ${outcome.content}`,
+      ...(outcome.artifactPaths ? { artifactPaths: outcome.artifactPaths } : {}),
       visionMessage: outcome.ok && outcome.imageDataUrl
         ? {
             role: "user",
@@ -705,6 +814,7 @@ export async function runMainToolDispatch(
       isError: !outcome.ok,
     };
   }
+  let mcpOutcome: MainToolDispatchResult;
   try {
     const [{ callServerToolContent }, { saveBrowserCaptureArtifact }] = await Promise.all([
       import("../mcp-tools/client"),
@@ -719,6 +829,7 @@ export async function runMainToolDispatch(
     const mcpFileProof = mcpFileCandidate ? beginNativeFileProof(mcpFileCandidate) : null;
     const result = await callServerToolContent(resolved.server, resolved.serverToolName, args, {
       timeoutMs: 30_000, signal: approval.signal, prepared: resolved.prepared,
+      ...(approval.retainMcpToolResult ? { retainFullResult: true as const } : {}),
       expectedToolSchemaDigest: resolved.schemaDigest, onToolSchemaInvalidated: () => invalidateToolMenu(byName),
       session: mcpToolCallSessions.get(byName),
     });
@@ -744,8 +855,10 @@ export async function runMainToolDispatch(
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
       broker?.finishAction(actionId, result.isError ? "failed" : "succeeded");
     }
-    return {
-      content: text.slice(0, MAX_TOOL_RESULT_CHARS),
+    mcpOutcome = {
+      content: text,
+      ...(result.rawResult ? { rawMcpResult: result.rawResult } : {}),
+      ...(capturePaths.length ? { artifactPaths: capturePaths } : {}),
       visionMessage: images.length > 0
         ? {
             role: "user",
@@ -767,12 +880,32 @@ export async function runMainToolDispatch(
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
       broker?.finishAction(actionId, "failed");
     }
-    return {
+    mcpOutcome = {
       content: `Error: ${message}`,
       visionMessage: null,
       isError: true,
     };
   }
+  // Outside the ordinary tool-error catch: rejection belongs to the host run
+  // lifecycle, while the completed tool receipt above remains intact.
+  const state = approval.mcpResultDeliveryState;
+  let delivery: Promise<void> | undefined;
+  try {
+    delivery = approval.beforeMcpToolResult?.({ catalogId: resolved.server.catalogId ?? null,
+      toolName: resolved.serverToolName, isError: mcpOutcome.isError });
+    if (delivery) state?.pending.add(delivery);
+    await delivery;
+  } catch (reason) {
+    const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
+    blocked.blocked = true; blocked.reason = reason;
+    throw reason;
+  } finally {
+    if (delivery) state?.pending.delete(delivery);
+  }
+  assertMcpResultDelivery(approval);
+  approval.signal?.throwIfAborted();
+  approval.assertCurrent?.();
+  return mcpOutcome;
 }
 
 /** OpenAI Chat Completions still needs the actual provider tool-call ID in its
@@ -1042,7 +1175,7 @@ export async function runLocalOpenAiChat(
     // (격리 앱 실측 2026-09-13: get_screen 21회, 4분 타임아웃). 도구를 빼고 사람에게 이유를 말한다.
     // 브라우저 스크린샷도 같은 이유로 뺀다 — 3회 반복 실측(2026-09-13)에서 비전 없는 모델이
     // browser_take_screenshot 을 8번 부르고 screen_capture_unavailable 로 실패했다.
-    const isBlindTool = (name: string) => name.startsWith("mcp__cua-driver__") || /^mcp__agentlas-browser__browser_(?:take_)?screenshot$/.test(name);
+    const isBlindTool = (name: string) => name === "read_image" || name.startsWith("mcp__cua-driver__") || /^mcp__agentlas-browser__browser_(?:take_)?screenshot$/.test(name);
     const blind = tools.filter((tool) => isBlindTool(tool.function.name));
     if (blind.length > 0) {
       tools = tools.filter((tool) => !isBlindTool(tool.function.name));
@@ -1050,10 +1183,10 @@ export async function runLocalOpenAiChat(
       events.onNotice?.({
         level: "info",
         code: "computer-use-needs-vision-model",
-        message: req.locale === "ko" ? "이 로컬 모델은 화면을 볼 수 없어 컴퓨터 유즈 도구를 이번 실행에서 뺐습니다. 브라우저·파일·셸 도구는 그대로입니다." : "This local model cannot see the screen, so Computer Use tools were left out of this run. Browser, file and shell tools are unchanged.",
+        message: req.locale === "ko" ? "이 로컬 모델은 이미지를 볼 수 없어 이미지 읽기·컴퓨터 유즈 도구를 이번 실행에서 뺐습니다." : "This local model cannot see images, so image-reading and Computer Use tools were left out of this run.",
         i18n: {
-          ko: "이 로컬 모델은 화면을 볼 수 없어 컴퓨터 유즈 도구를 이번 실행에서 뺐습니다. 브라우저·파일·셸 도구는 그대로입니다.",
-          en: "This local model cannot see the screen, so Computer Use tools were left out of this run. Browser, file and shell tools are unchanged.",
+          ko: "이 로컬 모델은 이미지를 볼 수 없어 이미지 읽기·컴퓨터 유즈 도구를 이번 실행에서 뺐습니다.",
+          en: "This local model cannot see images, so image-reading and Computer Use tools were left out of this run.",
         },
       });
     }
@@ -1113,26 +1246,11 @@ export async function runLocalOpenAiChat(
   let reachedAnswer = false;
   /** 실제로 돈 도구 왕복 횟수 — 실패 문구에는 상한이 아니라 이 사실이 실린다. */
   let toolTurnsTaken = 0;
-  let lastToolSignature = "";
-  let identicalToolTurns = 0;
+  const progress = createToolLoopProgress(runtimeKind, req, events);
+  const usage = createToolLoopUsage(events);
   /** The optional Surface fallback is a one-time swap, never a per-turn oscillation. */
   let surfaceFallbackApplied = false;
-  let observedInputTokens = 0;
-  let observedOutputTokens = 0;
-  let usageComplete = true;
   let streamUsageUnsupported = false;
-  const observeTurnUsage = (result: StreamTurnResult): void => {
-    const usage = result.terminalUsage;
-    if (!usage || !usageComplete
-      || observedInputTokens + usage.inputTokens > Number.MAX_SAFE_INTEGER
-      || observedOutputTokens + usage.outputTokens > Number.MAX_SAFE_INTEGER
-      || observedInputTokens + observedOutputTokens + usage.inputTokens + usage.outputTokens > Number.MAX_SAFE_INTEGER) {
-      usageComplete = false;
-      return;
-    }
-    observedInputTokens += usage.inputTokens;
-    observedOutputTokens += usage.outputTokens;
-  };
 
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
     const requestBody: Record<string, unknown> = {
@@ -1246,6 +1364,7 @@ export async function runLocalOpenAiChat(
     }
     assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
     let resp: Response;
+    let usageAttempt = usage.start();
     try {
       resp = await fetch(chatEndpoint, {
         method: "POST",
@@ -1271,11 +1390,11 @@ export async function runLocalOpenAiChat(
         // identical request once without the unsupported usage option. Since
         // the retry cannot promise a terminal usage pair, keep the whole
         // invocation's observed usage unknown, including earlier tool turns.
-        usageComplete = false;
         streamUsageUnsupported = true;
         const retryBody = { ...requestBody };
         delete retryBody.stream_options;
         assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
+        usageAttempt = usage.start();
         try {
           resp = await fetch(chatEndpoint, {
             method: "POST",
@@ -1304,6 +1423,7 @@ export async function runLocalOpenAiChat(
           sawUnsupportedToolCallAttempt = true;
           events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
           assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
+          usageAttempt = usage.start();
           const fallback = await fetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
@@ -1315,7 +1435,7 @@ export async function runLocalOpenAiChat(
             throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
           }
           const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
-          observeTurnUsage(result);
+          usage.complete(usageAttempt, result.terminalUsage);
           if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
           finalText = result.text;
           reachedAnswer = true;
@@ -1326,7 +1446,7 @@ export async function runLocalOpenAiChat(
     }
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
-    observeTurnUsage(result);
+    usage.complete(usageAttempt, result.terminalUsage);
     if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
     if (approvalContext.scienceCollectionCapability && (result.missingToolCallIds || result.incompleteToolCalls
       || result.finishReason === "tool_calls" && result.toolCalls.length === 0)) {
@@ -1370,22 +1490,12 @@ export async function runLocalOpenAiChat(
     }
     sawAnyToolCall = true;
     toolTurnsTaken += 1;
-    const progress = trackToolTurnProgress(
-      { signature: lastToolSignature, identicalTurns: identicalToolTurns },
-      result.toolCalls.map((call) => call.function),
-    );
-    lastToolSignature = progress.signature;
-    identicalToolTurns = progress.identicalTurns;
-    if (progress.stalled) {
-      // 같은 호출을 같은 인자로 반복하고 있다 — 더 돌아도 새 사실이 오지 않는다.
-      finalText = result.text;
-      break;
-    }
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
     const visionMessages: ChatMessage[] = [];
     for (const call of result.toolCalls) {
       assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
-      const outcome = await runOneToolCall(byName, call, events, approvalContext, broker);
+      const outcome = await runOneToolCall(byName, call, progress.events, approvalContext, broker);
+      progress.assertProgress();
       messages.push(outcome.toolMessage);
       if (outcome.visionMessage && opts.acceptsImageResults !== false) visionMessages.push(outcome.visionMessage);
     }
@@ -1430,9 +1540,7 @@ export async function runLocalOpenAiChat(
         ? workforceNativeToolEnforcement(req, runtimeKind, [])
         : workforceZeroToolsEnforcement(req, runtimeKind, zeroToolsCapabilities);
 
-  const observedUsage = usageComplete
-    ? { inputTokens: observedInputTokens, outputTokens: observedOutputTokens } : undefined;
-  if (observedUsage) events.onTerminalObservedUsage?.(observedUsage);
+  const observedUsage = usage.total();
   return {
     // 실패일 때도 원문은 지우지 않는다 — 표식을 안 읽는 소비자에게 빈 말풍선을
     // 주지 않기 위해서다. 판정은 어디까지나 failure 칸이 한다.

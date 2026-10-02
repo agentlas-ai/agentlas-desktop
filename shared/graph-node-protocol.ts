@@ -83,6 +83,41 @@ export type NodeResult =
   /** 결과가 **없다**. 빈 문자열이 아니라 이 모양으로 말한다. */
   | { kind: "none"; reason: string };
 
+/** A declared no-action result is a disposition, never proof of goal completion. */
+export type GraphNoActionDisposition = { disposition: "no_action"; reason: string };
+
+/**
+ * Accept only an opted-in, node-bound final port.output envelope. Host observations
+ * remain separate from the model declaration; prose and claimed effect counts
+ * cannot authorize this path or make an uncertain action replay-safe.
+ */
+export function declaredGraphNoAction(input: {
+  nodeId: string;
+  allowNoAction: unknown;
+  finalText?: string | null;
+  externalToolCalls: number;
+  preparedActionCount: number;
+  unsafeToolObserved: boolean;
+  unsafeToolRequested: boolean;
+  failed: boolean;
+}): GraphNoActionDisposition | null {
+  if (input.allowNoAction !== true || input.externalToolCalls !== 0 || input.preparedActionCount !== 0
+      || input.unsafeToolObserved || input.unsafeToolRequested || input.failed) return null;
+  try {
+    const envelope = JSON.parse(input.finalText ?? "");
+    const exactKeys = (value: unknown, keys: string[]): value is Record<string, unknown> =>
+      Boolean(value && typeof value === "object" && !Array.isArray(value)
+        && Object.keys(value).length === keys.length && Object.keys(value).every((key) => keys.includes(key)));
+    if (!exactKeys(envelope, ["wire", "kind", "nodeId", "result"])
+        || envelope.wire !== GRAPH_WIRE || envelope.kind !== NODE_OUTPUT_KIND || envelope.nodeId !== input.nodeId
+        || !exactKeys(envelope.result, ["kind", "json"]) || envelope.result.kind !== "json"
+        || !exactKeys(envelope.result.json, ["disposition", "reason"])) return null;
+    const value = envelope.result.json;
+    if (value.disposition !== "no_action" || typeof value.reason !== "string" || !value.reason.trim()) return null;
+    return { disposition: "no_action", reason: value.reason.trim() };
+  } catch { return null; }
+}
+
 /**
  * 사람에게 보이는 기록. 도구 호출·생각·오류 같은 것.
  * ★이 칸은 다음 노드의 모델 입력이 되지 않는다(AutoGen의 그 경계).

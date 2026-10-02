@@ -22,7 +22,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 126;
+const SCHEMA_VERSION = 127;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -264,6 +264,25 @@ function tableExists(db: Database.Database, table: string): boolean {
   return Boolean(
     db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1").get(table),
   );
+}
+
+/** Remove only the historical non-unique copy of the table's exact UNIQUE
+ * constraint. Unexpected definitions are preserved; no user rows are changed. */
+function dropRedundantRunSequenceIndex(db: Database.Database): void {
+  if (!tableExists(db, "run_events")) return;
+  const indexes = db.prepare("PRAGMA index_list('run_events')").all() as
+    Array<{ name: string; unique: number; origin: string; partial: number }>;
+  const redundant = indexes.find((index) => index.name === "idx_run_events_run_seq");
+  if (!redundant || redundant.unique !== 0 || redundant.partial !== 0 || redundant.origin !== "c") return;
+  const exactKeys = (name: string): boolean => {
+    const keys = (db.prepare(`PRAGMA index_xinfo(${quoteSqlIdentifier(name)})`).all() as
+      Array<{ name: string | null; desc: number; coll: string; key: number }>).filter((column) => column.key === 1);
+    return keys.length === 2 && keys[0].name === "run_id" && keys[1].name === "seq"
+      && keys.every((column) => column.desc === 0 && column.coll === "BINARY");
+  };
+  if (!exactKeys(redundant.name) || !indexes.some((index) => index.name !== redundant.name
+    && index.unique === 1 && index.origin === "u" && index.partial === 0 && exactKeys(index.name))) return;
+  db.exec("DROP INDEX idx_run_events_run_seq");
 }
 
 /**
@@ -935,12 +954,118 @@ export function consolidateSplitAutoExperiencePacks(db: Database.Database): {
   return { groups: groups.length, moved, archived };
 }
 
+const MANAGED_MIGRATION_BACKUP_SCHEMA = "agentlas.managed-migration-backup.v1";
+const MAX_MANAGED_MIGRATION_BACKUPS = 3;
+const MIGRATION_BACKUP_TAG_RE = /^(?:pre-upgrade-v[1-9]\d*|v102-seats|v103-seat-session)$/;
+
+function migrationBackupFingerprint(file: string): Record<string, string> {
+  const stat = fs.lstatSync(file, { bigint: true });
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("migration_backup_unsafe_file");
+  return { dev: String(stat.dev), ino: String(stat.ino), size: String(stat.size),
+    mtime: String(stat.mtimeNs), ctime: String(stat.ctimeNs) };
+}
+
+/** Only future, explicitly managed copies participate. Legacy .bak files are
+ * recovery evidence, not candidates inferred from their age or filename. */
+function pruneManagedMigrationBackups(db: Database.Database, currentBackup: string): void {
+  try {
+    const source = db.name;
+    const directory = path.dirname(source);
+    for (const profile of new Set([directory, userDataPath()])) {
+      for (const marker of ["install-journal.v1.json", "install-journal-corrupt.v1.json"]) {
+        if (fs.existsSync(path.join(profile, "updater", marker))) return;
+      }
+    }
+    const prefix = `${path.basename(source)}.migration-backup.v1.`;
+    const names = fs.readdirSync(directory).filter((name) => name.startsWith(prefix));
+    const backupNames = names.filter((name) => name.endsWith(".bak"));
+    if (backupNames.length <= MAX_MANAGED_MIGRATION_BACKUPS) return;
+    const sourceIdentity = migrationBackupFingerprint(source);
+    const liveVersion = Number(db.pragma("user_version", { simple: true }));
+    if (!Number.isSafeInteger(liveVersion) || liveVersion < 0) return;
+    const copies: Array<{ file: string; metadataFile: string; createdAt: number; sourceVersion: number; fingerprint: Record<string, string> }> = [];
+    for (const name of names) {
+      if (name.endsWith(".bak.retention.json") && !backupNames.includes(name.slice(0, -".retention.json".length))) return;
+    }
+    for (const name of backupNames) {
+      const suffix = name.slice(prefix.length);
+      if (!/^(?:pre-upgrade-v[1-9]\d*|v102-seats|v103-seat-session)\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.bak$/.test(suffix)) return;
+      const file = path.join(directory, name);
+      const metadataFile = `${file}.retention.json`;
+      const metadataStat = fs.lstatSync(metadataFile);
+      if (!metadataStat.isFile() || metadataStat.isSymbolicLink() || metadataStat.size > 8 * 1024) return;
+      const meta = JSON.parse(fs.readFileSync(metadataFile, "utf8")) as Record<string, unknown>;
+      const identity = meta.sourceIdentity as Record<string, unknown> | null;
+      const targetVersion = Number(meta.targetSchemaVersion);
+      const fingerprint = migrationBackupFingerprint(file);
+      if (meta.schemaVersion !== MANAGED_MIGRATION_BACKUP_SCHEMA || meta.backupName !== name
+        || meta.sourceName !== path.basename(source) || !identity
+        || identity.dev !== sourceIdentity.dev || identity.ino !== sourceIdentity.ino
+        || typeof meta.tag !== "string" || !MIGRATION_BACKUP_TAG_RE.test(meta.tag)
+        || !suffix.startsWith(`${meta.tag}.`) || !Number.isSafeInteger(meta.sourceSchemaVersion)
+        || !Number.isSafeInteger(meta.targetSchemaVersion) || Number(meta.sourceSchemaVersion) < 0
+        || targetVersion < Number(meta.sourceSchemaVersion) || targetVersion > SCHEMA_VERSION
+        || (meta.tag.startsWith("pre-upgrade-v") && Number(meta.tag.slice("pre-upgrade-v".length)) !== meta.sourceSchemaVersion)
+        || JSON.stringify(meta.fingerprint) !== JSON.stringify(fingerprint)
+        || typeof meta.createdAt !== "string" || !Number.isFinite(Date.parse(meta.createdAt))
+        || new Date(meta.createdAt).toISOString() !== meta.createdAt) return;
+      for (const sidecar of ["-wal", "-shm", "-journal"]) if (fs.existsSync(`${file}${sidecar}`)) return;
+      // The newest copy is the active migration's rollback material. Earlier
+      // copies become eligible only after their target schema actually exists
+      // in the same source inode; a failed migration cannot age them out.
+      if (file !== currentBackup && targetVersion > liveVersion) return;
+      copies.push({ file, metadataFile, createdAt: Date.parse(meta.createdAt), sourceVersion: Number(meta.sourceSchemaVersion), fingerprint });
+    }
+    const candidates = copies.filter((copy) => copy.file !== currentBackup)
+      .sort((a, b) => b.createdAt - a.createdAt || b.file.localeCompare(a.file))
+      .slice(MAX_MANAGED_MIGRATION_BACKUPS - 1);
+    if (candidates.length === 0) return;
+    db.transaction(() => {
+      // Complete preflight before deleting anything. Read failures, corruption,
+      // or any actual ledger reference preserve the whole set, even above cap.
+      if (String(db.pragma("quick_check", { simple: true })) !== "ok") return;
+      if ((db.pragma("foreign_key_check") as unknown[]).length > 0) return;
+      for (const copy of copies) {
+        let backup: Database.Database | null = null;
+        try {
+          backup = new Database(copy.file, { readonly: true, fileMustExist: true });
+          if (String(backup.pragma("quick_check", { simple: true })) !== "ok"
+            || Number(backup.pragma("user_version", { simple: true })) !== copy.sourceVersion) return;
+        } finally { backup?.close(); }
+      }
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'")
+        .all() as Array<{ name: string }>;
+      for (const candidate of candidates) {
+        for (const table of tables) {
+          const columns = schemaColumns(db, table.name);
+          if (!columns.length) continue;
+          const where = columns.map((column) => `instr(CAST(${quoteSqlIdentifier(column.name)} AS TEXT), ?) > 0`).join(" OR ");
+          if (db.prepare(`SELECT 1 FROM ${quoteSqlIdentifier(table.name)} WHERE ${where} LIMIT 1`)
+            .get(...columns.map(() => path.basename(candidate.file)))) return;
+        }
+      }
+      for (const copy of copies) {
+        if (JSON.stringify(migrationBackupFingerprint(copy.file)) !== JSON.stringify(copy.fingerprint)) return;
+      }
+      for (const candidate of candidates) {
+        fs.unlinkSync(candidate.file);
+        fs.unlinkSync(candidate.metadataFile);
+      }
+    }).immediate();
+  } catch {
+    // Retention failure never weakens recovery or prevents an upgrade.
+  }
+}
+
 function backupDatabaseFile(db: Database.Database, tag: string): string | null {
   try {
     const source = db.name;
     if (!source || source === ":memory:") return null;
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const target = `${source}.${tag}-${stamp}.bak`;
+    const managed = MIGRATION_BACKUP_TAG_RE.test(tag);
+    const stamp = new Date().toISOString();
+    const target = managed
+      ? `${source}.migration-backup.v1.${tag}.${randomUUID()}.bak`
+      : `${source}.${tag}-${stamp.replace(/[:.]/g, "-")}.bak`;
     // ★ Copy through SQLite, never through fs (2026-09-05). Until this date the
     // backup was `wal_checkpoint(FULL)` + `fs.copyFileSync(source, target)`. On
     // POSIX, closing *any* descriptor a process holds on a file releases every
@@ -958,6 +1083,18 @@ function backupDatabaseFile(db: Database.Database, tag: string): string | null {
     // scripts/store-sidecar-lock-safety-contract.cjs (probes the fcntl locks).
     db.prepare("VACUUM INTO ?").run(target);
     hardenStoreFile(target);
+    if (managed) {
+      try {
+        const identity = migrationBackupFingerprint(source);
+        fs.writeFileSync(`${target}.retention.json`, JSON.stringify({
+          schemaVersion: MANAGED_MIGRATION_BACKUP_SCHEMA, sourceName: path.basename(source),
+          sourceIdentity: { dev: identity.dev, ino: identity.ino }, backupName: path.basename(target), tag,
+          sourceSchemaVersion: Number(db.pragma("user_version", { simple: true })), targetSchemaVersion: SCHEMA_VERSION,
+          createdAt: stamp, fingerprint: migrationBackupFingerprint(target),
+        }), { mode: 0o600, flag: "wx" });
+        pruneManagedMigrationBackups(db, target);
+      } catch { /* Unclassified copies remain intact and never enter retention. */ }
+    }
     return target;
   } catch {
     return null;
@@ -2301,8 +2438,6 @@ export function initStore(options: StoreInitOptions = {}): void {
         payload_json TEXT NOT NULL DEFAULT '{}',
         UNIQUE(run_id, seq)
       );
-      CREATE INDEX IF NOT EXISTS idx_run_events_run_seq
-        ON run_events(run_id, seq);
       CREATE INDEX IF NOT EXISTS idx_run_events_ts
         ON run_events(ts DESC);
       CREATE INDEX IF NOT EXISTS idx_run_events_automation
@@ -6774,6 +6909,12 @@ export function initStore(options: StoreInitOptions = {}): void {
         _db!.exec("ALTER TABLE chat_messages ADD COLUMN speaker_agent_id TEXT");
       }
     })();
+  }
+
+  // v127: UNIQUE(run_id, seq) already supplies this exact ordered lookup.
+  // Keep its authority index and all ledger rows; free only a redundant b-tree.
+  if (userVersion < 127) {
+    _db.transaction(() => { dropRedundantRunSequenceIndex(_db!); })();
   }
 
   } catch (error) {

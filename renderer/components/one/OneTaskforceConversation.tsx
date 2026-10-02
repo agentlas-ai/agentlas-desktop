@@ -35,15 +35,21 @@ function isOneNode(id: string): boolean {
 
 function memberForNode(org: OneOrgState | null, nodeId: string): OneOrgMember | undefined {
   return org?.members.find((member) => (
-    nodeId === member.installedAgentId
+    nodeId === member.id
+    || nodeId === member.installedAgentId
     || nodeId === member.agentSlug
     || nodeId.endsWith(`:${member.agentSlug}`)
     || nodeId.includes(`:${member.agentSlug}:`)
   ));
 }
 
-function fallbackNodeName(id: string): string {
+function fallbackNodeName(id: string, locale: Locale): string {
   const tail = id.split(":").filter(Boolean).at(-1) ?? id;
+  // Unknown execution identities stay in the ledger, never in a speaker label.
+  // Keep readable slugs and explicit roster/handoff names unchanged.
+  if (/^(?:[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}|[0-9a-f]{24,64})$/i.test(tail)) {
+    return locale === "ko" ? "팀원" : "Agent";
+  }
   return tail
     .replace(/-[0-9a-f]{8}$/i, "")
     .split("-")
@@ -58,7 +64,7 @@ function handoffName(handoff: OneActivityHandoff, id: string): string | undefine
   return undefined;
 }
 
-function speakerFor(org: OneOrgState | null, handoff: OneActivityHandoff, id: string): Speaker {
+function speakerFor(org: OneOrgState | null, handoff: OneActivityHandoff, id: string, locale: Locale): Speaker {
   if (isOneNode(id)) {
     return { id, name: "One", tone: "character:orange-dino", status: "quiet", one: true };
   }
@@ -66,7 +72,7 @@ function speakerFor(org: OneOrgState | null, handoff: OneActivityHandoff, id: st
   const unavailable = !member || Boolean(member.archivedAt) || member.statusKind === "locked" || member.statusKind === "failed";
   return {
     id,
-    name: member?.displayName || handoffName(handoff, id) || fallbackNodeName(id),
+    name: member?.displayName || handoffName(handoff, id) || fallbackNodeName(id, locale),
     tone: member?.icon ?? "character:blue-wave-2d",
     status: unavailable ? "locked" : member.statusKind,
     one: false,
@@ -280,7 +286,7 @@ export function OneTaskforceConversation({
     for (const handoff of state.handoffs) {
       for (const message of handoff.messages) {
         if (seen.has(message.id)) continue;
-        const speaker = speakerFor(org, handoff, message.fromAgentId);
+        const speaker = speakerFor(org, handoff, message.fromAgentId, locale);
         // A machine-only envelope has no place in the shared room. It remains
         // available to the internal ledger without creating an empty or
         // receipt-shaped chat bubble for the user.
@@ -293,7 +299,7 @@ export function OneTaskforceConversation({
           message,
           handoff,
           speaker,
-          recipient: speakerFor(org, handoff, message.toAgentId),
+          recipient: speakerFor(org, handoff, message.toAgentId, locale),
         });
       }
     }

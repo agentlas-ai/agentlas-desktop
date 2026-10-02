@@ -1,3 +1,4 @@
+import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
 import { assertScienceRecoveryAcpRequest } from "../science-host/recovery-authority";
 // Generic ACP runner — one client for every runtime that speaks the Agent Client
@@ -34,7 +35,7 @@ import {
   type AcpMcpTranslation,
 } from "./acp-protocol";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, RuntimeTurnUnsettledError } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -137,9 +138,46 @@ export function setAcpPermissionArbiter(arbiter: AcpPermissionArbiter | null): v
   setRuntimeToolPermissionArbiter(arbiter);
 }
 
+function closedAcpObject(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    && Object.keys(value).every(key => keys.includes(key));
+}
+
+/** Closed setup metadata is not inference evidence. Unknown extensions stay conservative. */
+function isAcpSetupMetadata(params: unknown): boolean {
+  let update = params;
+  if (closedAcpObject(params, ["sessionId", "update"]) && typeof params.sessionId === "string") update = params.update;
+  const optionalText = (value: Record<string, unknown>, key: string) => value[key] === undefined || typeof value[key] === "string";
+  if (closedAcpObject(update, ["sessionUpdate", "currentModeId"]) && update.sessionUpdate === "current_mode_update") {
+    return typeof update.currentModeId === "string";
+  }
+  if (closedAcpObject(update, ["sessionUpdate", "availableCommands"]) && update.sessionUpdate === "available_commands_update") {
+    return Array.isArray(update.availableCommands) && update.availableCommands.every(command =>
+      closedAcpObject(command, ["name", "description", "input"]) && typeof command.name === "string"
+      && typeof command.description === "string" && (command.input === undefined
+        || (closedAcpObject(command.input, ["hint"]) && typeof command.input.hint === "string")));
+  }
+  if (closedAcpObject(update, ["sessionUpdate", "configOptions"]) && update.sessionUpdate === "config_option_update") {
+    const isValue = (value: unknown) => closedAcpObject(value, ["value", "name", "description"])
+      && typeof value.value === "string" && typeof value.name === "string" && optionalText(value, "description");
+    const isGroup = (group: unknown) => closedAcpObject(group, ["group", "name", "options"])
+      && typeof group.group === "string" && typeof group.name === "string"
+      && Array.isArray(group.options) && group.options.every(isValue);
+    return Array.isArray(update.configOptions) && update.configOptions.every(option =>
+      closedAcpObject(option, ["id", "name", "description", "category", "type", "currentValue", "options"])
+      && typeof option.id === "string" && typeof option.name === "string"
+      && optionalText(option, "description") && optionalText(option, "category")
+      && option.type === "select" && typeof option.currentValue === "string"
+      && Array.isArray(option.options) && (option.options.every(isValue) || option.options.every(isGroup)));
+  }
+  return false;
+}
+
 /** Client-side handling of one session's stream. */
 export class AcpSessionClient {
   text = "";
+  /** Non-metadata live activity makes execution uncertain, even without assistant text. */
+  turnActivityObserved = false;
   contextUsed?: number;
   contextSize?: number;
   private readonly tools = new Map<string, ToolState>();
@@ -164,12 +202,16 @@ export class AcpSessionClient {
   endReplay(): void {
     this.replaying = false;
     this.text = "";
+    this.turnActivityObserved = false;
     this.tools.clear();
     this.thinking = false;
   }
 
-  onUpdate(params: any): void {
+  onUpdate(params: any, onLiveActivity?: () => void): void {
     if (this.replaying) return;
+    if (isAcpSetupMetadata(params)) return;
+    this.turnActivityObserved = true;
+    onLiveActivity?.();
     const update = params?.update ?? params;
     switch (update?.sessionUpdate) {
       case "agent_message_chunk": {
@@ -536,12 +578,14 @@ export function acpSessionPool(): AcpSessionPool<Session> {
        */
       // 파이프는 런타임에 Socket 이라 ref/unref 를 갖지만 타입(Readable/Writable)에는 없다.
       unref: (session) => {
+        releaseAttemptChild(session.child);
         session.child.unref?.();
         for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
           (pipe as unknown as { unref?: () => void } | null)?.unref?.();
         }
       },
       ref: (session) => {
+        claimAttemptChild(session.child);
         session.child.ref?.();
         for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
           (pipe as unknown as { ref?: () => void } | null)?.ref?.();
@@ -841,10 +885,9 @@ export async function configureAcpSessionModel(
 /** Runner factory — one Runner per ACP agent spec. */
 export function createAcpRunner(spec: AcpAgentSpec): Runner {
   /**
-   * 한 턴. `allowStaleRetry` 가 true 인 첫 시도에서만, 재사용 세션이 아무 출력도 내지
-   * 못하고 실패했을 때 StaleAcpSessionError 를 던진다 — 바깥이 새 세션으로 한 번 더
-   * 시도한다(사용자에게는 차이가 없다). 두 번째 시도는 이 표식을 던지지 않으므로
-   * 무한 재시도가 원천적으로 불가능하다.
+   * Only a host-proven stale resident session before prompt dispatch or live
+   * protocol activity may be replaced once. Empty assistant text cannot prove
+   * that the previous attempt did not infer or act.
    */
   const runTurn = async (req: RunnerRequest, events: RunnerEvents, allowStaleRetry: boolean): Promise<RunnerResult> => {
     const recovery = assertScienceRecoveryAcpRequest(req, spec.id);
@@ -935,8 +978,15 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       })
       : null;
     const turnSink: AcpTurnSink = {
-      onNotification: (method, params) => { if (method === "session/update") client.onUpdate(params); },
+      onNotification: (method, params) => {
+        if (method === "session/update") {
+          // Setup can produce live activity too; retain it without admitting replayed history.
+          client.onUpdate(params, ensureEffectRun);
+        }
+      },
       onRequest: async (method, params) => {
+        agentRequestObserved = true;
+        ensureEffectRun();
         if (method === "session/request_permission") {
           assertScienceRecoveryAcpRequest(req, spec.id);
           return client.answerPermission(params);
@@ -963,7 +1013,12 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     let lease: AcpSessionLease<Session> | null = null;
     /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
     let broken = false;
+    let promptDispatchAttempted = false;
+    let agentRequestObserved = false;
     let effectRun: ReturnType<typeof beginAdapterEffectRun> = null, effectTerminal: string | null = null;
+    const ensureEffectRun = (): ReturnType<typeof beginAdapterEffectRun> => {
+      return effectRun ??= beginAdapterEffectRun({ adapterKind: "acp", chatId: req.chatId, agentId: req.agentId });
+    };
     const onAbort = () => { broken = true; if (session) killCliTree(session.child); };
     req.signal?.addEventListener("abort", onAbort, { once: true });
     try {
@@ -1092,7 +1147,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       const requestedModel = req.model?.trim() ?? "";
       if (!reusing || session.requestedModel !== requestedModel) {
         const targetModel = requestedModel || (reusing ? session.defaultModel : undefined);
-        if (reusing && !targetModel) throw new Error("acp_model_default_requires_fresh_session");
+        if (reusing && !targetModel) throw new StaleAcpSessionError(new Error("acp_model_default_requires_fresh_session"));
         session.modelSelectionResponse = await configureAcpSessionModel(spec, session.conn, sessionId,
           session.modelSelectionResponse, targetModel);
         session.requestedModel = requestedModel;
@@ -1167,6 +1222,9 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
             req.forceSurface, req.restrictedReadBoundary, req.untrustedNoTools,
             req.untrustedAllowedMcpTools, req.workforceRuntimeToolGrant,
             undefined, req.surfaceGate,
+            undefined,
+            undefined,
+            req.judgmentOnly === true ? "host-judgment" : undefined,
           ),
           req.history.length > 0 ? renderConversationContext(req.history, locale, CLI_HISTORY_CONTEXT_TOKENS).block : "",
           req.turnContext,
@@ -1175,20 +1233,28 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         ].filter(Boolean).join("\n\n");
       nativeMcp?.assertCurrent();
       assertScienceRecoveryAcpRequest(req, spec.id);
-      effectRun = beginAdapterEffectRun({ adapterKind: "acp", chatId: req.chatId, agentId: req.agentId });
+      if (lease && !lease.fresh && !acpSessionAlive(session)) {
+        throw new StaleAcpSessionError(new Error("acp_session_closed_before_prompt"));
+      }
+      effectRun = ensureEffectRun();
+      // Mark before calling transport: an exception cannot prove nothing was sent.
+      promptDispatchAttempted = true;
       const result = await session.conn.request(
         "session/prompt",
         { sessionId, prompt: [{ type: "text", text: promptText }, ...imageBlocks] },
         { signal: req.signal },
       );
-      effectTerminal = typeof result?.stopReason === "string" ? result.stopReason : null;
+      const stopReason = result?.stopReason;
+      if (typeof stopReason !== "string" || !["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"].includes(stopReason)) {
+        throw new RuntimeTurnUnsettledError(spec.id, locale);
+      }
+      effectTerminal = stopReason;
       client.finish();
       // Ordinary turns retain the session; fresh recovery must never seed a later resume.
       if (!recovery && req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
         events.onStatus(`[runtime-session] store_failed kind=${sessionKind}`);
       }
       if (req.signal?.aborted) throw abortReasonError(req);
-      const stopReason = String(result?.stopReason ?? "");
       const text = client.text.trim();
       if (stopReason === "refusal") {
         return { text, failure: { kind: "refused", message: "ACP stopReason=refusal", runtime: spec.id, source: "marker" }, sessionId };
@@ -1208,12 +1274,13 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       // 원인 없는 실패를 겪는다. 다시 여는 비용이 그보다 싸다.
       broken = true;
       if (req.signal?.aborted) throw abortReasonError(req);
-      /*
-       * ★재사용 세션이 아무 말도 못 하고 실패했으면, 그건 사용자의 문제가 아니라
-       * 우리가 물려준 세션의 문제다(에이전트가 죽었거나 프로토콜이 깨졌다). 조용히
-       * 버리고 새 세션으로 한 번 더 — 화면에는 아무 차이도 남기지 않는다.
-       */
-      if (allowStaleRetry && lease && !lease.fresh && client.text === "") {
+      // Preserve the effect ledger in finally; missing text is never no-effect proof.
+      if (!effectTerminal && (promptDispatchAttempted || client.turnActivityObserved || agentRequestObserved)) {
+        throw new RuntimeTurnUnsettledError(spec.id, locale);
+      }
+      if (allowStaleRetry && lease && !lease.fresh && session
+        && !promptDispatchAttempted && !client.turnActivityObserved && !agentRequestObserved
+        && (err instanceof StaleAcpSessionError || !acpSessionAlive(session))) {
         throw new StaleAcpSessionError(err);
       }
       /*

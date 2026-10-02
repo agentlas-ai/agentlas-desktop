@@ -1,3 +1,6 @@
+import { latestTaskCheckpoint } from "./checkpoint";
+import { getLongRunGoalRevisionBinding } from "../store/long-runs";
+import { observationRuntime } from "./observation-runtime";
 /**
  * 묻기 전에 직접 본다 — 오너 지시 2026-09-23.
  *
@@ -11,7 +14,7 @@
  *
  *   done     → 시도 묶음을 "관찰로 정리됨"으로 원장에 적고(사람 확인과 다른 증명 종류), 다시 하지 않고
  *              다음 작업부터 이어간다.
- *   not_done → 같은 기록을 남기고 이어가되, 다음 턴은 그 작업을 새로 다시 해도 된다.
+ *   not_done → 현재 Main 원장이 바깥 효과가 없음을 증명할 때만 정리하고 이어간다. 모델의 부재 보고만으로 재시도하지 않는다.
  *   unknown / 표식 없음 / 실행 실패·시간 초과 → 오늘의 동작(사람의 한 문장 재개)으로 돌아간다.
  *                                               옛 시도를 조용히 재실행하는 길은 없다.
  *
@@ -80,11 +83,22 @@ const BOUNDARY_BLOCK_REASONS = new Set<string>([
 function settleBoundaryByObservation(longRunId: string, ticket: EffectObservationTicket,
   verdict: "done" | "not_done", evidence: string): { version: number } {
   if (getLongRunAttemptReview(longRunId).attemptIds.length) throw new Error("effect_observation_attempt_set_changed");
+  let noEffect: ReturnType<typeof receiptSettlesAttempts> = null;
+  if (verdict === "not_done") {
+    const checkpoint = latestTaskCheckpoint(ticket.goalId);
+    const invocationRunId = checkpoint?.sideEffects.boundary?.invocationRunId ?? checkpoint?.invocationRunId;
+    if (!invocationRunId || checkpoint?.goalRevision !== getLongRunGoalRevisionBinding(longRunId)?.revision
+      || ticket.attemptIds.length !== 1 || ticket.attemptIds[0] !== `invocation:${invocationRunId}`) {
+      throw new Error("effect_observation_target_absence_unproven");
+    }
+    noEffect = receiptSettlesAttempts([{ id: ticket.attemptIds[0], invocationRunId }]);
+    if (!noEffect) throw new Error("effect_observation_target_absence_unproven");
+  }
   appendLongRunEvent({ runId: longRunId, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
     payload: { action: "settle_boundary", targetIds: [...ticket.attemptIds], verdict,
-      evidence: evidence.replace(/\s+/g, " ").trim().slice(0, 500),
+      evidence: (noEffect?.evidence ?? evidence).replace(/\s+/g, " ").trim().slice(0, 500),
       observationInvocationRunId: ticket.observationRunId, observationDigest: ticket.digest,
-      externalOutcomeProof: "observed_read_only_by_model" } });
+      externalOutcomeProof: noEffect ? "host_receipt_closed_ledger" : "observed_read_only_by_model" } });
   const version = getLongRun(longRunId)?.version;
   if (typeof version !== "number") throw new Error(`long_run_not_found:${longRunId}`);
   return { version };
@@ -342,10 +356,50 @@ ${EFFECT_OBSERVATION_MARKER}{"verdict":"done","attempts":${ids},"evidence":"the 
 const RECEIPT_KO = "중단된 작업의 기록을 확인했어요. 검색·읽기·페이지 열기만 했고 바깥을 바꾼 동작은 없어서, 다시 보지 않고 이어갑니다.";
 const RECEIPT_EN = "Checked the interrupted work's own record: it only searched, read and opened pages, so nothing outside changed. Continuing without another look.";
 
-function sayExhausted(chatId: string, runId: string): void {
+/** Owner copy never includes raw arguments/results, URL credentials, queries or paths that may contain tokens. */
+export function effectObservationReviewTargets(invocationRunIds: readonly string[]): string[] {
+  const targets: string[] = [];
+  for (const invocationRunId of [...new Set(invocationRunIds)].slice(0, MAX_OBSERVED_ATTEMPTS)) {
+    try {
+      const receipt = readAttemptEffectReceipt(invocationRunId);
+      const candidates = receipt.closed ? new Set(receipt.candidates.map((call) => call.toolId)) : null;
+      const rows = getDb().prepare(
+        "SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq DESC LIMIT 40",
+      ).all(invocationRunId) as Array<{ payload_json: string }>;
+      for (const row of rows) {
+        const payload = JSON.parse(row.payload_json) as Record<string, unknown>;
+        if (candidates && !candidates.has(String(payload.toolId ?? ""))) continue;
+        const tool = typeof payload.toolName === "string" && /^[a-zA-Z0-9_.:/-]{1,100}$/u.test(payload.toolName) ? payload.toolName : null;
+        if (!tool) continue;
+        let origin: string | null = null;
+        try {
+          const args = typeof payload.toolArgs === "string" ? JSON.parse(payload.toolArgs) : payload.toolArgs;
+          if (args && typeof args === "object" && !Array.isArray(args)) {
+            const nested = args.Arguments && typeof args.Arguments === "object" ? args.Arguments : null;
+            const raw = args.url ?? nested?.url;
+            if (typeof raw === "string") {
+              const url = new URL(raw);
+              if (/^https?:$/u.test(url.protocol)) origin = url.origin.slice(0, 160);
+            }
+          }
+        } catch { /* No inferred target when the recorded argument is unavailable. */ }
+        const ref = /^[a-zA-Z0-9_-]{1,100}$/u.test(invocationRunId) ? invocationRunId.slice(0, 12) : null;
+        const line = [tool, origin, ref ? `#${ref}` : null].filter(Boolean).join(" · ");
+        if (!targets.includes(line)) targets.push(line);
+        if (targets.length >= 5) return targets;
+      }
+    } catch { /* A damaged ledger never becomes guessed action detail. */ }
+  }
+  return targets;
+}
+
+function sayExhausted(chatId: string, runId: string, invocationRunIds: readonly string[]): void {
+  const targets = effectObservationReviewTargets(invocationRunIds);
+  const koTarget = targets.length ? `확인할 작업 기록: ${targets.join("; ")}. ` : "대상 도구·주소를 기록에서 특정하지 못했어요. ";
+  const enTarget = targets.length ? `Recorded calls to review: ${targets.join("; ")}. ` : "The recorded tool and target could not be identified. ";
   say(chatId, runId, { status: "needs-owner" },
-    `이전 작업이 반영됐는지 ${MAX_INCONCLUSIVE_OBSERVATIONS}번 직접 확인했지만 판단할 수 없어, 자동 재확인을 멈췄어요(${EFFECT_OBSERVATION_EXHAUSTED}). 결과를 직접 확인하신 뒤 목표 칩에서 이어가기를 누르거나 이 대화에 한 문장을 보내면, 반복하기 전에 먼저 확인하도록 이어서 진행합니다.`,
-    `I checked ${MAX_INCONCLUSIVE_OBSERVATIONS} times but could not tell whether the earlier action went through, so automatic re-checks stopped (${EFFECT_OBSERVATION_EXHAUSTED}). Check the result, then press Continue on the goal chip or send one sentence here; the goal resumes and verifies before repeating anything.`);
+    `자동 확인으로 이전 작업의 결과를 판정하지 못해 재확인을 멈췄어요. ${koTarget}이 대화의 해당 도구 활동을 열고 대상 사이트의 활동 내역이나 결과 파일을 확인한 뒤, 결과 링크·파일 경로 또는 결과가 없음을 보여 주는 근거를 보내 주세요. 확인 전에는 같은 작업을 반복하지 않습니다.`,
+    `Automatic checks could not determine whether the earlier action took effect and have stopped. ${enTarget}Open the matching tool activity in this conversation, check the target site's activity history or resulting file, and send its link/path or evidence that it is absent. The action will not be repeated before its outcome is checked.`);
 }
 
 /**
@@ -526,7 +580,10 @@ export function maybeDispatchEffectObservation(
   const digest = effectObservationDigest(run.id, targetIds, epoch);
   if (alreadyObserved(run.id, digest)) return { status: "skipped", reason: "already_observed" };
   const observationRunId = randomUUID();
-  const goalRuntime = goalObservationRuntime(run.id, chatId);
+  const observationSelection = observationRuntime(goalObservationRuntime(run.id, chatId), `goal:${goalId}`,
+    () => { maybeDispatchEffectObservation(dispatcher, goalId, trigger, options); });
+  if ("wait" in observationSelection) return { status: "skipped", reason: observationSelection.wait };
+  const goalRuntime = observationSelection.selection;
   const request: McpInvocationRequest = {
     chatId, runId: observationRunId, promptOrigin: "system", taskIntent: "task", permissions: "read",
     // Its run notices are shown in the owner's chat; without a locale they were English in Korean rooms.
@@ -571,7 +628,14 @@ function recordInconclusive(ticket: EffectObservationTicket, reason: string,
   }
   scheduleObservationRetry(ticket.longRunId, reason, ticket.attemptIds);
   if (observationExhausted(ticket.longRunId, ticket.attemptIds)) {
-    sayExhausted(ticket.chatId, ticket.observationRunId);
+    let invocationRunIds: string[] = [];
+    try {
+      invocationRunIds = ticket.kind === "boundary"
+        ? ticket.attemptIds.filter((id) => id.startsWith("invocation:")).map((id) => id.slice("invocation:".length))
+        : getLongRunAttemptReview(ticket.longRunId).attempts.filter((attempt) => ticket.attemptIds.includes(attempt.id))
+          .map((attempt) => attempt.invocationRunId).filter((id): id is string => Boolean(id));
+    } catch { /* Still show the next action if the attempt index cannot be read. */ }
+    sayExhausted(ticket.chatId, ticket.observationRunId, invocationRunIds);
     return;
   }
   const retryKo = "잠시 뒤 앱이 스스로 다시 확인하고, 확인되는 대로 이어갑니다.";
@@ -690,7 +754,7 @@ export function completeEffectObservation(input: {
     })();
   } catch (error) {
     const reason = error instanceof Error ? error.message.slice(0, 120) : "effect_observation_settle_failed";
-    recordInconclusive(ticket, reason, { observed: verdict });
+    recordInconclusive(ticket, reason, reason === "effect_observation_target_absence_unproven" ? "unknown" : { observed: verdict });
     return { outcome: "fallback", reason };
   }
   if (prepared.wait) {
@@ -952,6 +1016,9 @@ export function maybeDispatchAutomationEffectObservation(
   if (plan.goal && observationExhausted(plan.goal.longRunId, plan.goal.attempts.map((attempt) => attempt.id))) {
     return { status: "skipped", reason: EFFECT_OBSERVATION_EXHAUSTED };
   }
+  const observationSelection = observationRuntime(plan.automation.runtimeSelection, `automation:${automationId}`,
+    () => { maybeDispatchAutomationEffectObservation(runtime, automationId, trigger, options); });
+  if ("wait" in observationSelection) return { status: "skipped", reason: observationSelection.wait };
   const observationRunId = `effect-observation-${randomUUID()}`;
   const session = getOrCreateAutomationSession({
     automationId, projectId: plan.automation.projectId ?? null, runtimeSelection: plan.automation.runtimeSelection ?? null,
@@ -962,7 +1029,7 @@ export function maybeDispatchAutomationEffectObservation(
   const request: McpInvocationRequest = {
     runId: observationRunId, chatId: session.chat.id, automationId, promptOrigin: "system", taskIntent: "task",
     permissions: "read", userPrompt: buildAutomationEffectObservationPrompt(plan),
-    runtimeSelection: plan.automation.runtimeSelection, mcpBrowserProfileKey: `automation-${automationId}`,
+    runtimeSelection: observationSelection.selection ?? undefined, mcpBrowserProfileKey: `automation-${automationId}`,
     toolMode: plan.automation.toolMode ?? "auto",
   };
   if (request.permissions !== "read") throw new Error("effect_observation_must_be_read_only");
@@ -1024,7 +1091,7 @@ function completeAutomationEffectObservation(input: {
       } catch { /* the automation receipt above is the durable record */ }
       scheduleObservationRetry(plan.goal.longRunId, reason, plan.goal.attempts.map((attempt) => attempt.id));
       if (observationExhausted(plan.goal.longRunId, plan.goal.attempts.map((attempt) => attempt.id)) && plan.goal.chatId) {
-        sayExhausted(plan.goal.chatId, observationRunId);
+        sayExhausted(plan.goal.chatId, observationRunId, plan.goal.attempts.map((attempt) => attempt.invocationRunId).filter((id): id is string => Boolean(id)));
         return { outcome: "fallback", reason: EFFECT_OBSERVATION_EXHAUSTED };
       }
     }
@@ -1058,6 +1125,13 @@ function completeAutomationEffectObservation(input: {
   let result: { reconciled: AutomationGraphReconcileResult | null; queuedId: string | null } | null = null;
   try {
     result = getDb().transaction(() => {
+      if (verdict === "not_done") {
+        // A graph hold and a Goal attempt set are separate targets. Neither
+        // can borrow an unrelated closed receipt to authorize replay.
+        const targets = [...(plan.goal?.attempts ?? []),
+          ...(plan.hold ? [{ id: `graph:${plan.hold.runId}`, invocationRunId: plan.hold.runId }] : [])];
+        if (!receiptSettlesAttempts(targets)) throw new Error("effect_observation_target_absence_unproven");
+      }
       const reconciled = plan.hold ? reconcileAutomationGraph({
         automationId, runId: plan.hold.runId, occurrenceId: plan.hold.occurrenceId,
         graphDigest: plan.hold.graphDigest, checkpointDigest: plan.hold.checkpointDigest,
@@ -1089,7 +1163,8 @@ function completeAutomationEffectObservation(input: {
       return { reconciled, queuedId };
     })();
   } catch (error) {
-    return fallback(error instanceof Error ? error.message.slice(0, 120) : "effect_observation_settle_failed", verdict);
+    const reason = error instanceof Error ? error.message.slice(0, 120) : "effect_observation_settle_failed";
+    return fallback(reason, reason === "effect_observation_target_absence_unproven" ? undefined : verdict);
   }
   // done 이고 모든 단계가 닫혔으면 새로 돌리지 않는다 — 복원된 일정이 다음 주기를 맡는다.
   // not_done·재개가 필요한 보류·목표의 다음 단계는 지금 이어간다.

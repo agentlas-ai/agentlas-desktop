@@ -18,11 +18,12 @@
 //
 // 권한 등급(minPerm)은 사용자가 고른 권한 칩과 같은 축이다. read 실행에서는
 // write_file 이 목록에 아예 없다 — "있는데 거절"이 아니라 "없다".
-import { observeWorkspaceFile, type FileObservation } from "./file-observation";
+import { FILE_OBSERVATION_MAX_BYTES, observeWorkspaceFile, type FileObservation } from "./file-observation";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { inflateSync } from "node:zlib";
 
 export type ToolPermission = "read" | "write" | "full";
 
@@ -212,6 +213,90 @@ function readUtf8File(file: string): string {
   }
 }
 
+const IMAGE_DATA_URL_PREFIX = "data:image/png;base64,";
+const IMAGE_DATA_URL_MAX_CHARS = 8_000_000;
+const IMAGE_MAX_BYTES = Math.min(FILE_OBSERVATION_MAX_BYTES,
+  Math.floor((IMAGE_DATA_URL_MAX_CHARS - IMAGE_DATA_URL_PREFIX.length) / 4) * 3);
+const IMAGE_MAX_PIXELS = 16_000_000;
+const PNG_CRC_TABLE = Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit++) value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  return value >>> 0;
+});
+
+/** Validate bounded PNG pixels without loading a native decoder or executing a helper. */
+function pngDimensions(bytes: Buffer): { width: number; height: number } {
+  const invalid = () => { throw new Error("read_image_invalid_png"); };
+  if (bytes.length < 57 || !bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) invalid();
+  let offset = 8, width = 0, height = 0, depth = 0, channels = 0, palette = false, ended = false, dataEnded = false;
+  const data: Buffer[] = [];
+  while (offset + 12 <= bytes.length) {
+    const length = bytes.readUInt32BE(offset), end = offset + 12 + length;
+    if (end > bytes.length) invalid();
+    const type = bytes.toString("ascii", offset + 4, offset + 8), chunk = bytes.subarray(offset + 8, end - 4);
+    let crc = 0xffffffff;
+    for (const byte of bytes.subarray(offset + 4, end - 4)) crc = PNG_CRC_TABLE[(crc ^ byte) & 255] ^ (crc >>> 8);
+    if (((crc ^ 0xffffffff) >>> 0) !== bytes.readUInt32BE(end - 4)) invalid();
+    if (offset === 8 && type !== "IHDR") invalid();
+    if (type === "IHDR") {
+      if (offset !== 8 || length !== 13) invalid();
+      width = chunk.readUInt32BE(0); height = chunk.readUInt32BE(4); depth = chunk[8];
+      const color = chunk[9], depths: Record<number, readonly number[]> = { 0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16] };
+      channels = ({ 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 } as Record<number, number>)[color];
+      if (!width || !height || width * height > IMAGE_MAX_PIXELS || !depths[color]?.includes(depth)
+        || chunk[10] !== 0 || chunk[11] !== 0) invalid();
+      if (chunk[12] !== 0) throw new Error("read_image_interlaced_png_unsupported");
+      palette = color !== 3;
+    } else if (type === "PLTE") {
+      if (data.length || !length || length > 768 || length % 3) invalid();
+      palette = true;
+    } else if (type === "IDAT") {
+      if (!palette || dataEnded) invalid();
+      data.push(chunk);
+    } else if (type === "IEND") {
+      if (length || !data.length || end !== bytes.length) invalid();
+      ended = true; offset = end; break;
+    } else {
+      if (!/^[a-z][A-Za-z]{3}$/.test(type)) invalid(); // Unknown critical chunks cannot be decoded safely.
+      if (data.length) dataEnded = true;
+    }
+    offset = end;
+  }
+  if (!ended || offset !== bytes.length) invalid();
+  const rowBytes = Math.ceil(width * channels * depth / 8), decodedBytes = (rowBytes + 1) * height;
+  if (decodedBytes > 40_000_000) throw new Error("read_image_pixel_capacity_exceeded");
+  const pixels = inflateSync(Buffer.concat(data), { maxOutputLength: decodedBytes });
+  if (pixels.length !== decodedBytes) invalid();
+  for (let row = 0; row < height; row++) if (pixels[row * (rowBytes + 1)] > 4) invalid();
+  return { width, height };
+}
+
+function readWorkspaceImage(cwd: string, input: unknown): BuiltinToolRunResult {
+  const file = resolveExistingIn(cwd, input), fd = openRegularFile(file, fs.constants.O_RDONLY);
+  let bytes: Buffer;
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.size || stat.size > IMAGE_MAX_BYTES) throw new Error("read_image_byte_capacity_exceeded");
+    bytes = Buffer.alloc(stat.size);
+    let count = 0;
+    while (count < bytes.length) {
+      const read = fs.readSync(fd, bytes, count, bytes.length - count, count);
+      if (!read) throw new Error("read_image_file_changed");
+      count += read;
+    }
+    if (fs.readSync(fd, Buffer.alloc(1), 0, 1, count)) throw new Error("read_image_file_changed");
+  } finally { fs.closeSync(fd); }
+  const dimensions = pngDimensions(bytes);
+  const observation = observeWorkspaceFile(cwd, String(input), "read", bytes);
+  if (!observation) throw new Error("read_image_observation_unavailable");
+  return {
+    content: JSON.stringify({ mediaType: "image/png", relativePath: observation.relativePath,
+      sha256: observation.sha256, bytes: observation.bytes, ...dimensions }),
+    fileObservation: observation,
+    imageDataUrl: `${IMAGE_DATA_URL_PREFIX}${bytes.toString("base64")}`,
+  };
+}
+
 function writeUtf8File(file: string, content: string): void {
   // 기존 inode 를 잘라내지 않고 새 inode 로 교체한다. 작업 폴더의 항목이 바깥 파일로의
   // 하드링크라면, 이 방식은 작업 폴더 경로만 갱신하고 다른 링크의 inode 는 못 바꾼다.
@@ -318,6 +403,21 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
         content = lines.slice(start, end).join("\n");
       }
       return { content: truncate(content, 20_000), ...(fileObservation ? { fileObservation } : {}) };
+    },
+  },
+  {
+    name: "read_image",
+    minPerm: "read",
+    description: "Read the pixels of a non-interlaced PNG image inside the working folder. Use a relative path. Returns the image for visual interpretation, with a verified file hash; maximum 6 MB and 16 million pixels.",
+    parameters: {
+      type: "object",
+      properties: { path: { type: "string", minLength: 1, maxLength: 700, description: "PNG image path relative to the working folder" } },
+      required: ["path"],
+      additionalProperties: false,
+    },
+    run(args, ctx) {
+      if (Object.keys(args).length !== 1 || typeof args.path !== "string" || !args.path || args.path.length > 700) throw new Error("read_image_invalid_input");
+      return readWorkspaceImage(ctx.cwd, args.path);
     },
   },
   {
@@ -532,7 +632,9 @@ export const BUILTIN_TOOLS: readonly BuiltinTool[] = [
           if (note) head += ` (${note})`;
           else if (overflowed) head += " (output exceeded 8MB, truncated)";
           const body = truncate([out, err].join("\n").trim() || "(no output)", 12_000);
-          resolve(`${head}\n${body}`);
+          const content = `${head}\n${body}`;
+          if (code !== 0 || note || overflowed) reject(new Error(content));
+          else resolve(content);
         }
         child.on("error", (error) => {
           if (settled) return;

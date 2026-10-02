@@ -1,9 +1,15 @@
+import { withLocalModelPermissionRelay } from "./local-model-approval";
+import { withAttemptChildren, type AttemptChildren } from "../runtime/attempt-children";
+import { drainAttemptChildren, killCliTree } from "../runtime/exec";
+import type { RuntimeToolPermissionDecision } from "../runtime/tool-approval";
+import { randomUUID } from "node:crypto";
 import { createHash } from "node:crypto";
 import type { DaemonLocalModelService } from "./local-model-service";
 import type { RunnerEvents, RunnerResult } from "../runtime/runner";
+import { admitRemoteLocalMcp } from "../local-model-hub/mcp-admission";
 import { assertLocalModelWireValue, localModelRemoteError, remoteLocalModelRequest,
   type LocalModelControlCommand, type LocalModelControlPage, type LocalModelRpcCommand,
-  type LocalModelRpcReply, type RemoteLocalModelRunEvent, type RemoteLocalModelRunPage } from "../local-model-hub/remote-contract";
+  type LocalModelRpcReply, type RemoteLocalModelRunEvent, type RemoteLocalModelRunPage, type RemoteLocalModelPermissionRequest, type RemoteMcpToolResultRequest } from "../local-model-hub/remote-contract";
 
 type State = LocalModelControlPage["state"];
 type Entry = {
@@ -12,7 +18,11 @@ type Entry = {
   waiters: Set<() => void>; bytes: number;
 };
 type Run = Entry & { events: Array<{ sequence: number; event: RemoteLocalModelRunEvent; bytes: number }>;
-  sequence: number; truncated: number; acknowledged: number; eventBytes: number };
+  sequence: number; truncated: number; acknowledged: number; eventBytes: number;
+  resultBoundaryGeneration?: string;
+  runtimeQuiesced?: boolean;
+  resultRequests: Map<string, { request: RemoteMcpToolResultRequest; settle(allow: boolean): void }>;
+  permissions: Map<string, { request: RemoteLocalModelPermissionRequest; settle(decision: RuntimeToolPermissionDecision): void }> };
 const ID = /^[A-Za-z0-9_-]{8,128}$/;
 const MAX_RESULT_BYTES = 2 * 1024 * 1024;
 const MAX_EVENT_BYTES = 512 * 1024;
@@ -126,6 +136,9 @@ export function createDaemonLocalModelRpc(options: {
     return { schema: "agentlas.local-model-run-page.v1", ownerEpoch: options.ownerEpoch, runId: row.id,
       state: row.state, events: selected, nextSequence: selected.at(-1)?.sequence ?? after,
       truncatedBeforeSequence: Math.max(row.truncated, row.acknowledged),
+      permissionRequests: [...row.permissions.values()].map(x => x.request),
+      mcpToolResults: [...row.resultRequests.values()].map(x => x.request),
+      ...(row.runtimeQuiesced !== undefined ? { runtimeQuiesced: row.runtimeQuiesced } : {}),
       result: row.result as RunnerResult | null, errorCode: row.errorCode, errorMessage: row.errorMessage };
   }
   function emit(row: Run, event: RemoteLocalModelRunEvent): void {
@@ -175,10 +188,20 @@ export function createDaemonLocalModelRpc(options: {
           if (detached.size >= 256 && !detached.has(clientId)) throw localModelRemoteError("local_model_remote_client_capacity_exceeded");
           detached.add(clientId);
           for (const row of controls.values()) if (row.clientId === clientId && row.state === "running") row.controller.abort(localModelRemoteError("local_model_remote_client_detached"));
+          for (const row of runs.values()) if (row.clientId === clientId) {
+            for (const permission of [...row.permissions.values()]) permission.settle("deny");
+            for (const result of [...row.resultRequests.values()]) result.settle(false);
+          }
           value = { detached: true }; break;
         }
         case "control.cancel": value = cancel(controls, clientId, command.operationId, "control"); break;
         case "run.cancel": value = cancel(runs, clientId, command.runId, "run"); break;
+        case "run.result-capability": {
+          assertAdmission(clientId);
+          value = { schema: "agentlas.local-model-result-boundary.v1", supported: true,
+            ownerEpoch: options.ownerEpoch, clientId, runId: id(command.runId), generation: id(command.generation) };
+          break;
+        }
         case "control.start": {
           const itemKey = key(clientId, id(command.operationId));
           if (!command.command || !Array.isArray(command.command.args)) throw localModelRemoteError("local_model_remote_command_invalid");
@@ -204,16 +227,21 @@ export function createDaemonLocalModelRpc(options: {
           const itemKey = key(clientId, id(command.runId));
           if (!command.request || Object.prototype.hasOwnProperty.call(command.request, "signal")) throw localModelRemoteError("local_model_remote_request_invalid");
           const request = remoteLocalModelRequest(command.request);
-          const digest = material(request);
+          const resultBoundaryGeneration = command.resultBoundaryGeneration === undefined ? undefined : id(command.resultBoundaryGeneration);
+          const digest = material({ request, mcpAdmission: command.mcpAdmission, resultBoundaryGeneration });
           let row = runs.get(itemKey);
           if (row) {
             if (row.material !== digest) throw localModelRemoteError("local_model_remote_id_conflict");
           } else {
             assertAdmission(clientId); makeRoom(runs, 8);
-            row = { ...entry(clientId, command.runId, digest), events: [], sequence: 0, truncated: 0, acknowledged: 0, eventBytes: 0 };
+            row = { ...entry(clientId, command.runId, digest), events: [], sequence: 0, truncated: 0, acknowledged: 0, eventBytes: 0, permissions: new Map(), resultRequests: new Map(), resultBoundaryGeneration };
             runs.set(itemKey, row);
             if (cancelled.has(`run:${itemKey}`)) row.controller.abort(localModelRemoteError("local_model_remote_cancelled"));
             const current = row;
+            const children: AttemptChildren = { children: new Set(), closing: false, stop: child => killCliTree(child, 500) };
+            let boundaryRefused = false;
+            const closeChildren = () => { children.closing = true; };
+            current.controller.signal.addEventListener("abort", closeChildren, { once: true });
             const events: RunnerEvents = {
               onPartial: (...args) => emit(current, { kind: "onPartial", args }),
               onStatus: (...args) => emit(current, { kind: "onStatus", args }),
@@ -222,16 +250,103 @@ export function createDaemonLocalModelRpc(options: {
               onThinking: (...args) => emit(current, { kind: "onThinking", args }),
               onNotice: (...args) => emit(current, { kind: "onNotice", args }),
             };
-            launch(row, () => options.service.runtime.run({ ...request, signal: current.controller.signal }, events));
+            launch(row, () => withAttemptChildren(children, async () => {
+              let admitted: Awaited<ReturnType<typeof admitRemoteLocalMcp>> | null = null;
+              try {
+                admitted = command.mcpAdmission
+                  ? await admitRemoteLocalMcp(command.mcpAdmission, () => { assertAdmission(clientId); current.controller.signal.throwIfAborted(); })
+                  : null;
+                return await withLocalModelPermissionRelay({
+                  signal: current.controller.signal,
+                  assertCurrent: () => assertAdmission(clientId),
+                  runtime: "agentlas-local", sessionKey: `agentlas-local:${request.sessionFingerprintSeed ?? request.cwd ?? "default"}`,
+                  permission: request.permission, cwd: request.cwd, planMode: request.planMode, unattended: request.unattended,
+                  chatId: request.approvalChatId ?? request.chatId,
+                  request: (ask, resourceDigest, family) => {
+                    assertAdmission(clientId); current.controller.signal.throwIfAborted();
+                    if (current.permissions.size >= 16) return Promise.resolve("deny");
+                    return new Promise<RuntimeToolPermissionDecision>(resolve => {
+                      const approvalId = randomUUID();
+                      let settled = false;
+                      const finish = (decision: RuntimeToolPermissionDecision) => {
+                        if (settled) return; settled = true;
+                        clearTimeout(timer); current.controller.signal.removeEventListener("abort", abort);
+                        current.permissions.delete(approvalId); resolve(decision); wake(current);
+                      };
+                      const abort = () => finish("deny");
+                      const timer = setTimeout(abort, 5 * 60_000);
+                      current.controller.signal.addEventListener("abort", abort, { once: true });
+                      current.permissions.set(approvalId, { request: { id: approvalId, family, ask, resourceDigest }, settle: finish });
+                      wake(current);
+                      if (current.controller.signal.aborted) abort();
+                    });
+                  },
+                }, admitted?.proxyScope, () => options.service.runtime.run({ ...request,
+                  ...(resultBoundaryGeneration ? { beforeMcpToolResult: (input: RemoteMcpToolResultRequest["input"]) => {
+                    assertAdmission(clientId); current.controller.signal.throwIfAborted();
+                    if (current.resultRequests.size >= 16) throw localModelRemoteError("local_model_remote_result_capacity_exceeded");
+                    return new Promise<void>((resolve, reject) => {
+                      const resultId = randomUUID(); let settled = false;
+                      const finish = (allow: boolean) => {
+                        if (settled) return; settled = true;
+                        if (!allow) { boundaryRefused = true; children.closing = true; }
+                        clearTimeout(timer); current.controller.signal.removeEventListener("abort", abort);
+                        current.resultRequests.delete(resultId);
+                        if (allow) resolve(); else reject(localModelRemoteError("local_model_remote_result_delivery_rejected"));
+                        wake(current);
+                      };
+                      const abort = () => finish(false);
+                      const timer = setTimeout(abort, 5 * 60_000);
+                      current.controller.signal.addEventListener("abort", abort, { once: true });
+                      current.resultRequests.set(resultId, { request: { id: resultId, ownerEpoch: options.ownerEpoch,
+                        clientId, runId: current.id, generation: resultBoundaryGeneration, afterSequence: current.sequence, input }, settle: finish });
+                      wake(current);
+                      if (current.controller.signal.aborted) abort();
+                    });
+                  } } : {}),
+                  ...(admitted ? { mcpConfigPath: admitted.configPath, env: { ...request.env, ...admitted.runtimeEnv } } : {}), signal: current.controller.signal }, events));
+              }
+              finally {
+                admitted?.cleanup();
+                for (const permission of [...current.permissions.values()]) permission.settle("deny");
+                for (const result of [...current.resultRequests.values()]) result.settle(false);
+                if (current.controller.signal.aborted || boundaryRefused) {
+                  children.closing = true;
+                  current.runtimeQuiesced = await drainAttemptChildren(children);
+                }
+                current.controller.signal.removeEventListener("abort", closeChildren);
+              }
+            }));
           }
           value = runPage(row); break;
+        }
+        case "run.permission": {
+          const row = get(runs, clientId, command.runId);
+          const pending = row.permissions.get(command.approvalId);
+          assertAdmission(clientId);
+          if (row.state !== "running" || row.controller.signal.aborted || !pending
+            || pending.request.resourceDigest !== command.resourceDigest
+            || !["allow_once", "allow_session", "deny"].includes(command.decision)) {
+            throw localModelRemoteError("local_model_remote_permission_refused");
+          }
+          pending.settle(command.decision); value = { resolved: true }; break;
+        }
+        case "run.result": {
+          const row = get(runs, clientId, command.runId);
+          const pending = row.resultRequests.get(command.resultId);
+          assertAdmission(clientId);
+          if (command.ownerEpoch !== options.ownerEpoch || row.state !== "running" || row.controller.signal.aborted
+            || !pending || command.generation !== row.resultBoundaryGeneration || typeof command.allow !== "boolean") {
+            throw localModelRemoteError("local_model_remote_result_refused");
+          }
+          pending.settle(command.allow); value = { resolved: true }; break;
         }
         case "run.read": {
           const row = get(runs, clientId, command.runId);
           const after = integer(command.afterSequence, 0, Number.MAX_SAFE_INTEGER);
           const limit = integer(command.limit, 128, 256);
           if (!limit || after > row.sequence) throw localModelRemoteError("local_model_remote_cursor_invalid");
-          await wait(row, integer(command.waitMs, 0, 25_000), () => row.state !== "running" || row.sequence > after);
+          await wait(row, integer(command.waitMs, 0, 25_000), () => row.state !== "running" || row.sequence > after || row.permissions.size > 0 || row.resultRequests.size > 0);
           value = runPage(row, after, limit); break;
         }
         case "run.ack": {

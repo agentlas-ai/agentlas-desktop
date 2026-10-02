@@ -66,5 +66,16 @@ export async function probeManagedLocalRuntime(): Promise<RuntimeStatus | null> 
 
 export const runManagedLocalModel: Runner = async (request, events) => {
   if (!configured) throw new Error("local_model_hub_not_configured");
-  return await configured.runtime.run(request, events);
+  try { return await configured.runtime.run(request, events); }
+  catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : error instanceof Error ? error.message : null;
+    if (typeof code === "string" && (code.startsWith("local_model_remote_mcp_admission_")
+      || code.startsWith("mcp_prepared_"))) return { text: "", failure: {
+      kind: "refused", runtime: "agentlas-local", source: "marker",
+      providerCode: "local_model_remote_mcp_admission_refused",
+      message: request.locale === "ko" ? "선택한 로컬 모델의 도구 권한을 준비하지 못했습니다. 같은 로컬 연결을 유지합니다."
+        : "The selected local model's tool admission could not be prepared. The local binding is unchanged.",
+    } };
+    throw error;
+  }
 };

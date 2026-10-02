@@ -1213,6 +1213,8 @@ function summarizeSnapshot(
   const running = states.filter((state) => state === "running").length;
   const failed = states.filter((state) => state === "failed").length;
   const skipped = states.filter((state) => state === "skipped").length;
+  if (snap.status === "needs_input") return { title: ko ? "로그인 복원을 기다리고 있어요" : "Waiting for login",
+    detail: ko ? "완료된 단계는 보존되어 있어요. 로그인 확인 뒤 안전한 단계부터 이어갑니다." : "Completed steps are saved. Safe steps continue after login verification." };
   if (snap.status === "running" || running > 0) {
     return {
       title: ko ? "작업하고 있어요" : "Working on it",
@@ -1455,6 +1457,7 @@ function runtimeFactLabel(fact: WorkflowRunRuntimeFact, ko: boolean): string {
 }
 
 export function statusTone(state: WorkflowNodeRunState): CSSProperties {
+  if (state === "needs_input") return { color: "var(--warn)" };
   if (state === "running") return { color: "var(--accent)" };
   if (state === "done") return { color: "var(--green-deep)" };
   if (state === "failed") return { color: "var(--red-deep)" };

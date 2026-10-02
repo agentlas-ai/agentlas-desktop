@@ -13,13 +13,12 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
-import { getDefaultEnvironment } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { OwnedStdioClientTransport } from "./owned-stdio-transport";
+import { OwnedStdioClientTransport, ownedStdioEnvironment } from "./owned-stdio-transport";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { readEnvVar } from "../secrets/vault";
 import { listInstalledServers, getServer } from "./registry";
-import { isCurrentElectronExecutable, withCliPath } from "../runtime/exec";
+import { isCurrentElectronExecutable } from "../runtime/exec";
 import { withUvxPath } from "./uv-runtime";
 import {
   OPENCRAB_CATALOG_ID,
@@ -492,7 +491,7 @@ function stdioEnvironmentForCommand(
   base: Record<string, string>,
 ): Record<string, string> {
   return {
-    ...base,
+    ...ownedStdioEnvironment(command, base),
     ...(isCurrentElectronExecutable(command) ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
   };
 }
@@ -520,16 +519,14 @@ async function createTransport(
   if (prepared) {
     const launch = actualTarget ? preparedMcpTargetTransport(prepared, server) : preparedMcpTransport(prepared, server);
     if (launch.kind === "stdio") {
-      const base = await withUvxPath(launch.command, withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" }), { signal });
       signal?.throwIfAborted();
       preparedMcpTransport(prepared, server);
       Object.assign(resolved, launch.env);
       return { transport: new OwnedStdioClientTransport({ command: launch.command, args: launch.args,
         ...(actualTarget ? { cwd: targetCwd } : {}),
-        env: stdioEnvironmentForCommand(launch.command, {
-          ...Object.fromEntries(Object.entries(base).filter((entry): entry is [string, string] => typeof entry[1] === "string")),
-          ...launch.env,
-        }), stderr: "ignore" }) as unknown as Transport, runtimeRoot: launch.runtimeRoot };
+        env: launch.env, environmentResolved: true,
+        validatePrepared: () => { preparedMcpTransport(prepared, server); },
+        stderr: "ignore" }) as unknown as Transport, runtimeRoot: launch.runtimeRoot };
     }
     Object.assign(resolved, launch.headers, { __preparedEndpoint: launch.url });
     const init = { requestInit: { headers: launch.headers },
@@ -549,7 +546,7 @@ async function createTransport(
     // 깔아 두지 않았다는 이유로 그 13개가 전부 죽으면 안 된다(withUvxPath 안의 사유 참조).
     const baseEnv = await withUvxPath(
       server.command,
-      withCliPath({ ...getDefaultEnvironment(), PATH: process.env.PATH ?? "" }),
+      ownedStdioEnvironment(server.command),
       { signal },
     );
     const stdioEnv = Object.fromEntries(
@@ -568,6 +565,15 @@ async function createTransport(
     }
     let command = expandHome(server.command);
     let args = (server.args ?? []).map(expandHome);
+    // Rebind the stock Browser test/legacy SDK path too: SDK-safe env defaults
+    // otherwise lose Main's private profile/port and use the shared launcher.
+    const browserRuntime = server.catalogId === "agentlas-browser"
+      && server.command === process.execPath && server.envKeys.length === 0
+      && server.configurationValid !== false && args.length === 1
+      && args[0] === path.join(os.homedir(), ".agentlas", "agentlas-browser-cdp.mjs")
+      ? (await import("./mcp-config")).agentlasBrowserCdpRuntimeContract()
+      : null;
+    if (browserRuntime) { command = browserRuntime.command; args = browserRuntime.args; }
     let runtimeRoot: string | null = null;
     if (server.catalogId === HEPHAESTUS_NETWORK_CATALOG_ID) {
       // Workforce is the one caller that acts on its own rejections: when a
@@ -591,11 +597,11 @@ async function createTransport(
     const transport = new OwnedStdioClientTransport({
       command,
       args,
-      // getDefaultEnvironment()는 PATH/HOME 등 안전한 기본값 — 거기에 시크릿을 얹는다.
+      // Safe defaults/temp locations are captured with explicit server overrides.
       // Any stdio server using this executable must run as Node, including
       // workspace-preview and future built-ins. Enforce after resolved env so
       // a missing/overridden flag cannot start another Desktop application.
-      env: stdioEnvironmentForCommand(command, { ...stdioEnv, ...resolved }),
+      env: stdioEnvironmentForCommand(command, { ...stdioEnv, ...resolved, ...browserRuntime?.env }),
       stderr: "ignore",
     }) as unknown as Transport;
     return { transport, runtimeRoot };
@@ -760,6 +766,31 @@ export interface McpToolContentResult {
   text: string;
   isError: boolean;
   images: Array<{ mediaType: "image/png" | "image/jpeg"; data: string }>;
+  /** Exact decoded MCP response, retained only by the Main-owned Science bridge. */
+  rawResult?: Record<string, unknown>;
+}
+
+/** The ordinary adapter keeps its established admission limits. Science retains exact blocks
+ * first, and bounds model delivery separately; an already received result is never re-executed. */
+export function normalizeMcpToolContentResult(value: unknown, maxTextChars: number, retainFullResult = false): McpToolContentResult {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("mcp_tool_result_invalid");
+  const res = value as Record<string, unknown>;
+  if (res.isError !== undefined && typeof res.isError !== "boolean") throw new Error("mcp_tool_result_invalid_error_flag");
+  if (res.content !== undefined && !Array.isArray(res.content)) throw new Error("mcp_tool_result_invalid_content");
+  const content = (res.content ?? []) as Array<{ type?: string; text?: string; data?: string; mimeType?: string }>;
+  const text = joinMcpToolText(content, retainFullResult ? Number.MAX_SAFE_INTEGER : maxTextChars);
+  const images: McpToolContentResult["images"] = []; let imageBytes = 0;
+  for (const item of content) {
+    if (item?.type !== "image" || !["image/png", "image/jpeg"].includes(item.mimeType ?? "")
+      || typeof item.data !== "string" || !/^[A-Za-z0-9+/=]+$/.test(item.data)) continue;
+    imageBytes += Math.ceil(item.data.length * 0.75);
+    if (images.length >= 4 || imageBytes > 8 * 1024 * 1024) {
+      if (retainFullResult) continue; // Full bytes remain in rawResult; this is only a vision preview.
+      throw new McpToolResponseTooLargeError(8 * 1024 * 1024);
+    }
+    images.push({ mediaType: item.mimeType as "image/png" | "image/jpeg", data: item.data });
+  }
+  return { text, images, isError: res.isError === true, ...(retainFullResult ? { rawResult: res } : {}) };
 }
 
 export interface McpToolCallOptions {
@@ -771,6 +802,8 @@ export interface McpToolCallOptions {
   onToolSchemaInvalidated?: () => void;
   timeoutMs?: number;
   maxTextChars?: number;
+  /** Main-owned Science opt-in; preserve the received result before model projection. */
+  retainFullResult?: true;
   signal?: AbortSignal;
   /** Mutable transaction seal. First compatible Workforce call fills it; all
    * later calls must use the exact same real runtime target/version/protocol. */
@@ -1071,33 +1104,13 @@ async function callServerToolContentInternal(
 
           preparation.signal.throwIfAborted();
           if (options?.prepared) preparedMcpTransport(options.prepared, server);
-          const res = (await activeClient.callTool({ name: toolName, arguments: args })) as {
-            content?: Array<{ type?: string; text?: string; data?: string; mimeType?: string }>;
-            isError?: boolean;
-          };
-          if (res.isError !== undefined && typeof res.isError !== "boolean") throw new Error("mcp_tool_result_invalid_error_flag");
-          const content = res.content ?? [];
-          const text = joinMcpToolText(content, maxTextChars);
-          const images: McpToolContentResult["images"] = [];
-          let imageBytes = 0;
-          for (const item of content) {
-            if (
-              item?.type !== "image" ||
-              (item.mimeType !== "image/png" && item.mimeType !== "image/jpeg") ||
-              typeof item.data !== "string" ||
-              !/^[A-Za-z0-9+/=]+$/.test(item.data)
-            ) continue;
-            imageBytes += Math.ceil(item.data.length * 0.75);
-            if (images.length >= 4 || imageBytes > 8 * 1024 * 1024) {
-              throw new McpToolResponseTooLargeError(8 * 1024 * 1024);
-            }
-            images.push({ mediaType: item.mimeType, data: item.data });
-          }
+          const res = await activeClient.callTool({ name: toolName, arguments: args });
+          const normalized = normalizeMcpToolContentResult(res, maxTextChars, options?.retainFullResult === true);
           if (session && sessionEntry) session.touch();
           else await closeMcpClientAndTransport(activeClient, transport);
           client = null;
           transport = null;
-          return { text, images, isError: res.isError === true };
+          return normalized;
         }
         throw new Error(`Agentlas OS runtime could not provide MCP tool: ${toolName}`);
       })(),

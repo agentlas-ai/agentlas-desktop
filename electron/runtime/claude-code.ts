@@ -12,6 +12,7 @@ import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
+import { ToolRequestReplayGuard } from "../../shared/tool-request-replay";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import {
@@ -21,6 +22,7 @@ import {
   workforceNativeToolEnforcement,
   workforceZeroToolsEnforcement,
   wrapSystemPrompt,
+  RuntimeTurnUnsettledError,
 } from "./runner";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
 import { detectApprovalRequired } from "./runtime-refusal";
@@ -53,7 +55,7 @@ import {
   composeResumeTurnPrompt,
   renderConversationContext,
   renderGapContext,
-  unseenHistoryGap, dedupeStableTurnContext } from "./continuity";
+  unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext, invalidateStableTurnContext } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, withCliPath, writeStdin } from "./exec";
@@ -758,12 +760,14 @@ export function claudeFailureFromEvent(
     };
   }
   if (ev.type === "result" && ev.is_error === true) {
+    // A terminal API envelope is less specific than an observed provider cause.
+    // Preserve auth, rate-limit and other explicit failures across that envelope.
+    if (prior?.source === "marker" && prior.kind !== "exit") return prior;
     const message = typeof ev.result === "string" && ev.result.trim()
       ? ev.result.trim().slice(0, 2000) : "claude error";
     return {
       kind: ev.api_error_status === 429 ? "quota"
         : /not logged in|please run \/login/i.test(finalText) ? "auth"
-        : ev.terminal_reason === "api_error" ? "quota"
         : "exit",
       message, runtime: "claude", source: "marker",
       ...(prior?.retryAfterHint ? { retryAfterHint: prior.retryAfterHint } : {}),
@@ -871,6 +875,8 @@ const runClaudeTurn = async (
     undefined,
     runReq.surfaceGate,
     "claude-code",
+    runReq.sciencePromptProfile,
+    runReq.judgmentOnly === true ? "host-judgment" : undefined,
   );
   const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableIdentity.fingerprint) : null;
   const savedSession = !assertScienceRecoveryRequest(runReq, "claude-code") && !runReq.untrustedNoTools && runReq.chatId
@@ -892,18 +898,12 @@ const runClaudeTurn = async (
     : "";
   // resume 턴: 시스템 프롬프트가 재전송되지 않으므로 gap+턴 컨텍스트를 사용자 메시지에 싣는다.
   // 새 세션: 턴 컨텍스트를 시스템 프롬프트 뒤에 붙여 세션을 시드한다.
-  const dedupedTurnContext = resumeSessionId
-    ? dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND, sessionId: resumeSessionId, turnContext: runReq.turnContext, stableBlocks: runReq.turnContextStable })
-    : { text: runReq.turnContext ?? "", skipped: 0, savedBytes: 0 };
-  if (dedupedTurnContext.skipped && process.env.AGENTLAS_PROMPT_DEBUG) {
-    console.warn(`[prompt] stable turn-context blocks skipped=${dedupedTurnContext.skipped} savedBytes=${dedupedTurnContext.savedBytes} chat=${runReq.chatId ?? "-"}`);
-  }
-  const continuationPrompt = composeResumeTurnPrompt(
+  let continuationPrompt = composeResumeTurnPrompt(
     runReq.userPrompt,
-    [gapContext, dedupedTurnContext.text].filter(Boolean).join("\n\n"),
+    [gapContext, runReq.turnContext].filter(Boolean).join("\n\n"),
     runReq.locale,
   );
-  const flatUser = resumeSessionId ? continuationPrompt : flattenHistory(runReq);
+  let flatUser = resumeSessionId ? continuationPrompt : flattenHistory(runReq);
   /*
    * 읽기 전용 실행이면 그 사실을 말해 준다 — 도구를 조용히 빼기만 하면 모델은 그것을
    * 일시적 장애로 읽고 우회를 찾는다. 실측: 서브에이전트 위임 → 다른 도구 대체 →
@@ -1351,6 +1351,31 @@ const runClaudeTurn = async (
     throw abortReasonError(req);
   }
   const session = lease?.session ?? null;
+  // Bind preparation to the actual held native identity when available. Native
+  // init/thread creation alone cannot prove fresh seed retention, so it is untracked.
+  const contextSessionId = session?.nativeSessionId ?? resumeSessionId;
+  // Use semantic request authority, not transport argv/pool identity: resume vs
+  // fresh argument order, one-shot vs pooled carriers and materialized temporary
+  // MCP filenames must not make an unchanged native contract look new.
+  const contextFingerprint = crypto.createHash("sha256").update(JSON.stringify([fingerprint,
+    runtimeSessionOwnerId ?? null, isolateRuntimeSessionOwner, runReq.systemPrompt, runReq.locale,
+    runReq.permission, runReq.approvalsReviewer, runReq.model, runReq.effort,
+    runReq.forceSurface, runReq.browserOnly, runReq.minimalObservation, runReq.desktopControlGrant,
+    runReq.isolatedMcpConfig, runReq.mcpAllowedTools,
+    runReq.mcpConfigPath, runReq.toolBrokerSettingsPath, executableIdentity.fingerprint,
+    runCwd, runEnv.CLAUDE_CONFIG_DIR])).digest("hex");
+  const resumeContext = contextSessionId ? dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND,
+    sessionId: contextSessionId, contextFingerprint, turnContext: runReq.turnContext,
+    stableBlocks: runReq.turnContextStable }) : undefined;
+  let stableContextAcknowledged = false;
+  if (resumeContext) {
+    continuationPrompt = composeResumeTurnPrompt(runReq.userPrompt,
+      [gapContext, resumeContext.text].filter(Boolean).join("\n\n"), runReq.locale);
+    if (resumeSessionId) flatUser = continuationPrompt;
+    if (resumeContext.skipped && process.env.AGENTLAS_PROMPT_DEBUG) {
+      console.warn(`[prompt] stable turn-context blocks skipped=${resumeContext.skipped} savedBytes=${resumeContext.savedBytes} chat=${runReq.chatId ?? "-"}`);
+    }
+  }
 
   try {
     return await new Promise<RunnerResult>((resolve, reject) => {
@@ -1364,6 +1389,8 @@ const runClaudeTurn = async (
       );
     };
     let child: ReturnType<typeof spawnCli>;
+    const runtimeAttemptId = crypto.randomUUID();
+    let turnDispatchAttempted = false;
     if (session) {
       child = session.child;
     } else {
@@ -1382,6 +1409,8 @@ const runClaudeTurn = async (
         return;
       }
       trackRunChild(child);
+      turnDispatchAttempted = true;
+      events.onRuntimeAttemptStarted?.(runtimeAttemptId);
       writeStdin(child, flatUser);
     }
     // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
@@ -1426,7 +1455,7 @@ const runClaudeTurn = async (
     let cur = "";
     let finalText = "";
     let tokens: number | undefined;
-    let observedUsage: { inputTokens: number; outputTokens: number } | undefined;
+    let observedUsage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | undefined;
     /** Root assistant messages only; result.modelUsage may include resumed turns. */
     const turnModel = new ClaudeTurnModelTracker();
     let stderr = "";
@@ -1496,6 +1525,7 @@ const runClaudeTurn = async (
     };
 
     const toolNameById = new Map<string, string>();
+    const toolRequestReplay = new ToolRequestReplayGuard();
 
     /**
 
@@ -1744,6 +1774,8 @@ const runClaudeTurn = async (
       type?: string;
       subtype?: string;
       session_id?: string;
+      uuid?: string;
+      num_turns?: number;
       mcp_servers?: Array<{ name?: string; status?: string }>;
       tools?: string[];
       message?: {
@@ -1811,8 +1843,17 @@ const runClaudeTurn = async (
         return;
       }
       if (typeof ev.session_id === "string" && ev.session_id) {
+        if (resumeContext?.delivery && ev.session_id !== resumeContext.delivery.identity.sessionId
+          && !ev.parent_tool_use_id && ev.isSidechain !== true) {
+          invalidateStableTurnContext(resumeContext.delivery.identity);
+        }
         sessionId = ev.session_id;
         if (session) session.nativeSessionId = ev.session_id;
+      }
+      if (ev.type === "system" && ev.subtype === "compact_boundary"
+        && !ev.parent_tool_use_id && ev.isSidechain !== true && contextSessionId) {
+        invalidateStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND,
+          sessionId: ev.session_id ?? sessionId ?? contextSessionId });
       }
       if (ev.error === "authentication_failed") {
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
@@ -1940,6 +1981,8 @@ const runClaudeTurn = async (
             } catch {
               argStr = "";
             }
+            if (!toolRequestReplay.accept(block.id, block.name, JSON.stringify(block),
+              JSON.stringify([ev.session_id ?? null, ev.parent_tool_use_id ?? null, ev.isSidechain === true]))) continue;
             if (block.id) {
               toolNameById.set(block.id, block.name);
               toolInputById.set(block.id, block.input);
@@ -2007,6 +2050,16 @@ const runClaudeTurn = async (
         // ★한도 거절은 표식이다 — 예전에는 케이스가 없어 조용히 버려졌다(분류는 순수 함수 한 곳).
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
       } else if (ev.type === "result") {
+        sawResult = true;
+        // The root result's native UUID, positive turn count and exact session
+        // bind delivery to this prompt. system/init, stdin writes and host status do not.
+        if (ev.is_error !== true && !runnerFailure && !structuredRuntimeError && !broken
+          && !ev.parent_tool_use_id && ev.isSidechain !== true
+          && typeof ev.session_id === "string" && typeof ev.uuid === "string" && ev.uuid.trim()
+          && Number.isSafeInteger(ev.num_turns) && ev.num_turns! > 0 && !req.signal?.aborted) {
+          stableContextAcknowledged = acknowledgeStableTurnContext(resumeContext?.delivery,
+            { sessionId: ev.session_id, acknowledgementId: ev.uuid }) || stableContextAcknowledged;
+        }
         const resultShape = ev as { subtype?: unknown; num_turns?: unknown };
         if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
           && resultShape.num_turns === 0) resumedConversationMissing = true;
@@ -2029,8 +2082,10 @@ const runClaudeTurn = async (
             observedUsage = {
               inputTokens: inputTotal,
               outputTokens: usage.output_tokens!,
+              ...(Number.isSafeInteger(usage.cache_read_input_tokens) && usage.cache_read_input_tokens! >= 0
+                ? { cachedInputTokens: usage.cache_read_input_tokens } : {}),
             };
-            events.onTerminalObservedUsage?.(observedUsage);
+            events.onTerminalObservedUsage?.(observedUsage, runtimeAttemptId);
           }
         }
         // ★모든 is_error가 표식이다 — 예전에는 로그인 만료 한 케이스만 집고 나머지를
@@ -2038,7 +2093,7 @@ const runClaudeTurn = async (
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
         if (
           ev.is_error === true
-          && (ev.terminal_reason === "api_error" || /not logged in|please run \/login/i.test(finalText))
+          && runnerFailure?.kind === "auth"
         ) {
           structuredRuntimeError = new Error(
             runReq.locale === "ko"
@@ -2084,7 +2139,8 @@ const runClaudeTurn = async (
       settled = true;
       broken = true;
       detachTurn();
-      rejectRuntime(err);
+      rejectRuntime(turnDispatchAttempted && !sawResult && !req.signal?.aborted
+        ? new RuntimeTurnUnsettledError(KIND, req.locale) : err);
     };
     const settle = (code: number | null) => {
       if (settled) return;
@@ -2105,12 +2161,13 @@ const runClaudeTurn = async (
         rejectRuntime(new Error(hostObservation.error));
         return;
       }
-      /*
-       * ★상주 턴이 `result` 를 못 봤다 — 세션이 죽었거나 프로토콜이 깨졌다. 이건 사용자의
-       * 문제가 아니라 우리가 물려준 세션의 문제다. 조용히 버리고 기존 1회성 `-p --resume`
-       * 경로로 **한 번** 다시 간다(그 호출은 상주를 쓰지 않으므로 무한 재시도가 불가능하다).
-       * 이미 본문이 나온 뒤라면 재시도가 화면에 답을 두 번 쓰게 되므로 하지 않는다.
-       */
+      // No result after a dispatched turn is uncertain, including tool-only
+      // turns with no visible text. Only an unattempted resident write may fall
+      // back to one-shot without risking another model or external action.
+      if (turnDispatchAttempted && !sawResult) {
+        rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale));
+        return;
+      }
       if (session && !sawResult && !combined() && !finalText) {
         broken = true;
         const why = (stderr || session.stderrTail).slice(-500);
@@ -2269,15 +2326,11 @@ const runClaudeTurn = async (
           reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
           return;
         }
-        if (resumeSessionId && req.chatId) clearRuntimeSession(req.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
         if (resumeSessionId) {
           events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${code}`);
-          if (req.unattended) {
-            reject(new Error(`Automation runtime session resume failed for ${KIND}; refusing to create a fresh CLI session.`));
-            return;
-          }
-          // Interactive chat may recover with full durable history after the receipt.
-          void runClaudeTurn({ ...req, runtimeSessionId: undefined }, events, false, observeNativeFile).then(resolve, reject);
+          // A settled failure alone does not prove that earlier tool effects
+          // were absent. The typed zero-turn result above is the safe exception.
+          rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale));
           return;
         }
         reject(new Error(`claude CLI exit ${code}${stderr ? `\n${stderr.slice(0, 500)}` : ""}`));
@@ -2309,9 +2362,12 @@ const runClaudeTurn = async (
        */
       session.active = turnSink;
       const turnText = lease && !lease.fresh ? continuationPrompt : flatUser;
-      if (!claudeResidentSessionAlive(session) || !writeClaudeResidentTurn(session, turnText)) {
-        // 빌린 순간과 쓰는 순간 사이에 죽었거나 stdin 이 닫혔다 — 조용히 1회성 경로로.
+      if (!claudeResidentSessionAlive(session)) {
         settle(null);
+      } else {
+        turnDispatchAttempted = true;
+        events.onRuntimeAttemptStarted?.(runtimeAttemptId);
+        if (!writeClaudeResidentTurn(session, turnText)) settle(null);
       }
     } else {
       child.on("error", onProcessError);
@@ -2319,6 +2375,9 @@ const runClaudeTurn = async (
     }
     });
   } finally {
+    if (contextSessionId && (broken || req.signal?.aborted || (resumeContext?.delivery && !stableContextAcknowledged))) {
+      invalidateStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND, sessionId: contextSessionId });
+    }
     if (lease) {
       // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
       if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse) pool.discard(lease);

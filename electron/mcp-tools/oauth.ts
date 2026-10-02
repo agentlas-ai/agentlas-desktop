@@ -1,4 +1,3 @@
-import { quarantineDedicatedGoogleSessions } from "../browser/google-session-boundary";
 // 원격 MCP 서버 OAuth — MCP authorization spec(2025-06-18) 클라이언트.
 //
 // 왜 필요한가: 지금까지 원격 MCP에 인증하는 길은 "사용자가 어딘가에서 토큰을 발급받아
@@ -293,21 +292,14 @@ async function openInAgentlasChrome(url: string): Promise<boolean> {
         "--no-default-browser-check",
         "--restore-last-session=false",
         "--disable-session-crashed-bubble",
-        "--disable-background-networking",
         "--new-window",
-        "chrome://version/",
+        url,
       ], { detached: true, stdio: "ignore" });
       child.unref();
       for (let attempt = 0; attempt < 40; attempt += 1) {
         if (await browserCdpPortReady()) {
           const ownership = await reconcileBrowserCdpOwnerWithRetry({ attempts: 2, delayMs: 50 });
           if (ownership.state === "owned" && ownership.pid) {
-            await quarantineDedicatedGoogleSessions(browserCdpProfilePath(), browserCdpPort(), async () => {
-              const owner = await reconcileBrowserCdpOwnerWithRetry();
-              return owner.state === "owned" && owner.pid === ownership.pid;
-            });
-            const navigation = spawn(exe, [`--user-data-dir=${browserCdpProfilePath()}`, url], { detached: false, stdio: "ignore" });
-            navigation.on("error", () => { /* caller can reopen the sign-in window */ });
             scheduleBrowserCdpGuardian(ownership.pid);
             return;
           }

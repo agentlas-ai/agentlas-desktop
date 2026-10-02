@@ -1,0 +1,150 @@
+{
+  "schema": "agentlas.science.rd-runtime-bundle.v1",
+  "packageVersion": "1.27.0",
+  "manifest": {
+    "schema": "agentlas.plugin/v2",
+    "slug": "agentlas-science-research-director",
+    "name": "Agentlas Science Research Director",
+    "version": "1.27.0",
+    "builtin": true,
+    "publisher": {
+      "name": "Agentlas",
+      "url": "https://agentlas.cloud"
+    },
+    "surface": {
+      "displayName": "Research Director",
+      "displayNameKo": "연구 디렉터",
+      "tagline": "Direct one rigorous study to a journal-ready package",
+      "taglineKo": "하나의 연구를 엄밀한 저널 제출본까지 지휘합니다",
+      "description": "Coordinates literature, hypotheses, frozen analysis plans, laboratory tools, evidence lineage, conclusions, manuscript drafting, and journal-specific validation without inventing results.",
+      "descriptionKo": "선행연구, 가설, 동결 분석계획, 랩 도구, 증거 계보, 결론, 논문 작성과 저널별 검증을 결과 조작 없이 하나의 연구로 연결합니다.",
+      "category": "data",
+      "brandColor": "#375F55",
+      "defaultPrompts": [
+        "이 연구 질문을 선행연구부터 저널 제출본까지 하나의 연구로 진행해줘",
+        "현재 연구 상태와 증거 공백을 점검하고 다음으로 필요한 랩 작업을 지휘해줘"
+      ]
+    },
+    "invocation": {
+      "mention": "@agentlas-science-research-director",
+      "implicit": "router",
+      "standalone": true
+    },
+    "runtime": {
+      "kind": "builtin-agent",
+      "agentSlug": "agentlas-science-research-director",
+      "persona": "agent/soul.md",
+      "agentContract": "agent/agent.md",
+      "workflowContract": "skills/direct-study/SKILL.md",
+      "manuscriptContract": "skills/write-manuscript/SKILL.md",
+      "promptSha256": "ca34009c7674dfce2ce06934a343802cd79f8bb2f7537156a413a913d2007777",
+      "failClosed": true,
+      "core": "agent/runtime-core.md",
+      "manualCatalog": "contracts/runtime-manual-catalog.json",
+      "bundle": "contracts/runtime-bundle.json",
+      "catalogSha256": "79ab73c540ae3da0f1ff42a9a1df7a1305d5ff236424bd770d5f550cfa6ab3a9",
+      "archivedPromptSha256": "b6b01a83aabea2f77a5b157b7736c212488f71919e25aeb3c6f33567deab2953"
+    },
+    "provides": {
+      "skills": {
+        "router": "skills/index/SKILL.md",
+        "workflows": [
+          "direct-study",
+          "write-manuscript",
+          "reference"
+        ]
+      }
+    },
+    "requires": {
+      "prereq": [
+        {
+          "id": "agentlas-science",
+          "provided-by": "app"
+        }
+      ],
+      "os": [
+        "darwin",
+        "win32",
+        "linux"
+      ]
+    },
+    "permissions": {
+      "fileWrite": "project-only",
+      "network": "ask",
+      "shell": "deny"
+    },
+    "state": {
+      "files": [
+        "research-director-state.json"
+      ],
+      "assets": false
+    }
+  },
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 4659,
+      "sha256": "eade56ed5974800a51713b8243fc52299c022059e77eeeb6a411c785973cf07e"
+    },
+    {
+      "path": "agent/agent.md",
+      "bytes": 21966,
+      "sha256": "99350b4e680ff529de897905d991a08cc36785db22dcff8d5bc5b38ca0e51e48"
+    },
+    {
+      "path": "agent/routing-card.json",
+      "bytes": 6380,
+      "sha256": "993ee5ea7e0f7631973947c8c159dfedb588e193fad85338fb92b8e1910f9084"
+    },
+    {
+      "path": "agent/runtime-core.md",
+      "bytes": 1680,
+      "sha256": "ca34009c7674dfce2ce06934a343802cd79f8bb2f7537156a413a913d2007777"
+    },
+    {
+      "path": "agent/soul.md",
+      "bytes": 5006,
+      "sha256": "6060787c466fb954be131467cd1b8882ee37330c28884471bcbde3884d8a23e6"
+    },
+    {
+      "path": "contracts/decision.schema.json",
+      "bytes": 1539,
+      "sha256": "8e68cb19ff9bc7d53568b04659dda438c29e4546ef568caec0feb48af2d93994"
+    },
+    {
+      "path": "contracts/evidence-ledger.schema.json",
+      "bytes": 1394,
+      "sha256": "51d012a27e47c53999305cddda95499634bf1c5596eb85b14bbb01a1d9547bdf"
+    },
+    {
+      "path": "contracts/research-state.schema.json",
+      "bytes": 5569,
+      "sha256": "7f542e98cb4ece3b94f73c38dcb3db0ff54b9587a24186f7b99662c078f19503"
+    },
+    {
+      "path": "contracts/runtime-manual-catalog.json",
+      "bytes": 20343,
+      "sha256": "79ab73c540ae3da0f1ff42a9a1df7a1305d5ff236424bd770d5f550cfa6ab3a9"
+    },
+    {
+      "path": "skills/direct-study/SKILL.md",
+      "bytes": 20168,
+      "sha256": "b7c7644122aec72a612ff723f9114b5bf401f9b8c61b23838dd070bd18ff2c1a"
+    },
+    {
+      "path": "skills/index/SKILL.md",
+      "bytes": 918,
+      "sha256": "fd4e3ff803e4f3198f0e9f086a8c74a0527136d23f93d715e8a6bd557f2cb5fc"
+    },
+    {
+      "path": "skills/reference/SKILL.md",
+      "bytes": 53753,
+      "sha256": "c962db26d35f1c86e48cefa18829373e264188df5fd78ab9af1d7f5d9ccf9a36"
+    },
+    {
+      "path": "skills/write-manuscript/SKILL.md",
+      "bytes": 38873,
+      "sha256": "f03af817bd8bc8566998c419d2f753507b3a06e764bc56287e6dc1544d873a04"
+    }
+  ]
+}

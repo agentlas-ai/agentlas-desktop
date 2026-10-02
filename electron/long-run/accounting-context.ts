@@ -5,13 +5,15 @@ import { getDb } from "../store/db";
 import { getLongRunByGoalId, appendLongRunEvent, recordLongRunUsage } from "../store/long-runs";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { recordRunEvent } from "../store/run-events";
-import { longRunMonetaryRefusal, type LongRunUsageInput } from "./budget";
+import { longRunMonetaryRefusal, normalizeLongRunUsage, type LongRunUsageInput } from "./budget";
 
 export interface InvocationAccountingOwner { goalId: string; attemptId: string | null }
 interface Scope {
   invocationRunId: string;
-  chatId: string;
+  chatId: string | null;
   anchorId: string;
+  automationId?: string;
+  nodeId?: string;
   readOwner: () => InvocationAccountingOwner | null;
   allowHostPausedWait?: boolean;
 }
@@ -25,6 +27,63 @@ export function withInvocationAccounting<T>(input: {
     .get(input.runId) as { id: string; chat_id: string | null } | undefined;
   if (!anchor || anchor.chat_id !== input.chatId) throw new Error("accounting_invocation_anchor_missing");
   return accountingContext.run({ invocationRunId: input.runId, chatId: input.chatId, anchorId: anchor.id, readOwner: input.readOwner }, call);
+}
+
+/** Graph-owned attribution only. The persisted running node is the authority;
+ * request text cannot assign provider usage to an automation or a Goal. */
+export function withAutomationNodeAccounting<T>(input: {
+  runId: string; automationId: string; nodeId: string; chatId: string;
+}, call: () => T): T {
+  const db = getDb();
+  const row = db.prepare(`SELECT a.goal_id, r.node_states_json FROM automation_runs r
+    JOIN automations a ON a.id=r.automation_id
+    WHERE r.id=? AND r.automation_id=? AND r.status='running'`)
+    .get(input.runId, input.automationId) as { goal_id: string | null; node_states_json: string } | undefined;
+  let states: Record<string, unknown> | null = null;
+  try { states = row ? JSON.parse(row.node_states_json) : null; } catch { /* Refuse malformed host state. */ }
+  if (!row || states?.[input.nodeId] !== "running"
+    || !db.prepare("SELECT 1 FROM chats WHERE id=?").get(input.chatId)) {
+    throw new Error("accounting_automation_anchor_missing");
+  }
+  const goal = row.goal_id ? getLongRunByGoalId(row.goal_id) : null;
+  const goalId = goal && ownsHostGoalLoop(goal.surface) ? goal.goalId : null;
+  const anchor = recordRunEvent({ runId: input.runId, chatId: input.chatId,
+    automationId: input.automationId, nodeId: input.nodeId, kind: "automation_usage_scope_started",
+    sourceEventId: `automation-usage-scope:${input.runId}:${input.nodeId}:${randomUUID()}`,
+    payload: { schemaVersion: "agentlas.automation-accounting.v1", goalId } });
+  return accountingContext.run({ invocationRunId: input.runId, chatId: input.chatId,
+    anchorId: anchor.id, automationId: input.automationId, nodeId: input.nodeId,
+    readOwner: () => goalId ? { goalId, attemptId: null } : null }, call);
+}
+
+/** Result/strategy inference may follow a sealed graph. Its usage anchor
+ * records that inference without reopening the graph or authorizing a replay. */
+export function withAutomationRunAccounting<T>(input: {
+  runId: string; automationId: string; chatId?: string | null;
+}, call: () => T): T {
+  const db = getDb();
+  const row = db.prepare(`SELECT a.goal_id FROM automations a WHERE a.id=? AND (
+    EXISTS (SELECT 1 FROM automation_runs r WHERE r.id=? AND r.automation_id=a.id)
+    OR EXISTS (SELECT 1 FROM run_events e WHERE e.run_id=? AND e.automation_id=a.id
+      AND e.kind='automation_schedule_attempt_started')
+    OR EXISTS (SELECT 1 FROM run_events e WHERE e.automation_id=a.id
+      AND e.kind='automation_effect_observation'
+      AND json_extract(e.payload_json,'$.action')='dispatched'
+      AND json_extract(e.payload_json,'$.permission')='read'
+      AND json_extract(e.payload_json,'$.observationInvocationRunId')=?))`)
+    .get(input.automationId, input.runId, input.runId, input.runId) as { goal_id: string | null } | undefined;
+  if (!row || (input.chatId && !db.prepare("SELECT 1 FROM chats WHERE id=?").get(input.chatId))) {
+    throw new Error("accounting_automation_anchor_missing");
+  }
+  const goal = row.goal_id ? getLongRunByGoalId(row.goal_id) : null;
+  const goalId = goal && ownsHostGoalLoop(goal.surface) ? goal.goalId : null;
+  const anchor = recordRunEvent({ runId: input.runId, chatId: input.chatId ?? null,
+    automationId: input.automationId, kind: "automation_run_accounting_started",
+    sourceEventId: `automation-run-accounting:${input.runId}:${randomUUID()}`,
+    payload: { schemaVersion: "agentlas.automation-accounting.v1", goalId } });
+  return accountingContext.run({ invocationRunId: input.runId, chatId: input.chatId ?? null,
+    anchorId: anchor.id, automationId: input.automationId,
+    readOwner: () => goalId ? { goalId, attemptId: null } : null }, call);
 }
 
 /** Verification owns inference usage without reopening the task's sealed run.
@@ -121,14 +180,17 @@ export function beginAccountedInference(input: { kind: string; model?: string | 
     const refusal = longRunMonetaryRefusal(goal);
     if (refusal) throw new Error(refusal);
   }
-  const sourceId = `judgment:${scope.invocationRunId}:${randomUUID()}`;
+  const sourceId = `${scope.automationId ? "automation" : "judgment"}:${scope.invocationRunId}:${randomUUID()}`;
   const usageIdentity = { sourceId, invocationRunId: scope.invocationRunId, scopeAnchorId: scope.anchorId,
     ...(owner?.attemptId ? { attemptId: owner.attemptId } : {}) };
   const db = getDb();
   db.transaction(() => {
-    recordRunEvent({ runId: scope.invocationRunId, chatId: scope.chatId, kind: "runtime_usage_started", sourceEventId: `${sourceId}:started`,
+    recordRunEvent({ runId: scope.invocationRunId, chatId: scope.chatId, automationId: scope.automationId,
+      nodeId: scope.nodeId, kind: "runtime_usage_started", sourceEventId: `${sourceId}:started`,
       payload: { schemaVersion: "agentlas.inference-accounting.v1", sourceId, scopeAnchorId: scope.anchorId,
-        attribution: owner ? "goal" : "unassigned", goalId: owner?.goalId ?? null, attemptId: owner?.attemptId ?? null, runtime: { kind: input.kind, model: input.model ?? null, source: input.source ?? null }, costStatus: "unknown" } });
+        attribution: owner ? "goal" : scope.automationId ? "automation" : "unassigned",
+        goalId: owner?.goalId ?? null, attemptId: owner?.attemptId ?? null,
+        runtime: { kind: input.kind, model: input.model ?? null, source: input.source ?? null }, costStatus: "unknown" } });
     if (owner) appendLongRunEvent({ runId: getLongRunByGoalId(owner.goalId)!.id, kind: "run.usage_started", actorKind: "host",
       sourceEventId: `${sourceId}:started`, payload: { sourceId, invocationRunId: scope.invocationRunId, attemptId: owner.attemptId } });
   }).immediate();
@@ -137,12 +199,15 @@ export function beginAccountedInference(input: { kind: string; model?: string | 
     // Timeout/Stop is a final observation. A late provider cannot replace it.
     if (settled) return;
     settled = true;
+    const tokens = normalizeLongRunUsage({ ...usageIdentity, observedUsage }).tokens;
     db.transaction(() => {
-      if (owner) recordLongRunUsage(owner.goalId, { ...usageIdentity, observedUsage });
-      recordRunEvent({ runId: scope.invocationRunId, chatId: scope.chatId, kind: "runtime_usage_recorded", sourceEventId: `${sourceId}:result`,
+      if (owner) recordLongRunUsage(owner.goalId, { ...usageIdentity, observedUsage: tokens });
+      recordRunEvent({ runId: scope.invocationRunId, chatId: scope.chatId, automationId: scope.automationId,
+        nodeId: scope.nodeId, kind: "runtime_usage_recorded", sourceEventId: `${sourceId}:result`,
         payload: { schemaVersion: "agentlas.inference-accounting.v1", sourceId, scopeAnchorId: scope.anchorId,
-          attribution: owner ? "goal" : "unassigned", goalId: owner?.goalId ?? null, attemptId: owner?.attemptId ?? null, outcome,
-          tokens: observedUsage ?? null, cost: { status: "unknown", usd: null, reasonCode: "provider_cost_unavailable" } } });
+          attribution: owner ? "goal" : scope.automationId ? "automation" : "unassigned",
+          goalId: owner?.goalId ?? null, attemptId: owner?.attemptId ?? null, outcome,
+          tokens, cost: { status: "unknown", usd: null, reasonCode: "provider_cost_unavailable" } } });
     }).immediate();
   } };
 }

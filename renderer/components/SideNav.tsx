@@ -14,7 +14,7 @@ import { UpdateBanner } from "./UpdateBanner";
 import { navigate } from "@/lib/navigation";
 import { ipc } from "@/lib/ipc";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
-import { useScienceSuiteStatus } from "@/lib/use-science-suite-status";
+import { scienceCoreInstalled, scienceCoreReady, useScienceSuiteStatus } from "@/lib/use-science-suite-status";
 import { classifyHubEntity, entityClassShortLabel } from "@/lib/agent-entity-kind";
 import { pickLocalized, useT } from "@/lib/i18n";
 import {
@@ -86,7 +86,8 @@ export function SideNav({
   const [searchSuggestionQuery, setSearchSuggestionQuery] = useState("");
   const [searchActiveIndex, setSearchActiveIndex] = useState(0);
   const scienceSuite = useScienceSuiteStatus();
-  const scienceReady = Boolean(scienceSuite?.installed && scienceSuite.enabled);
+  const scienceReady = scienceCoreReady(scienceSuite);
+  const scienceInstalled = scienceCoreInstalled(scienceSuite);
   const searchGenerationRef = useRef(0);
   // 텔레그램 항목은 이동이 아니라 팝업이라, 활성 표시가 pathname 이 아니라 팝업 상태를 따른다.
   const telegramOneDialogOpen = useSyncExternalStore(
@@ -533,7 +534,7 @@ export function SideNav({
             ? (locale === "ko" ? "Agentlas Science 열기" : "Open Agentlas Science")
             : scienceSuite?.phase === "repair-required"
               ? (locale === "ko" ? "Agentlas Science 복구" : "Repair Agentlas Science")
-              : scienceSuite?.installed
+              : scienceInstalled
                 ? (locale === "ko" ? "Agentlas Science 켜기" : "Enable Agentlas Science")
                 : (locale === "ko" ? "Agentlas Science 다운로드" : "Download Agentlas Science")}
         >
@@ -547,7 +548,7 @@ export function SideNav({
                 ? (locale === "ko" ? "열기" : "Open")
                 : scienceSuite?.phase === "repair-required"
                   ? (locale === "ko" ? "복구" : "Repair")
-                  : scienceSuite?.installed
+                  : scienceInstalled
                     ? (locale === "ko" ? "켜기" : "Enable")
                     : (locale === "ko" ? "받기" : "Download")}</span>
             </span>
@@ -558,7 +559,7 @@ export function SideNav({
                 ? (locale === "ko" ? "Science 열기" : "Open Science")
                 : scienceSuite?.phase === "repair-required"
                   ? (locale === "ko" ? "Science 복구" : "Repair Science")
-                  : scienceSuite?.installed
+                  : scienceInstalled
                     ? (locale === "ko" ? "Science 켜기" : "Enable Science")
                     : (locale === "ko" ? "Science 다운로드" : "Download Science")}
             </span>

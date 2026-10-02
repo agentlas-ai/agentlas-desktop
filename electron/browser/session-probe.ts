@@ -1,9 +1,8 @@
 import { chromium, type Browser, type Page } from "playwright";
 import type { BrowserSessionProbeResult } from "../../shared/browser-session-probe";
 import { listBrowserSites, normalizeSite } from "../store/browser-vault";
-import { dedicatedGoogleSessionsQuarantined } from "./google-session-boundary";
 import {
-  acquireBrowserCdpLease, browserCdpPort, browserCdpPortReady, browserCdpProfilePath,
+  acquireBrowserCdpLease, browserCdpPort, browserCdpPortReady,
   reconcileBrowserCdpOwnerWithRetry, releaseBrowserCdpLease,
 } from "../mcp-tools/browser-cdp-launcher";
 
@@ -36,10 +35,6 @@ export function probeBrowserSession(input: string): Promise<BrowserSessionProbeR
   }
   const policy = policies[site];
   if (!policy) return Promise.resolve(result("unverified", "no-authentication-detector", "unsupported-site"));
-  const isolated = () => {
-    try { return dedicatedGoogleSessionsQuarantined(browserCdpProfilePath()); }
-    catch { return false; }
-  };
   const pending = flights.get(site);
   if (pending) return pending;
   const flight = (async () => {
@@ -52,18 +47,12 @@ export function probeBrowserSession(input: string): Promise<BrowserSessionProbeR
       if ((await reconcileBrowserCdpOwnerWithRetry()).state !== "owned") {
         return result("unverified", "dedicated-browser-ownership-unconfirmed", "browser-not-owned");
       }
-      if (!isolated()) {
-        return result("unverified", "google-session-isolation-unconfirmed", "google-session-relogin-required");
-      }
       browser = await chromium.connectOverCDP(`http://127.0.0.1:${browserCdpPort()}`, { timeout: 3_000 });
       if ((await reconcileBrowserCdpOwnerWithRetry()).state !== "owned") {
         return result("unverified", "dedicated-browser-ownership-changed", "browser-not-owned");
       }
       const context = browser.contexts()[0];
       if (!context) return result("unverified", "dedicated-browser-context-unavailable", "browser-unavailable");
-      if (!isolated()) {
-        return result("unverified", "google-session-isolation-changed", "google-session-relogin-required");
-      }
       page = await context.newPage();
       await page.goto(policy.url, { waitUntil: "domcontentloaded", timeout: 6_000 });
       await page.locator(policy.signedIn).first().waitFor({ state: "visible", timeout: 2_000 }).catch(() => undefined);

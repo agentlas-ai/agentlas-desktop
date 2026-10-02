@@ -12,13 +12,16 @@
 // facts decide (2026-09-24): only read-only runs get this far (form gate), so
 // another bounded attempt cannot act twice. A person is involved only for a
 // named boundary — payment, credential, security consent, or purpose.
-import { judgeRequired } from "../system-agents/judgment";
+import { judgeRequired, runtimeSelectionCacheScope } from "../system-agents/judgment";
+import { createHash } from "node:crypto";
+import { normalizeRuntimeSelectionInput } from "../../shared/runtime-selection";
 import {
   ONE_AUTO_RECOVERY_MAX_ATTEMPTS,
   ONE_RECOVERY_LABELS,
   ONE_RECOVERY_OUTCOME_LABELS,
   oneRecoveryHostFactDecision,
   oneAutoRecoveryFormGate,
+  oneAutoRecoveryTerminalStop,
   oneAutoRecoveryFromLabel,
   oneRecoveryOutcomeFromLabel,
   oneRunFailureFingerprint,
@@ -28,9 +31,10 @@ import {
   type OneRecoveryOutcomeDecision,
   type OneRunFailureFingerprint,
 } from "../../shared/one-auto-recovery";
-import type { InvocationRunReceipt } from "../../shared/types";
+import type { InvocationRunReceipt, RunEventUi, RuntimeSelection } from "../../shared/types";
 import type { RuntimeLocale } from "../runtime/status-i18n";
 import { automationRunToolCounts } from "../automation-progress-facts";
+import { currentUiLocale } from "../ui-locale";
 
 /** Host receipts: tool calls of this run that could have acted outside. Null when the ledger is unreadable. */
 export interface OneRecoveryHostFacts {
@@ -55,6 +59,9 @@ export interface OneAutoRecoveryInput {
   signal?: AbortSignal;
   /** Injected by contracts; Main reads the run's own host receipts. */
   hostFacts?: OneRecoveryHostFacts | null;
+  /** Main-owned exact runtime/control scope, never inferred from failure prose. */
+  runtimeSelection?: RuntimeSelection;
+  controlScope?: string;
 }
 
 export interface OneAutoRecoveryResult {
@@ -80,6 +87,52 @@ export interface OneRecoveryOutcomeResult {
   decision: OneRecoveryOutcomeDecision;
   diagnosis: string;
   decidedBy: "llm" | "unavailable";
+}
+
+/** The accepted controller pin survives One's inherited picker (a null chat pin). */
+export function oneRecoveryRuntimeSelection(
+  receipt: Pick<InvocationRunReceipt, "runId" | "chatId">,
+  events: readonly Pick<RunEventUi, "runId" | "chatId" | "kind" | "payload">[],
+  chatSelection?: RuntimeSelection | null,
+): RuntimeSelection | undefined {
+  if (chatSelection) return normalizeRuntimeSelectionInput(chatSelection, { roles: ["orchestrator"], allowInherit: false });
+  const selected = [...events].reverse().find((event) => event.runId === receipt.runId
+    && event.chatId === receipt.chatId && event.kind === "runtime_selection"
+    && event.payload?.eventKind === "runtime-selected" && event.payload?.runtimeRole === "orchestrator");
+  if (!selected) return undefined;
+  const payload = selected.payload!;
+  return normalizeRuntimeSelectionInput({
+    kind: payload.runtimeKind, backend: payload.runtimeBackend, source: payload.runtimeSource,
+    model: payload.runtimeModel, effort: payload.runtimeEffort, longContext: payload.runtimeLongContext,
+    acpAgentId: payload.runtimeAcpAgentId,
+  }, { roles: ["orchestrator"], allowInherit: false });
+}
+
+// Keep only the current recovery snapshot for each chat. A new run/control/attempt
+// replaces it; deleting the chat releases it. Renderer unsubscribe never owns
+// Main's in-flight judgment and cannot turn polling into another provider call.
+const recoveryJudgments = new Map<string, { signature: string; result: Promise<OneAutoRecoveryResult> }>();
+const recoverySignals = new WeakMap<AbortSignal, number>();
+let recoverySignalSequence = 0;
+
+export function forgetOneRecoveryJudgment(chatId: string): void {
+  recoveryJudgments.delete(chatId);
+}
+
+function recoveryJudgmentSignature(input: OneAutoRecoveryInput): string {
+  const receipt = input.receipt;
+  let signalScope: number | null = null;
+  if (input.signal) {
+    signalScope = recoverySignals.get(input.signal) ?? ++recoverySignalSequence;
+    recoverySignals.set(input.signal, signalScope);
+  }
+  return createHash("sha256").update(JSON.stringify([
+    receipt.runId, receipt.chatId, receipt.status, receipt.errorCode, receipt.errorMessage,
+    receipt.executionPermission, receipt.interruptionCause, receipt.hostStopCause, receipt.eventCount,
+    input.goal, input.attemptsSpent, input.previousFingerprint ?? null, input.locale,
+    input.hostFacts,
+    runtimeSelectionCacheScope(input.runtimeSelection), input.controlScope ?? null, signalScope,
+  ])).digest("hex");
 }
 
 const GUIDANCE = [
@@ -113,14 +166,23 @@ function evidence(input: OneAutoRecoveryInput): string {
 export async function judgeOneAutoRecovery(
   input: OneAutoRecoveryInput,
 ): Promise<OneAutoRecoveryResult> {
+  input = { ...input, receipt: { ...input.receipt }, locale: input.locale ?? currentUiLocale(),
+    hostFacts: input.hostFacts !== undefined ? input.hostFacts : readHostFacts(input.receipt.runId) };
+  const signature = recoveryJudgmentSignature(input);
+  const current = recoveryJudgments.get(input.receipt.chatId);
+  if (current?.signature === signature) return current.result;
+  // Install before any await. Preserve unavailable results and rejections too:
+  // unchanged host evidence cannot authorize an endless presentation retry.
+  const result = Promise.resolve().then(() => judgeOneAutoRecoverySnapshot(input));
+  recoveryJudgments.set(input.receipt.chatId, { signature, result });
+  return result;
+}
+
+async function judgeOneAutoRecoverySnapshot(input: OneAutoRecoveryInput): Promise<OneAutoRecoveryResult> {
   const fingerprint = oneRunFailureFingerprint(input.receipt);
-  if (input.receipt.interruptionCause === "steering") {
-    return {
-      decision: { retry: false, reason: "settled" },
-      fingerprint,
-      diagnosis: "",
-      decidedBy: "form",
-    };
+  const terminalStop = oneAutoRecoveryTerminalStop(input.receipt);
+  if (terminalStop) {
+    return { decision: terminalStop, fingerprint, diagnosis: terminalStopDiagnosis(terminalStop.reason, input.locale), decidedBy: "form" };
   }
   const gated = oneAutoRecoveryFormGate({
     receipt: input.receipt,
@@ -141,6 +203,7 @@ export async function judgeOneAutoRecovery(
         "If the person stopped the run, simply acknowledge that. If repeating could duplicate an external action, ask them to confirm the outside result before continuing.",
       ].join(" "),
       scanSecrets: true,
+      runtimeSelection: input.runtimeSelection,
       ...(input.locale ? { locale: input.locale } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
@@ -164,6 +227,7 @@ export async function judgeOneAutoRecovery(
     input: evidence(input),
     guidance: GUIDANCE,
     scanSecrets: true,
+    runtimeSelection: input.runtimeSelection,
     ...(input.locale ? { locale: input.locale } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   });
@@ -202,6 +266,17 @@ export async function judgeOneAutoRecovery(
   };
 }
 
+function terminalStopDiagnosis(reason: string, locale?: RuntimeLocale): string {
+  const ko = (locale ?? currentUiLocale()) === "ko";
+  if (reason === "no-progress") return ko
+    ? "같은 작업이 진전 없이 반복되어 자동 재시도를 멈췄어요. 현재 결과를 확인하고 다음에 할 작업을 알려 주세요."
+    : "Automatic retries stopped because the work was repeating without progress. Review the current result and specify the next step.";
+  if (reason === "unsafe-to-repeat") return ko
+    ? "이전 작업의 처리 결과가 아직 확인되지 않아 자동으로 다시 실행하지 않았어요. 해당 작업의 결과를 확인한 뒤 이어갈 방향을 알려 주세요."
+    : "The previous operation's outcome is still unconfirmed, so it was not retried automatically. Check that operation's result before directing the next step.";
+  return "";
+}
+
 /**
  * A process exit is not outcome proof. After an automatic retry reaches a
  * completed receipt, One asks the resident judge whether the original request
@@ -211,6 +286,14 @@ export async function judgeOneAutoRecovery(
 export async function judgeOneRecoveryOutcome(
   input: OneRecoveryOutcomeInput,
 ): Promise<OneRecoveryOutcomeResult> {
+  const terminalStop = oneAutoRecoveryTerminalStop(input.originalReceipt)
+    ?? oneAutoRecoveryTerminalStop(input.recoveryReceipt);
+  if (terminalStop) return {
+    decision: { verified: false, retry: false, reason: terminalStop.reason },
+    diagnosis: terminalStopDiagnosis(terminalStop.reason, input.locale),
+    // No outcome verification was admitted at this terminal boundary.
+    decidedBy: "unavailable",
+  };
   if (
     !["failed", "interrupted"].includes(input.originalReceipt.status)
     || input.recoveryReceipt.status !== "completed"

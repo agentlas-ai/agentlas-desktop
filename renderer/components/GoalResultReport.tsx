@@ -13,7 +13,13 @@ export function GoalResultReport({ result, locale, children }: {
    * (오너 녹화 2026-09-26: 말풍선마다 "Verification pending"). 실행에 결속된 보고만 표를 단다.
    */
   if (result.status === "pending" && !result.runId) return <>{children}</>;
-  const label = locale === "ko"
+  const label = result.verificationState === "not_requested"
+    ? result.verificationScope === "episode"
+      ? locale === "ko" ? "이번 회차 작업 보고 · 별도 검증 전" : "Episode report · not independently verified"
+      : locale === "ko" ? "작업 보고 · 별도 검증 전" : "Report · not independently verified"
+    : result.verificationState === "inconclusive"
+      ? locale === "ko" ? "작업 보고 · 검증 근거 부족" : "Report · verification inconclusive"
+      : locale === "ko"
     ? result.status === "legacy" ? "이전 작업 보고 · 검증 미확인" : result.status === "pending" ? "검증 전 작업 보고" : "검증 미통과 · 결과 확인 필요"
     : result.status === "legacy" ? "Previous report · verification unknown" : result.status === "pending" ? "Verification pending" : "Verification not passed · review required";
   return <div data-goal-result={result.status} style={{ marginTop: 10 }}>

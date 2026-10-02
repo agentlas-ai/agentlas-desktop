@@ -1,11 +1,13 @@
 import {
   prepareMcpProxyLaunch,
+  preparedMcpProxyLaunchScope,
   activateMcpProxyLaunch,
   revokeMcpProxyLaunch,
   deactivateMcpProxyLaunch,
   cancelMcpProxyLaunchPreparation,
   isPersistentMcpProxyLaunch,
 } from "./proxy-session";
+import type { BeforeMcpToolResult } from "../runtime/runner";
 // MCP -> 런타임 브리지. 설치·활성화된 MCP 서버를 런타임별 설정으로 직렬화한다.
 // - Claude Code: `--mcp-config` JSON 파일 (vault 값은 `${ENV_ALIAS}` 참조만 기록)
 // - Codex CLI: `-c mcp_servers.<name>...` config overrides (시크릿 값 없는 이름/경로만 전달)
@@ -16,6 +18,8 @@ import {
 // 이게 없으면 카탈로그의 Playwright(브라우저) 서버가 "설치"만 되고 채팅 중 호출되지 않았다.
 // 이제 에이전트가 실제로 브라우저를 띄워 회원가입/로그인/키 발급을 대신 해줄 수 있다.
 import { registerPreparedMcpConfig, preparedMcpBindings, mcpServerConfigurationDigest } from "./prepared-transport";
+import { ownedStdioEnvironment } from "./owned-stdio-transport";
+import { withUvxPath } from "./uv-runtime";
 import path from "node:path";
 import os from "node:os";
 import fs from "node:fs";
@@ -145,6 +149,7 @@ function pushCodexConfig(args: string[], key: string, prop: string, value: strin
 export interface McpConfigResult {
   /** True only after exact canonical native browser credentials were bound. */
   nativeBrowserBound?: true;
+  nativeComputerUseBound?: true;
   configPath: string;
   /** ["mcp__playwright", ...] — write/full 권한에서 --allowedTools 자동 승인용. */
   allowedTools: string[];
@@ -163,6 +168,8 @@ export interface McpConfigResult {
 }
 
 export interface McpConfigBuildOptions {
+  /** Receiving native host's origin/epoch revocation fence. Never a wire value. */
+  admissionCurrent?: () => boolean;
   /** Main-owned non-chat Build plan authority; never accepted from a runtime payload. */
   browserApproval?: {
     owner: NonNullable<BrowserApprovalRequestEvent["owner"]>;
@@ -171,7 +178,7 @@ export interface McpConfigBuildOptions {
   /** Exact Main-authorized workspace, including runs without a tool-gate proxy. */
   workingFolder?: string;
   /** Main-only, run-scoped native guest grant; token remains in runtime secret aliases. */
-  nativeBrowser?: { endpoint: string; token: string };
+  nativeBrowser?: { endpoint: string; token: string; nativeComputerUse?: import("../computer-use/native-guest").NativeGuestComputerUseCapability };
   /** Playwright MCP persistent profile key. Used by automations to avoid sharing the interactive browser profile lock. */
   browserProfileKey?: string;
   /** When present, serialize only these selected catalog ids for the current run. */
@@ -195,6 +202,8 @@ export interface McpConfigBuildOptions {
    * 배선된 런타임에도 붙여 두면 두 관문이 같은 답을 내므로 해롭지 않다.
    */
   toolGate?: {
+    /** Main-only result delivery boundary, retained by the registered proxy gate. */
+    beforeMcpToolResult?: BeforeMcpToolResult;
     /** Main-authored Plan ceiling, independent of per-tool approval grants. */
     planMode?: true;
     /** Main-only: One's turn that reports a teammate result — no one-team tools (EDGE-CASES X4). */
@@ -726,6 +735,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const codexConfigArgs: string[] = [];
   const runtimeEnv: Record<string, string> = {};
   let nativeBrowserBound = false;
+  let nativeComputerUseBound = false;
   const preparedRows: Parameters<typeof registerPreparedMcpConfig>[0]["servers"] = [];
   const includedServerIds: string[] = [];
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
@@ -873,7 +883,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
     const key = mcpConfigKey(s);
     if (s.transport === "stdio" && s.command) {
-      const browserRuntime = (shouldApplyAgentlasBrowserCdpOverride(s) || (opts?.nativeBrowser && isCanonicalAgentlasBrowserLauncher(s)))
+      // Dedicated-profile runs need the same host-selected port/profile as
+      // native-guest runs; SDK-safe stdio defaults do not inherit them.
+      const browserRuntime = (shouldApplyAgentlasBrowserCdpOverride(s) || isCanonicalAgentlasBrowserLauncher(s))
         ? agentlasBrowserCdpRuntimeContract(nativeBrowserLauncherScope)
         : null;
       let command = resolveStdioCommand(s);
@@ -897,7 +909,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           sessionKey: opts.toolGate.sessionKey,
           chatId: scope.chatId,
           surface: scope.surface,
-        }, opts.toolGate.permission ?? "read");
+        }, opts.toolGate.permission ?? "read", { unattended: opts.toolGate.unattended === true });
       } else if (s.catalogId === "agentlas-browser" && opts?.browserApproval) {
         const { owner, permission } = opts.browserApproval;
         if (owner.surface !== "work" || owner.context !== "build" || owner.chatId !== null || !owner.sessionKey) {
@@ -992,6 +1004,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           Object.entries(launch.env).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
         );
       }
+      if (command === "uv" || command === "uvx") {
+        // Preserve the existing managed-uv bootstrap, before its PATH is sealed.
+        const preparedEnv = await withUvxPath(command, ownedStdioEnvironment(command, builtInEnv));
+        builtInEnv.PATH = preparedEnv.PATH ?? "";
+      }
       const secretAliases: Record<string, string> = {};
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
@@ -1006,6 +1023,14 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         secretAliases.AGENTLAS_NATIVE_BROWSER_TOKEN = alias;
         runtimeEnv[alias] = opts.nativeBrowser.token;
         nativeBrowserBound = true;
+      }
+      if (opts?.nativeBrowser && canonicalComputerUseSelected && ["cua-driver", "agentlas-browser"].includes(s.catalogId ?? "")) {
+        if (!opts.toolGate || !mcpProxyApprovalPort()) throw new Error("computer-use-tool-gate-unavailable");
+        if (!opts.nativeBrowser.nativeComputerUse) throw new Error("native-guest-capability-unavailable");
+        const alias = mcpRuntimeSecretAlias(key, "AGENTLAS_NATIVE_GUEST_COMPUTER_USE");
+        secretAliases.AGENTLAS_NATIVE_GUEST_COMPUTER_USE = alias;
+        runtimeEnv[alias] = JSON.stringify(opts.nativeBrowser.nativeComputerUse);
+        if (s.catalogId === "cua-driver") nativeComputerUseBound = true;
       }
       const aliases = Object.values(secretAliases);
       if (
@@ -1072,7 +1097,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         consentTransport = actual;
         const browserReadOnly = s.catalogId === "agentlas-browser" && agentlasBrowserReadOnlyProfile(opts?.toolGate);
         const proxied = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles,
-          browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined, browserReadOnly);
+          s.catalogId === "cua-driver" ? "cua-driver" : browserRuntime && opts?.nativeBrowser ? "agentlas-browser" : undefined, browserReadOnly);
+        if (s.catalogId === "cua-driver" && opts?.toolGate && !proxied) throw new Error("computer-use-tool-gate-unavailable");
         if (browserReadOnly && !proxied) throw new Error("browser-read-only-gate-unavailable");
         const browserCodexMainGated = s.catalogId === "agentlas-browser" && agentlasBrowserCodexMainGated(opts?.toolGate);
         if (browserCodexMainGated && !proxied) throw new Error("browser-main-gate-unavailable");
@@ -1084,7 +1110,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // External stdio MCPs launch through the least-privilege wrapper. The
         // child gets OS necessities and only its own mapped credentials, never
         // LLM auth or another MCP's opaque alias.
-        const codexLaunch = opts?.toolGate?.planMode || browserReadOnly || browserCodexMainGated ? proxied : null;
+        const codexLaunch = opts?.toolGate?.planMode || browserReadOnly || browserCodexMainGated || s.catalogId === "cua-driver" ? proxied : null;
         pushCodexConfig(codexConfigArgs, key, "command", tomlString(codexLaunch?.command ?? process.execPath));
         pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(codexLaunch?.args ?? wrapperArgs));
         pushCodexConfig(
@@ -1257,7 +1283,31 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
   const configurations = preparedRows.map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
-  releasePrepared = registerPreparedMcpConfig({ path: configPath, servers: preparedRows, runtimeEnv, isCurrent: () => {
+  const { admissionCurrent: _admissionCurrent, ...delegationBuildOptions } = opts ?? {};
+  for (const row of preparedRows) {
+    const entry = mcpServers[row.configKey] as { env?: Record<string, string> };
+    const handle = entry.env?.[MCP_PROXY_LAUNCH_ENV];
+    if (handle) row.proxyScope = preparedMcpProxyLaunchScope(handle);
+  }
+  const proxyScope = preparedRows.find(row => row.proxyScope)?.proxyScope;
+  // Process-local callbacks stay on Main's proxy registration. The delegated
+  // reconstruction intent is structured-cloned and cannot carry authority closures.
+  if (delegationBuildOptions.toolGate) {
+    const { beforeMcpToolResult: _beforeMcpToolResult, ...serializableGate } = delegationBuildOptions.toolGate;
+    delegationBuildOptions.toolGate = serializableGate;
+  }
+  if (proxyScope && delegationBuildOptions.toolGate) {
+    delegationBuildOptions.toolGate = { ...delegationBuildOptions.toolGate, cwd: proxyScope.cwd };
+  }
+  // Relay grants also carry a process-local release callback. Delegate only
+  // their authenticated endpoint/token, never that callback or native owner.
+  if (opts?.nativeBrowser) delegationBuildOptions.nativeBrowser = {
+    endpoint: opts.nativeBrowser.endpoint, token: opts.nativeBrowser.token,
+    ...(opts.nativeBrowser.nativeComputerUse ? { nativeComputerUse: opts.nativeBrowser.nativeComputerUse } : {}),
+  };
+  releasePrepared = registerPreparedMcpConfig({ path: configPath, servers: preparedRows, runtimeEnv,
+    buildOptions: delegationBuildOptions, isCurrent: () => {
+    if (opts?.admissionCurrent && !opts.admissionCurrent()) return false;
     const current = new Map(listInstalledServers().map((server) => [server.id, mcpServerConfigurationDigest(server)]));
     return configurations.every(([id, digest]) => current.get(id) === digest);
   } });
@@ -1271,6 +1321,6 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   }
   return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers, cleanup,
     ...(workspacePreviewCapabilityCleanup ? { workspacePreviewCapabilityCleanup } : {}),
-    ...(nativeBrowserBound ? { nativeBrowserBound: true as const } : {}) };
+    ...(nativeBrowserBound ? { nativeBrowserBound: true as const } : {}), ...(nativeComputerUseBound ? { nativeComputerUseBound: true as const } : {}) };
   } catch (error) { cleanup(); throw error; }
 }

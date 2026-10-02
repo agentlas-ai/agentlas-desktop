@@ -1,5 +1,3 @@
-import { isProtectedBrowserSessionHost } from "../../shared/browser-session-transfer";
-import { dedicatedGoogleSessionsQuarantined } from "./google-session-boundary";
 /*
  * 로그인 복구 사다리의 실제 손발 — 저장소 측정, 겨냥 가져오기, 다시 읽기, 카드, 세션 감시.
  * 판정과 순서는 login-recovery.ts(순수)에 있고, 여기서는 그 결정을 실행만 한다.
@@ -10,6 +8,7 @@ import { dedicatedGoogleSessionsQuarantined } from "./google-session-boundary";
  */
 import fs from "node:fs";
 import path from "node:path";
+import { createHash } from "node:crypto";
 import { session as electronSession } from "electron";
 import type { McpInvocationEvent } from "../../shared/types";
 import { registrableDomain } from "../../shared/registrable-domain";
@@ -24,6 +23,7 @@ import {
   type LoginRecoveryEvent,
   type LoginRecoveryLadder,
   type LoginRecoveryOutcome,
+  type LoginPrerequisiteRef,
   type OwnerLoginCard,
   type TargetedImportReport,
 } from "./login-recovery";
@@ -39,8 +39,8 @@ const NATIVE_PARTITION = "persist:agentlas-browser-default";
 const WATCH_LIMIT_MS = 6 * 60 * 60 * 1000;
 
 /** 목표 재개 — main 이 invocation 서비스를 알 때 한 번 등록한다. */
-let resumeHandler: ((reason: "login-restored") => void) | null = null;
-export function setLoginRecoveryResumeHandler(handler: ((reason: "login-restored") => void) | null): void {
+let resumeHandler: ((reason: "login-restored", prerequisite?: LoginPrerequisiteRef) => void) | null = null;
+export function setLoginRecoveryResumeHandler(handler: ((reason: "login-restored", prerequisite?: LoginPrerequisiteRef) => void) | null): void {
   resumeHandler = handler;
 }
 
@@ -49,7 +49,7 @@ function consentDomains(domains: readonly string[]): Promise<{ profileId: string
     const consent = getBrowserCredentialConsent();
     if (!consent.granted || !consent.profileId) return null;
     const allowed = new Set(consent.domains);
-    const scoped = [...new Set(domains.map((d) => registrableDomain(d)).filter((d) => d && !isProtectedBrowserSessionHost(d) && allowed.has(d)))];
+    const scoped = [...new Set(domains.map((d) => registrableDomain(d)).filter((d) => d && allowed.has(d)))];
     return scoped.length ? { profileId: consent.profileId, domains: scoped } : null;
   });
 }
@@ -76,8 +76,6 @@ async function readStore(surface: BrowserCookieSurface, domains: readonly string
 }
 
 async function readSource(domains: readonly string[]): Promise<CookieMetadata[] | null> {
-  domains = domains.filter((domain) => !isProtectedBrowserSessionHost(domain));
-  if (!domains.length) return null;
   const { getBrowserCredentialConsent } = await import("./credential-sync");
   const consent = getBrowserCredentialConsent();
   if (!consent.granted || !consent.profileId) return null;
@@ -115,12 +113,10 @@ async function cdpPages(): Promise<CdpPageTarget[]> {
 /** One CDP session: send commands, optionally wait for one event, then close. */
 async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params?: Record<string, unknown>) => Promise<unknown>, waitFor: (event: string, timeoutMs: number) => Promise<boolean>) => Promise<T>): Promise<T> {
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
-  const isolated = () => dedicatedGoogleSessionsQuarantined(launcher.browserCdpProfilePath());
   // All recovery CDP commands (including evaluation, reload, and cookie feeds)
   // share this boundary. An existing answering port is never sufficient proof.
   if (!loopbackWs(wsUrl, launcher.browserCdpPort())
-    || (await launcher.reconcileBrowserCdpOwnerWithRetry()).state !== "owned"
-    || !isolated()) throw new Error("google-session-isolation-unconfirmed");
+    || (await launcher.reconcileBrowserCdpOwnerWithRetry()).state !== "owned") throw new Error("browser-ownership-unconfirmed");
   return new Promise<T>((resolve, reject) => {
     const socket = new WebSocket(wsUrl, { perMessageDeflate: false, maxPayload: 8 * 1024 * 1024 });
     let seq = 0;
@@ -136,9 +132,6 @@ async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params
       if (error) reject(error); else resolve(value as T);
     };
     const call = (method: string, params: Record<string, unknown> = {}) => new Promise<unknown>((res, rej) => {
-      try {
-        if (!isolated()) throw new Error("google-session-isolation-unconfirmed");
-      } catch (error) { rej(error instanceof Error ? error : new Error("google-session-isolation-unconfirmed")); return; }
       const id = ++seq;
       pending.set(id, { resolve: res, reject: rej });
       try { socket.send(JSON.stringify({ id, method, params })); } catch (error) { pending.delete(id); rej(error as Error); }
@@ -248,8 +241,6 @@ type CdpCookieParam = { name: string; value: string; domain: string; path: strin
 
 /** Feed cookies into the running, owned dedicated browser without closing it. */
 async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[]): Promise<number | null> {
-  cookies = cookies.filter((cookie) => !isProtectedBrowserSessionHost(cookie.domain));
-  if (!cookies.length) return 0;
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
   if (!(await launcher.browserCdpPortReady())) return null;
   const owned = await launcher.reconcileBrowserCdpOwnerWithRetry();
@@ -272,20 +263,30 @@ async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[]): Promise<numb
 }
 
 // ── 겨냥 가져오기: 원본 → 에이전트가 쓰는 저장소, 그 도메인만 원본이 이긴다 ──────────────
-async function targetedImport(input: { domains: string[]; surface: BrowserCookieSurface }): Promise<TargetedImportReport> {
+async function targetedImport(input: { domains: string[]; surface: BrowserCookieSurface; isCurrent?: () => boolean }): Promise<TargetedImportReport> {
+  const { browserCredentialConsentRevision, getBrowserCredentialConsent } = await import("./credential-sync");
+  const revision = browserCredentialConsentRevision();
   const scope = await consentDomains(input.domains);
   if (!scope) return { state: "not-consented", written: 0 };
+  const isCurrent = () => {
+    const consent = getBrowserCredentialConsent();
+    return browserCredentialConsentRevision() === revision && (input.isCurrent?.() ?? true)
+      && consent.granted && consent.profileId === scope.profileId
+      && scope.domains.every((domain) => consent.domains.includes(domain));
+  };
+  if (!isCurrent()) return { state: "not-consented", written: 0 };
   const credential = await import("./credential-import");
+  if (!isCurrent()) return { state: "not-consented", written: 0 };
   const source = credential.readSourceSessionCookies(scope.profileId, scope.domains);
   if (!source.ok) {
     if (source.reason !== "unsupported-platform") return { state: "failed", written: 0 };
-    // Other platforms: the dedicated store keeps the maintenance-window importer (source wins,
-    // explicit); the partition is fed from that store.
+    // The explicitly selected dedicated surface keeps its maintenance-window importer.
     if (input.surface === "cdp-profile") {
-      const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false });
+      const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "dedicated" });
       return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
     }
-    return feedStore({ from: "cdp-profile", to: "native-partition", domains: scope.domains });
+    const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "native" });
+    return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
   }
   try {
     if (input.surface === "native-partition") {
@@ -295,7 +296,7 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
         expires: cookie.expires ?? -1, session: cookie.expires === undefined,
         httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite,
       })), electronSession.fromPartition(NATIVE_PARTITION), Date.now() / 1_000,
-      { isCurrent: () => true, explicitImport: true });
+      { isCurrent, explicitImport: true });
       return counts.imported > 0 ? { state: "imported", written: counts.imported } : { state: "failed", written: 0 };
     }
     const params: CdpCookieParam[] = source.cookies.map((cookie) => ({
@@ -310,7 +311,7 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
     source.wipe();
   }
   // Dedicated browser not running: nothing to close, so the maintenance import is safe here.
-  const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false });
+  const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "dedicated" });
   return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
 }
 
@@ -399,7 +400,8 @@ function record(event: LoginRecoveryEvent, ctx: LoginRecoveryContext): void {
   console.info("[login-recovery]", JSON.stringify(event));
   if (!ctx.runId) return;
   void import("../store/run-events").then(({ tryRecordRunEvent }) => {
-    tryRecordRunEvent({ runId: ctx.runId!, chatId: ctx.chatId ?? null, kind: "browser_login_recovery", payload: { ...event } });
+    tryRecordRunEvent({ runId: ctx.runId!, chatId: ctx.chatId ?? null, nodeId: ctx.nodeId ?? null,
+      kind: "browser_login_recovery", payload: { ...event } });
   }).catch(() => undefined);
 }
 
@@ -429,6 +431,42 @@ function sharedLadder(): LoginRecoveryLadder {
   return ladder;
 }
 
+/** Called when the invocation/node settles, independently of login success. */
+export function releaseLoginRecoveryScope(scope: { runId: string; nodeId?: string }): void {
+  ladder?.releaseScope(scope);
+}
+
+type RecoveryBrowserGrant = Pick<NativeBrowserRelayGrant, "pages" | "health"> & {
+  refresh?: () => Promise<void>;
+  recoverLoginWalls?: (input: { nodeId?: string; onPrerequisiteRestored?: (prerequisite: LoginPrerequisiteRef) => void }) => Promise<LoginRecoveryOutcome[]>;
+};
+const grantIds = new WeakMap<object, number>();
+let nextGrantId = 0;
+function grantSlotId(grant: object): number {
+  let id = grantIds.get(grant);
+  if (id === undefined) { id = ++nextGrantId; grantIds.set(grant, id); }
+  return id;
+}
+const opaqueProfileId = (value: string) => createHash("sha256").update(value).digest("hex");
+
+function pendingReleaseBatch(slots: string[], released?: () => void) {
+  const pending = new Set(slots);
+  let finished = false, handed = false, notified = false;
+  const check = () => {
+    if (!finished || !handed || notified || pending.size > 0) return;
+    notified = true;
+    try { released?.(); } catch { /* host cleanup must not fail recovery */ }
+  };
+  return {
+    callback: (slot: string) => released ? () => { pending.delete(slot); check(); } : undefined,
+    outcome: (slot: string, outcome: LoginRecoveryOutcome) => {
+      if (outcome.state === "awaiting-owner" || outcome.state === "in-flight") handed = true;
+      else pending.delete(slot);
+    },
+    finish: () => { finished = true; check(); },
+  };
+}
+
 /** Tools after which the agent may be standing on a new page. */
 const PAGE_CHANGING_TOOLS = new Set(["browser_navigate", "browser_navigate_back", "browser_tabs", "browser_click",
   "browser_snapshot", "browser_wait_for", "browser_press_key"]);
@@ -451,19 +489,23 @@ export function observeBrowserToolForLoginWall(input: {
   toolName: string;
   runId?: string;
   chatId?: string;
-  nativeGrant?: Pick<NativeBrowserRelayGrant, "pages" | "health">;
+  nodeId?: string;
+  signal?: AbortSignal;
+  nativeGrant?: RecoveryBrowserGrant;
   notify?: (card: OwnerLoginCard) => void;
-}): void {
+  onPrerequisiteRestored?: (prerequisite: LoginPrerequisiteRef) => void;
+}): Promise<LoginRecoveryOutcome[]> {
   const leaf = input.toolName.startsWith("agentlas-browser.") ? input.toolName.slice("agentlas-browser.".length) : null;
-  if (!leaf || !PAGE_CHANGING_TOOLS.has(leaf)) return;
-  void recoverLoginWallsNow(input).catch((error: unknown) => {
+  if (!leaf || !PAGE_CHANGING_TOOLS.has(leaf)) return Promise.resolve([]);
+  return recoverLoginWallsNow(input).catch((error: unknown) => {
     console.warn("[login-recovery] observe failed", error instanceof Error ? error.name : "unknown");
+    return [];
   });
 }
 
 /** Ask Main's resume path (blocked-goal sweep) to continue goals after a recovery. Best effort. */
-export function triggerBrowserRecoveryResume(): void {
-  try { resumeHandler?.("login-restored"); } catch { /* resume is best effort */ }
+export function triggerBrowserRecoveryResume(prerequisite?: LoginPrerequisiteRef): void {
+  try { resumeHandler?.("login-restored", prerequisite); } catch { /* resume is best effort */ }
 }
 
 /**
@@ -473,33 +515,86 @@ export function triggerBrowserRecoveryResume(): void {
 export async function recoverLoginWallsNow(input: {
   runId?: string;
   chatId?: string;
-  nativeGrant?: Pick<NativeBrowserRelayGrant, "pages" | "health">;
+  nodeId?: string;
+  signal?: AbortSignal;
+  onPendingScopeReleased?: () => void;
+  onPrerequisiteRestored?: (prerequisite: LoginPrerequisiteRef) => void;
+  nativeGrant?: RecoveryBrowserGrant;
   notify?: (card: OwnerLoginCard) => void;
 }): Promise<LoginRecoveryOutcome[]> {
   const resume = triggerBrowserRecoveryResume;
+  const verificationSignal = input.signal ?? new AbortController().signal;
   const outcomes: LoginRecoveryOutcome[] = [];
-  if (input.nativeGrant && input.nativeGrant.health?.().failedOver !== true) {
-    for (const page of input.nativeGrant.pages()) {
-      if (detectLoginWall({ url: page.url }).kind !== "login-wall") continue;
+  if (input.signal?.aborted) return outcomes;
+  // A daemon cannot access Electron's session or vault. Its broker fixes Main's
+  // run/chat/abort authority and performs recovery against the actual native guest.
+  if (typeof input.nativeGrant?.recoverLoginWalls === "function") {
+    const remote = await input.nativeGrant.recoverLoginWalls({ nodeId: input.nodeId, onPrerequisiteRestored: input.onPrerequisiteRestored });
+    for (const outcome of remote) {
+      if (outcome.state === "awaiting-owner" && outcome.newCard && !input.signal?.aborted) {
+        try { input.notify?.(outcome.card); } catch { /* notification cannot invalidate recovery */ }
+      }
+    }
+    return remote;
+  }
+  const { browserCredentialConsentRevision, getBrowserCredentialConsent } = await import("./credential-sync");
+  const revision = browserCredentialConsentRevision();
+  const consent = getBrowserCredentialConsent();
+  const consentGeneration = `${revision}:${opaqueProfileId(JSON.stringify([consent.granted,
+    consent.profileId, [...consent.domains].sort()]))}`;
+  const consentCurrent = () => browserCredentialConsentRevision() === revision && !input.signal?.aborted;
+  if (!consentCurrent()) return outcomes;
+  if (input.nativeGrant) {
+    await input.nativeGrant.refresh?.();
+    const grant = input.nativeGrant;
+    const health = grant.health?.();
+    if (!consentCurrent() || health?.current === false || health?.failedOver === true) {
+      return outcomes;
+    }
+    const pages = grant.pages().map((page, index) => ({ page,
+      slotId: (page as { id?: string }).id ?? `grant-${grantSlotId(grant)}-page-${index}` }));
+    const batch = pendingReleaseBatch(pages.map(({ slotId }) => slotId), input.onPendingScopeReleased);
+    for (const { page, slotId } of pages) {
       const evaluate = page.evaluate;
-      outcomes.push(await sharedLadder().observe(page.url, {
+      const outcome = await sharedLadder().observe(page.url, {
         surface: "native-partition", reload: page.reload, runId: input.runId, chatId: input.chatId,
+        nodeId: input.nodeId, signal: input.signal, slotId, profileId: opaqueProfileId(NATIVE_PARTITION),
+        onPendingScopeReleased: batch.callback(slotId), onPrerequisiteRestored: input.onPrerequisiteRestored,
+        consentGeneration, isCurrent: () => {
+          const state = grant.health?.();
+          return consentCurrent() && state?.current !== false && state?.failedOver !== true;
+        },
+        isPendingCurrent: consentCurrent,
+        canonicalSession: true,
+        ...(page.retainLoginVerification ? { retainVerification: () => page.retainLoginVerification!(verificationSignal) } : {}),
         notify: input.notify, resume, openSignIn: (card) => page.navigate(card.signInUrl),
         ...(evaluate ? { vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluate("location.href") || "") || null, evaluate,
           settled: async () => { await new Promise((r) => setTimeout(r, 1_500)); return String(await evaluate("location.href").catch(() => "") || "") || null; } },
         productionVaultSource()) } : {}),
-      }));
+      });
+      outcomes.push(outcome);
+      batch.outcome(slotId, outcome);
     }
+    batch.finish();
     return outcomes;
   }
-  for (const page of await cdpPages()) {
-    if (detectLoginWall({ url: page.url }).kind !== "login-wall") continue;
-    outcomes.push(await sharedLadder().observe(page.url, {
+  const { browserCdpProfilePath } = await import("../mcp-tools/browser-cdp-launcher");
+  const profileId = opaqueProfileId(browserCdpProfilePath());
+  const pages = await cdpPages();
+  const batch = pendingReleaseBatch(pages.map((page) => page.id), input.onPendingScopeReleased);
+  for (const page of pages) {
+    const outcome = await sharedLadder().observe(page.url, {
       surface: "cdp-profile", reload: () => reloadCdpPage(page), runId: input.runId, chatId: input.chatId,
+      nodeId: input.nodeId, signal: input.signal, slotId: page.id, profileId,
+      onPendingScopeReleased: batch.callback(page.id), onPrerequisiteRestored: input.onPrerequisiteRestored,
+      consentGeneration, isCurrent: consentCurrent,
       notify: input.notify, resume,
       vaultFill: () => vaultFillSignIn({ url: async () => String(await evaluateCdpPage(page, "location.href") || "") || null, evaluate: (expression) => evaluateCdpPage(page, expression),
         settled: () => settledCdpPage(page) }, productionVaultSource()),
-    }));
+    });
+    outcomes.push(outcome);
+    batch.outcome(page.id, outcome);
   }
+  batch.finish();
   return outcomes;
 }

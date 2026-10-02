@@ -1,3 +1,5 @@
+import { runObservedRunner, observedRunnerUsage } from "../runtime/observed-runner";
+import { runnerFailureFromError } from "../runtime/runner";
 import { beginAccountedInference } from "../long-run/accounting-context";
 import { withAdapterEffectPreparation } from "../invocation/adapter-effect-context";
 import { hasActiveVerificationSession, markVerificationEffectFailure, runVerificationEffectDispatch } from "../long-run/verification-effects";
@@ -22,7 +24,7 @@ import { detectRuntimes } from "../runtime/detect";
 import { invocationJudgmentContext } from "../runtime/judgment-context";
 import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
-import { pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
+import { runtimeFailureBlocksReplay, pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
 import { runtimeCooldown } from "../runtime/runtime-cooldown";
 import {
@@ -440,6 +442,7 @@ export function runtimeSelectionCacheScope(
     model: selection.model ?? null,
     effort: selection.effort ?? null,
     longContext: selection.longContext ?? null,
+    ...(selection.acpAgentId ? { acpAgentId: selection.acpAgentId } : {}),
   })}`;
 }
 
@@ -866,7 +869,7 @@ async function callJudgmentModelDetailed(opts: {
         ? remainingMs
         : Math.min(30_000, remainingMs, Math.max(10_000, Math.floor(remainingMs / 2)));
       const accounting = beginAccountedInference(runtime);
-      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(runtime.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => picked.runner(
+      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(runtime.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(picked.runner,
           {
             systemPrompt: opts.systemPrompt,
             history: [],
@@ -894,19 +897,26 @@ async function callJudgmentModelDetailed(opts: {
             onTool,
           },
         ))), attemptSignal));
-      accounting?.complete(bounded.value?.observedUsage, bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
+      accounting?.complete(bounded.value?.observedUsage ?? observedRunnerUsage(bounded.error), bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
       if (bounded.error !== undefined) {
         const error = bounded.error;
-        lastFailure = {
+        const normalized = runnerFailureFromError(error, runtime.kind);
+        lastFailure = runtimeFailureBlocksReplay(normalized) ? normalized : {
           kind: bounded.timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
           message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
           runtime: runtime.kind,
           source: "exit",
         };
         recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
-        if (bounded.cancelled) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+        if (bounded.cancelled || bounded.timedOut || runtimeFailureBlocksReplay(lastFailure)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
         if (requiresNoTools && isJudgmentRefusal(error)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
         continue;
+      }
+      if (bounded.cancelled || bounded.timedOut || opts.signal?.aborted) {
+        lastFailure = { kind: bounded.timedOut ? "timeout" : "exit", runtime: runtime.kind,
+          source: "marker", message: bounded.timedOut ? "judgment_timed_out" : "judgment_cancelled" };
+        recordAttempt(startedAt, bounded.timedOut ? "timeout" : "cancelled", lastFailure);
+        return { text: null, failure: lastFailure, runtimeReceipt, attempts };
       }
       const result = bounded.value!;
         if (result.failure) {
@@ -917,7 +927,7 @@ async function callJudgmentModelDetailed(opts: {
            */
           lastFailure = result.failure;
           recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
-          if (requiresNoTools && (lastFailure.kind === "unsupported" || lastFailure.kind === "refused")) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+          if (runtimeFailureBlocksReplay(lastFailure) || requiresNoTools && (lastFailure.kind === "unsupported" || lastFailure.kind === "refused")) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
           continue;
         }
         const text = result.text ?? "";
@@ -951,7 +961,7 @@ async function callJudgmentModelDetailed(opts: {
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         const startedAt = Date.now();
         const accounting = beginAccountedInference(selection);
-        const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(selection.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => recovery.runner(
+        const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(selection.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(recovery.runner,
             {
               systemPrompt: opts.systemPrompt,
               history: [],
@@ -972,16 +982,21 @@ async function callJudgmentModelDetailed(opts: {
             },
             { onPartial: () => {}, onStatus: () => {}, onTool },
           ))), attemptSignal));
-        accounting?.complete(bounded.value?.observedUsage, bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
+        accounting?.complete(bounded.value?.observedUsage ?? observedRunnerUsage(bounded.error), bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
         if (bounded.error !== undefined) {
           const error = bounded.error;
-          lastFailure = {
+          const normalized = runnerFailureFromError(error, selection.kind);
+          lastFailure = runtimeFailureBlocksReplay(normalized) ? normalized : {
             kind: bounded.timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
             message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
             runtime: selection.kind,
             source: "exit",
           };
           recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
+        } else if (bounded.cancelled || bounded.timedOut || opts.signal?.aborted) {
+          lastFailure = { kind: bounded.timedOut ? "timeout" : "exit", runtime: selection.kind,
+            source: "marker", message: bounded.timedOut ? "judgment_timed_out" : "judgment_cancelled" };
+          recordAttempt(startedAt, bounded.timedOut ? "timeout" : "cancelled", lastFailure);
         } else {
           const result = bounded.value!;
           if (result.failure) {

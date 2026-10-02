@@ -92,6 +92,9 @@ export function makeLocalOpenAiRunner(
       undefined,
       contextWindow !== undefined ? "managed-local" : undefined,
       req.surfaceGate === "exclude" ? "exclude" : surfaceGate,
+      undefined,
+      req.sciencePromptProfile,
+      req.judgmentOnly === true ? "host-judgment" : undefined,
     );
     const systemContent = req.minimalObservation ? req.systemPrompt : wrapped();
     // Managed local only: when the keyword-gated Surface protocol is what pushes the

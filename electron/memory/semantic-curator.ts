@@ -1,3 +1,4 @@
+import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // Model-facing half of Memory governance. This module never writes memory.
 // It builds a content-bounded request and parses a proposed disposition; the
 // deterministic Curator remains the final privacy/scope/write authority.
@@ -38,6 +39,8 @@ export const SEMANTIC_MEMORY_CURATOR_PROMPT = `# Agentlas Semantic Memory Curato
 You review proposed memory candidates after a completed model turn. You do not solve
 the original task and you never write storage. Judge meaning and future usefulness;
 the host applies deterministic privacy, ownership, deduplication, and write gates.
+When content_native is present, it is the authoritative original wording. Review
+both texts; defer contradictory English/original meanings instead of choosing one.
 
 Return JSON only: {"schema_version":"agentlas.semantic-curation.v1","decisions":[...]}
 Each decision must contain candidate_index, disposition (accept|session|discard|defer),
@@ -74,11 +77,13 @@ export function buildSemanticCurationRequest(
   context: SemanticReviewContext,
 ): { prompt: string; reviewableIndices: number[] } {
   const candidates = events.flatMap((event, candidateIndex) => {
-    if (event.sensitivity === "secret" || looksSecret(event.content)) return [];
+    if (event.sensitivity === "secret" || looksSecret(event.content)
+      || looksSecret(event.content_native ?? "")) return [];
     return [{
       candidate_index: candidateIndex,
       memory_kind: event.memory_kind,
       content: event.content.replace(/\s+/g, " ").trim().slice(0, 600),
+      ...(event.content_native ? { content_native: event.content_native.replace(/\s+/g, " ").trim().slice(0, 600) } : {}),
       suggested_scope: event.suggested_scope,
       confidence: event.confidence,
       sensitivity: event.sensitivity,
@@ -173,7 +178,7 @@ export async function runSemanticMemoryReview(input: {
   });
   if (request.reviewableIndices.length === 0) return {};
   try {
-    const result = await input.runner({
+    const result = await runObservedRunner(input.runner, {
       systemPrompt: SEMANTIC_MEMORY_CURATOR_PROMPT,
       history: [],
       userPrompt: request.prompt,
@@ -197,6 +202,8 @@ export async function runSemanticMemoryReview(input: {
       onPartial: () => undefined,
       onTool: () => undefined,
     });
+    if (input.signal?.aborted) return { semanticAttempted: true, semanticFailed: true };
+    if (result.failure) throw new ObservedRunnerFailureError(result.failure);
     const decisions = parseSemanticCurationResponse(result.text, request.reviewableIndices);
     if (decisions.length !== request.reviewableIndices.length) {
       return { semanticAttempted: true, semanticFailed: true };

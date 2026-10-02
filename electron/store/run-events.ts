@@ -1,5 +1,6 @@
 import { getLongRunAttemptGoalRevision } from "./long-runs";
-import { parseEffectMetadata } from "../invocation/effect-metadata";
+import { diagnosticSummaryBoundary, runtimeFallbackDiagnosticKey, statusOnlyDiagnosticKey, isStatusOnlyDiagnosticPayload } from "./runtime-fallback-diagnostic";
+import { parseEffectMetadata, type MainHostControlObservation } from "../invocation/effect-metadata";
 import { decodeRuntimeEvidence, runtimeEvidenceForRow, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
 import { WORKER_REPORT_MAX_BYTES, isWorkerReportScope, parseWorkerReport, type WorkerReportScope, type WorkerReport } from "../../shared/worker-report";
 import { createHash, randomUUID } from "node:crypto";
@@ -29,6 +30,7 @@ import {
   type PersistenceDecisionPayload,
 } from "../../shared/persistence-policy";
 import { classifyToolFailure } from "../../shared/tool-failure";
+import type { ObservedToolActivity } from "../automation-result";
 import { decodeToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { emitDesktopStoreChange } from "./change-bus";
 import { projectObservedTaskParticipantInDb } from "./task-participant-projection";
@@ -405,6 +407,17 @@ interface SafePayloadContext {
  * this exemption; arguments, results and all other fields remain redacted. */
 function canonicalAdapterToolId(input: Record<string, unknown>, context?: SafePayloadContext): string | undefined {
   if (context?.kind !== "mcp_tool-use" || !context.chatId || typeof input.toolId !== "string") return undefined;
+  const qualified = /^(.+):tool:([a-f0-9]{64})$/.exec(input.toolId);
+  if (qualified && qualified[1].startsWith(`${context.runId}:`)) {
+    const rows = getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id = ? AND chat_id = ?
+      AND kind = 'runtime_adapter_effect_started' AND seq < ? AND json_extract(payload_json, '$.scopeId') = ? LIMIT 2`)
+      .all(context.runId, context.chatId, context.seq ?? Number.MAX_SAFE_INTEGER, qualified[1]) as Array<{ payload_json: string }>;
+    if (rows.length === 1) {
+      const { runtimeEvidence: _evidence, ...metadata } = JSON.parse(rows[0].payload_json);
+      const admission = parseEffectMetadata("runtime_adapter_effect_started", metadata, context.runId);
+      if (admission?.parentScopeId && admission.chatId === context.chatId) return input.toolId;
+    }
+  }
   const match = /^([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}):agy-tool:(call_mcp_tool|view_file|list_dir):(0|[1-9][0-9]{0,15})$/.exec(input.toolId);
   if (!match || match[1] !== context.runId || !Number.isSafeInteger(Number(match[4]))) return undefined;
   // reduceAgyLine retains call_mcp_tool in the identity, but expands its
@@ -640,6 +653,11 @@ function safePayload(
       if (envelope) out[key] = envelope;
       continue;
     }
+    if (key === "toolHostControl" && context?.kind === "mcp_tool-use") {
+      const exact = parseEffectMetadata("runtime_host_control_observed", value, context.runId);
+      if (exact) out[key] = exact;
+      continue;
+    }
     if (key === "instructionSnapshot") {
       // Exact host snapshot is local Main state, removed from generic UI reads.
       if (context?.kind === "instruction_snapshot" && typeof value === "object"
@@ -741,13 +759,13 @@ function safePayload(
  *   If the top row was deleted and its rowid reused, the stored row id no
  *   longer matches and the table is rescanned from the start.
  */
-const RUN_EVENT_SCRUB_RULES = 1;
+const RUN_EVENT_SCRUB_RULES = 2;
 const RUN_EVENT_SCRUB_WATERMARK_KEY = "run_event_legacy_scrub_watermark";
 type RunEventScrubWatermark = { rules: number; tables: Partial<Record<"run_events" | "failure_events", { rowid: number; id: string }>> };
 
 export function scrubLegacyRunEventSecrets(): number {
   const db = getDb();
-  const markers = ["%auth_token%", "%ct0%", "%access_token%", "%refresh_token%", "%authorization%", "%cookie%"];
+  const markers = ["%auth_token%", "%ct0%", "%access_token%", "%refresh_token%", "%authorization%", "%cookie%", "%sk-%"];
   const where = markers.map(() => "LOWER(payload_json) LIKE ?").join(" OR ");
   let changed = 0;
   let stored: RunEventScrubWatermark = { rules: RUN_EVENT_SCRUB_RULES, tables: {} };
@@ -830,6 +848,15 @@ export function scrubLegacyRunEventSecrets(): number {
   db.transaction(() => {
     scrubTable("run_events");
     scrubTable("failure_events");
+    // Legacy error columns are independent of payload_json and can contain a
+    // provider's masked prefix/suffix even when its payload has no credentials.
+    const errors = db.prepare("SELECT id, error_message FROM failure_events WHERE error_message LIKE '%sk-%'")
+      .all() as Array<{ id: string; error_message: string }>;
+    const updateError = db.prepare("UPDATE failure_events SET error_message = ? WHERE id = ?");
+    for (const error of errors) {
+      const scrubbed = redactRunEventSensitiveText(error.error_message);
+      if (scrubbed !== error.error_message) { updateError.run(scrubbed, error.id); changed += 1; }
+    }
     db.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run(RUN_EVENT_SCRUB_WATERMARK_KEY, JSON.stringify(next));
   }).immediate();
   return changed;
@@ -1127,8 +1154,103 @@ function normalizeLimit(value: unknown, fallback: number): number {
   return Math.max(1, Math.min(500, Math.floor(numeric)));
 }
 
+interface FallbackDiagnosticStats {
+  count: number; firstRowId: string; firstTimestamp: string; lastTimestamp: string;
+  firstSourceSequence: number; lastSourceSequence: number;
+  lastStoredSequence: number; lastRowId: string; statusOnly?: boolean;
+}
+// Bounded acceleration only: the committed rows remain the count/reference authority.
+const fallbackDiagnosticCache = new WeakMap<object, Map<string, Map<string, FallbackDiagnosticStats>>>();
+const FALLBACK_DIAGNOSTIC_MAX_RUNS = 32;
+const FALLBACK_DIAGNOSTIC_MAX_KEYS = 64;
+function fallbackDiagnosticRunCache(runId: string): Map<string, FallbackDiagnosticStats> | undefined {
+  const db = getDb();
+  let runs = fallbackDiagnosticCache.get(db);
+  if (!runs) { runs = new Map(); fallbackDiagnosticCache.set(db, runs); }
+  let keys = runs.get(runId);
+  if (!keys && runs.size < FALLBACK_DIAGNOSTIC_MAX_RUNS) { keys = new Map(); runs.set(runId, keys); }
+  return keys;
+}
+function committedFallbackDiagnosticStats(runId: string): Map<string, FallbackDiagnosticStats> {
+  const stats = new Map<string, FallbackDiagnosticStats>();
+  const rows = getDb().prepare(`SELECT * FROM run_events WHERE run_id = ? AND ((kind = 'mcp_notice'
+    AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.noticeCode') END = 'runtime-fallback')
+    OR (kind = 'mcp_tool-use' AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.statusOnlyDiagnostic') END = 1))
+    AND CASE WHEN json_valid(payload_json) THEN json_type(payload_json, '$.noticeDiagnosticKey') END = 'text'
+    ORDER BY seq ASC`).all(runId) as RunEventRow[];
+  for (const row of rows) {
+    const payload = parsePayload(row.payload_json);
+    if (row.kind === "mcp_tool-use" && !isStatusOnlyDiagnosticPayload(payload, true)) continue;
+    const key = payload.noticeDiagnosticKey;
+    const sourceSequence = payload.noticeSourceSequence;
+    if (typeof key !== "string" || !/^[a-f0-9]{64}$/.test(key) || !Number.isSafeInteger(sourceSequence)) continue;
+    const ts = typeof payload.noticeObservedAt === "string" ? payload.noticeObservedAt : row.ts;
+    const previous = stats.get(key);
+    if (!previous) stats.set(key, { count: 1, firstRowId: row.id, firstTimestamp: ts, lastTimestamp: ts,
+      firstSourceSequence: Number(sourceSequence), lastSourceSequence: Number(sourceSequence), lastStoredSequence: row.seq, lastRowId: row.id, ...(row.kind === "mcp_tool-use" ? { statusOnly: true } : {}) });
+    else { previous.count++; previous.lastTimestamp = ts; previous.lastSourceSequence = Number(sourceSequence);
+      previous.lastStoredSequence = row.seq; previous.lastRowId = row.id; }
+  }
+  return stats;
+}
+function refreshFallbackDiagnosticStats(runId: string, key: string, cached?: FallbackDiagnosticStats): FallbackDiagnosticStats | undefined {
+  if (!cached || !getDb().prepare("SELECT 1 FROM run_events WHERE id = ? AND run_id = ?").get(cached.lastRowId, runId)) {
+    return committedFallbackDiagnosticStats(runId).get(key);
+  }
+  const stats = { ...cached };
+  // Another writer/module instance may have appended since this bounded cache
+  // observed the run. Scan only its tail through the existing (run_id, seq) key.
+  const tail = getDb().prepare(`SELECT * FROM run_events WHERE run_id = ? AND seq > ? AND kind IN ('mcp_notice', 'mcp_tool-use')
+    AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json, '$.noticeDiagnosticKey') END = ? ORDER BY seq ASC`)
+    .all(runId, cached.lastStoredSequence, key) as RunEventRow[];
+  for (const row of tail) {
+    const payload = parsePayload(row.payload_json);
+    if ((row.kind === "mcp_tool-use" && !isStatusOnlyDiagnosticPayload(payload, true))
+      || payload.noticeDiagnosticKey !== key || !Number.isSafeInteger(payload.noticeSourceSequence)) continue;
+    stats.count++; stats.lastTimestamp = typeof payload.noticeObservedAt === "string" ? payload.noticeObservedAt : row.ts;
+    stats.lastSourceSequence = Number(payload.noticeSourceSequence); stats.lastStoredSequence = row.seq; stats.lastRowId = row.id;
+  }
+  return stats;
+}
+function statusDiagnosticWorthSharing(input: Record<string, unknown>, evidence: NonNullable<ReturnType<typeof decodeRuntimeEvidence>>,
+  rowId: string, ts: string, context: SafePayloadContext): boolean {
+  const { statusOnlyDiagnostic: _status, noticeDiagnosticKey: key, noticeSourceSequence: sequence,
+    noticeObservedAt: observedAt, ...body } = input;
+  const timestamp = typeof observedAt === "string" ? observedAt : ts;
+  const bytes = (payload: Record<string, unknown>, runtimeEvidence = evidence) => Buffer.byteLength(JSON.stringify(safePayload({ ...payload, runtimeEvidence }, context)));
+  const baseline = bytes(body);
+  const reference = bytes({ eventKind: "tool-use", statusOnlyDiagnostic: true, noticeDiagnosticKey: key,
+    noticeDiagnosticReference: rowId, noticeSourceSequence: sequence, noticeObservedAt: timestamp });
+  const summary = bytes({ noticeDiagnosticKey: key, noticeOccurrenceCount: Number.MAX_SAFE_INTEGER, noticeReference: rowId,
+    noticeFirstTimestamp: timestamp, noticeLastTimestamp: timestamp,
+    noticeFirstSourceSequence: sequence, noticeLastSourceSequence: sequence },
+    { ...evidence, sourceEventId: `status-diagnostic-summary:${key}:${Number.MAX_SAFE_INTEGER}`, phase: "observed" });
+  const fullCopyOverhead = bytes({ ...input, noticeOccurrenceCount: Number.MAX_SAFE_INTEGER, noticeFirstTimestamp: timestamp,
+    noticeLastTimestamp: timestamp, noticeFirstSourceSequence: sequence, noticeLastSourceSequence: sequence }) - baseline;
+  // At counts 3 and 4, only one copy is shared but up to three full copies
+  // carry metadata. Require savings even against that conservative envelope
+  // plus the terminal summary. Short status copy keeps its original shape.
+  return baseline > reference + summary + 3 * Math.max(0, fullCopyOverhead);
+}
+function hydrateFallbackDiagnostic(row: RunEventRow, payload: Record<string, unknown>): Record<string, unknown> {
+  const reference = payload.noticeDiagnosticReference;
+  if (!((row.kind === "mcp_notice" && payload.noticeCode === "runtime-fallback")
+    || (row.kind === "mcp_tool-use" && payload.statusOnlyDiagnostic === true)) || typeof reference !== "string") return payload;
+  const first = getDb().prepare("SELECT * FROM run_events WHERE id = ? AND run_id = ? LIMIT 1").get(reference, row.run_id) as RunEventRow | undefined;
+  if (!first || first.kind !== row.kind || first.chat_id !== row.chat_id || first.node_id !== row.node_id
+    || first.agent_id !== row.agent_id || first.automation_id !== row.automation_id || first.seq >= row.seq) return payload;
+  const original = parsePayload(first.payload_json);
+  if (original.noticeDiagnosticReference || original.noticeDiagnosticKey !== payload.noticeDiagnosticKey
+    || (row.kind === "mcp_notice" ? original.noticeCode !== "runtime-fallback" : !isStatusOnlyDiagnosticPayload(original, true))) return payload;
+  // Hydrate only diagnostic copy. The current row's source evidence and occurrence
+  // facts remain its own, never borrowed from the first observation.
+  const { runtimeEvidence: _evidence, noticeObservedAt: _observedAt, noticeSourceSequence: _sequence,
+    noticeOccurrenceCount: _count, noticeFirstTimestamp: _firstTs, noticeLastTimestamp: _lastTs,
+    noticeFirstSourceSequence: _firstSeq, noticeLastSourceSequence: _lastSeq, ...copy } = original;
+  return { ...copy, ...payload };
+}
 function runRowToUi(row: RunEventRow): RunEventUi {
-  const payload = parsePayload(row.payload_json, { runId: row.run_id, chatId: row.chat_id, kind: row.kind, seq: row.seq });
+  const payload = hydrateFallbackDiagnostic(row, parsePayload(row.payload_json, { runId: row.run_id, chatId: row.chat_id, kind: row.kind, seq: row.seq }));
   // The generic ledger API is diagnostic and broadly renderer-visible. Exact
   // semantic results may leave Main only through the Task/run-bound restore
   // API, never through runLedger.events.
@@ -1194,7 +1316,7 @@ function failureRowToUi(row: FailureEventRow): FailureEventUi {
  */
 function bumpAgentUsage(agentId: string, runId: string, ts: string): void {
   const attributed = getDb()
-    .prepare("SELECT COUNT(*) AS n FROM run_events WHERE run_id = ? AND agent_id = ?")
+    .prepare("SELECT COUNT(*) AS n FROM (SELECT 1 FROM run_events WHERE run_id = ? AND agent_id = ? LIMIT 2)")
     .get(runId, agentId) as { n?: number } | undefined;
   const isFirstForRun = Number(attributed?.n ?? 0) <= 1 ? 1 : 0;
   getDb().prepare(
@@ -1207,7 +1329,9 @@ function bumpAgentUsage(agentId: string, runId: string, ts: string): void {
 }
 
 export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
-  return getDb().transaction(() => {
+  let committedDiagnostic: { key: string; stats: FallbackDiagnosticStats } | undefined;
+  const terminal = ["invoke_completed", "invoke_waiting", "invoke_failed", "invoke_cancelled", "invoke_interrupted", "mcp_final", "mcp_error"].includes(input.kind);
+  const result = getDb().transaction(() => {
     const id = input.sourceEventId ? `evt_${stableUuid(`${input.runId}:${input.sourceEventId}`)}` : `evt_${randomUUID()}`;
     const existing = getDb().prepare("SELECT * FROM run_events WHERE id = ?").get(id) as RunEventRow | undefined;
     if (existing) {
@@ -1230,22 +1354,58 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
       sourceEventId: input.sourceEventId ?? id, phase: input.evidencePhase ?? runtimeEvidencePhase(input.kind, input.payload),
       correlation: { ...input.correlation, ...boundCorrelation, invocationRunId: input.runId } });
     if (!runtimeEvidence) throw new Error("runtime_evidence_invalid");
+    const ts = nowIso();
+    let storedPayload = input.payload;
+    let statusOnly = input.kind === "mcp_tool-use" && isStatusOnlyDiagnosticPayload(input.payload);
+    if (statusOnly && input.payload && !statusDiagnosticWorthSharing(input.payload, runtimeEvidence, id, ts,
+      { runId: input.runId, kind: input.kind, chatId: input.chatId ?? null, seq })) {
+      const { statusOnlyDiagnostic: _status, noticeDiagnosticKey: _key, noticeSourceSequence: _sequence,
+        noticeObservedAt: _observedAt, ...body } = input.payload;
+      storedPayload = body;
+      statusOnly = false;
+    }
+    const key = ((runtimeEvidence.phase === "observed" && input.kind === "mcp_notice" && input.payload?.noticeCode === "runtime-fallback")
+      || (runtimeEvidence.phase === "requested" && statusOnly))
+      && typeof input.payload?.noticeDiagnosticKey === "string" && /^[a-f0-9]{64}$/.test(input.payload.noticeDiagnosticKey)
+      ? createHash("sha256").update(`${input.payload.noticeDiagnosticKey}:${JSON.stringify(runtimeEvidence.correlation)}`).digest("hex") : undefined;
+    if (key && Number.isSafeInteger(input.payload?.noticeSourceSequence)) {
+      storedPayload = { ...input.payload, noticeDiagnosticKey: key };
+      const keys = fallbackDiagnosticRunCache(input.runId);
+      if (keys && (keys.has(key) || keys.size < FALLBACK_DIAGNOSTIC_MAX_KEYS)) {
+        const previous = refreshFallbackDiagnosticStats(input.runId, key, keys.get(key));
+        const observedAt = typeof input.payload!.noticeObservedAt === "string" ? input.payload!.noticeObservedAt : ts;
+        const sourceSequence = Number(input.payload!.noticeSourceSequence);
+        const stats: FallbackDiagnosticStats = previous
+          ? { ...previous, count: previous.count + 1, lastTimestamp: observedAt, lastSourceSequence: sourceSequence,
+            lastStoredSequence: seq, lastRowId: id }
+          : { count: 1, firstRowId: id, firstTimestamp: observedAt, lastTimestamp: observedAt,
+            firstSourceSequence: sourceSequence, lastSourceSequence: sourceSequence, lastStoredSequence: seq, lastRowId: id, ...(statusOnly ? { statusOnly: true } : {}) };
+        committedDiagnostic = { key, stats };
+        storedPayload = diagnosticSummaryBoundary(stats.count)
+          ? { ...storedPayload, noticeOccurrenceCount: stats.count, noticeFirstTimestamp: stats.firstTimestamp,
+            noticeLastTimestamp: stats.lastTimestamp, noticeFirstSourceSequence: stats.firstSourceSequence,
+            noticeLastSourceSequence: stats.lastSourceSequence }
+          : { ...(statusOnly ? { eventKind: "tool-use", statusOnlyDiagnostic: true } : { eventKind: "notice", noticeCode: "runtime-fallback" }), noticeDiagnosticKey: key,
+            noticeDiagnosticReference: stats.firstRowId, noticeSourceSequence: sourceSequence, noticeObservedAt: observedAt };
+      }
+    }
+    const durablePayload = safePayload({ ...storedPayload, runtimeEvidence }, { runId: input.runId, kind: input.kind, chatId: input.chatId ?? null, seq });
+    if (input.kind === "mcp_tool-use" && storedPayload?.toolHostControl) {
+      const control = storedPayload.toolHostControl as MainHostControlObservation;
+      control.storedProjectionSha256 = createHash("sha256").update(JSON.stringify([durablePayload.toolName ?? null, durablePayload.toolId ?? null, durablePayload.toolArgs ?? null, durablePayload.toolResultPreview ?? null, durablePayload.toolIsError ?? null, durablePayload.toolOrigin ?? null, durablePayload.role ?? null, durablePayload.phase ?? null, durablePayload.tier ?? null, input.agentId ?? null, input.nodeId ?? null])).digest("hex");
+      durablePayload.toolHostControl = parseEffectMetadata("runtime_host_control_observed", control, input.runId);
+    }
     const row = {
       id,
       run_id: input.runId,
       seq,
-      ts: nowIso(),
+      ts,
       kind: input.kind,
       chat_id: input.chatId ?? null,
       automation_id: input.automationId ?? null,
       node_id: input.nodeId ?? null,
       agent_id: input.agentId ?? null,
-      payload_json: JSON.stringify(safePayload({ ...input.payload, runtimeEvidence }, {
-        runId: input.runId,
-        kind: input.kind,
-        chatId: input.chatId ?? null,
-        seq,
-      })),
+      payload_json: JSON.stringify(durablePayload),
     };
     getDb()
       .prepare(
@@ -1286,8 +1446,25 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
           (receipt) => { recordRunEvent(receipt); });
       } catch { /* supplementary */ }
     }
+    if (terminal) {
+      try {
+        for (const [key, stats] of committedFallbackDiagnosticStats(input.runId)) {
+          recordRunEvent({ runId: input.runId, kind: stats.statusOnly ? "runtime_status_diagnostic_summary" : "runtime_fallback_diagnostic_summary",
+            sourceEventId: `${stats.statusOnly ? "status" : "fallback"}-diagnostic-summary:${key}:${stats.count}`,
+            chatId: input.chatId, agentId: input.agentId, payload: { noticeDiagnosticKey: key,
+              noticeOccurrenceCount: stats.count, noticeReference: stats.firstRowId,
+              noticeFirstTimestamp: stats.firstTimestamp, noticeLastTimestamp: stats.lastTimestamp,
+              noticeFirstSourceSequence: stats.firstSourceSequence, noticeLastSourceSequence: stats.lastSourceSequence } });
+        }
+      } catch { /* Derived diagnostics cannot withhold a terminal receipt. All source/count rows remain authoritative. */ }
+    }
     return runRowToUi(row);
   })();
+  // Cache changes are published only after the transaction commits. Terminal
+  // counts come from SQLite so restarts/cache overflow cannot lose occurrences.
+  if (terminal) fallbackDiagnosticCache.get(getDb())?.delete(input.runId);
+  else if (committedDiagnostic) fallbackDiagnosticRunCache(input.runId)?.set(committedDiagnostic.key, committedDiagnostic.stats);
+  return result;
 }
 
 export function recordFailureEvent(input: RecordFailureEventInput): FailureEventUi {
@@ -1393,7 +1570,7 @@ export function tryRecordFailureEvent(input: RecordFailureEventInput): void {
   }
 }
 
-export function recordMcpInvocationEvent(runId: string, req: McpInvocationRequest, ev: McpInvocationEvent, options?: { requireDurable?: boolean }): void {
+export function recordMcpInvocationEvent(runId: string, req: McpInvocationRequest, ev: McpInvocationEvent, options?: { requireDurable?: boolean; hostControl?: MainHostControlObservation }): void {
   // Skip the entire already-committed projection, including selection/failure
   // companion rows. The host assigns the source sequence before delivery.
   if (Number.isSafeInteger(ev.sequence)) {
@@ -1439,7 +1616,18 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
       })
     : undefined;
   const runtimeFailure = boundedRuntimeFailure(ev.error?.runtimeFailure);
+  const statusDiagnosticKey = statusOnlyDiagnosticKey(req, ev);
+  const noticeDiagnosticKey = runtimeFallbackDiagnosticKey(req, ev) ?? statusDiagnosticKey;
+  const finalUsage = ev.kind === "final" ? ev.observedUsage : undefined;
+  const cachedInput = finalUsage && "cachedInputTokens" in finalUsage
+    ? finalUsage.cachedInputTokens : undefined;
+  const observedCachedInputTokens = finalUsage && typeof cachedInput === "number"
+    && Number.isSafeInteger(cachedInput) && cachedInput >= 0
+    && Number.isSafeInteger(finalUsage.inputTokens) && finalUsage.inputTokens >= 0
+    && cachedInput <= finalUsage.inputTokens ? cachedInput : undefined;
   const payload = {
+    ...(statusDiagnosticKey ? { statusOnlyDiagnostic: true } : {}),
+    ...(noticeDiagnosticKey ? { noticeDiagnosticKey, noticeSourceSequence: ev.sequence, noticeObservedAt: ev.observedAt } : {}),
     eventKind: ev.kind,
     status: ev.status,
     activityCode: ev.activity?.code,
@@ -1466,14 +1654,19 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     surfaceId: ev.surfaceId,
     oneArtifacts: ev.oneArtifacts,
     toolName: ev.tool?.name,
+    toolHostControl: options?.hostControl,
     toolOrigin: ev.tool?.origin,
     toolId: ev.tool?.id,
     toolIsError: ev.tool?.isError,
+    toolCompleted: ev.kind === "tool-use" && (ev.tool?.result !== undefined
+      || (typeof ev.tool?.observationDigest === "string" && /^[a-f0-9]{64}$/.test(ev.tool.observationDigest))),
     toolFailureCode,
     // 재방문 시에도 "무엇을 어디에" 했는지 남는다 — 이름만 남기면 과거 턴의 행이
     // "Bash"·"Read"로만 보인다(2026-08-15 실측). 상한·마스킹은 safePayload가 건다.
     toolArgs: ev.tool?.args,
     toolResultPreview: ev.tool?.result,
+    toolObservationDigest: typeof ev.tool?.observationDigest === "string"
+      && /^[a-f0-9]{64}$/.test(ev.tool.observationDigest) ? ev.tool.observationDigest : undefined,
     // Public HTTPS URLs are evidence references, not tool output content. Keep
     // them so the One Sources rail survives a route change or app restart.
     toolSourceUrls: ev.tool?.sourceUrls,
@@ -1489,6 +1682,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     // are stringified by safePayload, which would make budget settlement unknown.
     observedInputTokens: ev.kind === "final" ? ev.observedUsage?.inputTokens : undefined,
     observedOutputTokens: ev.kind === "final" ? ev.observedUsage?.outputTokens : undefined,
+    observedCachedInputTokens,
     lifecyclePhase: ev.lifecycle?.phase,
     // A lifecycle event may carry the host's absolute workspace path. The
     // ledger is renderer-visible and durable, so persist only the same
@@ -1760,14 +1954,19 @@ export function countAgentSteeringEvents(agentId: string, chatId?: string | null
   return Number(row?.n ?? 0);
 }
 
-/**
- * 이 실행에서 **호스트가 관측한** 도구 호출. 모델의 산문이 아니라 원장에서 읽는다.
- *
- * ★왜 필요한가(실측 2026-08-19): X 게시 자동화가 "successfully posted and confirmed"
- * 라고 답했고 판정기가 그 문장만 읽어 12연속 accepted 를 냈다. 실제 게시 0건, 그리고
- * 그 실행들의 도구 호출도 0건이었다. 도구를 하나도 안 부르고 바깥을 바꿀 수는 없다.
- */
-export function observedToolActivity(runId: string): { callCount: number; toolNames: string[] } {
+/** A current-run permission fact for reporting, never a replay authorization or
+ * proof that the whole automation remains incomplete. */
+export function observedApprovalRequiredToolCount(runId: string): number {
+  if (!runId) return 0;
+  const row = getDb().prepare(`SELECT COUNT(DISTINCT COALESCE(NULLIF(json_extract(payload_json, '$.toolId'), ''), id)) AS n
+    FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' AND json_valid(payload_json)
+      AND json_extract(payload_json, '$.toolIsError') = 1
+      AND json_extract(payload_json, '$.toolFailureCode') = 'approval_required'`).get(runId) as { n?: number } | undefined;
+  return Number(row?.n ?? 0);
+}
+
+/** Read tool observations from the ledger rather than the model's final prose. */
+export function observedToolActivity(runId: string): ObservedToolActivity {
   if (!runId) return { callCount: 0, toolNames: [] };
   // run_events 에 title 컬럼은 없다(db.ts 의 CREATE TABLE 이 정본) — 이름은 payload 에만 있다.
   const rows = getDb()
@@ -1797,7 +1996,24 @@ export function observedToolActivity(runId: string): { callCount: number; toolNa
   //   Agentlas Plugins · universe/auto-select/Hub bridge 6건만 남겼는데 판정이 그걸 근거로
   //   "3건 모두 게시했고 도구 활동이 뒷받침한다"고 확인해 줬다. 판단은 shared/tool-activity 정본.
   const external = externalToolNames(raw);
-  return { callCount: external.length, toolNames: [...new Set(external)] };
+  // Read recent results independently of the older call-name window, so an
+  // approval refusal after many progress events is still visible to the judge.
+  const recent = getDb().prepare("SELECT payload_json FROM run_events WHERE run_id = ? AND kind = 'mcp_tool-use' ORDER BY seq DESC LIMIT 501")
+    .all(runId) as { payload_json: string | null }[];
+  const results: NonNullable<ObservedToolActivity["results"]> = [];
+  for (const row of recent.slice(0, 500).reverse()) {
+    try {
+      const payload = row.payload_json ? JSON.parse(row.payload_json) : null;
+      const toolName = payload?.toolName;
+      if (typeof toolName !== "string" || externalToolNames([toolName]).length === 0) continue;
+      const failed = payload.toolIsError === true;
+      const completed = payload.toolCompleted === true || typeof payload.toolResultPreview === "string";
+      results.push({ toolName: toolName.slice(0, 120), state: failed ? "failed" : completed ? "completed" : "pending",
+        ...(failed ? { failureCode: classifyToolFailure({ explicitCode: payload.toolFailureCode, result: payload.toolResultPreview }) } : {}) });
+    } catch { /* Corrupt rows cannot establish a tool result. */ }
+  }
+  return { callCount: external.length, toolNames: [...new Set(external)], results: results.slice(-40),
+    resultsTruncated: recent.length > 500 || results.length > 40, approvalRequiredCount: observedApprovalRequiredToolCount(runId) };
 }
 
 export function listRunEvents(runId: string, limit?: number): RunEventUi[] {
@@ -1997,6 +2213,55 @@ export function hasInvocationRunReceipt(runId: string): boolean {
   return row?.found === 1;
 }
 
+type InvocationReceiptStatement = import("better-sqlite3").Statement<unknown[]>;
+const invocationReceiptStatements = new WeakMap<object, Map<string, InvocationReceiptStatement>>();
+function invocationReceiptStatement(sql: string): InvocationReceiptStatement {
+  const db = getDb();
+  let statements = invocationReceiptStatements.get(db);
+  if (!statements) { statements = new Map(); invocationReceiptStatements.set(db, statements); }
+  const cached = statements.get(sql);
+  if (cached) return cached;
+  const statement = db.prepare(sql);
+  if (statements.size < 32) statements.set(sql, statement);
+  return statement;
+}
+const INVOCATION_RECEIPT_SMALL_RUN_ROWS = 64;
+const INVOCATION_RECEIPT_SMALL_RUN_BYTES = 64 * 1024;
+const invocationReceiptByteLength = new WeakMap<object, string>();
+function invocationSmallRunProbe(runId: string): { count: number; bytes: number } {
+  const db = getDb();
+  let byteLength = invocationReceiptByteLength.get(db);
+  if (!byteLength) {
+    try {
+      invocationReceiptStatement("SELECT octet_length('') AS bytes").get();
+      // Native byte-length metadata avoids loading large overflow values.
+      byteLength = "octet_length(payload_json)";
+    } catch (error) {
+      // The capability probe has no schema/data inputs. Older SQLite engines
+      // may reject the function; preserve real busy/corrupt/closed errors.
+      if ((error as { code?: string })?.code !== "SQLITE_ERROR") throw error;
+      byteLength = "length(CAST(payload_json AS BLOB))";
+    }
+    invocationReceiptByteLength.set(db, byteLength);
+  }
+  return invocationReceiptStatement(`SELECT COUNT(*) AS count, COALESCE(SUM(payload_bytes), 0) AS bytes FROM
+    (SELECT ${byteLength} AS payload_bytes FROM run_events WHERE run_id = ? LIMIT ${INVOCATION_RECEIPT_SMALL_RUN_ROWS + 1})`)
+    .get(runId) as { count: number; bytes: number };
+}
+const INVOCATION_TERMINAL_KINDS = new Set(["invoke_waiting", "invoke_completed", "mcp_final", "invoke_cancelled", "invoke_interrupted", "invoke_failed", "invoke_threw", "mcp_error"]);
+
+// JSON.parse uses the last duplicate property, whereas json_extract uses the
+// first. json_each is only a conservative candidate filter; validate lazily in
+// JavaScript, without a LIMIT that could hide older valid settlement evidence.
+const INVOCATION_OBJECT_JSON = "CASE WHEN json_valid(payload_json) THEN CASE WHEN json_type(payload_json) = 'object' THEN payload_json ELSE '{}' END ELSE '{}' END";
+const INVOCATION_TRIM_CHARS = "char(9,10,11,12,13,32,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279)";
+function invocationPayloadCandidates(runId: string, key: string, kindFilter = "", valueFilter = ""): Iterable<RunEventRow> {
+  return invocationReceiptStatement(`SELECT * FROM run_events WHERE run_id = ? ${kindFilter}
+    AND EXISTS (SELECT 1 FROM json_each(${INVOCATION_OBJECT_JSON}) field
+      WHERE field.key = ? AND field.type = 'text' AND trim(field.value, ${INVOCATION_TRIM_CHARS}) <> '' ${valueFilter})
+    ORDER BY seq DESC`).iterate(runId, key) as Iterable<RunEventRow>;
+}
+
 /**
  * Rebuild a terminal/recovery receipt from the append-only run ledger.
  * A started row without a terminal row is `interrupted` here: only main's
@@ -2004,52 +2269,59 @@ export function hasInvocationRunReceipt(runId: string): boolean {
  */
 export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | null {
   if (!runId) return null;
-  const rows = getDb()
-    .prepare("SELECT * FROM run_events WHERE run_id = ? ORDER BY seq ASC")
-    .all(runId) as RunEventRow[];
-  const start = rows.find((row) => row.kind === "invoke_started");
+  // All projections share a read snapshot, including concurrent append-only
+  // writers. Nested callers use the store's normal savepoint semantics.
+  return getDb().transaction(() => invocationRunReceiptSnapshot(runId))();
+}
+function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | null {
+  // Bounded row/byte probes choose the reading strategy, never truncate
+  // history or a receipt body. Few rows with large bodies stay selective.
+  const probe = invocationSmallRunProbe(runId);
+  const smallRows = probe.count <= INVOCATION_RECEIPT_SMALL_RUN_ROWS && probe.bytes <= INVOCATION_RECEIPT_SMALL_RUN_BYTES
+    ? invocationReceiptStatement("SELECT * FROM run_events WHERE run_id = ? ORDER BY seq ASC").all(runId) as RunEventRow[] : undefined;
+  const start = smallRows ? smallRows.find(row => row.kind === "invoke_started") : invocationReceiptStatement("SELECT * FROM run_events WHERE run_id = ? AND kind = 'invoke_started' ORDER BY seq ASC LIMIT 1")
+    .get(runId) as RunEventRow | undefined;
   if (!start) return null;
-
   const startPayload = parsePayload(start.payload_json);
-  let status: InvocationRunReceipt["status"] = "interrupted";
-  let terminal: RunEventRow | undefined;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const row = rows[index];
-    if (row.kind === "invoke_completed" || row.kind === "mcp_final") {
-      status = "completed";
-      terminal = row;
-      break;
+  const terminal = smallRows ? smallRows.slice().reverse().find(row => INVOCATION_TERMINAL_KINDS.has(row.kind)) : invocationReceiptStatement(`SELECT * FROM run_events WHERE run_id = ?
+    AND kind IN ('invoke_waiting', 'invoke_completed', 'mcp_final', 'invoke_cancelled', 'invoke_interrupted', 'invoke_failed', 'invoke_threw', 'mcp_error')
+    ORDER BY seq DESC LIMIT 1`).get(runId) as RunEventRow | undefined;
+  let status: InvocationRunReceipt["status"] = terminal?.kind === "invoke_waiting" ? "waiting_input" : terminal?.kind === "invoke_completed" || terminal?.kind === "mcp_final"
+    ? "completed" : terminal?.kind === "invoke_cancelled" ? "cancelled"
+      : terminal && terminal.kind !== "invoke_interrupted" ? "failed" : "interrupted";
+  const latest = smallRows ? smallRows[smallRows.length - 1] : invocationReceiptStatement("SELECT ts FROM run_events WHERE run_id = ? ORDER BY seq DESC LIMIT 1")
+    .get(runId) as { ts: string };
+  const eventCount = smallRows ? smallRows.length : (invocationReceiptStatement("SELECT COUNT(*) AS count FROM run_events WHERE run_id = ?").get(runId) as { count: number }).count;
+  const receiptChatId = start.chat_id ?? stringPayload(startPayload, "chatId") ?? "";
+  // Select the closed markers without replaying tool bodies. Every mismatched
+  // chat remains a veto, including a malformed marker that cannot be proof.
+  const steeringEvidence: Array<{ runId: string; chatId?: string; kind: string; payload: Record<string, unknown> }> = [];
+  if (status === "interrupted" && smallRows) {
+    for (const row of smallRows) {
+      if (row.kind === "user_steering" || row.kind === "invoke_cancel_requested" || row.kind === "invoke_interrupted") {
+        steeringEvidence.push({ runId: row.run_id, chatId: row.chat_id ?? undefined, kind: row.kind, payload: parsePayload(row.payload_json) });
+      }
     }
-    if (row.kind === "invoke_cancelled" || row.kind === "invoke_interrupted") {
-      status = row.kind === "invoke_interrupted" ? "interrupted" : "cancelled";
-      terminal = row;
-      break;
+  } else if (status === "interrupted") {
+    const wrongChat = invocationReceiptStatement(`SELECT run_id, chat_id, kind FROM run_events WHERE run_id = ?
+      AND kind IN ('user_steering', 'invoke_cancel_requested', 'invoke_interrupted')
+      AND chat_id IS NOT NULL AND chat_id <> '' AND chat_id <> ? LIMIT 1`).get(runId, receiptChatId) as RunEventRow | undefined;
+    if (wrongChat) steeringEvidence.push({ runId: wrongChat.run_id, chatId: wrongChat.chat_id ?? undefined, kind: wrongChat.kind, payload: {} });
+    for (const kind of ["user_steering", "invoke_interrupted"]) {
+      const row = invocationReceiptStatement("SELECT run_id, chat_id, kind FROM run_events WHERE run_id = ? AND kind = ? LIMIT 1")
+        .get(runId, kind) as RunEventRow | undefined;
+      if (row) steeringEvidence.push({ runId: row.run_id, chatId: row.chat_id ?? undefined, kind: row.kind, payload: {} });
     }
-    if (row.kind === "invoke_failed" || row.kind === "invoke_threw" || row.kind === "mcp_error") {
-      status = "failed";
-      terminal = row;
-      break;
+    for (const row of invocationPayloadCandidates(runId, "reason", "AND kind = 'invoke_cancel_requested'", "AND field.value = 'steering'")) {
+      const payload = parsePayload(row.payload_json);
+      if (payload.reason === "steering") {
+        steeringEvidence.push({ runId: row.run_id, chatId: row.chat_id ?? undefined, kind: row.kind, payload });
+        break;
+      }
     }
   }
-
-  const latest = rows[rows.length - 1] ?? start;
-  const receiptChatId = start.chat_id ?? stringPayload(startPayload, "chatId") ?? "";
-  // Only the three closed-form steering markers can establish this cause.
-  // Projecting every payload through runRowToUi here made each receipt read
-  // replay large tool/output runs just to classify one interruption.
-  const steeringEvidence = rows
-    .filter((row) => row.kind === "user_steering"
-      || row.kind === "invoke_cancel_requested"
-      || row.kind === "invoke_interrupted")
-    .map((row) => ({
-      runId: row.run_id,
-      chatId: row.chat_id ?? undefined,
-      kind: row.kind,
-      payload: parsePayload(row.payload_json),
-    }));
   const interruptionCause = isOneSteeringInterruption(
-    { runId, chatId: receiptChatId, status },
-    steeringEvidence,
+    { runId, chatId: receiptChatId, status }, steeringEvidence,
   ) ? "steering" as const : undefined;
   const terminalPayload = terminal ? parsePayload(terminal.payload_json) : {};
   // Main 이 직접 끊은 실행(앱 종료·오너의 Goal 일시정지/삭제)은 표식으로 남는다. 닫힌 어휘의 정확한
@@ -2065,18 +2337,12 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     providerCode: terminalPayload.runtimeFailureProviderCode,
     retryAfterAt: terminalPayload.runtimeFailureRetryAfterAt,
   });
-  // 원래는 reverse().map(parse)가 결과를 찾은 뒤에도 **모든** payload를 eager하게
-  // 파싱했다. 뒤에서부터 찾고 발견 즉시 멈춘다.
   let settledPayload: Record<string, unknown> | undefined;
-  for (let index = rows.length - 1; index >= 0; index -= 1) {
-    const payload = parsePayload(rows[index].payload_json);
-    if (stringPayload(payload, "resultFolder")) {
-      settledPayload = payload;
-      break;
-    }
+  for (const row of smallRows ? smallRows.slice().reverse() : invocationPayloadCandidates(runId, "resultFolder")) {
+    const payload = parsePayload(row.payload_json);
+    if (stringPayload(payload, "resultFolder")) { settledPayload = payload; break; }
   }
-  const failure = getDb()
-    .prepare("SELECT * FROM failure_events WHERE run_id = ? ORDER BY datetime(ts) DESC, rowid DESC LIMIT 1")
+  const failure = invocationReceiptStatement("SELECT * FROM failure_events WHERE run_id = ? ORDER BY datetime(ts) DESC, rowid DESC LIMIT 1")
     .get(runId) as FailureEventRow | undefined;
   // Tool/runtime attempts may fail and recover inside a successful run. Keep
   // those rows in failure_events for diagnostics and learning, but never
@@ -2087,7 +2353,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
   // tool refusal that happened to be its last in-turn failure — that refusal was answered and
   // the turn went on. Measured 2026-09-27: 12 Science turns cut by a dev-app restart were
   // reported `tool_failed` with a stale claim-ledger refusal as their cause.
-  const terminalFailure = status === "completed"
+  const terminalFailure = status === "completed" || status === "waiting_input"
     || (status !== "failed" && failure?.source === "tool") ? undefined : failure;
 
   // 표시=실행 (계약 7-C-8 / C-D-1): 이 실행이 실제로 돈 모델은 원장의
@@ -2095,16 +2361,15 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
   // 증빙이 아니므로 receipt가 원장 값을 직접 나른다.
   let executedModel = stringPayload(terminalPayload, "model");
   if (!executedModel) {
-    for (let index = rows.length - 1; index >= 0; index -= 1) {
-      const row = rows[index];
-      if (row.kind !== "mcp_final" && row.kind !== "invoke_result") continue;
+    for (const row of smallRows ? smallRows.slice().reverse().filter(row => row.kind === "mcp_final" || row.kind === "invoke_result") : invocationPayloadCandidates(runId, "model", "AND kind IN ('mcp_final', 'invoke_result')",
+      `AND (NOT EXISTS (SELECT 1 FROM json_each(${INVOCATION_OBJECT_JSON}) role
+        WHERE role.key = 'modelRole' AND role.type = 'text' AND trim(role.value, ${INVOCATION_TRIM_CHARS}) <> '')
+        OR EXISTS (SELECT 1 FROM json_each(${INVOCATION_OBJECT_JSON}) role
+          WHERE role.key = 'modelRole' AND (role.type <> 'text' OR trim(role.value, ${INVOCATION_TRIM_CHARS}) IN ('', 'orchestrator'))))`)) {
       const payload = parsePayload(row.payload_json);
       const modelValue = stringPayload(payload, "model");
       const role = stringPayload(payload, "modelRole");
-      if (modelValue && (!role || role === "orchestrator")) {
-        executedModel = modelValue;
-        break;
-      }
+      if (modelValue && (!role || role === "orchestrator")) { executedModel = modelValue; break; }
     }
   }
 
@@ -2115,8 +2380,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
   // sealed image was visible in chat and the Result rail.
   let hasBoundImage = false;
   try {
-    hasBoundImage = Boolean(getDb()
-      .prepare(
+    hasBoundImage = Boolean(invocationReceiptStatement(
         `SELECT 1
            FROM one_artifact_bindings
           WHERE run_id = ? AND kind = 'image'
@@ -2135,7 +2399,7 @@ export function getInvocationRunReceipt(runId: string): InvocationRunReceipt | n
     startedAt: start.ts,
     updatedAt: latest.ts,
     ...(terminal ? { finishedAt: terminal.ts } : {}),
-    eventCount: rows.length,
+    eventCount,
     ...(settledPayload ? { resultFolder: stringPayload(settledPayload, "resultFolder") } : {}),
     ...(typeof startPayload.hasImages === "boolean" || hasBoundImage ? { hasImages } : {}),
     ...(stringArrayPayload(startPayload, "borrowAgents")

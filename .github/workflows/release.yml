@@ -158,11 +158,20 @@ jobs:
           const manifest = JSON.parse(fs.readFileSync(path.join(source, 'manifest.json'), 'utf8'));
           if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
           const seen = new Set();
+          const sourceCommit = require('node:child_process').execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}']).toString().trim();
+          const sourcePaths = new Set(require('node:child_process').execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', sourceCommit]).toString().split('\0'));
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
             const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `da893984b3ab0254e55557734c1010f3d3ba3935:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
+            if (sourcePaths.has(entry.path)) {
+              if (!fs.existsSync(entry.path) || !fs.lstatSync(entry.path).isFile()) throw new Error('Committed runtime file is missing from the release source');
+              const committed = require('node:child_process').execFileSync('git', ['show', `${sourceCommit}:${entry.path}`]);
+              if (!fs.readFileSync(entry.path).equals(committed)) throw new Error('Committed runtime file differs from the release source');
+              continue;
+            }
+            if (fs.existsSync(entry.path)) throw new Error('Private verification target is untracked and already exists');
             fs.mkdirSync(path.dirname(entry.path), { recursive: true });
             fs.writeFileSync(entry.path, bytes);
           }
@@ -329,11 +338,20 @@ jobs:
           const manifest = JSON.parse(fs.readFileSync(path.join(source, 'manifest.json'), 'utf8'));
           if (manifest.schema !== 'agentlas.private-release-verification.v1' || !Array.isArray(manifest.files)) throw new Error('Invalid private verification manifest');
           const seen = new Set();
+          const sourceCommit = require('node:child_process').execFileSync('git', ['rev-parse', '--verify', 'HEAD^{commit}']).toString().trim();
+          const sourcePaths = new Set(require('node:child_process').execFileSync('git', ['ls-tree', '-r', '--name-only', '-z', sourceCommit]).toString().split('\0'));
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
             const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `da893984b3ab0254e55557734c1010f3d3ba3935:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
+            if (sourcePaths.has(entry.path)) {
+              if (!fs.existsSync(entry.path) || !fs.lstatSync(entry.path).isFile()) throw new Error('Committed runtime file is missing from the release source');
+              const committed = require('node:child_process').execFileSync('git', ['show', `${sourceCommit}:${entry.path}`]);
+              if (!fs.readFileSync(entry.path).equals(committed)) throw new Error('Committed runtime file differs from the release source');
+              continue;
+            }
+            if (fs.existsSync(entry.path)) throw new Error('Private verification target is untracked and already exists');
             fs.mkdirSync(path.dirname(entry.path), { recursive: true });
             fs.writeFileSync(entry.path, bytes);
           }

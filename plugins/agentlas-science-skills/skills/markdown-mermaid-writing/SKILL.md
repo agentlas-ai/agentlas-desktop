@@ -299,6 +299,9 @@ Each file contains: production-quality exemplar, tips specific to that type, and
 
 `templates/` — decision\_record, how\_to\_guide, issue, kanban, presentation, project\_documentation, pull\_request, research\_paper, status\_report
 
+### Examples
+
+`assets/examples/example-research-report.md` — a complete scientific research report demonstrating proper heading hierarchy, multiple diagram types (flowchart, sequence, gantt), tables, footnote citations, collapsible sections, and all style guide rules applied.
 
 ---
 

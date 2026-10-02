@@ -171,6 +171,18 @@
       "note": "★커널은 pure/read/mutation 셋을 안다(run-graph.ts GraphNodeEffect). 레지스트리에 pure가 빠져 있었다."
     },
     {
+      "name": "allowNoAction",
+      "on": "node.config",
+      "appliesTo": ["agent", "action", "output"],
+      "grade": "critical",
+      "type": "boolean",
+      "writer": "저작자",
+      "reader": "커널의 명시적 무행동 결과 계약",
+      "unknown": "true가 아니면 기존 mutation 도구 증거 검사를 유지",
+      "status": "implemented",
+      "note": "true일 때만 현재 nodeId에 결박된 graph/1 port.output JSON result {disposition:no_action,reason}을 허용. 호스트가 외부 호출 0·준비된 행동 0·오류 및 불확실 효과 없음을 별도로 확인한다. 목표 달성이나 발행 완료 증거가 아니다."
+    },
+    {
       "name": "approval",
       "on": "node.config",
       "appliesTo": [

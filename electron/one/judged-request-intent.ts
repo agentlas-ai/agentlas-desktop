@@ -19,6 +19,7 @@ import {
   type RequiredJudgeSpec,
   type RequiredVerdict,
 } from "../system-agents/judgment";
+import type { RuntimeSelection } from "../../shared/types";
 
 const INTENT_LABELS = ["conversation", "task"] as const;
 
@@ -38,7 +39,7 @@ export type OneRequestIntentJudge = (
  */
 export async function resolveOneRequestIntent(
   prompt: string,
-  opts: { signal?: AbortSignal; timeoutMs?: number; judgeFn?: OneRequestIntentJudge } = {},
+  opts: { signal?: AbortSignal; timeoutMs?: number; judgeFn?: OneRequestIntentJudge; runtimeSelection?: RuntimeSelection } = {},
 ): Promise<ResolvedOneRequestIntent> {
   const input = oneRequestIntentJudgmentInput(prompt);
   if (!input) return { intent: "undecided", source: "unavailable", reason: "empty prompt" };
@@ -51,6 +52,7 @@ export async function resolveOneRequestIntent(
     guidance: ONE_REQUEST_INTENT_JUDGMENT_GUIDANCE,
     signal: opts.signal,
     timeoutMs: opts.timeoutMs,
+    runtimeSelection: opts.runtimeSelection,
   });
   return verdict.source === "llm" && verdict.verdict !== null
     ? { intent: verdict.verdict, source: "llm", reason: verdict.reason }
@@ -59,24 +61,26 @@ export async function resolveOneRequestIntent(
 
 /** Warm the cache for a One conversation-shaped turn before the sync start path runs. */
 export async function prejudgeOneRequestIntent(
-  request: { oneMode?: boolean; taskIntent?: string; userPrompt?: string },
+  request: { oneMode?: boolean; taskIntent?: string; userPrompt?: string; runtimeSelection?: RuntimeSelection },
   opts: { signal?: AbortSignal; timeoutMs?: number } = {},
 ): Promise<void> {
   if (request.oneMode !== true) return;
   if (request.taskIntent !== undefined && request.taskIntent !== "conversation") return;
   if (typeof request.userPrompt !== "string" || !request.userPrompt.trim()) return;
   try {
-    await resolveOneRequestIntent(request.userPrompt, opts);
+    await resolveOneRequestIntent(request.userPrompt, { ...opts, runtimeSelection: request.runtimeSelection });
   } catch {
     // A failed warm remains undecided; warming is best-effort.
   }
 }
 
 /** Synchronous read of an already-judged intent. null = not judged. */
-export function judgedOneRequestIntent(prompt: string): OneRequestIntent | null {
+export function judgedOneRequestIntent(prompt: string, runtimeSelection?: RuntimeSelection): OneRequestIntent | null {
   const verdict = peekJudgment<OneRequestIntent>(
     ONE_REQUEST_INTENT_JUDGMENT_KIND,
     oneRequestIntentJudgmentInput(prompt),
+    undefined,
+    runtimeSelection,
   );
   return verdict && verdict.source === "llm" ? verdict.verdict : null;
 }

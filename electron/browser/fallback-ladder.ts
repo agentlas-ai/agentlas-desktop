@@ -55,6 +55,7 @@ export const BROWSER_FAILURE_CODES = [
   "page-load-failed",
   /** The run needed the browser and the agentlas-browser MCP was not attached. */
   "browser-mcp-not-attached",
+  "native-tool-failed",
 ] as const;
 export type BrowserFailureCode = (typeof BROWSER_FAILURE_CODES)[number];
 
@@ -64,6 +65,7 @@ export type LadderRung =
   | "login-recovery"
   | "connector-alternative"
   | "computer-use-dedicated"
+  | "computer-use-native"
   | "human-check-wait"
   | "stop";
 
@@ -73,6 +75,7 @@ export const LADDER_RUNG_LIMITS: Readonly<Record<Exclude<LadderRung, "stop">, { 
   "switch-surface": { attempts: 1, timeoutMs: 20_000 },
   "login-recovery": { attempts: 1, timeoutMs: 30_000 },
   "connector-alternative": { attempts: 1, timeoutMs: 5_000 },
+  "computer-use-native": { attempts: 1, timeoutMs: 5_000 },
   "computer-use-dedicated": { attempts: 1, timeoutMs: 5_000 },
   // Only the arming (card + watcher start) is bounded here; the watcher has its own cap.
   "human-check-wait": { attempts: 1, timeoutMs: 10_000 },
@@ -93,18 +96,19 @@ export const LADDER_STOP_COOLDOWN_MS = 5 * 60_000;
  * be evasion); they wait for the owner. A foreign port is re-inspected, never killed.
  */
 export const LADDER_POLICY: Readonly<Record<BrowserFailureCode, readonly LadderRung[]>> = Object.freeze({
-  "bridge-wire-dropped": ["reestablish", "switch-surface", "stop"],
+  "bridge-wire-dropped": ["reestablish", "switch-surface", "computer-use-native", "stop"],
   "chrome-launch-failed": ["reestablish", "switch-surface", "connector-alternative", "stop"],
   "chrome-crashed": ["reestablish", "switch-surface", "connector-alternative", "stop"],
   "ownership-unverifiable": ["reestablish", "switch-surface", "connector-alternative", "computer-use-dedicated", "stop"],
   "port-foreign": ["reestablish", "switch-surface", "connector-alternative", "stop"],
-  "native-session-ended": ["reestablish", "switch-surface", "connector-alternative", "computer-use-dedicated", "stop"],
-  "native-tab-limit": ["reestablish", "switch-surface", "connector-alternative", "computer-use-dedicated", "stop"],
-  "native-guest-destroyed": ["reestablish", "switch-surface", "connector-alternative", "computer-use-dedicated", "stop"],
+  "native-session-ended": ["reestablish", "computer-use-native", "stop"],
+  "native-tab-limit": ["reestablish", "computer-use-native", "stop"],
+  "native-guest-destroyed": ["reestablish", "computer-use-native", "stop"],
   "login-wall": ["login-recovery", "switch-surface", "connector-alternative", "stop"],
   "human-check-required": ["human-check-wait", "stop"],
   "page-load-failed": ["reestablish", "switch-surface", "connector-alternative", "stop"],
   "browser-mcp-not-attached": ["connector-alternative", "stop"],
+  "native-tool-failed": ["computer-use-native", "stop"],
 });
 
 /**
@@ -309,12 +313,14 @@ const RUNG_LABEL: Record<LadderRung, { ko: string; en: string }> = {
   "switch-surface": { ko: "다른 Agentlas 브라우저로 전환", en: "switch to the other Agentlas browser" },
   "login-recovery": { ko: "로그인 복구", en: "login recovery" },
   "connector-alternative": { ko: "사이트 API·커넥터 찾기", en: "look for a site API or connector" },
+  "computer-use-native": { ko: "같은 브라우저 화면 조작", en: "computer use on this browser guest" },
   "computer-use-dedicated": { ko: "전용 창 화면 조작", en: "computer use on the dedicated window" },
   "human-check-wait": { ko: "사람 확인 대기", en: "wait for the human check" },
   "stop": { ko: "중지", en: "stop" },
 };
 
 const FAILURE_LABEL: Record<BrowserFailureCode, { ko: string; en: string }> = {
+  "native-tool-failed": { ko: "브라우저 DOM 도구가 실패했습니다", en: "The native browser DOM tool failed" },
   "bridge-wire-dropped": { ko: "브라우저 도구 연결이 끊겼습니다", en: "The browser tool connection dropped" },
   "chrome-launch-failed": { ko: "전용 브라우저를 시작하지 못했습니다", en: "The dedicated browser could not start" },
   "chrome-crashed": { ko: "전용 브라우저가 종료됐습니다", en: "The dedicated browser stopped" },

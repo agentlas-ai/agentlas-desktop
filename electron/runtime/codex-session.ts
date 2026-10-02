@@ -1,3 +1,4 @@
+import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 // Codex 상주 세션 — 턴마다 스폰-종료하던 `codex exec` 를 `codex app-server` 로 붙든다.
 //
 // ★정정된 전제. "codex 는 구조적으로 상주 불가"는 틀린 결론이었다(`codex exec --help`만
@@ -383,12 +384,14 @@ export function codexSessionPool(): AcpSessionPool<CodexResidentSession> {
        * 영영 안 끝난다(ACP·claude 구현에서 실제로 나온 함정 — 같은 처방을 그대로).
        */
       unref: (session) => {
+        releaseAttemptChild(session.child);
         session.child.unref?.();
         for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
           (pipe as unknown as { unref?: () => void } | null)?.unref?.();
         }
       },
       ref: (session) => {
+        claimAttemptChild(session.child);
         session.child.ref?.();
         for (const pipe of [session.child.stdin, session.child.stdout, session.child.stderr]) {
           (pipe as unknown as { ref?: () => void } | null)?.ref?.();
@@ -431,6 +434,7 @@ export async function prepareCodexThreadResume(
   session: CodexResidentSession,
   threadId: string,
   signal?: AbortSignal,
+  options: { deadlineAt?: number } = {},
 ): Promise<() => void> {
   const key = codexThreadOwnerKey(session, threadId);
   if (codexResumeClaims.has(key)) {
@@ -466,9 +470,14 @@ export async function prepareCodexThreadResume(
       };
       const onExit = (): void => finish();
       const onAbort = (): void => finish(signal?.reason instanceof Error ? signal.reason : new Error("Codex thread resume cancelled"));
-      const timer = setTimeout(() => finish(new CodexSessionContinuityError(
-        "writer_close_timeout", "Codex's previous thread writer did not exit; resume was stopped.",
-      )), 2_000);
+      // The request owns the lifetime. A slow session-end hook must not turn
+      // a still-live request into a new thread after an unrelated grace timer.
+      // Legacy callers without cancellation retain a bounded wait.
+      const deadlineAt = typeof options.deadlineAt === "number" && Number.isFinite(options.deadlineAt)
+        ? options.deadlineAt : signal ? null : Date.now() + 15_000;
+      const timer = deadlineAt === null ? undefined : setTimeout(() => finish(new CodexSessionContinuityError(
+        "writer_close_timeout", "Codex's previous thread writer did not exit before the request deadline; resume was stopped.",
+      )), Math.max(0, deadlineAt - Date.now()));
       child.once("exit", onExit);
       signal?.addEventListener("abort", onAbort, { once: true });
       if (childExited(child)) finish();

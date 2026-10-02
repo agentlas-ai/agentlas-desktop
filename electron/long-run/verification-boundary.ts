@@ -1,3 +1,4 @@
+import { hasPendingInvocationDirection } from "./pending-directions";
 import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
@@ -43,7 +44,7 @@ export function captureGoalVerificationBoundary(goalId: string, invocationRunId:
     JOIN long_run_workers w ON w.id = a.worker_id WHERE a.run_id = ? AND w.role = 'controller' ORDER BY a.rowid DESC LIMIT 1`)
     .get(run.id) as {id: string; invocation_run_id: string | null} | undefined;
   if (controller?.invocation_run_id !== invocationRunId) throw new Error("verification_newer_controller_attempt");
-  if (getDb().prepare("SELECT 1 FROM invocation_steers WHERE original_run_id = ? AND status IN ('queued','draining','failed','cancelled') LIMIT 1").get(invocationRunId)) throw new Error("verification_pending_direction");
+  if (hasPendingInvocationDirection(invocationRunId)) throw new Error("verification_pending_direction");
   const latestUser = getDb().prepare("SELECT id, text FROM chat_messages WHERE chat_id = ? AND role = 'user' ORDER BY rowid DESC LIMIT 1").get(chat.id);
   const workspace = getChatWorkingFolder(chat.id);
   const instructions = workspace ? compileProjectInstructionSnapshot({projectDir: workspace}).snapshot.revision : null;

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-import type { WorkflowGraph } from "../../shared/types";
+import type { Automation, WorkflowGraph } from "../../shared/types";
 import { graphExecutionDigest, sha256Value } from "../../shared/graph-execution-digest";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { parseAutomationStrategySchedulePatch, prepareAutomationStrategySchedule,
@@ -103,6 +103,8 @@ export interface AutomationStrategyRevisionConsumption {
   revision: number | null;
   sourceRunId: string | null;
   runGraphDigest: string | null;
+  /** Definition-bound strategy used by this run; the execution digest stays exact. */
+  runStrategyGraphDigest: string | null;
   revisionGraphDigest: string | null;
   runDefinitionDigest: string | null;
   revisionDefinitionDigest: string | null;
@@ -410,11 +412,14 @@ export function inspectAutomationStrategyRevisionForRun(input: {
   automationId: string;
   graphDigest: string | null;
   dryRun: boolean;
+  /** Main's frozen dispatch snapshot, never an IPC/model assertion of equivalence. */
+  execution?: { automation: Automation; graph: WorkflowGraph };
 }): AutomationStrategyRevisionConsumption {
   const base = {
     revision: null,
     sourceRunId: null,
     runGraphDigest: input.graphDigest,
+    runStrategyGraphDigest: null,
     revisionGraphDigest: null,
     runDefinitionDigest: null,
     revisionDefinitionDigest: null,
@@ -437,7 +442,27 @@ export function inspectAutomationStrategyRevisionForRun(input: {
     strategyDigest: latest.strategyDigest,
   };
   if (input.dryRun) return { ...revisionBase, status: "not_consumed", reason: "dry_run" };
-  if (!input.graphDigest || latest.graphDigest !== input.graphDigest) {
+  let strategyGraphDigest = input.graphDigest;
+  if (input.execution) {
+    try {
+      const stored = getAutomation(input.automationId);
+      const { automation, graph } = input.execution;
+      // A temporary worker runtime can change the checkpoint identity without
+      // changing the applied strategy. Prove that this is the only changed
+      // execution-contract field; prompts, tools, effects and owner edits must
+      // still match the durable revision and current definition below.
+      if (!stored?.graph || automation.id !== input.automationId
+        || graphExecutionDigest(automation, graph) !== input.graphDigest
+        || graphExecutionDigest(stored, stored.graph) !== latest.graphDigest) {
+        strategyGraphDigest = null;
+      } else {
+        strategyGraphDigest = graphExecutionDigest({ ...automation, runtimeSelection: stored.runtimeSelection }, graph);
+      }
+    } catch {
+      strategyGraphDigest = null;
+    }
+  }
+  if (!strategyGraphDigest || latest.graphDigest !== strategyGraphDigest) {
     return { ...revisionBase, status: "not_consumed", reason: "graph_digest_mismatch" };
   }
 
@@ -450,7 +475,8 @@ export function inspectAutomationStrategyRevisionForRun(input: {
   if (!currentDefinitionDigest) {
     return { ...revisionBase, status: "not_consumed", reason: "definition_unavailable" };
   }
-  const withDefinition = { ...revisionBase, runDefinitionDigest: currentDefinitionDigest };
+  const withDefinition = { ...revisionBase, runStrategyGraphDigest: strategyGraphDigest,
+    runDefinitionDigest: currentDefinitionDigest };
   if (latest.definitionDigest !== currentDefinitionDigest) {
     return { ...withDefinition, status: "not_consumed", reason: "definition_digest_mismatch" };
   }

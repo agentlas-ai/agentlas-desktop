@@ -9,6 +9,7 @@ import { reviewScienceAnalysisPlanWithFreshness } from "agentlas-science";
 // - sandbox: true (renderer는 sandboxed)
 // - 모든 Node API는 preload → ipc 경로로만 노출
 import { startInstallBeacon } from "./install-beacon";
+import { PAGE_FRAME_PROBE_SOURCE } from "./browser/page-frame-probe";
 import {
   app,
   autoUpdater as electronAutoUpdater,
@@ -122,7 +123,7 @@ import { migrateRegisteredAgents } from "./architecture/agent-migrations";
 import { seedBuiltinAgents } from "./architecture/seed";
 import { repairAllRootChatSurfaceControllers } from "./store/chats";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
-import { materializeBuiltinPlugins } from "./plugins/materialize";
+import { installedPluginsRoot, materializeBuiltinPlugins } from "./plugins/materialize";
 import { startHephaestusRuntimeAutoUpdate } from "./hephaestus/engine";
 import { startCliRuntimeAutoUpdate, stopCliRuntimeAutoUpdate } from "./runtime/auto-update";
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
@@ -156,6 +157,7 @@ import {
   stopAgentlasMobileBridge,
 } from "./mobile-bridge/runtime";
 import { userDataDir, userDataPath } from "./runtime-paths";
+import { assertPendingInstallBrowserBoundary, configureInstallBrowserBoundary, prepareInstallBrowserBoundary } from "./browser/install-browser-boundary";
 import { runHostShutdownHooks } from "./host-lifecycle";
 import {
   initializeAppRuntimeCoordinator,
@@ -523,7 +525,9 @@ function initializeInstallIdentity(): InstallIdentity {
       ?? (identity.channel === "local-candidate" || identity.channel === "dev"
         ? path.join(app.getPath("appData"), identity.userDataNamespace)
         : null);
+    configureInstallBrowserBoundary(userDataDir ?? app.getPath("userData"), path.join(app.getPath("appData"), "Agentlas"));
     if (userDataDir) {
+      assertPendingInstallBrowserBoundary();
       fs.mkdirSync(userDataDir, { recursive: true, mode: 0o700 });
       app.setPath("userData", userDataDir);
     }
@@ -569,15 +573,28 @@ async function initializeDesktopStore(options: Parameters<typeof initStore>[0] =
 }
 
 /** All native clients address the exact opened store and installation. */
+let nativeBrowserMainBroker: Promise<import("./browser/main-browser-broker").MainBrowserBroker> | null = null;
 function desktopDaemonClientOptions(): ScienceDaemonClientOptions {
   const storePath = openedStorePath();
   if (!storePath) throw new Error("daemon-client-store-not-open");
+  // Early clients can spawn the daemon before materialization. Select the same
+  // plugin root now so the child inherits the QA/dev installation boundary.
+  installedPluginsRoot();
   return {
     userDataDir: userDataDir(), storePath, installIdentity,
     appVersion: app.getVersion(), parentPid: process.pid,
     appInstanceId: desktopAppInstanceId(),
     expectedStoreIdentity: storeIdentityDigest(storePath, desktopAppInstanceId()),
     requiredSchemaVersion: STORE_SCHEMA_VERSION,
+    browserCapability: async (binding) => {
+      nativeBrowserMainBroker ??= import("./browser/main-browser-broker").then(module => module.startMainBrowserBroker({
+        createGrant: input => import("./browser/native-cdp-relay").then(relay => relay.createNativeBrowserRelayGrant(input)),
+        allowedReadEvaluationSources: [PAGE_FRAME_PROBE_SOURCE],
+        recoverLogin: (nativeGrant, input) => import("./browser/login-recovery-runtime")
+          .then(recovery => recovery.recoverLoginWallsNow({ ...input, nativeGrant })),
+      }));
+      return (await nativeBrowserMainBroker).issue(binding);
+    },
   };
 }
 
@@ -1349,6 +1366,7 @@ function stopQuitServices(): Promise<void> {
 
   const memoryCleanupStopped = stopMemoryRevocationCleanup();
   quitServicesStopPromise = Promise.all([
+    nativeBrowserMainBroker?.then(broker => broker.close()),
     localModelHubControl?.shutdown(),
     localModelOwnerCleanup?.(),
     legacyLearningJob?.catch(() => {}),
@@ -1464,6 +1482,17 @@ configureUpdateResumeHost({
 
 let restoreDaemonAutostartAfterFailedUpdate: (() => void) | null = null;
 async function prepareAutomaticUpdateQuit(): Promise<void> {
+  // The daemon may own work that has no GUI invocation. An automatic install
+  // cannot stop that service merely because the last window has closed.
+  if (!updateInstallDeferredForVersion(getUpdaterState().version)) {
+    const { readDaemonActiveWorkForUpdate } = await import("./daemon/app-launcher");
+    const serviceWork = await readDaemonActiveWorkForUpdate({
+      userDataDir: userDataDir(), storePath: openedStorePath(), installIdentity,
+    });
+    if (quitWorkCount(collectUpdateWork().map((item) => item.kind), serviceWork) > 0) {
+      throw new Error("automatic_update_active_work");
+    }
+  }
   // [나중에] was chosen for this version while work ran: this quit is the consented install. Pause
   // the work for the update first so it continues after the relaunch (owner brief rule 4).
   const deferredWork = updateInstallDeferredForVersion(getUpdaterState().version) ? collectUpdateWork() : [];
@@ -1525,11 +1554,25 @@ function finishQuitCleanup(options: { preserveUpdater?: boolean } = {}): Promise
     return quitCleanupPromise;
   }
   quitCleanupPromise = (async () => {
-    // Detach before the GUI invocation coordinator aborts its local waits.
+    // Detach synchronously before aborting GUI waits: the local-model client
+    // marks detaching before returning, so abort cannot cancel daemon work.
+    try { scienceExecutionIpc?.close(); } catch (error) { console.error("[science-daemon] IPC detach failed", error); }
+    try { scienceDaemonClient?.close(); } catch (error) { console.error("[science-daemon] client detach failed", error); }
+    let localModelDetach: Promise<void> | undefined;
+    try { localModelDetach = localModelDaemonClient?.detach(); }
+    catch (error) {
+      console.error("[local-model] client detach failed", error);
+      try { localModelDaemonClient?.close(); } catch {}
+    }
+    // Mark Desktop-owned work before local provider shutdown, so child exit
+    // cannot become an ordinary failed action or retry.
+    try { closeAutomationDispatchForShutdown(); } catch {}
+    try { invocationService.beginAppShutdown(); } catch {}
+    try { closeLongRunVerifierAdmission(); } catch {}
+    try { interruptLongRunVerifiers(); } catch {}
+    // All local admission gates are closed before awaiting the remote detach.
     // Neither that signal nor a window close is authority to stop daemon work.
-    scienceExecutionIpc?.close();
-    scienceDaemonClient?.close();
-    await localModelDaemonClient?.detach().catch(error => console.error("[local-model] client detach failed", error));
+    await localModelDetach?.catch(error => console.error("[local-model] client detach failed", error));
     try {
       const report = await shutdownAppRuntimeCoordinator(15_000);
       if (report.pausedRunIds.length > 0) {
@@ -1600,7 +1643,7 @@ const automaticQuitInstaller = createAutomaticQuitInstaller({
   // Running work blocks quit-install unless the person already chose [나중에] for this version in
   // the in-app confirm — then this quit installs and the work continues after the relaunch.
   shouldInstallOnQuit: () => !developmentEffectsSuppressed() && !systemShutdownInProgress
-    && (invocationService.activeChatIds().length === 0 || updateInstallDeferredForVersion(getUpdaterState().version)),
+    && (collectUpdateWork().length === 0 || updateInstallDeferredForVersion(getUpdaterState().version)),
   logger: console,
 });
 electronAutoUpdater.on("before-quit-for-update", () => {
@@ -1620,6 +1663,13 @@ function forceQuitAfterContinuity(reason: string): void {
   // An OS credential prompt or native worker must not leave an invisible
   // Main process and defunct helpers alive indefinitely after Quit.
   shellReadyForWindows = false;
+  try { scienceExecutionIpc?.close(); } catch {}
+  try { scienceDaemonClient?.close(); } catch {}
+  try { localModelDaemonClient?.close(); } catch {}
+  try { closeAutomationDispatchForShutdown(); } catch {}
+  try { invocationService.beginAppShutdown(); } catch {}
+  try { closeLongRunVerifierAdmission(); } catch {}
+  try { interruptLongRunVerifiers(); } catch {}
   try { runHostShutdownHooks(); } catch {}
   try { closeScienceStore(); } catch {}
   try { closeStore(); } catch {}
@@ -1845,6 +1895,9 @@ app.whenReady().then(async () => {
   // Electron may never resolve ready for them. Keep startup gated here so no
   // store, updater, daemon, or window work begins without lock ownership.
   if (!await singleInstanceLockPromise) return;
+  // Prepare the private profile/port pair before any browser startup recovery,
+  // plugin materialization or child host can resolve a CDP endpoint.
+  await prepareInstallBrowserBoundary();
   if (!initialSingleInstanceLock) traceUpdaterStartup("single-instance-lock-ready");
   if (developmentEffectsSuppressed()) {
     // Apply before the first real window, including renderer fetches and HMR.
@@ -4497,17 +4550,8 @@ app.whenReady().then(async () => {
         .then((legacy) => { if (legacy.length) console.info("[long-run] legacy ongoing startup reconciliation", legacy); })
         .catch((error) => console.error("[long-run] legacy ongoing startup reconciliation failed", error))
         .finally(() => {
-          // Owner signed in after a login-recovery card: continue now (event), not on the next tick.
-          void import("./browser/login-recovery-runtime").then(({ setLoginRecoveryResumeHandler }) => {
-            setLoginRecoveryResumeHandler(() => {
-              try {
-                const swept = sweepBlockedGoals(invocationService, "periodic").filter((entry) => entry.action !== "deferred");
-                console.info("[login-recovery] resume sweep", JSON.stringify({ resumed: swept.length }));
-              } catch (error) {
-                console.error("[login-recovery] resume sweep failed", error);
-              }
-            });
-          }).catch(() => undefined);
+          // Browser login restoration is consumed by its exact invocation/node
+          // wait handle. An unrelated session event cannot wake every Goal.
           try {
             const swept = sweepBlockedGoals(invocationService, "startup");
             if (swept.length) console.info("[long-run] blocked goal sweep", swept);

@@ -14,6 +14,7 @@ export const AGENTLAS_ONE_TEAM_TOOL_NAMES = [
   "one_team_session_status",
   "one_team_create_member",
   "one_team_invite",
+  "one_team_compose_group",
 ] as const;
 
 const SOURCE = String.raw`"use strict";
@@ -59,6 +60,7 @@ const tools = [
   { name: "one_team_session_status", annotations: ro, description: "Status of a teammate session you started; when finished, includes the teammate's final answer. wait_seconds (0-180) waits for it to finish first.", inputSchema: { type: "object", properties: { session_id: session, wait_seconds: { type: "integer", minimum: 0, maximum: 180 } }, required: ["session_id"], additionalProperties: false } },
   { name: "one_team_create_member", annotations: act, description: "Create a NEW teammate on the owner's One team (same as the owner's New Agent button: own chat, memory and a default character) and, by default, invite them into this group chat. Use when the owner asks you to make/create/hire an agent or teammate, or when the work needs a specialist nobody on one_team_list covers. Give a short human name, the role, and optionally a personality/working style. It needs write or full permission. The same name is never created twice (an existing teammate with that name is returned instead). A refusal (team full, read-only run, invalid name) says exactly why and that nobody was created. A created result has confirmed:true and owner_message in the owner's language: tell the owner that. Then hand work with one_team_start_session.", inputSchema: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 80 }, role: { type: "string", maxLength: 100, description: "One line: what this teammate is responsible for." }, personality: { type: "string", maxLength: 1200 }, invite: { type: "boolean", description: "Default true: also add them to this group chat (ignored when this chat is not a group chat)." } }, required: ["name"], additionalProperties: false } },
   { name: "one_team_invite", annotations: act, description: "Invite an EXISTING teammate (see one_team_list) into this group chat. Use when the owner asks you to invite/bring/add a teammate to this group. It needs write or full permission and this conversation must be a group chat. A refusal (not a group chat, group full, unknown teammate) says exactly why and that the group is unchanged.", inputSchema: { type: "object", properties: { member: { type: "string", minLength: 1, maxLength: 200, description: "Teammate name or member id (see one_team_list)." } }, required: ["member"], additionalProperties: false } },
+  { name: "one_team_compose_group", annotations: act, description: "Make this exact One conversation a group with specified EXISTING active local teammates, or add them to its existing group. Use only when the owner requests a group conversation. First check one_team_list.conversation and use exact member_id values from teammates; create a missing teammate separately. Needs write or full permission. Preserves this conversation, task, goal, messages and runtime. Never removes current members or starts work. Repeating the same composition returns the same group without duplicates. Check confirmed, created, added_member_ids and owner_message; hand work separately with one_team_start_session.", inputSchema: { type: "object", properties: { members: { type: "array", minItems: 1, maxItems: 16, uniqueItems: true, items: { type: "string", minLength: 3, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$" }, description: "Exact member_id values returned by one_team_list for existing active local teammates." } }, required: ["members"], additionalProperties: false } },
 ];
 function handle(requestValue) {
   if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-one-team", version: "1.0.0" } };
@@ -73,6 +75,7 @@ function handle(requestValue) {
   if (name === "one_team_session_status") return request("status", { sessionId: args.session_id, waitSeconds: args.wait_seconds });
   if (name === "one_team_create_member") return request("create", { name: args.name, role: args.role, personality: args.personality, invite: args.invite });
   if (name === "one_team_invite") return request("invite", { member: args.member });
+  if (name === "one_team_compose_group") return request("compose_group", { members: args.members });
   return Promise.resolve(error("Unknown One team tool."));
 }
 function line(value) {

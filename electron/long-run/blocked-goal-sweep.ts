@@ -194,6 +194,21 @@ function alreadyToldForCause(run: LongRunRecord): boolean {
   return Boolean(row && run.blockedReason && row.reason === run.blockedReason);
 }
 
+/** A periodic wake is not new progress. Only a newer bound Goal revision releases a settled stall. */
+function stallProgressRequired(run: LongRunRecord): boolean {
+  if (run.status !== "blocked" || !["stall_window_exhausted", "invocation_no_progress"].includes(run.blockedReason ?? "")) return false;
+  const row = getDb().prepare(`SELECT
+    COALESCE(MAX(CASE WHEN (kind = 'run.cycle_recorded' AND json_extract(payload_json, '$.blocked') = 1)
+      OR (kind = 'run.status_changed' AND json_extract(payload_json, '$.to') = 'blocked'
+        AND json_extract(payload_json, '$.reason') IN ('stall_window_exhausted', 'invocation_no_progress')) THEN seq END), 0) AS stallSeq,
+    COALESCE(MAX(CASE WHEN kind = 'run.goal_revision_bound'
+      AND json_type(payload_json, '$.revision') = 'integer'
+      AND json_type(payload_json, '$.previousRevision') = 'integer'
+      AND json_extract(payload_json, '$.revision') > json_extract(payload_json, '$.previousRevision') THEN seq END), 0) AS revisionSeq
+    FROM long_run_events WHERE run_id = ?`).get(run.id) as { stallSeq: number; revisionSeq: number } | undefined;
+  return !row || row.stallSeq <= 0 || row.revisionSeq <= row.stallSeq;
+}
+
 function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string): BlockedGoalSweepResult {
   const toldBefore = alreadyToldForCause(run);
   const chatId = run.rootChatId!;
@@ -379,6 +394,9 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   // 2b. The goal's last turn asked the owner a question (typed decision request): the owner's answer resumes it through
   // the ordinary resume-with-message path. Re-running the goal meanwhile only asks again (live 2026-09-25).
   if (run.status === "blocked" && run.blockedReason === "goal_owner_answer_required") return defer("owner_answer_pending");
+  // Preserve the no-progress boundary; effects may be reconciled above, but time alone cannot retry the same work.
+  // Explicit owner resume uses its existing user-control path and does not pass through this sweep.
+  if (stallProgressRequired(run)) return defer("stall_progress_required");
   // 2a. Its turn was refused because another turn holds this Work project: wait for that turn to end
   // (resumeGoalsWaitingOnProject is called when it settles). No model start, no retry schedule, no notice.
   if (run.status === "blocked" && run.blockedReason === WORK_PROJECT_RESIDENCY_BUSY_CODE && projectHeldByAnotherTurn(run, dispatcher)) {

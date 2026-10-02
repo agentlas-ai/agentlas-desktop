@@ -40,11 +40,14 @@ import {
   type RungOutcome,
 } from "./fallback-ladder";
 import { detectLoginWall } from "./login-wall";
-import { PAGE_FRAME_PROBE_SOURCE, nativeBrowserRelayGrantForEndpoint, type NativeBrowserRelayGrant, type NativeBrowserRelayPage } from "./native-cdp-relay";
+import { remoteNativeBrowserGrantForEndpoint, remoteNativeBrowserOwnerScopeForId } from "./main-browser-channel";
+import { PAGE_FRAME_PROBE_SOURCE } from "./page-frame-probe";
+import type { NativeBrowserRelayGrant, NativeBrowserRelayPage, NativeBrowserRelayOwnerScope } from "./native-cdp-relay";
 
 type Notice = NonNullable<McpInvocationEvent["notice"]>;
 
-interface RunBinding { chatId: string; runId: string; locale: "ko" | "en"; notify?: (notice: Notice) => void }
+interface RunBinding { chatId: string; runId: string; locale: "ko" | "en"; notify?: (notice: Notice) => void;
+  nativeGrant?: NativeBrowserRelayGrant | null; nativeRequired?: boolean; nativeComputerUseAvailable?: boolean }
 const runs = new Map<string, RunBinding>();
 
 /** The run lends its ids and notice sink; returns the unbind. */
@@ -57,6 +60,21 @@ export function bindBrowserLadderRun(binding: RunBinding): () => void {
     computerUseGrants.get(binding.chatId)?.();
     computerUseGrants.delete(binding.chatId);
   };
+}
+
+async function localNativeGrant(endpoint: string | null): Promise<NativeBrowserRelayGrant | null> {
+  if (!endpoint) return null;
+  const remote = remoteNativeBrowserGrantForEndpoint(endpoint);
+  if (remote) return remote;
+  if (process.type !== "browser" || process.env.ELECTRON_RUN_AS_NODE === "1") return null;
+  return (await import("./native-cdp-relay")).nativeBrowserRelayGrantForEndpoint(endpoint);
+}
+
+async function ownerScopeForId(id: string): Promise<NativeBrowserRelayOwnerScope | null> {
+  const remote = remoteNativeBrowserOwnerScopeForId(id);
+  if (remote) return remote;
+  if (process.type !== "browser" || process.env.ELECTRON_RUN_AS_NODE === "1") return null;
+  return (await import("./native-cdp-relay")).nativeBrowserRelayOwnerScopeForId(id);
 }
 
 // ── Surface reading (measurement only) ──────────────────────────────────────────────────────────────────────
@@ -102,12 +120,13 @@ function nativePages(grant: NativeBrowserRelayGrant): LadderPage[] {
       url: page.url, surface: "native" as const,
       evaluate: page.evaluate,
       reload: page.reload,
-      present: async () => { page.present?.(); },
+      present: async () => { await page.present?.(); },
     }));
 }
 
 async function surfacePages(grant: NativeBrowserRelayGrant | null): Promise<LadderPage[]> {
-  if (grant && grant.health?.().failedOver !== true) return nativePages(grant);
+  await grant?.refresh?.();
+  if (grant) return nativePages(grant);
   return dedicatedPages().catch(() => []);
 }
 
@@ -149,14 +168,14 @@ async function dedicatedFacts(): Promise<BrowserFailureFacts["dedicated"]> {
 /** Measure the surface after a failed call. Exported for the contract. */
 export async function measureBrowserFailure(input: { grant: NativeBrowserRelayGrant | null; resultText: string }): Promise<{ facts: BrowserFailureFacts; page?: LadderPage }> {
   const markers = agentlasBrowserMarkers(input.resultText);
-  const health = input.grant?.health?.();
   const surface: BrowserSurface = input.grant ? "native" : "dedicated";
   const pages = await surfacePages(input.grant).catch(() => []);
+  const health = input.grant?.health?.();
   const page = pages[0];
   const facts: BrowserFailureFacts = {
     surface, markers,
     ...(health ? { native: { current: health.current, lastRefusal: health.lastRefusal, failedOver: health.failedOver } } : {}),
-    ...(!input.grant || health?.failedOver ? { dedicated: await dedicatedFacts().catch(() => ({ ownership: "unverifiable" as const, portReady: false })) } : {}),
+    ...(!input.grant ? { dedicated: await dedicatedFacts().catch(() => ({ ownership: "unverifiable" as const, portReady: false })) } : {}),
     page: await pageFacts(page),
   };
   return { facts, ...(page ? { page } : {}) };
@@ -172,9 +191,13 @@ function recordEvent(event: BrowserLadderEvent, binding: RunBinding | undefined)
   }).catch(() => undefined);
 }
 
-function cardNotice(card: LadderOwnerCard, locale: "ko" | "en", level: Notice["level"]): Notice {
+function cardNotice(card: LadderOwnerCard, locale: "ko" | "en", level: Notice["level"], scope: LadderScope): Notice {
+  const browserSurface = scope.grant || scope.binding?.nativeRequired ? "native" : "dedicated";
+  let details: Record<string, unknown> = {};
+  try { details = JSON.parse(card.details); } catch { /* A malformed card never gains a native scope. */ }
   return { level, code: card.code, message: locale === "ko" ? card.message.ko : card.message.en,
-    i18n: { ko: card.message.ko, en: card.message.en }, details: card.details };
+    i18n: { ko: card.message.ko, en: card.message.en }, details: JSON.stringify({ ...details, browserSurface,
+      ...(scope.grant?.ownerScopeId ? { ownerScopeId: scope.grant.ownerScopeId } : {}) }) };
 }
 
 // ── Rungs (production) ───────────────────────────────────────────────────────────────────────────────────────
@@ -185,7 +208,7 @@ interface LadderScope {
   page: LadderPage | undefined;
   site: string | null;
   suggestions: string[];
-  handoff?: { kind: "connector" | "computer-use"; id: string };
+  handoff?: { kind: "connector" | "computer-use" | "native-guest"; id: string };
 }
 
 async function reestablish(code: BrowserFailureCode, scope: LadderScope): Promise<RungOutcome> {
@@ -196,12 +219,12 @@ async function reestablish(code: BrowserFailureCode, scope: LadderScope): Promis
     return url && !isBrowserErrorPage(url) ? { result: "recovered", detail: { reloaded: true } } : { result: "failed", detail: { reloaded: false } };
   }
   const grant = scope.grant;
-  if (grant && grant.health?.().failedOver !== true) {
+  if (grant) {
     const before = grant.health?.();
-    if (!before?.current) return { result: "unavailable", detail: { reason: "grant-not-current" } };
+    if (!before?.current || before.failedOver) return { result: "unavailable", detail: { reason: "grant-not-current" } };
     // A full tab list is not fixed by reconnecting; the other surface has no such limit.
     if (code === "native-tab-limit") return { result: "unavailable", detail: { reason: "tab-limit" } };
-    const after = grant.reestablish?.();
+    const after = await grant.reestablish?.();
     return after?.current ? { result: "recovered", detail: { revived: after.revived, leases: after.leases } } : { result: "failed" };
   }
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
@@ -221,36 +244,10 @@ async function reestablish(code: BrowserFailureCode, scope: LadderScope): Promis
 }
 
 async function switchSurface(scope: LadderScope): Promise<RungOutcome> {
-  const grant = scope.grant;
-  if (!grant || grant.health?.().failedOver === true) {
-    // Dedicated → in-app needs a window-bound grant, which only a new run can mint (the card's retry).
-    return { result: "unavailable", detail: { reason: grant ? "already-failed-over" : "no-in-app-grant" } };
-  }
-  if (!grant.health?.().current || !grant.failover) return { result: "unavailable", detail: { reason: "grant-not-current" } };
-  const launcher = await import("../mcp-tools/browser-cdp-launcher");
-  try { await launcher.ensureBrowserCdpHost(); }
-  catch (error) { return { result: "failed", detail: { host: launcher.browserCdpHostFailureDiagnostic(error).code } }; }
-  const owned = await launcher.reconcileBrowserCdpOwnerWithRetry().catch(() => null);
-  if (owned?.state !== "owned") return { result: "failed", detail: { ownership: owned?.state ?? "unknown" } };
-  const port = launcher.browserCdpPort();
-  const { fetchCdpJson } = await import("./native-session-cookie-import");
-  const version = await fetchCdpJson(port, "/json/version").catch(() => null) as { webSocketDebuggerUrl?: unknown } | null;
-  const ws = typeof version?.webSocketDebuggerUrl === "string" ? version.webSocketDebuggerUrl : "";
-  let parsed: URL | null = null;
-  try { parsed = new URL(ws); } catch { parsed = null; }
-  if (!parsed || parsed.protocol !== "ws:" || parsed.hostname !== "127.0.0.1" || Number(parsed.port) !== port) return { result: "failed", detail: { reason: "no-devtools-endpoint" } };
-  // Carry the site session the in-app browser holds (the owner's own login) into the dedicated profile.
-  let carried = 0;
-  if (scope.site) {
-    const { productionLoginRecoveryDeps } = await import("./login-recovery-runtime");
-    const { identityDomainsFor } = await import("./login-wall");
-    const domains = [...new Set([scope.site, ...identityDomainsFor(scope.site)])];
-    const report = await productionLoginRecoveryDeps().feedStore({ from: "native-partition", to: "cdp-profile", domains }).catch(() => ({ state: "failed" as const, written: 0 }));
-    carried = report.written;
-  }
-  const lease = await launcher.acquireBrowserCdpLease("ladder-failover").catch(() => null);
-  grant.failover({ webSocketDebuggerUrl: parsed.toString(), port, release: () => launcher.releaseBrowserCdpLease(lease) });
-  return grant.health?.().failedOver ? { result: "recovered", surface: "dedicated", detail: { carriedCookies: carried } } : { result: "failed", detail: { reason: "failover-refused" } };
+  // Moving a native task into CFT silently changes its login identity and can
+  // replay the owner's imported tokens in a second browser. Reconnect/reload
+  // the canonical host, or use the remaining explicit recovery steps.
+  return { result: "unavailable", detail: { reason: scope.grant ? "canonical-session-surface-fixed" : "no-in-app-grant" } };
 }
 
 async function loginRecovery(scope: LadderScope): Promise<RungOutcome> {
@@ -291,7 +288,22 @@ async function connectorAlternative(scope: LadderScope): Promise<RungOutcome> {
 /** Scope releasers per chat: a computer-use grant lives while the ladder's run does (and never past its cap). */
 const computerUseGrants = new Map<string, () => void>();
 
+async function computerUseNative(scope: LadderScope): Promise<RungOutcome> {
+  if (!scope.grant?.nativeComputerUse || !scope.grant.health?.().current) return { result: "unavailable", detail: { reason: "native-guest-capability-unavailable" } };
+  if (!scope.binding?.nativeComputerUseAvailable) return { result: "unavailable", detail: { reason: "native-computer-use-not-selected" } };
+  const capability = scope.grant.nativeComputerUse;
+  const response = await fetch(`${capability.endpoint}/native-guest/action`, { method: "POST",
+    headers: { Authorization: `Bearer ${capability.token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ scopeId: capability.scopeId, action: "listApps" }), signal: AbortSignal.timeout(3_000) });
+  const value = await response.json() as { ok?: boolean; apps?: { name?: string }[] };
+  if (!value.ok || value.apps?.length !== 1 || typeof value.apps[0].name !== "string"
+    || !value.apps[0].name.startsWith(`native-guest:${capability.scopeId}:`)) return { result: "unavailable", detail: { reason: "native-guest-target-unavailable-or-ambiguous" } };
+  scope.handoff = { kind: "native-guest", id: value.apps[0].name };
+  return { result: "handed-off", detail: { scope: "native-guest", app: value.apps[0].name } };
+}
+
 async function computerUseDedicated(scope: LadderScope): Promise<RungOutcome> {
+  if (scope.grant || scope.binding?.nativeRequired) return { result: "unavailable", detail: { reason: "canonical-session-surface-fixed" } };
   const { listInstalledServers } = await import("../mcp-tools/registry");
   const cu = listInstalledServers().find((server) => server.enabled && /computer-use|cua/.test(`${server.id} ${server.catalogId ?? ""}`));
   if (!cu) return { result: "unavailable", detail: { reason: "computer-use-not-installed" } };
@@ -371,6 +383,8 @@ function answerFor(result: LadderRunResult, input: { mutating: boolean }, scope:
   } else if (state.final === "handed-off") {
     text = scope.handoff?.kind === "connector"
       ? `Agentlas browser ladder: the browser path failed (${state.code}); the installed connector "${scope.handoff.id}" covers this site. Use it instead of the browser.`
+      : scope.handoff?.kind === "native-guest"
+      ? `Agentlas browser ladder: DOM/CDP failed (${state.code}). Use the selected computer-use tools with app "${scope.handoff.id}". First get_screen for that app, then use its latest source_id for each input. The same Main-owned guest remains in use. Each CUA call still requires its own existing permission/approval gate. File upload, clipboard and OS apps are unavailable. Do not replay the failed mutation automatically.`
       : `Agentlas browser ladder: the browser path failed (${state.code}). The dedicated Agentlas browser is now visible; use computer use with app "pid:${scope.handoff?.id}". Computer use is locked to that window until this run ends — other apps, the owner's own Chrome, OS dialogs and password prompts are refused.`;
   } else if (state.final === "waiting-owner") {
     text = state.code === "human-check-required"
@@ -394,12 +408,13 @@ function productionDeps(code: BrowserFailureCode, scope: LadderScope, ladderId: 
         case "switch-surface": return switchSurface(scope);
         case "login-recovery": return loginRecovery(scope);
         case "connector-alternative": return connectorAlternative(scope);
+        case "computer-use-native": return computerUseNative(scope);
         case "computer-use-dedicated": return computerUseDedicated(scope);
         case "human-check-wait": return humanCheckWait(scope, ladderId);
       }
     },
     stop: (card) => {
-      try { binding?.notify?.(cardNotice(card, binding.locale, "error")); } catch { /* run ended */ }
+      try { binding?.notify?.(cardNotice(card, binding.locale, "error", scope)); } catch { /* run ended */ }
     },
     suggestions: () => scope.suggestions,
   };
@@ -425,12 +440,16 @@ export async function onAgentlasBrowserToolFailure(input: {
   mutating: boolean;
   resultText: string;
 }): Promise<BrowserLadderAnswer | null> {
-  const grant = nativeBrowserRelayGrantForEndpoint(input.nativeEndpoint ?? null);
   const binding = input.chatId ? runs.get(input.chatId) : undefined;
+  const grant = await localNativeGrant(input.nativeEndpoint ?? null) ?? binding?.nativeGrant ?? null;
+  if ((input.nativeEndpoint || binding?.nativeRequired) && !grant) return { replay: false,
+    meta: { schema: BROWSER_LADDER_SCHEMA, code: "native-browser-grant-revoked", final: "stopped", surface: "native" },
+    text: "This browser task has ended. A current task grant is required to continue in the same browser session." };
   const measured = await (measureOverride ?? measureBrowserFailure)({ grant, resultText: input.resultText });
-  const code = classifyBrowserFailure(measured.facts);
+  const code = classifyBrowserFailure(measured.facts) ?? (grant && !/permission|approval|denied|cancelled|plan-mode|simulation/i.test(input.resultText)
+    ? "native-tool-failed" : null);
   if (!code) return null;
-  const key = `${input.nativeEndpoint ?? "dedicated"}:${code}`;
+  const key = `${grant?.endpoint ?? "dedicated"}:${code}`;
   const pageUrl = measured.facts.page?.url ?? null;
   const wall = measured.facts.page?.loginWall ? detectLoginWall({ url: pageUrl }) : null;
   // A sign-in wall names the site it guards (youtube.com behind accounts.google.com), not the identity host.
@@ -444,7 +463,7 @@ export async function onAgentlasBrowserToolFailure(input: {
     const deps = (depsOverride ?? productionDeps)(code, scope, ladderId);
     flight = runBrowserLadder({ ladderId, code, surface: measured.facts.surface, site: scope.site }, deps).then((result) => {
       if (result.card && result.state.final === "waiting-owner") {
-        try { binding?.notify?.(cardNotice(result.card, binding.locale, "warning")); } catch { /* run ended */ }
+        try { binding?.notify?.(cardNotice(result.card, binding.locale, "warning", scope)); } catch { /* run ended */ }
       }
       if (result.state.final === "stopped") stopped.set(key, { at: Date.now(), result });
       return result;
@@ -494,26 +513,66 @@ export function noteBrowserBridgeWire(event: "dropped" | "reopened", input: { ch
 }
 
 /** A run that needed the browser but had no agentlas-browser attached: one typed stop, one card. */
-export function recordBrowserMcpNotAttached(input: { chatId: string; runId: string; locale: "ko" | "en"; notify?: (notice: Notice) => void }): void {
+export function recordBrowserMcpNotAttached(input: { chatId: string; runId: string; locale: "ko" | "en"; notify?: (notice: Notice) => void; nativeRequired?: boolean }): void {
   const ladderId = randomUUID();
-  const binding: RunBinding = { chatId: input.chatId, runId: input.runId, locale: input.locale, ...(input.notify ? { notify: input.notify } : {}) };
+  const binding: RunBinding = { chatId: input.chatId, runId: input.runId, locale: input.locale,
+    nativeRequired: input.nativeRequired === true, ...(input.notify ? { notify: input.notify } : {}) };
   const scope: LadderScope = { grant: null, binding, page: undefined, site: null, suggestions: [] };
   void runBrowserLadder({ ladderId, code: "browser-mcp-not-attached", surface: "dedicated" }, productionDeps("browser-mcp-not-attached", scope, ladderId)).catch(() => undefined);
 }
 
 /** The owner card's single button. */
-export async function browserLadderOwnerAction(input: { action: "retry" | "open-browser" | "fix"; chatId?: string | null; site?: string | null }): Promise<{ ok: boolean; code: string }> {
+export async function browserLadderOwnerAction(input: {
+  action: "retry" | "open-browser" | "fix"; ownerScopeId?: string | null;
+  browserSurface?: "native" | "dedicated"; site?: string | null;
+}): Promise<{ ok: boolean; code: string }> {
+  if (!["retry", "open-browser", "fix"].includes(input.action)) return { ok: false, code: "invalid-request" };
+  if (input.ownerScopeId !== undefined && input.ownerScopeId !== null) {
+    if (!/^[a-f0-9-]{36}$/i.test(input.ownerScopeId) || input.browserSurface === "dedicated") {
+      return { ok: false, code: "native-browser-owner-scope-invalid" };
+    }
+    const scope = await ownerScopeForId(input.ownerScopeId);
+    if (!scope || scope.ownerScopeId !== input.ownerScopeId || scope.grant.ownerScopeId !== input.ownerScopeId) {
+      return { ok: false, code: "native-browser-owner-scope-ended" };
+    }
+    const grant = scope.grant;
+    try {
+      await grant.refresh?.();
+      const current = () => grant.health?.().current === true && grant.health?.().failedOver !== true;
+      if (!current()) return { ok: false, code: "native-browser-owner-scope-ended" };
+      if (input.action === "open-browser") {
+        const site = input.site && /^[a-z0-9.-]{1,253}$/i.test(input.site) ? input.site : null;
+        const pages = grant.pages();
+        const matches = site ? pages.filter((page) => {
+          const wall = detectLoginWall({ url: page.url });
+          return wall.kind === "login-wall" ? wall.site === site : siteOf(page.url) === site;
+        }) : pages;
+        if (matches.length !== 1 || !matches[0].present) {
+          return { ok: false, code: matches.length > 1 ? "native-browser-owner-page-ambiguous" : "native-browser-owner-page-unavailable" };
+        }
+        const presented = await matches[0].present();
+        if (!current()) return { ok: false, code: "native-browser-owner-scope-ended" };
+        return presented === true ? { ok: true, code: "native-browser-presented" }
+          : { ok: false, code: "native-browser-owner-presentation-unavailable" };
+      }
+      // Clear only this exact grant's ladder cooldown; keep sibling runs and their waiting cards.
+      for (const key of stopped.keys()) if (key.startsWith(`${grant.endpoint}:`)) stopped.delete(key);
+      const ready = await grant.reestablish?.();
+      // A reconnect does not prove sign-in restored; session-change recovery owns node resumption.
+      return current() && ready?.current ? { ok: true, code: "native-browser-ready" } : { ok: false, code: "native-browser-not-ready" };
+    } catch { return { ok: false, code: "native-browser-owner-action-unavailable" }; }
+  }
+  // An old/missing card scope cannot silently turn a canonical action into CFT.
+  // Dedicated is an explicit legacy surface choice supplied by a typed host card.
+  if (input.browserSurface !== "dedicated") return { ok: false, code: "native-browser-owner-scope-required" };
   if (input.action === "open-browser") {
-    const watcher = [...humanWatchers.entries()].find(([key]) => !input.chatId || key.startsWith(`${input.chatId}:`))?.[1];
-    if (watcher) { await watcher.present().catch(() => undefined); return { ok: true, code: "browser-presented" }; }
-    const site = input.site && /^[a-z0-9.-]+$/i.test(input.site) ? input.site : null;
+    const site = input.site && /^[a-z0-9.-]{1,253}$/i.test(input.site) ? input.site : null;
     if (!site) return { ok: false, code: "no-site" };
     const { browserOpenLogin } = await import("./connect");
     const opened = await browserOpenLogin(site).catch(() => null);
     return { ok: Boolean(opened && (opened as { ok?: boolean }).ok !== false), code: "login-window-opened" };
   }
-  // retry / fix: clear the cooldown, bring the dedicated browser up (never touching a foreign one), resume goals.
-  stopped.clear();
+  for (const key of stopped.keys()) if (key.startsWith("dedicated:")) stopped.delete(key);
   const { agiRestartAgentlasBrowser } = await import("../agi/browser-seams");
   const ready = await agiRestartAgentlasBrowser().catch(() => false);
   const { triggerBrowserRecoveryResume } = await import("./login-recovery-runtime");

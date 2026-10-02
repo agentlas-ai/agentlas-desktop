@@ -14,7 +14,6 @@
  */
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
-import { dedicatedGoogleSessionsQuarantined } from "../browser/google-session-boundary";
 import type { AgiLoginRecoveryOutcome } from "./actions";
 
 const LADDER_WAIT_MS = 20_000;
@@ -71,8 +70,7 @@ export async function agiRestartAgentlasBrowser(): Promise<boolean> {
   if (!closed.closed && closed.reason === "active-leases") {
     try {
       const ownership = await launcher.reconcileBrowserCdpOwnerWithRetry();
-      return ownership.state === "owned" && await launcher.browserCdpPortReady()
-        && dedicatedGoogleSessionsQuarantined(launcher.browserCdpProfilePath());
+      return ownership.state === "owned" && await launcher.browserCdpPortReady();
     } catch { return false; }
   }
   try { await launcher.ensureBrowserCdpHost(); } catch { return false; }

@@ -4,14 +4,15 @@
  * A Goal the app admitted on its own (automatic intake) gets at most AUTOMATIC_GOAL_RETRY_CAP host
  * continuations — verifier retries and sweep resumes — counted since the latest owner action (effect observations
  * are reconciliation, not retries; see automaticGoalRetryCount). At the cap the host stops spending and settles:
- * done-with-evidence when the latest verification has passed criteria with admitted host refs and none
- * failed, otherwise it asks the owner once and waits (coded blocked reason; the owner's next message or
+ * done-with-evidence only when the latest authorized verification passed every current criterion
+ * with resolvable host refs, otherwise it asks the owner once and waits (coded blocked reason; the owner's next message or
  * Resume continues it). Measured before: a one-line file write ran 17 invocations / 7 verifier attempts.
  * Explicit Goals (goal chip, owner-defined) keep their own unbounded-by-this-rule contract.
  */
 import { getDb } from "../store/db";
 import {
   AUTO_GOAL_OWNER_REVIEW_REQUIRED, AUTO_GOAL_SETTLED_WITH_EVIDENCE, settleAutomaticGoalAtRetryCap,
+  currentCompleteGoalVerificationEvidence,
   type LongRunRecord,
 } from "../store/long-runs";
 import { completeChatGoalContract } from "../store/chat-goals";
@@ -51,21 +52,9 @@ export function automaticGoalAtRetryCap(run: LongRunRecord): boolean {
   return isAutomaticGoal(run) && automaticGoalRetryCount(run.id) >= AUTOMATIC_GOAL_RETRY_CAP;
 }
 
-/** Latest verifier round: passed criteria with admitted refs and no failed criterion. */
+/** Latest complete, current, authorized verifier round with resolvable host refs. */
 export function automaticGoalSettlementEvidence(runId: string): { refs: string[]; receiptIds: string[] } | null {
-  const worker = getDb().prepare(`SELECT verifier_worker_id AS w FROM long_run_verification_receipts
-    WHERE run_id = ? ORDER BY rowid DESC LIMIT 1`).get(runId) as { w: string } | undefined;
-  if (!worker) return null;
-  const rows = getDb().prepare(`SELECT id, verdict, evidence_refs_json FROM long_run_verification_receipts
-    WHERE run_id = ? AND verifier_worker_id = ? ORDER BY rowid`).all(runId, worker.w) as Array<{ id: string; verdict: string; evidence_refs_json: string }>;
-  if (!rows.length || rows.some((row) => row.verdict === "failed")) return null;
-  const refs = new Set<string>(); const receiptIds: string[] = [];
-  for (const row of rows) {
-    if (row.verdict !== "passed") continue;
-    try { for (const ref of JSON.parse(row.evidence_refs_json) as unknown[]) if (typeof ref === "string") refs.add(ref); } catch { /* malformed refs prove nothing */ }
-    receiptIds.push(row.id);
-  }
-  return refs.size > 0 ? { refs: [...refs], receiptIds } : null;
+  return currentCompleteGoalVerificationEvidence(runId);
 }
 
 /** `status` is the durable host-status marker (both lines here stay prominent: a closed goal, an owner review). */

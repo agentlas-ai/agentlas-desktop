@@ -1,0 +1,588 @@
+{
+  "schema": "agentlas.science.rd-manual-catalog.v1",
+  "packageVersion": "1.27.0",
+  "instructionPolicy": "optional-reference",
+  "pageCodePoints": 4000,
+  "sources": [
+    {
+      "id": "persona",
+      "path": "agent/soul.md",
+      "bytes": 5006,
+      "sha256": "6060787c466fb954be131467cd1b8882ee37330c28884471bcbde3884d8a23e6",
+      "contentSha256": "6060787c466fb954be131467cd1b8882ee37330c28884471bcbde3884d8a23e6"
+    },
+    {
+      "id": "contract",
+      "path": "agent/agent.md",
+      "bytes": 21966,
+      "sha256": "99350b4e680ff529de897905d991a08cc36785db22dcff8d5bc5b38ca0e51e48",
+      "contentSha256": "99350b4e680ff529de897905d991a08cc36785db22dcff8d5bc5b38ca0e51e48"
+    },
+    {
+      "id": "study",
+      "path": "skills/direct-study/SKILL.md",
+      "bytes": 20168,
+      "sha256": "b7c7644122aec72a612ff723f9114b5bf401f9b8c61b23838dd070bd18ff2c1a",
+      "contentSha256": "b7c7644122aec72a612ff723f9114b5bf401f9b8c61b23838dd070bd18ff2c1a"
+    },
+    {
+      "id": "manuscript",
+      "path": "skills/write-manuscript/SKILL.md",
+      "bytes": 38873,
+      "sha256": "f03af817bd8bc8566998c419d2f753507b3a06e764bc56287e6dc1544d873a04",
+      "contentSha256": "f03af817bd8bc8566998c419d2f753507b3a06e764bc56287e6dc1544d873a04"
+    }
+  ],
+  "sections": [
+    {
+      "id": "persona.identity",
+      "title": "Complete principal-investigator persona",
+      "sourcePath": "agent/soul.md",
+      "start": 0,
+      "end": 5006,
+      "contentSha256": "6060787c466fb954be131467cd1b8882ee37330c28884471bcbde3884d8a23e6",
+      "pageSha256": [
+        "92b46b644507d92b928bf73da9ab9ce68644276bb6bbcf27bafd862805cdcf20",
+        "2c8fc052dcd10765a7897c6db4e006c92f62f3a76e10c08c4b782cde864b98d5"
+      ]
+    },
+    {
+      "id": "contract.intro",
+      "title": "# Agentlas Science Research Director",
+      "sourcePath": "agent/agent.md",
+      "start": 0,
+      "end": 38,
+      "contentSha256": "800f0ace7c7a0ef00fec70f02b3cd09016ee377f53d8c5a77c94ee0c69040e38",
+      "pageSha256": [
+        "800f0ace7c7a0ef00fec70f02b3cd09016ee377f53d8c5a77c94ee0c69040e38"
+      ]
+    },
+    {
+      "id": "contract.mission",
+      "title": "Mission",
+      "sourcePath": "agent/agent.md",
+      "start": 38,
+      "end": 526,
+      "contentSha256": "2d3b16fa3a7b9de313a091f532a2c4499f42f81847debb2c24dc264adec11bce",
+      "pageSha256": [
+        "2d3b16fa3a7b9de313a091f532a2c4499f42f81847debb2c24dc264adec11bce"
+      ]
+    },
+    {
+      "id": "contract.method",
+      "title": "How research is done here: laws, not steps",
+      "sourcePath": "agent/agent.md",
+      "start": 526,
+      "end": 3033,
+      "contentSha256": "cfbf38f0a50dc08f925b7735c6a19d379f18546c8dc7106ac2efcb4008d81087",
+      "pageSha256": [
+        "cfbf38f0a50dc08f925b7735c6a19d379f18546c8dc7106ac2efcb4008d81087"
+      ]
+    },
+    {
+      "id": "contract.autonomy",
+      "title": "Default: autonomous end-to-end; interrupt only at genuine forks",
+      "sourcePath": "agent/agent.md",
+      "start": 3033,
+      "end": 8202,
+      "contentSha256": "4fd790a7331864c17c52e782111e1074c2368b089db30a692f62c30c75d2cf8a",
+      "pageSha256": [
+        "df1117cbdb56f60b3e7888d50778a3961e987210becba274afca8468c5b7b720",
+        "a4d061c375b0a0cc5578b87d8f2a71469f4b8598ad099261f14bb1569baaefc6"
+      ]
+    },
+    {
+      "id": "contract.integrity",
+      "title": "Integrity rules (host-enforced product correctness)",
+      "sourcePath": "agent/agent.md",
+      "start": 8202,
+      "end": 9046,
+      "contentSha256": "d4a8a1824971f348a798c20d7748d255a4be2d855761f338ae9312d1b91d4b26",
+      "pageSha256": [
+        "d4a8a1824971f348a798c20d7748d255a4be2d855761f338ae9312d1b91d4b26"
+      ]
+    },
+    {
+      "id": "contract.state",
+      "title": "Durable state",
+      "sourcePath": "agent/agent.md",
+      "start": 9046,
+      "end": 11059,
+      "contentSha256": "878ae09a2d3dda7df11abfd2fe6f40f2579b6eefc5c11850f3ba9c08f4fac329",
+      "pageSha256": [
+        "878ae09a2d3dda7df11abfd2fe6f40f2579b6eefc5c11850f3ba9c08f4fac329"
+      ]
+    },
+    {
+      "id": "contract.evidence",
+      "title": "Evidence and Research Knowledge Graph",
+      "sourcePath": "agent/agent.md",
+      "start": 11059,
+      "end": 14180,
+      "contentSha256": "9220bf437feef2dc93604e55464123a4b37f801fe6295449dfd54da66e0c3dc9",
+      "pageSha256": [
+        "9220bf437feef2dc93604e55464123a4b37f801fe6295449dfd54da66e0c3dc9"
+      ]
+    },
+    {
+      "id": "contract.tools",
+      "title": "Tool map — search before you say a tool is missing",
+      "sourcePath": "agent/agent.md",
+      "start": 14180,
+      "end": 16397,
+      "contentSha256": "4a510c537cff6674c07245103f34ef78e4fdb296e6af70ef89a204b36f195845",
+      "pageSha256": [
+        "4a510c537cff6674c07245103f34ef78e4fdb296e6af70ef89a204b36f195845"
+      ]
+    },
+    {
+      "id": "contract.speaking",
+      "title": "Speaking to the researcher",
+      "sourcePath": "agent/agent.md",
+      "start": 16397,
+      "end": 17276,
+      "contentSha256": "1e4ef603bc1ab8f4fa43b7ba3ea5d75a706586952fedbd000fef2a9ddc2f9785",
+      "pageSha256": [
+        "1e4ef603bc1ab8f4fa43b7ba3ea5d75a706586952fedbd000fef2a9ddc2f9785"
+      ]
+    },
+    {
+      "id": "contract.languages",
+      "title": "Languages",
+      "sourcePath": "agent/agent.md",
+      "start": 17276,
+      "end": 17934,
+      "contentSha256": "ed046cbbad3728ad5abb346010fcc0c47967dfb9e300444d4cb380adacf43b19",
+      "pageSha256": [
+        "ed046cbbad3728ad5abb346010fcc0c47967dfb9e300444d4cb380adacf43b19"
+      ]
+    },
+    {
+      "id": "contract.content",
+      "title": "The manuscript is not a work log",
+      "sourcePath": "agent/agent.md",
+      "start": 17934,
+      "end": 19167,
+      "contentSha256": "638dab9352a473178162804eb11948cd12236dfd1c4c9238f496837dfd7af6e1",
+      "pageSha256": [
+        "638dab9352a473178162804eb11948cd12236dfd1c4c9238f496837dfd7af6e1"
+      ]
+    },
+    {
+      "id": "contract.figures",
+      "title": "Tables and figures the journal will read",
+      "sourcePath": "agent/agent.md",
+      "start": 19167,
+      "end": 20018,
+      "contentSha256": "1d110f803ef01f1a3199317cbb36b3a106489c208aa0591fbc65c9e6f5f09e0b",
+      "pageSha256": [
+        "1d110f803ef01f1a3199317cbb36b3a106489c208aa0591fbc65c9e6f5f09e0b"
+      ]
+    },
+    {
+      "id": "contract.decisions",
+      "title": "Bottom-sheet decision policy",
+      "sourcePath": "agent/agent.md",
+      "start": 20018,
+      "end": 21037,
+      "contentSha256": "2084191718820b644add708098985cf49aca7bab007dbc7255ca7b6264b2c77c",
+      "pageSha256": [
+        "2084191718820b644add708098985cf49aca7bab007dbc7255ca7b6264b2c77c"
+      ]
+    },
+    {
+      "id": "contract.stop",
+      "title": "Stop conditions",
+      "sourcePath": "agent/agent.md",
+      "start": 21037,
+      "end": 21743,
+      "contentSha256": "7bdb3762da9e6065a3e274dff91241e8d2b3d63bc9965327c376c985bf5aa755",
+      "pageSha256": [
+        "7bdb3762da9e6065a3e274dff91241e8d2b3d63bc9965327c376c985bf5aa755"
+      ]
+    },
+    {
+      "id": "study.intro",
+      "title": "---",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 0,
+      "end": 672,
+      "contentSha256": "46943063f9f3582eeda32b900df5db51e4219e655f6fcf7c1ee8e6f309dadd34",
+      "pageSha256": [
+        "46943063f9f3582eeda32b900df5db51e4219e655f6fcf7c1ee8e6f309dadd34"
+      ]
+    },
+    {
+      "id": "study.default",
+      "title": "Default operating mode",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 672,
+      "end": 2924,
+      "contentSha256": "ad31201629d4e130d60c49f58921fc366f78f3a41eca798486377235a1cf04eb",
+      "pageSha256": [
+        "ad31201629d4e130d60c49f58921fc366f78f3a41eca798486377235a1cf04eb"
+      ]
+    },
+    {
+      "id": "study.steps",
+      "title": "Steps",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 2924,
+      "end": 2934,
+      "contentSha256": "2bc111be01b9a6634130b45397bd3f36579b9c640e683ccc85e3d16fc2d299f7",
+      "pageSha256": [
+        "2bc111be01b9a6634130b45397bd3f36579b9c640e683ccc85e3d16fc2d299f7"
+      ]
+    },
+    {
+      "id": "study.step-01",
+      "title": "When an operation needs existing study identities, use `inspect_research_workspace` and the latest study state. Use the returned bounded",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 2934,
+      "end": 4053,
+      "contentSha256": "54597cdb6cf42f3bdf8d4e693527b1fe0cbcbd229f5776d9c4d7f86b5808871d",
+      "pageSha256": [
+        "54597cdb6cf42f3bdf8d4e693527b1fe0cbcbd229f5776d9c4d7f86b5808871d"
+      ]
+    },
+    {
+      "id": "study.step-02",
+      "title": "Determine the next legal phase from the state transition table. Phases are evidence milestones,",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 4053,
+      "end": 4550,
+      "contentSha256": "5ced6c5173ce74df86730f3c540e3440be7767840e2fcc2f6167cddb1ca00d02",
+      "pageSha256": [
+        "5ced6c5173ce74df86730f3c540e3440be7767840e2fcc2f6167cddb1ca00d02"
+      ]
+    },
+    {
+      "id": "study.step-03",
+      "title": "During intake, frame the question (population/system, outcome, exposure, comparison,",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 4550,
+      "end": 5367,
+      "contentSha256": "6a581924fa11692b15c9f5e2d1b86f7625d63aed353383440591c9c4e9acedc0",
+      "pageSha256": [
+        "6a581924fa11692b15c9f5e2d1b86f7625d63aed353383440591c9c4e9acedc0"
+      ]
+    },
+    {
+      "id": "study.step-04",
+      "title": "Execute the next useful measurement without a preparatory checklist. Retain the exact IDs,",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 5367,
+      "end": 5548,
+      "contentSha256": "0294be6d1009e4810759c153335accc66d0e62aca5d073aa4b81ebe28abada5c",
+      "pageSha256": [
+        "0294be6d1009e4810759c153335accc66d0e62aca5d073aa4b81ebe28abada5c"
+      ]
+    },
+    {
+      "id": "study.step-05",
+      "title": "Ask a bottom-sheet decision only when the answer changes the estimand, design, frozen plan,",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 5548,
+      "end": 6213,
+      "contentSha256": "2ba176b14b55d798a1e4499e299281df84e84f0cc850269778eca70ee7b64868",
+      "pageSha256": [
+        "2ba176b14b55d798a1e4499e299281df84e84f0cc850269778eca70ee7b64868"
+      ]
+    },
+    {
+      "id": "study.step-06",
+      "title": "After academic search, build the evidence matrix (design, population/system, n, exposure,",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 6213,
+      "end": 7084,
+      "contentSha256": "c7a3b49bc346086edf3256afaa7c4dd840aa067880b0f79a71b8109da29e37e2",
+      "pageSha256": [
+        "c7a3b49bc346086edf3256afaa7c4dd840aa067880b0f79a71b8109da29e37e2"
+      ]
+    },
+    {
+      "id": "study.step-07",
+      "title": "Create one evidence-bound primary hypothesis (H0/H1, named estimand, pre-specified analysis,",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 7084,
+      "end": 7381,
+      "contentSha256": "9bb068d0c1293d981ee058ae7b4d7b0d21e1b05a24ee702167a47bdd30ce3e86",
+      "pageSha256": [
+        "9bb068d0c1293d981ee058ae7b4d7b0d21e1b05a24ee702167a47bdd30ce3e86"
+      ]
+    },
+    {
+      "id": "study.step-08",
+      "title": "For a confirmatory analysis that needs a frozen design, use `propose_analysis_plan` (estimand, units, design, definitions, exclusions,",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 7381,
+      "end": 10042,
+      "contentSha256": "e054f0d3965772e3ea5753f4f86d72b4e1e8921b3f42a7e9e5f45875ea69a10a",
+      "pageSha256": [
+        "e054f0d3965772e3ea5753f4f86d72b4e1e8921b3f42a7e9e5f45875ea69a10a"
+      ]
+    },
+    {
+      "id": "study.step-09",
+      "title": "Before selecting any statistical method or visualization, call",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 10042,
+      "end": 14845,
+      "contentSha256": "fc729cf605d62b7558f2c837b61d9b6a7c070bdc1efba1f85cd044dd93cbf8d6",
+      "pageSha256": [
+        "d10216bb00dcd9cbee0b064e3445cb289637d0e14333a24c0df704153dbfebd7",
+        "91ea6bd097fe9bad4cfe12df4d8f6b9f222ddd6802d2d07b11d919bc12d3a498"
+      ]
+    },
+    {
+      "id": "study.step-10",
+      "title": "For domain analysis, prefer the exact domain tool over generic computation, and read",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 14845,
+      "end": 16598,
+      "contentSha256": "3890b4c305a4157ce988c7f159777cba609a5ddcd67ee7a1a44f36388c875985",
+      "pageSha256": [
+        "3890b4c305a4157ce988c7f159777cba609a5ddcd67ee7a1a44f36388c875985"
+      ]
+    },
+    {
+      "id": "study.step-11",
+      "title": "Run the frozen sensitivity analyses before interpreting any headline effect; label any unplanned",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 16598,
+      "end": 17374,
+      "contentSha256": "8d7e6c591049bbad255540a4113fc18d7d2ff0c2f4cdfb517ab1dd7972bf8ddf",
+      "pageSha256": [
+        "8d7e6c591049bbad255540a4113fc18d7d2ff0c2f4cdfb517ab1dd7972bf8ddf"
+      ]
+    },
+    {
+      "id": "study.step-12",
+      "title": "Emit a new state revision after every material transition. Never rewrite an earlier revision.",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 17374,
+      "end": 17472,
+      "contentSha256": "f44b6fd0a714bd9e83cb0f791c6bfdf414b531e56cbfeaac762e28dbb43238cb",
+      "pageSha256": [
+        "f44b6fd0a714bd9e83cb0f791c6bfdf414b531e56cbfeaac762e28dbb43238cb"
+      ]
+    },
+    {
+      "id": "study.step-13",
+      "title": "For `phase_gate.evidenceSha256`, echo only the canonical hash returned by the current lifecycle,",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 17472,
+      "end": 17897,
+      "contentSha256": "8d996603458f778e838f0d68467baf0f1bd18f697a87ba379a92fb16c24e4184",
+      "pageSha256": [
+        "8d996603458f778e838f0d68467baf0f1bd18f697a87ba379a92fb16c24e4184"
+      ]
+    },
+    {
+      "id": "study.step-14",
+      "title": "When the requested scope ends, report what was done, what the evidence shows (with status",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 17897,
+      "end": 18083,
+      "contentSha256": "27a0b521f0605a4408c9691030e5d79ed471d79047aadcf6351b8719b4909fb0",
+      "pageSha256": [
+        "27a0b521f0605a4408c9691030e5d79ed471d79047aadcf6351b8719b4909fb0"
+      ]
+    },
+    {
+      "id": "study.outputs",
+      "title": "Outputs",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 18083,
+      "end": 18475,
+      "contentSha256": "8cf9612d42cc9b280d98027de39b9b6a8fe77c97698604b468ede9b4fb6a7551",
+      "pageSha256": [
+        "8cf9612d42cc9b280d98027de39b9b6a8fe77c97698604b468ede9b4fb6a7551"
+      ]
+    },
+    {
+      "id": "study.verification",
+      "title": "Verification",
+      "sourcePath": "skills/direct-study/SKILL.md",
+      "start": 18475,
+      "end": 20168,
+      "contentSha256": "541d2a606d163c8cf6badb8b8411794491064f61660f97156863cb3583f746ed",
+      "pageSha256": [
+        "541d2a606d163c8cf6badb8b8411794491064f61660f97156863cb3583f746ed"
+      ]
+    },
+    {
+      "id": "manuscript.intro",
+      "title": "---",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 0,
+      "end": 691,
+      "contentSha256": "672a2dfb421d19a0bdd1072824b2fe922fe88a06d389980e08b8a8ad0dc457ce",
+      "pageSha256": [
+        "672a2dfb421d19a0bdd1072824b2fe922fe88a06d389980e08b8a8ad0dc457ce"
+      ]
+    },
+    {
+      "id": "manuscript.preconditions",
+      "title": "Preconditions",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 691,
+      "end": 3105,
+      "contentSha256": "8bcdb47afd7b4b19f852999fa136180d67becfd1a82655881b0f2dcb5017d9c6",
+      "pageSha256": [
+        "8bcdb47afd7b4b19f852999fa136180d67becfd1a82655881b0f2dcb5017d9c6"
+      ]
+    },
+    {
+      "id": "manuscript.blueprint",
+      "title": "Optional manuscript blueprint calibration",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 3105,
+      "end": 10007,
+      "contentSha256": "762dc1eba480c74fdd84bea71ec1ea3f24ac4e0d5103aaa9581c38adeea76208",
+      "pageSha256": [
+        "c6aede1db899e133cc9addbee36e9f098f5ddc3e702baac596b60816927ebec9",
+        "f4c981bcb532ead905a64e6e805afa1035a05beb5a96b2583c64baed011f7201"
+      ]
+    },
+    {
+      "id": "manuscript.argument",
+      "title": "Turn comparable papers into an argument, not borrowed prose",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 10007,
+      "end": 19157,
+      "contentSha256": "64b2dc2953a32c660f0af274d8c3cdee5ee967e464b10ea84e9ca6418d820dc3",
+      "pageSha256": [
+        "506d9ebfb7c6569c2f69ce38dd80f7b21650a6067dc9dceab85f652d53473f9d",
+        "eac332ab496a8204130fd59c56b7386cca44b3305ef2aa9c52e8bd54b14bb75c",
+        "6e16b117f8756833f6c06dedee6ff995a782765905c849fe94409a24db9da37c"
+      ]
+    },
+    {
+      "id": "manuscript.passes",
+      "title": "Draft in passes",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 19157,
+      "end": 20761,
+      "contentSha256": "77bcbc52b64b45266d155460bdd187d6545c01ce2ddde1b867923716cf7d8a78",
+      "pageSha256": [
+        "77bcbc52b64b45266d155460bdd187d6545c01ce2ddde1b867923716cf7d8a78"
+      ]
+    },
+    {
+      "id": "manuscript.drafting",
+      "title": "Durable section drafting",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 20761,
+      "end": 23212,
+      "contentSha256": "c33dbbeb6fdccc6d27ceb958b97e7a51e3d8caa23d6fb5eaf30756d813cc6605",
+      "pageSha256": [
+        "c33dbbeb6fdccc6d27ceb958b97e7a51e3d8caa23d6fb5eaf30756d813cc6605"
+      ]
+    },
+    {
+      "id": "manuscript.dialect",
+      "title": "The manuscript Markdown dialect",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 23212,
+      "end": 28492,
+      "contentSha256": "b7bbb350d8a864fab2a21465532be9830bd5800e80ee441015f4f91044a0679d",
+      "pageSha256": [
+        "050b01ea9e39f11deb5e248587254eab1aed327a768fe65fcbe72c50d030e432",
+        "7ff8f1b7d847260908461394f677b2ad0b8dd57c6a2d1612330243a2b6e9ee6b"
+      ]
+    },
+    {
+      "id": "manuscript.procedure",
+      "title": "Procedure",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 28492,
+      "end": 37450,
+      "contentSha256": "19e5e1283418793d50adaee364fc4ea09b075b69cd9da12c105fd43808cc7c50",
+      "pageSha256": [
+        "7682dbb20892def9e0fa2d3d561e52468db6592bdf853c5e32d481012f7fdc4b",
+        "e9a9256ce104eef465f2028ae8dc904cc236801b4bd49da8d1bfad2f2c8898ef",
+        "2a654fbbbe4acb6cc6c8ed36019ee0bdcb853aeb0b021e11e2d4d96c0fbef449"
+      ]
+    },
+    {
+      "id": "manuscript.verification",
+      "title": "Verification",
+      "sourcePath": "skills/write-manuscript/SKILL.md",
+      "start": 37450,
+      "end": 38833,
+      "contentSha256": "334521757603e51fbf4e76068cff831bdda08cd988f9198095cb0a0f2e0d8a17",
+      "pageSha256": [
+        "334521757603e51fbf4e76068cff831bdda08cd988f9198095cb0a0f2e0d8a17"
+      ]
+    }
+  ],
+  "operations": {
+    "common": [
+      "contract.state"
+    ],
+    "study": [
+      "contract.autonomy",
+      "study.default",
+      "study.step-03"
+    ],
+    "lifecycle": [
+      "study.step-01",
+      "study.step-02",
+      "study.step-12",
+      "study.step-13"
+    ],
+    "plans": [
+      "contract.decisions",
+      "study.step-08"
+    ],
+    "episode": [
+      "study.step-04",
+      "study.step-07",
+      "study.step-11"
+    ],
+    "sources": [
+      "contract.evidence",
+      "study.step-06"
+    ],
+    "stats": [
+      "study.step-09",
+      "contract.figures"
+    ],
+    "math": [
+      "study.step-04",
+      "study.step-10",
+      "study.step-11"
+    ],
+    "manuscript": [
+      "contract.content",
+      "contract.figures",
+      "manuscript.preconditions",
+      "manuscript.dialect"
+    ],
+    "manuscript-blueprint": [
+      "manuscript.blueprint"
+    ],
+    "manuscript-argument": [
+      "manuscript.argument"
+    ],
+    "manuscript-drafting": [
+      "manuscript.passes",
+      "manuscript.drafting"
+    ],
+    "referee": [
+      "contract.method",
+      "contract.evidence",
+      "manuscript.verification"
+    ],
+    "publication": [
+      "contract.stop",
+      "manuscript.procedure",
+      "manuscript.verification"
+    ],
+    "criterion": [
+      "contract.evidence",
+      "study.verification"
+    ]
+  }
+}

@@ -2,6 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { tryRecordFailureEvent } from "../store/run-events";
 import { readSkillCatalogAsset } from "../hephaestus/skill-catalog";
+import { assertMemoryWriteAllowed, MemoryRevokedError } from "../memory/revocations";
+import { nativeTextsFor } from "../memory/native-text";
 import {
   appendAgentEvolutionLedger,
   computeAgentPackageHash,
@@ -208,39 +210,86 @@ function appendLedger(row: AgentEvolutionProposalRow, event: string): void {
   }
 }
 
+class EvolutionSourceError extends Error {
+  readonly code = "evolution_source_invalid";
+
+  constructor(readonly reason: string) {
+    super(`evolution_source_${reason}`);
+    this.name = "EvolutionSourceError";
+  }
+}
+
 function validateMemorySources(
   agentId: string,
   input: Record<string, unknown> | undefined,
+  captureFingerprints = false,
 ): Record<string, unknown> {
   const source = input && typeof input === "object" && !Array.isArray(input) ? { ...input } : {};
   const rawIds = source.memoryEntryIds;
   if (rawIds === undefined) return source;
   if (!Array.isArray(rawIds) || rawIds.length > 100) {
-    throw new Error("memoryEntryIds must be an array of at most 100 ids");
+    throw new EvolutionSourceError("ids_invalid");
   }
   const ids = [...new Set(rawIds.map((value) => String(value).trim()).filter(Boolean))];
   const getMemory = getDb().prepare(
-    `SELECT id, agent_id, scope, project_path, superseded_at
+    `SELECT id, agent_id, scope, kind, content, project_id, project_path, chat_id, superseded_at
      FROM memory_entries WHERE id = ?`,
   );
+  const natives = nativeTextsFor("memory_entry", ids);
+  const captured = source._agentlasMemorySourceContentHashes;
+  if (!captureFingerprints && captured !== undefined
+    && (!captured || typeof captured !== "object" || Array.isArray(captured))) {
+    throw new EvolutionSourceError("fingerprints_invalid");
+  }
+  const fingerprints: Record<string, string> = {};
   for (const id of ids) {
     const row = getMemory.get(id) as {
       id: string;
       agent_id: string | null;
       scope: string;
+      kind: string;
+      content: string;
+      project_id: string | null;
       project_path: string | null;
+      chat_id: string | null;
       superseded_at: string | null;
     } | undefined;
-    if (!row || row.superseded_at || row.agent_id !== agentId) {
-      throw new Error("Evolution source memory does not belong to this agent");
-    }
+    if (!row) throw new EvolutionSourceError("missing");
+    if (row.superseded_at || !row.content.trim()) throw new EvolutionSourceError("superseded");
+    if (row.agent_id !== agentId) throw new EvolutionSourceError("owner_changed");
     // Project memory remains contextual. Only agent-owned, folderless learning
     // can be promoted into the durable agent package prompt.
     if (row.scope !== "agent_repo" || row.project_path !== null) {
-      throw new Error("Project-scoped memory cannot be promoted into a global agent asset");
+      throw new EvolutionSourceError("scope_changed");
     }
+    const native = natives.get(id) ?? null;
+    const authority = {
+      scope: "agent_repo" as const,
+      kind: row.kind as Parameters<typeof assertMemoryWriteAllowed>[0]["kind"],
+      content: row.content,
+      projectId: row.project_id,
+      projectPath: row.project_path,
+      agentId: row.agent_id,
+      chatId: row.chat_id,
+    };
+    try {
+      assertMemoryWriteAllowed(authority);
+      if (native) assertMemoryWriteAllowed({ ...authority, content: native });
+    } catch (error) {
+      if (error instanceof MemoryRevokedError) throw new EvolutionSourceError("revoked");
+      throw error;
+    }
+    const fingerprint = sha256(JSON.stringify(["evolution-memory-source-v1", row.content, native]));
+    if (!captureFingerprints && captured !== undefined
+      && (captured as Record<string, unknown>)[id] !== fingerprint) {
+      throw new EvolutionSourceError("content_changed");
+    }
+    fingerprints[id] = fingerprint;
   }
   source.memoryEntryIds = ids;
+  // Older ID-only proposals retain their original contract. New linked
+  // proposals bind exact canonical/native bytes in additive source metadata.
+  if (captureFingerprints) source._agentlasMemorySourceContentHashes = fingerprints;
   return source;
 }
 
@@ -561,7 +610,7 @@ export function createAgentEvolutionProposal(
     throw new Error("Proposed agent asset exceeds the portable 512 KiB evolution limit");
   }
   const authoritative = inspectAgentFileText(input.agentId, input.targetPath);
-  const validatedSource = validateMemorySources(input.agentId, input.source);
+  const validatedSource = validateMemorySources(input.agentId, input.source, true);
   if (proposalType === "skill") {
     const skillSlug = typeof validatedSource.skillSlug === "string" ? validatedSource.skillSlug : "";
     const catalogContentHash = typeof validatedSource.catalogContentHash === "string"
@@ -705,15 +754,29 @@ export function approveAndApplyAgentEvolutionProposal(
   }
 
   try {
-    if (targetExistedBefore(row)) {
-      writeAgentFile(row.agent_id, row.target_path, row.after_content);
-    } else {
-      createAgentFile(row.agent_id, row.target_path, row.after_content);
-    }
+    // Hold the same write lock as forget while checking sources and mutating
+    // the package. An ID-only legacy proposal cannot prove content continuity;
+    // it still must prove that each linked source remains live and authorized.
+    getDb().transaction(() => {
+      validateMemorySources(row.agent_id, parseObject(row.source_json));
+      if (targetExistedBefore(row)) {
+        writeAgentFile(row.agent_id, row.target_path, row.after_content);
+      } else {
+        createAgentFile(row.agent_id, row.target_path, row.after_content);
+      }
+    }).immediate();
     const applied = finalizeOperation(row, operation);
     appendLedger(applied, "proposal_applied");
     return toUi(applied);
   } catch (error) {
+    if (error instanceof EvolutionSourceError) {
+      getDb().prepare(
+        `UPDATE agent_evolution_proposals
+         SET status = 'conflicted', operation_json = NULL, last_error = ?, updated_at = ?
+         WHERE id = ? AND status = 'applying'`,
+      ).run(error.message, nowIso(), row.id);
+      throw error;
+    }
     const message = error instanceof Error ? error.message : String(error);
     let restored = false;
     const createRace = !targetExistedBefore(row) && (error as NodeJS.ErrnoException).code === "EEXIST";

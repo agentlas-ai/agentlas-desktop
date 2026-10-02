@@ -156,7 +156,13 @@ export class AcpSessionPool<S> {
         reusable.inUse = true;
         reusable.lastActivityAt = this.now();
         // 유휴 동안 풀어 둔 참조를 되돌린다 — 턴이 도는 동안 호스트가 나가면 안 된다.
-        try { this.opts.ref?.(reusable.session); } catch { /* 이미 죽었을 수 있다 */ }
+        try { this.opts.ref?.(reusable.session); }
+        catch (error) {
+          // A failed ownership/ref check cannot lend a closing native process
+          // to another invocation. Retire it before releasing admission.
+          this.remove(reusable, { close: true, reason: "error" });
+          throw error;
+        }
         touchAgentResidency(reusable.residencyKey, { inUse: true, now: reusable.lastActivityAt });
         finishProjectResidencyAdmission(projectId, projectAdmission);
         projectAdmission = null;

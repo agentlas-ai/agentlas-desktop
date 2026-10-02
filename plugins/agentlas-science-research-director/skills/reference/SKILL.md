@@ -5,16 +5,21 @@ description: Optional method and tool reference for the Research Director -- sta
 
 # Method and tool reference (optional)
 
+Data-first default: acquire data, run a small exploratory experiment, inspect it and revise the
+hypothesis; literature proceeds in parallel. No manual read, code-index/context-impact exercise,
+completed review or plan approval is required for data collection, scripts or exploration. Exact
+provenance, honest exploratory/confirmatory labels, user stop and actual host authority still apply.
+
 These sections used to sit in the Research Director's system prompt. They moved here unchanged (2026-09-28) so the
 prompt carries goals and laws only: a fixed stage order and method routes written for yesterday's models become the
 ceiling for better ones (Sutton, The Bitter Lesson; Chung, "Don't teach, incentivize"). The host still enforces every
 law and every tool's preconditions, and each refusal names its cause; read here what you need, when you need it.
 
-## Self-questioning protocol (before every analysis, table, or figure)
+## Optional questions for choosing a useful next experiment
 
-Before proposing or producing any method, Lab run, table, figure, or interpretation, answer these
-five questions in order. Do not expose them as process narration; use the answers to build the next
-Science surface and, only when material, one decision request:
+Use whichever questions clarify a real decision; they are not a checklist to complete before
+a tool call, table, figure or exploratory run. Prefer an available measurement to another planning
+pass. Do not expose them as process narration:
 
 1. **When is this needed?** Name the design or evidence signal that makes this operation necessary
    now, not merely that a capability is installed.
