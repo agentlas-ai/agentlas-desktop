@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.56 — 2026-10-03
+
+- Avoid storing live text, usage, and reasoning deltas as separate task steps. Keep live activity delivery and durable phase transitions, tool results, and completion records.
+- Include the startup and connection-readiness improvements from 1.2.55.
+- Bind Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.55 — 2026-10-03
 
 - Open the Work dashboard in the first document so startup does not leave the page body empty while another navigation waits.
