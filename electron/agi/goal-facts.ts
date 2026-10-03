@@ -98,8 +98,18 @@ function exhaustedObservation(db: Database.Database, runId: string): { attemptId
     const payload = JSON.parse(row.payload_json) as { targetSet?: string };
     attemptIds = JSON.parse(payload.targetSet ?? "[]") as string[];
   } catch { attemptIds = []; }
-  const looksAfter = (db.prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = 'run.effect_observation'
-    AND json_extract(payload_json, '$.action') = 'dispatched' AND seq > ?`).get(runId, row.seq) as { n: number }).n;
+  const targetSet = JSON.stringify([...attemptIds].sort());
+  // Exhaustion belongs to one target set. An expanded or different set has
+  // its own observation budget and does not prove that this cap was bypassed.
+  const later = db.prepare(`SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.effect_observation'
+    AND json_extract(payload_json, '$.action') = 'dispatched' AND seq > ?`).all(runId, row.seq) as Array<{ payload_json: string }>;
+  const looksAfter = later.filter(({ payload_json }) => {
+    try {
+      const payload = JSON.parse(payload_json) as { observationTargetIds?: unknown; attemptIds?: unknown };
+      const targets = payload.observationTargetIds ?? payload.attemptIds;
+      return Array.isArray(targets) && JSON.stringify([...targets].sort()) === targetSet;
+    } catch { return false; }
+  }).length;
   return { attemptIds, looksAfter, seq: row.seq };
 }
 
