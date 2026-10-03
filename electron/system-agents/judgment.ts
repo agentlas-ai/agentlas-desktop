@@ -602,6 +602,42 @@ async function callJudgmentModel(opts: Parameters<typeof callJudgmentModelDetail
   return (await callJudgmentModelDetailed(opts)).text;
 }
 
+/** Conclusive configured-pool refusals need no runtime discovery. A successful
+ * preflight grants nothing: the caller rereads the pool after discovery and
+ * preserves exact runtime selection and the live pre-dispatch fingerprint fence. */
+function configuredJudgmentPoolRefusal(
+  pool: JudgmentPool,
+  selectionPolicy: JudgmentSelectionPolicy | undefined,
+  requiresNoTools: boolean,
+): { text: null; failure: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt } | null {
+  if (pool.state === "unavailable") return { text: null, failure: {
+    kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_unavailable",
+  } };
+  if (selectionPolicy && (pool.state !== "configured"
+    || pool.fingerprint !== selectionPolicy.poolFingerprint)) return { text: null, failure: {
+    kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
+  } };
+  if (!requiresNoTools || pool.state !== "configured"
+    || pool.selections.some(selection => inspectJudgmentCapability(selection, "no_tools").status === "verified")) return null;
+  const first = pool.selections[0];
+  const capability = first ? inspectJudgmentCapability(first, "no_tools") : undefined;
+  const runtimeReceipt: JudgmentRuntimeReceipt | undefined = first && capability ? {
+    route: "orchestrator_pool",
+    fingerprint: pool.fingerprint,
+    execution: "not_invoked",
+    ...(first.longContext !== undefined ? { longContext: first.longContext } : {}),
+    ...(first.effort ? { effort: first.effort } : {}),
+    selectionPolicy,
+    selection: { kind: first.kind, backend: first.backend, source: first.source, model: first.model },
+    capability,
+  } : undefined;
+  return { text: null, failure: {
+    kind: "unsupported", runtime: "judgment", source: "marker",
+    providerCode: capability?.reason ?? "judgment_no_verified_capability_in_pool",
+    message: capability?.reason ?? "judgment_no_verified_capability_in_pool",
+  }, ...(runtimeReceipt ? { runtimeReceipt } : {}) };
+}
+
 async function callJudgmentModelDetailed(opts: {
   systemPrompt: string;
   input: string;
@@ -662,6 +698,12 @@ async function callJudgmentModelDetailed(opts: {
     signal: opts.signal && inherited?.signal && opts.signal !== inherited.signal
       ? AbortSignal.any([opts.signal, inherited.signal]) : opts.signal ?? inherited?.signal,
   };
+  // Only a no-pin configured-pool refusal can finish before discovery. An
+  // explicit/inherited pin and its permitted fallback keep their existing route.
+  if (!opts.runtimeSelection) {
+    const refused = configuredJudgmentPoolRefusal(readJudgmentPool(), opts.selectionPolicy, requiresNoTools);
+    if (refused) return refused;
+  }
   const runWithJudgmentPurpose = <T>(action: () => T): T => opts.authoring
     ? action() : withAdapterEffectPreparation(action);
   /** 마지막으로 본 실패 — 전멸 시 이것이 "왜"의 전부다. */
@@ -677,13 +719,11 @@ async function callJudgmentModelDetailed(opts: {
     operationalStoreUnavailable = true;
   }
   const pool = opts.runtimeSelection ? null : readJudgmentPool();
-  if (pool?.state === "unavailable") return { text: null, failure: {
-    kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_unavailable",
-  } };
-  if (opts.selectionPolicy && (pool?.state !== "configured"
-    || pool.fingerprint !== opts.selectionPolicy.poolFingerprint)) return { text: null, failure: {
-    kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
-  } };
+  // Discovery awaited: the preflight snapshot is never execution authority.
+  if (pool) {
+    const refused = configuredJudgmentPoolRefusal(pool, opts.selectionPolicy, requiresNoTools);
+    if (refused) return refused;
+  }
   const pinnedChoice = opts.runtimeSelection ? selectExactRuntime(runtimes, opts.runtimeSelection) : null;
   const active = opts.runtimeSelection ? pinnedChoice?.active ?? null
     : pool?.state === "configured" ? null : pickActive(runtimes);
@@ -735,25 +775,6 @@ async function callJudgmentModelDetailed(opts: {
         return true;
       });
     }
-  }
-  if (requiresNoTools && !opts.runtimeSelection && pool?.state === "configured" && configuredSelections.length === 0) {
-    const first = pool.selections[0];
-    const capability = first ? inspectJudgmentCapability(first, "no_tools") : undefined;
-    const noToolReceipt = first && capability ? {
-      route,
-      fingerprint,
-      execution: "not_invoked" as const,
-      ...(first.longContext !== undefined ? { longContext: first.longContext } : {}),
-      ...(first.effort ? { effort: first.effort } : {}),
-      selectionPolicy: opts.selectionPolicy,
-      selection: { kind: first.kind, backend: first.backend, source: first.source, model: first.model },
-      capability,
-    } : undefined;
-    return { text: null, failure: {
-      kind: "unsupported", runtime: "judgment", source: "marker",
-      providerCode: capability?.reason ?? "judgment_no_verified_capability_in_pool",
-      message: capability?.reason ?? "judgment_no_verified_capability_in_pool",
-    }, ...(noToolReceipt ? { runtimeReceipt: noToolReceipt } : {}) };
   }
   if (!candidates.length && (opts.runtimeSelection || pool?.state === "configured")) return { text: null, failure: {
     kind: "refused", runtime: "judgment", source: "marker", message: "judgment_selected_runtime_unavailable",
