@@ -82,7 +82,7 @@ published release and the installed version to check delivery.
 
 ## Release log
 
-- **2026-10-03 · v1.2.57 — startup and approval updates** — Defer independent OS update preparation until after the product document loads. Preserve queued instructions, fit composer controls into narrow layouts, and recheck durable chat approval rules after revocation. This release keeps the Agentlas OS v1.2.54 runtime binding.
+- **2026-10-03 · v1.2.57 — startup and approval updates** — Defer independent OS update preparation until after the product document loads. Preserve queued instructions, fit composer controls into narrow layouts, and recheck durable chat approval rules after revocation. This release binds Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 
 - **2026-10-03 · v1.2.56 — live activity and task records** — Avoid storing live text, usage, and reasoning deltas as separate task steps while retaining live activity delivery, phase transitions, tool results, and completion records. Includes the startup and connection-readiness improvements from 1.2.55. This release binds Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 

@@ -7,7 +7,9 @@
 - Preserve new One and Work instructions in the existing execution queue instead of automatically interrupting current work.
 - Fit composer controls into narrow layouts and refresh experience relations once after each promotion batch.
 - Avoid runtime discovery when the configured judgment pool already establishes a conclusive unavailable or unsupported refusal.
-- Include the live task-record improvements from 1.2.56. Keep the Agentlas OS v1.2.54 runtime and source binding.
+- Include the live task-record improvements from 1.2.56.
+
+This release binds Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 
 ## 1.2.56 — 2026-10-03
 
