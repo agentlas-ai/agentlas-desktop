@@ -7216,6 +7216,7 @@ button[data-toggle-state="on"] {
    when a right-side panel leaves the chat column narrow. */
 .chat-input-shell {
   min-width: 0;
+  container: chat-composer / inline-size;
   max-width: min(740px, calc(100vw - 32px));
   border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge));
   box-shadow: 0 8px 24px rgba(15, 18, 20, 0.07), 0 1px 2px rgba(15, 18, 20, 0.05);
@@ -7251,7 +7252,7 @@ button[data-toggle-state="on"] {
   display: flex;
   align-items: center;
   gap: 6px;
-  flex-wrap: nowrap;
+  flex-wrap: wrap;
   width: 100%;
   min-width: 0;
   overflow: visible;
@@ -7449,13 +7450,16 @@ button[data-toggle-state="on"] {
 
 .chat-input-tools-left {
   flex: 1 1 auto;
-  overflow: hidden;
+  flex-wrap: wrap;
+  overflow: visible;
 }
 
 .chat-input-tools-right {
   flex: 0 0 auto;
   justify-content: flex-end;
   margin-left: auto;
+  max-width: 100%;
+  flex-wrap: wrap;
 }
 
 .chat-input-chip {
@@ -7599,6 +7603,10 @@ button[data-toggle-state="on"] {
   white-space: nowrap;
 }
 
+.chat-input-context-icon {
+  display: none;
+}
+
 .chat-input-context-owner,
 .chat-input-context-percent {
   flex: 0 0 auto;
@@ -7654,17 +7662,39 @@ button[data-toggle-state="on"] {
     flex-basis: 30px;
   }
 }
-@container (max-width: 420px) {
-  .chat-input-tools-left .chat-input-chip-label {
+@container chat-composer (max-width: 560px) {
+  .chat-input-chip-label,
+  .chat-input-context-label,
+  .chat-input-context-percent,
+  .chat-input-context-chevron {
     display: none;
   }
   /* 글자를 숨긴 칩은 꺾쇠도 뺀다 — 아이콘만 남겨 AGI 단추 자리를 돌려준다(One 작성창과 같은 규칙). */
-  .chat-input-tools-left .chat-input-chip > svg:last-child {
+  .chat-input-chip > svg:last-child {
     display: none;
   }
   .chat-input-chip,
-  .chat-input-model-chip {
-    max-width: 44px;
+  .chat-input-model-chip,
+  .chat-input-context-pill {
+    width: 30px !important;
+    max-width: 30px;
+    padding: 0 !important;
+    gap: 0 !important;
+    flex-shrink: 0;
+    justify-content: center;
+  }
+  .chat-input-context-icon {
+    display: block;
+  }
+  .chat-input-tools-left,
+  .chat-input-tools-right {
+    gap: 4px !important;
+  }
+  .chat-input-active-modes {
+    flex-wrap: wrap;
+  }
+  .chat-input-active-modes .chat-input-chip {
+    font-size: 0 !important;
   }
 }
 

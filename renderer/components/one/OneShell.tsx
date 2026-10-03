@@ -149,7 +149,8 @@ import { toolFailureCopy } from "@shared/tool-failure";
 import { useJudgedOneDecision } from "@/lib/one-decision-judged";
 import { visibleDecisionReceipt } from "@/lib/one-decision-receipt";
 import { mergeDurableChatCatchup } from "./durable-chat-catchup";
-import { alwaysApprovedChatIds, grantAlwaysApproval, subscribeAlwaysApproved } from "@/lib/always-approved-chats";
+import { alwaysApprovedChatIds, grantAlwaysApproval, readChatAlwaysApproval, subscribeAlwaysApproved } from "@/lib/always-approved-chats";
+import { useChatAlwaysApproval } from "@/lib/use-chat-always-approval";
 import type { OneRecurrenceSelectionV1 } from "@shared/one-recurrence";
 import { seatEventLine } from "@shared/one-seat-events";
 import { shouldPresentOneWeeklyReflection } from "@shared/one-weekly-reflection";
@@ -3477,6 +3478,8 @@ export function OneShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  const composerAlwaysApproval = useChatAlwaysApproval(activeThreadChatId);
+  const onePermissionLabel = `${onePermission === "auto" ? (appLocale === "ko" ? "자동 모드" : "Auto mode") : onePermission === "read" ? (appLocale === "ko" ? "읽기 전용" : "Read only") : onePermission === "write" ? (appLocale === "ko" ? "파일 편집" : "Accept file edits") : (appLocale === "ko" ? "전체 액세스" : "Full access")}${composerAlwaysApproval.enabled ? (appLocale === "ko" ? " · 항상 승인" : " · Always approve") : ""}`;
   /*
    * ★머리말·담당·작성창 문구는 **지금 연 대화**로 판정한다 (좌석 전환 실측 2026-09-26).
    *   activeThreadChat 은 런타임 탐지와 함께 늦게 도착해, 그 사이(격리 앱에서 1.5~2.4초)
@@ -5003,7 +5006,7 @@ export function OneShell() {
               const steerReceipt = await api.invoke.steer({
                 chatId,
                 userPrompt: text,
-                steeringMode: "interrupt",
+                steeringMode: "queue",
                 taskIntent,
                 oneMode: true,
                 locale: runLocale,
@@ -5514,7 +5517,7 @@ export function OneShell() {
           chatId,
           userPrompt: value,
           // 검증 중인 턴은 Main 이 끊지 않고 줄만 세운다(service.steer). 오너 요청이 먼저다.
-          steeringMode: "interrupt",
+          steeringMode: "queue",
           taskIntent: selected ? "task" : "conversation",
           oneMode: true,
           locale: normalizedLocale,
@@ -6385,12 +6388,23 @@ export function OneShell() {
    * 무엇이 언제 승인됐는지는 대화 기록에서 사라지지 않는다.
    */
   useEffect(() => {
-    if (busy || alwaysApprovedChats.length === 0) return;
-    const auto = confirmations.find((item) => alwaysApprovedChats.includes(item.chatId)
-      && !manualAlwaysApprovalRef.current.has(item.sourceMessageId));
-    if (!auto) return;
-    const reply = firstApprovalLabel(auto) ?? "Approve. Proceed with the proposed action.";
-    void answerConfirmation(auto, reply);
+    if (busy || confirmations.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      for (const auto of confirmations) {
+        if (cancelled) return;
+        if (manualAlwaysApprovalRef.current.has(auto.sourceMessageId)) continue;
+        const approved = await readChatAlwaysApproval(auto.chatId);
+        // Cleanup invalidates a replaced question, busy transition, or unmount.
+        // Main's commitAnswer still validates the exact pending source ID.
+        if (cancelled) return;
+        if (!approved || manualAlwaysApprovalRef.current.has(auto.sourceMessageId)) continue;
+        const reply = firstApprovalLabel(auto) ?? "Approve. Proceed with the proposed action.";
+        await answerConfirmation(auto, reply);
+        return;
+      }
+    })().catch(() => undefined); // An unavailable policy read leaves the question for the owner.
+    return () => { cancelled = true; };
   }, [alwaysApprovedChats, answerConfirmation, busy, confirmations]);
 
   const snoozeConfirmation = useCallback(async (confirmation: PendingConfirmation) => {
@@ -8892,6 +8906,7 @@ export function OneShell() {
                 })}
                 plugins={onePluginOptions}
                 permission={onePermission}
+                alwaysApproval={composerAlwaysApproval}
                 turnOptions={turnOverrides}
                 localFilesConnected={Boolean(workspacePath)}
                 onMenuChange={setComposerMenu}
@@ -9061,7 +9076,7 @@ export function OneShell() {
                     void submit(value);
                   }}
                   title={busy
-                    ? (appLocale === "ko" ? "현재 실행을 정리한 뒤 제출" : "Submit after settling the current run")
+                    ? (appLocale === "ko" ? "진행 중 작업에 지시 추가" : "Add instruction to the ongoing task")
                     : undefined}
                 >
                   {busy ? (appLocale === "ko" ? "현재 작업 조정" : "Adjust current work") : (appLocale === "ko" ? "보내기" : "Send")}
@@ -9085,7 +9100,7 @@ export function OneShell() {
               <div key={queued.id} className={styles.steeringQueue} role="status" aria-live="polite" data-one-steering-queue="true">
                 <span>{appLocale === "ko" ? "다음 지시" : "Next instruction"}</span>
                 <strong>{queued.text}</strong>
-                <small>{appLocale === "ko" ? "현재 실행을 정리한 뒤 새 지시를 이어서 실행합니다" : "Settles the current execution, then continues with the new instruction"}</small>
+                <small>{appLocale === "ko" ? "현재 실행을 유지하고 완료 후 새 지시를 이어서 실행합니다" : "Keeps the current execution running, then continues with the new instruction"}</small>
                 <button
                   type="button"
                   className={styles.steeringQueueRemove}
@@ -9317,17 +9332,19 @@ export function OneShell() {
                     className={styles.composerChip}
                     data-one-composer-trigger="permission"
                     data-one-permission={onePermission}
+                    data-chat-always-approved={composerAlwaysApproval.enabled ? "true" : "false"}
                     disabled={composerSettingsBlocked}
                     aria-expanded={composerMenu === "permission"}
                     aria-haspopup="dialog"
                     aria-controls={composerMenu === "permission" ? "one-composer-popover" : undefined}
                     aria-label={appLocale === "ko"
-                      ? `권한: ${onePermission === "auto" ? "자동 모드" : onePermission === "read" ? "읽기 전용" : onePermission === "write" ? "파일 편집" : "전체 액세스"}`
-                      : `Permission: ${onePermission === "auto" ? "Auto mode" : onePermission === "read" ? "Read only" : onePermission === "write" ? "Accept file edits" : "Full access"}`}
+                      ? `권한: ${onePermissionLabel}`
+                      : `Permission: ${onePermissionLabel}`}
+                    title={onePermissionLabel}
                     onClick={() => setComposerMenu((current) => current === "permission" ? null : "permission")}
                   >
-                    <IconShield size={15} />
-                    <span>{onePermission === "auto" ? (appLocale === "ko" ? "자동 모드" : "Auto mode") : onePermission === "read" ? (appLocale === "ko" ? "읽기 전용" : "Read only") : onePermission === "write" ? (appLocale === "ko" ? "파일 편집" : "Accept file edits") : (appLocale === "ko" ? "전체 액세스" : "Full access")}</span>
+                    {composerAlwaysApproval.enabled ? <IconCheck size={15} /> : <IconShield size={15} />}
+                    <span>{onePermissionLabel}</span>
                     <IconChevronDown size={12} />
                   </button>
                   <button
@@ -9360,11 +9377,11 @@ export function OneShell() {
                       disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || composerInteractionBlocked)}
                       aria-label={busy
                         ? composer.trim()
-                          ? (appLocale === "ko" ? "현재 실행을 정리한 뒤 제출" : "Submit after settling the current run")
+                          ? (appLocale === "ko" ? "진행 중 작업에 지시 추가" : "Add instruction to the ongoing task")
                           : tFor(appLocale, "one.shell.composer.stop_run_aria")
                         : tFor(appLocale, "one.shell.composer.send_aria")}
                       title={busy && composer.trim()
-                        ? (appLocale === "ko" ? "현재 실행을 정리한 뒤 다음 지시를 이어서 실행합니다" : "Settles the current execution, then continues with the next instruction")
+                        ? (appLocale === "ko" ? "현재 실행을 유지하고 완료 후 다음 지시를 이어서 실행합니다" : "Keeps the current execution running, then continues with the next instruction")
                         : undefined}
                     >
                       {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}

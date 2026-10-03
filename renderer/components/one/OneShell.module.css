@@ -2369,15 +2369,17 @@
   display: flex;
   align-items: center;
   gap: 2px;
-  overflow-x: auto;
+  flex-wrap: wrap;
+  overflow: visible;
   scrollbar-width: none;
   container: one-composer-tools / inline-size;
 }
 .composerTools::-webkit-scrollbar { display: none; }
 /* 좁은 작성창(결과 패널을 연 440px 대화 열): 칩의 꺾쇠를 빼고 여백을 줄여 글자 자리를 먼저
    돌려준다 — 모델 이름이 "g…" 로 뭉개지기 전에 장식부터 뺀다. 칩은 눌러서 여는 그대로다. */
-@container one-composer-tools (max-width: 420px) {
-  .composerChip { gap: 4px; padding: 0 6px; }
+@container one-composer-tools (max-width: 500px) {
+  .composerChip { width: 34px; flex: 0 0 34px; gap: 0; padding: 0; }
+  .composerChip span { display: none; }
   .composerChip > svg:last-child { display: none; }
 }
 

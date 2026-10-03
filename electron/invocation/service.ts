@@ -4598,8 +4598,8 @@ export class InvocationService {
       chatId: req.chatId,
       agentId: active[1].actualAgentId,
     });
-    // Interactive One/Work steering settles the old one-shot process after the
-    // replacement is durable. Other callers retain additive queue semantics.
+    // Only an explicit interrupt settles the current process after the next
+    // request is durable. Ordinary One/Work input retains additive queue semantics.
     // 검증 중인 결과는 끊지 않는다 — 끝난 턴의 판정을 버리면 목표가 다시 막힌다. 줄만 선다.
     const interruptsCurrent = req.steeringMode === "interrupt" && !this.pendingGoalVerifications.has(active[0])
       ? this.interruptForSteer(active[0], active[1])

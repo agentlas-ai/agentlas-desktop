@@ -34,6 +34,7 @@ import { callableHubBookmarks } from "@/lib/hub-bookmark-events";
 import { installedAgentMentionTarget } from "@/lib/mention-orchestration-target";
 import { pickLocalized, useT, type Locale } from "@/lib/i18n";
 import { ipc, grantForDroppedFile } from "@/lib/ipc";
+import { useChatAlwaysApproval, type ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { ChatFileDraft } from "@/lib/chat-files";
 
 type ModelOption = { id: string; label: string; tag?: string };
@@ -407,6 +408,7 @@ function ChatInputComponent({
 }) {
   const { t, locale } = useT();
   const router = useRouter();
+  const alwaysApproval = useChatAlwaysApproval(activeChatId);
   const initialDraftRef = useRef<ChatComposerDraftCache | null>(null);
   if (initialDraftRef.current === null) initialDraftRef.current = readChatComposerDraft(activeChatId);
   const [input, setInputState] = useState(initialDraftRef.current.input);
@@ -495,6 +497,7 @@ function ChatInputComponent({
   // 기본값을 write로 — 바이브코딩 앱에서 read-only 기본은 첫 "만들어줘"가 파일을 못 써 조용히 실패한다.
   // write는 cwd 파일 편집만 허용(셸·외부 자동호출은 차단)이라 안전한 기본값.
   const [permissions, setPermissions] = useState<PermissionLevel>("write");
+  const permissionLabel = `${t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}${alwaysApproval.enabled ? (locale === "ko" ? " · 항상 승인" : " · Always approve") : ""}`;
   // 컨텍스트는 진단 지표가 아니라 다음 행동(새 세션/비우기)으로 바로 이어져야 한다.
   // / 슬래시 + @ 멘션 인라인 자동완성
   const [trigger, setTrigger] = useState<null | {
@@ -1258,6 +1261,8 @@ function ChatInputComponent({
             setTimeout(() => textareaRef.current?.focus(), 0);
           }}
           t={t}
+          locale={locale}
+          alwaysApproval={alwaysApproval}
         />
       )}
 
@@ -1786,8 +1791,9 @@ function ChatInputComponent({
             {/* 권한 칩 */}
             <button
               className="chat-input-chip"
-              aria-label={`${locale === "ko" ? "권한" : "Permissions"}: ${t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}`}
-              title={`${locale === "ko" ? "권한" : "Permissions"}: ${t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}`}
+              aria-label={`${locale === "ko" ? "권한" : "Permissions"}: ${permissionLabel}`}
+              title={`${locale === "ko" ? "권한" : "Permissions"}: ${permissionLabel}`}
+              data-chat-always-approved={alwaysApproval.enabled ? "true" : "false"}
               aria-expanded={permOpen}
               aria-haspopup="menu"
               data-popover-trigger="permission"
@@ -1808,9 +1814,9 @@ function ChatInputComponent({
                       : "var(--green-deep)",
               }}
             >
-              <IconShield size={13} />
+              {alwaysApproval.enabled ? <IconCheck size={13} /> : <IconShield size={13} />}
               <span className="chat-input-chip-label">
-                {t(`chatinput.perm.${permissions}` as `chatinput.perm.${PermissionLevel}`)}
+                {permissionLabel}
               </span>
               <IconChevronDown size={11} style={{ opacity: 0.6, flexShrink: 0 }} />
             </button>
@@ -1851,7 +1857,7 @@ function ChatInputComponent({
           <div className="chat-input-tools-right" style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {/* 컨텍스트 지표는 "Runtime" 상태표가 아니라 세션 전환/정리 진입점이다. */}
             {tokensUsage && (
-              <div style={{ position: "relative", flexShrink: 0 }}>
+              <div className="chat-input-context-control" style={{ flexShrink: 0 }}>
                 <button
                   type="button"
                   data-popover-trigger="context"
@@ -1868,9 +1874,10 @@ function ChatInputComponent({
                     minWidth: 0, cursor: "pointer",
                   }}
                 >
-                  <span>{t("chatinput.context.label")}</span>
+                  <span className="chat-input-context-icon" aria-hidden><IconLayers size={13} /></span>
+                  <span className="chat-input-context-label">{t("chatinput.context.label")}</span>
                   <span className="chat-input-context-percent" style={{ color: "var(--accent)" }}>{contextTokenLabel}</span>
-                  <IconChevronDown size={10} style={{ opacity: 0.65 }} />
+                  <span className="chat-input-context-chevron" aria-hidden><IconChevronDown size={10} style={{ opacity: 0.65 }} /></span>
                 </button>
                 {contextMenuOpen && (
                   <section
@@ -1879,8 +1886,8 @@ function ChatInputComponent({
                     data-chat-context-menu="true"
                     data-popover-kind="context"
                     style={{
-                      position: "absolute", right: 0, bottom: "calc(100% + 8px)", zIndex: 50,
-                      width: 286, padding: 10, display: "grid", gap: 8,
+                      position: "absolute", right: 16, bottom: "calc(100% - 4px)", zIndex: 50,
+                      width: "min(286px, calc(100% - 32px))", padding: 10, display: "grid", gap: 8,
                       border: "1px solid var(--paper-edge)", borderRadius: 10,
                       background: "var(--paper)", boxShadow: "0 12px 28px rgba(15, 23, 42, 0.14)",
                     }}
@@ -1922,12 +1929,13 @@ function ChatInputComponent({
             {/* Plan/Goal 모드 토글은 툴바에서 숨김 — + 메뉴(PlusMenu)의 ToggleRow로만 노출.
                 켜져 있으면 아래 활성 칩(chat-input-active-modes)이 상태를 보여준다. */}
             {(planMode || effectiveGoalMode) && (
-              <div style={{ display: "flex", gap: 4 }}>
+              <div className="chat-input-active-modes" style={{ display: "flex", gap: 4 }}>
                 {planMode && (
                   <button
                     className="chat-input-chip"
                     onClick={() => setPlanMode(false)}
                     title={t("chatinput.plan_mode")}
+                    aria-label={t("chatinput.plan_mode")}
                     style={{ ...toolBtnStyle(true), width: "auto", padding: "0 8px", gap: 4, fontSize: 10.5, fontWeight: 600, color: "var(--accent)" }}
                   >
                     <IconRoute size={12} />
@@ -1940,6 +1948,7 @@ function ChatInputComponent({
                     // controlled(영속 goal)일 때 이 ×는 단순 off가 아니라 명시적 목표 종료다.
                     onClick={() => toggleGoalMode(false)}
                     title={t("chatinput.goal_mode")}
+                    aria-label={t("chatinput.goal_mode")}
                     style={{ ...toolBtnStyle(true), width: "auto", padding: "0 8px", gap: 4, fontSize: 10.5, fontWeight: 600, color: "var(--accent)" }}
                   >
                     <IconTarget size={12} />
@@ -2008,10 +2017,10 @@ function ChatInputComponent({
                     /* 아무것도 안 썼을 때 회색인 것은 사유를 적을 필요가 없다(보면 안다). */
                     data-disabled-reason={submitDisabled && nothingToSend ? "empty-input" : undefined}
                     aria-label={busy
-                      ? (locale === "ko" ? "현재 실행을 정리한 뒤 제출" : "Submit after settling the current run")
+                      ? (locale === "ko" ? "진행 중 작업에 지시 추가" : "Add instruction to the ongoing task")
                       : t("chatinput.send")}
                     title={submitDisabledReason ?? (busy
-                      ? (locale === "ko" ? "현재 실행을 정리한 뒤 다음 지시를 이어서 실행합니다" : "Settles the current execution, then continues with the next instruction")
+                      ? (locale === "ko" ? "현재 실행을 유지하고 완료 후 다음 지시를 이어서 실행합니다" : "Keeps the current execution running, then continues with the next instruction")
                       : undefined)}
                     style={{
                       width: 38,
@@ -2242,7 +2251,7 @@ function SteeringQueueBar({ queuedCount, locale }: { queuedCount: number; locale
       <span className="chat-input-steering-pulse" aria-hidden />
       <strong>{locale === "ko" ? `다음 지시 ${queuedCount}개` : `${queuedCount} queued`}</strong>
       <span className="chat-composer-progress-label">
-        {locale === "ko" ? "현재 실행을 정리한 뒤 새 지시를 이어서 실행합니다" : "Settles the current execution, then continues with the new instruction"}
+        {locale === "ko" ? "현재 실행을 유지하고 완료 후 새 지시를 이어서 실행합니다" : "Keeps the current execution running, then continues with the new instruction"}
       </span>
     </div>
   );
@@ -2276,7 +2285,7 @@ function SteeringDraftBar({
         className="chat-steering-draft-send"
         onClick={onSend}
         title={busy
-          ? (locale === "ko" ? "현재 실행을 정리한 뒤 제출" : "Submit after settling the current run")
+          ? (locale === "ko" ? "진행 중 작업에 지시 추가" : "Add instruction to the ongoing task")
           : (locale === "ko" ? "새 작업으로 보내기" : "Send as a new turn")}
         data-chat-steering-send="true"
       >
@@ -3005,10 +3014,14 @@ function PermissionMenu({
   value,
   setValue,
   t,
+  locale,
+  alwaysApproval,
 }: {
   value: PermissionLevel;
   setValue: (v: PermissionLevel) => void;
   t: TFunction;
+  locale: Locale;
+  alwaysApproval: ChatAlwaysApprovalControl;
 }) {
   const opts: Array<{ id: PermissionLevel; color: string }> = [
     { id: "read", color: "var(--green-deep)" },
@@ -3029,6 +3042,23 @@ function PermissionMenu({
           compact
         />
       ))}
+      <Divider />
+      <Row
+        onClick={() => { void alwaysApproval.toggle(); }}
+        disabled={!alwaysApproval.available || alwaysApproval.pending}
+        icon={<IconCheck size={13} style={{ color: "var(--accent)" }} />}
+        title={locale === "ko" ? "항상 승인" : "Always approve"}
+        subtitle={locale === "ko" ? "이 대화의 승인 요청을 자동으로 허용합니다" : "Automatically allow approval requests in this conversation"}
+        selected={alwaysApproval.enabled}
+        checkbox
+        compact
+        right={alwaysApproval.pending
+          ? <span>{locale === "ko" ? "저장 중" : "Saving"}</span>
+          : alwaysApproval.enabled ? <IconCheck size={14} style={{ color: "var(--accent)" }} /> : undefined}
+      />
+      {alwaysApproval.failed && <div role="alert" style={{ padding: "6px 10px", fontSize: 11, color: "var(--red-deep)" }}>
+        {locale === "ko" ? "승인 설정을 저장하지 못했습니다. 다시 시도해 주세요." : "Could not save the approval setting. Please try again."}
+      </div>}
     </Popover>
   );
 }
@@ -3257,6 +3287,8 @@ function Row({
   autocompleteOption = false,
   compact = false,
   selected,
+  disabled = false,
+  checkbox = false,
 }: {
   onClick?: () => void;
   /** 마우스가 위로 올라오면 호출 — 키보드 activeIndex와 마우스 활성을 동기화 */
@@ -3270,19 +3302,21 @@ function Row({
   autocompleteOption?: boolean;
   compact?: boolean;
   selected?: boolean;
+  disabled?: boolean;
+  checkbox?: boolean;
 }) {
   // active일 때는 hover 색을 항상 표시 — inline 토글이라 ref로 보존하지 않음
   return (
     <button
       type="button"
       onClick={onClick}
-      disabled={!onClick}
+      disabled={!onClick || disabled}
       title={compact ? subtitle : undefined}
       aria-label={compact && subtitle ? `${title}. ${subtitle}` : undefined}
       aria-checked={compact ? selected : undefined}
       aria-pressed={!compact ? selected : undefined}
       data-autocomplete-option={autocompleteOption ? "true" : undefined}
-      role={autocompleteOption ? "option" : compact ? (selected === undefined ? "menuitem" : "menuitemradio") : undefined}
+      role={autocompleteOption ? "option" : compact ? (checkbox ? "menuitemcheckbox" : selected === undefined ? "menuitem" : "menuitemradio") : undefined}
       aria-selected={autocompleteOption ? (active ? "true" : "false") : undefined}
       style={{
         display: "flex",

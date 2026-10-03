@@ -4179,7 +4179,8 @@ export function registerIpcHandlers(): void {
       chatId: ask.chatId,
       consentBinding,
     });
-    if (ruled === "allow") return "allow_session";
+    // Durable rules are re-read for each request so revocation is not cached by the runtime.
+    if (ruled === "allow") return "allow_once";
     if (ask.permission === "full") return "allow_session";
     if (ruled === "deny") return "deny";
     if (!ask.mutating) return "allow_once";

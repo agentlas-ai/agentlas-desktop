@@ -28,7 +28,7 @@ import {
   toolApprovalActionId,
   type ToolApprovalDecisionResult,
 } from "@shared/tool-approval-action";
-import { isChatAlwaysApproved, waitForAlwaysApprovedChats } from "./always-approved-chats";
+import { readChatAlwaysApproval } from "./always-approved-chats";
 
 let queue: ToolApprovalRequestEvent[] = [];
 const visibleChats = new Map<string, number>();
@@ -61,23 +61,23 @@ function emit(): void {
 async function upsert(next: ToolApprovalRequestEvent): Promise<void> {
   if (next.mode !== "live") return; // 사후 고지는 카드가 아니다.
   if (decided.has(next.id) || queue.some((item) => item.id === next.id)) return;
-  await waitForAlwaysApprovedChats();
+  const alwaysApproved = await readChatAlwaysApproval(next.chatId);
   if (decided.has(next.id) || queue.some((item) => item.id === next.id)) return;
   /*
    * 이 대화에 이미 "항상 승인"을 준 사용자에게는 카드를 만들지 않는다.
    *
    * 큐에 넣고 화면에서 지우는 방식이면 카드가 한 프레임 깜빡이고, 무엇보다 사용자가
-   * 이미 답한 질문을 제품이 또 꺼낸 셈이 된다. 여기서 바로 세션 허용으로 답하면
+   * 이미 답한 질문을 제품이 또 꺼낸 셈이 된다. 여기서 이번 호출 허용으로 답하면
    * 실행이 멈추지 않는다 — 답 자체는 평소 경로(resolveToolApproval)로 나가므로
    * 영수증과 기록은 그대로 남는다.
    */
-  if (isChatAlwaysApproved(next.chatId)) {
+  if (alwaysApproved) {
     // Auto-approval still needs an exact Main receipt. Keep the card in the
     // shared queue while it is being committed so a failed bridge cannot make
     // a live runtime question disappear without feedback.
     queue = [...queue, next];
     emit();
-    void decideToolApproval(next.id, "allow_session");
+    void decideToolApproval(next.id, "allow_once");
     return;
   }
   queue = [...queue, next];

@@ -7,6 +7,7 @@
  * commits instead of treating this notification as data.
  */
 export type DesktopStoreEntity =
+  | "capability-grant"
   | "agent"
   | "firm"
   | "project"

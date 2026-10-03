@@ -20,6 +20,7 @@ import {
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import { runtimeModelFallbackLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { runtimeUsesEngineModelSetting } from "@shared/models";
+import type { ChatAlwaysApprovalControl } from "@/lib/use-chat-always-approval";
 import type { RuntimeStatus } from "@shared/types";
 import styles from "./OneShell.module.css";
 
@@ -68,6 +69,7 @@ type Props = {
   agents: OneComposerAgentOption[];
   plugins: OneComposerPluginOption[];
   permission: OnePermissionMode;
+  alwaysApproval: ChatAlwaysApprovalControl;
   turnOptions: Partial<Record<OneTurnOptionKey, true>>;
   localFilesConnected: boolean;
   onMenuChange: (menu: OneComposerMenuKey | null) => void;
@@ -99,6 +101,7 @@ export function OneComposerControls({
   agents,
   plugins,
   permission,
+  alwaysApproval,
   turnOptions,
   localFilesConnected,
   onMenuChange,
@@ -331,6 +334,23 @@ export function OneComposerControls({
                 onClick={() => onSelectPermission(item.id)}
               />
             ))}
+            {activeMenu === "permission" && <>
+              <div className={styles.composerPopoverDivider} />
+              <ComposerRow
+                icon={<IconCheck size={15} />}
+                title={locale === "ko" ? "항상 승인" : "Always approve"}
+                subtitle={locale === "ko" ? "이 대화의 승인 요청을 자동으로 허용합니다" : "Automatically allow approval requests in this conversation"}
+                checked={alwaysApproval.enabled}
+                toggle
+                disabled={!alwaysApproval.available || alwaysApproval.pending}
+                status={alwaysApproval.pending ? (locale === "ko" ? "저장 중" : "Saving") : undefined}
+                compactDetails
+                onClick={() => { void alwaysApproval.toggle(); }}
+              />
+              {alwaysApproval.failed && <div role="alert" className={styles.composerPopoverSectionLabel}>
+                {locale === "ko" ? "승인 설정을 저장하지 못했습니다. 다시 시도해 주세요." : "Could not save the approval setting. Please try again."}
+              </div>}
+            </>}
           </div>
         </>
       )}
@@ -340,11 +360,12 @@ export function OneComposerControls({
   return portalHost ? createPortal(popover, portalHost) : null;
 }
 
-function ComposerRow({ icon, title, subtitle, checked, toggle, trailing, status, compactDetails, dataPermission, onClick }: { icon: React.ReactNode; title: string; subtitle?: string; checked?: boolean; toggle?: boolean; trailing?: React.ReactNode; status?: string; compactDetails?: boolean; dataPermission?: OnePermissionMode; onClick: () => void }) {
+function ComposerRow({ icon, title, subtitle, checked, toggle, trailing, status, compactDetails, dataPermission, disabled, onClick }: { icon: React.ReactNode; title: string; subtitle?: string; checked?: boolean; toggle?: boolean; trailing?: React.ReactNode; status?: string; compactDetails?: boolean; dataPermission?: OnePermissionMode; disabled?: boolean; onClick: () => void }) {
   const descriptionId = useId();
   return (
     <button
       type="button"
+      disabled={disabled}
       className={styles.composerPopoverRow}
       data-selected={checked ? "true" : undefined}
       data-one-permission-option={dataPermission}

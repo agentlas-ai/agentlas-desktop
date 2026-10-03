@@ -108,14 +108,14 @@ export function ToolApprovalCard({
         : (ko ? "이 작업이 끝날 때까지 다시 묻지 않습니다." : "No more questions until this task ends."),
       disabled: locked,
     },
-    ...(compact && !chip ? [] : [{
+    {
       id: "allow_always",
       title: ko ? "항상 허용" : "Always allow",
       note: escalation
         ? (ko ? "권한이 모자랄 때 항상 전체 액세스로 진행합니다." : "Always continue with full access when permission falls short.")
         : (ko ? "이 도구의 같은 작업 패턴을 다시 묻지 않습니다." : "Do not ask again for this tool's matching action pattern."),
       disabled: locked,
-    }]),
+    },
     {
       id: "deny",
       title: ko ? "거부" : "Deny",

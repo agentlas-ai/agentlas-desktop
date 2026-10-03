@@ -4856,7 +4856,7 @@ function ChatPage() {
           const steered = await api.invoke.steer({
             chatId: chat.id,
             userPrompt: invocationPrompt,
-            steeringMode: "interrupt",
+            steeringMode: "queue",
             images,
             locale,
             permissions: opts?.permissions ?? DEFAULT_PERMISSION,
@@ -5017,7 +5017,7 @@ function ChatPage() {
           const steerReceipt = await api.invoke.steer({
             chatId: chat.id,
             userPrompt: boundText,
-            steeringMode: "interrupt",
+            steeringMode: "queue",
             images: opts?.images,
             locale,
             permissions: opts?.permissions ?? DEFAULT_PERMISSION,

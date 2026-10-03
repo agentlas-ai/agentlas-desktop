@@ -15,6 +15,7 @@
  */
 import { createHash } from "node:crypto";
 import { getDb } from "./db";
+import { emitDesktopStoreChange } from "./change-bus";
 import type {
   ToolApprovalConsentBinding,
 } from "../../shared/types";
@@ -362,7 +363,9 @@ export function recordCapabilityGrant(input: CapabilityGrantInput): CapabilityGr
 }
 
 export function revokeCapabilityGrant(id: number): boolean {
-  return getDb().prepare("DELETE FROM capability_grants WHERE id = ?").run(id).changes > 0;
+  const changed = getDb().prepare("DELETE FROM capability_grants WHERE id = ?").run(id).changes > 0;
+  if (changed) emitDesktopStoreChange({ entity: "capability-grant" });
+  return changed;
 }
 
 export function listCapabilityGrants(scope?: string): CapabilityGrantRow[] {
@@ -412,13 +415,15 @@ export function isChatAlwaysApproved(chatId: string): boolean {
 }
 
 export function grantChatAlwaysApproval(chatId: string, source = "chip"): void {
-  recordCapabilityGrant({ capability: "*", decision: "allow", scope: `chat:${chatId}`, source });
+  const result = recordCapabilityGrant({ capability: "*", decision: "allow", scope: `chat:${chatId}`, source });
+  if (result.ok) emitDesktopStoreChange({ entity: "capability-grant", id: chatId });
 }
 
 export function revokeChatAlwaysApproval(chatId: string): void {
   getDb()
     .prepare("DELETE FROM capability_grants WHERE capability = '*' AND scope = ?")
     .run(`chat:${chatId}`);
+  emitDesktopStoreChange({ entity: "capability-grant", id: chatId });
 }
 
 export function listAlwaysApprovedChatIds(): string[] {
