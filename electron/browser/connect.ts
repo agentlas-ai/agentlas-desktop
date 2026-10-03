@@ -42,6 +42,7 @@ import {
   type BrowserActionLogRow,
   type BrowserPermissionDecision,
 } from "../store/browser-vault";
+import { isChatAlwaysApproved } from "../store/capability-grants";
 import { currentUiLocale } from "../ui-locale";
 import type { BrowserApprovalRequestEvent } from "../../shared/types";
 
@@ -478,9 +479,27 @@ function emitToRenderer(channel: string, payload: unknown): void {
 }
 
 /**
+ * 오너가 이 대화를 "항상 허용"으로 둔 사실(capability_grants '*' · chat:<id>). 실행 권한은 실행을
+ * 시작할 때 굳지만 이 허락은 대화의 **지금** 사실이라, 승인 시점마다 DB 에서 다시 읽는다 —
+ * 목표 루프처럼 오래 도는 실행 도중에 켠 허락도 바로 적용된다.
+ */
+function chatAlwaysApproved(owner: BrowserApprovalOptions["owner"]): boolean {
+  const chatId = owner?.chatId;
+  if (typeof chatId !== "string" || !chatId) return false;
+  try {
+    return isChatAlwaysApproved(chatId);
+  } catch {
+    return false; // 원장을 못 읽으면 허락이 없는 것으로 본다(묻는 쪽으로 닫힘).
+  }
+}
+
+/**
  * 되돌릴 수 없는 브라우저 행동 전에 호출. 저장된 권한을 먼저 보고, 없으면 경량 바텀시트를
  * renderer 로 띄워 사용자 결정을 기다린다.
- *  - 결제(payment)/임의코드(unsafe-code): 승인은 절대 기억하지 않고 항상 물어봄. 단 명시 "거부"는 기억.
+ *  - 결제(payment)/임의코드(unsafe-code): 사이트 단위 승인은 기억하지 않는다. 단 명시 "거부"는 기억.
+ *  - 임의코드는 오너가 그 대화를 "항상 허용"으로 두었으면 묻지 않는다(오너 지시 2026-10-04:
+ *    "항상허용 전체권한인데도 계속 승인요청에 이번만 허용"). 결제는 그래도 매번 묻는다 — 유료 작업만
+ *    멈추고 묻는다는 오너 결정(2026-09-29)의 경계다.
  *  - always: 즉시 approved(스킵). deny: 즉시 denied.
  *  - once/신규: 바텀시트 → 결과. always/deny면 기억.
  */
@@ -520,6 +539,11 @@ export async function browserRequestApproval(
   if (stored === "deny") {
     logBrowserAction({ site, action: req.actionType, target: req.target, result: "blocked", approval: "deny" });
     return "denied";
+  }
+  // 사이트별 "거부"는 오너가 그 사이트에 내린 구체적 결정이라 위에서 먼저 존중한다.
+  if (req.actionType !== "payment" && chatAlwaysApproved(options.owner)) {
+    logBrowserAction({ site, action: req.actionType, target: req.target, result: "auto", approval: "chat-always" });
+    return "approved";
   }
 
   // The person is driving this desktop and asked for the action. Ordinary
@@ -620,6 +644,26 @@ export async function browserRequestApproval(
     approval: decision,
   });
   return approved ? "approved" : "denied";
+}
+
+/**
+ * 오너가 대화를 "항상 허용"으로 켠 순간, 그 대화에서 이미 떠 있는 결제 아닌 승인 카드를 통과시킨다.
+ * 안 그러면 켠 직후에도 방금 뜬 "이번만 허용" 카드가 남아 같은 것을 또 누르게 된다.
+ * 사이트 단위로 기억하지 않는다(once) — 허락의 근거는 대화 쪽 원장이다.
+ */
+export function settlePendingBrowserApprovalsForChat(chatId: string): number {
+  let settled = 0;
+  for (const [requestId, pending] of [...pendingApprovals]) {
+    if (pending.request.owner?.chatId !== chatId || pending.request.actionType === "payment") continue;
+    if (!chatAlwaysApproved(pending.request.owner)) continue;
+    clearTimeout(pending.timer);
+    pendingApprovals.delete(requestId);
+    emitToRenderer(APPROVAL_CHANNEL, { ...pending.request, expiresAt: 0 });
+    emitApprovalLifecycle({ status: "resolved", requestId, decision: "once" });
+    pending.resolve("once");
+    settled += 1;
+  }
+  return settled;
 }
 
 /** renderer 바텀시트가 사용자의 선택(once/always/deny)을 돌려준다. */

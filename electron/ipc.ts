@@ -745,6 +745,7 @@ import {
   browserResolveApproval,
   listPendingBrowserApprovals,
   browserListLogs,
+  settlePendingBrowserApprovalsForChat,
 } from "./browser/connect";
 import type { BrowserPermissionDecision } from "./browser/connect";
 import { importBrowserCredentials, scanBrowserCredentials } from "./browser/credential-import";
@@ -4035,7 +4036,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("capability:revokeGrant", (_e, id: number) => revokeCapabilityGrant(Number(id)));
   ipcMain.handle("capability:listAlwaysApprovedChats", () => listAlwaysApprovedChatIds());
   ipcMain.handle("capability:grantChatAlwaysApproval", (_e, chatId: string) => {
-    if (typeof chatId === "string" && chatId) grantChatAlwaysApproval(chatId.slice(0, 128), "chip");
+    if (typeof chatId === "string" && chatId) {
+      const scopedChatId = chatId.slice(0, 128);
+      grantChatAlwaysApproval(scopedChatId, "chip");
+      // 켠 순간 이미 떠 있던 그 대화의 브라우저 승인 카드(결제 제외)도 함께 통과시킨다.
+      settlePendingBrowserApprovalsForChat(scopedChatId);
+    }
     return listAlwaysApprovedChatIds();
   });
   ipcMain.handle("capability:revokeChatAlwaysApproval", (_e, chatId: string) => {
@@ -5857,7 +5863,9 @@ export function registerIpcHandlers(): void {
       graph,
       input.initialVars && typeof input.initialVars === "object" ? input.initialVars : undefined,
     );
-    const blocked = verification.steps.find((step) => step.state === "blocked") ?? null;
+    // 1.2.54부터 검증기는 돌려 봐서 실패한 단계를 "pending"(결과 미검증, 저장 여부는 사람이 고름)으로
+    // 낸다. "blocked" 만 찾으면 실패한 그래프가 칩 없이 그대로 저장된다 — 둘 다 이어갈 길이 필요하다.
+    const blocked = verification.steps.find((step) => step.state === "blocked" || step.state === "pending") ?? null;
     const repaired = verification.steps
       .filter((step) => step.state === "repaired")
       .map((step) => ({ nodeId: step.nodeId, label: step.label, code: step.repairedCode ?? "" }));

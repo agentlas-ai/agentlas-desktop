@@ -326,6 +326,15 @@ const NON_ROUTABLE_FAILURES = new Set([
   "RESUME_CONFLICT",
 ]);
 
+/** Admission holds whose cause is an external effect of unknown outcome (closed list). */
+const UNCERTAIN_EFFECT_HOLD_CODES = new Set([
+  "MUTATION_UNVERIFIED",
+  "RESUME_CONFLICT",
+  "automation_partial_reconciliation_required",
+  "automation_partial_graph_changed",
+  "automation_fresh_run_blocked",
+]);
+
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
 const PREVIOUS_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
 const LEGACY_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v2";
@@ -1913,6 +1922,22 @@ export async function runGraph(
       updatedAt: new Date().toISOString(),
       checkpointDigest: "sha256:" + "0".repeat(64),
     });
+  }
+  /*
+   * ★An admission hold on an effect whose outcome is unknown must outlive this run.
+   *   Held nodes do not run here, but the hold used to live only in this run's nodeFailures.
+   *   This run then became the latest failed checkpoint: the next run resumed from it (the held
+   *   node neither completed nor ambiguous) and dispatched the external effect again, and the
+   *   reconciliation view had nothing to show (test-automation-trigger-safety, 2026-10-04: a
+   *   legacy "publish done, no receipt" run → held once → re-dispatched on the second run).
+   *   Recording the hold as ambiguous keeps it held (MUTATION_UNVERIFIED on resume) and visible
+   *   to reconciliation and background observation until someone settles it.
+   */
+  const uncertainEffectHolds = [...admissionPending.entries()]
+    .filter(([nodeId, failure]) => effectNodeIds.has(nodeId) && UNCERTAIN_EFFECT_HOLD_CODES.has(failure.code))
+    .map(([nodeId]) => nodeId);
+  if (uncertainEffectHolds.length > 0) {
+    checkpoint.ambiguousNodeIds = [...new Set([...checkpoint.ambiguousNodeIds, ...uncertainEffectHolds])];
   }
   const loginResumeRunIds = { ...opts.loginResumeRunIds };
   if (waitingSource) {
@@ -5119,9 +5144,11 @@ export async function runGraph(
         // A node's durable failure receipt is authoritative even when the
         // aggregate Graph error string is rewritten by an adapter. In
         // particular, MUTATION_UNVERIFIED must block strategy revision just
-        // like the scheduler's reconciliation gate does.
+        // like the scheduler's reconciliation gate does — and so must every other
+        // hold on an effect of unknown outcome (a legacy partial is held with
+        // automation_partial_reconciliation_required, not MUTATION_UNVERIFIED).
         effectsUnconfirmed: Object.values(nodeFailures).some((failure) =>
-          failure.code === "MUTATION_UNVERIFIED"),
+          UNCERTAIN_EFFECT_HOLD_CODES.has(failure.code)),
         runError: error,
         runtimeSelection: automation.runtimeSelection ?? null,
         signal: opts.signal,

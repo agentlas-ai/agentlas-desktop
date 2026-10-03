@@ -1822,9 +1822,15 @@ export class InvocationService {
       }
     };
     let emptyFailureNoticePersisted = false;
+    // A failed team run first commits its own honest reply ("This task is not complete yet …")
+    // and only then turns the held final into an error. That reply arrives as a durable message
+    // identity, not as streamed partial text, so partialText stays empty — and the run used to
+    // append a second, false "failed before it could finish a reply" notice under it
+    // (2026-10-04, verify-one-improvement-proof-producer failed-worker scenario).
+    let durableAssistantReplyBound = false;
     const persistEmptyFailureNotice = (terminalKind: string): void => {
       const abortReason = controller.signal.reason instanceof Error ? controller.signal.reason.message : null;
-      if (record.background || emptyFailureNoticePersisted || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
+      if (record.background || emptyFailureNoticePersisted || durableAssistantReplyBound || record.partialText.trim() || runReq.agentAppMode || remoteWorkspaceBinding
         || runReq.promptOrigin === "system" || terminalKind === "invoke_cancelled"
         || record.steeringInterruptRequested || isOwnerGoalStopCause(abortReason)) return;
       try {
@@ -2849,6 +2855,9 @@ export class InvocationService {
         };
         const durableTextForVerification = event.durableTextForVerification;
         const durableMessageId = event.durableAssistantMessageIdForVerification;
+        if (!event.agentId && (durableMessageId || (event.kind === "partial" && event.durableMessageId))) {
+          durableAssistantReplyBound = true;
+        }
         // Preserve only the opaque committed-message identity for history
         // catch-up. The body used to verify it remains Main-only.
         if (

@@ -586,7 +586,14 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     const deliver = () => {
       if (closed || native.get(wireId) !== pending) return;
       validate();
-      pending.controller?.signal.throwIfAborted();
+      // A lifetime abort (wire closing, run parked) withholds the result. A client's own
+      // notifications/cancelled is not that: its answer is the "cancelled" denial itself.
+      // Throwing here closed the whole bridge (reason=mcp_proxy_call_cancelled), cut every
+      // other call on the wire, and the proxy child told the model to "call the tool again"
+      // for the call it had just cancelled (test-mcp-proxy, 2026-10-04; regressed in 1.2.53).
+      const abortReason = pending.controller?.signal.reason;
+      const clientCancelled = abortReason instanceof Error && abortReason.message === "mcp_proxy_call_cancelled";
+      if (!clientCancelled) pending.controller?.signal.throwIfAborted();
       pending.detach?.(); native.delete(wireId); external.delete(idKey(pending.id));
       down({ ...frame, id: pending.id });
     };

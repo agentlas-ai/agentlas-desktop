@@ -5,8 +5,9 @@ import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
 // 경량 승인 바텀시트 — 되돌릴 수 없는 브라우저 행동(전송·게시·삭제·결제) 전에 뜬다.
 // 기존 ChatQuestionSheet 대비 최소 UI: 한 줄 설명 + [한 번만] [항상 승인] [거부].
 //  - Full access는 Main 게이트에서 모든 브라우저 체크포인트를 통과시키므로 이 시트에 도달하지
-//    않는다. gated 실행에서 도달하는 결제(payment)/임의코드(unsafe-code)는 allowAlways=false라
-//    "항상 승인" 버튼은 뜨지 않는다(승인 캐시 금지 = 매번 확인). 버튼은 플래그로만 살아난다.
+//    않는다. 대화를 "항상 허용"으로 둔 경우도 임의코드(unsafe-code)는 Main 이 묻지 않고 통과시킨다
+//    (오너 지시 2026-10-04). 그 밖의 gated 실행에서 도달하는 결제(payment)/임의코드는
+//    allowAlways=false라 사이트 단위 "항상 승인" 버튼은 뜨지 않는다. 버튼은 플래그로만 살아난다.
 //  - "거부"는 electron이 site+action 으로 기억 → 다음부터 시트 없이 차단(browser:revokePermission으로 해제).
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { usePathname, useSearchParams } from "next/navigation";
@@ -220,8 +221,8 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
   const safetyNote = isPayment
     ? (ko ? "결제는 안전을 위해 매번 확인합니다." : "Payments are confirmed every time for safety.")
     : isUnsafeCode
-      ? (ko ? "임의 코드는 페이지에서 여러 동작을 한 번에 실행할 수 있어 매번 확인합니다."
-            : "Arbitrary code can perform multiple page actions and is confirmed every time.")
+      ? (ko ? "임의 코드는 페이지에서 여러 동작을 한 번에 실행할 수 있어 확인합니다. 이 대화를 ‘항상 허용’으로 켜 두면 다시 묻지 않습니다."
+            : "Arbitrary code can perform multiple page actions, so it is confirmed. Turn on Always allow for this conversation to stop these prompts.")
       : null;
 
   const content = (

@@ -1914,9 +1914,9 @@ async function runOne(
       //    "결과가 수용되지 않았다"는 거짓 전제로 사람만 할 수 있는 일을 시키는 셈이고,
       //    매 실행마다 호출이 한 번씩 더 나간다. 이 상태는 사용자에게 표면화하면 된다.
       // blocked·partial·error는 외부 제약 해소나 재시도로 실제로 나아질 수 있으므로 그대로 둔다.
-      // 다만 외부 mutation의 성패가 확인되지 않은 실행은 예외다. 스케줄을 정지시킨 뒤
-      // System Optimizer를 띄우면, 그 에이전트가 독립적으로 같은 효과를 재시도할 수 있다.
-      // 이 경우는 사용자가 실제 반영 여부를 조정할 때까지 모델 복구도 보류한다.
+      // 외부 mutation의 성패가 확인되지 않은 실행도 복구를 보류하지 않는다(1.2.54부터). 위에서
+      // graph_effect_check_pending 사실을 남기고, 복구 사유에 "모르는 결과는 보존하고 그 미확인
+      // 외부 행동은 반복하지 말라"를 항상 붙여 System Optimizer가 같은 효과를 재시도하지 않게 한다.
       if (
         (runStatus !== "ok" && runStatus !== "skipped") &&
         !shutdownDispatchClosed && !controller.signal.aborted && getAutomation(a.id)?.enabled === true &&
