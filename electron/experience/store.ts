@@ -29,6 +29,7 @@ import {
   rebuildExperienceRelationIndex,
   recordExperienceLineageEvent,
   refreshExperienceRelationArtifacts,
+  refreshExperienceRelationArtifactsForPacks,
 } from "./relation-index";
 import {
   canonicalEnvironmentProfile,
@@ -1689,6 +1690,13 @@ export function promoteExperienceCandidateFromRunReceipt(input: {
   candidateId: string;
   runId: string;
 }): ExperiencePromotionReceipt {
+  return promoteExperienceCandidateWithRunReceipt(input);
+}
+
+function promoteExperienceCandidateWithRunReceipt(input: {
+  candidateId: string;
+  runId: string;
+}, deferredRelationPacks?: Set<string>): ExperiencePromotionReceipt {
   const candidateId = cleanText(input.candidateId, "candidateId", 120);
   const runId = cleanText(input.runId, "runId", 120);
   if (!SAFE_EVIDENCE_REF_RE.test(runId)) {
@@ -1726,14 +1734,27 @@ export function promoteExperienceCandidateFromRunReceipt(input: {
     recordExperienceLineageEvent(candidate.pack_id, "promotion");
   });
   transaction();
-  try {
-    refreshExperienceRelationArtifacts(candidate.pack_id);
-  } catch (error) {
-    console.warn(`[experience-relations] outcome promotion projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+  if (deferredRelationPacks) {
+    deferredRelationPacks.add(candidate.pack_id);
+  } else {
+    try {
+      refreshExperienceRelationArtifacts(candidate.pack_id);
+    } catch (error) {
+      console.warn(`[experience-relations] outcome promotion projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+    }
   }
   return receiptFromRow(
     getDb().prepare("SELECT * FROM experience_promotion_receipts WHERE id = ?").get(id) as PromotionReceiptRow,
   );
+}
+
+function refreshDeferredExperienceRelations(packIds: Set<string>): void {
+  if (packIds.size === 0) return;
+  try {
+    refreshExperienceRelationArtifactsForPacks(packIds);
+  } catch (error) {
+    console.warn(`[experience-relations] outcome promotion projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+  }
 }
 
 /**
@@ -1776,14 +1797,22 @@ export function promoteWaitingExperienceCandidates(input: {
   ).all(agentId, limit) as Array<{ id: string }>;
   if (rows.length === 0) return { eligible: 0, promoted: 0 };
   let promoted = 0;
-  for (const row of rows) {
-    try {
-      promoteExperienceCandidateFromRunReceipt({ candidateId: row.id, runId });
-      promoted += 1;
-    } catch {
-      // A stale pack base or a candidate promoted by a concurrent turn is not a
-      // reason to abandon the rest of the batch.
+  // Rebuilding the shared graph after each candidate rewrites every Pack's
+  // nodes/edges repeatedly. Keep each receipt and lineage transaction, then
+  // project the committed batch once before returning to the event loop.
+  const relationPacks = new Set<string>();
+  try {
+    for (const row of rows) {
+      try {
+        promoteExperienceCandidateWithRunReceipt({ candidateId: row.id, runId }, relationPacks);
+        promoted += 1;
+      } catch {
+        // A stale pack base or a candidate promoted by a concurrent turn is not a
+        // reason to abandon the rest of the batch.
+      }
     }
+  } finally {
+    refreshDeferredExperienceRelations(relationPacks);
   }
   return { eligible: rows.length, promoted };
 }
@@ -1818,9 +1847,15 @@ export function promoteExperienceCandidatesForRun(input: {
   // inside the promotion itself.
   if (!hasDurableRunStartReceipt(runId)) return { eligible: rows.length, promoted: 0 };
   let promoted = 0;
-  for (const row of rows) {
-    promoteExperienceCandidateFromRunReceipt({ candidateId: row.candidate_id, runId });
-    promoted += 1;
+  const relationPacks = new Set<string>();
+  try {
+    for (const row of rows) {
+      promoteExperienceCandidateWithRunReceipt({ candidateId: row.candidate_id, runId }, relationPacks);
+      promoted += 1;
+    }
+  } finally {
+    // Earlier receipts remain committed if a later promotion fails.
+    refreshDeferredExperienceRelations(relationPacks);
   }
   return { eligible: rows.length, promoted };
 }

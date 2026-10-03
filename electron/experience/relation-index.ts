@@ -329,12 +329,16 @@ export function recordExperienceLineageEvent(
   const pack = packRow(packId);
   const release = currentReleaseProjection(pack);
   const previous = getDb().prepare(
-    `SELECT release_id FROM experience_lineage_events
+    `SELECT release_id, created_at FROM experience_lineage_events
       WHERE pack_id = ? AND release_id != ?
       ORDER BY created_at DESC, id DESC LIMIT 1`,
-  ).get(pack.id, release.releaseId) as { release_id: string } | undefined;
+  ).get(pack.id, release.releaseId) as { release_id: string; created_at: string } | undefined;
   const eventId = stableId("experience-lineage", pack.id, release.releaseId, eventType);
-  const createdAt = new Date().toISOString();
+  // Several promotions can commit in one clock tick. Their release chain is
+  // ordered by this timestamp, so a tie must not let hash-ID order pick an
+  // older release as the next promotion's predecessor.
+  const priorTime = Date.parse(previous?.created_at ?? "");
+  const createdAt = new Date(Math.max(Date.now(), Number.isFinite(priorTime) ? priorTime + 1 : 0)).toISOString();
   getDb().prepare(
     `INSERT OR IGNORE INTO experience_lineage_events (
        id, pack_id, release_id, event_type, base_package_hash,
@@ -1431,6 +1435,20 @@ export function getExperienceOntologyGraphSnapshot(agentIdValue: string): Experi
 
 export function refreshExperienceRelationArtifacts(packId: string): ExperienceRelationIndexStatus {
   writeExperienceLineageLedger(packId);
+  return rebuildExperienceRelationIndex();
+}
+
+/** Project a synchronous promotion batch after its individual receipts commit. */
+export function refreshExperienceRelationArtifactsForPacks(packIds: Iterable<string>): ExperienceRelationIndexStatus {
+  for (const packId of new Set(packIds)) {
+    try {
+      writeExperienceLineageLedger(packId);
+    } catch (error) {
+      // A missing project folder must not prevent other ledgers or the shared
+      // derived index from reflecting promotions that have already committed.
+      console.warn(`[experience-relations] lineage projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
+    }
+  }
   return rebuildExperienceRelationIndex();
 }
 
