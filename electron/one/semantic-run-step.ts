@@ -53,6 +53,11 @@ export class SemanticRunStepProjector {
   }
 
   record(event: McpInvocationEvent, sequence: number, persist: (step: SemanticRunStep) => boolean): boolean {
+    // Worker streams carry the role/phase tag on every delta. These live-only
+    // updates do not create a new task step or consume a phase boundary, just
+    // as recordMcpInvocationEvent keeps them out of the durable audit ledger.
+    if (event.kind === "partial" || event.kind === "usage"
+      || (event.kind === "reasoning" && event.reasoning?.phase === "delta")) return false;
     const actor = event.agentId ?? event.runtimeAgentId ?? "system";
     const phaseProof = digest([this.authorityRevision, event.phase, event.runtimeAgentId,
       event.nodeId, event.role, event.tier, event.modelRole, event.runtimeSelection]);
