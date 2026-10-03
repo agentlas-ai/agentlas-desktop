@@ -41,7 +41,7 @@ function scheduleStartupContinuation(runId: string, reason: string): boolean {
   const run = getLongRun(runId);
   if (!run || longRunOwnerHold(runId) || !["blocked", "queued", "running", "paused", "waiting_tool"].includes(run.status)
     || (run.status === "paused" && !["app_closed", "crash_recovery", "runtime_unavailable"].includes(run.pauseReason ?? ""))) return false;
-  const slot = nextBlockedGoalRetrySlot(runId);
+  const slot = nextBlockedGoalRetrySlot(runId, Date.now(), { startup: true });
   scheduleBlockedGoalRetry({ runId, expectedVersion: run.version, kind: "resume", fromReason: reason,
     retryIndex: slot.retryIndex, nextAt: slot.nextAt, detail: "startup_advisory_fresh_context",
     trigger: "startup-advisory", effectUncertain: true, appInstanceId: desktopAppInstanceId() });

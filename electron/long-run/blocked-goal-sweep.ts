@@ -212,7 +212,10 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   if (run.status !== "blocked") {
     const retry = pendingBlockedGoalRetry(run.id);
     if (retry) {
-      if (Date.parse(retry.nextAt) > Date.now()) {
+      // A retry that a previous launch put in the future stood on that launch's failure (runtime, login, update).
+      // The first sweep of a new launch owes one prompt look; a repeat failure then backs off from index 0.
+      const restartedRetryDue = trigger === "startup" && run.status === "paused" && Date.parse(retry.nextAt) > Date.now();
+      if (Date.parse(retry.nextAt) > Date.now() && !restartedRetryDue) {
         // The host pause at shutdown/startup does not cancel a scheduled retry: keep the app visibly waiting.
         if (run.status === "paused") {
           scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: retry.kind, fromReason: retry.fromReason,

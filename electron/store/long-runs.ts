@@ -1411,15 +1411,28 @@ export function scheduleBlockedGoalRetry(input: {
   return next;
 }
 
-/** Backoff for the next automatic retry: 5 min doubling, capped at 6 h. It counts this run's automatic
- * retries and resumes in the last 24 h, so a failure that keeps coming back slows down instead of spinning,
- * and a Goal that recovered starts fast again the next day. */
-export function nextBlockedGoalRetrySlot(runId: string, now = Date.now()): { retryIndex: number; nextAt: string } {
+/** Delay of the first retry after the app (re)started: a restart changes what failed before (runtime, login,
+ * update), so one prompt look is owed. Later failures of the same launch back off normally. */
+export const BLOCKED_GOAL_STARTUP_RETRY_MS = 30_000;
+
+/** Backoff for the next automatic retry: 5 min doubling, capped at 6 h. It counts only the failures this run
+ * has had since its last success (a settled completed turn or an owner control) within 24 h. A resume that
+ * worked is not a failure: counting it made every healthy Goal that resumes every few minutes sit at the 6 h
+ * cap after a single restart (measured 2026-10-03: retryIndex 70 on a 37-cycle Goal, 751 on a spinning one).
+ * Carried copies of an existing retry never count either — they re-write the same schedule. */
+export function nextBlockedGoalRetrySlot(runId: string, now = Date.now(),
+  options: { startup?: boolean } = {}): { retryIndex: number; nextAt: string } {
   const since = new Date(now - 24 * 60 * 60_000).toISOString();
-  const prior = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = ? AND occurred_at > ?
-    AND json_extract(payload_json, '$.action') IN ('retry_scheduled','resumed')`).get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, since) as { n: number };
+  const success = getDb().prepare(`SELECT COALESCE(MAX(seq), 0) AS seq FROM long_run_events WHERE run_id = ? AND (
+      (kind = 'worker.attempt_settled' AND json_extract(payload_json, '$.state') = 'completed') OR kind = 'run.user_control')`)
+    .get(runId) as { seq: number };
+  const prior = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = ? AND seq > ? AND occurred_at > ?
+    AND json_extract(payload_json, '$.action') = 'retry_scheduled'
+    AND COALESCE(json_extract(payload_json, '$.detail'), '') <> 'host_pause_carried_retry'`)
+    .get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, success.seq, since) as { n: number };
   const retryIndex = prior.n;
-  const delayMs = Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.min(retryIndex, 10));
+  const backoffMs = Math.min(6 * 60 * 60_000, 5 * 60_000 * 2 ** Math.min(retryIndex, 10));
+  const delayMs = options.startup && retryIndex === 0 ? BLOCKED_GOAL_STARTUP_RETRY_MS : backoffMs;
   return { retryIndex, nextAt: new Date(now + delayMs).toISOString() };
 }
 
