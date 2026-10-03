@@ -884,6 +884,8 @@ export interface RuntimeCommand {
 }
 
 export interface RuntimeStatus {
+  /** Display-only observation; never an execution admission receipt. */
+  localObservation?: { state: "pending" | "observed"; ownerEpoch: string | null; reasonCode?: string };
   /**
    * 모델을 지정하지 않고("엔진 설정 사용") 이 런타임을 돌렸을 때 **실제로 쓰인 모델 id**.
    * 실행 결과에서만 나오는 값이라 벤더가 세대를 올려도 저절로 따라간다.

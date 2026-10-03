@@ -574,6 +574,25 @@ async function initializeDesktopStore(options: Parameters<typeof initStore>[0] =
 
 /** All native clients address the exact opened store and installation. */
 let nativeBrowserMainBroker: Promise<import("./browser/main-browser-broker").MainBrowserBroker> | null = null;
+const desktopBrowserCapability: NonNullable<ScienceDaemonClientOptions["browserCapability"]> = async (binding) => {
+  if (!nativeBrowserMainBroker) {
+    traceUpdaterStartup("native-browser-broker-started");
+    const flight = import("./browser/main-browser-broker").then(module => module.startMainBrowserBroker({
+      createGrant: input => import("./browser/native-cdp-relay").then(relay => relay.createNativeBrowserRelayGrant(input)),
+      allowedReadEvaluationSources: [PAGE_FRAME_PROBE_SOURCE],
+      recoverLogin: (nativeGrant, input) => import("./browser/login-recovery-runtime")
+        .then(recovery => recovery.recoverLoginWallsNow({ ...input, nativeGrant })),
+    })).then(broker => {
+      traceUpdaterStartup("native-browser-broker-ready");
+      return broker;
+    }).catch(error => {
+      if (nativeBrowserMainBroker === flight) nativeBrowserMainBroker = null;
+      throw error;
+    });
+    nativeBrowserMainBroker = flight;
+  }
+  return (await nativeBrowserMainBroker).issue(binding);
+};
 function desktopDaemonClientOptions(): ScienceDaemonClientOptions {
   const storePath = openedStorePath();
   if (!storePath) throw new Error("daemon-client-store-not-open");
@@ -586,15 +605,7 @@ function desktopDaemonClientOptions(): ScienceDaemonClientOptions {
     appInstanceId: desktopAppInstanceId(),
     expectedStoreIdentity: storeIdentityDigest(storePath, desktopAppInstanceId()),
     requiredSchemaVersion: STORE_SCHEMA_VERSION,
-    browserCapability: async (binding) => {
-      nativeBrowserMainBroker ??= import("./browser/main-browser-broker").then(module => module.startMainBrowserBroker({
-        createGrant: input => import("./browser/native-cdp-relay").then(relay => relay.createNativeBrowserRelayGrant(input)),
-        allowedReadEvaluationSources: [PAGE_FRAME_PROBE_SOURCE],
-        recoverLogin: (nativeGrant, input) => import("./browser/login-recovery-runtime")
-          .then(recovery => recovery.recoverLoginWallsNow({ ...input, nativeGrant })),
-      }));
-      return (await nativeBrowserMainBroker).issue(binding);
-    },
+    browserCapability: desktopBrowserCapability,
   };
 }
 
@@ -616,12 +627,8 @@ function applyDockIcon(): void {
   // permanent false warning in the shipped log, which teaches everyone to
   // ignore startup warnings.
   if (app.isPackaged) return;
-  /*
-   * Every unpackaged instance shows up in the Dock as "Electron". 2026-09-25 a remote-desktop user chose Quit from
-   * one such Dock menu and ended an isolated E2E app (pid 96164) instead of the instance they meant (macOS log:
-   * DockHelper "perform action for menu item" -> Electron[96164] "Handling Quit AppleEvent"). Name the instance in
-   * its Dock menu, directly above the system Quit item, so the choice is visible before it is made.
-   */
+  // Unpackaged instances share the Electron Dock label. Show the installation
+  // identity above Quit so the user can distinguish concurrently open apps.
   try {
     const cdpPort = process.argv.find((arg) => arg.startsWith("--remote-debugging-port="))?.split("=")[1];
     const userData = app.getPath("userData");
@@ -1102,7 +1109,7 @@ async function loadMainRendererIntoWindow(): Promise<void> {
       mainWindow.webContents.openDevTools({ mode: "detach" });
     }
   } else {
-    await loadMainUrl("agentlas://app/index.html");
+    await loadMainUrl("agentlas://app/dashboard");
   }
 }
 

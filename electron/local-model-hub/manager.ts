@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { constants as fsConstants, openSync, fstatSync, lstatSync, readSync, closeSync } from "node:fs";
+import type { LocalModelRuntimeObservation } from "./ports";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { mkdir, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -442,6 +444,53 @@ export class LocalModelHubManager {
     const compatible = compatibleEnginePackage();
     const receipt = compatible.item ? this.state.engineInstallations.find((item) => item.enginePackageId === compatible.item!.packageId) : null;
     return receipt?.devices ?? [];
+  }
+
+  /** Read current owner inventory only; never initialize, probe devices or
+   * acquire a lease in response to a display query. */
+  observeRuntimeInventory(): LocalModelRuntimeObservation {
+    const pending = (reasonCode: string): LocalModelRuntimeObservation => ({
+      state: "pending", ownerEpoch: this.instanceId, reasonCode,
+    });
+    if (this.shutdownPromise) return pending("local_model_hub_admission_closed");
+    if (!this.initialized) return pending("local_model_hub_initialization_pending");
+    if (this.unavailableReason) return pending(this.unavailableReason);
+    // A small existing lease read fences the instance without reaching the
+    // mutation-oriented assertOwnership()/ready()/initialize() path.
+    try {
+      const maximumLeaseBytes = 4_096;
+      const before = lstatSync(this.ownerLeasePath);
+      if (!before.isFile() || before.size < 1 || before.size > maximumLeaseBytes) {
+        return pending("local_model_hub_owner_lease_lost");
+      }
+      const descriptor = openSync(this.ownerLeasePath, fsConstants.O_RDONLY
+        | (fsConstants.O_NONBLOCK ?? 0) | (fsConstants.O_NOFOLLOW ?? 0));
+      try {
+        const opened = fstatSync(descriptor);
+        if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino
+          || opened.size < 1 || opened.size > maximumLeaseBytes) return pending("local_model_hub_owner_lease_lost");
+        const bytes = Buffer.alloc(opened.size);
+        let offset = 0;
+        while (offset < bytes.length) {
+          const count = readSync(descriptor, bytes, offset, bytes.length - offset, offset);
+          if (count === 0) return pending("local_model_hub_owner_lease_lost");
+          offset += count;
+        }
+        const after = fstatSync(descriptor);
+        const currentPath = lstatSync(this.ownerLeasePath);
+        if (after.size !== opened.size || !currentPath.isFile() || currentPath.dev !== opened.dev
+          || currentPath.ino !== opened.ino || currentPath.size !== opened.size) return pending("local_model_hub_owner_lease_lost");
+        const lease = JSON.parse(bytes.toString("utf8")) as OwnerLease;
+        if (!lease || lease.schemaVersion !== 1 || lease.instanceId !== this.instanceId || lease.pid !== process.pid) {
+          return pending("local_model_hub_owner_lease_lost");
+        }
+      } finally { closeSync(descriptor); }
+    } catch { return pending("local_model_hub_owner_lease_lost"); }
+    return { state: "observed", ownerEpoch: this.instanceId, snapshot: structuredClone({
+      resident: this.residentProcess && this.residentReceipt?.state === "resident" ? this.residentReceipt : null,
+      modelInstallations: this.state.modelInstallations,
+      capabilityReceipts: this.state.capabilityReceipts,
+    }) };
   }
 
   async snapshot(): Promise<LocalModelHubSnapshot> {

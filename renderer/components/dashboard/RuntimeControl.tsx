@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as
 import { effortLabel, effortOptions } from "@/lib/effort-label";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
+import { invalidateViewData, loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import type {
   RuntimeRole,
   RuntimeRolePoolState,
@@ -254,11 +254,20 @@ export function RuntimeControl() {
   }, [loadPool]);
 
   const loadLocalModelSnapshot = useCallback(async () => {
-    const api = ipc()?.localModelHub;
-    if (!api) return null;
+    const api = ipc();
+    if (!api?.localModelHub) return null;
     try {
-      const snapshot = await api.snapshot();
+      const snapshot = await api.localModelHub.snapshot();
       setLocalModelSnapshot(snapshot);
+      // The initial inventory can precede daemon readiness. Replace its
+      // pending projection when this real snapshot settles, without polling.
+      invalidateViewData("dashboard.runtimes");
+      try {
+        const detected = await loadViewData("dashboard.runtimes", () => api.runtime.detect(), { maxAgeMs: 300_000 });
+        setRuntimes(detected);
+      } catch {
+        // A connection inventory failure does not invalidate this snapshot.
+      }
       return snapshot;
     } catch {
       setLocalModelSnapshot(null);
@@ -1167,9 +1176,11 @@ export function RuntimeControl() {
           </div>
           <span
             className="dashboard-runtime-pool-badge"
-            data-tone={active ? "active" : "idle"}
+            data-tone={active && active.localObservation?.state !== "pending" ? "active" : "idle"}
           >
-            {active
+            {active?.localObservation?.state === "pending"
+              ? ko ? "준비 확인 중" : "Checking readiness"
+              : active
               ? ko
                 ? "연결됨"
                 : "Connected"
@@ -1183,7 +1194,8 @@ export function RuntimeControl() {
     );
   }
 
-  const anyActive = runtimes.some((runtime) => runtime.kind !== "ollama");
+  const anyActive = runtimes.some((runtime) => runtime.kind !== "ollama" && runtime.localObservation?.state !== "pending");
+  const localPending = runtimes.some((runtime) => runtime.localObservation?.state === "pending");
   const localInstalled = (localModelSnapshot?.modelInstallations.length ?? 0) > 0;
   return (
     <div
@@ -1217,12 +1229,17 @@ export function RuntimeControl() {
         <div className="dashboard-module-empty">
           {ko ? "런타임 확인 중…" : "Checking runtimes…"}
         </div>
-      ) : !anyActive && !localInstalled ? (
+      ) : !anyActive && !localInstalled && !localPending ? (
         <div className="dashboard-module-empty">
           {ko ? "연결된 런타임이 없습니다." : "No runtime connected."}
         </div>
       ) : (
         <>
+          {localPending && (
+            <div className="dashboard-runtime-message" role="status" aria-live="polite">
+              {ko ? "로컬 모델의 준비 상태를 확인하고 있습니다." : "Checking local model readiness."}
+            </div>
+          )}
           <div className="dashboard-runtime-library">
             {renderRole("orchestrator")}
             {renderRole("worker")}

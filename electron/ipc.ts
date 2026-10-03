@@ -41,6 +41,7 @@ import type {
 import {
   clearDetectCache,
   detectRuntimes,
+  observeRuntimes,
   resolveRolePoolPicks,
   setActiveRuntime,
 } from "./runtime/detect";
@@ -2815,7 +2816,7 @@ export function registerIpcHandlers(): void {
     // single-flight 백그라운드라 사용량 UI를 기다리게 하지 않는다.
     const [snapshot, runtimes] = await Promise.all([
       getUsageSnapshot(force ? { force: true } : undefined),
-      detectRuntimes(force),
+      observeRuntimes(force),
     ]);
     return {
       ...snapshot,
@@ -2828,7 +2829,7 @@ export function registerIpcHandlers(): void {
     if (developmentEffectsSuppressed()) return retryUsageProvider(providerId);
     const result = await retryUsageProvider(providerId);
     if (result.attempted) clearDetectCache();
-    const runtimes = await detectRuntimes(result.attempted);
+    const runtimes = await observeRuntimes(result.attempted);
     return {
       ...result,
       snapshot: {
@@ -3055,7 +3056,7 @@ export function registerIpcHandlers(): void {
   });
 
   // ── runtime ─────────────────────────────────────────────
-  ipcMain.handle("runtime:detect", (_e, force?: boolean) => detectRuntimes(force === true));
+  ipcMain.handle("runtime:detect", (_e, force?: boolean) => observeRuntimes(force === true));
   ipcMain.handle("runtime:setActive", (_e, selection: RuntimeSelection) =>
     setActiveRuntime(selection),
   );

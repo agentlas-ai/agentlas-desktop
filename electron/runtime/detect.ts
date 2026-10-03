@@ -2,6 +2,7 @@
 // PRD 3.1 FRE 6단계 — 사용자가 입력 안 해도 한 번 클릭으로 연결되도록.
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { canonicalRuntimeBackend } from "../../shared/runtime-backends";
+import { runtimeMatchesSelection as exactRuntimeMatchesSelection } from "../../shared/runtime-selection";
 import { allocationAdvertisement } from "./model-advertisement";
 import { clearCodexBinCache, probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
@@ -19,7 +20,7 @@ import { probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
 import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
-import { probeManagedLocalRuntime } from "../local-model-hub/runtime-adapter";
+import { observeManagedLocalRuntime, probeManagedLocalRuntime } from "../local-model-hub/runtime-adapter";
 import { hasApiKey } from "../secrets/vault";
 import { isRuntimeCredentialUnavailable, probeRuntimeCredentialAccess, type RuntimeCredentialProbe } from "./credential-access";
 import {
@@ -64,6 +65,8 @@ type ActiveRuntimeRow = {
 
 let detectCache: { at: number; list: RuntimeStatus[] } | null = null;
 let detectInFlight: Promise<RuntimeStatus[]> | null = null;
+let observationCache: { at: number; generation: number; list: RuntimeStatus[] } | null = null;
+let observationFlight: { generation: number; promise: Promise<RuntimeStatus[]> } | null = null;
 let detectGeneration = 0;
 let detectInFlightGeneration = -1;
 
@@ -82,6 +85,7 @@ function runtimeProbeDisabled(kind: RuntimeKind): boolean {
 function cloneRuntimeStatuses(list: RuntimeStatus[]): RuntimeStatus[] {
   return list.map((runtime) => ({
     ...runtime,
+    localObservation: runtime.localObservation ? { ...runtime.localObservation } : undefined,
     credentialAccess: runtime.credentialAccess ? { ...runtime.credentialAccess } : undefined,
     availableModels: runtime.availableModels ? [...runtime.availableModels] : runtime.availableModels,
     allocationModels: runtime.allocationModels ? [...runtime.allocationModels] : runtime.allocationModels,
@@ -142,6 +146,7 @@ export function conservativeLocalRuntimeAllocation(models: string[]): Pick<
 /** 감지 캐시 무효화 — 활성 런타임 변경·CLI 재로그인 직후 등 "연결" 칩이 낡으면 안 되는 시점에 호출. */
 export function clearDetectCache(): void {
   detectCache = null;
+  observationCache = null;
   detectGeneration += 1;
   // A successful CLI replacement invalidates both the assembled runtime list
   // and the lower-level `--version` probe. Keeping the latter would let a
@@ -370,6 +375,63 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
   }
 }
 
+/** UI inventory has its own flight; it never joins local execution admission. */
+export async function observeRuntimes(force = false): Promise<RuntimeStatus[]> {
+  if (process.env.AGENTLAS_DISABLE_RUNTIME_PROBES === "1") return [];
+  hydrateResolvedAliasesOnce();
+  if (force) clearDetectCache();
+  const generation = detectGeneration;
+  let raw: RuntimeStatus[];
+  if (observationCache?.generation === generation && Date.now() - observationCache.at < runtimeDetectCacheMs()) {
+    raw = cloneRuntimeStatuses(observationCache.list);
+  } else {
+    if (observationFlight?.generation !== generation) {
+      observationFlight = { generation, promise: detectRuntimesUncached(true) };
+    }
+    const flight = observationFlight;
+    try {
+      raw = await flight.promise;
+      if (generation === detectGeneration) observationCache = { at: Date.now(), generation, list: cloneRuntimeStatuses(raw) };
+    } finally {
+      if (observationFlight === flight) observationFlight = null;
+    }
+  }
+  if (generation !== detectGeneration) return observeRuntimes();
+  // Local state is never stored in the display cache: a real snapshot's new
+  // epoch/pending state is visible on the very next read, without invalidation.
+  const local = runtimeProbeDisabled("agentlas-local") ? null : await observeManagedLocalRuntime();
+  if (generation !== detectGeneration) return observeRuntimes();
+  const list = cloneRuntimeStatuses(raw);
+  if (local) list.push(local);
+  const roles = listResolvedModelRoles();
+  for (const runtime of list) {
+    if (runtime.localObservation?.state === "pending") {
+      const selection = roles.orchestrator?.selection.kind === "agentlas-local"
+        ? roles.orchestrator.selection
+        : RUNTIME_ROLES.map(role => roles[role]?.selection).find(selection => selection?.kind === "agentlas-local");
+      // A pending row reflects one exact saved identity, never a source wildcard
+      // that could make a different installed model pin appear selected.
+      if (selection?.backend) runtime.backend = selection.backend;
+      if (selection?.model) runtime.model = selection.model;
+      if (selection?.source) runtime.source = selection.source;
+    }
+    runtime.activeRoles = RUNTIME_ROLES.filter(role => {
+      const selection = roles[role]?.selection;
+      return selection ? exactRuntimeMatchesSelection(runtime, selection) : false;
+    });
+    runtime.roleSelections = Object.fromEntries(runtime.activeRoles.map(role => [role, { ...roles[role]!.selection }]));
+    runtime.active = runtime.activeRoles.includes("orchestrator");
+  }
+  return cloneRuntimeStatuses(markSignedOutRuntimes(list).map(runtime => {
+    const observed = resolvedCliModelAlias(runtime.kind, "");
+    const configured = cliConfiguredDefaultModel(runtime.kind);
+    return { ...runtime,
+      ...(observed ? { observedDefaultModel: observed } : {}),
+      ...(configured ? { cliDefaultModel: configured } : {}),
+    };
+  }));
+}
+
 /**
  * Agentlas 서빙을 지금 쓸 수 있는가 = 로그인되어 있는가.
  *
@@ -412,13 +474,13 @@ function hasAgentlasServingAccess(): boolean {
   }
 }
 
-async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
+async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeStatus[]> {
   const db = getDb();
   const activeRow = db
     .prepare("SELECT kind, backend, source, acp_agent_id, runtime_label, model, long_context FROM active_runtime WHERE id = 1")
     .get() as ActiveRuntimeRow | undefined;
   const active = activeRow ?? null;
-  if (active) {
+  if (active && !observationOnly) {
     writeRuntimeSelectionMirror({
       kind: active.kind,
       ...(active.backend ? { backend: active.backend } : {}),
@@ -476,7 +538,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     cursorDisabled ? Promise.resolve(null) : probeCursor(),
     lmstudioDisabled ? Promise.resolve(null) : probeLMStudio(),
     mlxDisabled ? Promise.resolve(null) : probeMLX(),
-    agentlasLocalDisabled ? Promise.resolve(null) : probeManagedLocalRuntime(),
+    agentlasLocalDisabled || observationOnly ? Promise.resolve(null) : probeManagedLocalRuntime(),
     probeRuntimeCredentialAccess(() => hasApiKey("anthropic")),
     probeRuntimeCredentialAccess(() => hasApiKey("openai")),
     probeRuntimeCredentialAccess(() => hasApiKey("google")),
@@ -933,7 +995,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
     list.find((runtime) => runtime.kind === "byok" && runtime.backend === active.backend),
   );
   const firstAvailable = list.find((runtime) => !isRuntimeCredentialUnavailable(runtime));
-  if (!active && !list.some((runtime) => runtime.active) && !activeCredentialUnavailable && firstAvailable) {
+  if (!observationOnly && !active && !list.some((runtime) => runtime.active) && !activeCredentialUnavailable && firstAvailable) {
     firstAvailable.active = true;
     saveActiveRuntime(firstAvailable);
     setModelRole({
@@ -955,7 +1017,7 @@ async function detectRuntimesUncached(): Promise<RuntimeStatus[]> {
   // 전원 스킵이면 1순위를 그대로 쓴다(조용한 하향 대체 금지, 스킵 내역은 유지).
   const gates = rolePoolGates(list);
   const roleAssignments = listResolvedModelRoles();
-  for (const role of POOL_AUTOPICK_ROLES) {
+  for (const role of observationOnly ? [] : POOL_AUTOPICK_ROLES) {
     if (credentialBlockedRolePick(role, list, roleAssignments)) continue;
     const pick = pickModelRoleFromPool(role, gates);
     if (pick) {
@@ -1003,7 +1065,7 @@ function rolePoolGates(list: RuntimeStatus[]): {
     isRuntimeAvailable: (selection) => {
       if (selection.kind === "ollama") return false;
       const runtime = runtimeFor(selection);
-      return Boolean(runtime) && !isRuntimeCredentialUnavailable(runtime);
+      return Boolean(runtime) && runtime?.localObservation?.state !== "pending" && !isRuntimeCredentialUnavailable(runtime);
     },
     /**
      * 이 런타임이 실제로 가진 모델인가. **런타임이 광고한 인벤토리가 있을 때만**

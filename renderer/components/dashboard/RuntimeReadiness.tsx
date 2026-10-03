@@ -90,7 +90,7 @@ const RUNTIME_KIND_LABELS: Record<string, string> = {
 
 /** The migration-only Ollama projection is a stored pin, not a runtime that can run. */
 function executableRuntimes(runtimes: RuntimeStatus[]): RuntimeStatus[] {
-  return runtimes.filter((runtime) => runtime.kind !== "ollama");
+  return runtimes.filter((runtime) => runtime.kind !== "ollama" && runtime.localObservation?.state !== "pending");
 }
 
 function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
@@ -116,6 +116,15 @@ function activeRuntimeLabel(runtimes: RuntimeStatus[], ko: boolean): string {
 function runtimeItem(allRuntimes: RuntimeStatus[], ko: boolean): ReadinessItem {
   const runtimes = executableRuntimes(allRuntimes);
   const signedOut = runtimes.filter((runtime) => runtime.signInRequired);
+  const pendingLocal = allRuntimes.find((runtime) => runtime.localObservation?.state === "pending");
+  if (pendingLocal && (pendingLocal.active || runtimes.length === 0)) {
+    return {
+      id: "runtime",
+      label: ko ? "로컬 LLM 런타임" : "Local LLM runtime",
+      detail: ko ? "로컬 모델의 준비 상태를 확인하고 있습니다." : "Checking local model readiness.",
+      status: "attention",
+    };
+  }
   if (runtimes.length === 0) {
     return {
       id: "runtime",

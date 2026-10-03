@@ -2,7 +2,7 @@ import type { RuntimeStatus } from "../../shared/types";
 import type { Runner } from "../runtime/runner";
 import { LocalModelHubManager } from "./manager";
 import { createManagedLocalModelRunner } from "./runner";
-import type { LocalModelHubRuntimePort } from "./ports";
+import type { LocalModelHubRuntimePort, LocalModelRuntimeInventory } from "./ports";
 
 let configured: { manager: LocalModelHubManager | null; runtime: LocalModelHubRuntimePort } | null = null;
 
@@ -16,7 +16,8 @@ export function configureLocalModelRuntime(runtime: LocalModelHubRuntimePort): v
 /** Main configures one manager; detect, IPC and selection consume that identity. */
 export function configureLocalModelHubManager(manager: LocalModelHubManager): void {
   if (configured && configured.manager !== manager) throw new Error("local_model_hub_already_configured");
-  configured ??= { manager, runtime: { snapshot: () => manager.snapshot(), run: createManagedLocalModelRunner(manager) } };
+  configured ??= { manager, runtime: { snapshot: () => manager.snapshot(),
+    observeSnapshot: async () => manager.observeRuntimeInventory(), run: createManagedLocalModelRunner(manager) } };
 }
 
 export function requireLocalModelHubManager(): LocalModelHubManager {
@@ -29,39 +30,59 @@ export async function probeManagedLocalRuntime(): Promise<RuntimeStatus | null> 
   if (!configured) return null;
   try {
     const snapshot = await configured.runtime.snapshot();
-    const resident = snapshot.resident;
-    if (!resident) return null;
-    const installation = snapshot.modelInstallations.find((item) => item.installationId === resident.installationId);
-    if (!installation) return null;
-    return {
-      kind: "agentlas-local",
-      backend: "agentlas-local",
-      source: `agentlas-local:${resident.enginePackageId}:${resident.installationId}`,
-      version: resident.enginePackageId,
-      active: false,
-      label: "Agentlas Local · On-device",
-      model: installation.fileName,
-      availableModels: [installation.fileName],
-      allocationModels: [installation.fileName],
-      allocationModelProfiles: {
-        [installation.fileName]: {
-          contextWindow: resident.contextTokens,
-          // 비전 프로젝터가 붙어 로드된 모델은 이미지 입력을 받는다 — 대시보드 멀티모달 자리에 앉을 수 있다.
-          capabilities: installation.projectorFileName ? ["multimodal"] : [],
-          supportsTools: snapshot.capabilityReceipts.some((receipt) =>
-            receipt.installationId === installation.installationId && receipt.toolUse === "verified"),
-          supportsMultimodal: Boolean(installation.projectorFileName),
-        },
-      },
-      effort: null,
-      efforts: [],
-    };
+    return runtimeFromSnapshot(snapshot);
   } catch {
     // Detection is a best-effort inventory. A broken local manager must not
     // reject the shared probe batch and hide healthy CLI connections. The
     // Local Models screen reports its own snapshot/install failures.
     return null;
   }
+}
+
+function runtimeFromSnapshot(snapshot: LocalModelRuntimeInventory): RuntimeStatus | null {
+  const resident = snapshot.resident;
+  if (!resident) return null;
+  const installation = snapshot.modelInstallations.find((item) => item.installationId === resident.installationId);
+  if (!installation) return null;
+  return {
+    kind: "agentlas-local",
+    backend: "agentlas-local",
+    source: `agentlas-local:${resident.enginePackageId}:${resident.installationId}`,
+    version: resident.enginePackageId,
+    active: false,
+    label: "Agentlas Local · On-device",
+    model: installation.fileName,
+    availableModels: [installation.fileName],
+    allocationModels: [installation.fileName],
+    allocationModelProfiles: {
+      [installation.fileName]: {
+        contextWindow: resident.contextTokens,
+        // 비전 프로젝터가 붙어 로드된 모델은 이미지 입력을 받는다 — 대시보드 멀티모달 자리에 앉을 수 있다.
+        capabilities: installation.projectorFileName ? ["multimodal"] : [],
+        supportsTools: snapshot.capabilityReceipts.some((receipt) =>
+          receipt.installationId === installation.installationId && receipt.toolUse === "verified"),
+        supportsMultimodal: Boolean(installation.projectorFileName),
+      },
+    },
+    effort: null,
+    efforts: [],
+  };
+}
+
+/** No snapshot call: an unavailable observation remains visible and cannot admit work. */
+export async function observeManagedLocalRuntime(): Promise<RuntimeStatus | null> {
+  if (!configured) return null;
+  const observation = await configured.runtime.observeSnapshot?.() ?? {
+    state: "pending" as const, ownerEpoch: null, reasonCode: "local_model_observation_unavailable",
+  };
+  if (observation.state === "observed") {
+    const runtime = runtimeFromSnapshot(observation.snapshot);
+    return runtime ? { ...runtime, localObservation: { state: "observed", ownerEpoch: observation.ownerEpoch } } : null;
+  }
+  return { kind: "agentlas-local", backend: "agentlas-local", source: "agentlas-local:pending",
+    version: null, active: false, label: "Agentlas Local · On-device",
+    localObservation: observation,
+  };
 }
 
 export const runManagedLocalModel: Runner = async (request, events) => {

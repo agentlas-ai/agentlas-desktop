@@ -368,7 +368,13 @@ function quickCheck(databasePath: string): boolean {
   }
 }
 
-function pruneOldRecoveryCopies(root: string, keepPath: string): void {
+/** An update's recovery copy is the whole database plus every agent asset. The newest one protects the install
+ * that just ran; once the app started and the install journal was cleared, a second one only protects the
+ * install before that. Pending installation journals retain their recovery protection. */
+const RECOVERY_COPIES_AT_CAPTURE = 2;
+const RECOVERY_COPIES_AFTER_VERIFIED_START = 1;
+
+function pruneOldRecoveryCopies(root: string, keepPath: string | null, keepTotal = RECOVERY_COPIES_AT_CAPTURE): void {
   try {
     // A journal (including a quarantined corrupt one) still owns its recovery
     // copies. Never infer that an old directory is disposable from its age.
@@ -397,7 +403,7 @@ function pruneOldRecoveryCopies(root: string, keepPath: string): void {
       .sort((left, right) => right.mtimeMs - left.mtimeMs);
     let kept = 0;
     for (const directory of directories) {
-      if (directory.fullPath === keepPath || kept < 2) {
+      if (directory.fullPath === keepPath || kept < keepTotal) {
         kept += 1;
         continue;
       }
@@ -412,12 +418,9 @@ const RECOVERY_DATABASE_NAME = "agentlas.sqlite";
 const MAX_INACTIVE_RECOVERY_DATABASES = 2;
 const RECOVERY_SANITIZATION_VERSION = "opencrab-url-credential-v1";
 /*
- * ★Every launch used to re-verify the same immutable recovery copies: a full
- *   `PRAGMA quick_check` plus a latin1 regex scan of every byte, for up to two
- *   ~450MB SQLite files, synchronously on Electron Main before the window.
- *   Measured on copies of a real profile (2026-09-27): 4.7s cold / 0.7s warm
- *   of blocked Main, and the result was "0 scrubbed" on every launch.
- *   A copy that this exact scrubber already proved clean, and whose file
+ *   Re-scanning an unchanged recovery copy repeats database validation and
+ *   credential inspection during startup. A copy that this exact scrubber
+ *   already proved clean, and whose file
  *   identity (dev/ino/size/mtime/ctime) is unchanged with no sidecars, cannot
  *   have gained a credential. Any change to the file, a sidecar, or the
  *   scrubber version makes it a new file and it is scanned again.
@@ -762,6 +765,8 @@ export function scrubInactiveUpdaterRecoveryOpenCrabCredentialUrls(input: {
 
   const recoveryRoot = path.join(updaterRoot, "recovery");
   if (!fs.existsSync(recoveryRoot)) return result;
+  // The journal is gone, so reconciliation verified the last install: older copies protect nothing now.
+  pruneOldRecoveryCopies(recoveryRoot, null, RECOVERY_COPIES_AFTER_VERIFIED_START);
   let realRecoveryRoot: string;
   try {
     realRecoveryRoot = fs.realpathSync(recoveryRoot);

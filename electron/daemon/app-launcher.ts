@@ -13,6 +13,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import net from "node:net";
+import { createHash } from "node:crypto";
 import {
   callControlSocket,
 } from "./control-socket";
@@ -59,6 +60,9 @@ export interface EnsureDaemonOptions extends DaemonServiceOptions {
   installIdentity?: InstallIdentity;
   /** Upper bound for the spawned helper to establish its control socket. */
   startupTimeoutMs?: number;
+  /** Bootstrap authorities remain distinct even when they address one socket. */
+  requiredSchemaVersion?: number;
+  storeBootstrapToken?: string;
   /** Main-owned process instance, never a Goal progress indicator. */
   appInstanceId?: string;
   /** Legacy per-GUI diagnostic digest; never the service ownership identity. */
@@ -67,12 +71,15 @@ export interface EnsureDaemonOptions extends DaemonServiceOptions {
   browserCapability?: (binding: NativeBrowserDaemonBinding) => Promise<NativeBrowserMainCapability>;
 }
 
+type DaemonEnsurePhase = "identity" | "ping" | "owner-probe" | "shutdown"
+  | "spawn" | "readiness" | "cleanup" | "verify" | "browser-capability" | "attach";
+
 export type EnsureDaemonStatus =
   | { status: "disabled" }
   | { status: "already-running"; pid: number; version: string }
   | { status: "spawned"; pid: number | null; version: string }
   | { status: "respawned"; pid: number | null; previousVersion: string }
-  | { status: "failed"; reason: string; mobileBridgeFallbackSafe?: boolean };
+  | { status: "failed"; reason: string; phase?: DaemonEnsurePhase; mobileBridgeFallbackSafe?: boolean };
 
 interface DaemonPing {
   ok?: boolean;
@@ -387,9 +394,12 @@ async function stopObservedDaemon(socketPath: string, ping: DaemonPing, timeoutM
   return false;
 }
 
-async function attachDesktop(socketPath: string, ping: DaemonPing, opts: EnsureDaemonOptions): Promise<void> {
+async function attachDesktop(socketPath: string, ping: DaemonPing, opts: EnsureDaemonOptions,
+  phase: (value: DaemonEnsurePhase) => void = () => {}): Promise<void> {
+  phase("browser-capability");
   const browserCapability = opts.browserCapability && Number.isSafeInteger(ping.pid) && ping.bootId && ping.serviceIdentity
     ? await opts.browserCapability({ daemonPid: Number(ping.pid), bootId: ping.bootId, serviceIdentity: ping.serviceIdentity }) : undefined;
+  phase("attach");
   await callControlSocket(socketPath, "daemon.attach", {
     ...serviceControlGuard(ping),
     parentPid: opts.parentPid ?? process.pid,
@@ -399,21 +409,67 @@ async function attachDesktop(socketPath: string, ping: DaemonPing, opts: EnsureD
   }, 3_000);
 }
 
-/** Attach to the same service across GUI restarts, or start its follower after
- * the GUI has completed migration. Version replacement drains the old process. */
-export async function ensureDaemonRunning(options: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
-  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return { status: "disabled" };
-  const log = options.log ?? console.log;
-  const diagnostics = diagnosticLog(options.userDataDir);
+// Share only an active bootstrap for the exact authority. Settled generations
+// are discarded: every later call must inspect the current owner/boot again.
+const daemonEnsureInFlight = new Map<string, Promise<EnsureDaemonStatus>>();
+const capabilityAuthorities = new WeakMap<NonNullable<EnsureDaemonOptions["browserCapability"]>, number>();
+let nextCapabilityAuthority = 0;
+
+function ensureAuthorityKey(opts: EnsureDaemonOptions & DaemonServiceIdentity, socketPath: string): string {
+  let capabilityAuthority = 0;
+  if (opts.browserCapability) {
+    capabilityAuthority = capabilityAuthorities.get(opts.browserCapability) ?? ++nextCapabilityAuthority;
+    capabilityAuthorities.set(opts.browserCapability, capabilityAuthority);
+  }
+  // The digest stays in memory. Paths and bootstrap tokens never become logs.
+  return createHash("sha256").update(JSON.stringify({
+    serviceIdentity: opts.serviceIdentity, userDataDir: opts.userDataDir,
+    storePath: opts.storePath, install: serializeInstallIdentity(opts.installIdentity), socketPath,
+    appVersion: opts.appVersion, requiredSchemaVersion: opts.requiredSchemaVersion ?? null,
+    parentPid: opts.parentPid ?? process.pid, appInstanceId: opts.appInstanceId ?? null,
+    expectedStoreIdentity: opts.expectedStoreIdentity ?? null,
+    storeBootstrapToken: opts.storeBootstrapToken ?? null,
+    daemonEntry: canonicalDaemonPath(opts.daemonEntry ?? defaultDaemonEntry()),
+    execPath: canonicalDaemonPath(opts.execPath ?? process.execPath),
+    startupTimeoutMs: opts.startupTimeoutMs ?? 30_000, capabilityAuthority,
+  })).digest("hex");
+}
+
+export function ensureDaemonRunning(options: EnsureDaemonOptions): Promise<EnsureDaemonStatus> {
+  if (process.env.AGENTLAS_DISABLE_DAEMON === "1") return Promise.resolve({ status: "disabled" });
   try {
     const opts = { ...options, ...resolveDaemonServiceIdentity(options) };
     const socketPath = daemonControlSocketPath(opts.userDataDir);
+    const key = ensureAuthorityKey(opts, socketPath);
+    const existing = daemonEnsureInFlight.get(key);
+    if (existing) return existing;
+    // Publish before invoking bootstrap, including synchronous/reentrant callers.
+    const flight = Promise.resolve().then(() => ensureDaemonRunningOnce(opts, socketPath)).finally(() => {
+      if (daemonEnsureInFlight.get(key) === flight) daemonEnsureInFlight.delete(key);
+    });
+    daemonEnsureInFlight.set(key, flight);
+    return flight;
+  } catch {
+    return Promise.resolve({ status: "failed", reason: "daemon_launcher_identity_failed", phase: "identity" });
+  }
+}
+
+/** Attach to the same service across GUI restarts, or start its follower after
+ * the GUI has completed migration. Version replacement drains the old process. */
+async function ensureDaemonRunningOnce(
+  opts: EnsureDaemonOptions & DaemonServiceIdentity, socketPath: string,
+): Promise<EnsureDaemonStatus> {
+  const log = opts.log ?? console.log;
+  const diagnostics = diagnosticLog(opts.userDataDir);
+  let phase: DaemonEnsurePhase = "ping";
+  const setPhase = (value: DaemonEnsurePhase) => { phase = value; };
+  try {
     const ping = await pingDaemon(socketPath);
     let previousVersion: string | null = null;
     if (ping?.ok) {
       if (!matchesService(ping, opts)) return { status: "failed", reason: "daemon_service_identity_mismatch" };
       if (ping.version === opts.appVersion && ping.serviceProtocolVersion === 2) {
-        await attachDesktop(socketPath, ping, opts);
+        await attachDesktop(socketPath, ping, opts, setPhase);
         recordDiagnostic(diagnostics, "already_running", { pid: ping.pid, bootId: ping.bootId,
           parentPid: opts.parentPid ?? process.pid, appInstanceId: opts.appInstanceId });
         logDaemonIdentity(log, ping);
@@ -424,25 +480,32 @@ export async function ensureDaemonRunning(options: EnsureDaemonOptions): Promise
       }
       previousVersion = ping.version ?? "0.0.0";
       recordDiagnostic(diagnostics, "version_skew", { pid: ping.pid });
+      phase = "shutdown";
       if (!await stopObservedDaemon(socketPath, ping, 25_000)) {
         return { status: "failed", reason: "old_daemon_shutdown_timeout" };
       }
       lastExitReason = "version_skew";
-    } else if (!await controlSocketIsAbsent(socketPath)) {
-      return { status: "failed", reason: "daemon_control_owner_unconfirmed" };
+    } else {
+      phase = "owner-probe";
+      if (!await controlSocketIsAbsent(socketPath)) {
+        return { status: "failed", reason: "daemon_control_owner_unconfirmed", phase };
+      }
     }
 
+    phase = "spawn";
     const spawned = spawnDaemonForDesktop(opts, diagnostics, previousVersion ? "version_skew" : "initial");
+    phase = "readiness";
     const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath, diagnostics,
       opts.startupTimeoutMs, opts.serviceIdentity, opts.appInstanceId, log);
     if (readiness !== "ready") {
+      phase = "cleanup";
       const stopped = await stopUnreadyDaemon(spawned);
       // Another GUI may have won publication during our spawn. Reuse that
       // exact service; never stop a process for which we have no child handle.
       const winner = await pingDaemon(socketPath);
       if (winner?.ok && matchesService(winner, opts) && winner.version === opts.appVersion
         && winner.serviceProtocolVersion === 2) {
-        await attachDesktop(socketPath, winner, opts);
+        await attachDesktop(socketPath, winner, opts, setPhase);
         return { status: "already-running", pid: winner.pid ?? -1, version: winner.version };
       }
       recordDiagnostic(diagnostics, "spawn_unready", { pid: spawned.pid,
@@ -450,18 +513,21 @@ export async function ensureDaemonRunning(options: EnsureDaemonOptions): Promise
       return { status: "failed", reason: `daemon_${readiness}_before_control_ready`,
         mobileBridgeFallbackSafe: stopped && await controlSocketIsAbsent(socketPath) };
     }
+    phase = "verify";
     const ready = await pingDaemon(socketPath);
     if (!ready?.ok || ready.pid !== spawned.pid || ready.version !== opts.appVersion || !matchesService(ready, opts)) {
       await stopUnreadyDaemon(spawned);
       return { status: "failed", reason: "daemon_ready_identity_changed" };
     }
-    await attachDesktop(socketPath, ready, opts);
+    await attachDesktop(socketPath, ready, opts, setPhase);
     return previousVersion
       ? { status: "respawned", pid: spawned.pid, previousVersion }
       : { status: "spawned", pid: spawned.pid, version: opts.appVersion };
   } catch {
     recordDiagnostic(diagnostics, "spawn_error", { reason: "error" });
-    return { status: "failed", reason: "daemon_launcher_failed" };
+    // Only fixed phase names cross the diagnostic boundary, never raw errors.
+    try { log(`[daemon] launcher failed phase=${phase}`); } catch { /* logging is supplementary */ }
+    return { status: "failed", reason: `daemon_launcher_${phase.replaceAll("-", "_")}_failed`, phase };
   }
 }
 

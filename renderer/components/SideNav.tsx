@@ -250,7 +250,7 @@ export function SideNav({
       return pathname.startsWith("/workspace") || pathname.startsWith("/project");
     }
     if (path === "/dashboard") {
-      return pathname.startsWith("/dashboard");
+      return pathname === "/" || pathname.startsWith("/dashboard");
     }
     return pathname === path || pathname.startsWith(path + "/");
   };

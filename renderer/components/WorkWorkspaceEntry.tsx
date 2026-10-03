@@ -40,8 +40,9 @@ export function WorkWorkspaceEntry(){
   async function start(text:string,options?:SendOptions){
     if(submitting.current)return;submitting.current=true;setBusy(true);setError('');
     try{const bridge=workStartBridge();if(!bridge)throw new Error(ko?'작업 시작 연결을 사용할 수 없습니다.':'Work start is unavailable.');
-      if(!exactSelection)throw new Error(ko?'사용할 모델을 연결해 주세요. 입력은 보존됩니다.':'Connect a model to start. Your request is preserved.');
-      const intent=persistWorkStart({prompt:text,...(projectId?{projectId}:{}),runtimeSelection:exactSelection,options});const result=await bridge.create(intent);
+      // An explicit Send with no pin lets Main initialize a new store through
+      // full admission. A saved or chosen pin remains exact, even while pending.
+      const intent=persistWorkStart({prompt:text,...(projectId?{projectId}:{}),...(exactSelection?{runtimeSelection:exactSelection}:{}),options});const result=await bridge.create(intent);
       if(result.intentId!==intent.intentId||result.prompt!==text)throw new Error('work_start_receipt_mismatch');
       window.dispatchEvent(new Event('agentlas:projects-changed'));navigate(`/workspace/task?id=${encodeURIComponent(result.chatId)}&workStart=${encodeURIComponent(result.intentId)}`);
     }catch(cause){setPrefill(text);const code=failureCode(cause);const suffix=code?(ko?` (사유 코드: ${code})`:` (reason code: ${code})`):'';setError((ko?'작업을 시작하지 못했습니다. 입력은 보존했습니다. 모델과 프로젝트 연결을 확인한 뒤 다시 보내 주세요.':'Work could not start. Your input is preserved. Check the model and project connection, then send again.')+suffix);}finally{submitting.current=false;setBusy(false);}
@@ -64,7 +65,7 @@ export function WorkWorkspaceEntry(){
     <div className={styles.composer}>
       <ChatInput onSend={(text,options)=>{void start(text,options);}} busy={busy} runtime={selectedRuntime} modelOptions={models} onSelectModel={model=>{if(exactSelection)setSelection({...exactSelection,model});}} onSelectEffort={effort=>{if(exactSelection)setSelection({...exactSelection,effort});}} activeChatId="work-entry-draft" prefillText={prefill} activeProjectId={projectId} projectOrchestration placeholder={ko?'원하는 결과를 설명하세요':'Describe the result you want'}/>
       {error&&<p className={styles.notice} role="alert">{error}</p>}
-      {!runtime&&!error&&<p className={styles.notice}>{runtimeLoaded?(ko?'연결된 모델을 선택해 주세요. 입력은 보존됩니다.':'Choose a connected model. Your request is preserved.'):(ko?'모델 연결을 확인하고 있습니다. 먼저 요청을 적어 두세요.':'Checking your model connection. You can write your request now.')} <button onClick={()=>navigate('/settings')}>{ko?'모델 설정':'Model settings'}</button></p>}
+      {!runtime&&!error&&<p className={styles.notice}>{runtimeLoaded?(ko?'요청을 보내면 모델 연결을 확인합니다. 입력은 보존됩니다.':'Sending checks your model connection. Your request is preserved.'):(ko?'모델 연결을 확인하고 있습니다. 먼저 요청을 적어 두세요.':'Checking your model connection. You can write your request now.')} <button onClick={()=>navigate('/settings')}>{ko?'모델 설정':'Model settings'}</button></p>}
     </div>
   </section>;
 }

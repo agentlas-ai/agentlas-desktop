@@ -10,7 +10,8 @@ import { canonicalDaemonPath, daemonControlSocketPath, resolveDaemonServiceIdent
 import type { InstallIdentity } from "../install-identity";
 import type { DaemonLocalModelStatus } from "../daemon/local-model-service";
 import type { RunnerEvents, RunnerResult } from "../runtime/runner";
-import type { LocalModelHubControlPort, LocalModelHubRuntimePort } from "./ports";
+import type { LocalModelHubControlPort, LocalModelHubRuntimePort, LocalModelRuntimeObservation } from "./ports";
+import type { LocalModelHubSnapshot } from "../../shared/local-model-hub";
 import { exportPreparedMcpAdmission, preparedMcpProxyScope, preparedMcpProxyScopeMatchesAsk } from "../mcp-tools/prepared-transport";
 import { assertLocalModelWireValue, localModelRemoteError, remoteLocalModelRequest,
   type LocalModelControlCommand, type LocalModelControlPage, type LocalModelRpcCommand,
@@ -74,6 +75,10 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
   let daemon: VerifiedDaemon | null = null;
   let ready: DaemonLocalModelStatus | null = null;
   let starting: Promise<DaemonLocalModelStatus> | null = null;
+  let observedSnapshot: { ownerEpoch: string; snapshot: LocalModelHubSnapshot } | null = null;
+  let observationGeneration = 0;
+  let observationFlight: Promise<LocalModelRuntimeObservation> | null = null;
+  let snapshotFlight: Promise<LocalModelHubSnapshot> | null = null;
 
   function assertIdentity(): void {
     if (closed) throw failure("local_model_daemon_client_closed", "not-dispatched");
@@ -145,6 +150,8 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
     } catch (error) { return Promise.reject(error); }
     if (ready) return Promise.resolve(ready);
     if (starting) return starting;
+    observedSnapshot = null;
+    observationGeneration += 1;
     starting = (async () => {
       await options.startupReady;
       if (detaching || closed) throw failure("local_model_daemon_client_detached", "not-dispatched");
@@ -198,8 +205,34 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
       return page.result as Awaited<ReturnType<LocalModelHubControlPort[K]>>;
     } finally { signal?.removeEventListener("abort", abort); }
   }
+  async function readSnapshot(): Promise<LocalModelHubSnapshot> {
+    await ensureStarted();
+    observedSnapshot = null;
+    observationGeneration += 1;
+    const epoch = daemon!.bootId;
+    const generation = observationGeneration;
+    const snapshot = await controlCall<"snapshot">({ method: "snapshot", args: [] });
+    // Revalidate the live boot after the operation; a delayed old-daemon
+    // page cannot become a current UI observation after restart or close.
+    const current = await inspect();
+    if (closed || detaching || generation !== observationGeneration || current.bootId !== epoch
+      || daemon?.bootId !== epoch) {
+      observedSnapshot = null;
+      throw failure("local_model_daemon_boot_changed", "unknown");
+    }
+    observedSnapshot = { ownerEpoch: epoch, snapshot: structuredClone(snapshot) };
+    return snapshot;
+  }
+  function snapshot(): Promise<LocalModelHubSnapshot> {
+    if (snapshotFlight) return snapshotFlight;
+    const flight = readSnapshot().finally(() => {
+      if (snapshotFlight === flight) snapshotFlight = null;
+    });
+    snapshotFlight = flight;
+    return flight;
+  }
   const control: LocalModelHubControlPort = {
-    snapshot: () => controlCall<"snapshot">({ method: "snapshot", args: [] }),
+    snapshot,
     searchModels: input => controlCall<"searchModels">({ method: "searchModels", args: [input] }),
     inspectRepository: input => controlCall<"inspectRepository">({ method: "inspectRepository", args: [input] }),
     addModel: input => controlCall<"addModel">({ method: "addModel", args: [input] }),
@@ -224,8 +257,43 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
     cancel: async input => await command({ op: "run.cancel", clientId, runId: input.runId }, input.ownerEpoch) as { requested: boolean },
     acknowledge: async input => { await command({ op: "run.ack", clientId, runId: input.runId, throughSequence: input.throughSequence }, input.ownerEpoch); },
   };
+  async function observeSnapshotUncached(): Promise<LocalModelRuntimeObservation> {
+    if (closed || detaching) return { state: "pending", ownerEpoch: null, reasonCode: "local_model_daemon_client_detached" };
+    const observed = observedSnapshot;
+    if (observed && daemon?.bootId === observed.ownerEpoch) {
+      const generation = observationGeneration;
+      try {
+        // Ping is observation only: no launcher, startup barrier, service
+        // construction or localModel.start is reachable through this path.
+        const current = await inspect();
+        if (!closed && !detaching && generation === observationGeneration
+          && observedSnapshot === observed && current.bootId === observed.ownerEpoch) {
+          return { state: "observed", ownerEpoch: observed.ownerEpoch, snapshot: structuredClone(observed.snapshot) };
+        }
+        if (observedSnapshot === observed) observedSnapshot = null;
+        return { state: "pending", ownerEpoch: closed || detaching ? null : current.bootId,
+          reasonCode: closed || detaching ? "local_model_daemon_client_detached"
+            : current.bootId !== observed.ownerEpoch ? "local_model_daemon_boot_changed" : "local_model_snapshot_pending" };
+      } catch (error) {
+        if (observedSnapshot === observed) observedSnapshot = null;
+        return { state: "pending", ownerEpoch: null, reasonCode: error instanceof LocalModelDaemonClientError
+          ? error.code : "local_model_observation_failed" };
+      }
+    }
+    return { state: "pending", ownerEpoch: daemon?.bootId ?? null,
+      reasonCode: starting ? "local_model_daemon_starting" : "local_model_snapshot_pending" };
+  }
+  function observeSnapshot(): Promise<LocalModelRuntimeObservation> {
+    if (observationFlight) return observationFlight;
+    const flight = observeSnapshotUncached().finally(() => {
+      if (observationFlight === flight) observationFlight = null;
+    });
+    observationFlight = flight;
+    return flight;
+  }
   const runtime: LocalModelHubRuntimePort = {
     snapshot: control.snapshot,
+    observeSnapshot,
     run: async (request, events) => {
       // Validate opaque fields before any daemon startup or request dispatch.
       const mcpAdmission = request.mcpConfigPath ? exportPreparedMcpAdmission(request.mcpConfigPath) : undefined;
@@ -433,11 +501,13 @@ export function createLocalModelDaemonClient(options: LocalModelDaemonClientOpti
   };
   function close(): void {
     detaching = true; closed = true;
+    observedSnapshot = null; observationGeneration += 1;
     for (const cancel of [...pending]) cancel();
   }
   function detach(): Promise<void> {
     if (detachPromise) return detachPromise;
     detaching = true;
+    observedSnapshot = null; observationGeneration += 1;
     detachPromise = (async () => {
       try {
         await starting?.catch(() => {});

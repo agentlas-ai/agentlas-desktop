@@ -10,12 +10,20 @@ export type LocalModelHubControlPort = Pick<LocalModelHubManager,
   | "downloadEngine" | "downloadModel" | "importModel" | "installEngine"
   | "installDownloadedModel" | "loadModel" | "unload" | "testCapabilities">;
 
+export type LocalModelRuntimeInventory = Pick<LocalModelHubSnapshot, "resident" | "modelInstallations" | "capabilityReceipts">;
+
+export type LocalModelRuntimeObservation =
+  | { state: "pending"; reasonCode: string; ownerEpoch: string | null }
+  | { state: "observed"; ownerEpoch: string; snapshot: LocalModelRuntimeInventory };
+
 export interface LocalModelHubSnapshotPort {
   snapshot(): Promise<LocalModelHubSnapshot>;
 }
 
 /** Detection and invocation share one local owner or one remote facade. */
 export interface LocalModelHubRuntimePort extends LocalModelHubSnapshotPort {
+  /** Observation never prepares a service or waits for execution admission. */
+  observeSnapshot?: () => Promise<LocalModelRuntimeObservation>;
   run: Runner;
 }
 
