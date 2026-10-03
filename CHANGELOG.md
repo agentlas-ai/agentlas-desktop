@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.57 — 2026-10-03
+
+- Schedule independent OS update preparation after the product document loads, keeping required startup integrity and execution checks.
+- Recheck durable per-chat tool approval rules for later requests, and require a new approval after revocation when no separate session permission applies.
+- Preserve new One and Work instructions in the existing execution queue instead of automatically interrupting current work.
+- Fit composer controls into narrow layouts and refresh experience relations once after each promotion batch.
+- Avoid runtime discovery when the configured judgment pool already establishes a conclusive unavailable or unsupported refusal.
+- Include the live task-record improvements from 1.2.56. Keep the Agentlas OS v1.2.54 runtime and source binding.
+
 ## 1.2.56 — 2026-10-03
 
 - Avoid storing live text, usage, and reasoning deltas as separate task steps. Keep live activity delivery and durable phase transitions, tool results, and completion records.
