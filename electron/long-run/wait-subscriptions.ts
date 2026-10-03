@@ -6,7 +6,7 @@ import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAgentSurface } from "../store/agent-surfaces";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, unsettledLongRunAttempts, nextBlockedGoalRetrySlot, scheduleBlockedGoalRetry, longRunOwnerHold } from "../store/long-runs";
+import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, unsettledLongRunAttempts, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, longRunOwnerHold } from "../store/long-runs";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
 import { claimCheckpointContinuation, latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
@@ -113,6 +113,9 @@ function scheduleFreshGoalWaitContinuation(wait: Pick<GoalWaitSubscription, "run
   const run = getLongRun(wait.runId);
   if (!run || longRunOwnerHold(run.id) || ["pausing", "cancelling", "cancelled", "completed"].includes(run.status)
     || (run.status === "paused" && !["app_closed", "crash_recovery", "runtime_unavailable"].includes(run.pauseReason ?? ""))) return;
+  // The blocked-goal sweep owns an existing retry, including one already due.
+  // Replacing it on each wait poll would move its deadline forward forever.
+  if (pendingBlockedGoalRetry(run.id)) return;
   const slot = nextBlockedGoalRetrySlot(run.id, now);
   scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
     fromReason: reason, retryIndex: slot.retryIndex, nextAt: slot.nextAt,
