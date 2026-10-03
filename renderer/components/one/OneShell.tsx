@@ -210,6 +210,7 @@ import { OneCreateAgentDialog, type OneCreateAgentSeed, type OneEditMemberTarget
 import { OneTaskforceDialog, OneTaskforceRail } from "./OneTaskforces";
 import { OneRunComet, oneRunCometHostClass, useOneRunSignals } from "./OneRunComet";
 import { OneComputerHistory } from "./OneComputerHistory";
+import { OneToolchains, toolchainStackClassName } from "./OneToolchains";
 import { OneSettingsRail, OneSettingsSheet, type OneSettingsKey } from "./OneSettings";
 import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
@@ -9533,6 +9534,8 @@ export function OneShell() {
             >
               <IconClose size={14} />
             </button>
+            <div className={toolchainStackClassName}>
+            <OneToolchains api={ipc()?.toolchains} locale={appLocale} />
             <OneComputerHistory
               state={computerHistory}
               locale={appLocale}
@@ -9558,6 +9561,7 @@ export function OneShell() {
                   .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
               }}
             />
+            </div>
           </aside>
         )}
         <TaskSidePanel

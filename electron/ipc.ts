@@ -526,6 +526,7 @@ import { registerBrowserUiIpc } from "./browser/ui-ipc";
 import { registerBrowserAnnotationIpc } from "./browser/annotation-ipc";
 import { registerAutomationStrategyIpc } from "./automation-strategy-ipc";
 import { registerAgentMailIpc } from "./agent-mail/ipc";
+import { registerToolchainIpc } from "./toolchains/ipc";
 import { registerAliveIpc } from "./alive-organisms";
 import { noteOwnerAutomationPinEdit } from "./automation-runtime-provenance";
 import { prejudgeCompletionClaims } from "./one/judged-completion-claim";
@@ -3445,6 +3446,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("computerHistory:clear", () => clearComputerHistory());
   ipcMain.handle("computerHistory:prepareDraft", (_e, recommendationId: string, locale: "ko" | "en") =>
     prepareComputerHistoryDraftPrompt(recommendationId, locale === "ko" ? "ko" : "en"));
+  // Adaptive Toolchains — what past runs taught the product to do (electron/toolchains).
+  registerToolchainIpc(ipcMain);
 
   // ── agentFiles (에이전트 폴더 파일 — 우측 패널 에디터) ──
   ipcMain.handle("agentFiles:list", (_e, agentId: string) => listAgentFiles(agentId));

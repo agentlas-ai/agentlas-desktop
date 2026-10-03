@@ -20,6 +20,9 @@ import { sha256Value } from "../../shared/graph-execution-digest";
 import { inspectGraphMcpTools } from "../workflow/mcp-call";
 import { recordOneGraphAuthority } from "./graph-ownership";
 import { oneTeamDispatchOwnerChat, type OneTeamCaller } from "./team-dispatch";
+import { toolchainInputProblems } from "../../shared/toolchain";
+import { searchToolchains } from "../toolchains/search";
+import { callableContractFor, contractManifest, currentCallableContracts, recordToolchainReturned, recordToolchainRun } from "../toolchains/interface";
 
 function owner(caller: OneTeamCaller) {
   const chatId = oneTeamDispatchOwnerChat(caller.chatId);
@@ -37,6 +40,29 @@ function scoped(caller: OneTeamCaller): Automation[] {
 }
 function exact(caller: OneTeamCaller, id: unknown): Automation {
   const automation = typeof id === "string" ? scoped(caller).find(a => a.id === id) : undefined;
+  if (!automation) throw new Error("one_graph_target_not_in_context");
+  return automation;
+}
+/** run/result only: a graph outside this conversation is reachable when its owner
+ * made it callable (tested contract, current definition, enabled). Inspect and
+ * every authoring operation stay scoped to the origin conversation. */
+function exactOrCallable(caller: OneTeamCaller, id: unknown): Automation {
+  if (typeof id === "string" && scoped(caller).some(a => a.id === id)) return exact(caller, id);
+  const automation = typeof id === "string" && callableContractFor(id) ? getAutomation(id) : null;
+  if (!automation) throw new Error("one_graph_target_not_in_context");
+  return automation;
+}
+/** The caller's own Toolchain request: its result stays readable even if the
+ * contract is withdrawn or goes stale after the request was accepted. */
+function requestedByCaller(caller: OneTeamCaller, automationId: string, eventId: unknown): boolean {
+  const event = typeof eventId === "string" ? getTriggerEvent(eventId) : null;
+  if (!event || event.automationId !== automationId) return false;
+  const payload = event.payload as Record<string, unknown>;
+  return payload.source === "toolchain" && payload.ownerChatId === owner(caller).id;
+}
+function exactOrRequested(caller: OneTeamCaller, id: unknown, eventId: unknown): Automation {
+  if (typeof id === "string" && scoped(caller).some(a => a.id === id)) return exact(caller, id);
+  const automation = typeof id === "string" && requestedByCaller(caller, id, eventId) ? getAutomation(id) : null;
   if (!automation) throw new Error("one_graph_target_not_in_context");
   return automation;
 }
@@ -75,7 +101,15 @@ function checkReferences(caller: OneTeamCaller, graph: WorkflowGraph, selfId?: s
  * gone away. The saved origin and saved grants, never payload fields, own scope. */
 export function validateOneGraphCommandScope(a: Automation): void {
   const chatId = a.monitor?.originChatId;
-  if (!chatId || !getChat(chatId)) throw new Error("one_graph_owner_missing");
+  if (!chatId || !getChat(chatId)) {
+    // An owner-made graph has no origin conversation. When the owner made it a
+    // callable Toolchain (tested contract, current definition, enabled) and it
+    // references no other graph, there is no conversation scope to enlarge and it
+    // runs with its own saved permission — refusing it would make every graph built
+    // in the editor uncallable while its contract says otherwise.
+    if (callableContractFor(a.id) && !resolveAutomationGraph(a).nodes.some(node => node.type === "subgraph")) return;
+    throw new Error("one_graph_owner_missing");
+  }
   checkReferences({ chatId, permission: a.executionPermission }, resolveAutomationGraph(a), a.id,
     a.executionPermission, a.hubMode ?? "local-only");
 }
@@ -92,9 +126,11 @@ function graphSame(a: Automation, graph: WorkflowGraph, bp: GraphBlueprint, sche
 
 async function waitForResult(caller: OneTeamCaller, a: Automation, input: Record<string, unknown>) {
   const read = () => {
-    exact(caller, a.id);
     const event = typeof input.event_id === "string" ? getTriggerEvent(input.event_id) : null;
     if (!event || event.automationId !== a.id) throw new Error("one_graph_event_not_in_context");
+    if (!scoped(caller).some(item => item.id === a.id) && !requestedByCaller(caller, a.id, event.id)) {
+      throw new Error("one_graph_target_not_in_context");
+    }
     return event;
   };
   let event = read();
@@ -141,6 +177,16 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     definitionProtocol: "agentlas.automation-graph-definition.v1", execution: "host_compiled_dependency_graph", strategyOwner: "One",
     ...(input.catalog_id ? { inventory: await inspectGraphMcpTools({ chat, catalogId: input.catalog_id as string, permission: caller.permission }) } : {}),
     ...(input.include_registration_protocol === true ? { registrationProtocol: AUTOMATION_PROTOCOL } : {}) };
+  if (name === "toolchain_search") {
+    const pool = currentCallableContracts();
+    const hits = searchToolchains(String(input.task), pool.map(entry => entry.contract),
+      typeof input.limit === "number" ? input.limit : undefined);
+    const toolchains = hits.map(hit => pool.find(entry => entry.automation.id === hit.automationId)!)
+      .map(entry => contractManifest(entry.contract, entry.automation, automationDefinitionDigest(entry.automation)));
+    recordToolchainReturned(toolchains.map(item => item.graph_id));
+    // An empty list is the answer, not a failure: do the work normally.
+    return { schemaVersion: "agentlas.toolchain-search.v1", toolchains };
+  }
   if (name === "one_graph_inspect") {
     if (!input.graph_id) return { graphs: scoped(caller).map(a => receipt(a, { source: a.graph?.nodes.length ? "stored-graph" : "legacy-prompt", goal: a.goal ?? null })) };
     const a = exact(caller, input.graph_id);
@@ -183,7 +229,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     }
     return { ...receipt(a), ...definition };
   }
-  if (name === "one_graph_result") return waitForResult(caller, exact(caller, input.graph_id), input);
+  if (name === "one_graph_result") return waitForResult(caller, exactOrRequested(caller, input.graph_id, input.event_id), input);
   if (name === "one_graph_set_enabled" && input.enabled === false) {
     const a = exact(caller, input.graph_id);
     const result = applyAutomationLifecycle({ parsed: { action: "pause", automationId: a.id, name: a.name, prompt: "", schedule: "", scheduleEmitted: false },
@@ -242,7 +288,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
       return receipt(saved, { ok: true, action: existing ? "updated" : "created", ...(connections && !enable ? { activation: connections.activation } : {}) });
     }).immediate();
   }
-  const a = exact(caller, input.graph_id);
+  const a = name === "one_graph_run" ? exactOrCallable(caller, input.graph_id) : exact(caller, input.graph_id);
   // A lost tool response can be retried after the host pinned a runtime or the
   // definition was later revised. The old exact event remains the authority;
   // it must not become a second execution or require the new definition.
@@ -296,21 +342,38 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     return receipt(result.automation, { ok: true, action: result.action });
   }
   if (name === "one_graph_run") {
-    await connected(caller, a);
+    // The contract check is cheap and deterministic, so it answers first: a caller
+    // binding the wrong input learns exactly which field, not a connection status.
+    const contract = callableContractFor(a.id);
+    if (contract) {
+      const problems = toolchainInputProblems(contract, input.input ?? {});
+      if (problems.length) return { ok: false, code: "toolchain_input_invalid", problems, input_schema: contract.inputSchema };
+    }
+    const inScope = scoped(caller).some(item => item.id === a.id);
+    if (inScope) await connected(caller, a);
+    else {
+      // Cross-conversation call of an owner-approved Toolchain: the saved origin owns scope.
+      validateOneGraphCommandScope(a);
+      const report = await reportGraphConnections(resolveAutomationGraph(a), currentUiLocale());
+      if (!report.activation.canActivate) throw new Error(`one_graph_not_connected:${report.activation.reason}`);
+    }
     const queuedReceipt = getDb().transaction(() => {
-      const current = exact(caller, a.id); fresh(current, input.expected_revision);
+      const current = exactOrCallable(caller, a.id); fresh(current, input.expected_revision);
       if (hasGraphLoginWait(a.id) || getAutomationGraphReconciliation(a.id)) throw new Error("one_graph_execution_unsettled");
       const decision = decideGraphRunRequest({ ref: current.id, automations: [current], input: input.input as Record<string, unknown> | undefined, dryRun: input.dry_run === true });
       if (!decision.ok) return decision;
       const requestHash = createHash("sha256").update(`${chat.id}\0${input.request_id}`).digest("hex");
       const dedupeKey = `one-graph:${requestHash}`;
-      const payload = { source: "one-mcp", definitionRevision: input.expected_revision, ownerChatId: chat.id, input: decision.input, dryRun: input.dry_run === true };
+      // Outside its origin conversation a graph is reachable only as a Toolchain; the
+      // delivery path then checks the contract instead of conversation ownership.
+      const payload = { source: inScope ? "one-mcp" : "toolchain", definitionRevision: input.expected_revision, ownerChatId: chat.id, input: decision.input, dryRun: input.dry_run === true };
       const prior = getDb().prepare("SELECT payload_json FROM automation_trigger_events WHERE automation_id=? AND trigger_kind='command' AND dedupe_key=?").get(a.id, dedupeKey) as { payload_json: string } | undefined;
       if (prior && prior.payload_json !== JSON.stringify(payload)) throw new Error("one_graph_request_identity_conflict");
       const queued = enqueueTriggerEvent({ automationId: a.id, triggerKind: "command", dedupeKey, payload });
       return { ...receipt(current, { ok: true, status: "requested", event_id: queued.event.id, already_requested: !queued.inserted, event_status: queued.event.status }), event_id: queued.event.id };
     }).immediate();
     if (!("event_id" in queuedReceipt)) return queuedReceipt;
+    if (contract && (queuedReceipt as { already_requested?: boolean }).already_requested !== true) recordToolchainRun(a.id);
     return { ...queuedReceipt, ...await waitForResult(caller, a, { ...input, event_id: queuedReceipt.event_id, wait_seconds: input.wait_seconds ?? 20 }) };
   }
   throw new Error("one_graph_unknown_operation");

@@ -367,7 +367,22 @@ export function prepareComputerHistoryDraftPrompt(
         `Original proposal: "${recommendation.body}"`,
         safetyLine,
       ].join("\n");
+  noteDraftPrepared();
   return { recommendationId, recommendationKind: recommendation.kind, prompt, evidenceCount: references.length };
+}
+
+/**
+ * Removal gate input (docs/2026-10-03-adaptive-toolchain/PLAN.md §9 Phase 4): Computer
+ * History may be retired only if it has no unique use left, and that has to be
+ * measured. Count the one action that proves use — preparing a draft — never content.
+ */
+const DRAFT_USE_KEY = "one_computer_history_draft_use_v1";
+function noteDraftPrepared(): void {
+  try {
+    const previous = JSON.parse(getMeta(DRAFT_USE_KEY) || "{}") as { count?: unknown };
+    const count = typeof previous.count === "number" && Number.isSafeInteger(previous.count) ? previous.count : 0;
+    setMeta(DRAFT_USE_KEY, JSON.stringify({ count: count + 1, lastAt: new Date().toISOString() }));
+  } catch { /* measurement never blocks the draft */ }
 }
 
 export function getComputerHistoryConsent(): "off" | "on" { return consent(); }

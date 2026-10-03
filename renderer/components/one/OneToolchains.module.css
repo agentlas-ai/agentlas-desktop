@@ -1,0 +1,42 @@
+.root { display: grid; gap: 10px; min-width: 0; padding: 64px 16px 8px; }
+.header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.header > div { display: grid; gap: 4px; min-width: 0; }
+.header h2 { margin: 0; color: var(--ink); font-size: 15px; font-weight: 690; letter-spacing: -.025em; }
+.header p { margin: 0; color: var(--muted-deep); font-size: 9px; line-height: 1.45; }
+.header button,
+.actions button { min-height: 28px; padding: 0 9px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); color: var(--muted-deep); font-size: 9px; white-space: nowrap; cursor: pointer; }
+.header button:disabled,
+.actions button:disabled { color: var(--muted); cursor: not-allowed; }
+.actions button[data-primary="true"] { border-color: transparent; background: var(--ok); color: var(--white); }
+.actions button[data-primary="true"]:disabled { opacity: .55; }
+.empty,
+.error { margin: 0; color: var(--muted-deep); font-size: 10px; line-height: 1.5; }
+.error { color: var(--danger, var(--muted-deep)); }
+.automation { display: grid; gap: 7px; padding: 11px 12px; border: 1px solid var(--paper-3); border-radius: 12px; background: var(--paper); }
+.automation h3 { margin: 0; overflow: hidden; color: var(--ink); font-size: 11px; font-weight: 690; text-overflow: ellipsis; white-space: nowrap; }
+.list { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.item,
+.contract { display: grid; gap: 4px; padding: 9px 10px; border-radius: 9px; background: var(--paper-2); }
+.itemHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; }
+.itemHead strong { min-width: 0; color: var(--ink-soft); font-size: 10px; font-weight: 650; overflow-wrap: anywhere; }
+.badge { flex: none; padding: 2px 6px; border-radius: 999px; background: var(--paper-3); color: var(--muted-deep); font-size: 8px; font-weight: 700; }
+.badge[data-state="active"] { background: var(--ok); color: var(--white); }
+.badge[data-state="ready"] { background: var(--info, var(--ok)); color: var(--white); }
+.metric { color: var(--muted-deep); font-size: 9px; line-height: 1.4; }
+.reason { color: var(--ink-soft); font-size: 9px; line-height: 1.4; }
+.observed { color: var(--muted-deep); font-size: 9px; }
+.actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.actions:empty { display: none; }
+.others > summary { color: var(--muted-deep); font-size: 10px; cursor: pointer; }
+.others[open] { display: grid; gap: 8px; }
+.cases > summary { color: var(--info, var(--muted-deep)); font-size: 9px; cursor: pointer; }
+.cases ul { display: grid; gap: 5px; margin: 6px 0 0; padding: 0; list-style: none; }
+.cases li { display: grid; gap: 2px; padding: 5px 7px; border-left: 2px solid var(--paper-edge); border-radius: 4px; background: var(--paper); }
+.cases li[data-ok="true"] { border-left-color: var(--ok); }
+.cases li[data-ok="false"] { border-left-color: var(--danger, #c0392b); }
+.caseVerdict { color: var(--ink-soft); font-size: 8px; font-weight: 700; }
+.caseTask { color: var(--muted-deep); font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
+/* Stacked above Computer History inside the home rail: the rail's close button
+   needs the first panel's top room only, so the history below sits close. */
+.stack { display: grid; align-content: start; min-width: 0; }
+.stack > section:last-child { padding-top: 14px; }

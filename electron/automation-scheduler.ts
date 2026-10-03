@@ -55,6 +55,7 @@ import { buildSystemOptimizerPrompt } from "./system-agents/system-optimizer";
 import { runMcpInvocation } from "./mcp/client";
 import { automationRuntimePermission } from "../shared/graph-node-protocol";
 import { runGraph, type RunGraphResult } from "./workflow/run-graph";
+import { callableContractFor } from "./toolchains/interface";
 import { graphExecutionDigest } from "../shared/graph-execution-digest";
 import { AutomationWorkspaceError, automationWorkspaceOwnerText, captureAutomationWorkspace } from "./automation-workspace";
 import { sweepAutomationEffectObservations } from "./long-run/effect-observation";
@@ -2296,9 +2297,13 @@ export async function runAutomationFromTrigger(
   const a = getAutomation(id);
   if (!a) return { accepted: false };
   const command = decodeGraphCommandDelivery(a, ctx,
-    ctx.source === "one-mcp" ? automationDefinitionDigest(a) : undefined);
+    ctx.source === "one-mcp" || ctx.source === "toolchain" ? automationDefinitionDigest(a) : undefined);
   if (command && !command.ok) return { accepted: false, status: "blocked", error: command.code };
-  if (command?.ok && ctx.source === "one-mcp") {
+  // Withdrawing a Toolchain or editing its automation stops calls already queued.
+  if (command?.ok && ctx.source === "toolchain" && !callableContractFor(a.id)) {
+    return { accepted: false, status: "blocked", error: "toolchain_not_callable" };
+  }
+  if (command?.ok && (ctx.source === "one-mcp" || ctx.source === "toolchain")) {
     try { validateOneGraphCommandScope(a); }
     catch (error) { return { accepted: false, status: "blocked", error: error instanceof Error ? error.message : "one_graph_scope_invalid" }; }
   }

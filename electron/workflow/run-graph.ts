@@ -92,6 +92,8 @@ import {
 // 코드가 읽는 값의 판별은 이 정본 하나뿐이다(`vars.get("x")` 눈먼 지점의 수리).
 import { codeReferencedVars as codeReferencedVarsSync } from "../../shared/graph-code-vars";
 import { currentUiLocale } from "../ui-locale";
+import { beginNodeToolchain } from "../toolchains/runtime";
+import { scheduleToolchainRefresh } from "../toolchains/learner";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
 
@@ -3961,6 +3963,14 @@ export async function runGraph(
           nodeAbort.abort(new Error("automation_node_timeout"));
         }, nodeDeadlineMs);
         let markedQuotaFailure = false;
+        // Adaptive Toolchain overlay (electron/toolchains/runtime.ts). Inert unless an
+        // owner-approved crystallization matches this node's definition digest; every
+        // guard failure falls back to the node exactly as it ran before.
+        const toolchainSession = nativeMcpCall ? null : beginNodeToolchain({
+          runId, automationId: automation.id, node, dryRun: Boolean(dryRun),
+          workspaceBinding: automationWorkspace.binding,
+        });
+        let toolchainSettled = false;
         try {
           // agent 노드는 config.ref가 가리키는 에이전트/회사 세션에서 실행(멀티에이전트 그래프).
           let runnerError: string | null = null;
@@ -4039,7 +4049,9 @@ export async function runGraph(
               runId,
               chatId: nodeChat.id,
               automationId: automation.id,
-              userPrompt: executionPrompt,
+              // The overlay block is a host-read hint, not node input: it stays out of
+              // beginNode's input digest so resume decisions are unchanged.
+              userPrompt: executionPrompt + (toolchainSession?.promptBlock ?? ""),
               // ★오너에게 가는 보고의 언어 = 오너의 화면 언어. 요청에 locale 이 없으면 pickLocale 이
               //   "en" 으로 떨어져, 한국어 화면의 오너도 자동화 보고를 영어로 받았다(게시물 언어 규칙과 별개).
               locale: currentUiLocale(),
@@ -4106,6 +4118,7 @@ export async function runGraph(
               if (eventReadOnly && ev.tool?.id && typeof ev.tool.args === "string") {
                 readOnlyToolCallIds.set(ev.tool.id, ev.tool.name);
               }
+              if (ev.kind === "tool-use") toolchainSession?.observeTool(ev.tool);
               if (ev.kind === "tool-use" && ev.tool?.name) {
                 // A request can reach a mutating tool before its completion
                 // receipt arrives. Its absence must not become proof that no
@@ -4148,6 +4161,10 @@ export async function runGraph(
                     ...(ev.tool.isError ? {
                       toolResultPreview: typeof ev.tool.result === "string" ? ev.tool.result : undefined,
                       toolFailureCode: classifyToolFailure({ explicitCode: ev.tool.failureCode, result: ev.tool.result, status: ev.status }),
+                    } : typeof ev.tool.result === "string" ? {
+                      // Size only, never content: lets the toolchain learner weigh what a
+                      // read costs the node (runners cap results near 12k characters).
+                      toolResultChars: ev.tool.result.length,
                     } : {}),
                   },
                 });
@@ -4226,6 +4243,8 @@ export async function runGraph(
               onWorkforcePrepareReceipt: persistWorkforcePrepareReceipt,
             },
           ));
+          toolchainSettled = true;
+          toolchainSession?.finish({ resultFolder: result.resultFolder ?? null });
           markedQuotaFailure = result.markedQuotaFailure === true;
           if (result.workforcePrepareReceipt) {
             persistWorkforcePrepareReceipt(result.workforcePrepareReceipt);
@@ -4580,6 +4599,7 @@ export async function runGraph(
         } finally {
           clearTimeout(nodeTimer);
           runSignal.removeEventListener("abort", relayRunAbort);
+          if (!toolchainSettled) toolchainSession?.finish({ resultFolder: null });
         }
         return;
       }
@@ -5011,6 +5031,7 @@ export async function runGraph(
     }
     try {
       finishGraphRun(runId, !runSignal.aborted && Object.keys(checkpoint!.loginWaits).length ? "needs_input" : ok ? "ok" : "error");
+      if (!dryRun) scheduleToolchainRefresh(automation.id);
     } catch {
       /* 스냅샷 종료 실패는 다음 boot/periodic recovery가 닫는다 */
     }

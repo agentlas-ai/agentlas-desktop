@@ -589,6 +589,13 @@ const api: AgentlasIpc = {
     prepareDraft: (recommendationId: string, locale: "ko" | "en") =>
       ipcRenderer.invoke("computerHistory:prepareDraft", recommendationId, locale),
   },
+  toolchains: {
+    overview: () => ipcRenderer.invoke("toolchains:overview"),
+    refresh: (automationId?: string) => ipcRenderer.invoke("toolchains:refresh", automationId),
+    decide: (input) => ipcRenderer.invoke("toolchains:decide", input),
+    expose: (automationId: string) => ipcRenderer.invoke("toolchains:expose", automationId),
+    withdraw: (automationId: string) => ipcRenderer.invoke("toolchains:withdraw", automationId),
+  },
   agentFiles: {
     list: (agentId: string) => ipcRenderer.invoke("agentFiles:list", agentId),
     read: (agentId: string, absPath: string) =>
