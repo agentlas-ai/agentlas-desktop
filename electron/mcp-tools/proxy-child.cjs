@@ -100,7 +100,7 @@ function dropped(reason) {
   // stranded while the child appears alive.
   process.stdin.resume();
   if (stdinEnded) { close(0); return; }
-  if (wasConnected) { attempt = 0; firstDropAt = Date.now(); failPending(reason); }
+  if (wasConnected) failPending(reason);
   if (!firstDropAt) firstDropAt = Date.now();
   if (Date.now() - firstDropAt > RECONNECT_GIVE_UP_MS) { close(3, "mcp_proxy_bridge_unavailable"); return; }
   const delay = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.min(attempt, 6)); attempt += 1;
@@ -153,6 +153,11 @@ function connect() {
         let frame = null; try { frame = JSON.parse(line); } catch {}
         if (frame && typeof frame === "object" && frame.id !== undefined && typeof frame.method !== "string") {
           const key = idKey(frame.id);
+          // HTTP acceptance alone does not recover an MCP session. Preserve
+          // backoff and the outage deadline until initialization succeeds.
+          if ((key === initializeId || swallow.has(key)) && !frame.error && frame.result && typeof frame.result === "object") {
+            attempt = 0; firstDropAt = 0;
+          }
           if (key === initializeId) {
             if (initializeTimer) clearTimeout(initializeTimer);
             initializeTimer = null; initializeId = null;
