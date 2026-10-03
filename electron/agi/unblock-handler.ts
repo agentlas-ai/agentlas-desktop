@@ -54,6 +54,7 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
   model?: AgiModelAttempt | null): AgiUnblockHandlerWithModel {
   const inFlight = new Set<Promise<unknown>>();
   const handler = ((input: AgiUnblockInput) => {
+    if (input.facts?.repairInFlight || model?.isRunning(input.goalId)) return { outcome: "rested", code: "agi.repair-in-flight" };
     const d = input.diagnosis;
     if (!input.runId || input.runVersion === null) return { outcome: "failed", code: "agi.goal-ledger-missing" };
     const incident = executor.incidents.get(input.incidentId);
@@ -62,8 +63,10 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
     const facts = input.facts ?? readFacts?.(input.goalId) ?? null;
     const done: Array<{ action: string; result: string }> = [];
     const run = (action: AgiActionKind, args: Record<string, unknown>, index: number, runFence = fence): AgiActionReceipt => {
+      const refreshed = input.refreshFence?.();
+      if (input.refreshFence && !refreshed) return { actionId: actionId(input, attempt, action, index), action, ok: false, code: "agi.action.state-changed" };
       const receipt = executor.execute({ schema: AGI_ACTION_SCHEMA, actionId: actionId(input, attempt, action, index), incidentId: input.incidentId,
-        attempt, fence: runFence, action, args, attemptTokensSoFar: 0 });
+        attempt, fence: refreshed ?? runFence, action, args, attemptTokensSoFar: 0 });
       done.push({ action, result: receipt.ok ? receipt.code : `refused:${receipt.code}` });
       return receipt;
     };
@@ -90,6 +93,7 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
     const work = initialVersion === null ? null : run("start_work_turn", { nodeId: d.eligibleTactics[0] ?? null }, 90,
       { ...fence, runVersion: initialVersion });
     const workStarted = work?.ok === true;
+    if (workStarted) return { outcome: "acted", code: "agi.work-continued", actions: done };
     if (model) {
       const pre = [...done];
       const modelVersion = executor.currentVersion(input.goalId);
@@ -101,8 +105,8 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
           final = { ...result, outcome: acted ? "acted" : result.outcome, code: acted ? "agi.model-fallback-acted" : result.code,
             actions: [...(result.actions ?? []), ...done.slice(pre.length)] };
         }
-        executor.recordAttemptResult(input.goalId, input.stateDigest, final);
-      }, () => executor.recordAttemptResult(input.goalId, input.stateDigest, { outcome: "failed", code: "agi.model-attempt-threw" }));
+        executor.recordAttemptResult(input.goalId, input.stateDigest, final, attempt);
+      }, () => executor.recordAttemptResult(input.goalId, input.stateDigest, { outcome: "failed", code: "agi.model-attempt-threw" }, attempt));
       inFlight.add(flight);
       void flight.finally(() => inFlight.delete(flight));
       return { outcome: workStarted ? "acted" : "rested", code: "agi.model-attempt-dispatched", actions: done };
@@ -113,6 +117,7 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
     if (d.ownerClass === "human_only" && d.boundary) return { outcome: "needs-human", code: `agi.boundary.${d.boundary}`, actions: done };
     return { outcome: "rested", code: "agi.no-deterministic-path", actions: done };
   }) as AgiUnblockHandlerWithModel;
+  handler.isBusy = (goalId) => model?.isRunning(goalId) === true;
   handler.settled = async () => { while (inFlight.size) await Promise.allSettled([...inFlight]); };
   return handler;
 }

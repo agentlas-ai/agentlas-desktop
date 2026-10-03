@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Fragment, useEffect, useMemo, useState } from "react";
 import { personalizeOneText, useOnePersonaName } from "@/lib/one-persona-name";
 import { IconCheck, IconClose, IconPlus, IconUsers } from "@/components/Icon";
 import type { OneOrgMember, OneOrgState } from "@shared/one-org";
@@ -241,7 +241,7 @@ export function OneTaskforceDialog({
     title={taskforce ? (locale === "ko" ? "태스크포스 멤버" : "Taskforce members") : (locale === "ko" ? "태스크포스 만들기" : "Create Taskforce")}
     titleId="one-taskforce-dialog-title"
     ariaLabelledBy="one-taskforce-dialog-title"
-    description={locale === "ko" ? "One은 항상 참여합니다. 동료를 추가하거나 회색으로 표시된 사용할 수 없는 멤버를 제거할 수 있습니다." : "One always participates. Add staff, or remove unavailable members shown in grey."}
+    description={locale === "ko" ? "One은 항상 참여합니다. 동료를 추가하거나 사용할 수 없는 멤버의 자리를 재선택할 수 있습니다. 이전 대화의 작성자는 바뀌지 않습니다." : "One always participates. Add staff or reselect an unavailable member's place. Past message authors stay unchanged."}
   >
     <div className={styles.dialogBody} aria-busy={busy ? "true" : "false"}>
       <label className={styles.titleField}>{locale === "ko" ? "이름" : "Name"}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} placeholder={locale === "ko" ? "예: Launch Team" : "e.g. Launch Team"} /></label>
@@ -256,8 +256,7 @@ export function OneTaskforceDialog({
         {rows.map((member) => {
           const unavailable = memberUnavailable(member);
           const checked = selected.includes(member.installedAgentId);
-          return <button
-            key={member.id}
+          return <Fragment key={member.id}><button
             type="button"
             className={styles.memberRow}
             data-unavailable={unavailable ? "true" : "false"}
@@ -268,7 +267,19 @@ export function OneTaskforceDialog({
             <OneAgentPortrait status={unavailable ? "locked" : member.statusKind} label={member.displayName} tone={member.icon} />
             <span><strong>{member.displayName}</strong><small>{memberStatus(member, locale)}</small></span>
             <span className={styles.checkbox} data-checked={checked ? "true" : "false"}>{checked ? <IconCheck size={12} /> : null}</span>
-          </button>;
+          </button>
+            {unavailable && checked && <label className={styles.memberReplacement}>
+              <span>{locale === "ko" ? `${selected.indexOf(member.installedAgentId) + 1}번 자리 재선택` : `Reselect place ${selected.indexOf(member.installedAgentId) + 1}`}</span>
+              <select value="" disabled={busy} onChange={(event) => {
+                const replacement = event.target.value;
+                if (!replacement || !rows.some(row => row.installedAgentId === replacement && !memberUnavailable(row))) return;
+                setSelected(current => current.includes(replacement) ? current : current.map(id => id === member.installedAgentId ? replacement : id));
+              }}>
+                <option value="">{locale === "ko" ? "사용 가능한 동료 선택" : "Choose available staff"}</option>
+                {rows.filter(row => !memberUnavailable(row) && !selected.includes(row.installedAgentId)).map(row => <option key={row.id} value={row.installedAgentId}>{row.displayName}</option>)}
+              </select>
+            </label>}
+          </Fragment>;
         })}
         {rows.length === 0 && <p className={styles.noStaff}>{locale === "ko" ? "먼저 왼쪽 조직에 동료를 추가하세요." : "Add standing staff to the organisation first."}</p>}
       </section>

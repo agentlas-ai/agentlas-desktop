@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type Database from "better-sqlite3";
 import { getDb } from "./db";
+import { recordAgentIdentityMerge, reconcileAgentRosterReceipts, rewriteAgentRosterReferences } from "./agent-identity";
 import { getRoute, getRoutesRevision, removeRoute, type AgentRoute } from "../agents/routes";
 import { currentUiLocale } from "../ui-locale";
 
@@ -251,6 +252,7 @@ function mergeDuplicateFirm(db: Database.Database, canonical: FirmRow, duplicate
       // Only collapse synthetic member cells. A separately installed worker
       // with its own prompt remains a real asset and is retained in the chart.
       if (duplicateAgent?.parent_team_id === duplicate.id && !duplicateAgent.system_prompt.trim()) {
+        recordAgentIdentityMerge(db, duplicateId, canonicalId, `firm:${localFirmIdentityKey(canonical)}\u0000node:${nodeIdentity(node)}`);
         mergeReferences(db, duplicateId, canonicalId);
         deleteMembers.push({ duplicateId, canonicalId });
       }
@@ -304,7 +306,8 @@ function referencedTables(db: Database.Database): Array<{ table: string; column:
     .all() as Array<{ name: string; sql: string | null }>;
   const result: Array<{ table: string; column: string }> = [];
   for (const table of rows) {
-    if (table.name === "installed_agents" || !table.sql) continue;
+    // Historical authors and closed occupancy are evidence, not live aliases.
+    if (["installed_agents", "run_events", "failure_events", "chat_messages", "one_seat_occupants"].includes(table.name) || !table.sql) continue;
     let columns: Array<{ name: string }> = [];
     try {
       columns = db.prepare(`PRAGMA table_info(${quoteIdentifier(table.name)})`).all() as Array<{ name: string }>;
@@ -441,6 +444,7 @@ function dropRedundantStrandedRows(
 }
 
 function mergeReferences(db: Database.Database, duplicateId: string, canonicalId: string): void {
+  rewriteAgentRosterReferences(db, duplicateId, canonicalId);
   updateFirmReferences(db, duplicateId, canonicalId);
   mergeOneOrgSeats(db, duplicateId, canonicalId);
   for (const reference of referencedTables(db)) {
@@ -571,6 +575,7 @@ function liveIdentityKeyByContent(entries: Array<{ row: AgentRow; route: AgentRo
 
 function dedupeLocalInstalledAgentsOnce(): DedupeResult {
   const db = getDb();
+  reconcileAgentRosterReceipts(db);
   const rows = db.prepare("SELECT * FROM installed_agents ORDER BY installed_at ASC").all() as AgentRow[];
   const entries = rows.map((row) => {
     const route = getRoute(row.id);
@@ -597,13 +602,14 @@ function dedupeLocalInstalledAgentsOnce(): DedupeResult {
   // ★ 합치기는 묶음마다 따로 커밋한다. 한 묶음이 `agent_merge_would_orphan` 으로 멈추면
   // 예전에는 트랜잭션 하나가 통째로 되감겨 **나머지 정상 묶음까지 한 건도 안 고쳐졌다**.
   // 수리는 되는 데까지 가고, 못 간 곳은 이유를 남긴다.
-  for (const group of groups.values()) {
+  for (const [identityKey, group] of groups) {
     if (group.length < 2) continue;
     const canonical = canonicalRow(group);
     for (const duplicate of group) {
       if (duplicate.id === canonical.id) continue;
       try {
         db.transaction(() => {
+          recordAgentIdentityMerge(db, duplicate.id, canonical.id, identityKey);
           mergeReferences(db, duplicate.id, canonical.id);
           db.prepare("DELETE FROM installed_agents WHERE id = ?").run(duplicate.id);
         })();

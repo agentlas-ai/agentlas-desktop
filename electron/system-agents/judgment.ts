@@ -26,7 +26,7 @@ import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { runtimeFailureBlocksReplay, pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
-import { runtimeCooldown } from "../runtime/runtime-cooldown";
+import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown } from "../runtime/runtime-cooldown";
 import {
   inspectJudgmentCapability,
   type JudgmentCapabilityReceipt,
@@ -831,6 +831,12 @@ async function callJudgmentModelDetailed(opts: {
       ...(failure ? { failureKind: failure.kind } : {}),
     };
     attempts.push(attempt);
+    const selection = runtimeReceipt.selection;
+    if (selection.source !== undefined && selection.backend !== undefined) {
+      const identity = { ...selection, source: selection.source, backend: selection.backend };
+      if (failure) noteRuntimeFailure(identity, failure);
+      else if (outcome === "success") noteRuntimeSucceeded(identity);
+    }
     noteJudgmentLatency(runtimeReceipt.selection, outcome, attempt.elapsedMs);
     console.info("[judgment-runtime-result]", JSON.stringify(attempt));
   };
@@ -839,10 +845,12 @@ async function callJudgmentModelDetailed(opts: {
       : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
   for (const [runtimeIndex, candidate] of candidates.entries()) {
       const { runtime, route, fingerprint: candidateFingerprint } = candidate;
-      const livePool = !opts.runtimeSelection ? readJudgmentPool() : null;
+      const livePool = !opts.runtimeSelection || route === "orchestrator_pool" ? readJudgmentPool() : null;
       if (opts.selectionPolicy
         ? (livePool?.state !== "configured" || livePool.fingerprint !== opts.selectionPolicy.poolFingerprint)
-        : !opts.runtimeSelection && livePool?.fingerprint !== fingerprint) return { text: null, failure: {
+        : route === "orchestrator_pool"
+          ? livePool?.state !== "configured" || livePool.fingerprint !== candidateFingerprint
+          : !opts.runtimeSelection && livePool?.fingerprint !== fingerprint) return { text: null, failure: {
         kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
       }, runtimeReceipt, attempts };
       if (opts.signal?.aborted) break;
@@ -868,6 +876,21 @@ async function callJudgmentModelDetailed(opts: {
           providerCode: capability.reason,
           message: capability.reason,
         };
+        continue;
+      }
+      const cooldown = runtimeCooldown(runtime);
+      if (cooldown) {
+        runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "not_invoked", selection: {
+          kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
+        }, ...(opts.selectionPolicy ? { selectionPolicy: opts.selectionPolicy } : {}), ...(capability ? { capability } : {}) };
+        lastFailure = { kind: cooldown.kind, runtime: runtime.kind, source: "marker",
+          providerCode: "judgment_runtime_cooldown", message: "judgment_runtime_cooldown",
+          retryAfterHint: new Date(cooldown.until).toISOString() };
+        // No runner started: this must not poison an empty verification session
+        // or extend the cooldown. A later authorized pool member can still judge.
+        const skipped: JudgmentRuntimeAttempt = { runtimeReceipt, outcome: "failed", elapsedMs: 0, failureKind: cooldown.kind };
+        attempts.push(skipped);
+        console.info("[judgment-runtime-result]", JSON.stringify(skipped));
         continue;
       }
       const picked = pickRunner(runtime);
@@ -922,12 +945,8 @@ async function callJudgmentModelDetailed(opts: {
       if (bounded.error !== undefined) {
         const error = bounded.error;
         const normalized = runnerFailureFromError(error, runtime.kind);
-        lastFailure = runtimeFailureBlocksReplay(normalized) ? normalized : {
-          kind: bounded.timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
-          message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
-          runtime: runtime.kind,
-          source: "exit",
-        };
+        lastFailure = bounded.timedOut && !runtimeFailureBlocksReplay(normalized)
+          ? { ...normalized, kind: "timeout" } : normalized;
         recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
         if (bounded.cancelled || bounded.timedOut || runtimeFailureBlocksReplay(lastFailure)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
         if (requiresNoTools && isJudgmentRefusal(error)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
@@ -1007,12 +1026,8 @@ async function callJudgmentModelDetailed(opts: {
         if (bounded.error !== undefined) {
           const error = bounded.error;
           const normalized = runnerFailureFromError(error, selection.kind);
-          lastFailure = runtimeFailureBlocksReplay(normalized) ? normalized : {
-            kind: bounded.timedOut ? "timeout" : isJudgmentRefusal(error) ? "refused" : "exit",
-            message: error instanceof Error ? error.message.slice(0, 2000) : String(error),
-            runtime: selection.kind,
-            source: "exit",
-          };
+          lastFailure = bounded.timedOut && !runtimeFailureBlocksReplay(normalized)
+            ? { ...normalized, kind: "timeout" } : normalized;
           recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
         } else if (bounded.cancelled || bounded.timedOut || opts.signal?.aborted) {
           lastFailure = { kind: bounded.timedOut ? "timeout" : "exit", runtime: selection.kind,

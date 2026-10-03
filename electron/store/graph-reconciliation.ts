@@ -19,6 +19,7 @@ import type {
 import {
   isReadOnlyCheckpointTool,
   parseGraphCheckpoint,
+  reconcileReadOnlyInterruptedAgentNodes,
   type GraphCheckpoint,
 } from "../workflow/run-graph";
 import { emitDesktopStoreChange } from "./change-bus";
@@ -569,9 +570,8 @@ function exactDecisionMap(
 }
 
 /**
- * A scheduled occurrence with unresolved side effects must not keep entering
- * the runner on a timer. Keep the automation enabled, but remove its due time
- * until the explicit reconciliation commit restores the regular schedule.
+ * Workspace recovery retains a bounded wake. Effect quarantine is handled
+ * separately by recoverGraphScheduleCursors, using the sealed node frontier.
  */
 export function suspendAutomationForGraphReconciliation(automationId: string): boolean {
   if (!validId(automationId)) return false;
@@ -952,7 +952,7 @@ export function recoverReadOnlySuspendedGraphs(): AutomationGraphReconcileResult
       ).get(loaded.run.id, candidate.id) as { node_failures_json: string | null } | undefined;
       if (!failureRow?.node_failures_json) continue;
       const failures = JSON.parse(failureRow.node_failures_json) as Record<string, { code?: unknown }>;
-      if ([...unresolved].some((nodeId) => failures[nodeId]?.code !== "MUTATION_UNVERIFIED" ||
+      if ([...unresolved].some((nodeId) => !["MUTATION_UNVERIFIED", "NODE_TIMEOUT"].includes(String(failures[nodeId]?.code)) ||
           (loaded.checkpoint.prepareReceipts[nodeId]?.length ?? 0) > 0)) continue;
 
       // 501 is a refusal threshold, not a truncated evidence window. A large
@@ -1016,4 +1016,146 @@ export function recoverReadOnlySuspendedGraphs(): AutomationGraphReconcileResult
     }
   }
   return recovered;
+}
+
+
+/** Nodes the existing kernel can still reach without replaying a held effect. */
+export function graphCheckpointRunnableNodes(graph: WorkflowGraph, checkpoint: GraphCheckpoint): string[] {
+  const terminal = new Set([...checkpoint.completedNodeIds, ...checkpoint.skippedNodeIds]);
+  const held = new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds]);
+  const blockedEdges = new Set(checkpoint.blockedEdgeIds);
+  const blocked = new Set(held);
+  // A loop may change the frontier after a predicate settles. Do not infer a
+  // permanent hold from this deliberately conservative DAG projection.
+  if (graph.edges.some((edge) => edge.maxIterations !== undefined)) {
+    return graph.nodes.filter((node) => !terminal.has(node.id) && !held.has(node.id)).map((node) => node.id);
+  }
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const node of graph.nodes) {
+      if (terminal.has(node.id) || blocked.has(node.id)) continue;
+      if (graph.edges.some((edge) => edge.target === node.id && !blockedEdges.has(edge.id)
+          && blocked.has(edge.source)
+          && !(held.has(edge.source) && ["error", "timeout", "always"].includes(edge.sourceHandle ?? "")))) {
+        blocked.add(node.id); changed = true;
+      }
+    }
+  }
+  return graph.nodes.filter((node) => !terminal.has(node.id) && !blocked.has(node.id)).map((node) => node.id);
+}
+
+const SCHEDULE_RECOVERY_EVENT = "workflow_schedule_recovery";
+
+function scheduleCheckpoint(automation: Automation, allowRevisedHold = false): { run: LatestRunRow; graph: WorkflowGraph; checkpoint: GraphCheckpoint; revisedGraph?: boolean } | null {
+  const run = getDb().prepare(`SELECT id, automation_id, started_at, last_activity_at, status, node_states_json,
+      occurrence_id, graph_digest, checkpoint_json, dry_run FROM automation_runs
+      WHERE automation_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1`).get(automation.id) as LatestRunRow | undefined;
+  if (!run || run.status !== "error" || run.dry_run === 1 || !run.checkpoint_json
+      || !run.occurrence_id?.startsWith(`schedule:${automation.id}:`)) return null;
+  if (Buffer.byteLength(run.checkpoint_json, "utf8") > MAX_CHECKPOINT_BYTES) return null;
+  const graph = strictGraph(executionGraphAutomation(automation));
+  const digest = graphExecutionDigest(automation, graph);
+  if (run.graph_digest !== digest) {
+    // Historical authority can expose its old hold, never execute a new graph.
+    const revised = allowRevisedHold ? loadReconciliation(automation.id) : null;
+    return revised?.revisedGraph && !Object.keys(revised.checkpoint.loginWaits).length ? revised : null;
+  }
+  let raw: unknown;
+  try { raw = JSON.parse(run.checkpoint_json); } catch { return null; }
+  const checkpoint = parseGraphCheckpoint(raw, digest, run.occurrence_id,
+    new Set(graph.nodes.map((node) => node.id)), new Set(graph.edges.map((edge) => edge.id)),
+    new Set(graph.nodes.filter(nodeCouldHaveActedOutside).map((node) => node.id)));
+  if (!checkpoint || Object.keys(checkpoint.loginWaits).length) return null;
+  return { run, graph, checkpoint };
+}
+
+/** A cursor repair is bound to the saved occurrence even across a missed cron slot. */
+export function recoveredGraphScheduleOccurrence(automation: Automation): string | null {
+  const saved = scheduleCheckpoint(automation);
+  if (!saved || !automation.nextRunAt) return null;
+  const row = getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id = ? AND kind = ?
+    ORDER BY seq DESC LIMIT 1`).get(saved.run.id, SCHEDULE_RECOVERY_EVENT) as { payload_json: string } | undefined;
+  if (!row) return null;
+  try {
+    const receipt = JSON.parse(row.payload_json);
+    return receipt.action === "resume_independent_nodes" && receipt.nextRunAt === automation.nextRunAt
+      && receipt.checkpointDigest === saved.checkpoint.checkpointDigest
+      && receipt.graphDigest === saved.run.graph_digest && receipt.occurrenceId === saved.run.occurrence_id
+      ? saved.run.occurrence_id : null;
+  } catch { return null; }
+}
+
+/**
+ * Upgrade old enabled/NULL schedule cursors and stop timer-only quarantine
+ * loops. This never reconciles a mutation or changes a checkpoint. The existing
+ * effect-observation sweep remains responsible for exact external evidence;
+ * its successful reconciliation restores the clock. Other automations and
+ * independent nodes keep their own execution authority.
+ */
+export function recoverGraphScheduleCursors(now = new Date()): Array<{ automationId: string; action: string }> {
+  const db = getDb();
+  const candidates = db.prepare(`SELECT id FROM automations WHERE enabled = 1
+    AND COALESCE(trigger_type, 'schedule') = 'schedule'
+    AND (next_run_at IS NULL OR next_run_at <= ?) AND lease_owner IS NULL
+    ORDER BY created_at LIMIT 2000`).all(now.toISOString()) as Array<{ id: string }>;
+  const changed: Array<{ automationId: string; action: string }> = [];
+  for (const candidate of candidates) {
+    try {
+      db.transaction(() => {
+        const automation = getAutomation(candidate.id);
+        if (!automation?.enabled || (automation.triggerType ?? "schedule") !== "schedule") return;
+        const policy = db.prepare("SELECT end_at, max_runs, run_count FROM automations WHERE id = ?")
+          .get(automation.id) as { end_at: string | null; max_runs: number | null; run_count: number } | undefined;
+        if (!policy || (policy.end_at && Date.parse(policy.end_at) <= now.getTime())
+            || (policy.max_runs != null && policy.run_count >= policy.max_runs)) return;
+        const saved = scheduleCheckpoint(automation, true);
+        if (!saved) return;
+        const graphRevised = saved.revisedGraph === true;
+        const { run, graph, checkpoint } = saved;
+        const heldNodeIds = [...new Set([...checkpoint.inFlightNodeIds, ...checkpoint.ambiguousNodeIds])].sort();
+        // Project only replay safety already proved by the same kernel helper.
+        // Do not turn missing history into permission to retry a held effect.
+        const projection = structuredClone(checkpoint);
+        const replaySafeNodeIds = (graphRevised ? [] : reconcileReadOnlyInterruptedAgentNodes(projection, run.id, graph))
+          .filter((nodeId) => (checkpoint.toolReceipts[nodeId]?.length ?? 0) > 0
+            && Boolean(db.prepare("SELECT 1 FROM run_events WHERE run_id = ? AND node_id = ? AND kind = 'mcp_tool-use' LIMIT 1")
+              .get(run.id, nodeId)));
+        const replaySafe = new Set(replaySafeNodeIds);
+        projection.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((id) => !replaySafe.has(id));
+        projection.inFlightNodeIds = checkpoint.inFlightNodeIds.filter((id) => !replaySafe.has(id));
+        const runnableNodeIds = graphRevised ? [] : graphCheckpointRunnableNodes(graph, projection);
+        const observationOnly = heldNodeIds.length > 0 && runnableNodeIds.length === 0;
+        // Empty completed occurrences and ordinary future schedules have no repair
+        // authority here. A ready cursor is never advanced or fired twice.
+        if (!observationOnly && (automation.nextRunAt !== null || !runnableNodeIds.length)) return;
+        const action = observationOnly ? "observe_quarantined_effects" : "resume_independent_nodes";
+        const nextRunAt = observationOnly ? null : now.toISOString();
+        const sourceEventId = `schedule-recovery:${checkpoint.checkpointDigest}:${action}:${nextRunAt ?? "hold"}`;
+        const prior = db.prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind = ?
+          AND json_extract(payload_json, '$.checkpointDigest') = ?
+          AND json_extract(payload_json, '$.action') = ? LIMIT 1`)
+          .get(run.id, SCHEDULE_RECOVERY_EVENT, checkpoint.checkpointDigest, action);
+        if (prior && automation.nextRunAt === nextRunAt) return;
+        const update = db.prepare(`UPDATE automations SET next_run_at = ?
+          WHERE id = ? AND enabled = 1 AND lease_owner IS NULL AND next_run_at IS ?
+          AND NOT EXISTS (SELECT 1 FROM automation_runs WHERE automation_id = ? AND status = 'running')`)
+          .run(nextRunAt, automation.id, automation.nextRunAt, automation.id);
+        if (update.changes !== 1) return;
+        recordRunEvent({ runId: run.id, automationId: automation.id, kind: SCHEDULE_RECOVERY_EVENT, sourceEventId,
+          payload: { schemaVersion: "agentlas.graph-schedule-recovery.v1", action,
+            reasonCode: graphRevised ? "graph_definition_reconciliation_pending"
+              : observationOnly ? "graph_effect_observation_pending" : "graph_schedule_cursor_missing",
+            graphRevised,
+            occurrenceId: run.occurrence_id, graphDigest: run.graph_digest, checkpointDigest: checkpoint.checkpointDigest,
+            priorNextRunAt: automation.nextRunAt, nextRunAt, heldNodeIds, runnableNodeIds, replaySafeNodeIds,
+            checkpointPreserved: true, executionConsumed: false } });
+        changed.push({ automationId: automation.id, action });
+      }).immediate();
+    } catch (error) {
+      // One damaged historical occurrence must not starve other schedules.
+      console.warn(`[automation] graph schedule recovery skipped (${candidate.id}):`, error);
+    }
+  }
+  for (const row of changed) emitDesktopStoreChange({ entity: "automation", id: row.automationId });
+  return changed;
 }

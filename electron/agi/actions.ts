@@ -79,9 +79,9 @@ export interface AgiExecutorDeps {
   goal(goalId: string): AgiGoalView | null;
   /** continueGoalForAlive (blocked-goal-sweep.ts) — the existing continuation path. */
   continueGoal(runId: string, expectedVersion: number): { action: string; detail: string };
-  /** settleUncertainAttemptsByObservation with verdict "done" and the later run as the observation. */
+  /** Reuse Main's validated observation receipt for exactly these already-settled attempts. */
   settleUncertain(runId: string, input: { attemptIds: string[]; evidence: string; evidenceRunId: string }): void;
-  /** A later, in-scope run whose host receipt (tool ledger / final) covers the uncertain attempts. */
+  /** An in-scope Main observation receipt; an unrelated successful tool is not proof. */
   resolveEvidence(goalId: string, ref: string): { runId: string; summary: string } | null;
   team?: {
     create(chatId: string, permission: AgiGoalView["permission"], input: { name: string; role?: string; personality?: string }): { memberId: string; created: boolean };
@@ -138,10 +138,10 @@ export class AgiActionExecutor {
   }
 
   /** A model attempt settled after the monitor recorded "dispatched": write its end onto the state's attempt row. */
-  recordAttemptResult(goalId: string, stateDigest: string, result: { outcome: string; code?: string }): void {
+  recordAttemptResult(goalId: string, stateDigest: string, result: { outcome: string; code?: string }, attempt?: number): void {
     try {
-      this.deps.db.prepare("UPDATE agi_unblock_attempts SET outcome = ?, code = ?, result_json = ?, at_ms = ? WHERE goal_id = ? AND state_digest = ?")
-        .run(result.outcome, result.code ?? null, JSON.stringify(result), this.deps.now(), goalId, stateDigest);
+      this.deps.db.prepare("UPDATE agi_unblock_attempts SET outcome = ?, code = ?, result_json = ?, at_ms = ? WHERE goal_id = ? AND state_digest = ? AND code = 'agi.model-attempt-dispatched' AND (? IS NULL OR incident_id IN (SELECT id FROM agi_incidents WHERE attempts=?))")
+        .run(result.outcome, result.code ?? null, JSON.stringify(result), this.deps.now(), goalId, stateDigest, attempt ?? null, attempt ?? null);
     } catch { /* table absent in a bare executor (contracts) */ }
   }
 
@@ -167,6 +167,11 @@ export class AgiActionExecutor {
   execute(request: AgiActionRequest): AgiActionReceipt {
     const replay = request && typeof request.actionId === "string" ? this.receipt(request.actionId) : null;
     if (replay) return { ...replay, replayed: true };
+    // A previously claimed action can have an unknown external effect. Never execute it again.
+    if (request && typeof request.actionId === "string" && this.deps.db.prepare(
+      "SELECT 1 FROM agi_action_receipts WHERE action_id=? AND status='claimed'").get(request.actionId)) {
+      return { actionId: request.actionId, action: request.action, ok: false, code: "agi.action.in-flight" };
+    }
     // A refused precondition is recorded (replay-stable) with attempt 0: it was never executed, so it counts neither
     // toward the per-attempt cap nor the circuit breaker nor G1.
     const refuse = (code: string, detail?: Record<string, unknown>): AgiActionReceipt => this.settle(request, { actionId: String(request?.actionId ?? ""), action: String(request?.action ?? ""), ok: false, code, ...(detail ? { detail } : {}) }, 0);
@@ -212,9 +217,12 @@ export class AgiActionExecutor {
       if (asked) return refuse("agi.ask.already-asked");
     }
     // 7. durable claim, then the effect
-    this.deps.db.prepare(`INSERT INTO agi_action_receipts(action_id,incident_id,goal_id,attempt,action,status,created_at_ms)
-      VALUES (?,?,?,?,?,'claimed',?) ON CONFLICT(action_id) DO NOTHING`)
-      .run(request.actionId, incident.id, goal.goalId, request.attempt, request.action, this.deps.now());
+    const claimed = this.deps.db.prepare(`INSERT INTO agi_action_receipts(action_id,incident_id,goal_id,attempt,action,status,created_at_ms)
+      SELECT ?,?,?,?,?,'claimed',? WHERE NOT EXISTS
+        (SELECT 1 FROM agi_action_receipts WHERE goal_id=? AND action=? AND status='claimed')
+      ON CONFLICT(action_id) DO NOTHING`)
+      .run(request.actionId, incident.id, goal.goalId, request.attempt, request.action, this.deps.now(), goal.goalId, request.action);
+    if (claimed.changes !== 1) return this.receipt(request.actionId) ?? { actionId: request.actionId, action: request.action, ok: false, code: "agi.action.in-flight" };
     let result: AgiActionReceipt;
     try {
       result = this.run(request, goal, incident.id);

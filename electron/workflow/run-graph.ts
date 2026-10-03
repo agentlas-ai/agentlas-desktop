@@ -4936,26 +4936,11 @@ export async function runGraph(
         });
       running.set(node.id, p);
     }
-    if (running.size > 0 && [...running.keys()].every((id) => graphNodeById.get(id)?.type === "eval")) {
-      const readyWork = ordered.some((node) => node.type !== "eval" && status.get(node.id) === "pending"
-        && inboundResolved(node.id) && !shouldSkip(node.id));
-      if (!readyWork) {
-        for (const nodeId of [...running.keys()]) {
-          backgroundCheckNodes.add(nodeId);
-          checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== nodeId);
-          status.set(nodeId, "pending");
-          // Persist pending now; the late check writes only its own child events.
-          checkpointGraphRunNode(runId, nodeId, "pending", syncCheckpoint());
-          running.delete(nodeId);
-          nodeFailures[nodeId] ??= { code: "VERIFICATION_PENDING", reason: "This result is being checked in the background.",
-            nextAction: "Consume the background check receipt on the next turn." };
-          tryRecordRunEvent({ runId: `${runId}:check:${nodeId}`, automationId: automation.id, nodeId,
-            kind: "workflow_background_check_started", payload: { sourceRunId: runId, pending: true } });
-        }
-        ok = false;
-        error ??= "graph_verification_pending";
-      }
-    }
+    // A terminal check still owns this occurrence until it settles or its
+    // existing node timeout/Stop boundary fires. Detaching the last eval here
+    // left VERIFICATION_PENDING checkpoints whose next run launched the same
+    // check again without ever consuming its result. Independent work keeps
+    // its separate slot above; the normal join below durably seals the check.
     if (running.size === 0) {
       if (Object.keys(checkpoint!.loginWaits).length > 0) break;
       const stillPending = ordered.some((n) => status.get(n.id) === "pending");

@@ -94,6 +94,15 @@ export interface AgiTacticFact {
 
 export interface AgiBlockerFacts {
   goalId: string;
+  /** Host-only wake identity; no message or tool payload is included. */
+  chatId?: string | null;
+  progress?: { ownerInputId: string | null; completedToolId: string | null; authority?: string; checkpoint?: string | null };
+  /** An admitted provider, observer, or worker already owns this goal's work. */
+  repairInFlight?: boolean;
+  /** Exact host schedule transition; not idle time or a retry of an effect. */
+  nextWakeAtMs?: number;
+  /** Strict action rebase boundary, separate from cost/wake identity. */
+  fenceState?: string;
   runId: string | null;
   runVersion: number | null;
   /** long_runs.status */
@@ -173,11 +182,14 @@ function signalKey(signal: AgiBlockerSignal): Record<string, unknown> {
   }
 }
 
-/** The exact blocked state. Same digest = same state = at most one unblock attempt (R6). */
-export function agiBlockerStateDigest(facts: Pick<AgiBlockerFacts, "goalId" | "runId" | "status" | "pauseReason" | "blockedReason" | "signals">): string {
+/** The exact blocked state. Same digest = same incident and durable retry history; counter/timestamp churn is not progress. */
+export function agiBlockerStateDigest(facts: Pick<AgiBlockerFacts, "goalId" | "runId" | "status" | "pauseReason" | "blockedReason" | "signals" | "progress" | "tactics" | "blockedNodeId">): string {
   const signals = facts.signals.map(signalKey).map((entry) => JSON.stringify(entry)).sort();
   return sha({ schema: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, runId: facts.runId, status: facts.status,
-    pauseReason: facts.pauseReason, blockedReason: facts.blockedReason, signals });
+    pauseReason: facts.pauseReason, blockedReason: facts.blockedReason, signals,
+    progress: facts.progress ?? null, blockedNodeId: facts.blockedNodeId ?? null,
+    tactics: (facts.tactics ?? []).map(t => ({ id: t.nodeId, status: t.status, deps: [...(t.dependsOn ?? [])].sort() }))
+      .sort((a, b) => a.id.localeCompare(b.id)) });
 }
 
 /**

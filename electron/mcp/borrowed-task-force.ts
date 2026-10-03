@@ -7101,9 +7101,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
   // 이미 있는데 리터럴 true를 반환하면 전원 실패해도 완전 성공으로 보고된다. 같은 파일의
   // Hub team 경로(workerResults.every)와 동일한 집계로 맞춘다 — 중첩 group/team 전파도 함께 정상화.
   return {
-    ok: p.requireAllWorkers
-      ? taskForceExecutionVerified
-      : results.every((result) => result.ok) && !requiredSurfaceMissing,
+    ok: taskForceExecutionVerified,
     text: displayText,
     tokens: final.tokens,
     receipt,

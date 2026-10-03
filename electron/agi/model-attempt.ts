@@ -1,7 +1,7 @@
 /**
  * AGI goal manager, P4 — the model-backed unblock attempt (plan §3.3, R8/R4/R6).
  *
- * One bounded real model invocation per exact blocked state, on the judgment no-tools path (the same isolation the
+ * One bounded model attempt per claimed incident retry, on the judgment no-tools path (the same isolation the
  * Alive light wake uses: no shell, no MCP, strict output schema). The model gets fresh evidence first (R8): the host
  * reads the P2 tools for this goal and packs the capped, redacted slices into the prompt. It may ask for up to
  * AGI_MAX_EXTRA_READS more P2 reads once (a second and last round). It answers only with typed P3 actions, which Main
@@ -53,6 +53,7 @@ export function ensureAgiModelAttemptSchema(db: Database.Database): void {
     runtime_json TEXT, rounds INTEGER NOT NULL DEFAULT 0, input_tokens INTEGER, output_tokens INTEGER,
     actions_json TEXT NOT NULL DEFAULT '[]' CHECK(json_valid(actions_json)), code TEXT,
     created_at_ms INTEGER NOT NULL, settled_at_ms INTEGER)`);
+  db.exec("CREATE INDEX IF NOT EXISTS idx_agi_model_running_goal ON agi_model_attempts(goal_id) WHERE status='running'");
 }
 
 /** Strict JSON schema for the model answer (every property required for strict-mode runtimes). */
@@ -82,8 +83,10 @@ Your job: clear the block or route around it so the goal keeps moving, choosing 
   failed), merge duplicates within a strategy, retire, or reorder. Never change intent.
 - If the plan needs a role nobody on the team has, create_teammate (then invite_teammate in group chats) and
   dispatch_teammate the concrete work bound to an active tactic id. Teammates may be created without asking.
-- Uncertain outward effects: never redo them; settle_uncertain_effect only with an evidenceRef "run:<runId>[:tool:<name>]"
-  from a later run in this chat that shows the effect.
+- Uncertain outward effects: never redo them. settle_uncertain_effect may reuse only an evidenceRef
+  "run:<observationRunId>" whose Main observation receipt already confirmed exactly those attemptIds.
+  A later successful tool, browser read or final message is not proof. Independent work can continue while the
+  read-only observation controller checks the original targets.
 - A login wall: run_login_recovery(domain) first. A dead Agentlas Browser: restart_agentlas_browser. The app itself:
   request_app_restart (asks once; never restarts by itself).
 - A tool path that crashed: retry_node_with(nodeId, capability, path) naming one installed path from the evidence.
@@ -158,7 +161,23 @@ export function agiEvidenceReads(input: AgiUnblockInput): Array<{ tool: string; 
 
 function estimateTokens(text: string): number { return Math.ceil(Buffer.byteLength(text, "utf8") / 3); }
 
+const activeRepairs = new WeakMap<object, Set<string>>();
+
 export class AgiModelAttempt {
+  isRunning(goalId: string): boolean {
+    return activeRepairs.get(this.deps.db)?.has(goalId) === true || Boolean(this.deps.db.prepare(
+      "SELECT 1 FROM agi_model_attempts WHERE goal_id=? AND status='running' LIMIT 1").get(goalId));
+  }
+
+  async run(input: AgiUnblockInput, preActions: Array<{ action: string; result: string }> = []): Promise<AgiUnblockResult & { attemptId: string }> {
+    if (this.isRunning(input.goalId)) return { attemptId: "", outcome: "rested", code: "agi.model.in-flight" };
+    const active = activeRepairs.get(this.deps.db) ?? new Set<string>();
+    activeRepairs.set(this.deps.db, active);
+    active.add(input.goalId);
+    try { return await this.runAttempt(input, preActions); }
+    finally { active.delete(input.goalId); }
+  }
+
   constructor(private readonly deps: AgiModelAttemptDeps) { ensureAgiModelAttemptSchema(deps.db); }
 
   private evidenceBlock(goalId: string, reads: Array<{ tool: string; args: Record<string, unknown> }>): string {
@@ -172,15 +191,20 @@ export class AgiModelAttempt {
    * Runs the attempt to its end: evidence → model (≤2 rounds) → typed actions. Never throws; the result says what
    * happened. `preActions` are deterministic actions the handler already executed this attempt (shown to the model).
    */
-  async run(input: AgiUnblockInput, preActions: Array<{ action: string; result: string }> = []): Promise<AgiUnblockResult & { attemptId: string }> {
+  private async runAttempt(input: AgiUnblockInput, preActions: Array<{ action: string; result: string }> = []): Promise<AgiUnblockResult & { attemptId: string }> {
     const d = this.deps;
     const incident = d.executor.incidents.get(input.incidentId);
     const attemptNo = Math.max(1, incident?.attempts ?? 1);
     const attemptId = `agi-model:${input.incidentId.slice(-24)}:${input.stateDigest.slice(-16)}:${attemptNo}`;
-    const existing = d.db.prepare("SELECT status, code FROM agi_model_attempts WHERE id = ?").get(attemptId) as { status: string; code: string | null } | undefined;
-    if (existing) return { attemptId, outcome: "failed", code: "agi.model.attempt-already-ran" };
-    d.db.prepare("INSERT INTO agi_model_attempts(id,goal_id,incident_id,state_digest,status,created_at_ms) VALUES (?,?,?,?,'running',?)")
-      .run(attemptId, input.goalId, input.incidentId, input.stateDigest, d.now());
+    const claim = d.db.transaction(() => {
+      const existing = d.db.prepare("SELECT status FROM agi_model_attempts WHERE id=?").get(attemptId);
+      if (existing) return "agi.model.attempt-already-ran";
+      if (d.db.prepare("SELECT 1 FROM agi_model_attempts WHERE goal_id=? AND status='running' LIMIT 1").get(input.goalId)) return "agi.model.in-flight";
+      d.db.prepare("INSERT INTO agi_model_attempts(id,goal_id,incident_id,state_digest,status,created_at_ms) VALUES (?,?,?,?,'running',?)")
+        .run(attemptId, input.goalId, input.incidentId, input.stateDigest, d.now());
+      return null;
+    }).immediate();
+    if (claim) return { attemptId, outcome: "rested", code: claim };
     let usageComplete = true;
     const settle = (status: string, code: string, extra: { runtime?: unknown; rounds?: number; input?: number; output?: number; actions?: unknown[] } = {}) => {
       d.db.prepare(`UPDATE agi_model_attempts SET status=?, code=?, runtime_json=?, rounds=?, input_tokens=?, output_tokens=?, actions_json=?, settled_at_ms=?
@@ -212,6 +236,10 @@ export class AgiModelAttempt {
     let used: AgiModelCandidate | null = null;
     let rounds = 0;
     for (let round = 1; round <= 2; round += 1) {
+      if (input.refreshFence && !input.refreshFence()) {
+        settle("refused", "agi.action.state-changed", { rounds, input: inputTokens, output: outputTokens });
+        return { attemptId, outcome: "rested", code: "agi.action.state-changed", tokens: tokensUsed };
+      }
       const estimate = estimateTokens(SYSTEM_PROMPT) + estimateTokens(userPrompt) + AGI_MODEL_OUTPUT_TOKENS;
       const refusal = admitAgiTokens(d.db, { goalId: input.goalId, nowMs: d.now(), attemptTokensSoFar: tokensUsed, estimate });
       if (refusal) {
@@ -252,10 +280,18 @@ export class AgiModelAttempt {
     let fence = { goalId: input.goalId, runId: input.runId ?? "", runVersion: input.runVersion ?? -1 };
     const receipts: AgiActionReceipt[] = [];
     ordered.forEach((entry, index) => {
+      if (input.refreshFence) {
+        const refreshed = input.refreshFence();
+        if (!refreshed) {
+          receipts.push({ actionId: `${attemptId}:${index}:${entry.action}`, action: entry.action, ok: false, code: "agi.action.state-changed" });
+          return;
+        }
+        fence = refreshed;
+      }
       const receipt = d.executor.execute({ schema: AGI_ACTION_SCHEMA, actionId: `${attemptId}:${index}:${entry.action}`, incidentId: input.incidentId,
         attempt: attemptNo, fence, action: entry.action, args: entry.args, attemptTokensSoFar: tokensUsed });
       receipts.push(receipt);
-      if (receipt.ok) {
+      if (receipt.ok && !input.refreshFence) {
         const version = d.executor.currentVersion(input.goalId);
         if (version !== null) fence = { ...fence, runVersion: version };
       }

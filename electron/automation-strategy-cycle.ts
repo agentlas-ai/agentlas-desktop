@@ -282,7 +282,21 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
         });
         if (!current()) { unavailable(input, "reflection_source_changed"); return; }
         if (reflection.status !== "proposal") {
-          unavailable(input, reflection.reason);
+          // Preserve the value-free runner evidence instead of collapsing
+          // auth, timeout and no-dispatch failures into the same opaque reason.
+          const receipt = (value: NonNullable<typeof reflection.runtimeReceipt>) => ({
+            selection: { kind: value.selection.kind, backend: value.selection.backend ?? null,
+              model: value.selection.model ?? null },
+            route: value.route, execution: value.execution, fingerprint: value.fingerprint,
+            ...(value.capability ? { capability: value.capability } : {}),
+          });
+          unavailable(input, reflection.reason, {
+            ...(reflection.runtimeReceipt ? { runtimeReceipt: receipt(reflection.runtimeReceipt) } : {}),
+            ...(reflection.attempts ? { attempts: reflection.attempts.map((attempt) => ({
+              runtimeReceipt: receipt(attempt.runtimeReceipt), outcome: attempt.outcome,
+              elapsedMs: attempt.elapsedMs, ...(attempt.failureKind ? { failureKind: attempt.failureKind } : {}),
+            })) } : {}),
+          });
         } else {
           const proposal = createAutomationStrategyProposalForRun({
             actor: "main",

@@ -13,7 +13,7 @@ import { getDb } from "../store/db";
 import { appendChatMessage } from "../store/chats";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { getLongRunByGoalId, settleUncertainAttemptsByObservation } from "../store/long-runs";
+import { EFFECT_OBSERVATION_EVENT_KIND, getLongRunAttemptReview, getLongRunByGoalId, latestLongRunAttemptSafeEpoch } from "../store/long-runs";
 import { readGoalPlan, updateGoalPlanNode, insertGoalPlanNode, recordGoalPlanDecision } from "../store/goal-plans";
 import { recordPersistenceDecisionEvent } from "../store/run-events";
 import { continueGoalForAlive } from "../long-run/blocked-goal-sweep";
@@ -66,6 +66,34 @@ function planView(goalId: string): AgiPlanView | null {
     status: tactic.status, ord: tactic.ord, description: tactic.description, doneWhen: tactic.done_when, failures: tactic.failures })) };
 }
 
+/** A generic successful tool in a later turn does not prove an earlier
+ * mutation. AGI may reuse only Main's exact, validated observation receipt;
+ * new effects are reconciled by the read-only observation controller. */
+export function readAgiObservationReceipt(runId: string, observationRunId: string, attemptIds?: readonly string[]):
+  { runId: string; summary: string } | null {
+  const epoch = latestLongRunAttemptSafeEpoch(runId);
+  if (!epoch) return null;
+  const row = getDb().prepare(`SELECT payload_json FROM long_run_events
+    WHERE run_id=? AND seq=? AND kind=? AND actor_kind='host'`).get(runId, epoch.eventSeq, EFFECT_OBSERVATION_EVENT_KIND) as
+    { payload_json: string } | undefined;
+  if (!row) return null;
+  try {
+    const payload = JSON.parse(row.payload_json);
+    if (payload.action !== "settle_uncertain_attempts" || payload.observationInvocationRunId !== observationRunId
+      || typeof payload.observationDigest !== "string" || payload.observationDigest.startsWith("agi-evidence:")
+      || payload.attestation?.verdict !== "done"
+      || payload.attestation?.externalOutcomeProof !== "observed_read_only_by_model"
+      || typeof payload.attestation?.evidence !== "string" || !payload.attestation.evidence.trim()
+      || getLongRunAttemptReview(runId).attemptIds.some(id => epoch.attemptIds.includes(id))) return null;
+    // Safe epochs cover the cumulative immutable ledger; this observation
+    // proves only its exact newly reviewed set, not every historical attempt.
+    const reviewed: string[] = payload.attestation.reviewedAttemptIds;
+    if (attemptIds && (new Set(attemptIds).size !== attemptIds.length
+      || JSON.stringify([...attemptIds].sort()) !== JSON.stringify([...reviewed].sort()))) return null;
+    return { runId: observationRunId, summary: payload.attestation.evidence.slice(0, 500) };
+  } catch { return null; }
+}
+
 export function createAgiExecutor(): AgiActionExecutor {
   const deps: AgiExecutorDeps = {
     db: getDb(),
@@ -77,19 +105,17 @@ export function createAgiExecutor(): AgiActionExecutor {
     },
     continueGoal: (runId, version) => continueGoalForAlive(runId, version, invocationService),
     settleUncertain: (runId, input) => {
-      settleUncertainAttemptsByObservation(runId, { attemptIds: input.attemptIds, verdict: "done", evidence: input.evidence,
-        observationInvocationRunId: input.evidenceRunId, observationDigest: `agi-evidence:${input.evidenceRunId}` });
+      if (!readAgiObservationReceipt(runId, input.evidenceRunId, input.attemptIds)) {
+        throw new Error("agi.settle.target-proof-required");
+      }
+      // The host already settled exactly these historical attempts. Reuse that
+      // receipt without writing another acknowledgment or clearing a new set.
     },
-    // A later run in the goal's own chat with a successful outward tool call: run:<runId>[:tool:<name>].
     resolveEvidence: (goalId, ref) => {
-      const match = /^run:([A-Za-z0-9._:-]{1,160}?)(?::tool:([a-z0-9._-]{1,80}))?$/i.exec(ref);
+      const match = /^run:([A-Za-z0-9._:-]{1,160})$/i.exec(ref);
       const run = getLongRunByGoalId(goalId);
-      if (!match || !run?.rootChatId) return null;
-      const row = getDb().prepare(`SELECT run_id, json_extract(payload_json, '$.toolName') AS tool FROM run_events WHERE run_id = ? AND chat_id = ?
-        AND kind = 'mcp_tool-use' AND COALESCE(json_extract(payload_json, '$.toolIsError'), 0) = 0
-        ${match[2] ? "AND json_extract(payload_json, '$.toolName') LIKE ?" : ""} ORDER BY seq DESC LIMIT 1`)
-        .get(...[match[1], run.rootChatId, ...(match[2] ? [`%${match[2]}%`] : [])]) as { run_id: string; tool: string } | undefined;
-      return row ? { runId: row.run_id, summary: `later run ${row.run_id} recorded ${row.tool} without error` } : null;
+      if (!match || ref.includes(":tool:") || !run?.rootChatId) return null;
+      return readAgiObservationReceipt(run.id, match[1]);
     },
     team: {
       create: (chatId, permission, input) => {

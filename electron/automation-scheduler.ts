@@ -244,7 +244,7 @@ import {
 import { withRunPriority } from "./runtime/run-priority";
 import { runMainBackgroundTask, captureMainRootContinuation, admitMainAutomation, withMainScheduledRoot, takeMainInvocationAdmission, MainInvocationLifetime, type MainInvocationAdmission } from "./runtime/scheduled-root-context";
 import { synthesizeLegacyGraph } from "./automation-emitter";
-import { recoverReadOnlySuspendedGraphs, suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
+import { recoverGraphScheduleCursors, recoveredGraphScheduleOccurrence, recoverReadOnlySuspendedGraphs, suspendAutomationForGraphReconciliation } from "./store/graph-reconciliation";
 import { getSource as getMarketSource } from "./marketplace";
 import {
   buildStrategyDirective,
@@ -333,6 +333,8 @@ export function goalContinuationRunContext(a: Automation): string | undefined {
 export function scheduledOccurrenceIdForDueRun(a: Automation): string {
   const scheduledFor = a.nextRunAt;
   if (!scheduledFor) return `schedule:${a.id}:${randomUUID()}`;
+  const recoveredOccurrence = recoveredGraphScheduleOccurrence(a);
+  if (recoveredOccurrence) return recoveredOccurrence;
   const previousOccurrenceId = getLatestGraphRunOccurrenceId(a.id);
   const occurrencePrefix = `schedule:${a.id}:`;
   if (previousOccurrenceId?.startsWith(occurrencePrefix)) {
@@ -2348,6 +2350,11 @@ function tick(): void {
     }
   } catch (err) {
     console.error("[automation] read-only graph recovery failed:", err);
+  }
+  try {
+    recoverGraphScheduleCursors();
+  } catch (err) {
+    console.error("[automation] graph schedule recovery failed:", err);
   }
   try {
     sweepAutomationEffectObservations(automationObservationRuntime);

@@ -244,7 +244,7 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
 
 /** The mandate remains open after verified work. A quiet, durable observation
  * cycle is the fallback; it is not permission to repeat an external action. */
-export function registerOngoingGoalCycle(input: { goalId: string; invocationRunId: string; hasTransientAttachments?: boolean; now?: number }): GoalWaitSubscription {
+export function registerOngoingGoalCycle(input: { goalId: string; invocationRunId: string; hasTransientAttachments?: boolean; now?: number; usefulProgress?: boolean }): GoalWaitSubscription {
   const now = input.now ?? Date.now();
   // Keep the plan read, receipt validation and wait insertion within one DB
   // transaction so another plan revision cannot sneak between them.
@@ -261,9 +261,10 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
     const justObserved = priorWait?.state === "dispatched"
       && priorWait.successorInvocationId === input.invocationRunId
       && priorWait.observationOnly === true;
-    const unresolvedPriorEffects = Boolean(run && getDb().prepare(
-      "SELECT 1 FROM long_run_worker_attempts WHERE run_id=? AND side_effect_state='uncertain' LIMIT 1",
-    ).get(run.id));
+    // Immutable historical rows retain uncertainty for audit. A valid Main/
+    // user SafeEpoch settles custody in the existing projection, not by erasing
+    // those rows. Invalid receipts and live attempts remain unresolved.
+    const unresolvedPriorEffects = Boolean(run && unsettledLongRunAttempts(run.id).length);
     const stalled = run != null && ownsHostGoalLoop(run.surface) && revision?.lifecycle === "ongoing"
       && run.stallStreak >= run.stallWindow;
     const progressKey = stalled ? run.lastProgressKey ?? `one-host:unknown:revision:${revision!.revision}` : undefined;
@@ -276,10 +277,10 @@ export function registerOngoingGoalCycle(input: { goalId: string; invocationRunI
       ? new Date(now + (recoveryMode === "stall_replan" ? 60_000 : backoffMs)).toISOString()
       : ongoingCycleWakeAt({ now, runId: run?.id ?? "", goalRevision: revision?.revision ?? -1,
       invocationRunId: input.invocationRunId, plan: run ? latestRuntimePlan(run.id) : null,
-      checkpoint: producerCheckpoint, effectBoundary: boundary });
+      checkpoint: producerCheckpoint, effectBoundary: boundary, usefulProgress: input.usefulProgress });
     return registerGoalWaitSubscription({ ...input,
       ...(recoveryMode ? { recoveryMode, recoveryProgressKey: progressKey } : {}),
-      observationOnly: !justObserved || unresolvedPriorEffects,
+      observationOnly: (!justObserved && input.usefulProgress !== true) || unresolvedPriorEffects,
       projectDir: producerCheckpoint?.invocationRunId === input.invocationRunId ? producerCheckpoint.workspacePath : null,
       now, intent: {
       schemaVersion: "agentlas.goal-wait-intent.v1", subject: { kind: "timer", notBefore },

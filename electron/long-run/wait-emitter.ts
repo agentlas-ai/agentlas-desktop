@@ -57,6 +57,7 @@ export function parseGoalWaitIntent(text: string): { text: string; request: Pars
 
 export function goalWaitProtocol(lifecycle?: "finite" | "ongoing" | null): string {
   return `When this Goal must wait for an already observed Desktop invocation or an existing artifact input to change, request a durable wait and end this turn. Do not repeatedly call a model to poll unchanged state. Waits are checked only while the app is running. Do not promise a wait was accepted; the host returns a durable registration receipt. Do not declare the Goal complete in the same response. Only use actual IDs already observed; never invent a subject. CI, arbitrary URLs and other external jobs currently need their own supported monitor and cannot be represented as an invocation ID.
+This is a response block consumed by Desktop Main, not an MCP tool to search for or call.
 Emit at most one block:
 \`\`\`agentlas-goal-wait
 {"schemaVersion":"agentlas.goal-wait-intent.v1","subject":{"kind":"invocation","invocationRunId":"observed ID","chatId":"observed chat ID"},"condition":"terminal","nextAction":"What to inspect after it settles","deadline":null}

@@ -412,95 +412,153 @@ function longRunAttemptSetDigest(runId: string, throughEventSeq: number, receipt
  * unsettled. The event sequence is the epoch; attempt rows remain immutable
  * audit evidence. */
 export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafeEpochRecord | null {
-  const row = getDb().prepare(
-    `SELECT seq, payload_json FROM long_run_events
-     WHERE run_id = ? AND ((kind = 'run.user_control' AND actor_kind = 'user'
-         AND json_extract(payload_json, '$.action') = 'acknowledge_uncertain_attempts')
-       OR (kind = '${EFFECT_OBSERVATION_EVENT_KIND}' AND actor_kind = 'host'
-         AND json_extract(payload_json, '$.action') = 'settle_uncertain_attempts'))
-     ORDER BY seq DESC LIMIT 1`,
-  ).get(runId) as { seq: number; payload_json: string } | undefined;
-  if (!row) return null;
-  try {
-    const payload = JSON.parse(row.payload_json) as {
-      attemptIds?: unknown;
-      attemptReceipts?: unknown;
-      safeEpoch?: { schemaVersion?: unknown; throughEventSeq?: unknown; attemptSetDigest?: unknown };
-      attestation?: { schemaVersion?: unknown; reviewedAttemptIds?: unknown; reviewedAttemptSetDigest?: unknown;
-        statement?: unknown; externalOutcomeProof?: unknown };
-    };
-    if (!Array.isArray(payload.attemptIds) || payload.attemptIds.some((id) => typeof id !== "string" || !id)) return null;
-    const attemptIds = [...payload.attemptIds].sort();
-    if (new Set(attemptIds).size !== attemptIds.length || JSON.stringify(attemptIds) !== JSON.stringify(payload.attemptIds)) return null;
-    if (!Array.isArray(payload.attemptReceipts) || payload.attemptReceipts.length !== attemptIds.length) return null;
-    // Older Resume handlers silently wrote otherwise-valid safe epochs. Keep
-    // their audit records, but do not let those legacy events authorize new
-    // automatic work without the explicit, exact user-review attestation.
-    const attestation = payload.attestation;
-    // Owner review and observed completion remain distinct from replay authority.
-    // Absence requires a revalidated host no-effect receipt; old model not_done
-    // reports remain audit data without authorizing another outward attempt.
-    const userAttested = attestation?.schemaVersion === "agentlas.uncertain-attempt-user-attestation.v1"
-      && attestation.statement === "user_says_external_outcomes_reviewed_before_new_work"
-      && attestation.externalOutcomeProof === "not_observed_by_host";
-    const observed = attestation?.schemaVersion === EFFECT_OBSERVATION_ATTESTATION_SCHEMA
-      && ((attestation.statement === "observed_external_outcome_done"
-        && attestation.externalOutcomeProof === "observed_read_only_by_model")
-        || (attestation.statement === EFFECT_RECEIPT_STATEMENT && attestation.externalOutcomeProof === EFFECT_RECEIPT_PROOF));
-    if (!attestation || (!userAttested && !observed)
-      || !Array.isArray(attestation.reviewedAttemptIds)
-      || attestation.reviewedAttemptIds.length === 0
-      || attestation.reviewedAttemptIds.some((id) => typeof id !== "string" || !attemptIds.includes(id))
-      || new Set(attestation.reviewedAttemptIds).size !== attestation.reviewedAttemptIds.length
-      || typeof attestation.reviewedAttemptSetDigest !== "string"
-      || !/^sha256:[a-f0-9]{64}$/.test(attestation.reviewedAttemptSetDigest)) return null;
-    const receipts = payload.attemptReceipts as LongRunAcknowledgedAttemptReceipt[];
-    if (receipts.some((receipt) => !receipt || typeof receipt !== "object"
-      || typeof receipt.attemptId !== "string" || !attemptIds.includes(receipt.attemptId)
-      || !["completed", "failed", "interrupted", "cancelled", "uncertain"].includes(receipt.state)
-      || !["none", "committed", "uncertain"].includes(receipt.sideEffectState)
-      || typeof receipt.updatedAt !== "string" || !receipt.updatedAt
-      || (receipt.completedAt !== null && typeof receipt.completedAt !== "string")
-      || !Number.isSafeInteger(receipt.lastAttemptEventSeq) || receipt.lastAttemptEventSeq < 0)
-      || JSON.stringify(receipts.map((receipt) => receipt.attemptId)) !== JSON.stringify(attemptIds)) return null;
-    const safeEpoch = payload.safeEpoch;
-    if (safeEpoch?.schemaVersion !== "agentlas.long-run-attempt-safe-epoch.v1"
-      || !Number.isSafeInteger(safeEpoch.throughEventSeq) || Number(safeEpoch.throughEventSeq) < 0
-      || safeEpoch.throughEventSeq !== row.seq - 1
-      || safeEpoch.attemptSetDigest !== longRunAttemptSetDigest(runId, Number(safeEpoch.throughEventSeq), receipts)) return null;
-    const bound = getDb().prepare(
-      `SELECT a.id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
-         MIN(CASE WHEN e.kind = 'worker.attempt_started' THEN e.seq END) AS start_seq,
-         COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
-       FROM long_run_worker_attempts AS a
-       LEFT JOIN long_run_events AS e ON e.run_id = a.run_id
-         AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
-         AND json_extract(e.payload_json, '$.attemptId') = a.id
-       WHERE a.run_id = ? AND a.id IN (${attemptIds.map(() => "?").join(",") || "NULL"})
-       GROUP BY a.id`,
-    ).all(runId, ...attemptIds) as Array<{ id: string; state: LongRunAttemptState;
-      side_effect_state: "none" | "committed" | "uncertain"; updated_at: string; completed_at: string | null;
-      start_seq: number | null; last_attempt_event_seq: number }>;
-    const receiptById = new Map(receipts.map((receipt) => [receipt.attemptId, receipt]));
-    if (bound.length !== attemptIds.length || bound.some((attempt) => attempt.start_seq === null
-      || attempt.start_seq > Number(safeEpoch.throughEventSeq)
-      || attempt.last_attempt_event_seq > Number(safeEpoch.throughEventSeq)
-      || attempt.state !== receiptById.get(attempt.id)?.state
-      || attempt.side_effect_state !== receiptById.get(attempt.id)?.sideEffectState
-      || attempt.updated_at !== receiptById.get(attempt.id)?.updatedAt
-      || attempt.completed_at !== receiptById.get(attempt.id)?.completedAt
-      || attempt.last_attempt_event_seq !== receiptById.get(attempt.id)?.lastAttemptEventSeq)) return null;
-    if (attestation.statement === EFFECT_RECEIPT_STATEMENT) {
-      const targets = getDb().prepare(`SELECT id, invocation_run_id AS invocationRunId FROM long_run_worker_attempts
-        WHERE run_id = ? AND id IN (${attemptIds.map(() => "?").join(",") || "NULL"})`).all(runId, ...attemptIds) as
-        Array<{ id: string; invocationRunId: string | null }>;
-      if (targets.length !== attemptIds.length || !receiptSettlesAttempts(targets)) return null;
+  const db = getDb();
+  return db.transaction((): LongRunAttemptSafeEpochRecord | null => {
+    type EpochRow = { seq: number; kind: string; actor_kind: string; payload_json: string };
+    const epochFilter = `((kind = 'run.user_control' AND actor_kind = 'user'
+        AND json_extract(payload_json, '$.action') = 'acknowledge_uncertain_attempts')
+      OR (kind = '${EFFECT_OBSERVATION_EVENT_KIND}' AND actor_kind = 'host'
+        AND json_extract(payload_json, '$.action') = 'settle_uncertain_attempts'))`;
+    const row = db.prepare(`SELECT seq, kind, actor_kind, payload_json FROM long_run_events
+      WHERE run_id = ? AND ${epochFilter} ORDER BY seq DESC LIMIT 1`).get(runId) as EpochRow | undefined;
+    if (!row) return null;
+    try {
+      // Each cumulative entry needs a direct, typed review of the same immutable
+      // receipt. A later good observation cannot launder an older AGI guess.
+      const decodeEpoch = (entry: EpochRow) => {
+        try {
+          const payload = JSON.parse(entry.payload_json) as {
+            attemptIds?: unknown; attemptReceipts?: unknown; observationDigest?: unknown; observationInvocationRunId?: unknown;
+            safeEpoch?: { schemaVersion?: unknown; throughEventSeq?: unknown; attemptSetDigest?: unknown };
+            attestation?: { schemaVersion?: unknown; reviewedAttemptIds?: unknown; reviewedAttemptSetDigest?: unknown;
+              statement?: unknown; externalOutcomeProof?: unknown; verdict?: unknown };
+          };
+          if (!Array.isArray(payload.attemptIds) || !payload.attemptIds.length
+            || payload.attemptIds.some(id => typeof id !== "string" || !id)) return null;
+          const attemptIds = [...payload.attemptIds].sort() as string[];
+          const idSet = new Set(attemptIds);
+          if (idSet.size !== attemptIds.length || JSON.stringify(attemptIds) !== JSON.stringify(payload.attemptIds)
+            || !Array.isArray(payload.attemptReceipts) || payload.attemptReceipts.length !== attemptIds.length) return null;
+          const attestation = payload.attestation;
+          const userAttested = entry.kind === "run.user_control" && entry.actor_kind === "user"
+            && attestation?.schemaVersion === "agentlas.uncertain-attempt-user-attestation.v1"
+            && attestation.statement === "user_says_external_outcomes_reviewed_before_new_work"
+            && attestation.externalOutcomeProof === "not_observed_by_host";
+          const noEffect = attestation?.statement === EFFECT_RECEIPT_STATEMENT
+            && attestation.externalOutcomeProof === EFFECT_RECEIPT_PROOF && attestation.verdict === "not_done";
+          const observed = entry.kind === EFFECT_OBSERVATION_EVENT_KIND && entry.actor_kind === "host"
+            && typeof payload.observationDigest === "string" && Boolean(payload.observationDigest.trim())
+            && !payload.observationDigest.startsWith("agi-evidence:")
+            && typeof payload.observationInvocationRunId === "string" && Boolean(payload.observationInvocationRunId.trim())
+            && attestation?.schemaVersion === EFFECT_OBSERVATION_ATTESTATION_SCHEMA
+            && ((attestation.statement === "observed_external_outcome_done"
+              && attestation.externalOutcomeProof === "observed_read_only_by_model" && attestation.verdict === "done") || noEffect);
+          if (!attestation || (!userAttested && !observed)
+            || !Array.isArray(attestation.reviewedAttemptIds) || !attestation.reviewedAttemptIds.length
+            || attestation.reviewedAttemptIds.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS
+            || attestation.reviewedAttemptIds.some(id => typeof id !== "string" || !idSet.has(id))
+            || new Set(attestation.reviewedAttemptIds).size !== attestation.reviewedAttemptIds.length
+            || typeof attestation.reviewedAttemptSetDigest !== "string"
+            || !/^sha256:[a-f0-9]{64}$/.test(attestation.reviewedAttemptSetDigest)) return null;
+          const receipts = payload.attemptReceipts as LongRunAcknowledgedAttemptReceipt[];
+          if (receipts.some(receipt => !receipt || typeof receipt !== "object"
+            || typeof receipt.attemptId !== "string" || !idSet.has(receipt.attemptId)
+            || !["completed", "failed", "interrupted", "cancelled", "uncertain"].includes(receipt.state)
+            || !["none", "committed", "uncertain"].includes(receipt.sideEffectState)
+            || typeof receipt.updatedAt !== "string" || !receipt.updatedAt
+            || (receipt.completedAt !== null && typeof receipt.completedAt !== "string")
+            || !Number.isSafeInteger(receipt.lastAttemptEventSeq) || receipt.lastAttemptEventSeq < 0)
+            || JSON.stringify(receipts.map(receipt => receipt.attemptId)) !== JSON.stringify(attemptIds)) return null;
+          const safeEpoch = payload.safeEpoch;
+          if (safeEpoch?.schemaVersion !== "agentlas.long-run-attempt-safe-epoch.v1"
+            || !Number.isSafeInteger(safeEpoch.throughEventSeq) || Number(safeEpoch.throughEventSeq) < 0
+            || safeEpoch.throughEventSeq !== entry.seq - 1
+            || safeEpoch.attemptSetDigest !== longRunAttemptSetDigest(runId, Number(safeEpoch.throughEventSeq), receipts)
+            || receipts.some(receipt => receipt.lastAttemptEventSeq > Number(safeEpoch.throughEventSeq))) return null;
+          return { attemptIds, receipts, reviewedIds: attestation.reviewedAttemptIds as string[], noEffect: observed && noEffect,
+            throughEventSeq: Number(safeEpoch.throughEventSeq), attemptSetDigest: String(safeEpoch.attemptSetDigest) };
+        } catch { return null; }
+      };
+      const latest = decodeEpoch(row);
+      if (!latest) return null;
+      const { attemptIds } = latest;
+      const bound = db.prepare(
+        `SELECT a.id, a.invocation_run_id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
+           MIN(CASE WHEN e.kind = 'worker.attempt_started' THEN e.seq END) AS start_seq,
+           COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
+         FROM long_run_worker_attempts AS a
+         LEFT JOIN long_run_events AS e ON e.run_id = a.run_id
+           AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
+           AND json_extract(e.payload_json, '$.attemptId') = a.id
+         WHERE a.run_id = ? AND a.id IN (SELECT value FROM json_each(?))
+         GROUP BY a.id`,
+      ).all(runId, JSON.stringify(attemptIds)) as Array<{ id: string; invocation_run_id: string | null; state: LongRunAttemptState;
+        side_effect_state: "none" | "committed" | "uncertain"; updated_at: string; completed_at: string | null;
+        start_seq: number | null; last_attempt_event_seq: number }>;
+      const receiptById = new Map(latest.receipts.map(receipt => [receipt.attemptId, receipt]));
+      if (bound.length !== attemptIds.length || bound.some(attempt => attempt.start_seq === null
+        || attempt.start_seq > latest.throughEventSeq || attempt.last_attempt_event_seq > latest.throughEventSeq
+        || attempt.state !== receiptById.get(attempt.id)?.state
+        || attempt.side_effect_state !== receiptById.get(attempt.id)?.sideEffectState
+        || attempt.updated_at !== receiptById.get(attempt.id)?.updatedAt
+        || attempt.completed_at !== receiptById.get(attempt.id)?.completedAt
+        || attempt.last_attempt_event_seq !== receiptById.get(attempt.id)?.lastAttemptEventSeq)) return null;
+      const receiptKey = (receipt: LongRunAcknowledgedAttemptReceipt): string => JSON.stringify([
+        receipt.attemptId, receipt.state, receipt.sideEffectState, receipt.updatedAt, receipt.completedAt, receipt.lastAttemptEventSeq,
+      ]);
+      const boundById = new Map(bound.map(attempt => [attempt.id, attempt]));
+      const pending = new Set(attemptIds);
+      const noEffectIds = new Set<string>();
+      const acceptDirectReviews = (epoch: NonNullable<ReturnType<typeof decodeEpoch>>): void => {
+        const reviewed = new Set(epoch.reviewedIds);
+        // A no-effect epoch must still prove all the IDs it directly inspected,
+        // not the older done/user-reviewed effects in its cumulative envelope.
+        const epochReceipts = new Map(epoch.receipts.map(receipt => [receipt.attemptId, receipt]));
+        if (epoch.noEffect && epoch.reviewedIds.some(id => {
+          const prior = epochReceipts.get(id), current = receiptById.get(id);
+          return !prior || !current || receiptKey(prior) !== receiptKey(current)
+            || (boundById.get(id)?.start_seq ?? Infinity) > epoch.throughEventSeq;
+        })) return;
+        for (const receipt of epoch.receipts) {
+          if (!reviewed.has(receipt.attemptId)) continue;
+          const current = receiptById.get(receipt.attemptId);
+          if (!current || receiptKey(current) !== receiptKey(receipt)
+            || (boundById.get(receipt.attemptId)?.start_seq ?? Infinity) > epoch.throughEventSeq) continue;
+          if (pending.delete(receipt.attemptId) && epoch.noEffect) {
+            for (const id of epoch.reviewedIds) noEffectIds.add(id);
+          }
+        }
+      };
+      acceptDirectReviews(latest);
+      let beforeSeq = row.seq;
+      while (pending.size) {
+        // Batch by event cursor, not by lifetime: a long-running Goal can
+        // accumulate more than 500 valid observations. There is no recursive
+        // call or per-ID SQL query, and malformed pages cannot hide older proof.
+        const previous = db.prepare(`SELECT seq, kind, actor_kind, payload_json FROM long_run_events
+          WHERE run_id = ? AND seq < ? AND ${epochFilter}
+            AND EXISTS (SELECT 1 FROM json_each(long_run_events.payload_json, '$.attestation.reviewedAttemptIds')
+              WHERE value IN (SELECT value FROM json_each(?)))
+          ORDER BY seq DESC LIMIT ?`).all(runId, beforeSeq, JSON.stringify([...pending]), MAX_GOAL_RESUME_REVIEW_ATTEMPTS) as EpochRow[];
+        if (!previous.length) break;
+        for (const entry of previous) {
+          const epoch = decodeEpoch(entry);
+          if (epoch) acceptDirectReviews(epoch);
+          if (!pending.size) break;
+        }
+        beforeSeq = previous[previous.length - 1].seq;
+        if (previous.length < MAX_GOAL_RESUME_REVIEW_ATTEMPTS) break;
+      }
+      if (pending.size) return null;
+      if (noEffectIds.size && !receiptSettlesAttempts([...noEffectIds].map(id => ({
+        id, invocationRunId: boundById.get(id)!.invocation_run_id,
+      })))) return null;
+      return { schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1", throughEventSeq: latest.throughEventSeq,
+        attemptSetDigest: latest.attemptSetDigest, eventSeq: row.seq, attemptIds };
+    } catch {
+      return null;
     }
-    return { schemaVersion: safeEpoch.schemaVersion, throughEventSeq: Number(safeEpoch.throughEventSeq),
-      attemptSetDigest: safeEpoch.attemptSetDigest, eventSeq: row.seq, attemptIds };
-  } catch {
-    return null;
-  }
+  })();
 }
 
 /** Attempts still unsafe to replay after applying only an exact, durable human

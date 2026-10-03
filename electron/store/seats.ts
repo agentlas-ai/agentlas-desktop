@@ -322,30 +322,29 @@ export function ensureGroupSeatForTaskforce(input: {
 
 /**
  * T3(슬롯 추가)·T4(슬롯 제거) — 열린 점유를 멤버 목록에 맞춘다.
- * 남는 멤버는 자기 슬롯을 유지하고(이력 연속), 빠진 멤버의 행은 닫고(수정·삭제 아님 — I6),
- * 새 멤버는 다음 빈 슬롯에 연다.
+ * 같은 순서의 멤버는 점유 이력을 유지하고, 바뀐 슬롯은 이전 행을 닫아(I6)
+ * 정본 멤버 순서의 같은 자리에 새 점유를 연다.
  */
 export function syncGroupSeatOccupants(seatId: string, memberAgentIds: string[]): void {
   const db = getDb();
   const now = new Date().toISOString();
   const open = openOccupants(seatId);
-  const wanted = new Set(memberAgentIds);
-  const seatedAgents = new Set(open.map((row) => row.agent_id).filter((id): id is string => id !== null));
+  if (new Set(memberAgentIds).size !== memberAgentIds.length) throw new Error("one_group_member_collision");
+  // Ordered taskforce IDs are the current slot contract. Reordering/reselecting
+  // closes changed occupancies; it never reattributes their historical rows.
   for (const row of open) {
-    if (row.agent_id !== null && !wanted.has(row.agent_id)) {
+    if (row.agent_id !== memberAgentIds[row.slot]) {
       db.prepare(
         "UPDATE one_seat_occupants SET until = ? WHERE seat_id = ? AND slot = ? AND since = ? AND until IS NULL",
       ).run(now, seatId, row.slot, row.since);
     }
   }
-  let nextSlot = open.reduce((max, row) => Math.max(max, row.slot), -1) + 1;
   const insert = db.prepare(
-    "INSERT OR IGNORE INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until) VALUES (?, ?, ?, ?, ?, NULL)",
+    "INSERT INTO one_seat_occupants (seat_id, slot, agent_id, display_name, since, until) VALUES (?, ?, ?, ?, ?, NULL)",
   );
-  for (const agentId of memberAgentIds) {
-    if (seatedAgents.has(agentId)) continue;
-    insert.run(seatId, nextSlot, agentId, agentDisplayName(agentId), nextOccupancySince(seatId, nextSlot, now));
-    nextSlot += 1;
+  for (const [slot, agentId] of memberAgentIds.entries()) {
+    if (open.some(row => row.slot === slot && row.agent_id === agentId)) continue;
+    insert.run(seatId, slot, agentId, agentDisplayName(agentId), nextOccupancySince(seatId, slot, now));
   }
   db.prepare("UPDATE one_seats SET updated_at = ? WHERE id = ?").run(now, seatId);
   applySeatSnapshotToChats(seatId);

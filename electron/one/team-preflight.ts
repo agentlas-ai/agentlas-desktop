@@ -1473,7 +1473,7 @@ function sameRoomSnapshot(
 ): boolean {
   const room = (deps.listOneTaskforces ?? listOneTaskforces)().find(group => group.chatId === chatId);
   return !!room && room.id === expected.id && room.revision === expected.revision
-    && canonicalJson([...room.memberAgentIds].sort()) === canonicalJson([...expected.memberAgentIds].sort());
+    && canonicalJson(room.memberAgentIds) === canonicalJson(expected.memberAgentIds);
 }
 
 function exactRosterBinding(

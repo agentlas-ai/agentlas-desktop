@@ -11,6 +11,8 @@
  * contracts can drive the real queries on an in-memory store.
  */
 import type Database from "better-sqlite3";
+import { createHash } from "node:crypto";
+import { isGoalObserving } from "../long-run/effect-observation-tickets";
 import type { AgiBlockerFacts, AgiBlockerSignal, AgiTacticFact } from "./blocker";
 
 /** The scheduler ticks every minute; a due slot missed by more than this with no run started is a miss. */
@@ -174,15 +176,71 @@ function receiptSignal(code: string, runId: string | null): AgiBlockerSignal {
   return { kind: "run_failed", code, runId };
 }
 
+/** Only accepted Goal sources and in-scope host receipts wake a spent incident. Role=user and chat-wide
+ * tool history are not provenance. Version, heartbeat, diagnostic notices and retry timestamps are excluded. */
+function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<AgiBlockerFacts, "progress" | "nextWakeAtMs" | "fenceState"> {
+  const revision = tableExists(db, "chat_goal_revisions") ? db.prepare(
+    "SELECT revision,source_message_id,payload_json,created_at FROM chat_goal_revisions WHERE goal_id=? ORDER BY revision DESC LIMIT 1")
+    .get(run.goalId) as { revision: number; source_message_id: string; payload_json: string; created_at: string } | undefined : undefined;
+  const control = db.prepare("SELECT seq FROM long_run_events WHERE run_id=? AND kind='run.user_control' AND actor_kind='user' ORDER BY seq DESC LIMIT 1")
+    .get(run.id) as { seq: number } | undefined;
+  const checkpoint = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND kind IN
+    ('run.task_checkpoint','run.checkpoint_continuation','run.ongoing_cycle_verified','run.cycle_recorded',
+     'run.wait_notification','run.wait_claim_reconciled') ORDER BY seq DESC LIMIT 1`).get(run.id) as { seq: number } | undefined;
+  const complete = tableExists(db, "run_events") && tableExists(db, "long_run_worker_attempts") ? db.prepare(`SELECT e.id FROM run_events e
+    WHERE e.chat_id=? AND e.kind IN ('mcp_tool-use','runtime_effect_boundary') AND e.ts>=?
+    AND (e.kind='runtime_effect_boundary' OR json_extract(e.payload_json,'$.toolCompleted')=1)
+    AND EXISTS(SELECT 1 FROM long_run_worker_attempts a WHERE a.run_id=? AND a.invocation_run_id=e.run_id)
+    ORDER BY e.ts DESC,e.seq DESC LIMIT 1`).get(run.rootChatId, revision?.created_at ?? "", run.id) as { id: string } | undefined : undefined;
+  // Column selection permits older schema fixtures without treating a timestamp as a policy change.
+  const row = (table: string, names: string[], where: string, args: unknown[]) => {
+    if (!tableExists(db, table)) return [];
+    const columns = new Set((db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(c => c.name));
+    const selected = names.filter(name => columns.has(name));
+    return selected.length ? db.prepare(`SELECT ${selected.join(",")} FROM ${table} WHERE ${where}`).all(...args) : [];
+  };
+  const planHead = row("goal_plan_nodes", ["revision","plan_seq"], "goal_id=? ORDER BY revision DESC,plan_seq DESC LIMIT 1", [run.goalId]);
+  const owner = row("long_runs", ["app_instance_id","host_owner_kind","runtime_fallback_policy","max_cycles","max_cost_usd",
+    "max_workers","wallclock_deadline","cycle_count","cost_used_usd","last_progress_key"], "id=?", [run.id]);
+  const chat = row("chats", ["goal_id","runtime_selection_json"], "id=?", [run.rootChatId]);
+  const pool = row("model_role_members", ["position","kind","backend","source","model","effort","long_context"], "role='orchestrator' ORDER BY position", []);
+  const wait = db.prepare(`SELECT json_extract(payload_json,'$.subscription.waitId') id,
+    json_extract(payload_json,'$.subscription.intent.subject.notBefore') due,
+    json_extract(payload_json,'$.subscription.state') status FROM long_run_events
+    WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1`).get(run.id) as { id: string; due: string; status: string } | undefined;
+  const schedules = row("automations", ["id","enabled","next_run_at"], "goal_id=? ORDER BY id", [run.goalId]) as Array<{ id: string; enabled: number; next_run_at?: string }>;
+  const dates = [wait?.due, ...(owner as Array<{ wallclock_deadline?: string }>).map(o => o.wallclock_deadline)].filter(Boolean)
+    .map(value => Date.parse(value!)).filter(Number.isFinite);
+  // A missed scheduler slot changes state at the existing grace, not at an arbitrary idle timeout.
+  dates.push(...schedules.filter(a => a.enabled === 1 && a.next_run_at).map(a => Date.parse(a.next_run_at!) + AGI_MISSED_DUE_GRACE_MS + 1).filter(Number.isFinite));
+  const retry = db.prepare(`SELECT json_extract(payload_json,'$.nextAt') at FROM long_run_events
+    WHERE run_id=? AND kind='run.blocked_sweep' AND json_extract(payload_json,'$.action')='retry_scheduled'
+    ORDER BY seq DESC LIMIT 1`).get(run.id) as { at: string } | undefined;
+  const retryAt = retry?.at ? Date.parse(retry.at) : NaN;
+  // Polling may rewrite a future retry timestamp. Only crossing its due boundary is new evidence.
+  const retryDue = Number.isFinite(retryAt) && nowMs >= retryAt;
+  const boundary = dates.map(at => ({ at, due: nowMs >= at }));
+  const boundaryEvent = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND NOT
+    (kind='run.blocked_sweep' AND json_extract(payload_json,'$.action')='retry_scheduled')
+    ORDER BY seq DESC LIMIT 1`).get(run.id) as { seq: number } | undefined;
+  const authority = createHash("sha256").update(JSON.stringify({ revision: revision?.payload_json ?? null, planHead, owner, chat, pool, wait, schedules, boundary, retryDue })).digest("hex");
+  return { progress: { ownerInputId: `${revision?.source_message_id ?? ""}:${control?.seq ?? ""}`,
+    completedToolId: complete?.id ?? null, checkpoint: checkpoint ? String(checkpoint.seq) : null, authority },
+    fenceState: String(boundaryEvent?.seq ?? ""),
+    nextWakeAtMs: Math.min(...[...dates, retryAt].filter(at => Number.isFinite(at) && at > nowMs)) };
+}
+
 export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): AgiBlockerFacts | null {
   const { db } = deps;
   const run = readAgiGoalRow(db, goalId);
   if (!run) return null;
   const signals: AgiBlockerSignal[] = [];
   const refs: string[] = [];
+  const heldByOwner = (run.status === "paused" && run.pauseReason === "user") || ownerHold(db, run.id);
   const busy = run.rootChatId ? deps.chatBusy?.(run.rootChatId) === true : false;
   const terminal = ["completed", "failed", "cancelled", "cancelling"].includes(run.status);
-  if (!terminal && !busy) {
+  if (heldByOwner && !terminal) signals.push({ kind: "owner_pause" });
+  if (!terminal && !busy && !heldByOwner) {
     if ((run.status === "paused" && run.pauseReason === "user") || ((run.status === "paused" || run.status === "blocked") && ownerHold(db, run.id))) {
       signals.push({ kind: "owner_pause" });
     } else {
@@ -226,7 +284,11 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
     }
   }
   const plan = tactics(db, goalId);
-  return { goalId, runId: run.id, runVersion: run.version, status: busy && !terminal ? "running" : run.status,
+  const wake = wakeState(db, run, deps.nowMs());
+  const latest = run.rootChatId ? deps.latestReceipt?.(run.rootChatId) : null;
+  return { goalId, chatId: run.rootChatId, ...wake,
+    fenceState: JSON.stringify([wake.fenceState, latest?.runId ?? null, latest?.status ?? null]),
+    repairInFlight: busy || isGoalObserving(goalId), runId: run.id, runVersion: run.version, status: busy && !terminal && !heldByOwner ? "running" : run.status,
     pauseReason: run.pauseReason, blockedReason: run.blockedReason, signals, tactics: plan.tactics,
     blockedNodeId: plan.blockedNodeId, evidenceRefs: refs };
 }

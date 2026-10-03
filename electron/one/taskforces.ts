@@ -66,8 +66,8 @@ function normalizeMemberIds(value: unknown, options: { allowUnavailable: boolean
   if (!options.allowUnavailable && ids.length > 0) {
     const placeholders = ids.map(() => "?").join(",");
     const rows = getDb().prepare(
-      `SELECT installed_agent_id FROM one_org_members
-       WHERE archived_at IS NULL AND installed_agent_id IN (${placeholders})`,
+      `SELECT m.installed_agent_id FROM one_org_members m JOIN installed_agents a ON a.id=m.installed_agent_id
+       WHERE m.archived_at IS NULL AND m.installed_agent_id IN (${placeholders})`,
     ).all(...ids) as Array<{ installed_agent_id: string }>;
     const available = new Set(rows.map((row) => row.installed_agent_id));
     const missing = ids.filter((id) => !available.has(id));
@@ -80,8 +80,8 @@ function assertMembersAvailable(ids: string[]): void {
   if (ids.length === 0) return;
   const placeholders = ids.map(() => "?").join(",");
   const rows = getDb().prepare(
-    `SELECT installed_agent_id FROM one_org_members
-     WHERE archived_at IS NULL AND installed_agent_id IN (${placeholders})`,
+    `SELECT m.installed_agent_id FROM one_org_members m JOIN installed_agents a ON a.id=m.installed_agent_id
+     WHERE m.archived_at IS NULL AND m.installed_agent_id IN (${placeholders})`,
   ).all(...ids) as Array<{ installed_agent_id: string }>;
   const available = new Set(rows.map((row) => row.installed_agent_id));
   if (ids.some((id) => !available.has(id))) {
@@ -147,6 +147,8 @@ export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce
   const id = randomUUID();
   const now = new Date().toISOString();
   getDb().transaction(() => {
+    assertMembersAvailable(memberAgentIds);
+    ensureOneGroupLocalStaff(memberAgentIds, false, { allowPriorTaskFailure: true });
     const chat = createChat({ title, originSurface: "one", taskMode: "conversation" });
     getDb().prepare(
       `INSERT INTO one_taskforces
@@ -178,11 +180,15 @@ export function updateOneTaskforce(input: UpdateOneTaskforceInput): OneTaskforce
   assertMembersAvailable(memberAgentIds.filter((agentId) => !prior.has(agentId)));
   const now = new Date().toISOString();
   getDb().transaction(() => {
-    getDb().prepare(
+    const added = memberAgentIds.filter((agentId) => !prior.has(agentId));
+    assertMembersAvailable(added);
+    ensureOneGroupLocalStaff(added, false, { allowPriorTaskFailure: true });
+    const changed = getDb().prepare(
       `UPDATE one_taskforces
        SET title = ?, description = ?, member_agent_ids_json = ?, updated_at = ?, revision = revision + 1
-       WHERE id = ?`,
-    ).run(title, description, JSON.stringify(memberAgentIds), now, id);
+       WHERE id = ? AND revision = ? AND member_agent_ids_json = ?`,
+    ).run(title, description, JSON.stringify(memberAgentIds), now, id, row.revision, row.member_agent_ids_json);
+    if (changed.changes !== 1) throw new Error("one_group_revision_changed: This Taskforce changed on another surface. Reload and try again.");
     renameChat(row.chat_id, title);
     // T3(멤버 영입)·T4(멤버 방출) — 열린 점유를 멤버 목록에 맞추고(빠진 멤버는 행을
     // 닫기만 한다, I6) 좌석 제목·세션 스냅샷을 같은 트랜잭션에서 갱신한다(I9).

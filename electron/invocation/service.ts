@@ -16,6 +16,7 @@ import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, goalWaitRefusalResolvesItself, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
 import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
+import { settleNativeGoalEpisode } from "../long-run/native-goal-pass";
 import { GOAL_RESUME_EFFECT_BOUNDARY_UNCERTAIN, goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { prepareCheckpointContinuation } from "../long-run/continuation";
 import { parkGoalAfterPassStopWithPool } from "../long-run/goal-pass-stop";
@@ -286,6 +287,8 @@ export interface InvocationSettledEnvelope {
 }
 
 interface RunRecord {
+  /** Main verification owns this yielded native episode's next scheduling step. */
+  nativeGoalEpisodePending?: boolean;
   mainLifetime?: MainInvocationLifetime;
   background?: boolean;
   completion?: Promise<void>;
@@ -949,7 +952,9 @@ export class InvocationService {
   }
 
   activeChatIds(): string[] {
-    return [...new Set([...this.activeRuns.activeChatIds(), ...[...this.settlingRuns.values(), ].filter((record) => !record.background).map((record) => record.chatId)])];
+    return [...new Set([...this.activeRuns.activeChatIds(), ...[...this.settlingRuns.values(),
+      ...[...this.pendingGoalVerifications.values()].filter(record => record.nativeGoalEpisodePending),
+    ].filter((record) => !record.background).map((record) => record.chatId)])];
   }
 
   /** 오너가 보낸 요청이 이 대화에서 차례를 기다린다 — 자동 재개는 그 뒤로 미룬다. */
@@ -3728,7 +3733,7 @@ export class InvocationService {
               // The turn asked the owner; the question card is the way out and answering resumes the Goal.
               appendLongRunEvent({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host", payload: { reason: "goal_owner_answer_required" } });
               this.scheduleGoalContinuation(current.goalId, record, "goal_owner_answer_required");
-            } else if (findAutomationByGoalId(turnGoalId)?.enabled) {
+            } else if (!result.goalEpisodeYield && findAutomationByGoalId(turnGoalId)?.enabled) {
               // Its hidden continuation owns the next step: say so instead of looking like a live turn.
               transitionLongRun({ runId: current.id, to: "waiting_tool", actorKind: "host", reason: "goal_continuation_scheduled" });
             } else {
@@ -3740,7 +3745,7 @@ export class InvocationService {
         if (completionClaim?.claimed && completionClaim.goalId) {
           const ongoingRevision = getChatGoalRevision(completionClaim.goalId);
           if (ongoingRevision?.lifecycle === "ongoing" && getChat(chat.id)?.goalId === completionClaim.goalId
-            && !controller.signal.aborted) {
+            && !controller.signal.aborted && !result.goalEpisodeYield) {
             // A continuing mandate needs a settled execution boundary and a
             // next observation, not a model judge declaring the entire mandate
             // complete after every episode. The wait checkpoint keeps this
@@ -3789,12 +3794,14 @@ export class InvocationService {
             return;
           }
           let retryCheckpointId: string | null = null;
+          let episodeCheckpointId: string | null = null;
           // The client records only a verification request. The independent
           // judge starts here, after invoke_completed/mcp_final and the result
           // receipt are durable, so model prose can never outrun host evidence.
-          this.scheduleGoalContinuation(completionClaim.goalId, record, "verification_background");
+          if (!result.goalEpisodeYield) this.scheduleGoalContinuation(completionClaim.goalId, record, "verification_background");
           if ([...this.pendingGoalVerifications.values()].some((pending) => pending.chatId === chat.id)) return;
           this.pendingGoalVerifications.set(runId, record);
+          record.nativeGoalEpisodePending = Boolean(result.goalEpisodeYield);
           void runMainBackgroundTask(() => {
             const verificationRunId = `background-verification:${runId}`;
             const verificationLifetime = new MainInvocationLifetime(admitMainInvocation(chat.id, verificationRunId), chat.id, verificationRunId);
@@ -3841,6 +3848,7 @@ export class InvocationService {
                *
                * The goal being verified is named by the claim. That is the identity to act on.
                */
+              episodeCheckpointId = verification?.checkpointId ?? null;
               settleGoalResultMessages({ chatId: chat.id, goalId: completionClaim.goalId!, runId,
                 verified: !controller.signal.aborted && ["completed", "cycle_completed"].includes(verification?.disposition ?? "") });
               if (controller.signal.aborted || getChat(chat.id)?.goalId !== completionClaim.goalId) return;
@@ -3849,6 +3857,9 @@ export class InvocationService {
                 completeChatGoalContract(verifiedGoalId, "completed");
                 if (getChat(chat.id)?.goalId === verifiedGoalId) setChatGoalBinding(chat.id, null);
               } else if (verification?.disposition === "cycle_completed") {
+                // This episode registers its exact wait after verification below.
+                // Do not announce an absent receipt or an assumed 30-minute time.
+                if (result.goalEpisodeYield) return;
                 const wait = latestGoalWaitSubscription(verifiedGoalId);
                 const message = pickLocale(runReq) === "ko"
                   ? "이번 회차를 확인했습니다. 지속 목표는 유지되며, 앱 실행 중 30분 뒤 현재 상태를 확인해 이어갑니다. 중지하면 더 이상 재개하지 않습니다."
@@ -3862,7 +3873,7 @@ export class InvocationService {
                 retryCheckpointId = verification.checkpointId;
               } else if (!verification) {
                 const current = getLongRunByGoalId(verifiedGoalId);
-                if (current?.status === "verifying") transitionLongRun({ runId: current.id,
+                if (!result.goalEpisodeYield && current?.status === "verifying") transitionLongRun({ runId: current.id,
                   to: "blocked", actorKind: "host", reason: "verification_unavailable" });
               }
             })
@@ -3874,11 +3885,27 @@ export class InvocationService {
               // on. Silence here was the difference between "blocked, here is why" and a run stuck
               // in `verifying` with no way forward.
               const current = getLongRunByGoalId(completionClaim.goalId!);
-              if (current && ["running", "verifying"].includes(current.status)) {
+              if (!result.goalEpisodeYield && current && ["running", "verifying"].includes(current.status)) {
                 transitionLongRun({ runId: current.id, to: "blocked", actorKind: "host", reason: "verification_unavailable" });
               }
             })
             .finally(() => {
+              if (result.goalEpisodeYield && !controller.signal.aborted && !record.steeringInterruptRequested
+                && !this.steerQueues.get(record.chatId)?.length) {
+                try {
+                  const settlement = settleNativeGoalEpisode(result.goalEpisodeYield, {
+                    checkpointId: episodeCheckpointId, hasTransientAttachments: record.hasTransientAttachments });
+                  tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_native_episode_settlement",
+                    payload: { settlement, goalId: result.goalEpisodeYield.goalId, goalRevision: result.goalEpisodeYield.goalRevision } });
+                } catch (error) {
+                  console.warn("[long-run] native episode settlement unavailable:", error);
+                  // A rolled-back wait/cycle transaction still needs a durable
+                  // follow-up. Existing current-authority/effect guards choose
+                  // observation before any action and preserve registered waits.
+                  this.scheduleGoalContinuation(result.goalEpisodeYield.goalId, record, "native-episode-settlement-pending");
+                }
+              }
+              record.nativeGoalEpisodePending = false;
               this.pendingGoalVerifications.delete(runId);
               this.publishActiveChats();
               // 검증을 기다리며 줄 선 오너 요청은 지금 바로 돈다(스윕의 옛 목표 재개보다 먼저).
@@ -4063,7 +4090,7 @@ export class InvocationService {
             catch (error) { console.warn("[blocked-goal-sweep] project release resume failed:", error); }
           }, 1_500).unref?.();
         }
-        if (!effectObservation && !hasQueuedSteer) this.scheduleGoalContinuation(record.automaticGoalId ?? projectionGoalId ?? undefined, record,
+        if (!effectObservation && !hasQueuedSteer && !record.nativeGoalEpisodePending) this.scheduleGoalContinuation(record.automaticGoalId ?? projectionGoalId ?? undefined, record,
           observedRuntimeErrorCode ?? "goal_turn_settled");
         if (retryGoalCheckpoint && !hasQueuedSteer) this.continueGoalCheckpoint({
           ...retryGoalCheckpoint, record, executionContext,

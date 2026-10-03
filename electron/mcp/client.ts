@@ -84,6 +84,7 @@ import { getAgentById, listInstalledAgents } from "./registry";
 import { applyGoalPlanMarkers, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, recordGoalPlanPassStop } from "../long-run/goal-shaping";
 import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
+import { captureNativeGoalEpisode, type NativeGoalEpisodeBinding } from "../long-run/native-goal-pass";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import {
   autoRouteStatus,
@@ -1664,6 +1665,8 @@ export interface McpInvocationResult {
    * 없으면 마커는 텍스트에서 지워진 뒤 아무 데도 도달하지 못한다.
    */
   goalWaitRequest?: ParsedGoalWait;
+  /** Main must settle this episode before deciding the next Goal turn. */
+  goalEpisodeYield?: NativeGoalEpisodeBinding;
   goalCompletionClaim?: { claimed: boolean; evidence: string | null; goalId: string | null };
   /** A failed goal pass stopped the loop with the goal still open (typed; see long-run/goal-pass-stop.ts). */
   goalPassStop?: GoalPassStop;
@@ -4216,14 +4219,21 @@ ${effectiveUserPrompt}`;
       sizeBytes: artifact.sizeBytes,
     }));
   };
-  const runBoundTaskForceInvocation = (
+  const runBoundTaskForceInvocation = async (
     params: Parameters<typeof runBorrowedTaskForceInvocation>[0],
   ) => {
     // Main preparation can await roster/lease work after the common guard.
     // Check the prepared scope at this first team dispatch, not each worker.
     assertMcpGoalSelectionCurrent();
-    return runBorrowedTaskForceInvocation({
+    // A synthesis final precedes the aggregate return. Main ignores errors
+    // after its first terminal, so hold that final until worker verification.
+    let finalEvent: McpInvocationEvent | undefined;
+    const result = await runBorrowedTaskForceInvocation({
       ...params,
+      sink: event => {
+        if (event.kind === "final" && !event.agentId) finalEvent = event;
+        else params.sink(event);
+      },
       // Every early team route crosses this Main-owned boundary. A verifier
       // retry must reach the planner/workers before the general runner helper.
       goalCheckpoint: params.chat.goalId ? latestTaskCheckpoint(params.chat.goalId) ?? undefined : undefined,
@@ -4234,6 +4244,22 @@ ${effectiveUserPrompt}`;
       prepareWorkerCapabilities,
       ...(browserApprovalScope ? { browserApprovalScope } : {}),
     });
+    if (result.ok) {
+      if (finalEvent) params.sink(finalEvent);
+    } else {
+      if (finalEvent?.durableAssistantMessageIdForVerification) params.sink({
+        kind: "partial", text: "", durableMessageId: finalEvent.durableAssistantMessageIdForVerification,
+      });
+      params.sink({
+        ...finalEvent, kind: "error",
+        text: finalEvent?.text ?? result.text,
+        error: {
+          code: "task-force-verification-failed",
+          message: locale === "ko" ? "태스크포스의 일부 실행이 완료되거나 검증되지 않았습니다. 저장된 결과와 실행 기록을 확인하세요." : "Some task force execution is incomplete or unverified. Review the saved result and run history.",
+        },
+      });
+    }
+    return result;
   };
   const workforceProjectDir = workingFolder ?? process.cwd();
   // 프로젝트가 있으면 편성은 프로젝트에 붙는다 — 새 대화를 열어도 팀을 물려받는다.
@@ -6660,6 +6686,9 @@ ${effectiveUserPrompt}`;
       };
     }
     modelTurnStarted = true;
+    const nativeGoalEpisode = activeGoalId && req.runId && !executionContext && continuousMode
+      ? captureNativeGoalEpisode(activeGoalId, chat.id, req.runId) : null;
+    let goalEpisodeYield: NativeGoalEpisodeBinding | null = null;
     let result = await invokeCurrentRuntime(activeRunnerReq);
     /*
      * ★런타임이 표식으로 실패를 말했으면 그 text는 답이 아니다 — 거절 고지문이다.
@@ -6735,7 +6764,7 @@ ${effectiveUserPrompt}`;
       const asksUser = extractAskFences(continuation.text).questions.length > 0;
       if (asksUser) passShouldContinue = false;
       if (activeGoalId && continuousMode && !signal?.aborted && !asksUser) {
-        if (passClaim.claimed) {
+        if (passClaim.claimed && !nativeGoalEpisode) {
           await closeOpenGoalLedgerTasks({
             goalId: activeGoalId,
             evidence: passClaim.evidence
@@ -6771,6 +6800,15 @@ ${effectiveUserPrompt}`;
       // keep its mandate after that verification; it does not justify asking
       // this same native turn to complete the claimed work again.
       if (passClaim.claimed) passShouldContinue = false;
+      // An unfinished ongoing invocation has no terminal/effect checkpoint of
+      // its own. Goal unmet and prose/tool counts cannot authorize another pass.
+      // Main verification chooses useful follow-up or a durable observation.
+      if (nativeGoalEpisode && !asksUser && !signal?.aborted) {
+        goalEpisodeYield = nativeGoalEpisode;
+        passShouldContinue = false;
+        tryRecordRunEvent({ runId: nativeGoalEpisode.invocationRunId, chatId: chat.id,
+          kind: "goal_native_episode_yield", payload: { ...nativeGoalEpisode } });
+      }
       /*
        * A marker-driven loop has no ledger to tell it that nothing is happening, so this is its only
        * runaway guard: output that has not changed at all for three passes running is not work.
@@ -7003,6 +7041,13 @@ ${effectiveUserPrompt}`;
     const automationHandoff = needsAutomationRegistration(result.text);
     const waitProposal = !executionContext && activeGoalId ? parseGoalWaitIntent(result.text) : { text: result.text, request: null };
     const goalWaitRequest = waitProposal.request;
+    // Fast/single-pass Goal turns need the same terminal custody as live passes.
+    if (nativeGoalEpisode && !goalEpisodeYield && !goalWaitRequest && !automationHandoff
+      && !signal?.aborted && extractAskFences(result.text).questions.length === 0) {
+      goalEpisodeYield = nativeGoalEpisode;
+      tryRecordRunEvent({ runId: nativeGoalEpisode.invocationRunId, chatId: chat.id,
+        kind: "goal_native_episode_yield", payload: { ...nativeGoalEpisode } });
+    }
     result = { ...result, text: waitProposal.text };
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     // 전술·계획 표식 회수도 모든 경로가 지나는 이 한 지점에서 한다(완료 선언과 같은 이유).
@@ -7030,7 +7075,7 @@ ${effectiveUserPrompt}`;
        * 반대로 하면 방금 닫은 task가 안 보이는 낡은 판정으로 완료를 놓치고,
        * 라이브 루프가 이미 기록해 둔 판정도 같은 이유로 폐기해야 한다.
        */
-      if (goalCompletion.claimed) {
+      if (goalCompletion.claimed && !goalEpisodeYield) {
         await closeOpenGoalLedgerTasks({
           goalId: activeGoalId,
           // 근거를 안 적었으면 감사 가능한 대체값을 넣는다. 근거를 필수로 하면
@@ -8009,6 +8054,7 @@ ${effectiveUserPrompt}`;
         observedUsage: invocationObservedUsage,
         stormbreakerContinueRequested,
         ...(goalWaitRequest ? { goalWaitRequest } : {}),
+      ...(goalEpisodeYield ? { goalEpisodeYield } : {}),
         goalCompletionClaim: {
           claimed: goalCompletion.claimed,
           evidence: goalCompletion.evidence,
@@ -8044,6 +8090,7 @@ ${effectiveUserPrompt}`;
       observedUsage: invocationObservedUsage,
       stormbreakerContinueRequested,
       ...(goalWaitRequest ? { goalWaitRequest } : {}),
+      ...(goalEpisodeYield ? { goalEpisodeYield } : {}),
       goalCompletionClaim: {
         claimed: goalCompletion.claimed,
         evidence: goalCompletion.evidence,
