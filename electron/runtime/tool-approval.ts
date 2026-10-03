@@ -114,7 +114,8 @@ export function setRuntimeToolPermissionArbiter(arbiter: RuntimeToolPermissionAr
  * ── "항상 허용" 영속 훅 ──────────────────────────────────────────────────
  * 이 파일은 Electron/store 를 import 하지 않는다(러너 단독 테스트 계약). 그래서
  * allow_always 의 영구 기록은 ipc.ts 가 주입한 persister 가 맡는다. persister 가
- * 없으면 allow_always 는 allow_session 과 같게 동작한다 — 조용히 넓어지지 않는다.
+ * 없으면 이번 호출만 허용하고 unavailable 영수증을 남긴다. 영속 승인은
+ * 별도 세션 허용을 만들지 않아, 다음 호출이 철회 가능한 저장소 규칙을 다시 확인한다.
  */
 export interface AlwaysAllowGrant {
   capability: string;
@@ -306,7 +307,7 @@ function settleApproval(
   outcome: ToolApprovalOutcome,
 ): ToolApprovalOutcome {
   for (const sessionKey of sessionKeys) {
-    if (outcome.decision === "allow_session" || outcome.decision === "allow_always") {
+    if (outcome.decision === "allow_session") {
       rememberSessionGrant(sessionKey, request);
     }
   }
@@ -517,7 +518,7 @@ export function resolveToolApproval(
     // 이미 거부된 호출이라 이번 실행은 되살릴 수 없다 — 그래서 이 선택이 뜻하는 바는
     // 오직 "다음부터는 묻지 말고 허용하라"이고, 그것만은 반드시 남아야 한다.
     const known = announced.get(id);
-    if ((decision === "allow_session" || decision === "allow_always") && known?.sessionKey) {
+    if (decision === "allow_session" && known?.sessionKey) {
       rememberSessionGrant(known.sessionKey, known.request);
     }
     if (known && decision === "allow_always") {

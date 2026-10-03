@@ -4219,8 +4219,9 @@ export function registerIpcHandlers(): void {
       consentBinding,
     });
     if (outcome.decision === "deny") recentUserDenials.set(denialKey(ask), Date.now());
-    // allow_always 는 tool-approval 이 이미 영속했다 — 러너 계약에는 세션 허용으로 답한다.
-    return outcome.decision === "allow_always" ? "allow_session" : outcome.decision;
+    // Durable consent is checked again for each call, including its first approval.
+    // A native session permit would outlive revocation of the saved rule.
+    return outcome.decision === "allow_always" ? "allow_once" : outcome.decision;
   });
 
   onToolApprovalRequested((request) => {

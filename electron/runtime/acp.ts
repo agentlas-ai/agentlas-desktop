@@ -308,10 +308,15 @@ export class AcpSessionClient {
     const readOnly = this.permission === "read" || this.permission === undefined;
     const kind = normalizeToolKind(params?.toolCall?.kind);
     const mutating = !["read", "search", "fetch", "think"].includes(kind);
-    const find = (...kinds: string[]) => options.find((o) => kinds.includes(String(o?.kind)));
-    const rejectOption = () => find("reject_once", "reject_always") ?? options.find((o) => /reject|deny/i.test(String(o?.optionId)));
-    const allowOption = (session: boolean) =>
-      (session ? find("allow_always", "allow_once") : find("allow_once", "allow_always")) ?? options.find((o) => /allow/i.test(String(o?.optionId)));
+    // The provider's typed option kind is the authority contract, not its label
+    // or array position. A once approval must never become a native session grant.
+    const find = (kind: string) => options.find((o) => o?.kind === kind
+      && typeof o.optionId === "string" && o.optionId.length > 0
+      && options.filter((candidate) => candidate?.optionId === o.optionId).length === 1);
+    const rejectOption = () => find("reject_once") ?? find("reject_always");
+    const allowOption = (session: boolean) => session
+      ? find("allow_always") ?? find("allow_once")
+      : find("allow_once");
     const selected = (option: any) => (option ? { outcome: { outcome: "selected", optionId: option.optionId } } : { outcome: { outcome: "cancelled" } });
 
     if (this.approval.planMode && mutating) return selected(rejectOption());
@@ -341,7 +346,7 @@ export class AcpSessionClient {
       // ACP: a client cancelling the turn answers pending permission requests with
       // the `cancelled` outcome, not a user rejection.
       if (this.approval.signal?.aborted) return { outcome: { outcome: "cancelled" } };
-      if (decision === "deny") return selected(rejectOption());
+      if (decision !== "allow_once" && decision !== "allow_session") return selected(rejectOption());
       return selected(allowOption(decision === "allow_session"));
     }
     if (readOnly && mutating) return selected(rejectOption());
