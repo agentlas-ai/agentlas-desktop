@@ -339,26 +339,32 @@ export function sweepBlockedGoals(dispatcher: EffectObservationDispatcher, trigg
   catch (error) { console.warn("[blocked-goal-sweep] observer sweep unavailable:", error); }
   const results: BlockedGoalSweepResult[] = [];
   const budget = { dispatches: 0 };
+  // The per-sweep dispatch budget is first come, first served, so the order is the fairness rule. Id order always
+  // put the same Goals first and starved the rest (a Work Goal sorted last behind four One Goals, measured on the
+  // owner's DB 2026-10-03). Longest-waiting first; the id breaks ties so the order stays deterministic.
+  const candidates: Array<{ id: string; updatedAt: string }> = [];
   let afterId = "";
   while (true) {
-    const rows = getDb().prepare(`SELECT id FROM long_runs WHERE id > ?
+    const rows = getDb().prepare(`SELECT id, updated_at AS updatedAt FROM long_runs WHERE id > ?
       AND surface IN ('one','work') AND execution_location = 'desktop-local' AND host_owner_kind = 'desktop'
       AND (status IN ('blocked','queued')
         OR (status = 'paused' AND pause_reason IN ('runtime_unavailable','app_closed','crash_recovery'))
         OR (status IN ('waiting_tool','running') AND EXISTS (SELECT 1 FROM long_run_events e WHERE e.run_id = long_runs.id AND e.kind IN (?, ?))))
-      ORDER BY id LIMIT 100`).all(afterId, BLOCKED_GOAL_SWEEP_EVENT_KIND, OWNER_GOAL_AMENDMENT_PENDING_KIND) as Array<{ id: string }>;
+      ORDER BY id LIMIT 100`).all(afterId, BLOCKED_GOAL_SWEEP_EVENT_KIND, OWNER_GOAL_AMENDMENT_PENDING_KIND) as Array<{ id: string; updatedAt: string }>;
     if (!rows.length) break;
-    for (const { id } of rows) {
-      afterId = id;
-      try {
-        assertDesktopLongRunAdmissionOpen();
-        const run = getLongRun(id);
-        if (!run) continue;
-        const result = sweepOne(run, dispatcher, trigger, budget);
-        if (result) results.push(result);
-      } catch (error) {
-        results.push({ runId: id, fromReason: null, action: "deferred", detail: errorCode(error, "blocked_goal_sweep_failed") });
-      }
+    candidates.push(...rows);
+    afterId = rows[rows.length - 1].id;
+  }
+  candidates.sort((a, b) => a.updatedAt.localeCompare(b.updatedAt) || a.id.localeCompare(b.id));
+  for (const { id } of candidates) {
+    try {
+      assertDesktopLongRunAdmissionOpen();
+      const run = getLongRun(id);
+      if (!run) continue;
+      const result = sweepOne(run, dispatcher, trigger, budget);
+      if (result) results.push(result);
+    } catch (error) {
+      results.push({ runId: id, fromReason: null, action: "deferred", detail: errorCode(error, "blocked_goal_sweep_failed") });
     }
   }
   return results;
