@@ -17,7 +17,13 @@ export function createOptionalMaintenance(options: {
   let cancelDispatch: (() => void) | undefined;
   let active: AbortController | undefined;
   let running: Promise<void> | undefined;
-  let current: { documentKey: unknown; generation: number; isCurrent: () => boolean; attempted: boolean } | undefined;
+  type MaintenanceRequest = {
+    documentKey: unknown;
+    generation: number;
+    isCurrent: () => boolean;
+    attempted: boolean;
+  };
+  let current: MaintenanceRequest | undefined;
   const invalidate = () => {
     generation += 1;
     current = undefined;
@@ -28,7 +34,8 @@ export function createOptionalMaintenance(options: {
   const arm = (input: { documentKey: unknown; isCurrent(): boolean; paintOpportunity(): Promise<unknown> }) => {
     if (stopped || completed || current?.documentKey === input.documentKey) return;
     invalidate();
-    const request = current = { documentKey: input.documentKey, generation, isCurrent: input.isCurrent, attempted: false };
+    const request: MaintenanceRequest = { documentKey: input.documentKey, generation, isCurrent: input.isCurrent, attempted: false };
+    current = request;
     const valid = () => !stopped && !completed && current === request && input.isCurrent();
     const dispatch = () => {
       if (!valid() || request.attempted) return;
