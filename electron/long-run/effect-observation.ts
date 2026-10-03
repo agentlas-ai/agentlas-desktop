@@ -210,6 +210,11 @@ export function isEffectUncertainBlockReason(reason: string | null | undefined):
  * to unlock independent work. Foreground scheduling belongs to its controller. */
 export const MAX_INCONCLUSIVE_OBSERVATIONS = 3;
 export const EFFECT_OBSERVATION_EXHAUSTED = "effect_observation_exhausted";
+/** Looks one Goal may spend in a rolling day across every target set. The per-set cap resets whenever a restart
+ * interrupts another attempt (the set grows), so a Work Goal on the owner's DB spent 18 looks in two days, each
+ * about 80k input tokens and none conclusive. Past the cap uncertainty stays recorded; foreground work goes on. */
+export const MAX_GOAL_OBSERVATIONS_PER_DAY = 6;
+export const EFFECT_OBSERVATION_DAILY_CAP = "effect_observation_daily_cap";
 
 /** Inconclusive looks already spent on exactly this target set (every epoch counts). Only looks whose
  * verdict was read from the runner's raw final text count — the looks before that fix could never
@@ -272,6 +277,10 @@ export function goalObservationRetryPlan(longRunId: string, targetIds: readonly 
   const looks = events.filter(({ payload }) => payload.action === "dispatched"
     && Array.isArray(payload.observationTargetIds ?? payload.attemptIds)
     && JSON.stringify([...(payload.observationTargetIds ?? payload.attemptIds)].sort()) === targetSet);
+  const dayAgo = now - 24 * 60 * 60_000;
+  if (events.filter(({ at, payload }) => payload.action === "dispatched" && at >= dayAgo).length >= MAX_GOAL_OBSERVATIONS_PER_DAY) {
+    return { skip: EFFECT_OBSERVATION_DAILY_CAP };
+  }
   if (!looks.length) return { epoch: 0, nextAt: new Date(now).toISOString() };
   if (looks.length >= MAX_INCONCLUSIVE_OBSERVATIONS) return { skip: EFFECT_OBSERVATION_EXHAUSTED };
   const last = looks[looks.length - 1];
