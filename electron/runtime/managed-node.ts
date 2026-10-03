@@ -217,6 +217,8 @@ interface AsyncVerificationResult {
 export interface ResolveManagedNodeRuntimeAsyncOptions {
   /** Security-sensitive consumers revalidate the full supplied runtime tree. */
   forceVerify?: boolean;
+  /** Optional warmup must not poison later execution with a negative cache. */
+  cacheFailures?: boolean;
   signal?: AbortSignal;
   timeoutMs?: number;
 }
@@ -887,8 +889,9 @@ async function resolveManagedNodeRuntimeAsyncOnce(
     cached = attempt.resolution;
     return cached;
   }
-  cached = { ok: false, reason: failures[0] ?? "managed Node runtime was not bundled" };
-  return cached;
+  const failure: ManagedNodeResolution = { ok: false, reason: failures[0] ?? "managed Node runtime was not bundled" };
+  if (options.cacheFailures !== false) cached = failure;
+  return failure;
 }
 
 function enqueueAsyncVerification(work: () => Promise<ManagedNodeResolution>): Promise<ManagedNodeResolution> {

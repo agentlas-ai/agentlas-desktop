@@ -115,21 +115,26 @@ function pythonCandidates(root: string | null): string[] {
 }
 
 /** 단일 python 후보가 3.9+ 인지 프로브하고 버전을 반환(아니면 null). */
-function probePython(candidate: string, env: NodeJS.ProcessEnv): Promise<string | null> {
+function probePython(candidate: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string | null> {
   return new Promise((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
+    let onAbort: (() => void) | undefined;
     const done = (v: string | null) => {
       if (!settled) {
         settled = true;
         if (timer) clearTimeout(timer);
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
         resolve(v);
       }
     };
+    if (signal?.aborted) { done(null); return; }
     try {
       const probe = "import sys; sys.stdout.write('%d.%d.%d' % sys.version_info[:3]) if sys.version_info >= (3,9) else sys.exit(3)";
       const args = candidate === "py" ? ["-3", "-c", probe] : ["-c", probe];
       const child = crossSpawn(candidate, args, { env, stdio: ["ignore", "pipe", "ignore"] });
+      onAbort = () => { try { child.kill(); } catch {} done(null); };
+      signal?.addEventListener("abort", onAbort, { once: true });
       let out = "";
       child.stdout?.on("data", (d) => (out += d.toString()));
       child.on("error", () => done(null));
@@ -150,6 +155,7 @@ function probePython(candidate: string, env: NodeJS.ProcessEnv): Promise<string 
         }
         done(null);
       }, timeoutMs);
+      if (signal?.aborted) onAbort();
     } catch {
       done(null);
     }
@@ -159,11 +165,13 @@ function probePython(candidate: string, env: NodeJS.ProcessEnv): Promise<string 
 /** python3.9+ 인터프리터를 해석(캐시). 못 찾으면 null.
  *  존재하지 않는 절대경로 후보는 프로브 없이 즉시 스킵해(no-python 머신의 누적 타임아웃 방지),
  *  bare 이름(python3/python/py)만 PATH 로 실제 프로브한다. */
-export async function resolveHephaestusPython(): Promise<{ python: string; version: string } | null> {
+export async function resolveHephaestusPython(options: { signal?: AbortSignal; cacheResult?: boolean } = {}): Promise<{ python: string; version: string } | null> {
+  if (options.signal?.aborted) return null;
   if (cachedPython !== undefined) return cachedPython;
   const root = hephaestusRoot();
   const env = withPythonCacheBoundary(withCliPath({ ...process.env }));
   for (const candidate of pythonCandidates(root)) {
+    if (options.signal?.aborted) return null;
     // 절대경로인데 파일이 없으면 프로브 자체를 건너뛴다(타임아웃 낭비 제거).
     if (path.isAbsolute(candidate)) {
       try {
@@ -172,13 +180,15 @@ export async function resolveHephaestusPython(): Promise<{ python: string; versi
         continue;
       }
     }
-    const version = await probePython(candidate, env);
+    const version = await probePython(candidate, env, options.signal);
+    if (options.signal?.aborted) return null;
     if (version) {
-      cachedPython = { python: candidate, version };
-      return cachedPython;
+      const resolved = { python: candidate, version };
+      if (options.cacheResult !== false) cachedPython = resolved;
+      return resolved;
     }
   }
-  cachedPython = null;
+  if (options.cacheResult !== false) cachedPython = null;
   return null;
 }
 
@@ -288,8 +298,11 @@ export async function resolveHephaestusStdioLaunch(
      * can delay Desktop startup by minutes.
      */
     includeJudgeRuntime?: boolean;
+    signal?: AbortSignal;
+    cachePythonResult?: boolean;
   },
 ): Promise<HephaestusStdioLaunch | null> {
+  if (options?.signal?.aborted) return null;
   const selectedRoot = runtimeRootOverride?.trim()
     || hephaestusRootDetail({ excludeRejected: options?.excludeRejected })?.root
     || null;
@@ -303,8 +316,8 @@ export async function resolveHephaestusStdioLaunch(
   } catch {
     return null;
   }
-  const py = await resolveHephaestusPython();
-  if (!py) return null;
+  const py = await resolveHephaestusPython({ signal: options?.signal, cacheResult: options?.cachePythonResult });
+  if (options?.signal?.aborted || !py) return null;
   const pythonArgs = py.python === "py"
     ? ["-3", "-c", PY_BOOTSTRAP, module, ...args]
     : ["-c", PY_BOOTSTRAP, module, ...args];
@@ -342,11 +355,13 @@ export async function resolveHephaestusStdioLaunch(
  * and atomic `runtime/current` switch. The immutable bundled runtime remains
  * usable while this detached worker runs or when the machine is offline.
  */
-export async function startHephaestusRuntimeAutoUpdate(): Promise<boolean> {
+export async function startHephaestusRuntimeAutoUpdate(options: { signal?: AbortSignal } = {}): Promise<boolean> {
+  if (options.signal?.aborted) return false;
   // Prewarm the exact packaged Node receipt outside Electron Main even when
   // update checks are disabled. Later provider discovery and CLI launches use
   // the process cache instead of hashing the full runtime tree on first Work.
-  await resolveManagedNodeRuntimeAsync();
+  await resolveManagedNodeRuntimeAsync({ signal: options.signal, cacheFailures: false });
+  if (options.signal?.aborted) return false;
   if (
     process.env.HEPHAESTUS_AUTO_UPDATE === "0" ||
     process.env.HEPHAESTUS_UPDATE_CHECK === "0"
@@ -357,9 +372,9 @@ export async function startHephaestusRuntimeAutoUpdate(): Promise<boolean> {
     "agentlas_cloud.update",
     ["--auto-update-worker", runtimeRoot],
     undefined,
-    { includeJudgeRuntime: false },
+    { includeJudgeRuntime: false, signal: options.signal, cachePythonResult: false },
   );
-  if (!launch) return false;
+  if (!launch || options.signal?.aborted) return false;
   try {
     const child = crossSpawn(launch.command, launch.args, {
       cwd: safeCwd(),

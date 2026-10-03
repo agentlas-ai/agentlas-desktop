@@ -125,6 +125,7 @@ import { repairAllRootChatSurfaceControllers } from "./store/chats";
 import { ensureDefaultMcpPluginsInstalled } from "./mcp-tools/defaults";
 import { installedPluginsRoot, materializeBuiltinPlugins } from "./plugins/materialize";
 import { startHephaestusRuntimeAutoUpdate } from "./hephaestus/engine";
+import { createOptionalMaintenance } from "./runtime/optional-maintenance";
 import { startCliRuntimeAutoUpdate, stopCliRuntimeAutoUpdate } from "./runtime/auto-update";
 import { scrubLegacyOpenCrabMcpConfig } from "./mcp-tools/mcp-config";
 import { scrubLegacyOpenCrabCredentialUrls } from "./mcp-tools/registry";
@@ -1097,6 +1098,48 @@ function registerRendererProtocol(): void {
   });
 }
 
+let osMaintenanceReady = false;
+let mainDocumentGeneration = 0;
+const osMaintenance = createOptionalMaintenance({
+  run: async (signal) => {
+    const started = await startHephaestusRuntimeAutoUpdate({ signal });
+    if (!signal.aborted) console.info(`[startup] os-maintenance-${started ? "started" : "unavailable"}`);
+    return started;
+  },
+  onFailure: () => console.warn("[startup] os-maintenance-failed"),
+});
+
+function armOsMaintenanceAfterProductLoad(window: BrowserWindow): void {
+  if (!osMaintenanceReady || window !== mainWindow || window.isDestroyed()) return;
+  const contents = window.webContents;
+  const frame = contents.mainFrame;
+  const documentGeneration = mainDocumentGeneration;
+  const url = frame.url;
+  const isProductUrl = (value: string): boolean => {
+    try {
+      const target = new URL(value);
+      if (target.protocol === "agentlas:" && target.hostname === "app") return true;
+      if (!isDev || !process.env.ELECTRON_START_URL) return false;
+      const development = new URL(process.env.ELECTRON_START_URL);
+      return (development.protocol === "http:" || development.protocol === "https:")
+        && target.origin === development.origin;
+    } catch { return false; }
+  };
+  if (!isProductUrl(url)) return;
+  osMaintenance.arm({
+    documentKey: `${contents.id}:${documentGeneration}`,
+    isCurrent: () => osMaintenanceReady && !quitServicesStopPromise && !quitCleanupPromise
+      && mainWindow === window && !window.isDestroyed() && !contents.isDestroyed()
+      && !contents.isLoadingMainFrame() && mainDocumentGeneration === documentGeneration
+      && contents.mainFrame === frame && frame.url === url && isProductUrl(frame.url),
+    // This is a product-document paint opportunity, not full-body readiness.
+    // Hidden windows may suspend rAF; the coordinator has a guarded fallback.
+    paintOpportunity: () => frame.executeJavaScript(
+      "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))",
+    ),
+  });
+}
+
 async function loadMainRendererIntoWindow(): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const startUrl = process.env.ELECTRON_START_URL;
@@ -1182,6 +1225,18 @@ async function createWindow(options: { startupPlaceholder?: boolean } = {}): Pro
   };
   mainWindow.once("ready-to-show", revealMainWindow);
   mainWindow.webContents.once("did-finish-load", revealMainWindow);
+  const startupWindow = mainWindow;
+  mainWindow.webContents.on("did-start-navigation", (_event, _url, isInPlace, isMainFrame) => {
+    if (mainWindow !== startupWindow || !isMainFrame || isInPlace) return;
+    mainDocumentGeneration += 1;
+    osMaintenance.invalidate();
+  });
+  mainWindow.webContents.on("did-finish-load", () => armOsMaintenanceAfterProductLoad(startupWindow));
+  mainWindow.once("closed", () => {
+    if (mainWindow && mainWindow !== startupWindow) return;
+    mainDocumentGeneration += 1;
+    osMaintenance.invalidate();
+  });
   const revealFallback = setTimeout(revealMainWindow, MAIN_WINDOW_REVEAL_FALLBACK_MS);
   mainWindow.once("closed", () => clearTimeout(revealFallback));
 
@@ -1351,6 +1406,8 @@ async function stopDesktopOwnedMobileBridge(): Promise<void> {
 function stopQuitServices(): Promise<void> {
   if (quitServicesStopPromise) return quitServicesStopPromise;
   shellReadyForWindows = false;
+  osMaintenanceReady = false;
+  osMaintenance.stop();
   if (legacyLearningTimer) clearTimeout(legacyLearningTimer);
   legacyLearningTimer = null;
   legacyLearningController?.abort(new Error("legacy_learning_shutdown"));
@@ -4147,16 +4204,8 @@ app.whenReady().then(async () => {
     traceStartup("development-external-effects-suppressed");
     return;
   }
-  // Agentlas OS is independently releaseable. Desktop immediately runs from
-  // the newer of its immutable bundle and managed runtime, then starts the
-  // digest-verified updater in the background. Offline machines keep the
-  // bundle; successful updates atomically switch ~/.agentlas/runtime/current.
-  try {
-    await startHephaestusRuntimeAutoUpdate();
-  } catch (err) {
-    console.error("[hephaestus] Agentlas OS auto-update bootstrap failed:", err);
-  }
-  traceStartup("os-updater-started");
+  // Independent OS maintenance is armed after the guarded product-document
+  // load below. Runtime, store and Desktop updater continuity gates stay here.
   // A session can expire by TTL or be rejected by the server while every
   // renderer remains mounted. Switch the bookmark authority boundary and
   // account UI immediately instead of waiting for a future focus event.
@@ -4289,6 +4338,7 @@ app.whenReady().then(async () => {
   // The customer window is the startup boundary. Optional network-backed
   // services below (Mobile Bridge, Telegram workers, browser helpers) restore
   // independently and must never keep a healthy local Desktop invisible.
+  osMaintenanceReady = true;
   if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
   else await loadMainRendererIntoWindow();
   traceStartup("window-loaded");
