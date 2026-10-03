@@ -11,6 +11,7 @@ import type { Duplex } from "node:stream";
 interface RelaySocket {
   readyState: number;
   on(event: "message", listener: (data: unknown) => void): void;
+  on(event: "error", listener: () => void): void;
   once(event: "close", listener: () => void): void;
   send(value: string): void;
   close(code?: number): void;
@@ -912,6 +913,11 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
       websocket.handleUpgrade(request, socket, head, (ws) => {
       lease.socket = ws;
       lastRefusal = null;
+      ws.on("error", () => {
+        // ws closes receive/protocol failures; the close handler below resets
+        // this lease. Its error event must not escape into Desktop's Main.
+        console.warn("[native-browser-relay] socket receive failed");
+      });
       ws.on("message", (data) => {
         let value: { id?: unknown; method?: unknown; params?: unknown; sessionId?: unknown };
         try { value = JSON.parse(String(data)); } catch { ws.close(1003); return; }
