@@ -22,6 +22,7 @@ interface Operation {
   params: string[];
   signature: string;
   doc: string;
+  keywords?: readonly string[];
   effect: AppControlEffect;
   entry?: AppControlCatalogEntry;
 }
@@ -53,7 +54,8 @@ function operations(): Operation[] {
     if (entry.surface === "science" && !science) continue;
     const policy = appControlPolicy(entry);
     if (!policy.allowed) continue;
-    fromCatalog.push({ path: entry.path, surface: entry.surface, params: entry.params, signature: entry.signature, doc: entry.doc, effect: policy.effect, entry });
+    fromCatalog.push({ path: entry.path, surface: entry.surface, params: entry.params, signature: entry.signature, doc: entry.doc,
+      ...(entry.keywords ? { keywords: entry.keywords } : {}), effect: policy.effect, entry });
   }
   return [...HOST_OPERATIONS, ...fromCatalog];
 }
@@ -61,28 +63,55 @@ function operations(): Operation[] {
 const words = (value: string) => value
   .replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9가-힣]+/).filter(Boolean);
 
+// The owner asks in Korean; operation names and most docs are English. Common product words map across.
+const KOREAN_TERMS: Array<[RegExp, string[]]> = [
+  [/알림|알람/, ["alert", "notification"]], [/소리|사운드/, ["sound"]], [/설정|환경/, ["settings", "config", "set"]],
+  [/자동화|워크플로/, ["automation", "automations"]], [/프로젝트/, ["project", "projects"]], [/언어|한국어|영어/, ["language", "locale"]],
+  [/기억|메모리/, ["memory"]], [/모델/, ["model", "models"]], [/에이전트|직원|팀원/, ["agent", "agents"]], [/팀/, ["team"]],
+  [/메일|이메일/, ["mail"]], [/업데이트/, ["updater", "update"]], [/사이언스|연구/, ["science", "research"]], [/대화|채팅/, ["chat", "chats"]],
+  [/목표|골/, ["goal"]], [/동시|병렬/, ["concurrency"]], [/텔레그램/, ["telegram"]], [/모바일|폰|휴대폰/, ["mobile"]],
+  [/브라우저/, ["browser"]], [/일정|스케줄|예약/, ["schedule"]], [/토큰|한도/, ["token", "limit"]], [/사용량|요금|비용/, ["usage"]],
+  [/인터뷰|질문/, ["interview"]], [/드리밍|꿈/, ["dreaming"]], [/도구|툴/, ["tool", "tools", "mcp"]], [/플러그인/, ["plugin"]],
+  [/사이트|웹사이트/, ["site"]], [/문서|pdf/i, ["document"]], [/이미지|그림/, ["image"]], [/동영상|비디오|영상/, ["video"]],
+  [/로컬/, ["local"]], [/화면|이동|열어/, ["navigate"]], [/켜|끄|꺼|활성|비활성/, ["enabled", "toggle", "set"]],
+  [/원고|논문/, ["manuscript"]], [/데이터/, ["data", "datasets"]], [/런타임|엔진/, ["runtime"]], [/키체인|백그라운드|데몬/, ["daemon"]],
+  // Verbs.
+  [/삭제|지워|지우|제거/, ["remove", "delete"]], [/만들|생성|추가/, ["create", "add"]], [/목록|개수|몇/, ["list"]],
+  [/바꿔|바꾸|변경|수정/, ["set", "update"]], [/실행|돌려/, ["run"]], [/멈춰|중지|정지/, ["stop", "pause"]], [/확인|조회|상태/, ["get", "status"]],
+];
+function queryTerms(query: string): string[] {
+  const terms = new Set(words(query));
+  for (const [pattern, english] of KOREAN_TERMS) if (pattern.test(query)) for (const term of english) terms.add(term);
+  return [...terms];
+}
+
 export function appControlOperations(input: { query?: unknown; area?: unknown; limit?: unknown }): {
   science_installed: boolean; areas?: Array<{ area: string; operations: number }>; operations?: Array<Record<string, unknown>>; total: number;
 } {
   const all = operations();
   const science = scienceInstalled();
-  const area = typeof input.area === "string" ? input.area.trim() : "";
-  const query = typeof input.query === "string" ? input.query.trim().slice(0, 200) : "";
-  if (!area && !query) {
+  let area = typeof input.area === "string" ? input.area.trim() : "";
+  let query = typeof input.query === "string" ? input.query.trim().slice(0, 200) : "";
+  const areaList = () => {
     const counts = new Map<string, number>();
     for (const operation of all) {
       const key = operation.surface === "science" ? operation.path.split(".").slice(0, 2).join(".") : operation.path.split(".")[0];
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
-    return { science_installed: science, total: all.length,
-      areas: [...counts].map(([key, count]) => ({ area: key, operations: count })).sort((a, b) => a.area.localeCompare(b.area)) };
+    return [...counts].map(([key, count]) => ({ area: key, operations: count })).sort((a, b) => a.area.localeCompare(b.area));
+  };
+  if (!area && !query) return { science_installed: science, total: all.length, areas: areaList() };
+  // An area that is not one ("settings") is read as words to search for.
+  if (area && !all.some((operation) => operation.path === area || operation.path.startsWith(`${area}.`))) {
+    query = `${area} ${query}`.trim();
+    area = "";
   }
   const limit = typeof input.limit === "number" && Number.isInteger(input.limit) ? Math.min(Math.max(input.limit, 1), 80) : 40;
   let matched = area ? all.filter((operation) => operation.path === area || operation.path.startsWith(`${area}.`)) : all;
   if (query) {
-    const terms = words(query);
+    const terms = queryTerms(query);
     const scored = matched.map((operation) => {
-      const haystack = new Set([...words(operation.path), ...words(operation.doc), ...words(operation.signature)]);
+      const haystack = new Set([...words(operation.path), ...words(operation.doc), ...words(operation.signature), ...(operation.keywords ?? []).flatMap(words)]);
       const pathText = operation.path.toLowerCase();
       let score = 0;
       for (const term of terms) {
@@ -92,11 +121,14 @@ export function appControlOperations(input: { query?: unknown; area?: unknown; l
       return { operation, score };
     }).filter((item) => item.score > 0).sort((a, b) => b.score - a.score || a.operation.path.localeCompare(b.operation.path));
     matched = scored.map((item) => item.operation);
+    // Nothing matched: hand back the map rather than an empty answer.
+    if (!matched.length) return { science_installed: science, total: 0, areas: areaList() };
   }
   return { science_installed: science, total: matched.length,
     operations: matched.slice(0, limit).map((operation) => ({
       operation: operation.path, args: operation.params, signature: operation.signature, effect: operation.effect,
       ...(appControlEffectNeedsOwnerTurn(operation.effect) ? { owner_turn_only: true } : {}),
+      ...(operation.keywords?.length ? { fields: operation.keywords } : {}),
       ...(operation.doc ? { doc: operation.doc } : {}),
     })) };
 }

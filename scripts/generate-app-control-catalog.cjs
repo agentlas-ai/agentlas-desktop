@@ -152,8 +152,32 @@ let ipcInterface = null;
 ts.forEachChild(types, (node) => { if (ts.isInterfaceDeclaration(node) && node.name.text === "AgentlasIpc") ipcInterface = node; });
 if (!ipcInterface) throw new Error("AgentlasIpc interface not found");
 walkType(ipcInterface.members, "");
+// Field names of the shared types an operation takes or returns, so "sound" finds runAlerts.set (Partial<RunAlertSettings>).
+const typeFields = new Map();
+ts.forEachChild(types, (node) => {
+  if (ts.isInterfaceDeclaration(node)) typeFields.set(node.name.text, node.members.map((member) => member.name && (ts.isIdentifier(member.name) || ts.isStringLiteral(member.name)) ? member.name.text : null).filter(Boolean));
+  else if (ts.isTypeAliasDeclaration(node) && ts.isTypeLiteralNode(node.type)) typeFields.set(node.name.text, node.type.members.map((member) => member.name && ts.isIdentifier(member.name) ? member.name.text : null).filter(Boolean));
+});
+function returnTypeText(path) {
+  const segments = path.split(".");
+  let members = ipcInterface.members;
+  let found = null;
+  for (const [index, segment] of segments.entries()) {
+    const member = members.find((candidate) => candidate.name && (ts.isIdentifier(candidate.name) || ts.isStringLiteral(candidate.name)) && candidate.name.text === segment);
+    if (!member) return "";
+    if (index === segments.length - 1) { found = member; break; }
+    if (!ts.isPropertySignature(member) || !member.type || !ts.isTypeLiteralNode(member.type)) return "";
+    members = member.type.members;
+  }
+  if (!found) return "";
+  if (ts.isMethodSignature(found)) return found.type ? found.type.getText(types) : "";
+  return found.type && ts.isFunctionTypeNode(found.type) ? found.type.type.getText(types) : "";
+}
 for (const operation of operations) {
   const info = operation.surface === "desktop" ? typed.get(operation.path) : null;
+  const referenced = `${info?.signature ?? ""} ${operation.surface === "desktop" ? returnTypeText(operation.path) : ""}`.match(/\b[A-Z][A-Za-z0-9]+\b/g) ?? [];
+  const keywords = [...new Set(referenced.flatMap((name) => typeFields.get(name) ?? []))].slice(0, 24);
+  if (keywords.length) operation.keywords = keywords;
   operation.signature = (info?.signature ?? operation.bridgeSignature).replace(/\s+/g, " ").slice(0, 320);
   operation.doc = info?.doc ?? "";
   delete operation.bridgeSignature;
@@ -168,7 +192,7 @@ const body = [
   "  | { literal: string | number | boolean | null | [] }",
   "  | { extensionId: true }",
   "  | { object: Array<[string, AppControlInvokeArg]> };",
-  "export interface AppControlCatalogEntry { path: string; surface: \"desktop\" | \"science\"; channel: string; params: string[]; invokeArgs: AppControlInvokeArg[]; signature: string; doc: string }",
+  "export interface AppControlCatalogEntry { path: string; surface: \"desktop\" | \"science\"; channel: string; params: string[]; invokeArgs: AppControlInvokeArg[]; signature: string; doc: string; keywords?: string[] }",
   `export const APP_CONTROL_CATALOG: readonly AppControlCatalogEntry[] = ${JSON.stringify(operations, null, 0)
     .replace(/\},\{"path"/g, "},\n  {\"path\"").replace(/^\[/, "[\n  ").replace(/\]$/, ",\n]")};`,
   "",
