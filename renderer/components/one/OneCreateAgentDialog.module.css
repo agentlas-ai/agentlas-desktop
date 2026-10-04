@@ -197,10 +197,7 @@
 .generator textarea:focus,
 .fields input:focus,
 .fields textarea:focus,
-.fields select:focus {
-  border-color: var(--ink-soft);
-  box-shadow: 0 0 0 3px rgba(55, 63, 58, .1);
-}
+.fields select:focus { outline: none; }
 
 .modelPicker small {
   color: var(--muted-deep);

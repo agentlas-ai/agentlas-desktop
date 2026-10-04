@@ -392,7 +392,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
   font-size: 13px;
 }
 .editorField input:focus,
-.editorField select:focus { outline: none; border-color: var(--one-sheet-accent); box-shadow: var(--one-sheet-focus); }
+.editorField select:focus { outline: none; }
 .editorReadOnly { display: grid; grid-template-columns: 90px minmax(0, 1fr); gap: 4px 12px; padding: 12px; border-radius: var(--one-sheet-card-radius); background: var(--one-sheet-card-muted); }
 .editorReadOnly > span { grid-row: 1 / span 2; color: var(--one-sheet-muted); font-size: 11px; }
 .editorReadOnly strong { font-size: 13px; }

@@ -2457,7 +2457,6 @@
 .composerQuickMode { width: 34px; padding: 0; }
 
 .composer:focus-within {
-  border-color: var(--paper-edge-strong);
   box-shadow: 0 15px 42px rgba(25, 31, 36, 0.095), 0 2px 7px rgba(25, 31, 36, 0.04);
 }
 
@@ -2672,7 +2671,7 @@
   outline: none;
 }
 
-.searchHeader input:focus { border-color: var(--ok-soft); box-shadow: 0 0 0 3px rgba(96,122,54,.08); }
+.searchHeader input:focus { outline: none; }
 
 .searchScope {
   min-height: 42px;

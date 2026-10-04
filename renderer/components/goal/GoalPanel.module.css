@@ -99,7 +99,7 @@
   width: 100%; box-sizing: border-box; font: inherit; font-size: 13px; color: var(--ink); resize: vertical;
   padding: 6px 8px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper);
 }
-.editorField textarea:focus, .editorField input:focus { outline: none; border-color: var(--ink-soft); }
+.editorField textarea:focus, .editorField input:focus { outline: none; }
 .editorActions { display: flex; justify-content: flex-end; gap: 6px; }
 .editorActions button, .shape button, .suggestionActions button {
   min-height: 26px; padding: 0 10px; border-radius: 7px; border: 1px solid var(--paper-edge); background: var(--paper); color: var(--ink-soft); font: inherit; font-size: 12px; cursor: pointer;

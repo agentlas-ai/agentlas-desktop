@@ -336,7 +336,7 @@ button.row:disabled .trailing { color: var(--muted-deep); }
   outline: none;
   -moz-appearance: textfield;
 }
-.customField input:focus { border-bottom-color: var(--accent); }
+.customField input:focus { outline: none; }
 .customField input::placeholder { color: var(--muted); }
 .customField input::-webkit-outer-spin-button,
 .customField input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }

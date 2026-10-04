@@ -163,7 +163,6 @@
 }
 
 .searchBar:focus-within {
-  border-color: var(--paper-edge);
   background: var(--paper);
 }
 

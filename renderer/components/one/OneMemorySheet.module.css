@@ -237,14 +237,15 @@
 .primaryButton:focus-visible,
 .secondaryButton:focus-visible,
 .dangerButton:focus-visible,
-.textDangerButton:focus-visible,
-.editForm input:focus,
-.editForm textarea:focus,
-.editForm select:focus {
+.textDangerButton:focus-visible {
   outline: none;
   border-color: var(--one-sheet-accent);
   box-shadow: var(--one-sheet-focus);
 }
+/* Text fields draw no focus border or ring (owner 2026-10-04); the caret shows focus. */
+.editForm input:focus,
+.editForm textarea:focus,
+.editForm select:focus { outline: none; }
 
 .editForm {
   display: grid;
@@ -336,4 +337,4 @@
   font-size: 13px;
   color: var(--ink);
 }
-.searchInput:focus { outline: 2px solid rgba(96, 122, 54, 0.3); outline-offset: 1px; }
+.searchInput:focus { outline: none; }

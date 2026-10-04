@@ -11,7 +11,7 @@
 .add, .navigation > button, .controls > button { display:grid; place-items:center; flex-shrink:0; border:0; background:transparent; color:inherit; cursor:pointer; width:28px; height:28px; border-radius:6px; }
 .navigation { display:flex; flex-shrink:0; align-items:center; gap:3px; padding:4px 9px 8px; border-bottom:1px solid var(--line,#eee); }
 .navigation > input { flex:1; min-width:0; height:29px; border:1px solid transparent; border-radius:7px; padding:0 10px; font:12px/1.5 inherit; color:inherit; background:color-mix(in srgb,var(--ink,#202124) 4%,transparent); }
-.navigation > input:focus { outline:none; border-color:var(--line,#ddd); }
+.navigation > input:focus { outline: none; }
 .browser button:hover { background:color-mix(in srgb,var(--ink,#202124) 7%,transparent); }
 .browser button:disabled { opacity:.3; cursor:default; }
 .browser button:focus-visible { outline:2px solid var(--accent,#777); outline-offset:1px; }

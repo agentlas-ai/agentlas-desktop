@@ -5,7 +5,7 @@
 .button:focus-visible { outline:2px solid var(--accent,#7774ef); outline-offset:1px; }
 .popover { position:fixed; z-index:10000; width:274px; }
 .popover textarea { display:block; width:100%; min-height:72px; max-height:160px; resize:vertical; padding:8px 12px; border:0; border-radius:8px; background:transparent; color:inherit; font:inherit; font-size:var(--panel-menu-font-size); font-weight:400; line-height:1.5; outline:none; }
-.popover textarea:focus-visible { outline:1px solid var(--accent,#7774ef); outline-offset:-1px; }
+.popover textarea:focus-visible { outline: none; }
 .actions { display:flex; justify-content:flex-end; gap:2px; }
 .actions button { width:auto; white-space:nowrap; }
 .message { margin:0; padding:6px 12px; color:var(--muted-deep,#777); font:inherit; }

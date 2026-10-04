@@ -2,7 +2,7 @@
 .searchRow { display:flex; gap:8px; }
 .search { position:relative; display:flex; align-items:center; gap:10px; flex:1; min-width:0; padding:0 14px; border:1px solid var(--paper-edge); background:var(--paper); border-radius:10px; color:var(--muted-deep); transition:border-color .12s, box-shadow .12s; }
 .search input { width:100%; height:40px; padding:0; border:0; outline:0; background:transparent; color:var(--ink); font:inherit; font-size:13px; }
-.search:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+.search:focus-within { outline: none; }
 .spinner { display:inline-flex; opacity:0; transition:opacity .15s; }
 .spinner svg { animation:hf-spin 1.1s linear infinite; }
 .search[data-loading="true"] .spinner { opacity:1; }

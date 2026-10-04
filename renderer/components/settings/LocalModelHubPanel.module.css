@@ -2,7 +2,7 @@
 .toolbar { display:flex; align-items:center; gap:12px; padding-bottom:16px; border-bottom:1px solid var(--paper-edge); }
 .search { display:flex; align-items:center; gap:9px; flex:1; min-width:0; color:var(--muted-deep); }
 .search input { width:100%; min-width:0; border:0; outline:0; padding:8px 0; background:transparent; color:var(--ink); font:inherit; }
-.search:focus-within { outline:1px solid var(--accent); outline-offset:3px; border-radius:5px; }
+.search:focus-within { border-radius:5px; }
 .menus { position:relative; display:flex; gap:3px; }
 .icon { width:30px; height:30px; display:grid; place-items:center; background:transparent; color:var(--muted-deep); border:0; border-radius:7px; cursor:pointer; }
 .icon:hover,.icon[aria-expanded=true] { background:var(--paper-2); }

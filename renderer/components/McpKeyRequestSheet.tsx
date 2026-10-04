@@ -341,11 +341,7 @@ export function McpKeyRequestSheet({
           background: var(--one-sheet-control-surface);
           color: var(--one-sheet-ink);
         }
-        .mkr-one .mkr-field input:focus {
-          outline: none;
-          border-color: var(--one-sheet-accent);
-          box-shadow: var(--one-sheet-focus);
-        }
+        .mkr-one .mkr-field input:focus { outline: none; }
         .mkr-one .mkr-actions button {
           min-height: var(--one-sheet-control-height);
           border-color: var(--one-sheet-control-border);

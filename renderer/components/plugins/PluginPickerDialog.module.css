@@ -391,10 +391,7 @@
   font-size: 13px;
 }
 
-.keyInput:focus {
-  outline: 2px solid var(--ink-soft);
-  outline-offset: -1px;
-}
+.keyInput:focus { outline: none; }
 
 .keyNote {
   margin: 14px 24px 0;

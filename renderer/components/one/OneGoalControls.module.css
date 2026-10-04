@@ -14,7 +14,7 @@
 .handoff[data-goal-model-state="applied"] { color: var(--ink); }
 .editor { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--paper-edge); border-radius: 9px; background: var(--paper); }
 .editor textarea { width: 100%; min-height: 76px; resize: vertical; box-sizing: border-box; border: 1px solid var(--paper-edge); border-radius: 7px; padding: 8px; color: var(--ink); background: var(--paper); font: inherit; line-height: 1.45; }
-.editor textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.editor textarea:focus-visible { outline: none; }
 .editor p { margin: 0; color: var(--muted-deep); font-size: 11px; }
 .editor > div { display: flex; justify-content: flex-end; gap: 6px; }
 .helpButton { width: 20px; min-height: 20px !important; height: 20px; padding: 0 !important; border: 1px solid var(--paper-edge); border-radius: 50% !important; color: var(--muted-deep) !important; font-size: 10px; font-weight: 700 !important; }

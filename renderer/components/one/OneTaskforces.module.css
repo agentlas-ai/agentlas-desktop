@@ -27,10 +27,10 @@
 .busyState small { color: var(--muted-deep); font-size: 9px; line-height: 1.4; }
 .titleField { display: grid; gap: 6px; color: var(--muted-deep); font-size: 11px; font-weight: 650; }
 .titleField input { min-height: 42px; padding: 0 12px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); color: var(--ink); font: inherit; font-size: 13px; outline: none; }
-.titleField input:focus { border-color: var(--muted-deep); box-shadow: 0 0 0 3px rgba(52, 58, 55, .08); }
+.titleField input:focus { outline: none; }
 .descriptionField { display: grid; gap: 6px; color: var(--muted-deep); font-size: 11px; font-weight: 650; }
 .descriptionField textarea { min-height: 82px; padding: 10px 12px; resize: vertical; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper); color: var(--ink); font: inherit; font-size: 12px; line-height: 1.55; outline: none; }
-.descriptionField textarea:focus { border-color: var(--muted-deep); box-shadow: 0 0 0 3px rgba(52, 58, 55, .08); }
+.descriptionField textarea:focus { outline: none; }
 .memberList { display: grid; gap: 6px; max-height: min(46vh, 410px); overflow-y: auto; }
 .memberReplacement { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 8px; padding: 0 10px 8px; font-size: 11px; color: var(--muted-deep); }
 .memberReplacement select { min-width: 0; min-height: 36px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); color: var(--ink); font: inherit; }

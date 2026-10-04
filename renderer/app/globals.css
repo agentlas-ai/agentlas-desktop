@@ -687,10 +687,17 @@ a:hover {
  *
  *   감싼 상자가 대신 표시를 내는 곳(작성창 등)은 data-focus-ring="wrapper" 로
  *   빠진다 — 거기는 이미 보이고, 안쪽에 링을 더 그리면 지저분해진다.
+ *
+ * ★오너 결정 2026-10-04: "입력창 누를 때 테두리 나오게 하지마 — 모든 곳에서".
+ *   글자를 넣는 칸은 마우스로 눌러도 브라우저가 :focus-visible 로 친다. 그래서 위의 키보드용
+ *   링이 클릭할 때마다 작성창 안에 검은 네모로 그려졌다(One 개인 대화 작성창 스크린샷).
+ *   글자 입력칸·선택칸과 그 칸을 감싼 검색·작성 상자는 초점이 와도 테두리·링을 그리지 않는다 —
+ *   깜빡이는 커서가 이미 초점을 보여 준다. 화면별로 칸에 붙어 있던 초점 테두리·링도 같은 날 걷어냈다.
+ *   체크박스·라디오·버튼처럼 글자를 넣지 않는 것은 위 규칙대로 키보드 초점 링을 유지한다.
  */
-:where(input, textarea, select):focus-visible:not([data-focus-ring="wrapper"]) {
-  outline: 2px solid var(--accent) !important;
-  outline-offset: 1px;
+:where(textarea, select, input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="button"], [type="submit"], [type="reset"])):focus,
+:where(textarea, select, input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="button"], [type="submit"], [type="reset"])):focus-visible {
+  outline: none !important;
 }
 
 /*
@@ -1571,10 +1578,7 @@ html[data-one-output-resizing="true"] * {
 .dashboard-org-search {
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
-.dashboard-org-search:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--paper-edge));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 9%, transparent);
-}
+.dashboard-org-search:focus-within { outline: none; }
 
 .dashboard-org-search input {
   min-width: 0;
@@ -2916,10 +2920,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   box-sizing: border-box;
 }
 
-.automation-architect-input-row textarea:focus {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--paper-edge));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 10%, transparent);
-}
+.automation-architect-input-row textarea:focus { outline: none; }
 
 .automation-architect-attach {
   width: 38px;
@@ -3316,7 +3317,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
 .automation-session-error { position: relative; margin: 0 12px 8px; padding: 12px 50px 12px 14px; border: 1px solid var(--paper-3); border-radius: 14px; background: var(--paper); color: var(--rd-ink); font-size: 11px; line-height: 1.5; }
 .automation-session-composer { border-top: 1px solid var(--rd-hair); padding: 10px 12px 12px; display: flex; flex-direction: column; gap: 8px; background: var(--rd-surface); }
 .automation-session-composer textarea { width: 100%; resize: none; padding: 9px 10px; border: 1px solid var(--rd-hair); border-radius: 10px; background: var(--rd-surface-2); color: var(--rd-ink); font: inherit; font-size: 11.5px; line-height: 1.5; }
-.automation-session-composer textarea:focus { outline: none; border-color: var(--rd-accent); }
+.automation-session-composer textarea:focus { outline: none; }
 .automation-session-composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .automation-session-composer-actions span { color: var(--rd-ink-3); font-size: 10px; }
 .automation-session-composer-actions button { padding: 6px 14px; border: 1px solid var(--rd-hair); border-radius: 999px; background: var(--rd-surface-2); color: var(--rd-ink); font-size: 11px; font-weight: 700; cursor: pointer; }
@@ -4109,7 +4110,7 @@ button[data-toggle-state="on"] {
 .project-field { display: grid; gap: 7px; }
 .project-field > span { font-size: 12px; font-weight: 700; color: var(--rd-ink-2); }
 .project-field input, .project-field textarea { width: 100%; border: 1px solid var(--rd-hair-2); border-radius: 12px; padding: 12px 14px; background: var(--rd-surface); color: var(--rd-ink); font: inherit; resize: vertical; outline: none; }
-.project-field input:focus, .project-field textarea:focus { border-color: var(--rd-accent); box-shadow: 0 0 0 3px color-mix(in oklch, var(--rd-accent) 10%, transparent); }
+.project-field input:focus, .project-field textarea:focus { outline: none; }
 /* 열 최소폭을 0으로 — 고정 최소폭(260/360/340px)이 좁은 컨테이너에서 그리드를
    패널 밖으로 밀어 목록이 경계를 넘어 그려졌다. 스크롤은 각 열이 소유한다. */
 .project-agent-workbench { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, .8fr); gap: 14px; min-height: 350px; }
@@ -4118,7 +4119,7 @@ button[data-toggle-state="on"] {
 .project-agent-pool, .project-agent-library { min-width: 0; border: 1px solid var(--rd-hair); border-radius: 16px; background: var(--rd-surface); padding: 14px; overflow-x: hidden; overflow-y: auto; }
 .project-roster-search-create { position: relative; display: block; margin: 2px 0 10px; }
 .project-roster-search-create > input { width: 100%; min-height: 34px; padding: 0 10px; border: 1px solid var(--rd-hair); border-radius: 9px; background: var(--rd-surface-2); color: var(--rd-ink); font-size: 12.5px; }
-.project-roster-search-create > input:focus-visible { outline: 2px solid color-mix(in oklch, var(--rd-accent) 32%, transparent); outline-offset: 1px; }
+.project-roster-search-create > input:focus-visible { outline: none; }
 .project-roster-search-empty-create { padding: 16px 8px; color: var(--rd-ink-3); font-size: 12px; text-align: center; }
 .project-agent-pool[data-empty="true"] { border-style: dashed; background: color-mix(in oklch, var(--rd-accent) 4%, var(--rd-surface)); }
 .project-agent-pool-head { display: flex; align-items: center; justify-content: space-between; min-height: 36px; margin-bottom: 8px; }
@@ -6069,10 +6070,7 @@ button[data-toggle-state="on"] {
 .chat-qsheet-other-input::placeholder {
   color: var(--muted);
 }
-.chat-qsheet-other-input:focus {
-  border-color: var(--accent);
-  outline: none;
-}
+.chat-qsheet-other-input:focus { outline: none; }
 .chat-qsheet-foot {
   display: flex;
   align-items: center;
@@ -6208,10 +6206,7 @@ button[data-toggle-state="on"] {
   font-size: 12.5px;
   background: var(--rd-surface);
 }
-.rd .build-interview-qinput:focus {
-  border-color: color-mix(in oklch, var(--rd-accent) 55%, var(--rd-hair));
-  outline: none;
-}
+.rd .build-interview-qinput:focus { outline: none; }
 
 /* 업로드 위치 선택(클라우드 vs 허브) */
 .build-upload-choice {
@@ -7260,8 +7255,7 @@ button[data-toggle-state="on"] {
 }
 
 .chat-input-shell:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--paper-edge));
-  box-shadow: 0 12px 32px rgba(15, 18, 20, 0.1), 0 0 0 3px color-mix(in srgb, var(--accent) 9%, transparent);
+  box-shadow: 0 12px 32px rgba(15, 18, 20, 0.1);
 }
 
 .chat-input-toolbar {
@@ -7363,7 +7357,7 @@ button[data-toggle-state="on"] {
 .chat-composer-goal-stack > .chat-composer-goal { width: 100%; }
 .chat-composer-goal-editor { display: grid; gap: 6px; padding: 8px; border: 1px solid var(--paper-edge); border-radius: 9px; background: var(--paper); }
 .chat-composer-goal-editor textarea { width: 100%; min-height: 76px; resize: vertical; box-sizing: border-box; border: 1px solid var(--paper-edge); border-radius: 7px; padding: 8px; color: var(--ink); background: var(--paper); font: inherit; line-height: 1.45; }
-.chat-composer-goal-editor textarea:focus-visible { outline: 2px solid var(--ink); outline-offset: 1px; }
+.chat-composer-goal-editor textarea:focus-visible { outline: none; }
 .chat-composer-goal-editor p { margin: 0; color: var(--muted-deep); font-size: 11px; }
 .chat-composer-goal-editor > div { display: flex; justify-content: flex-end; gap: 6px; }
 
@@ -8566,10 +8560,7 @@ button[data-toggle-state="on"] {
   box-shadow: none;
 }
 
-.rd .portal-input:focus {
-  border-color: color-mix(in oklch, var(--rd-accent) 55%, var(--rd-hair-2));
-  box-shadow: 0 0 0 3px color-mix(in oklch, var(--rd-accent) 14%, transparent);
-}
+.rd .portal-input:focus { outline: none; }
 
 .rd .portal-chip-row {
   display: flex;
@@ -9750,10 +9741,7 @@ button[data-toggle-state="on"] {
 .sidenav-search {
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
-.sidenav-search:focus-within {
-  border-color: color-mix(in srgb, var(--accent) 48%, var(--paper-edge));
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 9%, transparent);
-}
+.sidenav-search:focus-within { outline: none; }
 .sidenav-search input {
   flex: 1;
   min-width: 0;
@@ -10602,10 +10590,7 @@ button[data-toggle-state="on"] {
   margin: 16px 20px 4px;
   transition: border-color 140ms ease, box-shadow 140ms ease;
 }
-.hub-borrow-search:focus-within {
-  border-color: var(--rd-accent);
-  box-shadow: 0 0 0 3px var(--rd-accent-soft);
-}
+.hub-borrow-search:focus-within { outline: none; }
 .hub-borrow-search input {
   border: none;
   background: none;

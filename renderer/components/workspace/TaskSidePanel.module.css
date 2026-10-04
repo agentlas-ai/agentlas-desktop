@@ -874,7 +874,7 @@ button.artifactVisual { cursor: pointer; }
   background: var(--paper-2);
   color: var(--muted-deep);
 }
-.browserAddressForm:focus-within { border-color: var(--paper-edge-strong); background: var(--paper); box-shadow: 0 0 0 2px rgba(50, 55, 59, .06); }
+.browserAddressForm:focus-within { background: var(--paper); }
 .browserAddressForm input {
   min-width: 0;
   width: 100%;
