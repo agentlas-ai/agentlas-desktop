@@ -21,8 +21,8 @@ import {
   IconClose,
   IconPower,
   IconRefresh,
+  IconPlus,
   IconSearch,
-  IconSparkles,
   IconToolchain,
   IconWand,
 } from "@/components/Icon";
@@ -119,12 +119,18 @@ function when(iso: string, locale: string): string {
 }
 
 function span(from: string, to: string, locale: string): string {
-  if (from === to) return when(from, locale);
   const a = new Date(from), b = new Date(to);
-  const sameDay = a.toDateString() === b.toDateString();
   const time = (date: Date) => date.toLocaleTimeString(locale === "ko" ? "ko-KR" : "en-US", { hour: "numeric", minute: "2-digit" });
+  // Within one minute it is one moment.
+  if (Math.abs(b.getTime() - a.getTime()) < 60_000) return when(from, locale);
   const day = (date: Date) => date.toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", { month: "numeric", day: "numeric" });
-  return sameDay ? `${day(a)} ${time(a)}–${time(b)}` : `${day(a)}–${day(b)}`;
+  if (a.toDateString() !== b.toDateString()) return `${day(a)}–${day(b)}`;
+  // "오후 4:55–6:29", "4:55–6:29 PM": the period once.
+  let start = time(a), end = time(b);
+  const period = /^(오전|오후) /.exec(start)?.[1];
+  if (period && end.startsWith(`${period} `)) end = end.slice(period.length + 1);
+  else if (!period && /[AP]M$/.test(start) && start.slice(-2) === end.slice(-2)) start = start.slice(0, -3);
+  return `${day(a)} ${start}–${end}`;
 }
 
 function HistoryRow({ event, copy, locale }: { event: ToolchainHistoryEvent; copy: ToolchainCopy; locale: string }) {
@@ -137,7 +143,7 @@ function HistoryRow({ event, copy, locale }: { event: ToolchainHistoryEvent; cop
     </li>
   );
   switch (event.kind) {
-    case "made": return row(<IconSparkles size={12} />, when(event.at, locale), h.made(event.by), "made");
+    case "made": return row(<IconPlus size={12} />, when(event.at, locale), h.made(event.by), "made");
     case "ran": return row(<IconBolt size={12} />, span(event.from, event.to, locale), h.ran(event.count, event.by), "ran");
     case "tool": return row(<IconToolchain size={12} />, when(event.at, locale), h.tool(event.passed, event.tested, event.by), event.passed ? "tool" : "draft");
     case "called": return row(<IconChat size={12} />, span(event.from, event.to, locale), h.called(event.count, event.caller), "called");

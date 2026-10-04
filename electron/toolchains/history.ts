@@ -33,7 +33,8 @@ function chatTitle(chatId: string | null): string | null {
   if (!chatId) return null;
   try {
     const row = getDb().prepare("SELECT title FROM chats WHERE id = ?").get(chatId) as { title: string | null } | undefined;
-    const title = row?.title?.replace(/\s+/g, " ").trim();
+    // A title that is itself a quotation ("'state-of-the-art AI tools'") reads as one name without its quotes.
+    const title = row?.title?.replace(/\s+/g, " ").trim().replace(/^["'“‘「]+|["'”’」]+$/g, "").trim();
     return title ? (title.length > 28 ? `${title.slice(0, 27)}…` : title) : null;
   } catch {
     return null;
