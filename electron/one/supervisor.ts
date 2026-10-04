@@ -4,6 +4,7 @@ import { createChat, getChat, appendChatMessage, listChatMessages, normalizeChat
 import { ensureCanonicalTaskForChat, listCanonicalTasks, getCanonicalTaskForChat, hasPassedTaskForceExecutionVerification } from "../store/tasks";
 import { getProject } from "../store/projects";
 import { grantChatAlwaysApproval } from "../store/capability-grants";
+import { queuedSteerState } from "../store/invocation-steers";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { invocationService } from "../invocation/service";
 import { admitMainInvocation } from "../runtime/scheduled-root-context";
@@ -85,6 +86,7 @@ export function oneSupervisor():OneSupervisorService {
       cancel:runId=>invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>invocationService.pauseGoal(chatId,goalId),
       cancelGoal:(chatId,goalId)=>invocationService.deleteGoal(chatId,goalId),
       steer:(req,runId)=>invocationService.steer(req,runId,undefined,undefined,admitMainInvocation(req.chatId)),
+      steerState:id=>queuedSteerState(id),
       onSettled:listener=>invocationService.onSettled(listener),
     },science:{
       tasks:()=>{if(!science) return Promise.reject(new Error("science_daemon_unavailable"));return science.tasks();},

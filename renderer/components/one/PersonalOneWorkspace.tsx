@@ -156,6 +156,8 @@ export function PersonalOneWorkspace() {
     ?copy("상태가 바뀌었습니다. 최신 상태를 확인해 주세요.","The state changed. Review the latest observation.")
     :value.state==="held"?copy("요청은 저장되었습니다. 실행 결과를 확인해야 합니다.","The request is saved. Its execution outcome needs confirmation.")
     :value.kind==="appearance"?copy("설정을 저장했습니다.","Settings saved.")
+    :value.kind==="steer"&&value.reason==="applied_in_next_run"?copy("지시가 작업의 다음 실행에 들어갔습니다.","The direction went into the task's next run.")
+    :value.kind==="steer"&&value.reason==="steer_withdrawn"?copy("이 지시는 실행 전에 거둬졌습니다.","This direction was withdrawn before it ran.")
     :value.kind==="steer"?copy("이 작업의 다음 지시로 접수했습니다.","Saved as the next direction for this task.")
     :value.kind==="cancel"||value.kind==="stop-reply"?terminal(value.state)?stateLabel(value.state):copy("중지를 요청했습니다. 실행 정리를 기다립니다.","Stop requested. Waiting for execution to settle.")
     :copy("작업을 맡겼습니다. 여기서 대화를 이어갈 수 있습니다.","Task handed off. You can keep talking here.");

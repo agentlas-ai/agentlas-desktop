@@ -176,6 +176,13 @@ export function beginQueuedSteerDrain(id: string, drainedRunId: string): boolean
   ).run(drainedRunId, new Date().toISOString(), id).changes === 1;
 }
 
+/** Where a queued direction stands: still waiting, delivered into a run ("started"), withdrawn or failed. */
+export function queuedSteerState(id: string): { status: DurableQueuedSteer["status"]; drainedRunId: string | null } | null {
+  const row = getDb().prepare("SELECT status, drained_run_id FROM invocation_steers WHERE id = ?").get(id) as
+    { status: DurableQueuedSteer["status"]; drained_run_id: string | null } | undefined;
+  return row ? { status: row.status, drainedRunId: row.drained_run_id } : null;
+}
+
 export function settleQueuedSteer(id: string, status: "started" | "cancelled" | "failed"): boolean {
   return getDb().prepare(
     "UPDATE invocation_steers SET status = ?, updated_at = ? WHERE id = ? AND status IN ('queued','draining') AND recovery_state = 'ready'",

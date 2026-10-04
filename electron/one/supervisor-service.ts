@@ -20,6 +20,8 @@ export interface SupervisorRuntime {
   pauseGoal(chatId: string, goalId: string): void;
   cancelGoal(chatId: string, goalId: string): void;
   onSettled(listener: (event: {runId: string; chatId: string; receipt: InvocationRunReceipt}) => void): () => void;
+  /** Where a queued direction stands (invocation_steers): delivered into a run, withdrawn or failed. */
+  steerState?(queuedRequestId: string): {status: string; drainedRunId: string | null} | null;
 }
 export interface SupervisorDependencies {
   store: OneSupervisorStore;
@@ -451,6 +453,8 @@ export class OneSupervisorService {
         } else {
           const result=this.deps.runtime.steer({chatId:task.chatId,userPrompt:input.text!,taskIntent:"task",promptOrigin:"system",locale:this.deps.locale(),steeringMode:"queue"},task.runId!);
           if (!result.queued || (result.activeRunId && result.activeRunId !== task.runId)) throw new Error("supervisor_task_steer_unconfirmed");
+          // The apply cursor (UX03/D04): the durable queued direction this receipt waits on.
+          if (result.queuedRequestId) this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?").run(JSON.stringify({...input,queuedRequestId:result.queuedRequestId}),row.command_id);
         }
       }
       const current=this.deps.store.get(row.command_id)!;
@@ -478,8 +482,25 @@ export class OneSupervisorService {
       return current.state==='dispatching' ? this.deps.store.update(current,{state:"held",acknowledgement:"unknown",reason:error instanceof Error?error.message.slice(0,240):'reply_stop_unconfirmed'}) : JSON.parse(current.receipt_json);
     }
   }
+  /** Received, delivered and applied are different facts (I13). A direction is applied once the worker's next run
+   * started with it; until then the receipt says "not yet observed". Withdrawn or failed directions say so. */
+  private reconcileSteers(oneId: string): void {
+    if (!this.deps.runtime.steerState) return;
+    const rows = this.deps.store.db.prepare(`SELECT * FROM one_supervisor_requests WHERE one_id=? AND kind='steer'
+      AND json_extract(receipt_json,'$.reason')='application_not_yet_observed' ORDER BY rowid DESC LIMIT 50`).all(oneId) as SupervisorRequestRow[];
+    for (const row of rows) {
+      let queued: string | undefined;
+      try { queued = JSON.parse(row.payload_json).queuedRequestId; } catch { continue; }
+      if (!queued) continue;
+      const state = this.deps.runtime.steerState(queued);
+      const reason = state?.status === "started" ? "applied_in_next_run" : state?.status === "cancelled" ? "steer_withdrawn"
+        : state?.status === "failed" ? "steer_not_applied" : null;
+      if (reason) this.deps.store.update(row, {reason});
+    }
+  }
   async snapshot(): Promise<OneSupervisorSnapshot> {
     this.recover();
+    this.reconcileSteers(this.binding().oneId);
     const binding=this.binding();
     let science:SupervisorTask[]=[]; let scienceError:string|null=null;
     try { science=await this.deps.science?.tasks() ?? []; } catch(error) {scienceError=error instanceof Error ? error.message.slice(0,240) : "science_observation_unavailable";}
