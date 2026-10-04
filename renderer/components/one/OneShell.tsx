@@ -1403,7 +1403,11 @@ export function OneShell() {
   // event owner's run ID so a late durable receipt cannot make fresh events
   // look like duplicates of the previous run.
   const activityEventRunIdRef = useRef<string | null>(null);
-  const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string }>>([]);
+  // Each entry belongs to exactly one conversation (Main queues steers per chat). The strip and
+  // the "it started" hand-off read only the visible conversation's entries; a chat-less list let
+  // one room's "다음 지시" show in every room and be inserted as a user bubble wherever the next
+  // run attached (production X/Threads/YouTube rooms, 2026-10-04).
+  const [queuedSteers, setQueuedSteers] = useState<Array<{ id: string; text: string; chatId: string }>>([]);
   // Read by the active-chat listener, which must not re-subscribe on every queue change.
   const queuedSteersRef = useRef(queuedSteers);
   queuedSteersRef.current = queuedSteers;
@@ -4094,7 +4098,9 @@ export function OneShell() {
     // Switching threads drops the strip — unless this navigation is the fresh
     // submit landing on the chat it just created, whose steers are already
     // queued in Main behind the run that is starting.
-    if (!activeThreadChatId || runChatIdRef.current !== activeThreadChatId) setQueuedSteers([]);
+    setQueuedSteers((current) => current.some((item) => item.chatId !== activeThreadChatId)
+      ? current.filter((item) => item.chatId === activeThreadChatId)
+      : current);
     if (homeTransitionPendingRef.current && composerDraftKeyRef.current === "new" && composerDraftKey !== "new") return;
     if (composerDraftKeyRef.current === composerDraftKey) return;
     const previousKey = composerDraftKeyRef.current;
@@ -4170,8 +4176,10 @@ export function OneShell() {
         // The queued instruction is now the model's turn: it leaves the queue
         // strip and enters the conversation as the prompt of this run.
         setQueuedSteers((current) => {
-          const started = current[0];
-          if (started) {
+          const index = current.findIndex((item) => item.chatId === chatId);
+          if (index < 0) return current;
+          const started = current[index];
+          if (activeThreadChatIdRef.current === chatId) {
             setMessages((messages) => messages.some((message) => message.id === started.id)
               ? messages
               : [
@@ -4179,7 +4187,7 @@ export function OneShell() {
                 { id: started.id, role: "user" as const, text: started.text, createdAt: attachment.startedAt ?? new Date().toISOString() },
               ]);
           }
-          return current.slice(1);
+          return [...current.slice(0, index), ...current.slice(index + 1)];
         });
         withdrawQueuedNotice();
         subscribeRun(attachment.runId);
@@ -4249,8 +4257,8 @@ export function OneShell() {
               // the hand-off retry below) may already have answered. Its answer
               // lives in the durable transcript: read it rather than leaving the
               // conversation ending on the instruction (QA 2026-09-27).
-              const unattachedQueue = queuedSteersRef.current.length > 0;
-              setQueuedSteers([]);
+              const unattachedQueue = queuedSteersRef.current.some((item) => item.chatId === chatId);
+              setQueuedSteers((current) => current.filter((item) => item.chatId !== chatId));
               if (unattachedQueue) withdrawQueuedNotice();
               if (unattachedQueue && runChatIdRef.current === chatId) {
                 void settleOrderedRunRef.current(chatId, runTaskIdRef.current, null).catch(() => undefined);
@@ -4285,8 +4293,8 @@ export function OneShell() {
           void api.invoke.activeChats().then((active) => {
             if (runIdRef.current || runChatIdRef.current !== chatId) return;
             if (active.includes(chatId)) attachToActiveRun();
-            else if (queuedSteersRef.current.length > 0) {
-              setQueuedSteers([]);
+            else if (queuedSteersRef.current.some((item) => item.chatId === chatId)) {
+              setQueuedSteers((current) => current.filter((item) => item.chatId !== chatId));
               withdrawQueuedNotice();
               void settleOrderedRunRef.current(chatId, runTaskIdRef.current, null).catch(() => undefined);
             }
@@ -5511,7 +5519,7 @@ export function OneShell() {
       // until the model actually receives it; it becomes a conversation turn
       // only when its run starts (see the active-chat attach below). Showing it
       // as a bubble *and* in the queue drew the same words twice.
-      setQueuedSteers((current) => [...current, { id: optimisticId, text: value }]);
+      setQueuedSteers((current) => [...current, { id: optimisticId, text: value, chatId }]);
       scrollToLatest();
       try {
         const steerReceipt = await api.invoke.steer({
@@ -6050,9 +6058,9 @@ export function OneShell() {
   // Pull a queued direction back before its run starts. Main removes it by
   // position + exact text; if it already started (or the queue was already
   // cleared), the strip entry is dropped anyway — the truth is the run list.
-  const removeQueuedSteer = useCallback(async (id: string, position: number, text: string) => {
+  const removeQueuedSteer = useCallback(async (id: string, position: number, text: string, ownerChatId: string) => {
     const api = ipc();
-    const chatId = runChatIdRef.current;
+    const chatId = ownerChatId;
     setQueuedSteers((current) => current.filter((item) => item.id !== id));
     if (!api || !chatId) return;
     try {
@@ -9092,7 +9100,7 @@ export function OneShell() {
                 </button>
               </div>
             )}
-            {queuedSteers.map((queued, index) => (
+            {queuedSteers.filter((queued) => queued.chatId === activeThreadChatId).map((queued, index) => (
               // Codex keeps each queued message visible above the composer and
               // lets the user pull it back before the model receives it. Stop
               // clears the queue in Main, so the strip clears with it (see
@@ -9108,7 +9116,7 @@ export function OneShell() {
                   data-one-steering-remove="true"
                   aria-label={appLocale === "ko" ? "다음 지시 취소" : "Remove queued instruction"}
                   title={appLocale === "ko" ? "다음 지시 취소" : "Remove queued instruction"}
-                  onClick={() => void removeQueuedSteer(queued.id, index + 1, queued.text)}
+                  onClick={() => void removeQueuedSteer(queued.id, index + 1, queued.text, queued.chatId)}
                 >
                   <IconClose size={12} />
                 </button>

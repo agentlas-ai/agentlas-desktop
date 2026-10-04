@@ -137,6 +137,17 @@ import { EFFECT_OBSERVATION_SYSTEM_PROMPT, effectObservationOutputSchema, stripE
 import { effectObservationTicket } from "../long-run/effect-observation-tickets";
 import { goalExecutionDirectivePromptBlock } from "../long-run/goal-execution-context";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
+import { AGENT_ASK_OPEN } from "../../shared/agent-control-blocks";
+
+/**
+ * A turn that opened an ask fence handed the next move to the owner — even when the fence body
+ * is not the JSON card the parser accepts. Production 2026-10-03 (X room): Codex closed the fence
+ * with `<<end-agentlas-ask>>` around a prose question, so no card was parsed, the loop counted
+ * "no question", and the same Goal run re-asked 143 times in 90 minutes.
+ */
+function turnAsksOwner(text: string): boolean {
+  return extractAskFences(text).questions.length > 0 || text.includes(AGENT_ASK_OPEN);
+}
 import { getFirm, listFirms } from "../store/firms";
 import { recordBorrowedAgentCareer } from "../agents/borrowed-profiles";
 import {
@@ -6761,7 +6772,7 @@ ${effectiveUserPrompt}`;
        * 대화가 '실행 중'으로 남았고, 질문 시트는 "실행이 정리되면 전송"만 보이며 고른 답을 보내지 못했다.
        * 답이 오면 질문 연속 실행(questionContinuation)이 같은 목표를 이어간다.
        */
-      const asksUser = extractAskFences(continuation.text).questions.length > 0;
+      const asksUser = turnAsksOwner(continuation.text);
       if (asksUser) passShouldContinue = false;
       if (activeGoalId && continuousMode && !signal?.aborted && !asksUser) {
         if (passClaim.claimed && !nativeGoalEpisode) {
@@ -7043,7 +7054,7 @@ ${effectiveUserPrompt}`;
     const goalWaitRequest = waitProposal.request;
     // Fast/single-pass Goal turns need the same terminal custody as live passes.
     if (nativeGoalEpisode && !goalEpisodeYield && !goalWaitRequest && !automationHandoff
-      && !signal?.aborted && extractAskFences(result.text).questions.length === 0) {
+      && !signal?.aborted && !turnAsksOwner(result.text)) {
       goalEpisodeYield = nativeGoalEpisode;
       tryRecordRunEvent({ runId: nativeGoalEpisode.invocationRunId, chatId: chat.id,
         kind: "goal_native_episode_yield", payload: { ...nativeGoalEpisode } });
@@ -7063,7 +7074,9 @@ ${effectiveUserPrompt}`;
       claimed: !goalWaitRequest && (finalClaim.claimed || goalClaimSeen),
       evidence: finalClaim.evidence ?? goalClaimEvidence,
     };
-    let stormbreakerContinueRequested = !req.agentAppMode && !goalWaitRequest && !automationHandoff && finalContinuation.shouldContinue;
+    const finalAsksOwner = turnAsksOwner(finalContinuation.text);
+    let stormbreakerContinueRequested = !req.agentAppMode && !goalWaitRequest && !automationHandoff && !finalAsksOwner
+      && finalContinuation.shouldContinue;
     result = { ...result, text: goalCompletion.text };
     // ── persistent goal 최종 판정 (L2: continue = 모델마커 OR goal 미달) ──────
     // 라이브 루프가 이미 사이클을 기록했으면 그 판정을 재사용하고, 아니면(비-continuous
@@ -7102,7 +7115,7 @@ ${effectiveUserPrompt}`;
         });
       }
       if (latestGoalDecision) {
-        if (!stormbreakerContinueRequested && latestGoalDecision.continue) {
+        if (!stormbreakerContinueRequested && latestGoalDecision.continue && !finalAsksOwner) {
           stormbreakerContinueRequested = true;
         } else if (
           stormbreakerContinueRequested &&

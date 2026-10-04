@@ -3,12 +3,12 @@ import type { Chat, McpInvocationEvent } from "../../shared/types";
 import type { McpInvocationResult } from "../mcp/client";
 import type { InvocationWorkspaceBinding } from "../invocation/workspace-binding";
 import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-binding";
-import { buildMcpConfigFile } from "../mcp-tools/mcp-config";
+import { buildMcpConfigFile, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
 import { mcpToolIsMutating } from "../mcp-tools/proxy-server";
 import { isReadOnlyGraphBrowserObservation } from "../../shared/graph-browser-observation";
 import { loadMainToolInventory, runMainToolDispatch } from "../runtime/local-tool-loop";
 import { agentRunCwd } from "../runtime/exec";
-import { getChatWorkingFolder } from "../store/chats";
+import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAutomation } from "../store/automations";
 import { oneGraphAuthorityOwner } from "../one/graph-ownership";
 import { sha256Value } from "../../shared/graph-execution-digest";
@@ -88,6 +88,19 @@ export interface GraphMcpCallResult extends McpInvocationResult {
   output: unknown;
 }
 
+/**
+ * The Agentlas Browser binding refuses a gated config without an owner scope
+ * (`browser-approval-scope-missing`, required since 1.2.28). Both graph paths below were added in
+ * 1.2.54 without one, so every graph inventory or call that touched the browser failed — and One
+ * read the machine code as "the owner must approve read access" and asked for an approval that
+ * does not exist (production X room, 2026-10-03: 143 repeated questions). The scope is the chat the
+ * graph acts for; an automation session that was not opened from One belongs to Work.
+ */
+function graphBrowserApprovalScope(chatId: string): BrowserApprovalScope {
+  const surface = getChat(chatId)?.originSurface === "one" ? "one" : "work";
+  return Object.freeze({ surface, chatId });
+}
+
 /** Inventory is read from the same prepared Main binding used for dispatch.
  * No tool is invoked and no remote definition is accepted as an authority. */
 export async function inspectGraphMcpTools(input: {
@@ -100,7 +113,8 @@ export async function inspectGraphMcpTools(input: {
     skipDefaultSeed: true, configKey: `graph-inventory-${randomUUID()}`,
     ...(workingFolder ? { workingFolder } : {}),
     toolGate: { runtime: "graph-mcp", sessionKey: `graph-inventory:${randomUUID()}`, permission: input.permission,
-      cwd: workingFolder ?? agentRunCwd(), chatId: input.chat.id, unattended: true },
+      cwd: workingFolder ?? agentRunCwd(), chatId: input.chat.id, unattended: true,
+      approvalScope: graphBrowserApprovalScope(input.chat.id) },
     admissionCurrent: () => !input.signal?.aborted });
   if (!config) throw new Error("graph_mcp_catalog_unavailable");
   try {
@@ -156,6 +170,7 @@ export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<Graph
       try { assertCurrent(); return true; } catch { return false; }
     }, ...(workingFolder ? { workingFolder } : {}), browserProfileKey: `automation-${input.automationId}`,
     toolGate: { runtime: "graph-mcp", sessionKey, permission, cwd, chatId, unattended: true,
+      approvalScope: graphBrowserApprovalScope(chatId),
       ...(input.dryRun ? { simulation: true } : {}), ...(permission === "read" ? { readOnlyObservation: true } : {}) } });
   if (!config) throw new Error("graph_mcp_catalog_unavailable");
   try {
