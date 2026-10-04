@@ -52,14 +52,19 @@ export function oneSupervisor():OneSupervisorService {
   if (supervisor) return supervisor;
   const legacy=new OneSupervisorLegacyMigration(getDb());
   const store = new OneSupervisorStore(getDb());
-  const schemaOwner = openedStoreMigrationRole() === "owner";
-  const workQueue = new OneSupervisorWorkQueue(getDb(), schemaOwner);
+  // Main is the only process that runs Work, so it hosts the Work queue and executor whatever its store role.
+  // With a compatible daemon alive (the ordinary installed state) Main opens the store as a follower
+  // (initializeDesktopStore). Gating the executor on "owner" left every hand-off queued forever: QA,
+  // 2026-10-04, a QA daemon started first and One's Work sat "stored" for 10 minutes. The queue tables are
+  // additive (CREATE IF NOT EXISTS), so Main creates them in either role; the daemon never does.
+  const hostsWork = openedStoreMigrationRole() !== null;
+  const workQueue = new OneSupervisorWorkQueue(getDb(), hostsWork);
   const startNative = (req: Parameters<typeof invocationService.start>[0], hostNoticePurpose?: SupervisorHostNoticePurpose) => {
     if (req.runtimeSelection) req={...req,runtimeSelection:normalizeChatRuntimeSelection(req.runtimeSelection) ?? undefined};
     return invocationService.start(req,undefined,undefined,undefined,hostNoticePurpose,admitMainInvocation(req.chatId,req.runId));
   };
   supervisor=new OneSupervisorService({
-    store,identity:getOneProfile,workQueue,workIdentityMutable:schemaOwner,wakeWorkQueue:()=>workExecutor?.kick(),
+    store,identity:getOneProfile,workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>workExecutor?.kick(),
     createConversation:()=>createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id,
     history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text)=>appendChatMessage(chatId,"user",text).id,
     createWork:input=>{
@@ -88,7 +93,7 @@ export function oneSupervisor():OneSupervisorService {
     },
   });
   supervisor.recover();
-  if (schemaOwner) {
+  if (hostsWork) {
     workExecutor = new OneSupervisorWorkExecutor({store,queue:workQueue,
     ownerEpoch:desktopAppInstanceId(),ownerKind:"desktop-main",locale:currentUiLocale,
     assertOwner:()=>{assertDesktopLongRunAdmissionOpen();workQueue.setActiveIdentity(getOneProfile().oneId);},
