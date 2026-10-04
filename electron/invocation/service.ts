@@ -1,5 +1,6 @@
 import { canResumeInvocationBrowserLoginWait, claimInvocationBrowserLoginWait, registerInvocationBrowserLoginWait, settleInvocationBrowserLoginWait,
   type BrowserLoginWaitHandle, type InvocationBrowserLoginWait } from "./browser-login-wait";
+import { isOneQuietReply } from "../../shared/one-supervisor";
 import { bindWorkAttachmentRun, workAttachmentGroupIds, releaseWorkAttachmentRun, redactWorkAttachmentEvent, redactWorkAttachmentText } from "./work-attachments";
 import { stoppedGoalMessageReopens } from "../../shared/goal-display-state";
 import { withBrowserDownloadProofContext } from "../long-run/download-proof";
@@ -2927,6 +2928,10 @@ export class InvocationService {
           && !remoteWorkspaceBinding
           && typeof event.text === "string"
           && event.text.trim()
+          // One's quiet reply on a host-started review or check-in is deliberately not saved (dots parity): its
+          // durable record is the one_quiet_reply run event, not a transcript row. Treating it as a lost result
+          // failed every quiet turn and retried the review until its attempts ran out (QA 2026-10-04).
+          && !((hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin") && isOneQuietReply(event.text))
           && !hasDurableAssistantMessage(
             runReq.chatId,
             typeof durableTextForVerification === "string" && durableTextForVerification.trim()
