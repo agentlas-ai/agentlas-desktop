@@ -6976,6 +6976,12 @@ function ChatPage() {
           }}
         />
       </div>}
+      {/* Everything stacked on the composer shares its width and side margins (owner 2026-10-04: "챗창과 그 위 박스들
+          좌우 간격 동일하게") — the same box as the folder row above and the composer's own footer padding. */}
+      <div data-work-composer-stack="true" style={{
+        width: `min(calc(100% - 32px), ${WORK_COMPOSER_WIDTH_PX}px)`, margin: "0 auto", display: "flex",
+        flexDirection: "column", alignItems: "stretch", ["--one-composer-width" as string]: `${WORK_COMPOSER_WIDTH_PX}px`,
+      }}>
       <AutomationMonitorStrip key={chatId} chatId={chatId || null} locale={locale} />
       {/* One Goal surface (owner 2026-10-04 "골 하나만 해라"): with a Goal, the bar above the conversation holds the
           objective, its controls and next check, and folds the continuity detail; nothing is attached to the composer. */}
@@ -6988,6 +6994,7 @@ function ChatPage() {
             details={<ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} embedded />} />
         : <ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />}
       <AgiDefectChip chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />
+      </div>
       {surfaceConflict && surfaceConflict.surfaceId === surface?.id && (
         <div role="alert" data-artifact-state-conflict="true" style={{ padding: "8px 12px", fontSize: 12, background: "var(--paper-2)", borderTop: "var(--hairline)" }}>
           <p>{locale === "ko" ? "화면이 바뀌어 입력을 저장하지 못했습니다. 내 입력을 다시 적용하거나 최신 저장 상태를 불러오세요." : "This surface changed. Reapply your edit or load the latest saved state."}</p>

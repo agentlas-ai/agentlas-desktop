@@ -1,5 +1,6 @@
 /* Work's one Goal surface above the conversation (owner 2026-10-04 "골 하나만 해라"): a card of its own, not a tab on the composer. */
-.top[data-goal-bar-placement] { margin: 0 auto 6px; box-sizing: border-box; overflow: hidden;
+/* Width comes from the screen's composer stack, so its sides line up with the composer. */
+.top[data-goal-bar-placement] { width: 100%; margin: 0 0 6px; box-sizing: border-box; overflow: hidden;
   border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge)); border-radius: 12px;
   background: color-mix(in srgb, var(--paper-2) 72%, var(--paper)); }
 .top > :global(.chat-composer-goal) { margin: 0; border: 0; border-radius: 0; box-shadow: none; }
