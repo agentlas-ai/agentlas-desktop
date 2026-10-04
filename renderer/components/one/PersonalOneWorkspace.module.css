@@ -38,3 +38,9 @@
 .plusIcon{display:grid;place-items:center;width:22px;color:var(--ink-soft)}
 .plusSection{padding:6px 8px 3px;color:var(--muted-deep);font-size:10.5px;font-weight:650}
 .plusDivider{height:1px;margin:5px 6px;background:var(--paper-3)}
+/* While One answers: three dots in a reply bubble, nothing else. */
+.typing{align-self:flex-start;display:inline-flex;gap:5px;padding:12px 14px;border-radius:16px;background:var(--paper-3)}
+.typing span{width:6px;height:6px;border-radius:50%;background:var(--muted-deep);opacity:.35;animation:personalTyping 1.2s infinite ease-in-out}
+.typing span:nth-child(2){animation-delay:.15s}.typing span:nth-child(3){animation-delay:.3s}
+@keyframes personalTyping{0%,80%,100%{opacity:.25}40%{opacity:.85}}
+@media (prefers-reduced-motion:reduce){.typing span{animation:none;opacity:.5}}

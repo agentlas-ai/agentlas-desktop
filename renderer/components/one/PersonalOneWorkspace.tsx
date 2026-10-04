@@ -5,7 +5,7 @@ import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { Markdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconLayers, IconPanelRight, IconPlus, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
-import type { OneSupervisorSnapshot, SupervisorActivityItem, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation } from "../../../shared/one-supervisor";
+import type { OneSupervisorSnapshot, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation } from "../../../shared/one-supervisor";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor, type OneProfile } from "../../../shared/one-profile";
 import { readStoredRuntimeSelection } from '@shared/runtime-selection';
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "../../../shared/agent-control-blocks";
@@ -159,7 +159,6 @@ export function PersonalOneWorkspace() {
     :value.kind==="steer"?copy("이 작업의 다음 지시로 접수했습니다.","Saved as the next direction for this task.")
     :value.kind==="cancel"||value.kind==="stop-reply"?terminal(value.state)?stateLabel(value.state):copy("중지를 요청했습니다. 실행 정리를 기다립니다.","Stop requested. Waiting for execution to settle.")
     :copy("작업을 맡겼습니다. 여기서 대화를 이어갈 수 있습니다.","Task handed off. You can keep talking here.");
-  const activity=(items:SupervisorActivityItem[],state:string)=>!!items.length&&<details className={styles.activity}><summary>{items.some(item=>item.state==="running")&&!terminal(state)?copy("진행 과정","Activity"):copy("진행 기록","Activity history")} · {items.length}</summary>{items.map(item=><div key={item.id} data-activity-state={item.state}><span>{item.kind==="reasoning"?copy("생각 정리","Thinking"):item.label}{item.durationMs!==undefined?" · "+Math.round(item.durationMs/1000)+"s":""}</span><small>{stateLabel(item.state)}</small>{item.summary&&<p>{item.summary}</p>}</div>)}</details>;
   // A hand-off reads as a link to the session One opened (owner 2026-10-04: icons, no filler text).
   const delegation=(item:SupervisorDelegation)=>{
     const owned=snapshot?.tasks.find(task=>task.taskId===item.taskId); const state=owned?.state ?? item.state;
@@ -186,11 +185,13 @@ export function PersonalOneWorkspace() {
           {!snapshot?.messages.length&&!pendingMessages.length&&<div className={styles.empty}><h2>{copy("무엇을 함께 할까요?","What shall we work on?")}</h2></div>}
           {personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []).map(({message,turn,answer})=><div className={styles.turn} key={message.id} data-command-id={turn?.commandId}>
             <article className={styles.bubble} data-role={message.role}><Markdown text={message.role==="assistant"?visibleAnswer(message.text):message.text} messageId={message.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>
-            {turn&&activity(live?.runId===turn.runId&&live.activity.length?live.activity:turn.activity,turn.state)}
             {answer&&<article className={styles.bubble} data-role="assistant" data-run-id={turn?.runId}><Markdown text={visibleAnswer(answer.text)} messageId={answer.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>}
             {!answer&&live&&turn&&live.runId===turn.runId&&live.text&&<article className={styles.bubble} data-role="assistant" data-run-id={turn.runId}><Markdown text={visibleAnswer(live.text)} messageId={"live:"+turn.runId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>}
             {turn&&snapshot?.delegations?.filter(item=>item.originReplyRunId===turn.runId).map(delegation)}
-            {turn&&!answer&&!terminal(turn.state)&&<p className={styles.delivery}>{turn.state==="stored"?copy("접수됨 · 앞선 답변 후 이어집니다","Received · follows the current reply"):stateLabel(turn.state)}</p>}
+            {/* Owner 2026-10-04: no activity log under a reply ("이런건 없어도 되는"). While One answers, three dots. */}
+            {turn&&!answer&&!terminal(turn.state)&&(turn.state==="stored"
+              ?<p className={styles.delivery}>{copy("대기 중","Queued")}</p>
+              :!(live&&live.runId===turn.runId&&live.text)&&<div className={styles.typing} role="status" aria-label={copy("답하는 중","Answering")}><span/><span/><span/></div>)}
           </div>)}
           {pendingMessages.map(message=><div className={styles.turn} key={message.commandId} data-optimistic-message={message.commandId}><article className={styles.bubble} data-role="user"><Markdown text={message.text} messageId={message.commandId}/></article><p className={styles.delivery}>{message.acknowledged?copy("접수됨","Received"):copy("접수 확인 중","Confirming reception")}</p></div>)}
           {snapshot?.delegations?.filter(item=>!item.originReplyRunId || !snapshot.turns?.some(turn=>turn.runId===item.originReplyRunId)).map(delegation)}
