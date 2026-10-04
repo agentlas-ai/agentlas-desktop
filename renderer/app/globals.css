@@ -3175,6 +3175,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
 /* Live tool permission is an inline approval chip, never a full-width ask sheet.
    The title stays readable while the four decisions remain explicit and easy to hit. */
 .tool-approval-chip {
+  flex-wrap: wrap;
   /* 불투명한 흰 바탕은 상수가 아니라 테마 토큰으로 낸다 — 상수 흰색 위에 테마
      글자색(--ink)이 오면 다크에서 흰 상자 + 흰 글자가 된다(오너 실사용 2026-09-07). */
   /* 래퍼가 이미 작성창 폭이다. 여기서 다시 내용만큼 줄이면 그 폭이 무의미해진다. */
@@ -3226,6 +3227,10 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   min-width: 0;
   display: flex;
   flex: 0 1 auto;
+  /* A narrow column (One with its side panel open, 2026-10-04) wraps the choices under the question instead of
+     pushing them past the edge. */
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 6px;
   align-items: center;
 }

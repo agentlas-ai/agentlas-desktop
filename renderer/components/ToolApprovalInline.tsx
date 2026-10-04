@@ -39,6 +39,16 @@ const RUNTIME_LABEL: Record<string, string> = {
   agentlas: "Agentlas",
 };
 
+/**
+ * A tool as a person reads it. MCP calls arrive as "mcp__<server>__<tool>" (owner 2026-10-04 screenshot:
+ * "mcp__one-team__one_supervi…" in an approval chip); the server prefix and underscores are machine spelling.
+ */
+export function toolDisplayName(tool: string): string {
+  const mcp = /^mcp__([^_]+(?:[-.][^_]+)*)__(.+)$/.exec(tool.trim());
+  const name = (mcp ? mcp[2] : tool).replace(/[_]+/g, " ").replace(/\s+/g, " ").trim();
+  return name || tool;
+}
+
 export function ToolApprovalCard({
   request,
   compact = false,
@@ -90,7 +100,7 @@ export function ToolApprovalCard({
     ? (ko ? "전체 액세스로 진행할까요?" : "Continue with full access?")
     : imageTool
       ? (ko ? "이미지 생성을 허용할까요?" : "Allow image generation?")
-      : (ko ? `${request.tool} 사용을 허용할까요?` : `Allow ${request.tool}?`);
+      : (ko ? `${toolDisplayName(request.tool)} 사용을 허용할까요?` : `Allow ${toolDisplayName(request.tool)}?`);
   const askOptions: AskCardOption[] = [
     {
       id: "allow_once",

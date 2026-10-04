@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { Markdown, type LinkedFileArtifact } from "@/components/Markdown";
-import { IconArrowUp, IconBrain, IconClose, IconPanelRight, IconPlus, IconRefresh, IconSettings } from "@/components/Icon";
+import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconLayers, IconPanelRight, IconPlus, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
 import type { OneSupervisorSnapshot, SupervisorActivityItem, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation } from "../../../shared/one-supervisor";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor, type OneProfile } from "../../../shared/one-profile";
 import { readStoredRuntimeSelection } from '@shared/runtime-selection';
@@ -60,6 +60,14 @@ export function PersonalOneWorkspace() {
   const [profileError,setProfileError]=useState(false);
   const [memoryOpen,setMemoryOpen]=useState(false); const [memory,setMemory]=useState<OneMemoryState|null>(null);
   const [historyOpen,setHistoryOpen]=useState(false);
+  const [plusOpen,setPlusOpen]=useState(false); const plusMenu=useRef<HTMLDivElement>(null);
+  useEffect(()=>{
+    if(!plusOpen)return;
+    const outside=(event:PointerEvent)=>{if(!plusMenu.current?.contains(event.target as Node))setPlusOpen(false);};
+    const escape=(event:KeyboardEvent)=>{if(event.key==="Escape")setPlusOpen(false);};
+    document.addEventListener("pointerdown",outside);document.addEventListener("keydown",escape);
+    return()=>{document.removeEventListener("pointerdown",outside);document.removeEventListener("keydown",escape);};
+  },[plusOpen]);
   const [dismissedKeyRun,setDismissedKeyRun]=useState<string|null>(null);
   const closeMemory=useCallback(()=>setMemoryOpen(false),[]);
   const [savedRequests,setSavedRequests]=useState<PendingSupervisorWrite[]>([]);
@@ -143,7 +151,7 @@ export function PersonalOneWorkspace() {
   const exactResult=task?.result && (!handoff || handoff.runId===task.runId) ? task.result : null;
   const openTask=(taskId:string|null,handoffId:string|null=null)=>{setSelected(taskId);setSelectedHandoff(handoffId);setTasksOpen(true);setTaskPreviewOnly(true);setFile(null);};
   const taskRoute=(item:SupervisorTask)=>item.surface==='science'?'/science':item.surface==='one'?'/one?chat='+encodeURIComponent(item.chatId!):'/workspace/task?id='+encodeURIComponent(item.chatId!);
-  const stateLabel=(state:string)=>({stored:copy("접수됨","Received"),dispatching:copy("시작 중","Starting"),accepted:copy("진행 중","In progress"),running:copy("진행 중","In progress"),queued:copy("대기 중","Queued"),cancelling:copy("정리 중","Stopping"),cancelled:copy("취소됨","Cancelled"),completed:copy("완료","Completed"),failed:copy("확인 필요","Needs review"),held:copy("실행 확인 필요","Checking execution"),interrupted:copy("중단됨","Interrupted"),paused:copy("일시 정지","Paused")} as Record<string,string>)[state] ?? state;
+  const stateLabel=(state:string)=>({stored:copy("접수됨","Received"),dispatching:copy("시작 중","Starting"),accepted:copy("진행 중","In progress"),running:copy("진행 중","In progress"),queued:copy("대기 중","Queued"),cancelling:copy("정리 중","Stopping"),cancelled:copy("취소됨","Cancelled"),completed:copy("완료","Completed"),failed:copy("확인 필요","Needs review"),held:copy("실행 확인 필요","Checking execution"),interrupted:copy("중단됨","Interrupted"),paused:copy("일시 정지","Paused")} as Record<string,string>)[state] ?? copy("진행 중","In progress"); // an internal state name (waiting_tool…) is never shown
   const receiptCopy=(value:SupervisorCommandReceipt)=>value.reason==="supervisor_task_version_conflict"||value.reason==="supervisor_reply_target_stale"||value.reason==="supervisor_profile_version_conflict"
     ?copy("상태가 바뀌었습니다. 최신 상태를 확인해 주세요.","The state changed. Review the latest observation.")
     :value.state==="held"?copy("요청은 저장되었습니다. 실행 결과를 확인해야 합니다.","The request is saved. Its execution outcome needs confirmation.")
@@ -152,10 +160,13 @@ export function PersonalOneWorkspace() {
     :value.kind==="cancel"||value.kind==="stop-reply"?terminal(value.state)?stateLabel(value.state):copy("중지를 요청했습니다. 실행 정리를 기다립니다.","Stop requested. Waiting for execution to settle.")
     :copy("작업을 맡겼습니다. 여기서 대화를 이어갈 수 있습니다.","Task handed off. You can keep talking here.");
   const activity=(items:SupervisorActivityItem[],state:string)=>!!items.length&&<details className={styles.activity}><summary>{items.some(item=>item.state==="running")&&!terminal(state)?copy("진행 과정","Activity"):copy("진행 기록","Activity history")} · {items.length}</summary>{items.map(item=><div key={item.id} data-activity-state={item.state}><span>{item.kind==="reasoning"?copy("생각 정리","Thinking"):item.label}{item.durationMs!==undefined?" · "+Math.round(item.durationMs/1000)+"s":""}</span><small>{stateLabel(item.state)}</small>{item.summary&&<p>{item.summary}</p>}</div>)}</details>;
+  // A hand-off reads as a link to the session One opened (owner 2026-10-04: icons, no filler text).
   const delegation=(item:SupervisorDelegation)=>{
-    const owned=snapshot?.tasks.find(task=>task.taskId===item.taskId);
-    return <button key={item.commandId} className={styles.delegation} data-handoff-command={item.commandId} onClick={()=>openTask(item.taskId,item.commandId)}>
-      <span className={styles.taskIndicator} data-state={owned?.state ?? item.state} aria-hidden="true"/><span><strong>{item.title}</strong><small>{item.surface==='science'?'Science':'Work'} · {copy('내 컴퓨터','This computer')} · {stateLabel(owned?.state ?? item.state)}</small></span>
+    const owned=snapshot?.tasks.find(task=>task.taskId===item.taskId); const state=owned?.state ?? item.state;
+    return <button key={item.commandId} type="button" className={styles.delegation} data-handoff-command={item.commandId} data-state={state} data-hover="own" onClick={()=>openTask(item.taskId,item.commandId)}>
+      <span className={styles.delegationIcon} aria-hidden="true">{item.surface==='science'?<IconSparkles size={15}/>:<IconLayers size={15}/>}</span>
+      <span className={styles.delegationCopy}><strong>{item.title}</strong><small>{item.surface==='science'?'Science':'Work'} · {stateLabel(state)}</small></span>
+      <span className={styles.delegationMeta} aria-hidden="true">{state==="completed"&&<IconCheck size={14}/>}<IconChevronRight size={14}/></span>
     </button>;
   };
   const observedCommands=new Set(snapshot?.turns?.filter(turn=>snapshot.messages.some(message=>message.id===turn.userMessageId)).map(turn=>turn.commandId));
@@ -192,11 +203,21 @@ export function PersonalOneWorkspace() {
               local permission selection must not resolve a previous run's card. */}
           <ToolApprovalInline chatId={snapshot?.conversationChatId} compact chip composerWidth={736} />
         </div>
-        {!!snapshot?.tasks.length&&<div className={styles.taskChips}>{snapshot.tasks.slice(0,3).map(item=><button key={item.taskId} onClick={()=>openTask(item.taskId)}><span>{item.title}</span><small>{stateLabel(item.state)}</small></button>)}</div>}
         {error&&<p role="status" className={styles.feedback}>{copy("접수를 확인할 수 없습니다. 저장된 요청과 연결 상태를 확인해 주세요.","Reception could not be confirmed. Review the saved request and connection.")}</p>}
         {savedRequests.filter(intent=>!inFlight.current.has(intent.commandId)).map(intent=><button className={styles.retry} key={intent.commandId} onClick={()=>void outbox.current!.deliver(ipc()!.oneSupervisor,intent).then(value=>{showReceipt(value);setSavedRequests(outbox.current!.list());void sync();}).catch(()=>setError(true))}>{copy("같은 저장 요청 다시 확인","Retry the same saved request")} · {intent.method}</button>)}
         <form className={styles.composer} onSubmit={event=>{event.preventDefault();void send();}}>
-          <button type="button" className={styles.iconButton} aria-label={copy("작업 맡기기","Hand off a task")} onClick={()=>{setTasksOpen(true);setTaskPreviewOnly(false);setFile(null);}}><IconPlus size={19}/></button>
+          <div ref={plusMenu} className={styles.plus}>
+            <button type="button" className={styles.iconButton} aria-label={copy("추가","Add")} aria-haspopup="menu" aria-expanded={plusOpen} data-hover="own" onClick={()=>setPlusOpen(value=>!value)}><IconPlus size={19}/></button>
+            {plusOpen&&<div className={styles.plusMenu} role="menu" aria-label={copy("추가","Add")}>
+              <div className={styles.plusSection}>{copy("맡기기","Hand off")}</div>
+              <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);setTasksOpen(true);setTaskPreviewOnly(false);setSelected(null);setFile(null);}}><span className={styles.plusIcon}><IconLayers size={15}/></span><strong>{copy("Work에 맡기기","Hand to Work")}</strong></button>
+              {!!snapshot?.scienceProjects?.length&&<button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);setTasksOpen(true);setTaskPreviewOnly(false);setSelected(null);setFile(null);}}><span className={styles.plusIcon}><IconSparkles size={15}/></span><strong>{copy("Science에 맡기기","Hand to Science")}</strong></button>}
+              <div className={styles.plusDivider}/>
+              <div className={styles.plusSection}>{name}</div>
+              <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void openMemory();}}><span className={styles.plusIcon}><IconBrain size={15}/></span><strong>{copy("메모리","Memory")}</strong></button>
+              <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void appearance();}}><span className={styles.plusIcon}><IconSettings size={15}/></span><strong>{copy("이름과 말풍선","Name and bubbles")}</strong></button>
+            </div>}
+          </div>
           <textarea aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onKeyDown={event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();void send();}}} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
           <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||!text.trim()}><IconArrowUp size={18}/></button>
         </form>
@@ -220,10 +241,10 @@ export function PersonalOneWorkspace() {
       {!!snapshot?.scienceProjects?.length&&<><label>{copy("Science 프로젝트","Science project")}<select value={scienceProject} onChange={event=>setScienceProject(event.target.value)}><option value="">{copy("프로젝트 선택","Choose a project")}</option>{snapshot.scienceProjects.map(project=><option key={project.projectId} value={project.projectId}>{project.title}</option>)}</select></label><button disabled={workPending||!scienceProject||!work.trim()} onClick={()=>void startWork(true)}>{copy("Science에 맡기기","Hand off to Science")}</button></>}
       {snapshot?.scienceError&&<p className={styles.feedback}>{copy("Science 관측 연결을 확인할 수 없습니다.","Science observation is unavailable.")}</p>}
       {receipt&&receipt.kind!=="reply"&&<p role="status" className={styles.feedback}>{receiptCopy(receipt)}</p>}
-      <div className={styles.taskList}>{snapshot?.tasks.map(item=><button key={item.taskId} data-task-id={item.taskId} data-selected={selected===item.taskId} onClick={()=>setSelected(item.taskId)}><strong>{item.title}</strong><span>{item.surface} · {stateLabel(item.state)}</span><small>{copy("관측","Observed")}: {new Date(item.observedAt).toLocaleTimeString()}</small></button>)}</div>
+      <div className={styles.taskList}>{snapshot?.tasks.map(item=><button key={item.taskId} data-task-id={item.taskId} data-selected={selected===item.taskId} onClick={()=>setSelected(item.taskId)}><strong>{item.title}</strong><span>{item.surface==='science'?'Science':item.surface==='one'?'One':'Work'} · {stateLabel(item.state)}</span></button>)}</div>
       </>}
       {taskPreviewOnly&&!task&&<p role="status">{handoff?stateLabel(handoff.state):copy('작업 관측을 확인하고 있습니다.','Checking the task observation.')}</p>}
-      {task&&<section className={styles.detail}><h3>{task.title}</h3><p>{task.surface} · {stateLabel(task.state)}</p>
+      {task&&<section className={styles.detail}><h3>{task.title}</h3><p>{task.surface==='science'?'Science':task.surface==='one'?'One':'Work'} · {stateLabel(task.state)}</p>
         {task.controls.includes("steer")&&<><textarea aria-label={copy("이 작업에 추가 지시","Direction for this task")} value={direction} onChange={event=>setDirection(event.target.value)} maxLength={8000}/><button disabled={controlPending||!direction.trim()} onClick={()=>void control(task,"steer")}>{copy("이 작업에 지시 전달","Send direction to this task")}</button></>}
         {task.controls.includes("cancel")&&<button disabled={controlPending} onClick={()=>void control(task,"cancel")}>{copy("이 작업 취소","Cancel this task")}</button>}
         <small>{task.owner==='science-daemon'?'Science':'Work'} · {copy('내 컴퓨터','This computer')} · {copy('관측','Observed')} {new Date(task.observedAt).toLocaleTimeString()}</small>
