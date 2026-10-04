@@ -395,13 +395,14 @@ const HOST_OBSERVED_PREFIX = /^이 에이전트는 다음과 같은 요청을 �
 /** One or two lines a person can scan. Owner 2026-10-05: "메모리티켓의 제목을 한 두 줄로 정리해서 적는게 나을듯
  * 메모리티켓 제목은 큐레이터가 쓰지 않나 없으면 제목같은거 가져다 쓰면 되지". */
 function memoryTitle(content: string, ticket: { summary: string | null; emitted: boolean } | undefined): string {
-  const clean = (value: string) => value.replace(/^\s*\**\[Hope\]\**\s*/i, "").replace(/\s+/g, " ").trim();
+  const clean = (value: string) => value.replace(/<<agentlas[\s\S]*$/i, "").replace(/^\s*\**\[Hope\]\**\s*/i, "").replace(/\s+/g, " ").trim();
   const summary = ticket?.summary ? clean(ticket.summary) : "";
   // The curator's title: the summary the model wrote for its own ticket.
   if (ticket?.emitted && summary.length >= 8) return summary;
   const request = clean(content.replace(HOST_OBSERVED_PREFIX, ""));
-  // A host-written prompt (a review or check-in) says nothing as a title; what the turn did does.
-  if (/^\[Host[:\]]/i.test(request) && summary) return summary;
+  // A host-written prompt (a review or check-in) says nothing as a title; what the turn did does. Without a model
+  // summary that is the reply's opening, so its first sentence.
+  if (/^\[Host[:\]]/i.test(request) && summary) return summary.split(/(?<=[.!?。])\s/)[0].slice(0, 160);
   // Otherwise the request itself, without run markers such as "[RL-…]".
   const titled = request.replace(/^(\[[^\]\n]{1,80}\]\s*)+/, "").trim() || request;
   return titled.length > 160 ? `${titled.slice(0, 159)}…` : titled;
@@ -428,7 +429,8 @@ function memoryTickets(ids: readonly string[]): Map<string, { summary: string | 
     const natives = nativeTextsFor("memory_episode", rows.map((row) => row.episode ?? "").filter(Boolean));
     for (const row of rows) {
       if (result.has(row.id)) continue; // the ticket that first wrote it
-      result.set(row.id, { summary: (row.episode && natives.get(row.episode)) || row.summary || null, emitted: row.emitter === "valid" });
+      // "empty" is a well-formed envelope with no candidates: the model still wrote the turn summary.
+      result.set(row.id, { summary: (row.episode && natives.get(row.episode)) || row.summary || null, emitted: row.emitter === "valid" || row.emitter === "empty" });
     }
   } catch {
     // Older stores without ticket tables: titles come from the content.
