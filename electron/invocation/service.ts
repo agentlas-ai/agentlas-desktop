@@ -56,7 +56,7 @@ import {
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
   transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount,
-  longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpAt } from "../store/long-runs";
+  longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
@@ -4330,10 +4330,10 @@ export class InvocationService {
       const ownerSince = spaced ? (getDb().prepare("SELECT MAX(created_at) AS at FROM chat_messages WHERE chat_id = ? AND role = 'user'")
         .get(record.chatId) as { at: string | null } | undefined)?.at ?? null : null;
       const repeats = spaced ? consecutiveGoalTurnFollowUps(run.id, reason, ownerSince) : 0;
+      const plan = spaced ? goalTurnFollowUpPlan({ repeats, requestedNotBefore: options.requestedNotBefore })
+        : { nextAt: new Date(Date.now() + 30_000).toISOString(), requestedBy: "host" as const };
       scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
-        fromReason: reason, retryIndex: repeats,
-        nextAt: spaced ? goalTurnFollowUpAt({ repeats, requestedNotBefore: options.requestedNotBefore })
-          : new Date(Date.now() + 30_000).toISOString(),
+        fromReason: reason, retryIndex: repeats, nextAt: plan.nextAt, requestedBy: plan.requestedBy,
         detail: reason, trigger: "goal-turn-background", effectUncertain: unsettledLongRunAttemptCount(run.id) > 0,
         appInstanceId: desktopAppInstanceId() });
       setTimeout(() => {

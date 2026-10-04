@@ -1,3 +1,4 @@
+import { decideGoalWake, recordGoalWake } from "./wake-arbiter";
 import { runMainBackgroundTask, admitMainInvocation } from "../runtime/scheduled-root-context";
 import { latestTaskCheckpoint } from "./checkpoint";
 import { getLongRunGoalRevisionBinding } from "../store/long-runs";
@@ -675,6 +676,9 @@ export function maybeDispatchEffectObservation(
   const chatId = run.rootChatId;
   const chat = chatId ? getChat(chatId) : null;
   if (!chatId || !chat || chat.goalId !== goalId) return { status: "skipped", reason: "chat_binding_changed" };
+  // One wake policy (wake-arbiter). A look is a model run too: it yields to the owner and counts toward the barrier.
+  const wake = decideGoalWake({ runId: run.id, chatId, source: "observation", gate: dispatcher, requireIdleChat: false });
+  if (!wake.start) return { status: "skipped", reason: wake.reason };
   const savedBoundary = boundaryObservationTarget(run.id);
   // 자동화가 이어받는 목표는 자동화의 브라우저 프로필·세션에서 본다(오너의 Threads 사례) —
   // 같은 관찰 한 번이 자동화 보류 단계와 이 목표의 불확실한 시도를 함께 정리한다.
@@ -792,6 +796,7 @@ export function maybeDispatchEffectObservation(
     const started = runMainBackgroundTask(() => dispatcher.start(request, undefined, undefined, undefined, "goal-continuation",
       admitMainInvocation(chatId, observationRunId)));
     if (started.runId !== observationRunId) throw new Error("effect_observation_dispatch_identity_mismatch");
+    recordGoalWake({ runId: run.id, chatId, source: "observation", invocationRunId: observationRunId, cause: trigger.slice(0, 80) });
     return { status: "dispatched", runId: observationRunId };
   } catch (error) {
     takeEffectObservationTicket(observationRunId);

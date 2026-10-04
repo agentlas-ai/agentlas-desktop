@@ -1,3 +1,5 @@
+import { goalNextWake } from "../long-run/goal-next-wake";
+import type { GoalNextWake } from "../../shared/goal-wake";
 import { admitMainInvocation, MainInvocationLifetime, runMainBackgroundTask } from "../runtime/scheduled-root-context";
 import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
 import type { LongRunUsageInput } from "../long-run/budget";
@@ -51,6 +53,8 @@ export interface GoalLedgerSnapshot {
   executionLocation: "desktop-local" | "web-hosted";
   /** 골 구조 판단 결과(모양·현재 전술) — 읽기 모델. 판단 전이면 없음(2026-09-24 오너 최우선). */
   plan?: GoalPlanView | null;
+  /** When the host next starts a turn for this Goal, why, and who asked for that time (wake-arbiter). */
+  nextWake?: GoalNextWake | null;
 }
 
 export interface GoalLedgerTask {
@@ -114,6 +118,7 @@ export async function getGoalLedgerGoal(
       version: run.version,
       executionLocation: run.executionLocation,
       plan: goalPlanView(goalId),
+      nextWake: (() => { try { return goalNextWake(goalId); } catch { return null; } })(),
     };
   } catch {
     return null;

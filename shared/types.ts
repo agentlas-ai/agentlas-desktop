@@ -804,7 +804,7 @@ export interface ChatContinuitySnapshot {
       metrics: { passed: number; repairableFailed: number; prerequisiteFailed: number;
         otherFailed: number; inconclusive: number }; nextWakeAt: string | null };
     wait: null | { waitId: string; state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";
-      subjectKind: "invocation" | "artifact" | "timer"; nextCheckAt: string | null;
+      subjectKind: "invocation" | "artifact" | "timer" | "automation"; nextCheckAt: string | null;
       executionAvailability: "app-running" };
     /** Main-owned: a read-only effect observation is running for this Goal. */
     effectObservation?: "checking" | null;
@@ -1900,7 +1900,7 @@ export interface ChatGoalContext {
   wait?: {
     waitId: string;
     state: "pending" | "claimed" | "dispatched" | "blocked" | "expired" | "cancelled";
-    subjectKind: "invocation" | "artifact" | "timer";
+    subjectKind: "invocation" | "artifact" | "timer" | "automation";
     nextCheckAt: string | null;
     deadline: string | null;
     executionAvailability: "app-running";

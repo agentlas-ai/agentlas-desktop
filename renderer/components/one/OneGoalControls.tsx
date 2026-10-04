@@ -11,6 +11,7 @@ import { navigate } from "@/lib/navigation";
 import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-surface-status";
 import { GoalStrategyStatus } from "./GoalStrategyStatus";
 import { GoalPlanSummary, goalPlanOf } from "@/components/goal/GoalPlanSummary";
+import { goalNextWakeLabel, goalNextWakeOf } from "@shared/goal-wake";
 import { requestGoalPanelOpen } from "@/components/goal/GoalPanel";
 import styles from "./OneGoalControls.module.css";
 import { AgiDefectChip } from "../agi/AgiBugReport";
@@ -424,6 +425,11 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
       <button type="button" className={styles.helpButton} aria-label={ko ? "목표 상태 도움말" : "Goal status help"}
         aria-haspopup="dialog" aria-expanded={helpOpen} onClick={() => { setModelNoteOpen(false); setHelpOpen((open) => !open); }}>?</button>
     </div>}
+    {view.goalId && (() => {
+      // When the host will next start a turn for this Goal and who asked for that time (wake-arbiter).
+      const wake = goalNextWakeOf(view.context);
+      return wake ? <p className={styles.nextWake} data-goal-next-wake={wake.requestedBy}>{goalNextWakeLabel(wake, locale)}</p> : null;
+    })()}
     {modelPending && modelNoteOpen && <div id={modelNoteId} className={styles.help} role="tooltip" data-goal-model-note="true">
       <p><strong>{ko ? "모델 변경 대기 중" : "Model change pending"}</strong>{pendingModel ? ` · ${pendingModel}` : ""}</p>
       <p>{ko

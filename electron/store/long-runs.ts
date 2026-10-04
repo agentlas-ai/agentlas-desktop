@@ -1332,9 +1332,10 @@ export interface BlockedGoalRetry {
   retryIndex: number;
   nextAt: string;
   effectUncertain: boolean;
+  /** model = the Goal's own turn asked for this time (shown to the owner as such); host = the host's policy. */
+  requestedBy: "model" | "host";
 }
 
-/** A host-owned retry schedule that no later transition has superseded (a user pause, a new turn, a stop). */
 /**
  * Follow-ups scheduled after Goal turns for the same reason since the owner last spoke (`ownerSince`) or used a
  * Goal control. Each one is a turn that ended without starting new work. Measured on the owner's DB 2026-10-04
@@ -1355,14 +1356,19 @@ export function consecutiveGoalTurnFollowUps(runId: string, reason: string, owne
 
 /** When the next follow-up of a Goal turn may start: 30 s doubling per consecutive repeat (6 h cap), never before
  * the time the turn itself asked for (24 h cap). */
-export function goalTurnFollowUpAt(input: { repeats: number; requestedNotBefore?: string | null; now?: number }): string {
+export function goalTurnFollowUpPlan(input: { repeats: number; requestedNotBefore?: string | null; now?: number }): { nextAt: string; requestedBy: "model" | "host" } {
   const now = input.now ?? Date.now();
   const backoff = Math.min(6 * 60 * 60_000, 30_000 * 2 ** Math.min(Math.max(input.repeats, 0), 12));
   const requested = input.requestedNotBefore ? Date.parse(input.requestedNotBefore) : Number.NaN;
   const asked = Number.isFinite(requested) ? Math.min(requested - now, 24 * 60 * 60_000) : 0;
-  return new Date(now + Math.max(backoff, asked)).toISOString();
+  return { nextAt: new Date(now + Math.max(backoff, asked)).toISOString(), requestedBy: asked > backoff ? "model" : "host" };
 }
 
+export function goalTurnFollowUpAt(input: { repeats: number; requestedNotBefore?: string | null; now?: number }): string {
+  return goalTurnFollowUpPlan(input).nextAt;
+}
+
+/** A host-owned retry schedule that no later transition has superseded (a user pause, a new turn, a stop). */
 export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null {
   const run = getLongRun(runId);
   if (!run || !(run.status === "waiting_tool"
@@ -1380,7 +1386,7 @@ export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null 
       || typeof payload.nextAt !== "string" || !Number.isSafeInteger(payload.retryIndex)) return null;
     return { seq: row.seq, fromReason: typeof payload.fromReason === "string" ? payload.fromReason : null,
       kind: payload.kind, retryIndex: Number(payload.retryIndex), nextAt: payload.nextAt,
-      effectUncertain: payload.effectUncertain === true };
+      effectUncertain: payload.effectUncertain === true, requestedBy: payload.requestedBy === "model" ? "model" : "host" };
   } catch { return null; }
 }
 
@@ -1405,6 +1411,7 @@ export function scheduleBlockedGoalRetry(input: {
   trigger: string;
   effectUncertain: boolean;
   appInstanceId?: string | null;
+  requestedBy?: "model" | "host";
 }): LongRunRecord {
   if (longRunOwnerHold(input.runId)) throw new Error(LONG_RUN_OWNER_HOLD_CODE);
   const db = getDb();
@@ -1431,7 +1438,8 @@ export function scheduleBlockedGoalRetry(input: {
       payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "retry_scheduled", kind: input.kind,
         fromReason: input.fromReason, retryIndex: input.retryIndex, nextAt: input.nextAt,
         detail: input.detail.slice(0, 120), trigger: input.trigger.slice(0, 80),
-        effectUncertain: input.effectUncertain, appInstanceId: input.appInstanceId ?? null }, at: now });
+        effectUncertain: input.effectUncertain, appInstanceId: input.appInstanceId ?? null,
+        ...(input.requestedBy === "model" ? { requestedBy: "model" } : {}) }, at: now });
   })();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   const next = getLongRun(input.runId);

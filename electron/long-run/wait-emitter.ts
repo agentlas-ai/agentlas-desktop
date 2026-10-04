@@ -3,7 +3,9 @@
 export type GoalWaitSubject =
   | { kind: "invocation"; invocationRunId: string; chatId: string }
   | { kind: "artifact"; artifactId: string }
-  | { kind: "timer"; notBefore: string };
+  | { kind: "timer"; notBefore: string }
+  /** A saved graph (Toolchain) that reads a value on its own schedule; the Goal wakes when its output changes. */
+  | { kind: "automation"; automationId: string };
 export interface GoalWaitIntent {
   schemaVersion: "agentlas.goal-wait-intent.v1";
   subject: GoalWaitSubject;
@@ -39,6 +41,9 @@ export function parseGoalWaitIntent(text: string): { text: string; request: Pars
     } else if (subject.kind === "artifact" && identifier(subject.artifactId) && item.condition === "changed"
       && Object.keys(subject).every(key => ["kind", "artifactId"].includes(key))) {
       bound = { kind: "artifact", artifactId: subject.artifactId };
+    } else if (subject.kind === "automation" && identifier(subject.automationId) && item.condition === "changed"
+      && Object.keys(subject).every(key => ["kind", "automationId"].includes(key))) {
+      bound = { kind: "automation", automationId: subject.automationId };
     } else if (subject.kind === "timer" && typeof subject.notBefore === "string" && Number.isFinite(Date.parse(subject.notBefore))
       && item.condition === "due" && Object.keys(subject).every(key => ["kind", "notBefore"].includes(key))) {
       bound = { kind: "timer", notBefore: new Date(subject.notBefore).toISOString() };
@@ -62,7 +67,7 @@ Emit at most one block:
 \`\`\`agentlas-goal-wait
 {"schemaVersion":"agentlas.goal-wait-intent.v1","subject":{"kind":"invocation","invocationRunId":"observed ID","chatId":"observed chat ID"},"condition":"terminal","nextAction":"What to inspect after it settles","deadline":null}
 \`\`\`
-For a saved artifact input, use subject {"kind":"artifact","artifactId":"observed artifact ID"} and condition "changed". ${lifecycle !== "finite"
+For a saved artifact input, use subject {"kind":"artifact","artifactId":"observed artifact ID"} and condition "changed". To watch a value that changes later (followers, views, replies, prices), do not wake a model to re-measure it: save a graph in this conversation (or reuse a callable Toolchain) whose steps read the value without an agent step and that runs on its own schedule, then use subject {"kind":"automation","automationId":"that graph's ID"} and condition "changed". The host compares the graph's latest completed output and wakes this Goal only when it changes, with that output attached. This works for one-time and ongoing Goals. ${lifecycle !== "finite"
     ? `For an explicitly ongoing Goal, use subject {"kind":"timer","notBefore":"future ISO timestamp"} and condition "due" to wait until the next useful work cycle. Respect the user's cadence, and inspect current external state before acting; never repeat an already completed post or purchase. Timer waits cannot be earlier than one minute from now.`
     : `This Goal is a one-time (finite) Goal: a timer subject is refused unless a goal deadline is stated below. Without one, when the remaining outcome can only be measured later (followers, views, replies next week), do not request a wait: finish this turn normally, and state in your reply what should be re-measured and when, so the owner can ask for continued tracking.`} A requested deadline must be an ISO timestamp; null preserves no user-imposed deadline. New user directions, Stop and changed Goal authority always override this request.`;
 }

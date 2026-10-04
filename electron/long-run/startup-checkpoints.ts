@@ -1,3 +1,4 @@
+import { recordGoalWake } from "./wake-arbiter";
 import { hasPendingInvocationDirection } from "./pending-directions";
 import { latestGoalWaitSubscription, registerOngoingGoalCycle, type GoalWaitSubscription } from "./wait-subscriptions";
 import { randomUUID } from "node:crypto";
@@ -448,6 +449,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
         })();
         const started = dispatcher.start(claimed.request, undefined, undefined, undefined, "goal-continuation");
         if (started.runId !== successorRunId) throw new Error("legacy_lifecycle_dispatch_identity_mismatch");
+        recordGoalWake({ runId: id, chatId: claimed.request.chatId ?? "", source: "startup", invocationRunId: successorRunId, cause: "legacy-lifecycle" });
         const current = getLongRun(id);
         if (current?.status === "queued") transitionLongRun({ runId: id, to: "running", actorKind: "host",
           reason: "legacy-lifecycle-startup-dispatched", expectedVersion: current.version, appInstanceId });
@@ -664,6 +666,7 @@ export function resumeSettledGoalCheckpoints(dispatcher: CheckpointStartupDispat
       }
       const started = dispatcher.start(resumedRequest, undefined, undefined, undefined, "goal-continuation");
       if (started.runId !== successorRunId) throw new Error("checkpoint_startup_dispatch_identity_mismatch");
+      recordGoalWake({ runId: candidate.id, chatId: chat.id, source: "startup", invocationRunId: successorRunId, cause: "settled-checkpoint" });
       const current = getLongRun(candidate.id);
       if (current?.status === "queued") transitionLongRun({ runId: current.id, to: "running", actorKind: "host",
         reason: "checkpoint-startup-dispatched", expectedVersion: current.version, appInstanceId });

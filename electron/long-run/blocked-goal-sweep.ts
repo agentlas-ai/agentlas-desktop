@@ -23,6 +23,7 @@ import { isEffectUncertainBlockReason, maybeDispatchEffectObservation, sweepDueG
 import { type EffectObservationDispatcher } from "./effect-observation-tickets";
 import { currentUiLocale } from "../ui-locale";
 import { holdingAgentResidency } from "../runtime/agent-residency";
+import { decideGoalWake, recordGoalWake, type GoalWakeSource } from "./wake-arbiter";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 
 export type BlockedGoalSweepAction = "observation_dispatched" | "resumed" | "retry_scheduled" | "cancelled" | "deferred";
@@ -113,8 +114,22 @@ function alreadyToldForCause(run: LongRunRecord): boolean {
 function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string): BlockedGoalSweepResult {
   const toldBefore = alreadyToldForCause(run);
   const chatId = run.rootChatId!;
-  // The owner's own message comes first on every resume path (the sweep checks this too; Alive's continue did not).
-  if (dispatcher.hasQueuedOwnerRequest?.(chatId)) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "owner_request_queued" };
+  // Every resume path (sweep, Alive's continue, a released project) asks the one wake policy: the owner first,
+  // then the daily barrier. A reached barrier parks the Goal until its window frees, visibly.
+  const source: GoalWakeSource = trigger === "alive" ? "alive" : trigger === "project-released" ? "project-released"
+    : trigger === "startup" ? "startup" : "sweep";
+  const verdict = decideGoalWake({ runId: run.id, chatId, source, gate: dispatcher });
+  if (!verdict.start) {
+    if (verdict.reason === "wake_budget_reached") {
+      try {
+        const latest = getLongRun(run.id);
+        if (latest && !pendingBlockedGoalRetry(latest.id)) scheduleBlockedGoalRetry({ runId: latest.id, expectedVersion: latest.version,
+          kind: "resume", fromReason: "wake_budget_reached", retryIndex: 0, nextAt: verdict.retryAt, detail: "wake_budget_reached",
+          trigger, effectUncertain: false, appInstanceId: desktopAppInstanceId() });
+      } catch (error) { console.warn("[blocked-goal-sweep] budget park unavailable:", error); }
+    }
+    return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: verdict.reason };
+  }
   let prepared: { request: NonNullable<ReturnType<typeof automaticGoalResumeRequest>>; queuedId: string } | null = null;
   let current = run;
   for (let pass = 0; pass < 2 && !prepared; pass += 1) {
@@ -159,6 +174,7 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
   try {
     dispatcher.start(prepared.request, undefined, undefined, undefined, "goal-continuation");
     confirmDesktopLongRunResumeDispatched(prepared.queuedId);
+    recordGoalWake({ runId: run.id, chatId, source, invocationRunId: prepared.request.runId ?? null, cause: run.blockedReason ?? trigger });
     return { runId: run.id, fromReason: run.blockedReason, action: "resumed", detail: prepared.request.runId ?? "dispatched" };
   } catch (error) {
     const code = errorCode(error, "blocked_goal_dispatch_failed");
