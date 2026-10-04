@@ -17,7 +17,22 @@ import styles from "./OneMemoryMap.module.css";
 interface Props {
   snapshot: OneMemoryMapSnapshot;
   locale: "ko" | "en";
+  /** A fixed height (the memory sheet); the home panel keeps its tall default. */
+  height?: number;
+  /** Fill each memory with its kind's colour instead of the density gray. */
+  colorByKind?: boolean;
+  /** Controlled selection, so a list beside the map and the map point at the same memory. */
+  selectedId?: string | null;
+  onSelect?: (id: string | null) => void;
+  /** What a memory says, for the hover card. The map snapshot itself never carries content. */
+  describe?: (id: string) => { label: string; text: string } | null;
 }
+
+/** Kind colours, muted so a crowded map stays calm. */
+export const ONE_MEMORY_KIND_COLORS: Record<string, string> = {
+  procedure: "#5b7ea8", decision: "#5f8f62", preference: "#b07a48", risk: "#b55b58",
+  fact: "#7c8087", hypothesis: "#8a73ab", evidence: "#6f8b94", deprecation: "#a3a3a3", conflict: "#a8615a",
+};
 
 interface Size { width: number; height: number }
 
@@ -94,7 +109,7 @@ function clusterCenters(nodes: OneMemoryMapPlacedNode[]): Map<string, { x: numbe
   }]));
 }
 
-function OneMemoryMapComponent({ snapshot, locale }: Props) {
+function OneMemoryMapComponent({ snapshot, locale, height, colorByKind = false, selectedId, onSelect, describe }: Props) {
   const copy = COPY[locale];
   const rootRef = useRef<HTMLElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -104,8 +119,14 @@ function OneMemoryMapComponent({ snapshot, locale }: Props) {
     [size.height, size.width, snapshot],
   );
   const [hoveredId, setHoveredId] = useState<string | null>(null);
-  const [pinnedId, setPinnedId] = useState<string | null>(null);
-  const activeId = pinnedId ?? hoveredId;
+  const [ownPinnedId, setOwnPinnedId] = useState<string | null>(null);
+  const controlled = onSelect !== undefined;
+  const pinnedId = controlled ? selectedId ?? null : ownPinnedId;
+  const setPinnedId = (value: string | null | ((current: string | null) => string | null)) => {
+    const next = typeof value === "function" ? value(pinnedId) : value;
+    if (controlled) onSelect?.(next); else setOwnPinnedId(next);
+  };
+  const activeId = hoveredId ?? pinnedId;
   const nodesById = useMemo(() => new Map(layout.nodes.map((node) => [node.id, node])), [layout.nodes]);
   const activeNode = activeId ? nodesById.get(activeId) ?? null : null;
 
@@ -138,7 +159,12 @@ function OneMemoryMapComponent({ snapshot, locale }: Props) {
     if (!context) return;
     context.setTransform(dpr, 0, 0, dpr, 0, 0);
     context.clearRect(0, 0, size.width, size.height);
-    context.fillStyle = "var(--paper)";
+    // A canvas cannot read CSS variables ("var(--paper)" was ignored, so the fills kept the previous colour);
+    // resolve the theme tokens once per draw.
+    const tokens = rootRef.current ? getComputedStyle(rootRef.current) : null;
+    const paper = tokens?.getPropertyValue("--paper").trim() || "#ffffff";
+    const ink = tokens?.getPropertyValue("--black").trim() || tokens?.getPropertyValue("--ink").trim() || "#171719";
+    context.fillStyle = paper;
     context.fillRect(0, 0, size.width, size.height);
 
     const centers = clusterCenters(layout.nodes);
@@ -196,9 +222,10 @@ function OneMemoryMapComponent({ snapshot, locale }: Props) {
     }
 
     for (const node of layout.nodes) {
-      drawRoundedCell(context, node, node.id === activeId ? "var(--black)" : memoryGray(node.density));
+      const resting = colorByKind ? ONE_MEMORY_KIND_COLORS[node.kind] ?? "#8a8d92" : memoryGray(node.density);
+      drawRoundedCell(context, node, node.id === activeId || node.id === pinnedId ? ink : resting);
     }
-  }, [activeId, activeNode, layout, nodesById, size.height, size.width, snapshot.edges]);
+  }, [activeId, activeNode, colorByKind, layout, nodesById, pinnedId, size.height, size.width, snapshot.edges]);
 
   const nodeAtPointer = (event: PointerEvent<HTMLCanvasElement>): OneMemoryMapPlacedNode | null => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -246,13 +273,14 @@ function OneMemoryMapComponent({ snapshot, locale }: Props) {
     setHoveredId(null);
   };
 
+  const described = activeNode && describe ? describe(activeNode.id) : null;
   const tooltipStyle = activeNode ? {
     left: Math.max(12, Math.min(size.width - 228, activeNode.cx + (activeNode.cx > size.width * 0.68 ? -222 : 14))),
     top: Math.max(58, Math.min(size.height - 154, activeNode.cy - 34)),
   } : undefined;
 
   return (
-    <section ref={rootRef} className={styles.map} aria-label={locale === "ko" ? "메모리 맵" : "Memory map"}>
+    <section ref={rootRef} className={styles.map} data-compact={height ? "true" : undefined} style={height ? { height, minHeight: height } : undefined} aria-label={locale === "ko" ? "메모리 맵" : "Memory map"}>
       <canvas
         ref={canvasRef}
         className={styles.canvas}
@@ -271,13 +299,13 @@ function OneMemoryMapComponent({ snapshot, locale }: Props) {
 
       {activeNode && tooltipStyle && (
         <div id="one-memory-map-tooltip" className={styles.tooltip} style={tooltipStyle} role="status" aria-live="polite">
-          <dl>
+          {described ? <div className={styles.described}><strong>{described.label}</strong><p>{described.text}</p></div> : <dl>
             <div><dt>{copy.kind}</dt><dd>{activeNode.kind}</dd></div>
             <div><dt>{copy.project}</dt><dd>{activeNode.projectSlug ?? copy.shared}</dd></div>
             <div><dt>{copy.scope}</dt><dd>One / {activeNode.scope}</dd></div>
             <div><dt>{copy.relations}</dt><dd>{activeNode.relationCount}</dd></div>
             <div><dt>{copy.evidence}</dt><dd>{activeNode.evidenceCount}</dd></div>
-          </dl>
+          </dl>}
         </div>
       )}
       <p className={styles.srOnly}>{copy.keyboard}</p>

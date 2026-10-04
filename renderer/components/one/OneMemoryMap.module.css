@@ -78,3 +78,10 @@
     border-radius: 0;
   }
 }
+
+/* The memory sheet's compact map: a framed canvas with a content card on hover. */
+.map[data-compact="true"] { border: 1px solid var(--paper-edge); border-radius: 12px; background: var(--paper); }
+.map[data-compact="true"] .tooltip { border: 1px solid var(--paper-edge); border-radius: 10px; box-shadow: 0 10px 28px rgba(20, 25, 20, .1); }
+.described { display: grid; gap: 4px; }
+.described strong { font-size: 10.5px; font-weight: 650; color: var(--muted-deep); }
+.described p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }

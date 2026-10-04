@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  useCallback,
   useEffect,
   useMemo,
   useRef,
@@ -29,6 +30,9 @@ import { OneImprovementProofCard } from "./OneImprovementProofCard";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type { OneDurableMemoryEntryUi } from "@shared/types";
+import type { OneMemoryMapSnapshot } from "@shared/one-memory-map";
+import { OneMemoryMap, ONE_MEMORY_KIND_COLORS } from "./OneMemoryMap";
+import { IconAlertTriangle, IconFileText, IconLayers, IconRoute, IconSearch, IconSparkles, IconTarget, IconTrash, IconUser } from "@/components/Icon";
 import styles from "./OneMemorySheet.module.css";
 
 interface OneMemorySheetProps {
@@ -81,8 +85,31 @@ function formatDate(value: string, locale: "ko" | "en"): string {
   }).format(date);
 }
 
+function formatShortDate(value: string, locale: "ko" | "en"): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  return date.toLocaleDateString(locale === "ko" ? "ko-KR" : "en-US", { month: "numeric", day: "numeric" });
+}
+
 function shortRef(value: string): string {
   return value.length > 22 ? `${value.slice(0, 9)}…${value.slice(-8)}` : value;
+}
+
+/** Memory kinds as the owner reads them: an icon, a word, a colour (owner 2026-10-04: visuals, no filler). */
+const KIND_ICON: Record<string, typeof IconRoute> = {
+  procedure: IconRoute, decision: IconTarget, preference: IconUser, risk: IconAlertTriangle,
+  fact: IconFileText, hypothesis: IconSparkles,
+};
+function kindLabel(kind: string, locale: Locale): string {
+  const ko: Record<string, string> = { procedure: "방법", decision: "결정", preference: "선호", risk: "위험", fact: "사실",
+    hypothesis: "가설", evidence: "근거", deprecation: "폐기", conflict: "충돌" };
+  const en: Record<string, string> = { procedure: "How-to", decision: "Decision", preference: "Preference", risk: "Risk", fact: "Fact",
+    hypothesis: "Hypothesis", evidence: "Evidence", deprecation: "Retired", conflict: "Conflict" };
+  return (locale === "ko" ? ko : en)[kind] ?? kind;
+}
+function KindIcon({ kind, size = 14 }: { kind: string; size?: number }) {
+  const Icon = KIND_ICON[kind] ?? IconLayers;
+  return <span className={styles.kindIcon} style={{ color: ONE_MEMORY_KIND_COLORS[kind] ?? "#8a8d92" }} aria-hidden="true"><Icon size={size} /></span>;
 }
 
 export function OneMemorySheet({
@@ -111,10 +138,14 @@ export function OneMemorySheet({
   const [durableRetry, setDurableRetry] = useState(0);
   const [durableQuery, setDurableQuery] = useState("");
   const [durableExpanded, setDurableExpanded] = useState(false);
+  const [memoryMap, setMemoryMap] = useState<OneMemoryMapSnapshot | null>(null);
+  const [kindFilter, setKindFilter] = useState<string | null>(null);
+  const [selectedMemory, setSelectedMemory] = useState<string | null>(null);
   const durableRequest = useRef(0);
   useEffect(() => {
     const request = ++durableRequest.current;
-    if (!open) return;
+    // A closed sheet forgets its last read, so reopening shows "loading" instead of the old count for a frame.
+    if (!open) { setDurable(null); setMemoryMap(null); setSelectedMemory(null); return; }
     setBusyId(null);
     setDurable(null);
     setDurableError(false);
@@ -130,6 +161,8 @@ export function OneMemorySheet({
         setDurable(rows);
       })
       .catch(() => { if (request === durableRequest.current) setDurableError(true); });
+    // The map is a picture of the same entries; without it the list still works.
+    void api.oneMemory.getMap?.().then((map) => { if (request === durableRequest.current) setMemoryMap(map); }).catch(() => undefined);
     return () => { ++durableRequest.current; };
   }, [open, durableRetry]);
   const forgetDurable = async (entry: OneDurableMemoryEntryUi) => {
@@ -148,6 +181,7 @@ export function OneMemorySheet({
       const rows = await api.oneMemory.listEntries({ limit: 1000 });
       if (request !== durableRequest.current) return;
       setDurable(rows);
+      void api.oneMemory.getMap?.().then((map) => { if (request === durableRequest.current) setMemoryMap(map); }).catch(() => undefined);
       if (result.ok) {
         setMessage(locale === "ko" ? "잊었어요. 기억 지도에서도 사라집니다." : "Forgotten. It leaves the memory map too.");
         setError(null);
@@ -161,11 +195,24 @@ export function OneMemorySheet({
   const durableFiltered = useMemo(() => {
     const rows = durable ?? [];
     const query = durableQuery.trim().toLowerCase();
+    const ofKind = kindFilter ? rows.filter((row) => row.kind === kindFilter) : rows;
     const filtered = query
-      ? rows.filter((row) => row.content.toLowerCase().includes(query) || (row.projectSlug ?? "").toLowerCase().includes(query) || row.kind.toLowerCase().includes(query))
-      : rows;
-    return durableExpanded || query ? filtered : filtered.slice(0, 8);
-  }, [durable, durableQuery, durableExpanded]);
+      ? ofKind.filter((row) => row.content.toLowerCase().includes(query) || (row.projectSlug ?? "").toLowerCase().includes(query) || row.kind.toLowerCase().includes(query))
+      : ofKind;
+    // The memory picked on the map is always in view, first.
+    const picked = selectedMemory ? filtered.find((row) => row.id === selectedMemory) : undefined;
+    const ordered = picked ? [picked, ...filtered.filter((row) => row !== picked)] : filtered;
+    return durableExpanded || query || kindFilter ? ordered : ordered.slice(0, 8);
+  }, [durable, durableQuery, durableExpanded, kindFilter, selectedMemory]);
+  const kindCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const row of durable ?? []) counts.set(row.kind, (counts.get(row.kind) ?? 0) + 1);
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]);
+  }, [durable]);
+  const describeMemory = useCallback((id: string) => {
+    const row = durable?.find((entry) => entry.id === id);
+    return row ? { label: kindLabel(row.kind, locale), text: row.content } : null;
+  }, [durable, locale]);
   const [editingCandidateId, setEditingCandidateId] = useState<string | null>(null);
   const [candidateContent, setCandidateContent] = useState("");
   const [editingMemoryId, setEditingMemoryId] = useState<string | null>(null);
@@ -393,10 +440,8 @@ export function OneMemorySheet({
       closeOnBackdrop={!busyId}
       closeOnEscape={!busyId}
       closeDisabled={Boolean(busyId)}
-      eyebrow={tFor(locale, "one.mem.header.eyebrow")}
       title={tFor(locale, "one.mem.header.title")}
       titleId="one-memory-title"
-      description={tFor(locale, "one.mem.header.body")}
     >
         {!state ? (
           <div className={styles.loading} role="status"><span>{tFor(locale, "one.mem.loading")}</span><LoadingEstimate locale={locale} operationKey="one-memory-load" expectedSeconds={[1, 15]} /></div>
@@ -416,7 +461,6 @@ export function OneMemorySheet({
                 <div className={styles.sectionHeading}>
                   <div>
                     <h3 id="memory-compounding-title">{tFor(locale, "one.mem.compounding.title")}</h3>
-                    <p>{tFor(locale, "one.mem.compounding.body")}</p>
                   </div>
                 </div>
                 <div className={styles.cardList}>
@@ -443,31 +487,41 @@ export function OneMemorySheet({
             )}
 
             <section className={styles.section} aria-labelledby="durable-memory-title" data-one-durable-memory="true">
-              <div className={styles.sectionHeading}>
-                <div>
-                  <h3 id="durable-memory-title">
-                    {locale === "ko"
-                      ? `One이 기억하는 것 ${durable ? durable.length : durableError ? "· 확인 필요" : "…"}`
-                      : `What One remembers ${durable ? durable.length : durableError ? "· needs review" : "…"}`}
-                  </h3>
-                  <p>
-                    {locale === "ko"
-                      ? "기억 지도의 점 하나가 여기의 한 줄입니다. 대화와 일에서 One이 스스로 남긴 기억이고, 여기서 잊게 할 수 있어요."
-                      : "Each dot on the memory map is one line here — what One kept from conversations and work. You can make it forget any of them."}
-                  </p>
+              <h3 id="durable-memory-title" className={styles.memoryCount}>
+                {locale === "ko" ? "기억" : "Memories"} <span>{durable ? durable.length : durableError ? "!" : "…"}</span>
+              </h3>
+              {memoryMap && memoryMap.nodes.length > 0 && (
+                <div className={styles.memoryMap} data-one-memory-sheet-map="true">
+                  <OneMemoryMap snapshot={memoryMap} locale={locale === "ko" ? "ko" : "en"} height={232} colorByKind
+                    selectedId={selectedMemory} onSelect={setSelectedMemory} describe={describeMemory} />
                 </div>
-              </div>
-              {durable && durable.length > 8 && (
-                <input
-                  className={styles.searchInput}
-                  type="search"
-                  value={durableQuery}
-                  onChange={(event) => setDurableQuery(event.target.value)}
-                  placeholder={locale === "ko" ? "기억 검색" : "Search memories"}
-                  aria-label={locale === "ko" ? "기억 검색" : "Search memories"}
-                />
               )}
-              <div className={styles.cardList}>
+              {kindCounts.length > 1 && (
+                <div className={styles.kindChips} role="group" aria-label={locale === "ko" ? "종류" : "Kind"}>
+                  <button type="button" data-hover="own" data-active={kindFilter === null ? "true" : "false"} onClick={() => setKindFilter(null)}>
+                    {locale === "ko" ? "전체" : "All"} <small>{durable?.length ?? 0}</small>
+                  </button>
+                  {kindCounts.map(([kind, count]) => (
+                    <button key={kind} type="button" data-hover="own" data-kind={kind} data-active={kindFilter === kind ? "true" : "false"}
+                      onClick={() => setKindFilter((current) => current === kind ? null : kind)}>
+                      <KindIcon kind={kind} size={13} />{kindLabel(kind, locale)} <small>{count}</small>
+                    </button>
+                  ))}
+                </div>
+              )}
+              {durable && durable.length > 8 && (
+                <label className={styles.memorySearch}>
+                  <IconSearch size={14} />
+                  <input
+                    type="search"
+                    value={durableQuery}
+                    onChange={(event) => setDurableQuery(event.target.value)}
+                    placeholder={locale === "ko" ? "검색" : "Search"}
+                    aria-label={locale === "ko" ? "기억 검색" : "Search memories"}
+                  />
+                </label>
+              )}
+              <div className={styles.memoryList}>
                 {durableError ? (
                   <div>
                     <p className={styles.error} role="alert">{locale === "ko" ? "기억을 불러오지 못했습니다. 다시 시도해 주세요." : "Memories could not be loaded. Try again."}</p>
@@ -480,17 +534,16 @@ export function OneMemorySheet({
                   <p className={styles.empty}>{locale === "ko" ? "아직 One이 남긴 기억이 없어요. 대화하고 일을 맡기면 여기에 쌓입니다." : "One has not kept anything yet. It fills up as you talk and delegate work."}</p>
                 )}
                 {durableFiltered.map((entry) => (
-                  <article key={entry.id} className={styles.card} data-durable-entry="true">
-                    <div className={styles.cardTop}>
-                      <span className={styles.scopeBadge}>{entry.kind}{entry.projectSlug ? ` · ${entry.projectSlug}` : ""}</span>
-                      <span className={styles.enabledBadge}>{formatDate(entry.createdAt, locale)}</span>
-                    </div>
-                    <p className={styles.cardContent}>{entry.content}</p>
-                    <div className={styles.cardActions}>
-                      <button type="button" className={styles.dangerButton} onClick={() => void forgetDurable(entry)} disabled={Boolean(busyId)}>
-                        {locale === "ko" ? "잊기" : "Forget"}
-                      </button>
-                    </div>
+                  <article key={entry.id} className={styles.memoryRow} data-durable-entry="true" data-kind={entry.kind}
+                    data-selected={selectedMemory === entry.id ? "true" : undefined}
+                    onClick={() => setSelectedMemory((current) => current === entry.id ? null : entry.id)}>
+                    <KindIcon kind={entry.kind} />
+                    <p title={entry.content}>{entry.content}</p>
+                    <time dateTime={entry.createdAt}>{formatShortDate(entry.createdAt, locale)}</time>
+                    <button type="button" className={styles.forgetIcon} data-hover="own" onClick={(event) => { event.stopPropagation(); void forgetDurable(entry); }}
+                      disabled={Boolean(busyId)} aria-label={locale === "ko" ? "잊기" : "Forget"} title={locale === "ko" ? "잊기" : "Forget"}>
+                      <IconTrash size={14} />
+                    </button>
                   </article>
                 ))}
                 {durable && !durableExpanded && !durableQuery.trim() && durable.length > 8 && (
@@ -507,7 +560,6 @@ export function OneMemorySheet({
                 <div className={styles.sectionHeading}>
                   <div>
                     <h3 id="memory-candidates-title">{tFor(locale, "one.mem.candidates.title", { n: pending.length })}</h3>
-                    <p>{tFor(locale, "one.mem.candidates.body")}</p>
                   </div>
                 </div>
                 <div className={styles.cardList}>
@@ -567,7 +619,6 @@ export function OneMemorySheet({
                 <div className={styles.sectionHeading}>
                   <div>
                     <h3 id="saved-memory-title">{tFor(locale, "one.mem.saved.title", { n: state.memories.length })}</h3>
-                    <p>{tFor(locale, "one.mem.saved.body")}</p>
                   </div>
                 </div>
                 <div className={styles.cardList}>
@@ -615,7 +666,6 @@ export function OneMemorySheet({
               <div className={styles.sectionHeading}>
                 <div>
                   <h3 id="memory-history-title">{tFor(locale, "one.mem.history.title")}</h3>
-                  <p>{tFor(locale, "one.mem.history.body")}</p>
                 </div>
               </div>
               <div className={styles.historyList}>
