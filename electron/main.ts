@@ -4640,6 +4640,18 @@ app.whenReady().then(async () => {
       console.error("[updater] resuming work interrupted by the update failed", error);
     }
   }
+  // The personal One supervisor owns a durable Work queue. It starts with Main — after the store, long-run admission,
+  // Goal checkpoints and the update resume above — so personal Work queued before a restart is claimed and dispatched
+  // even when the One screen is never opened (Hope Stage 2 handover, D01). Account identity is read per call and the
+  // queue stops with the app's runtime participants on quit and update.
+  if (!developmentEffectsSuppressed()) {
+    try {
+      const { oneSupervisor } = await import("./one/supervisor");
+      oneSupervisor();
+    } catch (error) {
+      console.error("[one-supervisor] cold start failed", error);
+    }
+  }
   // One/Work Alive organisms (AGI toggle) — after DB migration and long-run admission. Enabled lives
   // resume on their own; wakes the previous process lost are reconciled on the first beat (hostLost).
   // AGENTLAS_ALIVE_ORGANISMS=off is an operator kill switch (lives stay durable and resume when it is removed).
