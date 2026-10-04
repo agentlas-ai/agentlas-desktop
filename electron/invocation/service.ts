@@ -286,6 +286,13 @@ export interface InvocationSettledEnvelope {
   workspaceBinding?: InvocationWorkspaceBinding;
 }
 
+/** crossed: the durable start receipt exists. handedOff: the completion chain owns settlement from then on. */
+interface StartBoundary {
+  crossed: boolean;
+  runId?: string;
+  handedOff?: boolean;
+}
+
 interface RunRecord {
   /** Main verification owns this yielded native episode's next scheduling step. */
   nativeGoalEpisodePending?: boolean;
@@ -1232,7 +1239,7 @@ export class InvocationService {
     /** Main-only renderer admission identity; never accepted from an IPC request. */
     durableAdmission?: InvocationAdmissionIdentity,
   ): InvocationStartResult {
-    const startBoundary = { crossed: false };
+    const startBoundary: StartBoundary = { crossed: false };
     try {
       const started = this.startPrepared(req, workspaceBinding, executionContext, questionContinuation,
         hostNoticePurpose, mainAdmission, durableAdmission, startBoundary);
@@ -1241,6 +1248,9 @@ export class InvocationService {
       }
       return started;
     } catch (error) {
+      if (startBoundary.crossed && !startBoundary.handedOff && startBoundary.runId) {
+        this.releaseUndispatchedStart(startBoundary.runId, req.chatId, error);
+      }
       if (durableAdmission && !startBoundary.crossed) {
         // Direct control flow proves no provider dispatch occurred. Absence of
         // a receipt alone would not prove that, especially across epochs.
@@ -1272,7 +1282,7 @@ export class InvocationService {
     hostNoticePurpose: ChatHostNotice["purpose"] | undefined,
     mainAdmission: MainInvocationAdmission | undefined,
     durableAdmission: InvocationAdmissionIdentity | undefined,
-    startBoundary: { crossed: boolean },
+    startBoundary: StartBoundary,
   ): InvocationStartResult {
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
     if (durableAdmission && (durableAdmission.runId !== req.runId || durableAdmission.chatId !== req.chatId)) {
@@ -1966,6 +1976,7 @@ export class InvocationService {
         },
       });
       startBoundary.crossed = true;
+      startBoundary.runId = runId;
     } catch (error) {
       releaseOneAttachmentRun(requestedOneAttachmentRef);
       throw error;
@@ -4114,8 +4125,30 @@ export class InvocationService {
           }
         }
       }));
+    // From here the completion chain above owns this run's terminal settlement and registry slot.
+    startBoundary.handedOff = true;
 
     return { runId };
+  }
+
+  /**
+   * A synchronous throw after the durable start receipt but before the completion chain took the run: no provider was
+   * called, yet nothing else would ever settle the chat slot. Live 2026-10-04 (TPA study, update-like restart): one
+   * "database is locked" here left the Science chat refusing every retry with chat_invocation_active until the app was
+   * reopened. Record the terminal fact and release the slot; the caller still receives the original error.
+   */
+  private releaseUndispatchedStart(runId: string, chatId: string, error: unknown): void {
+    console.warn("[invocation] start failed after its durable receipt and before dispatch; releasing the chat", error);
+    const message = error instanceof Error ? error.message : String(error);
+    tryRecordRunEvent({
+      runId,
+      kind: "invoke_threw",
+      chatId,
+      agentId: this.activeRuns.get(runId)?.actualAgentId,
+      payload: { errorCode: "invoke-start-failed", errorMessage: message.slice(0, 500), providerDispatched: false },
+    });
+    this.settlingRuns.delete(runId);
+    if (this.activeRuns.settle(runId)) this.publishActiveChats();
   }
 
   /** Main-only scheduler seam. Claims are durable before this call; a crash
