@@ -736,6 +736,8 @@ export interface ToolchainInterface {
   } | null;
   /** Search hits returned to One, and runs One actually requested (AWM: exposure ≠ use). */
   usage: { returned: number; runs: number };
+  /** Who made it callable: the owner from the Toolchains screen, or One for a graph it saved. */
+  exposedBy?: { kind: "owner" | "one"; chatId: string | null; at: string };
   updatedAt: string;
 }
 

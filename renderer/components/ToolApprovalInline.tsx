@@ -248,6 +248,14 @@ export function ToolApprovalCard({
   }
 
   if (compact && chip) {
+    // The second line says what is being allowed, not that something is being asked (the
+    // question already says that). A runtime-blocked call carries the command or path it
+    // tried; an escalation request carries none, so it states the boundary it would widen.
+    const chipDetail = request.detail?.trim()
+      ? `${runtimeName} · ${request.detail.trim()}`
+      : escalation
+        ? (ko ? "지금은 읽기 전용 — 허용하면 이 요청을 이어서 합니다" : "Read-only now — allowing continues this request")
+        : runtimeName;
     return (
       <section
         className="tool-approval-chip"
@@ -258,9 +266,8 @@ export function ToolApprovalCard({
         data-testid="tool-approval-card"
       >
         <div className="tool-approval-chip-copy">
-          <span className="tool-approval-chip-kicker">{ko ? "승인 필요" : "Approval needed"}</span>
           <strong>{askTitle}</strong>
-          <small>{ko ? `${runtimeName} · 실행 전 확인` : `${runtimeName} · confirm before running`}</small>
+          <small title={chipDetail}>{chipDetail}</small>
         </div>
         <div className="tool-approval-chip-actions" role="group" aria-label={ko ? "승인 선택" : "Approval choices"}>
           {askOptions.map((option) => (

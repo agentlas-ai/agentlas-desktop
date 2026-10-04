@@ -201,6 +201,33 @@
 .object,
 .thoughtLabel { color: var(--work-muted); }
 
+.toolchainSources {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0 2px;
+}
+
+.toolchainSource {
+  display: inline-flex;
+  max-width: 100%;
+  min-height: 24px;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 999px;
+  background: var(--paper);
+  color: var(--work-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.toolchainSource > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.toolchainSource:hover { border-color: var(--info); color: var(--work-ink); }
+.toolchainSource[data-toolchain-state="draft"] { border-style: dashed; }
+.toolchainSource:focus-visible { outline: 2px solid var(--info); outline-offset: 2px; }
+
 .toolOrigin {
   width: 17px;
   height: 17px;

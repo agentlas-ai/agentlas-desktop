@@ -1,9 +1,11 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
+import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import { oneGraphDispatch } from "./graph-dispatch";
 import {
   oneTeamCreateMember,
@@ -21,6 +23,14 @@ import {
 // and its permission). Same shape as the agent-mail control server.
 
 const MAX_REQUEST_BYTES = 64 * 1024;
+
+// The server outlives the turn that first starts it, and Node gives every later
+// request the async context that was live at listen(). Started inside a turn, it
+// served all later chats with that finished turn's runtime pin and aborted
+// signal: toolchain_publish's test model never ran ("isolated_runtime_failed").
+// So listen from the module-load context, and handle each request outside any
+// invocation's judgment context.
+const hostRootContext = AsyncLocalStorage.snapshot();
 
 export interface OneTeamCapabilityBinding extends OneTeamCaller {
   capabilityId: string;
@@ -109,13 +119,13 @@ export function startOneTeamControlServer(): Promise<number> {
   if (server && boundPort) return Promise.resolve(boundPort);
   if (serverStarting) return serverStarting;
   serverToken = randomUUID();
-  const startup = new Promise<number>((resolve) => {
+  const startup = hostRootContext(() => new Promise<number>((resolve) => {
     const srv = http.createServer((req, res) => {
       if (req.method !== "POST" || req.url !== "/one-team") return writeJson(res, 404, { ok: false, error: "not-found" });
       void readJsonBody(req).then(async (body) => {
         if (!body) return writeJson(res, 400, { ok: false, error: "invalid-request" });
         try {
-          writeJson(res, 200, { ok: true, result: await handleOneTeamControlRequest(body) });
+          writeJson(res, 200, { ok: true, result: await outsideInvocationJudgmentContext(() => handleOneTeamControlRequest(body)) });
         } catch (error) {
           writeJson(res, 409, { ok: false, error: error instanceof Error ? error.message : "one-team-failed" });
         }
@@ -136,7 +146,7 @@ export function startOneTeamControlServer(): Promise<number> {
       }
       resolve(boundPort);
     });
-  });
+  }));
   serverStarting = startup;
   void startup.finally(() => { if (serverStarting === startup) serverStarting = null; });
   return startup;

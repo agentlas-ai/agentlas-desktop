@@ -312,12 +312,17 @@ export async function runColdStartTest(automationId: string, draft: ToolchainInt
 }
 
 /** Draft (or refresh) the contract and test it; callable only if the test passes. */
-export async function exposeAutomation(automationId: string, signal?: AbortSignal): Promise<ToolchainInterface> {
+export async function exposeAutomation(
+  automationId: string,
+  signal?: AbortSignal,
+  actor: { kind: "owner" | "one"; chatId?: string | null } = { kind: "owner" },
+): Promise<ToolchainInterface> {
   const automation = getAutomation(automationId);
   if (!automation?.graph) throw new Error("toolchain_automation_missing");
   const draft = draftInterface(automation);
   const coldStart = await runColdStartTest(automationId, draft, signal);
-  const contract: ToolchainInterface = { ...draft, coldStart, state: coldStart.passed ? "callable" : "draft" };
+  const contract: ToolchainInterface = { ...draft, coldStart, state: coldStart.passed ? "callable" : "draft",
+    exposedBy: { kind: actor.kind, chatId: actor.chatId ?? null, at: new Date().toISOString() } };
   mutateToolchainState(automationId, (current) => ({
     ...current,
     interface: { ...contract, usage: current.interface?.usage ?? contract.usage },

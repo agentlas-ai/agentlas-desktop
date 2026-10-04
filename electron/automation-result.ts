@@ -279,6 +279,19 @@ function toolActivityBlock(activity: ObservedToolActivity | undefined): string {
  * 판정기에게 실제로 가는 글. 게이트가 이 조립을 직접 잴 수 있게 밖으로 낸다 —
  * "판정이 무엇을 보고 판단하는가"는 이 제품에서 가장 자주 어긋난 자리다.
  */
+/**
+ * Steps the host computes itself — no model runs in them, so none can claim an effect it did
+ * not make. A graph made only of these has zero tool calls by construction, and the
+ * claimed_without_tools inversion below must not read that as a false claim.
+ * Measured 2026-10-04: every run of One's code-only Toolchain ("reverse a sentence", output
+ * correct) was flipped to error · claimed_without_tools and briefed to the owner as an anomaly.
+ */
+const HOST_COMPUTED_NODE_TYPES: ReadonlySet<string> = new Set(["trigger", "code", "condition", "transform"]);
+
+export function graphIsHostComputedOnly(graph: { nodes: ReadonlyArray<{ type: string }> } | null | undefined): boolean {
+  return Boolean(graph?.nodes.length) && graph!.nodes.every((node) => HOST_COMPUTED_NODE_TYPES.has(node.type));
+}
+
 export function automationJudgeInput(
   value: string,
   opts: {

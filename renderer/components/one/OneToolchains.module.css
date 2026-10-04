@@ -3,6 +3,8 @@
 .header > div { display: grid; gap: 4px; min-width: 0; }
 .header h2 { margin: 0; color: var(--ink); font-size: 15px; font-weight: 690; letter-spacing: -.025em; }
 .header p { margin: 0; color: var(--muted-deep); font-size: 9px; line-height: 1.45; }
+.header > .headerActions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+.header button { display: inline-flex; align-items: center; gap: 4px; }
 .header button,
 .actions button { min-height: 28px; padding: 0 9px; border: 1px solid var(--paper-edge); border-radius: 8px; background: var(--paper); color: var(--muted-deep); font-size: 9px; white-space: nowrap; cursor: pointer; }
 .header button:disabled,
@@ -33,7 +35,7 @@
 .cases ul { display: grid; gap: 5px; margin: 6px 0 0; padding: 0; list-style: none; }
 .cases li { display: grid; gap: 2px; padding: 5px 7px; border-left: 2px solid var(--paper-edge); border-radius: 4px; background: var(--paper); }
 .cases li[data-ok="true"] { border-left-color: var(--ok); }
-.cases li[data-ok="false"] { border-left-color: var(--danger, #c0392b); }
+.cases li[data-ok="false"] { border-left-color: var(--danger); }
 .caseVerdict { color: var(--ink-soft); font-size: 8px; font-weight: 700; }
 .caseTask { color: var(--muted-deep); font-size: 9px; line-height: 1.4; overflow-wrap: anywhere; }
 /* Stacked above Computer History inside the home rail: the rail's close button

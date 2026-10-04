@@ -22,7 +22,7 @@ import { recordOneGraphAuthority } from "./graph-ownership";
 import { oneTeamDispatchOwnerChat, type OneTeamCaller } from "./team-dispatch";
 import { toolchainInputProblems } from "../../shared/toolchain";
 import { searchToolchains } from "../toolchains/search";
-import { callableContractFor, contractManifest, currentCallableContracts, recordToolchainReturned, recordToolchainRun } from "../toolchains/interface";
+import { callableContractFor, contractManifest, currentCallableContracts, exposeAutomation, recordToolchainReturned, recordToolchainRun } from "../toolchains/interface";
 
 function owner(caller: OneTeamCaller) {
   const chatId = oneTeamDispatchOwnerChat(caller.chatId);
@@ -187,6 +187,21 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     // An empty list is the answer, not a failure: do the work normally.
     return { schemaVersion: "agentlas.toolchain-search.v1", toolchains };
   }
+  if (name === "toolchain_publish") {
+    // One may publish only a graph its own conversation saved; the fresh-session test is the gate,
+    // not One's say-so. Owner withdrawal and the Toolchains screen keep the final word.
+    writable(caller);
+    const a = exact(caller, input.graph_id);
+    fresh(a, input.expected_revision);
+    if (!a.graph?.nodes.length) throw new Error("toolchain_graph_required");
+    const contract = await exposeAutomation(a.id, undefined, { kind: "one", chatId: owner(caller).id });
+    const test = contract.coldStart;
+    return { schemaVersion: "agentlas.toolchain-publish.v1", graph_id: a.id, name: contract.name, state: contract.state,
+      ...(test ? { fresh_session_test: { passed: test.passed, matching_requests: test.positives, found: test.positiveFound ?? null,
+        selected: test.positiveSelected, bound: test.positiveBound, unrelated_requests: test.negatives,
+        wrongly_selected: test.negativeSelected } } : {}),
+      ...(contract.state === "callable" ? {} : { next: "The contract stays a draft. Improve the graph purpose or input labels, then publish again." }) };
+  }
   if (name === "one_graph_inspect") {
     if (!input.graph_id) return { graphs: scoped(caller).map(a => receipt(a, { source: a.graph?.nodes.length ? "stored-graph" : "legacy-prompt", goal: a.goal ?? null })) };
     const a = exact(caller, input.graph_id);
@@ -296,11 +311,12 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     const requestHash = createHash("sha256").update(`${chat.id}\0${input.request_id}`).digest("hex");
     const prior = getDb().prepare("SELECT id, payload_json FROM automation_trigger_events WHERE automation_id=? AND trigger_kind='command' AND dedupe_key=?").get(a.id, `one-graph:${requestHash}`) as { id: string; payload_json: string } | undefined;
     if (prior) {
-      const payload = JSON.parse(prior.payload_json) as { definitionRevision: string; ownerChatId: string; input: Record<string, string>; dryRun: boolean };
+      const payload = JSON.parse(prior.payload_json) as { source?: string; definitionRevision: string; ownerChatId: string; input: Record<string, string>; dryRun: boolean };
       const raw = input.input as Record<string, unknown> | undefined;
       if (payload.definitionRevision !== input.expected_revision || payload.ownerChatId !== chat.id || payload.dryRun !== (input.dry_run === true)
         || Object.entries(payload.input).some(([key, value]) => typeof raw?.[key] !== "string" || (raw[key] as string).trim() !== value)) throw new Error("one_graph_request_identity_conflict");
       return { ...receipt(a), ok: true, already_requested: true,
+        invoked_as: payload.source === "toolchain" || callableContractFor(a.id) ? "toolchain" : "graph",
         ...await waitForResult(caller, a, { ...input, event_id: prior.id, wait_seconds: input.wait_seconds ?? 20 }) };
     }
   }
@@ -370,7 +386,8 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
       const prior = getDb().prepare("SELECT payload_json FROM automation_trigger_events WHERE automation_id=? AND trigger_kind='command' AND dedupe_key=?").get(a.id, dedupeKey) as { payload_json: string } | undefined;
       if (prior && prior.payload_json !== JSON.stringify(payload)) throw new Error("one_graph_request_identity_conflict");
       const queued = enqueueTriggerEvent({ automationId: a.id, triggerKind: "command", dedupeKey, payload });
-      return { ...receipt(current, { ok: true, status: "requested", event_id: queued.event.id, already_requested: !queued.inserted, event_status: queued.event.status }), event_id: queued.event.id };
+      return { ...receipt(current, { ok: true, status: "requested", event_id: queued.event.id, already_requested: !queued.inserted, event_status: queued.event.status,
+        invoked_as: contract ? "toolchain" : "graph" }), event_id: queued.event.id };
     }).immediate();
     if (!("event_id" in queuedReceipt)) return queuedReceipt;
     if (contract && (queuedReceipt as { already_requested?: boolean }).already_requested !== true) recordToolchainRun(a.id);

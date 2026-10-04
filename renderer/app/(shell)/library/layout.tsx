@@ -17,6 +17,7 @@ export default function LibraryLayout({ children }: { children: React.ReactNode 
   if (pathname.startsWith("/library/agents")) title = t("nav.agent");
   else if (pathname.startsWith("/library/env")) title = t("nav.env_keys");
   else if (pathname.startsWith("/library/mcps")) title = t("nav.mcp_tools");
+  else if (pathname.startsWith("/library/toolchains")) title = t("nav.toolchains");
 
   return (
     <div style={{ flex: 1, display: "flex", flexDirection: "column", background: "transparent", overflow: "hidden" }}>

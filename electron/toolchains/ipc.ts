@@ -78,7 +78,7 @@ export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
     return toolchainOverview();
   });
   ipc.handle("toolchains:expose", async (_event, automationId: unknown) => {
-    await exposeAutomation(automationIdOf(automationId));
+    await exposeAutomation(automationIdOf(automationId), undefined, { kind: "owner" });
     return toolchainOverview();
   });
   ipc.handle("toolchains:withdraw", (_event, automationId: unknown) => {

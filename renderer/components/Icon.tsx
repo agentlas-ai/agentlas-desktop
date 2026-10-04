@@ -140,6 +140,9 @@ export const IconTarget = (p: Props) =>
   svg("M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18zM12 17a5 5 0 1 0 0-10 5 5 0 0 0 0 10zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2z", p);
 export const IconRoute = (p: Props) =>
   svg("M6 19a2 2 0 1 1 0-4 2 2 0 0 1 0 4zM18 9a2 2 0 1 1 0-4 2 2 0 0 1 0 4zM18 9v7a4 4 0 0 1-4 4H7M6 15V8a4 4 0 0 1 4-4h3", p);
+/** 툴체인 — 저장된 그래프가 다른 대화에서 부르는 도구로 이어진다는 표시(사슬 고리). */
+export const IconToolchain = (p: Props) =>
+  svg("M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71", p);
 export const IconCode = (p: Props) =>
   svg("M8 6 3 12l5 6M16 6l5 6-5 6M14 4l-4 16", p);
 export const IconShield = (p: Props) =>

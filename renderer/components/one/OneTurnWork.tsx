@@ -15,12 +15,15 @@ import {
   IconNetwork,
   IconSearch,
   IconSparkles,
+  IconToolchain,
 } from "@/components/Icon";
 import { extractAutomationRegistrations, type OneActivityState } from "@/lib/one-activity";
 import type { OneThreadRunBlock } from "@/lib/one-thread-work";
 import { OneAutomationRegistrationCard } from "./OneAdaptiveResult";
 import { ToolObservation } from "../ToolObservation";
 import { toolObservationAction } from "@/lib/tool-observation";
+import { toolchainSourcesOf, type ToolchainSourceRef } from "@/lib/toolchain-source";
+import { navigate } from "@/lib/navigation";
 import {
   CONNECTED_TOOL_LABEL,
   buildOneWorkPresentation,
@@ -158,6 +161,34 @@ function CellIcon({ cell }: { cell: OneWorkCell }) {
     default:
       return <IconSparkles {...props} />;
   }
+}
+
+/**
+ * Source chip: this answer ran (or published) a Toolchain. Built only from the
+ * host's typed receipts (lib/toolchain-source), and it opens that Toolchain in
+ * Work › Environment › Toolchains.
+ */
+function ToolchainSourceChip({ source, locale }: { source: ToolchainSourceRef; locale: "ko" | "en" }) {
+  const ko = locale === "ko";
+  const label = source.kind === "run"
+    ? (ko ? "툴체인 사용" : "Used toolchain")
+    : source.state === "callable"
+      ? (ko ? "툴체인으로 등록" : "Published as toolchain")
+      : (ko ? "툴체인 시험 미통과" : "Toolchain test not passed");
+  return (
+    <button
+      type="button"
+      className={styles.toolchainSource}
+      data-toolchain-source={source.kind}
+      data-toolchain-state={source.state ?? undefined}
+      data-automation-id={source.automationId}
+      title={ko ? "툴체인 화면에서 열기" : "Open in Toolchains"}
+      onClick={() => navigate(`/library/toolchains?automation=${encodeURIComponent(source.automationId)}`)}
+    >
+      <IconToolchain size={11} />
+      <span>{label}{source.name ? ` · ${source.name}` : ""}</span>
+    </button>
+  );
 }
 
 function ToolOriginBadge({ origin, locale }: { origin: ToolInvocationOrigin; locale: "ko" | "en" }) {
@@ -603,6 +634,7 @@ export function OneTurnWork({
   const ko = locale === "ko";
   const presentation = useMemo(() => buildOneWorkPresentation(state, locale, workspacePath), [state, locale, workspacePath]);
   const automationRegistrations = useMemo(() => extractAutomationRegistrations(state), [state]);
+  const toolchainSources = useMemo(() => toolchainSourcesOf(presentation.cells), [presentation.cells]);
   const active = busy || preparing;
   const loginWaiting = !active && (runStatus === "waiting_input"
     || state.items.some(item => item.kind === "run" && item.status === "waiting_input"));
@@ -728,6 +760,12 @@ export function OneTurnWork({
           )}
           <span className={styles.headerChevron} aria-hidden="true"><IconChevronDown size={12} /></span>
         </button>
+      )}
+      {/* Outside the fold: where the answer came from stays visible after the block collapses. */}
+      {toolchainSources.length > 0 && (
+        <div className={styles.toolchainSources} data-one-toolchain-sources="true">
+          {toolchainSources.map((source) => <ToolchainSourceChip key={`${source.kind}:${source.automationId}`} source={source} locale={locale} />)}
+        </div>
       )}
       {(active || expanded) && workerGroups.length > 0 && (
         <div className={styles.workerList} aria-label={ko ? "작업자별 활동" : "Activity by worker"}>

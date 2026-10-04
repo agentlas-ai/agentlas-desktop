@@ -33,6 +33,7 @@ import {
   IconBolt,
   IconKey,
   IconNetwork,
+  IconToolchain,
   IconSearch,
   IconSettings,
   IconChevronDown,
@@ -229,6 +230,7 @@ export function SideNav({
         items: [
           { label: t("nav.env_keys"), href: "/library/env", icon: IconKey },
           { label: t("nav.mcp_tools"), href: "/library/mcps", icon: IconNetwork },
+          { label: t("nav.toolchains"), href: "/library/toolchains", icon: IconToolchain },
         ],
       },
     ],

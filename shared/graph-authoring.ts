@@ -8,7 +8,7 @@ type Shape = {
   properties?: Record<string, Shape>; required?: string[];
   additionalProperties?: boolean; items?: Shape;
   minLength?: number; maxLength?: number; minItems?: number; maxItems?: number;
-  minimum?: number; maximum?: number; pattern?: string;
+  minimum?: number; maximum?: number; pattern?: string; description?: string;
 };
 const string = (maxLength = 8000): Shape => ({ type: "string", minLength: 1, maxLength });
 const object = (properties: Record<string, Shape>, required: string[] = []): Shape =>
@@ -30,7 +30,10 @@ export const GRAPH_BLUEPRINT_INPUT_SCHEMA = object({
     uses: array(object({ capability: { enum: CAPABILITIES }, provider: { anyOf: [{ type: "null" }, string(128)] } }, ["capability"])),
     kind: { enum: ["agent", "code", "runGraph", "mcp_call"] }, graphRef: id,
     mcpCall: GRAPH_MCP_CALL_INPUT_SCHEMA,
-    code: string(24000), codeLang: { enum: ["python", "js"] }, packages: array(string(120)),
+    // The runner contract (electron/workflow/code-runner.ts). Without it a model saving a code step
+    // had to guess or read host source (measured 2026-10-04: five source reads before one save).
+    code: { ...string(24000), description: "Code step body. Earlier values arrive in `vars` (python dict: vars.get('text'); js object: vars.text) — list the names in consumes. Assign the output to `result`; it becomes this step's produces value. print/console output is a log only." },
+    codeLang: { enum: ["python", "js"] }, packages: array(string(120)),
     role: string(200), roleEn: string(200),
   }, ["title", "instruction", "effect"]), 32, 1),
   branches: array(object({
@@ -58,6 +61,7 @@ export const ONE_GRAPH_TOOLS = [
   { name: "one_graph_run", annotations: act, description: "Execute an enabled saved graph through the host queue and return its result when ready (wait_seconds default 20, at most 50). Pass current expected_revision and stable request_id; retries never duplicate execution. Input contains named strings; no prompt copy. If still running, retain event_id and use one_graph_result. One owns strategy and may evaluate returned data itself or encode reasoning steps in the blueprint.", inputSchema: object({ graph_id: id, expected_revision: revision, request_id: string(128), wait_seconds: { type: "integer", minimum: 0, maximum: 50 },
     input: { type: "object", additionalProperties: true }, dry_run: { type: "boolean" },
   }, ["graph_id", "expected_revision", "request_id"]) },
+  { name: "toolchain_publish", annotations: act, description: "Make a graph this conversation saved callable from other conversations (a Toolchain) when future requests will reuse it. Host drafts the contract (purpose, when to use and not, input schema, pessimistic effects) and runs a fresh-session test with no tools; only a passing test makes it callable, otherwise it stays a draft and the result says where the test failed. Pass graph_id and its current expected_revision. The owner can withdraw it from Toolchains.", inputSchema: object({ graph_id: id, expected_revision: revision }, ["graph_id", "expected_revision"]) },
   { name: "toolchain_search", annotations: ro, description: "Find an owner-approved callable automation (Toolchain) for a task before doing the work yourself. Returns at most 5 contracts (purpose, when_to_use, when_not_to_use, input_schema, input_examples, effects, expected_revision) or none. None means do the work normally. To use one, call one_graph_run with its graph_id, expected_revision, a stable request_id and input matching input_schema.", inputSchema: object({ task: string(2000), limit: { type: "integer", minimum: 1, maximum: 5 } }, ["task"]) },
   { name: "one_graph_result", annotations: ro, description: "Result/status of this conversation's exact graph event. Optional wait_seconds waits up to 50 seconds; repeated reads never execute work. Includes bounded node outputs and typed failures. Fetch a longer output by node_id and offset/limit without loading all instructions/history.", inputSchema: object({ graph_id: id, event_id: id, wait_seconds: { type: "integer", minimum: 0, maximum: 50 }, node_id: id, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 32000 } }, ["graph_id", "event_id"]) },
 ] as const;

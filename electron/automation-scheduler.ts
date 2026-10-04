@@ -206,6 +206,7 @@ import {
   AUTOMATION_OUTCOME_JUDGE_TIMEOUT_MS,
   classifyAutomationFailure,
   classifyAutomationOutcome,
+  graphIsHostComputedOnly,
   isJudgmentUnavailable,
   type AutomationJudgeReceipt,
   type AutomationResultClassification,
@@ -1610,7 +1611,10 @@ async function runOne(
         //   도구 호출이 0건이면 바깥은 그대로다 — 그 사실은 지어낼 수 없다.
         try {
           const evidenceOutput = output;
-          const evidenceActivity = currentRunId ? structuredClone(observedToolActivity(currentRunId)) : undefined;
+          // A host-computed graph (code/condition/transform only) has no model that could claim an
+          // effect; its zero tool calls are not evidence of a false claim, so no observation is passed.
+          const evidenceActivity = currentRunId && !graphIsHostComputedOnly(a.graph)
+            ? structuredClone(observedToolActivity(currentRunId)) : undefined;
           const evidenceRecord = structuredClone(runRecord);
           const evidenceGoal = structuredClone(declaredGoalForAutomation(a));
           pendingClassifications.push(() => classifyInBackground({ automation: a, runId: currentRunId, phase: "outcome", sourceSignal: controller.signal,
