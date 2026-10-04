@@ -2022,6 +2022,8 @@ export type ChatHostNotice =
   | { purpose: "update-resume"; runId: string }
   /** One's conversation: One woke to check work it delegated that has finished (one line, no prompt). */
   | { purpose: "one-delegation-review"; runId: string }
+  /** One ran a check-in the owner asked for. Never saved as a row: only One's own message, if any, appears. */
+  | { purpose: "one-checkin"; runId: string }
   | { purpose: "automation-report"; runId: string; automationId: string }
   /** Teammate session: the brief One handed over (shown as coming from One, not the owner). */
   | { purpose: "one-dispatch-brief"; runId: string }

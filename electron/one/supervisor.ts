@@ -11,7 +11,8 @@ import { currentUiLocale } from "../ui-locale";
 import { OneSupervisorStore, supervisorHash, personalSupervisorConversationInDb, supervisorStoppedGoalForTask } from "./supervisor-store";
 import { OneSupervisorService } from "./supervisor-service";
 import { SupervisorScienceAdapter } from "./supervisor-science";
-import { supervisorExactResult, supervisorReplyTurns } from "./supervisor-presentation";
+import { supervisorExactResult, supervisorQuietRun, supervisorReplyTurns } from "./supervisor-presentation";
+import { onAskUserLifecycle } from "../confirm/ask-user";
 import { OneSupervisorLegacyMigration } from './supervisor-migration';
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { SupervisorTask, SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
@@ -75,7 +76,7 @@ export function oneSupervisor():OneSupervisorService {
       // The native Work invocation persists its own human input once. The
       // atomic supervisor request already durably owns this brief before dispatch.
       return {chatId:chat.id,taskId:task.id};
-    },alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,
+    },alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),quietRun:runId=>supervisorQuietRun(getDb(),runId),tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,
     turns:(chatId,requests)=>supervisorReplyTurns(getDb(),chatId,requests,invocationService.attach(chatId)),
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
@@ -104,10 +105,25 @@ export function oneSupervisor():OneSupervisorService {
       receipt:runId=>invocationService.receipt(runId),onSettled:listener=>invocationService.onSettled(listener)},
     onFailure:error=>console.warn("[one-supervisor] worker admission deferred",error instanceof Error ? error.message : "unknown"),
   });
+  // Dots parity (owner 2026-10-04): One speaks first on a check-in it was asked to run, or when a worker it
+  // delegated to is waiting for the owner. The listener is not an answer surface (it returns false).
+  const fireCheckins=()=>{try{supervisor?.fireDueCheckins();}catch(error){console.warn("[one-supervisor] check-ins deferred",error instanceof Error ? error.message : "unknown");}};
+  const checkinTimer=setInterval(fireCheckins,30_000);checkinTimer.unref?.();
+  const stopQuestions=onAskUserLifecycle(event=>{
+    if (event.chatId && event.expiresAt > Date.now()) {
+      try {
+        const options=event.options.map(option=>option.label).filter(Boolean);
+        supervisor?.workerNeedsOwner(event.chatId,event.requestId,[event.question,...(options.length ? [`options: ${options.join(" / ")}`] : [])].join("\n"));
+      } catch (error) { console.warn("[one-supervisor] waiting-worker notice deferred",error instanceof Error ? error.message : "unknown"); }
+    }
+    return false;
+  });
+  const stopProactive=()=>{clearInterval(checkinTimer);stopQuestions();};
   registerAppRuntimeParticipant("one-supervisor-work-queue", {
-    closeAdmission:()=>workExecutor?.close(),interrupt:()=>workExecutor?.close(),isSettled:()=>true,
+    closeAdmission:()=>{workExecutor?.close();stopProactive();},interrupt:()=>{workExecutor?.close();stopProactive();},isSettled:()=>true,
   });
   workExecutor.start();
+  fireCheckins(); // a check-in due while the app was closed runs once now
   }
   return supervisor;
 }

@@ -115,6 +115,7 @@ import { goalDeadlineAt } from "../long-run/goal-deadline";
 import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
 import { getDb } from "../store/db";
 import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
+import { isOneQuietReply } from "../../shared/one-supervisor";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { findCanonicalTaskForChat } from "../store/tasks";
@@ -2298,6 +2299,8 @@ async function runMcpInvocationInContext(
   const promptIsSystemAuthored = req.promptOrigin === "system";
   const persistUserMessage = () => {
     if (effectObservationRun || req.agentAppMode || userMessagePersisted) return;
+    // A check-in One runs on its own leaves no row; only One's own message, if any, appears (dots parity).
+    if (promptIsSystemAuthored && hostNoticePurpose === "one-checkin") { userMessagePersisted = true; return; }
     if (promptIsSystemAuthored) {
       appendChatMessage(chat.id, "system", req.userPrompt, (hostNoticePurpose === "goal-continuation" || hostNoticePurpose === "one-dispatch-brief" || hostNoticePurpose === "update-resume" || hostNoticePurpose === "one-delegation-review") && req.runId
         ? { hostNotice: { purpose: hostNoticePurpose, runId: req.runId } } : undefined);
@@ -7991,7 +7994,11 @@ ${effectiveUserPrompt}`;
        * 중간 턴이 길이 0 assistant 메시지로 저장됨).
        * 삼키지도 않는다 — 빈 답 자체가 진단 신호이므로 사실은 원장에 남긴다.
        */
-      if (persistedDisplay.trim() || finalImageOptions?.images?.length) {
+      if ((hostNoticePurpose === "one-delegation-review" || hostNoticePurpose === "one-checkin") && isOneQuietReply(persistedDisplay)) {
+        // One decided the owner does not need to hear anything: nothing is saved and no alert fires (run-alerts).
+        tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, kind: "one_quiet_reply", chatId: chat.id, agentId: agent.id,
+          payload: { purpose: hostNoticePurpose } });
+      } else if (persistedDisplay.trim() || finalImageOptions?.images?.length) {
         durableAssistantEntry = appendInvocationAssistantResult({
           chatId: chat.id,
           speakerAgentId: agent.id,

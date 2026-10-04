@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
-import type { SupervisorCommandReceipt, SupervisorNotice, SupervisorRequestState } from "../../shared/one-supervisor";
+import { ONE_CHECKIN_LIMITS, nextCheckinAt, type OneCheckin, type OneCheckinCadence, type SupervisorCommandReceipt, type SupervisorNotice, type SupervisorRequestState } from "../../shared/one-supervisor";
 
 export interface SupervisorRequestRow {
   command_id: string; one_id: string; kind: SupervisorCommandReceipt["kind"]; payload_json: string;
@@ -81,7 +81,18 @@ export class OneSupervisorStore {
         db.prepare("UPDATE one_supervisor_notices SET review_state='skipped',review_reason='settled_before_review_loop'").run();
       })();
     }
+    if (!(db.prepare("PRAGMA table_info(one_supervisor_notices)").all() as Array<{name:string}>).some(column=>column.name === "detail")) {
+      db.exec("ALTER TABLE one_supervisor_notices ADD COLUMN detail TEXT");
+    }
     db.exec("CREATE INDEX IF NOT EXISTS one_supervisor_notice_review ON one_supervisor_notices(one_id,review_state)");
+    // Check-ins the owner asked One to run on its own (dots parity). Additive, like the tables above.
+    db.exec(`CREATE TABLE IF NOT EXISTS one_supervisor_checkins (
+        id TEXT PRIMARY KEY, one_id TEXT NOT NULL, instruction TEXT NOT NULL, cadence_json TEXT NOT NULL,
+        notify TEXT NOT NULL CHECK(notify IN ('important','always')), next_at INTEGER NOT NULL,
+        active INTEGER NOT NULL DEFAULT 1, fires INTEGER NOT NULL DEFAULT 0, last_fired_at INTEGER,
+        created_at TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE
+      );
+      CREATE INDEX IF NOT EXISTS one_supervisor_checkin_due ON one_supervisor_checkins(one_id,active,next_at);`);
   }
   conversation(oneId: string): string | null {
     return (this.db.prepare("SELECT chat_id FROM one_supervisor_conversations WHERE one_id=?").get(oneId) as {chat_id: string} | undefined)?.chat_id ?? null;
@@ -137,6 +148,60 @@ export class OneSupervisorStore {
     this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
       VALUES(?,?,?,?,?,?,?,?,?)`).run(supervisorHash([row.one_id,row.task_id,row.run_id]),row.one_id,row.task_id,row.origin_chat_id,row.run_id,state,new Date().toISOString(),
       state === "cancelled" ? "skipped" : "pending", state === "cancelled" ? "owner_cancelled" : null);
+  }
+  private checkinRow(row: {id:string;instruction:string;cadence_json:string;notify:"important"|"always";next_at:number;last_fired_at:number|null;fires:number}): OneCheckin {
+    return {id:row.id,instruction:row.instruction,cadence:JSON.parse(row.cadence_json) as OneCheckinCadence,notify:row.notify,
+      nextAt:new Date(row.next_at).toISOString(),lastFiredAt:row.last_fired_at ? new Date(row.last_fired_at).toISOString() : null,fires:row.fires};
+  }
+  addCheckin(oneId: string, input: {commandId: string; instruction: string; cadence: OneCheckinCadence; notify: "important" | "always"}, now = Date.now()): OneCheckin {
+    return this.db.transaction(() => {
+      const prior = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE command_id=?").get(input.commandId) as Parameters<OneSupervisorStore["checkinRow"]>[0] & {one_id:string} | undefined;
+      if (prior) { if (prior.one_id !== oneId) throw new Error("supervisor_command_identity_conflict"); return this.checkinRow(prior); }
+      if ((this.db.prepare("SELECT count(*) AS n FROM one_supervisor_checkins WHERE one_id=? AND active=1").get(oneId) as {n:number}).n >= ONE_CHECKIN_LIMITS.active) {
+        throw new Error("supervisor_checkin_limit");
+      }
+      const id = `checkin_${supervisorHash([oneId,input.commandId]).slice(0,24)}`;
+      this.db.prepare(`INSERT INTO one_supervisor_checkins(id,one_id,instruction,cadence_json,notify,next_at,created_at,command_id) VALUES(?,?,?,?,?,?,?,?)`)
+        .run(id,oneId,input.instruction,JSON.stringify(input.cadence),input.notify,nextCheckinAt(input.cadence,now),new Date(now).toISOString(),input.commandId);
+      return this.checkinRow(this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE id=?").get(id) as Parameters<OneSupervisorStore["checkinRow"]>[0]);
+    })();
+  }
+  checkins(oneId: string): OneCheckin[] {
+    return (this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND active=1 ORDER BY next_at").all(oneId) as Array<Parameters<OneSupervisorStore["checkinRow"]>[0]>).map(row=>this.checkinRow(row));
+  }
+  checkin(oneId: string, id: string): (OneCheckin & {active:boolean}) | null {
+    const row = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND id=?").get(oneId,id) as (Parameters<OneSupervisorStore["checkinRow"]>[0] & {active:number}) | undefined;
+    return row ? {...this.checkinRow(row),active:row.active===1} : null;
+  }
+  cancelCheckin(oneId: string, id: string): boolean {
+    return this.db.prepare("UPDATE one_supervisor_checkins SET active=0 WHERE one_id=? AND id=? AND active=1").run(oneId,id).changes === 1;
+  }
+  /** Moves every due check-in to its next time (CAS on next_at) and queues one notice per firing. A check-in that was
+   * due several times while the app was closed fires once, then resumes its cadence from now. */
+  fireDueCheckins(oneId: string, chatId: string, now = Date.now()): number {
+    return this.db.transaction(() => {
+      let fired = 0;
+      const due = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND active=1 AND next_at<=? ORDER BY next_at LIMIT 20").all(oneId,now) as Array<Parameters<OneSupervisorStore["checkinRow"]>[0] & {id:string}>;
+      for (const row of due) {
+        let next: number;
+        try { next = nextCheckinAt(JSON.parse(row.cadence_json) as OneCheckinCadence, now); } catch { this.cancelCheckin(oneId,row.id); continue; }
+        const moved = this.db.prepare("UPDATE one_supervisor_checkins SET next_at=?,last_fired_at=?,fires=fires+1 WHERE id=? AND next_at=?").run(next,now,row.id,row.next_at).changes;
+        if (moved !== 1) continue;
+        const firing = `fire:${row.next_at}`;
+        this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state)
+          VALUES(?,?,?,?,?,'scheduled',?,'pending')`).run(supervisorHash([oneId,`checkin:${row.id}`,firing]),oneId,`checkin:${row.id}`,chatId,firing,new Date(now).toISOString());
+        fired += 1;
+      }
+      return fired;
+    })();
+  }
+  /** A delegated worker is waiting for the owner (a question). One tells the owner; it does not answer for them. */
+  noticeNeedsOwner(oneId: string, taskId: string, chatId: string, waitId: string, detail: string): boolean {
+    return this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,detail)
+      VALUES(?,?,?,?,?,'needs-owner',?,'pending',?)`).run(supervisorHash([oneId,taskId,`wait:${waitId}`]),oneId,taskId,chatId,`wait:${waitId}`,new Date().toISOString(),detail.slice(0,2000)).changes === 1;
+  }
+  noticeDetail(id: string): string | null {
+    return (this.db.prepare("SELECT detail FROM one_supervisor_notices WHERE id=?").get(id) as {detail:string|null}|undefined)?.detail ?? null;
   }
   /** Binds up to `limit` unreviewed results to one review run. The run id is the generation: a notice is claimed once,
    * and only that run's settlement may close it, so a late or replayed outcome cannot report it twice (D07). */

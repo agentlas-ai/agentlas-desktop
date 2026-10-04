@@ -114,6 +114,10 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
         ...(input.project_id ? {projectId:String(input.project_id)} : {}),permissions:"full"},binding.supervisorReplyRunId);
       case "one_supervisor_start_science": return service.startScience({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),projectId:String(input.project_id ?? "")},binding.supervisorReplyRunId);
       case "one_supervisor_follow_up": return service.followUp({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),text:String(input.message ?? "")},binding.supervisorReplyRunId);
+      case "one_supervisor_checkin": return service.checkin({commandId:String(input.command_id ?? ""),action:input.action as "create"|"cancel"|"list",
+        ...(input.instruction !== undefined ? {instruction:String(input.instruction)} : {}),...(input.every_minutes !== undefined ? {everyMinutes:Number(input.every_minutes)} : {}),
+        ...(input.daily_at !== undefined ? {dailyAt:String(input.daily_at)} : {}),...(input.notify !== undefined ? {notify:input.notify as "important"|"always"} : {}),
+        ...(input.checkin_id !== undefined ? {checkinId:String(input.checkin_id)} : {})});
       case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
       default: throw new Error("supervisor_operation_unknown");
     }

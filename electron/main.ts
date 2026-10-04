@@ -145,6 +145,7 @@ import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, note
 import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
 import { decideRunAlert, fireRunAlert, getRunAlerts } from "./run-alerts";
+import { supervisorQuietRun } from "./one/supervisor-presentation";
 import { currentUiLocale, setCurrentUiLocale } from "./ui-locale";
 import { prepareMacRuntimeResourcesForExecution } from "./runtime/mac-resource-seal";
 import {
@@ -785,6 +786,9 @@ function checkOneBriefingDesktopNotification(): void {
  * 둘 다 켜져 있으면 알림이 두 번 뜰 수 있어, 저쪽이 이미 보낸 실행은 건너뛴다.
  */
 let disposeRunAlertBridge: (() => void) | null = null;
+function supervisorQuietRunInStore(runId: string): boolean {
+  try { return supervisorQuietRun(getDb(), runId); } catch { return false; }
+}
 function startRunAlertBridge(): void {
   if (disposeRunAlertBridge) return;
   disposeRunAlertBridge = invocationService.onSettled((envelope) => {
@@ -799,6 +803,8 @@ function startRunAlertBridge(): void {
         pendingQuestion: envelope.pendingQuestion === true,
       });
       if (!decision.alert) return;
+      // One checked and decided the owner needs to hear nothing ([quiet]): no sound, no bounce.
+      if (supervisorQuietRunInStore(envelope.receipt.runId)) return;
       // 같은 실행을 One 팀 브리지가 이미 알렸으면 두 번 울리지 않는다.
       if ([...oneTeamNotificationKeys].some((key) => key.startsWith(`${envelope.receipt.runId}:`))) return;
       fireRunAlert({

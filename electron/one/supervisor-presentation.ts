@@ -13,6 +13,12 @@ export function supervisorExactResult(db:Database.Database,chatId:string,runId:s
     ORDER BY e.seq DESC LIMIT 1`).get(runId,chatId) as {id:string;text:string}|undefined ?? null;
 }
 
+/** A host-started One run that ended with the quiet reply: nothing was saved and no alert should fire. */
+export function supervisorQuietRun(db:Database.Database,runId:string):boolean {
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE name='run_events'").get()) return false;
+  return !!db.prepare("SELECT 1 FROM run_events WHERE run_id=? AND kind='one_quiet_reply' LIMIT 1").get(runId);
+}
+
 export function supervisorReplyTurns(db:Database.Database,chatId:string,requests:SupervisorRequestRow[],live?:{runId:string;events:McpInvocationEvent[]} | null):SupervisorReplyTurn[] {
   const hasEvents=!!db.prepare("SELECT 1 FROM sqlite_master WHERE name='run_events'").get();
   return requests.filter(row=>row.kind==='reply' && row.run_id && row.user_message_id).reverse().map(row=>{
