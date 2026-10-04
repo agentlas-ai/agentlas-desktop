@@ -2,7 +2,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LOCAL_CANDIDATE_BUILD_INSTALL_IDENTITY, type InstallIdentity } from "./install-identity";
-import type { IpcMain } from "electron";
+import type { IpcMain, IpcMainInvokeEvent } from "electron";
+import { recordAppControlHandler } from "./app-control/ipc-registry";
 import { normalizeIpcArgsInPlace } from "./ipc-args-normalize";
 import { encodeIpcErrorMessage, isIpcErrorCode } from "../shared/ipc-error-code";
 
@@ -178,7 +179,7 @@ function codedIpcError(channel: string, error: unknown): unknown {
 export function developmentIpcBoundary(source: Pick<IpcMain, "handle">): Pick<IpcMain, "handle"> {
   return {
     handle(channel, listener) {
-      source.handle(channel, (event, ...args) => {
+      const boundary = (event: IpcMainInvokeEvent, ...args: unknown[]) => {
         normalizeIpcArgsInPlace(args);
         assertDevelopmentIpcAllowed(channel, args);
         let result: unknown;
@@ -191,7 +192,10 @@ export function developmentIpcBoundary(source: Pick<IpcMain, "handle">): Pick<Ip
           return Promise.resolve(result).catch((error: unknown) => { throw codedIpcError(channel, error); });
         }
         return result;
-      });
+      };
+      source.handle(channel, boundary);
+      // One's app-control route calls the same boundary a click reaches (electron/app-control).
+      recordAppControlHandler(channel, boundary);
     },
   };
 }

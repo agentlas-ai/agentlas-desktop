@@ -6152,7 +6152,7 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
   // 대화에 딸린 자동화 — 실행 중 줄·보고 요약·오른쪽 "자동화" 탭. 원장(run_events)만 읽는다.
-  registerAutomationChatActivityIpc();
+  registerAutomationChatActivityIpc(ipcMain);
   // 목표 전용 패널(오른쪽 "목표" 탭) — 원장 읽기와 오너의 형식 있는 편집(오너 2026-09-28).
   registerGoalPanelIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   // 승인은 사람의 결정이라 판정 모델 가용성과 무관하게 동작해야 한다. 결정은 가장 최근

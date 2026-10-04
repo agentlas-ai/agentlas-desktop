@@ -118,6 +118,10 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
         ...(input.instruction !== undefined ? {instruction:String(input.instruction)} : {}),...(input.every_minutes !== undefined ? {everyMinutes:Number(input.every_minutes)} : {}),
         ...(input.daily_at !== undefined ? {dailyAt:String(input.daily_at)} : {}),...(input.notify !== undefined ? {notify:input.notify as "important"|"always"} : {}),
         ...(input.checkin_id !== undefined ? {checkinId:String(input.checkin_id)} : {})});
+      // The app-control catalog (every bridge operation) loads only when One first uses it.
+      case "one_app_operations": return (require("../app-control/service") as typeof import("../app-control/service")).appControlOperations(input);
+      case "one_app_call": return (require("../app-control/service") as typeof import("../app-control/service"))
+        .appControlCall({ownerTurn:service.ownerTurn(binding.supervisorReplyRunId)},{operation:input.operation,args:input.args});
       case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
       default: throw new Error("supervisor_operation_unknown");
     }

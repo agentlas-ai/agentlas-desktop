@@ -4,6 +4,7 @@
 "use client";
 import { useEffect } from "react";
 import { useRouter } from "next/navigation";
+import { useT, type LocalePref } from "@/lib/i18n";
 
 interface MenuBridge {
   onNavigate: (handler: (route: string) => void) => () => void;
@@ -19,6 +20,7 @@ const SIDEBAR_COLLAPSE_KEY = "agentlas.sidebar.collapsed";
 
 export function MenuBridge() {
   const router = useRouter();
+  const { setPref: setLocalePref } = useT();
 
   useEffect(() => {
     if (typeof window === "undefined" || !window.agentlasMenu) return;
@@ -52,12 +54,18 @@ export function MenuBridge() {
         );
         return;
       }
+      // One changed the app language for the owner (electron/app-control): the same setter as Settings.
+      const locale = /^__locale__:(ko|en|system)$/.exec(route)?.[1];
+      if (locale) {
+        setLocalePref(locale as LocalePref);
+        return;
+      }
       if (route.startsWith("/")) {
         router.push(route);
       }
     });
     return off;
-  }, [router]);
+  }, [router, setLocalePref]);
 
   return null;
 }

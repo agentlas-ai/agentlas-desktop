@@ -6,7 +6,7 @@
  * Site icons: the renderer never contacts a site. Main fetches /favicon.ico from the public host the
  * automation itself already visited (no third-party icon service), bounded in size and time, and caches it.
  */
-import { ipcMain, net } from "electron";
+import { net, type IpcMain } from "electron";
 import { isPublicHostname } from "../shared/automation-activity";
 import { automationChatActivity, automationRunDigest, automationRunPage } from "./store/automation-chat-activity";
 
@@ -53,7 +53,8 @@ function text(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 && value.length <= 512 ? value : null;
 }
 
-export function registerAutomationChatActivityIpc(): void {
+/** `ipc` is Main's IPC boundary (electron/development-effect-policy), the one every handler registers through. */
+export function registerAutomationChatActivityIpc(ipcMain: Pick<IpcMain, "handle">): void {
   ipcMain.handle("automations:chatActivity", (_event, scope: unknown) => {
     const input = scope && typeof scope === "object" ? scope as Record<string, unknown> : {};
     return automationChatActivity({

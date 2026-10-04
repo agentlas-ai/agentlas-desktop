@@ -46,6 +46,8 @@ import { createLocalModelDaemonClient } from "./local-model-hub/daemon-client";
 import { createOllamaMigrationService } from "./local-model-hub/migration-runtime";
 import { registerOllamaMigrationIpc } from "./local-model-hub/migration-ipc";
 import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
+import { isAppControlEvent } from "./app-control/ipc-registry";
+import { configureAppControlHost } from "./app-control/service";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { installDesktopScienceHost } from "./science-host";
@@ -195,6 +197,7 @@ import {
   closeAllScienceExtensionViews,
   closeScienceExtensionView,
   captureScienceExtensionViewRegion,
+  assertScienceExtensionReleasePermission,
   assertScienceExtensionViewPermission,
   isScienceExtensionViewSender,
   openScienceExtensionView,
@@ -694,6 +697,8 @@ const STARTUP_PLACEHOLDER_HTML = `<!doctype html>
 const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURIComponent(STARTUP_PLACEHOLDER_HTML)}`;
 
 let mainWindow: BrowserWindow | null = null;
+// One operates the app through the same handlers the window calls (electron/app-control).
+configureAppControlHost({ mainWindow: () => mainWindow, scienceInstalled: () => scienceExtensionStatus().phase === "installed" });
 let lastStartupNavigationFailure: {
   kind: ReturnType<typeof classifyStartupNavigationFailure>;
   target: string;
@@ -2501,9 +2506,16 @@ app.whenReady().then(async () => {
   ipcMain.handle("productExtensions:closeScienceView", (event, rawLeaseId) => closeScienceExtensionView(event.sender.id, scienceViewLeaseId(rawLeaseId)));
   const assertScienceSender = (event: Electron.IpcMainInvokeEvent, input: unknown, permission: ProductExtensionPermission = "science:projects") => {
     const extensionId = input && typeof input === "object" && "extensionId" in input ? String((input as { extensionId?: unknown }).extensionId ?? "") : "";
-    if (extensionId !== "agentlas-science" || !isScienceExtensionViewSender(event.sender.id)) throw new Error("science-extension-sender-not-authorized");
+    // One operating Science (electron/app-control) is a Main-built event, not a view: same installed check, and the
+    // release's own declared permissions instead of an open view's.
+    const appControl = isAppControlEvent(event);
+    if (extensionId !== "agentlas-science" || (!appControl && !isScienceExtensionViewSender(event.sender.id))) throw new Error("science-extension-sender-not-authorized");
     const status = scienceExtensionStatus();
     if (status.phase !== "installed") throw new Error("science-extension-not-active");
+    if (appControl) {
+      assertScienceExtensionReleasePermission(permission);
+      return status;
+    }
     if (permission === "science:agent-runtime" && event.senderFrame !== event.sender.mainFrame) throw new Error("science-extension-subframe-denied");
     assertScienceExtensionViewPermission(event.sender.id, permission);
     return status;

@@ -85,6 +85,12 @@ export class OneSupervisorService {
   assertConversation(chatId:string):void {
     if(this.binding().chatId!==chatId) throw new Error('supervisor_identity_changed');
   }
+  /** The reply run answers a message the owner wrote, not a review or check-in the host started (those read workers' output). */
+  ownerTurn(replyRunId?: string): boolean {
+    if (!replyRunId) return false;
+    const row = this.deps.store.db.prepare("SELECT command_id FROM one_supervisor_requests WHERE run_id=? AND kind='reply' LIMIT 1").get(replyRunId) as {command_id:string}|undefined;
+    return !!row && !row.command_id.startsWith("review:");
+  }
   private settle(row: SupervisorRequestRow, receipt: InvocationRunReceipt): void {
     if (!settled(receipt)) return;
     if (row.kind==='cancel' && JSON.parse(row.payload_json).boundGoalId) return;
