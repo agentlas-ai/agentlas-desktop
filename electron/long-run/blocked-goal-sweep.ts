@@ -113,6 +113,8 @@ function alreadyToldForCause(run: LongRunRecord): boolean {
 function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string): BlockedGoalSweepResult {
   const toldBefore = alreadyToldForCause(run);
   const chatId = run.rootChatId!;
+  // The owner's own message comes first on every resume path (the sweep checks this too; Alive's continue did not).
+  if (dispatcher.hasQueuedOwnerRequest?.(chatId)) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "owner_request_queued" };
   let prepared: { request: NonNullable<ReturnType<typeof automaticGoalResumeRequest>>; queuedId: string } | null = null;
   let current = run;
   for (let pass = 0; pass < 2 && !prepared; pass += 1) {

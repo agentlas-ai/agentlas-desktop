@@ -1335,6 +1335,34 @@ export interface BlockedGoalRetry {
 }
 
 /** A host-owned retry schedule that no later transition has superseded (a user pause, a new turn, a stop). */
+/**
+ * Follow-ups scheduled after Goal turns for the same reason since the owner last spoke (`ownerSince`) or used a
+ * Goal control. Each one is a turn that ended without starting new work. Measured on the owner's DB 2026-10-04
+ * (Thread Marketing): a fixed 30-second follow-up after every refused wait re-ran a ~247k-token turn 39 times
+ * in one hour, all with the same answer ("972 to go, next check 15:11").
+ */
+export function consecutiveGoalTurnFollowUps(runId: string, reason: string, ownerSince: string | null, now = Date.now()): number {
+  const day = new Date(now - 24 * 60 * 60_000).toISOString();
+  const floor = ownerSince && ownerSince > day ? ownerSince : day;
+  const control = getDb().prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM long_run_events WHERE run_id = ? AND kind = 'run.user_control'")
+    .get(runId) as { seq: number };
+  const row = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = ? AND seq > ? AND occurred_at > ?
+    AND json_extract(payload_json, '$.action') = 'retry_scheduled'
+    AND json_extract(payload_json, '$.trigger') = 'goal-turn-background'
+    AND json_extract(payload_json, '$.detail') = ?`).get(runId, BLOCKED_GOAL_SWEEP_EVENT_KIND, control.seq, floor, reason) as { n: number };
+  return row.n;
+}
+
+/** When the next follow-up of a Goal turn may start: 30 s doubling per consecutive repeat (6 h cap), never before
+ * the time the turn itself asked for (24 h cap). */
+export function goalTurnFollowUpAt(input: { repeats: number; requestedNotBefore?: string | null; now?: number }): string {
+  const now = input.now ?? Date.now();
+  const backoff = Math.min(6 * 60 * 60_000, 30_000 * 2 ** Math.min(Math.max(input.repeats, 0), 12));
+  const requested = input.requestedNotBefore ? Date.parse(input.requestedNotBefore) : Number.NaN;
+  const asked = Number.isFinite(requested) ? Math.min(requested - now, 24 * 60 * 60_000) : 0;
+  return new Date(now + Math.max(backoff, asked)).toISOString();
+}
+
 export function pendingBlockedGoalRetry(runId: string): BlockedGoalRetry | null {
   const run = getLongRun(runId);
   if (!run || !(run.status === "waiting_tool"

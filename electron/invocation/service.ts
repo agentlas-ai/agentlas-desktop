@@ -56,7 +56,7 @@ import {
   settleLongRunWorkerAttempt,
   startLongRunWorkerAttempt,
   transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount,
-  longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry } from "../store/long-runs";
+  longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpAt } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
@@ -121,6 +121,7 @@ import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   admitInvocationWithStartReceipt,
   decideInvocationAdmission,
+  getPendingInvocationAdmissionForChat,
   type InvocationAdmissionIdentity,
 } from "../store/invocation-admissions";
 import { listChatFileSnapshot } from "../store/chat-message-attachments";
@@ -971,7 +972,15 @@ export class InvocationService {
 
   /** 오너가 보낸 요청이 이 대화에서 차례를 기다린다 — 자동 재개는 그 뒤로 미룬다. */
   hasQueuedOwnerRequest(chatId: string): boolean {
-    return Boolean(this.steerQueues.get(chatId)?.length);
+    if (this.steerQueues.get(chatId)?.length) return true;
+    // The owner's request is reserved (invoke:run) before One's preflight judges run. A host resume that started
+    // in that window took the chat and the owner's start was refused: Thread Marketing 2026-10-04, preflight at
+    // 05:00:15.5Z, sweep resume at 05:00:17.8Z, "could not start" at 05:00:20.5Z. Bounded in time so a pending
+    // row left by a crashed process cannot hold a Goal back.
+    try {
+      const pending = getPendingInvocationAdmissionForChat(chatId);
+      return Boolean(pending && Date.now() - Date.parse(pending.pendingAt) < 120_000);
+    } catch { return false; }
   }
 
   activeRunIds(): string[] {
@@ -3719,7 +3728,10 @@ export class InvocationService {
             if (!finiteTimerEndsTurn) {
               const latest = current ? getLongRun(current.id) : null;
               if (latest?.status === "running") transitionLongRun({ runId: latest.id, to: "blocked", actorKind: "host", reason });
-              tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason, errorMessage: reason });
+              // The generic code hides the cause (owner DB 2026-10-04: 39 refusals in an hour, all generic).
+              const cause = error instanceof Error ? error.message : String(error);
+              tryRecordFailureEvent({ runId, chatId: chat.id, source: "invoke", errorCode: reason,
+                errorMessage: reason === "goal_wait_registration_failed" && cause !== reason ? `${reason}: ${cause.slice(0, 200)}` : reason });
               // Say what was refused and what the owner can do — the old sentence ("Review the requested subject
               // and the execution state") named neither (2026-09-27).
               const message = pickLocale(runReq) === "ko"
@@ -3735,7 +3747,10 @@ export class InvocationService {
             }
           }
           if (!finiteTimerEndsTurn) {
-            this.scheduleGoalContinuation(goalLongRun?.goalId, record, "goal_wait_registration_failed");
+            // The turn asked to be woken at a time; a refused registration must not turn that into "30 s from now".
+            const asked = result.goalWaitRequest.status === "requested" && result.goalWaitRequest.intent.subject.kind === "timer"
+              ? result.goalWaitRequest.intent.subject.notBefore : null;
+            this.scheduleGoalContinuation(goalLongRun?.goalId, record, "goal_wait_registration_failed", { requestedNotBefore: asked });
             return;
           }
         }
@@ -4295,7 +4310,8 @@ export class InvocationService {
   }
 
   /** Durable continuation and read-only reconciliation have independent owners. */
-  private scheduleGoalContinuation(goalId: string | null | undefined, record: RunRecord, reason: string): void {
+  private scheduleGoalContinuation(goalId: string | null | undefined, record: RunRecord, reason: string,
+    options: { requestedNotBefore?: string | null } = {}): void {
     const stop = record.controller.signal.reason;
     const ownerStop = record.controller.signal.aborted && stop instanceof Error
       && (stop.message === STOPPED_BY_USER || isOwnerGoalStopCause(stop.message) || Boolean(invocationHostStopCause(stop.message)));
@@ -4307,8 +4323,17 @@ export class InvocationService {
       const wait = latestGoalWaitSubscription(goalId);
       if (wait && ["pending", "claimed"].includes(wait.state)) return;
       if (pendingBlockedGoalRetry(run.id)) return;
+      // A turn that asked to wait and could not register it ends with nothing started; repeating it every 30 s
+      // forever is the loop measured on the owner's DB (2026-10-04). Repeats double the spacing until the owner
+      // speaks or uses a Goal control; a time the turn asked for is honoured. Other reasons keep the 30 s step.
+      const spaced = reason === "goal_wait_registration_failed";
+      const ownerSince = spaced ? (getDb().prepare("SELECT MAX(created_at) AS at FROM chat_messages WHERE chat_id = ? AND role = 'user'")
+        .get(record.chatId) as { at: string | null } | undefined)?.at ?? null : null;
+      const repeats = spaced ? consecutiveGoalTurnFollowUps(run.id, reason, ownerSince) : 0;
       scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
-        fromReason: reason, retryIndex: 0, nextAt: new Date(Date.now() + 30_000).toISOString(),
+        fromReason: reason, retryIndex: repeats,
+        nextAt: spaced ? goalTurnFollowUpAt({ repeats, requestedNotBefore: options.requestedNotBefore })
+          : new Date(Date.now() + 30_000).toISOString(),
         detail: reason, trigger: "goal-turn-background", effectUncertain: unsettledLongRunAttemptCount(run.id) > 0,
         appInstanceId: desktopAppInstanceId() });
       setTimeout(() => {
