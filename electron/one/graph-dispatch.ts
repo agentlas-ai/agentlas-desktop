@@ -25,6 +25,7 @@ import { searchToolchains } from "../toolchains/search";
 import { callableContractFor, contractManifest, currentCallableContracts, draftInterface, exposeAutomation, interfaceIsStale, recordToolchainReturned, recordToolchainRun } from "../toolchains/interface";
 import { readToolchainState } from "../toolchains/store";
 import { TOOLCHAIN_CONSUMER_TOOLS } from "../toolchains/consumer";
+import { recordToolchainRepair, reportToolchainProblem, toolchainRepairVerdict } from "../toolchains/reports";
 
 /** How long one toolchain_publish call waits for its test before answering "testing" (runtime tool timeouts are ~60 s). */
 const PUBLISH_WAIT_MS = (() => {
@@ -312,6 +313,22 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     return { ...receipt(a), ...definition };
   }
   if (name === "one_graph_result") return waitForResult(caller, exactOrRequested(caller, input.graph_id, input.event_id), input);
+  if (name === "toolchain_report") {
+    // The caller reports; only the conversation that made the Toolchain changes it (PLAN.md §0 rule 1).
+    if (typeof input.graph_id === "string" && scoped(caller).some(item => item.id === input.graph_id)) {
+      return { schemaVersion: "agentlas.toolchain-report.v1", graph_id: input.graph_id, state: "not_reported", code: "toolchain_report_own_graph",
+        next: "This conversation made this graph: fix it with one_graph_patch (then toolchain_publish), or leave it as it is." };
+    }
+    const automation = typeof input.graph_id === "string" ? getAutomation(input.graph_id) : null;
+    if (!automation || !requestedByCaller(caller, automation.id, input.event_id)) throw new Error("toolchain_report_event_not_in_context");
+    const outcome = reportToolchainProblem({ automation, reporterChatId: chat.id, eventId: String(input.event_id),
+      problem: String(input.problem), expected: typeof input.expected === "string" ? input.expected : null });
+    return { schemaVersion: "agentlas.toolchain-report.v1", graph_id: automation.id,
+      ...(outcome.state === "queue_full"
+        ? { state: "not_reported", code: "toolchain_report_queue_full", open_reports: outcome.open }
+        : { state: outcome.state, report_id: outcome.reportId, delivered_to: outcome.deliveredTo }),
+      next: "Do this request without the Toolchain. Whoever made it decides whether to fix it; do not retry it for this input." };
+  }
   if (name === "one_graph_set_enabled" && input.enabled === false) {
     const a = exact(caller, input.graph_id);
     const result = applyAutomationLifecycle({ parsed: { action: "pause", automationId: a.id, name: a.name, prompt: "", schedule: "", scheduleEmitted: false },
@@ -356,7 +373,11 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
           return receipt(current, { ok: true, action: "unchanged" });
         }
         editable(current);
+        const repair = toolchainRepairVerdict(current, chat.id);
+        if (!repair.ok) return { ok: false, code: "toolchain_repair_budget_reached", graph_id: current.id, repairs_today: repair.repairs, retry_at: repair.retryAt,
+          next: "Leave the Toolchain as it is. The owner can allow another change by speaking in this conversation." };
         updateAutomationGraph(current.id, graph, { note: "One structured blueprint" });
+        recordToolchainRepair(current.id, chat.id);
         saved = updateAutomation(current.id, { name: bp.name, goal: bp.goal, promptTemplate: bp.goal,
           scheduleHuman: schedule, scheduleJson: null, triggerType, trigger: { kind: triggerType }, executionPermission: permission });
         saved = applyAutomationLifecycle({ parsed: { action: enable ? "resume" : "pause", automationId: saved.id, expectedDefinitionDigest: automationDefinitionDigest(saved), name: saved.name, prompt: "", schedule: "", scheduleEmitted: false }, chatId: chat.id, canWrite: true }).automation;
@@ -412,7 +433,11 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
       recordOneGraphAuthority(current, chat.id);
       return receipt(current, { ok: true, action: "unchanged" });
     }
+    const repair = toolchainRepairVerdict(current, chat.id);
+    if (!repair.ok) return { ok: false, code: "toolchain_repair_budget_reached", graph_id: current.id, repairs_today: repair.repairs, retry_at: repair.retryAt,
+      next: "Leave the Toolchain as it is. The owner can allow another change by speaking in this conversation." };
     updateAutomationGraph(current.id, graph, { note: "One instruction patch" });
+    recordToolchainRepair(current.id, chat.id);
     const promptPatch = !current.graph?.nodes.length && edits.length === 1 && edits[0].node_id === "n1" ? { promptTemplate: edits[0].instruction } : {};
     const saved = input.goal === undefined && !Object.keys(promptPatch).length ? getAutomation(current.id)! : updateAutomation(current.id, { ...promptPatch, ...(input.goal === undefined ? {} : { goal: input.goal as string }) });
     recordOneGraphAuthority(saved, chat.id);

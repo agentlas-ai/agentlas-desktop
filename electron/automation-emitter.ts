@@ -126,7 +126,7 @@ export const ONE_GRAPH_PROTOCOL = [
   "[Agentlas graph tools]",
   "You own the goal, judgment and strategy. Graph is your execution tool: save reusable collection, action, reasoning or code steps, call by graph_id and inputs, inspect actual results, and patch instructions as strategy changes.",
   "Use one_graph_save/run/result/inspect/patch/set_enabled with the schemas provided by the connected tools. Save enables when dependencies are connected; no extra owner confirmation. Do not claim a queued or pending request completed.",
-  "Before doing a request by hand that a saved automation may already do, call toolchain_search with the request. If a returned contract fits (check when_not_to_use), run it with one_graph_run using its graph_id, expected_revision and input; an empty result means do the work normally. When you save a graph that later requests will reuse, call toolchain_publish so other conversations can find it; a failed fresh-session test leaves it a draft.",
+  "Before doing a request by hand that a saved automation may already do, call toolchain_search with the request. If a returned contract fits (check when_not_to_use), run it with one_graph_run using its graph_id, expected_revision and input; an empty result means do the work normally. When you save a graph that later requests will reuse, call toolchain_publish so other conversations can find it; a failed fresh-session test leaves it a draft. If a Toolchain you did not make returns a wrong result, call toolchain_report and do the work normally. When another conversation reports a wrong result from a Toolchain this conversation made, check that run with one_graph_result, then either fix it with one_graph_patch and publish it again or leave it if the report is mistaken.",
   "The host retains definitions. Cache schema-qualified cacheKey; pass expected_revision for changes, stable request_id for retries, and changed node instructions instead of repeating the whole graph.",
   "For a typed zero-model monitor source beyond the blueprint schema, fetch one_graph_schema with include_registration_protocol:true. Execution is app-scoped; future waiting, unavailable credentials or unknown effects are typed state, not evidence of completion.",
   "[/Agentlas graph tools]",
@@ -135,8 +135,8 @@ export const ONE_GRAPH_PROTOCOL = [
 /** A Work task that may use saved Toolchains but owns no graphs (electron/toolchains/consumer.ts). */
 export const TOOLCHAIN_CONSUMER_PROTOCOL = [
   "[Agentlas saved Toolchains]",
-  "Before doing a request by hand that a saved automation may already do, call toolchain_search with the request. If a returned contract fits (check when_not_to_use), run it with one_graph_run using its graph_id, expected_revision and input, read one_graph_result if it is still running, then answer with its result. An empty search result means do the work normally.",
-  "These are the only graph tools in this task: it cannot save, inspect or change graphs.",
+  "Before doing a request by hand that a saved automation may already do, call toolchain_search with the request. If a returned contract fits (check when_not_to_use), run it with one_graph_run using its graph_id, expected_revision and input, read one_graph_result if it is still running, then answer with its result. An empty search result means do the work normally. If its result is wrong for the input, call toolchain_report with that graph_id and event_id and what was wrong, then do the work normally.",
+  "These are the only graph tools in this task: it cannot save, inspect or change graphs; whoever made a Toolchain fixes it.",
   "[/Agentlas saved Toolchains]",
 ].join("\n");
 

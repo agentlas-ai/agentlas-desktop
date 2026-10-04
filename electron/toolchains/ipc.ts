@@ -42,6 +42,8 @@ export function toolchainOverview(): ToolchainOverview {
       interface: state?.interface ?? null,
       interfaceStale: state?.interface ? interfaceIsStale(state.interface, automation) : false,
       testInProgress: toolchainTestInProgress(automation.id),
+      openReports: (state?.reports ?? []).filter((report) => report.state === "open").reverse()
+        .map((report) => ({ at: report.at, problem: report.problem.length > 160 ? `${report.problem.slice(0, 159)}…` : report.problem })),
     });
   }
   return { schemaVersion: "agentlas.toolchain-overview.v1", generatedAt: new Date().toISOString(), automations };

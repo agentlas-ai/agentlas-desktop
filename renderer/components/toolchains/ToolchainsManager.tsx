@@ -230,6 +230,8 @@ function ToolchainEntry({ view, copy, locale, busy, exposing, focused, onExpose,
           {copy.coldStart(contract.coldStart)} · {copy.manager.tested(dateTimeLabel(contract.coldStart.at, locale), contract.coldStart.model)}
         </span>}
         {contract && <span className={styles.metric} data-usage="true">{copy.usage(contract.usage?.returned ?? 0, contract.usage?.runs ?? 0)}</span>}
+        {view.openReports?.length ? <span className={styles.metric} data-toolchain-reports={view.openReports.length}>
+          {copy.reported(view.openReports.length, view.openReports[0].problem)}</span> : null}
         {effects.length > 0 && <div className={styles.effects}>{effects.map((label) => <span key={label}>{label}</span>)}</div>}
         <ContractDetails view={view} copy={copy} />
         {learned.length > 0 && <section className={styles.learned} aria-label={copy.manager.learned}>

@@ -83,6 +83,7 @@ export function toolchainCopy(locale: string) {
       : (k.selected ? (ko ? "잘못 고름" : "Wrongly chosen") : (ko ? "정상 거절" : "Correctly declined")),
     caseKind: (kind: "positive" | "negative") => kind === "positive" ? (ko ? "맞는 요청" : "Should use") : (ko ? "아닌 요청" : "Should not"),
     usage: (returned: number, runs: number) => ko ? `검색에 나옴 ${returned} · 실제 호출 ${runs}` : `Returned by search ${returned} · called ${runs}`,
+    reported: (count: number, latest: string) => ko ? `잘못된 결과 보고 ${count}건 · ${latest}` : `${count} wrong-result report${count === 1 ? "" : "s"} · ${latest}`,
     others: (count: number) => ko ? `다른 자동화 ${count}개` : `${count} other automations`,
     viewAll: ko ? "전체 보기" : "View all",
     failed: ko ? "처리하지 못했습니다" : "Could not complete",

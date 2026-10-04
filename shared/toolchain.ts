@@ -825,7 +825,38 @@ export interface ToolchainAutomationState {
   observations: CaseObservation[];
   crystallizations: Crystallization[];
   interface: ToolchainInterface | null;
+  /** Problems callers reported (toolchain_report): the event that travels up to whoever made it. Newest last. */
+  reports?: ToolchainReport[];
+  /** Definition changes the making conversation applied while this was a Toolchain (repair budget). Newest last. */
+  repairs?: Array<{ at: string; chatId: string }>;
 }
+
+/**
+ * A caller's "this run was wrong for this input" (PLAN.md §0, result → repair loop). A caller never
+ * repairs a Toolchain it did not make; it reports, and the conversation that made it decides.
+ */
+export interface ToolchainReport {
+  id: string;
+  at: string;
+  /** The conversation (Work task or One's) that ran it and reported. */
+  reporterChatId: string;
+  /** The exact run the report is about (an event the reporter requested). */
+  eventId: string;
+  problem: string;
+  expected: string | null;
+  /** open until a repair changes the definition or the owner dismisses it. */
+  state: "open" | "repaired" | "dismissed";
+  settledAt?: string;
+}
+
+export const TOOLCHAIN_REPORT_POLICY = {
+  /** Open reports kept per Toolchain; more are refused until the maker acts (no flood upward). */
+  maxOpen: 5,
+  /** Reports kept in total, newest last. */
+  keep: 20,
+  /** Repairs by its making conversation per 24 h without the owner speaking there. */
+  repairBudget: 3,
+} as const;
 
 export function emptyToolchainState(automationId: string): ToolchainAutomationState {
   return {
@@ -857,6 +888,8 @@ export interface ToolchainAutomationView {
   interfaceStale: boolean;
   /** A fresh-session test for this automation is running in the host right now. */
   testInProgress?: boolean;
+  /** Problems callers reported that no repair has addressed yet, newest first. */
+  openReports?: Array<{ at: string; problem: string }>;
 }
 
 export interface ToolchainOverview {
