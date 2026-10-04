@@ -87,6 +87,7 @@ import {
   type OneConversationLocale,
 } from "@/lib/one-conversation-locale";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
+import { spentOrgSheetRequest } from "@/lib/one-org-sheet-request";
 import type {
   Chat,
   ChatHistoryEntry,
@@ -1330,6 +1331,9 @@ function OneSessionsShell() {
    * 창을 하나로 합치면서 이 두 화면의 진입점이 사라졌기 때문에, 요청을 여기로 올려 보낸다.
    */
   const [orgSheetRequest, setOrgSheetRequest] = useState<{ token: number; kind: "tools" | "replace"; memberId: string } | null>(null);
+  // Org chart requests (staff sheet, add picker) take tokens from this counter. It never restarts, even after a request
+  // is spent and cleared — a mounted chart compares against its last token.
+  const orgSheetSerial = useRef(0);
   /** One 자신을 고치는 창. 팀원 편집과 같은 창을 쓴다(오너 지시 2026-08-23). */
   const [editOneTarget, setEditOneTarget] = useState<OneEditSelfTarget | null>(null);
   const createAgentSeedTokenRef = useRef(0);
@@ -7063,7 +7067,7 @@ function OneSessionsShell() {
   // 첫 화면에서 좌석 붙이기 — 조직도의 기존 추가 시트(로컬/Cloud/Hub → materialize → 좌석)를 그대로 연다.
   const openSeatAttachFromHome = () => {
     setRailMode("organisation");
-    setAgentPickerRequest((current) => ({ token: (current?.token ?? 0) + 1, source: "my" }));
+    setAgentPickerRequest({ token: ++orgSheetSerial.current, source: "my" });
   };
   const selectedSuggestion = useMemo(() => {
     if (!selected || !oneSuggestions || selected.canonicalStatus !== "completed") return null;
@@ -7827,6 +7831,7 @@ function OneSessionsShell() {
               accountSignedIn={accountSignedIn}
               locale={appLocale}
               addRequest={agentPickerRequest}
+              onAddRequestTaken={(token) => setAgentPickerRequest((current) => current?.token === token ? undefined : current)}
               onAdd={addOneOrg}
               onAddExistingComplete={() => {
                 setCreateAgentOpen(false);
@@ -7872,6 +7877,7 @@ function OneSessionsShell() {
                 setCreateAgentOpen(true);
               }}
               sheetRequest={orgSheetRequest ?? undefined}
+              onSheetRequestTaken={(token) => setOrgSheetRequest((current) => spentOrgSheetRequest(current, token))}
               activeOne={activeOneSelected}
               activeMemberId={activeOneMember?.installedAgentId ?? null}
               activeTaskForceIds={turnAgentIds}
@@ -9798,10 +9804,10 @@ function OneSessionsShell() {
           await refreshAll();
         }}
         onOpenTools={(memberId) => {
-          setOrgSheetRequest((current) => ({ token: (current?.token ?? 0) + 1, kind: "tools", memberId }));
+          setOrgSheetRequest({ token: ++orgSheetSerial.current, kind: "tools", memberId });
         }}
         onReplaceMember={(memberId) => {
-          setOrgSheetRequest((current) => ({ token: (current?.token ?? 0) + 1, kind: "replace", memberId }));
+          setOrgSheetRequest({ token: ++orgSheetSerial.current, kind: "replace", memberId });
         }}
         onArchiveMember={async (memberId) => {
           const member = oneOrgState?.members.find((row) => row.id === memberId);
@@ -9827,10 +9833,7 @@ function OneSessionsShell() {
           // Keep New Agent mounted behind the picker. It owns the draft and
           // becomes inert while OneOrgChart's child sheet owns focus. Only a
           // successful explicit "Add this agent" confirmation closes it.
-          setAgentPickerRequest((current) => ({
-            token: (current?.token ?? 0) + 1,
-            source: "my",
-          }));
+          setAgentPickerRequest({ token: ++orgSheetSerial.current, source: "my" });
         }}
       />
       <OneFeatureIntro

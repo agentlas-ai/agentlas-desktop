@@ -3,6 +3,7 @@ import { takeOrgSheetRequest } from "@/lib/one-org-sheet-request";
 import type { HubAgentBookmark, InstalledAgent, InstalledMcpServer, MarketplaceListing, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
 import { OneAgentPortrait } from "./OneAgentPortrait";
+import { OneAgentChoicePicker } from "./OneAgentChoicePicker";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import { ipc } from "@/lib/ipc";
@@ -90,6 +91,7 @@ export function OneOrgChart({
   onAddExistingComplete,
   onCreateAgent,
   addRequest,
+  onAddRequestTaken,
   onMaterializeSource,
   onRename,
   onUpdate,
@@ -104,6 +106,7 @@ export function OneOrgChart({
   onEditOne,
   onEditIdentity,
   sheetRequest,
+  onSheetRequestTaken,
   oneAvatarIcon,
   activeOne = false,
   activeMemberId,
@@ -134,6 +137,8 @@ export function OneOrgChart({
   onAddExistingComplete?: () => void;
   onCreateAgent?: () => void;
   addRequest?: { token: number; source: "my" | "cloud" | "hub" };
+  /** Spent like sheetRequest: cleared by its owner, so returning to the Agents tab does not reopen the picker. */
+  onAddRequestTaken?: (token: number) => void;
   onMaterializeSource: (source: "cloud" | "hub", listing: MarketplaceListing) => Promise<InstalledAgent>;
   onRename: (member: OneOrgMember, displayName: string) => Promise<void>;
   onUpdate?: (member: OneOrgMember, displayName: string, collaborationStyle: OneOrgCollaborationStyle) => Promise<void>;
@@ -156,6 +161,8 @@ export function OneOrgChart({
    * 여기에 열어 달라고 말할 수 있어야 한다. `token` 은 같은 대상을 다시 눌러도 열리게 한다.
    */
   sheetRequest?: { token: number; kind: "tools" | "replace"; memberId: string };
+  /** The request is spent: its owner clears it so the next mount of this chart cannot open it again. */
+  onSheetRequestTaken?: (token: number) => void;
   /** One 이 프로필에서 고른 캐릭터. 없으면 지금까지의 기본 얼굴. */
   oneAvatarIcon?: string;
   activeOne?: boolean;
@@ -222,8 +229,11 @@ export function OneOrgChart({
     window.addEventListener("agentlas:auth-changed", onAuthChanged);
     return () => window.removeEventListener("agentlas:auth-changed", onAuthChanged);
   }, []);
+  const handledAddToken = useRef(0);
   useEffect(() => {
-    if (!addRequest?.token) return;
+    if (!addRequest?.token || addRequest.token === handledAddToken.current) return;
+    handledAddToken.current = addRequest.token;
+    onAddRequestTaken?.(addRequest.token);
     setAddTab(addRequest.source);
     setSelectedAgent("");
     setAddSearch("");
@@ -241,6 +251,7 @@ export function OneOrgChart({
     const taken = takeOrgSheetRequest(sheetRequest, handledSheetToken.current, state?.members);
     if (!taken || !sheetRequest) return;
     handledSheetToken.current = taken.token;
+    onSheetRequestTaken?.(taken.token);
     const member = taken.member;
     if (sheetRequest.kind === "tools") {
       setToolsMember(member);
@@ -349,7 +360,7 @@ export function OneOrgChart({
     style: "협업 말투", styleDetail: "One이 이 직원에게 일을 넘길 때 적용", modelTools: "모델과 도구", autoDefault: "자동 배정이 기본", modelAuto: "모델 · 자동",
     modelPreferred: (backend: string) => `권장 엔진 ${backend} 우선`, modelDefault: "One이 작업마다 사용 가능한 런타임을 배정",
     modelHint: "직원을 추가할 때 모델을 강제로 고정하지 않습니다. 모델 고정은 팀 전체 실행 계획과 충돌할 수 있어 One 오케스트레이터 모델만 설정 메뉴에서 지정합니다.", openTools: "도구 설정 열기",
-    replace: "담당 교체", replaceDetail: "이름·대화·산출물은 유지", otherAgent: "다른 에이전트", chooseReplacement: "교체할 에이전트 선택",
+    replace: "담당 교체", replaceDetail: "이름·대화·산출물은 유지", otherAgent: "다른 에이전트", chooseReplacement: "교체할 에이전트 선택", searchAgents: "에이전트 검색...", noAgentMatch: "찾는 에이전트가 없습니다",
     handover: "전임 담당의 인수인계 메모를 새 담당에게 전달", replaceHint: "교체하면 전임자의 경험·기억과 그 담당 전용 루틴은 이어지지 않습니다.", replaceAction: "선택한 담당으로 교체",
     archive: "해고 대신 보관", cancel: "취소", save: "저장",
   } : {
@@ -357,7 +368,7 @@ export function OneOrgChart({
     style: "Collaboration style", styleDetail: "Used when One hands work to this staff member", modelTools: "Model and tools", autoDefault: "Assigned automatically", modelAuto: "Model · Automatic",
     modelPreferred: (backend: string) => `Prefers recommended runtime ${backend}`, modelDefault: "One assigns an available runtime for each task",
     modelHint: "A staff member does not pin a model. Per-agent model pins can conflict with the team execution plan, so only the One orchestrator model is selected in Settings.", openTools: "Open tool settings",
-    replace: "Replace assignee", replaceDetail: "Keep the name, conversation, and outputs", otherAgent: "Replacement agent", chooseReplacement: "Choose a replacement",
+    replace: "Replace assignee", replaceDetail: "Keep the name, conversation, and outputs", otherAgent: "Replacement agent", chooseReplacement: "Choose a replacement", searchAgents: "Search agents...", noAgentMatch: "No matching agent",
     handover: "Pass a handover note from the previous assignee", replaceHint: "The previous assignee's experience, memory, and dedicated routines do not transfer automatically.", replaceAction: "Replace with selected agent",
     archive: "Archive instead of dismissing", cancel: "Cancel", save: "Save",
   };
@@ -724,7 +735,17 @@ export function OneOrgChart({
 
           <section className={styles.editorSection}>
             <div className={styles.editorHeading}><strong>{editorCopy.replace}</strong><span>{editorCopy.replaceDetail}</span></div>
-            <label className={styles.editorField}>{editorCopy.otherAgent}<select value={replaceId} onChange={(event) => setReplaceId(event.target.value)}><option value="">{editorCopy.chooseReplacement}</option>{replacementCandidates.map((agent) => <option key={agent.id} value={agent.id}>{agent.localDisplayName || agent.name}</option>)}</select></label>
+            <OneAgentChoicePicker
+              label={editorCopy.otherAgent}
+              placeholder={editorCopy.chooseReplacement}
+              searchPlaceholder={editorCopy.searchAgents}
+              emptyLabel={editorCopy.noAgentMatch}
+              choices={replacementCandidates.map((agent) => ({ id: agent.id, name: agent.localDisplayName || agent.name, tone: agent.tone,
+                detail: (locale === "ko" ? agent.tagline : agent.taglineEn || agent.tagline) || undefined }))}
+              value={replaceId}
+              onChange={setReplaceId}
+              disabled={busy}
+            />
             <label className={styles.editorCheck}><input type="checkbox" checked={handover} onChange={(event) => setHandover(event.target.checked)} /> {editorCopy.handover}</label>
             <p className={styles.editorHint}>{editorCopy.replaceHint}</p>
             <button type="button" className={styles.secondaryAction} disabled={!replaceId || busy} onClick={() => void submitReplace(editorMember, replaceId)}>{editorCopy.replaceAction}</button>
