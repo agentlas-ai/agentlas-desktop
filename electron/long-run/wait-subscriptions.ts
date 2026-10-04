@@ -6,7 +6,7 @@ import { getDb } from "../store/db";
 import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAgentSurface } from "../store/agent-surfaces";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, unsettledLongRunAttempts, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, longRunOwnerHold } from "../store/long-runs";
+import { addLongRunTask, appendLongRunEvent, getLongRun, getLongRunByGoalId, getLongRunGoalRevisionBinding, listLongRunTasks, transitionLongRun, unsettledLongRunAttempts, nextBlockedGoalRetrySlot, pendingBlockedGoalRetry, scheduleBlockedGoalRetry, longRunOwnerHold, liveLongRunAttemptCount } from "../store/long-runs";
 import { readInvocationEffectBoundary } from "../invocation/effect-boundary-reader";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId } from "./app-runtime-coordinator";
 import { claimCheckpointContinuation, latestTaskCheckpoint, recordTaskCheckpoint } from "./checkpoint";
@@ -105,12 +105,37 @@ export function latestGoalWaitSubscription(goalId: string): GoalWaitSubscription
 }
 /** An admitted new invocation supersedes the old wait. Delayed observers must
  * see this durable cancellation instead of dispatching a competing successor. */
-export function supersedeGoalWaitForInvocation(goalId: string, invocationRunId: string): void {
-  getDb().transaction(() => {
+export interface SupersededGoalWait { previous: GoalWaitSubscription; cancelled: GoalWaitSubscription; runWasWaiting: boolean }
+
+export function supersedeGoalWaitForInvocation(goalId: string, invocationRunId: string): SupersededGoalWait | null {
+  return getDb().transaction(() => {
     const wait = latestGoalWaitSubscription(goalId), run = getLongRunByGoalId(goalId);
-    if (!wait || wait.state !== "pending" || wait.sourceInvocationId === invocationRunId || !run || run.surface === "science") return;
-    persist({ ...wait, revision: wait.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: "new_invocation" });
-    if (run.status === "waiting_tool") transitionLongRun({ runId: run.id, to: "running", actorKind: "host", reason: "goal_wait_superseded" });
+    if (!wait || wait.state !== "pending" || wait.sourceInvocationId === invocationRunId || !run || run.surface === "science") return null;
+    const cancelled: GoalWaitSubscription = { ...wait, revision: wait.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: "new_invocation" };
+    persist(cancelled);
+    const runWasWaiting = run.status === "waiting_tool";
+    if (runWasWaiting) transitionLongRun({ runId: run.id, to: "running", actorKind: "host", reason: "goal_wait_superseded" });
+    return { previous: wait, cancelled, runWasWaiting };
+  })();
+}
+
+/**
+ * The invocation that superseded a wait failed before any provider ran (InvocationService.releaseUndispatchedStart),
+ * so the wait it cancelled is still this Goal's next step. Without this the Goal sat "running" with no attempt and no
+ * wait until a restart (be78c2a0, "Not covered"). Restores it only when nothing moved since: the cancellation is still
+ * the latest record, and no worker attempt is live.
+ */
+export function restoreGoalWaitAfterUndispatchedStart(superseded: SupersededGoalWait): boolean {
+  return getDb().transaction(() => {
+    const latest = latestGoalWaitSubscription(superseded.previous.goalId);
+    if (!latest || latest.waitId !== superseded.cancelled.waitId || latest.revision !== superseded.cancelled.revision || latest.state !== "cancelled") return false;
+    const run = getLongRun(superseded.previous.runId);
+    if (!run || liveLongRunAttemptCount(run.id) > 0) return false;
+    persist({ ...superseded.previous, revision: latest.revision + 1 });
+    if (superseded.runWasWaiting && run.status === "running") {
+      transitionLongRun({ runId: run.id, to: "waiting_tool", actorKind: "host", reason: "goal_wait_restored_after_failed_start" });
+    }
+    return true;
   })();
 }
 /** Retire only this wait/checkpoint. The next invocation uses current context

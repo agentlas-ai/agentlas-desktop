@@ -14,7 +14,7 @@ import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
-import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
+import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, goalWaitRefusalResolvesItself, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
 import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
 import { settleNativeGoalEpisode } from "../long-run/native-goal-pass";
@@ -2300,7 +2300,9 @@ export class InvocationService {
     }
     let goalLongRun = projectionGoalId ? getLongRunByGoalId(projectionGoalId) : null;
     if (!stoppedGoalReactivation && !executionContext && goalLongRun?.rootChatId === chat.id) {
-      supersedeGoalWaitForInvocation(goalLongRun.goalId, runId);
+      const superseded = supersedeGoalWaitForInvocation(goalLongRun.goalId, runId);
+      // A start that fails before any provider runs gives the Goal its wait back (releaseUndispatchedStart runs this).
+      if (superseded) startBoundary.cleanups?.push(() => { restoreGoalWaitAfterUndispatchedStart(superseded); });
       goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
     }
     let goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
@@ -3338,7 +3340,8 @@ export class InvocationService {
               // A paused timer wait belongs to the old turn. Supersede it only
               // after durable resume; doing it at admission advances the CAS
               // version and makes the new message reject its own transition.
-              supersedeGoalWaitForInvocation(current.goalId, runId);
+              const superseded = supersedeGoalWaitForInvocation(current.goalId, runId);
+              if (superseded) startBoundary.cleanups?.push(() => { restoreGoalWaitAfterUndispatchedStart(superseded); });
               return getLongRun(running.id);
             })();
             // The exact human source and Goal revision are durable now. Release
