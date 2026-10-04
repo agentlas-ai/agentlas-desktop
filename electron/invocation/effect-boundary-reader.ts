@@ -279,7 +279,12 @@ export function readInvocationEffectBoundary(input: InvocationEffectBoundaryInpu
           WHERE run_id = ? AND kind = 'run.effect_observation' AND json_extract(payload_json, '$.action') = 'settle_boundary'
             AND EXISTS (SELECT 1 FROM json_each(payload_json, '$.targetIds') WHERE value = ?)
           ORDER BY seq DESC LIMIT 1`).get(runId, `invocation:${input.invocationRunId}`) as { seq: number; verdict: string | null; proof: string | null } | undefined;
-        if (row && (row.verdict === "done" || (row.verdict === "not_done"
+        // A look that saw the result absent, and an outcome continued under the owner's repeat-risk policy
+        // (owner 2026-10-05), settle it as well as the host's own receipt does.
+        if (row && (row.verdict === "done"
+          || (row.verdict === "not_done" && row.proof === "observed_read_only_by_model")
+          || (row.verdict === "unknown" && row.proof === "owner_policy_accepts_repeat_risk")
+          || (row.verdict === "not_done"
           && row.proof === "host_receipt_closed_ledger"
           && receiptSettlesAttempts([{ id: `invocation:${input.invocationRunId}`, invocationRunId: input.invocationRunId }])))) { settledByObservation = `long-run:${runId}:event:${row.seq}`; break; }
       }

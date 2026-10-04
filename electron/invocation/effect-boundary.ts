@@ -150,11 +150,15 @@ export class InvocationEffectBoundaryTracker {
    * Nothing could have left the machine: a result-covered adapter was selected and not one tool
    * operation or adapter scope was observed (a pre-start refusal such as work_project_residency_busy,
    * or a text-only failure). Such an interrupted attempt has no external effect to ask about.
+   * An adapter scope that closed complete as "not_dispatched" with no operation counts as none: the turn never
+   * reached the model. Owner DB 2026-10-04: 17 Codex "thread/resume timed out" turns were marked uncertain only
+   * because their scope existed, and that uncertainty refused every Goal wait (1-minute loop).
    */
   observedNoOperations(): boolean {
     return this.adapters.size > 0 && [...this.adapters].every((kind) => RESULT_COVERAGE.has(kind))
-      && this.operations.size === 0 && this.adapterScopes.size === 0 && this.observedTools === 0
-      && this.scienceCorrelations.size === 0;
+      && this.operations.size === 0 && this.observedTools === 0 && this.scienceCorrelations.size === 0
+      && [...this.adapterScopes.values()].every((scope) => scope.report?.complete === true && scope.report.quiesced === true
+        && scope.report.terminal === "not_dispatched" && scope.report.operationIds.length === 0);
   }
   recorded(event: McpInvocationEvent, control?: MainHostControlObservation): void {
     if (control && this.hostControls.get(control.controlId)?.projectionSha256 === control.projectionSha256) { this.durableControls.add(control.controlId); return; }

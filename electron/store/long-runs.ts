@@ -1,4 +1,4 @@
-import { receiptSettlesAttempts } from "../long-run/attempt-effect-receipt";
+import { attemptReceiptProvesNoEffect, receiptSettlesAttempts } from "../long-run/attempt-effect-receipt";
 import { ownsHostGoalLoop } from "../long-run/host-goal-surface";
 import { normalizeLongRunUsage, readLongRunCostAccounting, type LongRunUsageInput, type LongRunCostAccounting } from "../long-run/budget";
 import { decodeRuntimeEvidence, runtimeEvidencePhase, type RuntimeCorrelation, type RuntimeEvidencePhase } from "../../shared/runtime-evidence";
@@ -452,7 +452,12 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
             && typeof payload.observationInvocationRunId === "string" && Boolean(payload.observationInvocationRunId.trim())
             && attestation?.schemaVersion === EFFECT_OBSERVATION_ATTESTATION_SCHEMA
             && ((attestation.statement === "observed_external_outcome_done"
-              && attestation.externalOutcomeProof === "observed_read_only_by_model" && attestation.verdict === "done") || noEffect);
+              && attestation.externalOutcomeProof === "observed_read_only_by_model" && attestation.verdict === "done")
+              || (attestation.statement === "observed_external_outcome_not_done"
+                && attestation.externalOutcomeProof === "observed_read_only_by_model" && attestation.verdict === "not_done")
+              || (attestation.statement === EFFECT_OWNER_POLICY_STATEMENT
+                && attestation.externalOutcomeProof === EFFECT_OWNER_POLICY_PROOF && attestation.verdict === "unknown")
+              || noEffect);
           if (!attestation || (!userAttested && !observed)
             || !Array.isArray(attestation.reviewedAttemptIds) || !attestation.reviewedAttemptIds.length
             || attestation.reviewedAttemptIds.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS
@@ -530,6 +535,8 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
         }
       };
       acceptDirectReviews(latest);
+      // An attempt its own closed receipt answers needs no review in any epoch (unsettledLongRunAttempts drops it too).
+      for (const id of [...pending]) if (attemptReceiptProvesNoEffect(boundById.get(id)?.invocation_run_id ?? null)) pending.delete(id);
       let beforeSeq = row.seq;
       while (pending.size) {
         // Batch by event cursor, not by lifetime: a long-running Goal can
@@ -566,7 +573,7 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
  * created after the acknowledged ledger epoch. */
 export function unsettledLongRunAttempts(runId: string): UnsettledLongRunAttempt[] {
   const rows = getDb().prepare(
-    `SELECT a.id, a.state, a.side_effect_state,
+    `SELECT a.id, a.state, a.side_effect_state, a.invocation_run_id,
        (SELECT MIN(e.seq) FROM long_run_events AS e
         WHERE e.run_id = a.run_id AND e.kind = 'worker.attempt_started'
           AND json_extract(e.payload_json, '$.attemptId') = a.id) AS start_event_seq
@@ -574,10 +581,12 @@ export function unsettledLongRunAttempts(runId: string): UnsettledLongRunAttempt
      WHERE a.run_id = ? AND (a.state IN ('running','uncertain') OR a.side_effect_state = 'uncertain')
      ORDER BY a.started_at, a.id`,
   ).all(runId) as Array<{ id: string; state: LongRunAttemptState;
-    side_effect_state: "none" | "committed" | "uncertain"; start_event_seq: number | null }>;
+    side_effect_state: "none" | "committed" | "uncertain"; invocation_run_id: string | null; start_event_seq: number | null }>;
   const safeEpoch = latestLongRunAttemptSafeEpoch(runId);
   const acknowledged = new Set(safeEpoch?.attemptIds ?? []);
-  return rows.filter((row) => row.state === "running" || !safeEpoch || !acknowledged.has(row.id)
+  // Its own closed receipt already answers an attempt that only read or never reached the model.
+  return rows.filter((row) => row.state === "running" || !attemptReceiptProvesNoEffect(row.invocation_run_id)).filter((row) =>
+    row.state === "running" || !safeEpoch || !acknowledged.has(row.id)
     || row.start_event_seq === null || row.start_event_seq > safeEpoch.throughEventSeq).map((row) => ({
       id: row.id, state: row.state, sideEffectState: row.side_effect_state, startEventSeq: row.start_event_seq,
     }));
@@ -686,6 +695,14 @@ export const EFFECT_OBSERVATION_ATTESTATION_SCHEMA = "agentlas.uncertain-attempt
 /** The host's own closed ledger proved every recorded call observation-only (attempt-effect-receipt.ts). */
 export const EFFECT_RECEIPT_STATEMENT = "receipt_no_outward_call";
 export const EFFECT_RECEIPT_PROOF = "host_receipt_closed_ledger";
+/**
+ * Owner decision 2026-10-05: when the app can neither prove nor observe what an interrupted attempt did, the Goal
+ * goes on and accepts the risk of repeating it, instead of staying blocked. Owner DB 2026-10-04: the looks were
+ * exhausted, then capped, then too many to dispatch, and the unresolved set refused every wait (1-minute loop).
+ * The record states that nothing was observed; the next turn is told the outcome is unknown and checks first.
+ */
+export const EFFECT_OWNER_POLICY_STATEMENT = "unresolved_outcome_accepted_by_owner_policy";
+export const EFFECT_OWNER_POLICY_PROOF = "owner_policy_accepts_repeat_risk";
 
 /**
  * 효과 관찰(오너 지시 2026-09-23 "직접 보면 알잖아") — Main 이 띄운 읽기 전용 관찰 실행이 바깥을
@@ -699,14 +716,17 @@ export const EFFECT_RECEIPT_PROOF = "host_receipt_closed_ledger";
  */
 export function settleUncertainAttemptsByObservation(runId: string, input: {
   attemptIds: readonly string[];
-  verdict: "done" | "not_done";
+  /** "unknown" only with proof "owner_policy". */
+  verdict: "done" | "not_done" | "unknown";
   evidence: string;
   observationInvocationRunId: string;
   observationDigest: string;
-  /** "receipt": no look was needed — the host's closed ledger proved no outward call (verdict must be not_done). */
-  proof?: "observation" | "receipt";
+  /** "receipt": no look was needed — the host's closed ledger proved no outward call (verdict must be not_done).
+   *  "owner_policy": the outcome could not be proven or observed; the Goal goes on (verdict must be unknown). */
+  proof?: "observation" | "receipt" | "owner_policy";
 }): LongRunAttemptAcknowledgment {
   if (input.proof === "receipt" && input.verdict !== "not_done") throw new Error("effect_receipt_verdict_invalid");
+  if ((input.proof === "owner_policy") !== (input.verdict === "unknown")) throw new Error("effect_owner_policy_verdict_invalid");
   const db = getDb();
   let result: LongRunAttemptAcknowledgment | null = null;
   db.transaction(() => {
@@ -717,10 +737,9 @@ export function settleUncertainAttemptsByObservation(runId: string, input: {
     if (JSON.stringify([...review.attemptIds].sort()) !== JSON.stringify([...input.attemptIds].sort())) {
       throw new Error("effect_observation_attempt_set_changed");
     }
-    // A model's absence report is not permission to repeat a possible effect.
-    // Resolve the exact current attempt set again under this write transaction.
+    // The host's own receipt is the strongest answer; without it a read-only look that saw the result absent
+    // settles the set (owner 2026-10-05: measure and decide, accept a possible repeat over a blocked Goal).
     const noEffect = input.verdict === "not_done" ? receiptSettlesAttempts(review.attempts) : null;
-    if (input.verdict === "not_done" && !noEffect) throw new Error("effect_observation_target_absence_unproven");
     const evidence = (noEffect?.evidence ?? input.evidence).replace(/\s+/g, " ").trim().slice(0, 500);
     if (!evidence) throw new Error("effect_observation_evidence_missing");
     const receipts = db.prepare(
@@ -753,8 +772,10 @@ export function settleUncertainAttemptsByObservation(runId: string, input: {
           reviewedAttemptIds: review.attemptIds, reviewedAttemptSetDigest: review.attemptSetDigest,
           ...(noEffect
             ? { statement: EFFECT_RECEIPT_STATEMENT, externalOutcomeProof: EFFECT_RECEIPT_PROOF }
-            : { statement: input.verdict === "done" ? "observed_external_outcome_done" : "observed_external_outcome_not_done",
-              externalOutcomeProof: "observed_read_only_by_model" }),
+            : input.proof === "owner_policy"
+              ? { statement: EFFECT_OWNER_POLICY_STATEMENT, externalOutcomeProof: EFFECT_OWNER_POLICY_PROOF }
+              : { statement: input.verdict === "done" ? "observed_external_outcome_done" : "observed_external_outcome_not_done",
+                externalOutcomeProof: "observed_read_only_by_model" }),
           verdict: input.verdict, evidence } },
       at: new Date().toISOString() });
     const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;

@@ -118,6 +118,32 @@ export function readAttemptEffectReceipt(invocationRunId: string): AttemptEffect
   return { invocationRunId, closed: true, openReason: null, readOnlyCalls, candidates, hostConfirmed };
 }
 
+const provenNoEffect = new Set<string>();
+const unprovenAtSeq = new Map<string, number>();
+
+/**
+ * One attempt's own closed receipt proves no outward call (only reads, or the turn never reached the model).
+ * Such an attempt is never unsettled: it needs no look and no person, and it must not hold a set of real
+ * uncertainties hostage (owner DB 2026-10-04: 17 never-dispatched turns in a set of 21 made every look answer
+ * unknown, then the set outgrew the look limit). A proof is final once written, so it is cached; a missing proof
+ * is re-read only when the invocation's ledger has grown.
+ */
+export function attemptReceiptProvesNoEffect(invocationRunId: string | null): boolean {
+  if (!invocationRunId) return false;
+  if (provenNoEffect.has(invocationRunId)) return true;
+  let lastSeq: number;
+  try {
+    lastSeq = (getDb().prepare("SELECT COALESCE(MAX(seq), -1) AS seq FROM run_events WHERE run_id = ?").get(invocationRunId) as { seq: number }).seq;
+  } catch { return false; }
+  if (unprovenAtSeq.get(invocationRunId) === lastSeq) return false;
+  let receipt: AttemptEffectReceipt;
+  try { receipt = readAttemptEffectReceipt(invocationRunId); } catch { return false; }
+  const proven = receipt.closed && !receipt.candidates.length && !receipt.hostConfirmed.length;
+  if (proven) { provenNoEffect.add(invocationRunId); unprovenAtSeq.delete(invocationRunId); }
+  else unprovenAtSeq.set(invocationRunId, lastSeq);
+  return proven;
+}
+
 /**
  * The host's own answer for a set of uncertain attempts, or null when a look is still needed. Only when every
  * attempt has a closed receipt with no candidate call: then nothing outside changed and the answer is not_done.

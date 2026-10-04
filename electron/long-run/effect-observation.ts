@@ -49,7 +49,7 @@ import type {
 } from "../../shared/types";
 import {
   appendLongRunEvent, getLongRun, getLongRunAttemptReview, getLongRunByGoalId, settleUncertainAttemptsByObservation,
-  unsettledLongRunAttempts, EFFECT_OBSERVATION_EVENT_KIND, type LongRunAttemptReview,
+  unsettledLongRunAttempts, EFFECT_OBSERVATION_EVENT_KIND, EFFECT_OWNER_POLICY_PROOF, type LongRunAttemptReview,
 } from "../store/long-runs";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { desktopAppInstanceId } from "./app-runtime-coordinator";
@@ -92,8 +92,8 @@ function settleBoundaryByObservation(longRunId: string, ticket: EffectObservatio
       || ticket.attemptIds.length !== 1 || ticket.attemptIds[0] !== `invocation:${invocationRunId}`) {
       throw new Error("effect_observation_target_absence_unproven");
     }
+    // Without the host's receipt, the look's own observation of absence settles it (owner 2026-10-05).
     noEffect = receiptSettlesAttempts([{ id: ticket.attemptIds[0], invocationRunId }]);
-    if (!noEffect) throw new Error("effect_observation_target_absence_unproven");
   }
   appendLongRunEvent({ runId: longRunId, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
     payload: { action: "settle_boundary", targetIds: [...ticket.attemptIds], verdict,
@@ -470,9 +470,20 @@ export function readHostAutomationObservationContext(chatId: string) {
   }
 }
 
+/** When the attempt ran, from its own run ledger: the look checks what appeared in exactly that window. */
+function attemptWindow(attempt: { startedAt?: string; invocationRunId: string | null }): string | null {
+  if (!attempt.startedAt) return null;
+  let endedAt: string | null = null;
+  try {
+    endedAt = attempt.invocationRunId ? (getDb().prepare("SELECT MAX(ts) AS ts FROM run_events WHERE run_id = ?")
+      .get(attempt.invocationRunId) as { ts: string | null } | undefined)?.ts ?? null : null;
+  } catch { endedAt = null; }
+  return `   ran: ${attempt.startedAt} → ${endedAt ?? "unknown"} (UTC). Anything it posted, sent or changed was created in this window.`;
+}
+
 export function buildEffectObservationPrompt(input: {
   objective: string;
-  attempts: ReadonlyArray<{ id: string; taskTitle: string; taskObjective: string; invocationRunId: string | null }>;
+  attempts: ReadonlyArray<{ id: string; taskTitle: string; taskObjective: string; invocationRunId: string | null; startedAt?: string }>;
   hostState?: ReturnType<typeof readHostAutomationObservationContext>;
 }): string {
   const blocks = input.attempts.map((attempt, index) => {
@@ -480,6 +491,7 @@ export function buildEffectObservationPrompt(input: {
       `${index + 1}. attempt id: ${attempt.id}`,
       `   task: ${attempt.taskTitle.slice(0, 240)}`,
       attempt.taskObjective && attempt.taskObjective !== attempt.taskTitle ? `   objective: ${attempt.taskObjective.slice(0, 600)}` : null,
+      attemptWindow(attempt),
       attemptActionLines(attempt.invocationRunId),
     ].filter(Boolean).join("\n");
   }).join("\n");
@@ -498,6 +510,7 @@ Rules for this check:
 - This run is read-only. Do not perform, retry, complete, or undo any action. Do not post, send, submit, buy, reply, like, delete or edit anything.
 - Only look: open or refresh the relevant page in the browser, list recent posts / messages / orders / files, read logs or the working folder, or read this app's own state (for example the registered automations and their schedules).
 - Decide from what you actually see, not from what should have happened.
+- Use each attempt's time window: open the account, page or folder the calls touched and list what was created or changed in that window. A visible list with nothing in the window is not_done; a matching item in the window is done.
 - Judge only whether the listed action(s) took effect. The Goal line is context: whether the goal is reached (a follower count, a target number) is not this check's question and is never evidence for either verdict.
 ${READ_ONLY_CALLS_RULE}
 
@@ -571,6 +584,42 @@ function sayExhausted(chatId: string, runId: string, _invocationRunIds: readonly
   say(chatId, runId, { status: "effect-retrying" },
     "이전 작업의 결과는 아직 미확정입니다. 확인 기록을 남겨 두고 다음 작업을 계속합니다.",
     "The earlier result is still unknown. Its check remains recorded while the next work continues.");
+}
+
+/**
+ * Owner decision 2026-10-05: an outcome the app could neither prove (receipt) nor observe (read-only look) never
+ * holds the Goal. Past the look limits the unresolved set is recorded as accepted and the Goal goes on, accepting
+ * that the action may be repeated. Owner DB 2026-10-04: exhausted → daily cap → too many to look at; the set then
+ * refused every Goal wait and the Goal re-ran every minute. Returns true when it settled the current blocker.
+ */
+function continueUnresolvedByOwnerPolicy(longRunId: string, chatId: string | null, reason: string): boolean {
+  try {
+    const run = getLongRun(longRunId);
+    if (!run || longRunOwnerHold(run.id) || ["completed", "cancelled", "archived", "cancelling", "pausing"].includes(run.status)) return false;
+    const observationRunId = `effect-policy-${randomUUID()}`;
+    const evidence = `${reason.slice(0, 80)}: neither the host receipt nor a read-only look settled the outcome; continuing under the owner's repeat-risk policy`;
+    const review = getLongRunAttemptReview(run.id);
+    if (review.attempts.some((attempt) => attempt.state === "running")) return false;
+    if (review.attemptIds.length) {
+      settleUncertainAttemptsByObservation(run.id, { attemptIds: review.attemptIds, verdict: "unknown", evidence,
+        observationInvocationRunId: observationRunId, observationDigest: receiptDigest(`policy:${run.id}`, review.attemptIds),
+        proof: "owner_policy" });
+    } else {
+      const boundary = boundaryObservationTarget(run.id);
+      if (!boundary || "skip" in boundary) return false;
+      appendLongRunEvent({ runId: run.id, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
+        payload: { action: "settle_boundary", targetIds: [`invocation:${boundary.invocationRunId}`], verdict: "unknown", evidence,
+          observationInvocationRunId: observationRunId, observationDigest: receiptDigest(`policy:${run.id}`, [boundary.invocationRunId]),
+          externalOutcomeProof: EFFECT_OWNER_POLICY_PROOF } });
+    }
+    if (chatId) say(chatId, observationRunId, { status: "effect-continuing" },
+      "이전 작업이 반영됐는지 확인하지 못했어요. 목표는 계속 진행하고, 같은 작업을 다시 하기 전에 현재 상태부터 봅니다.",
+      "Could not confirm whether the earlier action went through. The goal continues and checks the current state before repeating it.");
+    return true;
+  } catch (error) {
+    console.warn("[effect-observation] owner-policy continuation unavailable:", error);
+    return false;
+  }
 }
 
 /**
@@ -701,9 +750,11 @@ export function maybeDispatchEffectObservation(
   }
   const review = getLongRunAttemptReview(run.id);
   review.attempts = review.attempts.filter((attempt) => attempt.state !== "running");
-  if (review.attempts.length > MAX_OBSERVED_ATTEMPTS) return { status: "skipped", reason: "too_many_attempts" };
+  if (review.attempts.length > MAX_OBSERVED_ATTEMPTS) {
+    return { status: "skipped", reason: continueUnresolvedByOwnerPolicy(run.id, chatId, "too_many_attempts") ? "owner_policy_continued" : "too_many_attempts" };
+  }
   let kind: EffectObservationTicket["kind"] = "attempts";
-  let targets: Array<{ id: string; taskTitle: string; taskObjective: string; invocationRunId: string | null }> = review.attempts;
+  let targets: Array<{ id: string; taskTitle: string; taskObjective: string; invocationRunId: string | null; startedAt?: string }> = review.attempts;
   if (!targets.length) {
     // 시도 행이 없는 효과 경계 불확실 — 마지막 실행이 바깥에 무엇을 했는지 한 번 본다.
     if (savedBoundary && "skip" in savedBoundary) return { status: "skipped", reason: savedBoundary.skip };
@@ -758,9 +809,14 @@ export function maybeDispatchEffectObservation(
         : { status: "skipped", reason: outcome?.reason ?? "effect_receipt_settle_failed" };
     }
   }
-  if (observationExhausted(run.id, targetIds)) return { status: "skipped", reason: EFFECT_OBSERVATION_EXHAUSTED };
+  if (observationExhausted(run.id, targetIds)) {
+    return { status: "skipped", reason: continueUnresolvedByOwnerPolicy(run.id, chatId, EFFECT_OBSERVATION_EXHAUSTED) ? "owner_policy_continued" : EFFECT_OBSERVATION_EXHAUSTED };
+  }
   const retryPlan = goalObservationRetryPlan(run.id, targetIds);
-  if ("skip" in retryPlan) return { status: "skipped", reason: retryPlan.skip };
+  if ("skip" in retryPlan) {
+    const limit = retryPlan.skip === EFFECT_OBSERVATION_EXHAUSTED || retryPlan.skip === EFFECT_OBSERVATION_DAILY_CAP;
+    return { status: "skipped", reason: limit && continueUnresolvedByOwnerPolicy(run.id, chatId, retryPlan.skip) ? "owner_policy_continued" : retryPlan.skip };
+  }
   epoch = retryPlan.epoch;
   const digest = effectObservationDigest(run.id, targetIds, epoch);
   if (alreadyObserved(run.id, digest)) return { status: "skipped", reason: "already_observed" };
@@ -826,7 +882,9 @@ function recordInconclusive(ticket: EffectObservationTicket, reason: string,
         : getLongRunAttemptReview(ticket.longRunId).attempts.filter((attempt) => ticket.attemptIds.includes(attempt.id))
           .map((attempt) => attempt.invocationRunId).filter((id): id is string => Boolean(id));
     } catch { /* Still show the next action if the attempt index cannot be read. */ }
-    sayExhausted(ticket.chatId, ticket.observationRunId, invocationRunIds);
+    if (!continueUnresolvedByOwnerPolicy(ticket.longRunId, ticket.chatId, EFFECT_OBSERVATION_EXHAUSTED)) {
+      sayExhausted(ticket.chatId, ticket.observationRunId, invocationRunIds);
+    }
     return;
   }
   const retryKo = "확인은 백그라운드에서 처리하며 다음 작업을 계속합니다.";
@@ -1290,13 +1348,8 @@ function completeAutomationEffectObservation(input: {
       if (plan.goal && effectObservationAuthorityDigest(plan.goal.longRunId) !== plan.goal.authorityDigest) {
         throw new Error("effect_observation_authority_changed");
       }
-      if (verdict === "not_done") {
-        // A graph hold and a Goal attempt set are separate targets. Neither
-        // can borrow an unrelated closed receipt to authorize replay.
-        const targets = [...(plan.goal?.attempts ?? []),
-          ...(plan.hold ? [{ id: `graph:${plan.hold.runId}`, invocationRunId: plan.hold.runId }] : [])];
-        if (!receiptSettlesAttempts(targets)) throw new Error("effect_observation_target_absence_unproven");
-      }
+      // A read-only look that saw the result absent settles a graph hold and a Goal attempt set without the
+      // host's receipt: a possible repeat is accepted over a Goal blocked on an answer nobody can give (owner 2026-10-05).
       // Resolve exact node evidence without owning the Goal, trigger or schedule.
       const reconciled = plan.hold ? reconcileAutomationGraph({
         automationId, runId: plan.hold.runId, occurrenceId: plan.hold.occurrenceId,
