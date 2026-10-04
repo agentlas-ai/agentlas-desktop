@@ -8902,6 +8902,8 @@ export interface OneDurableMemoryEntryUi {
   kind: string;
   scope: string;
   content: string;
+  /** One or two lines: the curator's ticket summary, else the request this memory came from. */
+  title: string;
   projectSlug: string | null;
   evidenceCount: number;
   createdAt: string;

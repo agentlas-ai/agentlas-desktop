@@ -197,7 +197,7 @@ export function OneMemorySheet({
     const query = durableQuery.trim().toLowerCase();
     const ofKind = kindFilter ? rows.filter((row) => row.kind === kindFilter) : rows;
     const filtered = query
-      ? ofKind.filter((row) => row.content.toLowerCase().includes(query) || (row.projectSlug ?? "").toLowerCase().includes(query) || row.kind.toLowerCase().includes(query))
+      ? ofKind.filter((row) => row.title.toLowerCase().includes(query) || row.content.toLowerCase().includes(query) || (row.projectSlug ?? "").toLowerCase().includes(query) || row.kind.toLowerCase().includes(query))
       : ofKind;
     // The memory picked on the map is always in view, first.
     const picked = selectedMemory ? filtered.find((row) => row.id === selectedMemory) : undefined;
@@ -538,12 +538,14 @@ export function OneMemorySheet({
                     data-selected={selectedMemory === entry.id ? "true" : undefined}
                     onClick={() => setSelectedMemory((current) => current === entry.id ? null : entry.id)}>
                     <KindIcon kind={entry.kind} />
-                    <p title={entry.content}>{entry.content}</p>
+                    <p title={entry.content}>{entry.title || entry.content}</p>
                     <time dateTime={entry.createdAt}>{formatShortDate(entry.createdAt, locale)}</time>
                     <button type="button" className={styles.forgetIcon} data-hover="own" onClick={(event) => { event.stopPropagation(); void forgetDurable(entry); }}
                       disabled={Boolean(busyId)} aria-label={locale === "ko" ? "잊기" : "Forget"} title={locale === "ko" ? "잊기" : "Forget"}>
                       <IconTrash size={14} />
                     </button>
+                    {/* The title is the ticket's line; the memory itself opens under it. */}
+                    {selectedMemory === entry.id && entry.title && entry.title !== entry.content && <p className={styles.memoryDetail}>{entry.content}</p>}
                   </article>
                 ))}
                 {durable && !durableExpanded && !durableQuery.trim() && durable.length > 8 && (

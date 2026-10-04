@@ -389,6 +389,53 @@ export function getOneMemoryMap(): OneMemoryMapSnapshot {
  * so the count in the sheet equals the node count on the map. Content is bounded
  * and control characters stripped; only the project folder's basename travels.
  */
+// The host's own record of a turn whose model emitted no Memory Events (memory/curator.ts hostObservedTurnEvents).
+const HOST_OBSERVED_PREFIX = /^이 에이전트는 다음과 같은 요청을 수행한다:\s*/;
+
+/** One or two lines a person can scan. Owner 2026-10-05: "메모리티켓의 제목을 한 두 줄로 정리해서 적는게 나을듯
+ * 메모리티켓 제목은 큐레이터가 쓰지 않나 없으면 제목같은거 가져다 쓰면 되지". */
+function memoryTitle(content: string, ticket: { summary: string | null; emitted: boolean } | undefined): string {
+  const clean = (value: string) => value.replace(/^\s*\**\[Hope\]\**\s*/i, "").replace(/\s+/g, " ").trim();
+  const summary = ticket?.summary ? clean(ticket.summary) : "";
+  // The curator's title: the summary the model wrote for its own ticket.
+  if (ticket?.emitted && summary.length >= 8) return summary;
+  const request = clean(content.replace(HOST_OBSERVED_PREFIX, ""));
+  // A host-written prompt (a review or check-in) says nothing as a title; what the turn did does.
+  if (/^\[Host[:\]]/i.test(request) && summary) return summary;
+  // Otherwise the request itself, without run markers such as "[RL-…]".
+  const titled = request.replace(/^(\[[^\]\n]{1,80}\]\s*)+/, "").trim() || request;
+  return titled.length > 160 ? `${titled.slice(0, 159)}…` : titled;
+}
+
+/** Each entry's ticket: the decision that wrote it, and that ticket's turn summary (original wording first). */
+function memoryTickets(ids: readonly string[]): Map<string, { summary: string | null; emitted: boolean }> {
+  const result = new Map<string, { summary: string | null; emitted: boolean }>();
+  if (!ids.length) return result;
+  try {
+    const db = getDb();
+    const rows: Array<{ id: string; emitter: string; episode: string | null; summary: string | null }> = [];
+    for (let offset = 0; offset < ids.length; offset += 400) {
+      const chunk = ids.slice(offset, offset + 400);
+      rows.push(...db.prepare(
+        `SELECT d.target_memory_id AS id, t.emitter_status AS emitter, e.episode_id AS episode, e.summary AS summary
+           FROM memory_decisions d
+           JOIN memory_tickets t ON t.ticket_id = d.ticket_id
+           LEFT JOIN memory_episodes e ON e.ticket_id = d.ticket_id
+          WHERE d.target_memory_id IN (${chunk.map(() => "?").join(",")})
+          ORDER BY d.created_at ASC`,
+      ).all(...chunk) as typeof rows);
+    }
+    const natives = nativeTextsFor("memory_episode", rows.map((row) => row.episode ?? "").filter(Boolean));
+    for (const row of rows) {
+      if (result.has(row.id)) continue; // the ticket that first wrote it
+      result.set(row.id, { summary: (row.episode && natives.get(row.episode)) || row.summary || null, emitted: row.emitter === "valid" });
+    }
+  } catch {
+    // Older stores without ticket tables: titles come from the content.
+  }
+  return result;
+}
+
 export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryUi[] {
   const capped = Math.min(1_000, Math.max(1, Math.floor(limit) || 300));
   const rows = getDb().prepare(
@@ -402,6 +449,7 @@ export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryU
   }>;
   // People see the original wording; English is the search/model surface.
   const listNatives = nativeTextsFor("memory_entry", rows.map((row) => row.id));
+  const tickets = memoryTickets(rows.map((row) => row.id));
   return rows.map((row) => {
     let evidenceCount = 0;
     try {
@@ -416,6 +464,7 @@ export function listOneDurableMemoryEntries(limit = 300): OneDurableMemoryEntryU
       kind: row.kind,
       scope: row.scope,
       content: content.length > 600 ? `${content.slice(0, 599)}…` : content,
+      title: memoryTitle(content, tickets.get(row.id)),
       projectSlug: row.project_path ? safeSlug(path.basename(row.project_path)) : null,
       evidenceCount,
       createdAt: row.created_at,

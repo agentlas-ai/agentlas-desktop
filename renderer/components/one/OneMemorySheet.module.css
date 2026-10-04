@@ -356,6 +356,7 @@
 .memoryRow[data-selected="true"] { background: var(--paper-3); }
 .memoryRow p { margin: 0; font-size: 12.5px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 .memoryRow time { font-size: 11px; color: var(--muted-deep); white-space: nowrap; }
+.memoryRow p.memoryDetail { grid-column: 2 / -1; display: block; -webkit-line-clamp: unset; font-size: 12px; color: var(--muted-deep); white-space: pre-wrap; overflow-wrap: anywhere; }
 .forgetIcon { display: grid; place-items: center; width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted-deep); cursor: pointer; opacity: 0; }
 .memoryRow:hover .forgetIcon, .memoryRow[data-selected="true"] .forgetIcon, .forgetIcon:focus-visible { opacity: 1; }
 .forgetIcon:hover { background: var(--paper-3); color: var(--danger, #b55b58); }
