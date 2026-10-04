@@ -378,8 +378,11 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
           next: "Leave the Toolchain as it is. The owner can allow another change by speaking in this conversation." };
         updateAutomationGraph(current.id, graph, { note: "One structured blueprint" });
         recordToolchainRepair(current.id, chat.id);
+        // The monitor lives inside the trigger document: replacing the trigger without it dropped the origin binding,
+        // so every revision of a saved graph failed its own scope check (measured 2026-10-04, QA app, real model).
         saved = updateAutomation(current.id, { name: bp.name, goal: bp.goal, promptTemplate: bp.goal,
-          scheduleHuman: schedule, scheduleJson: null, triggerType, trigger: { kind: triggerType }, executionPermission: permission });
+          scheduleHuman: schedule, scheduleJson: null, triggerType, trigger: { kind: triggerType }, monitor: current.monitor,
+          executionPermission: permission });
         saved = applyAutomationLifecycle({ parsed: { action: enable ? "resume" : "pause", automationId: saved.id, expectedDefinitionDigest: automationDefinitionDigest(saved), name: saved.name, prompt: "", schedule: "", scheduleEmitted: false }, chatId: chat.id, canWrite: true }).automation;
       } else saved = createAutomation({ name: bp.name, goal: bp.goal, promptTemplate: bp.goal,
         targetType: "agent", targetId: chat.agentId, projectId: chat.projectId,
@@ -418,6 +421,8 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     if (new Set(edits.map(edit => edit.node_id)).size !== edits.length) throw new Error("one_graph_duplicate_node_patch");
     for (const edit of edits) {
       const node = graph.nodes.find(n => n.id === edit.node_id);
+      // A code step is changed by saving the revised blueprint (one_graph_save with graph_id), not by an instruction.
+      if (node?.type === "code") throw new Error("one_graph_code_step_requires_save");
       if (!node || !["agent", "action"].includes(node.type)) throw new Error("one_graph_instruction_node_invalid");
       node.config = { ...node.config, ...(node.config.mcpCall ? { note: edit.instruction } : { prompt: edit.instruction }) };
     }
