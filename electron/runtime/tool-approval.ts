@@ -165,6 +165,32 @@ function persistAlwaysGrant(request: ToolApprovalRequest): ToolApprovalDurableCo
   }
 }
 
+/*
+ * ── 영속 승인 장부 훅 ────────────────────────────────────────────────────
+ * live 결정은 Main 이 주입한 장부(SQLite)에 **먼저** 기록되고, 그다음에 기다리던 실행이 듣는다.
+ * 그래서 화면·폰이 응답을 잃거나 앱이 다시 떠도 같은 요청 id 로 실제 결정을 다시 읽는다.
+ * 허용은 실행에 넘기기 직전에 장부에서 다시 꺼내며(consume) 그때 이 요청이 아직 살아 있는지를
+ * 다시 본다 — 취소된 실행이나 이전 앱 세대의 결정은 허용이 되지 않는다(I07).
+ * 장부에 남은 결정은 표시 근거일 뿐, 죽은 실행의 허용을 새 실행에 넘기지 않는다.
+ * 장부가 없거나 기록에 실패하면 예전처럼 이 프로세스 안에서만 기다린다(승인이 막히지 않는다).
+ */
+export interface ToolApprovalLedger {
+  persist(request: ToolApprovalRequest): void;
+  decide(id: string, decision: ToolApprovalDecision, actionId: string,
+    assertCurrent: (request: ToolApprovalRequest) => void): ToolApprovalResolutionReceipt;
+  consume(id: string, assertCurrent: (request: ToolApprovalRequest) => void):
+    { decision: ToolApprovalDecision; decidedAt: string } | null;
+  cancel(id: string): void;
+  recordConsent(id: string, receipt: ToolApprovalDurableConsentReceipt): void;
+  get(id: string): ToolApprovalResolutionReceipt;
+}
+
+let toolApprovalLedger: ToolApprovalLedger | null = null;
+
+export function setToolApprovalLedger(ledger: ToolApprovalLedger | null): void {
+  toolApprovalLedger = ledger;
+}
+
 export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter | null {
   const arbiter = runtimeToolPermissionArbiter;
   return arbiter ? (ask) => ask.planMode && ask.mutating
@@ -203,6 +229,8 @@ type Pending = {
   timer: NodeJS.Timeout;
   waiters: Set<ApprovalWaiter>;
   dedupeKey: string;
+  /** The Main ledger holds this request, so its decision is committed there before any waiter hears it. */
+  durable?: true;
 };
 
 const pending = new Map<string, Pending>();
@@ -362,6 +390,9 @@ function detachPending(entry: Pending): void {
 function expirePending(entry: Pending): void {
   if (pending.get(entry.request.id) !== entry) return;
   detachPending(entry);
+  if (entry.durable) {
+    try { toolApprovalLedger?.cancel(entry.request.id); } catch { /* the ledger's own expiry closes it */ }
+  }
   const outcome: ToolApprovalOutcome = { decision: "deny", decidedAt: new Date().toISOString() };
   rememberResolution({ requestId: entry.request.id, decision: "deny", actionId: null,
     status: "expired", decidedAt: outcome.decidedAt });
@@ -411,6 +442,9 @@ export function requestToolApproval(
   const entry: Pending = { request, dedupeKey, waiters: new Set(),
     timer: setTimeout(() => expirePending(entry), timeoutMs) };
   entry.timer.unref?.();
+  if (toolApprovalLedger && request.chatId) {
+    try { toolApprovalLedger.persist(request); entry.durable = true; } catch { /* in-process only, as before */ }
+  }
   pending.set(request.id, entry);
   pendingByKey.set(dedupeKey, request.id);
   const promise = joinApproval(entry, sessionKey, signal);
@@ -471,6 +505,56 @@ export function announceToolDenied(
   return request;
 }
 
+/** A decision this process no longer holds in memory (an earlier app run, or an evicted record) read back from the ledger. */
+function ledgerResolution(id: string): ResolutionRecord | undefined {
+  if (!toolApprovalLedger) return undefined;
+  let receipt: ToolApprovalResolutionReceipt;
+  try { receipt = toolApprovalLedger.get(id); } catch { return undefined; }
+  if (receipt.status === "not_found" || receipt.status === "pending" || !receipt.resolvedDecision || !receipt.decidedAt) return undefined;
+  const record: ResolutionRecord = {
+    requestId: id,
+    decision: receipt.resolvedDecision,
+    actionId: receipt.actionId,
+    status: receipt.status === "expired" ? "expired" : "resolved",
+    decidedAt: receipt.decidedAt,
+    ...(receipt.durableConsent ? { durableConsent: receipt.durableConsent } : {}),
+  };
+  rememberResolution(record);
+  return record;
+}
+
+/**
+ * Commits the owner's decision to the ledger before any waiter hears it, and takes an allow back out
+ * only while the request is still current. Returns a receipt to answer with instead of settling, or
+ * null to settle normally. A deny always settles — refusing is safe even when the ledger cannot write.
+ */
+function commitDurableDecision(entry: Pending, decision: ToolApprovalDecision, actionId: string): ToolApprovalResolutionReceipt | null {
+  const ledger = toolApprovalLedger as ToolApprovalLedger;
+  const id = entry.request.id;
+  const assertCurrent = () => {
+    if (pending.get(id) !== entry || entry.waiters.size === 0) throw new Error("tool_approval_not_current");
+  };
+  let receipt: ToolApprovalResolutionReceipt;
+  try {
+    receipt = ledger.decide(id, decision, actionId, assertCurrent);
+  } catch {
+    // Not written: an allow stays pending so the owner can answer again; nothing has run.
+    return decision === "deny" ? null : unresolvedReceipt(id, decision, "pending");
+  }
+  if (receipt.status === "expired") {
+    expirePending(entry);
+    return resolutionReceipt(resolutions.get(id) as ResolutionRecord, decision, "expired");
+  }
+  if (receipt.status !== "resolved") return decision === "deny" ? null : receipt;
+  if (decision === "deny") return null;
+  let consumed: { decision: ToolApprovalDecision; decidedAt: string } | null = null;
+  try { consumed = ledger.consume(id, assertCurrent); } catch { consumed = null; }
+  if (consumed?.decision === decision) return null;
+  // Committed, but no longer current at the moment of use: the run gets a refusal, never the allow.
+  expirePending(entry);
+  return resolutionReceipt(resolutions.get(id) as ResolutionRecord, decision, "expired");
+}
+
 /**
  * 사용자의 선택을 반영하고 exact receipt를 남긴다. 응답이 유실된 renderer는 같은
  * actionId를 재전송하지 않고 getToolApprovalResolution으로 실제 결정을 확인한다.
@@ -484,7 +568,8 @@ export function resolveToolApproval(
     return unresolvedReceipt(id, decision, "invalid_action");
   }
 
-  const prior = resolutions.get(id);
+  // A request this run still holds goes through the live path, so a ledger-side expiry also releases its waiter.
+  const prior = resolutions.get(id) ?? (pending.has(id) ? undefined : ledgerResolution(id));
   if (prior) {
     rememberResolution(prior);
     if (prior.status === "expired") {
@@ -500,11 +585,18 @@ export function resolveToolApproval(
   const entry = pending.get(id);
   let outcome: ToolApprovalOutcome = { decision, decidedAt: new Date().toISOString() };
   if (entry) {
+    if (entry.durable && toolApprovalLedger) {
+      const committed = commitDurableDecision(entry, decision, actionId);
+      if (committed) return committed;
+    }
     detachPending(entry);
     const waiters = [...entry.waiters];
     entry.waiters.clear();
     for (const waiter of waiters) waiter.cleanup();
     outcome = settleApproval(entry.request, new Set(waiters.map(waiter => waiter.sessionKey)), outcome);
+    if (entry.durable && outcome.durableConsent) {
+      try { toolApprovalLedger?.recordConsent(id, outcome.durableConsent); } catch { /* the in-memory receipt still carries it */ }
+    }
     for (const waiter of waiters) waiter.resolve(outcome);
     rememberResolution({
       requestId: id,
@@ -553,7 +645,7 @@ export function resolveToolApproval(
 
 /** Main의 live queue와 resolution ledger를 한 요청 id로 다시 읽는다. */
 export function getToolApprovalResolution(id: string): ToolApprovalResolutionReceipt {
-  const record = resolutions.get(id);
+  const record = resolutions.get(id) ?? (pending.has(id) ? undefined : ledgerResolution(id));
   if (record) {
     return resolutionReceipt(
       record,

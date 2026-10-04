@@ -196,6 +196,7 @@ import {
 import { getRoute } from "./agents/routes";
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
+import { installDurableToolApprovalLedger } from "./one/supervisor-approval-ledger";
 import { AutomationWorkspaceError, automationWorkspaceView, withOwnerAutomationWorkspaceIntent } from "./automation-workspace";
 import {
   canonicalInvocationRequestJson,
@@ -4167,6 +4168,12 @@ export function registerIpcHandlers(): void {
     if (!result.ok) return { ok: false, code: result.code };
     return { ok: true, id: result.id };
   });
+  // live 승인 결정의 영속 장부 — 결정은 여기 먼저 기록되고 그다음 실행이 듣는다. 장부를 못 열면 예전처럼 메모리로만 기다린다.
+  try {
+    installDurableToolApprovalLedger(getDb());
+  } catch (error) {
+    console.error("[tool-approval] durable ledger unavailable", error);
+  }
   setRuntimeToolPermissionArbiter(async (ask) => {
     /*
      * 저장된 능력 규칙이 최우선이다(deny > allow, chat > agent > global).

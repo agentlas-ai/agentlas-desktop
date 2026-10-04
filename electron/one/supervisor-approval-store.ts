@@ -135,6 +135,17 @@ export class OneSupervisorApprovalStore {
     assertCurrent(JSON.parse(row.request_json) as ToolApprovalRequestEvent);
     return {decision: row.decision, decidedAt: row.decided_at};
   }
+  /** A new Main run owns no earlier run's waiter: what an earlier run left pending can no longer be answered. */
+  retireEarlierOwners(ownerEpoch: string): number {
+    return Number(this.db.prepare(`UPDATE one_supervisor_tool_approvals SET status='expired',decision='deny',decided_at=?,reason='owner_restarted'
+      WHERE status='pending' AND owner_epoch!=?`).run(new Date(this.now()).toISOString(), ownerEpoch).changes);
+  }
+  /** Keeps the newest settled receipts; pending rows are never pruned. */
+  prune(keepSettled = 1000): number {
+    return Number(this.db.prepare(`DELETE FROM one_supervisor_tool_approvals WHERE status!='pending' AND rowid NOT IN
+      (SELECT rowid FROM one_supervisor_tool_approvals WHERE status!='pending' ORDER BY rowid DESC LIMIT ?)`)
+      .run(Math.max(0, Math.floor(keepSettled))).changes);
+  }
   cancel(id: string, ownerEpoch: string): void {
     this.db.prepare(`UPDATE one_supervisor_tool_approvals SET status='expired',decision='deny',decided_at=?,reason='run_cancelled'
       WHERE id=? AND owner_epoch=? AND status='pending'`).run(new Date(this.now()).toISOString(), id, ownerEpoch);

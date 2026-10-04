@@ -631,6 +631,18 @@ export async function browserRequestApproval(
     return "cancelled";
   }
 
+  // 허용은 실행에 넘기기 직전에 다시 본다(I07): 오너가 누른 사이 실행이 취소됐다면 허용을 넘기지 않는다.
+  if (decision !== "deny" && options.signal?.aborted) {
+    logBrowserAction({
+      site,
+      action: req.actionType,
+      target: req.target,
+      result: "cancelled",
+      approval: "cancelled-after-decision",
+    });
+    return "cancelled";
+  }
+
   // 명시적 결정만 기억(once는 저장 안 됨 — store에서 가드).
   // payment/unsafe-code는 "거부"만 영속된다: 승인 캐시는 금지지만, 사용자가 막은 사이트를
   // 매번 다시 묻지 않기 위해 deny는 남긴다. 취소는 browser:revokePermission.
