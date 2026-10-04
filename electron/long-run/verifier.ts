@@ -21,7 +21,9 @@ import {
   bindLongRunWorker,
   getLongRunByGoalId,
   getLongRunGoalRevisionBinding,
+  liveLongRunAttemptCount,
   listLongRunTasks,
+  longRunOwnerHold,
   recordLongRunVerification,
   recordLongRunCycle,
   requestLongRunVerification,
@@ -1476,7 +1478,11 @@ export async function verifyGoalCompletionClaim(input: {
     if (!completed && disposition !== "cycle_completed" && disposition !== "interrupted") disposition = "retry_required";
     if (!completed && disposition !== "cycle_completed") {
       const current = getLongRunByGoalId(input.goalId);
-      if (current && !input.background && current.status === "verifying") {
+      // A finished background check can inherit verifying from the controller.
+      // Leave that idle state so the caller can schedule its recorded retry,
+      // while a live controller or owner pause retains the next step.
+      if (current && current.status === "verifying" && (!input.background
+        || (!longRunOwnerHold(current.id) && liveLongRunAttemptCount(current.id) === 0))) {
         // Transitions append long-run events, so the existing store-change path
         // refreshes the cockpit with either the next action or typed block reason.
         const hardFail = checkpointVerdicts.some((verdict) => verdict.verdict === "failed");
