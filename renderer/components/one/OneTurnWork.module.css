@@ -24,6 +24,8 @@
   font-size: 13px;
   line-height: 1.55;
 }
+/* A run that left no answer text ends the turn here; the 12px kept for the answer only widened the gap to the next turn. */
+.work:last-child { margin-bottom: 0; }
 
 /* ── live header (running) ────────────────────────────────────────────── */
 .liveBlock { display: grid; gap: 1px; }

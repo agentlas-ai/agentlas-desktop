@@ -394,7 +394,8 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
     finish();
   };
 
-  if (!open) return offerTour ? <button type="button" onClick={() => setOpen(true)} style={{ position: "fixed", top: 12, right: 20, zIndex: 30, height: 32, padding: "0 12px", border: "1px solid var(--paper-edge)", borderRadius: 15, background: "var(--paper)", color: "var(--ink-soft)", fontSize: 12, fontWeight: 400, cursor: "pointer", WebkitAppRegion: "no-drag" } as CSSProperties}>{ko ? "처음 사용 안내" : "Getting started"}</button> : null;
+  // In the title-bar strip: at top 12 / 32px tall it covered the right end of the dashboard's status card (y 28).
+  if (!open) return offerTour ? <button type="button" onClick={() => setOpen(true)} style={{ position: "fixed", top: 3, right: 20, zIndex: 30, height: 22, padding: "0 10px", border: "1px solid var(--paper-edge)", borderRadius: 11, background: "var(--paper)", color: "var(--ink-soft)", fontSize: 12, fontWeight: 400, cursor: "pointer", WebkitAppRegion: "no-drag" } as CSSProperties}>{ko ? "처음 사용 안내" : "Getting started"}</button> : null;
 
   const inToolStage = Boolean(loginStage || keyStage);
 

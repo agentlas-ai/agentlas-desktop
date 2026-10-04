@@ -4,7 +4,8 @@
   border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge)); border-radius: 12px;
   background: color-mix(in srgb, var(--paper-2) 72%, var(--paper)); }
 .top > :global(.chat-composer-goal) { margin: 0; border: 0; border-radius: 0; box-shadow: none; }
-.top > [data-goal-plan] { margin: 0; border: 0; }
+/* The plan line starts under the objective text (10px padding + 18px icon + 7px gap), like the next-check line. */
+.top > [data-goal-plan] { margin: 0; border: 0; padding-left: 35px; }
 .nextWake { margin: 0; padding: 0 10px 6px 35px; color: var(--muted-deep); font-size: 10.5px; line-height: 1.4; }
 .details { padding: 0 10px 0 35px; }
 .details:has(> *) { padding-bottom: 8px; }

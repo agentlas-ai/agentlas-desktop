@@ -15,6 +15,8 @@ import { useChatAttention } from "@/lib/attention";
 import { ProductModeMenu } from "./one/ProductModeMenu";
 import { AccountChip } from "./AccountChip";
 import { VersionChip } from "./VersionChip";
+import { SidebarResizeHandle } from "./SidebarResizeHandle";
+import { useWorkSidebarWidth } from "@/lib/work-sidebar-width";
 
 export function ProjectSidebar() {
   const { locale } = useT();
@@ -25,6 +27,7 @@ export function ProjectSidebar() {
   const [tasks, setTasks] = useState<CanonicalTask[]>(() => readViewData<CanonicalTask[]>("dashboard.tasks.200")?.value ?? []);
   const [loadFailed, setLoadFailed] = useState(false);
   const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
+  const sidebar = useWorkSidebarWidth();
 
   useEffect(() => {
     try {
@@ -70,7 +73,8 @@ export function ProjectSidebar() {
   }, []);
 
   return (
-    <aside className="project-sidebar glass-thin">
+    <aside className="project-sidebar glass-thin" data-sidebar-resizing={sidebar.resizing ? "true" : "false"}
+      style={{ position: "relative", width: sidebar.width, flexBasis: sidebar.width }}>
       <div className="project-sidebar-drag titlebar-drag" />
       <div className="project-sidebar-head titlebar-nodrag"><ProductModeMenu current="work" /></div>
       <button
@@ -103,6 +107,7 @@ export function ProjectSidebar() {
         {!loadFailed && projects.length === 0 ? <button type="button" className="project-sidebar-empty" onClick={() => openProjectSettings()}>{ko ? "첫 프로젝트를 만들어 보세요" : "Create your first project"}</button> : null}
       </nav>
       <div className="project-sidebar-foot"><AccountChip /><VersionChip /></div>
+      <SidebarResizeHandle sidebar={sidebar} />
     </aside>
   );
 }

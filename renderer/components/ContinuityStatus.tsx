@@ -169,11 +169,15 @@ export function ContinuityStatus({ chatId, locale, detail = false, embedded = fa
       {snapshot.automations.map((row) => <AutomationStrategyPanel key={row.automationId} automationId={row.automationId} locale={locale} />)}
     </div>;
   }
+  // Without a Goal the compact bar only said "연결된 Goal 없음" above every Work composer (owner 2026-10-04: a state the
+  // user has no use for). It shows only when there are schedules to report, headed by them.
+  if (!detail && !snapshot.goal && !scheduleLine.length && !snapshot.automations.length) return null;
   return <details className={detail ? styles.detail : styles.compact} open={detail || undefined} data-continuity-status={detail ? "detail" : "compact"}
     data-observation={error ? "stale" : "confirmed"} aria-label={ko ? "작업 연속성 상태" : "Work continuity status"}>
     <summary className={styles.summary}>
-      <strong>{goalHeading}</strong>
-      <span>{goalStatus(snapshot, ko, error)}</span>
+      <strong>{snapshot.goal || detail ? goalHeading : (ko ? "예약" : "Schedules")}</strong>
+      <span>{snapshot.goal || detail ? goalStatus(snapshot, ko, error)
+        : ko ? `${snapshot.automations.length}개` : String(snapshot.automations.length)}</span>
     </summary>
     <div className={styles.content}>
     <div className={styles.line} aria-live="polite">

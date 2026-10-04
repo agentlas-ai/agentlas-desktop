@@ -157,6 +157,7 @@ import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
+import { currentWorkSidebarWidth, WORK_SIDEBAR_WIDTH_EVENT } from "@/lib/work-sidebar-width";
 import { AgiDefectChip } from "./agi/AgiBugReport";
 import {
   appendChatFileMarker,
@@ -701,17 +702,13 @@ const RIGHT_PANEL_MAX_WIDTH = 1280;
  * 앱 창 자체의 최소 폭은 960px 이라(electron/main.ts) 이 경계는 임베드/작은 창 전용이다.
  */
 const RIGHT_PANEL_OVERLAY_MAX_VIEWPORT = 760;
-/**
- * 레일이 옆에 설 때 비워 둬야 하는 폭 = 셸 사이드바(.project-sidebar 274px 고정)
- * + 채팅이 읽히는 최소 폭.
- *
- * 예전에는 사이드바를 세지 않은 520 이었다. 그래서 최소 창(960px)에서 레일이 415px 까지
- * 자라 채팅이 271px 로 눌렸다(2026-09-03 실측: 작성창 215px, 한 문장이 3줄).
- */
-const CHAT_COLUMN_RESERVED_WIDTH = 274 + RIGHT_PANEL_MIN_WIDTH;
 const RIGHT_PANEL_RESULT_RATIO = 0.432;
-/** 좌측 사이드바 실측 폭 — 대화 열을 계산할 때 먼저 빼 둔다. */
-const CHAT_SIDEBAR_WIDTH = 274;
+/**
+ * 좌측 사이드바 폭 — 대화 열을 계산할 때 먼저 빼 둔다. 사이드바를 세지 않으면 최소 창(960px)에서
+ * 레일이 415px 까지 자라 채팅이 271px 로 눌렸다(2026-09-03 실측: 작성창 215px, 한 문장이 3줄).
+ * 오너가 폭을 바꿀 수 있게 된 뒤(2026-10-04)로는 상수(274)가 아니라 지금 보이는 폭을 잰다.
+ */
+const chatSidebarWidth = () => currentWorkSidebarWidth();
 /** 한국어 본문이 한 줄에 충분히 들어가는 최소 대화 열 폭(실측 기준). */
 const MIN_READABLE_CHAT_COLUMN = 520;
 // 세로 높이는 폭과 달리 기본이 '전체'다 — null 이면 키를 지워 창 크기를 그대로 따라간다.
@@ -1051,7 +1048,7 @@ function clampRightPanelWidth(width: number): number {
        * 이제 대화가 읽을 수 있는 폭을 먼저 떼고, 그러고도 레일이 자기 최소보다 작아지면
        * 레일 최소가 이긴다(둘 다는 못 지키는 폭에서의 마지막 방어선).
        */
-      : Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - CHAT_SIDEBAR_WIDTH - MIN_READABLE_CHAT_COLUMN);
+      : Math.max(RIGHT_PANEL_MIN_WIDTH, window.innerWidth - chatSidebarWidth() - MIN_READABLE_CHAT_COLUMN);
   return Math.min(RIGHT_PANEL_MAX_WIDTH, viewportMax, Math.max(RIGHT_PANEL_MIN_WIDTH, Math.round(width)));
 }
 
@@ -1071,7 +1068,7 @@ function preferredRichResultWidth(): number {
      */
     : Math.min(
         Math.round(window.innerWidth * RIGHT_PANEL_RESULT_RATIO),
-        window.innerWidth - CHAT_SIDEBAR_WIDTH - MIN_READABLE_CHAT_COLUMN,
+        window.innerWidth - chatSidebarWidth() - MIN_READABLE_CHAT_COLUMN,
       );
   return clampRightPanelWidth(requested);
 }
@@ -2509,7 +2506,11 @@ function ChatPage() {
       return next === current ? current : next;
     });
     window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
+    window.addEventListener(WORK_SIDEBAR_WIDTH_EVENT, onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener(WORK_SIDEBAR_WIDTH_EVENT, onResize);
+    };
   }, [readableRightPanelActive]);
   const workspaceOpen = rightPanelOpen && rightPanelTab === "file";
   const networkOpen = rightPanelOpen && rightPanelTab === "agent";
@@ -6659,7 +6660,11 @@ function ChatPage() {
           같은 뜻의 토큰(--paper)을 쓴다 — 다크 테마에서도 함께 따라간다. */}
       <div
         className="task-cockpit-main"
-        style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden", boxSizing: "border-box", background: "var(--paper)" }}
+        style={{ flex: 1, display: "flex", flexDirection: "column", minWidth: 0, minHeight: 0, overflow: "hidden", boxSizing: "border-box", background: "var(--paper)",
+          // Messages share the composer's edges in a narrow column too: the composer keeps 16px sides there, the
+          // stream kept 32px plus its 8px scrollbar gutter, so text ran 24px inside the composer on each side
+          // (960px window with the result rail: 288px of text over a 336px composer).
+          ["--chat-stream-padding" as string]: `24px clamp(8px, calc((100% - ${WORK_COMPOSER_WIDTH_PX + 32}px) / 2 + 8px), 32px)` }}
       >
       <header
         className="task-cockpit-header titlebar-drag"
@@ -6958,9 +6963,9 @@ function ChatPage() {
         style={{
           width: "min(calc(100% - 32px), 740px)",
           margin: "0 auto",
-          // Align the visible folder control with the textarea's text inset,
-          // not merely with the composer's outer border.
-          padding: "6px 0 0 18px",
+          // The folder chip starts on the composer's left edge like every box stacked under it (owner 2026-10-04:
+          // a chip 18px right of the Goal bar). Below it, the same 6px gap the stacked boxes keep.
+          padding: "6px 0",
           display: "flex",
           alignItems: "center",
           gap: 8,
@@ -6993,7 +6998,8 @@ function ChatPage() {
             onEndGoal={handleToggleGoal} nextWake={goalNextWakeOf(goalContext)}
             details={<ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} embedded />} />
         : <ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />}
-      <AgiDefectChip chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />
+      {/* Its own row: the stack stretches its children, which made the chip a full-width grey bar. */}
+      <div style={{ display: "flex" }}><AgiDefectChip chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} /></div>
       </div>
       {surfaceConflict && surfaceConflict.surfaceId === surface?.id && (
         <div role="alert" data-artifact-state-conflict="true" style={{ padding: "8px 12px", fontSize: 12, background: "var(--paper-2)", borderTop: "var(--hairline)" }}>

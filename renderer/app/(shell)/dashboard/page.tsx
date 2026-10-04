@@ -23,7 +23,8 @@ export default function DashboardPage() {
     <div className="dashboard-root rd" style={{ position: "relative", display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <div className="titlebar-drag" style={{ position: "absolute", top: 0, left: 0, right: 0, height: 38 }} />
       <div className="dashboard-scroll">
-        <div className="dashboard-shell">
+        {/* The bottom clears the help button (20px from the edge, 46px tall), which covered the last card's button. */}
+        <div className="dashboard-shell" style={{ paddingBottom: 88 }}>
           <h1 className="sr-only">{ko ? "대시보드" : "Dashboard"}</h1>
 
           <FleetSummaryStrip />

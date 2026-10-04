@@ -11,6 +11,8 @@ import { ProductModeMenu } from "./one/ProductModeMenu";
 import { AccountChip } from "./AccountChip";
 import { CreditBalanceWidget } from "./CreditBalanceWidget";
 import { UpdateBanner } from "./UpdateBanner";
+import { SidebarResizeHandle } from "./SidebarResizeHandle";
+import { useWorkSidebarWidth } from "@/lib/work-sidebar-width";
 import { navigate } from "@/lib/navigation";
 import { ipc } from "@/lib/ipc";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
@@ -79,6 +81,9 @@ export function SideNav({
   const [compactViewport, setCompactViewport] = useState(false);
   const [compactOpen, setCompactOpen] = useState(false);
   const collapsed = forceCollapsed || (compactViewport ? !compactOpen : collapsedPref);
+  const sidebar = useWorkSidebarWidth();
+  // Only the open rail on a wide window takes the shared width; collapsed (68px) and the narrow-window rail keep their CSS.
+  const resizable = !collapsed && !compactViewport;
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>({});
   const [query, setQuery] = useState("");
   const [searchFocused, setSearchFocused] = useState(false);
@@ -280,6 +285,8 @@ export function SideNav({
       data-compact={compactViewport ? "true" : "false"}
       data-compact-open={compactViewport && compactOpen ? "true" : "false"}
       data-merged={forceCollapsed ? "true" : "false"}
+      data-sidebar-resizing={sidebar.resizing ? "true" : "false"}
+      style={resizable ? { width: sidebar.width, ...(sidebar.resizing ? { transition: "none" } : {}) } : undefined}
     >
       {/* 맥 신호등 회피 + 창 드래그 */}
       <div className="sidenav-drag titlebar-drag" />
@@ -586,6 +593,7 @@ export function SideNav({
           <AccountChip />
         </div>
       </div>
+      {resizable && <SidebarResizeHandle sidebar={sidebar} />}
     </aside>
   );
 }

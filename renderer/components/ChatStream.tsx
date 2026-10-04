@@ -606,8 +606,9 @@ export function ChatStream({
       </span>
 
       <style jsx global>{`
+        /* both-edges: a gutter on the right only centred the messages 4px left of the composer below them. */
         .agentlas-chat-stream-scroll {
-          scrollbar-gutter: stable;
+          scrollbar-gutter: stable both-edges;
         }
         .agentlas-chat-empty {
           width: min(820px, 100%);

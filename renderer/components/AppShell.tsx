@@ -344,6 +344,50 @@ function BackgroundWorkPill({
   );
 }
 
+/**
+ * When the Work composer reaches under the help button (with the default left panel, a window narrower than about
+ * 1140px), the button sat on the composer's top-right corner. Then it rises above the composer and the boxes stacked
+ * on it; otherwise null keeps the fixed offset. The composer mounts after the route loads, is replaced per chat and
+ * grows while typing, so it is re-found and observed.
+ */
+function useComposerLift(active: boolean): number | null {
+  const [lift, setLift] = useState<number | null>(null);
+  useEffect(() => {
+    if (!active) { setLift(null); return; }
+    let observed: Element | null = null;
+    let frame = 0;
+    const measure = () => {
+      const composer = document.querySelector(".chat-input-shell");
+      if (composer !== observed) {
+        if (observed) observer.unobserve(observed);
+        if (composer) observer.observe(composer);
+        observed = composer;
+      }
+      if (!(composer instanceof HTMLElement)) { setLift(null); return; }
+      const rect = composer.getBoundingClientRect();
+      // The button's column: 20px from the right edge, 46px wide, 8px of air.
+      if (rect.right <= window.innerWidth - 74) { setLift(null); return; }
+      const top = Math.min(rect.top, ...['[data-chat-folder-row="true"]', '[data-work-composer-stack="true"]']
+        .map((selector) => document.querySelector(selector)?.getBoundingClientRect())
+        .filter((box): box is DOMRect => Boolean(box && box.height > 0))
+        .map((box) => box.top));
+      setLift(Math.round(window.innerHeight - top + 10));
+    };
+    const schedule = () => { cancelAnimationFrame(frame); frame = requestAnimationFrame(measure); };
+    const observer = new ResizeObserver(schedule);
+    schedule();
+    const retry = window.setInterval(schedule, 1500);
+    window.addEventListener("resize", schedule);
+    return () => {
+      cancelAnimationFrame(frame);
+      clearInterval(retry);
+      observer.disconnect();
+      window.removeEventListener("resize", schedule);
+    };
+  }, [active]);
+  return lift;
+}
+
 function GuideFab({
   avoidComposer,
   onReplayTour,
@@ -358,7 +402,7 @@ function GuideFab({
   const [bugOpen, setBugOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const bottom = avoidComposer ? 102 : 20;
+  const composerLift = useComposerLift(Boolean(avoidComposer) && !hidden);
 
   useDismissibleLayer({
     open,
@@ -394,7 +438,8 @@ function GuideFab({
       style={{
         position: "fixed",
         right: "var(--guide-fab-right, 20px)",
-        bottom: avoidComposer ? "var(--guide-fab-bottom-chat, 102px)" : "var(--guide-fab-bottom, 20px)",
+        bottom: composerLift !== null ? composerLift
+          : avoidComposer ? "var(--guide-fab-bottom-chat, 102px)" : "var(--guide-fab-bottom, 20px)",
         zIndex: 150,
       }}
     >

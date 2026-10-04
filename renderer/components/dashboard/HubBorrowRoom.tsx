@@ -201,7 +201,8 @@ export function HubBorrowRoom() {
                     </span>
                   </div>
                 ) : null}
-                <div className="hub-borrow-card-name" title={ko ? r.name : r.nameEn || r.name}>
+                {/* Room for the kind icon pinned top-right: a long name ran underneath it. */}
+                <div className="hub-borrow-card-name" style={{ paddingRight: 28 }} title={ko ? r.name : r.nameEn || r.name}>
                   {ko ? r.name : r.nameEn || r.name}
                 </div>
                 <div

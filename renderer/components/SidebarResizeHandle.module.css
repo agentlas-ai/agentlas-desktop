@@ -1,0 +1,5 @@
+/* Sits on the panel's right border. The visible line appears only on hover, focus or while dragging. */
+.handle { position: absolute; top: 0; right: -3px; bottom: 0; z-index: 60; width: 7px; cursor: col-resize; touch-action: none; }
+.handle::after { content: ""; position: absolute; top: 0; bottom: 0; left: 2px; width: 2px; background: var(--ink-muted); opacity: 0; transition: opacity 120ms ease; }
+.handle:hover::after, .handle:focus-visible::after, [data-sidebar-resizing="true"] > .handle::after { opacity: .55; }
+.handle:focus-visible { outline: none; }
