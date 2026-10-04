@@ -33,6 +33,9 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const hostRootContext = AsyncLocalStorage.snapshot();
 
 export interface OneTeamCapabilityBinding extends OneTeamCaller {
+  /** A Work task: only `tools` (Toolchain search/run/result) may be called through this capability. */
+  scope?: "toolchain-consumer";
+  tools?: readonly string[];
   capabilityId: string;
 }
 
@@ -90,6 +93,9 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
   if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
+  // The child lists only the consumer tools, but the boundary is here, not in the child.
+  if (binding.scope === "toolchain-consumer"
+    && (request.operation !== "graph" || !binding.tools?.includes(String(request.name ?? "")))) throw new Error("one-team-consumer-scope");
   switch (request.operation) {
     case "graph": return oneGraphDispatch(binding, String(request.name ?? ""),
       request.input && typeof request.input === "object" && !Array.isArray(request.input)
@@ -154,7 +160,7 @@ export function startOneTeamControlServer(): Promise<number> {
 
 /** Mint a per-config capability file (0600) that the MCP child reads. */
 export async function createOneTeamCapability(
-  input: OneTeamCaller,
+  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools">,
   configKey: string,
 ): Promise<{ path: string; binding: OneTeamCapabilityBinding }> {
   const port = await startOneTeamControlServer();
@@ -166,7 +172,8 @@ export async function createOneTeamCapability(
   if (process.platform !== "win32") fs.chmodSync(directory, 0o700);
   const target = capabilityPath(configKey, binding.capabilityId);
   const temp = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  fs.writeFileSync(temp, JSON.stringify({ schemaVersion: 1, port, token: serverToken, capabilityId: binding.capabilityId }), { flag: "wx", mode: 0o600 });
+  fs.writeFileSync(temp, JSON.stringify({ schemaVersion: 1, port, token: serverToken, capabilityId: binding.capabilityId,
+    ...(binding.tools ? { tools: [...binding.tools] } : {}) }), { flag: "wx", mode: 0o600 });
   if (process.platform !== "win32") fs.chmodSync(temp, 0o600);
   fs.renameSync(temp, target);
   return { path: target, binding };

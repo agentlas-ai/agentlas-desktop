@@ -32,7 +32,11 @@ function control() {
   if (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid()))) throw new Error("One team capability permissions are invalid.");
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (!value || value.schemaVersion !== 1 || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535 || typeof value.token !== "string" || typeof value.capabilityId !== "string") throw new Error("One team capability is invalid.");
+  if (value.tools !== undefined && (!Array.isArray(value.tools) || value.tools.length > 16 || value.tools.some((name) => typeof name !== "string"))) throw new Error("One team capability is invalid.");
   return value;
+}
+function allowedTools() {
+  try { const info = control(); return Array.isArray(info.tools) ? info.tools : null; } catch { return null; }
 }
 function request(operation, input) {
   const info = control();
@@ -66,11 +70,17 @@ const tools = [
   { name: "one_team_compose_group", annotations: act, description: "Make this exact One conversation a group with specified EXISTING active local teammates, or add them to its existing group. Use only when the owner requests a group conversation. First check one_team_list.conversation and use exact member_id values from teammates; create a missing teammate separately. Needs write or full permission. Preserves this conversation, task, goal, messages and runtime. Never removes current members or starts work. Repeating the same composition returns the same group without duplicates. Check confirmed, created, added_member_ids and owner_message; hand work separately with one_team_start_session.", inputSchema: { type: "object", properties: { members: { type: "array", minItems: 1, maxItems: 16, uniqueItems: true, items: { type: "string", minLength: 3, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$" }, description: "Exact member_id values returned by one_team_list for existing active local teammates." } }, required: ["members"], additionalProperties: false } },
 ];
 function handle(requestValue) {
-  if (requestValue.method === "initialize") return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-one-team", version: "1.0.0" } };
+  if (requestValue.method === "initialize") {
+    const consumer = allowedTools();
+    return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-one-team", version: "1.0.0" },
+      ...(consumer ? { instructions: "Saved Toolchains: before doing a request by hand that a saved automation may already do, call toolchain_search with the request. If a returned contract fits (check when_not_to_use), run it with one_graph_run using its graph_id, expected_revision and input, then answer with its result. An empty result means do the work normally." } : {}) };
+  }
   if (requestValue.method === "notifications/initialized" || requestValue.method === "ping") return requestValue.method === "ping" ? {} : undefined;
-  if (requestValue.method === "tools/list") return { tools };
+  const allowed = allowedTools();
+  if (requestValue.method === "tools/list") return { tools: allowed ? tools.filter((tool) => allowed.includes(tool.name)) : tools };
   if (requestValue.method !== "tools/call") throw new Error("Method not found");
   const name = requestValue.params && requestValue.params.name;
+  if (allowed && !allowed.includes(name)) return Promise.resolve(error("This One team tool is not available in this conversation."));
   const args = requestValue.params && requestValue.params.arguments && typeof requestValue.params.arguments === "object" ? requestValue.params.arguments : {};
   if (name === "one_team_list") return request("list", {});
   if (name === "one_team_start_session") return request("start", { member: args.member, brief: args.brief, newSession: args.new_session });

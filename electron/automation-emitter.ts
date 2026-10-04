@@ -132,6 +132,24 @@ export const ONE_GRAPH_PROTOCOL = [
   "[/Agentlas graph tools]",
 ].join("\n");
 
+/** A Work task that may use saved Toolchains but owns no graphs (electron/toolchains/consumer.ts). */
+export const TOOLCHAIN_CONSUMER_PROTOCOL = [
+  "[Agentlas saved Toolchains]",
+  "Before doing a request by hand that a saved automation may already do, call toolchain_search with the request. If a returned contract fits (check when_not_to_use), run it with one_graph_run using its graph_id, expected_revision and input, read one_graph_result if it is still running, then answer with its result. An empty search result means do the work normally.",
+  "These are the only graph tools in this task: it cannot save, inspect or change graphs.",
+  "[/Agentlas saved Toolchains]",
+].join("\n");
+
+/**
+ * The automation guidance for one turn. One's own conversation authors graphs with the One Team
+ * tools; a Work task holding only the Toolchain consumer tools is told what those are for and keeps
+ * the registration fallback; every other run gets the fallback alone.
+ */
+export function automationProtocolFor(oneTeamAttached: boolean, toolchainConsumer: boolean): string {
+  if (oneTeamAttached && !toolchainConsumer) return ONE_GRAPH_PROTOCOL;
+  return oneTeamAttached ? `${TOOLCHAIN_CONSUMER_PROTOCOL}\n\n${AUTOMATION_PROTOCOL}` : AUTOMATION_PROTOCOL;
+}
+
 // Fallback for runtimes without the native host authoring tool.
 export const AUTOMATION_PROTOCOL = [
   "## Setting up automations",

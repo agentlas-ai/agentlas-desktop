@@ -216,7 +216,7 @@ import { harvestCompactionSummaries } from "../memory/compaction-harvest";
 import { parseMemoryEvents } from "../memory/events";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
-import { AUTOMATION_PROTOCOL, ONE_GRAPH_PROTOCOL, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
+import { automationProtocolFor, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { applyFinalDisplayBackstop } from "./final-display-backstop";
 import {
@@ -3334,6 +3334,8 @@ ${effectiveUserPrompt}`;
   let toolBrokerInstalled = false;
   // config key ↔ catalog id 대응. 관문 생성이 이 블록 바깥으로 나가면서 필요해졌다.
   let mcpIncludedServers: Array<{ serverId: string; catalogId: string | null; configKey: string }> = [];
+  // One Team attached to a Work task as a Toolchain consumer: it may search and run, not author.
+  let mcpToolchainConsumer = false;
   let mcpAutoSelectionPrompt = "";
   // ★한 곳에서만 답한다(shared/runtime-mcp.ts). 예전에는 이 자리에 손으로 적은
   // 여섯 줄이 있었고, ACP 러너가 session/new.mcpServers 번역을 배운 뒤에도 그 목록은
@@ -3827,6 +3829,7 @@ ${effectiveUserPrompt}`;
         // 관문이 좁힐 이름은 config key에서 나온다(`mcp__<key>__*`). 커널은 catalog id로
         // 선언하므로, 두 이름을 다 아는 유일한 지점이 여기다 — 아래 관문 생성이 이걸 쓴다.
         mcpIncludedServers = cfg.includedServers ?? [];
+        mcpToolchainConsumer = cfg.toolchainConsumer === true;
       }
       // Browser fallback ladder: lend this run's ids and notice sink; a browser run without the browser MCP
       // attached is recorded as a typed ladder stop (one card) instead of silently using another browser.
@@ -5589,7 +5592,7 @@ ${effectiveUserPrompt}`;
     if (officeContext) {
       turnContextParts.push(officeContext);
     }
-    const lifecycleContext = mcpIncludedServers.some(server => server.catalogId === "one-team")
+    const lifecycleContext = mcpIncludedServers.some(server => server.catalogId === "one-team") && !mcpToolchainConsumer
       ? null : automationLifecycleContext(chat.id, req.automationId);
     if (lifecycleContext) {
       turnContextParts.push(lifecycleContext);
@@ -5605,7 +5608,7 @@ ${effectiveUserPrompt}`;
     // Fresh/sessionless requests already merge this into the system prompt;
     // resumed sessions receive it with their turn. Do not inject it twice.
     if (executionContext?.source !== "science") {
-      const automationProtocol = mcpIncludedServers.some(server => server.catalogId === "one-team") ? ONE_GRAPH_PROTOCOL : AUTOMATION_PROTOCOL;
+      const automationProtocol = automationProtocolFor(mcpIncludedServers.some(server => server.catalogId === "one-team"), mcpToolchainConsumer);
       turnContextParts.push(automationProtocol); stableTurnContextParts.push(automationProtocol);
     }
   }

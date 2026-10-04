@@ -24,6 +24,7 @@ import { toolchainInputProblems } from "../../shared/toolchain";
 import { searchToolchains } from "../toolchains/search";
 import { callableContractFor, contractManifest, currentCallableContracts, draftInterface, exposeAutomation, interfaceIsStale, recordToolchainReturned, recordToolchainRun } from "../toolchains/interface";
 import { readToolchainState } from "../toolchains/store";
+import { TOOLCHAIN_CONSUMER_TOOLS } from "../toolchains/consumer";
 
 /** How long one toolchain_publish call waits for its test before answering "testing" (runtime tool timeouts are ~60 s). */
 const PUBLISH_WAIT_MS = (() => {
@@ -33,7 +34,17 @@ const PUBLISH_WAIT_MS = (() => {
 /** An unchanged definition that failed its test this recently is not re-tested on the next call. */
 const PUBLISH_RETEST_AFTER_MS = 10 * 60_000;
 
+/** A Work task's capability (team-control-server scope "toolchain-consumer"). */
+function isToolchainConsumer(caller: OneTeamCaller): boolean {
+  return (caller as { scope?: unknown }).scope === "toolchain-consumer";
+}
 function owner(caller: OneTeamCaller) {
+  if (isToolchainConsumer(caller)) {
+    // The Work task itself is the requester; it never stands in for One's conversation.
+    const chat = caller.chatId ? getChat(caller.chatId) : null;
+    if (!chat || chat.archivedAt || chat.originSurface === "one") throw new Error("one_graph_owner_missing");
+    return chat;
+  }
   const chatId = oneTeamDispatchOwnerChat(caller.chatId);
   const chat = chatId ? getChat(chatId) : null;
   if (!chat) throw new Error("one_graph_owner_missing");
@@ -44,6 +55,8 @@ function writable(caller: OneTeamCaller): void {
   if (owner(caller).archivedAt) throw new Error("one_graph_owner_archived");
 }
 function scoped(caller: OneTeamCaller): Automation[] {
+  // A Work task owns no graphs: everything it runs is reached as a callable Toolchain.
+  if (isToolchainConsumer(caller)) return [];
   const chat = owner(caller);
   return listAutomations().filter(a => a.monitor?.originChatId === chat.id);
 }
@@ -77,6 +90,18 @@ function exactOrRequested(caller: OneTeamCaller, id: unknown, eventId: unknown):
 }
 function fresh(a: Automation, expected: unknown): void {
   if (typeof expected !== "string" || expected !== automationDefinitionDigest(a)) throw new Error("one_graph_definition_changed");
+}
+/**
+ * toolchain_publish after a test run: the first run pins a runtime (pinAutomationRuntimeIfUnset),
+ * which changes the definition digest although nothing One saved changed. Measured 2026-10-04:
+ * save -> one_graph_run -> toolchain_publish with the save receipt's revision was refused as
+ * one_graph_definition_changed. The publish test never runs the graph (a fresh model only finds
+ * and picks it), so the revision One saved still stands when the pin is the only difference.
+ */
+function freshForPublish(a: Automation, expected: unknown): void {
+  if (typeof expected === "string" && a.runtimeSelection
+    && expected === automationDefinitionDigest({ ...a, runtimeSelection: undefined })) return;
+  fresh(a, expected);
 }
 function editable(a: Automation): void {
   if (hasDurableActiveAutomationExecution(a.id) || hasGraphLoginWait(a.id)
@@ -177,6 +202,7 @@ async function waitForResult(caller: OneTeamCaller, a: Automation, input: Record
 }
 
 export async function oneGraphDispatch(caller: OneTeamCaller, name: string, input: Record<string, unknown>): Promise<unknown> {
+  if (isToolchainConsumer(caller) && !TOOLCHAIN_CONSUMER_TOOLS.includes(name)) throw new Error("one_graph_consumer_scope");
   const tool = ONE_GRAPH_TOOLS.find(t => t.name === name);
   if (!tool) throw new Error("one_graph_unknown_operation");
   const problems = graphAuthoringShapeProblems(input, tool.inputSchema);
@@ -201,7 +227,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     // not One's say-so. Owner withdrawal and the Toolchains screen keep the final word.
     writable(caller);
     const a = exact(caller, input.graph_id);
-    fresh(a, input.expected_revision);
+    freshForPublish(a, input.expected_revision);
     if (!a.graph?.nodes.length) throw new Error("toolchain_graph_required");
     const base = { schemaVersion: "agentlas.toolchain-publish.v1", graph_id: a.id, name: a.name };
     const testSummary = (test: NonNullable<ReturnType<typeof readToolchainState>["interface"]>["coldStart"]) => test

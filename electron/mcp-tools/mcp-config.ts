@@ -161,6 +161,8 @@ export interface McpConfigResult {
   includedServerIds: string[];
   /** Value-free runtime attribution map used only for one-server startup recovery. */
   includedServers?: Array<{ serverId: string; catalogId: string | null; configKey: string }>;
+  /** One Team is attached as a Toolchain consumer only (a Work task): search, run, result. */
+  toolchainConsumer?: true;
   /** Remove this run's Main capability file and revoke its in-memory binding. */
   workspacePreviewCapabilityCleanup?: () => void;
   /** Idempotently revoke only this preparation's transports and owned file. */
@@ -811,6 +813,13 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     : false;
 
   const inboundMailRun = isAgentMailAutoRunChat(callerChatId);
+  // A Work task (not One's own conversation) gets One Team only as a Toolchain consumer: search,
+  // run callable Toolchains, read its own results (electron/toolchains/consumer.ts). Loaded lazily —
+  // the toolchain module reaches the judgment runners, which reach this file.
+  const toolchainConsumer = Boolean(callerChatId) && serializedServers.some((s) => s.catalogId === "one-team")
+    && !oneTeamDispatchAllowedFor(callerChatId)
+    ? (await import("../toolchains/consumer")).toolchainConsumerAllowedFor(callerChatId)
+    : false;
 
   try {
   for (const s of serializedServers) {
@@ -844,9 +853,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
     if (s.catalogId === "one-team" && (!callerChatId || opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true
       || opts?.toolGate?.oneTeamReport === true
-      || !oneTeamDispatchAllowedFor(callerChatId) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
+      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
       // One's own conversation only (depth 1): a teammate chat, a session One
-      // opened, Work chats and dry runs never see the team dispatch tools.
+      // opened and dry runs never see the team dispatch tools. A Work task sees
+      // the Toolchain consumer subset only (toolchainConsumer above).
       continue;
     }
     if (s.catalogId === "workspace-preview" && !isAuthenticWorkspacePreviewMcpLaunch(s.command, s.args ?? [])) {
@@ -984,7 +994,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
           const capability = await createOneTeamCapability(
-            { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read" },
+            { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read",
+              ...(toolchainConsumer ? { scope: "toolchain-consumer" as const,
+                tools: (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS } : {}) },
             capabilityConfigKey,
           );
           oneTeamCapabilityCleanup.push(() => removeOneTeamCapability(capabilityConfigKey, capability.binding.capabilityId));
@@ -1320,6 +1332,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
   }
   return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers, cleanup,
+    ...(toolchainConsumer && includedServers.some((server) => server.catalogId === "one-team") ? { toolchainConsumer: true as const } : {}),
     ...(workspacePreviewCapabilityCleanup ? { workspacePreviewCapabilityCleanup } : {}),
     ...(nativeBrowserBound ? { nativeBrowserBound: true as const } : {}), ...(nativeComputerUseBound ? { nativeComputerUseBound: true as const } : {}) };
   } catch (error) { cleanup(); throw error; }

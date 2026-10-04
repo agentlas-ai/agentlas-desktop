@@ -22,6 +22,7 @@ import { getDb } from "../store/db";
 import { callConnectedModelDetailed, configuredOrchestratorJudgmentPolicy } from "../system-agents/judgment";
 import { isVerifiedJudgmentCapability } from "../system-agents/judgment-capability";
 import { detectRuntimes } from "../runtime/detect";
+import { runtimeCooldown } from "../runtime/runtime-cooldown";
 import { selectionForRuntime } from "../../shared/runtime-selection";
 import { listToolchainStates, mutateToolchainState, readToolchainState, ToolchainStateConflict } from "./store";
 import { searchToolchains } from "./search";
@@ -208,17 +209,28 @@ async function callIsolatedModel(systemPrompt: string, input: string, signal?: A
   const policy = configuredOrchestratorJudgmentPolicy();
   if (policy) {
     const pooled = await callConnectedModelDetailed({ ...base, selectionPolicy: policy });
-    if (pooled.text) return { text: pooled.text, model: pooled.runtimeReceipt ? JSON.stringify(pooled.runtimeReceipt).slice(0, 120) : "judgment-pool", reason: null };
+    const receipt = pooled.runtimeReceipt;
+    if (pooled.text) return { text: pooled.text, reason: null,
+      model: receipt?.selection ? `${[receipt.selection.kind, receipt.selection.model].filter(Boolean).join(":")} via ${receipt.route}` : "judgment-pool" };
   }
+  // Every verified tool-free runtime is a candidate, not just the first one. A runtime known to be in
+  // a quota/auth cooldown goes last (it is still tried — the cooldown may have just ended), and one
+  // that fails hands over to the next. Independent review 2026-10-04: the fallback used to pick one
+  // runtime and stop, so an exhausted first choice failed the test while another model was free.
   const isolated = (await detectRuntimes()).filter((runtime) => !runtime.signInRequired && isVerifiedJudgmentCapability(runtime))
-    .sort((left, right) => Number(right.active) - Number(left.active))[0];
-  if (!isolated) return { text: null, model: null, reason: "no_isolated_runtime" };
-  const selection = selectionForRuntime(isolated);
-  const direct = await callConnectedModelDetailed({ ...base, runtimeSelection: selection });
-  const model = [selection.kind, selection.model].filter(Boolean).join(":");
-  return direct.text
-    ? { text: direct.text, model, reason: null }
-    : { text: null, model, reason: String(direct.failure?.message || direct.failure?.kind || "isolated_runtime_failed").slice(0, 80) };
+    .sort((left, right) => Number(Boolean(runtimeCooldown(left))) - Number(Boolean(runtimeCooldown(right)))
+      || Number(right.active) - Number(left.active));
+  if (!isolated.length) return { text: null, model: null, reason: "no_isolated_runtime" };
+  let last: { model: string; reason: string } | null = null;
+  for (const runtime of isolated) {
+    if (signal?.aborted) break;
+    const selection = selectionForRuntime(runtime);
+    const model = [selection.kind, selection.model].filter(Boolean).join(":");
+    const direct = await callConnectedModelDetailed({ ...base, runtimeSelection: selection });
+    if (direct.text) return { text: direct.text, model, reason: null };
+    last = { model, reason: String(direct.failure?.message || direct.failure?.kind || "isolated_runtime_failed").slice(0, 80) };
+  }
+  return { text: null, model: last?.model ?? null, reason: last?.reason ?? "isolated_runtime_failed" };
 }
 
 function parseJsonObject(text: string | null): Record<string, unknown> | null {
