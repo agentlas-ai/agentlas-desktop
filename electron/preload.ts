@@ -977,6 +977,15 @@ const api: AgentlasIpc = {
   oneRequestIntent: {
     resolve: (prompt, runtimeSelection) => ipcRenderer.invoke("oneRequestIntent:resolve", prompt, runtimeSelection),
   },
+  oneSupervisor: {
+    snapshot: () => ipcRenderer.invoke("oneSupervisor:snapshot"),
+    send: (input) => ipcRenderer.invoke("oneSupervisor:send", input),
+    startWork: (input) => ipcRenderer.invoke("oneSupervisor:startWork", input),
+    startScience: (input) => ipcRenderer.invoke("oneSupervisor:startScience", input),
+    control: (input) => ipcRenderer.invoke("oneSupervisor:control", input),
+    stopReply: (input) => ipcRenderer.invoke("oneSupervisor:stopReply", input),
+    appearance: (input) => ipcRenderer.invoke("oneSupervisor:appearance", input),
+  },
   oneTeamPreflight: {
     prepare: (input) => ipcRenderer.invoke("oneTeamPreflight:prepare", input),
     getForChat: (chatId) => ipcRenderer.invoke("oneTeamPreflight:getForChat", chatId),

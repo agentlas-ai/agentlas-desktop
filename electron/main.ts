@@ -1,3 +1,4 @@
+import { configureOneSupervisorScience } from "./one/supervisor";
 import { reviewScienceAnalysisPlanWithFreshness } from "agentlas-science";
 // Electron 진입점.
 // dev:  ELECTRON_START_URL = http://localhost:3100 (Next.js dev server)
@@ -2283,7 +2284,10 @@ app.whenReady().then(async () => {
    */
   configureScienceRuntimeRole("data-client");
   installDesktopScienceHost();
-  if (!developmentEffectsSuppressed()) scienceDaemonClient = createScienceDaemonClient(desktopDaemonClientOptions());
+  if (!developmentEffectsSuppressed()) {
+    scienceDaemonClient = createScienceDaemonClient(desktopDaemonClientOptions());
+    configureOneSupervisorScience(scienceDaemonClient);
+  }
   // A native update target must reconcile its durable install journal before
   // optional keychain/session restoration. On a locked or headless machine
   // that restoration can be slow, while the update handoff is already

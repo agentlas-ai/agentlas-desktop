@@ -269,6 +269,7 @@ import {
   type OneActivityState,
 } from "@/lib/one-activity";
 import styles from "./OneShell.module.css";
+import { PersonalOneWorkspace } from "./PersonalOneWorkspace";
 import panelMenu from "@/components/PanelPopover.module.css";
 
 // IPC 결과는 호출마다 새 객체다. 내용이 같으면 이전 상태 참조를 돌려줘 React가
@@ -1267,6 +1268,11 @@ function readLastOneConversation(): string | null {
 }
 
 export function OneShell() {
+  const params = useSearchParams();
+  return params.get("personal") === "1" ? <PersonalOneWorkspace /> : <OneSessionsShell />;
+}
+
+function OneSessionsShell() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const selectedTaskId = searchParams.get("task");
@@ -7771,19 +7777,20 @@ export function OneShell() {
               }}
             ><IconSidebar size={16} /></button>
           </div>
+          <button type="button" data-personal-one-entry="true" className={styles.railPrimaryButton} style={{display:"flex",alignItems:"center",gap:10,minHeight:52}} onClick={() => router.push("/one?personal=1")}><OneAgentPortrait status="quiet" label={oneDisplayName} tone={oneAvatarTone} size="small"/><span style={{display:"flex",flexDirection:"column",gap:2,minWidth:0,textAlign:"left",fontSize:12,color:"var(--ink)"}}><strong style={{fontWeight:600}}>{oneDisplayName}</strong><small style={{fontSize:11,color:"var(--muted-deep)"}}>{appLocale === "ko" ? "개인 에이전트" : "Personal agent"}</small></span></button>
           {railMode !== "settings" ? <>
             {/* 대화 목록은 하루에 수십 번 오가는 곳이라 화면 뒤로 숨기지 않는다. 레일이
                 조직도로 차 있으므로 탭으로 나누되, 나가지 않고 한 화면 안에 남긴다. */}
             <div className={styles.railTabs} role="tablist" aria-label={appLocale === "ko" ? "레일 보기" : "Rail view"}>
-              <button type="button" role="tab" aria-selected={railMode === "organisation"} data-active={railMode === "organisation" ? "true" : "false"} onClick={() => setRailMode("organisation")}>{appLocale === "ko" ? "조직" : "Team"}</button>
+              <button type="button" role="tab" aria-selected={railMode === "organisation"} data-active={railMode === "organisation" ? "true" : "false"} onClick={() => setRailMode("organisation")}>Agents</button>
               <button
                 type="button"
                 role="tab"
                 aria-selected={railMode === "sessions"}
-                aria-label={hasOtherSessionAttention ? (appLocale === "ko" ? "세션 · 다른 세션에 알림 있음" : "Sessions · another session needs attention") : undefined}
+                aria-label={hasOtherSessionAttention ? "Session · another session needs attention" : undefined}
                 data-active={railMode === "sessions" ? "true" : "false"}
                 onClick={() => setRailMode("sessions")}
-              ><span className={styles.railTabLabel}>{appLocale === "ko" ? "세션" : "Sessions"}{hasOtherSessionAttention && <span className={styles.railTabAlertDot} aria-hidden="true" />}</span></button>
+              ><span className={styles.railTabLabel}>Session{hasOtherSessionAttention && <span className={styles.railTabAlertDot} aria-hidden="true" />}</span></button>
               {mailTabVisible && <button
                 type="button"
                 role="tab"
@@ -7792,7 +7799,7 @@ export function OneShell() {
                 data-active={railMode === "mail" ? "true" : "false"}
                 data-one-mail-tab={mail.available ? "active" : "setup"}
                 onClick={() => setRailMode("mail")}
-              ><span className={styles.railTabLabel}>{tFor(appLocale, "one.mail.tab")}{mail.unread && mail.unread.inbox > 0 && <span className={styles.railTabCount} aria-hidden="true">{mail.unread.inbox > 99 ? "99+" : mail.unread.inbox}</span>}</span></button>}
+              ><span className={styles.railTabLabel}>Mail{mail.unread && mail.unread.inbox > 0 && <span className={styles.railTabCount} aria-hidden="true">{mail.unread.inbox > 99 ? "99+" : mail.unread.inbox}</span>}</span></button>}
             </div>
             {railMode === "mail" ? (
               <OneMailRail mail={mail} locale={appLocale} />

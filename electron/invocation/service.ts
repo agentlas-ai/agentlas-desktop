@@ -162,6 +162,8 @@ import {
   tryRecordDurableOneSurfaceResult,
 } from "../store/one-surface-results";
 import { getOneProfile } from "../store/one-profile";
+import { personalSupervisorConversationInDb } from "../one/supervisor-store";
+import { personalSupervisorGuidance } from "../../shared/one-supervisor-context";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 import {
   buildApprovedOneMemoryContext,
@@ -1682,7 +1684,9 @@ export class InvocationService {
         };
       }
     }
-    const judgedTaskIntent = requestedOneMode
+    const personalSupervisor = requestedOneMode && personalSupervisorConversationInDb(getDb(), getOneProfile().oneId, chat.id);
+    if (personalSupervisor) oneProfileContext = [oneProfileContext, personalSupervisorGuidance(getOneProfile().displayName)].filter(Boolean).join("\n\n");
+    const judgedTaskIntent = requestedOneMode && !personalSupervisor
       && invocationRequest.taskIntent === "conversation"
       && classifyOneRequestIntent(invocationRequest.userPrompt,
         (prompt) => judgedOneRequestIntent(prompt, invocationRequest.runtimeSelection, Boolean(boundGoal))) === "task";

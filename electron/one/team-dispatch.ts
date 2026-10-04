@@ -761,12 +761,22 @@ function inviteIntoGroup(chatId: string, member: OneOrgMember): boolean {
   return true;
 }
 
+/** Only the persistent private room is protected; ordinary One group participation is unchanged. */
+function assertGroupMutationAllowed(chatId: string): void {
+  const db = getDb();
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get()
+    && db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE chat_id=?").get(chatId)) {
+    throw new Error("one-personal-conversation-is-private: Open Organization and use a separate group conversation; the personal conversation is unchanged.");
+  }
+}
+
 function memberView(member: OneOrgMember) {
   return { member_id: member.id, name: member.displayName, name_en: member.nameEn };
 }
 
 export function oneTeamInvite(caller: OneTeamCaller, input: { member?: unknown }) {
   const chatId = assertCaller(caller.chatId);
+  assertGroupMutationAllowed(chatId);
   assertRosterPermission(caller);
   const member = resolveOneTeamMember(typeof input.member === "string" ? input.member : "");
   const joined = inviteIntoGroup(chatId, member);
@@ -796,6 +806,7 @@ function isOneTeamComposeGroupInput(input: unknown): input is OneTeamComposeGrou
 
 export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
   const chatId = assertCaller(caller.chatId);
+  assertGroupMutationAllowed(chatId);
   assertRosterPermission(caller);
   if (caller.permission !== "write" && caller.permission !== "full") throw new Error("one-team-permission-required");
   if (!isOneTeamComposeGroupInput(input)) {

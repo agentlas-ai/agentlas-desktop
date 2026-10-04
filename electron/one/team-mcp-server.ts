@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { gzipSync, gunzipSync } from "node:zlib";
 import { ONE_GRAPH_TOOLS, ONE_GRAPH_TOOL_NAMES } from "../../shared/graph-authoring";
+import { ONE_SUPERVISOR_TOOLS, ONE_SUPERVISOR_TOOL_NAMES } from "../../shared/one-supervisor-tools";
 
 // Built-in inline MCP server: One starts and steers a teammate's own session.
 // The child holds no authority — each call is forwarded to Main's loopback
@@ -17,6 +18,7 @@ export const AGENTLAS_ONE_TEAM_TOOL_NAMES = [
   "one_team_invite",
   "one_team_compose_group",
   ...ONE_GRAPH_TOOL_NAMES,
+  ...ONE_SUPERVISOR_TOOL_NAMES,
 ] as const;
 
 const SOURCE = String.raw`"use strict";
@@ -69,6 +71,7 @@ const tools = [
   { name: "one_team_invite", annotations: act, description: "Invite an EXISTING teammate (see one_team_list) into this group chat. Use when the owner asks you to invite/bring/add a teammate to this group. It needs write or full permission and this conversation must be a group chat. A refusal (not a group chat, group full, unknown teammate) says exactly why and that the group is unchanged.", inputSchema: { type: "object", properties: { member: { type: "string", minLength: 1, maxLength: 200, description: "Teammate name or member id (see one_team_list)." } }, required: ["member"], additionalProperties: false } },
   { name: "one_team_compose_group", annotations: act, description: "Make this exact One conversation a group with specified EXISTING active local teammates, or add them to its existing group. Use only when the owner requests a group conversation. First check one_team_list.conversation and use exact member_id values from teammates; create a missing teammate separately. Needs write or full permission. Preserves this conversation, task, goal, messages and runtime. Never removes current members or starts work. Repeating the same composition returns the same group without duplicates. Check confirmed, created, added_member_ids and owner_message; hand work separately with one_team_start_session.", inputSchema: { type: "object", properties: { members: { type: "array", minItems: 1, maxItems: 16, uniqueItems: true, items: { type: "string", minLength: 3, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$" }, description: "Exact member_id values returned by one_team_list for existing active local teammates." } }, required: ["members"], additionalProperties: false } },
 ];
+tools.push(...${JSON.stringify(ONE_SUPERVISOR_TOOLS)});
 function handle(requestValue) {
   if (requestValue.method === "initialize") {
     const consumer = allowedTools();
@@ -89,6 +92,7 @@ function handle(requestValue) {
   if (name === "one_team_create_member") return request("create", { name: args.name, role: args.role, personality: args.personality, invite: args.invite });
   if (name === "one_team_invite") return request("invite", { member: args.member });
   if (name === "one_team_compose_group") return request("compose_group", { members: args.members });
+  if (${JSON.stringify(ONE_SUPERVISOR_TOOL_NAMES)}.includes(name)) return request("supervisor", { name, input: args });
   if (${JSON.stringify(ONE_GRAPH_TOOL_NAMES)}.includes(name)) return request("graph", { name, input: args });
   return Promise.resolve(error("Unknown One team tool."));
 }

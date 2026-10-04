@@ -1,4 +1,6 @@
 import { MobileGoalControl, type MobileGoalControlServices } from "./goal-control";
+import { oneSupervisor } from "../one/supervisor";
+import { ONE_SUPERVISOR_SCHEMA, type SupervisorSendInput, type SupervisorWorkInput, type SupervisorScienceInput, type SupervisorControlInput, type SupervisorCommandReceipt } from "../../shared/one-supervisor";
 import { MOBILE_GOAL_CONTROL_CAPABILITY, isMobileGoalControlMethod } from "../../shared/mobile-goal-control";
 import { onGoalControlChange } from "../goal-control-events";
 import { projectOneDecisionOwnerAnswerV4, validateOneDecisionOwnerAnswerV4, type OneDecisionOwnerAnswerV4Binding } from "./one-decision-owner-answer";
@@ -828,6 +830,9 @@ function asJsonValue(value: unknown, label: string): MobileBridgeJsonValue {
 
 function boundedRedactedText(value: string, maxBytes: number): string {
   return sanitizeMobileBridgeText(value, maxBytes);
+}
+function supervisorReceiptValue(receipt:SupervisorCommandReceipt,label:string):MobileBridgeJsonValue {
+  return asJsonValue({...receipt,reason:receipt.reason ? boundedRedactedText(receipt.reason,500) : null},label);
 }
 
 /**
@@ -2062,6 +2067,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
   capabilities(): MobileBridgeJsonValue {
     return {
+      oneSupervisorV1: ONE_SUPERVISOR_SCHEMA,
       visualSessionV2: this.visualSessions.capability(),
       ...(this.goalControl ? { goalControlV1: MOBILE_GOAL_CONTROL_CAPABILITY } : {}),
     };
@@ -2502,6 +2508,33 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         noParams(request);
         return asJsonValue((await this.projectSnapshot()).agents, request.method);
       }
+      case "one.supervisor.snapshot": {
+        noParams(request);
+        const snapshot = await oneSupervisor().snapshot();
+        return asJsonValue({...snapshot,
+          displayName:boundedRedactedText(snapshot.displayName,240),
+          scienceError:snapshot.scienceError ? "science_observation_unavailable" : null,
+          scienceProjects:snapshot.scienceProjects.map(project=>({...project,title:boundedRedactedText(project.title,1_000)})),
+          messages:snapshot.messages.map(message=>({id:message.id,role:message.role,text:boundedRedactedText(message.text,16_000),createdAt:message.createdAt})),
+          tasks:snapshot.tasks.map(task=>({...task,title:boundedRedactedText(task.title,1_000),result:task.result ? boundedRedactedText(task.result,24_000) : null})),
+          requests:snapshot.requests.map(receipt=>({...receipt,reason:receipt.reason ? boundedRedactedText(receipt.reason,500) : null})),
+          turns:(snapshot.turns ?? []).map(turn=>({...turn,activity:turn.activity.map(item=>({...item,label:boundedRedactedText(item.label,240),...(item.summary ? {summary:boundedRedactedText(item.summary,2_000)} : {})}))})),
+          delegations:(snapshot.delegations ?? []).map(item=>({...item,title:boundedRedactedText(item.title,240)})),
+          ...(snapshot.legacyHistory?{legacyHistory:{...snapshot.legacyHistory,linked:snapshot.legacyHistory.linked.map(source=>({...source,title:boundedRedactedText(source.title,1_000)}))}}:{}),
+        },request.method);
+      }
+      case "one.supervisor.send":
+        return supervisorReceiptValue(oneSupervisor().send(guardedParams(request,["commandId","text","runtimeSelection"]) as unknown as SupervisorSendInput),request.method);
+      case "one.supervisor.startWork":
+        return supervisorReceiptValue(oneSupervisor().startWork(guardedParams(request,["commandId","text","projectId","permissions","runtimeSelection"]) as unknown as SupervisorWorkInput),request.method);
+      case "one.supervisor.startScience":
+        return supervisorReceiptValue(await oneSupervisor().startScience(guardedParams(request,["commandId","text","projectId"]) as unknown as SupervisorScienceInput),request.method);
+      case "one.supervisor.control":
+        return supervisorReceiptValue(await oneSupervisor().control(guardedParams(request,["commandId","taskId","expectedVersion","action","text"]) as unknown as SupervisorControlInput),request.method);
+      case "one.supervisor.stopReply":
+        return supervisorReceiptValue(oneSupervisor().stopReply(guardedParams(request,["commandId","runId"]) as unknown as {commandId:string;runId:string}),request.method);
+      case "one.supervisor.appearance":
+        return supervisorReceiptValue(oneSupervisor().appearance(guardedParams(request,['commandId','oneId','expectedVersion','displayName','bubbleColor']) as unknown as Parameters<ReturnType<typeof oneSupervisor>['appearance']>[0]),request.method);
       case "one.org.get": {
         noParams(request);
         return asJsonValue(getOneOrgState(), request.method);

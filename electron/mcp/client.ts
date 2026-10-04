@@ -114,6 +114,7 @@ import { getChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapsho
 import { goalDeadlineAt } from "../long-run/goal-deadline";
 import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
 import { getDb } from "../store/db";
+import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { findCanonicalTaskForChat } from "../store/tasks";
@@ -2274,9 +2275,10 @@ async function runMcpInvocationInContext(
   // graph checkpoint, node variables, and the current node prompt. Replaying
   // the automation's durable chat here only injects stale recovery prose and
   // can make a model change rebuild an enormous, unrelated transcript.
+  const excludedSupervisorInputs = supervisorExcludedHistoryMessages(getDb(), chat.id, req.runId);
   const history = req.agentAppMode || executionContext?.source === "automation" || scienceRecovery
     ? []
-    : listChatMessages(chat.id, 80);
+    : listChatMessages(chat.id, 80).filter(message => !excludedSupervisorInputs.has(message.id));
   const priorHistory = history;
   const hadPriorConversationContext = scienceRecovery || req.agentAppMode || isAliveControllerRun
     ? false
@@ -2284,8 +2286,10 @@ async function runMcpInvocationInContext(
   // Group, firm, borrowed-task-force, and Stormbreaker branches return before
   // the ordinary single-run persistence point. Keep the visible request durable
   // exactly once regardless of which executable orchestrator owns it.
-  let userMessagePersisted = false;
-  let persistedUserMessageId: string | null = null;
+  // Personal ingress already committed this exact human message with its ACK.
+  // Reuse that binding instead of appending a second copy during dispatch.
+  let persistedUserMessageId: string | null = supervisorIngressMessage(getDb(), chat.id, req.runId);
+  let userMessagePersisted = persistedUserMessageId !== null;
   // A product-authored continuation is not the person's turn. It stays durable
   // so the next turn keeps the context, but it is written as a system turn:
   // replaying the conversation must never attribute our wording to the user,
@@ -3768,6 +3772,7 @@ ${effectiveUserPrompt}`;
       }
       mcpPrepStage = "config-build";
       const cfg = await buildMcpConfigFile({
+        supervisorReplyRunId: req.runId,
         // Graph nodes can share a runId. Every preparation, including doctor
         // and unattended runs, needs its own sealed file and launch lifetime.
         configKey: `invocation-${randomUUID()}`,

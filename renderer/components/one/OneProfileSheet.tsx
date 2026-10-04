@@ -16,6 +16,7 @@ import type {
   OneProfile,
 } from "@/lib/types";
 import { OneBottomSheet } from "./OneBottomSheet";
+import { ONE_BUBBLE_COLORS, type OneBubbleColor } from "@shared/one-profile";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneProfileSheet.module.css";
 
@@ -70,6 +71,7 @@ export function OneProfileSheet({
   const hydratedVersionRef = useRef<number | null>(null);
   const [displayName, setDisplayName] = useState(profile?.displayName ?? "One");
   const [role, setRole] = useState(profile?.role ?? "Agentlas One");
+  const [bubbleColor,setBubbleColor]=useState<OneBubbleColor>(profile?.bubbleColor ?? 'blue');
   const [profileContext, setProfileContext] = useState(profile?.profileContext ?? "");
   const [newContent, setNewContent] = useState("");
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -83,6 +85,7 @@ export function OneProfileSheet({
     hydratedVersionRef.current = profile.version;
     setDisplayName(profile.displayName);
     setRole(profile.role);
+    setBubbleColor(profile.bubbleColor ?? 'blue');
     setProfileContext(profile.profileContext);
     if (editingId && !profile.operatingPrinciples.some((item) => item.id === editingId)) {
       setEditingId(null);
@@ -134,7 +137,7 @@ export function OneProfileSheet({
     await mutate(
       () => api.oneProfile.update({
         expectedVersion: profile.version,
-        patch: { displayName, role, profileContext },
+        patch: { displayName, role, profileContext, bubbleColor },
       }),
       tFor(locale, "one.prof.msg.profile_saved"),
     );
@@ -235,7 +238,7 @@ export function OneProfileSheet({
       onClose={onClose}
       closeLabel={tFor(locale, "one.prof.close_aria")}
       ariaLabelledBy="one-profile-title"
-      size="wide"
+      size="compact"
       closeOnBackdrop={!busy}
       closeOnEscape={!busy}
       closeDisabled={busy}
@@ -266,6 +269,12 @@ export function OneProfileSheet({
               <label>
                 <span>{tFor(locale, "one.prof.field.role")}</span>
                 <input value={role} onChange={(event) => setRole(event.target.value)} maxLength={120} required disabled={busy} />
+              </label>
+              <label>
+                <span>{locale==='ko'?'말풍선 색':'Bubble color'}</span>
+                <select value={bubbleColor} onChange={event=>setBubbleColor(event.target.value as OneBubbleColor)} disabled={busy}>
+                  {Object.keys(ONE_BUBBLE_COLORS).map(color=><option key={color} value={color}>{color}</option>)}
+                </select>
               </label>
               <label>
                 <span>{tFor(locale, "one.prof.field.context")}</span>

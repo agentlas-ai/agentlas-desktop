@@ -33,6 +33,8 @@ const MAX_REQUEST_BYTES = 64 * 1024;
 const hostRootContext = AsyncLocalStorage.snapshot();
 
 export interface OneTeamCapabilityBinding extends OneTeamCaller {
+  /** Exact Main invocation; optional for legacy capabilities, never supplied by the MCP child. */
+  supervisorReplyRunId?: string;
   /** A Work task: only `tools` (Toolchain search/run/result) may be called through this capability. */
   scope?: "toolchain-consumer";
   tools?: readonly string[];
@@ -93,6 +95,27 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
   if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
+  if (request.operation === "supervisor") {
+    if (binding.scope === "toolchain-consumer") throw new Error("one-team-consumer-scope");
+    const {isPersonalSupervisorConversation,oneSupervisor} = require("./supervisor") as typeof import("./supervisor");
+    if (!binding.chatId || !isPersonalSupervisorConversation(binding.chatId)) throw new Error("supervisor_personal_conversation_required");
+    const input = request.input && typeof request.input === "object" && !Array.isArray(request.input) ? request.input as Record<string, unknown> : {};
+    const service = oneSupervisor();
+    service.assertConversation(binding.chatId);
+    switch (request.name) {
+      case "one_supervisor_status": {
+        const snapshot = await service.snapshot();
+        return { one_id: snapshot.oneId, executor: snapshot.executor, observed_at: snapshot.observedAt, science_error: snapshot.scienceError,
+          science_projects:snapshot.scienceProjects,
+          tasks: snapshot.tasks.filter(task => !input.task_id || task.taskId === input.task_id).map(task=>input.task_id ? task : {...task,result:null}) };
+      }
+      case "one_supervisor_start_work": return service.startWork({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),
+        ...(input.project_id ? {projectId:String(input.project_id)} : {}),permissions:binding.permission},binding.supervisorReplyRunId);
+      case "one_supervisor_start_science": return service.startScience({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),projectId:String(input.project_id ?? "")},binding.supervisorReplyRunId);
+      case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
+      default: throw new Error("supervisor_operation_unknown");
+    }
+  }
   // The child lists only the consumer tools, but the boundary is here, not in the child.
   if (binding.scope === "toolchain-consumer"
     && (request.operation !== "graph" || !binding.tools?.includes(String(request.name ?? "")))) throw new Error("one-team-consumer-scope");
@@ -160,7 +183,7 @@ export function startOneTeamControlServer(): Promise<number> {
 
 /** Mint a per-config capability file (0600) that the MCP child reads. */
 export async function createOneTeamCapability(
-  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools">,
+  input: OneTeamCaller & Pick<OneTeamCapabilityBinding, "scope" | "tools" | "supervisorReplyRunId">,
   configKey: string,
 ): Promise<{ path: string; binding: OneTeamCapabilityBinding }> {
   const port = await startOneTeamControlServer();

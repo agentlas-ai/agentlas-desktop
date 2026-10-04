@@ -32,6 +32,13 @@ type Row = {
 
 const MAX_MEMBERS = 16;
 
+function assertGroupRoomAvailable(db: ReturnType<typeof getDb>, chatId: string): void {
+  if (db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get()
+    && db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE chat_id=?").get(chatId)) {
+    throw new Error("one-personal-conversation-is-private");
+  }
+}
+
 function assertId(value: unknown, label: string): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$/.test(value)) {
     throw new Error(`${label} is invalid.`);
@@ -260,6 +267,7 @@ function ensureOneTaskforceForChat(input: { chatId: string; memberAgentIds: stri
   const db = getDb();
   if (!db.inTransaction) throw new Error("one_group_transaction_required");
   const chatId = assertId(input.chatId, "chatId");
+  assertGroupRoomAvailable(db, chatId);
   const chat = db.prepare("SELECT title, origin_surface, archived_at, seat_id FROM chats WHERE id = ?").get(chatId) as
     { title: string; origin_surface: string; archived_at: string | null; seat_id: string | null } | undefined;
   if (!chat || chat.origin_surface !== "one" || chat.archived_at) throw new Error("one_group_chat_unavailable");
@@ -296,6 +304,7 @@ export function composeOneTaskforceForChat(input: { chatId: string; memberAgentI
   const db = getDb();
   const result = db.transaction(() => {
     const chatId = assertId(input.chatId, "chatId");
+    assertGroupRoomAvailable(db, chatId);
     const chat = db.prepare("SELECT title, kind, origin_surface, archived_at, seat_id FROM chats WHERE id = ?").get(chatId) as
       { title: string; kind: string; origin_surface: string; archived_at: string | null; seat_id: string | null } | undefined;
     if (!chat || chat.kind !== "user" || chat.origin_surface !== "one" || chat.archived_at) throw new Error("one-team-group-chat-unavailable");

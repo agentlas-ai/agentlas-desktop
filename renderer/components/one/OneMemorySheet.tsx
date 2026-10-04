@@ -107,6 +107,8 @@ export function OneMemorySheet({
   // What One actually remembers (the rows the memory map is drawn from). Loaded
   // when the sheet opens; the sheet and the map must agree on the count.
   const [durable, setDurable] = useState<OneDurableMemoryEntryUi[] | null>(null);
+  const [durableError, setDurableError] = useState(false);
+  const [durableRetry, setDurableRetry] = useState(0);
   const [durableQuery, setDurableQuery] = useState("");
   const [durableExpanded, setDurableExpanded] = useState(false);
   const durableRequest = useRef(0);
@@ -115,16 +117,21 @@ export function OneMemorySheet({
     if (!open) return;
     setBusyId(null);
     setDurable(null);
+    setDurableError(false);
     const api = ipc();
     if (!api?.oneMemory?.listEntries) {
-      setDurable([]);
+      setDurableError(true);
       return;
     }
     api.oneMemory.listEntries({ limit: 1000 })
-      .then((rows) => { if (request === durableRequest.current) setDurable(rows); })
-      .catch(() => { if (request === durableRequest.current) setDurable([]); });
+      .then((rows) => {
+        if (request !== durableRequest.current) return;
+        if (!Array.isArray(rows)) { setDurableError(true); return; }
+        setDurable(rows);
+      })
+      .catch(() => { if (request === durableRequest.current) setDurableError(true); });
     return () => { ++durableRequest.current; };
-  }, [open]);
+  }, [open, durableRetry]);
   const forgetDurable = async (entry: OneDurableMemoryEntryUi) => {
     const api = ipc();
     if (!api?.oneMemory?.forgetEntry) return;
@@ -440,8 +447,8 @@ export function OneMemorySheet({
                 <div>
                   <h3 id="durable-memory-title">
                     {locale === "ko"
-                      ? `One이 기억하는 것 ${durable ? durable.length : "…"}`
-                      : `What One remembers ${durable ? durable.length : "…"}`}
+                      ? `One이 기억하는 것 ${durable ? durable.length : durableError ? "· 확인 필요" : "…"}`
+                      : `What One remembers ${durable ? durable.length : durableError ? "· needs review" : "…"}`}
                   </h3>
                   <p>
                     {locale === "ko"
@@ -461,6 +468,14 @@ export function OneMemorySheet({
                 />
               )}
               <div className={styles.cardList}>
+                {durableError ? (
+                  <div>
+                    <p className={styles.error} role="alert">{locale === "ko" ? "기억을 불러오지 못했습니다. 다시 시도해 주세요." : "Memories could not be loaded. Try again."}</p>
+                    <button type="button" className={styles.secondaryButton} onClick={() => setDurableRetry(value => value + 1)} disabled={Boolean(busyId)}>{locale === "ko" ? "기억 다시 불러오기" : "Retry loading memories"}</button>
+                  </div>
+                ) : durable === null ? (
+                  <p className={styles.empty} role="status">{locale === "ko" ? "기억을 불러오는 중입니다." : "Loading memories."}</p>
+                ) : null}
                 {durable && durable.length === 0 && (
                   <p className={styles.empty}>{locale === "ko" ? "아직 One이 남긴 기억이 없어요. 대화하고 일을 맡기면 여기에 쌓입니다." : "One has not kept anything yet. It fills up as you talk and delegate work."}</p>
                 )}

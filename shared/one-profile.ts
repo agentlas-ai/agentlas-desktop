@@ -3,6 +3,8 @@ import { redactSecrets } from "./secret-patterns";
 export const ONE_PROFILE_CONTRACT_VERSION = "1.0.0" as const;
 
 export type OneProfileLocale = "system" | "ko" | "en";
+export const ONE_BUBBLE_COLORS={blue:"#0077cc",green:"#26794d",purple:"#7652ad",rose:"#b64e76",amber:"#8b651f",slate:"#536276"} as const;
+export type OneBubbleColor=keyof typeof ONE_BUBBLE_COLORS;
 export type OneOperatingPrincipleScope = "personal" | "project" | "agent" | "team";
 
 export interface OneOperatingPrinciple {
@@ -39,6 +41,7 @@ export interface OneProfile {
    * 사다리가 필요 없다 — 다만 예전 저장본에는 이 칸이 없으므로 항상 선택 항목이다.
    */
   avatarIcon?: string;
+  bubbleColor?: OneBubbleColor;
   operatingPrinciples: OneOperatingPrinciple[];
   createdAt: string;
   updatedAt: string;
@@ -46,7 +49,7 @@ export interface OneProfile {
 
 export interface OneProfileUpdateInput {
   expectedVersion: number;
-  patch: Partial<Pick<OneProfile, "displayName" | "role" | "profileContext" | "preferredLocale" | "timeZone" | "avatarIcon">>;
+  patch: Partial<Pick<OneProfile, "displayName" | "role" | "profileContext" | "preferredLocale" | "timeZone" | "avatarIcon" | "bubbleColor">>;
 }
 
 export interface OneOperatingPrincipleCreateInput {
@@ -88,6 +91,7 @@ export interface OneProfileDeviceProjection {
   preferredLocale: OneProfileLocale;
   timeZone: string | null;
   updatedAt: string;
+  bubbleColor?: OneBubbleColor;
   operatingPrinciples: Array<Pick<
     OneOperatingPrinciple,
     "id" | "content" | "scope" | "approvalSource" | "approvedAt" | "updatedAt"
@@ -171,6 +175,7 @@ export function isOneProfile(value: unknown): value is OneProfile {
     "preferredLocale",
     "timeZone",
     "avatarIcon",
+    "bubbleColor",
     "operatingPrinciples",
     "createdAt",
     "updatedAt",
@@ -186,6 +191,7 @@ export function isOneProfile(value: unknown): value is OneProfile {
     !(value.timeZone === null || isBoundedString(value.timeZone, 1, 128)) ||
     // 예전 저장본에는 이 칸이 아예 없다. 없는 것과 잘못된 것은 다르다.
     !(value.avatarIcon === undefined || isBoundedString(value.avatarIcon, 1, 160)) ||
+    !(value.bubbleColor === undefined || typeof value.bubbleColor==='string' && Object.hasOwn(ONE_BUBBLE_COLORS,value.bubbleColor)) ||
     !Array.isArray(value.operatingPrinciples) || value.operatingPrinciples.length > 128 ||
     !value.operatingPrinciples.every(isPrinciple) ||
     !isIsoTimestamp(value.createdAt) ||
@@ -239,6 +245,7 @@ export function projectOneProfileForDevice(profile: OneProfile): OneProfileDevic
     role: deviceSafeText(profile.role).value,
     preferredLocale: profile.preferredLocale,
     timeZone: profile.timeZone,
+    bubbleColor:profile.bubbleColor ?? 'blue',
     updatedAt: profile.updatedAt,
     operatingPrinciples: safePrinciples,
     omittedOperatingPrincipleCount: enabled.length - safePrinciples.length,

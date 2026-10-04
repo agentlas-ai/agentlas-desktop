@@ -1,5 +1,6 @@
 import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobileGoalControlMethod, validateMobileGoalControlParams } from "./mobile-goal-control";
 import type { OneSurfaceManifestV1 } from "./one-surface";
+import { supervisorIdentifier, supervisorObject, supervisorText } from "./one-supervisor";
 import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
 import {
   ONE_DECISION_CONTRACT_VERSION,
@@ -105,6 +106,13 @@ export const MOBILE_BRIDGE_METHODS = [
   "host.status",
   "team.list",
   "one.org.get",
+  "one.supervisor.snapshot",
+  "one.supervisor.send",
+  "one.supervisor.startWork",
+  "one.supervisor.startScience",
+  "one.supervisor.control",
+  "one.supervisor.stopReply",
+  "one.supervisor.appearance",
   "one.avatar.get",
   "one.org.add",
   "one.org.openMember",
@@ -216,6 +224,8 @@ export type MobileBridgeMethod =
 
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  "one.supervisor.send", "one.supervisor.startWork", "one.supervisor.startScience",
+  "one.supervisor.control", "one.supervisor.stopReply", "one.supervisor.appearance",
   ...MOBILE_GOAL_CONTROL_WRITE_METHODS,
   "device.revokeSelf",
   "hub.invoke",
@@ -2596,6 +2606,7 @@ const METHOD_SET: ReadonlySet<string> = new Set([...MOBILE_BRIDGE_METHODS, ...MO
 const EVENT_SET: ReadonlySet<string> = new Set(MOBILE_BRIDGE_EVENT_NAMES);
 const BLOCKED_JSON_KEYS = new Set(["__proto__", "prototype", "constructor"]);
 const EMPTY_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  "one.supervisor.snapshot",
   "snapshot.get",
   "host.status",
   "team.list",
@@ -3518,6 +3529,37 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["chatId"])
         ? requiredString(params, "chatId")
         : "composer.context accepts only chatId";
+    case "one.supervisor.send":
+    case "one.supervisor.startWork":
+    case "one.supervisor.startScience":
+    case "one.supervisor.control":
+    case "one.supervisor.appearance":
+    case "one.supervisor.stopReply": {
+      try {
+        const allowed = method === "one.supervisor.appearance" ? ['commandId','oneId','expectedVersion','displayName','bubbleColor']
+          : method === "one.supervisor.control" ? ["commandId","taskId","expectedVersion","action","text"]
+          : method === "one.supervisor.stopReply" ? ["commandId","runId"]
+          : method === "one.supervisor.startScience" ? ["commandId","projectId","text"]
+          : method === "one.supervisor.startWork" ? ["commandId","projectId","text","permissions","runtimeSelection"]
+          : ["commandId","text","runtimeSelection","permissions"];
+        supervisorObject(params,[...allowed,'oneId']); supervisorIdentifier(params.commandId);
+        if(params.oneId!==undefined)supervisorIdentifier(params.oneId);
+        if(method==='one.supervisor.appearance') {
+          supervisorIdentifier(params.oneId);
+          return Number.isSafeInteger(params.expectedVersion) && Number(params.expectedVersion)>0 && typeof params.displayName==='string' && !!params.displayName.trim() && params.displayName.length<=64 && ['blue','green','purple','rose','amber','slate'].includes(String(params.bubbleColor)) ? null : 'supervisor_appearance_invalid';
+        }
+        if (method === "one.supervisor.stopReply") supervisorIdentifier(params.runId);
+        else if (method === "one.supervisor.control") {
+          supervisorIdentifier(params.taskId); supervisorIdentifier(params.expectedVersion);
+          if (params.action !== "steer" && params.action !== "cancel") return "supervisor_action_invalid";
+          if (params.action === "steer") supervisorText(params.text);
+          else if (params.text !== undefined) return "supervisor_cancel_contains_text";
+        } else supervisorText(params.text);
+        if (params.projectId !== undefined || method === "one.supervisor.startScience") supervisorIdentifier(params.projectId);
+        if (params.permissions !== undefined && !["read","write","full"].includes(String(params.permissions))) return "supervisor_permission_invalid";
+        return params.runtimeSelection === undefined ? null : validateRuntimeSelectionValue(params.runtimeSelection,"orchestrator");
+      } catch (error) { return error instanceof Error ? error.message : "supervisor_input_invalid"; }
+    }
     case "one.invoke.start":
       if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "planMode", "goalMode", "networkMode", "liveMode", "taskForceTargets", "images", "runtimeSelection"])) {
         return "one.invoke.start contains unsupported fields";

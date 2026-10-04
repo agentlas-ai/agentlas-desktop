@@ -170,6 +170,8 @@ export interface McpConfigResult {
 }
 
 export interface McpConfigBuildOptions {
+  /** Main-only personal One reply origin for exact Work/Science handoff attribution. */
+  supervisorReplyRunId?: string;
   /** Receiving native host's origin/epoch revocation fence. Never a wire value. */
   admissionCurrent?: () => boolean;
   /** Main-owned non-chat Build plan authority; never accepted from a runtime payload. */
@@ -995,6 +997,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           const capabilityConfigKey = opts?.configKey ?? key;
           const capability = await createOneTeamCapability(
             { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read",
+              ...(opts?.supervisorReplyRunId ? { supervisorReplyRunId: opts.supervisorReplyRunId } : {}),
               ...(toolchainConsumer ? { scope: "toolchain-consumer" as const,
                 tools: (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS } : {}) },
             capabilityConfigKey,

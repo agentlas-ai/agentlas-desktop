@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { looksSecret } from "../../shared/secret-patterns";
 import {
   ONE_PROFILE_CONTRACT_VERSION,
+  ONE_BUBBLE_COLORS,
   isOneProfile,
   projectOneProfileForDevice,
   type OneOperatingPrinciple,
@@ -20,7 +21,7 @@ import { getDb } from "./db";
 import { tryRecordOneDomainEvent } from "../one/domain-events";
 
 const META_KEY = "agentlas.one.profile.v1";
-const PROFILE_PATCH_KEYS = ["displayName", "role", "profileContext", "preferredLocale", "timeZone", "avatarIcon"] as const;
+const PROFILE_PATCH_KEYS = ["displayName", "role", "profileContext", "preferredLocale", "timeZone", "avatarIcon", "bubbleColor"] as const;
 const PROFILE_LOCALES = new Set<OneProfileLocale>(["system", "ko", "en"]);
 const PRINCIPLE_SCOPES = new Set<OneOperatingPrincipleScope>([
   "personal",
@@ -400,6 +401,10 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
     previousDisplayName = current.displayName;
     const next: OneProfile = { ...current };
     if ("displayName" in input.patch) next.displayName = cleanText(input.patch.displayName, "displayName", 1, 64);
+    if ('bubbleColor' in input.patch) {
+      if(typeof input.patch.bubbleColor!=='string' || !Object.hasOwn(ONE_BUBBLE_COLORS,input.patch.bubbleColor)) throw new TypeError('Invalid One bubble color');
+      next.bubbleColor=input.patch.bubbleColor;
+    }
     if ("role" in input.patch) next.role = cleanText(input.patch.role, "role", 1, 120);
     if ("profileContext" in input.patch) next.profileContext = cleanText(input.patch.profileContext, "profileContext", 0, 4_000);
     if ("preferredLocale" in input.patch) {
@@ -440,7 +445,7 @@ export function updateOneProfile(input: OneProfileUpdateInput): OneProfile {
       next.profileContext === current.profileContext &&
       next.preferredLocale === current.preferredLocale &&
       next.timeZone === current.timeZone &&
-      next.avatarIcon === current.avatarIcon
+      next.avatarIcon === current.avatarIcon && next.bubbleColor===current.bubbleColor
     ) return current;
     return { ...next, version: timestamp.version, updatedAt: timestamp.iso };
   });

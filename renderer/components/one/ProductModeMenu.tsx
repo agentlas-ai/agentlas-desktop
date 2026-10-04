@@ -15,7 +15,7 @@ import styles from "./ProductModeMenu.module.css";
 const ONE_RETURN_ROUTE_KEY = "agentlas.one.return-route.v1";
 
 function safeOneReturnRoute(value: string | null): string {
-  if (!value || value.length > 2_048 || !/^\/one(?:\?(?:task|conversation)=[A-Za-z0-9._:%-]+)?$/.test(value)) return "/one";
+  if (!value || value.length > 2_048 || !/^\/one(?:\?(?:personal=1|(?:task|chat|conversation)=[A-Za-z0-9._:%-]+))?$/.test(value)) return "/one";
   return value;
 }
 

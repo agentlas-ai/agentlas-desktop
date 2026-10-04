@@ -1,6 +1,7 @@
 // Main 프로세스 ↔ Renderer 간 공유 타입.
 // renderer/lib/types.ts에서 re-export.
 import type { AutomationMonitorContract, AutomationPollState } from "./automation-monitor";
+import type { OneSupervisorAPI } from "./one-supervisor";
 import type { LocalModelHubAPI } from "./local-model-hub";
 import type { LocalModelMigrationAPI } from "./local-model-migration";
 import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "./credential-recovery";
@@ -8042,6 +8043,7 @@ export interface AgentlasIpc {
     revokePreview: (input: OneArtifactPreviewRevokeV1) => Promise<{ revoked: boolean }>;
   };
   /** Persistent One identity and user-approved operating principles. */
+  oneSupervisor: OneSupervisorAPI;
   oneProfile: {
     get: () => Promise<OneProfile>;
     /** 계정 하나 = One 하나 — 이 계정의 One 이 기계 전역 프로필을 이어받았는지("inherited"), 새로 시작했는지("fresh"). */

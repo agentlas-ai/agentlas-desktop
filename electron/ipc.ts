@@ -1,3 +1,4 @@
+import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { goalActiveChatIds } from "./store/goal-active-chats";
 import { registerAutomationChatActivityIpc } from "./automation-chat-activity-ipc";
@@ -1616,6 +1617,7 @@ function goalAutomationOwnershipReview(automationId: string, goalId: string, roo
 
 export function registerIpcHandlers(): void {
   const ipcMain = developmentIpcBoundary(electronIpcMain);
+  registerOneSupervisorIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserUiIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAutofillIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserProfileImportIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });

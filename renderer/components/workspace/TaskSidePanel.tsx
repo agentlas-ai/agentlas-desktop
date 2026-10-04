@@ -37,6 +37,7 @@ import panelMenu from "@/components/PanelPopover.module.css";
 import { RailAgentScreen } from "@/components/browser/RailAgentScreen";
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+import { Markdown } from "@/components/Markdown";
 import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputViewer";
 import { CodeIdeViewer, isCodeArtifactName } from "@/components/CodeIdeViewer";
 import { ipc } from "@/lib/ipc";
@@ -669,7 +670,15 @@ function ChatFileOpenViewer({ file, locale, chatId = null, onClose, onExpand, on
 
     </div>}
     <div style={{ minHeight: 0, flex: 1, overflow: liveKind ? "hidden" : "auto" }}>
-      {file.kind === "directory" || ["markdown", "json", "text"].includes(preview.viewerKind) ? (
+      {preview.available === false ? (
+        <p role="alert" style={{ padding: 16, fontSize: 12, lineHeight: 1.6 }}>
+          {locale === "ko" ? "파일을 읽을 수 없습니다. 원래 작업의 파일과 접근 권한을 확인해 주세요." : "This file could not be read. Check the file and access in its originating work."}
+        </p>
+      ) : preview.viewerKind === "markdown" && preview.content ? (
+        <div style={{ padding: 16, lineHeight: 1.65, overflowWrap: "anywhere" }}>
+          <Markdown text={preview.content} chatId={file.chatId} messageId={`file-preview:${file.tabId}`} />
+        </div>
+      ) : file.kind === "directory" || ["markdown", "json", "text"].includes(preview.viewerKind) ? (
         <pre style={{ margin: 0, padding: 12, fontFamily: "var(--font-mono)", fontSize: 11.5, lineHeight: 1.55, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{preview.content || filePreviewEmptyMessage(preview.reason, locale, preview.name, preview.path)}</pre>
       ) : liveKind && file.fileUrl ? (
         <LiveOutputViewer
