@@ -112,6 +112,7 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
       case "one_supervisor_start_work": return service.startWork({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),
         ...(input.project_id ? {projectId:String(input.project_id)} : {}),permissions:binding.permission},binding.supervisorReplyRunId);
       case "one_supervisor_start_science": return service.startScience({commandId:String(input.command_id ?? ""),text:String(input.brief ?? ""),projectId:String(input.project_id ?? "")},binding.supervisorReplyRunId);
+      case "one_supervisor_follow_up": return service.followUp({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),text:String(input.message ?? "")},binding.supervisorReplyRunId);
       case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
       default: throw new Error("supervisor_operation_unknown");
     }

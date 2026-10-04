@@ -1,9 +1,10 @@
 import type { InvocationRunReceipt, McpInvocationRequest } from "../../shared/types";
+import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
 import { OneSupervisorWorkQueue, type SupervisorWorkLease } from "./supervisor-work-queue";
 
 export interface SupervisorWorkRuntime {
-  start(request: McpInvocationRequest): {runId: string};
+  start(request: McpInvocationRequest, hostNoticePurpose?: SupervisorHostNoticePurpose): {runId: string};
   attach(chatId: string): {runId: string} | null;
   receipt(runId: string): InvocationRunReceipt | null;
   onSettled(listener: (event: {runId: string; chatId: string; receipt: InvocationRunReceipt}) => void): () => void;
@@ -105,9 +106,13 @@ export class OneSupervisorWorkExecutor {
       if (!starting) return;
       this.deps.store.update(row, {state: "dispatching"});
       this.deps.assertOwner();
+      // A brief One wrote (bound to its reply) is shown in the Work session as handed over by One, never as the
+      // owner's words, and carries no owner authority (no automatic Goal, no user model pin). The owner's own brief stays theirs.
+      const byOne = row.source_reply_run_id !== null;
       const started = this.deps.runtime.start({runId: starting.run_id, chatId: starting.chat_id,
         userPrompt: input.text, taskIntent: "task", permissions: input.permissions,
-        locale: this.deps.locale(), runtimeSelection: input.runtimeSelection});
+        locale: this.deps.locale(), runtimeSelection: input.runtimeSelection,
+        ...(byOne ? {promptOrigin: "system" as const} : {})}, byOne ? "one-dispatch-brief" : undefined);
       if (started.runId !== starting.run_id) throw new Error("supervisor_work_native_run_mismatch");
       const current = this.deps.queue.get(starting.command_id)!;
       if (current.phase === "starting") {

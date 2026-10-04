@@ -2020,6 +2020,8 @@ export type ChatHostNotice =
   | { purpose: "goal-continuation"; runId: string }
   /** A turn the update restart interrupted, continued by the app after it came back (one line, no prompt). */
   | { purpose: "update-resume"; runId: string }
+  /** One's conversation: One woke to check work it delegated that has finished (one line, no prompt). */
+  | { purpose: "one-delegation-review"; runId: string }
   | { purpose: "automation-report"; runId: string; automationId: string }
   /** Teammate session: the brief One handed over (shown as coming from One, not the owner). */
   | { purpose: "one-dispatch-brief"; runId: string }

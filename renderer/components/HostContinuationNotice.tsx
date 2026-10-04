@@ -65,6 +65,15 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat }: { t
       style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}
     >{locale === "ko" ? "업데이트 후 이어서 진행합니다" : "Continuing after the update"}</p>;
   }
+  if (notice?.purpose === "one-delegation-review") {
+    // One woke because work it handed off finished. The ledger keeps the host's review request; the person sees one line.
+    return <p
+      data-host-notice="one-delegation-review"
+      data-run-id={notice.runId}
+      role="status"
+      style={{ alignSelf: "stretch", maxWidth: 760, margin: "4px 0", color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.5 }}
+    >{locale === "ko" ? "맡긴 일이 끝나 결과를 확인합니다" : "Checking the work that finished"}</p>;
+  }
   if (notice?.purpose === "host-status") {
     // The host's own status line (effect check, wait, cycle). Where One cannot fold it into its turn's
     // work block it is still one quiet line: the short status, then the sentence as written.

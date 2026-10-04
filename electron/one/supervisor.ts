@@ -13,7 +13,7 @@ import { SupervisorScienceAdapter } from "./supervisor-science";
 import { supervisorExactResult, supervisorReplyTurns } from "./supervisor-presentation";
 import { OneSupervisorLegacyMigration } from './supervisor-migration';
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
-import type { SupervisorTask } from "../../shared/one-supervisor";
+import type { SupervisorTask, SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorWorkQueue } from "./supervisor-work-queue";
 import { OneSupervisorWorkExecutor } from "./supervisor-work-executor";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId, registerAppRuntimeParticipant } from "../long-run/app-runtime-coordinator";
@@ -53,9 +53,9 @@ export function oneSupervisor():OneSupervisorService {
   const store = new OneSupervisorStore(getDb());
   const schemaOwner = openedStoreMigrationRole() === "owner";
   const workQueue = new OneSupervisorWorkQueue(getDb(), schemaOwner);
-  const startNative = (req: Parameters<typeof invocationService.start>[0]) => {
+  const startNative = (req: Parameters<typeof invocationService.start>[0], hostNoticePurpose?: SupervisorHostNoticePurpose) => {
     if (req.runtimeSelection) req={...req,runtimeSelection:normalizeChatRuntimeSelection(req.runtimeSelection) ?? undefined};
-    return invocationService.start(req,undefined,undefined,undefined,undefined,admitMainInvocation(req.chatId,req.runId));
+    return invocationService.start(req,undefined,undefined,undefined,hostNoticePurpose,admitMainInvocation(req.chatId,req.runId));
   };
   supervisor=new OneSupervisorService({
     store,identity:getOneProfile,workQueue,workIdentityMutable:schemaOwner,wakeWorkQueue:()=>workExecutor?.kick(),

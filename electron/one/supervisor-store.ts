@@ -70,6 +70,18 @@ export class OneSupervisorStore {
     if (!(db.prepare("PRAGMA table_info(one_supervisor_requests)").all() as Array<{name:string}>).some(column=>column.name === "source_reply_run_id")) {
       db.exec("ALTER TABLE one_supervisor_requests ADD COLUMN source_reply_run_id TEXT");
     }
+    if (!(db.prepare("PRAGMA table_info(one_supervisor_notices)").all() as Array<{name:string}>).some(column=>column.name === "review_state")) {
+      db.transaction(() => {
+        db.exec(`ALTER TABLE one_supervisor_notices ADD COLUMN review_state TEXT NOT NULL DEFAULT 'pending';
+          ALTER TABLE one_supervisor_notices ADD COLUMN review_run_id TEXT;
+          ALTER TABLE one_supervisor_notices ADD COLUMN reviewed_at TEXT;
+          ALTER TABLE one_supervisor_notices ADD COLUMN review_reason TEXT;
+          ALTER TABLE one_supervisor_notices ADD COLUMN review_attempts INTEGER NOT NULL DEFAULT 0;`);
+        // Results that settled before One reviewed its own delegations were already shown; never replay them as new reports.
+        db.prepare("UPDATE one_supervisor_notices SET review_state='skipped',review_reason='settled_before_review_loop'").run();
+      })();
+    }
+    db.exec("CREATE INDEX IF NOT EXISTS one_supervisor_notice_review ON one_supervisor_notices(one_id,review_state)");
   }
   conversation(oneId: string): string | null {
     return (this.db.prepare("SELECT chat_id FROM one_supervisor_conversations WHERE one_id=?").get(oneId) as {chat_id: string} | undefined)?.chat_id ?? null;
@@ -118,10 +130,38 @@ export class OneSupervisorStore {
   pending(oneId:string):SupervisorRequestRow[] {
     return this.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND state IN ('stored','dispatching','accepted','held') ORDER BY rowid ASC").all(oneId) as SupervisorRequestRow[];
   }
+  /** Written in the same transaction as the settlement, so a crash cannot lose a finished delegation's report (D06).
+   * The owner's own cancellation needs no report back. */
   notice(row: SupervisorRequestRow, state: string): void {
     if (!row.task_id || !row.run_id) return;
-    this.db.prepare("INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at) VALUES(?,?,?,?,?,?,?)")
-      .run(supervisorHash([row.one_id,row.task_id,row.run_id]),row.one_id,row.task_id,row.origin_chat_id,row.run_id,state,new Date().toISOString());
+    this.db.prepare(`INSERT OR IGNORE INTO one_supervisor_notices(id,one_id,task_id,origin_chat_id,run_id,state,created_at,review_state,review_reason)
+      VALUES(?,?,?,?,?,?,?,?,?)`).run(supervisorHash([row.one_id,row.task_id,row.run_id]),row.one_id,row.task_id,row.origin_chat_id,row.run_id,state,new Date().toISOString(),
+      state === "cancelled" ? "skipped" : "pending", state === "cancelled" ? "owner_cancelled" : null);
+  }
+  /** Binds up to `limit` unreviewed results to one review run. The run id is the generation: a notice is claimed once,
+   * and only that run's settlement may close it, so a late or replayed outcome cannot report it twice (D07). */
+  claimReview(oneId: string, reviewRunId: string, limit = 5): SupervisorNotice[] {
+    const ids = (this.db.prepare("SELECT id FROM one_supervisor_notices WHERE one_id=? AND review_state='pending' ORDER BY rowid LIMIT ?")
+      .all(oneId, Math.max(1, Math.min(5, limit))) as Array<{id: string}>).map(row => row.id);
+    for (const id of ids) {
+      this.db.prepare(`UPDATE one_supervisor_notices SET review_state='claimed',review_run_id=?,review_attempts=review_attempts+1
+        WHERE id=? AND review_state='pending'`).run(reviewRunId, id);
+    }
+    return this.db.prepare(`SELECT id,task_id AS taskId,origin_chat_id AS originChatId,run_id AS runId,state,created_at AS createdAt
+      FROM one_supervisor_notices WHERE review_run_id=? AND review_state='claimed' ORDER BY rowid`).all(reviewRunId) as SupervisorNotice[];
+  }
+  closeReview(reviewRunId: string, reason: string | null): number {
+    return Number(this.db.prepare(`UPDATE one_supervisor_notices SET review_state='reviewed',reviewed_at=?,review_reason=?
+      WHERE review_run_id=? AND review_state='claimed'`).run(new Date().toISOString(), reason, reviewRunId).changes);
+  }
+  /** A review run that produced no report (never started, or failed) returns its results to the queue, at most three
+   * attempts per result; after that the result stays visible in Activity and is not retried. */
+  retryReview(reviewRunId: string, reason: string): number {
+    return Number(this.db.prepare(`UPDATE one_supervisor_notices SET
+        review_state=CASE WHEN review_attempts<3 THEN 'pending' ELSE 'reviewed' END,
+        review_run_id=CASE WHEN review_attempts<3 THEN NULL ELSE review_run_id END,
+        reviewed_at=CASE WHEN review_attempts<3 THEN NULL ELSE ? END, review_reason=?
+      WHERE review_run_id=? AND review_state='claimed'`).run(new Date().toISOString(), reason.slice(0, 240), reviewRunId).changes);
   }
   notices(oneId: string): SupervisorNotice[] {
     return this.db.prepare("SELECT id,task_id AS taskId,origin_chat_id AS originChatId,run_id AS runId,state,created_at AS createdAt FROM one_supervisor_notices WHERE one_id=? ORDER BY rowid DESC LIMIT 100").all(oneId) as SupervisorNotice[];

@@ -2299,7 +2299,7 @@ async function runMcpInvocationInContext(
   const persistUserMessage = () => {
     if (effectObservationRun || req.agentAppMode || userMessagePersisted) return;
     if (promptIsSystemAuthored) {
-      appendChatMessage(chat.id, "system", req.userPrompt, (hostNoticePurpose === "goal-continuation" || hostNoticePurpose === "one-dispatch-brief" || hostNoticePurpose === "update-resume") && req.runId
+      appendChatMessage(chat.id, "system", req.userPrompt, (hostNoticePurpose === "goal-continuation" || hostNoticePurpose === "one-dispatch-brief" || hostNoticePurpose === "update-resume" || hostNoticePurpose === "one-delegation-review") && req.runId
         ? { hostNotice: { purpose: hostNoticePurpose, runId: req.runId } } : undefined);
     } else {
       /*

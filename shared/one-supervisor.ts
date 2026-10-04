@@ -7,7 +7,7 @@ export type SupervisorSurface = "one" | "work" | "science";
 export type SupervisorRequestState = "stored" | "dispatching" | "accepted" | "completed" | "cancelled" | "failed" | "held";
 export interface SupervisorCommandReceipt {
   commandId: string;
-  kind: "reply" | "work" | "science" | "steer" | "cancel" | "stop-reply" | "appearance";
+  kind: "reply" | "work" | "science" | "steer" | "cancel" | "stop-reply" | "appearance" | "follow-up";
   state: SupervisorRequestState;
   taskId: string | null;
   runId: string | null;
@@ -102,6 +102,10 @@ export interface OneSupervisorSnapshot {
 export interface SupervisorSendInput { commandId: string; text: string; runtimeSelection?: RuntimeSelection; oneId?:string; permissions?:"read"|"write"|"full" }
 export interface SupervisorWorkInput extends SupervisorSendInput { projectId?: string; permissions?: "read" | "write" | "full" }
 export interface SupervisorScienceInput { commandId: string; text: string; projectId: string; oneId?:string }
+/** A new turn in a delegated Work session after its run settled (live runs are steered instead). */
+export interface SupervisorFollowUpInput { commandId: string; taskId: string; text: string; oneId?: string }
+/** How a host-started supervisor turn is labelled in its chat: One's own brief in a worker session, or One's review line. */
+export type SupervisorHostNoticePurpose = "one-dispatch-brief" | "one-delegation-review";
 export interface SupervisorControlInput { commandId: string; taskId: string; expectedVersion: string; action: "steer" | "cancel"; text?: string; oneId?:string }
 export interface OneSupervisorAPI {
   snapshot(): Promise<OneSupervisorSnapshot>;
