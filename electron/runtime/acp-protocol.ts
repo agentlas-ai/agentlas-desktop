@@ -11,7 +11,7 @@
 // back into us (session/request_permission, fs/*, terminal/*) — those arrive
 // as requests with an id and must be answered.
 import type { ChildProcess } from "node:child_process";
-import readline from "node:readline";
+import { onJsonLines } from "./json-lines";
 
 export const ACP_PROTOCOL_VERSION = 1;
 
@@ -64,8 +64,8 @@ export class AcpConnection {
 
   constructor(private readonly child: ChildProcess, private readonly handlers: AcpConnectionHandlers = {}) {
     if (!child.stdout || !child.stdin) throw new Error("ACP agent must be spawned with piped stdio");
-    const rl = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-    rl.on("line", (line) => this.onLine(line));
+    // Split on "\n" only: readline also breaks at U+2028/U+2029, which JSON carries inside strings (./json-lines).
+    onJsonLines(child.stdout, (line) => this.onLine(line));
     child.stderr?.on("data", (buf: Buffer) => {
       this.stderrTail = (this.stderrTail + buf.toString("utf8")).slice(-4000);
     });

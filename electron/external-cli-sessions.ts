@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import readline from "node:readline";
 
 import type {
   ExternalCliSessionImportInput,
@@ -14,6 +13,7 @@ import { createChat, getChat, setChatRuntimeSelection, setChatWorkingFolder } fr
 import { ensureCanonicalTaskForChat, getCanonicalTaskForChat } from "./store/tasks";
 import { getProject } from "./store/projects";
 import { getDb } from "./store/db";
+import { readJsonLines } from "./runtime/json-lines";
 import { emitDesktopStoreChange } from "./store/change-bus";
 
 type Provider = ExternalCliSessionSummary["provider"];
@@ -223,10 +223,10 @@ async function parseSession(source: SourceFile, includeMessages: boolean): Promi
   let observedMessages = 0;
   let observedChars = 0;
   let oversizedMessage = false;
-  const stream = fs.createReadStream(source.filePath, { encoding: "utf8" });
-  const lines = readline.createInterface({ input: stream, crlfDelay: Infinity });
+  // Bytes, split on "\n" only: readline also breaks at U+2028/U+2029 inside JSON strings (runtime/json-lines).
+  const stream = fs.createReadStream(source.filePath);
   try {
-    for await (const line of lines) {
+    for await (const line of readJsonLines(stream)) {
       if (!line || line.length > 2_000_000) continue;
       let row: Record<string, unknown>;
       try {
@@ -282,7 +282,6 @@ async function parseSession(source: SourceFile, includeMessages: boolean): Promi
       }
     }
   } finally {
-    lines.close();
     stream.destroy();
   }
   if (!sessionId || observedMessages === 0 || !firstUser) return null;
