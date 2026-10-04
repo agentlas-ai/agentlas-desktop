@@ -16,6 +16,17 @@
  * (its own CDP profile) and Agentlas Computer Use (cua-driver, Main-gated)
  * are bound separately by the host and are not affected.
  *
+ * Attended runs too (QA app, 2026-10-04): a One turn on codex with write permission,
+ * blocked by a graph tool error, used the bundled `unified-computer-use` plugin to
+ * click through Agentlas's own owner screens — it edited a graph in the automation
+ * editor and re-registered a Toolchain as the owner. A lower layer acting with the
+ * owner's controls is what the owner's layer rule forbids (owner 2026-10-04). So
+ * the ChatGPT-bundled computer-use plugins are closed on every run without the
+ * grant, exactly like the bundled browser plugins below. That needs no config
+ * read (a plugin override for an absent plugin is harmless), so an attended turn
+ * stays hermetic; user-declared desktop servers are still closed only where the
+ * config was already read (unattended, browser-only).
+ *
  * Measured on codex-cli 0.156.1 with `app-server` + `mcpServerStatus/list`:
  *   - `-c plugins.<id>.enabled=false` (UNQUOTED id) removes the plugin's MCP
  *     servers (cua_repl, computer-history). The quoted form
@@ -110,6 +121,11 @@ export interface CodexDesktopSurfaceDecision {
 export function codexDesktopSurfaceClosed(input: CodexDesktopSurfaceInput): boolean {
   if (input.desktopControlGrant) return false;
   return input.unattended === true || input.browserOnly === true;
+}
+
+/** Whether this run must be kept off the ChatGPT-bundled computer-use plugins (every run without the grant). */
+export function codexBundledDesktopPluginsClosed(input: CodexDesktopSurfaceInput): boolean {
+  return input.desktopControlGrant !== true;
 }
 
 /** Whether this run must be kept off the owner's own browser (bundled chrome/browser plugins). */
@@ -252,7 +268,8 @@ export function codexUserConfigOutsideBrowser(input: { env?: NodeJS.ProcessEnv; 
 
 /**
  * `-c` overrides for this run:
- *   - vendor desktop control closed for unattended/browser-only runs;
+ *   - the bundled computer-use plugins closed on every run without the grant;
+ *   - user-declared desktop-control servers closed for unattended/browser-only runs;
  *   - the owner's own browser (bundled chrome/browser plugins) closed on every run;
  *   - outside browser equivalents (Playwright plugin, user browser-automation
  *     servers) hidden only while an Agentlas browser is reachable, otherwise kept
@@ -261,8 +278,9 @@ export function codexUserConfigOutsideBrowser(input: { env?: NodeJS.ProcessEnv; 
  */
 export function codexDesktopSurfaceArgs(input: CodexDesktopSurfaceInput): CodexDesktopSurfaceDecision {
   const desktopClosed = codexDesktopSurfaceClosed(input);
+  const bundledDesktopClosed = codexBundledDesktopPluginsClosed(input);
   const ownerBrowserClosed = codexBrowserSurfaceClosed(input);
-  if (!desktopClosed && !ownerBrowserClosed) return { args: [], receipt: null };
+  if (!desktopClosed && !bundledDesktopClosed && !ownerBrowserClosed) return { args: [], receipt: null };
   const host = new Set(input.hostServerNames ?? []);
   const hostBound = BROWSER.agentlasServerNames.some((name) => host.has(name));
   // User config is read only where it already was: a run nobody watches /
@@ -280,7 +298,7 @@ export function codexDesktopSurfaceArgs(input: CodexDesktopSurfaceInput): CodexD
   const hideOutsideBrowsers = policy === "agentlas-only";
 
   const plugins = [
-    ...(desktopClosed ? CODEX_DESKTOP_ONLY_PLUGINS : []),
+    ...(desktopClosed || bundledDesktopClosed ? CODEX_DESKTOP_ONLY_PLUGINS : []),
     ...(ownerBrowserClosed ? CODEX_OWNER_BROWSER_PLUGINS : []),
     ...(hideOutsideBrowsers ? BROWSER.codexPlugins : []),
   ];
@@ -293,7 +311,8 @@ export function codexDesktopSurfaceArgs(input: CodexDesktopSurfaceInput): CodexD
   }
   const closedServers = [...servers].filter((name) => !host.has(name)).sort();
   for (const server of closedServers) args.push("-c", `mcp_servers.${server}.enabled=false`);
-  const desktop = desktopClosed ? `closed reason=${input.browserOnly ? "browser_only" : "unattended"}` : "open";
+  const desktop = desktopClosed ? `closed reason=${input.browserOnly ? "browser_only" : "unattended"}`
+    : bundledDesktopClosed ? "bundled_closed" : "open";
   return {
     args,
     receipt: `[codex-surface] desktop_control=${desktop} browser_surface=${hideOutsideBrowsers ? "closed" : "fallback"} agentlas_browser=${agentlas} plugins=${plugins.length} user_servers=${closedServers.join("|") || "-"}`,
