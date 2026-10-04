@@ -315,6 +315,7 @@ export function recordScienceRuntimeOutboxEvent(input: {
   const sourceRunEventId = `science-runtime-event:v1:${input.runId}:${sourceSequence}:${sourceEventSha256}`;
   const deliveryId = stableUuid(`science-runtime-delivery:v1:${sourceRunEventId}`);
   const createdAt = nowIso();
+  // Same read-then-write shape as recordRunEvent: take the write lock first so another process's commit cannot void it.
   return getDb().transaction(() => {
     const existing = getDb().prepare("SELECT * FROM science_runtime_event_outbox WHERE run_id = ? AND source_sequence = ?")
       .get(input.runId, sourceSequence) as ScienceRuntimeOutboxRow | undefined;
@@ -331,7 +332,7 @@ export function recordScienceRuntimeOutboxEvent(input: {
     const row = getDb().prepare("SELECT * FROM science_runtime_event_outbox WHERE delivery_id = ?").get(deliveryId) as ScienceRuntimeOutboxRow | undefined;
     if (!row) throw new Error("science-runtime-outbox-create-failed");
     return scienceRuntimeOutboxFromRow(row);
-  })();
+  }).immediate();
 }
 
 export function listPendingScienceRuntimeOutboxEvents(limit = 5_000): ScienceRuntimeOutboxEvent[] {
@@ -1331,6 +1332,10 @@ function bumpAgentUsage(agentId: string, runId: string, ts: string): void {
 export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
   let committedDiagnostic: { key: string; stats: FallbackDiagnosticStats } | undefined;
   const terminal = ["invoke_completed", "invoke_waiting", "invoke_failed", "invoke_cancelled", "invoke_interrupted", "mcp_final", "mcp_error"].includes(input.kind);
+  // Read then write in one transaction, on a WAL shared with the daemon and the terminal. Deferred, the first read pins a
+  // snapshot and the INSERT's upgrade fails at once with SQLITE_BUSY_SNAPSHOT ("database is locked") if another process
+  // committed in between; busy_timeout cannot help. Live 2026-10-04: that throw at an invocation start wedged the chat.
+  // IMMEDIATE takes the write lock first and waits its turn under busy_timeout (a nested call stays a savepoint).
   const result = getDb().transaction(() => {
     const id = input.sourceEventId ? `evt_${stableUuid(`${input.runId}:${input.sourceEventId}`)}` : `evt_${randomUUID()}`;
     const existing = getDb().prepare("SELECT * FROM run_events WHERE id = ?").get(id) as RunEventRow | undefined;
@@ -1459,7 +1464,7 @@ export function recordRunEvent(input: RecordRunEventInput): RunEventUi {
       } catch { /* Derived diagnostics cannot withhold a terminal receipt. All source/count rows remain authoritative. */ }
     }
     return runRowToUi(row);
-  })();
+  }).immediate();
   // Cache changes are published only after the transaction commits. Terminal
   // counts come from SQLite so restarts/cache overflow cannot lose occurrences.
   if (terminal) fallbackDiagnosticCache.get(getDb())?.delete(input.runId);
