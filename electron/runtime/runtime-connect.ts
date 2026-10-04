@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import { agentRunCwd, killCliTree, spawnCli, withCliPath } from "./exec";
 import { observeCliExecutableIdentity } from "./cli-executable-identity";
+import { probeKimiAuth } from "./kimi-auth";
 import {
   augmentedEnv,
   installCli,
@@ -45,7 +46,8 @@ interface RuntimeConnectPlan {
 const PLANS: Record<ConnectableRuntime, RuntimeConnectPlan> = {
   codex: { installable: true, probeArgs: ["login", "status"], loginArgs: ["login"], openUrlFromOutput: false },
   "claude-code": { installable: true, probeArgs: ["auth", "status"], loginArgs: ["auth", "login"], openUrlFromOutput: false },
-  grok: { installable: true, probeArgs: ["models"], loginArgs: ["login", "--oauth"], openUrlFromOutput: true },
+  // Official Grok v0.2.103 opens its OAuth URL itself; opening it again creates duplicate tabs.
+  grok: { installable: true, probeArgs: ["models"], loginArgs: ["login", "--oauth"], openUrlFromOutput: false },
   // kimi login 은 브라우저를 스스로 연다(2026-09-29 실측: 앱도 열면 탭이 두 개).
   kimi: { installable: true, probeArgs: null, loginArgs: ["login"], openUrlFromOutput: false },
   // Antigravity 로그인은 인자 없이 띄운 TUI 안에서만 된다 → 터미널 로그인. 확인은 agy models.
@@ -189,6 +191,17 @@ export async function probeRuntimeAuth(kind: ConnectableRuntime, context: AuthPr
     : binaryFor(kind);
   if (!binary) return { kind, state: "not-installed", account: null, method: null, latencyMs: null, checkedAt, evidence: "binary not found", reason: "not-installed" };
   const name = kind === "claude-code" ? "claude" : kind === "antigravity" ? "agy" : kind === "cursor" ? "cursor-agent" : kind;
+  if (kind === "kimi") {
+    const started = Date.now();
+    const result = await probeKimiAuth({ env: context.env ?? augmentedEnv(), signal: context.signal });
+    return {
+      kind, state: result.state, account: null, method: result.state === "signed-in" ? "Kimi" : null,
+      latencyMs: Date.now() - started, checkedAt,
+      evidence: result.evidence.join(" · ") + (result.reason ? ` → ${result.reason}` : " → verified"),
+      ...(result.state === "unknown" ? { reason: result.reason === "aborted" ? "aborted" as const
+        : result.reason === "timeout" ? "timeout" as const : "unrecognized" as const } : {}),
+    };
+  }
   if (!plan.probeArgs) {
     return { kind, state: "unknown", account: null, method: null, latencyMs: null, checkedAt, evidence: `${name}: no auth-status command`, reason: "probe-unavailable" };
   }
@@ -397,7 +410,7 @@ export function createRuntimeConnector(deps: RuntimeConnectDeps) {
         publish(kind, { step: "done", phase: "done", endedAt: new Date().toISOString() });
         return;
       }
-      if (exited === 0 && !plan.probeArgs) {
+      if (exited === 0 && !plan.probeArgs && kind !== "kimi") {
         // 로그인 명령은 끝났지만 이 런타임엔 인증 상태를 물을 명령이 없다 — 초록으로 올리지 않는다.
         fail(kind, "probe_unavailable", "login finished; this runtime has no auth-status command to confirm it", { probe });
         return;

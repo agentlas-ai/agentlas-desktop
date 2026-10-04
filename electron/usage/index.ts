@@ -21,14 +21,15 @@ import type {
   UsageWindow,
 } from "../../shared/types";
 import { getDb } from "../store/db";
-import { getClaudeUsage } from "./claude";
+import { currentClaudeUsageAccountFingerprint, getClaudeUsage } from "./claude";
 import { currentCodexUsageAccountFingerprint, getCodexUsage } from "./codex";
 import { getGrokUsage } from "./grok";
+import { currentKimiUsageCredentialFingerprint, getKimiUsage } from "./kimi";
 import { localTokensFor } from "./local-logs";
 import { readProviderHealth } from "./provider-health";
 import { UsageRetryGate } from "./retry-policy";
 import { userDataPath } from "../runtime-paths";
-import { providerQuotaExhausted } from "../../shared/runtime-quota";
+import { isPaidOverageUsageWindow, providerQuotaExhausted } from "../../shared/runtime-quota";
 
 // 하이브리드 사용량(ccusage + agentcat 절충):
 //  - 서버 usage API = 정확한 리밋 %·리셋 시각. 단 rate limit이 짜서 자주 못 친다.
@@ -304,6 +305,7 @@ const ADAPTERS: Array<{ id: UsageRetryProviderId; fn: () => Promise<ProviderUsag
   { id: "claude-code", fn: getClaudeUsage },
   { id: "codex", fn: getCodexUsage },
   { id: "grok", fn: getGrokUsage },
+  { id: "kimi", fn: getKimiUsage },
 ];
 
 /** 로컬 로그는 토큰 절대량만 안다. 구독 사용률을 추정하거나 옛 서버 %를 복사하지 않는다. */
@@ -356,11 +358,14 @@ export function peekProviderUsedPercent(providerId: string, now = Date.now(), mo
   loadLastGood();
   const entry = lastResult.get(providerId) ?? lastGood.get(providerId);
   if (providerId === "codex" && !codexAccountMatches(entry?.usage)) return null;
+  if (providerId === "claude-code" && !claudeAccountMatches(entry?.usage)) return null;
+  if (providerId === "kimi" && !kimiCredentialMatches(entry?.usage)) return null;
   if (!entry || !Number.isFinite(entry.usage.fetchedAt)
     || now - entry.usage.fetchedAt > LAST_GOOD_MAX_MS) return null;
   const windows = entry.usage?.windows ?? [];
   let max: number | null = null;
   for (const window of windows) {
+    if (isPaidOverageUsageWindow(window, providerId)) continue;
     if (typeof window.usedPercent !== "number" || !Number.isFinite(window.usedPercent)) continue;
     // An expired limit is no longer evidence of current exhaustion. Do not
     // invent a fresh zero: a missing live observation remains unknown.
@@ -379,6 +384,8 @@ export function peekProviderQuotaExhausted(providerId: string, now = Date.now(),
   loadLastGood();
   const entry = lastResult.get(providerId) ?? lastGood.get(providerId);
   if (providerId === "codex" && !codexAccountMatches(entry?.usage)) return false;
+  if (providerId === "claude-code" && !claudeAccountMatches(entry?.usage)) return false;
+  if (providerId === "kimi" && !kimiCredentialMatches(entry?.usage)) return false;
   if (!entry || !Number.isFinite(entry.usage.fetchedAt)
     || now - entry.usage.fetchedAt > LAST_GOOD_MAX_MS) return false;
   if ((entry.usage.status !== "ok" && entry.usage.status !== "no_quota") || entry.usage.error === "local_estimate") return false;
@@ -388,6 +395,16 @@ export function peekProviderQuotaExhausted(providerId: string, now = Date.now(),
 function codexAccountMatches(usage: ProviderUsage | undefined): boolean {
   const current = currentCodexUsageAccountFingerprint();
   return !!current && !!usage?.accountFingerprint && current === usage.accountFingerprint;
+}
+
+function claudeAccountMatches(usage: ProviderUsage | undefined): boolean {
+  const current = currentClaudeUsageAccountFingerprint();
+  return !!current && !!usage?.accountFingerprint && current === usage.accountFingerprint;
+}
+
+function kimiCredentialMatches(usage: ProviderUsage | undefined): boolean {
+  const current = currentKimiUsageCredentialFingerprint();
+  return !!current && !!usage?.credentialFingerprint && current === usage.credentialFingerprint;
 }
 
 async function fetchProvider(
@@ -400,6 +417,18 @@ async function fetchProvider(
   // last-good reuse. An old cache without identity cannot prove an account match.
   if (id === "codex" && [lastResult.get(id), lastGood.get(id)]
     .some((entry) => entry && !codexAccountMatches(entry.usage))) {
+    lastResult.delete(id);
+    lastGood.delete(id);
+    backoffUntil.delete(id);
+  }
+  if (id === "claude-code" && [lastResult.get(id), lastGood.get(id)]
+    .some((entry) => entry && !claudeAccountMatches(entry.usage))) {
+    lastResult.delete(id);
+    lastGood.delete(id);
+    backoffUntil.delete(id);
+  }
+  if (id === "kimi" && [lastResult.get(id), lastGood.get(id)]
+    .some((entry) => entry && !kimiCredentialMatches(entry.usage))) {
     lastResult.delete(id);
     lastGood.delete(id);
     backoffUntil.delete(id);
@@ -451,8 +480,22 @@ async function fetchProvider(
       saveLastGood();
       return null;
     }
+    if (id === "claude-code" && usage.accountFingerprint && !claudeAccountMatches(usage)) {
+      lastResult.delete(id);
+      lastGood.delete(id);
+      saveLastGood();
+      return null;
+    }
+    if (id === "kimi" && !kimiCredentialMatches(usage)) {
+      lastResult.delete(id);
+      lastGood.delete(id);
+      saveLastGood();
+      return null;
+    }
 
-    const sameAccount = id === "codex"
+    const sameAccount = id === "kimi"
+      ? !!usage.credentialFingerprint && !!good?.usage.credentialFingerprint && usage.credentialFingerprint === good.usage.credentialFingerprint
+      : id === "codex" || id === "claude-code"
       ? !!usage.accountFingerprint && !!good?.usage.accountFingerprint
         && usage.accountFingerprint === good.usage.accountFingerprint
       : !usage.accountFingerprint || !good?.usage.accountFingerprint
@@ -484,7 +527,7 @@ async function fetchProvider(
         return fb;
       }
     }
-    if (usage.status === "ok" || usage.status === "no_quota") {
+    if ((usage.status === "ok" || usage.status === "no_quota") && (id !== "claude-code" || claudeAccountMatches(usage))) {
       lastGood.set(id, { usage, at: now });
       backoffUntil.delete(id);
       saveLastGood();
@@ -517,6 +560,14 @@ async function buildUsageSnapshot(options?: {
     const currentCodex = currentCodexUsageAccountFingerprint();
     if ((cachedCodex && (!currentCodex || cachedCodex.accountFingerprint !== currentCodex))
       || (!cachedCodex && currentCodex)) cache = null;
+    const cachedClaude = cache?.snapshot.providers.find((provider) => provider.provider === "claude-code");
+    const currentClaude = currentClaudeUsageAccountFingerprint();
+    if ((cachedClaude && (!currentClaude || cachedClaude.accountFingerprint !== currentClaude))
+      || (!cachedClaude && currentClaude)) cache = null;
+    const cachedKimi = cache?.snapshot.providers.find((provider) => provider.provider === "kimi");
+    const currentKimi = currentKimiUsageCredentialFingerprint();
+    if ((cachedKimi && (!currentKimi || cachedKimi.credentialFingerprint !== currentKimi))
+      || (!cachedKimi && currentKimi)) cache = null;
   }
   const forced = options?.forceAll === true || options?.forceProviderId != null;
   if (!forced && cache && now - cache.at < TTL_MS) {

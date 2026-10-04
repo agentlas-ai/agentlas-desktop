@@ -168,6 +168,9 @@ export const NATIVE_CLI_PINS: Record<NativeCliKind, NativePin> = {
 /** 무결성이 고정돼 있으므로 어느 미러에서 받아도 같은 바이트다. 공식 레지스트리가 먼저. */
 const REGISTRY_HOSTS = ["https://registry.npmjs.org/", "https://registry.npmmirror.com/"];
 const MARKER = ".agentlas-native.json";
+// An extracted executable can still fail its first real --version launch.
+// Keep it out of detection even if an antivirus temporarily locks its marker.
+const rejectedExecutables = new Set<string>();
 /** 이 시간 동안 한 바이트도 안 오면 끊고 다음 수단으로 간다(느린 망은 괜찮다). */
 const STALL_MS = 60_000;
 const ROUNDS = 3;
@@ -225,6 +228,7 @@ export function nativeCliExecutable(kind: NativeCliKind): string | null {
       const marker = JSON.parse(fs.readFileSync(path.join(dir, MARKER), "utf8")) as { version?: string; integrity?: string };
       if (marker.version !== pin.version || marker.integrity !== artifact.integrity) continue;
       const exe = path.join(dir, exeRelative(kind, key));
+      if (rejectedExecutables.has(path.resolve(exe))) continue;
       if (fs.statSync(exe).isFile()) {
         fs.accessSync(exe, fs.constants.X_OK);
         assertExecutableFormat(exe, key);
@@ -235,6 +239,25 @@ export function nativeCliExecutable(kind: NativeCliKind): string | null {
     }
   }
   return null;
+}
+
+/** Retire only this provider's owned completion marker before npm fallback. */
+export function invalidateNativeCliExecutable(kind: NativeCliKind, executable: string): boolean {
+  const key = platformKey();
+  if (!key || !isNativeCliKind(kind)) return false;
+  for (const root of nativeCliRoots()) {
+    const dir = installDir(root, kind, key);
+    const expected = path.join(dir, exeRelative(kind, key));
+    if (path.resolve(expected) !== path.resolve(executable)) continue;
+    rejectedExecutables.add(path.resolve(expected));
+    try {
+      fs.rmSync(path.join(dir, MARKER), { force: true });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 /** 실행 PATH 맨 앞에 둘 디렉터리 — 설치가 끝난 것만. */
@@ -792,7 +815,9 @@ async function installInto(
     if (fs.existsSync(finalDir)) fs.renameSync(finalDir, backup);
     try {
       await renameWithRetry(staging, finalDir, options);
-      return path.join(finalDir, exeRelative(kind, key));
+      const executable = path.join(finalDir, exeRelative(kind, key));
+      rejectedExecutables.delete(path.resolve(executable));
+      return executable;
     } catch (error) {
       if (fs.existsSync(backup) && !fs.existsSync(finalDir)) fs.renameSync(backup, finalDir);
       throw error;

@@ -15,7 +15,8 @@ import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { LocalModelMiniCards, useLocalModelSnapshot } from "@/components/dashboard/LocalModelMiniCards";
-import { providerHasUsableCredits } from "@shared/runtime-quota";
+import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
+import { providerHasUsableCredits, providerHasUsableExtraUsage } from "@shared/runtime-quota";
 import type {
   CliRuntimeVersionStatus,
   EnvVarMeta,
@@ -71,7 +72,8 @@ const ENGINES: EngineDef[] = [
 
 function windowLabel(w: UsageWindow, ko: boolean): string {
   const named = (label: string) => (w.limitName || w.model) ? `${w.limitName || w.model} · ${label}` : label;
-  if (w.kind === "monthly") return ko ? "추가 크레딧" : "Extra credits";
+  if (w.quotaRole === "paid-overage" || w.id === "extra_usage") return ko ? "추가 사용" : "Extra usage";
+  if (w.kind === "monthly") return ko ? "월간" : "Monthly";
   if (w.id.includes("-local-")) return ko ? (w.kind === "5h" ? "최근 5시간(로컬)" : "최근 7일(로컬)") : w.kind === "5h" ? "Last 5h (local)" : "Last 7d (local)";
   if (w.kind === "5h") return named(ko ? "5시간" : "5-hour");
   if (w.kind === "daily") return w.label || (ko ? "일일" : "Daily");
@@ -124,12 +126,32 @@ function providerCreditsLabel(usage: ProviderUsage, ko: boolean): string | null 
   const balance = credits.unlimited
     ? ko ? "무제한" : "unlimited"
     : typeof credits.balance === "number" && Number.isFinite(credits.balance)
-      ? new Intl.NumberFormat(ko ? "ko-KR" : "en-US", { maximumFractionDigits: 2 }).format(credits.balance)
+      ? credits.unit === "USD cents"
+        ? new Intl.NumberFormat(ko ? "ko-KR" : "en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(credits.balance / 100)
+        : `${new Intl.NumberFormat(ko ? "ko-KR" : "en-US", { maximumFractionDigits: 2 }).format(credits.balance)}${credits.unit ? ` ${credits.unit}` : ""}`
       : ko ? "잔액 확인 필요" : "balance unavailable";
   const continuation = !usage.stale && providerHasUsableCredits(usage)
     ? ko ? " · 구독 한도 이후 사용" : " · usable after limit"
     : "";
   return `${usage.label} ${ko ? "크레딧" : "credits"} ${balance}${continuation}`;
+}
+
+function providerExtraUsageLabel(usage: ProviderUsage, ko: boolean): string | null {
+  const extra = usage.extraUsage;
+  if (!extra) return null;
+  const prefix = `${usage.label} ${ko ? "추가 사용" : "extra usage"}`;
+  if (!extra.enabled) return `${prefix} ${ko ? "꺼짐" : "off"}`;
+  if (usage.stale) return `${prefix} ${ko ? "켜짐 · 마지막 확인 기준" : "on · last observation"}`;
+  if (providerHasUsableExtraUsage(usage)) {
+    return `${prefix} ${ko ? "켜짐 · 구독 한도 이후 허용" : "on · allowed after subscription limit"}`;
+  }
+  const exhausted = usage.spendControlReached === true || extra.monthlyLimit === 0
+    || (typeof extra.utilization === "number" && extra.utilization >= 100)
+    || (typeof extra.monthlyLimit === "number" && typeof extra.usedCredits === "number"
+      && extra.usedCredits >= extra.monthlyLimit);
+  return `${prefix} ${exhausted
+    ? ko ? "켜짐 · 추가 사용 한도 소진" : "on · extra usage limit reached"
+    : ko ? "켜짐 · 추가 사용 한도 확인 필요" : "on · extra usage allowance unavailable"}`;
 }
 
 function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
@@ -249,7 +271,8 @@ export function EngineUsage() {
     (readViewData<EnvVarMeta[]>("dashboard.env")?.value ?? []).filter((entry) => entry.hasValue).map((entry) => entry.key),
   ));
   const [busy, setBusy] = useState<string | null>(null);
-  const [busyStage, setBusyStage] = useState<"install" | "login" | null>(null);
+  const [connectSpec, setConnectSpec] = useState<RuntimeChipSpec | null>(null);
+  const { probes: runtimeAuth, refresh: refreshAuth } = useRuntimeAuth();
   const [usageLoadError, setUsageLoadError] = useState(false);
   const [notice, setNotice] = useState<{ id: string; text: string; command?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
@@ -283,13 +306,13 @@ export function EngineUsage() {
 
   const [connectionsLoadError, setConnectionsLoadError] = useState(false);
 
-  const loadConnections = useCallback(async () => {
+  const loadConnections = useCallback(async (force = false) => {
     const api = ipc();
     if (!api) return;
     try {
       const [rt, env] = await Promise.all([
-        loadViewData("dashboard.runtimes", () => api.runtime.detect(), { maxAgeMs: 300_000 }),
-        loadViewData("dashboard.env", () => api.env.list(), { maxAgeMs: 15_000 }),
+        loadViewData("dashboard.runtimes", () => api.runtime.detect(force), { maxAgeMs: 300_000, force }),
+        loadViewData("dashboard.env", () => api.env.list(), { maxAgeMs: 15_000, force }),
       ]);
       setRuntimes(rt);
       setEnvKeys(new Set(env.filter((e: EnvVarMeta) => e.hasValue).map((e) => e.key)));
@@ -333,87 +356,19 @@ export function EngineUsage() {
     const events = ipcEvents();
     if (!events?.onStoreChanged) return;
     return events.onStoreChanged((change) => {
-      if (change.entity === "runtime") void loadConnections();
+      if (change.entity === "runtime") {
+        void loadConnections(true);
+        void refreshAuth();
+      }
     });
-  }, [loadConnections]);
+  }, [loadConnections, refreshAuth]);
   useVisibleInterval(() => void loadUsage(), POLL_MS);
   // 로컬 묶음은 엔진 카드가 아니라 설치된 모델 카드(한 행 두 장)를 그린다 — 2026-09-13.
   const localModels = useLocalModelSnapshot();
 
-  // 재로그인은 터미널에서 끝난다 — 완료 시점을 앱이 폴링으로 감지해 자동 반영(15초 × 12 = 3분).
-  const pollGen = useRef(0);
   useEffect(() => () => {
-    pollGen.current++; // 언마운트 시 진행 중 폴링 중단
     usageRequestGen.current++; // 늦게 끝난 snapshot이 unmount 뒤 상태를 덮지 않게 한다.
   }, []);
-  const watchRecovery = useCallback(
-    async (providerId: string) => {
-      const api = ipc();
-      if (!api) return;
-      const gen = ++pollGen.current;
-      // 재로그인 완료 감지 폴링 — 예전엔 5초×36(3분간 usage 엔드포인트 폭격)이라 이 조회 자체가
-      // 429를 유발했다. 로그인 브라우저 왕복은 보통 20초+ 걸리므로 15초 간격으로 충분하고,
-      // 총 커버 시간(약 3분)은 유지하되 조회 횟수를 1/3로 줄인다.
-      for (let i = 0; i < 12; i++) {
-        await new Promise((r) => setTimeout(r, 15_000));
-        if (pollGen.current !== gen) return;
-        try {
-          const requestId = ++usageRequestGen.current;
-          const s = await api.usage.snapshot({ force: true });
-          if (pollGen.current !== gen) return;
-          if (usageRequestGen.current !== requestId) continue;
-          writeViewData("dashboard.usage", s);
-          setSnap(s);
-          setUsageLoadError(false);
-          const p = s.providers.find((x) => x.provider === providerId);
-          // 429(일시 제한)는 '아직 로그인 안 됨'이 아니다 — 계속 폴링하면 제한만 길어지니 멈춘다.
-          if (p && (p.status !== "error" || p.error === "rate_limited")) {
-            void loadConnections();
-            return;
-          }
-        } catch {
-          // 다음 틱 재시도
-        }
-      }
-    },
-    [loadConnections],
-  );
-
-  // Kimi has no usage adapter to use as a login receipt. Its runtime detector
-  // exposes it only after the official CLI has a usable default model, so poll
-  // that exact condition while the device-code terminal is open.
-  const watchKimiConnection = useCallback(async () => {
-    const api = ipc();
-    if (!api) return;
-    const gen = ++pollGen.current;
-    for (let i = 0; i < 60; i++) {
-      await new Promise((resolve) => setTimeout(resolve, 3_000));
-      if (pollGen.current !== gen) return;
-      try {
-        const detected = await api.runtime.detect(true);
-        if (pollGen.current !== gen) return;
-        writeViewData("dashboard.runtimes", detected);
-        setRuntimes(detected);
-        if (detected.some((runtime) => runtime.kind === "kimi")) {
-          setNotice({
-            id: "kimi",
-            text: ko ? "Kimi Code 연결을 확인했어요." : "Kimi Code is connected.",
-          });
-          return;
-        }
-      } catch {
-        // Device-code login may still be in progress.
-      }
-    }
-    if (pollGen.current === gen) {
-      setNotice({
-        id: "kimi",
-        text: ko
-          ? "로그인이 아직 끝나지 않았어요. 터미널에서 로그인을 마친 뒤 다시 연결을 눌러주세요."
-          : "Login is not finished yet. Complete it in the terminal, then choose Connect again.",
-      });
-    }
-  }, [ko]);
 
   function usageFor(id: string): ProviderUsage | undefined {
     return snap?.providers.find((p) => p.provider === id);
@@ -445,9 +400,11 @@ export function EngineUsage() {
   function isConnected(e: EngineDef): boolean {
     // 사용량/오류 영수증은 runtime 설치 증거가 아니다. 오래된 receipt가 Connect를 숨기면 안 된다.
     if (e.auth === "cli") {
-      return runtimes.some((r) => (e.cliKind && r.kind === e.cliKind)
-        || (e.detectKind && r.kind === e.detectKind)
-        || (e.acpAgentId && r.kind === "acp" && r.acpAgentId === e.acpAgentId));
+      const runtime = runtimeFor(e);
+      if (!runtime) return false;
+      const kind = e.cliKind ?? e.detectKind;
+      // Installing an executable does not prove that its account is signed in.
+      return kind ? runtimeAuth[kind]?.state === "signed-in" : true;
     }
     if (e.auth === "local") return runtimes.some((r) => r.kind === "agentlas-local");
     return !!e.keyEnv && envKeys.has(e.keyEnv);
@@ -468,56 +425,14 @@ export function EngineUsage() {
       return;
     }
     if (!e.cliKind) return;
-    setBusy(e.id);
-    setNotice(null);
-    let opened = false;
-    try {
-      // Antigravity는 앱이 npm으로 설치하지 않는다. 설치된 agy만 검증하고
-      // 로그인/업데이트는 Antigravity 자체 경로로 연다.
-      if (e.cliKind !== "antigravity") {
-        setBusyStage("install");
-        const inst = await api.runtime.installCli(e.cliKind);
-        if (!inst?.ok) {
-          setNotice({
-            id: e.id,
-            text: ko ? `CLI 설치에 실패했습니다: ${inst?.message ?? ""}` : `CLI install failed: ${inst?.message ?? ""}`,
-            command: inst?.command,
-          });
-          return;
-        }
-        if (inst.message?.startsWith("already installed")) {
-          try {
-            await api.runtime.updateCli?.(e.cliKind);
-          } catch {
-            // best-effort
-          }
-        }
-      }
-      // 2) 로그인 — 절대경로 실행(셸 PATH 무관). 실패도 표면화.
-      setBusyStage("login");
-      const login = await api.runtime.openCliLogin(e.cliKind);
-      if (!login?.ok) {
-        setNotice({
-          id: e.id,
-          text: ko ? `로그인 창을 열지 못했습니다: ${login?.message ?? ""}` : `Could not open login: ${login?.message ?? ""}`,
-          command: login?.command,
-        });
-        return;
-      }
-      opened = true;
-      await loadConnections();
-      await loadUsage(true);
-    } finally {
-      setBusy(null);
-      setBusyStage(null);
+    const spec = RUNTIME_CHIPS.find((chip) => chip.kind === e.cliKind);
+    if (spec) {
+      setNotice(null);
+      setConnectSpec(spec);
     }
-    // 터미널 로그인 완료를 감지해 자동 갱신 — usage 어댑터가 있는 엔진만(그 외엔 성공 신호가 없어 헛폴링).
-    if (opened && ["claude-code", "codex"].includes(e.id)) void watchRecovery(e.id);
-    if (opened && e.cliKind === "kimi") void watchKimiConnection();
   }
 
   function busyLabel(): string {
-    if (busyStage === "install") return ko ? "설치 중…" : "Installing…";
     return ko ? "연결 중…" : "Connecting…";
   }
 
@@ -601,6 +516,7 @@ export function EngineUsage() {
     const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
     const hasBars = connected && (u?.windows.length ?? 0) > 0;
     const creditsLabel = connected && u ? providerCreditsLabel(u, ko) : null;
+    const extraUsageLabel = connected && u ? providerExtraUsageLabel(u, ko) : null;
     const terminalError = connected && isTerminalProviderError(u);
     const retryableError = connected && u?.status === "error" && !isRateLimited(u);
     const showConnectedChip = connected && !terminalError && !retryableError;
@@ -688,6 +604,7 @@ export function EngineUsage() {
           </div>
         )}
         {creditsLabel && <div className="dashboard-engine-card-status" title={creditsLabel}>{creditsLabel}</div>}
+        {extraUsageLabel && <div className="dashboard-engine-card-status" title={extraUsageLabel}>{extraUsageLabel}</div>}
         {(actions || (keyFor === e.id && !connected)) && (
           <div className="dashboard-engine-card-foot">
             {actions ? <div className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</div> : <span />}
@@ -723,6 +640,17 @@ export function EngineUsage() {
 
   return (
     <div className="dashboard-engine-usage">
+      {connectSpec && <RuntimeConnectPopup
+        spec={connectSpec}
+        copy={connectCopy(ko)}
+        onClose={() => setConnectSpec(null)}
+        onDone={() => {
+          setConnectSpec(null);
+          void refreshAuth(connectSpec.kind);
+          void loadConnections(true);
+          void loadUsage(true);
+        }}
+      />}
       <div className="dashboard-module-head" data-collapsed="false">
         <span>{ko ? "LLM 연결 · 사용량" : "LLM connections · usage"}</span>
         <button onClick={() => void loadUsage(true)} className="titlebar-nodrag dashboard-refresh-button" title={ko ? "새로고침" : "Refresh"}>↻</button>

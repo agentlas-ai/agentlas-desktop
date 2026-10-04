@@ -9,11 +9,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnCli } from "./exec";
+import { spawnCli, killCliTree, cliPathValue, setCliPath } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
 import { cliSelfUpdateEnv } from "./cli-update-prefix";
 import {
   installNativeCli,
+  invalidateNativeCliExecutable,
   isNativeCliPath,
   nativeCliBinDirs,
   nativeCliExecutable,
@@ -35,7 +36,7 @@ const CLI_PLAN: Record<InstallableCli, {
   /** 외부(사용자 소유) 설치본의 자체 업데이트 인자. 없으면 자체 업데이트 명령이 없는 CLI. */
   selfUpdateArgs?: string[];
 }> = {
-  "claude-code": { pkg: "@anthropic-ai/claude-code", version: "2.1.214", loginArgs: [], bin: "claude", selfUpdateArgs: ["update"] },
+  "claude-code": { pkg: "@anthropic-ai/claude-code", version: "2.1.214", loginArgs: ["auth", "login"], bin: "claude", selfUpdateArgs: ["update"] },
   codex: { pkg: "@openai/codex", version: "0.144.6", loginArgs: ["login"], bin: "codex", selfUpdateArgs: ["update"] },
   // Official Moonshot Kimi Code CLI. `kimi login` opens the device-code OAuth
   // flow and does not require the user to create an API key. It has no stable
@@ -75,7 +76,7 @@ const EXTRA_BIN_DIRS = [
 ];
 
 function searchDirs(): string[] {
-  const fromPath = (process.env.PATH || "").split(path.delimiter).filter(Boolean);
+  const fromPath = cliPathValue(process.env).split(path.delimiter).filter(Boolean);
   // Once Agentlas owns a verified install, always prefer it over stale user or
   // system shims. Otherwise installation can succeed and login immediately
   // reopen an older broken binary from PATH.
@@ -157,13 +158,13 @@ export function augmentedEnv(): NodeJS.ProcessEnv {
   const merged = Array.from(new Set([
     ...nativeCliBinDirs(),
     managedBinDir(),
-    ...(process.env.PATH || "").split(path.delimiter),
+    ...cliPathValue(process.env).split(path.delimiter),
     ...(bundledNode ? [bundledNode] : []),
     ...EXTRA_BIN_DIRS,
   ]))
     .filter(Boolean)
     .join(path.delimiter);
-  return { ...process.env, PATH: merged };
+  return setCliPath(process.env, merged);
 }
 
 export interface CliActionResult {
@@ -270,9 +271,8 @@ function managedBinDir(): string {
 }
 
 function prependPath(env: NodeJS.ProcessEnv, dir: string): NodeJS.ProcessEnv {
-  const pathKey = Object.keys(env).find((key) => key.toLowerCase() === "path") ?? "PATH";
-  const current = (env[pathKey] ?? "").split(path.delimiter).filter(Boolean);
-  return { ...env, [pathKey]: [dir, ...current.filter((entry) => entry !== dir)].join(path.delimiter) };
+  const current = cliPathValue(env).split(path.delimiter).filter(Boolean);
+  return setCliPath(env, [dir, ...current.filter((entry) => entry !== dir)].join(path.delimiter));
 }
 
 /**
@@ -309,6 +309,27 @@ export function windowsCmdPath(
 /** NODE_OPTIONS 를 비우고 명령 한 줄을 실행하는 .cmd 본문. 비ASCII 경로가 남으면 UTF-8 로 읽게 한다. */
 export function windowsCmdScript(invocation: string, needsUtf8: boolean): string {
   return `@echo off\r\n${needsUtf8 ? "chcp 65001 >nul\r\n" : ""}setlocal\r\nset "NODE_OPTIONS="\r\n${invocation}\r\n`;
+}
+
+/** A visible cmd fallback with cmd.exe's explicit /s outer-quote contract. */
+export function buildWindowsCmdCliLogin(
+  binary: string,
+  args: readonly string[],
+  env: NodeJS.ProcessEnv,
+): { args: string[]; env: NodeJS.ProcessEnv; windowsVerbatimArguments: true } {
+  // Login arguments are release-owned words, never renderer or account input.
+  if (args.some((arg) => !/^[A-Za-z0-9_-]+$/.test(arg))) {
+    throw new Error("Unsupported Windows CLI login argument");
+  }
+  // Expand the path from an environment variable exactly once. Embedding an
+  // absolute path in the cmd string would expand %NAME% in a user's directory.
+  // Quotes contain spaces/&/parentheses; /v:off keeps ! in paths literal.
+  const invocation = ['"%AGENTLAS_CLI_LOGIN_EXECUTABLE%"', ...args.map((arg) => `"${arg}"`)].join(" ");
+  return {
+    args: ["/d", "/s", "/v:off", "/k", `"${invocation}"`],
+    env: { ...env, AGENTLAS_CLI_LOGIN_EXECUTABLE: binary },
+    windowsVerbatimArguments: true,
+  };
 }
 
 function writeNpmBootstrapNodeShim(runtime: ManagedNodeRuntime): void {
@@ -500,9 +521,6 @@ function resolveNpmRunner(): { ok: true; runner: NpmRunner } | { ok: false; reas
 }
 
 function managedBinary(name: string): string | null {
-  const nativeKind = (Object.keys(CLI_PLAN) as InstallableCli[]).find((kind) => CLI_PLAN[kind].bin === name);
-  const native = nativeKind && nativeCliSupported(nativeKind) ? nativeCliExecutable(nativeKind) : null;
-  if (native) return native;
   const candidates = process.platform === "win32"
     ? [path.join(AGENTLAS_NPM_PREFIX, `${name}.cmd`), path.join(AGENTLAS_NPM_PREFIX, `${name}.exe`)]
     : [path.join(AGENTLAS_NPM_PREFIX, "bin", name)];
@@ -563,6 +581,22 @@ async function installCliUnlocked(
       }
       if (opts?.signal?.aborted) return { ok: false, message: "cancelled", reasonCode: "install_cancelled" };
       trail.push("native:verify-failed");
+      const retired = invalidateNativeCliExecutable(kind, native.executable);
+      trail.push(retired ? "native:retired" : "native:marker-retirement-failed");
+    } else {
+      // A forced download can fail while a previous owned native installation
+      // remains. Reuse it only if it still launches; otherwise it would shadow
+      // the freshly installed npm fallback on the next detection pass.
+      const retained = nativeCliExecutable(kind);
+      if (retained) {
+        if (await verifyInstalledBinary(retained, opts?.signal, emit)) {
+          recordInstallTrail(kind, [...trail, "native:retained-verified"]);
+          return { ok: true, message: `installed and verified: ${retained}` };
+        }
+        if (opts?.signal?.aborted) return { ok: false, message: "cancelled", reasonCode: "install_cancelled" };
+        const retired = invalidateNativeCliExecutable(kind, retained);
+        trail.push(retired ? "native:retired" : "native:marker-retirement-failed");
+      }
     }
   }
 
@@ -690,7 +724,8 @@ async function installCliUnlocked(
     recordInstallTrail(kind, [...trail, "npm:launcher-missing"]);
     return { ok: false, message: "CLI installation finished but its launcher is missing", command: fallbackCommand };
   }
-  const verified = await runBinary(binary, ["--version"], 20_000, env);
+  const verified = await runBinary(binary, ["--version"], 20_000, env, opts?.signal);
+  if (opts?.signal?.aborted) return { ok: false, message: "cancelled", reasonCode: "install_cancelled" };
   if (!verified.ok) {
     recordInstallTrail(kind, [...trail, "npm:verify-failed"]);
     return { ok: false, message: "CLI launcher failed post-install verification", command: fallbackCommand, reasonCode: "install_verify_failed" };
@@ -809,14 +844,14 @@ function runBinary(
       return;
     }
     onAbort = () => {
-      try { child.kill(); } catch { /* already exited */ }
+      try { killCliTree(child); } catch { /* already exited */ }
       done({ ok: false, message: "cancelled", reasonCode: "install_cancelled" });
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     if (signal?.aborted) { onAbort(); return; }
     timer = setTimeout(() => {
       try {
-        child.kill();
+        killCliTree(child);
       } catch {
         // ignore
       }
@@ -1094,15 +1129,16 @@ export async function openCliLogin(kind: ManageableCli, requestedSource?: string
         // PowerShell 이 없거나 회사 정책으로 막힌 기계. 막다른 길로 끝내지 않는다 — 콘솔 프로그램을
         // detached 로 띄우면 윈도우가 그 프로그램에 **자기 콘솔 창**을 붙여 준다. 네이티브 exe 는
         // 그대로, .cmd 는 cmd.exe 가 읽게 한다(인자 배열로 넘겨 셸 문자열을 조합하지 않는다).
-        const direct = /\.exe$/i.test(abs)
-          ? { command: abs, args: [...loginArgs] }
+        const direct: { command: string; args: string[]; env: NodeJS.ProcessEnv; windowsVerbatimArguments?: boolean } = /\.exe$/i.test(abs)
+          ? { command: abs, args: [...loginArgs], env: loginEnv }
           : {
             command: path.join(process.env.SystemRoot || "C:\\Windows", "System32", "cmd.exe"),
-            args: ["/d", "/k", abs, ...loginArgs],
+            ...buildWindowsCmdCliLogin(abs, loginArgs, loginEnv),
           };
         started = await spawnTerminalVerified(direct.command, direct.args, {
           detached: true,
-          env: loginEnv,
+          env: direct.env,
+          windowsVerbatimArguments: direct.windowsVerbatimArguments,
           stdio: "ignore",
           windowsHide: false,
         });

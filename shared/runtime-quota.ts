@@ -29,8 +29,27 @@ export function quotaExhausted(usedPercent: number | null | undefined): boolean 
 export function providerHasUsableCredits(usage: Pick<ProviderUsage, "credits" | "spendControlReached" | "stale">): boolean {
   const credits = usage.credits;
   return usage.stale !== true && usage.spendControlReached !== true && credits?.hasCredits === true
+    && credits.spendAllowed !== false
     && credits.overageLimitReached !== true
     && (credits.unlimited === true || (typeof credits.balance === "number" && Number.isFinite(credits.balance) && credits.balance > 0));
+}
+
+/** Admission hint only: the provider still decides whether funded extra use is
+ * available. Remaining monthly spend allowance is not a wallet balance. */
+export function providerHasUsableExtraUsage(usage: Pick<ProviderUsage, "extraUsage" | "spendControlReached" | "stale">): boolean {
+  const extra = usage.extraUsage;
+  if (usage.stale === true || usage.spendControlReached === true || extra?.enabled !== true) return false;
+  if (quotaExhausted(extra.utilization)) return false;
+  if (extra.unlimited === true) return true;
+  if (typeof extra.monthlyLimit !== "number" || !Number.isFinite(extra.monthlyLimit) || extra.monthlyLimit <= 0) return false;
+  if (typeof extra.usedCredits === "number" && Number.isFinite(extra.usedCredits) && extra.usedCredits >= 0)
+    return extra.usedCredits < extra.monthlyLimit;
+  return typeof extra.utilization === "number" && Number.isFinite(extra.utilization) && extra.utilization >= 0;
+}
+
+/** Legacy saved Claude extra_usage windows also remain spending controls. */
+export function isPaidOverageUsageWindow(window: Pick<UsageWindow, "id" | "quotaRole">, providerId?: string): boolean {
+  return window.quotaRole === "paid-overage" || (providerId === "claude-code" && window.id === "extra_usage");
 }
 
 function usageWindowMatchesModel(window: Pick<UsageWindow, "model">, model: string | undefined, providerId: string | undefined): boolean {
@@ -43,7 +62,7 @@ function usageWindowMatchesModel(window: Pick<UsageWindow, "model">, model: stri
  * continue on the same provider's usable credits; monthly/spending caps cannot.
  * The caller owns snapshot freshness and measured runtime failures/cooldowns. */
 export function providerQuotaExhausted(
-  usage: Pick<ProviderUsage, "credits" | "spendControlReached" | "limits" | "windows" | "stale">,
+  usage: Pick<ProviderUsage, "credits" | "extraUsage" | "spendControlReached" | "limits" | "windows" | "stale">,
   now = Date.now(), model?: string, providerId?: string,
 ): boolean {
   const limits = (usage.limits ?? []).filter(limit => usageWindowMatchesModel(limit, model, providerId));
@@ -51,18 +70,22 @@ export function providerQuotaExhausted(
     && !(typeof window.resetAt === "number" && Number.isFinite(window.resetAt) && window.resetAt <= now));
   if (usage.spendControlReached === true || limits.some(limit => limit.spendControlReached === true)) return true;
   for (const window of applicable) {
+    // An exhausted paid allowance cannot consume the still-available included
+    // subscription. It only prevents bypassing an exhausted subscription below.
+    if (isPaidOverageUsageWindow(window, providerId)) continue;
     if (!quotaExhausted(window.usedPercent)) continue;
     if (window.kind === "monthly") return true;
     const limit = limits.find(item => item.limitId === (window.limitId ?? null));
     const creditUsage = limit ? { credits: limit.credits, spendControlReached: limit.spendControlReached === true, stale: usage.stale } : usage;
-    if (!providerHasUsableCredits(creditUsage)) return true;
+    if (!providerHasUsableCredits(creditUsage) && !providerHasUsableExtraUsage(usage)) return true;
   }
   // A machine limit flag can report exhaustion without a percentage window.
   for (const limit of limits) {
     if (limit.limitReached !== true) continue;
     const windows = usage.windows.filter(window => (window.limitId ?? null) === limit.limitId);
     if (windows.length && !applicable.some(window => (window.limitId ?? null) === limit.limitId)) continue;
-    if (!providerHasUsableCredits({ credits: limit.credits, spendControlReached: limit.spendControlReached === true, stale: usage.stale })) return true;
+    if (!providerHasUsableCredits({ credits: limit.credits, spendControlReached: limit.spendControlReached === true, stale: usage.stale })
+      && !providerHasUsableExtraUsage(usage)) return true;
   }
   return false;
 }

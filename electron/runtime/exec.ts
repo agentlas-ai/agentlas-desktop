@@ -92,13 +92,27 @@ function preferredManagedCliDir(): string | null {
   return managed;
 }
 
+/** Read the PATH entry Node will actually pass to a child. */
+export function cliPathValue(env: NodeJS.ProcessEnv): string {
+  if (process.platform !== "win32") return env.PATH ?? "";
+  // Node selects the first lexicographic key when Windows receives duplicates.
+  const key = Object.keys(env).filter((entry) => entry.toLowerCase() === "path").sort()[0];
+  return key ? env[key] ?? "" : "";
+}
+
+export function setCliPath(env: NodeJS.ProcessEnv, value: string): NodeJS.ProcessEnv {
+  const next = { ...env };
+  if (process.platform === "win32") {
+    for (const key of Object.keys(next)) if (key.toLowerCase() === "path") delete next[key];
+  }
+  next.PATH = value;
+  return next;
+}
+
 /** Agentlas 관리 CLI를 우선하고 그 뒤에 기존 PATH와 보충 경로를 둔 새 env 반환. */
 export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const sep = path.delimiter;
-  // Windows는 환경변수 키가 대소문자 무관 — 실제 키 이름을 찾아 그대로 갱신한다.
-  const pathKey =
-    Object.keys(base).find((k) => k.toLowerCase() === "path") ?? "PATH";
-  const existing = (base[pathKey] ?? "").split(sep).filter(Boolean);
+  const existing = cliPathValue(base).split(sep).filter(Boolean);
   const managed = preferredManagedCliDir();
   const bundledNode = bundledNodeBinDir();
   const merged = Array.from(new Set([
@@ -109,7 +123,7 @@ export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     ...(bundledNode ? [bundledNode] : []),
     ...cliSearchDirs(),
   ].filter(Boolean)));
-  return { ...base, [pathKey]: merged.join(sep) };
+  return setCliPath(base, merged.join(sep));
 }
 
 /**

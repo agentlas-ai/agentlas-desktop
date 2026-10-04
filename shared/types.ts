@@ -5203,6 +5203,8 @@ export interface UsageWindow {
   /** 영문 기본 라벨(폴백). 표시는 렌더러가 kind/model로 로컬라이즈. */
   label: string;
   kind: UsageWindowKind;
+  /** A paid overage budget is separate from the included subscription quota. */
+  quotaRole?: "subscription" | "paid-overage";
   /** 0–100. monthly는 used/limit로 계산. */
   usedPercent: number;
   /** 리셋 시각(epoch ms). 모르면 미설정. */
@@ -5250,6 +5252,21 @@ export interface ProviderUsageCredits {
   /** Null means the provider did not return a finite balance. */
   balance: number | null;
   overageLimitReached?: boolean;
+  /** Provider currency/credit units when explicitly known. */
+  unit?: string;
+  /** False when a provider spending control cannot authorize using its wallet. */
+  spendAllowed?: boolean;
+}
+
+/** Claude's provider-reported extra-use spending allowance. These values are
+ * spending controls in provider units, not a purchased wallet balance. */
+export interface ProviderUsageExtraUsage {
+  enabled: boolean;
+  monthlyLimit: number | null;
+  usedCredits: number | null;
+  utilization: number | null;
+  /** Explicit provider null monthly_limit while enabled means no monthly cap. */
+  unlimited: boolean;
 }
 
 /** Credit and spend controls for one provider-owned rate-limit bucket. */
@@ -5274,6 +5291,7 @@ export interface ProviderUsage {
   fetchedAt: number;
   /** Provider credits are separate from the Agentlas AI credit balance. */
   credits?: ProviderUsageCredits;
+  extraUsage?: ProviderUsageExtraUsage;
   spendControlReached?: boolean;
   limits?: ProviderUsageLimit[];
   /** Last successful provider observation reused after a transient read failure. */
@@ -5284,6 +5302,8 @@ export interface ProviderUsage {
   retryAfterSeconds?: number;
   /** secret-free 계정 지문(sha256 앞 16 hex). 같은 구독 계정의 멀티 데스크탑 병합 표시 기준. */
   accountFingerprint?: string;
+  /** Credential-scope cache identity; it does not establish an account identity. */
+  credentialFingerprint?: string;
 }
 
 /** Usage 조회와 함께 반환되는 설치형 CLI의 버전/자동 업데이트 상태. */

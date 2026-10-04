@@ -12,7 +12,8 @@ export async function getGrokUsage(): Promise<ProviderUsage | null> {
     label: "Grok",
     status: "error",
     error: "quota_exhausted",
-    fetchedAt: Date.now(),
+    // Preserve the time of the actual 402 receipt, not the dashboard read time.
+    fetchedAt: health.updatedAt,
     // HTTP 402 proves exhaustion only. It does not expose a measured percentage,
     // quota window, or reset timestamp, so the Dashboard must remain status-only.
     windows: [],
