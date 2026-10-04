@@ -286,11 +286,16 @@ export interface InvocationSettledEnvelope {
   workspaceBinding?: InvocationWorkspaceBinding;
 }
 
-/** crossed: the durable start receipt exists. handedOff: the completion chain owns settlement from then on. */
+/**
+ * crossed: the durable start receipt exists. handedOff: the deferred completion chain is assigned.
+ * cleanups: releases for resources this start has acquired so far, appended as each one is taken, so a failure
+ * before the runner's own terminal settlement can undo exactly what exists (no closure reads a later binding).
+ */
 interface StartBoundary {
   crossed: boolean;
   runId?: string;
   handedOff?: boolean;
+  cleanups?: Array<() => void>;
 }
 
 interface RunRecord {
@@ -1243,13 +1248,18 @@ export class InvocationService {
     try {
       const started = this.startPrepared(req, workspaceBinding, executionContext, questionContinuation,
         hostNoticePurpose, mainAdmission, durableAdmission, startBoundary);
-      for (const [waitingRunId, waiting] of this.browserLoginWaitingRuns) {
-        if (waiting.chatId === req.chatId && waitingRunId !== started.runId) this.cancelParkedBrowserLoginWait(waitingRunId, "new_invocation", true);
+      // The run is dispatched from here: a failed cleanup of an older parked wait must not report it as not started.
+      try {
+        for (const [waitingRunId, waiting] of this.browserLoginWaitingRuns) {
+          if (waiting.chatId === req.chatId && waitingRunId !== started.runId) this.cancelParkedBrowserLoginWait(waitingRunId, "new_invocation", true);
+        }
+      } catch (error) {
+        console.warn("[invocation] parked browser-login wait cleanup failed after a dispatched start:", error);
       }
       return started;
     } catch (error) {
       if (startBoundary.crossed && !startBoundary.handedOff && startBoundary.runId) {
-        this.releaseUndispatchedStart(startBoundary.runId, req.chatId, error);
+        this.releaseUndispatchedStart(startBoundary.runId, req.chatId, error, startBoundary.cleanups ?? []);
       }
       if (durableAdmission && !startBoundary.crossed) {
         // Direct control flow proves no provider dispatch occurred. Absence of
@@ -1977,6 +1987,7 @@ export class InvocationService {
       });
       startBoundary.crossed = true;
       startBoundary.runId = runId;
+      startBoundary.cleanups = [() => releaseOneAttachmentRun(requestedOneAttachmentRef)];
     } catch (error) {
       releaseOneAttachmentRun(requestedOneAttachmentRef);
       throw error;
@@ -2150,6 +2161,10 @@ export class InvocationService {
       canonicalTask = projectTaskStatus(req.chatId, "running", false, invocationOrigin);
     }
     let taskMaterialized = Boolean(canonicalTask);
+    startBoundary.cleanups?.push(() => {
+      if (taskMaterialized) projectTaskStatus(runReq.chatId, terminalTaskStatus({ kind: "error", requestsDecision: false,
+        cancelled: false, hasPartialText: false }), taskMaterialized, invocationOrigin);
+    });
     let taskRunStartedRecorded = false;
     let memoryCandidateProposed = false;
     if (canonicalTask) {
@@ -2202,6 +2217,7 @@ export class InvocationService {
     const effectObservationDeadline = effectObservation
       ? setTimeout(() => this.cancelWithReason(runId, new Error("effect_observation_time_budget")), EFFECT_OBSERVATION_TIME_LIMIT_MS)
       : null;
+    startBoundary.cleanups?.push(() => { if (effectObservationDeadline) clearTimeout(effectObservationDeadline); });
     if (!projectionGoalId && runReq.goalMode && (runReq.permissions === "write" || runReq.permissions === "full")) {
       projectionGoalId = resolveDesktopWorkforceGoalId({
         chatGoalId: null,
@@ -2439,6 +2455,7 @@ export class InvocationService {
         }
         return [...new Set(groups)];
       } });
+      startBoundary.cleanups?.push(() => { void releaseWorkAttachmentRun(runId).catch(() => { /* the binding is closed either way */ }); });
     }
     const lifetime = record.mainLifetime = new MainInvocationLifetime(mainAdmission, chat.id, runId);
     this.settlingRuns.set(runId, record);
@@ -4097,6 +4114,10 @@ export class InvocationService {
         releaseOneAttachmentRun(requestedOneAttachmentRef);
       })))))).catch((error: unknown) => {
         console.warn("[invocation] execution cleanup failed:", error);
+        // The inner chain settles the slot in its own finally. Still registered here means a lifetime wrapper rejected
+        // before that chain was attached (or its finally threw first): start() already returned, so settle and
+        // publish here or the chat stays "running" and refuses every later start (independent review 2026-10-04).
+        if (this.activeRuns.has(runId)) this.releaseUndispatchedStart(runId, runReq.chatId, error, startBoundary.cleanups ?? [], record);
       }).finally(() => lifetime.afterSettled(() => {
         this.settlingRuns.delete(runId);
         this.publishActiveChats();
@@ -4132,23 +4153,36 @@ export class InvocationService {
   }
 
   /**
-   * A synchronous throw after the durable start receipt but before the completion chain took the run: no provider was
-   * called, yet nothing else would ever settle the chat slot. Live 2026-10-04 (TPA study, update-like restart): one
-   * "database is locked" here left the Science chat refusing every retry with chat_invocation_active until the app was
-   * reopened. Record the terminal fact and release the slot; the caller still receives the original error.
+   * A failure after the durable start receipt that the runner's own terminal settlement will never see: a synchronous
+   * throw before the completion chain was assigned (the caller gets the error), or a lifetime wrapper rejecting before
+   * the inner chain was attached (start() already returned, so `settledRecord` is published). Live 2026-10-04 (TPA
+   * study, update-like restart): one "database is locked" here left the Science chat refusing every retry with
+   * chat_invocation_active until the app was reopened. Undo what the start acquired, record the terminal fact once,
+   * and release the slot.
    */
-  private releaseUndispatchedStart(runId: string, chatId: string, error: unknown): void {
+  private releaseUndispatchedStart(runId: string, chatId: string, error: unknown, cleanups: Array<() => void>,
+    settledRecord?: RunRecord): void {
     console.warn("[invocation] start failed after its durable receipt and before dispatch; releasing the chat", error);
-    const message = error instanceof Error ? error.message : String(error);
-    tryRecordRunEvent({
-      runId,
-      kind: "invoke_threw",
-      chatId,
-      agentId: this.activeRuns.get(runId)?.actualAgentId,
-      payload: { errorCode: "invoke-start-failed", errorMessage: message.slice(0, 500), providerDispatched: false },
-    });
+    for (const cleanup of cleanups) {
+      try { cleanup(); } catch (cleanupError) { console.warn("[invocation] undispatched start cleanup failed:", cleanupError); }
+    }
+    // The ledger projects a start without a terminal row as "interrupted", so ask for the row itself: a runner that
+    // already wrote its terminal fact before failing keeps it, and only a missing one is recorded here.
+    const terminalRecorded = getDb().prepare(`SELECT 1 FROM run_events WHERE run_id = ? AND kind IN
+      ('invoke_waiting','invoke_completed','mcp_final','invoke_cancelled','invoke_interrupted','invoke_failed','invoke_threw','mcp_error') LIMIT 1`).get(runId);
+    if (!terminalRecorded) {
+      const message = error instanceof Error ? error.message : String(error);
+      tryRecordRunEvent({
+        runId,
+        kind: "invoke_threw",
+        chatId,
+        agentId: this.activeRuns.get(runId)?.actualAgentId,
+        payload: { errorCode: "invoke-start-failed", errorMessage: message.slice(0, 500), providerDispatched: false },
+      });
+    }
     this.settlingRuns.delete(runId);
     if (this.activeRuns.settle(runId)) this.publishActiveChats();
+    if (settledRecord) this.publishSettled(runId, settledRecord);
   }
 
   /** Main-only scheduler seam. Claims are durable before this call; a crash
