@@ -10,6 +10,7 @@ interface AvailabilityPorts {
   cooldown(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "model">, now: number): { kind: string; until: number } | null;
   signedOut(runtime: Pick<RuntimeStatus, "kind" | "backend" | "source" | "model">): unknown;
   usedPercent(providerId: string, now: number, model?: string): number | null;
+  quotaExhausted?(providerId: string, now: number, model?: string): boolean;
 }
 
 /** Read authority for an exact detected executable/account and selected model.
@@ -42,17 +43,19 @@ export function scienceRuntimeSelectionAvailability(
   if (!subscriptionBackend || runtime.backend !== subscriptionBackend || sameKind.length !== 1)
     return { status: "unknown" };
   const used = ports.usedPercent(runtime.kind, now, exact.model ?? undefined);
-  if (quotaExhausted(used)) return { status: "unavailable", reason: "quota" };
+  const exhausted = ports.quotaExhausted?.(runtime.kind, now, exact.model ?? undefined) ?? quotaExhausted(used);
+  if (exhausted) return { status: "unavailable", reason: "quota" };
   return { status: typeof used === "number" && Number.isFinite(used) ? "available" : "unknown" };
 }
 
 export async function inspectScienceRuntimeSelectionAvailability(selection: RuntimeSelection): Promise<ScienceRuntimeSelectionAvailability> {
-  const [{ detectRuntimes }, cooldown, { peekProviderUsedPercent }] = await Promise.all([
+  const [{ detectRuntimes }, cooldown, { peekProviderUsedPercent, peekProviderQuotaExhausted }] = await Promise.all([
     import("../runtime/detect"), import("../runtime/runtime-cooldown"), import("../usage"),
   ]);
   return scienceRuntimeSelectionAvailability(selection, await detectRuntimes(), {
     cooldown: cooldown.runtimeCooldown,
     signedOut: cooldown.runtimeSignedOut,
     usedPercent: peekProviderUsedPercent,
+    quotaExhausted: peekProviderQuotaExhausted,
   });
 }

@@ -6,7 +6,6 @@ import { runtimeMatchesSelection as exactRuntimeMatchesSelection } from "../../s
 import { allocationAdvertisement } from "./model-advertisement";
 import { clearCodexBinCache, probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
-import { quotaExhausted } from "../../shared/runtime-quota";
 import { summarizeDiscovery, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { POOL_AUTOPICK_ROLES, RUNTIME_ROLES, type RuntimeRole } from "../../shared/runtime-roles";
 import { reportDiscoveryLoudly , storedResolvedAliases } from "./model-discovery-store";
@@ -35,7 +34,7 @@ import {
   setModelRole,
   type ModelRolePoolPick,
 } from "../store/model-roles";
-import { peekProviderUsedPercent } from "../usage";
+import { peekProviderQuotaExhausted } from "../usage";
 import type {
   RuntimeBackend,
   RuntimeKind,
@@ -1013,7 +1012,7 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
 
   // 역할 풀 해석: 순서(=우선순위)대로 첫 가용 멤버를 고른다.
   //  - runtime-unavailable: 그 kind/backend가 지금 이 컴퓨터에 감지되지 않음
-  //  - quota-exceeded: 마지막 정상 사용량 스냅샷에서 창 사용률 ≥ 90%
+  //  - quota-exceeded: 현재 사용량 한도 소진 + 사용 가능한 제공자 크레딧 없음
   // 전원 스킵이면 1순위를 그대로 쓴다(조용한 하향 대체 금지, 스킵 내역은 유지).
   const gates = rolePoolGates(list);
   const roleAssignments = listResolvedModelRoles();
@@ -1090,7 +1089,7 @@ function rolePoolGates(list: RuntimeStatus[]): {
       return !catalog.includes(model);
     },
     isQuotaExceeded: (selection) => {
-      return quotaExhausted(peekProviderUsedPercent(selection.kind));
+      return peekProviderQuotaExhausted(selection.kind, Date.now(), selection.model ?? undefined);
     },
   };
 }

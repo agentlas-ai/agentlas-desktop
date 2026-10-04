@@ -5243,6 +5243,25 @@ export type UsageProviderErrorCode =
 /** 사용량을 기계 판독할 수 있고 명시 재시도를 지원하는 Provider allowlist. */
 export type UsageRetryProviderId = "claude-code" | "codex" | "kimi" | "grok";
 
+/** Provider-owned purchased credits, in the provider's own credit units. */
+export interface ProviderUsageCredits {
+  hasCredits: boolean;
+  unlimited: boolean;
+  /** Null means the provider did not return a finite balance. */
+  balance: number | null;
+  overageLimitReached?: boolean;
+}
+
+/** Credit and spend controls for one provider-owned rate-limit bucket. */
+export interface ProviderUsageLimit {
+  limitId: string | null;
+  model?: string | null;
+  credits?: ProviderUsageCredits;
+  allowed?: boolean | null;
+  limitReached?: boolean | null;
+  spendControlReached?: boolean | null;
+}
+
 /** 한 LLM 프로바이더의 사용량 스냅샷. */
 export interface ProviderUsage {
   /** "claude-code" | "codex" | "gemini" | "deepseek" | "glm" | "grok" | "pi" | "ollama" */
@@ -5253,6 +5272,12 @@ export interface ProviderUsage {
   windows: UsageWindow[];
   /** 조회 시각(epoch ms). */
   fetchedAt: number;
+  /** Provider credits are separate from the Agentlas AI credit balance. */
+  credits?: ProviderUsageCredits;
+  spendControlReached?: boolean;
+  limits?: ProviderUsageLimit[];
+  /** Last successful provider observation reused after a transient read failure. */
+  stale?: boolean;
   /** 정규화된 안전 오류 코드. Provider 응답 원문·URL·로컬 경로는 포함하지 않는다. */
   error?: UsageProviderErrorCode;
   /** rate_limited일 때 Provider가 제시한 재시도 대기(초). Renderer는 표시하지 않아도 된다. */

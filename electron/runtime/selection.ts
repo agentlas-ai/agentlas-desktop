@@ -1,4 +1,3 @@
-import { quotaExhausted } from "../../shared/runtime-quota";
 import { isRuntimeCredentialUnavailable } from "./credential-access";
 import { invocationBreaker, invocationBreakerKey } from "./invocation-breaker";
 import { runtimeCooldown } from "./runtime-cooldown";
@@ -38,7 +37,8 @@ import { acpOrLegacyRunner, acpSessionKind, createAcpRunner } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import { withNativeBrowserGuidance, type Runner, type RunnerFailure } from "./runner";
-import { peekProviderUsedPercent } from "../usage";
+import { peekProviderQuotaExhausted } from "../usage";
+import { peekAgentlasCreditsAvailable } from "../billing";
 import { listModelRoleMembers } from "../store/model-roles";
 import { CONNECTABLE_RUNTIMES, type ConnectableRuntime } from "../../shared/runtime-connect";
 import { probeRuntimeAuthForRun } from "./runtime-connect";
@@ -466,7 +466,7 @@ function runtimeSelectionUnavailableReason(
   // A near-limit warning still leaves usable quota. Only an exhausted snapshot
   // excludes a candidate; actual provider quota/auth failures retain their cooldown.
   // 역할 풀 선택(detect.ts rolePoolGates)도 같은 판정을 쓴다 — shared/runtime-quota.
-  if (quotaExhausted(peekProviderUsedPercent(selection.kind))) return "quota-exceeded";
+  if (peekProviderQuotaExhausted(selection.kind, Date.now(), selection.model ?? undefined)) return "quota-exceeded";
   return null;
 }
 
@@ -547,8 +547,10 @@ export function rolePriorityRuntimes(
   role: RuntimeRole,
   options: {
     failedRuntime?: RuntimeStatus;
-    failure?: Pick<RunnerFailure, "kind" | "providerCode">;
+    failure?: Pick<RunnerFailure, "kind" | "providerCode"> & Partial<Pick<RunnerFailure, "source">>;
     exclude?: RuntimeStatus[];
+    /** Post-dispatch paid fallback requires explicit evidence that replay is safe. */
+    allowCreditFallback?: boolean;
   } = {},
 ): RuntimeStatus[] {
   // The serving provider may already have generated billable tokens. An
@@ -589,13 +591,27 @@ export function rolePriorityRuntimes(
     return false;
   };
   const out: RuntimeStatus[] = [];
+  let quotaFallbackEligible = options.failure?.kind === "quota" && options.failure.source === "marker"
+    && options.failedRuntime?.kind !== "agentlas";
   const pushCandidate = (candidate: RuntimeStatus | null): void => {
-    if (!candidate || blocked(candidate) || !pickRunner(candidate)) return;
+    if (!candidate) return;
+    const cooling = runtimeCooldown(candidate);
+    if (!options.failure && cooling?.kind === "quota" && candidate.kind !== "agentlas") quotaFallbackEligible = true;
+    if (blocked(candidate) || !pickRunner(candidate)) return;
     const unavailable = runtimeSelectionUnavailableReason(candidate, runtimeStatusSelection(candidate));
+    if (!options.failure && unavailable === "quota-exceeded" && candidate.kind !== "agentlas") quotaFallbackEligible = true;
     if (unavailable) return;
     if (!out.some((item) => sameRuntimeIdentity(item, candidate) && item.model === candidate.model)) {
       out.push(candidate);
     }
+  };
+  const appendQuotaCreditFallback = (): void => {
+    if (options.allowCreditFallback === false || (options.failure && options.allowCreditFallback !== true)
+      || !quotaFallbackEligible || !peekAgentlasCreditsAvailable()) return;
+    // Credits are a quota-only last resort after the owner's configured pool.
+    // Auth/storage failures and unresolved external effects never enter here.
+    const serving = runtimes.find(runtime => runtime.kind === "agentlas" && !runtime.signInRequired);
+    if (serving) pushCandidate({ ...serving, active: true });
   };
 
   if (members.length > 0) {
@@ -608,6 +624,7 @@ export function rolePriorityRuntimes(
         inherit: inherited,
       }));
     }
+    appendQuotaCreditFallback();
     return out;
   }
 
@@ -616,6 +633,7 @@ export function rolePriorityRuntimes(
   // runtime may be smuggled in ahead of its DB rows.
   const legacyActive = pickActive(runtimes, role);
   pushCandidate(legacyActive);
+  appendQuotaCreditFallback();
   return out;
 }
 

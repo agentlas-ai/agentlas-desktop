@@ -15,6 +15,7 @@ import { useT } from "@/lib/i18n";
 import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { LocalModelMiniCards, useLocalModelSnapshot } from "@/components/dashboard/LocalModelMiniCards";
+import { providerHasUsableCredits } from "@shared/runtime-quota";
 import type {
   CliRuntimeVersionStatus,
   EnvVarMeta,
@@ -69,7 +70,7 @@ const ENGINES: EngineDef[] = [
 ];
 
 function windowLabel(w: UsageWindow, ko: boolean): string {
-  const named = (label: string) => w.limitName ? `${w.limitName} · ${label}` : label;
+  const named = (label: string) => (w.limitName || w.model) ? `${w.limitName || w.model} · ${label}` : label;
   if (w.kind === "monthly") return ko ? "추가 크레딧" : "Extra credits";
   if (w.id.includes("-local-")) return ko ? (w.kind === "5h" ? "최근 5시간(로컬)" : "최근 7일(로컬)") : w.kind === "5h" ? "Last 5h (local)" : "Last 7d (local)";
   if (w.kind === "5h") return named(ko ? "5시간" : "5-hour");
@@ -117,10 +118,24 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
+function providerCreditsLabel(usage: ProviderUsage, ko: boolean): string | null {
+  const credits = usage.credits;
+  if (!credits) return null;
+  const balance = credits.unlimited
+    ? ko ? "무제한" : "unlimited"
+    : typeof credits.balance === "number" && Number.isFinite(credits.balance)
+      ? new Intl.NumberFormat(ko ? "ko-KR" : "en-US", { maximumFractionDigits: 2 }).format(credits.balance)
+      : ko ? "잔액 확인 필요" : "balance unavailable";
+  const continuation = !usage.stale && providerHasUsableCredits(usage)
+    ? ko ? " · 구독 한도 이후 사용" : " · usable after limit"
+    : "";
+  return `${usage.label} ${ko ? "크레딧" : "credits"} ${balance}${continuation}`;
+}
+
 function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
   // 로컬 추정 창(unit="tokens", 서버 % 없음) — %바 대신 토큰 절대량을 보여준다.
   const isLocalTokens = w.unit === "tokens" && w.used != null;
-  const pct = Math.round(w.usedPercent);
+  const pct = Math.max(0, Math.min(100, Math.round(w.usedPercent)));
   if (isLocalTokens && pct === 0) {
     return (
       <div className="dashboard-usage-bar" data-local="true">
@@ -144,10 +159,10 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
   return (
     <div className="dashboard-usage-bar">
       <span>{windowLabel(w, ko)}</span>
-      <div>
+      <div role="progressbar" aria-label={`${windowLabel(w, ko)} ${ko ? "사용량" : "usage"}`} aria-valuemin={0} aria-valuemax={100} aria-valuenow={pct}>
         <div style={{ width: `${pct}%`, background: fill }} />
       </div>
-      <span data-warn={warn ? "true" : "false"}>{pct}%</span>
+      <span data-warn={warn ? "true" : "false"}>{ko ? `사용 ${pct}%` : `${pct}% used`}</span>
       <span title={money ?? undefined}>{money ?? formatReset(w.resetAt, ko)}</span>
     </div>
   );
@@ -569,6 +584,10 @@ export function EngineUsage() {
     if (u?.status === "no_quota") return ko ? "연결됨 · 사용량 곧" : "connected · usage soon";
     // 서버 리밋 조회가 잠시 막혀 로컬 로그로 표시 중(status=ok, error 마커) — 정직하게 알린다.
     if (u?.error === "local_estimate") return ko ? "연결됨 · 로컬 추정" : "connected · local estimate";
+    if (u?.stale) {
+      const minutes = Math.max(0, Math.floor((Date.now() - u.fetchedAt) / 60_000));
+      return ko ? `연결됨 · 마지막 확인 ${minutes}분 전` : `connected · checked ${minutes}m ago`;
+    }
     if (e.id === "grok" && snap && !u) {
       return ko ? "연결됨 · 사용량은 Grok Settings에서 확인" : "connected · usage in Grok Settings";
     }
@@ -581,6 +600,7 @@ export function EngineUsage() {
     const rt = runtimeFor(e);
     const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
     const hasBars = connected && (u?.windows.length ?? 0) > 0;
+    const creditsLabel = connected && u ? providerCreditsLabel(u, ko) : null;
     const terminalError = connected && isTerminalProviderError(u);
     const retryableError = connected && u?.status === "error" && !isRateLimited(u);
     const showConnectedChip = connected && !terminalError && !retryableError;
@@ -616,7 +636,7 @@ export function EngineUsage() {
       </button>
     ) : null;
     return (
-      <div key={e.id} className="dashboard-engine-card" data-connected={connected ? "true" : "false"}>
+      <div key={e.id} className="dashboard-engine-card" data-provider={e.id} data-connected={connected ? "true" : "false"}>
         <div className="dashboard-engine-card-head">
           <span className="dashboard-engine-logo" aria-hidden="true"><img src={e.logoSrc} alt="" /></span>
           <span className="sr-only">{e.logoAlt}</span>
@@ -654,7 +674,7 @@ export function EngineUsage() {
           className="dashboard-engine-card-status"
           data-terminal-state={terminalError ? "true" : undefined}
           style={connected && u?.status === "error" ? { color: "var(--dash-red)" } : undefined}
-          title={statusLine}
+          title={`${statusLine}${u ? ` · ${ko ? "마지막 확인" : "Last checked"} ${new Date(u.fetchedAt).toLocaleString(ko ? "ko-KR" : "en-US")}` : ""}`}
         >
           {statusLine}
         </div>
@@ -667,6 +687,7 @@ export function EngineUsage() {
             {u!.windows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
           </div>
         )}
+        {creditsLabel && <div className="dashboard-engine-card-status" title={creditsLabel}>{creditsLabel}</div>}
         {(actions || (keyFor === e.id && !connected)) && (
           <div className="dashboard-engine-card-foot">
             {actions ? <div className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</div> : <span />}

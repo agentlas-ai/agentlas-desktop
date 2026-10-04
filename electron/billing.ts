@@ -6,6 +6,19 @@ import type { BillingCheckoutReadiness, BillingPlanCatalog, BillingPlanOffer, Ea
 import { PROJECT_AGENT_POOL_MAX } from "../shared/project-agent-pool";
 
 const TIMEOUT_MS = 8000;
+const CREDIT_OBSERVATION_MAX_MS = 60_000;
+let creditObservation: { cookie: string; at: number; balance: HubCreditBalance } | null = null;
+
+/** Read-only admission hint; serving reservation and settlement stay server-owned.
+ * Never reuse a previous account's wallet or an old/error balance for fallback. */
+export function peekAgentlasCreditsAvailable(now = Date.now()): boolean {
+  const observed = creditObservation;
+  if (!observed || now < observed.at || now - observed.at > CREDIT_OBSERVATION_MAX_MS
+    || observed.cookie !== getSessionCookieHeader()) return false;
+  const balance = observed.balance;
+  return balance.authenticated === true && !balance.error
+    && typeof balance.remainingCredits === "number" && Number.isFinite(balance.remainingCredits) && balance.remainingCredits > 0;
+}
 
 // 세션 쿠키 호출은 전부 auth.fetchWithHubSession 경유 — 401이면 auth 캐시 세션까지 폐기된다.
 // (직접 fetch로 돌아가면 "크레딧만 사라지고 계정 칩은 로그인 상태" 불일치가 되살아난다.)
@@ -16,7 +29,8 @@ async function timedFetch(cookie: string, url: string, init: RequestInit = {}): 
 /** GET /api/billing/credits — AI 사용 잔액 조회. 미로그인은 authenticated:false. */
 export async function getBillingCredits(): Promise<HubCreditBalance> {
   const cookie = getSessionCookieHeader();
-  if (!cookie) return { authenticated: false };
+  if (!cookie) { creditObservation = null; return { authenticated: false }; }
+  creditObservation = null;
   try {
     const res = await timedFetch(cookie, `${webBaseUrl()}/api/billing/credits`);
     // 401 = 세션 무효 — 미인증으로 강등. 세션 폐기는 fetchWithHubSession이 이미 처리했으므로
@@ -27,6 +41,7 @@ export async function getBillingCredits(): Promise<HubCreditBalance> {
     // The server may still include a historic creator wallet. Never project it
     // into current Desktop or paired Mobile clients after settlement closure.
     delete balance.earningsCredits;
+    creditObservation = { cookie, at: Date.now(), balance: { ...balance } };
     return balance;
   } catch {
     return { authenticated: true, error: "network" };

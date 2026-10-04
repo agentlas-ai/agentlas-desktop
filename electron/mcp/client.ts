@@ -15,6 +15,8 @@ import { withInvocationUsage, beginInvocationUsageAttempt, currentInvocationObse
 import { createNoProgressGuard, noteNoProgressEvent, toolObservationDigest } from "../automation-progress-guard";
 import { formatAutomationNextRun } from "../../shared/automation-next-run";
 import { runtimeQuotaFailureMessage } from "../../shared/runtime-quota";
+import { getBillingCredits } from "../billing";
+import { peekProviderQuotaExhausted } from "../usage";
 import { getOneProfile } from "../store/one-profile";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
 import { recordAutomationPinProvenance } from "../automation-runtime-provenance";
@@ -2749,6 +2751,12 @@ ${effectiveUserPrompt}`;
   }
 
   let runtimes = await detectRuntimes();
+  // Credit fallback is admitted only from a current authenticated wallet.
+  // Warm it on actual subscription exhaustion, before role-pool selection.
+  if (runtimes.some((runtime) => peekProviderQuotaExhausted(runtime.kind, Date.now(), runtime.model ?? undefined))) {
+    await getBillingCredits();
+    throwIfInvocationAborted(signal, locale);
+  }
   // A pinned runtime missing from the cached inventory is re-probed once before the run fails: one slow probe under
   // load dropped codex and failed a Science turn with science-runtime-unavailable (dev app, 2026-09-27 00:23Z).
   if (req.runtimeSelection && !runtimes.some((runtime) => runtime.kind === req.runtimeSelection!.kind)) {
@@ -6288,6 +6296,9 @@ ${effectiveUserPrompt}`;
     }>();
     let runnerEventGeneration = 0;
     let aliveUsageAttemptOrdinal = 0;
+    // Paid fallback cannot replay effects from any earlier attempt in this
+    // invocation, even if the last candidate rejects before producing output.
+    let creditRetryBlocked = false;
     const runtimeAttemptKey = (runtime: RuntimeStatus): string => JSON.stringify([
       runtime.kind,
       runtime.backend,
@@ -6309,12 +6320,14 @@ ${effectiveUserPrompt}`;
     const createAttemptRunnerEvents = (): {
       events: RunnerEvents; settle: () => void;
       observedUsage: (returnedUsage?: LongRunUsageInput["observedUsage"]) => LongRunUsageInput["observedUsage"];
+      creditRetrySafe: () => boolean;
     } => {
       const generation = ++runnerEventGeneration;
       let settled = false;
       const usageCollector = createRuntimeUsageCollector();
       const recordTerminalUsage: NonNullable<RunnerEvents["onTerminalObservedUsage"]> = (usage, attemptId): void => {
         if (settled || generation !== runnerEventGeneration) return;
+        if (usage && (!Number.isFinite(usage.outputTokens) || usage.outputTokens !== 0)) creditRetryBlocked = true;
         usageCollector.recordTerminal(usage, attemptId);
       };
       const forward = <T extends unknown[]>(handler: (...args: T) => void) => (...args: T): void => {
@@ -6323,9 +6336,15 @@ ${effectiveUserPrompt}`;
       };
       return {
         events: {
-          onPartial: forward(runnerEvents.onPartial),
+          onPartial: forward((...args: Parameters<RunnerEvents["onPartial"]>) => {
+            if (args[0]) creditRetryBlocked = true;
+            runnerEvents.onPartial(...args);
+          }),
           onStatus: forward(runnerEvents.onStatus),
-          onTool: forward(runnerEvents.onTool),
+          onTool: forward((...args: Parameters<NonNullable<RunnerEvents["onTool"]>>) => {
+            creditRetryBlocked = true;
+            runnerEvents.onTool(...args);
+          }),
           onUsage: forward(runnerEvents.onUsage),
           // A provider can send its terminal usage after cancellation. The
           // display callbacks stop then, but this exact accounting fact may
@@ -6334,13 +6353,17 @@ ${effectiveUserPrompt}`;
             if (!settled && generation === runnerEventGeneration) usageCollector.start(attemptId);
           },
           onTerminalObservedUsage: recordTerminalUsage,
-          onThinking: forward(runnerEvents.onThinking),
+          onThinking: forward((...args: Parameters<NonNullable<RunnerEvents["onThinking"]>>) => {
+            if (args[0]) creditRetryBlocked = true;
+            runnerEvents.onThinking(...args);
+          }),
           onNotice: forward(runnerEvents.onNotice),
         },
         settle: () => {
           settled = true;
         },
         observedUsage: (returnedUsage) => usageCollector.total(returnedUsage),
+        creditRetrySafe: () => !creditRetryBlocked,
       };
     };
     const directRuntimeFallbackAllowed =
@@ -6487,6 +6510,7 @@ ${effectiveUserPrompt}`;
         let invocationUsageAttempt: ReturnType<typeof beginInvocationUsageAttempt> | undefined;
         let attemptUsageRecorded = false;
         const persistAttemptUsage = (usage: LongRunUsageInput["observedUsage"], outcome: "returned" | "failed" | "cancelled"): void => {
+          if (usage && (!Number.isFinite(usage.outputTokens) || usage.outputTokens !== 0)) creditRetryBlocked = true;
           if (attemptUsageRecorded) return;
           attemptUsageRecorded = true;
           invocationUsageAttempt?.complete(usage);
@@ -6531,6 +6555,7 @@ ${effectiveUserPrompt}`;
           }
           invocationUsageAttempt = beginInvocationUsageAttempt();
           result = await selected.runner(requestForRuntime, attemptEvents.events);
+          if (result.observedUsage && (!Number.isFinite(result.observedUsage.outputTokens) || result.observedUsage.outputTokens !== 0)) creditRetryBlocked = true;
           const observedUsage = attemptEvents.observedUsage(result.observedUsage);
           result = { ...result, observedUsage: observedUsage ?? undefined };
           persistAttemptUsage(observedUsage,
@@ -6552,6 +6577,7 @@ ${effectiveUserPrompt}`;
         } finally {
           attemptEvents.settle();
         }
+        if (result.text.trim()) creditRetryBlocked = true;
         persistGoalUsage(result.observedUsage);
         // A run that actually worked is the only thing that clears "sign in required".
         if (!result.failure) noteRuntimeSucceeded(selectedRuntime);
@@ -6579,6 +6605,16 @@ ${effectiveUserPrompt}`;
         // First failure: this is when recovery actually begins.
         if (recoveryStartedAt == null) recoveryStartedAt = Date.now();
         originalFailure = originalFailure ?? failed;
+        // A paid request must not replay work that has already produced output
+        // or run tools. Only an explicit provider quota rejection can admit it.
+        const allowCreditFallback = failed.kind === "quota" && failed.source === "marker"
+          && active.kind !== "agentlas" && attemptEvents.creditRetrySafe()
+          && !result.text.trim() && (!result.observedUsage
+            || (Number.isFinite(result.observedUsage.outputTokens) && result.observedUsage.outputTokens === 0));
+        if (allowCreditFallback) {
+          await getBillingCredits();
+          throwIfInvocationAborted(signal, locale);
+        }
         /*
          * ★"지금 못 쓴다"를 시한부 사실로 남긴다. 이게 없으면 다음 턴이 같은 죽은
          * 런타임에 또 7분을 쓰고(실측), 폴백은 이미 한도 초과인 후보를 다시 고른다.
@@ -6587,6 +6623,7 @@ ${effectiveUserPrompt}`;
         const fallback = rolePriorityRuntimes(runtimes, "orchestrator", {
           failedRuntime: active,
           failure: failed,
+          allowCreditFallback,
         }).find((candidate) => {
           const candidateKey = runtimeAttemptKey(candidate);
           return candidateKey !== selectedRuntimeKey && !attemptedRuntimeKeys.has(candidateKey);
@@ -6603,13 +6640,17 @@ ${effectiveUserPrompt}`;
           return emitTerminalRecoveryFailure(result, "event-limit");
         }
         recoveryRetryEvents += 1;
-        if (oneControllerFallbackEligible) {
+        if (oneControllerFallbackEligible && fallback.kind !== "agentlas") {
           emitControllerRuntimeFallback(fallback, failed);
         } else {
           const fromLabel = `${active.kind}${active.model ? ` · ${active.model}` : ""}`;
           const toLabel = `${fallback.kind}${fallback.model ? ` · ${fallback.model}` : ""}`;
-          const koMessage = `선택한 실행 환경 ${fromLabel}을 사용할 수 없어 오케스트레이터 우선순위 모델 ${toLabel}로 이어갑니다. 저장된 선택은 변경하지 않았습니다.`;
-          const enMessage = `The selected runtime ${fromLabel} is unavailable; continuing on orchestrator-priority model ${toLabel}. The saved selection was not changed.`;
+          const koMessage = fallback.kind === "agentlas"
+            ? `${fromLabel} 구독 한도가 소진되어 AI 크레딧으로 ${toLabel}에서 이어갑니다.`
+            : `선택한 실행 환경 ${fromLabel}을 사용할 수 없어 오케스트레이터 우선순위 모델 ${toLabel}로 이어갑니다. 저장된 선택은 변경하지 않았습니다.`;
+          const enMessage = fallback.kind === "agentlas"
+            ? `${fromLabel} reached its subscription limit; continuing on ${toLabel} with AI credits.`
+            : `The selected runtime ${fromLabel} is unavailable; continuing on orchestrator-priority model ${toLabel}. The saved selection was not changed.`;
           runnerEvents.onNotice({
             level: "warning",
             code: "runtime-fallback-attempt",

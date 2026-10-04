@@ -16,11 +16,55 @@
  * 막을 것은 자원 폭주뿐" 이라는 같은 날 결정과도 어긋난다. 한도가 진짜로 소진되면
  * 실행 실패 경로가 따로 받아 낸다.
  */
+import type { ProviderUsage, UsageWindow } from "./types";
+
 export const QUOTA_EXHAUSTED_PERCENT = 100;
 
 /** 이 사용률이면 자동 선택에서 건너뛴다. 사용률을 모르면(null) 건너뛰지 않는다. */
 export function quotaExhausted(usedPercent: number | null | undefined): boolean {
   return typeof usedPercent === "number" && Number.isFinite(usedPercent) && usedPercent >= QUOTA_EXHAUSTED_PERCENT;
+}
+
+/** Provider-owned paid allowance. A balance never overrides its spending cap. */
+export function providerHasUsableCredits(usage: Pick<ProviderUsage, "credits" | "spendControlReached" | "stale">): boolean {
+  const credits = usage.credits;
+  return usage.stale !== true && usage.spendControlReached !== true && credits?.hasCredits === true
+    && credits.overageLimitReached !== true
+    && (credits.unlimited === true || (typeof credits.balance === "number" && Number.isFinite(credits.balance) && credits.balance > 0));
+}
+
+function usageWindowMatchesModel(window: Pick<UsageWindow, "model">, model: string | undefined, providerId: string | undefined): boolean {
+  return !model || !window.model || window.model === model
+    || (providerId === "claude-code" && ["opus", "sonnet", "haiku"].includes(window.model)
+      && model.startsWith(`claude-${window.model}-`));
+}
+
+/** Selection authority shared by Main and display: subscription exhaustion can
+ * continue on the same provider's usable credits; monthly/spending caps cannot.
+ * The caller owns snapshot freshness and measured runtime failures/cooldowns. */
+export function providerQuotaExhausted(
+  usage: Pick<ProviderUsage, "credits" | "spendControlReached" | "limits" | "windows" | "stale">,
+  now = Date.now(), model?: string, providerId?: string,
+): boolean {
+  const limits = (usage.limits ?? []).filter(limit => usageWindowMatchesModel(limit, model, providerId));
+  const applicable = usage.windows.filter(window => usageWindowMatchesModel(window, model, providerId)
+    && !(typeof window.resetAt === "number" && Number.isFinite(window.resetAt) && window.resetAt <= now));
+  if (usage.spendControlReached === true || limits.some(limit => limit.spendControlReached === true)) return true;
+  for (const window of applicable) {
+    if (!quotaExhausted(window.usedPercent)) continue;
+    if (window.kind === "monthly") return true;
+    const limit = limits.find(item => item.limitId === (window.limitId ?? null));
+    const creditUsage = limit ? { credits: limit.credits, spendControlReached: limit.spendControlReached === true, stale: usage.stale } : usage;
+    if (!providerHasUsableCredits(creditUsage)) return true;
+  }
+  // A machine limit flag can report exhaustion without a percentage window.
+  for (const limit of limits) {
+    if (limit.limitReached !== true) continue;
+    const windows = usage.windows.filter(window => (window.limitId ?? null) === limit.limitId);
+    if (windows.length && !applicable.some(window => (window.limitId ?? null) === limit.limitId)) continue;
+    if (!providerHasUsableCredits({ credits: limit.credits, spendControlReached: limit.spendControlReached === true, stale: usage.stale })) return true;
+  }
+  return false;
 }
 
 /** Accept only the normalized timestamp carried by Main's typed failure. No

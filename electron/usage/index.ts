@@ -22,12 +22,13 @@ import type {
 } from "../../shared/types";
 import { getDb } from "../store/db";
 import { getClaudeUsage } from "./claude";
-import { getCodexUsage } from "./codex";
+import { currentCodexUsageAccountFingerprint, getCodexUsage } from "./codex";
 import { getGrokUsage } from "./grok";
 import { localTokensFor } from "./local-logs";
 import { readProviderHealth } from "./provider-health";
 import { UsageRetryGate } from "./retry-policy";
 import { userDataPath } from "../runtime-paths";
+import { providerQuotaExhausted } from "../../shared/runtime-quota";
 
 // 하이브리드 사용량(ccusage + agentcat 절충):
 //  - 서버 usage API = 정확한 리밋 %·리셋 시각. 단 rate limit이 짜서 자주 못 친다.
@@ -305,18 +306,15 @@ const ADAPTERS: Array<{ id: UsageRetryProviderId; fn: () => Promise<ProviderUsag
   { id: "grok", fn: getGrokUsage },
 ];
 
-/** 로컬 로그 토큰만으로 구성한 폴백 ProviderUsage. 서버가 아예 안 될 때만 쓴다.
- *  usedPercent는 알 수 없어(로컬엔 한도 없음) 서버 last-good %를 빌려 근사, 없으면 0(토큰 절대량 표시). */
+/** 로컬 로그는 토큰 절대량만 안다. 구독 사용률을 추정하거나 옛 서버 %를 복사하지 않는다. */
 function localFallback(id: string, base: ProviderUsage | null, now: number): ProviderUsage | null {
   const local = localTokensFor(id);
   if (!local || local.lastActivity == null || (local.fiveHour === 0 && local.sevenDay === 0)) return null;
-  const goodWindows = base?.windows ?? [];
-  const pctOf = (kind: string) => goodWindows.find((w) => w.kind === kind)?.usedPercent ?? 0;
   const mk = (kind: UsageWindow["kind"], label: string, tokens: number): UsageWindow => ({
     id: `${id}-local-${kind}`,
     label,
     kind,
-    usedPercent: pctOf(kind),
+    usedPercent: 0,
     used: tokens,
     unit: "tokens",
   });
@@ -357,7 +355,9 @@ export function peekProviderUsedPercent(providerId: string, now = Date.now(), mo
   if (developmentEffectsSuppressed()) return null;
   loadLastGood();
   const entry = lastResult.get(providerId) ?? lastGood.get(providerId);
-  if (!entry || now - entry.at > LAST_GOOD_MAX_MS) return null;
+  if (providerId === "codex" && !codexAccountMatches(entry?.usage)) return null;
+  if (!entry || !Number.isFinite(entry.usage.fetchedAt)
+    || now - entry.usage.fetchedAt > LAST_GOOD_MAX_MS) return null;
   const windows = entry.usage?.windows ?? [];
   let max: number | null = null;
   for (const window of windows) {
@@ -373,12 +373,37 @@ export function peekProviderUsedPercent(providerId: string, now = Date.now(), mo
   return max;
 }
 
+/** Runtime eligibility uses the same observed quota and native credits as the dashboard. */
+export function peekProviderQuotaExhausted(providerId: string, now = Date.now(), model?: string): boolean {
+  if (developmentEffectsSuppressed()) return false;
+  loadLastGood();
+  const entry = lastResult.get(providerId) ?? lastGood.get(providerId);
+  if (providerId === "codex" && !codexAccountMatches(entry?.usage)) return false;
+  if (!entry || !Number.isFinite(entry.usage.fetchedAt)
+    || now - entry.usage.fetchedAt > LAST_GOOD_MAX_MS) return false;
+  if ((entry.usage.status !== "ok" && entry.usage.status !== "no_quota") || entry.usage.error === "local_estimate") return false;
+  return providerQuotaExhausted(entry.usage, now, model, providerId);
+}
+
+function codexAccountMatches(usage: ProviderUsage | undefined): boolean {
+  const current = currentCodexUsageAccountFingerprint();
+  return !!current && !!usage?.accountFingerprint && current === usage.accountFingerprint;
+}
+
 async function fetchProvider(
   id: UsageRetryProviderId,
   fn: () => Promise<ProviderUsage | null>,
   now: number,
   force: boolean,
 ): Promise<ProviderUsage | null> {
+  // Account changes must invalidate every fast path, including cooldown and
+  // last-good reuse. An old cache without identity cannot prove an account match.
+  if (id === "codex" && [lastResult.get(id), lastGood.get(id)]
+    .some((entry) => entry && !codexAccountMatches(entry.usage))) {
+    lastResult.delete(id);
+    lastGood.delete(id);
+    backoffUntil.delete(id);
+  }
   // 실제 실행에서 확인된 terminal 상태는 과거 정상/비할당 last-good보다 권위가 높다.
   // runtime이 전체 cache를 비운 직후뿐 아니라 앱 재시작 후에도 바로 어댑터를 읽는다.
   const terminalHealth = readProviderHealth(id);
@@ -388,7 +413,12 @@ async function fetchProvider(
   if (!hasTerminalHealth && last && now - last.at < FORCE_MIN_MS) return last.usage;
   // 평상시(비-force)엔 서버를 10분에 한 번만 친다 — 그 사이 last-good을 그대로 재사용해 429 예방.
   const good = lastGood.get(id);
-  if (!hasTerminalHealth && !force && good && now - good.at < SERVER_MIN_INTERVAL_MS) {
+  // A provider reset ends the cached observation's validity even inside the
+  // ordinary polling interval. Read again instead of displaying last week's %.
+  const hasResetWindow = good?.usage.windows.some((window) =>
+    typeof window.resetAt === "number" && Number.isFinite(window.resetAt) && window.resetAt <= now,
+  );
+  if (!hasTerminalHealth && !force && good && !hasResetWindow && now - good.at < SERVER_MIN_INTERVAL_MS) {
     lastResult.set(id, { usage: good.usage, at: now });
     return good.usage;
   }
@@ -406,7 +436,31 @@ async function fetchProvider(
       // Renderer에는 원문을 반환하지 않지만 main 진단 로그에는 오류 원인을 남긴다.
       console.warn(`[usage] adapter ${id} threw:`, err instanceof Error ? err.message : err);
     }
-    if (!usage) return null; // 미연결 — 스냅샷에서 제외
+    if (!usage) {
+      // A disconnected account cannot keep granting eligibility from its disk cache.
+      lastResult.delete(id);
+      lastGood.delete(id);
+      saveLastGood();
+      return null;
+    }
+    if (id === "codex" && !codexAccountMatches(usage)) {
+      // The owner may switch accounts while a request is in flight. Do not
+      // publish or persist the previous account's eventual response.
+      lastResult.delete(id);
+      lastGood.delete(id);
+      saveLastGood();
+      return null;
+    }
+
+    const sameAccount = id === "codex"
+      ? !!usage.accountFingerprint && !!good?.usage.accountFingerprint
+        && usage.accountFingerprint === good.usage.accountFingerprint
+      : !usage.accountFingerprint || !good?.usage.accountFingerprint
+        || usage.accountFingerprint === good.usage.accountFingerprint;
+    if (!sameAccount) {
+      lastGood.delete(id);
+      saveLastGood();
+    }
 
     if (usage.status === "error" && usage.error && TRANSIENT_ERRORS.has(usage.error)) {
       if (usage.error === "rate_limited") {
@@ -417,13 +471,14 @@ async function fetchProvider(
           : BACKOFF_429_MS;
         backoffUntil.set(id, now + waitMs);
       }
-      if (good && now - good.at < LAST_GOOD_MAX_MS) {
+      if (good && sameAccount && now - good.usage.fetchedAt < LAST_GOOD_MAX_MS) {
         // 일시 장애 — 에러 UI 대신 마지막 정상 수치를 유지(다음 주기에 자연 회복).
-        lastResult.set(id, { usage: good.usage, at: now });
-        return good.usage;
+        const staleUsage = { ...good.usage, stale: true };
+        lastResult.set(id, { usage: staleUsage, at: now });
+        return staleUsage;
       }
       // last-good도 없다 — 로컬 로그로라도 표시(빈 "조회 실패" 방지). 로컬조차 없으면 원래 에러.
-      const fb = localFallback(id, good?.usage ?? null, now);
+      const fb = localFallback(id, sameAccount ? good?.usage ?? null : null, now);
       if (fb) {
         lastResult.set(id, { usage: fb, at: now });
         return fb;
@@ -457,6 +512,12 @@ async function buildUsageSnapshot(options?: {
   if (developmentEffectsSuppressed()) return suppressedUsageSnapshot();
   loadLastGood();
   const now = Date.now();
+  if (cache) {
+    const cachedCodex = cache.snapshot.providers.find((provider) => provider.provider === "codex");
+    const currentCodex = currentCodexUsageAccountFingerprint();
+    if ((cachedCodex && (!currentCodex || cachedCodex.accountFingerprint !== currentCodex))
+      || (!cachedCodex && currentCodex)) cache = null;
+  }
   const forced = options?.forceAll === true || options?.forceProviderId != null;
   if (!forced && cache && now - cache.at < TTL_MS) {
     return cache.snapshot;

@@ -3918,7 +3918,7 @@ button[data-dashboard-chevron="open"] {
   /* 리셋 문자열을 max-content로 고정하면 좁은 카드에서 마지막 track이 카드 밖으로
      밀린다. 마지막 track은 줄어들 수 있게 두고, span의 ellipsis가 긴 문자열을
      안전하게 줄인다. */
-  grid-template-columns: minmax(48px, 56px) minmax(40px, 1fr) 32px minmax(0, max-content);
+  grid-template-columns: minmax(48px, 56px) minmax(40px, 1fr) max-content minmax(0, max-content);
   align-items: center;
   gap: 4px;
 }
@@ -4908,7 +4908,7 @@ button[data-toggle-state="off"] {
   }
 
   .dashboard-usage-bar {
-    grid-template-columns: minmax(0, 72px) minmax(0, 1fr) 32px;
+    grid-template-columns: minmax(0, 72px) minmax(0, 1fr) max-content;
   }
 
   .dashboard-usage-bar > span:last-child {
