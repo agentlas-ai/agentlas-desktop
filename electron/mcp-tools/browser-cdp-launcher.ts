@@ -1594,7 +1594,11 @@ export async function ensureBrowserCdpHostHeaded(input: {
  * approval behavior cannot drift between the shipped script and its tests.
  */
 export const BROWSER_APPROVAL_CLASSIFIER_SOURCE = String.raw`
-const PAY_RE = /(checkout|\bpay(ment)?\b|purchase|\bbuy\b|\border\b|donate|subscrib|billing|credit\s*card|debit\s*card|card\s*number|cvv|cvc|결제|구매|주문|결재|카드)/i;
+// "subscrib" alone and a bare "order" are not money: production 2026-10-04 (Youtube launch room, Full access +
+// Always allow) asked for payment approval on YouTube Studio's "Subscribers gained 추가" metric checkbox five times,
+// and "Sort order" reads the same. A free channel Subscribe is a social engagement (BROWSER_SOCIAL_ENGAGE_SOURCE).
+// A paid flow still names pay/purchase/buy/billing/card/checkout/결제, or the order or subscription itself.
+const PAY_RE = /(checkout|\bpay(ment)?\b|purchase|\bbuy\b|\b(?:place|complete|confirm|submit)\s+(?:your\s+|the\s+)?order\b|\border\s+(?:now|summary)\b|donate|\bpaid\s+subscription|\bsubscription\s+(?:plan|fee|payment|billing)|\bstart\s+(?:a\s+|your\s+)?(?:paid\s+)?subscription|\bsubscribe\s+(?:to\s+)?(?:premium|plus|pro)\b|billing|credit\s*card|debit\s*card|card\s*number|cvv|cvc|결제|구매|주문하기|주문\s*확인|결재|유료\s*구독|정기\s*결제|카드\s*번호|카드\s*정보|카드\s*등록)/i;
 const SEND_RE = /(publish|\bpost\b|\bsend\b|submit|tweet|retweet|\bshare\b|reply|\bcomment\b|confirm|전송|게시|제출|답글|댓글|공유|보내|확인)/i;
 const PUBLISH_RE = /(publish|\bpost\b|tweet|retweet|게시|공개)/i;
 const DELETE_RE = /(delete|remove|destroy|unsubscribe|삭제|제거|탈퇴)/i;

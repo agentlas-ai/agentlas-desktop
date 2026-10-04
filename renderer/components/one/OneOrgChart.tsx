@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { takeOrgSheetRequest } from "@/lib/one-org-sheet-request";
 import type { HubAgentBookmark, InstalledAgent, InstalledMcpServer, MarketplaceListing, McpServerStatus, McpToolCatalogEntry } from "@shared/types";
 import type { OneOrgCollaborationStyle, OneOrgMember, OneOrgState } from "@shared/one-org";
 import { OneAgentPortrait } from "./OneAgentPortrait";
@@ -235,10 +236,12 @@ export function OneOrgChart({
    * 통합 편집 창이 "도구 설정" 또는 "담당 교체"를 열어 달라고 하면 여기서 연다.
    * 대상이 지금 조직에 없으면 아무것도 하지 않는다 — 빈 시트를 띄우는 것보다 낫다.
    */
+  const handledSheetToken = useRef(0);
   useEffect(() => {
-    if (!sheetRequest?.token) return;
-    const member = state?.members.find((row) => row.id === sheetRequest.memberId);
-    if (!member) return;
+    const taken = takeOrgSheetRequest(sheetRequest, handledSheetToken.current, state?.members);
+    if (!taken || !sheetRequest) return;
+    handledSheetToken.current = taken.token;
+    const member = taken.member;
     if (sheetRequest.kind === "tools") {
       setToolsMember(member);
       return;
