@@ -311,27 +311,68 @@ export async function runColdStartTest(automationId: string, draft: ToolchainInt
   return result;
 }
 
-/** Draft (or refresh) the contract and test it; callable only if the test passes. */
-export async function exposeAutomation(
+/**
+ * Hard ceiling for one fresh-session test (two tool-free model calls, each with its own pooled and
+ * fallback attempt), so a stuck model cannot hold the slot or write a result much later.
+ */
+export const TOOLCHAIN_TEST_BUDGET_MS = 300_000;
+
+/** One test per automation at a time; a second caller (owner or One) shares the running one. */
+const testsInFlight = new Map<string, Promise<ToolchainInterface>>();
+
+export function toolchainTestInProgress(automationId: string): boolean {
+  return testsInFlight.has(automationId);
+}
+
+/**
+ * Draft (or refresh) the contract and test it; callable only if the test passes.
+ *
+ * Independent review 2026-10-04: the test can outlive every caller's wait, so it is host-owned —
+ * single-flight per automation, bounded by TOOLCHAIN_TEST_BUDGET_MS — and it never overwrites a
+ * decision taken while it ran (an owner withdrawal used to be silently reverted to callable).
+ */
+export function exposeAutomation(
   automationId: string,
   signal?: AbortSignal,
   actor: { kind: "owner" | "one"; chatId?: string | null } = { kind: "owner" },
 ): Promise<ToolchainInterface> {
+  const running = testsInFlight.get(automationId);
+  if (running) return running;
+  const test = runExposure(automationId, signal, actor)
+    .finally(() => { if (testsInFlight.get(automationId) === test) testsInFlight.delete(automationId); });
+  testsInFlight.set(automationId, test);
+  return test;
+}
+
+/** What identifies the contract a test started from; usage counters may change, nothing else may. */
+function contractMarker(contract: ToolchainInterface | null): string {
+  return contract ? `${contract.state}|${contract.updatedAt}|${contract.exposedBy?.at ?? ""}|${contract.withdrawnBy?.at ?? ""}` : "none";
+}
+
+async function runExposure(
+  automationId: string,
+  signal: AbortSignal | undefined,
+  actor: { kind: "owner" | "one"; chatId?: string | null },
+): Promise<ToolchainInterface> {
   const automation = getAutomation(automationId);
   if (!automation?.graph) throw new Error("toolchain_automation_missing");
+  const startedFrom = contractMarker(readToolchainState(automationId).interface);
   const draft = draftInterface(automation);
-  const coldStart = await runColdStartTest(automationId, draft, signal);
+  const budget = AbortSignal.timeout(TOOLCHAIN_TEST_BUDGET_MS);
+  const coldStart = await runColdStartTest(automationId, draft, signal ? AbortSignal.any([signal, budget]) : budget);
   const contract: ToolchainInterface = { ...draft, coldStart, state: coldStart.passed ? "callable" : "draft",
     exposedBy: { kind: actor.kind, chatId: actor.chatId ?? null, at: new Date().toISOString() } };
-  mutateToolchainState(automationId, (current) => ({
-    ...current,
-    interface: { ...contract, usage: current.interface?.usage ?? contract.usage },
-  }));
+  mutateToolchainState(automationId, (current) => {
+    // The owner withdrew it (or another write replaced it) while the test ran: that decision stands.
+    if (contractMarker(current.interface) !== startedFrom) throw new Error("toolchain_changed_during_test");
+    return { ...current, interface: { ...contract, usage: current.interface?.usage ?? contract.usage } };
+  });
   return contract;
 }
 
 export function withdrawAutomation(automationId: string): void {
+  const at = new Date().toISOString();
   mutateToolchainState(automationId, (current) => current.interface
-    ? { ...current, interface: { ...current.interface, state: "deprecated", updatedAt: new Date().toISOString() } }
+    ? { ...current, interface: { ...current.interface, state: "deprecated", withdrawnBy: { kind: "owner", at }, updatedAt: at } }
     : null);
 }

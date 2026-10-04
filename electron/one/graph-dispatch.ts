@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Automation, WorkflowGraph } from "../../shared/types";
 import { buildGraphFromBlueprint, type GraphBlueprint } from "../../shared/graph-blueprint";
-import { graphAuthoringShapeProblems, GRAPH_BLUEPRINT_INPUT_SCHEMA, ONE_GRAPH_TOOLS } from "../../shared/graph-authoring";
+import { graphAuthoringShapeProblems, GRAPH_BLUEPRINT_INPUT_SCHEMA, isGraphControlTool, ONE_GRAPH_TOOLS } from "../../shared/graph-authoring";
 import { readAutomationGraphDefinition, resolveAutomationGraph } from "../../shared/automation-graph-definition";
 import { requiredExecutionPermission } from "../../shared/graph-node-protocol";
 import { decideGraphRunRequest } from "../../shared/graph-run-request";
@@ -22,7 +22,16 @@ import { recordOneGraphAuthority } from "./graph-ownership";
 import { oneTeamDispatchOwnerChat, type OneTeamCaller } from "./team-dispatch";
 import { toolchainInputProblems } from "../../shared/toolchain";
 import { searchToolchains } from "../toolchains/search";
-import { callableContractFor, contractManifest, currentCallableContracts, exposeAutomation, recordToolchainReturned, recordToolchainRun } from "../toolchains/interface";
+import { callableContractFor, contractManifest, currentCallableContracts, draftInterface, exposeAutomation, interfaceIsStale, recordToolchainReturned, recordToolchainRun } from "../toolchains/interface";
+import { readToolchainState } from "../toolchains/store";
+
+/** How long one toolchain_publish call waits for its test before answering "testing" (runtime tool timeouts are ~60 s). */
+const PUBLISH_WAIT_MS = (() => {
+  const supplied = Number(process.env.AGENTLAS_TOOLCHAIN_PUBLISH_WAIT_MS);
+  return Number.isFinite(supplied) && supplied >= 100 && supplied <= 45_000 ? supplied : 45_000;
+})();
+/** An unchanged definition that failed its test this recently is not re-tested on the next call. */
+const PUBLISH_RETEST_AFTER_MS = 10 * 60_000;
 
 function owner(caller: OneTeamCaller) {
   const chatId = oneTeamDispatchOwnerChat(caller.chatId);
@@ -194,12 +203,44 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     const a = exact(caller, input.graph_id);
     fresh(a, input.expected_revision);
     if (!a.graph?.nodes.length) throw new Error("toolchain_graph_required");
-    const contract = await exposeAutomation(a.id, undefined, { kind: "one", chatId: owner(caller).id });
-    const test = contract.coldStart;
-    return { schemaVersion: "agentlas.toolchain-publish.v1", graph_id: a.id, name: contract.name, state: contract.state,
-      ...(test ? { fresh_session_test: { passed: test.passed, matching_requests: test.positives, found: test.positiveFound ?? null,
+    const base = { schemaVersion: "agentlas.toolchain-publish.v1", graph_id: a.id, name: a.name };
+    const testSummary = (test: NonNullable<ReturnType<typeof readToolchainState>["interface"]>["coldStart"]) => test
+      ? { fresh_session_test: { passed: test.passed, matching_requests: test.positives, found: test.positiveFound ?? null,
         selected: test.positiveSelected, bound: test.positiveBound, unrelated_requests: test.negatives,
-        wrongly_selected: test.negativeSelected } } : {}),
+        wrongly_selected: test.negativeSelected } }
+      : {};
+    const stored = readToolchainState(a.id).interface;
+    const current = stored && !interfaceIsStale(stored, a) ? stored : null;
+    // The owner's withdrawal is the owner's word; only the owner re-registers (Toolchains screen).
+    if (stored?.state === "deprecated") {
+      return { ...base, state: "deprecated", code: "toolchain_withdrawn_by_owner",
+        next: "The owner withdrew this Toolchain. Only the owner can make it callable again (Work › Environment › Toolchains)." };
+    }
+    // Already callable for this exact definition: a retest can only flip a working tool to draft.
+    if (current?.state === "callable") return { ...base, name: current.name, state: "callable", already_callable: true, ...testSummary(current.coldStart) };
+    // One shares only what cannot change anything outside; a graph that can act stays the owner's call.
+    if (!draftInterface(a).effects.readOnlyHint) {
+      return { ...base, state: "not_published", code: "toolchain_owner_registration_required",
+        next: "This graph can change things outside (posts, sends or writes), so One may not share it. Tell the owner: they can make it callable from Work › Environment › Toolchains." };
+    }
+    // The same definition failed recently: answer with that result instead of spending another test.
+    if (current?.state === "draft" && current.coldStart && Date.now() - Date.parse(current.coldStart.at) < PUBLISH_RETEST_AFTER_MS) {
+      return { ...base, name: current.name, state: "draft", already_tested: true, ...testSummary(current.coldStart),
+        next: "This exact definition did not pass a few minutes ago. Improve the graph purpose or input labels (which changes the definition), then publish again." };
+    }
+    // The test is host-owned (single-flight, budgeted). Wait a bounded time; if it is still running, say so.
+    const pending = exposeAutomation(a.id, undefined, { kind: "one", chatId: owner(caller).id });
+    pending.catch(() => undefined);
+    const settled = await Promise.race([
+      pending.then((contract) => ({ contract })),
+      new Promise<null>((resolve) => { const timer = setTimeout(() => resolve(null), PUBLISH_WAIT_MS); timer.unref?.(); }),
+    ]);
+    if (!settled) {
+      return { ...base, state: "testing",
+        next: "The fresh-session test is still running in the host. Call toolchain_publish again with the same graph_id and expected_revision in about a minute to read the result." };
+    }
+    const contract = settled.contract;
+    return { ...base, name: contract.name, state: contract.state, ...testSummary(contract.coldStart),
       ...(contract.state === "callable" ? {} : { next: "The contract stays a draft. Improve the graph purpose or input labels, then publish again." }) };
   }
   if (name === "one_graph_inspect") {
@@ -337,7 +378,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     for (const edit of calls) {
       const node = graph.nodes.find(n => n.id === edit.node_id);
       if (!node || !node.config?.mcpCall || !["agent", "action"].includes(node.type)) throw new Error("one_graph_mcp_node_invalid");
-      if (edit.call?.catalogId === "one-team" && edit.call.toolName.startsWith("one_graph_")) throw new Error("one_graph_recursive_tool_call");
+      if (isGraphControlTool(edit.call?.catalogId, edit.call?.toolName)) throw new Error("one_graph_recursive_tool_call");
       node.config = { ...node.config, mcpCall: edit.call };
     }
     checkReferences(caller, graph, current.id, current.executionPermission, current.hubMode ?? "local-only");

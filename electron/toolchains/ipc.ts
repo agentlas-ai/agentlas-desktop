@@ -11,7 +11,7 @@ import {
   type ToolchainOverview,
 } from "../../shared/toolchain";
 import { listAutomations } from "../store/automations";
-import { exposeAutomation, interfaceIsStale, withdrawAutomation } from "./interface";
+import { exposeAutomation, interfaceIsStale, toolchainTestInProgress, withdrawAutomation } from "./interface";
 import { refreshAllToolchains, refreshToolchainForAutomation } from "./learner";
 import { listToolchainStates, mutateToolchainState } from "./store";
 
@@ -41,6 +41,7 @@ export function toolchainOverview(): ToolchainOverview {
       })),
       interface: state?.interface ?? null,
       interfaceStale: state?.interface ? interfaceIsStale(state.interface, automation) : false,
+      testInProgress: toolchainTestInProgress(automation.id),
     });
   }
   return { schemaVersion: "agentlas.toolchain-overview.v1", generatedAt: new Date().toISOString(), automations };

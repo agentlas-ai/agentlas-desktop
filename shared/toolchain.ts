@@ -738,6 +738,8 @@ export interface ToolchainInterface {
   usage: { returned: number; runs: number };
   /** Who made it callable: the owner from the Toolchains screen, or One for a graph it saved. */
   exposedBy?: { kind: "owner" | "one"; chatId: string | null; at: string };
+  /** Set by the owner's withdrawal; One may not republish a withdrawn Toolchain. */
+  withdrawnBy?: { kind: "owner"; at: string };
   updatedAt: string;
 }
 
@@ -853,6 +855,8 @@ export interface ToolchainAutomationView {
   interface: ToolchainInterface | null;
   /** True when the interface was tested against a definition that has since changed. */
   interfaceStale: boolean;
+  /** A fresh-session test for this automation is running in the host right now. */
+  testInProgress?: boolean;
 }
 
 export interface ToolchainOverview {

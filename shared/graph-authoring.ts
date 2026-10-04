@@ -67,6 +67,15 @@ export const ONE_GRAPH_TOOLS = [
 ] as const;
 export const ONE_GRAPH_TOOL_NAMES = ONE_GRAPH_TOOLS.map(tool => tool.name);
 
+/**
+ * A saved graph may not drive the graph/Toolchain control surface itself (save, patch, run,
+ * publish, search …). Membership, not a name prefix: the old `one_graph_` prefix rule let a graph
+ * step call toolchain_publish unattended (independent review 2026-10-04).
+ */
+export function isGraphControlTool(catalogId: unknown, toolName: unknown): boolean {
+  return catalogId === "one-team" && typeof toolName === "string" && (ONE_GRAPH_TOOL_NAMES as readonly string[]).includes(toolName);
+}
+
 /** Validate the finite JSON-schema vocabulary above before calling semantic
  * validators (which deliberately accept already typed blueprint objects). */
 export function graphAuthoringShapeProblems(value: unknown, shape: Shape, at = "input"): string[] {

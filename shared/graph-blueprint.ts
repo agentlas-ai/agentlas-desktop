@@ -398,7 +398,9 @@ export function validateBlueprint(
         || (call.schemaDigest !== undefined && !/^[a-f0-9]{64}$/.test(call.schemaDigest))) {
         push(`${at}의 실제 MCP 도구와 구조화된 인수가 없습니다.`);
       }
-      if (call?.catalogId === "one-team" && call.toolName.startsWith("one_graph_")) {
+      // Both control families (one_graph_*, toolchain_*). graph-authoring.ts imports this module, so
+      // the authoritative membership check lives there (isGraphControlTool); a gate keeps the two equal.
+      if (call?.catalogId === "one-team" && /^(?:one_graph_|toolchain_)/.test(call.toolName)) {
         push(`${at}에서 그래프 관리 도구를 재귀 호출할 수 없습니다. 저장된 하위 그래프를 참조하세요.`);
       }
     }

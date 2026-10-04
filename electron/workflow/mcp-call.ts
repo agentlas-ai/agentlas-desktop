@@ -12,6 +12,7 @@ import { getChat, getChatWorkingFolder } from "../store/chats";
 import { getAutomation } from "../store/automations";
 import { oneGraphAuthorityOwner } from "../one/graph-ownership";
 import { sha256Value } from "../../shared/graph-execution-digest";
+import { isGraphControlTool } from "../../shared/graph-authoring";
 
 export interface GraphMcpCall {
   catalogId: string;
@@ -141,7 +142,7 @@ export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<Graph
     || typeof raw.catalogId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(raw.catalogId)
     || typeof raw.toolName !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,199}$/.test(raw.toolName)
     || (raw.schemaDigest !== undefined && !/^[a-f0-9]{64}$/.test(raw.schemaDigest))) throw new Error("graph_mcp_call_invalid");
-  if (raw.catalogId === "one-team" && raw.toolName.startsWith("one_graph_")) throw new Error("graph_mcp_recursive_graph_control_denied");
+  if (isGraphControlTool(raw.catalogId, raw.toolName)) throw new Error("graph_mcp_recursive_graph_control_denied");
   const args = projectGraphMcpArguments(raw.arguments, input.vars);
   const authority = raw.catalogId === "one-team" ? getAutomation(input.automationId) : null;
   const teamOwner = authority ? oneGraphAuthorityOwner(authority) : null;

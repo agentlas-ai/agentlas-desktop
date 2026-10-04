@@ -31,6 +31,16 @@ function refused(code = "automation_goal_execution_owner_changed"): never {
   throw Object.assign(new Error(code), { code });
 }
 
+/**
+ * A refusal raised by these barriers (typed `code`, never matched on message text): the Goal must
+ * not receive another dispatch right now — stopped, superseded, or not in queued/running (e.g. the
+ * host is still verifying effects). Callers that only wanted to dispatch more work withhold it; a
+ * barrier refusal is not a failure of work that already finished.
+ */
+export function isGoalDispatchRefusal(error: unknown): error is Error & { code: string } {
+  return error instanceof Error && (error as { code?: unknown }).code === "automation_goal_execution_owner_changed";
+}
+
 function readOwner(automationId: string): Omit<GoalOwner, "generation"> | undefined {
   const a = getAutomation(automationId);
   if (!a) refused();

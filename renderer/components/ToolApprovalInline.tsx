@@ -13,6 +13,7 @@
  * 승인 자체는 대화를 멈추는 경계지만, 화면을 차지하는 질문 시트가 아니다. Graph 칩은
  * 제목·런타임·네 선택지를 한 줄로 보여 주고, One은 기존 질문 카드를 그대로 쓴다.
  */
+import { redactSecrets } from "@shared/secret-patterns";
 import { useEffect, useState } from "react";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import { useT } from "@/lib/i18n";
@@ -252,7 +253,7 @@ export function ToolApprovalCard({
     // question already says that). A runtime-blocked call carries the command or path it
     // tried; an escalation request carries none, so it states the boundary it would widen.
     const chipDetail = request.detail?.trim()
-      ? `${runtimeName} · ${request.detail.trim()}`
+      ? `${runtimeName} · ${redactSecrets(request.detail.trim())}`
       : escalation
         ? (ko ? "지금은 읽기 전용 — 허용하면 이 요청을 이어서 합니다" : "Read-only now — allowing continues this request")
         : runtimeName;

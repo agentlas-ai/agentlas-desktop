@@ -276,13 +276,12 @@ function toolActivityBlock(activity: ObservedToolActivity | undefined): string {
 }
 
 /**
- * 판정기에게 실제로 가는 글. 게이트가 이 조립을 직접 잴 수 있게 밖으로 낸다 —
- * "판정이 무엇을 보고 판단하는가"는 이 제품에서 가장 자주 어긋난 자리다.
- */
-/**
- * Steps the host computes itself — no model runs in them, so none can claim an effect it did
- * not make. A graph made only of these has zero tool calls by construction, and the
- * claimed_without_tools inversion below must not read that as a false claim.
+ * Steps the host executes itself: trigger, condition and transform are deterministic host
+ * logic; a code step's script was written by a model but the host runs it (and a failed step
+ * may be rewritten by a model and run again — run-graph.ts rewriteFailedCodeStep). No model
+ * acts at run time, so a graph made only of these makes zero tool calls by construction and the
+ * claimed_without_tools inversion below must not read that as a false claim. The judge is told
+ * instead (hostComputedBlock) and still weighs whether the output itself is plausible.
  * Measured 2026-10-04: every run of One's code-only Toolchain ("reverse a sentence", output
  * correct) was flipped to error · claimed_without_tools and briefed to the owner as an anomaly.
  */
@@ -292,16 +291,31 @@ export function graphIsHostComputedOnly(graph: { nodes: ReadonlyArray<{ type: st
   return Boolean(graph?.nodes.length) && graph!.nodes.every((node) => HOST_COMPUTED_NODE_TYPES.has(node.type));
 }
 
+function hostComputedBlock(hostComputedGraph: boolean | undefined): string {
+  if (!hostComputedGraph) return "";
+  return [
+    "",
+    "[HOST-COMPUTED GRAPH — measured by the host: every step ran as host code (code, condition, transform)]",
+    "Tool calls are not expected here, so their absence is not evidence either way. Judge whether the output itself plausibly meets the goal; a claimed outside effect (posted, sent, saved elsewhere) that the output cannot show is unverified, not ok.",
+    "[/HOST-COMPUTED GRAPH]",
+  ].join("\n");
+}
+
+/**
+ * 판정기에게 실제로 가는 글. 게이트가 이 조립을 직접 잴 수 있게 밖으로 낸다 —
+ * "판정이 무엇을 보고 판단하는가"는 이 제품에서 가장 자주 어긋난 자리다.
+ */
 export function automationJudgeInput(
   value: string,
   opts: {
     toolActivity?: ObservedToolActivity;
     runRecord?: ObservedRunRecord;
     declaredGoal?: DeclaredAutomationGoal;
+    hostComputedGraph?: boolean;
   } = {},
 ): string {
   return `${value.slice(0, 8_000)}${goalBlock(opts.declaredGoal)}`
-    + `${runRecordBlock(opts.runRecord)}${toolActivityBlock(opts.toolActivity)}`;
+    + `${runRecordBlock(opts.runRecord)}${toolActivityBlock(opts.toolActivity)}${hostComputedBlock(opts.hostComputedGraph)}`;
 }
 
 export async function classifyAutomationOutcome(
@@ -313,6 +327,8 @@ export async function classifyAutomationOutcome(
     toolActivity?: ObservedToolActivity;
     runRecord?: ObservedRunRecord;
     declaredGoal?: DeclaredAutomationGoal;
+    /** Every step is host-executed (graphIsHostComputedOnly); no tool observation is passed for it. */
+    hostComputedGraph?: boolean;
   } = {},
 ): Promise<AutomationResultClassification> {
   const value = text?.trim() ?? "";

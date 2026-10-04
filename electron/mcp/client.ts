@@ -19,7 +19,7 @@ import { getOneProfile } from "../store/one-profile";
 import { applyAutomationLifecycle, automationLifecycleContext, automationLifecycleRefusalText } from "../automation-lifecycle";
 import { recordAutomationPinProvenance } from "../automation-runtime-provenance";
 import { AutomationWorkspaceError, bindCreatedGoalContinuationWorkspace } from "../automation-workspace";
-import { assertFiniteGoalLifecycleCurrent } from "../automation-execution-control";
+import { assertFiniteGoalLifecycleCurrent, isGoalDispatchRefusal } from "../automation-execution-control";
 import { selectionForRuntime } from "../../shared/runtime-selection";
 import { officeTaskContextForInvocation } from "../office-task-context";
 import { goalDeadlineWaitClause, goalWaitProtocol, parseGoalWaitIntent, stripGoalWaitDisplayText, type ParsedGoalWait } from "../long-run/wait-emitter";
@@ -7194,94 +7194,114 @@ ${effectiveUserPrompt}`;
         assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId, rootChatId: chat.id,
           expectedRevision: activeGoalRevision });
       };
-      assertContinuationGoalCurrent();
-      const marker = `Source chat: ${chat.id}`;
-      // goal_id 1급 조회가 먼저다 — 프롬프트 마커 문자열 검색은 goal_id 없는 레거시
-      // 연속실행의 폴백으로만 남는다. goal당 연속실행은 정확히 한 행이다.
-      const goalContinuation = activeGoalId ? findAutomationByGoalId(activeGoalId) : null;
-      const existingContinuation = goalContinuation
-        ?? listAutomations().find(
-          (automation) => automation.enabled && automation.promptTemplate.includes(marker),
-        );
-      // A hidden continuation is a new invocation, not a trusted continuation
-      // of the current process. Pin an explicit single Hub hire as a Hub target
-      // so the scheduler performs a fresh authoritative hepCall on every run.
-      const continuationHubSlug = borrowedAgentSlugs.length === 1 ? borrowedAgentSlugs[0] : null;
-      const continuationHubVersion = continuationHubSlug
-        ? explicitBorrowSpecs.find((spec) => spec.slug === continuationHubSlug)?.packageHash
-        : undefined;
-      if (continuationHubSlug && !continuationHubVersion) {
-        throw Object.assign(new Error("automation_hub_release_pin_missing"), {
-          code: "automation_hub_release_pin_missing",
-        });
-      }
-      if (existingContinuation) {
-        getDb().transaction(() => {
-          assertContinuationGoalCurrent();
-          if (continuationHubSlug &&
-            (existingContinuation.targetType !== "hub" || existingContinuation.targetId !== continuationHubSlug
-              || existingContinuation.targetVersion !== continuationHubVersion)) {
-            // A changed definition still requires its normal execution-owner
-            // review; this update never issues an ownership receipt.
-            updateAutomation(existingContinuation.id, {
-              targetType: "hub",
-              targetId: continuationHubSlug,
-              ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
-            });
-          }
-          if (activeGoalId) {
-            if (existingContinuation.goalId !== activeGoalId) {
-              updateAutomation(existingContinuation.id, { goalId: activeGoalId });
+      try {
+        assertContinuationGoalCurrent();
+        const marker = `Source chat: ${chat.id}`;
+        // goal_id 1급 조회가 먼저다 — 프롬프트 마커 문자열 검색은 goal_id 없는 레거시
+        // 연속실행의 폴백으로만 남는다. goal당 연속실행은 정확히 한 행이다.
+        const goalContinuation = activeGoalId ? findAutomationByGoalId(activeGoalId) : null;
+        const existingContinuation = goalContinuation
+          ?? listAutomations().find(
+            (automation) => automation.enabled && automation.promptTemplate.includes(marker),
+          );
+        // A hidden continuation is a new invocation, not a trusted continuation
+        // of the current process. Pin an explicit single Hub hire as a Hub target
+        // so the scheduler performs a fresh authoritative hepCall on every run.
+        const continuationHubSlug = borrowedAgentSlugs.length === 1 ? borrowedAgentSlugs[0] : null;
+        const continuationHubVersion = continuationHubSlug
+          ? explicitBorrowSpecs.find((spec) => spec.slug === continuationHubSlug)?.packageHash
+          : undefined;
+        if (continuationHubSlug && !continuationHubVersion) {
+          throw Object.assign(new Error("automation_hub_release_pin_missing"), {
+            code: "automation_hub_release_pin_missing",
+          });
+        }
+        if (existingContinuation) {
+          getDb().transaction(() => {
+            assertContinuationGoalCurrent();
+            if (continuationHubSlug &&
+              (existingContinuation.targetType !== "hub" || existingContinuation.targetId !== continuationHubSlug
+                || existingContinuation.targetVersion !== continuationHubVersion)) {
+              // A changed definition still requires its normal execution-owner
+              // review; this update never issues an ownership receipt.
+              updateAutomation(existingContinuation.id, {
+                targetType: "hub",
+                targetId: continuationHubSlug,
+                ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
+              });
             }
-            if (!existingContinuation.enabled) toggleAutomation(existingContinuation.id, true);
-          }
-        })();
-      }
-      if (!existingContinuation) {
-        const continuationSchedule = activeGoalId
-          ? goalContinuationSchedule(latestGoalDecision)
-          : STORMBREAKER_LONG_RUN_SCHEDULE;
-        getDb().transaction(() => {
-          assertContinuationGoalCurrent();
-          if (activeGoalId && !req.runId) {
-            throw new AutomationWorkspaceError("automation_workspace_creation_source_unverified");
-          }
-          const continuation = createAutomation({
-            name: activeGoalId
-              ? `Goal continuation · ${chat.title || agent.name}`
-              : `Stormbreaker continuation · ${chat.title || agent.name}`,
-            scheduleHuman: continuationSchedule,
-            targetType: continuationHubSlug ? "hub" : chat.firmId ? "firm" : "agent",
-            targetId: continuationHubSlug ?? chat.firmId ?? chat.agentId,
-            // Main recovery may have selected another connected engine. Copy
-            // that final validated engine before sealing the creation receipt.
-            runtimeSelection: selectionForRuntime(active, {
-              longContext: active.longContextEnabled ?? undefined,
-            }),
-            ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
-            promptTemplate: buildStormbreakerLongRunPrompt({
+            if (activeGoalId) {
+              if (existingContinuation.goalId !== activeGoalId) {
+                updateAutomation(existingContinuation.id, { goalId: activeGoalId });
+              }
+              if (!existingContinuation.enabled) toggleAutomation(existingContinuation.id, true);
+            }
+          })();
+        }
+        if (!existingContinuation) {
+          const continuationSchedule = activeGoalId
+            ? goalContinuationSchedule(latestGoalDecision)
+            : STORMBREAKER_LONG_RUN_SCHEDULE;
+          getDb().transaction(() => {
+            assertContinuationGoalCurrent();
+            if (activeGoalId && !req.runId) {
+              throw new AutomationWorkspaceError("automation_workspace_creation_source_unverified");
+            }
+            const continuation = createAutomation({
+              name: activeGoalId
+                ? `Goal continuation · ${chat.title || agent.name}`
+                : `Stormbreaker continuation · ${chat.title || agent.name}`,
+              scheduleHuman: continuationSchedule,
+              targetType: continuationHubSlug ? "hub" : chat.firmId ? "firm" : "agent",
+              targetId: continuationHubSlug ?? chat.firmId ?? chat.agentId,
+              // Main recovery may have selected another connected engine. Copy
+              // that final validated engine before sealing the creation receipt.
+              runtimeSelection: selectionForRuntime(active, {
+                longContext: active.longContextEnabled ?? undefined,
+              }),
+              ...(continuationHubVersion ? { targetVersion: continuationHubVersion } : {}),
+              promptTemplate: buildStormbreakerLongRunPrompt({
+                sourceChatId: chat.id,
+                previousOutput: result.text,
+                userPrompt: req.userPrompt,
+                workingFolder,
+              }),
+              createdBy: "agent",
+              ...(activeGoalId ? { goalId: activeGoalId } : {}),
+            });
+            if (activeGoalId) bindCreatedGoalContinuationWorkspace({
+              automationId: continuation.id,
+              goalId: activeGoalId,
               sourceChatId: chat.id,
-              previousOutput: result.text,
-              userPrompt: req.userPrompt,
-              workingFolder,
-            }),
-            createdBy: "agent",
-            ...(activeGoalId ? { goalId: activeGoalId } : {}),
+              invocationRunId: req.runId!,
+            });
+          })();
+          sink({
+            kind: "tool-use",
+            tool: {
+              name: activeGoalId ? "Goal Loop · long-run" : "Stormbreaker Loop · long-run",
+              result: activeGoalId
+                ? `The goal is not achieved yet. Queued a hidden ${continuationSchedule} goal continuation that keeps running until the goal ledger reports completion, budget exhaustion, or an explicit end.`
+                : `More safe work remains after ${STORMBREAKER_MAX_EXECUTION_PASSES} immediate passes. Queued a hidden ${STORMBREAKER_LONG_RUN_SCHEDULE} continuation that reuses its own durable session and disables itself when the marker stops.`,
+            },
           });
-          if (activeGoalId) bindCreatedGoalContinuationWorkspace({
-            automationId: continuation.id,
-            goalId: activeGoalId,
-            sourceChatId: chat.id,
-            invocationRunId: req.runId!,
-          });
-        })();
+        }
+      } catch (error) {
+        /*
+         * The lifecycle barrier refused a further dispatch (independent review 2026-10-04: the long
+         * run was still `verifying` its last effects). That refusal is about the NEXT pass; this
+         * turn's answer is already complete. Throwing here failed the finished turn, so it was saved
+         * as an interrupted answer. Withhold the continuation (the transactions above rolled back,
+         * nothing was created or re-enabled) and finish the turn; every other error still throws.
+         */
+        if (!isGoalDispatchRefusal(error)) throw error;
         sink({
           kind: "tool-use",
           tool: {
-            name: activeGoalId ? "Goal Loop · long-run" : "Stormbreaker Loop · long-run",
-            result: activeGoalId
-              ? `The goal is not achieved yet. Queued a hidden ${continuationSchedule} goal continuation that keeps running until the goal ledger reports completion, budget exhaustion, or an explicit end.`
-              : `More safe work remains after ${STORMBREAKER_MAX_EXECUTION_PASSES} immediate passes. Queued a hidden ${STORMBREAKER_LONG_RUN_SCHEDULE} continuation that reuses its own durable session and disables itself when the marker stops.`,
+            name: "Goal Loop · continuation withheld",
+            result: locale === "ko"
+              ? `목표가 지금은 다음 실행을 받을 수 없는 상태라 이어받기를 예약하지 않았습니다 (${error.code}). 이번 답변은 그대로 완료됩니다.`
+              : `The goal cannot take another run right now, so no continuation was queued (${error.code}). This answer stands as completed.`,
           },
         });
       }

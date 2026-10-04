@@ -6,7 +6,7 @@
 // Nothing here decides a state. Main owns every transition; this screen shows
 // the overview it returns and sends only the owner's narrow decisions.
 "use client";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   OwnerDecision,
   ToolchainAutomationView,
@@ -199,7 +199,9 @@ function ToolchainEntry({ view, copy, locale, busy, exposing, focused, onExpose,
     ...(contract.effects.idempotentHint ? [copy.manager.effects.idempotent] : []),
     ...(contract.effects.openWorldHint ? [copy.manager.effects.openWorld] : []),
   ] : [];
-  const exposeLabel = exposing ? copy.exposing : contract && contract.state !== "deprecated" ? copy.retest : copy.expose;
+  // A test started anywhere (this screen, the One rail, or One's toolchain_publish) shows as running here.
+  const testing = exposing || view.testInProgress === true;
+  const exposeLabel = testing ? copy.exposing : contract && contract.state !== "deprecated" ? copy.retest : copy.expose;
   return (
     <article
       className={styles.entry}
@@ -237,9 +239,9 @@ function ToolchainEntry({ view, copy, locale, busy, exposing, focused, onExpose,
         {observed.map((target) => <span key={`${target.nodeId}:${target.kind}:${target.target}`} className={styles.observed}>
           {copy.observed(target.nodeId, target.target, target.share, target.waitingForIdentity)}</span>)}
         <div className={styles.actions}>
-          {callable
+          {callable && !testing
             ? <button type="button" disabled={busy} onClick={onWithdraw}>{copy.withdraw}</button>
-            : <button type="button" data-primary="true" disabled={busy || exposing} onClick={onExpose}>{exposeLabel}</button>}
+            : <button type="button" data-primary="true" disabled={busy || testing} onClick={onExpose}>{exposeLabel}</button>}
           <button type="button" data-link="true" onClick={() => navigate(`/automation/detail?id=${encodeURIComponent(view.automationId)}`)}>
             {copy.manager.openAutomation}
           </button>
@@ -258,37 +260,49 @@ export function ToolchainsManager({ api, locale, focusAutomationId = null }: {
   const copy = useMemo(() => toolchainCopy(locale), [locale]);
   const [overview, setOverview] = useState<ToolchainOverview | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [busy, setBusy] = useState(false);
+  // Busy is per entry: a minutes-long test on one Toolchain must not lock Withdraw on the others.
+  const [pending, setPending] = useState<ReadonlySet<string>>(() => new Set());
+  const [refreshing, setRefreshing] = useState(false);
   const [exposingId, setExposingId] = useState<string | null>(null);
+  // Every read and action takes a ticket; a response older than the newest one applied is dropped,
+  // so the 60 s poll can no longer overwrite the overview an action just returned.
+  const issued = useRef(0);
+  const applied = useRef(0);
+  const apply = useCallback((ticket: number, next: ToolchainOverview) => {
+    if (ticket < applied.current) return;
+    applied.current = ticket;
+    setOverview(next);
+    setLoadFailed(false);
+  }, []);
   const [error, setError] = useState<string | null>(null);
   const [lane, setLane] = useState<Lane>("all");
   const [query, setQuery] = useState("");
 
   const load = useCallback(async () => {
     if (!api) return;
+    const ticket = ++issued.current;
     try {
-      setOverview(await api.overview());
-      setLoadFailed(false);
+      apply(ticket, await api.overview());
     } catch {
       // A failed read is not an empty list; say so instead of drawing "nothing yet".
-      setLoadFailed(true);
+      if (ticket >= applied.current) setLoadFailed(true);
     }
-  }, [api]);
+  }, [api, apply]);
 
-  const run = useCallback(async (action: () => Promise<ToolchainOverview>) => {
-    setBusy(true);
+  const run = useCallback(async (key: string, action: () => Promise<ToolchainOverview>) => {
+    setPending((current) => new Set(current).add(key));
     setError(null);
+    const ticket = ++issued.current;
     try {
-      setOverview(await action());
-      setLoadFailed(false);
+      apply(ticket, await action());
     } catch (cause) {
       setError(toolchainErrorText(cause, copy));
       // A refused action may mean the state moved underneath; show the current truth.
       void load();
     } finally {
-      setBusy(false);
+      setPending((current) => { const next = new Set(current); next.delete(key); return next; });
     }
-  }, [copy, load]);
+  }, [apply, copy, load]);
 
   useEffect(() => {
     if (!api) return;
@@ -337,7 +351,11 @@ export function ToolchainsManager({ api, locale, focusAutomationId = null }: {
   }, [visible, locale, copy]);
 
   const decide = (view: ToolchainAutomationView) => (item: ToolchainCrystallizationView, decision: OwnerDecision) =>
-    void run(() => api!.decide({ automationId: view.automationId, crystallizationId: item.id, decision }));
+    void run(view.automationId, () => api!.decide({ automationId: view.automationId, crystallizationId: item.id, decision }));
+  const refreshAll = () => {
+    setRefreshing(true);
+    void run("*refresh", () => api!.refresh()).finally(() => setRefreshing(false));
+  };
 
   if (!api) {
     return <section className={styles.root} aria-label={copy.title}><p className={styles.notice}>{copy.unavailable}</p></section>;
@@ -360,8 +378,8 @@ export function ToolchainsManager({ api, locale, focusAutomationId = null }: {
             <input type="search" value={query} placeholder={copy.manager.search} aria-label={copy.manager.search}
               onChange={(event) => setQuery(event.target.value)} />
           </label>
-          <button type="button" disabled={busy} onClick={() => void run(() => api.refresh())}>
-            <IconRefresh size={12} /> {busy ? copy.analyzing : copy.analyze}
+          <button type="button" disabled={refreshing} onClick={refreshAll}>
+            <IconRefresh size={12} /> {refreshing ? copy.analyzing : copy.analyze}
           </button>
         </div>
       </header>
@@ -385,12 +403,12 @@ export function ToolchainsManager({ api, locale, focusAutomationId = null }: {
         {groups.map((group) => <details className={styles.day} key={group.key} open>
           <summary>{group.label}</summary>
           {group.entries.map((view) => <ToolchainEntry key={view.automationId} view={view} copy={copy} locale={locale}
-            busy={busy} exposing={exposingId === view.automationId} focused={view.automationId === focusAutomationId}
+            busy={pending.has(view.automationId)} exposing={exposingId === view.automationId} focused={view.automationId === focusAutomationId}
             onExpose={() => {
               setExposingId(view.automationId);
-              void run(() => api.expose(view.automationId)).finally(() => setExposingId(null));
+              void run(view.automationId, () => api.expose(view.automationId)).finally(() => setExposingId(null));
             }}
-            onWithdraw={() => void run(() => api.withdraw(view.automationId))}
+            onWithdraw={() => void run(view.automationId, () => api.withdraw(view.automationId))}
             onDecide={decide(view)} />)}
         </details>)}
       </div>}

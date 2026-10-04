@@ -15,6 +15,13 @@ import { getJson, normalizeUsageError, toPercent, toResetMs } from "./util";
 
 const execFileP = promisify(execFile);
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
+/*
+ * An E2E/QA app keeps its own credentials in memory (vault.ts USE_MEMORY_VAULT, same switch).
+ * This adapter read the owner's login keychain item regardless, so an isolated QA desktop could
+ * read — or raise the macOS access prompt for — the owner's Claude Code credential (independent
+ * review 2026-10-04). AGENTLAS_E2E_KEYCHAIN=1 opts back in, exactly as it does for the vault.
+ */
+const NATIVE_KEYCHAIN_READS = !(process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1");
 
 interface TokenCandidate {
   token: string;
@@ -30,7 +37,7 @@ async function readClaudeTokens(): Promise<{ candidates: TokenCandidate[]; keych
   // "항목이 없다"(=진짜 미로그인)와 "GUI 프로세스가 키체인 접근을 거부당함/응답 못 받음"을 구분한다 —
   // 후자를 null(미연결)로 삼키면 대시보드가 영원히 "연결됨"만 보여주고 사용량 바가 안 뜬다.
   let keychainBlocked = false;
-  if (process.platform === "darwin") {
+  if (process.platform === "darwin" && NATIVE_KEYCHAIN_READS) {
     try {
       const { stdout } = await execFileP(
         "security",

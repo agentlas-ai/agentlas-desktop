@@ -24,10 +24,20 @@ const PUBLISH_RECEIPT = "agentlas.toolchain-publish.v1";
 const MAX_RESULT_CHARS = 64_000;
 const ESCAPES: Record<string, string> = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f" };
 
-/** `mcp__one-team__one_graph_run` / `one-team.one_graph_run` / `one_graph_run` → `one_graph_run`. */
-export function bareToolName(name: string | undefined): string {
-  const token = String(name ?? "").match(/[A-Za-z0-9_]+\s*$/)?.[0].trim() ?? "";
-  return (token.split("__").filter(Boolean).at(-1) ?? "").toLowerCase();
+/**
+ * The tool's name on the built-in One Team server, or null for any other server. Runners expose
+ * `mcp__<configKey>__tool` (Claude/ACP) or `<configKey>.tool` (Codex) with the sealed config key
+ * (electron/invocation/tool-origin.ts); a bare suffix match let another MCP server returning a
+ * receipt-shaped result claim a Toolchain source (independent review 2026-10-04).
+ */
+export function oneTeamToolName(name: string | undefined, origin?: { kind?: string; providerName?: string; toolName?: string }): string | null {
+  const value = String(name ?? "").trim();
+  for (const prefix of ["mcp__one-team__", "one-team."]) {
+    if (value.startsWith(prefix) && value.length > prefix.length) return value.slice(prefix.length).toLowerCase();
+  }
+  // Main's typed origin, when the runner's raw name carried no server key.
+  if (origin?.kind === "agentlas-plugin" && origin.providerName === "One Team" && origin.toolName) return origin.toolName.toLowerCase();
+  return null;
 }
 
 /** Decode a JSON string starting at the opening quote; a cut string returns what was read. */
@@ -155,7 +165,7 @@ function receiptsIn(raw: string): Array<Record<string, unknown>> {
 
 export function toolchainSourceOf(cell: OneWorkCell): ToolchainSourceRef | null {
   if (cell.kind !== "call" || cell.status === "failed" || !cell.result || cell.result.length > MAX_RESULT_CHARS) return null;
-  const tool = bareToolName(cell.toolName ?? cell.label);
+  const tool = oneTeamToolName(cell.toolName ?? cell.label, cell.origin);
   if (tool !== "one_graph_run" && tool !== "toolchain_publish") return null;
   for (const receipt of receiptsIn(cell.result)) {
     const automationId = typeof receipt.graph_id === "string" && receipt.graph_id.trim() ? receipt.graph_id.trim() : null;

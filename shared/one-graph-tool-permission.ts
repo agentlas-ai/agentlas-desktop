@@ -22,6 +22,8 @@ export function oneGraphReadPermissionCall(input: {
 export function oneGraphToolTimeoutMs(input: {
   catalogId?: string | null; toolName: string; args?: unknown;
 }): number {
+  // toolchain_publish waits at most 45 s for its fresh-session test, then answers "testing".
+  if (input.catalogId === "one-team" && input.toolName === "toolchain_publish") return 60_000;
   if (input.catalogId !== "one-team"
     || !["one_graph_run", "one_graph_result"].includes(input.toolName)
     || !input.args || typeof input.args !== "object" || Array.isArray(input.args)) return 30_000;

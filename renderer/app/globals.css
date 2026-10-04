@@ -3253,7 +3253,7 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
 }
 
 .tool-approval-chip-action:focus-visible {
-  box-shadow: 0 0 0 2px var(--paper-3);
+  box-shadow: 0 0 0 2px var(--info);
 }
 
 .tool-approval-chip-action:disabled {
@@ -3272,6 +3272,20 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   border-color: var(--black);
   background: var(--black-soft);
   color: var(--white);
+}
+
+/* 다크에서 --black(#171719)은 칩 바탕 --paper(#131419)와 구분되지 않는다 — 주 행동만 뒤집어 칠한다. */
+:root[data-theme="dark"] .tool-approval-chip-action-once {
+  border-color: var(--ink);
+  background: var(--ink);
+  color: var(--paper);
+}
+
+:root[data-theme="dark"] .tool-approval-chip-action-once:hover,
+:root[data-theme="dark"] .tool-approval-chip-action-once:focus-visible {
+  border-color: var(--ink-soft);
+  background: var(--ink-soft);
+  color: var(--paper);
 }
 
 /* 거부는 위험한 선택이 아니라 안전한 선택이다 — 빨간 경고색을 쓰지 않고 조용한 글자 단추로 둔다. */

@@ -1613,13 +1613,14 @@ async function runOne(
           const evidenceOutput = output;
           // A host-computed graph (code/condition/transform only) has no model that could claim an
           // effect; its zero tool calls are not evidence of a false claim, so no observation is passed.
-          const evidenceActivity = currentRunId && !graphIsHostComputedOnly(a.graph)
+          const hostComputedGraph = graphIsHostComputedOnly(a.graph);
+          const evidenceActivity = currentRunId && !hostComputedGraph
             ? structuredClone(observedToolActivity(currentRunId)) : undefined;
           const evidenceRecord = structuredClone(runRecord);
           const evidenceGoal = structuredClone(declaredGoalForAutomation(a));
           pendingClassifications.push(() => classifyInBackground({ automation: a, runId: currentRunId, phase: "outcome", sourceSignal: controller.signal,
             assertCurrent: assertGoalCurrent, classify: signal => classifyAutomationOutcome(evidenceOutput, {
-              runtimeSelection: a.runtimeSelection, signal, toolActivity: evidenceActivity,
+              runtimeSelection: a.runtimeSelection, signal, toolActivity: evidenceActivity, hostComputedGraph,
               ...(evidenceRecord.steps.length > 0 ? { runRecord: evidenceRecord } : {}), declaredGoal: evidenceGoal,
             }) }));
         } catch {
