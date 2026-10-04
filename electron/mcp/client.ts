@@ -2470,6 +2470,13 @@ async function runMcpInvocationInContext(
     : req.planMode && !scienceReview
         ? buildPlanUserPrompt(req.userPrompt, locale)
         : req.userPrompt;
+  /*
+   * What this turn was asked to do, as the agent's experience records it ("이 에이전트는 다음과 같은 요청을
+   * 수행한다: …"). A host-written prompt — a Goal continuation, an update resume, One's review of finished work — is
+   * not a request; it was saved as One's procedure memory word for word (QA 2026-10-04, "[Host: work you delegated
+   * has finished…]"). A brief One handed to a worker is a real task, so it stays.
+   */
+  const hostWrotePrompt = () => promptIsSystemAuthored && hostNoticePurpose !== "one-dispatch-brief";
   if (oneTeamExecutionPolicy) {
     const taskSurfaceRecipe = oneTaskSurfaceRecipe(req.userPrompt, locale === "ko");
     // Output presentation and optional follow-ups do not constrain the current
@@ -7760,7 +7767,7 @@ ${effectiveUserPrompt}`;
             arch: process.arch,
             runtimeKind: active.kind,
             basePackageHash: agent.packageHash ?? null,
-            taskHint: effectiveUserPrompt,
+            taskHint: hostWrotePrompt() ? null : effectiveUserPrompt,
           },
           // 단일 borrow 실행 — 빌린 에이전트의 agent_repo 배움을 그 전역 둥지로 미러링.
           borrowedAgentSlugs:
@@ -7924,7 +7931,7 @@ ${effectiveUserPrompt}`;
               arch: process.arch,
               runtimeKind: active.kind,
               basePackageHash: agent.packageHash ?? null,
-              taskHint: effectiveUserPrompt,
+              taskHint: hostWrotePrompt() ? null : effectiveUserPrompt,
             },
           },
         });

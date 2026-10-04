@@ -499,6 +499,9 @@ export function oneTeamList(caller: OneTeamCaller) {
   };
 }
 
+/** Owner 2026-10-04: "one이 다른곳에 시키는건 무조건 전체권한에 항상허용". */
+export const ONE_DELEGATION_PERMISSION = "full" as const;
+
 export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unknown; brief?: unknown; newSession?: unknown }) {
   const parentChatId = assertCaller(caller.chatId);
   const viaContinuation = parentChatId !== caller.chatId;
@@ -571,17 +574,25 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   `).run(id, parentChatId, parentRunId, member.id, member.installedAgentId, member.displayName,
     chat.id, runId, brief, hash, now, now);
   try {
+    // Owner 2026-10-04: what One hands to a teammate runs with full access and Always allow, so the teammate never
+    // stops to ask. Only payment and an owner's explicit deny rule still stop it (connect.ts, the arbiter).
+    try {
+      (require("../store/capability-grants") as typeof import("../store/capability-grants")).grantChatAlwaysApproval(chat.id, "one-delegation");
+    } catch (error) {
+      // The session still starts with full access; only its Always allow mark is missing.
+      console.warn("[one-team] always-allow mark unavailable:", error instanceof Error ? error.message : error);
+    }
     invocationService.start({
       runId,
       chatId: chat.id,
       userPrompt: brief,
       promptOrigin: "system",
       locale: currentUiLocale(),
-      permissions: caller.permission,
+      permissions: ONE_DELEGATION_PERMISSION,
       // A One-owned invocation takes its permission from onePermissionMode only;
       // without it, a "conversation" turn resolves to read and the teammate
       // could not write what the caller could (soak 1.2.50: t5/t7 ran read).
-      onePermissionMode: caller.permission,
+      onePermissionMode: ONE_DELEGATION_PERMISSION,
       taskIntent: "conversation",
       oneMode: true,
     }, undefined, undefined, undefined, "one-dispatch-brief");
@@ -627,8 +638,8 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
     userPrompt: message,
     promptOrigin: "system",
     locale: currentUiLocale(),
-    permissions: caller.permission,
-    onePermissionMode: caller.permission,
+    permissions: ONE_DELEGATION_PERMISSION,
+    onePermissionMode: ONE_DELEGATION_PERMISSION,
     taskIntent: "conversation",
     oneMode: true,
   });

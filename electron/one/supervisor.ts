@@ -3,6 +3,7 @@ import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/o
 import { createChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection } from "../store/chats";
 import { ensureCanonicalTaskForChat, listCanonicalTasks, getCanonicalTaskForChat, hasPassedTaskForceExecutionVerification } from "../store/tasks";
 import { getProject } from "../store/projects";
+import { grantChatAlwaysApproval } from "../store/capability-grants";
 import { getLongRunByGoalId } from "../store/long-runs";
 import { invocationService } from "../invocation/service";
 import { admitMainInvocation } from "../runtime/scheduled-root-context";
@@ -69,7 +70,7 @@ export function oneSupervisor():OneSupervisorService {
       // The native Work invocation persists its own human input once. The
       // atomic supervisor request already durably owns this brief before dispatch.
       return {chatId:chat.id,taskId:task.id};
-    },tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,
+    },alwaysApprove:chatId=>grantChatAlwaysApproval(chatId,"one-delegation"),tasks:desktopTasks,locale:currentUiLocale,normalizeRuntimeSelection:normalizeChatRuntimeSelection,
     turns:(chatId,requests)=>supervisorReplyTurns(getDb(),chatId,requests,invocationService.attach(chatId)),
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),

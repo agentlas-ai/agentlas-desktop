@@ -4201,6 +4201,11 @@ export function registerIpcHandlers(): void {
     if (ruled === "allow") return "allow_once";
     if (ask.permission === "full") return "allow_session";
     if (ruled === "deny") return "deny";
+    // One's own coordination tools (one-team: hand off, follow up, observe, team sessions, groups) are gated by Main's
+    // One control server — capability binding, personal-conversation scope, follow-up bounds — the same gate codex exec
+    // runs reach through default_tools_approval_mode. Owner 2026-10-04: what One hands off runs without asking. An
+    // explicit owner deny rule (above) still wins.
+    if (ask.tool.startsWith("mcp__one-team__")) return "allow_session";
     if (!ask.mutating) return "allow_once";
     if (ask.permission === "write") return "allow_session";
     const deniedAt = recentUserDenials.get(denialKey(ask));

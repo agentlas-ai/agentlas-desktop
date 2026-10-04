@@ -35,6 +35,8 @@ export interface SupervisorDependencies {
   appearance?(input:{expectedVersion:number;displayName:string;bubbleColor:OneBubbleColor}):void;
   legacyHistory?(oneId:string,chatId:string):SupervisorLegacyHistory;
   workQueue?: OneSupervisorWorkQueue;
+  /** Marks a Work session One opened as Always allow (owner 2026-10-04), so the worker never stops to ask. */
+  alwaysApprove?(chatId: string): void;
   workIdentityMutable?: boolean;
   wakeWorkQueue?(): void;
   science?: {
@@ -237,7 +239,8 @@ export class OneSupervisorService {
     this.deps.store.update(row,{state:"dispatching"});
     try {
       this.deps.runtime.start({runId,chatId:delegated!.workerChatId!,userPrompt:input.text,taskIntent:"task",
-        permissions:delegated!.permissions ?? "read",locale:this.deps.locale(),runtimeSelection:delegated!.runtimeSelection,
+        // One's follow-up to its own delegation runs as the delegation does: full access (owner 2026-10-04).
+        permissions:originReplyRunId ? "full" : delegated!.permissions ?? "read",locale:this.deps.locale(),runtimeSelection:delegated!.runtimeSelection,
         ...(originReplyRunId ? {promptOrigin:"system" as const} : {})}, originReplyRunId ? "one-dispatch-brief" : undefined);
       const current=this.deps.store.get(row.command_id)!;
       return current.state==='dispatching' ? this.deps.store.update(current,{state:"accepted",acknowledgement:"delivered"}) : JSON.parse(current.receipt_json);
@@ -269,6 +272,7 @@ export class OneSupervisorService {
     let row!: SupervisorRequestRow;
     this.deps.store.db.transaction(() => {
       const work=this.deps.createWork(input);
+      if (originReplyRunId) this.deps.alwaysApprove?.(work.chatId);
       row=this.deps.store.receive({commandId:input.commandId,oneId,kind:"work",payload:input,originChatId:chatId,taskId:work.taskId,runId:randomUUID()});
       this.bindHandoffOrigin(row,originReplyRunId);
       if (!this.deps.workQueue) this.deps.store.update(row,{state:"dispatching"});
