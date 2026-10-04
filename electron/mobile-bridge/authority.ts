@@ -5125,6 +5125,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     return {
       status: "pending",
       requestId: approval.requestId,
+      chatId: typeof approval.owner?.chatId === "string" && approval.owner.chatId ? approval.owner.chatId : null,
       site: boundedRedactedText(approval.site, 1_024),
       actionType: boundedRedactedText(approval.actionType, 512),
       summary: boundedRedactedText(approval.summary, 4_096),

@@ -1892,6 +1892,11 @@ export interface MobileBridgeOneDecisionClarifyReceiptDto {
 export interface MobileBridgeBrowserApprovalDto {
   status: "pending";
   requestId: string;
+  /**
+   * The Desktop chat whose run asked (Main-minted owner), or null for a run without one. The phone answers a request
+   * in that conversation's sheet; without this field no browser approval could be found there (2026-10-05).
+   */
+  chatId: string | null;
   site: string;
   actionType: string;
   summary: string;
