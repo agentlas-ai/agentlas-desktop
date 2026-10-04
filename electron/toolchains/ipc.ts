@@ -12,7 +12,9 @@ import {
 } from "../../shared/toolchain";
 import { listAutomations } from "../store/automations";
 import { exposeAutomation, interfaceIsStale, toolchainTestInProgress, withdrawAutomation } from "./interface";
+import { toolchainHistory } from "./history";
 import { refreshAllToolchains, refreshToolchainForAutomation } from "./learner";
+import { toolchainLogos } from "./logo";
 import { listToolchainStates, mutateToolchainState } from "./store";
 
 const DECISIONS: ReadonlySet<OwnerDecision> = new Set(["approve", "dismiss", "demote", "retry"]);
@@ -56,6 +58,8 @@ function automationIdOf(value: unknown): string {
 
 export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
   ipc.handle("toolchains:overview", () => toolchainOverview());
+  ipc.handle("toolchains:logos", () => toolchainLogos(listAutomations().filter((automation) => automation.graph).map((automation) => automation.id)));
+  ipc.handle("toolchains:history", (_event, automationId: unknown) => toolchainHistory(automationIdOf(automationId)));
   ipc.handle("toolchains:refresh", (_event, automationId?: unknown) => {
     if (automationId === undefined || automationId === null) refreshAllToolchains();
     else refreshToolchainForAutomation(automationIdOf(automationId));

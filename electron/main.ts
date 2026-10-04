@@ -4389,6 +4389,18 @@ app.whenReady().then(async () => {
   }, 15_000).unref?.();
   startOneTeamNotificationBridge();
   startRunAlertBridge();
+  // Toolchain app icons are drawn by a real image model, so only the running app turns drawing on, after startup
+  // settles; Toolchains made before icons existed get theirs then (electron/toolchains/logo.ts).
+  setTimeout(() => {
+    if (quitServicesStopPromise || developmentEffectsSuppressed()) return;
+    void Promise.all([import("./toolchains/logo"), import("./toolchains/store"), import("./store/automations")])
+      .then(([logo, store, automations]) => logo.enableToolchainLogos(() => {
+        const names = new Map(automations.listAutomations().map((automation) => [automation.id, automation.name]));
+        return store.listToolchainStates().filter((state) => state.interface && state.interface.state !== "deprecated")
+          .map((state) => ({ automationId: state.automationId, name: state.interface!.name || names.get(state.automationId) || "", description: state.interface!.description }));
+      }))
+      .catch((error) => console.warn("[toolchains] icon drawing not started:", error instanceof Error ? error.message : error));
+  }, 90_000).unref?.();
   /*
    * Establish the daemon before choosing the physical Mobile Bridge owner.
    * Previously Desktop opened its listener first and `ensureDaemonRunning`

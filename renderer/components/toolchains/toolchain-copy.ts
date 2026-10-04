@@ -140,6 +140,24 @@ export function toolchainCopy(locale: string) {
       learned: ko ? "배운 것" : "Learned",
       openAutomation: ko ? "자동화 열기" : "Open automation",
       focused: ko ? "답변에서 연 툴체인" : "Opened from an answer",
+      close: ko ? "닫기" : "Close",
+      // How it became a tool (electron/toolchains/history.ts). As few words as a computer's history.
+      history: {
+        made: (by: "one" | "owner") => by === "one" ? (ko ? "One이 만듦" : "Made by One") : (ko ? "직접 만듦" : "Made by you"),
+        ran: (count: number, by: "one" | "owner" | "schedule") => ko
+          ? `${by === "one" ? "One 대화에서" : by === "schedule" ? "일정으로" : "직접"} ${count}번 실행`
+          : `Ran ${count}× ${by === "one" ? "in One's conversation" : by === "schedule" ? "on schedule" : "by you"}`,
+        tool: (passed: boolean, tested: string | null, by: "one" | "owner") => passed
+          ? (ko ? `도구가 됨${tested ? ` · 시험 ${tested}` : ""}${by === "one" ? " · One" : ""}` : `Became a tool${tested ? ` · test ${tested}` : ""}${by === "one" ? " · One" : ""}`)
+          : (ko ? `시험${tested ? ` ${tested}` : ""} · 아직 도구 아님` : `Test${tested ? ` ${tested}` : ""} · not a tool yet`),
+        called: (count: number, caller: string | null) => ko
+          ? `${caller ? `'${caller}'` : "다른 대화"}에서 ${count}번 호출`
+          : `Called ${count}× from ${caller ? `"${caller}"` : "another conversation"}`,
+        reported: ko ? "잘못된 결과 보고" : "Wrong result reported",
+        repaired: ko ? "고침" : "Repaired",
+        withdrawn: ko ? "호출 중단" : "Withdrawn",
+        empty: ko ? "아직 기록이 없습니다" : "No history yet",
+      },
     },
   };
 }

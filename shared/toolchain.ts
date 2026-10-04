@@ -898,8 +898,21 @@ export interface ToolchainOverview {
   automations: ToolchainAutomationView[];
 }
 
+/** How a Toolchain came to be, oldest first (electron/toolchains/history.ts). */
+export type ToolchainHistoryEvent =
+  | { kind: "made"; at: string; by: "one" | "owner" }
+  | { kind: "ran"; from: string; to: string; count: number; by: "one" | "owner" | "schedule" }
+  | { kind: "tool"; at: string; by: "one" | "owner"; passed: boolean; tested: string | null }
+  | { kind: "called"; from: string; to: string; count: number; caller: string | null }
+  | { kind: "reported"; at: string; problem: string }
+  | { kind: "repaired"; at: string }
+  | { kind: "withdrawn"; at: string };
+
 export interface ToolchainsApi {
   overview: () => Promise<ToolchainOverview>;
+  /** Each Toolchain's app icon drawn so far (data URLs), by automation id. */
+  logos: () => Promise<Record<string, string>>;
+  history: (automationId: string) => Promise<ToolchainHistoryEvent[]>;
   refresh: (automationId?: string) => Promise<ToolchainOverview>;
   decide: (input: { automationId: string; crystallizationId: string; decision: OwnerDecision }) => Promise<ToolchainOverview>;
   expose: (automationId: string) => Promise<ToolchainOverview>;

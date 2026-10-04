@@ -6,6 +6,7 @@
 // invalidated). It records the definition digest it was tested against; any
 // later edit makes it stale and it disappears from search until re-tested.
 
+import { ensureToolchainLogo } from "./logo";
 import {
   coldStartPassed,
   COLD_START_POLICY,
@@ -379,6 +380,8 @@ async function runExposure(
     if (contractMarker(current.interface) !== startedFrom) throw new Error("toolchain_changed_during_test");
     return { ...current, interface: { ...contract, usage: current.interface?.usage ?? contract.usage } };
   });
+  // Now it is a Toolchain: it gets its app icon (only when the app enabled drawing).
+  ensureToolchainLogo({ automationId, name: contract.name || automation.name, description: contract.description });
   return contract;
 }
 

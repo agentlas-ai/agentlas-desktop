@@ -591,6 +591,8 @@ const api: AgentlasIpc = {
   },
   toolchains: {
     overview: () => ipcRenderer.invoke("toolchains:overview"),
+    logos: () => ipcRenderer.invoke("toolchains:logos"),
+    history: (automationId: string) => ipcRenderer.invoke("toolchains:history", automationId),
     refresh: (automationId?: string) => ipcRenderer.invoke("toolchains:refresh", automationId),
     decide: (input) => ipcRenderer.invoke("toolchains:decide", input),
     expose: (automationId: string) => ipcRenderer.invoke("toolchains:expose", automationId),
