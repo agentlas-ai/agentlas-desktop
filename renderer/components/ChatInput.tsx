@@ -8,12 +8,14 @@
 // 모드 토글은 V0 UI만 (실제 동작은 V1): plan/goal/permission이 invocation payload로 전달.
 "use client";
 import { GoalPlanSummary } from "@/components/goal/GoalPlanSummary";
+import { goalNextWakeLabel, type GoalNextWake } from "@shared/goal-wake";
+import goalBarStyles from "./ComposerGoalBar.module.css";
 import type { GoalPlanView } from "../../shared/goal-shape";
 import { requestGoalPanelOpen } from "./goal/GoalPanel";
 import { ComposerDecisionSlot } from "./ComposerDecisionPortal";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
 import { AliveComposerButton } from "./alive/AliveComposerButton";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ImageAttachment,
   HubAgentBookmark,
@@ -328,6 +330,7 @@ function ChatInputComponent({
   onResumeGoal,
   onPauseGoal,
   onEditGoal,
+  goalBarPlacement = "composer",
   onToggleContinuous,
   onToggleSwarm,
   queuedCount = 0,
@@ -389,6 +392,9 @@ function ChatInputComponent({
   onPauseGoal?: () => void;
   /** Replace the stopped Goal contract with a user-authored revision. */
   onEditGoal?: (objective: string) => Promise<boolean>;
+  /** "none": the screen shows its one Goal surface elsewhere (Work puts it above the conversation; owner
+   * 2026-10-04 "골 하나만 해라 아래 챗창에 붙은 골을 지워"). The goal toggle stays in the composer. */
+  goalBarPlacement?: "composer" | "none";
   /** 스웜(swarmMode) 현재 상태 + 토글. */
   swarmMode?: boolean;
   onToggleSwarm?: () => void;
@@ -1429,7 +1435,7 @@ function ChatInputComponent({
       {!stagedSteering && queuedCount > 0 && (
         <SteeringQueueBar queuedCount={queuedCount} locale={locale} />
       )}
-      {effectiveGoalMode && (
+      {effectiveGoalMode && goalBarPlacement === "composer" && (
         <ComposerGoalBar
           label={progressLabel}
           criteria={goalCriteria}
@@ -1449,7 +1455,7 @@ function ChatInputComponent({
       <ComposerDecisionSlot className="composer-decision-stack" surface="work" />
       <div
         className="chat-input-shell"
-        data-has-progress={queuedCount > 0 || effectiveGoalMode ? "true" : "false"}
+        data-has-progress={queuedCount > 0 || (effectiveGoalMode && goalBarPlacement === "composer") ? "true" : "false"}
         style={{
           width: "min(100%, 740px)",
           margin: "0 auto",
@@ -2049,7 +2055,7 @@ function ChatInputComponent({
   );
 }
 
-function ComposerGoalBar({
+export function ComposerGoalBar({
   label,
   criteria,
   plan,
@@ -2062,6 +2068,9 @@ function ComposerGoalBar({
   onEdit,
   chatId,
   onEndGoal,
+  placement = "composer",
+  nextWake = null,
+  details,
 }: {
   label?: string;
   criteria?: string[];
@@ -2078,6 +2087,12 @@ function ComposerGoalBar({
   /** 편집 = 오른쪽 "목표" 탭(목표 전용 패널). 패널이 없으면 예전 편집기. */
   chatId?: string | null;
   onEndGoal: () => void;
+  /** "top": the screen's single Goal surface above the conversation instead of a tab on the composer. */
+  placement?: "composer" | "top";
+  /** When the host next starts a turn for this Goal (wake-arbiter), shown as one line. */
+  nextWake?: GoalNextWake | null;
+  /** What the screen used to show as a second Goal bar (schedules, holds); renders nothing when there is nothing to say. */
+  details?: ReactNode;
 }) {
   const { locale } = useT();
   const [editing, setEditing] = useState(false);
@@ -2175,7 +2190,8 @@ function ComposerGoalBar({
   const criteriaTitle = (criteria ?? []).join("\n");
   const editable = observed && Boolean(onEdit && label && ["paused", "blocked", "queued", "waiting_user", "draft"].includes(runStatus ?? ""));
   return (
-    <div className="chat-composer-goal-stack" data-chat-goal-bar="true">
+    <div className={placement === "top" ? `chat-composer-goal-stack ${goalBarStyles.top}` : "chat-composer-goal-stack"}
+      data-chat-goal-bar="true" data-goal-bar-placement={placement}>
     <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite">
       <span className="chat-composer-progress-icon" aria-hidden><IconTarget size={13} /></span>
       <strong>{locale === "ko" ? "목표" : "Goal"}</strong>
@@ -2229,6 +2245,9 @@ function ComposerGoalBar({
       </button>
     </div>
     {plan && <GoalPlanSummary plan={plan} locale={locale === "ko" ? "ko" : "en"} variant="composer-tab" />}
+    {nextWake && <p className={goalBarStyles.nextWake} data-goal-next-wake={nextWake.requestedBy}>
+      {goalNextWakeLabel(nextWake, locale === "ko" ? "ko" : "en")}</p>}
+    {details && <div className={goalBarStyles.details}>{details}</div>}
     {editing && <form className="chat-composer-goal-editor" onSubmit={(event) => {
       event.preventDefault();
       if (!editable || saving || !draft.trim() || !onEdit) return;

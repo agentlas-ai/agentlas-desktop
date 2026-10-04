@@ -1,0 +1,9 @@
+/* Work's one Goal surface above the conversation (owner 2026-10-04 "골 하나만 해라"): a card of its own, not a tab on the composer. */
+.top[data-goal-bar-placement] { margin: 0 auto 6px; box-sizing: border-box; overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge)); border-radius: 12px;
+  background: color-mix(in srgb, var(--paper-2) 72%, var(--paper)); }
+.top > :global(.chat-composer-goal) { margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+.top > [data-goal-plan] { margin: 0; border: 0; }
+.nextWake { margin: 0; padding: 0 10px 6px 35px; color: var(--muted-deep); font-size: 10.5px; line-height: 1.4; }
+.details { padding: 0 10px 0 35px; }
+.details:has(> *) { padding-bottom: 8px; }

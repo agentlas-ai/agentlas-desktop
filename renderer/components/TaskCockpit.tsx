@@ -118,7 +118,8 @@ import { extractQuestions } from "@/lib/ask-question";
 import { stripMultimodalSetup } from "@/lib/multimodal-setup";
 import { dropChatViewSnapshot, readChatViewSnapshot, saveChatViewSnapshot } from "@/lib/chat-view-cache";
 import { completePromptStartIntent } from "@/lib/prompt-actions";
-import { ChatInput } from "@/components/ChatInput";
+import { ChatInput, ComposerGoalBar } from "@/components/ChatInput";
+import { goalNextWakeOf } from "@shared/goal-wake";
 import { WorkbenchPanel, type SurfaceActionHandler, type SurfaceStatePatchHandler, type WorkbenchSurface } from "@/components/WorkbenchPanel";
 import type { LiveAgent, NetTimelineItem } from "@/components/AgentNetworkPanel";
 import { ProjectFolderBar } from "@/components/ProjectFolderBar";
@@ -6976,7 +6977,16 @@ function ChatPage() {
         />
       </div>}
       <AutomationMonitorStrip key={chatId} chatId={chatId || null} locale={locale} />
-      <ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />
+      {/* One Goal surface (owner 2026-10-04 "골 하나만 해라"): with a Goal, the bar above the conversation holds the
+          objective, its controls and next check, and folds the continuity detail; nothing is attached to the composer. */}
+      {chat?.goalId
+        ? <ComposerGoalBar placement="top" label={goalContext?.objective} criteria={goalContext?.acceptanceCriteria}
+            plan={goalPlanOf(goalContext)} runStatus={goalContext?.runStatus} pauseReason={goalContext?.pauseReason}
+            blockedReason={goalContext?.blockedReason} goalStatusStale={goalContextStale}
+            onResume={() => handleResumeGoal()} onPause={handlePauseGoal} onEdit={handleEditGoal} chatId={chat.id}
+            onEndGoal={handleToggleGoal} nextWake={goalNextWakeOf(goalContext)}
+            details={<ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} embedded />} />
+        : <ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />}
       <AgiDefectChip chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />
       {surfaceConflict && surfaceConflict.surfaceId === surface?.id && (
         <div role="alert" data-artifact-state-conflict="true" style={{ padding: "8px 12px", fontSize: 12, background: "var(--paper-2)", borderTop: "var(--hairline)" }}>
@@ -7091,6 +7101,7 @@ function ChatPage() {
           onResumeGoal={() => handleResumeGoal()}
           onPauseGoal={handlePauseGoal}
           onEditGoal={handleEditGoal}
+          goalBarPlacement="none"
           onToggleContinuous={handleToggleContinuous}
           onToggleSwarm={handleToggleSwarm}
         />

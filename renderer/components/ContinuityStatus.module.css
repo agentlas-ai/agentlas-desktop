@@ -16,3 +16,4 @@
 .observation{display:block;margin-top:4px;color:var(--ink-muted);font-size:10px}
 .unavailable{margin:4px 16px;color:var(--ink-muted);font-size:11px}
 @media(max-width:480px){.compact{padding:0 8px}.line{gap:3px 7px}}
+.embedded{display:grid;gap:4px;min-width:0;color:var(--ink);font-size:11px;line-height:1.45}

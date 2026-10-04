@@ -7,7 +7,9 @@ import { classifyGoalSurfaceStatus, goalSurfaceStatusLabel } from "@/lib/goal-su
 import { AutomationStrategyPanel } from "./automation/AutomationStrategyPanel";
 import styles from "./ContinuityStatus.module.css";
 
-type Props = { chatId: string | null; locale: "ko" | "en"; detail?: boolean };
+type Props = { chatId: string | null; locale: "ko" | "en"; detail?: boolean;
+  /** Folded inside the screen's one Goal bar (Work): no heading of its own, no Main bookkeeping, nothing when empty. */
+  embedded?: boolean };
 
 function when(value: string | null | undefined, locale: "ko" | "en"): string | null {
   if (!value || !Number.isFinite(Date.parse(value))) return null;
@@ -63,7 +65,7 @@ function nextActionLabel(value: NonNullable<NonNullable<ChatContinuitySnapshot["
 
 /** One bounded Main snapshot per observation. Its read failure never changes
  * Goal/automation authority, and a quiet durable ledger is not a dead agent. */
-export function ContinuityStatus({ chatId, locale, detail = false }: Props) {
+export function ContinuityStatus({ chatId, locale, detail = false, embedded = false }: Props) {
   const [snapshot, setSnapshot] = useState<ChatContinuitySnapshot | null>(null);
   const [error, setError] = useState(false);
   const [lastConfirmedAt, setLastConfirmedAt] = useState<string | null>(null);
@@ -104,7 +106,7 @@ export function ContinuityStatus({ chatId, locale, detail = false }: Props) {
     return () => { disposed = true; ++generation; off?.(); document.removeEventListener("visibilitychange", onVisibility); clearInterval(poll); };
   }, [chatId, refresh]);
   if (!chatId) return null;
-  if (!snapshot) return error
+  if (!snapshot) return embedded ? null : error
     ? <p className={styles.unavailable} role="status">{ko ? "작업 상태를 확인하지 못했습니다. Goal과 예약은 변경되지 않았습니다." : "Could not check work status. The Goal and schedules were not changed."}</p>
     : null;
   const independent = snapshot.automations.filter((row) => row.relationship === "independent");
@@ -143,6 +145,30 @@ export function ContinuityStatus({ chatId, locale, detail = false }: Props) {
     observationFresh: !error,
     effectObservationChecking: snapshot.goal.effectObservation === "checking",
   }) : null;
+  const scheduleLine = [
+    independent.length > 0 && <span key="schedules">{error ? (ko ? "별도 예약(마지막 확인)" : "Separate schedules (last confirmed)") : (ko ? "별도 예약 켜짐" : "Separate schedules enabled")} {enabledSchedules.length}
+      {disabledSchedules > 0 && ` · ${ko ? "꺼짐" : "off"} ${disabledSchedules}`}
+      {activeSchedules.length > 0 && ` · ${ko ? "실행 기록상 활성" : "ledger-active"} ${activeSchedules.length}`}
+      {enabledWithoutNextTime.length > 0 && ` · ${ko ? "최근 오류·다음 시각 없음" : "recent error·no next time"} ${enabledWithoutNextTime.length}`}
+      {nextSchedule && ` · ${ko ? "다음 예정" : "next expected"} ${when(nextSchedule.nextRunAt, locale)}`}</span>,
+    unverifiedSchedules.length > 0 && <span key="unverified">{ko ? "Goal 연결 확인 필요" : "Goal link unverified"} {unverifiedSchedules.length}</span>,
+    surface && surface.automation.held > 0 && <span key="held">{ko ? "보류된 자동화" : "Held automations"} {surface.automation.held}</span>,
+    surface && surface.automation.reconciliationHold > 0 && <span key="reconcile">{ko ? "자동화 조정 보류" : "Automation reconciliation hold"} {surface.automation.reconciliationHold}</span>,
+    modelStatus && <span key="model">{modelStatus} · {model?.requested.model ?? model?.requested.kind}</span>,
+    strategy?.state === "changed" && <span key="strategy">{ko ? "검증 결과에 따라 다음 행동 변경" : "Next action changed after verification"} · {nextActionLabel(strategy.nextAction, ko)}</span>,
+  ].filter(Boolean);
+  if (embedded) {
+    // The Goal bar already says what the Goal is doing and when it is next checked; only what it cannot say is here.
+    if (!scheduleLine.length && !(!error && claimedWaitNeedsReview) && !snapshot.automations.length) return null;
+    return <div className={styles.embedded} data-continuity-status="embedded" aria-label={ko ? "작업 연속성 상태" : "Work continuity status"}>
+      {scheduleLine.length > 0 && <div className={styles.line} aria-live="polite">{scheduleLine}</div>}
+      {!error && claimedWaitNeedsReview && <p className={styles.review} data-goal-claimed-wait-review="true">
+        {ko ? "이전 실행의 결과를 확인할 수 없어 자동 재실행을 멈췄습니다. 이 대화의 Activity에서 실제 결과를 확인한 뒤 이어가세요."
+          : "Automatic replay stopped because the previous run's outcome could not be confirmed. Check its actual result in Activity, then continue."}
+      </p>}
+      {snapshot.automations.map((row) => <AutomationStrategyPanel key={row.automationId} automationId={row.automationId} locale={locale} />)}
+    </div>;
+  }
   return <details className={detail ? styles.detail : styles.compact} open={detail || undefined} data-continuity-status={detail ? "detail" : "compact"}
     data-observation={error ? "stale" : "confirmed"} aria-label={ko ? "작업 연속성 상태" : "Work continuity status"}>
     <summary className={styles.summary}>
