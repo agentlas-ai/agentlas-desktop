@@ -843,7 +843,7 @@ async function callJudgmentModelDetailed(opts: {
   const failedOutcome = (failure: RunnerFailure, timedOut = false): JudgmentRuntimeAttempt["outcome"] =>
     timedOut || failure.kind === "timeout" ? "timeout" : opts.signal?.aborted ? "cancelled"
       : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
-  for (const [runtimeIndex, candidate] of candidates.entries()) {
+  for (const candidate of candidates) {
       const { runtime, route, fingerprint: candidateFingerprint } = candidate;
       const livePool = !opts.runtimeSelection || route === "orchestrator_pool" ? readJudgmentPool() : null;
       if (opts.selectionPolicy
@@ -904,14 +904,13 @@ async function callJudgmentModelDetailed(opts: {
       const startedAt = Date.now();
       const remainingMs = deadlineAt - Date.now();
       if (remainingMs <= 0) break;
-      // Give the current connected runtime enough time for a cold CLI start,
-      // while reserving half of the remaining call budget for fallback. Fast
-      // quota/auth/refusal failures therefore donate their unused time to the
-      // next candidate instead of dividing the budget across every detected
-      // but unusable provider.
-      const attemptTimeoutMs = runtimeIndex === candidates.length - 1
-        ? remainingMs
-        : Math.min(30_000, remainingMs, Math.max(10_000, Math.floor(remainingMs / 2)));
+      // Every attempt may use the whole remaining budget. A timeout ends the judgment (below: a timed-out
+      // runner's turn is unsettled, so no other runtime is started), which means time held back for a later
+      // candidate could never be spent after one. That reserve (half the budget, at most 30 s) is what failed:
+      // production 2026-10-05 14:31 UTC, a graph eval pinned to codex at xhigh effort ended "timed out after
+      // 23s" with 22 s of its 45 s budget unused, and 10-03 07:19 a 120 s call stopped at 30 s. Fast
+      // quota/auth/refusal failures still return early and leave their unused time to the next candidate.
+      const attemptTimeoutMs = remainingMs;
       const accounting = beginAccountedInference(runtime);
       const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(runtime.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(picked.runner,
           {

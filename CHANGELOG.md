@@ -4,6 +4,7 @@
 
 - The app no longer freezes for a second or more right after a turn that saves new experience. Saving an experience used to rewrite the agent's whole experience map; it now writes only the entries that changed.
 - Agents writing posts, reports or notes, or browsing, are no longer told to use the code map tools, which refused them; those refusals, and the git commands run to feed them in folders that are not repositories, were most of the failed tool calls in a day (Agentlas OS v1.2.55).
+- A verification step no longer gives up halfway through its time: a judgment's first model was stopped at half its budget to leave room for another model, which a timed-out judgment never hands over to.
 - The phone's view of your personal One shows Science projects again when there are many of them: the projects are checked side by side, and a project that answers late keeps its last known state.
 - Quitting the app stops its background timers before the database closes, so a quit no longer logs database errors.
 - The Science header shows only the mode menu, without the tagline and status words.
