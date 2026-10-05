@@ -6,6 +6,8 @@ import { revalidateInvocationWorkspaceBinding } from "../invocation/workspace-bi
 import { buildMcpConfigFile, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
 import { mcpToolIsMutating } from "../mcp-tools/proxy-server";
 import { isReadOnlyGraphBrowserObservation } from "../../shared/graph-browser-observation";
+import { READ_ONLY_BROWSER_TOOLS } from "../../shared/read-only-browser-tools";
+import type { WorkflowGraph } from "../../shared/types";
 import { loadMainToolInventory, runMainToolDispatch } from "../runtime/local-tool-loop";
 import { agentRunCwd } from "../runtime/exec";
 import { getChat, getChatWorkingFolder } from "../store/chats";
@@ -133,6 +135,41 @@ export async function inspectGraphMcpTools(input: {
       });
     return { catalogId: input.catalogId, tools, truncated: inventory.byName.size > tools.length };
   } finally { config.cleanup?.(); }
+}
+
+/**
+ * True when no argument can make this call read-only, so a step that declares it "read" is refused on every run.
+ * Mirrors the run-time check in runGraphMcpCall; only argument-independent verdicts are decided here (one-team
+ * graph calls and the browser's URL- and shape-dependent reads stay with the run-time check).
+ */
+export function graphMcpToolNeverReadOnly(catalogId: string, toolName: string): boolean {
+  if (catalogId === "one-team") return toolName === "one_graph_set_enabled";
+  if (catalogId === "agentlas-browser" && !(READ_ONLY_BROWSER_TOOLS as readonly string[]).includes(toolName)) return true;
+  return mcpToolIsMutating({ catalogId, toolName });
+}
+
+/**
+ * Save-time twin of the effect check in runGraphMcpCall. Production 2026-10-05: a room agent saved a Toolchain whose
+ * read step called agentlas-browser browser_run_code_unsafe; the run refused it (graph_mcp_effect_mismatch) on 5 of 5
+ * calls because nothing checked the declared effect when the graph was saved.
+ */
+export function graphMcpEffectProblems(graph: Pick<WorkflowGraph, "nodes">, locale: "ko" | "en"): Array<{ nodeId: string; reason: string }> {
+  const problems: Array<{ nodeId: string; reason: string }> = [];
+  for (const node of graph.nodes) {
+    const call = node.config?.mcpCall as Partial<GraphMcpCall> | undefined;
+    if (!call || typeof call.catalogId !== "string" || typeof call.toolName !== "string") continue;
+    const tool = `${call.catalogId}.${call.toolName}`;
+    if (node.config?.effect === "pure") {
+      problems.push({ nodeId: node.id, reason: locale === "ko"
+        ? `${node.id} 단계는 도구(${tool})를 부르므로 pure 가 될 수 없습니다. 효과를 read 나 mutation 으로 정하세요.`
+        : `Step ${node.id} calls a tool (${tool}), so it cannot be pure. Declare its effect as read or mutation.` });
+    } else if (node.config?.effect === "read" && graphMcpToolNeverReadOnly(call.catalogId, call.toolName)) {
+      problems.push({ nodeId: node.id, reason: locale === "ko"
+        ? `${node.id} 단계는 효과가 read 인데 ${tool} 은 상태를 바꿀 수 있는 도구라 실행할 때마다 거부됩니다. 읽기 전용 도구(agentlas-browser 의 browser_snapshot·browser_find·browser_navigate·browser_take_screenshot 등)를 쓰거나 효과를 mutation 으로 정하세요.`
+        : `Step ${node.id} declares effect read but ${tool} can change state, so every run would refuse it. Use a read-only tool (agentlas-browser browser_snapshot, browser_find, browser_navigate, browser_take_screenshot, ...) or declare the effect as mutation.` });
+    }
+  }
+  return problems;
 }
 
 export async function runGraphMcpCall(input: GraphMcpCallOptions): Promise<GraphMcpCallResult> {

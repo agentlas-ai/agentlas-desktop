@@ -17,7 +17,7 @@ import { currentUiLocale } from "../ui-locale";
 import { specFromStored, nextRun } from "../store/schedule";
 import { AUTOMATION_PROTOCOL } from "../automation-emitter";
 import { sha256Value } from "../../shared/graph-execution-digest";
-import { inspectGraphMcpTools } from "../workflow/mcp-call";
+import { graphMcpEffectProblems, inspectGraphMcpTools } from "../workflow/mcp-call";
 import { recordOneGraphAuthority } from "./graph-ownership";
 import { oneTeamDispatchOwnerChat, type OneTeamCaller } from "./team-dispatch";
 import { toolchainInputProblems } from "../../shared/toolchain";
@@ -345,6 +345,9 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     const graph: WorkflowGraph = { ...built.graph, nodes: built.graph.nodes.map(node =>
       ["agent", "action", "eval"].includes(node.type) && !node.config?.mcpCall
         ? { ...node, config: { ...node.config, ref: chat.agentId, targetType: "agent" } } : node) };
+    // A declared effect no argument can satisfy is refused on every run; say so now, while the author can fix it.
+    const effectProblems = graphMcpEffectProblems(graph, currentUiLocale());
+    if (effectProblems.length) return { ok: false, code: "one_graph_blueprint_invalid", problems: effectProblems.map(p => ({ reason: p.reason, ask: null })) };
     const hubMode = existing?.hubMode ?? "local-only";
     const permission = requiredExecutionPermission(graph);
     checkReferences(caller, graph, existing?.id, permission, hubMode);
@@ -433,6 +436,8 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
       if (isGraphControlTool(edit.call?.catalogId, edit.call?.toolName)) throw new Error("one_graph_recursive_tool_call");
       node.config = { ...node.config, mcpCall: edit.call };
     }
+    const effectProblems = graphMcpEffectProblems({ nodes: graph.nodes.filter(node => calls.some(edit => edit.node_id === node.id)) }, currentUiLocale());
+    if (effectProblems.length) return { ok: false, code: "one_graph_blueprint_invalid", graph_id: current.id, problems: effectProblems.map(p => ({ reason: p.reason, ask: null })) };
     checkReferences(caller, graph, current.id, current.executionPermission, current.hubMode ?? "local-only");
     if (JSON.stringify(graph) === JSON.stringify(resolveAutomationGraph(current)) && (input.goal === undefined || input.goal === current.goal)) {
       recordOneGraphAuthority(current, chat.id);
