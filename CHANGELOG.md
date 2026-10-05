@@ -22,6 +22,7 @@
 - Read Codex usage correctly and keep working on the same provider's credits when the subscription window runs out; monthly and spending caps still stop it.
 - Stop asking for payment approval on analytics labels such as "Subscribers gained", and stop the staff edit sheet from reopening by itself.
 - A searchable replacement-agent picker, a memory map with kind filters, no focus ring on text fields, and a cleaner personal One screen without internal states or activity logs.
+- Science 0.1.62: prior work is gathered by following citations outward from the closest papers and kept as a map of what each paper found, and it is offered again when a hypothesis is written. Every default paper follows one house style (title 20 pt, headings 14 pt, body 12 pt at 160% line spacing, tables 11 pt, notes 9 pt, significance stars, three decimals) and can also be written as 한글 (HWPX) with inline equations. Paper typography is restored in the printed PDF, and tool bookkeeping left in the text is flagged.
 - Keep Codex's bundled computer use closed unless the run chose Computer Use.
 - The phone opens your personal One on the selected computer.
 
