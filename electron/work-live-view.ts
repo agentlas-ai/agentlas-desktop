@@ -173,13 +173,26 @@ export function reclaimOrphanAgentBrowserTabs(ownerId?: number): number {
  * turn refused with native-browser-tab-limit while nothing was on screen).
  * A closed owner tab only loses its page; the chat's panel reopens its page.
  */
-function evictableAgentBrowserTab(ownerId: number): ActiveWorkView | null {
+/**
+ * A tab a live run drives is not taken from that run by anyone else. The run asking for a new tab may give up its
+ * own least recently used one, though: a continuous Goal run opened a tab per source it checked and went back to its
+ * first tab without closing them, filled all 8 within one run, and then could neither open a tab nor have one
+ * evicted, so the browser ladder stopped the Goal (production 2026-10-05 17:46 UTC, Thread Marketing, defect
+ * browser_unavailable:browser_ladder:native-tab-limit). Its working tab is the one it used last, so it stays.
+ */
+function heldOnlyBy(active: ActiveWorkView, holdId: string | undefined): boolean {
+  if (!holdId || !holdLive(holdId)) return false;
+  for (const held of active.holds) if (held !== holdId && holdLive(held)) return false;
+  return active.holds.has(holdId) || active.openedByHold === holdId;
+}
+
+function evictableAgentBrowserTab(ownerId: number, requestingHoldId?: string): ActiveWorkView | null {
   const rank = (active: ActiveWorkView) => active.openedByHold ? 0
     : (active.view.webContents.getURL() || active.pendingUrl) === "about:blank" ? 1 : 2;
   let victim: ActiveWorkView | null = null;
   for (const active of activeViews.values()) {
     if (browserCapacityGroup(active.ownerId) !== browserCapacityGroup(ownerId) || active.mode !== "browser") continue;
-    if (ownerViewing(active) || hasLiveHold(active)) continue;
+    if (ownerViewing(active) || (hasLiveHold(active) && !heldOnlyBy(active, requestingHoldId))) continue;
     if (!victim || rank(active) < rank(victim) || (rank(active) === rank(victim) && active.lastUsedAt < victim.lastUsedAt)) victim = active;
   }
   return victim;
@@ -190,7 +203,7 @@ function evictableAgentBrowserTab(ownerId: number): ActiveWorkView | null {
  * be made: reclaim tabs of dead runs, then evict (evictableAgentBrowserTab).
  * Synchronous so a page's window.open can be answered before it returns.
  */
-function ensureBrowserTabCapacity(ownerId: number): boolean {
+function ensureBrowserTabCapacity(ownerId: number, requestingHoldId?: string): boolean {
   reclaimOrphanAgentBrowserTabs();
   /*
    * Reconcile before refusing: a tab whose page is gone (destroyed contents or window) or whose renderer
@@ -207,7 +220,7 @@ function ensureBrowserTabCapacity(ownerId: number): boolean {
   }
   while ([...activeViews.values()].filter((active) => browserCapacityGroup(active.ownerId) === browserCapacityGroup(ownerId) && active.mode === "browser").length
     >= MAX_NATIVE_BROWSER_TABS_PER_OWNER) {
-    const victim = evictableAgentBrowserTab(ownerId);
+    const victim = evictableAgentBrowserTab(ownerId, requestingHoldId);
     if (!victim) return false;
     closeActive(victim);
   }
@@ -817,7 +830,7 @@ export async function openWorkLiveView(input: {
     // Reclaim tabs of runs that died without settling, then make room by
     // closing the least valuable tab nobody is watching or driving.
     // Refuse only when every tab is on screen or driven by a live run.
-    if (!ensureBrowserTabCapacity(input.ownerId)) return { ok: false, viewId, reason: "browser-tab-limit", message: BROWSER_TAB_LIMIT_MESSAGE };
+    if (!ensureBrowserTabCapacity(input.ownerId, input.agentHoldId)) return { ok: false, viewId, reason: "browser-tab-limit", message: BROWSER_TAB_LIMIT_MESSAGE };
   }
   const owned = [...activeViews.values()].filter((active) => active.ownerId === input.ownerId);
   // An app changing presentation retains its document during its short lease grace.
