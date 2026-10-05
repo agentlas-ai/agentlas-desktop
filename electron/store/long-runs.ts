@@ -703,87 +703,8 @@ export const EFFECT_RECEIPT_PROOF = "host_receipt_closed_ledger";
 export const EFFECT_OWNER_POLICY_STATEMENT = "unresolved_outcome_accepted_by_owner_policy";
 export const EFFECT_OWNER_POLICY_PROOF = "owner_policy_accepts_repeat_risk";
 
-/**
- * 효과 관찰(오너 지시 2026-09-23 "직접 보면 알잖아") — Main 이 띄운 읽기 전용 관찰 실행이 바깥을
- * 직접 보고 낸 정확한 판정(done / not_done)으로 불확실한 시도 묶음을 정리한다.
- *
- * 사람의 확인과는 다른 증명 종류다(externalOutcomeProof = observed_read_only_by_model, 근거 문자열 포함).
- * 호출부는 관찰을 띄울 때의 시도 집합을 넘기고, 여기서 같은 트랜잭션 안에서 그 집합이 그대로인지
- * 다시 대조한다 — 그 사이 새 시도가 생겼거나 하나라도 아직 돌고 있으면 거절한다.
- * 이 기록은 옛 시도를 재실행할 권한이 아니다: done 이면 "다시 하지 않는다", not_done 이면
- * "새 작업으로 다시 해도 된다"는 뜻이고, 둘 다 다음 턴이 새로 결정한다.
- */
-export function settleUncertainAttemptsByObservation(runId: string, input: {
-  attemptIds: readonly string[];
-  /** "unknown" only with proof "owner_policy". */
-  verdict: "done" | "not_done" | "unknown";
-  evidence: string;
-  observationInvocationRunId: string;
-  observationDigest: string;
-  /** "receipt": no look was needed — the host's closed ledger proved no outward call (verdict must be not_done).
-   *  "owner_policy": the outcome could not be proven or observed; the Goal goes on (verdict must be unknown). */
-  proof?: "observation" | "receipt" | "owner_policy";
-}): LongRunAttemptAcknowledgment {
-  if (input.proof === "receipt" && input.verdict !== "not_done") throw new Error("effect_receipt_verdict_invalid");
-  if ((input.proof === "owner_policy") !== (input.verdict === "unknown")) throw new Error("effect_owner_policy_verdict_invalid");
-  const db = getDb();
-  let result: LongRunAttemptAcknowledgment | null = null;
-  db.transaction(() => {
-    const review = getLongRunAttemptReview(runId);
-    if (!review.attemptIds.length) throw new Error("effect_observation_nothing_to_settle");
-    if (review.attempts.length > MAX_GOAL_RESUME_REVIEW_ATTEMPTS) throw new Error("goal_resume_uncertain_review_too_large");
-    if (review.attempts.some((attempt) => attempt.state === "running")) throw new Error("auto_goal_resume_attempt_unsettled");
-    if (JSON.stringify([...review.attemptIds].sort()) !== JSON.stringify([...input.attemptIds].sort())) {
-      throw new Error("effect_observation_attempt_set_changed");
-    }
-    // The host's own receipt is the strongest answer; without it a read-only look that saw the result absent
-    // settles the set (owner 2026-10-05: measure and decide, accept a possible repeat over a blocked Goal).
-    const noEffect = input.verdict === "not_done" ? receiptSettlesAttempts(review.attempts) : null;
-    const evidence = (noEffect?.evidence ?? input.evidence).replace(/\s+/g, " ").trim().slice(0, 500);
-    if (!evidence) throw new Error("effect_observation_evidence_missing");
-    const receipts = db.prepare(
-      `SELECT a.id AS attempt_id, a.state, a.side_effect_state, a.updated_at, a.completed_at,
-         COALESCE(MAX(e.seq), 0) AS last_attempt_event_seq
-       FROM long_run_worker_attempts AS a
-       LEFT JOIN long_run_events AS e ON e.run_id = a.run_id
-         AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
-         AND json_extract(e.payload_json, '$.attemptId') = a.id
-       WHERE a.run_id = ? AND a.state <> 'running'
-         AND (a.state = 'uncertain' OR a.side_effect_state = 'uncertain')
-       GROUP BY a.id ORDER BY a.id`,
-    ).all(runId) as Array<{ attempt_id: string; state: LongRunAttemptState;
-      side_effect_state: "none" | "committed" | "uncertain"; updated_at: string; completed_at: string | null;
-      last_attempt_event_seq: number }>;
-    const attemptReceipts: LongRunAcknowledgedAttemptReceipt[] = receipts.map((row) => ({
-      attemptId: row.attempt_id, state: row.state, sideEffectState: row.side_effect_state,
-      updatedAt: row.updated_at, completedAt: row.completed_at, lastAttemptEventSeq: row.last_attempt_event_seq,
-    }));
-    const attemptIds = attemptReceipts.map((receipt) => receipt.attemptId);
-    const run = db.prepare("SELECT last_event_seq FROM long_runs WHERE id = ?").get(runId) as { last_event_seq: number } | undefined;
-    if (!run) throw new Error(`long_run_not_found:${runId}`);
-    const safeEpoch: LongRunAttemptSafeEpoch = { schemaVersion: "agentlas.long-run-attempt-safe-epoch.v1",
-      throughEventSeq: run.last_event_seq,
-      attemptSetDigest: longRunAttemptSetDigest(runId, run.last_event_seq, attemptReceipts) };
-    appendEventInDb({ runId, kind: EFFECT_OBSERVATION_EVENT_KIND, actorKind: "host",
-      payload: { action: "settle_uncertain_attempts", attemptIds, attemptReceipts, safeEpoch,
-        observationInvocationRunId: input.observationInvocationRunId, observationDigest: input.observationDigest,
-        attestation: { schemaVersion: EFFECT_OBSERVATION_ATTESTATION_SCHEMA,
-          reviewedAttemptIds: review.attemptIds, reviewedAttemptSetDigest: review.attemptSetDigest,
-          ...(noEffect
-            ? { statement: EFFECT_RECEIPT_STATEMENT, externalOutcomeProof: EFFECT_RECEIPT_PROOF }
-            : input.proof === "owner_policy"
-              ? { statement: EFFECT_OWNER_POLICY_STATEMENT, externalOutcomeProof: EFFECT_OWNER_POLICY_PROOF }
-              : { statement: input.verdict === "done" ? "observed_external_outcome_done" : "observed_external_outcome_not_done",
-                externalOutcomeProof: "observed_read_only_by_model" }),
-          verdict: input.verdict, evidence } },
-      at: new Date().toISOString() });
-    const version = (db.prepare("SELECT version FROM long_runs WHERE id = ?").get(runId) as { version: number } | undefined)?.version;
-    if (typeof version !== "number") throw new Error(`long_run_not_found:${runId}`);
-    result = { attemptIds: review.attemptIds, version, safeEpoch };
-  })();
-  emitDesktopStoreChange({ entity: "long-run", id: runId });
-  return result!;
-}
+// settleUncertainAttemptsByObservation (the effect-look settlement writer) was retired on 2026-10-05 with the
+// looks themselves (long-run/effect-observation.ts). The safe-epoch reader above still accepts its past ledger rows.
 
 /** Factual unresolved attempt count for observation; never a continuation gate. */
 export function unsettledLongRunAttemptCount(runId: string): number {
