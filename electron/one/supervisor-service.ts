@@ -349,6 +349,49 @@ export class OneSupervisorService {
       return current.state==='dispatching' ? this.deps.store.update(current,{state:"held",acknowledgement:"unknown",reason:error instanceof Error ? error.message.slice(0,240) : "follow_up_start_unconfirmed"}) : JSON.parse(current.receipt_json);
     }
   }
+  /**
+   * One writes into an existing Agentlas conversation (a Work session, a teammate's chat, a group room) as One
+   * (owner 2026-10-05: One must be able to message the app's threads). The conversation shows it as handed over by
+   * One, never as the owner's words. A conversation with a live run takes it as a queued direction; otherwise it
+   * starts that conversation's next turn with full access, as everything One hands off does (owner 2026-10-04).
+   */
+  sendToChat(raw: {commandId:string;chatId:string;text:string;oneId?:string}, originReplyRunId?: string): SupervisorCommandReceipt {
+    const value=supervisorObject(raw,["commandId","chatId","text","oneId"]);
+    const input={commandId:supervisorIdentifier(value.commandId),chatId:supervisorIdentifier(value.chatId),text:supervisorText(value.text)};
+    const {oneId,chatId}=this.binding(value.oneId);
+    const taskId=`chat:${input.chatId}`;
+    if (this.deps.store.get(input.commandId)) {
+      return JSON.parse(this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId}).receipt_json);
+    }
+    const exists=this.deps.store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='chats'").get()
+      && this.deps.store.db.prepare("SELECT 1 FROM chats WHERE id=?").get(input.chatId);
+    const rejected=input.chatId===chatId ? "supervisor_chat_is_personal" : !exists ? "supervisor_chat_missing" : null;
+    const live=rejected ? null : this.deps.runtime.attach(input.chatId);
+    const runId=randomUUID();
+    const row=this.deps.store.db.transaction(()=>{
+      const saved=this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId,
+        ...(rejected || live ? {} : {runId})});
+      this.bindHandoffOrigin(saved,originReplyRunId);
+      return saved;
+    })();
+    if (rejected) return this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason:rejected});
+    if (live) {
+      // The conversation is working: the message waits for its next step, like an owner's queued direction.
+      const result=this.deps.runtime.steer({chatId:input.chatId,userPrompt:input.text,taskIntent:"task",promptOrigin:"system",locale:this.deps.locale(),steeringMode:"queue"},live.runId);
+      return this.deps.store.update(row,result.queued
+        ? {state:"completed",acknowledgement:"delivered",reason:"queued_for_running_turn"}
+        : {state:"failed",acknowledgement:"settled",reason:"supervisor_chat_direction_refused"});
+    }
+    this.deps.store.update(row,{state:"dispatching"});
+    try {
+      this.deps.runtime.start({runId,chatId:input.chatId,userPrompt:input.text,taskIntent:"task",permissions:"full",promptOrigin:"system",locale:this.deps.locale()},"one-dispatch-brief");
+      const current=this.deps.store.get(row.command_id)!;
+      return current.state==='dispatching' ? this.deps.store.update(current,{state:"accepted",acknowledgement:"delivered"}) : JSON.parse(current.receipt_json);
+    } catch (error) {
+      const current=this.deps.store.get(row.command_id)!;
+      return current.state==='dispatching' ? this.deps.store.update(current,{state:"held",acknowledgement:"unknown",reason:error instanceof Error ? error.message.slice(0,240) : "chat_send_start_unconfirmed"}) : JSON.parse(current.receipt_json);
+    }
+  }
   private bindHandoffOrigin(row:SupervisorRequestRow, originReplyRunId:string|undefined):void {
     if (!originReplyRunId) return;
     // The server supplies this from its Main-minted capability. It is never a tool/renderer field.
@@ -399,9 +442,10 @@ export class OneSupervisorService {
       return current.state==='dispatching' ? this.deps.store.update(current,{state:"held",acknowledgement:"unknown",reason:error instanceof Error ? error.message.slice(0,240) : "work_start_unconfirmed"}) : JSON.parse(current.receipt_json);
     }
   }
-  async startScience(raw: {commandId:string;text:string;projectId:string;oneId?:string}, originReplyRunId?:string): Promise<SupervisorCommandReceipt> {
-    const value=supervisorObject(raw,["commandId","text","projectId","oneId"]);
-    const input={commandId:supervisorIdentifier(value.commandId),text:supervisorText(value.text),projectId:supervisorIdentifier(value.projectId)};
+  async startScience(raw: {commandId:string;text:string;projectId:string;conversationId?:string;oneId?:string}, originReplyRunId?:string): Promise<SupervisorCommandReceipt> {
+    const value=supervisorObject(raw,["commandId","text","projectId","conversationId","oneId"]);
+    const input={commandId:supervisorIdentifier(value.commandId),text:supervisorText(value.text),projectId:supervisorIdentifier(value.projectId),
+      ...(value.conversationId ? {conversationId:supervisorIdentifier(value.conversationId)} : {})};
     if (!this.deps.science) throw new Error("supervisor_science_unavailable");
     const {oneId,chatId}=this.binding(value.oneId);
     const prior=this.deps.store.get(input.commandId);

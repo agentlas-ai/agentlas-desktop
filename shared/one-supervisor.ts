@@ -7,7 +7,7 @@ export type SupervisorSurface = "one" | "work" | "science";
 export type SupervisorRequestState = "stored" | "dispatching" | "accepted" | "completed" | "cancelled" | "failed" | "held";
 export interface SupervisorCommandReceipt {
   commandId: string;
-  kind: "reply" | "work" | "science" | "steer" | "cancel" | "stop-reply" | "appearance" | "follow-up" | "checkin";
+  kind: "reply" | "work" | "science" | "steer" | "cancel" | "stop-reply" | "appearance" | "follow-up" | "checkin" | "chat-send";
   state: SupervisorRequestState;
   taskId: string | null;
   runId: string | null;

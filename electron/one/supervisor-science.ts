@@ -57,11 +57,15 @@ export class SupervisorScienceAdapter {
     this.observedProjects=projects.filter(project=>id(project.id)).map(project=>({projectId:id(project.id),title:id(project.title)||"Science"}));
     return tasks;
   }
-  async start(input:{commandId:string;projectId:string;text:string}):Promise<{taskId:string;runId:string}> {
+  async start(input:{commandId:string;projectId:string;text:string;conversationId?:string}):Promise<{taskId:string;runId:string}> {
     const projects=rows(await this.command({op:"projects.list"}));
     if (!projects.some(project=>project.id===input.projectId)) throw new Error("supervisor_science_project_missing");
     const conversations=rows(await this.command({op:"conversations.list",input:{projectId:input.projectId}}));
-    const conversation=conversations.find(item=>!item.archivedAt);
+    // A named conversation (thread) is the owner's choice; without one, the project's open conversation.
+    const conversation=input.conversationId
+      ? conversations.find(item=>id(item.id)===input.conversationId && !item.archivedAt)
+      : conversations.find(item=>!item.archivedAt);
+    if (input.conversationId && !conversation) throw new Error("supervisor_science_conversation_missing");
     if (!id(conversation?.id)) throw new Error("supervisor_open_science_conversation_first");
     const result=row(await this.command({op:"composer.start",input:{requestId:input.commandId,projectId:input.projectId,conversationId:id(conversation!.id),mode:"append-user-message",content:input.text}}));
     const turn=row(result.turn);
