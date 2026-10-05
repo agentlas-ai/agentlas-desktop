@@ -4515,15 +4515,22 @@ app.whenReady().then(async () => {
   // failure and can retry on the next launch.
   let bridgeStartupJob: Promise<void> | null = null;
   let lastBridgeStartupError: unknown = null;
+  /** The last start failed only because the service was not ready or did not answer for its listener yet. */
+  let lastBridgeStartupDaemonNotReady = false;
   const performMobileBridgeStartup = async (requireSignedIn = false) => {
     lastBridgeStartupError = null;
+    lastBridgeStartupDaemonNotReady = false;
     if (!shellReadyForWindows || (requireSignedIn && !getAuthSession().signedIn)) return;
     const daemon = await daemonStartupPromise;
     let claimed = false;
     try {
       if (!shellReadyForWindows || (requireSignedIn && !getAuthSession().signedIn)) return;
-      if (!daemon) throw new Error("mobile-bridge-daemon-state-unavailable");
+      if (!daemon) {
+        lastBridgeStartupDaemonNotReady = true;
+        throw new Error("mobile-bridge-daemon-state-unavailable");
+      }
       if (daemon.outcome.status === "failed" && !daemon.outcome.mobileBridgeFallbackSafe) {
+        lastBridgeStartupDaemonNotReady = true;
         throw new Error(`mobile-bridge-daemon-not-ready: ${daemon.outcome.reason}`);
       }
       if (daemon && daemon.outcome.status !== "disabled" && daemon.outcome.status !== "failed") {
@@ -4531,6 +4538,7 @@ app.whenReady().then(async () => {
         if (!claimed) {
           // A failed RPC does not prove a healthy daemon listener. Ownership
           // is unknown, so opening a second listener would risk split ownership.
+          lastBridgeStartupDaemonNotReady = true;
           throw new Error("Agentlas daemon did not grant Mobile Bridge ownership");
         }
         daemonMobileBridgeClaimed = true;
@@ -4598,6 +4606,23 @@ app.whenReady().then(async () => {
     void started.then(() => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; },
       () => { if (explicitBridgeRestore === started) explicitBridgeRestore = null; });
   });
+  /*
+   * A service that was not ready at boot is usually load, and nothing retried it: after an OS-update reboot on
+   * 2026-10-05 (load average 60) the service's ownership ping timed out (daemon_control_owner_unconfirmed), the
+   * bridge start failed once, and the phone had no listener until the owner pressed "연결 다시 열기" or relaunched.
+   * Take the same restore path as that button (it re-ensures the service first), a bounded number of times, and
+   * only while nothing listens and the last failure was the service not being ready.
+   */
+  const MOBILE_BRIDGE_BOOT_RETRY_MS = [15_000, 45_000, 120_000, 300_000, 600_000];
+  const retryMobileBridgeAfterBoot = (attempt = 0): void => {
+    if (attempt >= MOBILE_BRIDGE_BOOT_RETRY_MS.length) return;
+    setTimeout(() => {
+      if (quitServicesStopPromise || quitCleanupPromise || mobileBridgeRuntimeStatus().running) return;
+      if (!lastBridgeStartupDaemonNotReady || !restoreMobileBridgeOwnership) return;
+      console.warn(`[mobile-bridge] retrying after the service was not ready (attempt ${attempt + 1})`);
+      void restoreMobileBridgeOwnership().catch(() => retryMobileBridgeAfterBoot(attempt + 1));
+    }, MOBILE_BRIDGE_BOOT_RETRY_MS[attempt]).unref?.();
+  };
   if (initialAuthRestoreWasUnavailable && !deferredAuthRestorePromise) {
     // Temporary authentication recovery intentionally owns the next action.
     // Never let an unknown initial Keychain state start the bridge, which would treat it
@@ -4611,10 +4636,10 @@ app.whenReady().then(async () => {
         console.warn("[mobile-bridge] start deferred; account restore is still temporarily unavailable");
         return;
       }
-      return startMobileBridgeAfterAuth();
+      return startMobileBridgeAfterAuth().then(() => retryMobileBridgeAfterBoot());
     });
   } else {
-    void startMobileBridgeAfterAuth();
+    void startMobileBridgeAfterAuth().then(() => retryMobileBridgeAfterBoot());
   }
   // Browser 승인 서버 — continuity gate가 닫힌 뒤에만 로컬 작업 서버를 연다.
   void startBrowserApprovalServer().catch((err) =>
