@@ -294,6 +294,11 @@ export class QuickJsEngine {
       }
       const dumped = this.context.dump(result.value);
       result.value.dispose();
+      // The code is the body of an async function, so code without `return` (for example `await cua.getState()`)
+      // completes with undefined. That is a finished evaluation, not an unserializable value: it used to fail with
+      // "Value is not JSON serializable." (13 production calls 2026-09-28..10-05, including the README's first line),
+      // and a failed report after a click invites a duplicate click. It now answers null.
+      if (dumped === undefined) return null;
       return jsonRoundTrip(dumped, "result-not-json");
     } finally {
       if (timer) clearTimeout(timer);

@@ -1,6 +1,6 @@
 # Agentlas Computer Use
 
-Agentlas Computer Use gives One and Work the same run-scoped JavaScript surface for an Agentlas browser tab and macOS applications. The `browser_cua_repl` tool keeps `globalThis` values between calls and returns the final value of each call.
+Agentlas Computer Use gives One and Work the same run-scoped JavaScript surface for an Agentlas browser tab and macOS applications. The `browser_cua_repl` tool keeps `globalThis` values between calls. Each call's code is the body of an async function: `return` the value you want back; a call without `return` answers `null`.
 
 ```js
 const state = await cua.getState();
