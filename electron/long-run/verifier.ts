@@ -412,7 +412,10 @@ export function auditWriteBoundary(
     const result = typeof payload.toolResultPreview === "string" ? payload.toolResultPreview : null;
     const detail = normalizeToolCall({ name, args: args as string | Record<string, unknown>, result, cwd: root });
     const outsideReferences = outsideAbsolutePaths(args, root);
-    if (name === "agentlas-browser.browser_find") {
+    // Codex records `agentlas-browser.browser_find`, Claude and Antigravity `mcp__agentlas-browser__browser_find`,
+    // Grok `agentlas-browser__browser_find`. Matching only the codex spelling counted a regex-only find on the other
+    // runtimes as an unclassified outside reference (same class as 803f7be1).
+    if (/^(?:agentlas-browser\.|mcp__agentlas-browser__|agentlas-browser__)browser_find$/.test(name)) {
       const browserFindArgs = parsedToolArgs(args);
       if (Object.keys(browserFindArgs).length === 1 && typeof browserFindArgs.regex === "string") {
         for (const candidate of outsideReferences) readOnlyOutsideReferences.add(candidate);
