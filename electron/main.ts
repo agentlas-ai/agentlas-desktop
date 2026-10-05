@@ -2986,7 +2986,8 @@ app.whenReady().then(async () => {
     const folder = store.getProject(projectId)?.folderPath;
     if (!file || !folder) return { ok: false };
     // openPath launches whatever the file is, so a downloaded name like x.command or x.app would run. Only a regular
-    // PDF file whose real path (symlinks resolved) is inside the project's papers/ folder is opened.
+    // document file whose real path (symlinks resolved) is inside the project's papers/ folder is opened: Science
+    // mirrors originals there as .pdf, .html (open-web pages; 17 of 28 in the 2026-10-05 live study) or .txt.
     let real: string;
     try {
       real = fs.realpathSync(file);
@@ -2995,7 +2996,7 @@ app.whenReady().then(async () => {
     } catch {
       return { ok: false };
     }
-    if (path.extname(real).toLowerCase() !== ".pdf") return { ok: false };
+    if (![".pdf", ".html", ".txt"].includes(path.extname(real).toLowerCase())) return { ok: false };
     const error = await shell.openPath(real);
     return { ok: !error };
   });
