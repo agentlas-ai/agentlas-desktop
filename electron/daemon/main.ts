@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import { runHostShutdownHooks } from "../host-lifecycle";
 import { configureCanonicalNativeBrowserCapability, clearCanonicalNativeBrowserCapability } from "../browser/main-browser-channel";
 import { setUserDataDir, userDataDir, runtimeResourcesPath } from "../runtime-paths";
+import { BackgroundTaskRegistry, type BackgroundTaskStartInput } from "./background-tasks";
 import { withRunPriority } from "../runtime/run-priority";
 import {
   AGENT_RESIDENCY_IDLE_REAP_MS,
@@ -109,6 +110,9 @@ function loginContinuityEnabled(): boolean {
   try { return loginContinuityReader ? loginContinuityReader() : true; } catch { return true; }
 }
 
+let backgroundTasks: BackgroundTaskRegistry | null = null;
+const backgroundTaskSubscribers = new Set<ControlSocketPeer>();
+
 function residencyInput(): DaemonResidencyInput {
   const science = scienceService?.status() ?? null;
   const local = localModelService?.status() ?? null;
@@ -119,6 +123,7 @@ function residencyInput(): DaemonResidencyInput {
     runChildren: liveRunChildCount(),
     science: science ? { state: science.state, settled: science.settled, activeToolRequests: science.activeToolRequests } : null,
     localModel: local ? { state: local.state, pendingOperations: local.pendingOperations, settled: local.settled } : null,
+    backgroundTasks: backgroundTasks?.running() ?? 0,
   };
 }
 const bootId = randomUUID();
@@ -404,6 +409,29 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     }
     return { ok: true, detached: true, pid: process.pid, bootId };
   }
+  if (method.startsWith("backgroundTasks.")) {
+    // A shell command on the owner's machine: the same service-control proof as Science (identity + boot id).
+    assertServiceControl(params);
+    if (!backgroundTasks) throw new Error("background_tasks_unavailable");
+    const input = (params ?? {}) as { id?: unknown; chatId?: unknown; status?: unknown; tailBytes?: unknown; task?: unknown };
+    const id = typeof input.id === "string" ? input.id : "";
+    if (method === "backgroundTasks.start") return backgroundTasks.start((input.task ?? {}) as BackgroundTaskStartInput);
+    if (method === "backgroundTasks.list") {
+      return backgroundTasks.list({ ...(typeof input.chatId === "string" ? { chatId: input.chatId } : {}),
+        ...(typeof input.status === "string" ? { status: input.status as never } : {}) });
+    }
+    if (method === "backgroundTasks.get") return backgroundTasks.get(id);
+    if (method === "backgroundTasks.output") return backgroundTasks.output(id, typeof input.tailBytes === "number" ? input.tailBytes : undefined);
+    if (method === "backgroundTasks.stop") return backgroundTasks.stop(id);
+    if (method === "backgroundTasks.subscribe") {
+      if (!backgroundTaskSubscribers.has(peer)) {
+        backgroundTaskSubscribers.add(peer);
+        peer.onClose(() => { backgroundTaskSubscribers.delete(peer); });
+      }
+      return { subscribed: true, ownerEpoch: bootId };
+    }
+    throw new Error(`unknown_method:${method}`);
+  }
   if (method === "science.start") {
     assertServiceControl(params);
     // Configure the in-process port before discovery. Construction is lazy:
@@ -656,6 +684,7 @@ function performShutdown(reason: string): Promise<void> {
     clearInterval(idleExitWatch);
     idleExitWatch = null;
   }
+  backgroundTasks?.stopAll();
   shutdownPromise = (async () => {
     let timeout: NodeJS.Timeout | null = null;
     localModelRpc?.closeAdmission();
@@ -789,6 +818,16 @@ export async function startDaemon(): Promise<void> {
   }
   console.log("[agentlasd] store ready");
   recordServicePhase("store_ready");
+  try {
+    backgroundTasks = new BackgroundTaskRegistry(path.join(userDataDir(), "background-tasks"), { serviceInstance: bootId });
+    const lost = backgroundTasks.recoverOrphans();
+    if (lost.length) console.log(`[agentlasd] background tasks that did not finish under the previous service: ${lost.map((task) => task.id).join(", ")}`);
+    backgroundTasks.onSettled((task) => {
+      for (const peer of backgroundTaskSubscribers) peer.notify("backgroundTasks.settled", task);
+    });
+  } catch (error) {
+    console.error("[agentlasd] background tasks unavailable:", error);
+  }
   const { getDaemonAutostartEnabled } = await import("../store/daemon-autostart");
   loginContinuityReader = getDaemonAutostartEnabled;
 

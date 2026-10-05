@@ -21,6 +21,8 @@ export interface DaemonResidencyInput {
   runChildren: number;
   science: { state: string; settled: boolean; activeToolRequests: number | null } | null;
   localModel: { state: string; pendingOperations: number; settled: boolean } | null;
+  /** Background tasks this service started and is still running (backgroundTasks.start). */
+  backgroundTasks?: number;
 }
 
 /** Work that would be cut if the service stopped now. Attachment/continuity are not work. */
@@ -28,6 +30,7 @@ export function daemonActiveWorkReasons(input: DaemonResidencyInput): string[] {
   const reasons: string[] = [];
   if (input.graphRuns > 0) reasons.push("graph-run");
   if (input.runChildren > 0) reasons.push("run-children");
+  if ((input.backgroundTasks ?? 0) > 0) reasons.push("background-tasks");
   const science = input.science;
   if (science && (science.state === "starting"
     || (science.state === "ready" && (!science.settled || (science.activeToolRequests ?? 0) > 0)))) {
