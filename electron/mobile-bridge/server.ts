@@ -213,6 +213,8 @@ interface ConnectionState {
   requestWindowStartedAt: number;
   requestCount: number;
   visualFrameInFlight: boolean;
+  /** The socket's transport failed (EPIPE, reset): reported once, nothing more is written to it. */
+  transportFailed: boolean;
 }
 
 interface UpgradeIdentity {
@@ -587,6 +589,7 @@ export class AgentlasMobileBridgeServer {
       requestWindowStartedAt: Date.now(),
       requestCount: 0,
       visualFrameInFlight: false,
+      transportFailed: false,
     };
     this.clients.add(state);
     this.syncAuthoritySubscription();
@@ -594,7 +597,7 @@ export class AgentlasMobileBridgeServer {
       state.alive = true;
     });
     socket.on("message", (data, isBinary) => this.receive(state, data, isBinary));
-    socket.on("error", (error) => this.onError(errorOf(error)));
+    socket.on("error", (error) => this.transportError(state, error, "socket"));
     socket.on("close", () => {
       state.inflight.clear();
       state.pendingAuthorityEvents.length = 0;
@@ -1229,8 +1232,9 @@ export class AgentlasMobileBridgeServer {
       this.send(state, mobileBridgeFailure(requestId, "response_too_large", "Visual frame exceeds the Mobile Bridge limit"));
       return;
     }
+    if (state.transportFailed) return;
     state.socket.send(packet, (error) => {
-      if (error) this.onError(error);
+      if (error) this.transportError(state, error, "write");
     });
   }
 
@@ -1440,8 +1444,25 @@ export class AgentlasMobileBridgeServer {
     this.send(state, this.eventEnvelope(state, event, payload, occurredAt));
   }
 
+  /*
+   * One line per broken connection, then stop writing to it. When a phone's socket drops, every write already
+   * queued on it fails with its own EPIPE: 99 "[mobile-bridge] write EPIPE" lines in the same millisecond at
+   * 2026-10-05 20:21:44 UTC (17 at 12:38:19), each a write the bridge kept making to a dead socket. The phone
+   * reconnects and resynchronizes on its own (20:22:33 that time).
+   */
+  private transportError(state: ConnectionState, error: unknown, origin: "socket" | "write"): void {
+    if (state.transportFailed) return;
+    state.transportFailed = true;
+    this.onError(errorOf(error));
+    // A socket "error" may be a protocol refusal that ws closes itself with its own code (1009 for an oversized
+    // frame); only a failed write proves the transport is gone and needs terminating.
+    if (origin === "write") {
+      try { state.socket.terminate(); } catch { /* already gone */ }
+    }
+  }
+
   private send(state: ConnectionState, message: MobileBridgeServerMessage): void {
-    if (state.revoked || state.socket.readyState !== WS_OPEN) return;
+    if (state.revoked || state.transportFailed || state.socket.readyState !== WS_OPEN) return;
     if (state.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
       state.socket.terminate();
       return;
@@ -1460,7 +1481,7 @@ export class AgentlasMobileBridgeServer {
       return;
     }
     state.socket.send(encoded, (error) => {
-      if (error) this.onError(error);
+      if (error) this.transportError(state, error, "write");
     });
   }
 
