@@ -21,6 +21,9 @@ export const AGENTLAS_ONE_TEAM_TOOL_NAMES = [
   ...ONE_SUPERVISOR_TOOL_NAMES,
 ] as const;
 
+// control() bounds a capability's tool allow-list by this server's own catalog (`tools`), not a fixed count: a fixed
+// 16 rejected every room's list of 17 non-supervisor tools in 1.2.61-1.2.62, so every One team tool failed with
+// "One team capability is invalid." outside the personal One conversation (production 2026-10-05 16:39 UTC, Thread).
 const SOURCE = String.raw`"use strict";
 const fs = require("node:fs");
 const http = require("node:http");
@@ -34,7 +37,7 @@ function control() {
   if (process.platform !== "win32" && ((stat.mode & 0o077) !== 0 || (typeof process.getuid === "function" && stat.uid !== process.getuid()))) throw new Error("One team capability permissions are invalid.");
   const value = JSON.parse(fs.readFileSync(file, "utf8"));
   if (!value || value.schemaVersion !== 1 || !Number.isInteger(value.port) || value.port < 1 || value.port > 65535 || typeof value.token !== "string" || typeof value.capabilityId !== "string") throw new Error("One team capability is invalid.");
-  if (value.tools !== undefined && (!Array.isArray(value.tools) || value.tools.length > 16 || value.tools.some((name) => typeof name !== "string"))) throw new Error("One team capability is invalid.");
+  if (value.tools !== undefined && (!Array.isArray(value.tools) || value.tools.length > tools.length || value.tools.some((name) => typeof name !== "string" || !tools.some((tool) => tool.name === name)))) throw new Error("One team capability is invalid.");
   return value;
 }
 function allowedTools() {
