@@ -62,6 +62,7 @@ import {
   markCodexAppServerUnsupported,
   openCodexResidentSession,
   prepareCodexThreadResume,
+  prepareCodexExecThreadResume,
   type CodexResidentSession,
   type CodexTurnSink,
 } from "./codex-session";
@@ -2610,7 +2611,11 @@ export const runCodex: Runner = async (
       turnContext: runReq.turnContext, stableBlocks: runReq.turnContextStable });
     // resume 턴: 시스템 프롬프트가 재전송되지 않으므로 gap+턴 컨텍스트를 사용자 메시지에 싣는다.
     let r: CodexRunResult;
+    let releaseWriter: (() => void) | undefined;
     try {
+      // Codex allows one writer per thread: this process's idle resident session must let go of it first.
+      releaseWriter = await prepareCodexExecThreadResume(path.resolve(runReq.cwd ?? agentRunCwd(),
+        runReq.env?.CODEX_HOME || process.env.CODEX_HOME || path.join(os.homedir(), ".codex")), resumeSessionId!, runReq.signal);
       r = await runCodexProcess(
       bin,
       args,
@@ -2633,6 +2638,8 @@ export const runCodex: Runner = async (
         });
       }
       throw error;
+    } finally {
+      releaseWriter?.();
     }
     if (runReq.signal?.aborted) {
       // 취소여도 스레드가 생겼으면 저장 → steering 메시지가 이 세션을 resume해 문맥 유지.

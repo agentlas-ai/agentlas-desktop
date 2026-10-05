@@ -4341,15 +4341,17 @@ export class InvocationService {
       const wait = latestGoalWaitSubscription(goalId);
       if (wait && ["pending", "claimed"].includes(wait.state)) return;
       if (pendingBlockedGoalRetry(run.id)) return;
-      // A turn that asked to wait and could not register it ends with nothing started; repeating it every 30 s
-      // forever is the loop measured on the owner's DB (2026-10-04). Repeats double the spacing until the owner
-      // speaks or uses a Goal control; a time the turn asked for is honoured. Other reasons keep the 30 s step.
-      const spaced = reason === "goal_wait_registration_failed";
-      const ownerSince = spaced ? (getDb().prepare("SELECT MAX(created_at) AS at FROM chat_messages WHERE chat_id = ? AND role = 'user'")
-        .get(record.chatId) as { at: string | null } | undefined)?.at ?? null : null;
-      const repeats = spaced ? consecutiveGoalTurnFollowUps(run.id, reason, ownerSince) : 0;
-      const plan = spaced ? goalTurnFollowUpPlan({ repeats, requestedNotBefore: options.requestedNotBefore })
-        : { nextAt: new Date(Date.now() + 30_000).toISOString(), requestedBy: "host" as const };
+      // Every follow-up of the same reason doubles its spacing (30 s, 1 min, 2 min … 6 h) until the owner speaks or
+      // uses a Goal control; a time the turn asked for is honoured. A turn that asked to wait and could not register
+      // it completes with nothing started, so it counts across completed turns (the 2026-10-04 Thread Marketing loop:
+      // 39 turns in an hour). Any other reason starts over after a completed turn, so a productive Goal keeps the 30 s
+      // step while a failing one backs off. Only the first case was spaced before, and the same loop came back with
+      // another reason: X Marketing 2026-10-05 failed runtime_turn_unsettled every minute for 25 minutes.
+      const nothingStarted = reason === "goal_wait_registration_failed";
+      const ownerSince = (getDb().prepare("SELECT MAX(created_at) AS at FROM chat_messages WHERE chat_id = ? AND role = 'user'")
+        .get(record.chatId) as { at: string | null } | undefined)?.at ?? null;
+      const repeats = consecutiveGoalTurnFollowUps(run.id, reason, ownerSince, Date.now(), { sinceCompletedTurn: !nothingStarted });
+      const plan = goalTurnFollowUpPlan({ repeats, requestedNotBefore: options.requestedNotBefore });
       scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
         fromReason: reason, retryIndex: repeats, nextAt: plan.nextAt, requestedBy: plan.requestedBy,
         detail: reason, trigger: "goal-turn-background", effectUncertain: unsettledLongRunAttemptCount(run.id) > 0,

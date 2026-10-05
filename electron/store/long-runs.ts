@@ -1283,11 +1283,15 @@ export interface BlockedGoalRetry {
  * (Thread Marketing): a fixed 30-second follow-up after every refused wait re-ran a ~247k-token turn 39 times
  * in one hour, all with the same answer ("972 to go, next check 15:11").
  */
-export function consecutiveGoalTurnFollowUps(runId: string, reason: string, ownerSince: string | null, now = Date.now()): number {
+export function consecutiveGoalTurnFollowUps(runId: string, reason: string, ownerSince: string | null, now = Date.now(),
+  options: { sinceCompletedTurn?: boolean } = {}): number {
   const day = new Date(now - 24 * 60 * 60_000).toISOString();
   const floor = ownerSince && ownerSince > day ? ownerSince : day;
-  const control = getDb().prepare("SELECT COALESCE(MAX(seq), 0) AS seq FROM long_run_events WHERE run_id = ? AND kind = 'run.user_control'")
-    .get(runId) as { seq: number };
+  // With sinceCompletedTurn a turn that completed starts the count over, so only follow-ups after turns that failed
+  // or never finished add up (a productive Goal keeps the 30 s step).
+  const control = getDb().prepare(`SELECT COALESCE(MAX(seq), 0) AS seq FROM long_run_events WHERE run_id = ? AND (kind = 'run.user_control'
+      OR (? = 1 AND kind = 'worker.attempt_settled' AND json_extract(payload_json, '$.state') = 'completed'))`)
+    .get(runId, options.sinceCompletedTurn ? 1 : 0) as { seq: number };
   const row = getDb().prepare(`SELECT COUNT(*) AS n FROM long_run_events WHERE run_id = ? AND kind = ? AND seq > ? AND occurred_at > ?
     AND json_extract(payload_json, '$.action') = 'retry_scheduled'
     AND json_extract(payload_json, '$.trigger') = 'goal-turn-background'

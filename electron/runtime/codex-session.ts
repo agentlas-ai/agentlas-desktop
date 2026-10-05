@@ -427,7 +427,13 @@ const codexResumeClaims = new Set<string>();
 const pendingCodexWriterExits = new Map<string, ChildProcess[]>();
 const childExited = (child: ChildProcess): boolean => child.exitCode !== null || child.signalCode !== null;
 const codexThreadOwnerKey = (session: CodexResidentSession, threadId: string): string =>
-  `${String(session.init?.codexHome ?? "")}\0${threadId}`;
+  `${realCodexHome(String(session.init?.codexHome ?? ""))}\0${threadId}`;
+
+/** app-server reports its CODEX_HOME resolved; a one-shot exec only knows the configured path. */
+function realCodexHome(home: string): string {
+  if (!home) return "";
+  try { return fs.realpathSync(home); } catch { return path.resolve(home); }
+}
 
 /** Transfer one persisted thread only after its previous idle writer has exited. */
 export async function prepareCodexThreadResume(
@@ -436,7 +442,38 @@ export async function prepareCodexThreadResume(
   signal?: AbortSignal,
   options: { deadlineAt?: number } = {},
 ): Promise<() => void> {
-  const key = codexThreadOwnerKey(session, threadId);
+  return claimCodexThreadWriter(realCodexHome(String(session.init?.codexHome ?? "")), threadId,
+    (candidate) => candidate !== session && candidate.threadId === threadId
+      && candidate.init?.codexHome === session.init?.codexHome, signal, options);
+}
+
+/**
+ * A one-shot `codex exec resume` is a writer of the thread too, and Codex refuses it ("thread … already has an active
+ * writer") while a resident app-server of this process still holds that thread. Production 2026-10-05 (X Marketing):
+ * an attended turn left its resident session holding the room's thread; the next Goal turns ran with an isolated MCP
+ * grant, which only `exec` supports, and every one exited in 0.2 s for 25 minutes. Hand the thread over the same way
+ * a resident resume does: retire this process's idle holder and wait for it to exit; an active turn stays busy.
+ */
+export async function prepareCodexExecThreadResume(
+  codexHome: string,
+  threadId: string,
+  signal?: AbortSignal,
+  options: { deadlineAt?: number } = {},
+): Promise<() => void> {
+  const home = realCodexHome(codexHome);
+  return claimCodexThreadWriter(home, threadId,
+    (candidate) => candidate.threadId === threadId && realCodexHome(String(candidate.init?.codexHome ?? "")) === home,
+    signal, options);
+}
+
+async function claimCodexThreadWriter(
+  home: string,
+  threadId: string,
+  holds: (candidate: CodexResidentSession) => boolean,
+  signal?: AbortSignal,
+  options: { deadlineAt?: number } = {},
+): Promise<() => void> {
+  const key = `${home}\0${threadId}`;
   if (codexResumeClaims.has(key)) {
     throw new CodexSessionContinuityError("writer_busy", "Codex thread resume is already in progress.");
   }
@@ -449,10 +486,7 @@ export async function prepareCodexThreadResume(
   };
   try {
     if (signal?.aborted) throw signal.reason ?? new Error("Codex thread resume cancelled");
-    const ownership = codexSessionPool().retireIdleMatching((candidate) =>
-      candidate !== session && candidate.threadId === threadId
-      && candidate.init?.codexHome === session.init?.codexHome,
-    );
+    const ownership = codexSessionPool().retireIdleMatching(holds);
     if (ownership.busy) {
       throw new CodexSessionContinuityError("writer_busy", "Codex thread still belongs to an active turn.");
     }
