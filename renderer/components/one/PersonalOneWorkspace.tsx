@@ -30,12 +30,7 @@ import styles from "./PersonalOneWorkspace.module.css";
 
 const visibleAnswer=(text:string)=>stripAgentRoutingBanners(stripAgentIdentityBadges(stripAgentControlBlocks(text,{streaming:true}))).trim();
 const terminal=(state:string)=>["completed","cancelled","failed","interrupted"].includes(state);
-function storedOnePermission():'read'|'write'|'full' {
-  // Match the existing One product default and honor a narrower saved choice.
-  // Reading this preference never changes a grant, setting, or goal authority.
-  if(typeof window==='undefined')return 'full';
-  try{const value=window.localStorage.getItem('agentlas.one.permission-mode.v1');return value==='auto'?'read':value==='read'||value==='write'||value==='full'?value:'full';}catch{return 'read';}
-}
+// Personal One runs every turn with full access and Computer Use; Main decides that (owner 2026-10-05).
 function storedOneRuntime() {
   if(typeof window==='undefined')return null;
   try{return readStoredRuntimeSelection(JSON.parse(window.localStorage.getItem('agentlas.one.runtime-selection.v1') ?? 'null'),{source:undefined,role:'orchestrator',inherit:false});}catch{return null;}
@@ -43,7 +38,7 @@ function storedOneRuntime() {
 export function PersonalOneWorkspace() {
   const router=useRouter(); const {locale}=useT(); const ko=locale==="ko"; const copy=(a:string,b:string)=>ko?a:b;
   const [snapshot,setSnapshot]=useState<OneSupervisorSnapshot|null>(null);
-  const [text,setText]=useState(""); const [work,setWork]=useState(""); const [permission,setPermission]=useState<"read"|"write"|"full">(storedOnePermission);
+  const [text,setText]=useState(""); const [work,setWork]=useState("");
   const [scienceProject,setScienceProject]=useState(""); const [selected,setSelected]=useState<string|null>(null); const [direction,setDirection]=useState("");
   const [error,setError]=useState(false); const [receipt,setReceipt]=useState<SupervisorCommandReceipt|null>(null);
   const [workPending,setWorkPending]=useState(false); const [controlPending,setControlPending]=useState(false); const [tasksOpen,setTasksOpen]=useState(false);
@@ -103,7 +98,7 @@ export function PersonalOneWorkspace() {
   };
   const send=async()=>{
     const message=text.trim();if(!message || !outbox.current)return;let intent:PendingSupervisorWrite;
-    try{const runtimeSelection=storedOneRuntime();intent=outbox.current.prepare("send",{text:message,permissions:permission,...(runtimeSelection?{runtimeSelection}:{})});}catch{setError(true);return;}
+    try{const runtimeSelection=storedOneRuntime();intent=outbox.current.prepare("send",{text:message,...(runtimeSelection?{runtimeSelection}:{})});}catch{setError(true);return;}
     if(inFlight.current.has(intent.commandId))return;inFlight.current.add(intent.commandId);setSavedRequests(outbox.current.list());setText("");nearBottom.current=true;
     setOptimistic(prior=>prior.some(item=>item.commandId===intent.commandId)?prior:[...prior,{commandId:intent.commandId,text:message,acknowledged:false}]);
     try{const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);if(!mounted.current)return;setSavedRequests(outbox.current.list());showReceipt(value);
@@ -112,7 +107,7 @@ export function PersonalOneWorkspace() {
   };
   const startWork=async(science=false)=>{
     if(!work.trim()||workPending||science&&!scienceProject)return;setWorkPending(true);
-    try{showReceipt(await write(science?"startScience":"startWork",{text:work.trim(),...(science?{projectId:scienceProject}:{permissions:permission})}));setWork("");void sync();}
+    try{showReceipt(await write(science?"startScience":"startWork",{text:work.trim(),...(science?{projectId:scienceProject}:{})}));setWork("");void sync();}
     catch{setError(true);}finally{setWorkPending(false);}
   };
   const control=async(task:SupervisorTask,action:"steer"|"cancel")=>{
@@ -239,7 +234,6 @@ export function PersonalOneWorkspace() {
       resultKey={`supervisor:${selectedHandoff ?? selected ?? 'list'}`} result={<div className={styles.taskContents} aria-label={copy("독립 작업","Independent tasks")}><header><h2>{copy("작업","Tasks")}</h2></header>
       {!taskPreviewOnly&&<>
       <label>{copy("Work에 맡길 일","Hand work to Work")}<textarea value={work} onChange={event=>setWork(event.target.value)} maxLength={8000}/></label>
-      <label>{copy("작업 권한","Work permission")}<select value={permission} onChange={event=>setPermission(event.target.value as typeof permission)}><option value="read">{copy("읽기","Read")}</option><option value="write">{copy("쓰기","Write")}</option><option value="full">{copy("전체","Full")}</option></select></label>
       <button disabled={workPending||!snapshot||!work.trim()} onClick={()=>void startWork()}>{copy("Work 시작","Start Work")}</button><button onClick={()=>router.push("/science")}>{copy("Science 열기","Open Science")}</button>
       {!!snapshot?.scienceProjects?.length&&<><label>{copy("Science 프로젝트","Science project")}<select value={scienceProject} onChange={event=>setScienceProject(event.target.value)}><option value="">{copy("프로젝트 선택","Choose a project")}</option>{snapshot.scienceProjects.map(project=><option key={project.projectId} value={project.projectId}>{project.title}</option>)}</select></label><button disabled={workPending||!scienceProject||!work.trim()} onClick={()=>void startWork(true)}>{copy("Science에 맡기기","Hand off to Science")}</button></>}
       {snapshot?.scienceError&&<p className={styles.feedback}>{copy("Science 관측 연결을 확인할 수 없습니다.","Science observation is unavailable.")}</p>}

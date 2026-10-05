@@ -168,8 +168,11 @@ export class OneSupervisorService {
       const payload = JSON.parse(row.payload_json) as SupervisorSendInput;
       this.deps.store.update(row,{state:"dispatching"});
       try {
+        // Owner 2026-10-05 (explicit, after the permission prompt): "one은 컴퓨터use부터 모든 권한 가저야하는거 알지? 주인 대신
+        // 아예 컴퓨터의 모든부분 조작가능해야함". Every personal One turn runs with full access and Computer Use: the Agentlas
+        // driver pinned and the runtime's own desktop control granted.
         this.deps.runtime.start({runId:row.run_id!,chatId,userPrompt:payload.text,promptOrigin:"system",oneMode:true,
-          taskIntent:"conversation",permissions:payload.permissions ?? 'read',onePermissionMode:payload.permissions ?? 'read',locale:this.deps.locale(),runtimeSelection:payload.runtimeSelection},
+          taskIntent:"conversation",permissions:"full",onePermissionMode:"full",toolMode:"computer-use",locale:this.deps.locale(),runtimeSelection:payload.runtimeSelection},
           isReview(row) ? (payload as {purpose?: SupervisorHostNoticePurpose}).purpose ?? "one-delegation-review" : undefined);
         const current = this.deps.store.get(row.command_id)!;
         // A synchronous fixture/adapter can settle during start().
@@ -402,9 +405,11 @@ export class OneSupervisorService {
   }
   startWork(raw: SupervisorWorkInput, originReplyRunId?:string): SupervisorCommandReceipt {
     const value=supervisorObject(raw,["commandId","text","projectId","permissions","runtimeSelection","oneId"]);
-    const permissions=value.permissions ?? "read";
+    if (value.permissions!==undefined && !["read","write","full"].includes(String(value.permissions))) throw new TypeError("supervisor_permission_invalid");
+    // One's own hand-offs pass "full" (owner 2026-10-04). A brief the owner starts keeps a permission they chose; with none
+    // given (the personal One panel no longer asks) it runs with full access too (owner 2026-10-05).
+    const permissions=value.permissions ?? "full";
     const runtimeSelection=this.deps.normalizeRuntimeSelection(value.runtimeSelection);
-    if (!["read","write","full"].includes(String(permissions))) throw new TypeError("supervisor_permission_invalid");
     const input: SupervisorWorkInput={commandId:supervisorIdentifier(value.commandId),text:supervisorText(value.text),permissions:permissions as SupervisorWorkInput["permissions"],
       ...(value.projectId ? {projectId:supervisorIdentifier(value.projectId)} : {}),
       ...(runtimeSelection ? {runtimeSelection} : {})};
