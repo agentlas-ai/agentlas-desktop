@@ -14,6 +14,7 @@ import { OneSupervisorService } from "./supervisor-service";
 import { SupervisorScienceAdapter } from "./supervisor-science";
 import { supervisorExactResult, supervisorQuietRun, supervisorReplyTurns } from "./supervisor-presentation";
 import { onAskUserLifecycle } from "../confirm/ask-user";
+import { registerOneHostAlertSink } from "./host-alerts";
 import { OneSupervisorLegacyMigration } from './supervisor-migration';
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { SupervisorTask, SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
@@ -120,7 +121,9 @@ export function oneSupervisor():OneSupervisorService {
     }
     return false;
   });
-  const stopProactive=()=>{clearInterval(checkinTimer);stopQuestions();};
+  // Host problems from other rooms reach the owner through One, not only as cards there (owner 2026-10-05).
+  const stopHostAlerts=registerOneHostAlertSink(alert=>supervisor?.hostNeedsOwner(alert) ?? false);
+  const stopProactive=()=>{clearInterval(checkinTimer);stopQuestions();stopHostAlerts();};
   registerAppRuntimeParticipant("one-supervisor-work-queue", {
     closeAdmission:()=>{workExecutor?.close();stopProactive();},interrupt:()=>{workExecutor?.close();stopProactive();},isSettled:()=>true,
   });

@@ -40,6 +40,7 @@ import {
   type RungOutcome,
 } from "./fallback-ladder";
 import { detectLoginWall } from "./login-wall";
+import { reportHostAlertToOne } from "../one/host-alerts";
 import { remoteNativeBrowserGrantForEndpoint, remoteNativeBrowserOwnerScopeForId } from "./main-browser-channel";
 import { PAGE_FRAME_PROBE_SOURCE } from "./page-frame-probe";
 import type { NativeBrowserRelayGrant, NativeBrowserRelayPage, NativeBrowserRelayOwnerScope } from "./native-cdp-relay";
@@ -416,6 +417,10 @@ function productionDeps(code: BrowserFailureCode, scope: LadderScope, ladderId: 
     stop: (card) => {
       // A DOM tool error with no other way in is the agent's to handle, not an owner card (see below).
       if (code === "native-tool-failed") return;
+      // Owner 2026-10-05: One tells the owner instead of a "press Retry" card in this room. The run itself never
+      // stopped (the agent was told to continue other work); the card stays only when One cannot take the report.
+      if (binding && reportHostAlertToOne({ chatId: binding.chatId, code: card.reasonCode,
+        detail: binding.locale === "ko" ? card.summary.ko : card.summary.en })) return;
       try { binding?.notify?.(cardNotice(card, binding.locale, "error", scope)); } catch { /* run ended */ }
     },
     suggestions: () => scope.suggestions,
@@ -466,6 +471,15 @@ export async function onAgentlasBrowserToolFailure(input: {
     flight = runBrowserLadder({ ladderId, code, surface: measured.facts.surface, site: scope.site }, deps).then((result) => {
       if (result.card && result.state.final === "waiting-owner") {
         try { binding?.notify?.(cardNotice(result.card, binding.locale, "warning", scope)); } catch { /* run ended */ }
+      }
+      // A sign-in or human check only the owner can pass: the card brings the browser forward, and One also tells
+      // the owner so it is not missed in another room (owner 2026-10-05).
+      if (result.state.final === "waiting-owner" && binding) {
+        const site = scope.site ? ` (${scope.site})` : "";
+        reportHostAlertToOne({ chatId: binding.chatId, code: result.card?.reasonCode ?? code,
+          detail: result.card ? (binding.locale === "ko" ? result.card.summary.ko : result.card.summary.en)
+            : binding.locale === "ko" ? `사이트 로그인이 필요합니다${site}. 열린 로그인 카드에서 로그인하면 작업이 이어집니다.`
+              : `The site needs the owner's sign-in${site}. Signing in from the open login card lets the run continue.` });
       }
       if (result.state.final === "stopped" && code !== "native-tool-failed") stopped.set(key, { at: Date.now(), result });
       return result;

@@ -11,6 +11,7 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
 import { appendChatMessage } from "../store/chats";
+import { reportHostAlertToOne } from "../one/host-alerts";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { EFFECT_OBSERVATION_EVENT_KIND, getLongRunAttemptReview, getLongRunByGoalId, latestLongRunAttemptSafeEpoch } from "../store/long-runs";
@@ -167,7 +168,17 @@ export function createAgiExecutor(): AgiActionExecutor {
       });
       emitDesktopStoreChange({ entity: "chat", id: chatId });
     },
-    onDefectFiled: (input) => { defectListener?.(input); if (input.chatId) emitDesktopStoreChange({ entity: "chat", id: input.chatId }); },
+    onDefectFiled: (input) => {
+      defectListener?.(input);
+      if (input.chatId) {
+        emitDesktopStoreChange({ entity: "chat", id: input.chatId });
+        // The monitor found this Goal stuck on an app defect and filed a report: One tells the owner (owner 2026-10-05).
+        reportHostAlertToOne({ chatId: input.chatId, code: `agi:${input.code}`,
+          detail: currentUiLocale() === "ko"
+            ? `앱 점검이 이 방의 목표가 앱 결함으로 막힌 것을 발견해 결함 보고를 보냈습니다(${input.code}). 앱이 우회 방법을 시도합니다.`
+            : `The app's monitor found this conversation's Goal stuck on an app defect and filed a report (${input.code}). The app is trying a workaround.` });
+      }
+    },
   };
   return new AgiActionExecutor(deps);
 }

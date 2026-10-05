@@ -304,6 +304,8 @@ export interface LadderOwnerCard {
   reasonCode: string;
   action: LadderCardAction;
   message: { ko: string; en: string };
+  /** The message without its button sentence, for One to tell the owner (one/host-alerts.ts). */
+  summary: { ko: string; en: string };
   /** JSON for the notice's details: machine fields only. */
   details: string;
 }
@@ -345,12 +347,12 @@ export function ladderOwnerCard(input: { code: BrowserFailureCode; tried: readon
   const reasonCode = ladderStopReasonCode(input.code);
   if (input.code === "human-check-required") {
     const site = input.site ? ` (${input.site})` : "";
+    const message = {
+      ko: `사람 확인이 필요해요${site} — 열린 브라우저에서 한 번 확인해 주시면 자동으로 이어갑니다`,
+      en: `A human check is needed${site} — pass it once in the open browser and the run continues on its own`,
+    };
     return {
-      code: BROWSER_HUMAN_CHECK_NOTICE, reasonCode, action: "open-browser",
-      message: {
-        ko: `사람 확인이 필요해요${site} — 열린 브라우저에서 한 번 확인해 주시면 자동으로 이어갑니다`,
-        en: `A human check is needed${site} — pass it once in the open browser and the run continues on its own`,
-      },
+      code: BROWSER_HUMAN_CHECK_NOTICE, reasonCode, action: "open-browser", message, summary: message,
       details: JSON.stringify({ schema: BROWSER_LADDER_SCHEMA, reasonCode, action: "open-browser", site: input.site ?? null }),
     };
   }
@@ -359,11 +361,15 @@ export function ladderOwnerCard(input: { code: BrowserFailureCode; tried: readon
   const triedEn = tried.map((rung) => RUNG_LABEL[rung].en).join(" → ") || "nothing";
   const action: LadderCardAction = input.code === "port-foreign" || input.code === "browser-mcp-not-attached" ? "fix" : "retry";
   const suggest = input.suggestions?.length ? input.suggestions.slice(0, 3).join(", ") : "";
+  const summary = {
+    ko: `${failure.ko}. 시도: ${triedKo}.${suggest ? ` 대안 커넥터: ${suggest}.` : ""}`,
+    en: `${failure.en}. Tried: ${triedEn}.${suggest ? ` Alternative connectors: ${suggest}.` : ""}`,
+  };
   return {
-    code: BROWSER_LADDER_STOP_NOTICE, reasonCode, action,
+    code: BROWSER_LADDER_STOP_NOTICE, reasonCode, action, summary,
     message: {
-      ko: `${failure.ko}. 시도: ${triedKo}.${suggest ? ` 대안 커넥터: ${suggest}.` : ""} ${action === "fix" ? "고치기" : "다시 시도"}를 누르면 이어갑니다`,
-      en: `${failure.en}. Tried: ${triedEn}.${suggest ? ` Alternative connectors: ${suggest}.` : ""} Press ${action === "fix" ? "Fix" : "Retry"} to continue`,
+      ko: `${summary.ko} ${action === "fix" ? "고치기" : "다시 시도"}를 누르면 이어갑니다`,
+      en: `${summary.en} Press ${action === "fix" ? "Fix" : "Retry"} to continue`,
     },
     details: JSON.stringify({ schema: BROWSER_LADDER_SCHEMA, reasonCode, action, tried: input.tried.map((t) => ({ rung: t.rung, result: t.result })), site: input.site ?? null, suggestions: input.suggestions ?? [] }),
   };
