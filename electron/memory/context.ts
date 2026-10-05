@@ -38,6 +38,7 @@ import {
   projectContextKey,
   recordContextSourceMarker,
 } from "../store/run-events";
+import { previousTurnMemorySection } from "./previous-turn";
 import {
   buildProjectContextSlice,
   projectSourceSignature,
@@ -769,6 +770,10 @@ export async function buildMemoryContext(
 ): Promise<string> {
   if (options.signal?.aborted) return "";
   const sections: string[] = [];
+  // Short-term memory (owner 2026-10-05): the previous turn of this conversation, so the model itself checks
+  // an interrupted outside action before repeating it instead of the host locking the Goal.
+  const previousTurn = previousTurnMemorySection(options.chatId, options.runId);
+  const withPreviousTurn = (list: string[]): string[] => previousTurn ? [previousTurn, ...list] : list;
 
   // Content-free observability: track which recall sources actually entered this
   // turn's prompt and their approximate injected token size. Emitted only when a
@@ -794,7 +799,7 @@ export async function buildMemoryContext(
     // the stored folder identity again immediately before touching any project
     // memory, and once more before returning the assembled prompt.
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      return formatMemorySections(globalMemorySections(agentId, options.taskPrompt, options));
+      return formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options)));
     }
     const rawSoul = readActivatedProjectMemoryText(projectPath, PROJECT_SOUL_FILE);
     const soul = rawSoul ? filterRevokedProjectSoul(
@@ -858,7 +863,7 @@ export async function buildMemoryContext(
     const timeline = timelineSection(options.projectId, projectPath, options.taskPrompt, { agentId, chatId: options.chatId });
     if (timeline) sections.push(timeline);
     if (!verifyActivatedFolderIdentity(projectPath)) {
-      return formatMemorySections(globalMemorySections(agentId, options.taskPrompt, options));
+      return formatMemorySections(withPreviousTurn(globalMemorySections(agentId, options.taskPrompt, options)));
     }
   } else {
     const globalSections = globalMemorySections(agentId, options.taskPrompt, options);
@@ -868,6 +873,7 @@ export async function buildMemoryContext(
     if (timeline) sections.push(timeline);
   }
 
+  if (previousTurn) injected.push({ source: "memory", text: previousTurn });
   flushMarkers();
-  return formatMemorySections(sections);
+  return formatMemorySections(withPreviousTurn(sections));
 }
