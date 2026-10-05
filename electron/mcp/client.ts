@@ -2084,6 +2084,33 @@ async function runMcpInvocationInContext(
   let resolvedResultFolder: string | undefined;
   let workforcePrepareReceipt: WorkforcePrepareCheckpointReceipt | undefined;
   let backstopSurfaceSeq = 0;
+  /*
+   * After a successful browser call, read where the agent actually stands from its own browser surface; never
+   * blocks. A login wall runs the recovery ladder (owner 2026-09-28: a login wall is a product defect). A site's
+   * human check (CAPTCHA/anti-bot) is not solved or bypassed: browser in front, the owner told through One.
+   *
+   * Owner 2026-10-05 ("코덱스 클로드 agy … 키미도 세상 모든거 다 … api랑 로컬모델도"): every runtime. The call is
+   * observed at its result boundary (beforeMcpToolResult), which every runtime's agentlas-browser call passes with
+   * the same catalog id and server tool name: Claude, Codex, Antigravity, Kimi, Cursor and Grok through Main's MCP
+   * proxy, API keys and local models through the local tool loop. Matching runtime tool names instead had only
+   * known the codex spelling: on the owner's store 11,255 Antigravity and 412 Claude browser calls were never
+   * observed, and an isolated 1.2.58 app opened a reCAPTCHA page on Claude with no card and no report to One.
+   */
+  let browserObservedAtBoundary = false;
+  const observeBrowserCall = (leaf: string, notify: (notice: NonNullable<McpInvocationEvent["notice"]>) => void): void => {
+    const browserTool = `agentlas-browser.${leaf}`;
+    // A native grant's login walls are recovered, awaited, inside beforeMcpToolResult.
+    if (!nativeBrowserGrant) {
+      void import("../browser/login-recovery-runtime").then(({ observeBrowserToolForLoginWall, ownerLoginCardNotice }) =>
+        observeBrowserToolForLoginWall({
+          toolName: browserTool, runId: req.runId, chatId: req.chatId, nodeId: executionContext?.nodeId, signal, nativeGrant: nativeBrowserGrant,
+          notify: (card) => notify(ownerLoginCardNotice(card, pickLocale(req))),
+        })).catch(() => undefined);
+    }
+    void import("../browser/fallback-ladder-runtime").then(({ observeBrowserToolForHumanCheck }) =>
+      observeBrowserToolForHumanCheck({ toolName: browserTool, ...(req.chatId ? { chatId: req.chatId } : {}), nativeGrant: nativeBrowserGrant ?? null }))
+      .catch(() => undefined);
+  };
   sink = (rawEvent: McpInvocationEvent) => {
     let ev = redactOneAttachmentEvent(req, rawEvent);
     const emit = (event: McpInvocationEvent) =>
@@ -2134,28 +2161,13 @@ async function runMcpInvocationInContext(
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
     }
-    // Login wall = product defect (owner 2026-09-28). After a browser tool result, read where the
-    // agent actually stands from its own browser surface and run the recovery ladder; never blocks.
-    // Codex names the call `agentlas-browser.browser_x`, Claude and the other runtimes `mcp__agentlas-browser__browser_x`.
-    // Only the codex spelling was matched, so on Claude a human check never reached the ladder or the owner
-    // (isolated 1.2.58 app, 2026-10-05: reCAPTCHA demo page opened, no card, no report to One).
-    const browserLeaf = ev.kind === "tool-use" && ev.tool?.result !== undefined && !ev.tool.isError
+    // Backstop for a run whose browser calls never reached the result boundary (beforeMcpToolResult below):
+    // recognise the call by its runtime's name. Codex says `agentlas-browser.browser_x`; Claude, Antigravity
+    // and the local loop say `mcp__agentlas-browser__browser_x`.
+    const browserLeaf = !browserObservedAtBoundary && ev.kind === "tool-use" && ev.tool?.result !== undefined && !ev.tool.isError
       ? /^(?:agentlas-browser\.|mcp__agentlas-browser__)(browser_[a-z_]+)$/.exec(ev.tool.name)?.[1] : undefined;
-    const browserTool = browserLeaf ? `agentlas-browser.${browserLeaf}` : null;
-    if (browserTool) {
-      // Canonical native calls are observed at the awaited transport boundary.
-      // Legacy isolated AgentApp callers retain their existing observer only.
-      if (!nativeBrowserGrant) {
-      void import("../browser/login-recovery-runtime").then(({ observeBrowserToolForLoginWall, ownerLoginCardNotice }) =>
-        observeBrowserToolForLoginWall({
-          toolName: browserTool, runId: req.runId, chatId: req.chatId, nodeId: executionContext?.nodeId, signal, nativeGrant: nativeBrowserGrant,
-          notify: (card) => { try { emit({ kind: "notice", notice: ownerLoginCardNotice(card, pickLocale(req)) }); } catch { /* run ended */ } },
-        })).catch(() => undefined);
-      }
-      // A site's human check (CAPTCHA/anti-bot) is not solved or bypassed: one card, browser in front, auto-resume.
-      void import("../browser/fallback-ladder-runtime").then(({ observeBrowserToolForHumanCheck }) =>
-        observeBrowserToolForHumanCheck({ toolName: browserTool, ...(req.chatId ? { chatId: req.chatId } : {}), nativeGrant: nativeBrowserGrant ?? null }))
-        .catch(() => undefined);
+    if (browserLeaf) {
+      observeBrowserCall(browserLeaf, (notice) => { try { emit({ kind: "notice", notice }); } catch { /* run ended */ } });
     }
     emit(ev);
   };
@@ -2168,6 +2180,12 @@ async function runMcpInvocationInContext(
   });
   const beforeMcpToolResult = async (input: { catalogId: string | null; toolName: string; isError: boolean }): Promise<void> => {
     login?.assertRunnable();
+    if (input.catalogId === "agentlas-browser") {
+      browserObservedAtBoundary = true;
+      if (!input.isError && /^browser_[a-z_]+$/.test(input.toolName)) {
+        observeBrowserCall(input.toolName, (notice) => { try { sink({ kind: "notice", notice }); } catch { /* run ended */ } });
+      }
+    }
     if (!login || !nativeBrowserGrant || !["agentlas-browser", "cua-driver"].includes(input.catalogId ?? "")) return;
     const observed = login.beginObservation();
     try {
