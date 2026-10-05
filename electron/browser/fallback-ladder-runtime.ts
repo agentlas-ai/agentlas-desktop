@@ -414,6 +414,8 @@ function productionDeps(code: BrowserFailureCode, scope: LadderScope, ladderId: 
       }
     },
     stop: (card) => {
+      // A DOM tool error with no other way in is the agent's to handle, not an owner card (see below).
+      if (code === "native-tool-failed") return;
       try { binding?.notify?.(cardNotice(card, binding.locale, "error", scope)); } catch { /* run ended */ }
     },
     suggestions: () => scope.suggestions,
@@ -465,12 +467,21 @@ export async function onAgentlasBrowserToolFailure(input: {
       if (result.card && result.state.final === "waiting-owner") {
         try { binding?.notify?.(cardNotice(result.card, binding.locale, "warning", scope)); } catch { /* run ended */ }
       }
-      if (result.state.final === "stopped") stopped.set(key, { at: Date.now(), result });
+      if (result.state.final === "stopped" && code !== "native-tool-failed") stopped.set(key, { at: Date.now(), result });
       return result;
     }).finally(() => { if (flights.get(key) === flight) flights.delete(key); });
     flights.set(key, flight);
   }
-  return answerFor(await flight, input, scope);
+  const result = await flight;
+  /*
+   * Owner rule 2026-10-05 ("직접 대조가 전체중단시키거나 하면안됨"): an unclassified DOM tool error in the
+   * in-app browser (a missing element, a click that did not land) is a page-level error the agent handles.
+   * When computer use cannot take over, the ladder used to stop with an owner error card ("press Retry to
+   * continue") and repeat that answer for 5 minutes; the AGI monitor then reported the Goal as stuck
+   * (browser_unavailable:browser_ladder:native-tool-failed, 1.2.55 and 1.2.57). Now the agent gets its own error back.
+   */
+  if (code === "native-tool-failed" && result.state.final === "stopped") return null;
+  return answerFor(result, input, scope);
 }
 
 const PAGE_CHANGING = new Set(["browser_navigate", "browser_navigate_back", "browser_click", "browser_snapshot", "browser_wait_for", "browser_tabs", "browser_press_key"]);
