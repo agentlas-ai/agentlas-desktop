@@ -442,6 +442,11 @@ function queuedSteerFromDurable(row: DurableQueuedSteer): QueuedSteer {
   };
 }
 
+/** The queued directions the owner wrote, in queue order; host-written turns (promptOrigin "system") are left out. */
+function ownerWrittenSteers(queue: QueuedSteer[]): QueuedSteer[] {
+  return queue.filter((queued) => queued.request.promptOrigin !== "system");
+}
+
 function steeringRecoveryFromDurable(row: DurableQueuedSteer): InvocationSteerRecovery {
   return {
     id: row.id,
@@ -4767,11 +4772,12 @@ export class InvocationService {
   unsteer(chatId: string, position: number, text: string): boolean {
     const queue = this.steerQueues.get(chatId);
     if (!queue?.length) return false;
-    const index = position - 1;
-    if (index < 0 || index >= queue.length) return false;
-    if (queue[index].request.userPrompt !== text) return false;
-    settleQueuedSteer(queue[index].id, "cancelled");
-    queue.splice(index, 1);
+    // The position is the strip's, which lists only the owner's directions (attach). Counting host notices too
+    // pointed it at a teammate report whenever one was queued first, and the owner's removal silently failed.
+    const target = ownerWrittenSteers(queue)[position - 1];
+    if (!target || target.request.userPrompt !== text) return false;
+    settleQueuedSteer(target.id, "cancelled");
+    queue.splice(queue.indexOf(target), 1);
     if (!queue.length) this.steerQueues.delete(chatId);
     else this.drainSteerQueue(chatId);
     return true;
@@ -4809,7 +4815,9 @@ export class InvocationService {
           runId,
           events: options?.includeEvents === false ? [] : record.events.slice(),
           startedAt: record.startedAt,
-          queuedSteers: (this.steerQueues.get(chatId) ?? []).map((queued, index) => ({
+          // Only what the owner wrote is a "next instruction" on screen. A host notice (a teammate's finished
+          // report) queued in the same line is plumbing, and the strip's positions count only the owner's.
+          queuedSteers: ownerWrittenSteers(this.steerQueues.get(chatId) ?? []).map((queued, index) => ({
             id: queued.id,
             text: queued.request.userPrompt,
             queuedAt: queued.queuedAt,

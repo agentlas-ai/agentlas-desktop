@@ -2029,6 +2029,20 @@ function OneSessionsShell() {
   // reconciliation; unrelated action notices must survive.
   const cancelNoticeRunIdRef = useRef<string | null>(null);
   const cancelNoticeTextRef = useRef<string | null>(null);
+  /*
+   * Stop drops the work queued behind a run, never what the owner wrote: Main discards the chat's queued
+   * directions on stop/pause (InvocationService.cancel, stopGoal), so the strip's texts go back into that chat's
+   * composer to send again or edit, as Codex restores queued messages on interrupt. Production 2026-08-31 to
+   * 2026-10-04: 6 of 34 owner directions were discarded by a stop or Goal pause and reached no one.
+   */
+  const returnQueuedSteersToComposer = useCallback((chatId: string) => {
+    const returned = queuedSteersRef.current.filter((item) => item.chatId === chatId).map((item) => item.text);
+    setQueuedSteers((current) => current.filter((item) => item.chatId !== chatId));
+    if (!returned.length) return;
+    const merge = (current: string) => [current, ...returned].filter(Boolean).join("\n");
+    if (activeThreadChatIdRef.current === chatId) setComposer(merge);
+    else writeOneComposerDraft(`chat:${chatId}`, { composer: merge(readOneComposerDraft(`chat:${chatId}`).composer) });
+  }, []);
   /** One handoff has no separate cancel authority; interrupt uses the same
    * Main-owned invocation cancel path as the composer Stop action. */
   const cancelActiveRun = useCallback((reason: string) => {
@@ -2056,11 +2070,12 @@ function OneSessionsShell() {
         throw new Error("invoke_cancel_receipt_mismatch");
       }
       // Main accepted the terminal action. The run remains visibly busy until
-      // its terminal event arrives, but directions Main just discarded must
-      // disappear from the local queue now.
+      // its terminal event arrives, but directions Main just discarded leave
+      // the queue now and go back to the composer.
       if (runIdRef.current !== runId || cancelNoticeRunIdRef.current !== runId) return;
       pendingSteersRef.current = [];
-      setQueuedSteers([]);
+      if (runChatIdRef.current) returnQueuedSteersToComposer(runChatIdRef.current);
+      else setQueuedSteers([]);
     }).catch(() => {
       // Rejection means nothing was cancelled; preserve the active run and its
       // queued directions instead of leaving a false stopped/pending screen.
@@ -2073,7 +2088,7 @@ function OneSessionsShell() {
         : "The stop request was rejected. The run and queued directions are unchanged; try again.";
       setActionNotice((current) => current === notice ? rejection : current);
     });
-  }, [appLocale]);
+  }, [appLocale, returnQueuedSteersToComposer]);
   /*
    * ★화면에 지금 떠 있는 메시지가 **어느 대화의 것인가**.
    *
@@ -6067,8 +6082,9 @@ function OneSessionsShell() {
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
     // queued behind it (InvocationService.cancel), so the strip must not keep
-    // showing them as "next". Handoff interruption intentionally shares this
-    // exact authority rather than inventing a second cancellation path.
+    // showing them as "next"; their texts return to the composer instead.
+    // Handoff interruption intentionally shares this exact authority rather
+    // than inventing a second cancellation path.
     cancelActiveRun("one-run-stop");
   }, [cancelActiveRun]);
 
@@ -8768,6 +8784,7 @@ function OneSessionsShell() {
                 goalControlEpochRef.current += 1;
                 setTurnOverrides((current) => currentOneGoalOverride(current, goalControlEpochRef.current));
               }}
+              onStopped={() => returnQueuedSteersToComposer(activeThreadChatId)}
             />}
             {armedOneMemoryUseOnce && (
               <div className={styles.oneMemoryUseOnceChip} role="status">
@@ -9123,8 +9140,8 @@ function OneSessionsShell() {
             {queuedSteers.filter((queued) => queued.chatId === activeThreadChatId).map((queued, index) => (
               // Codex keeps each queued message visible above the composer and
               // lets the user pull it back before the model receives it. Stop
-              // clears the queue in Main, so the strip clears with it (see
-              // stopRun) — a strip that outlives its queue was the recording's
+              // clears the queue in Main, so the strip clears with it and its
+              // texts return to the composer (see stopRun) — a strip that outlives its queue was the recording's
               // "steering cannot be cancelled" (2026-08-15 21:25, frames 46–72).
               <div key={queued.id} className={styles.steeringQueue} role="status" aria-live="polite" data-one-steering-queue="true">
                 <span>{appLocale === "ko" ? "다음 지시" : "Next instruction"}</span>

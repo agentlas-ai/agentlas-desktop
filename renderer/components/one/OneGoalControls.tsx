@@ -28,6 +28,8 @@ type GoalBridge = Pick<AgentlasIpc["chats"], "get" | "getGoalContext" | "getGoal
 export function createOneGoalControlSession(input: {
   chatId: string; api: GoalBridge; isCurrent: () => boolean;
   publish: (view: GoalView) => void; onDeleted: () => void;
+  /** Main accepted pause or delete, which also drops the directions queued behind the run (stopGoal). */
+  onStopped?: () => void;
 }) {
   let live = true;
   let readGeneration = 0;
@@ -103,8 +105,10 @@ export function createOneGoalControlSession(input: {
         if (updated.id !== input.chatId || updated.goalId) throw new Error("goal_control_binding_changed");
         publish({ goalId: null, context: null, continuity: null, handoff: null, review: null });
         input.onDeleted();
+        input.onStopped?.();
       } else if (action === "pause") {
         await input.api.pauseGoal(input.chatId, goalId);
+        if (fresh()) input.onStopped?.();
       } else {
         // Goal events can advance the long-run CAS version after the button
         // rendered (for example, app-close recovery or attempt settlement).
@@ -177,8 +181,10 @@ export function goalModelChangePending(input: {
   return !(handoff.requested.model && input.lastConfirmedModel === handoff.requested.model);
 }
 
-export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConfirmedModel, helpContent, handoffRequestKey }: {
+export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStopped, lastConfirmedModel, helpContent, handoffRequestKey }: {
   chatId: string; locale: "ko" | "en"; isCurrent: () => boolean; onDeleted: () => void;
+  /** Called after Main accepted pause or delete; directions queued behind the run were dropped with it. */
+  onStopped?: () => void;
   /** Bumped by the composer after Main acknowledges a Goal model handoff. */
   handoffRequestKey?: number;
   /** From the latest durable invocation final, never the composer default. */
@@ -193,15 +199,15 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, lastConf
   const rootRef = useRef<HTMLElement>(null);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
-  const callbacks = useRef({ isCurrent, onDeleted });
-  callbacks.current = { isCurrent, onDeleted };
+  const callbacks = useRef({ isCurrent, onDeleted, onStopped });
+  callbacks.current = { isCurrent, onDeleted, onStopped };
   const session = useRef<ReturnType<typeof createOneGoalControlSession> | null>(null);
   useEffect(() => {
     const api = ipc();
     if (!api) return;
     const owner = createOneGoalControlSession({ chatId, api: api.chats,
       isCurrent: () => callbacks.current.isCurrent(), publish: setView,
-      onDeleted: () => callbacks.current.onDeleted() });
+      onDeleted: () => callbacks.current.onDeleted(), onStopped: () => callbacks.current.onStopped?.() });
     session.current = owner;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let disposed = false;
