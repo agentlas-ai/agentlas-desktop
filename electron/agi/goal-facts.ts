@@ -12,6 +12,7 @@
  */
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
+import { isEffectUncertainBlockReason } from "../long-run/effect-observation";
 import { isGoalObserving } from "../long-run/effect-observation-tickets";
 import type { AgiBlockerFacts, AgiBlockerSignal, AgiTacticFact } from "./blocker";
 
@@ -271,13 +272,20 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
         refs.push(`long_run_event:${run.id}:${lastWait.seq}`);
       }
       if (run.status === "waiting_user") signals.push({ kind: "needs_input", code: "waiting_user" });
-      const uncertain = uncertainAttemptIds(db, run.id);
-      const exhausted = exhaustedObservation(db, run.id);
-      if (exhausted && exhausted.attemptIds.some((id) => uncertain.includes(id))) {
-        signals.push({ kind: "effect_observation_exhausted", attemptIds: exhausted.attemptIds, looksAfterExhausted: exhausted.looksAfter });
-        refs.push(`long_run_event:${run.id}:${exhausted.seq}`);
-      } else if (uncertain.length) {
-        signals.push({ kind: "effect_uncertain", attemptIds: uncertain });
+      // An outward effect whose result is unknown no longer holds a Goal (1.2.58, owner decision 2026-10-05): the next
+      // turn reads the previous one and checks for itself, and the looks that ended in "exhausted" are retired. Open
+      // uncertain attempts are the blocker only for a Goal an older install left blocked on one. Otherwise they hid the
+      // real failure: on 2026-10-05 AGI filed the rooms' runtime_turn_unsettled loop as cause effect_uncertain, cited a
+      // look exhausted the day before, and sent teammate work on that basis.
+      if (run.status === "blocked" && isEffectUncertainBlockReason(run.blockedReason)) {
+        const uncertain = uncertainAttemptIds(db, run.id);
+        const exhausted = exhaustedObservation(db, run.id);
+        if (exhausted && exhausted.attemptIds.some((id) => uncertain.includes(id))) {
+          signals.push({ kind: "effect_observation_exhausted", attemptIds: exhausted.attemptIds, looksAfterExhausted: exhausted.looksAfter });
+          refs.push(`long_run_event:${run.id}:${exhausted.seq}`);
+        } else if (uncertain.length) {
+          signals.push({ kind: "effect_uncertain", attemptIds: uncertain });
+        }
       }
       if (run.stallStreak >= run.stallWindow && run.stallWindow > 0) signals.push({ kind: "stall_detected", streak: run.stallStreak });
       if (deps.continuationParkedForOwner?.(goalId)) signals.push({ kind: "needs_input", code: "continuation_needs_input" });
