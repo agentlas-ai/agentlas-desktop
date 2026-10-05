@@ -638,13 +638,13 @@ export function OneTurnWork({
   const active = busy || preparing;
   const loginWaiting = !active && (runStatus === "waiting_input"
     || state.items.some(item => item.kind === "run" && item.status === "waiting_input"));
-  // Show actual tool actions during a run on both One and Work. Raw results
-  // stay collapsed inside each row; the user may still fold the process.
-  const [expanded, setExpanded] = useState(active);
+  // The process rows (thoughts, tool calls, notes) start folded, while the run works and after it settles; the live
+  // headline still says what is happening now, and the chevron opens the rows (owner 2026-10-05: reasoning entries
+  // are collapsed by default). A manual toggle holds while that run receives more events; a new run or its
+  // settlement folds them again.
+  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
-    // Open at run start, collapse on settlement, and preserve a manual toggle
-    // while that run receives more events.
-    setExpanded(active);
+    setExpanded(false);
   }, [active]);
   const liveElapsedMs = useElapsed(startedAt, active);
   // 답 없이 끊긴 실행. 종료 이벤트가 아니라 원장 판정을 근거로 삼는다 — 앱이 죽으면
