@@ -33,6 +33,7 @@ import {
   type BrowserApprovalLifecycleEvent,
   type BrowserPermissionDecision,
 } from "../browser/connect";
+import { getDb } from "../store/db";
 import { onDesktopStoreChange } from "../store/change-bus";
 import {
   acceptCanonicalTaskResult,
@@ -1674,6 +1675,8 @@ const RUN_CONTEXT_CACHE_MAX = 64;
 interface RunEventContext {
   cwd: string | undefined;
   taskId: string | null;
+  /** The run speaks in the owner's personal One conversation. */
+  personalOne: boolean;
 }
 const runContextCache = new Map<string, RunEventContext>();
 
@@ -1683,6 +1686,7 @@ function cachedRunContext(runId: string, chatId: string): RunEventContext {
   const resolved: RunEventContext = {
     cwd: resolveChatCwd(chatId),
     taskId: findCanonicalTaskForChat(chatId)?.id ?? null,
+    personalOne: isPersonalOneConversation(chatId),
   };
   if (runContextCache.size >= RUN_CONTEXT_CACHE_MAX) {
     const oldest = runContextCache.keys().next();
@@ -1694,6 +1698,32 @@ function cachedRunContext(runId: string, chatId: string): RunEventContext {
 
 function forgetRunContext(runId: string): void {
   runContextCache.delete(runId);
+}
+
+function isPersonalOneConversation(chatId: string): boolean {
+  try {
+    const db = getDb();
+    return !!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get()
+      && !!db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE chat_id=?").get(chatId);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * What the phone shows in its notification bar when One left the owner a message (owner 2026-10-05: "주인에게 줄
+ * 메세지있으면 폰에 알람떠야하는데 알림표시줄에"). Only a saved root answer counts: a quiet check-in or review saves
+ * nothing, so it carries no durable message id and never reaches the phone as a message.
+ */
+export function projectOneMessageForPhone(
+  event: Pick<McpInvocationEvent, "kind" | "agentId" | "durableMessageId" | "text">,
+): { messageId: string; preview: string } | null {
+  if (event.kind !== "final" || event.agentId || typeof event.durableMessageId !== "string" || !event.durableMessageId) return null;
+  const text = stripMobileBridgeControlFences(typeof event.text === "string" ? event.text : "")
+    .replace(/[*_`#>]+/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return { messageId: boundedRedactedText(event.durableMessageId, 256), preview: boundedRedactedText(text, 600) };
 }
 
 function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloadSummaryDto | null {
@@ -5059,11 +5089,18 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       invocationService.onEvent(({ runId, chatId, event }) => {
         // Live events arrive per token; the folder and Task lookups are per
         // RUN, not per event. The cache is dropped when the run terminates.
-        const { cwd, taskId } = cachedRunContext(runId, chatId);
+        const { cwd, taskId, personalOne } = cachedRunContext(runId, chatId);
+        const oneMessage = personalOne ? projectOneMessageForPhone(event) : null;
         this.emit({
           event: "invoke.event",
           payload: asJsonValue(
-            { runId, chatId, event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd }) },
+            {
+              runId,
+              chatId,
+              event: projectMobileBridgeInvocationEvent(event, { taskId, chatId, runId, cwd }),
+              ...(personalOne ? { personalOne: true } : {}),
+              ...(oneMessage ? { oneMessage } : {}),
+            },
             "invoke.event envelope",
           ),
         });
