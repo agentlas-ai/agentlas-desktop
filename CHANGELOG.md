@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.62 — 2026-10-05
+
+- The app no longer freezes for a second or more right after a turn that saves new experience. Saving an experience used to rewrite the agent's whole experience map; it now writes only the entries that changed.
+- Agents writing posts, reports or notes, or browsing, are no longer told to use the code map tools, which refused them; those refusals, and the git commands run to feed them in folders that are not repositories, were most of the failed tool calls in a day (Agentlas OS v1.2.55).
+- The phone's view of your personal One shows Science projects again when there are many of them: the projects are checked side by side, and a project that answers late keeps its last known state.
+- Quitting the app stops its background timers before the database closes, so a quit no longer logs database errors.
+- The Science header shows only the mode menu, without the tagline and status words.
+
+This release binds Agentlas OS v1.2.55 at 80d400b784a49a0ce6369addc8d4b8f62fe238c4; public runtime asset `hephaestus-runtime-v1.2.55.tar.gz` is pinned at SHA-256 `bfa861082c160739cd3e32884a67d3ef9c8af92e5d889ecd96682082072ae775`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.61 — 2026-10-05
 
 - Messages you send to your personal One from the phone reach it again; they had stopped at "접수 확인 중" because Desktop refused a field the newer phone app sends with them.
