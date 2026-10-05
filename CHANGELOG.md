@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.64 — 2026-10-06
+
+- Agents using the browser and computer-use script tool no longer get "Value is not JSON serializable." when their code does not end with `return`; such a call now answers null, and the tool tells agents to `return` the value they want (for example `return await cua.getState()`).
+
+This release binds Agentlas OS v1.2.55 at 80d400b784a49a0ce6369addc8d4b8f62fe238c4; public runtime asset `hephaestus-runtime-v1.2.55.tar.gz` is pinned at SHA-256 `bfa861082c160739cd3e32884a67d3ef9c8af92e5d889ecd96682082072ae775`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.63 — 2026-10-06
 
 - One in a group room can use its team, graph and Toolchain tools again. Since 1.2.61 a room's tool list was longer than the tool server allowed, so every one of those calls failed with "One team capability is invalid."
