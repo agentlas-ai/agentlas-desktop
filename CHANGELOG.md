@@ -2,6 +2,7 @@
 
 ## 1.2.63 — 2026-10-06
 
+- One in a group room can use its team, graph and Toolchain tools again. Since 1.2.61 a room's tool list was longer than the tool server allowed, so every one of those calls failed with "One team capability is invalid."
 - An unexpected error inside the app is written to the log instead of opening an error window. That window stopped the whole app, including its own quit and any update waiting to install, until someone clicked OK; overnight on 2026-10-05 it held an update quit for minutes with nobody at the Mac.
 
 This release binds Agentlas OS v1.2.55 at 80d400b784a49a0ce6369addc8d4b8f62fe238c4; public runtime asset `hephaestus-runtime-v1.2.55.tar.gz` is pinned at SHA-256 `bfa861082c160739cd3e32884a67d3ef9c8af92e5d889ecd96682082072ae775`.
