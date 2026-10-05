@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.60 — 2026-10-05
+
+- What you write to a room while its Goal is working reaches that Goal at the next step instead of waiting for the whole run, and it stays visible in the room when you come back from another room.
+- Rooms no longer show the raw "Memory Events" block at the end of a Goal's intermediate replies, and what those replies learned is kept in memory.
+- A Toolchain step that says it only reads but uses a tool that can change things is refused when the Toolchain is saved, with what to use instead, rather than failing on every run.
+- The Goal check reads a page search the same way on every runtime.
+- Science: a paper's saved text, downloaded PDF or mirrored web page opens from the paper's entry; research stages and prior work are drawn as pictures; a Full Autonomy study without a folder gets its own folder before its first turn; a failed paper extraction says what it means for that paper.
+
+This release binds Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.59 — 2026-10-05
 
 - A sign-in page or a site's human check (such as "I'm not a robot") is noticed whatever runs the conversation: Claude, Codex, Antigravity, Grok, Kimi, Cursor, an API key or a local model. The browser comes to the front and One tells you which conversation needs you. In 1.2.58 only conversations run by Codex reached One this way.
