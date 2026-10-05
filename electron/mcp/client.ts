@@ -2136,8 +2136,12 @@ async function runMcpInvocationInContext(
     }
     // Login wall = product defect (owner 2026-09-28). After a browser tool result, read where the
     // agent actually stands from its own browser surface and run the recovery ladder; never blocks.
-    const browserTool = ev.kind === "tool-use" && ev.tool?.result !== undefined && !ev.tool.isError
-      && ev.tool.name.startsWith("agentlas-browser.") ? ev.tool.name : null;
+    // Codex names the call `agentlas-browser.browser_x`, Claude and the other runtimes `mcp__agentlas-browser__browser_x`.
+    // Only the codex spelling was matched, so on Claude a human check never reached the ladder or the owner
+    // (isolated 1.2.58 app, 2026-10-05: reCAPTCHA demo page opened, no card, no report to One).
+    const browserLeaf = ev.kind === "tool-use" && ev.tool?.result !== undefined && !ev.tool.isError
+      ? /^(?:agentlas-browser\.|mcp__agentlas-browser__)(browser_[a-z_]+)$/.exec(ev.tool.name)?.[1] : undefined;
+    const browserTool = browserLeaf ? `agentlas-browser.${browserLeaf}` : null;
     if (browserTool) {
       // Canonical native calls are observed at the awaited transport boundary.
       // Legacy isolated AgentApp callers retain their existing observer only.
