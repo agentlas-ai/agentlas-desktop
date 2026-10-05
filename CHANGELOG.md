@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.2.58 — 2026-10-05
+
+- Hand work to your personal One the way you would to an assistant. One delegates to Work sessions and teammates with full access, checks what comes back against your request, sends one follow-up when something is missing, and tells you the result.
+- Your personal One works with full access and Computer Use on your Mac, so it can operate any app, file, setting or website for you, through the screen when there is no other way. If macOS has not yet allowed Agentlas Accessibility or Screen Recording, One asks you to.
+- One can post into any Agentlas conversation, including the Science thread you name, and starts Science studies in an existing conversation.
+- What the app cannot get past on its own in another room (a browser that is really unavailable, a sign-in or human check only you can pass, a Goal found stuck) is told to you by One, not only left as a card in that room.
+- When One leaves you a message, the Agentlas phone app can show it in the notification bar, with a switch in its notification settings (phone app 1.1.41 build 101 or later).
+- One speaks first when it matters. Ask it to check something every few minutes or daily, and it runs the check on its own and reports. A check with nothing worth telling stays silent. One also tells you when work it delegated is waiting for your answer.
+- Ask One to change a setting or use a feature of the app, and it does it the way your own click would: settings, automations, agents, projects, memory, models, and Science when it is installed. Deleting, installing, publishing, sending and answering happen only when you asked in your own message; approvals, keys, sign-in and payment stay with you.
+- Toolchains look like apps: each has its own icon, drawn once by your image model when it becomes a tool, and opening one shows in a few lines how it came to be: who made it, how often it ran, when it became a tool, and who called it since.
+- One's memories are titled with the line its curator wrote for them, instead of the raw request.
+- Resuming a long Codex conversation no longer times out when its history holds certain line-separator characters (copied from web pages such as Threads); those replies and updates were being dropped.
+- A Goal keeps its scheduled wait when a new message's start fails before any model runs, instead of sitting idle until the app restarts.
+- Browser approvals reach the phone in the conversation that asked, so they can be answered there.
+- A Goal no longer stops on an interrupted outside action whose result is unknown. Every turn now starts with what the previous turn in its conversation did and how it ended, and checks the current state itself before repeating an action; the separate read-only checks and owner acknowledgments are gone.
+- An automation step whose earlier outside action has an unknown result runs with a note about it, instead of holding the automation.
+- An error from an in-app page tool goes back to the agent to try another way, instead of stopping with a card for you.
+- Run delegated Work while the background service holds the database, so a hand-off never waits in a queue.
+- Record live tool approvals durably, so a reconnecting phone or a restarted app reads the real decision. A direction sent to running work now shows when the next run applied it.
+- Read Codex usage correctly and keep working on the same provider's credits when the subscription window runs out; monthly and spending caps still stop it.
+- Stop asking for payment approval on analytics labels such as "Subscribers gained", and stop the staff edit sheet from reopening by itself.
+- A searchable replacement-agent picker, a memory map with kind filters, no focus ring on text fields, and a cleaner personal One screen without internal states or activity logs.
+- Keep Codex's bundled computer use closed unless the run chose Computer Use.
+- The phone opens your personal One on the selected computer.
+
+This release binds Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.57 — 2026-10-03
 
 - Schedule independent OS update preparation after the product document loads, keeping required startup integrity and execution checks.
