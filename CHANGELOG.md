@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.61 — 2026-10-05
+
+- Messages you send to your personal One from the phone reach it again; they had stopped at "접수 확인 중" because Desktop refused a field the newer phone app sends with them.
+- After a restart under heavy load (an OS update, for example), the phone connection starts again on its own if it could not start the first time, instead of waiting for "연결 다시 열기" in Settings.
+- A turn's thoughts and tool steps stay folded by default, also while it runs; the line at the top still says what is happening, and the arrow opens the steps.
+- One in a group room no longer sees the tools that only work in your personal One conversation, so it stops trying them.
+- When a Goal seems stuck, the app's diagnosis names what actually failed instead of an older uncertain step.
+- The background service can run a long command as a background task with a short id, keep its output, and tell when it ends.
+
+This release binds Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.60 — 2026-10-05
 
 - What you write to a room while its Goal is working reaches that Goal at the next step instead of waiting for the whole run, and it stays visible in the room when you come back from another room.
