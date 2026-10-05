@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.63 — 2026-10-06
+
+- An unexpected error inside the app is written to the log instead of opening an error window. That window stopped the whole app, including its own quit and any update waiting to install, until someone clicked OK; overnight on 2026-10-05 it held an update quit for minutes with nobody at the Mac.
+
+This release binds Agentlas OS v1.2.55 at 80d400b784a49a0ce6369addc8d4b8f62fe238c4; public runtime asset `hephaestus-runtime-v1.2.55.tar.gz` is pinned at SHA-256 `bfa861082c160739cd3e32884a67d3ef9c8af92e5d889ecd96682082072ae775`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.62 — 2026-10-05
 
 - The app no longer freezes for a second or more right after a turn that saves new experience. Saving an experience used to rewrite the agent's whole experience map; it now writes only the entries that changed.
