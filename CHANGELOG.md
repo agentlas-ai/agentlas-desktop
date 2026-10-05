@@ -6,6 +6,10 @@
 - Rooms no longer show the raw "Memory Events" block at the end of a Goal's intermediate replies, and what those replies learned is kept in memory.
 - A Toolchain step that says it only reads but uses a tool that can change things is refused when the Toolchain is saved, with what to use instead, rather than failing on every run.
 - The Goal check reads a page search the same way on every runtime.
+- A room no longer fails every minute after an earlier reply left its Codex conversation open: the app waits for that conversation to be released before the next step continues it.
+- A Goal whose steps keep failing waits longer between attempts (30 seconds, then 1, 2, 4 minutes and so on, up to 6 hours) instead of retrying every minute; a step that succeeds brings it back to its normal pace.
+- When you press Stop or pause a Goal while your next directions are waiting, what you wrote goes back into the message box instead of disappearing. The waiting list shows only what you wrote, and removing an item removes the one you picked.
+- A Toolchain step that an earlier version marked done without its result runs again, instead of the next step failing on every retry.
 
 This release binds Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`.
 
