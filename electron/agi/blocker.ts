@@ -19,6 +19,7 @@
  */
 import { createHash } from "node:crypto";
 import type { FailureCauseKind, PersistenceBoundaryKind } from "../../shared/persistence-policy";
+import { goalContinuationAdmissible } from "../../shared/goal-continuation";
 
 export const AGI_BLOCKER_SCHEMA = "agentlas.agi-blocker.v1" as const;
 
@@ -259,12 +260,16 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     let altPaths = rest.altPaths.filter((action, index, list) => list.indexOf(action) === index);
     if (altPaths[0] === "ask_owner_once") altPaths = [...altPaths.slice(1), "ask_owner_once"];
     if (altPaths.includes("ask_owner_once") && !altPaths.some((action) => !AGI_NON_ALTERNATIVE_ACTIONS.has(action))) {
-      altPaths = eligibleTactics.length ? ["start_work_turn", ...altPaths] : ["replan_tree", ...altPaths];
+      altPaths = eligibleTactics.length && goalContinuationAdmissible(facts.status, facts.pauseReason)
+        ? ["start_work_turn", ...altPaths] : ["replan_tree", ...altPaths];
     }
     if ((ownerClass === "our_defect" || defects.length) && !altPaths.includes("file_defect")) altPaths.push("file_defect");
     // An unresolved action is an incident, not a stop for the whole Goal.
     // The work controller can pick another tactic while this incident is repaired.
-    if (rest.attemptDue && boundary !== "owner_stop" && !altPaths.includes("start_work_turn")) altPaths.unshift("start_work_turn");
+    // Offer a work turn only when the host can continue the Goal now (shared/goal-continuation.ts); otherwise the
+    // host defers it every time and the refusals come back as defect reports.
+    if (!goalContinuationAdmissible(facts.status, facts.pauseReason)) altPaths = altPaths.filter((action) => action !== "start_work_turn");
+    else if (rest.attemptDue && boundary !== "owner_stop" && !altPaths.includes("start_work_turn")) altPaths.unshift("start_work_turn");
     return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, defects, evidenceRefs,
       ...rest, display: rest.attemptDue && boundary !== "owner_stop" ? "running" : rest.display,
       ownerClass, boundary, altPaths };

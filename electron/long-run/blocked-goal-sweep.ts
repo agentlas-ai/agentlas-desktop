@@ -298,8 +298,10 @@ function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher,
   return resume(run, dispatcher, trigger);
 }
 
-/** Host pauses an Alive orchestrator may continue. An owner pause, an approval hold and a budget stop never are. */
-export const ALIVE_CONTINUABLE_PAUSE_REASONS: ReadonlySet<string> = new Set(["agent_paused", "runtime_unavailable", "app_closed", "crash_recovery"]);
+/** Host pauses an Alive orchestrator may continue. An owner pause, an approval hold and a budget stop never are.
+ * One definition, shared with the AGI classifier (shared/goal-continuation.ts). */
+export { ALIVE_CONTINUABLE_PAUSE_REASONS } from "../../shared/goal-continuation";
+import { ALIVE_CONTINUABLE_PAUSE_REASONS } from "../../shared/goal-continuation";
 
 /**
  * The Alive One/Work orchestrator's `goal.continue` — the same continuation path this sweep uses, for one Goal,
