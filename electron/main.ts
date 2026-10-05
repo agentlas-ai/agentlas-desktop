@@ -142,7 +142,7 @@ import { resolveOneTeamAvatarProtocolPath } from "./one/avatar";
 import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
-import { initFileLogging, installStdioErrorGuard, mainLogFilePath } from "./logging";
+import { initFileLogging, installMainProcessErrorSink, installStdioErrorGuard, mainLogFilePath } from "./logging";
 import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
 import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
@@ -331,6 +331,8 @@ export { currentUiLocale } from "./ui-locale";
  * 실측(2026-09-07): 그 구간에서 EPIPE 가 uncaughtException 으로 올라와 앱이 죽었다.
  */
 installStdioErrorGuard();
+// An uncaught error is logged instead of opening Electron's modal error box, which blocks Main (see logging.ts).
+installMainProcessErrorSink();
 
 // MCP helpers use this executable as a Node host. If a caller loses the Node
 // flag, Electron otherwise ignores the inline program and boots the product.
