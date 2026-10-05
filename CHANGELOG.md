@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.65 — 2026-10-06
+
+- A long Goal that keeps opening browser tabs no longer stops when all 8 are in use: when it needs a new tab it closes its own least recently used one. The tab it works in, the tab you are looking at and other tasks' tabs stay.
+- A Goal paused by its budget stays paused quietly. The app no longer keeps trying to unblock it as a payment problem or files repeated defect reports about it.
+- Opening the phone no longer sends a burst of Science status calls at once; at most four go out together, and a project that answers late keeps its last known state.
+
+This release binds Agentlas OS v1.2.55 at 80d400b784a49a0ce6369addc8d4b8f62fe238c4; public runtime asset `hephaestus-runtime-v1.2.55.tar.gz` is pinned at SHA-256 `bfa861082c160739cd3e32884a67d3ef9c8af92e5d889ecd96682082072ae775`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.64 — 2026-10-06
 
 - Agents using the browser and computer-use script tool no longer get "Value is not JSON serializable." when their code does not end with `return`; such a call now answers null, and the tool tells agents to `return` the value they want (for example `return await cua.getState()`).
