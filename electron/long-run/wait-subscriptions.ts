@@ -263,7 +263,8 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
     const prior = latestGoalWaitSubscription(run.goalId);
     if (prior?.state === "pending" || prior?.state === "claimed") throw new Error("goal_wait_already_registered");
     const boundary = readInvocationEffectBoundary({ invocationRunId: input.invocationRunId, expectedChatId: run.rootChatId });
-    if (boundary.effects !== "settled") throw new Error("goal_wait_effects_uncertain");
+    // Waiting does nothing outside; it needs only the producing turn to have finished (owner 2026-10-05).
+    if (!boundary.terminal) throw new Error("goal_wait_effects_uncertain");
     const attempt = getDb().prepare("SELECT worker_id, attempt FROM long_run_worker_attempts WHERE invocation_run_id=? AND run_id=?")
       .get(input.invocationRunId, run.id) as { worker_id: string; attempt: number } | undefined;
     if (!attempt) throw new Error("goal_wait_attempt_missing");

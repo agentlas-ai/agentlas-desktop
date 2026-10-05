@@ -1222,7 +1222,8 @@ export class InvocationService {
         held += 1;
         continue;
       }
-      if (!originalBoundary.terminal || originalBoundary.effects !== "settled") {
+      // The owner's own message is never held on an unknown outside outcome, only on a run that has not finished.
+      if (!originalBoundary.terminal) {
         holdQueuedSteerForRecovery(row.id, "original-run-effect-boundary-unconfirmed");
         held += 1;
         continue;

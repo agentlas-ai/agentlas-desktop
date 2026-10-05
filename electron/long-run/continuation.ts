@@ -78,7 +78,7 @@ export function prepareCheckpointContinuation(checkpoint: LongRunTaskCheckpoint,
   const expected = checkpoint.sideEffects.boundary;
   if (checkpoint.sideEffects.state !== "settled" || !expected || expected.invocationRunId !== checkpoint.invocationRunId) throw new Error("checkpoint_effect_boundary_missing");
   const boundary = readInvocationEffectBoundary({ invocationRunId: expected.invocationRunId, expectedChatId: chat.id });
-  if (boundary.effects !== "settled" || boundary.terminalEventId !== expected.terminalEventId
+  if (!boundary.terminal || boundary.terminalEventId !== expected.terminalEventId
     || boundary.receiptEventId !== expected.receiptEventId || boundary.snapshotDigest !== expected.snapshotDigest) throw new Error("checkpoint_effect_boundary_changed");
   const newest = getDb().prepare("SELECT invocation_run_id, state FROM long_run_worker_attempts WHERE run_id = ? AND worker_id IN (SELECT id FROM long_run_workers WHERE run_id = ? AND role = 'controller') ORDER BY rowid DESC LIMIT 1")
     .get(run.id, run.id) as { invocation_run_id: string | null; state: string } | undefined;

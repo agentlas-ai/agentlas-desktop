@@ -568,28 +568,27 @@ export function latestLongRunAttemptSafeEpoch(runId: string): LongRunAttemptSafe
   })();
 }
 
-/** Attempts still unsafe to replay after applying only an exact, durable human
- * acknowledgment. Running attempts always remain unsafe, as does every attempt
- * created after the acknowledged ledger epoch. */
+/**
+ * Attempts that still hold the Goal: only one that is running right now.
+ *
+ * Owner decision 2026-10-05 ("그냥 잠금 제거하고 … 미해결 대다수 오탐"): an attempt that ended without the app
+ * knowing its outside outcome (interrupted, cancelled, failed, app closed) no longer holds anything. On the
+ * owner's DB 73 such attempts produced 139 read-only looks (127 inconclusive), 19 manual acknowledgments and
+ * a Goal that re-ran every minute, while only 3 had really posted. Its record stays in the ledger, and the
+ * next turn reads it as short-term memory (memory/previous-turn.ts) and checks for itself.
+ */
 export function unsettledLongRunAttempts(runId: string): UnsettledLongRunAttempt[] {
   const rows = getDb().prepare(
-    `SELECT a.id, a.state, a.side_effect_state, a.invocation_run_id,
+    `SELECT a.id, a.state, a.side_effect_state,
        (SELECT MIN(e.seq) FROM long_run_events AS e
         WHERE e.run_id = a.run_id AND e.kind = 'worker.attempt_started'
           AND json_extract(e.payload_json, '$.attemptId') = a.id) AS start_event_seq
      FROM long_run_worker_attempts AS a
-     WHERE a.run_id = ? AND (a.state IN ('running','uncertain') OR a.side_effect_state = 'uncertain')
+     WHERE a.run_id = ? AND a.state = 'running'
      ORDER BY a.started_at, a.id`,
   ).all(runId) as Array<{ id: string; state: LongRunAttemptState;
-    side_effect_state: "none" | "committed" | "uncertain"; invocation_run_id: string | null; start_event_seq: number | null }>;
-  const safeEpoch = latestLongRunAttemptSafeEpoch(runId);
-  const acknowledged = new Set(safeEpoch?.attemptIds ?? []);
-  // Its own closed receipt already answers an attempt that only read or never reached the model.
-  return rows.filter((row) => row.state === "running" || !attemptReceiptProvesNoEffect(row.invocation_run_id)).filter((row) =>
-    row.state === "running" || !safeEpoch || !acknowledged.has(row.id)
-    || row.start_event_seq === null || row.start_event_seq > safeEpoch.throughEventSeq).map((row) => ({
-      id: row.id, state: row.state, sideEffectState: row.side_effect_state, startEventSeq: row.start_event_seq,
-    }));
+    side_effect_state: "none" | "committed" | "uncertain"; start_event_seq: number | null }>;
+  return rows.map((row) => ({ id: row.id, state: row.state, sideEffectState: row.side_effect_state, startEventSeq: row.start_event_seq }));
 }
 
 export function getLongRunAttemptReview(runId: string): LongRunAttemptReview {

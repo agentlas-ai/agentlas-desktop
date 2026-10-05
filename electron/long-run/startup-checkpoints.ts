@@ -79,7 +79,7 @@ export function scheduleUnverifiedOngoingGoalCycles(): CheckpointStartupResult[]
             || getChatGoalRevision(current.goalId)?.lifecycle !== "ongoing") throw new Error("ongoing_verification_recovery_changed");
           const effect = readInvocationEffectBoundary({ invocationRunId: producer.invocationRunId,
             expectedChatId: producer.chat.id });
-          if (effect.effects !== "settled" || effect.snapshotDigest !== producer.effect.snapshotDigest)
+          if (!effect.terminal || effect.snapshotDigest !== producer.effect.snapshotDigest)
             throw new Error("goal_wait_effects_uncertain");
           transitionLongRun({ runId: id, to: "queued", actorKind: "host",
             reason: "ongoing-observation-recovered", expectedVersion: current.version });
@@ -296,7 +296,7 @@ function preflightMissingStartupCheckpoint(candidate: NonNullable<ReturnType<typ
   let effect: ReturnType<typeof readInvocationEffectBoundary>;
   try { effect = readInvocationEffectBoundary({ invocationRunId: producer.invocation_run_id, expectedChatId: chat.id }); }
   catch { startupReplayRefusal("effect_boundary_uncertain"); }
-  if (effect.effects !== "settled" || !effect.receiptEventId || !effect.terminalEventId || !effect.snapshotDigest) {
+  if (!effect.terminal || !effect.receiptEventId || !effect.terminalEventId || !effect.snapshotDigest) {
     startupReplayRefusal("effect_boundary_uncertain");
   }
   const artifacts = listAgentSurfaces(chat.id).map((surface) => ({
@@ -386,7 +386,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
         const pendingDirection = hasPendingInvocationDirection(producer.invocation_run_id);
         if (pendingDirection) { refuse("newer_user_direction"); continue; }
         const effect = readInvocationEffectBoundary({ invocationRunId: producer.invocation_run_id, expectedChatId: chat.id });
-        if (effect.effects !== "settled") { refuse("effect_boundary_uncertain"); continue; }
+        if (!effect.terminal) { refuse("effect_boundary_uncertain"); continue; }
         const selection = exactLegacyGoalLifecycleRuntimeSelection({ longRunId: id, chatId: chat.id });
         if (!selection) { refuse("exact_runtime_unavailable"); continue; }
         const prepared = await prepareLegacyGoalLifecycle({ goalId: candidate.goalId, longRunId: id,
@@ -411,7 +411,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
             ORDER BY rowid DESC LIMIT 1`).get(chat.id) as { id: string } | undefined;
           if (latestUser?.id !== prepared.source.messageId || hasPendingInvocationDirection(producer.invocation_run_id ?? "")) throw new Error("legacy_lifecycle_newer_direction");
           const currentEffect = readInvocationEffectBoundary({ invocationRunId: producer.invocation_run_id!, expectedChatId: chat.id });
-          if (currentEffect.effects !== "settled" || currentEffect.receiptEventId !== effect.receiptEventId
+          if (!currentEffect.terminal || currentEffect.receiptEventId !== effect.receiptEventId
             || currentEffect.snapshotDigest !== effect.snapshotDigest) throw new Error("legacy_lifecycle_effect_changed");
           let workspace: string | null = null;
           try { workspace = JSON.parse(producer.workspace_binding_json)?.cwd ?? null; } catch { /* Reject below. */ }

@@ -706,6 +706,14 @@ export type EffectObservationDispatchResult =
  * 여러 자리(체크포인트 차단 직후·재시작 차단 직후·목표 칩 조회)에서 불러도 안전하다 —
  * 다이제스트당 한 번만 뜬다.
  */
+/**
+ * Owner decision 2026-10-05: a Goal no longer launches a separate read-only look at an earlier uncertain effect.
+ * The owner DB had 139 such looks, 127 inconclusive, each about 55k input tokens. The next turn of the
+ * conversation reads the previous turn as short-term memory (memory/previous-turn.ts) and checks for itself.
+ * An automation's own graph hold is a separate kernel path and is still observed through its automation below.
+ */
+const GOAL_EFFECT_LOOKS_RETIRED = true;
+
 export function maybeDispatchEffectObservation(
   dispatcher: EffectObservationDispatcher, goalId: string, trigger: string, options: { epoch?: number } = {},
 ): EffectObservationDispatchResult {
@@ -748,6 +756,7 @@ export function maybeDispatchEffectObservation(
       return viaAutomation;
     }
   }
+  if (GOAL_EFFECT_LOOKS_RETIRED) return { status: "skipped", reason: "effect_observation_retired" };
   const review = getLongRunAttemptReview(run.id);
   review.attempts = review.attempts.filter((attempt) => attempt.state !== "running");
   if (review.attempts.length > MAX_OBSERVED_ATTEMPTS) {
