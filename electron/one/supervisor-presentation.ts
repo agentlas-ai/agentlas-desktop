@@ -57,9 +57,12 @@ export function supervisorReplyTurns(db:Database.Database,chatId:string,requests
         } else if(event.kind==='tool-use') add(`tool:${event.tool?.id ?? event.sequence}`,'tool',event.tool?.name,event.tool?.isError?'failed':event.tool?.result!==undefined?'completed':'running');
       }
     }
-    const terminal=['completed','cancelled','failed'].includes(row.state);
+    // Held means Main cannot attest to a live owner after reconnect/restart.
+    // Preserve the turn and its observed activity, without projecting it as
+    // still thinking or executing tools on clients that display the activity.
+    const inactive=['completed','cancelled','failed','held'].includes(row.state);
     return {commandId:row.command_id,runId:row.run_id!,userMessageId:row.user_message_id!,
       assistantMessageId:supervisorExactResult(db,chatId,row.run_id)?.id ?? null,state:row.state,createdAt:row.created_at,
-      activity:[...activity.values()].slice(-20).map(item=>terminal && item.state==='running'?{...item,state:'interrupted' as const}:item)};
+      activity:[...activity.values()].slice(-20).map(item=>inactive && item.state==='running'?{...item,state:'interrupted' as const}:item)};
   });
 }

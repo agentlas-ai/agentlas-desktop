@@ -15,7 +15,7 @@ import { OneMemorySheet } from "./OneMemorySheet";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import type { OneMemoryState } from "@/lib/types";
 import { SupervisorOutbox, type PendingSupervisorWrite, type SupervisorWrite } from "@/lib/one-supervisor-outbox";
-import { personalOneTranscript } from "@/lib/personal-one-transcript";
+import { personalOneReplyPresentation, personalOneTranscript } from "@/lib/personal-one-transcript";
 import { usePersonalOneReply } from "@/lib/use-personal-one-reply";
 import { personalOneFile, type PersonalOneFile } from "@/lib/personal-one-file-preview";
 import { TaskSidePanel } from "@/components/workspace/TaskSidePanel";
@@ -180,16 +180,17 @@ export function PersonalOneWorkspace() {
       <div ref={transcript} className={styles.transcript} onScroll={event=>{const element=event.currentTarget;nearBottom.current=element.scrollHeight-element.scrollTop-element.clientHeight<100;}} aria-live="polite">
         <div className={styles.thread}>
           {!snapshot?.messages.length&&!pendingMessages.length&&<div className={styles.empty}><h2>{copy("무엇을 함께 할까요?","What shall we work on?")}</h2></div>}
-          {personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []).map(({message,turn,answer})=><div className={styles.turn} key={message.id} data-command-id={turn?.commandId}>
+          {personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []).map(({message,turn,answer})=>{
+            const replyPresentation=turn?personalOneReplyPresentation(turn,Boolean(answer),activeReply?.runId):null;
+            return <div className={styles.turn} key={message.id} data-command-id={turn?.commandId}>
             <article className={styles.bubble} data-role={message.role}><Markdown text={message.role==="assistant"?visibleAnswer(message.text):message.text} messageId={message.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>
             {answer&&<article className={styles.bubble} data-role="assistant" data-run-id={turn?.runId}><Markdown text={visibleAnswer(answer.text)} messageId={answer.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>}
             {!answer&&live&&turn&&live.runId===turn.runId&&live.text&&<article className={styles.bubble} data-role="assistant" data-run-id={turn.runId}><Markdown text={visibleAnswer(live.text)} messageId={"live:"+turn.runId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>}
             {turn&&snapshot?.delegations?.filter(item=>item.originReplyRunId===turn.runId).map(delegation)}
             {/* Owner 2026-10-04: no activity log under a reply ("이런건 없어도 되는"). While One answers, three dots. */}
-            {turn&&!answer&&!terminal(turn.state)&&(turn.state==="stored"
-              ?<p className={styles.delivery}>{copy("대기 중","Queued")}</p>
-              :!(live&&live.runId===turn.runId&&live.text)&&<div className={styles.typing} role="status" aria-label={copy("답하는 중","Answering")}><span/><span/><span/></div>)}
-          </div>)}
+            {replyPresentation==="answering"&&!(live&&live.runId===turn?.runId&&live.text)&&<div className={styles.typing} role="status" aria-label={copy("답하는 중","Answering")}><span/><span/><span/></div>}
+            {replyPresentation&&replyPresentation!=="answering"&&<p className={styles.delivery} role="status" data-reply-state={replyPresentation}>{replyPresentation==="queued"?copy("대기 중","Queued"):replyPresentation==="held"?copy("실행 확인 필요","Checking execution"):replyPresentation==="failed"?copy("답변이 중단되었습니다","Reply interrupted"):copy("취소됨","Cancelled")}</p>}
+          </div>})}
           {pendingMessages.map(message=><div className={styles.turn} key={message.commandId} data-optimistic-message={message.commandId}><article className={styles.bubble} data-role="user"><Markdown text={message.text} messageId={message.commandId}/></article><p className={styles.delivery}>{message.acknowledged?copy("접수됨","Received"):copy("접수 확인 중","Confirming reception")}</p></div>)}
           {snapshot?.delegations?.filter(item=>!item.originReplyRunId || !snapshot.turns?.some(turn=>turn.runId===item.originReplyRunId)).map(delegation)}
         </div>
