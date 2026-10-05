@@ -127,8 +127,9 @@ export default function ScienceHostPage() {
       } : undefined}>
         <header className={`${styles.header} titlebar-drag`}>
           <div className="titlebar-nodrag"><ProductModeMenu current="science" darkText locale={ko ? "ko" : "en"} /></div>
-          <div className={styles.title}>{ko ? "재현 가능한 연구 워크벤치" : "Reproducible research workbench"}</div>
-          <div className={styles.status}>{view?.state === "ready" ? (view.title || "Agentlas Science") : view?.state === "opening" ? (ko ? "여는 중" : "Opening") : ""}</div>
+          {/* No tagline and no status words: the header carries the mode menu only (owner 2026-10-05: cut the meaningless text). */}
+          <div className={styles.title} aria-hidden="true" />
+          <div className={styles.status} aria-hidden="true" />
         </header>
         <div ref={surfaceRef} className={styles.surface}>
           {(unavailable || failed) && (
