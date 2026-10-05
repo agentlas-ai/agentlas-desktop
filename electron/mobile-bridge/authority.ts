@@ -214,6 +214,7 @@ import {
   type MobileBridgeUserInputDto,
   type MobileBridgeVisualInputActionDto,
   type MobileBridgeVisualSessionRefusalDto,
+  ONE_SUPERVISOR_PARAM_KEYS,
 } from "../../shared/mobile-bridge";
 import { buildToolCallDisplay, normalizeToolCall } from "../../shared/tool-call-detail";
 import type { MobileBridgeHostIdentity } from "./pairing";
@@ -2554,17 +2555,17 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         },request.method);
       }
       case "one.supervisor.send":
-        return supervisorReceiptValue(oneSupervisor().send(guardedParams(request,["commandId","text","runtimeSelection"]) as unknown as SupervisorSendInput),request.method);
+        return supervisorReceiptValue(oneSupervisor().send(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.send"]) as unknown as SupervisorSendInput),request.method);
       case "one.supervisor.startWork":
-        return supervisorReceiptValue(oneSupervisor().startWork(guardedParams(request,["commandId","text","projectId","permissions","runtimeSelection"]) as unknown as SupervisorWorkInput),request.method);
+        return supervisorReceiptValue(oneSupervisor().startWork(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startWork"]) as unknown as SupervisorWorkInput),request.method);
       case "one.supervisor.startScience":
-        return supervisorReceiptValue(await oneSupervisor().startScience(guardedParams(request,["commandId","text","projectId"]) as unknown as SupervisorScienceInput),request.method);
+        return supervisorReceiptValue(await oneSupervisor().startScience(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startScience"]) as unknown as SupervisorScienceInput),request.method);
       case "one.supervisor.control":
-        return supervisorReceiptValue(await oneSupervisor().control(guardedParams(request,["commandId","taskId","expectedVersion","action","text"]) as unknown as SupervisorControlInput),request.method);
+        return supervisorReceiptValue(await oneSupervisor().control(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.control"]) as unknown as SupervisorControlInput),request.method);
       case "one.supervisor.stopReply":
-        return supervisorReceiptValue(oneSupervisor().stopReply(guardedParams(request,["commandId","runId"]) as unknown as {commandId:string;runId:string}),request.method);
+        return supervisorReceiptValue(oneSupervisor().stopReply(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.stopReply"]) as unknown as {commandId:string;runId:string}),request.method);
       case "one.supervisor.appearance":
-        return supervisorReceiptValue(oneSupervisor().appearance(guardedParams(request,['commandId','oneId','expectedVersion','displayName','bubbleColor']) as unknown as Parameters<ReturnType<typeof oneSupervisor>['appearance']>[0]),request.method);
+        return supervisorReceiptValue(oneSupervisor().appearance(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.appearance"]) as unknown as Parameters<ReturnType<typeof oneSupervisor>['appearance']>[0]),request.method);
       case "one.org.get": {
         noParams(request);
         return asJsonValue(getOneOrgState(), request.method);

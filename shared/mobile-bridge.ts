@@ -222,6 +222,22 @@ export type MobileBridgeMethod =
   | (typeof MOBILE_BRIDGE_METHODS)[number]
   | (typeof MOBILE_BRIDGE_RETIRED_METHODS)[number];
 
+/**
+ * The fields each One supervisor method accepts from the phone. The request validator here and the Desktop authority
+ * (electron/mobile-bridge/authority.ts) both read this one table. Two hand-kept lists drifted: the validator accepted
+ * `permissions` (and `oneId`) on one.supervisor.send while the authority refused them, so every phone message to the
+ * personal One stopped at "접수 확인 중" (production 2026-10-05 12:39 UTC, "one.supervisor.send contains unsupported
+ * field: permissions"; found by the monitoring peer session).
+ */
+export const ONE_SUPERVISOR_PARAM_KEYS = {
+  "one.supervisor.send": ["commandId", "text", "runtimeSelection", "permissions", "oneId"],
+  "one.supervisor.startWork": ["commandId", "projectId", "text", "permissions", "runtimeSelection", "oneId"],
+  "one.supervisor.startScience": ["commandId", "projectId", "text", "oneId"],
+  "one.supervisor.control": ["commandId", "taskId", "expectedVersion", "action", "text", "oneId"],
+  "one.supervisor.stopReply": ["commandId", "runId", "oneId"],
+  "one.supervisor.appearance": ["commandId", "oneId", "expectedVersion", "displayName", "bubbleColor"],
+} as const satisfies Record<string, readonly string[]>;
+
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "one.supervisor.send", "one.supervisor.startWork", "one.supervisor.startScience",
@@ -3541,13 +3557,7 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
     case "one.supervisor.appearance":
     case "one.supervisor.stopReply": {
       try {
-        const allowed = method === "one.supervisor.appearance" ? ['commandId','oneId','expectedVersion','displayName','bubbleColor']
-          : method === "one.supervisor.control" ? ["commandId","taskId","expectedVersion","action","text"]
-          : method === "one.supervisor.stopReply" ? ["commandId","runId"]
-          : method === "one.supervisor.startScience" ? ["commandId","projectId","text"]
-          : method === "one.supervisor.startWork" ? ["commandId","projectId","text","permissions","runtimeSelection"]
-          : ["commandId","text","runtimeSelection","permissions"];
-        supervisorObject(params,[...allowed,'oneId']); supervisorIdentifier(params.commandId);
+        supervisorObject(params,[...ONE_SUPERVISOR_PARAM_KEYS[method]]); supervisorIdentifier(params.commandId);
         if(params.oneId!==undefined)supervisorIdentifier(params.oneId);
         if(method==='one.supervisor.appearance') {
           supervisorIdentifier(params.oneId);
