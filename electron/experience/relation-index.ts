@@ -929,34 +929,77 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
     });
   }
 
+  // Write only the rows that changed. This runs on the Main thread after every promoting turn, and it used to
+  // delete and re-insert the whole index: production 2026-10-05 had 3,066 nodes and 65,137 edges behind five
+  // indexes, so one promotion rewrote ~68k rows (0.9-1.6 s measured on a copy of that database) and stalled
+  // Main for up to 3 s (science-daemon-rpc timerLatenessMs 3053 at 12:48:45 UTC, right after "[experience]
+  // promoted"). A promotion changes a few hundred rows. Changed rows are UPDATEd in place, never deleted and
+  // re-inserted: edges cascade from their nodes, so re-inserting a node would silently drop its unchanged edges.
+  // The per-row source_fingerprint/rebuilt_at therefore record when that row was last written; staleness is
+  // judged by experience_relation_index_state alone.
   const transaction = getDb().transaction(() => {
-    getDb().prepare("DELETE FROM experience_relation_edges").run();
-    getDb().prepare("DELETE FROM experience_relation_nodes").run();
-    const insertNode = getDb().prepare(
+    const db = getDb();
+    const nodeColumns = (node: NodeInsert) => [
+      node.packId, node.nodeType, node.entityRef, node.projectScopeKey, node.environmentKey,
+      node.basePackageHash, node.normalizedValue, JSON.stringify(node.payload),
+    ];
+    const edgeColumns = (edge: EdgeInsert) => [
+      edge.packId, edge.fromNode, edge.toNode, edge.edgeType, edge.projectScopeKey,
+      edge.environmentKey, edge.basePackageHash, JSON.stringify(edge.payload),
+    ];
+    const stored = (sql: string) => new Map(
+      (db.prepare(sql).raw().all() as unknown[][]).map((row) => [String(row[0]), JSON.stringify(row.slice(1))]),
+    );
+    const storedNodes = stored(
+      `SELECT node_id, pack_id, node_type, entity_ref, project_scope_key, environment_key,
+              base_package_hash, normalized_value, payload_json
+         FROM experience_relation_nodes`,
+    );
+    const storedEdges = stored(
+      `SELECT edge_id, pack_id, from_node, to_node, edge_type, project_scope_key,
+              environment_key, base_package_hash, payload_json
+         FROM experience_relation_edges`,
+    );
+    const deleteEdge = db.prepare("DELETE FROM experience_relation_edges WHERE edge_id = ?");
+    for (const edgeId of storedEdges.keys()) if (!edges.has(edgeId)) deleteEdge.run(edgeId);
+    const deleteNode = db.prepare("DELETE FROM experience_relation_nodes WHERE node_id = ?");
+    for (const nodeId of storedNodes.keys()) if (!nodes.has(nodeId)) deleteNode.run(nodeId);
+
+    const insertNode = db.prepare(
       `INSERT INTO experience_relation_nodes (
-         node_id, pack_id, node_type, entity_ref, project_scope_key, environment_key,
-         base_package_hash, normalized_value, payload_json, source_fingerprint, rebuilt_at
+         pack_id, node_type, entity_ref, project_scope_key, environment_key,
+         base_package_hash, normalized_value, payload_json, source_fingerprint, rebuilt_at, node_id
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const updateNode = db.prepare(
+      `UPDATE experience_relation_nodes SET
+         pack_id = ?, node_type = ?, entity_ref = ?, project_scope_key = ?, environment_key = ?,
+         base_package_hash = ?, normalized_value = ?, payload_json = ?, source_fingerprint = ?, rebuilt_at = ?
+       WHERE node_id = ?`,
     );
     for (const node of nodes.values()) {
-      insertNode.run(
-        node.nodeId, node.packId, node.nodeType, node.entityRef, node.projectScopeKey,
-        node.environmentKey, node.basePackageHash, node.normalizedValue,
-        JSON.stringify(node.payload), fingerprint, rebuiltAt,
-      );
+      const columns = nodeColumns(node);
+      const previous = storedNodes.get(node.nodeId);
+      if (previous === JSON.stringify(columns)) continue;
+      (previous === undefined ? insertNode : updateNode).run(...columns, fingerprint, rebuiltAt, node.nodeId);
     }
-    const insertEdge = getDb().prepare(
+    const insertEdge = db.prepare(
       `INSERT INTO experience_relation_edges (
-         edge_id, pack_id, from_node, to_node, edge_type, project_scope_key,
-         environment_key, base_package_hash, payload_json, source_fingerprint, rebuilt_at
+         pack_id, from_node, to_node, edge_type, project_scope_key,
+         environment_key, base_package_hash, payload_json, source_fingerprint, rebuilt_at, edge_id
        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
+    const updateEdge = db.prepare(
+      `UPDATE experience_relation_edges SET
+         pack_id = ?, from_node = ?, to_node = ?, edge_type = ?, project_scope_key = ?,
+         environment_key = ?, base_package_hash = ?, payload_json = ?, source_fingerprint = ?, rebuilt_at = ?
+       WHERE edge_id = ?`,
+    );
     for (const edge of edges.values()) {
-      insertEdge.run(
-        edge.edgeId, edge.packId, edge.fromNode, edge.toNode, edge.edgeType,
-        edge.projectScopeKey, edge.environmentKey, edge.basePackageHash,
-        JSON.stringify(edge.payload), fingerprint, rebuiltAt,
-      );
+      const columns = edgeColumns(edge);
+      const previous = storedEdges.get(edge.edgeId);
+      if (previous === JSON.stringify(columns)) continue;
+      (previous === undefined ? insertEdge : updateEdge).run(...columns, fingerprint, rebuiltAt, edge.edgeId);
     }
     getDb().prepare(
       `INSERT INTO experience_relation_index_state (
