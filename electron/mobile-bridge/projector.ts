@@ -180,7 +180,7 @@ function mobileBridgeChatImages(urls: readonly string[] | undefined): MobileBrid
     if (!attachmentId || seen.has(attachmentId)) continue;
     seen.add(attachmentId);
     images.push({ attachmentId });
-    if (images.length >= 4) break;
+    if (images.length >= 8) break;
   }
   return images;
 }
@@ -237,7 +237,7 @@ function mobileBridgeChatFiles(
         kind: file.kind,
         ...(entryCount !== undefined ? { entryCount } : {}),
       });
-      if (files.length >= 4) return files;
+      if (files.length >= 8) return files;
     }
   }
   return files;

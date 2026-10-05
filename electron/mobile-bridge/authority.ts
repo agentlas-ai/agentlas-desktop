@@ -55,7 +55,8 @@ import { sealOneMemoryCandidateProvenance } from "../one/memory-candidates";
 import { tryProduceAcceptedResultSuggestion } from "../one/completion-suggestion-producer";
 import { tryProduceOneImprovementProofForTask } from "../one/improvement-proof-producer";
 import { readOneArtifactImagePreview } from "../one/artifact-preview";
-import { readBoundChatMessageAttachment } from "../store/chat-message-attachments";
+import { MobileChatAttachmentUploads } from "./chat-attachment-upload";
+import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, readBoundChatMessageAttachment } from "../store/chat-message-attachments";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService } from "../invocation/service";
 import { readMobileBridgeHistoryPage } from "./history-page";
@@ -1087,6 +1088,7 @@ function invocationParams(
           "stormbreakerMode",
           "taskForceTargets",
           "images",
+          "fileGroupId",
           "runtimeSelection",
           "expectedQuestionMessageId",
           "expectedTaskId",
@@ -1114,6 +1116,7 @@ function invocationParams(
           "stormbreakerMode",
           "taskForceTargets",
           "images",
+          "fileGroupId",
           "runtimeSelection",
           "expectedQuestionMessageId",
           "expectedTaskId",
@@ -1132,6 +1135,7 @@ function invocationParams(
   const invocation: McpInvocationRequest = {
     chatId,
     userPrompt: requiredText(params, "userPrompt", 200_000),
+    ...(params.fileGroupId === undefined ? {} : {fileGroupId:requiredIdentifier(params,"fileGroupId")}),
   };
   const runId = optionalIdentifier(params, "runId", 160);
   const locale = optionalEnum(params, "locale", ["ko", "en"] as const);
@@ -1435,6 +1439,7 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
   networkMode?: true;
   liveMode?: true;
   images?: ImageAttachment[];
+  fileGroupId?: string;
   taskForceTargets?: OrchestrationTarget[];
   runtimeSelection?: RuntimeSelection;
 } {
@@ -1448,6 +1453,7 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
     "liveMode",
     "taskForceTargets",
     "images",
+    "fileGroupId",
     "runtimeSelection",
   ]);
   if (params.schemaVersion !== 1) {
@@ -1477,6 +1483,7 @@ function mobileOneStartParams(request: MobileBridgeRpcRequest): {
     ...(networkMode === true ? { networkMode: true as const } : {}),
     ...(liveMode === true ? { liveMode: true as const } : {}),
     ...(images !== undefined ? { images } : {}),
+    ...(params.fileGroupId === undefined ? {} : {fileGroupId:requiredIdentifier(params,"fileGroupId")}),
     ...(runtimeSelection !== undefined ? { runtimeSelection } : {}),
     ...(taskForceTargets !== undefined ? { taskForceTargets } : {}),
     ...(runtimeSelection !== undefined ? { runtimeSelection } : {}),
@@ -1976,6 +1983,7 @@ export function projectMobileBridgeRecentOneArtifacts(
  * projector before it reaches a phone.
  */
 export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthority {
+  private readonly attachmentUploads = new MobileChatAttachmentUploads();
   private readonly listeners = new Set<AuthorityListener>();
   private readonly onError: (error: Error) => void;
   private readonly cloudAgentActions: MobileBridgeCloudAgentActions;
@@ -2546,7 +2554,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           displayName:boundedRedactedText(snapshot.displayName,240),
           scienceError:snapshot.scienceError ? "science_observation_unavailable" : null,
           scienceProjects:snapshot.scienceProjects.map(project=>({...project,title:boundedRedactedText(project.title,1_000)})),
-          messages:snapshot.messages.map(message=>({id:message.id,role:message.role,text:boundedRedactedText(message.text,16_000),createdAt:message.createdAt})),
+          messages:projectMobileBridgeHistory(snapshot.messages,100,undefined,snapshot.conversationChatId),
           tasks:snapshot.tasks.map(task=>({...task,title:boundedRedactedText(task.title,1_000),result:task.result ? boundedRedactedText(task.result,24_000) : null})),
           requests:snapshot.requests.map(receipt=>({...receipt,reason:receipt.reason ? boundedRedactedText(receipt.reason,500) : null})),
           turns:(snapshot.turns ?? []).map(turn=>({...turn,activity:turn.activity.map(item=>({...item,label:boundedRedactedText(item.label,240),...(item.summary ? {summary:boundedRedactedText(item.summary,2_000)} : {})}))})),
@@ -2554,8 +2562,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           ...(snapshot.legacyHistory?{legacyHistory:{...snapshot.legacyHistory,linked:snapshot.legacyHistory.linked.map(source=>({...source,title:boundedRedactedText(source.title,1_000)}))}}:{}),
         },request.method);
       }
-      case "one.supervisor.send":
-        return supervisorReceiptValue(oneSupervisor().send(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.send"]) as unknown as SupervisorSendInput),request.method);
+      case "one.supervisor.send": {
+        const params=guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.send"]);
+        if (params.fileGroupId !== undefined) {
+          const snapshot=await oneSupervisor().snapshot();
+          this.attachmentUploads.bind(context.deviceId,requiredIdentifier(params,"fileGroupId"),snapshot.conversationChatId);
+        }
+        const images=optionalImages(params);
+        return supervisorReceiptValue(oneSupervisor().send({...params,...(images ? {images} : {})} as unknown as SupervisorSendInput),request.method);
+      }
       case "one.supervisor.startWork":
         return supervisorReceiptValue(oneSupervisor().startWork(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startWork"]) as unknown as SupervisorWorkInput),request.method);
       case "one.supervisor.startScience":
@@ -3126,6 +3141,20 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           request.method,
         );
       }
+      case "chat.attachments.begin": {
+        const params=guardedParams(request,["chatId","files"]);
+        const chatId=params.chatId == null ? undefined : requiredIdentifier(params,"chatId");
+        if(chatId) requireChat(chatId);
+        return asJsonValue(this.attachmentUploads.begin(context.deviceId,chatId,params.files as Array<{name:string;size:number}>),request.method);
+      }
+      case "chat.attachments.chunk": {
+        const params=guardedParams(request,["uploadId","fileIndex","offset","data"]);
+        return asJsonValue(this.attachmentUploads.chunk(context.deviceId,params as unknown as Parameters<MobileChatAttachmentUploads["chunk"]>[1]),request.method);
+      }
+      case "chat.attachments.finish": {
+        const params=guardedParams(request,["uploadId"]);
+        return asJsonValue(this.attachmentUploads.finish(context.deviceId,requiredIdentifier(params,"uploadId")),request.method);
+      }
       case "chat.attachment.imagePreview": {
         const params = guardedParams(request, ["chatId", "messageId", "attachmentId"]);
         const attachment = readBoundChatMessageAttachment({
@@ -3247,7 +3276,11 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           // Mobile's optimistic transcript is not durable Desktop history.
           // Persist the person's exact turn before execution so reconnect,
           // restart recovery, and One memory all retain the same conversation.
-          appendChatMessage(chat.id, "user", input.userPrompt);
+          if(input.fileGroupId) this.attachmentUploads.bind(context.deviceId,input.fileGroupId,chat.id);
+          validateChatAttachmentSelection(chat.id,input.fileGroupId,input.images);
+          input.images=[...(input.images ?? []),...chatFileImages(chat.id,input.fileGroupId)];
+          input.userPrompt=chatFilePrompt(chat.id,input.userPrompt,input.fileGroupId);
+          appendChatMessage(chat.id, "user", input.userPrompt,input.images?.length ? {images:input.images} : undefined);
           if (input.liveMode) setChatContinuousMode(chat.id, true);
           const invocation = await bindMobileOneTurn({
               chatId: chat.id,
@@ -3263,7 +3296,8 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
               // every @ target turn-only.
               ...(input.networkMode ? { sessionRouting: true } : {}),
               ...(input.taskForceTargets ? { taskForceTargets: input.taskForceTargets } : {}),
-              ...(input.images ? { images: input.images } : {}),
+              ...(!input.fileGroupId && input.images ? { images: input.images } : {}),
+              ...(input.fileGroupId ? {fileGroupId:input.fileGroupId} : {}),
               ...(runtimeSelection ? { runtimeSelection } : {}),
             });
           result = invocationService.start(
@@ -3288,6 +3322,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.start": {
         const { invocation, decisionAnswer } = invocationParams(request, false);
+        if(invocation.fileGroupId) this.attachmentUploads.bind(context.deviceId,invocation.fileGroupId,invocation.chatId);
+        validateChatAttachmentSelection(invocation.chatId,invocation.fileGroupId,invocation.images);
+        invocation.userPrompt=chatFilePrompt(invocation.chatId,invocation.userPrompt,invocation.fileGroupId);
         if (decisionAnswer && decisionAnswer.contractVersion !== ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION) {
           await prejudgePendingDecisionAnswer(
             invocation.chatId,
@@ -3340,6 +3377,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.steer": {
         const { invocation, expectedRunId, decisionAnswer } = invocationParams(request, true);
+        if(invocation.fileGroupId) this.attachmentUploads.bind(context.deviceId,invocation.fileGroupId,invocation.chatId);
+        validateChatAttachmentSelection(invocation.chatId,invocation.fileGroupId,invocation.images);
+        invocation.userPrompt=chatFilePrompt(invocation.chatId,invocation.userPrompt,invocation.fileGroupId);
         if (decisionAnswer && decisionAnswer.contractVersion !== ONE_DECISION_OWNER_ANSWER_CONTRACT_VERSION) {
           await prejudgePendingDecisionAnswer(
             invocation.chatId,

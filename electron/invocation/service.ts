@@ -125,7 +125,7 @@ import {
   getPendingInvocationAdmissionForChat,
   type InvocationAdmissionIdentity,
 } from "../store/invocation-admissions";
-import { listChatFileSnapshot } from "../store/chat-message-attachments";
+import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAutomationGoalExecutionOwnerMatches, nativeGoalStopOwnerMatches, snapshotAutomationGoalRunStops,
   stopKnownAutomationGoalRuns, type NativeGoalStopOwner } from "../automation-execution-control";
@@ -1751,11 +1751,13 @@ export class InvocationService {
           teamProposalId: preparedOneTeamPreflight?.proposalId ?? null,
         })
       : null;
+    validateChatAttachmentSelection(chat.id,invocationRequest.fileGroupId,invocationRequest.images);
+    if (invocationRequest.fileGroupId) invocationRequest.userPrompt=chatFilePrompt(chat.id,invocationRequest.userPrompt,invocationRequest.fileGroupId);
     const chatFileGroupIds = [...runReqChatFileGroupIds(invocationRequest.userPrompt)];
-    // These durable file markers are consumed only by the Work reader binding.
-    // A historical marker in a One objective is neither a new file grant nor
-    // evidence that this turn received an attachment.
-    const workChatFiles = chat.originSurface === "work" && !requestedOneMode && !runWorkspaceBinding && !invocationRequest.agentAppMode
+    // Mobile and personal One supply an explicit Main-validated group for this turn.
+    // Historical One markers alone remain unable to grant a new attachment reader.
+    const explicitChatFiles = invocationRequest.fileGroupId ? listChatFileSnapshot({chatId:chat.id,groupId:invocationRequest.fileGroupId}) : [];
+    const workChatFiles = explicitChatFiles.length ? explicitChatFiles : chat.originSurface === "work" && !requestedOneMode && !runWorkspaceBinding && !invocationRequest.agentAppMode
       ? chatFileGroupIds.flatMap((groupId) => listChatFileSnapshot({ chatId: chat.id, groupId })) : [];
     const validChatFileMarkers = new Set(workChatFiles.map((file) => file.groupId));
     const promptWithoutValidChatFileMarkers = invocationRequest.userPrompt.replace(
@@ -1787,6 +1789,7 @@ export class InvocationService {
         oneAttachmentContext: claimedOneAttachments.runtimeContext,
         oneAttachmentRedactions: claimedOneAttachments.redactions,
       } : {}),
+      ...(invocationRequest.fileGroupId ? {images:[...(invocationRequest.images ?? []),...chatFileImages(chat.id,invocationRequest.fileGroupId)]} : {}),
       ...(attachmentCapabilitySummary ? { attachmentCapabilitySummary } : {}),
     };
     if (effectObservation && runReq.permissions !== "read") throw new Error("effect_observation_must_be_read_only");
@@ -2462,10 +2465,10 @@ export class InvocationService {
       && !runWorkspaceBinding
       && Boolean(runReq.chatId)
       && (runReq.permissions ?? "read") !== "full";
-    if (!record.background && chat.originSurface === "work" && !requestedOneMode && !runReq.agentAppMode && !runWorkspaceBinding) {
+    if (!record.background && !runReq.agentAppMode && (explicitChatFiles.length > 0 || (chat.originSurface === "work" && !requestedOneMode && !runWorkspaceBinding))) {
       const pinnedRevision = goalLongRun ? getChatGoalRevision(goalLongRun.goalId) : null;
       bindWorkAttachmentRun({ runId, chatId: chat.id, signal: controller.signal, readGroups: () => {
-        const groups = workAttachmentGroupIds(runReq.userPrompt);
+        const groups = explicitChatFiles.length ? [invocationRequest.fileGroupId!] : workAttachmentGroupIds(runReq.userPrompt);
         if (pinnedRevision && goalLongRun) {
           const current = getChatGoalRevision(goalLongRun.goalId);
           if (!current || current.revision !== pinnedRevision.revision || current.chatId !== chat.id) throw new Error("work_attachment_goal_revision_changed");

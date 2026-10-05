@@ -4654,6 +4654,8 @@ export interface McpInvocationRequest {
   };
   /** 첨부 이미지 — BYOK/Ollama는 멀티모달로, CLI는 읽을 수 있는 로컬 파일로 스테이징해 전송. */
   images?: ImageAttachment[];
+  /** Main validates the immutable snapshot against this exact conversation. */
+  fileGroupId?: string;
   /** UI 사용자 locale — main이 emit하는 상태/오류 메시지가 이 언어로 나옴.
    *  영어 사용자에게 한국어 status가 새지 않도록 renderer가 항상 동봉. */
   locale?: "ko" | "en";

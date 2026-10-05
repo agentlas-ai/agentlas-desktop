@@ -1,3 +1,4 @@
+import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
 import { createChat, getChat, appendChatMessage, listChatMessages, normalizeChatRuntimeSelection } from "../store/chats";
@@ -69,7 +70,12 @@ export function oneSupervisor():OneSupervisorService {
   supervisor=new OneSupervisorService({
     store,identity:getOneProfile,workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>workExecutor?.kick(),
     createConversation:()=>createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id,
-    history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text)=>appendChatMessage(chatId,"user",text).id,
+    history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text,images)=>{
+      const groupId=/<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
+      validateChatAttachmentSelection(chatId,groupId,images);
+      const allImages=[...(images ?? []),...chatFileImages(chatId,groupId)];
+      return appendChatMessage(chatId,"user",text,allImages.length ? {images:allImages} : undefined).id;
+    },attachmentPrompt:chatFilePrompt,
     createWork:input=>{
       if (input.projectId && !getProject(input.projectId)) throw new Error("supervisor_work_project_missing");
       const chat=createChat({originSurface:"work",taskMode:"task",projectId:input.projectId,title:input.text.split(/\r?\n/,1)[0].slice(0,120)});

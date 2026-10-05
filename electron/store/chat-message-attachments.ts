@@ -60,7 +60,7 @@ const EXTERNALLY_OPENABLE_CHAT_FILE_EXTENSIONS = new Set([
 const MAX_DIRECTORY_ENTRIES = 512;
 const MAX_RELATIVE_PATH_BYTES = 768;
 const O_NOFOLLOW = typeof fs.constants.O_NOFOLLOW === "number" ? fs.constants.O_NOFOLLOW : 0;
-const MEDIA_BY_EXTENSION: Readonly<Record<string, string>> = Object.freeze({
+export const CHAT_FILE_MEDIA_BY_EXTENSION: Readonly<Record<string, string>> = Object.freeze({
   ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".avif": "image/avif", ".svg": "image/svg+xml",
   ".pdf": "application/pdf", ".txt": "text/plain", ".md": "text/markdown", ".rtf": "application/rtf",
   ".csv": "text/csv", ".tsv": "text/tab-separated-values", ".json": "application/json", ".jsonl": "application/x-ndjson",
@@ -98,7 +98,7 @@ function mediaTypeForImagePath(filePath: string): string | null {
   return null;
 }
 
-function hasExpectedImageSignature(bytes: Buffer, mediaType: string): boolean {
+export function hasExpectedImageSignature(bytes: Buffer, mediaType: string): boolean {
   if (mediaType === "image/png") {
     return bytes.length >= 8
       && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]));
@@ -328,7 +328,7 @@ function ensureChatFileSnapshotTables(): void {
 }
 
 function canonicalChatFileType(filePath: string): string {
-  const mediaType = MEDIA_BY_EXTENSION[path.extname(filePath).toLowerCase()];
+  const mediaType = CHAT_FILE_MEDIA_BY_EXTENSION[path.extname(filePath).toLowerCase()];
   if (!mediaType) throw new ChatFileSnapshotError("unsupported", `Unsupported file type: ${path.basename(filePath)}`);
   return mediaType;
 }
@@ -487,6 +487,65 @@ export function persistChatFileSnapshot(input: ChatFileSnapshotInput): { groupId
   };
 }
 
+/** Main-only authenticated Mobile bytes; same durable snapshot and execution reader as Desktop. */
+export function persistChatFileBytes(input: { chatId: string; groupId?: string; files: Array<{ name: string; bytes: Buffer }> }): { groupId: string; files: StoredChatFile[] } {
+  if (!input.chatId || !Array.isArray(input.files) || !input.files.length || input.files.length > ONE_ATTACHMENT_LIMITS.maxCount) throw new ChatFileSnapshotError("invalid", "Invalid mobile attachment set.");
+  ensureChatFileSnapshotTables();
+  const db = getDb();
+  if (!db.prepare("SELECT id FROM chats WHERE id = ?").get(input.chatId)) throw new ChatFileSnapshotError("missing", "The attachment conversation no longer exists.");
+  const names = new Set<string>(); let total = 0;
+  const prepared = input.files.map(file => {
+    if (typeof file.name !== "string" || safeChatFileName(file.name, "attachment") !== file.name || !Buffer.isBuffer(file.bytes)) throw new ChatFileSnapshotError("invalid", "Invalid mobile attachment metadata.");
+    const folded = file.name.normalize("NFKC").toLocaleLowerCase("en-US");
+    if (names.has(folded)) throw new ChatFileSnapshotError("collision", "Two attachments have the same displayed name.");
+    names.add(folded);
+    const mediaType = canonicalChatFileType(file.name);
+    const limit = ALLOWED_IMAGE_TYPES.has(mediaType) ? ONE_ATTACHMENT_LIMITS.maxImageBytes : ONE_ATTACHMENT_LIMITS.maxFileBytes;
+    if (file.bytes.length > limit) throw new ChatFileSnapshotError("too_large", "The attachment exceeds the Desktop per-file limit.");
+    if (ALLOWED_IMAGE_TYPES.has(mediaType) && !hasExpectedImageSignature(file.bytes, mediaType)) throw new ChatFileSnapshotError("invalid", "Image content does not match its filename.");
+    total += file.bytes.length;
+    if (total > ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new ChatFileSnapshotError("too_large", "The selected attachments exceed the Desktop total limit.");
+    return { id: randomUUID(), name: file.name, mediaType, size: file.bytes.length, sha256: createHash("sha256").update(file.bytes).digest("hex"), data: file.bytes };
+  });
+  const groupId = input.groupId ?? randomUUID(), createdAt = new Date().toISOString();
+  if (!CHAT_FILE_ID_RE.test(groupId)) throw new ChatFileSnapshotError("invalid", "Invalid attachment group identity.");
+  db.transaction(() => {
+    db.prepare("INSERT INTO chat_file_groups (id, chat_id, created_at) VALUES (?, ?, ?)").run(groupId, input.chatId, createdAt);
+    const insert = db.prepare(`INSERT INTO chat_file_items (id, group_id, chat_id, name, kind, media_type, size_bytes, sha256, data, manifest_json, created_at) VALUES (?, ?, ?, ?, 'file', ?, ?, ?, ?, NULL, ?)`);
+    for (const item of prepared) {
+      insert.run(item.id, groupId, input.chatId, item.name, item.mediaType, item.size, item.sha256, item.data, createdAt);
+      db.prepare("INSERT INTO chat_file_execution_sources(item_id, schema_version, source_grant_json) VALUES (?, 'snapshot-bytes-v1', '{}')").run(item.id);
+    }
+  })();
+  return { groupId, files: prepared.map(({ data: _bytes, ...item }) => ({ ...item, groupId, chatId: input.chatId, kind: "file" as const, fileUrl: `agentlas://chat-attachment/${item.id}` })) };
+}
+
+/** Bind a newly selected group into a transcript without accepting a raw filesystem path. */
+export function chatFilePrompt(chatId: string, text: string, fileGroupId?: string): string {
+  if (fileGroupId === undefined) return text;
+  if (!CHAT_FILE_ID_RE.test(fileGroupId) || !listChatFileSnapshot({chatId, groupId: fileGroupId}).length) throw new ChatFileSnapshotError("missing", "The attachment group is unavailable in this conversation.");
+  const marker = `<!-- agentlas-chat-files:v1:${fileGroupId} -->`;
+  return text.includes(marker) ? text : `${text}\n\n${marker}`;
+}
+
+/** Rehydrate snapshot images in Main, never accept a renderer-provided file path. */
+export function chatFileImages(chatId:string,groupId?:string):ImageAttachment[] {
+  if (!groupId) return [];
+  const inputs=workChatFileInputs(chatId,groupId);
+  return listChatFileSnapshot({chatId,groupId}).filter(item=>ALLOWED_IMAGE_TYPES.has(item.mediaType)).map(item=>{
+    const source=inputs.find(input=>input.id===item.id)!;
+    return {name:item.name,mediaType:item.mediaType as ImageAttachment["mediaType"],data:readWorkChatFileEntry(source,source.entries[0]).toString("base64")};
+  });
+}
+
+export function validateChatAttachmentSelection(chatId:string,groupId?:string,images?:ImageAttachment[]):void {
+  const files=groupId ? listChatFileSnapshot({chatId,groupId}) : [];
+  if (groupId && !files.length) throw new ChatFileSnapshotError("missing","The attachment group is unavailable in this conversation.");
+  if (files.length+(images?.length ?? 0)>ONE_ATTACHMENT_LIMITS.maxCount) throw new ChatFileSnapshotError("too_large","Too many selected attachments.");
+  const imageBytes=(images ?? []).reduce((total,image,index)=>total+decodeImage(image,index).bytes.length,0);
+  if (files.reduce((sum,item)=>sum+item.size,0)+imageBytes>ONE_ATTACHMENT_LIMITS.maxTotalBytes) throw new ChatFileSnapshotError("too_large","Selected attachments exceed the Desktop total limit.");
+}
+
 export function listChatFileSnapshot(input: { chatId: string; groupId: string }): StoredChatFile[] {
   if (!input || typeof input !== "object" || !input.chatId || !CHAT_FILE_ID_RE.test(input.groupId)) return [];
   ensureChatFileSnapshotTables();
@@ -621,7 +680,7 @@ export function readChatFileSnapshotForExternalOpen(input: unknown): { name: str
     || safeChatFileName(row.name, "attachment") !== row.name
   ) return null;
   const extension = path.extname(row.name).toLowerCase();
-  if (!EXTERNALLY_OPENABLE_CHAT_FILE_EXTENSIONS.has(extension) || MEDIA_BY_EXTENSION[extension] !== row.media_type) return null;
+  if (!EXTERNALLY_OPENABLE_CHAT_FILE_EXTENSIONS.has(extension) || CHAT_FILE_MEDIA_BY_EXTENSION[extension] !== row.media_type) return null;
   const digest = createHash("sha256").update(row.data).digest("hex");
   if (digest !== row.sha256 || digest !== input.sha256.toLowerCase()) return null;
   return { name: row.name, mediaType: row.media_type, bytes: Buffer.from(row.data), size: row.size_bytes, sha256: row.sha256 };

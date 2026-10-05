@@ -152,6 +152,9 @@ export const MOBILE_BRIDGE_METHODS = [
   "one.artifacts.recent",
   "one.artifact.imagePreview",
   "chat.attachment.imagePreview",
+  "chat.attachments.begin",
+  "chat.attachments.chunk",
+  "chat.attachments.finish",
   "tasks.acceptResult",
   "one.suggestions.act",
   "workspace.setProject",
@@ -230,7 +233,7 @@ export type MobileBridgeMethod =
  * field: permissions"; found by the monitoring peer session).
  */
 export const ONE_SUPERVISOR_PARAM_KEYS = {
-  "one.supervisor.send": ["commandId", "text", "runtimeSelection", "permissions", "oneId"],
+  "one.supervisor.send": ["commandId", "text", "runtimeSelection", "permissions", "oneId", "images", "fileGroupId"],
   "one.supervisor.startWork": ["commandId", "projectId", "text", "permissions", "runtimeSelection", "oneId"],
   "one.supervisor.startScience": ["commandId", "projectId", "text", "oneId"],
   "one.supervisor.control": ["commandId", "taskId", "expectedVersion", "action", "text", "oneId"],
@@ -240,6 +243,7 @@ export const ONE_SUPERVISOR_PARAM_KEYS = {
 
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  "chat.attachments.begin", "chat.attachments.chunk", "chat.attachments.finish",
   "one.supervisor.send", "one.supervisor.startWork", "one.supervisor.startScience",
   "one.supervisor.control", "one.supervisor.stopReply", "one.supervisor.appearance",
   ...MOBILE_GOAL_CONTROL_WRITE_METHODS,
@@ -338,6 +342,7 @@ export interface MobileBridgeInvokeSteerParams {
   stormbreakerMode?: boolean;
   taskForceTargets?: MobileBridgeTurnAgentTargetDto[];
   images?: MobileBridgeImageAttachmentDto[];
+  fileGroupId?: string;
   expectedQuestionMessageId?: string;
   expectedTaskId?: string;
   expectedTaskVersion?: number;
@@ -382,6 +387,7 @@ export interface MobileBridgeOneInvokeStartParams {
   liveMode?: boolean;
   taskForceTargets?: MobileBridgeTurnAgentTargetDto[];
   images?: MobileBridgeImageAttachmentDto[];
+  fileGroupId?: string;
 }
 
 /** Exact accepted start identity. Any later Task is projected by snapshot.updated. */
@@ -2929,6 +2935,7 @@ function validateInvokeOptions(
   }
   return firstError(
     validateImageAttachments(params.images),
+    optionalString(params, "fileGroupId", 36),
     optionalString(params, "runId", 160),
     requiredString(params, "chatId", 256),
     optionalString(params, "expectedQuestionMessageId", 256),
@@ -3493,6 +3500,18 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             requiredString(params, "artifactRef"),
           )
         : "one.artifact.imagePreview accepts only exact artifact binding fields";
+    case "chat.attachments.begin":
+      if (!hasOnlyKeys(params, ["chatId", "files"])) return "attachment_begin_fields_invalid";
+      if (params.chatId !== undefined && params.chatId !== null && requiredString(params,"chatId")) return "attachment_chat_invalid";
+      if (!Array.isArray(params.files) || params.files.length < 1 || params.files.length > 8) return "attachment_count_invalid";
+      return params.files.every(file => isRecord(file) && hasOnlyKeys(file,["name","size"]) && typeof file.name === "string" && file.name.length > 0 && file.name.length <= 180 && Number.isSafeInteger(file.size) && Number(file.size) >= 0 && Number(file.size) <= 64 * 1024 * 1024) ? null : "attachment_metadata_invalid";
+    case "chat.attachments.chunk":
+      return hasOnlyKeys(params,["uploadId","fileIndex","offset","data"])
+        ? firstError(requiredString(params,"uploadId",36),requiredString(params,"data",1398104),
+            Number.isSafeInteger(params.fileIndex) && Number(params.fileIndex) >= 0 && Number(params.fileIndex) < 8 && Number.isSafeInteger(params.offset) && Number(params.offset) >= 0 ? null : "attachment_offset_invalid")
+        : "attachment_chunk_fields_invalid";
+    case "chat.attachments.finish":
+      return hasOnlyKeys(params,["uploadId"]) ? requiredString(params,"uploadId",36) : "attachment_finish_fields_invalid";
     case "chat.attachment.imagePreview":
       return hasOnlyKeys(params, ["chatId", "messageId", "attachmentId"])
         ? firstError(
@@ -3570,13 +3589,17 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           if (params.action === "steer") supervisorText(params.text);
           else if (params.text !== undefined) return "supervisor_cancel_contains_text";
         } else supervisorText(params.text);
+        if (method === "one.supervisor.send") {
+          const attachmentError = firstError(validateImageAttachments(params.images), optionalString(params, "fileGroupId", 36));
+          if (attachmentError) return attachmentError;
+        }
         if (params.projectId !== undefined || method === "one.supervisor.startScience") supervisorIdentifier(params.projectId);
         if (params.permissions !== undefined && !["read","write","full"].includes(String(params.permissions))) return "supervisor_permission_invalid";
         return params.runtimeSelection === undefined ? null : validateRuntimeSelectionValue(params.runtimeSelection,"orchestrator");
       } catch (error) { return error instanceof Error ? error.message : "supervisor_input_invalid"; }
     }
     case "one.invoke.start":
-      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "planMode", "goalMode", "networkMode", "liveMode", "taskForceTargets", "images", "runtimeSelection"])) {
+      if (!hasOnlyKeys(params, ["schemaVersion", "userPrompt", "permissions", "planMode", "goalMode", "networkMode", "liveMode", "taskForceTargets", "images", "fileGroupId", "runtimeSelection"])) {
         return "one.invoke.start contains unsupported fields";
       }
       return firstError(
@@ -3592,17 +3615,18 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
         optionalBoolean(params, "liveMode"),
         validateTurnAgentTargets(params.taskForceTargets),
         validateImageAttachments(params.images),
+        optionalString(params, "fileGroupId", 36),
         params.runtimeSelection === undefined
           ? null
           : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
       );
     case "invoke.start":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes", "expectedDecisionOtherText", "expectedDecisionBindingDigest", "expectedDecisionOwnerConfirmed"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "fileGroupId", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes", "expectedDecisionOtherText", "expectedDecisionBindingDigest", "expectedDecisionOwnerConfirmed"])) {
         return "invoke.start contains unsupported fields";
       }
       return validateInvokeOptions(params);
     case "invoke.steer":
-      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "steeringMode", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes", "expectedDecisionOtherText", "expectedDecisionBindingDigest", "expectedDecisionOwnerConfirmed"])) {
+      if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "steeringMode", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "fileGroupId", "runtimeSelection", "expectedRunId", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes", "expectedDecisionOtherText", "expectedDecisionBindingDigest", "expectedDecisionOwnerConfirmed"])) {
         return "invoke.steer contains unsupported fields";
       }
       return firstError(validateInvokeOptions(params, true), requiredString(params, "expectedRunId", 160));

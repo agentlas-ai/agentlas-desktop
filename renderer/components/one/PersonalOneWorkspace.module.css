@@ -44,3 +44,10 @@
 .typing span:nth-child(2){animation-delay:.15s}.typing span:nth-child(3){animation-delay:.3s}
 @keyframes personalTyping{0%,80%,100%{opacity:.25}40%{opacity:.85}}
 @media (prefers-reduced-motion:reduce){.typing span{animation:none;opacity:.5}}
+
+.attachmentDrafts { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:8px; }
+.attachmentDraft { display:flex; align-items:center; gap:8px; max-width:280px; padding:8px 10px; border:1px solid var(--paper-edge); border-radius:12px; }
+.attachmentDraft img { width:36px; height:36px; object-fit:cover; border-radius:6px; }
+.attachmentDraft span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:12px; }
+.attachmentDraft small { display:block; opacity:.65; }
+.attachmentDraft button { flex-shrink:0; border:0; background:transparent; color:inherit; cursor:pointer; }

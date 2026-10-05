@@ -1,4 +1,4 @@
-import type { RuntimeSelection, ChatHistoryEntry } from "./types";
+import type { RuntimeSelection, ChatHistoryEntry, ImageAttachment } from "./types";
 import type { OneBubbleColor } from "./one-profile";
 
 /** Personal identity is One's durable oneId; none of these IDs is a provider session. */
@@ -99,7 +99,7 @@ export interface OneSupervisorSnapshot {
   delegations?: SupervisorDelegation[];
   legacyHistory?: SupervisorLegacyHistory;
 }
-export interface SupervisorSendInput { commandId: string; text: string; runtimeSelection?: RuntimeSelection; oneId?:string; permissions?:"read"|"write"|"full" }
+export interface SupervisorSendInput { commandId: string; text: string; runtimeSelection?: RuntimeSelection; oneId?:string; permissions?:"read"|"write"|"full"; images?:ImageAttachment[]; fileGroupId?:string }
 export interface SupervisorWorkInput extends SupervisorSendInput { projectId?: string; permissions?: "read" | "write" | "full" }
 export interface SupervisorScienceInput { commandId: string; text: string; projectId: string; oneId?:string }
 /**

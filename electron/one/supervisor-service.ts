@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { ChatHistoryEntry, InvocationRunReceipt, McpInvocationRequest, RuntimeSelection } from "../../shared/types";
+import type { ChatHistoryEntry, InvocationRunReceipt, McpInvocationRequest, RuntimeSelection, ImageAttachment } from "../../shared/types";
 import {
   ONE_SUPERVISOR_SCHEMA, supervisorIdentifier, supervisorObject, supervisorText,
   type OneSupervisorSnapshot, type SupervisorCommandReceipt, type SupervisorControlInput, type SupervisorNotice,
@@ -28,7 +28,8 @@ export interface SupervisorDependencies {
   identity(): {oneId: string; displayName: string; avatarIcon?:string; bubbleColor?:OneBubbleColor;version?:number};
   createConversation(): string;
   history(chatId: string): ChatHistoryEntry[];
-  appendUser(chatId: string, text: string): string;
+  appendUser(chatId: string, text: string, images?: ImageAttachment[]): string;
+  attachmentPrompt?(chatId:string,text:string,fileGroupId?:string):string;
   createWork(input: SupervisorWorkInput): {chatId: string; taskId: string};
   tasks(): SupervisorTask[];
   runtime: SupervisorRuntime;
@@ -139,15 +140,18 @@ export class OneSupervisorService {
     else if (!settled(receipt) && this.deps.runtime.attach(receipt.chatId)?.runId !== runId) this.deps.store.closeReview(runId, "review_outcome_unknown");
   }
   send(raw: SupervisorSendInput): SupervisorCommandReceipt {
-    const value = supervisorObject(raw,["commandId","text","runtimeSelection","oneId","permissions"]);
+    const value = supervisorObject(raw,["commandId","text","runtimeSelection","oneId","permissions","images","fileGroupId"]);
     if(value.permissions!==undefined && !['read','write','full'].includes(String(value.permissions)))throw new TypeError('supervisor_permission_invalid');
     const runtimeSelection=this.deps.normalizeRuntimeSelection(value.runtimeSelection);
     const input = {commandId:supervisorIdentifier(value.commandId),text:supervisorText(value.text),
       ...(value.permissions?{permissions:value.permissions as 'read'|'write'|'full'}:{}),
-      ...(runtimeSelection ? {runtimeSelection} : {})};
+      ...(runtimeSelection ? {runtimeSelection} : {}),
+      ...(value.images===undefined ? {} : {images:value.images as ImageAttachment[]}),
+      ...(value.fileGroupId===undefined ? {} : {fileGroupId:supervisorIdentifier(value.fileGroupId)})};
     const {oneId,chatId} = this.binding(value.oneId);
+    input.text=this.deps.attachmentPrompt?.(chatId,input.text,input.fileGroupId) ?? input.text;
     const row = this.deps.store.receive({commandId:input.commandId,oneId,kind:"reply",payload:input,originChatId:chatId,runId:randomUUID()},
-      () => this.deps.appendUser(chatId,input.text));
+      () => this.deps.appendUser(chatId,input.text,input.images));
     this.drain();
     return JSON.parse(this.deps.store.get(row.command_id)!.receipt_json);
   }
@@ -172,7 +176,8 @@ export class OneSupervisorService {
         // 아예 컴퓨터의 모든부분 조작가능해야함". Every personal One turn runs with full access and Computer Use: the Agentlas
         // driver pinned and the runtime's own desktop control granted.
         this.deps.runtime.start({runId:row.run_id!,chatId,userPrompt:payload.text,promptOrigin:"system",oneMode:true,
-          taskIntent:"conversation",permissions:"full",onePermissionMode:"full",toolMode:"computer-use",locale:this.deps.locale(),runtimeSelection:payload.runtimeSelection},
+          taskIntent:"conversation",permissions:"full",onePermissionMode:"full",toolMode:"computer-use",locale:this.deps.locale(),runtimeSelection:payload.runtimeSelection,
+          images:payload.images,fileGroupId:payload.fileGroupId},
           isReview(row) ? (payload as {purpose?: SupervisorHostNoticePurpose}).purpose ?? "one-delegation-review" : undefined);
         const current = this.deps.store.get(row.command_id)!;
         // A synchronous fixture/adapter can settle during start().

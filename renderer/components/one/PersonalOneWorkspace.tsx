@@ -1,7 +1,7 @@
 "use client";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
-import { ipc, ipcEvents } from "@/lib/ipc";
+import { ipc, ipcEvents, grantForDroppedFile } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { Markdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconLayers, IconPanelRight, IconPlus, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
@@ -20,7 +20,9 @@ import { usePersonalOneReply } from "@/lib/use-personal-one-reply";
 import { personalOneFile, type PersonalOneFile } from "@/lib/personal-one-file-preview";
 import { TaskSidePanel } from "@/components/workspace/TaskSidePanel";
 import { linkedLocalFileItem } from "@/lib/linked-local-file";
-import { requestChatFileOpen } from "@/lib/chat-files";
+import { requestChatFileOpen, chatFilesBridge, chatFileItem, parseChatFileMessage, formatChatFileSize, type ChatFileDraft, type ChatFileItem } from "@/lib/chat-files";
+import { ChatFileCards } from "@/components/ChatFileExperience";
+import { ONE_ATTACHMENT_LIMITS } from "../../../shared/one-attachments";
 import { ComposerDecisionSlot } from "@/components/ComposerDecisionPortal";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
@@ -38,6 +40,22 @@ function storedOneRuntime() {
 export function PersonalOneWorkspace() {
   const router=useRouter(); const {locale}=useT(); const ko=locale==="ko"; const copy=(a:string,b:string)=>ko?a:b;
   const [snapshot,setSnapshot]=useState<OneSupervisorSnapshot|null>(null);
+  const [attachments,setAttachments]=useState<Array<{draft:ChatFileDraft;preview?:string}>>([]);
+  const [attachmentError,setAttachmentError]=useState<string|null>(null);const [attachmentBusy,setAttachmentBusy]=useState(false);
+  const attachmentPicker=useRef<HTMLInputElement>(null);
+  const [messageFiles,setMessageFiles]=useState<Record<string,ChatFileItem[]>>({});
+  const loadedGroups=useRef(new Set<string>());
+  const attachmentsRef=useRef(attachments);attachmentsRef.current=attachments;
+  useEffect(()=>()=>{for(const item of attachmentsRef.current)if(item.preview)URL.revokeObjectURL(item.preview);},[]);
+  const pickAttachments=async(files:File[])=>{
+    const next=[...attachments];
+    try{for(const item of files){
+      const grant=await grantForDroppedFile(item);if(!grant)throw new Error(copy("이 파일을 읽을 수 없습니다.","This file is unavailable."));
+      if(next.length>=ONE_ATTACHMENT_LIMITS.maxCount || item.size>(item.type.startsWith("image/")?ONE_ATTACHMENT_LIMITS.maxImageBytes:ONE_ATTACHMENT_LIMITS.maxFileBytes) || next.reduce((sum,file)=>sum+file.draft.size,0)+item.size>ONE_ATTACHMENT_LIMITS.maxTotalBytes)throw new Error(copy("첨부는 최대 8개, 이미지 5 MB, 파일 64 MB, 전체 96 MB까지 가능합니다.","Attachments allow 8 items, 5 MB images, 64 MB files and 96 MB total."));
+      next.push({draft:{grant,name:item.name,mediaType:item.type||"application/octet-stream",size:item.size,kind:"file"},...(item.type.startsWith("image/")?{preview:URL.createObjectURL(item)}:{})});
+    }setAttachmentError(null);}catch(cause){setAttachmentError(cause instanceof Error?cause.message:String(cause));}
+    setAttachments(next);
+  };
   const [text,setText]=useState(""); const [work,setWork]=useState("");
   const [scienceProject,setScienceProject]=useState(""); const [selected,setSelected]=useState<string|null>(null); const [direction,setDirection]=useState("");
   const [error,setError]=useState(false); const [receipt,setReceipt]=useState<SupervisorCommandReceipt|null>(null);
@@ -86,6 +104,14 @@ export function PersonalOneWorkspace() {
     const timer=window.setInterval(()=>{if(document.visibilityState!=="hidden")void sync();},5000);const focus=()=>{void sync();};window.addEventListener("focus",focus);
     return()=>{mounted.current=false;++generation.current;window.clearInterval(timer);off?.();window.removeEventListener("focus",focus);};
   },[sync]);
+  useEffect(()=>{
+    const bridge=chatFilesBridge();if(!snapshot||!bridge)return;
+    const groups=[...new Set(snapshot.messages.flatMap(message=>parseChatFileMessage(message.text).groupIds))].filter(group=>!loadedGroups.current.has(group));
+    let disposed=false;
+    void Promise.all(groups.map(async group=>{const files=await bridge.listGroup({chatId:snapshot.conversationChatId,groupId:group});if(disposed)return;loadedGroups.current.add(group);setMessageFiles(prior=>({...prior,[group]:files.map(file=>chatFileItem(file,"user-attachment"))}));}));
+    return()=>{disposed=true;};
+  },[snapshot]);
+  useEffect(()=>{loadedGroups.current.clear();setMessageFiles({});},[snapshot?.conversationChatId]);
   const activeReply=snapshot?.requests.find(item=>item.kind==="reply" && ["dispatching","accepted"].includes(item.state));
   useLayoutEffect(()=>bindAgentScreenScope(snapshot?.conversationChatId ?? null),[snapshot?.conversationChatId]);
   const live=usePersonalOneReply(snapshot?.conversationChatId,activeReply?.runId ?? undefined,sync);
@@ -97,8 +123,14 @@ export function PersonalOneWorkspace() {
     const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);setSavedRequests(outbox.current.list());return value;
   };
   const send=async()=>{
-    const message=text.trim();if(!message || !outbox.current)return;let intent:PendingSupervisorWrite;
-    try{const runtimeSelection=storedOneRuntime();intent=outbox.current.prepare("send",{text:message,...(runtimeSelection?{runtimeSelection}:{})});}catch{setError(true);return;}
+    const message=text.trim();if((!message&&!attachments.length)||!outbox.current||!snapshot||attachmentBusy)return;let intent:PendingSupervisorWrite;
+    setAttachmentBusy(true);
+    try{const runtimeSelection=storedOneRuntime();let fileGroupId:string|undefined;
+      if(attachments.length){const bridge=chatFilesBridge();if(!bridge)throw new Error("attachment_bridge_unavailable");const stored=await bridge.snapshot({chatId:snapshot.conversationChatId,files:attachments.map(item=>item.draft)});fileGroupId=stored.groupId;}
+      intent=outbox.current.prepare("send",{text:message||copy("첨부 파일을 확인해 주세요.","Please review the attached files."),...(fileGroupId?{fileGroupId}:{}),...(runtimeSelection?{runtimeSelection}:{})});
+      for(const item of attachments)if(item.preview)URL.revokeObjectURL(item.preview);setAttachments([]);setAttachmentError(null);
+    }catch(cause){setAttachmentError(cause instanceof Error?cause.message:String(cause));setAttachmentBusy(false);return;}
+    setAttachmentBusy(false);
     if(inFlight.current.has(intent.commandId))return;inFlight.current.add(intent.commandId);setSavedRequests(outbox.current.list());setText("");nearBottom.current=true;
     setOptimistic(prior=>prior.some(item=>item.commandId===intent.commandId)?prior:[...prior,{commandId:intent.commandId,text:message,acknowledged:false}]);
     try{const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);if(!mounted.current)return;setSavedRequests(outbox.current.list());showReceipt(value);
@@ -183,7 +215,9 @@ export function PersonalOneWorkspace() {
           {personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []).map(({message,turn,answer})=>{
             const replyPresentation=turn?personalOneReplyPresentation(turn,Boolean(answer),activeReply?.runId):null;
             return <div className={styles.turn} key={message.id} data-command-id={turn?.commandId}>
-            <article className={styles.bubble} data-role={message.role}><Markdown text={message.role==="assistant"?visibleAnswer(message.text):message.text} messageId={message.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>
+            <article className={styles.bubble} data-role={message.role}><Markdown text={message.role==="assistant"?visibleAnswer(message.text):parseChatFileMessage(message.text).visibleText} messageId={message.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>
+            {message.role==="user"&&message.imageDataUrls?.map((src,index)=><img key={src} src={src} alt={copy("첨부 이미지 ","Attached image ")+(index+1)} style={{maxWidth:240,maxHeight:180,borderRadius:10}}/>)}
+            {parseChatFileMessage(message.text).groupIds.map(group=><ChatFileCards key={group} files={messageFiles[group] ?? []} locale={ko?"ko":"en"} onOpen={requestChatFileOpen}/>)}
             {answer&&<article className={styles.bubble} data-role="assistant" data-run-id={turn?.runId}><Markdown text={visibleAnswer(answer.text)} messageId={answer.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>}
             {!answer&&live&&turn&&live.runId===turn.runId&&live.text&&<article className={styles.bubble} data-role="assistant" data-run-id={turn.runId}><Markdown text={visibleAnswer(live.text)} messageId={"live:"+turn.runId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>}
             {turn&&snapshot?.delegations?.filter(item=>item.originReplyRunId===turn.runId).map(delegation)}
@@ -204,10 +238,19 @@ export function PersonalOneWorkspace() {
         </div>
         {error&&<p role="status" className={styles.feedback}>{copy("접수를 확인할 수 없습니다. 저장된 요청과 연결 상태를 확인해 주세요.","Reception could not be confirmed. Review the saved request and connection.")}</p>}
         {savedRequests.filter(intent=>!inFlight.current.has(intent.commandId)).map(intent=><button className={styles.retry} key={intent.commandId} onClick={()=>void outbox.current!.deliver(ipc()!.oneSupervisor,intent).then(value=>{showReceipt(value);setSavedRequests(outbox.current!.list());void sync();}).catch(()=>setError(true))}>{copy("같은 저장 요청 다시 확인","Retry the same saved request")} · {intent.method}</button>)}
+        <input ref={attachmentPicker} type="file" multiple hidden onChange={event=>{if(event.target.files)void pickAttachments(Array.from(event.target.files));event.target.value="";}}/>
+        {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} key={index}>
+          {item.preview&&<img src={item.preview} alt={item.draft.name}/>}
+          <span>{item.draft.name}<small>{formatChatFileSize(item.draft.size)}</small></span>
+          <button type="button" aria-label={copy("첨부 삭제: ","Remove attachment: ")+item.draft.name} onClick={()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));}}><IconClose size={14}/></button>
+        </div>)}</div>}
+        {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
         <form className={styles.composer} onSubmit={event=>{event.preventDefault();void send();}}>
           <div ref={plusMenu} className={styles.plus}>
             <button type="button" className={styles.iconButton} aria-label={copy("추가","Add")} aria-haspopup="menu" aria-expanded={plusOpen} data-hover="own" onClick={()=>setPlusOpen(value=>!value)}><IconPlus size={19}/></button>
             {plusOpen&&<div className={styles.plusMenu} role="menu" aria-label={copy("추가","Add")}>
+              <button type="button" role="menuitem" data-hover="own" disabled={attachmentBusy} onClick={()=>{setPlusOpen(false);attachmentPicker.current?.click();}}><span className={styles.plusIcon}><IconPlus size={15}/></span><strong>{copy("사진 및 파일 첨부","Attach photos and files")}</strong></button>
+              <div className={styles.plusDivider}/>
               <div className={styles.plusSection}>{copy("맡기기","Hand off")}</div>
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);setTasksOpen(true);setTaskPreviewOnly(false);setSelected(null);setFile(null);}}><span className={styles.plusIcon}><IconLayers size={15}/></span><strong>{copy("Work에 맡기기","Hand to Work")}</strong></button>
               {!!snapshot?.scienceProjects?.length&&<button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);setTasksOpen(true);setTaskPreviewOnly(false);setSelected(null);setFile(null);}}><span className={styles.plusIcon}><IconSparkles size={15}/></span><strong>{copy("Science에 맡기기","Hand to Science")}</strong></button>}
@@ -218,7 +261,7 @@ export function PersonalOneWorkspace() {
             </div>}
           </div>
           <textarea aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onKeyDown={event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();void send();}}} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
-          <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||!text.trim()}><IconArrowUp size={18}/></button>
+          <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={18}/></button>
         </form>
         {activeReply?.runId&&<button className={styles.stopReply} onClick={()=>void write("stopReply",{runId:activeReply.runId!}).then(value=>{showReceipt(value);void sync();}).catch(()=>setError(true))}>{copy("이 답변 중지","Stop this reply")}</button>}
       </div>
