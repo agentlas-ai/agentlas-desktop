@@ -2012,6 +2012,21 @@ export async function runGraph(
     const changedNames = Object.keys(initialVars).filter(
       (name) => JSON.stringify(checkpoint.vars[name]) !== JSON.stringify(initialVars[name]),
     );
+    /*
+     * A completed step that never produced the value it declares did not finish: every step that reads the value
+     * fails with NODE_INPUT_MISSING on each resume. Production 2026-10-05 (a Threads verification Toolchain):
+     * desktop 1.2.57's background effect look settled as completed, with no output, a read step whose model had
+     * been refused ("at capacity"); three resumes then failed at the next step within a second each. A read or pure
+     * step runs again and its readers with it (below). A mutation step stays completed, since running it again
+     * could repeat an outward effect; its reader still says which value is missing.
+     */
+    for (const node of graph.nodes) {
+      const produced = str(node.config ?? {}, "produces");
+      if (!produced || !completed.has(node.id) || Object.hasOwn(vars, produced) || nodeEffect(node) === "mutation") continue;
+      completed.delete(node.id);
+      delete outputs[node.id];
+      changedNames.push(produced);
+    }
     if (changedNames.length > 0) {
       /*
        * ★"이 단계가 그 값을 읽는가"의 판별은 **정본 하나로**.
