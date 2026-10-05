@@ -710,7 +710,9 @@ export type EffectObservationDispatchResult =
  * Owner decision 2026-10-05: a Goal no longer launches a separate read-only look at an earlier uncertain effect.
  * The owner DB had 139 such looks, 127 inconclusive, each about 55k input tokens. The next turn of the
  * conversation reads the previous turn as short-term memory (memory/previous-turn.ts) and checks for itself.
- * An automation's own graph hold is a separate kernel path and is still observed through its automation below.
+ * The same holds for an automation's graph steps: the kernel no longer holds a step on an unknown outcome
+ * (run-graph.ts UNCERTAIN_EFFECT_NOTE_CODES); the step reruns with a note to check first, so a background
+ * look at it would only spend tokens (owner 2026-10-05, "직접 대조가 전체중단시키거나 하면안됨").
  */
 const GOAL_EFFECT_LOOKS_RETIRED = true;
 
@@ -1210,6 +1212,7 @@ function sayGoal(plan: AutomationObservationPlan, runId: string, marker: SayStat
 export function maybeDispatchAutomationEffectObservation(
   runtime: AutomationObservationRuntime, automationId: string, trigger: string, options: { epoch?: number } = {},
 ): EffectObservationDispatchResult & { settled?: Promise<AutomationEffectObservationOutcome> } {
+  if (GOAL_EFFECT_LOOKS_RETIRED) return { status: "skipped", reason: "effect_observation_retired" };
   // A Goal's uncertain attempts (no graph hold) are answered by their own closed receipt first — no look, no person.
 
   // "3번 확인했지만 판단할 수 없어" notices; its receipt proves no outward call.
@@ -1406,6 +1409,7 @@ function completeAutomationEffectObservation(input: {
 
 /** 스케줄러 틱이 부른다 — 보류된 자동화와 막힌 목표를 이어받는 자동화를 훑는다(다이제스트당 한 번). */
 export function sweepAutomationEffectObservations(runtime: AutomationObservationRuntime): EffectObservationDispatchResult[] {
+  if (GOAL_EFFECT_LOOKS_RETIRED) return [];
   const rows = getDb().prepare(
     `SELECT a.id FROM automations AS a
      WHERE (SELECT r.status FROM automation_runs AS r WHERE r.automation_id = a.id

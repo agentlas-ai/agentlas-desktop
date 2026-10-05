@@ -335,6 +335,18 @@ const UNCERTAIN_EFFECT_HOLD_CODES = new Set([
   "automation_fresh_run_blocked",
 ]);
 
+/**
+ * The unknown-outcome holds that become a note in the step's prompt instead of a hold (owner decision
+ * 2026-10-05, "직접 대조가 전체중단시키거나 하면안됨"). RESUME_CONFLICT is two runs on one coordinate,
+ * not an unknown outcome, and stays a hold.
+ */
+const UNCERTAIN_EFFECT_NOTE_CODES = new Set([
+  "MUTATION_UNVERIFIED",
+  "automation_partial_reconciliation_required",
+  "automation_partial_graph_changed",
+  "automation_fresh_run_blocked",
+]);
+
 const GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v4";
 const PREVIOUS_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v3";
 const LEGACY_GRAPH_CHECKPOINT_SCHEMA = "agentlas.automation-graph-checkpoint.v2";
@@ -1933,11 +1945,23 @@ export async function runGraph(
    *   Recording the hold as ambiguous keeps it held (MUTATION_UNVERIFIED on resume) and visible
    *   to reconciliation and background observation until someone settles it.
    */
-  const uncertainEffectHolds = [...admissionPending.entries()]
-    .filter(([nodeId, failure]) => effectNodeIds.has(nodeId) && UNCERTAIN_EFFECT_HOLD_CODES.has(failure.code))
-    .map(([nodeId]) => nodeId);
-  if (uncertainEffectHolds.length > 0) {
-    checkpoint.ambiguousNodeIds = [...new Set([...checkpoint.ambiguousNodeIds, ...uncertainEffectHolds])];
+  /*
+   * Owner decision 2026-10-05 ("직접 대조가 전체중단시키거나 하면안됨"): an effect whose outcome is unknown
+   * never holds its step. Since c3a8759c (2026-10-04) such a hold was carried as ambiguous "until someone
+   * settles it", so a publishing automation stopped publishing until a background look or a person answered,
+   * and looks were mostly inconclusive. The step now runs; its prompt says the previous attempt's outcome is
+   * unknown and asks it to check the current state before repeating (a judgement aid, not a gate).
+   */
+  const uncertainEffectNotes = new Map<string, GraphNodeFailure>();
+  for (const [nodeId, failure] of [...admissionPending.entries()]) {
+    if (!UNCERTAIN_EFFECT_NOTE_CODES.has(failure.code)) continue;
+    admissionPending.delete(nodeId);
+    uncertainEffectNotes.set(nodeId, failure);
+  }
+  if (uncertainEffectNotes.size > 0) {
+    checkpoint.ambiguousNodeIds = checkpoint.ambiguousNodeIds.filter((nodeId) => !uncertainEffectNotes.has(nodeId));
+    tryRecordRunEvent({ runId, kind: "graph_uncertain_effect_noted", automationId: automation.id,
+      payload: { nodeIds: [...uncertainEffectNotes.keys()].sort(), codes: [...new Set([...uncertainEffectNotes.values()].map((failure) => failure.code))].sort() } });
   }
   const loginResumeRunIds = { ...opts.loginResumeRunIds };
   if (waitingSource) {
@@ -3926,12 +3950,22 @@ export async function runGraph(
             + " 이 단계는 실제로 무언가를 바꾸는 단계입니다 — 붙어 있는 도구로 직접 수행하세요."
             + " 도구를 쓸 수 없으면 수행했다고 쓰지 말고, 무엇이 없어서 못 했는지 한 줄로 적으세요."
           : "";
+        // The previous attempt of this step may or may not have acted outside; say so instead of holding it.
+        const uncertainEffectNote = uncertainEffectNotes.has(node.id)
+          ? L("\n\n[Agentlas 호스트 관측 — 판단 보조] 이 단계의 이전 시도는 바깥(게시·전송·결제 등)에 반영됐는지 확인되지 않은 채 끝났습니다."
+              + " 다시 수행하기 전에 현재 상태(예: 계정의 최근 게시물, 보낸 편지함)를 먼저 확인하세요. 이미 반영돼 있으면 반복하지 마세요."
+              + " 확인할 수 없으면 스스로 판단해 진행하고, 그 판단을 한 줄로 적으세요.",
+            "\n\n[Agentlas host observation — judgement aid] The previous attempt of this step ended without the app knowing whether it took effect outside (a post, message, payment)."
+              + " Before doing it again, look at the current state (for example the account's latest posts or the sent folder). If it already happened, do not repeat it."
+              + " If you cannot tell, decide yourself, go on, and say so in one line.")
+          : "";
         const strategyProposalDirective = node.type === "agent"
           && (outByNode.get(node.id) ?? []).length === 0
           ? `\n\n${buildAutomationStrategyProposalDirective()}`
           : "";
         const executionPrompt =
           buildNodeContinuityPrompt(nodeChat.id, prompt, strategyDirective)
+          + uncertainEffectNote
           + toolProofNudge
           + strategyProposalDirective
           + (effect === "mutation" && node.config.allowNoAction === true
