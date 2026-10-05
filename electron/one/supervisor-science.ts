@@ -9,6 +9,8 @@ const rows=(value:unknown):Row[]=>Array.isArray(value) ? value.map(row) : [];
 const id=(value:unknown):string=>typeof value === "string" ? value : "";
 
 /** Observed native service only: discovery never boots Science or duplicates its executor. */
+const SCIENCE_OBSERVATION_IN_FLIGHT=4;
+
 export class SupervisorScienceAdapter {
   private targets=new Map<string,{projectId:string;conversationId?:string;turnId?:string;loop?:Row}>();
   private observedProjects:Array<{projectId:string;title:string}>=[];
@@ -29,10 +31,24 @@ export class SupervisorScienceAdapter {
    */
   async tasks():Promise<SupervisorTask[]> {
     const deadline=Date.now()+2_000;
-    const observe=(command:DaemonScienceCommand):Promise<unknown>=>{
-      const remaining=deadline-Date.now();
-      if (remaining <= 0) return Promise.reject(new Error("science_observation_deadline"));
-      return this.client.commandObserved(command,{timeoutMs:remaining});
+    // At most SCIENCE_OBSERVATION_IN_FLIGHT service calls at once. Running every project side by side without a cap
+    // sent 19 science.command calls in the same millisecond when the phone connected, and all of them timed out
+    // together (production 2026-10-05 20:18:18 UTC, reported by the monitoring peer session). A call whose turn comes
+    // after the deadline is not sent; its project keeps its last answered rows.
+    let inFlight=0;
+    const waiting:Array<()=>void>=[];
+    const observe=async(command:DaemonScienceCommand):Promise<unknown>=>{
+      // A finishing call hands its slot straight to the next waiter, so a new caller cannot slip in between.
+      if (inFlight >= SCIENCE_OBSERVATION_IN_FLIGHT) await new Promise<void>(resolve=>waiting.push(resolve));
+      else inFlight+=1;
+      try {
+        const remaining=deadline-Date.now();
+        if (remaining <= 0) throw new Error("science_observation_deadline");
+        return await this.client.commandObserved(command,{timeoutMs:remaining});
+      } finally {
+        const next=waiting.shift();
+        if (next) next(); else inFlight-=1;
+      }
     };
     const projects=rows(await observe({op:"projects.list"})).slice(0,20);
     const observeProject=async(project:Row)=>{
