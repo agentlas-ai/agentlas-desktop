@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.59 — 2026-10-05
+
+- A sign-in page or a site's human check (such as "I'm not a robot") is noticed whatever runs the conversation: Claude, Codex, Antigravity, Grok, Kimi, Cursor, an API key or a local model. The browser comes to the front and One tells you which conversation needs you. In 1.2.58 only conversations run by Codex reached One this way.
+- Science: prior work is read from free sources first, with OpenAlex last and a pause after a long rate limit; each paper's text is fetched through one ladder of sources, and missing abstracts are filled from free sources. Scans whose text layer is broken are refused instead of quoted, hypothesis results show the passages they rely on, and a large read of stored data returns its first page.
+
+This release binds Agentlas OS v1.2.54 at dfbb43695990791a9d147b80648d57d2739a7c48; public runtime asset `hephaestus-runtime-v1.2.54.tar.gz` is pinned at SHA-256 `1f85cffee86c91835ba4ffa8db69513adc348db1e9a4d75ce4065020f5ce85c2`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.58 — 2026-10-05
 
 - Hand work to your personal One the way you would to an assistant. One delegates to Work sessions and teammates with full access, checks what comes back against your request, sends one follow-up when something is missing, and tells you the result.
