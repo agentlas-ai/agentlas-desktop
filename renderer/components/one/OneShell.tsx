@@ -3339,6 +3339,13 @@ function OneSessionsShell() {
     ]).then(async ([history, attachment, answers, latestReceipt, steeringRecovery, chatTimeline, preflightSteers]) => {
       if (activeThreadChatIdRef.current === chatId) {
         setPreflightSteerReceipts(preflightSteers);
+        // Directions waiting behind the live run are kept in Main's queue; this strip is local and is dropped on a
+        // room switch, so coming back rebuilds it from Main (production 2026-10-05: an owner direction to the Thread
+        // room "disappeared" after visiting another room while it was still queued).
+        const waiting = attachment?.queuedSteers ?? [];
+        setQueuedSteers((current) => current.some((item) => item.chatId === chatId) || waiting.length
+          ? [...current.filter((item) => item.chatId !== chatId), ...waiting.map((queued) => ({ id: queued.id, text: queued.text, chatId }))]
+          : current);
       }
       const taskReceipt = taskId ? selected?.latestReceipt ?? null : null;
       const durableReceipt = latestReceipt ?? taskReceipt;

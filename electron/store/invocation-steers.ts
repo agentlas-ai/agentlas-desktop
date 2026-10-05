@@ -169,6 +169,19 @@ export function listRecoverableQueuedSteers(): DurableQueuedSteer[] {
   return out;
 }
 
+/**
+ * A direction the owner wrote is waiting behind this chat's run. Host-written turns (a teammate finished, a Goal
+ * check) carry promptOrigin "system" and do not count.
+ */
+export function hasQueuedOwnerSteer(chatId: string): boolean {
+  const rows = getDb().prepare(
+    "SELECT request_json FROM invocation_steers WHERE chat_id = ? AND status = 'queued' AND recovery_state = 'ready'",
+  ).all(chatId) as Array<{ request_json: string }>;
+  return rows.some((row) => {
+    try { return (JSON.parse(row.request_json) as { promptOrigin?: unknown })?.promptOrigin !== "system"; } catch { return false; }
+  });
+}
+
 export function beginQueuedSteerDrain(id: string, drainedRunId: string): boolean {
   return getDb().prepare(
     `UPDATE invocation_steers SET status = 'draining', drained_run_id = ?, updated_at = ?

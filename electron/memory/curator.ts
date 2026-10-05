@@ -153,6 +153,11 @@ export interface CurateReplyOptions {
   semanticDecisions?: SemanticMemoryDecision[];
   semanticAttempted?: boolean;
   semanticFailed?: boolean;
+  /**
+   * Memory events taken out of this turn's earlier continuous passes, each committed as its own message before the
+   * final answer. Appended after the final answer's events, so semantic decisions keep their candidate indexes.
+   */
+  carriedEvents?: RawMemoryEvent[];
 }
 
 export interface CuratedReply {
@@ -928,10 +933,13 @@ export function curateReply(
   options: CurateReplyOptions = {},
 ): CuratedReply {
   const parsed = parseMemoryEvents(replyText);
+  const carried = options.carriedEvents ?? [];
+  const modelEvents = carried.length ? [...parsed.events, ...carried] : parsed.events;
+  const emitterStatus = parsed.events.length === 0 && carried.length > 0 ? "valid" : parsed.emitterStatus;
   const ticket = beginMemoryTicket({
     context: ctx,
-    emitterStatus: parsed.emitterStatus,
-    candidateCount: parsed.candidateCount,
+    emitterStatus,
+    candidateCount: parsed.candidateCount + carried.length,
     turnSummary: parsed.turnSummary ?? fallbackTurnObservation(parsed.cleanedText),
   });
   if (!ticket.created) {
@@ -962,8 +970,8 @@ export function curateReply(
    * 대신 만든다. 내용을 지어내지 않는다: 무엇을 요청받았고 어느 실행이었는지만 적고,
    * 출처를 host-observed 로 표시해 모델이 스스로 남긴 배움과 섞이지 않게 한다.
    */
-  const hostObserved = parsed.events.length === 0 ? hostObservedTurnEvents(ctx) : [];
-  const effectiveEvents = parsed.events.length > 0 ? parsed.events : hostObserved;
+  const hostObserved = modelEvents.length === 0 ? hostObservedTurnEvents(ctx) : [];
+  const effectiveEvents = modelEvents.length > 0 ? modelEvents : hostObserved;
   const attemptedReport = effectiveEvents.length > 0
     ? curateEvents(effectiveEvents, ctx, {
         ticketId: ticket.ticketId,
@@ -973,11 +981,11 @@ export function curateReply(
       })
     : emptyReport();
   const report = memoryDecisionReport(ticket.ticketId, attemptedReport);
-  const outcome = parsed.emitterStatus === "malformed"
+  const outcome = parsed.emitterStatus === "malformed" && carried.length === 0
     ? "malformed_output"
     : options.semanticFailed
       ? "curator_failed"
-      : parsed.events.length === 0
+      : modelEvents.length === 0
         ? "no_candidates"
         : "decided";
   appendTurnOutcomeDecision({
@@ -993,7 +1001,7 @@ export function curateReply(
     cleanedText: parsed.cleanedText,
     report,
     ticketId: ticket.ticketId,
-    emitterStatus: parsed.emitterStatus,
+    emitterStatus,
     curatorMode,
   };
 }

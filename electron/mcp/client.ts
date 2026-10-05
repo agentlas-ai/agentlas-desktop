@@ -217,7 +217,8 @@ import {
 } from "../memory/semantic-curator";
 import { isAutomationLedgerChat } from "../memory/automation-surface";
 import { harvestCompactionSummaries } from "../memory/compaction-harvest";
-import { parseMemoryEvents } from "../memory/events";
+import { parseMemoryEvents, type RawMemoryEvent } from "../memory/events";
+import { hasQueuedOwnerSteer } from "../store/invocation-steers";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
 import { automationProtocolFor, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
@@ -6086,6 +6087,9 @@ ${effectiveUserPrompt}`;
     // 접두해 본문/앵커 좌표계를 패스 전체에 걸쳐 단조로 유지한다. (continuousMode는 패스마다
     // 별도 assistant 메시지를 남기므로 제외 — 접두하면 내용이 중복된다)
     let partialFloor = "";
+    // Memory events a continuous pass ended with. Each pass is saved as its own message below, so its block is taken
+    // out there and curated with the final answer (production 2026-10-05: X Marketing showed the raw envelope).
+    const carriedPassMemoryEvents: RawMemoryEvent[] = [];
     const observedOneSourceUrls = new Set<string>();
     let observedOneToolEvidence = false;
     let observedOneToolFailure = false;
@@ -6931,6 +6935,14 @@ ${effectiveUserPrompt}`;
           passShouldContinue = true;
         }
       }
+      // The owner wrote while this run worked (production 2026-10-05, Thread Marketing: a direction queued behind a
+      // Goal's continuous run waited for the whole run). Stop at this pass boundary; Main then starts the owner's
+      // turn from the queue and the Goal continues from there.
+      if (passShouldContinue && !signal?.aborted && hasQueuedOwnerSteer(chat.id)) {
+        passShouldContinue = false;
+        tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
+          kind: "owner_steer_pass_boundary", payload: { pass } });
+      }
       if (!passShouldContinue || signal?.aborted) {
         result = { ...result, text: continuation.text };
         break;
@@ -6944,10 +6956,12 @@ ${effectiveUserPrompt}`;
       if (continuousMode) {
         // 이 턴의 완료된 결과를 즉시 별도 assistant 메시지로 남긴다 — 화면엔 새 말풍선이
         // 계속 이어 붙는 것처럼 보이고, 앱이 중간에 꺼져도 그때까지 기록은 남는다.
+        const passMemory = stripAllMemoryEventBlocks(continuation.text);
+        carriedPassMemoryEvents.push(...passMemory.events);
         const committedPass = appendInvocationAssistantResult({
           chatId: chat.id,
           speakerAgentId: agent.id,
-          text: stripStrayProtocolTokens(stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, continuation.text)))),
+          text: stripStrayProtocolTokens(stripPermissionEscalationMarker(redactWorkAttachmentText(req, redactOneAttachmentText(req, passMemory.cleanedText)))),
           goalId: activeGoalId,
           runId: req.runId,
         });
@@ -7862,7 +7876,7 @@ ${effectiveUserPrompt}`;
               curationContext,
               restrictedDiscardedMemoryEvents,
             )
-          : curateReply(displayText, curationContext, semanticOptions);
+          : curateReply(displayText, curationContext, { ...semanticOptions, carriedEvents: carriedPassMemoryEvents });
         // Restricted cleanup may intentionally remove the entire response. Never
         // restore the raw control block through the ordinary empty-text fallback.
 
