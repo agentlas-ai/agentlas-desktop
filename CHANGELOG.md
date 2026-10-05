@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.66 — 2026-10-06
+
+- You can attach photos and files to your personal One, from Desktop and from the phone.
+- Your personal One's reply indicators stay right after a run is recovered.
+- The personal One's left menu starts with "Back to One" (it was "Sessions and One features").
+- AGI no longer keeps proposing a work turn for a Goal that is waiting on a scheduled check, which the app could only refuse and then reported as a defect.
+- When the phone's connection drops, the app logs it once instead of once per queued message.
+- The computer-use app inspector says which depth and node limits it accepts when it refuses a request.
+
+This release binds Agentlas OS v1.2.55 at 80d400b784a49a0ce6369addc8d4b8f62fe238c4; public runtime asset `hephaestus-runtime-v1.2.55.tar.gz` is pinned at SHA-256 `bfa861082c160739cd3e32884a67d3ef9c8af92e5d889ecd96682082072ae775`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.65 — 2026-10-06
 
 - A long Goal that keeps opening browser tabs no longer stops when all 8 are in use: when it needs a new tab it closes its own least recently used one. The tab it works in, the tab you are looking at and other tasks' tabs stay.
