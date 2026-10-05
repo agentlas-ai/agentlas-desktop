@@ -1367,6 +1367,8 @@ let quitCleanupDone = false;
 let quitCleanupPromise: Promise<void> | null = null;
 /** Set once the One import module loads; quitting ends its chunked pass at the next block. */
 let stopOneImport: (() => void) | null = null;
+/** Stops the Alive organisms, the AGI monitor and the AGI bug-report timers (set once they start). */
+let stopAliveOrganismsOnQuit: (() => void) | null = null;
 /** Upper bound on waiting for the daemon ensure before the One import starts anyway. */
 const ONE_IMPORT_DAEMON_WAIT_MS = 30_000;
 let quitServicesStopPromise: Promise<void> | null = null;
@@ -1426,6 +1428,9 @@ function stopQuitServices(): Promise<void> {
   try { closeAutomationDispatchForShutdown(); } catch {}
   try { stopOneBriefingScheduler(); } catch {}
   try { stopOneImport?.(); } catch {}
+  // Nothing stopped them before: their timers outlived closeStore, and the AGI bug-report flush threw "The database
+  // connection is not open" 11 s into a quit (2026-10-05 12:55 UTC; found by the monitoring peer session).
+  try { stopAliveOrganismsOnQuit?.(); } catch {}
   try { stopBrowserOrphanSweep(); } catch {}
   try { stopBrowserApprovalServer(); } catch {}
   try { stopMcpProxyApprovalServer(); } catch {}
@@ -4744,8 +4749,9 @@ app.whenReady().then(async () => {
   // AGENTLAS_ALIVE_ORGANISMS=off is an operator kill switch (lives stay durable and resume when it is removed).
   if (!developmentEffectsSuppressed() && process.env.AGENTLAS_ALIVE_ORGANISMS !== "off") {
     try {
-      const { startAliveOrganisms } = await import("./alive-organisms");
+      const { startAliveOrganisms, stopAliveOrganisms } = await import("./alive-organisms");
       startAliveOrganisms();
+      stopAliveOrganismsOnQuit = stopAliveOrganisms;
     } catch (error) {
       console.error("[alive-organisms] start failed", error);
     }

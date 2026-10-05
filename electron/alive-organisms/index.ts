@@ -47,6 +47,7 @@ const ownerIntentGate = new AliveOwnerIntentGate();
 
 let agiBugReports: AgiBugReports | null = null;
 let agiBugReportTimer: ReturnType<typeof setInterval> | null = null;
+let agiBugReportFirstFlush: ReturnType<typeof setTimeout> | null = null;
 
 function mainLogPath(): string | null {
   try {
@@ -243,7 +244,8 @@ export function startAliveOrganisms(): AliveOrganismHost {
     const flush = () => { void agiBugReportSender().flush().catch((error) => console.warn("[agi-bug-report] flush failed:", error)); };
     agiBugReportTimer = setInterval(flush, 60_000);
     agiBugReportTimer.unref?.();
-    setTimeout(flush, 5_000).unref?.();
+    agiBugReportFirstFlush = setTimeout(flush, 5_000);
+    agiBugReportFirstFlush.unref?.();
   }
   return host;
 }
@@ -252,6 +254,8 @@ export function stopAliveOrganisms(): void {
   host?.stop(); agiMonitor?.stop();
   if (agiBugReportTimer) clearInterval(agiBugReportTimer);
   agiBugReportTimer = null;
+  if (agiBugReportFirstFlush) clearTimeout(agiBugReportFirstFlush);
+  agiBugReportFirstFlush = null;
 }
 
 function agiTokenLimitsView(): AgiTokenLimitsView {
