@@ -7,6 +7,8 @@ import { onHostShutdown } from "../host-lifecycle";
 import { userDataPath } from "../runtime-paths";
 import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import { oneGraphDispatch } from "./graph-dispatch";
+import { AGENTLAS_ONE_TEAM_TOOL_NAMES } from "./team-mcp-server";
+import { ONE_SUPERVISOR_TOOL_NAMES } from "../../shared/one-supervisor-tools";
 import {
   oneTeamCreateMember,
   oneTeamComposeGroup,
@@ -200,7 +202,13 @@ export async function createOneTeamCapability(
 ): Promise<{ path: string; binding: OneTeamCapabilityBinding }> {
   const port = await startOneTeamControlServer();
   if (!port) throw new Error("one-team-control-unavailable");
-  const binding: OneTeamCapabilityBinding = { ...input, capabilityId: randomUUID() };
+  // The personal-supervisor tools answer only in the owner's personal One conversation (the request handler below
+  // refuses them anywhere else). Listing them in every conversation made room Ones call one_app_operations and get
+  // supervisor_personal_conversation_required (production 2026-10-05, Thread Marketing and Youtube launch), so a
+  // conversation that is not the personal one is not offered them.
+  const tools = input.tools ?? (personalSupervisorConversation(input.chatId) ? undefined
+    : AGENTLAS_ONE_TEAM_TOOL_NAMES.filter((name) => !(ONE_SUPERVISOR_TOOL_NAMES as readonly string[]).includes(name)));
+  const binding: OneTeamCapabilityBinding = { ...input, ...(tools ? { tools } : {}), capabilityId: randomUUID() };
   capabilities.set(binding.capabilityId, binding);
   const directory = controlDir();
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
@@ -212,6 +220,17 @@ export async function createOneTeamCapability(
   if (process.platform !== "win32") fs.chmodSync(temp, 0o600);
   fs.renameSync(temp, target);
   return { path: target, binding };
+}
+
+function personalSupervisorConversation(chatId: string | null | undefined): boolean {
+  if (!chatId) return false;
+  try {
+    const { isPersonalSupervisorConversation } = require("./supervisor") as typeof import("./supervisor");
+    return isPersonalSupervisorConversation(chatId);
+  } catch {
+    // Unknown means not offered; the request handler would refuse the call anyway.
+    return false;
+  }
 }
 
 export function removeOneTeamCapability(configKey: string, capabilityId: string): void {
