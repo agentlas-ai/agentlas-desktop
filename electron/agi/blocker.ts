@@ -283,6 +283,16 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
       boundary: "owner_stop", altPaths: [], reasonCode: "owner_stop", signal: ownerPause });
   }
 
+  // 1b. A Goal paused by its budget is a stop only the owner lifts (owner decision 2026-10-04: the token limit really
+  //     stops; the way on is the owner's). It used to read as a "payment" boundary with an attempt due, so AGI kept
+  //     opening incidents and starting turns for a Goal paused since 2026-09-06 and filed a defect about it at
+  //     nearly every wake (agi_unblock_repeats_budget_paused_goal, agi.budget_pause_misclassified_as_payment and
+  //     five more codes on 2026-10-04..05). No attempt, no notice, like an owner stop.
+  if (facts.status === "paused" && facts.pauseReason === "budget") {
+    return base({ display: "paused", attemptDue: false, primarySignal: "owner_pause", causeKind: "boundary", ownerClass: "human_only",
+      boundary: "owner_stop", altPaths: [], reasonCode: "budget_stop", signal: null });
+  }
+
   // Secondary defect findings that ride along with any primary class.
   const exhausted = find("effect_observation_exhausted");
   const later = find("later_run_receipt");

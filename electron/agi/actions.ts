@@ -122,7 +122,8 @@ const ACTION_ID = /^[A-Za-z0-9._:-]{8,160}$/;
 function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
   return Boolean(value && typeof (value as { then?: unknown }).then === "function");
 }
-const OWNER_BOUNDARY_PAUSES = new Set(["user"]);
+// A budget pause is lifted by the owner too (blocker.ts budget_stop): AGI files defects there, nothing else.
+const OWNER_BOUNDARY_PAUSES = new Set(["user", "budget"]);
 
 function text(value: unknown, max: number): string | null {
   if (typeof value !== "string") return null;

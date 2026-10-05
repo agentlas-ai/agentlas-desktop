@@ -256,7 +256,6 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
       signals.push({ kind: "owner_pause" });
     } else {
       if (run.status === "paused" && run.pauseReason === "approval_required") signals.push({ kind: "boundary", boundary: "security_consent", code: "approval_required" });
-      else if (run.status === "paused" && run.pauseReason === "budget") signals.push({ kind: "boundary", boundary: "payment", code: "long_run_budget" });
       else if (run.status === "paused" && run.pauseReason) signals.push({ kind: "host_pause", reason: run.pauseReason });
       if (run.status === "blocked" && run.blockedReason) {
         if (OWNER_QUESTION.has(run.blockedReason)) signals.push({ kind: "needs_input", code: run.blockedReason });
