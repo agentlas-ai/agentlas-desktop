@@ -2968,6 +2968,37 @@ app.whenReady().then(async () => {
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
     return scienceStore().listSources(projectId);
   });
+  // The paper as saved, for the researcher's reader (Science sourceReaderView), and the downloaded original opened in
+  // its system viewer. Only a file under the project's papers/ folder is ever opened.
+  ipcMain.handle("science:sources:reader", (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const sourceId = input && typeof input === "object" && "sourceId" in input ? String((input as { sourceId?: unknown }).sourceId ?? "") : "";
+    const store = scienceStore() as ReturnType<typeof scienceStore> & { sourceReaderView?: (projectId: string, sourceId: string) => unknown };
+    return typeof store.sourceReaderView === "function" ? store.sourceReaderView(projectId, sourceId) : null;
+  });
+  ipcMain.handle("science:sources:openOriginal", async (event, input: unknown) => {
+    assertScienceSender(event, input);
+    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
+    const sourceId = input && typeof input === "object" && "sourceId" in input ? String((input as { sourceId?: unknown }).sourceId ?? "") : "";
+    const store = scienceStore() as ReturnType<typeof scienceStore> & { sourceReaderView?: (projectId: string, sourceId: string) => { original?: { path?: string } | null } | null };
+    const file = typeof store.sourceReaderView === "function" ? store.sourceReaderView(projectId, sourceId)?.original?.path : undefined;
+    const folder = store.getProject(projectId)?.folderPath;
+    if (!file || !folder) return { ok: false };
+    // openPath launches whatever the file is, so a downloaded name like x.command or x.app would run. Only a regular
+    // PDF file whose real path (symlinks resolved) is inside the project's papers/ folder is opened.
+    let real: string;
+    try {
+      real = fs.realpathSync(file);
+      if (!fs.statSync(real).isFile()) return { ok: false };
+      if (!real.startsWith(fs.realpathSync(path.join(folder, "papers")) + path.sep)) return { ok: false };
+    } catch {
+      return { ok: false };
+    }
+    if (path.extname(real).toLowerCase() !== ".pdf") return { ok: false };
+    const error = await shell.openPath(real);
+    return { ok: !error };
+  });
   ipcMain.handle("science:sources:get", (event, input: unknown) => {
     assertScienceSender(event, input);
     const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";

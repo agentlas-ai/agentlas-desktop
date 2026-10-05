@@ -176,6 +176,11 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     getVersion: (projectId: string, sourceVersionId: string) => ipcRenderer.invoke("science:sources:get", { extensionId, projectId, sourceVersionId }),
     // 목록의 행들을 한 번에 확인해 받는다. 한 건씩 부르면 왕복 수가 곧 대기 시간이 된다.
     getMany: (projectId: string, sourceIds: string[]) => ipcRenderer.invoke("science:sources:getMany", { extensionId, projectId, sourceIds }),
+    reader: (projectId: string, sourceId: string) => ipcRenderer.invoke("science:sources:reader", { extensionId, projectId, sourceId }),
+    openOriginal: (projectId: string, sourceId: string) => {
+      if (!navigator.userActivation?.isActive && process.env.AGENTLAS_E2E !== "1") return Promise.reject(new Error("science-source-original-user-gesture-required"));
+      return ipcRenderer.invoke("science:sources:openOriginal", { extensionId, projectId, sourceId });
+    },
   }),
   datasets: Object.freeze({
     importCsv: (input: unknown) => ipcRenderer.invoke("science:datasets:importCsv", { extensionId, input }),
