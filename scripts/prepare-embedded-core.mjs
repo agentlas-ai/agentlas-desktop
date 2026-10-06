@@ -155,6 +155,47 @@ function copyPinnedTrackedTree() {
   }
 }
 
+// Keep the canonical runtime instructions while omitting an upstream historical
+// contributor-only/benchmark narrative. Hash-pin mirrors before projecting;
+// upstream drift must be reviewed instead of silently changing a new paragraph.
+function transformRuntimeInstructions(files) {
+  const expected = ["AGENTS.md", "claude/plugins/agentlas-core-engine-meta-agent/AGENTS.md", "codex/plugins/agentlas-core-engine-meta-agent/AGENTS.md"];
+  const actual = files.filter(file => path.basename(file) === "AGENTS.md")
+    .map(file => path.relative(temporaryRoot, file).replaceAll("\\", "/")).sort();
+  if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
+    throw new Error("embedded Core runtime instruction mirror count/path mismatch");
+  }
+  for (const relative of expected) {
+    const file = path.join(temporaryRoot, relative);
+    let source = fs.readFileSync(file, "utf8");
+    const digest = require("node:crypto").createHash("sha256").update(source).digest("hex");
+    if (digest !== "3f490e2e24e05c0fb8c85de2ac9377bcb405c78baa7d6b39ccb738bab9849c60") {
+      throw new Error(`embedded Core runtime instruction source checksum mismatch: ${relative}`);
+    }
+    function replaceSpan(startText, endText, replacement) {
+      const start = source.indexOf(startText);
+      const end = source.indexOf(endText, start + startText.length);
+      if (start < 0 || end <= start || source.indexOf(startText, start + 1) >= 0
+          || source.indexOf(endText, end + 1) >= 0) {
+        throw new Error("embedded Core nonruntime paragraph boundary mismatch");
+      }
+      source = source.slice(0, start) + replacement + source.slice(end);
+    }
+    source = replaceExactly(source,
+      "> **Asked to install this repo, not to work on it?** This file is the\n> contributor constitution and will not help you. Read the install block at the",
+      "> **Asked to install this repo, not to work on it?** Read the install block at the", "runtime install entry");
+    replaceSpan("\n## Repository Constitution: Local Main Only\n", "\n## Public Release Allowlist (Hard Rule)\n", "");
+    replaceSpan("## Source Code & Commit Language\n", "\nExempt from this rule",
+      "## Generated Code Comment Language\n\nGenerated code comments must be written in English, regardless of the language\nof the requesting session or the user's instructions.\n");
+    replaceSpan("It is mandatory for the same reason the\n", "Do not report\n", "It is mandatory. ");
+    replaceSpan("18. For development changes to the engine ontology runtime, run\n", "19. For long-running or multi-file execution work", "");
+    const outputDigest = require("node:crypto").createHash("sha256").update(source).digest("hex");
+    if (outputDigest !== "470427c6ff736f32bb62f86c8dba5256911beb2596a1eef1781998cfa4425a34") throw new Error("embedded Core projected instruction checksum mismatch");
+    fs.writeFileSync(file, source);
+
+  }
+}
+
 function transformPreparedTree() {
   const files = contract.scanRetiredRuntime(temporaryRoot);
   void files;
@@ -182,6 +223,7 @@ function transformPreparedTree() {
   }
 
   const remaining = all.filter((filePath) => fs.existsSync(filePath));
+  transformRuntimeInstructions(remaining);
   for (const filePath of remaining) {
     const normalized = filePath.replaceAll("\\", "/");
     const base = path.basename(filePath);

@@ -55,7 +55,6 @@ function stripNodePtyDebug(projectDir, platform) {
 module.exports = async function beforePackPrepare(context) {
   const projectDir = context.packager.projectDir;
   verifyPublicPackageMetadata(projectDir);
-  stripNodePtyDebug(projectDir, context.electronPlatformName);
   const scienceNative = await prepareScienceNativeDependencies(projectDir, context.electronPlatformName, Arch[context.arch]);
   console.log(`[beforePack] prepared Science native dependencies ${JSON.stringify(scienceNative)}`);
   const signingPolicy = materializeProductExtensionSigningPolicy(projectDir);
