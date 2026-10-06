@@ -721,7 +721,15 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
       normalizedValue: null,
       payload: { source: "experience_packs", containsBasePackageMaterial: false },
     });
-    for (const release of lineageProjections(pack)) {
+    // Only the current release "contains" every item it carries. An earlier release "contains" just
+    // the items it added over the one it superseded (payload introduced: true), so any release's items
+    // are one walk along "supersedes". Every release used to link every item it carried, and a release
+    // carries everything before it: edges grew with the square of the promotions (One's pack: 256
+    // releases, 32,896 "contains" edges). Owner decision 2026-10-06: shrink it.
+    const releases = lineageProjections(pack);
+    const itemsByRelease = new Map(releases.map((release) => [release.releaseId, new Set(release.itemIds)]));
+    for (const release of releases) {
+      const supersededItems = release.supersedesReleaseId ? itemsByRelease.get(release.supersedesReleaseId) : undefined;
       const releaseNode = addNode({
         nodeId: stableId("experience-release-node", pack.id, release.releaseId),
         packId: pack.id,
@@ -790,7 +798,8 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
           payload: { rawContentStored: false },
         });
         itemNodes.set(itemId, itemNode);
-        addEdge(release, releaseNode, itemNode, "contains");
+        if (release.current) addEdge(release, releaseNode, itemNode, "contains");
+        else if (!supersededItems?.has(itemId)) addEdge(release, releaseNode, itemNode, "contains", { introduced: true });
         addEdge(release, itemNode, environmentNode, "applies_in_environment");
         for (const tag of tagsByItem.get(itemId) ?? []) {
           const tagNode = addNode({
