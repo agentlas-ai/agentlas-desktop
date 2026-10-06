@@ -1,7 +1,7 @@
 "use strict";
 
 const { execFileSync } = require("node:child_process");
-const { readFileSync } = require("node:fs");
+const { readFileSync, readdirSync } = require("node:fs");
 const path = require("node:path");
 const { Arch } = require("builder-util");
 const { prepareScienceNativeDependencies } = require("./science-native-dependencies.cjs");
@@ -27,6 +27,26 @@ function verifyPublicPackageMetadata(projectDir) {
   }
 }
 
+// Run before ASAR header sizes/integrity are captured, and only on the build
+// dependency copy. Removing debug symbols leaves native exported ABI intact.
+function stripNodePtyDebug(projectDir, platform) {
+  if (platform !== "darwin") return;
+  const root = path.join(projectDir, "node_modules", "node-pty");
+  function visit(directory) {
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const file = path.join(directory, entry.name);
+      if (entry.isDirectory()) visit(file);
+      else if (entry.isFile() && (entry.name.endsWith(".node") || entry.name === "spawn-helper")) {
+        const magic = readFileSync(file).subarray(0, 4).toString("hex");
+        if (["cffaedfe", "cefaedfe", "cafebabe", "bebafeca", "cafebabf"].includes(magic)) {
+          execFileSync("/usr/bin/strip", ["-S", file]);
+        }
+      }
+    }
+  }
+  visit(root);
+}
+
 /**
  * electron-builder can be invoked directly, outside the npm dist wrappers.
  * Always prepare and byte-verify the pinned Core checkout before extraResources
@@ -35,6 +55,7 @@ function verifyPublicPackageMetadata(projectDir) {
 module.exports = async function beforePackPrepare(context) {
   const projectDir = context.packager.projectDir;
   verifyPublicPackageMetadata(projectDir);
+  stripNodePtyDebug(projectDir, context.electronPlatformName);
   const scienceNative = await prepareScienceNativeDependencies(projectDir, context.electronPlatformName, Arch[context.arch]);
   console.log(`[beforePack] prepared Science native dependencies ${JSON.stringify(scienceNative)}`);
   const signingPolicy = materializeProductExtensionSigningPolicy(projectDir);
@@ -55,3 +76,5 @@ module.exports = async function beforePackPrepare(context) {
 };
 
 module.exports.verifyPublicPackageMetadata = verifyPublicPackageMetadata;
+
+module.exports.stripNodePtyDebug = stripNodePtyDebug;

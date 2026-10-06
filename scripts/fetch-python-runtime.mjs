@@ -28,6 +28,7 @@ import {
   lstatSync,
   mkdirSync,
   readlinkSync,
+  readFileSync,
   readdirSync,
   rmSync,
   writeFileSync,
@@ -252,6 +253,22 @@ console.log(`[fetch-python] bundling ${BUNDLED_PYTHON_PACKAGES.length} engine pa
     stdio: "inherit",
     env: { ...process.env, PYTHONNOUSERSITE: "1", PYTHONDONTWRITEBYTECODE: "1", PIP_DISABLE_PIP_VERSION_CHECK: "1" },
   });
+}
+// pip --target emits absolute build-interpreter shebangs. A shell/Python
+// polyglot launcher binds to this bundled interpreter after the app is moved.
+if (process.platform !== "win32") {
+  const consoleBin = path.join(sitePackages, "bin");
+  if (existsSync(consoleBin)) {
+    for (const name of readdirSync(consoleBin)) {
+      const file = path.join(consoleBin, name);
+      if (!lstatSync(file).isFile()) continue;
+      const text = readFileSync(file, "utf8");
+      if (!/^#![^\n]*python[^\n]*\n/.test(text)) continue;
+      const relativePython = path.relative(consoleBin, bin).split(path.sep).join("/");
+      const launcher = `#!/bin/sh\n'''exec' "$(dirname "$0")/${relativePython}" -I "$0" "$@"\n' '''\n`;
+      writeFileSync(file, launcher + text.slice(text.indexOf("\n") + 1));
+    }
+  }
 }
 // Prune wheel verification suites before import checks and the tree receipt.
 // sympy.testing is runtime-coupled and remains; only known test-suite folders go.

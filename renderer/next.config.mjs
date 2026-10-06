@@ -1,3 +1,5 @@
+import { fileURLToPath } from "node:url";
+
 // Electron의 file:// 로드 호환 — package build만 정적 export를 사용한다.
 // NODE_ENV는 상위 셸/QA 런처에서 production으로 상속될 수 있다. 그것으로
 // `next dev`를 export 설정으로 만들면 이미 열린 Electron의 dev 청크가 404가
@@ -20,6 +22,12 @@ const nextConfig = {
   // to resolve Vega's Node-only fallback (and so Desktop does not pull in a
   // native canvas binary just for Flint charts).
   webpack(config) {
+    config.module.rules.push({
+      test: /\.(?:m?js)$/,
+      enforce: "pre",
+      include: /node_modules[\\/](?:@file-viewer|pdfjs-dist|maplibre-gl)[\\/]/,
+      use: [{ loader: fileURLToPath(new URL("../build-resources/renderer-runtime-url-loader.cjs", import.meta.url)) }],
+    });
     config.resolve ??= {};
     config.resolve.alias ??= {};
     config.resolve.alias.canvas = false;
