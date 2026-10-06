@@ -1,8 +1,10 @@
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
+
+import type { MobilePushRelayPayload, MobilePushOutcome } from "./push";
 
 const WS_OPEN = 1;
 const RELAY_FILE = "relay.json";
@@ -275,6 +277,9 @@ export class MobileBridgeCloudRelay {
   private endpointCheckedAt = 0;
   private readonly secret: string;
   private control: RelaySocket | null = null;
+  private controlCookie: string | null = null;
+  private pushPlatforms: Array<"ios" | "android"> = [];
+  private readonly pushPending = new Map<string, { resolve: (outcome: MobilePushOutcome) => void; timer: NodeJS.Timeout }>();
   private retryTimer: NodeJS.Timeout | null = null;
   private controlHeartbeatTimer: NodeJS.Timeout | null = null;
   private stopped = true;
@@ -296,6 +301,32 @@ export class MobileBridgeCloudRelay {
     return { endpoint: this.endpoint, secret: this.secret };
   }
 
+  supportsPush(platform: "ios" | "android"): boolean {
+    return !this.stopped && this.control?.readyState === WS_OPEN &&
+      this.controlCookie === getSessionCookieHeader() && this.pushPlatforms.includes(platform);
+  }
+
+  /** Control is authenticated independently of phone tunnels. No token/body is logged. */
+  publishPush(payload: MobilePushRelayPayload): Promise<MobilePushOutcome> {
+    const control = this.control;
+    if (!this.supportsPush(payload.platform) || !control || control.readyState !== WS_OPEN ||
+        this.controlCookie !== getSessionCookieHeader() || this.pushPending.size >= 32 ||
+        payload.notification.hostId !== this.options.hostId) return Promise.resolve("unavailable");
+    const requestId = randomUUID();
+    return new Promise(resolve => {
+      const timer = setTimeout(() => { this.pushPending.delete(requestId); resolve("unavailable"); }, 12_000);
+      timer.unref?.();
+      this.pushPending.set(requestId, { resolve, timer });
+      try { control.send(JSON.stringify({ type: "relay.push", requestId, ...payload })); }
+      catch { clearTimeout(timer); this.pushPending.delete(requestId); resolve("unavailable"); }
+    });
+  }
+
+  private settlePushes(): void {
+    for (const pending of this.pushPending.values()) { clearTimeout(pending.timer); pending.resolve("unavailable"); }
+    this.pushPending.clear();
+  }
+
   start(): void {
     if (!this.stopped) return;
     this.stopped = false;
@@ -304,6 +335,9 @@ export class MobileBridgeCloudRelay {
 
   stop(): void {
     this.stopped = true;
+    this.settlePushes();
+    this.controlCookie = null;
+    this.pushPlatforms = [];
     if (this.retryTimer) clearTimeout(this.retryTimer);
     this.retryTimer = null;
     if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
@@ -387,6 +421,8 @@ export class MobileBridgeCloudRelay {
       perMessageDeflate: false,
     });
     this.control = socket;
+    this.controlCookie = cookie;
+    this.pushPlatforms = [];
     let opened = false;
     let controlAlive = true;
     socket.on("open", () => {
@@ -447,10 +483,13 @@ export class MobileBridgeCloudRelay {
       // 매달렸다가 "Opening handshake has timed out" 을 한 줄 더 남긴다. 지금 끊는다.
       socket.terminate();
     });
-    socket.on("message", (data) => this.handleControlMessage(data));
+    socket.on("message", (data) => { if (this.control === socket) this.handleControlMessage(data); });
     const disconnected = (...args: unknown[]) => {
       if (this.control !== socket) return;
       this.control = null;
+      this.controlCookie = null;
+      this.pushPlatforms = [];
+      this.settlePushes();
       if (this.controlHeartbeatTimer) clearInterval(this.controlHeartbeatTimer);
       this.controlHeartbeatTimer = null;
       if (refusedStatus !== null) {
@@ -478,6 +517,22 @@ export class MobileBridgeCloudRelay {
     try { parsed = JSON.parse(Buffer.isBuffer(data) ? data.toString("utf8") : String(data)); } catch { return; }
     if (!parsed || typeof parsed !== "object") return;
     const message = parsed as Record<string, unknown>;
+    if (message.type === "relay.ready") {
+      const push = message.push as Record<string, unknown> | undefined;
+      this.pushPlatforms = push?.provider === "fcm" && push.available === true && Array.isArray(push.platforms)
+        ? push.platforms.filter((value): value is "ios" | "android" => value === "ios" || value === "android") : [];
+      this.options.onStatusChanged?.();
+      return;
+    }
+    if (message.type === "relay.push.result") {
+      if (typeof message.requestId !== "string" || !["accepted", "unregistered", "unavailable", "refused"].includes(String(message.outcome))) return;
+      const pending = this.pushPending.get(message.requestId);
+      if (!pending) return;
+      clearTimeout(pending.timer);
+      this.pushPending.delete(message.requestId);
+      pending.resolve(message.outcome as MobilePushOutcome);
+      return;
+    }
     if (message.type === "relay.pair") {
       if (typeof message.channelId !== "string" || !CHANNEL_PATTERN.test(message.channelId)) return;
       this.openPairTunnel(message.channelId);

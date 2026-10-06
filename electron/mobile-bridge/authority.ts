@@ -1,3 +1,4 @@
+import type { MobilePushService, MobilePushNotice } from "./push";
 import { MobileGoalControl, type MobileGoalControlServices } from "./goal-control";
 import { oneSupervisor } from "../one/supervisor";
 import { ONE_SUPERVISOR_SCHEMA, type SupervisorSendInput, type SupervisorWorkInput, type SupervisorScienceInput, type SupervisorControlInput, type SupervisorCommandReceipt } from "../../shared/one-supervisor";
@@ -97,7 +98,7 @@ import {
   resolveRolePoolPicks,
   setActiveRuntime,
 } from "../runtime/detect";
-import { listModelRoleMembers, setModelRoleMembers } from "../store/model-roles";
+import { listModelRoleMembers, pickModelRoleFromPool, setModelRoleMembers } from "../store/model-roles";
 import { listRuntimeCommands } from "../runtime/commands";
 import { installPublicHubRelease, listInstalledAgents } from "../mcp/registry";
 import { addOneOrgMember, getOneOrgState, markOneOrgMemberRead, openOneOrgMember } from "../one/org";
@@ -323,6 +324,7 @@ function activeMobileBuildStatus(status: InternalMobileBuildStatus): boolean {
 }
 
 export interface AgentlasDesktopMobileBridgeAuthorityOptions {
+  mobilePush?: MobilePushService;
   /** Explicit injection advertises the callable Desktop goal-control capability. */
   goalControl?: MobileGoalControlServices;
   /** DESKTOP_MOBILE_BRIDGE: Stable identity loaded from the Desktop userData store. */
@@ -1734,6 +1736,52 @@ export function projectOneMessageForPhone(
   return { messageId: boundedRedactedText(event.durableMessageId, 256), preview: boundedRedactedText(text, 600) };
 }
 
+/** Lightweight saved-answer observer, independent of expensive phone snapshots. */
+export function durableMobileApprovalPending(id: string, chatId: string): boolean {
+  try {
+    return Boolean(getDb().prepare(`SELECT 1 FROM one_supervisor_tool_approvals
+      WHERE id=? AND chat_id=? AND status='pending' AND expires_at>? AND lease_until>?`)
+      .get(id, chatId, Date.now(), Date.now()));
+  } catch { return false; }
+}
+
+export function observeMobilePushNotices(hostId: string, listener: (notice: MobilePushNotice, stillCurrent?: () => boolean) => void): () => void {
+  const stopMessages = invocationService.onEvent(({ runId, chatId, event }) => {
+    if (event.agentId || event.kind !== "final") return;
+    const message = projectOneMessageForPhone(event);
+    if (!message) return; // quiet/check-in/worker answers have no saved root message
+    if (isPersonalOneConversation(chatId)) {
+      listener({ category: "oneMessage", destination: "personalOne", hostId,
+        entityId: hostId, messageId: message.messageId, dedupeKey: `one-message:${hostId}:${message.messageId}`,
+        subject: "One", occurredAt: new Date().toISOString() });
+      return;
+    }
+    if (!getChat(chatId)) return;
+    listener({ category: "resultReady", destination: "thread", hostId,
+      entityId: chatId, dedupeKey: `run-result:${hostId}:${runId}`,
+      subject: "Agentlas", occurredAt: new Date().toISOString() });
+  });
+  // A raw error can precede a successful provider fallback. Only the durable
+  // terminal receipt can establish failure; input/approval/cancel waits cannot.
+  const stopFailures = invocationService.onSettled(({ runId, chatId, agentId, receipt, pendingQuestion, browserLoginWaiting, userDecisionRequest }) => {
+    if (agentId || receipt.status !== "failed" || pendingQuestion || browserLoginWaiting || userDecisionRequest ||
+        isPersonalOneConversation(chatId) || !getChat(chatId)) return;
+    listener({ category: "failure", destination: "thread", hostId,
+      entityId: chatId, dedupeKey: `run-failed:${hostId}:${runId}`,
+      subject: "Agentlas", occurredAt: new Date().toISOString() });
+  });
+  const stopApprovals = onToolApprovalRequested(request => {
+    const chatId = request.chatId;
+    if (request.mode !== "live" || request.agentId || !chatId || !getChat(chatId) || isPersonalOneConversation(chatId)) return;
+    const stillCurrent = () => durableMobileApprovalPending(request.id, chatId);
+    if (!stillCurrent()) return;
+    listener({ category: "approval", destination: "approvals", hostId,
+      entityId: chatId, dedupeKey: `tool-approval:${hostId}:${request.id}`,
+      subject: "Agentlas", occurredAt: request.requestedAt }, stillCurrent);
+  });
+  return () => { stopMessages(); stopFailures(); stopApprovals(); };
+}
+
 function summarizeToolPayload(value: string | undefined): MobileBridgeToolPayloadSummaryDto | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -2107,6 +2155,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   capabilities(): MobileBridgeJsonValue {
     return {
       oneSupervisorV1: ONE_SUPERVISOR_SCHEMA,
+      ...(this.options.mobilePush ? { mobilePush: true } : {}),
       visualSessionV2: this.visualSessions.capability(),
       ...(this.goalControl ? { goalControlV1: MOBILE_GOAL_CONTROL_CAPABILITY } : {}),
     };
@@ -2550,7 +2599,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       case "one.supervisor.snapshot": {
         noParams(request);
         const snapshot = await oneSupervisor().snapshot();
-        return asJsonValue({...snapshot,
+        // Read the same ordered role configuration as runtime detection without
+        // launching probes in a frequently polled conversation snapshot. This is
+        // the configured default, not a claim about an old/current run's fallback.
+        const selected = pickModelRoleFromPool("orchestrator")?.selection;
+        const orchestratorModel = selected ? { provider: selected.kind, model: selected.model ?? null } : null;
+        return asJsonValue({...snapshot, orchestratorModel,
           displayName:boundedRedactedText(snapshot.displayName,240),
           scienceError:snapshot.scienceError ? "science_observation_unavailable" : null,
           scienceProjects:snapshot.scienceProjects.map(project=>({...project,title:boundedRedactedText(project.title,1_000)})),
@@ -4327,6 +4381,15 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         }, request.method);
       }
 
+      case "notifications.register":
+      case "notifications.unregister": {
+        if (!this.options.mobilePush) throw new Error("mobile_push_unavailable");
+        const params = guardedParams(request, request.method === "notifications.register"
+          ? ["schemaVersion", "token", "platform", "locale", "preferences"] : ["schemaVersion", "token"]);
+        return request.method === "notifications.register"
+          ? this.options.mobilePush.register(params, context)
+          : this.options.mobilePush.unregister(params, context);
+      }
       case "device.revokeSelf": {
         noParams(request);
         if (context.devBootstrap || context.devicePlatform === "dev") {

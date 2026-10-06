@@ -1,3 +1,4 @@
+import { MobilePushService } from "./push";
 import { desktopGoalControlServices } from "./goal-control";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
@@ -11,7 +12,7 @@ import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
   type MobileBridgePairingPayload,
 } from "../../shared/mobile-bridge";
-import { createMobileBridgeAuthority, type MobileBridgeAuthorityHandle } from "./authority";
+import { createMobileBridgeAuthority, observeMobilePushNotices, type MobileBridgeAuthorityHandle } from "./authority";
 import {
   MobileBridgePairingManager,
   createMobileBridgePairingPayload,
@@ -55,6 +56,8 @@ interface RunningBridge {
   accountPairing: MobileBridgeAccountPairingClient;
   server: AgentlasMobileBridgeServer;
   relay: MobileBridgeCloudRelay;
+  push: MobilePushService | null;
+  stopPushObserver: () => void;
   manifest: MobileBridgeEndpointManifest;
   terminalLoadoutFeedWriter: TerminalOntologyLoadoutFeedWriter;
   terminalControl: DesktopMobileTerminalControl;
@@ -195,6 +198,9 @@ async function startBridgeInternal(
   // the credential survives so signing back in restores the pairing.
   const identity = loadOrCreateMobileBridgeHostIdentity(options.userDataPath);
   const accountPairing = new MobileBridgeAccountPairingClient();
+  let push: MobilePushService | null = null;
+  let relay: MobileBridgeCloudRelay | null = null;
+  let stopPushObserver = () => {};
   const pairing = new MobileBridgePairingManager(options.userDataPath, {
     consumePairingAssertion: (input) => accountPairing.consumePairingAssertion(input),
     desktopSessionActive: () => Boolean(getSessionCookieHeader()),
@@ -210,6 +216,7 @@ async function startBridgeInternal(
       // 새 기기가 붙으면 릴레이의 "재페어링 필요" 래치를 푼다 — 그 래치는
       // 폐기된 자격으로 무한 재시도하던 것을 막는 것이지, 새 페어링을 막는 게 아니다.
       if (reason === "device-paired") relay?.clearRepairRequiredLatch();
+      try { push?.prune(); } catch { console.warn("[mobile-push] registration store unavailable"); }
       emitMobileBridgeStateChange(reason);
     },
   });
@@ -219,7 +226,16 @@ async function startBridgeInternal(
   const terminalLoadoutFeedFile = terminalOntologyLoadoutFeedPath(options.userDataPath);
   const terminalLoadoutFeedWriter = new TerminalOntologyLoadoutFeedWriter(terminalLoadoutFeedFile);
   const terminalControl = createDesktopMobileTerminalControl();
+  try {
+    push = new MobilePushService({ userDataPath: options.userDataPath, hostId: identity.hostId,
+      currentWorkspaceId: () => getSessionCookieHeader() ? getAuthSession().workspaceId ?? null : null,
+      deviceWorkspaceId: (deviceId) => pairing.deviceWorkspaceId(deviceId),
+      supportsPlatform: (platform) => relay?.supportsPush(platform) ?? false,
+      publish: (payload) => relay?.publishPush(payload) ?? Promise.resolve("unavailable"),
+    });
+  } catch { console.warn("[mobile-push] registration store unavailable; push capability disabled"); }
   const authority = createMobileBridgeAuthority({
+    ...(push ? { mobilePush: push } : {}),
     goalControl: desktopGoalControlServices(),
     hostIdentity: identity,
     displayName,
@@ -241,7 +257,6 @@ async function startBridgeInternal(
     onError: (error) => console.error("[mobile-bridge-authority]", error.message),
   });
   let server: AgentlasMobileBridgeServer | null = null;
-  let relay: MobileBridgeCloudRelay | null = null;
   try {
     const tls = await loadOrCreateMobileBridgeTls(options.userDataPath);
     if (tls.rotated && pairing.listDevices().length > 0) {
@@ -293,7 +308,13 @@ async function startBridgeInternal(
       onStatusChanged: () => emitMobileBridgeStateChange("runtime-started"),
       onPairFrame: (frameText) => server!.handleRelayPairFrame(frameText),
     });
-    running = { authority, pairing, accountPairing, server, relay, manifest, terminalLoadoutFeedWriter, terminalControl };
+    if (push) {
+      const service = push;
+      stopPushObserver = observeMobilePushNotices(identity.hostId, (notice, stillCurrent) => {
+        void service.dispatch(notice, stillCurrent).catch(() => console.warn("[mobile-push] dispatch unavailable"));
+      });
+    }
+    running = { authority, pairing, accountPairing, server, relay, push, stopPushObserver, manifest, terminalLoadoutFeedWriter, terminalControl };
     relay.start();
     // Refresh once at Desktop startup even when no phone is connected. This is
     // a read-only Hub query; the independent Terminal still has to opt in with
@@ -326,6 +347,8 @@ async function startBridgeInternal(
     return mobileBridgeRuntimeStatus();
   } catch (error) {
     lastError = error instanceof Error ? error.message : String(error);
+    stopPushObserver();
+    push?.dispose();
     relay?.stop();
     if (server) await server.close().catch(() => {});
     terminalLoadoutFeedWriter.dispose();
@@ -341,6 +364,8 @@ async function stopRunningBridge(emitStopped: boolean): Promise<void> {
   running = null;
   if (!state) return;
   try {
+    state.stopPushObserver();
+    state.push?.dispose();
     state.relay.stop();
     await state.server.close();
   } finally {
@@ -509,6 +534,7 @@ export function reconcileMobileBridgeDevicesForAccount(
   }
   if (!userDataPath) return { revoked: 0 };
   const revoked = revokeMobileBridgeDevicesForOtherAccounts(userDataPath, activeWorkspaceId);
+  try { state.push?.prune(); } catch { console.warn("[mobile-push] registration store unavailable"); }
   for (const deviceId of revoked) state.server.disconnectDevice(deviceId);
   if (revoked.length > 0) {
     console.warn(`[mobile-bridge] revoked ${revoked.length} device(s) bound to a different account`);

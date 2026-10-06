@@ -101,6 +101,7 @@ export const MOBILE_BRIDGE_MAIL_WRITE_METHODS = [
 ] as const;
 
 export const MOBILE_BRIDGE_METHODS = [
+  "notifications.register", "notifications.unregister",
   ...MOBILE_GOAL_CONTROL_METHODS,
   "snapshot.get",
   "host.status",
@@ -225,6 +226,25 @@ export type MobileBridgeMethod =
   | (typeof MOBILE_BRIDGE_METHODS)[number]
   | (typeof MOBILE_BRIDGE_RETIRED_METHODS)[number];
 
+export interface MobilePushRegistration {
+  schemaVersion: 1;
+  token: string;
+  platform: "ios" | "android";
+  locale: "ko" | "en";
+  preferences: { one: boolean; approval: boolean; completed: boolean; failures: boolean };
+}
+
+export function validateMobilePushParams(method: string, params: Record<string, unknown>): string | null {
+  const register = method === "notifications.register";
+  if (!hasOnlyKeys(params, register ? ["schemaVersion", "token", "platform", "locale", "preferences"] : ["schemaVersion", "token"]) || params.schemaVersion !== 1) return "mobile_push_params_invalid";
+  if ((register || params.token !== undefined) && (typeof params.token !== "string" || !/^[A-Za-z0-9:_-]{16,4096}$/.test(params.token))) return "mobile_push_token_invalid";
+  if (!register) return null;
+  if (typeof params.platform !== "string" || !["ios", "android"].includes(params.platform) || typeof params.locale !== "string" || !["ko", "en"].includes(params.locale)) return "mobile_push_platform_invalid";
+  const prefs = params.preferences;
+  const keys = ["one", "approval", "completed", "failures"];
+  return !isRecord(prefs) || !hasOnlyKeys(prefs, keys) || keys.some(key => typeof prefs[key] !== "boolean") ? "mobile_push_preferences_invalid" : null;
+}
+
 /**
  * The fields each One supervisor method accepts from the phone. The request validator here and the Desktop authority
  * (electron/mobile-bridge/authority.ts) both read this one table. Two hand-kept lists drifted: the validator accepted
@@ -243,6 +263,7 @@ export const ONE_SUPERVISOR_PARAM_KEYS = {
 
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
+  "notifications.register", "notifications.unregister",
   "chat.attachments.begin", "chat.attachments.chunk", "chat.attachments.finish",
   "one.supervisor.send", "one.supervisor.startWork", "one.supervisor.startScience",
   "one.supervisor.control", "one.supervisor.stopReply", "one.supervisor.appearance",
@@ -3244,6 +3265,7 @@ function validateVisualInputAction(value: unknown): string | null {
 }
 
 function validateParams(method: MobileBridgeMethod, params: Record<string, unknown>): string | null {
+  if (method === "notifications.register" || method === "notifications.unregister") return validateMobilePushParams(method, params);
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
   if (isMobileGoalControlMethod(method)) return validateMobileGoalControlParams(method, params);
   if (EMPTY_METHODS.has(method)) {
