@@ -1,4 +1,5 @@
 import type { ChatHostNotice, HostStatusKind } from "./types";
+import { normalizeOneDispatchPresentation } from "./one-dispatch-presentation";
 
 const HOST_STATUS_KINDS: readonly HostStatusKind[] = [
   "effect-checking", "effect-continuing", "wait-registered", "wait-not-scheduled", "cycle-verified", "goal-resuming",
@@ -59,9 +60,10 @@ export function normalizeChatHostNotice(role: string, value: unknown): ChatHostN
   }
   if (item.purpose === "one-dispatch-link" || item.purpose === "one-dispatch-result") {
     const name = typeof item.memberName === "string" ? item.memberName.replace(/\s+/g, " ").trim() : "";
-    if (Object.keys(item).some(key => !["purpose", "runId", "chatId", "memberName"].includes(key))
+    if (Object.keys(item).some(key => !["purpose", "runId", "chatId", "memberName", "dispatch"].includes(key))
       || !validId(item.runId) || !validId(item.chatId) || !name || name.length > 80) return undefined;
-    return { purpose: item.purpose, runId: item.runId, chatId: item.chatId, memberName: name };
+    const dispatch = normalizeOneDispatchPresentation(item.dispatch);
+    return { purpose: item.purpose, runId: item.runId, chatId: item.chatId, memberName: name, ...(dispatch ? { dispatch } : {}) };
   }
   if (item.purpose === "one-team-member-joined") {
     const name = typeof item.memberName === "string" ? item.memberName.replace(/\s+/g, " ").trim() : "";

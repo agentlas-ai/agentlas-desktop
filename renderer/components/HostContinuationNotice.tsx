@@ -1,6 +1,7 @@
 "use client";
 import type { ChatHostNotice } from "../../shared/types";
 import { Markdown } from "./Markdown";
+import { OneDispatchNotice } from "./one/OneDispatchNotice";
 import { automationReportDisplay } from "../lib/automation-report-display";
 import { agiActionNoticeLine, hostStatusLabel } from "../../shared/chat-host-notice";
 
@@ -8,7 +9,7 @@ import { agiActionNoticeLine, hostStatusLabel } from "../../shared/chat-host-not
  * Keep the original text in the message ledger; internal resume instructions
  * and verifier payloads are not user-facing task instructions.
  */
-export function HostContinuationNotice({ text, locale, notice, onOpenChat }: { text: string; locale: "ko" | "en"; notice?: ChatHostNotice; onOpenChat?: (chatId: string) => void }) {
+export function HostContinuationNotice({ text, locale, notice }: { text: string; locale: "ko" | "en"; notice?: ChatHostNotice; onOpenChat?: (chatId: string) => void }) {
   if (notice?.purpose === "one-dispatch-brief") {
     // 팀원 세션 첫머리: One 이 맡긴 일. 사람(오너)이 쓴 말처럼 보이면 안 된다.
     return <article
@@ -21,28 +22,7 @@ export function HostContinuationNotice({ text, locale, notice, onOpenChat }: { t
     </article>;
   }
   if (notice?.purpose === "one-dispatch-link" || notice?.purpose === "one-dispatch-result") {
-    const done = notice.purpose === "one-dispatch-result";
-    const label = locale === "ko"
-      ? `${done ? `팀원 ${notice.memberName}의 결과 도착` : `팀원 ${notice.memberName}에게 맡김`}`
-      : `${done ? `Result from teammate ${notice.memberName}` : `Handed to teammate ${notice.memberName}`}`;
-    const open = locale === "ko" ? "세션 열기" : "Open session";
-    return <p
-      data-host-notice={notice.purpose}
-      data-one-dispatch-chat={notice.chatId}
-      role="status"
-      style={{ alignSelf: "stretch", maxWidth: 760, margin: "6px 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}
-    >
-      <span>{label}</span>
-      <span aria-hidden="true">·</span>
-      {onOpenChat
-        ? <button
-          type="button"
-          data-one-dispatch-open={notice.chatId}
-          onClick={() => onOpenChat(notice.chatId)}
-          style={{ border: 0, background: "none", padding: 0, color: "var(--ink)", textDecoration: "underline", cursor: "pointer", font: "inherit" }}
-        >{open}</button>
-        : <span>{open}</span>}
-    </p>;
+    return <OneDispatchNotice notice={notice} locale={locale} />;
   }
   if (notice?.purpose === "one-team-member-joined") {
     // One 이 팀원을 만들거나 단톡방에 초대한 영수증 — 글은 Main 이 쓴 기록이 아니라 표식으로 다시 그린다.

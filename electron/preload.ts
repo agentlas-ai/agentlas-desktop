@@ -430,6 +430,7 @@ const api: AgentlasIpc = {
     setEnabled: (enabled: boolean) => ipcRenderer.invoke("memoryDreaming:setEnabled", enabled),
   },
   confirm: {
+    answerDelegatedQuestion: (input) => ipcRenderer.invoke("confirm:answerDelegatedQuestion", input),
     listPending: () => ipcRenderer.invoke("confirm:listPending"),
     commitAnswer: (input: {
       chatId: string;

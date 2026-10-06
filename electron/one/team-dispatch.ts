@@ -3,6 +3,41 @@ import { getDb } from "../store/db";
 import { emitDesktopStoreChange } from "../store/change-bus";
 import { currentUiLocale } from "../ui-locale";
 import type { OneOrgMember } from "../../shared/one-org";
+import type { OneDispatchQuestionAnswer } from "../../shared/one-dispatch-presentation";
+
+/** User-clicked answer only. Reuse Main's durable, idempotent question continuation authority. */
+export async function answerOneDispatchQuestion(input: OneDispatchQuestionAnswer) {
+  if (!input || typeof input !== "object" || Object.keys(input).some(key => !["parentChatId","dispatchId","chatId","runId","sourceMessageId","reply","locale","retryCommitted"].includes(key))
+    || [input.parentChatId,input.dispatchId,input.chatId,input.runId,input.sourceMessageId].some(id => typeof id !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id))
+    || (input.reply !== undefined && (typeof input.reply !== "string" || input.reply.length > 12000))
+    || (input.retryCommitted !== true && (typeof input.reply !== "string" || !input.reply.trim()))
+    || (input.locale !== undefined && input.locale !== "ko" && input.locale !== "en")
+    || (input.retryCommitted !== undefined && typeof input.retryCommitted !== "boolean")) throw new Error("one-dispatch-question-input-invalid");
+  const { assertOneDispatchQuestionBinding } = require("./dispatch-presentation") as typeof import("./dispatch-presentation");
+  const { commitPendingConfirmationAnswer, getCommittedQuestionContinuation, listCommittedQuestionAnswers } = require("../confirm") as typeof import("../confirm");
+  const { admitMainInvocation } = require("../runtime/scheduled-root-context") as typeof import("../runtime/scheduled-root-context");
+  const saved = input.retryCommitted ? listCommittedQuestionAnswers(input.chatId).find(answer => answer.sourceMessageId === input.sourceMessageId) : undefined;
+  if (input.retryCommitted && !saved?.continuationRunId) throw new Error("one-dispatch-question-retry-missing");
+  const reply = saved?.reply ?? input.reply!;
+  const existing = getCommittedQuestionContinuation(input.chatId,input.sourceMessageId,reply);
+  assertOneDispatchQuestionBinding(input,existing?.runId);
+  const { invocationService } = runtime();
+  const source = invocationService.receipt(input.runId);
+  if (!source || source.chatId !== input.chatId) throw new Error("one-dispatch-question-run-mismatch");
+  const committed = existing ? {continuationRunId:existing.runId} : commitPendingConfirmationAnswer(input.chatId,reply,input.sourceMessageId,
+    {locale:input.locale,permissions:source.executionPermission ?? "read"});
+  const dispatch = rowForSession(input.dispatchId,input.parentChatId);
+  retainDispatchResult(dispatch);
+  installSettleListener();
+  const receipt = await invocationService.continueCommittedQuestion(input.chatId,input.sourceMessageId,reply,admitMainInvocation(input.chatId));
+  if (receipt.status === "started" || receipt.status === "already-running") {
+    if (receipt.runId !== committed.continuationRunId) throw new Error("one-dispatch-question-continuation-mismatch");
+    const changed = getDb().prepare(`UPDATE one_team_dispatches SET status='running',child_run_id=?,result_text=NULL,reported_at=NULL,updated_at=?
+      WHERE id=? AND child_run_id=?`).run(receipt.runId,new Date().toISOString(),dispatch.id,input.runId);
+    if (changed.changes) appendParentNotice(row(dispatch.id)!,"link");
+  }
+  return receipt;
+}
 
 /*
  * One → 팀원 세션 위임(오너 2026-09-26: "One에게 다른 세션을 명령할 수 있는 새 세션 기능이 없어").
@@ -12,8 +47,8 @@ import type { OneOrgMember } from "../../shared/one-org";
  *
  * 설계 규칙(참고한 선례):
  *  1. 보고는 최종 결과 한 번 — Claude Code 서브에이전트는 중간 도구 호출을 부모에게 흘리지
- *     않고 "마지막 메시지"만 부모의 도구 결과로 돌려준다. 여기서도 팀원 세션의 마지막 답만
- *     One 에게 간다(과정은 팀원 세션에 남는다).
+ *     않고 "마지막 메시지"만 부모의 도구 결과로 돌려준다. 팀원 세션 원장을 유지하면서
+ *     실제 진행 기록·결과·질문은 기존 부모 방의 위임 영수증에도 읽기 전용으로 투영한다.
  *  2. 깊이 1 — Claude Code 서브에이전트는 또 서브에이전트를 못 만들고, Codex 는
  *     agents.max_depth 기본값이 1 이다. One 이 연 팀원 세션은 다시 위임하지 못한다
  *     (도구를 아예 안 보이고, 제어 서버가 한 번 더 거절한다).
@@ -81,7 +116,20 @@ function ensureTable(): void {
     CREATE INDEX IF NOT EXISTS idx_one_team_dispatches_child ON one_team_dispatches(child_chat_id);
     CREATE INDEX IF NOT EXISTS idx_one_team_dispatches_parent ON one_team_dispatches(parent_chat_id);
   `);
+  getDb().exec(`CREATE TABLE IF NOT EXISTS one_team_dispatch_results (
+    id TEXT NOT NULL, parent_chat_id TEXT NOT NULL, member_id TEXT NOT NULL, member_agent_id TEXT NOT NULL,
+    child_chat_id TEXT NOT NULL, child_run_id TEXT NOT NULL, status TEXT NOT NULL, result_text TEXT,
+    created_at TEXT NOT NULL, updated_at TEXT NOT NULL, PRIMARY KEY(id,child_run_id))`);
+  getDb().exec("CREATE INDEX IF NOT EXISTS idx_one_team_dispatch_results_room_run ON one_team_dispatch_results(parent_chat_id,child_chat_id,child_run_id)");
   tableReady = true;
+}
+
+function retainDispatchResult(dispatch: OneDispatchRow): void {
+  if (dispatch.status === "running") return;
+  getDb().prepare(`INSERT OR IGNORE INTO one_team_dispatch_results
+    (id,parent_chat_id,member_id,member_agent_id,child_chat_id,child_run_id,status,result_text,created_at,updated_at)
+    VALUES(?,?,?,?,?,?,?,?,?,?)`).run(dispatch.id,dispatch.parent_chat_id,dispatch.member_id,dispatch.member_agent_id,
+    dispatch.child_chat_id,dispatch.child_run_id,dispatch.status,dispatch.result_text,dispatch.created_at,dispatch.updated_at);
 }
 
 /** Lazily loaded so this module stays importable without the runtime stack (contract runs). */
@@ -343,6 +391,8 @@ function installSettleListener(): void {
       "SELECT * FROM one_team_dispatches WHERE child_chat_id = ? AND status = 'running' ORDER BY created_at DESC LIMIT 1",
     ).get(envelope.chatId) as OneDispatchRow | undefined;
     if (!dispatch) return;
+    // Waiting is still owned by this dispatch; only an actual terminal receipt closes it.
+    if (envelope.receipt.status === "waiting_input") return;
     // A queued steer drains right after this settle. Only the last run of the
     // child chat closes the dispatch.
     setTimeout(() => {
@@ -371,6 +421,7 @@ function finalizeDispatch(id: string, receiptStatus: string, runId: string): voi
   ).run(status, result, runId, now, id);
   if (changed.changes !== 1) return;
   const settled = row(id)!;
+  retainDispatchResult(settled);
   const pending = waiters.get(id);
   if (pending && pending.size > 0) {
     // One is waiting on one_team_session_status: the result goes back as that
@@ -412,7 +463,7 @@ function reportPrompt(dispatch: OneDispatchRow): string {
     "<<<",
     dispatch.result_text ?? "(no answer text)",
     ">>>",
-    "Report the exact session status and observed result to the owner in their language. Failed, cancelled or interrupted sessions must remain incomplete even when they produced useful text. A relay or your synthesis is not a new execution by that teammate. Do not start new work unless the owner asked for it.",
+    "The exact member result and status are already visible in the original room with the member identity. Do not repeat or quote that output. Only add a necessary decision or next-step synthesis in the owner's language. Failed, cancelled or interrupted sessions must remain incomplete even when they produced useful text. A relay or your synthesis is not a new execution by that teammate. Do not start new work unless the owner asked for it.",
   ].join("\n");
 }
 
@@ -441,22 +492,11 @@ function reportToOne(dispatch: OneDispatchRow): void {
     }
     getDb().prepare("UPDATE one_team_dispatches SET reported_at = ? WHERE id = ?").run(new Date().toISOString(), dispatch.id);
   } catch (error) {
-    // One cannot take a turn right now (e.g. a paused Goal owns the chat and a
-    // system turn may not resume it). The result must still reach the owner:
-    // Keep an explicit relay; this is not a new message authored by the actor.
+    // The durable result receipt already exposes the actual member output in the room.
+    // A blocked synthesis must not manufacture a second assistant relay.
     console.warn("[one-team] report turn not started:", error instanceof Error ? error.message : error);
-    try {
-      const heading = ko()
-        ? `One 전달 · ${dispatch.member_name} 세션 상태: ${dispatch.status}`
-        : `One relay · ${dispatch.member_name} session status: ${dispatch.status}`;
-      // appendParentNotice already carries the typed dispatch/session link.
-      // Keep this body visible as a One relay, without a teammate speaker ID.
-      chats.appendChatMessage(dispatch.parent_chat_id, "assistant", `${heading}\n\n${dispatch.result_text ?? (ko() ? "(관측된 답변 없음)" : "(no observed answer)")}`);
-      getDb().prepare("UPDATE one_team_dispatches SET reported_at = ? WHERE id = ?").run(new Date().toISOString(), dispatch.id);
-      emitDesktopStoreChange({ entity: "chat", id: dispatch.parent_chat_id });
-    } catch (fallbackError) {
-      console.warn("[one-team] result fallback not written:", fallbackError instanceof Error ? fallbackError.message : fallbackError);
-    }
+    getDb().prepare("UPDATE one_team_dispatches SET reported_at = ? WHERE id = ?").run(new Date().toISOString(), dispatch.id);
+
   }
 }
 
@@ -554,7 +594,8 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
     "SELECT child_chat_id FROM one_team_dispatches WHERE parent_chat_id = ? AND member_id = ? ORDER BY created_at DESC LIMIT 1",
   ).get(parentChatId, member.id) as { child_chat_id: string } | undefined;
   const reused = previous ? chats.getChat(previous.child_chat_id) : null;
-  const chat = reused ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation" });
+  const chat = reused ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation",
+    kind: "division", parentChatId });
   const createdHere = !reused;
   if (!fresh && invocationService.activeChatIds().includes(chat.id)) {
     throw new Error(`one-team-member-busy: ${ownerMessage(
@@ -616,7 +657,7 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
         ? `Handed to teammate ${created.member_name} in a new session. The result will come back to this conversation when it is done.`
         : `Handed to teammate ${created.member_name} in their earlier session. The result will come back to this conversation when it is done.`,
     ),
-    note: "Started in the teammate's own session; the owner already sees an 'Open session' link here, so never show session_id to them. Call one_team_session_status with wait_seconds to get the result; if you end your turn first, the result is reported back to this conversation automatically when it finishes.",
+    note: "Started as background work in this conversation. The teammate's observed progress and result appear here; never show session_id or repeat their result verbatim. Call one_team_session_status with wait_seconds to get the result; if you end your turn first, it is reported back automatically when it finishes.",
   };
 }
 
@@ -633,6 +674,7 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   }
   const { invocationService } = runtime();
   installSettleListener();
+  retainDispatchResult(dispatch);
   const result = invocationService.steer({
     chatId: dispatch.child_chat_id,
     userPrompt: message,
@@ -650,7 +692,9 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   getDb().prepare(
     "UPDATE one_team_dispatches SET status = 'running', reported_at = NULL, child_run_id = COALESCE(?, child_run_id), updated_at = ? WHERE id = ?",
   ).run(result.runId ?? result.activeRunId ?? null, now, dispatch.id);
-  return { ...view(row(dispatch.id)!), queued: result.queued, note: result.queued ? "Queued after the teammate's current step." : "Sent; the teammate is working on it." };
+  const continued = row(dispatch.id)!;
+  if (continued.child_run_id !== dispatch.child_run_id) appendParentNotice(continued, "link");
+  return { ...view(continued), queued: result.queued, note: result.queued ? "Queued after the teammate's current step." : "Sent; the teammate is working on it." };
 }
 
 export async function oneTeamSessionStatus(caller: OneTeamCaller, input: { sessionId?: unknown; waitSeconds?: unknown }) {

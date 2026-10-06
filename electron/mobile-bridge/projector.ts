@@ -1,4 +1,6 @@
 import { Buffer } from "node:buffer";
+import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
+import { oneDispatchRoomUpdatedAt } from "../one/dispatch-presentation";
 import { projectOneDecisionOwnerAnswerV4 } from "./one-decision-owner-answer";
 import path from "node:path";
 
@@ -921,7 +923,7 @@ export function projectMobileBridgeChat(
       : null,
     archivedAt: chat.archivedAt,
     createdAt: chat.createdAt,
-    updatedAt: chat.updatedAt,
+    updatedAt: oneDispatchRoomUpdatedAt(chat.id, chat.updatedAt),
     continuousMode: chat.continuousMode,
     swarmMode: chat.swarmMode,
     runtimeSelection: chat.runtimeSelection
@@ -960,6 +962,22 @@ export function projectMobileBridgeHistory(
     const message = selected[index];
     const images = mobileBridgeChatImages(message.imageDataUrls);
     const files = mobileBridgeChatFiles(chatId, message.role, message.text);
+    const notice = normalizeChatHostNotice(message.role, message.hostNotice);
+    const hostNotice = notice?.purpose === "one-dispatch-link" || notice?.purpose === "one-dispatch-result"
+      ? { ...notice, memberName: sanitizeMobileBridgeText(notice.memberName, 256),
+          ...(notice.dispatch ? { dispatch: { ...notice.dispatch,
+            memberIcon: /^(character:|one-avatar:)/.test(notice.dispatch.memberIcon) ? notice.dispatch.memberIcon : "",
+            ...(notice.dispatch.resultText ? { resultText: sanitizeMobileBridgeText(stripMobileBridgeControlFences(notice.dispatch.resultText), 12000) } : {}),
+            ...(notice.dispatch.activity ? { activity: notice.dispatch.activity.map(item => ({ ...item, text: sanitizeMobileBridgeText(item.text, 1200) })) } : {}),
+            ...(notice.dispatch.pendingQuestion ? { pendingQuestion: { sourceMessageId:notice.dispatch.pendingQuestion.sourceMessageId,
+              ...(notice.dispatch.pendingQuestion.continuationRunId && notice.dispatch.pendingQuestion.committedReply !== undefined
+                ? {continuationRunId:notice.dispatch.pendingQuestion.continuationRunId,committedReply:sanitizeMobileBridgeText(notice.dispatch.pendingQuestion.committedReply,12000)} : {}),
+              questions:notice.dispatch.pendingQuestion.questions.map(q => ({ ...q, question:sanitizeMobileBridgeText(q.question,4000),
+                ...(q.header ? {header:sanitizeMobileBridgeText(q.header,200)} : {}),
+                options:q.options.map(o => ({label:sanitizeMobileBridgeText(o.label,200),...(o.description ? {description:sanitizeMobileBridgeText(o.description,1000)} : {})})),
+              })) } } : {}),
+          } } : {}) }
+      : undefined;
     const shell: MobileBridgeChatMessageDto = {
       id: message.id,
       role: message.role,
@@ -970,6 +988,7 @@ export function projectMobileBridgeHistory(
         : {}),
       text: "",
       createdAt: message.createdAt,
+      ...(hostNotice ? { hostNotice } : {}),
       ...(message.role === "user" && promptRunIds.has(message.id)
         ? { runId: promptRunIds.get(message.id)! }
         : {}),
@@ -978,6 +997,9 @@ export function projectMobileBridgeHistory(
     };
     const remaining = budget - outBytes - mobileBridgeJsonBytes(shell) - 16;
     if (remaining <= 0) break;
+    // Older Mobile builds ignore typed notices. Preserve their existing room row and expose only verified output.
+    const messageText = hostNotice?.dispatch?.resultText
+      ? `${hostNotice.memberName} · ${hostNotice.dispatch.status}\n\n${hostNotice.dispatch.resultText}` : message.text;
     const candidate: MobileBridgeChatMessageDto = {
       ...shell,
       // 제어 블록 제거는 **모델의 답**에만 적용한다.
@@ -990,8 +1012,8 @@ export function projectMobileBridgeHistory(
       text: sanitizeMobileBridgeText(
         stripProjectedChatAttachmentMarkdown(
           stripProjectedChatFileMarkers(message.role === "user"
-            ? message.text
-            : stripMobileBridgeControlFences(message.text)),
+            ? messageText
+            : stripMobileBridgeControlFences(messageText)),
           images,
         ),
         Math.min(MOBILE_BRIDGE_TRANSCRIPT_TEXT_BYTES, remaining),

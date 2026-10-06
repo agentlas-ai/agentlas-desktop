@@ -179,6 +179,7 @@ export const MOBILE_BRIDGE_METHODS = [
   "browser.resolveApproval",
   // 동기 런타임 질문 — 기존 chat Decision/도구 승인과 섞지 않는다.
   "runtime.submitUserInput",
+  "one.dispatch.answerQuestion",
   // 런타임 도구 승인 — 데스크탑의 승인 칩과 같은 결정을 폰에서도 답한다.
   // 투영만 하고 답을 못 하게 두면 "보이는데 누를 수 없는" 반쪽 배선이 된다.
   "runtime.resolveToolApproval",
@@ -304,6 +305,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "one.decision.clarifyAnswer",
   "browser.resolveApproval",
   "runtime.submitUserInput",
+  "one.dispatch.answerQuestion",
   "runtime.resolveToolApproval",
   "automations.toggle",
   "automations.runNow",
@@ -1438,6 +1440,8 @@ export interface MobileBridgeChatMessageDto {
   role: "user" | "assistant" | "system";
   /** Exact installed assistant author when persisted by Main; absent on older rows. */
   speakerAgentId?: string;
+  /** Existing room receipt enriched from an exact internal delegation; never a prompt run binding. */
+  hostNotice?: Extract<import("./types").ChatHostNotice, { purpose: "one-dispatch-link" | "one-dispatch-result" }>;
   text: string;
   createdAt: string;
   /** Exact prompt-owning run from invoke_prompt_bound; absent on older Desktop builds. */
@@ -3706,6 +3710,13 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
             validateEnum(params, "decision", ["allow_once", "allow_session", "allow_always", "deny"], false),
           )
         : "runtime.resolveToolApproval accepts only id and decision";
+    case "one.dispatch.answerQuestion":
+      return hasOnlyKeys(params, ["parentChatId","dispatchId","chatId","runId","sourceMessageId","reply","locale","retryCommitted"])
+        ? firstError(requiredString(params,"parentChatId",128), requiredString(params,"dispatchId",128),
+            requiredString(params,"chatId",128), requiredString(params,"runId",128), requiredString(params,"sourceMessageId",128),
+            params.retryCommitted === true && params.reply === undefined ? null : requiredString(params,"reply",12000), validateEnum(params,"locale",["ko","en"],true),
+            params.retryCommitted === undefined || typeof params.retryCommitted === "boolean" ? null : "retryCommitted must be boolean")
+        : "one.dispatch.answerQuestion accepts only exact delegation and question fields";
     case "runtime.submitUserInput":
       return hasOnlyKeys(params, ["requestId", "answer"])
         ? firstError(

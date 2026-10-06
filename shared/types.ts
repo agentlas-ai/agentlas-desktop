@@ -2028,7 +2028,8 @@ export type ChatHostNotice =
   /** Teammate session: the brief One handed over (shown as coming from One, not the owner). */
   | { purpose: "one-dispatch-brief"; runId: string }
   /** One's conversation: compact "handed to teammate · open session" / "result arrived" link. */
-  | { purpose: "one-dispatch-link" | "one-dispatch-result"; runId: string; chatId: string; memberName: string }
+  | { purpose: "one-dispatch-link" | "one-dispatch-result"; runId: string; chatId: string; memberName: string;
+      dispatch?: import("./one-dispatch-presentation").OneDispatchPresentation }
   /** Group chat: One created and/or invited a teammate into this group ("새 팀원 X를 만들어 초대했어요"). */
   | { purpose: "one-team-member-joined"; memberName: string; created: boolean }
   /**
@@ -7434,6 +7435,7 @@ export interface AgentlasIpc {
   };
   /** 확인 요청 — 에이전트가 챗에서 사용자 결정을 기다리는 채팅 목록(미답변 질문 fence 기준). */
   confirm: {
+    answerDelegatedQuestion: (input: import("./one-dispatch-presentation").OneDispatchQuestionAnswer) => Promise<QuestionContinuationReceipt>;
     listPending: () => Promise<PendingConfirmation[]>;
     /** 답변과 그 exact continuation request를 한 durable intent로 확정한다. */
     commitAnswer: (input: {

@@ -6,6 +6,7 @@ import { normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
+import { oneDispatchSidebarPredicate, projectOneDispatchNotice } from "../one/dispatch-presentation";
 import { getChatGoalRevision } from "./chat-goals";
 import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-result";
 import { emitDesktopStoreChange } from "./change-bus";
@@ -201,6 +202,7 @@ export function listRecentChats(limit = 50): Chat[] {
        WHERE archived_at IS NULL
          AND kind = 'user'
          AND used_at IS NOT NULL
+         ${oneDispatchSidebarPredicate()}
        ORDER BY updated_at DESC
        LIMIT ?`,
     )
@@ -246,6 +248,7 @@ export function listRecentOneChats(limit = 50): Chat[] {
          AND kind = 'user'
          AND used_at IS NOT NULL
          AND origin_surface = 'one'
+         ${oneDispatchSidebarPredicate()}
        ORDER BY COALESCE(last_activity_at, updated_at) DESC
        LIMIT ?`,
     )
@@ -269,6 +272,7 @@ export function listChatsByProject(projectId: string): Chat[] {
        WHERE project_id = ?
          AND kind = 'user'
          AND used_at IS NOT NULL
+         ${oneDispatchSidebarPredicate()}
        ORDER BY updated_at DESC`,
     )
     .all(projectId) as ChatRow[];
@@ -282,6 +286,7 @@ export function listChatsByFirm(firmId: string): Chat[] {
        WHERE firm_id = ?
          AND kind = 'user'
          AND used_at IS NOT NULL
+         ${oneDispatchSidebarPredicate()}
        ORDER BY updated_at DESC`,
     )
     .all(firmId) as ChatRow[];
@@ -660,6 +665,7 @@ export function getOrCreateOneMemberChat(agentId: string, title: string): Chat {
          AND kind = 'user'
          AND archived_at IS NULL
          AND agent_id = ?
+         ${oneDispatchSidebarPredicate()}
        ORDER BY (used_at IS NOT NULL) DESC, updated_at DESC
        LIMIT 1`,
     )
@@ -1296,7 +1302,7 @@ function projectChatMessageRows(chatId: string, rows: MessageRow[]): ChatHistory
   const goalResults = storedGoalResults(chatId, rows.filter((row) => row.role === "assistant").map((row) => row.id));
   const legacyResults = legacyGoalResults(chatId, rows.filter((row) => row.role === "assistant" && !goalResults.has(row.id)).map((row) => row.id));
   return rows.map((r) => {
-    const hostNotice = parseChatHostNotice(r.role, r.host_notice_json);
+    const hostNotice = projectOneDispatchNotice(chatId, parseChatHostNotice(r.role, r.host_notice_json));
     return {
       id: r.id,
       durableMessageId: r.id,

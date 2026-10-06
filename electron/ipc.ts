@@ -1,3 +1,4 @@
+import { answerOneDispatchQuestion } from "./one/team-dispatch";
 import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { goalActiveChatIds } from "./store/goal-active-chats";
@@ -2998,6 +2999,10 @@ export function registerIpcHandlers(): void {
   });
 
   // ── confirm (확인 요청 — 챗에서 사용자 결정 대기) ────────
+  ipcMain.handle("confirm:answerDelegatedQuestion", (_e, input: import("../shared/one-dispatch-presentation").OneDispatchQuestionAnswer) => {
+    assertTrustedSitePublishIpcSender(_e);
+    return answerOneDispatchQuestion(input);
+  });
   ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
   ipcMain.handle("confirm:commitAnswer", (_e, input: {
     chatId?: unknown;

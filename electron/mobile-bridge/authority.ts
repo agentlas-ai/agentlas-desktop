@@ -1,3 +1,4 @@
+import { answerOneDispatchQuestion } from "../one/team-dispatch";
 import type { MobilePushService, MobilePushNotice } from "./push";
 import { MobileGoalControl, type MobileGoalControlServices } from "./goal-control";
 import { oneSupervisor } from "../one/supervisor";
@@ -36,6 +37,7 @@ import {
 } from "../browser/connect";
 import { getDb } from "../store/db";
 import { onDesktopStoreChange } from "../store/change-bus";
+import { oneDispatchParentForRun } from "../one/dispatch-presentation";
 import {
   acceptCanonicalTaskResult,
   ensurePairingVerificationTask,
@@ -3676,6 +3678,19 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         }, request.method);
       }
 
+      case "one.dispatch.answerQuestion": {
+        const params = guardedParams(request,["parentChatId","dispatchId","chatId","runId","sourceMessageId","reply","locale","retryCommitted"]);
+        const receipt = await answerOneDispatchQuestion({
+          parentChatId:requiredIdentifier(params,"parentChatId"), dispatchId:requiredIdentifier(params,"dispatchId"),
+          chatId:requiredIdentifier(params,"chatId"), runId:requiredIdentifier(params,"runId"),
+          sourceMessageId:requiredIdentifier(params,"sourceMessageId"),
+          ...(params.reply !== undefined ? {reply:requiredText(params,"reply",12000)} : {}),
+          ...(params.retryCommitted === true ? {retryCommitted:true} : {}),
+          ...(params.locale === "ko" || params.locale === "en" ? {locale:params.locale} : {}),
+        });
+        this.scheduleSnapshotUpdated();
+        return asJsonValue(receipt,request.method);
+      }
       case "runtime.submitUserInput": {
         const params = guardedParams(request, ["requestId", "answer"]);
         const requestId = requiredIdentifier(params, "requestId", ASK_USER_REQUEST_ID_RE);
@@ -5210,6 +5225,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         });
         if (event.kind === "final" || event.kind === "error") {
           forgetRunContext(runId);
+          this.scheduleSnapshotUpdated();
+        } else if ((event.kind === "tool-use" || (event.kind === "reasoning" && event.reasoning?.phase === "end"))
+          && oneDispatchParentForRun(chatId, runId)) {
+          // The original child event stays child-bound. Refresh the room's read-only projection.
           this.scheduleSnapshotUpdated();
         }
       }),
