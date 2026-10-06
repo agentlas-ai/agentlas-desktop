@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.67 — 2026-10-06
+
+- Agents can upload images and files of several megabytes in the in-app browser again (up to the browser tool's 50 MB). A larger upload used to cut the browser connection, and every later browser step in that turn failed.
+
+This release binds Agentlas OS v1.2.55 at 80d400b784a49a0ce6369addc8d4b8f62fe238c4; public runtime asset `hephaestus-runtime-v1.2.55.tar.gz` is pinned at SHA-256 `bfa861082c160739cd3e32884a67d3ef9c8af92e5d889ecd96682082072ae775`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.66 — 2026-10-06
 
 - You can attach photos and files to your personal One, from Desktop and from the phone.
