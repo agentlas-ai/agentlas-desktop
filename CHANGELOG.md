@@ -6,6 +6,7 @@
 - Agents no longer follow your personal Codex instructions file. Product runs still use your Codex sign-in, settings, plugins and history, but the coding rules you wrote for your own sessions no longer steer room and team agents.
 - After onboarding, the orchestrator and worker start on the AI you connected there. With no CLI connected and an Agentlas plan, both use Agentlas. A role you choose yourself is never overwritten.
 - Uploading an agent removes paths that only exist on your computer (home folders, external drives, temporary folders) and keeps the rest of the text.
+- The experience map no longer grows with the square of the promotions. Earlier releases link only the items they added, so an agent's experience index shrinks (about 96% fewer release links on a long-used agent) and refreshes faster.
 - A Goal whose chat you deleted is closed instead of being retried for hours.
 - AGI reads exactly the attempts it asks about, and defect reports show when they were fixed and by which change.
 - Phones register for message notifications per paired device.
