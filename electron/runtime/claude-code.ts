@@ -781,7 +781,15 @@ export function claudeFailureFromEvent(
   if (ev.type === "result" && ev.is_error === true) {
     // A terminal API envelope is less specific than an observed provider cause.
     // Preserve auth, rate-limit and other explicit failures across that envelope.
-    if (prior?.source === "marker" && prior.kind !== "exit") return prior;
+    if (prior?.source === "marker" && prior.kind !== "exit") {
+      // The rate-limit event supplies only a placeholder. A matching terminal
+      // 429 may add the provider's explanation without replacing its cause or reset hint.
+      if (prior.kind === "quota" && prior.message === "Claude rate limit rejected"
+        && ev.api_error_status === 429 && typeof ev.result === "string" && ev.result.trim()) {
+        return { ...prior, message: ev.result.trim().slice(0, 2000) };
+      }
+      return prior;
+    }
     const message = typeof ev.result === "string" && ev.result.trim()
       ? ev.result.trim().slice(0, 2000) : "claude error";
     return {
