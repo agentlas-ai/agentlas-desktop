@@ -201,9 +201,18 @@ export function callAgiReadTool(deps: AgiReadDeps, ctx: AgiReadContext, tool: st
     }
     case "attempt_receipts": {
       if (!tableExists(db, "long_run_worker_attempts")) return capped(name, { runId: scope.runId }, []);
-      const rows = db.prepare(`SELECT id, invocation_run_id, state, side_effect_state, started_at, completed_at FROM long_run_worker_attempts
-        WHERE run_id = ? ORDER BY started_at DESC LIMIT ?`).all(scope.runId, AGI_READ_CAPS[name].rows) as Array<Record<string, unknown>>;
-      return capped(name, { runId: scope.runId }, rows.reverse());
+      // AGI asks for specific attempts by id ("the requested attempt filter returned unrelated truncated rows",
+      // defect filed 2026-10-05 14:13Z): the filter was ignored and the newest rows of the whole run came back.
+      const wanted = Array.isArray(args.attemptIds)
+        ? [...new Set((args.attemptIds as unknown[]).filter((id): id is string => typeof id === "string" && ID.test(id)))].slice(0, AGI_READ_CAPS[name].rows)
+        : [];
+      const rows = (wanted.length
+        ? db.prepare(`SELECT id, invocation_run_id, state, side_effect_state, started_at, completed_at FROM long_run_worker_attempts
+            WHERE run_id = ? AND id IN (${wanted.map(() => "?").join(",")}) ORDER BY started_at DESC LIMIT ?`)
+          .all(scope.runId, ...wanted, AGI_READ_CAPS[name].rows)
+        : db.prepare(`SELECT id, invocation_run_id, state, side_effect_state, started_at, completed_at FROM long_run_worker_attempts
+            WHERE run_id = ? ORDER BY started_at DESC LIMIT ?`).all(scope.runId, AGI_READ_CAPS[name].rows)) as Array<Record<string, unknown>>;
+      return capped(name, { runId: scope.runId, ...(wanted.length ? { attemptIds: wanted } : {}) }, rows.reverse());
     }
     case "chat_tail": {
       if (!scope.chatId || !tableExists(db, "chat_messages")) return capped(name, { chatId: null }, []);
