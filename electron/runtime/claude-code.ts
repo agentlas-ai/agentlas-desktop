@@ -397,6 +397,25 @@ async function claudeExecutionSettings(req: RunnerRequest): Promise<string | nul
  * 는 영어). 영어 화면·영어 프로젝트에서 연구 디렉터가 한국어로 답하던 원인 — 그 설정을 해 둔 사용자 누구에게나 난다.
  * --settings 는 두 번 주면 뒤의 것만 남으므로(위 claudeExecutionSettings 주석) 기존 설정 객체에 language 만 합친다.
  */
+/**
+ * The user's own Claude instruction files, left out of every product run (owner decision 2026-10-06, all users:
+ * personal coding rules must not drive product agents). `~/.claude/CLAUDE.md` and the user rules folder are the
+ * person's rules for their own sessions — on this machine they made product agents answer "**[Hope]**" and follow
+ * a git-commit policy. `claudeMdExcludes` drops only these files: the user's settings, plugins, hooks and sign-in
+ * stay, and a project's own CLAUDE.md still applies. Measured (claude 2.x, -p): with the default sources the model
+ * quotes the "**[Hope]**" prefix; with this exclusion it reports none. (Codex: codex-product-home.ts.)
+ */
+export function personalClaudeInstructionFiles(env: NodeJS.ProcessEnv = process.env): string[] {
+  const configDir = path.resolve(env.CLAUDE_CONFIG_DIR || path.join(env.HOME || os.homedir(), ".claude"));
+  return [path.join(configDir, "CLAUDE.md"), path.join(configDir, "rules", "**", "*.md")];
+}
+
+export function withoutPersonalClaudeInstructions(settings: string, env: NodeJS.ProcessEnv = process.env): string {
+  const base = JSON.parse(settings) as Record<string, unknown>;
+  const existing = Array.isArray(base.claudeMdExcludes) ? base.claudeMdExcludes.filter((item): item is string => typeof item === "string") : [];
+  return JSON.stringify({ ...base, claudeMdExcludes: [...new Set([...existing, ...personalClaudeInstructionFiles(env)])] });
+}
+
 export async function withProductReplyLanguage(settings: string | null, locale: RunnerRequest["locale"]): Promise<string> {
   const language = locale === "ko" ? "korean" : "english";
   let base: Record<string, unknown> = {};
@@ -1062,7 +1081,8 @@ const runClaudeTurn = async (
   // `--permission-mode bypassPermissions`를 이기고 Bash 호출을 실제로 막았다. 허용 깃발
   // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.
   const executionSettings = await withProductReplyLanguage(await claudeExecutionSettings(runReq), runReq.locale);
-  const toolBrokerArgs = executionSettings ? ["--settings", executionSettings] : [];
+  const productSettings = withoutPersonalClaudeInstructions(executionSettings, runReq.env ?? process.env);
+  const toolBrokerArgs = productSettings ? ["--settings", productSettings] : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
         // Claude's safe-mode disables even an explicit --mcp-config. Keep it
