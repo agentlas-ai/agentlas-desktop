@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.69 — 2026-10-06
+
+- A room's Goal no longer spins on passes that do nothing. When the Goal is not reached but two passes in a row make no tool call (for example "the remaining check cannot be assigned"), the run ends and the Goal is looked at again on its normal schedule instead of every 25 seconds.
+- Agents no longer follow your personal Claude instructions file either. Product runs still use your Claude sign-in, settings, plugins and hooks, and a project's own CLAUDE.md still applies.
+- Packaged runtime paths stay portable, and native rebuild outputs are left out of the app.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.68 — 2026-10-06
 
 - A paused room also stops the scheduled graphs it created. Each skipped slot is recorded and the schedule moves on, so nothing keeps drafting while the room is on hold.
