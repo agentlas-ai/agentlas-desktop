@@ -2398,14 +2398,10 @@ export function applyScienceLongRunProjectionStatus(input: {
 }): LongRunRecord {
   const current = getLongRun(input.runId);
   if (!current || current.surface !== "science") throw new Error("science_projection_run_invalid");
-  const requestedTo = input.to;
-  const resolvedTo = resolveNonBlockingGoalStatus(current.status, input.to, input.pauseReason, "system");
-  input = { ...input, to: resolvedTo as typeof input.to };
-  if (current.status === input.to) {
-    if (requestedTo !== input.to) appendLongRunEvent({ runId: current.id, kind: "run.block_skipped", actorKind: "system",
-      payload: { requestedStatus: requestedTo, status: input.to, outcome: "unknown", sourceVersion: input.sourceVersion } });
-    return getLongRun(current.id) ?? current;
-  }
+  // Science owns execution and pause policy. This read-only projection must
+  // preserve its canonical state, including approval waits and failures; the
+  // host-owned Goal's nonblocking policy must not relabel them as runnable.
+  if (current.status === input.to) return current;
   if (LONG_RUN_TERMINAL_STATUSES.has(current.status)) {
     throw new Error(`science_projection_terminal_conflict:${current.status}->${input.to}`);
   }
@@ -2451,7 +2447,6 @@ export function applyScienceLongRunProjectionStatus(input: {
         from: current.status,
         to: input.to,
         pauseReason,
-        ...(requestedTo !== input.to ? { skippedStatus: requestedTo, outcome: "unknown" } : {}),
         sourceVersion: input.sourceVersion,
         sourceStateSha256: input.sourceStateSha256,
       },
