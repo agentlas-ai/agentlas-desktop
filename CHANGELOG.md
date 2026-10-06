@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.68 — 2026-10-06
+
+- A paused room also stops the scheduled graphs it created. Each skipped slot is recorded and the schedule moves on, so nothing keeps drafting while the room is on hold.
+- Agents no longer follow your personal Codex instructions file. Product runs still use your Codex sign-in, settings, plugins and history, but the coding rules you wrote for your own sessions no longer steer room and team agents.
+- After onboarding, the orchestrator and worker start on the AI you connected there. With no CLI connected and an Agentlas plan, both use Agentlas. A role you choose yourself is never overwritten.
+- Uploading an agent removes paths that only exist on your computer (home folders, external drives, temporary folders) and keeps the rest of the text.
+- A Goal whose chat you deleted is closed instead of being retried for hours.
+- AGI reads exactly the attempts it asks about, and defect reports show when they were fixed and by which change.
+- Phones register for message notifications per paired device.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.67 — 2026-10-06
 
 - Agents can upload images and files of several megabytes in the in-app browser again (up to the browser tool's 50 MB). A larger upload used to cut the browser connection, and every later browser step in that turn failed.
