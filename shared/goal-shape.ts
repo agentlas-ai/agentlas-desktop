@@ -77,6 +77,7 @@ export interface GoalStrategy {
   hypothesis: string;
   serves_krs: string[];
   kpi: string;
+  /** Planner cadence target, not a tool/turn admission cap; owner limits live in mission.boundaries. */
   actions_per_day: number | null;
   timebox_hours: number;
   observation_window_hours: number;
@@ -484,10 +485,10 @@ export const INITIAL_ACTIVE_STRATEGIES = GOAL_SHAPE_LIMITS.strategies;
 
 /**
  * 다음에 실행할 전술을 고른다.
- * 단일=그 전술, 목록=순서상 첫 미완, 트리=활성 전략마다 첫 미완(우선순위 순, 오늘 예산을 다 쓴 전략은 건너뜀).
+ * 단일=그 전술, 목록=순서상 첫 미완, 트리=활성 전략마다 첫 미완(우선순위 순). 계획의 일일 활동량은 실행 턴 수가 아니다.
  * 미룬(deferred) 전술은 다른 후보가 있으면 뒤로 간다. 경계 대기 전술도 마찬가지.
  */
-export function selectActiveTactics(plan: LiveGoalPlan, input: { nowMs: number; dispatchesToday?: Readonly<Record<string, number>>; limit?: number }): LiveTactic[] {
+export function selectActiveTactics(plan: LiveGoalPlan, input: { nowMs: number; limit?: number }): LiveTactic[] {
   const limit = Math.max(1, input.limit ?? 2);
   // An owner-paused branch (goal panel) is never dispatched — only an explicit pause stops a sub-goal.
   const pausedStrategies = new Set(plan.strategies.filter((s) => s.ownerPaused).map((s) => s.id));
@@ -502,8 +503,8 @@ export function selectActiveTactics(plan: LiveGoalPlan, input: { nowMs: number; 
   const picks: LiveTactic[] = [];
   const strategies = plan.strategies.filter((s) => s.status === "active" && !s.ownerPaused).sort((a, b) => a.priority - b.priority);
   for (const strategy of strategies) {
-    const used = input.dispatchesToday?.[strategy.id] ?? 0;
-    if (strategy.actions_per_day !== null && used >= strategy.actions_per_day) continue;
+    // A context assignment does not prove a business action occurred. Counting it against
+    // planned daily volume strands observation, preparation and failed attempts.
     const first = rank(ordered.filter((tactic) => tactic.strategy_id === strategy.id))[0];
     if (first) picks.push(first);
   }

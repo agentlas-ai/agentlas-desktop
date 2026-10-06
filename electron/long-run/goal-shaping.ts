@@ -91,10 +91,11 @@ export function goalShapeSystemPrompt(locale: "ko" | "en" = "en"): string {
     "- Every tactic has an id (t1, t2, ...), a concrete description, and done_when: an observable post-condition that proves it is finished. kind is one_off, or recurring for a repeated action (e.g. a daily post).",
     "- A tactic must change something. 'Look into it' alone is not a tactic.",
     "- mission_tree needs mission.objective (the owner's intent and end state), mission.diagnosis (one sentence naming the biggest obstacle — the crux), strategies, and tactics where EVERY tactic has strategy_id of an existing strategy — including measurement or tracking tactics (attach them to the strategy they inform). A tactic without a strategy is dropped.",
-    "- Strategy: id (s1, s2, ...), hypothesis (the guiding policy: why this approach should move the key results), serves_krs (metric names of the key results it serves), kpi (a leading indicator), budget {actions_per_day} only if a sensible daily volume follows from the required pace, timebox_hours (minimum observation before judging it), observation_window_hours.",
+    "- Strategy: id (s1, s2, ...), hypothesis (the guiding policy: why this approach should move the key results), serves_krs (metric names of the key results it serves), kpi (a leading indicator), budget {actions_per_day} is an advisory activity cadence, only if a sensible daily volume follows from the required pace; it is never a cap on preparation, observation, tool calls or work turns, timebox_hours (minimum observation before judging it), observation_window_hours.",
     "- key_results: ONLY numeric targets the owner actually wrote (target must equal a number in the owner's text, e.g. '1만' = 10000, '백만' = 1000000, '$10k' = 10000). Never invent targets. If the owner wrote no numeric target, key_results is []. A yes/no end state (e.g. 'capture the capital') belongs in mission.objective, not in key_results. deadline as an ISO 8601 calendar duration from now (e.g. P30D for '1달'/'one month') or null; a limit in non-calendar units (game turns, rounds, levels) stays in mission.objective. baseline only if the owner stated it.",
     "- boundaries: ONLY (a) owner rules, source 'owner' with quote = an exact substring of the owner's text, or (b) explicit platform/legal rules, source 'platform_rule' with rule_ref naming the rule, no numbers. Do NOT invent caps, quotas or safety limits — self-made limits are not boundaries.",
     "- review_every_hours (mission_tree only): how often to review strategies against the key-result pace (1-168; 24 is typical).",
+    "- A plan you made is adjustable. When it cannot advance, diagnose the actual prerequisite and change the approach within owner/platform boundaries; do not turn your planning assumptions into account usage limits or new owner decisions.",
     "- deadline (any shape): the owner's explicit time limit for the WHOLE goal, as an ISO 8601 duration from now (e.g. P30D for '1달 안에'/'within a month') or an ISO date for a named day ('by Friday' = that date). null when the owner gave no time limit. Never invent or infer one from the domain.",
     "- At most 6 strategies and 12 tactics. Tactics should each fit in one work session.",
     "- rationale: one or two sentences explaining the classification and shape.",
@@ -281,19 +282,6 @@ export function ownerPausedOpen(plan: LiveGoalPlan): LiveTactic[] {
   return plan.tactics.filter((t) => (t.status === "active" || t.status === "proposed") && (t.ownerPaused || (t.strategy_id !== null && paused.has(t.strategy_id))));
 }
 
-function utcDay(iso: string): string { return iso.slice(0, 10); }
-
-function dispatchesToday(plan: LiveGoalPlan, nowMs: number, reservedDecisionIds?: ReadonlySet<string>): Record<string, number> {
-  const today = utcDay(new Date(nowMs).toISOString());
-  const counts: Record<string, number> = {};
-  for (const row of listGoalPlanDecisions(plan.goalId, { revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", limit: 500 })) {
-    if (reservedDecisionIds?.has(row.id)) continue;
-    if (utcDay(row.createdAt) !== today) continue;
-    for (const id of Array.isArray(row.payload.strategyIds) ? row.payload.strategyIds as string[] : []) counts[id] = (counts[id] ?? 0) + 1;
-  }
-  return counts;
-}
-
 export function missionPaces(plan: LiveGoalPlan, nowMs: number): Array<{ krId: string; metric: string; target: number; unit: string; targetText: string; pace: MissionPace }> {
   return (plan.mission?.key_results ?? []).map((kr) => ({ krId: kr.id, metric: kr.metric, target: kr.target, unit: kr.unit, targetText: kr.target_text,
     // 센서는 P-a 스텁 — 호스트가 잰 표본이 아직 없다. 추측하지 않는다.
@@ -334,7 +322,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
 } = {}): string {
   const nowMs = input.nowMs ?? Date.now();
   const reservedDecisionIds = input.record === false ? input.reservedDecisionIds : undefined;
-  const tactics = selectActiveTactics(plan, { nowMs, dispatchesToday: dispatchesToday(plan, nowMs, reservedDecisionIds) });
+  const tactics = selectActiveTactics(plan, { nowMs });
   const strategyOf = (id: string | null) => plan.strategies.find((s) => s.id === id) ?? null;
   const lines: string[] = ["## Goal plan (host-owned shape decision · agentlas.goal-shape.v1)"];
   lines.push(`Current plan identity: goal ${plan.goalId} · revision ${plan.revision} · planSeq ${plan.planSeq}. This is the current projection for this Goal revision; earlier plan projections are historical.`);
@@ -353,6 +341,9 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
     if (plan.mission.boundaries.length) lines.push(`Boundaries (the only limits): ${plan.mission.boundaries.map((b) => b.text).join("; ")}`);
     const active = plan.strategies.filter((s) => s.status === "active").map((s) => `${s.id}: ${s.hypothesis}`);
     if (active.length) lines.push(`Active strategies: ${active.join(" | ")}`);
+    const cadence = plan.strategies.filter((s) => s.status === "active" && s.actions_per_day !== null)
+      .map((s) => `${s.id}: ${s.actions_per_day}/day`);
+    if (cadence.length) lines.push(`Planned activity cadence (advisory): ${cadence.join(" | ")}. Context assignments and work turns are not completed activities. Check actual results before repeating an external action; owner and platform boundaries still apply.`);
   }
   if (tactics.length) {
     lines.push("Current tactic(s) — work on these now, not on the whole plan:");
@@ -378,7 +369,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
     // Only the owner's explicit branch pause holds these; they are open leaves, so the goal is not done.
     lines.push(`The remaining sub-goals (${ownerPausedOpen(plan).map((t) => t.id).join(", ")}) are paused by the owner. Do not work on them and do not claim the goal is complete; report briefly and end this turn.`);
   } else if (plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")) {
-    lines.push("Open tactics remain, but none is currently eligible under the plan's strategy state or dispatch limits. Do not claim completion or add tactics to bypass those limits; report the current hold and end this turn.");
+    lines.push("Open tactics remain, but none is currently eligible under the plan's strategy state. Do not claim completion; inspect the current strategy state before continuing.");
   } else {
     lines.push("Every planned tactic is done or retired. Verify the goal's acceptance criteria; if work remains, add a tactic with an add_tactic plan-op.");
   }
@@ -386,6 +377,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   if (review) {
     lines.push("Strategy review is due: compare each active strategy against the key-result pace above. You may retire a strategy whose timebox has elapsed (cite evidence) or add a strategy that cites a key result. Missing sensor data is an infrastructure state, not a reason to retire a strategy.");
   }
+  lines.push("When progress is held: identify the concrete cause, adjust your own plan or its goal-owned automations when needed within owner/platform boundaries, and do independent useful work first. Preserve explicit owner pauses. If only an external condition or a future observation time remains, use the available durable wait/automation tools and verify the stored wake receipt. Explain once in plain language why you are waiting, what you did, and the next check actually registered; never invent a tomorrow wake or call a planning hold an account quota. Then rest without repeating unchanged status reports.");
   lines.push("Protocol (machine markers, each on its own line; the host strips them from the reply):");
   lines.push('- Tactic finished: <<agentlas-tactic>>{"id":"t1","status":"done","evidence":"what proves done_when"} — emit one for EVERY tactic you finish, including later tactics finished in this same turn.');
   lines.push('- Tactic cannot proceed: <<agentlas-tactic>>{"id":"t1","status":"blocked","cause":"tool_missing|tool_refused|resource_busy|effect_uncertain|unknown|boundary","boundary":"payment|credential|security_consent|owner_stop|purpose_change","evidence":"..."} — the host picks the next move; never abandon the goal.');
@@ -415,8 +407,11 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
 export function goalPlanContinuationNote(goalId: string, nowMs = Date.now()): string | null {
   const plan = readGoalPlan(goalId);
   if (!plan) return null;
-  const next = selectActiveTactics(plan, { nowMs, dispatchesToday: dispatchesToday(plan, nowMs) });
+  const next = selectActiveTactics(plan, { nowMs });
   if (!next.length && ownerPausedOpen(plan).length) return "Goal plan: the remaining sub-goals are paused by the owner — do not work on them and do not claim completion.";
+  if (!next.length && plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")) {
+    return "Goal plan: open tactics remain, but none is currently eligible under the plan's strategy state. Do not claim completion or an account quota. Diagnose and adjust your own plan within owner/platform boundaries, do independent useful work, or register and verify a durable wait for the actual condition/next check. Report the concrete cause, work done and registered next check once, then rest quietly.";
+  }
   if (!next.length) return "Goal plan: every planned tactic is done or retired — verify the acceptance criteria before claiming completion.";
   return `Goal plan — next tactic: ${next.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})`).join(" | ")}. Emit the tactic marker when it is done.`;
 }
@@ -593,7 +588,7 @@ export function goalPlanView(goalId: string, nowMs = Date.now()): GoalPlanView |
   try {
     const plan = readGoalPlan(goalId);
     if (!plan) return null;
-    const current = selectActiveTactics(plan, { nowMs, dispatchesToday: dispatchesToday(plan, nowMs) })[0] ?? null;
+    const current = selectActiveTactics(plan, { nowMs })[0] ?? null;
     const short = (t: LiveTactic) => ({ id: t.id, description: t.description.slice(0, GOAL_SHAPE_LIMITS.shortText), status: t.status });
     return {
       shape: plan.shape, problemNature: plan.problem_nature, fallback: plan.fallback, revision: plan.revision, planSeq: plan.planSeq,

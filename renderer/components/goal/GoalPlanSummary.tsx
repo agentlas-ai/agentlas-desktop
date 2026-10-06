@@ -33,7 +33,9 @@ export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
   const shape = SHAPE_LABEL[plan.shape][ko ? "ko" : "en"];
   const current = plan.currentTactic
     ? `${plan.currentTactic.id} ${plan.currentTactic.description}`
-    : (ko ? "계획된 하위목표 완료 · 기준 확인 중" : "All planned sub-goals done · checking criteria");
+    : plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")
+      ? (ko ? "남은 하위목표 대기 중" : "Remaining sub-goals waiting")
+      : (ko ? "계획된 하위목표 완료 · 기준 확인 중" : "All planned sub-goals done · checking criteria");
   return <div className={variant === "composer-tab" ? `${styles.root} ${styles.composerTab}` : styles.root} data-goal-plan={plan.shape} data-goal-plan-fallback={plan.fallback ? "true" : "false"}>
     <p className={styles.line}>
       <span className={styles.shape}>{ko ? "구조" : "Plan"}: {shape}{plan.fallback ? (ko ? " (임시)" : " (provisional)") : ""}</span>
