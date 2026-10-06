@@ -95,7 +95,6 @@ export function goalShapeSystemPrompt(locale: "ko" | "en" = "en"): string {
     "- key_results: ONLY numeric targets the owner actually wrote (target must equal a number in the owner's text, e.g. '1만' = 10000, '백만' = 1000000, '$10k' = 10000). Never invent targets. If the owner wrote no numeric target, key_results is []. A yes/no end state (e.g. 'capture the capital') belongs in mission.objective, not in key_results. deadline as an ISO 8601 calendar duration from now (e.g. P30D for '1달'/'one month') or null; a limit in non-calendar units (game turns, rounds, levels) stays in mission.objective. baseline only if the owner stated it.",
     "- boundaries: ONLY (a) owner rules, source 'owner' with quote = an exact substring of the owner's text, or (b) explicit platform/legal rules, source 'platform_rule' with rule_ref naming the rule, no numbers. Do NOT invent caps, quotas or safety limits — self-made limits are not boundaries.",
     "- review_every_hours (mission_tree only): how often to review strategies against the key-result pace (1-168; 24 is typical).",
-    "- A plan you made is adjustable. When it cannot advance, diagnose the actual prerequisite and change the approach within owner/platform boundaries; do not turn your planning assumptions into account usage limits or new owner decisions.",
     "- deadline (any shape): the owner's explicit time limit for the WHOLE goal, as an ISO 8601 duration from now (e.g. P30D for '1달 안에'/'within a month') or an ISO date for a named day ('by Friday' = that date). null when the owner gave no time limit. Never invent or infer one from the domain.",
     "- At most 6 strategies and 12 tactics. Tactics should each fit in one work session.",
     "- rationale: one or two sentences explaining the classification and shape.",
@@ -377,7 +376,6 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   if (review) {
     lines.push("Strategy review is due: compare each active strategy against the key-result pace above. You may retire a strategy whose timebox has elapsed (cite evidence) or add a strategy that cites a key result. Missing sensor data is an infrastructure state, not a reason to retire a strategy.");
   }
-  lines.push("When progress is held: identify the concrete cause, adjust your own plan or its goal-owned automations when needed within owner/platform boundaries, and do independent useful work first. Preserve explicit owner pauses. If only an external condition or a future observation time remains, use the available durable wait/automation tools and verify the stored wake receipt. Explain once in plain language why you are waiting, what you did, and the next check actually registered; never invent a tomorrow wake or call a planning hold an account quota. Then rest without repeating unchanged status reports.");
   lines.push("Protocol (machine markers, each on its own line; the host strips them from the reply):");
   lines.push('- Tactic finished: <<agentlas-tactic>>{"id":"t1","status":"done","evidence":"what proves done_when"} — emit one for EVERY tactic you finish, including later tactics finished in this same turn.');
   lines.push('- Tactic cannot proceed: <<agentlas-tactic>>{"id":"t1","status":"blocked","cause":"tool_missing|tool_refused|resource_busy|effect_uncertain|unknown|boundary","boundary":"payment|credential|security_consent|owner_stop|purpose_change","evidence":"..."} — the host picks the next move; never abandon the goal.');
@@ -410,7 +408,7 @@ export function goalPlanContinuationNote(goalId: string, nowMs = Date.now()): st
   const next = selectActiveTactics(plan, { nowMs });
   if (!next.length && ownerPausedOpen(plan).length) return "Goal plan: the remaining sub-goals are paused by the owner — do not work on them and do not claim completion.";
   if (!next.length && plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")) {
-    return "Goal plan: open tactics remain, but none is currently eligible under the plan's strategy state. Do not claim completion or an account quota. Diagnose and adjust your own plan within owner/platform boundaries, do independent useful work, or register and verify a durable wait for the actual condition/next check. Report the concrete cause, work done and registered next check once, then rest quietly.";
+    return "Goal plan: open tactics remain, but none is currently eligible under the plan's strategy state. Do not claim completion; inspect the current strategy state before continuing.";
   }
   if (!next.length) return "Goal plan: every planned tactic is done or retired — verify the acceptance criteria before claiming completion.";
   return `Goal plan — next tactic: ${next.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})`).join(" | ")}. Emit the tactic marker when it is done.`;
