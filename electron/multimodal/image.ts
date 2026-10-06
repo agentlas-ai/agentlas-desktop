@@ -10,6 +10,7 @@ import path from "node:path";
 import { app } from "electron";
 import { userDataPath } from "../runtime-paths";
 import { detachedSpawnOpts, killCliTree, trackRunChild } from "../runtime/exec";
+import { withCodexProductHome } from "../runtime/codex-product-home";
 
 export type ImageModel = "codex" | "gemini" | "auto";
 export interface ImageResult {
@@ -88,7 +89,8 @@ async function runCodexImage(prompt: string, target: string, cwd: string): Promi
       // "Reading additional input from stdin..."으로 EOF를 기다리며 영원히 블록된다.
       child = spawn(bin, ["exec", "-s", "workspace-write", "--skip-git-repo-check", instruction], {
         cwd,
-        env: process.env,
+        // The user's Codex home without their personal AGENTS.md, like every product run.
+        env: withCodexProductHome(process.env),
         stdio: ["ignore", "ignore", "ignore"],
         ...detachedSpawnOpts(),
       });

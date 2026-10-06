@@ -6,6 +6,7 @@
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
+import { withCodexProductHome } from "./codex-product-home";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
@@ -2318,6 +2319,8 @@ export const runCodex: Runner = async (
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "codex");
+  // Every product run reads the user's Codex home without their personal AGENTS.md (codex-product-home.ts).
+  req = { ...req, env: withCodexProductHome(req.env ?? process.env) };
   const observeNativeFile = bindNativeFileProofObserver();
   if (
     req.untrustedNoTools &&
