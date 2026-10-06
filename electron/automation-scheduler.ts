@@ -8,7 +8,7 @@ import { deliverAutomationResult } from "./automation-delivery";
 import { claimAutomationNotification } from "./automation-notifications";
 import { getDb } from "./store/db";
 import { emitDesktopStoreChange } from "./store/change-bus";
-import { getLongRunByGoalId, longRunOwnerHold } from "./store/long-runs";
+import { chatGoalStoppedByOwner, getLongRunByGoalId, longRunOwnerHold } from "./store/long-runs";
 import { decodeGraphCommandDelivery } from "../shared/graph-command";
 import { automationDefinitionDigest } from "./automation-lifecycle";
 import { validateOneGraphCommandScope } from "./one/graph-dispatch";
@@ -2132,6 +2132,18 @@ async function runDueAutomations(
     console.error("[automation] dueAutomations failed:", err);
     return;
   }
+  // A graph a room made waits while that room's Goal is stopped by its owner (owner decision 2026-10-06). Its slot
+  // is recorded as skipped and the schedule moves on, so resuming the room does not release a backlog at once.
+  due = due.filter((a) => {
+    const roomChatId = a.monitor?.originChatId;
+    if (!roomChatId || !chatGoalStoppedByOwner(roomChatId)) return true;
+    try {
+      markAutomationRun(a.id, now, { status: "skipped", advanceSchedule: true, executionConsumed: false, error: "room_goal_paused" });
+    } catch (error) {
+      console.error(`[automation] could not skip ${a.id} for its paused room:`, error);
+    }
+    return false;
+  });
   // due-폴링 경로는 크로스프로세스 리스로 클레임(headless vs GUI 이중 실행 방지).
   await runWithConcurrency(due, MAX_CONCURRENT_AUTOMATIONS, async (a) => {
     await dispatch(async () => { await runOne(a, {

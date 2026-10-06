@@ -1056,6 +1056,20 @@ export function upsertLongRunDomainBinding(input: {
  */
 export const LONG_RUN_OWNER_HOLD_CODE = "long_run_owner_paused";
 
+/**
+ * The room's Goal is stopped until its owner lifts it: an owner pause, an unreleased owner hold, or a budget stop.
+ * Owner decision 2026-10-06: a paused room also stops the agent graphs (Toolchains) it made — on 2026-10-05 the
+ * paused X Marketing room's schedules kept running and drafting.
+ */
+export function chatGoalStoppedByOwner(chatId: string): boolean {
+  const row = getDb().prepare(`SELECT id, status, pause_reason FROM long_runs WHERE root_chat_id = ?
+      AND status NOT IN ('completed', 'failed', 'cancelled') ORDER BY updated_at DESC LIMIT 1`)
+    .get(chatId) as { id: string; status: string; pause_reason: string | null } | undefined;
+  if (!row) return false;
+  if (row.status === "paused" && (row.pause_reason === "user" || row.pause_reason === "budget")) return true;
+  return longRunOwnerHold(row.id);
+}
+
 export function longRunOwnerHold(runId: string): boolean {
   const row = getDb().prepare(`SELECT
       (SELECT MAX(seq) FROM long_run_events WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user'
