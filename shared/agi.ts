@@ -77,6 +77,8 @@ export interface AgiDefectChip {
   createdAt: string;
   /** Local queue state of the report made from this defect, if the owner already sent one. */
   reportStatus: AgiBugReportLocalStatus | null;
+  /** Set once a commit fixed the family this defect belongs to (electron/agi/defect-resolutions.ts). */
+  resolved?: { at: string; commit: string; note: string } | null;
 }
 
 export interface AgiTokenLimitsView {

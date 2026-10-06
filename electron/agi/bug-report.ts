@@ -133,13 +133,18 @@ export class AgiBugReports {
   defectsForChat(chatId: string): AgiDefectChip[] {
     const hasTable = this.deps.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='agi_defect_reports'").get();
     if (!hasTable) return [];
+    const columns = new Set((this.deps.db.prepare("PRAGMA table_info(agi_defect_reports)").all() as Array<{ name: string }>).map((column) => column.name));
+    const hasResolution = columns.has("resolved_at_ms");
     const rows = this.deps.db.prepare(`SELECT d.id, d.code, d.category, d.goal_id, d.created_at_ms,
+        ${hasResolution ? "d.resolved_at_ms, d.resolved_commit, d.resolution_note," : "NULL AS resolved_at_ms, NULL AS resolved_commit, NULL AS resolution_note,"}
         (SELECT q.status FROM agi_bug_report_queue q WHERE q.defect_id = d.id AND q.status <> 'draft' ORDER BY q.updated_at_ms DESC LIMIT 1) AS report_status
       FROM agi_defect_reports d WHERE d.chat_id = ? ORDER BY d.created_at_ms DESC LIMIT 5`).all(chatId) as Array<{ id: string; code: string;
-      category: string; goal_id: string; created_at_ms: number; report_status: AgiBugReportRow["status"] | null }>;
+      category: string; goal_id: string; created_at_ms: number; report_status: AgiBugReportRow["status"] | null;
+      resolved_at_ms: number | null; resolved_commit: string | null; resolution_note: string | null }>;
     return rows.map((row) => ({ defectId: row.id, code: row.code, goalId: row.goal_id, createdAt: new Date(row.created_at_ms).toISOString(),
       category: (AGI_BUG_REPORT_CATEGORIES as readonly string[]).includes(row.category) ? row.category as AgiBugReportCategory : "other",
-      reportStatus: row.report_status ?? null }));
+      reportStatus: row.report_status ?? null,
+      resolved: row.resolved_at_ms ? { at: new Date(row.resolved_at_ms).toISOString(), commit: row.resolved_commit ?? "", note: row.resolution_note ?? "" } : null }));
   }
 
   /** Build the exact payload, redacted, and keep it as a draft. Nothing is sent. */

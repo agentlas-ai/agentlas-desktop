@@ -195,8 +195,16 @@ export function AgiDefectChip({ chatId, locale }: { chatId: string | null; local
     const off = ipcEvents()?.onStoreChanged?.((change) => { if (change.entity === "chat" && (!change.id || change.id === chatId)) load(); });
     return () => { off?.(); };
   }, [chatId, load]);
-  const pending = defects.find((defect) => defect.reportStatus === null || defect.reportStatus === "failed");
-  if (!pending) return null;
+  const pending = defects.find((defect) => !defect.resolved && (defect.reportStatus === null || defect.reportStatus === "failed"));
+  if (!pending) {
+    // Nothing left to report here. If AGI filed defects in this chat that a commit has since fixed, say so quietly.
+    const fixed = defects.find((defect) => defect.resolved);
+    if (!fixed?.resolved) return null;
+    const commit = fixed.resolved.commit.split(",")[0] ?? "";
+    return <span className={styles.chip} data-agi-defect-resolved={fixed.code}
+      title={fixed.resolved.note || (ko ? "이 결함은 수정됐어요" : "This defect was fixed")}>
+      {ko ? `해결됨${commit ? ` · ${commit}` : ""}` : `Fixed${commit ? ` · ${commit}` : ""}`}</span>;
+  }
   return <>
     <button type="button" className={styles.chip} data-agi-defect-chip={pending.code}
       title={ko ? `AGI가 앱 결함으로 분류했어요: ${pending.code}` : `AGI classified this as an app defect: ${pending.code}`}

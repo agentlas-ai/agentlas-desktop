@@ -32,6 +32,7 @@ import type Database from "better-sqlite3";
 import { MAX_SAME_MOVE_PER_CAUSE, PERSISTENCE_BOUNDARY_KINDS, isPersistenceBoundaryKind, type PersistenceBoundaryKind } from "../../shared/persistence-policy";
 import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind } from "./blocker";
 import { AgiIncidentStore } from "./incident-store";
+import { applyDefectResolutions, ensureDefectResolutionColumns } from "./defect-resolutions";
 
 export const AGI_ACTION_SCHEMA = "agentlas.agi-unblock.v1" as const;
 export const AGI_MAX_ACTIONS_PER_ATTEMPT = 4;
@@ -116,6 +117,9 @@ export function ensureAgiActionSchema(db: Database.Database): void {
     id TEXT PRIMARY KEY, goal_id TEXT NOT NULL, chat_id TEXT, incident_id TEXT, code TEXT NOT NULL, category TEXT NOT NULL,
     evidence_json TEXT NOT NULL CHECK(json_valid(evidence_json)), workaround TEXT, created_at_ms INTEGER NOT NULL,
     UNIQUE(goal_id, code))`);
+  // The report had no state, so a fixed defect looked open for ever. resolved_* is stamped by defect-resolutions.ts.
+  ensureDefectResolutionColumns(db);
+  try { applyDefectResolutions(db); } catch (error) { console.warn("[agi] defect resolutions not applied:", error); }
 }
 
 const ACTION_ID = /^[A-Za-z0-9._:-]{8,160}$/;
