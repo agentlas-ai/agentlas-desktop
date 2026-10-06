@@ -1512,6 +1512,12 @@ export function recordFailureEvent(input: RecordFailureEventInput): FailureEvent
   return failureRowToUi(row);
 }
 
+/** A tool call that came back: a result, or a Main-computed observation digest. Durable rows and the live pass loop read this one rule. */
+export function isCompletedToolEvent(ev: Pick<McpInvocationEvent, "kind" | "tool">): boolean {
+  return ev.kind === "tool-use" && (ev.tool?.result !== undefined
+    || (typeof ev.tool?.observationDigest === "string" && /^[a-f0-9]{64}$/.test(ev.tool.observationDigest)));
+}
+
 export function tryRecordRunEvent(input: RecordRunEventInput): void {
   try {
     recordRunEvent(input);
@@ -1663,8 +1669,7 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
     toolOrigin: ev.tool?.origin,
     toolId: ev.tool?.id,
     toolIsError: ev.tool?.isError,
-    toolCompleted: ev.kind === "tool-use" && (ev.tool?.result !== undefined
-      || (typeof ev.tool?.observationDigest === "string" && /^[a-f0-9]{64}$/.test(ev.tool.observationDigest))),
+    toolCompleted: isCompletedToolEvent(ev),
     toolFailureCode,
     // 재방문 시에도 "무엇을 어디에" 했는지 남는다 — 이름만 남기면 과거 턴의 행이
     // "Bash"·"Read"로만 보인다(2026-08-15 실측). 상한·마스킹은 safePayload가 건다.

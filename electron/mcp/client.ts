@@ -64,6 +64,7 @@ import {
   buildStormbreakerContinuationPrompt,
   CONTINUOUS_MODE_MAX_PASSES,
   STORMBREAKER_MAX_IDENTICAL_PASSES,
+  idleGoalPassStep,
   goalContinuationSchedule,
   STORMBREAKER_LONG_RUN_SCHEDULE,
   STORMBREAKER_LOOP_PROTOCOL,
@@ -236,7 +237,7 @@ import { resolveToolInvocationOrigin } from "../invocation/tool-origin";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { automationRegistrationMonitoring, hasAutomationRegistrationHandoff, resolveAutomationRegistrationTarget } from "../automation-registration";
 import { createAutomation, findAutomationByGoalId, getAutomation, listAutomations, toggleAutomation, updateAutomation, updateAutomationGraph } from "../store/automations";
-import { previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
+import { isCompletedToolEvent, previousTurnObservation, projectContextKey, recordContextSourceMarker, recordRunEvent, tryRecordRunEvent } from "../store/run-events";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import {
   resolveSiteAgentAppInlineMcpConfigForDispatch,
@@ -2080,6 +2081,8 @@ async function runMcpInvocationInContext(
     ? revalidateInvocationWorkspaceBinding(workspaceBinding)
     : null;
   const callerSink = sink;
+  // Tool calls that completed in this invocation: host-observed work, read at each continuous Goal pass boundary.
+  let completedToolCalls = 0;
   let runtimeAgentId: string | undefined;
   let finalTextFromSink = "";
   let resolvedResultFolder: string | undefined;
@@ -2162,6 +2165,7 @@ async function runMcpInvocationInContext(
     if (ev.kind === "final" && ev.text?.trim()) {
       finalTextFromSink = ev.text.trim();
     }
+    if (isCompletedToolEvent(ev)) completedToolCalls += 1;
     // Backstop for a run whose browser calls never reached the result boundary (beforeMcpToolResult below):
     // recognise the call by its runtime's name. Codex says `agentlas-browser.browser_x`; Claude, Antigravity
     // and the local loop say `mcp__agentlas-browser__browser_x`.
@@ -6822,6 +6826,8 @@ ${effectiveUserPrompt}`;
     /** Runaway guard for the marker-driven path, which has no ledger to consult. */
     let lastPassFingerprint = "";
     let identicalPassStreak = 0;
+    let lastPassToolCalls: number | null = null;
+    let idleGoalPasses = 0;
     let passRecoveryNote: string | null = null;
     /**
      * Set when a failed pass stopped the loop while leaving the goal open and resumable. Returned to the
@@ -6896,6 +6902,19 @@ ${effectiveUserPrompt}`;
       // keep its mandate after that verification; it does not justify asking
       // this same native turn to complete the claimed work again.
       if (passClaim.claimed) passShouldContinue = false;
+      // A pass the Goal ledger alone keeps alive has to show host-observed work. Production 2026-10-06, Youtube
+      // launch: 273 continuous passes about 25 s apart, each a paraphrase of "the plan's assignment limits block
+      // the remaining check; nothing done this turn", no tool call in any of them, the ledger answering "1 open
+      // task" every time, 17.5k fresh input tokens a pass. Paraphrase defeats the identical-output guard below, so
+      // the measure is the host's own count of completed tool calls. After GOAL_IDLE_PASS_LIMIT idle passes the
+      // invocation ends; Main's verification and wake schedule decide when the Goal is looked at again.
+      const idleStep = idleGoalPassStep({ continuousMode, goalDrivenPass, passShouldContinue, lastPassToolCalls, idlePasses: idleGoalPasses });
+      idleGoalPasses = idleStep.idlePasses;
+      if (idleStep.yieldNow) {
+        passShouldContinue = false;
+        tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
+          kind: "goal_idle_pass_yield", payload: { pass, idlePasses: idleGoalPasses } });
+      }
       // An unfinished ongoing invocation has no terminal/effect checkpoint of
       // its own. Goal unmet and prose/tool counts cannot authorize another pass.
       // Main verification chooses useful follow-up or a durable observation.
@@ -7007,7 +7026,10 @@ ${effectiveUserPrompt}`;
           : `${continuationPrompt}${planNote ? `\n\n${planNote}` : ""}`,
         images: undefined,
       };
+      const toolCallsBeforePass = completedToolCalls;
       result = await invokeCurrentRuntime(activeRunnerReq);
+      // A failed pass is retried or handed on below; it is not an idle pass.
+      lastPassToolCalls = result.failure ? null : completedToolCalls - toolCallsBeforePass;
       if (result.failure) {
         /*
          * A failed pass is not the end of the goal.
