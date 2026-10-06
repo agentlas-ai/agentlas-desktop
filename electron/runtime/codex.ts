@@ -6,7 +6,7 @@
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
-import { withCodexProductHome } from "./codex-product-home";
+import { accountCodexHome, withCodexProductHome } from "./codex-product-home";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
@@ -2448,7 +2448,8 @@ export const runCodex: Runner = async (
     // Read the same account home the child process will use. Main's process env
     // may differ from a runtime-owned CODEX_HOME, and consulting another cache
     // can validate an effort for the wrong account/model catalog.
-    const inventory = await readCodexModelInventory(runReq.env?.CODEX_HOME);
+    // The product mirror links models_cache.json, and the cache reader refuses links: read the account's own file.
+    const inventory = await readCodexModelInventory(accountCodexHome(runReq.env?.CODEX_HOME));
     const effort = runReq.effort
       ? resolveCodexModelEffort(inventory, runReq.model, runReq.effort)
       : defaultCodexModelEffort(inventory, runReq.model);

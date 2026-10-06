@@ -288,7 +288,17 @@ export async function readCodexModelInventory(
 ): Promise<CodexModelInventoryEntry[]> {
   const cachePath = path.join(codexHome, "models_cache.json");
   try {
-    const raw = await readStableCache(cachePath);
+    return inventoryFromCacheText(await readStableCache(cachePath));
+  } catch {
+    // First launch/offline/corrupt cache: fail closed for this read. The last
+    // valid process inventory remains registered, and the CLI keeps its own
+    // account default when no explicit model is available.
+    return [];
+  }
+}
+
+function inventoryFromCacheText(raw: string | null): CodexModelInventoryEntry[] {
+  try {
     if (!raw) return [];
     const parsed = JSON.parse(raw) as CodexModelCache;
     if (!Array.isArray(parsed.models) || parsed.models.length > MAX_MODEL_COUNT) return [];
@@ -325,9 +335,7 @@ export async function readCodexModelInventory(
     }
     return inventory;
   } catch {
-    // First launch/offline/corrupt cache: fail closed for this read. The last
-    // valid process inventory remains registered, and the CLI keeps its own
-    // account default when no explicit model is available.
+    // A corrupt or half-written cache yields no list; the last valid inventory stays registered.
     return [];
   }
 }
@@ -354,7 +362,10 @@ export async function readCodexModelDiscovery(
   } catch {
     raw = "";
   }
-  const inventory = await readCodexModelInventory(codexHome);
+  // One read decides both "present" and the list. Reading the file a second time raced Codex rewriting it: the
+  // first read saw the cache, the second an empty or half-written one, and discovery reported a false
+  // "yield-regression:1-lines-0-models" (production 2026-10-04 four times, 2026-10-06 10:33Z).
+  const inventory = inventoryFromCacheText(raw || null);
   const discovery = settleDiscovery("codex", {
     stdout: raw ? "cache:present" : "",
     models: inventory.map((model) => model.id),

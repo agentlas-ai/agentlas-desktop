@@ -56,7 +56,7 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
   }
   if (!entries.includes("auth.json")) return { skip: "no-file-sign-in" };
   if (keyringOnly(realHome)) return { skip: "keyring-sign-in" };
-  const home = path.join(mirrorRoot, crypto.createHash("sha256").update(realHome).digest("hex").slice(0, 12));
+  const home = mirrorPathFor(realHome, mirrorRoot);
   try {
     for (const store of CODEX_SHARED_STORES) {
       if (!entries.includes(store)) { fs.mkdirSync(path.join(realHome, store), { recursive: true }); entries.push(store); }
@@ -106,6 +106,24 @@ function isLink(at: string): boolean {
     return fs.lstatSync(at).isSymbolicLink();
   } catch {
     return false;
+  }
+}
+
+function mirrorPathFor(realHome: string, mirrorRoot = userDataPath("codex-product-home")): string {
+  return path.join(mirrorRoot, crypto.createHash("sha256").update(realHome).digest("hex").slice(0, 12));
+}
+
+/**
+ * The account home behind a run's CODEX_HOME. Readers that refuse symlinks on purpose (the model cache reader opens
+ * with O_NOFOLLOW) must read the real file, not the mirror's link to it; any other home is returned as given.
+ */
+export function accountCodexHome(home: string | undefined): string | undefined {
+  if (!home) return home;
+  const realHome = realCodexHome(process.env);
+  try {
+    return path.resolve(home) === mirrorPathFor(realHome) ? realHome : home;
+  } catch {
+    return home;
   }
 }
 
