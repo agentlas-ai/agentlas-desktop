@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.71 — 2026-10-06
+
+- Codex runs read your account's model list again when choosing a reasoning effort, and the model picker no longer reports a false "0 models" when Codex refreshes its model list at the same moment.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.70 — 2026-10-06
 
 - A Goal whose last run ended because it had nothing left it could do now waits longer before it is looked at again (30 seconds, then 1, 2, 4 minutes and so on, up to 6 hours) instead of being woken every couple of minutes. Talking to it, or using a Goal control, starts it right away.
