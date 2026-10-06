@@ -123,7 +123,15 @@ async function waitForStableNativeBrowserViewport(
   throw new Error("native-browser-screenshot-stale");
 }
 
-const MAX_MESSAGE_BYTES = 4 * 1024 * 1024;
+/*
+ * Room for Playwright's own upload cap. Playwright MCP connects over CDP without isLocal, so setInputFiles sends
+ * each file's bytes inline as base64 in one CDP message, up to Playwright's 50 MB total (fileUploadSizeLimit; 4/3
+ * larger as base64). At 4 MiB a 3.4 MB YouTube banner (4.6 MB as base64) exceeded the frame limit, ws closed the
+ * socket, and every later browser call in that turn failed with "socket hang up" (production 2026-10-06 00:03 UTC,
+ * Youtube launch). Larger files are refused by Playwright itself before anything is sent.
+ */
+const PLAYWRIGHT_UPLOAD_LIMIT_BYTES = 50 * 1024 * 1024;
+const MAX_MESSAGE_BYTES = Math.ceil(PLAYWRIGHT_UPLOAD_LIMIT_BYTES * 4 / 3) + 4 * 1024 * 1024;
 
 /** One page an agent is currently driving through this grant. URL is read from the guest itself. */
 export interface LoginVerificationLease {
