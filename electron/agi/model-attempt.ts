@@ -217,7 +217,7 @@ export class AgiModelAttempt {
       goalId: input.goalId, stateDigest: input.stateDigest, diagnosis: {
         primarySignal: input.diagnosis.primarySignal, causeKind: input.diagnosis.causeKind, ownerClass: input.diagnosis.ownerClass,
         boundary: input.diagnosis.boundary, reasonCode: input.diagnosis.reasonCode, defects: input.diagnosis.defects.map((x) => x.code),
-        hostSuggestedPaths: input.diagnosis.altPaths, eligibleTactics: input.diagnosis.eligibleTactics, evidenceRefs: input.diagnosis.evidenceRefs },
+        hostSuggestedPaths: input.diagnosis.altPaths, eligibleTactics: input.diagnosis.eligibleTactics, branchReadiness: input.diagnosis.branchReadiness ?? [], evidenceRefs: input.diagnosis.evidenceRefs },
       alreadyDoneThisAttempt: preActions, installedToolPaths: d.installedPaths().slice(0, 40),
       budget: { attemptTokenLimit: limits.attemptTokenLimit },
     };

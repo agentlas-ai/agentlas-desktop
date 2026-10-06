@@ -7,13 +7,15 @@
  *  - goal_plan_decisions: 영수증(append-only) — shape · shape_fallback · reshape_requested · tactic_dispatch · tactic_status ·
  *    strategy_review · plan_op · owner_edit.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getDb } from "./db";
 import {
   INITIAL_ACTIVE_STRATEGIES,
   type GoalShapePlan,
   type GoalTactic,
   liveGoalPlanFromRows,
+  readTacticRequirements,
+  validateTacticDependencies,
   type LiveGoalPlan,
   type LiveTactic,
   type PlanNodeStatus,
@@ -49,6 +51,26 @@ export function ensureGoalPlanTables(db: Db = getDb()): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_goal_plan_decisions_goal ON goal_plan_decisions(goal_id, revision, plan_seq, kind, created_at);
+    CREATE TABLE IF NOT EXISTS goal_plan_mutations (
+      goal_id TEXT NOT NULL, revision INTEGER NOT NULL, plan_seq INTEGER NOT NULL,
+      epoch INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY(goal_id,revision,plan_seq)
+    );
+    CREATE TRIGGER IF NOT EXISTS goal_plan_node_insert_epoch AFTER INSERT ON goal_plan_nodes BEGIN
+      INSERT INTO goal_plan_mutations(goal_id,revision,plan_seq,epoch) VALUES(NEW.goal_id,NEW.revision,NEW.plan_seq,1)
+      ON CONFLICT(goal_id,revision,plan_seq) DO UPDATE SET epoch=epoch+1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS goal_plan_node_update_epoch AFTER UPDATE ON goal_plan_nodes
+      WHEN OLD.payload_json IS NOT NEW.payload_json OR OLD.status IS NOT NEW.status OR OLD.ord IS NOT NEW.ord
+        OR OLD.parent_id IS NOT NEW.parent_id OR OLD.kind IS NOT NEW.kind OR OLD.node_id IS NOT NEW.node_id
+      BEGIN
+      INSERT INTO goal_plan_mutations(goal_id,revision,plan_seq,epoch) VALUES(NEW.goal_id,NEW.revision,NEW.plan_seq,1)
+      ON CONFLICT(goal_id,revision,plan_seq) DO UPDATE SET epoch=epoch+1;
+    END;
+    CREATE TRIGGER IF NOT EXISTS goal_plan_node_delete_epoch AFTER DELETE ON goal_plan_nodes BEGIN
+      INSERT INTO goal_plan_mutations(goal_id,revision,plan_seq,epoch) VALUES(OLD.goal_id,OLD.revision,OLD.plan_seq,1)
+      ON CONFLICT(goal_id,revision,plan_seq) DO UPDATE SET epoch=epoch+1;
+    END;
   `);
   // SQLite rolls DDL back with its enclosing transaction. A refused wait may
   // first read a Goal plan inside that transaction, then throw; caching here
@@ -60,7 +82,7 @@ export function ensureGoalPlanTables(db: Db = getDb()): void {
 export type GoalPlanDecisionKind =
   | "shape" | "shape_fallback" | "reshape_requested" | "tactic_dispatch" | "tactic_status" | "strategy_review" | "plan_op"
   /** An edit the owner made in the goal panel (electron/long-run/goal-panel.ts). Receipt only; the node rows carry the state. */
-  | "owner_edit";
+  | "owner_edit" | "marker_apply" | "marker_context";
 
 export interface GoalPlanDecisionRow {
   id: string;
@@ -111,7 +133,8 @@ export function latestGoalPlanSeq(goalId: string, revision: number): number {
 }
 
 function tacticPayload(tactic: GoalTactic, extra: Partial<Pick<LiveTactic, "runs" | "failures" | "evidence" | "guidance" | "deferredUntil">> = {}) {
-  return { description: tactic.description, done_when: tactic.done_when, kind: tactic.kind, runs: extra.runs ?? 0,
+  return { ...(tactic.depends_on !== undefined ? { depends_on: tactic.depends_on } : {}),
+    ...(tactic.prerequisites !== undefined ? { prerequisites: tactic.prerequisites } : {}), description: tactic.description, done_when: tactic.done_when, kind: tactic.kind, runs: extra.runs ?? 0,
     failures: extra.failures ?? 0, evidence: extra.evidence ?? null, guidance: extra.guidance ?? null, deferredUntil: extra.deferredUntil ?? null };
 }
 
@@ -130,6 +153,12 @@ export function saveGoalPlan(input: {
     const insert = db.prepare(`INSERT INTO goal_plan_nodes (goal_id, revision, plan_seq, node_id, kind, parent_id, status, ord, payload_json, created_at, updated_at)
       VALUES (?,?,?,?,?,?,?,?,?,?,?)`);
     const { plan } = input;
+    const error = validateTacticDependencies(plan.tactics);
+    if (error) throw new Error(error);
+    for (const tactic of plan.tactics) {
+      const notes: string[] = []; readTacticRequirements(tactic as unknown as Record<string, unknown>, notes, tactic.id);
+      if (notes.length) throw new Error("prerequisites_invalid");
+    }
     if (plan.mission) insert.run(input.goalId, input.revision, planSeq, "mission", "mission", null, "active", 0, JSON.stringify(plan.mission), at, at);
     plan.strategies.forEach((strategy, index) => {
       insert.run(input.goalId, input.revision, planSeq, strategy.id, "strategy", plan.mission ? "mission" : null,
@@ -148,9 +177,8 @@ export function saveGoalPlan(input: {
 }
 
 /** 가장 최근 개정(또는 지정 개정)의 가장 최근 차수 계획. */
-export function readGoalPlan(goalId: string, revision?: number): LiveGoalPlan | null {
-  ensureGoalPlanTables();
-  const db = getDb();
+export function readGoalPlan(goalId: string, revision?: number, db: Db = getDb()): LiveGoalPlan | null {
+  ensureGoalPlanTables(db);
   const rev = revision ?? (db.prepare("SELECT MAX(revision) AS r FROM goal_plan_decisions WHERE goal_id = ? AND kind IN ('shape','shape_fallback')")
     .get(goalId) as { r: number | null } | undefined)?.r;
   if (rev === null || rev === undefined) return null;
@@ -160,7 +188,19 @@ export function readGoalPlan(goalId: string, revision?: number): LiveGoalPlan | 
   if (!decision) return null;
   const nodes = db.prepare("SELECT * FROM goal_plan_nodes WHERE goal_id = ? AND revision = ? AND plan_seq = ? ORDER BY ord, created_at")
     .all(goalId, rev, decision.plan_seq) as Array<{ node_id: string; kind: string; parent_id: string | null; status: PlanNodeStatus; ord: number; payload_json: string }>;
-  return liveGoalPlanFromRows(goalId, rev, decision, nodes);
+  const plan = liveGoalPlanFromRows(goalId, rev, decision, nodes);
+  // Content hash catches direct row edits; the epoch also fences pause/resume ABA even when bytes return to the original state.
+  const epoch = (db.prepare("SELECT epoch FROM goal_plan_mutations WHERE goal_id=? AND revision=? AND plan_seq=?")
+    .get(goalId, rev, decision.plan_seq) as { epoch: number } | undefined)?.epoch ?? 0;
+  if (plan) plan.mutationIdentity = `sha256:${createHash("sha256").update(JSON.stringify({ goalId, revision: rev, epoch, decision,
+    nodes: [...nodes].sort((a, b) => a.node_id.localeCompare(b.node_id)).map(node => ({ node_id: node.node_id,
+      kind: node.kind, parent_id: node.parent_id, status: node.status, ord: node.ord, payload_json: node.payload_json })) })).digest("hex")}`;
+  if (plan) {
+    const cursor = db.prepare("SELECT id FROM goal_plan_decisions WHERE goal_id=? AND revision=? AND plan_seq=? ORDER BY rowid DESC LIMIT 1")
+      .get(goalId, rev, decision.plan_seq) as { id: string } | undefined;
+    plan.observationCursor = cursor?.id ?? "";
+  }
+  return plan;
 }
 
 /** 노드 하나의 상태·payload 조각을 바꾼다(같은 차수 안에서만). */
@@ -171,6 +211,14 @@ export function updateGoalPlanNode(plan: Pick<LiveGoalPlan, "goalId" | "revision
   const row = db.prepare("SELECT payload_json FROM goal_plan_nodes WHERE goal_id = ? AND revision = ? AND plan_seq = ? AND node_id = ?")
     .get(plan.goalId, plan.revision, plan.planSeq, nodeId) as { payload_json: string } | undefined;
   if (!row) throw new Error("goal_plan_node_missing");
+  if (patch.payload && ("depends_on" in patch.payload || "prerequisites" in patch.payload)) {
+    const live = readGoalPlan(plan.goalId, plan.revision)!;
+    const target = live.tactics.find(t => t.id === nodeId);
+    const notes: string[] = []; const requirements = readTacticRequirements({ ...safeJson(row.payload_json), ...patch.payload }, notes, nodeId);
+    if (!target || notes.length) throw new Error("prerequisites_invalid");
+    const error = validateTacticDependencies(live.tactics.map(t => t.id === nodeId ? { ...t, ...requirements } : t));
+    if (error) throw new Error(error);
+  }
   const payload = patch.payload ? { ...safeJson(row.payload_json), ...patch.payload } : safeJson(row.payload_json);
   db.prepare(`UPDATE goal_plan_nodes SET status = COALESCE(?, status), ord = COALESCE(?, ord), payload_json = ?, updated_at = ?
     WHERE goal_id = ? AND revision = ? AND plan_seq = ? AND node_id = ?`)
@@ -183,9 +231,50 @@ export function insertGoalPlanNode(plan: Pick<LiveGoalPlan, "goalId" | "revision
 }): void {
   ensureGoalPlanTables();
   const at = new Date().toISOString();
+  if (node.kind === "tactic") {
+    const notes: string[] = []; const requirements = readTacticRequirements(node.payload, notes, node.nodeId);
+    if (notes.length) throw new Error("prerequisites_invalid");
+    const live = readGoalPlan(plan.goalId, plan.revision)!;
+    const error = validateTacticDependencies([...live.tactics, { id: node.nodeId, strategy_id: node.parentId,
+      description: String(node.payload.description ?? ""), done_when: String(node.payload.done_when ?? ""), kind: "one_off", ...requirements }]);
+    if (error) throw new Error(error);
+  }
   getDb().prepare(`INSERT INTO goal_plan_nodes (goal_id, revision, plan_seq, node_id, kind, parent_id, status, ord, payload_json, created_at, updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
     .run(plan.goalId, plan.revision, plan.planSeq, node.nodeId, node.kind, node.parentId, node.status, node.ord, JSON.stringify(node.payload), at, at);
 }
 
 export { tacticPayload as goalPlanTacticPayload };
+
+/** Main-only exact compare-and-apply. The callback is synchronous local work, never provider/network work. */
+export function withCurrentGoalPlan<T>(goalId: string, expectedIdentity: string, apply: (plan: LiveGoalPlan) => T): T {
+  const db = getDb();
+  return db.transaction(() => {
+    const current = readGoalPlan(goalId);
+    if (!current || current.mutationIdentity !== expectedIdentity) throw new Error("goal_plan_stale");
+    const revisionTable = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='chat_goal_revisions'").get();
+    if (revisionTable) {
+      const latest = db.prepare("SELECT MAX(revision) revision FROM chat_goal_revisions WHERE goal_id=?").get(goalId) as { revision: number | null };
+      if (latest.revision !== null && latest.revision !== current.revision) throw new Error("goal_revision_stale");
+    }
+    return apply(current);
+  })();
+}
+
+/** All receipts for one producing invocation, in append order, independent of wall-clock order. */
+export function goalPlanInvocationReceipts(goalId: string, runId: string): Array<{ id: string; kind: string; payload: Record<string, unknown> }> {
+  ensureGoalPlanTables();
+  return (getDb().prepare(`SELECT id,kind,payload_json FROM goal_plan_decisions WHERE goal_id=?
+    AND kind IN ('marker_context','marker_apply') AND json_extract(payload_json,'$.runId')=? ORDER BY rowid`)
+    .all(goalId, runId) as Array<{ id: string; kind: string; payload_json: string }>).map(row => ({ id: row.id, kind: row.kind, payload: safeJson(row.payload_json) }));
+}
+
+/** Typed owner-control custody across pause/resume, separate from plan node mutation and observation bookkeeping. */
+export function goalPlanOwnerControlEpoch(goalId: string): string {
+  const db = getDb();
+  const count = db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name IN ('long_runs','long_run_events')").get() as { n: number };
+  if (count.n !== 2) return "[]";
+  return JSON.stringify(db.prepare(`SELECT e.run_id,MAX(e.seq) seq FROM long_run_events e
+    JOIN long_runs r ON r.id=e.run_id WHERE r.goal_id=? AND e.kind='run.user_control' AND e.actor_kind='user'
+    GROUP BY e.run_id ORDER BY e.run_id`).all(goalId));
+}

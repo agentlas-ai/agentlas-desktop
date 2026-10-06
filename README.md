@@ -58,10 +58,6 @@
   <img alt="Runtime" src="https://img.shields.io/badge/runtime-Claude%20Code%20%7C%20Codex%20%7C%20Antigravity%20%7C%20Grok%20%7C%20Ollama%20%7C%20BYOK-black">
 </p>
 
-<p align="center">
-  <img alt="Agentlas Desktop running a CEO agent over a live org chart" src="docs/screenshot.png" width="960">
-</p>
-
 ## Agent Hub and billing
 
 The Agent Hub contract in this source is free: publishing, finding, installing,
@@ -82,6 +78,7 @@ published release and the installed version to check delivery.
 
 ## Release log
 
+- **2026-10-07 · v1.2.72 — stable reading and visual graph controls** — One keeps your reading position and run status stable. Graphs use compact visual controls and distinguish execution errors from results that need review. Optional tool credentials and unidentified Claude usage buckets no longer block unrelated work. Goal plan updates share one readiness calculation and reject stale decisions. This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 - **2026-10-06 · v1.2.71 — teammate work stays in the group room** — One shows teammates' observed work and results with their own characters in the original room, Goals no longer treat plan assignments as completed daily activity, Codex model lists remain reliable during refresh, Science run statuses stay accurate, and Claude limit errors keep their detailed explanation. This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 - **2026-10-06 · v1.2.70 — stuck Goals back off** — A Goal whose last run ended with nothing it could do waits longer each time before it is looked at again, up to 6 hours, instead of every couple of minutes. This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 - **2026-10-06 · v1.2.69 — Goals stop spinning on idle passes; agents ignore your personal Claude rules** — A room's Goal ends a run after two passes that make no tool call instead of repeating every 25 seconds, and product agents no longer follow your personal Claude instructions file. This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
@@ -1966,10 +1963,10 @@ npm run dist:linux          # Linux: AppImage + .deb
 npm run dist:mac:unsigned   # macOS: unsigned .dmg (no Apple cert needed)
 ```
 
-Output lands in `release/`. Releases for the public download page are built by
-the cross-platform GitHub Actions workflow (`.github/workflows/release.yml`) on a
-tag push — see [`docs/PUBLIC-RELEASE.md`](docs/PUBLIC-RELEASE.md). End users don't
-need any of that.
+Output lands in `release/`. Public installers are built by the official
+[Release Signed macOS workflow](https://github.com/agentlas-ai/agentlas-desktop/actions/workflows/release-signed-mac.yml),
+which also starts the Windows and Linux packaging workflow. Download the published
+installer from the [Releases page](https://github.com/agentlas-ai/agentlas-desktop-releases/releases/latest).
 
 ## Architecture
 
@@ -1985,8 +1982,7 @@ Agentlas Desktop
 │  └─ updater.ts      electron-updater integration
 ├─ renderer/          Next.js App Router UI
 ├─ shared/            typed IPC contracts
-├─ scripts/           release, signing, and verification tooling
-└─ docs/              architecture and release notes
+└─ scripts/           release and build tooling
 ```
 
 The renderer never gets direct filesystem, keychain, or process-supervision
@@ -1996,12 +1992,6 @@ access — it talks to the main process through a typed preload bridge.
 
 | Document | Covers |
 |----------|--------|
-| [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | Process model, IPC bridge, runtime adapters, data flow. |
-| [docs/ARCHITECTURE_PLAYBOOK.md](docs/ARCHITECTURE_PLAYBOOK.md) | Built-in architecture, per-turn governed Memory/Experience recall, local Model2Vec hybrid, and safe extension invariants. |
-| [docs/M0-CHECKLIST.md](docs/M0-CHECKLIST.md) | The M0 spike scope and what's verified. |
-| [docs/PUBLIC-RELEASE.md](docs/PUBLIC-RELEASE.md) | Cross-platform CI release + the signed/notarized macOS path. |
-| [CONTRIBUTING.md](CONTRIBUTING.md) | How to set up, what to test, and the public-safety rules. |
-| [SECURITY.md](SECURITY.md) | How to report a vulnerability. |
 | [Migrating from OpenClaw](#migrating-from-openclaw) | Bring a SOUL, keys, and automations over from OpenClaw / Hermes. |
 
 ## Security model
@@ -2013,11 +2003,9 @@ access — it talks to the main process through a typed preload bridge.
 - Signing material is git-ignored and injected only during release.
 - Auto-update assets are served from GitHub Releases.
 
-Security reports: see [SECURITY.md](SECURITY.md).
-
 ## Contributing
 
-Pull requests are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md), run
+Pull requests are welcome. Run
 `npm run typecheck`, and keep public safety in mind: no credentials, no local
 logs, no signing material. Windows/Linux testing and packaging feedback is
 especially appreciated.

@@ -519,7 +519,7 @@ import { judge, judgeSubset } from "./system-agents/judgment";
 import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "../shared/project-hub-recommendation";
 import { PROJECT_TEAM_ROLES_JUDGMENT, PROJECT_TEAM_ROLE_FILL_JUDGMENT } from "../shared/project-team-recommendation";
 import { prejudgeOneMemoryIntent } from "./one/memory-detector";
-import { normalizeRuntimeSelectionInput } from "../shared/runtime-selection";
+import { normalizeRuntimeSelectionInput, RuntimeSelectionContractError } from "../shared/runtime-selection";
 import { withInvocationAccounting, withInvocationPreflightAccounting } from "./long-run/accounting-context";
 import { forgetOneRecoveryJudgment, judgeOneAutoRecovery, oneRecoveryRuntimeSelection } from "./one/auto-recovery";
 import { oneRunFailureFingerprint } from "../shared/one-auto-recovery";
@@ -1518,6 +1518,33 @@ function rendererInvocationRequest(req: McpInvocationRequest): McpInvocationRequ
       ? undefined
       : rendererTaskForceTargets(rendererFields.taskForceTargets),
   };
+}
+
+/** Only this synchronous, Main-owned validation boundary can establish that
+ * a fresh request was refused before reservation. A reused ID or unreadable
+ * ledger may already belong to an execution, so retain the original error. */
+function rendererInvocationRequestForStart(req: McpInvocationRequest): McpInvocationRequest {
+  try {
+    return rendererInvocationRequest(req);
+  } catch (error) {
+    if (!(error instanceof RuntimeSelectionContractError) || ![
+      "runtime_selection_invalid", "runtime_selection_unknown_key", "runtime_selection_kind_invalid",
+      "runtime_selection_field_invalid", "runtime_selection_backend_invalid", "runtime_selection_role_invalid",
+      "runtime_selection_inherit_invalid", "runtime_selection_acp_agent_required", "runtime_selection_acp_agent_forbidden",
+    ].includes(error.code)) throw error;
+    if (typeof req?.runId !== "string"
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(req.runId)
+      || typeof req.chatId !== "string" || !req.chatId.trim() || req.chatId.length > 512) throw error;
+    try {
+      // No await separates this refusal from the identity checks. Main cannot
+      // start a concurrent request between this proof and the IPC rejection.
+      // Query by run ID alone: a row bound to another chat is also unresolved.
+      if (getInvocationAdmission(req.runId) || hasInvocationRunReceipt(req.runId)) throw error;
+    } catch { throw error; }
+    throw Object.assign(new Error("The runtime selection was refused before this request could start.", { cause: error }), {
+      code: "invocation_pre_reservation_validation_refused",
+    });
+  }
 }
 
 // A PID can be reused. This boot-local identity is never accepted from the renderer.
@@ -6881,7 +6908,7 @@ export function registerIpcHandlers(): void {
       || !preflightSubmissionId || !req.oneMode)) {
       throw new Error("one_preflight_submission_invalid_run");
     }
-    const request = rendererInvocationRequest(req);
+    const request = rendererInvocationRequestForStart(req);
     request.runId ??= randomUUID();
     if (preflightSubmissionId) {
       assertOnePreflightSubmissionReady(preflightSubmissionId, request, rendererInvocationProcessEpoch);

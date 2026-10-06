@@ -3,6 +3,8 @@
 "use client";
 import type { CSSProperties, ReactNode } from "react";
 import { Handle, Position } from "@xyflow/react";
+import { IconClock } from "@/components/Icon";
+import { OneAgentPortrait } from "@/components/one/OneAgentPortrait";
 import { useT } from "@/lib/i18n";
 
 export const NODE_WIDTH = 216;
@@ -10,7 +12,7 @@ export const NODE_WIDTH = 216;
 /** 노드 라이브 실행 상태별 테두리/글로우 색(설계 §5 P2 캔버스 오버레이). */
 export const RUN_STATE_COLOR: Record<string, string> = {
   running: "var(--accent)",
-  needs_input: "var(--warn)",
+  needs_input: "var(--muted-deep)",
   done: "var(--ok, var(--ok))",
   failed: "var(--danger, var(--danger))",
   skipped: "var(--muted-deep)",
@@ -156,7 +158,7 @@ export function NodeCard(props: {
       {/* ★"실행 중"만 보이면 사람은 멈춘 걸로 읽는다. 지금 무엇을 하는 중인지를 그 자리에 쓴다.
           실패가 아니라 상태 변화이므로 색을 쓰지 않고 조용히 둔다(커넥터 C44). */}
       {props.runState === "needs_input" ? <div data-testid="node-login-wait" style={{ fontSize: 10, color: "var(--warn)", marginBottom: 6 }}>
-        {locale === "ko" ? "로그인 복원 대기" : "Waiting for login"}
+        <span aria-label={locale === "ko" ? "입력 대기" : "Waiting for input"} title={locale === "ko" ? "입력 대기" : "Waiting for input"}><IconClock size={13}/></span>
       </div> : null}
       {isRunning && props.progress ? (
         <div
@@ -212,15 +214,15 @@ export function NodeCard(props: {
             display: "inline-flex",
             alignItems: "center",
             justifyContent: "center",
-            width: 22,
-            height: 22,
+            width: props.type === "agent" ? 40 : 22,
+            height: props.type === "agent" ? 40 : 22,
             borderRadius: "var(--radius-sm)",
             background: "color-mix(in oklch, var(--fill-1) 76%, var(--paper))",
             color: accent,
             flexShrink: 0,
           }}
         >
-          {props.icon}
+          {props.type === "agent" ? <OneAgentPortrait size="small" label={props.title} status={isRunning ? "working" : props.runState === "failed" ? "failed" : "quiet"}/> : props.icon}
         </span>
         <div style={{ minWidth: 0, flex: 1 }}>
           <div
@@ -237,22 +239,6 @@ export function NodeCard(props: {
           </div>
         </div>
       </div>
-      {props.subtitle ? (
-        <div
-          style={{
-            marginTop: 10,
-            fontSize: 11,
-            color: "var(--ink-soft)",
-            lineHeight: 1.4,
-            display: "-webkit-box",
-            WebkitLineClamp: 2,
-            WebkitBoxOrient: "vertical",
-            overflow: "hidden",
-          }}
-        >
-          {props.subtitle}
-        </div>
-      ) : null}
       {props.badge ? <div style={{ marginTop: 8 }}>{props.badge}</div> : null}
       {props.branchHandles ? (
         <>

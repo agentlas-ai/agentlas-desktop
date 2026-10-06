@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 import type { ProviderUsage, UsageWindow } from "../../shared/types";
 import { getJson, normalizeUsageError, toPercent, toResetMs } from "./util";
+import { isSupportedClaudeSubscriptionWindow } from "../../shared/runtime-quota";
 
 const execFileP = promisify(execFile);
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -119,6 +120,7 @@ const LABELS: Record<string, string> = {
   seven_day: "Weekly (7d)",
   seven_day_opus: "Opus 7d",
   seven_day_sonnet: "Sonnet 7d",
+  seven_day_haiku: "Haiku 7d",
   extra_usage: "Extra usage",
 };
 
@@ -150,7 +152,7 @@ export function windowsFromClaude(payload: unknown): UsageWindow[] {
   const windows: UsageWindow[] = [];
   for (const [key, raw] of Object.entries(object(payload) ?? {})) {
     const e = object(raw);
-    if (!e || e.is_enabled === false || key === "extra_usage") continue;
+    if (!e || e.is_enabled === false || !isSupportedClaudeSubscriptionWindow({ id: key })) continue;
     const pct = toPercent(e.utilization ?? e.used_percentage);
     if (pct == null) continue;
     windows.push({

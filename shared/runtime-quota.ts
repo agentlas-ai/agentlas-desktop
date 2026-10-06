@@ -20,6 +20,21 @@ import type { ProviderUsage, UsageWindow } from "./types";
 
 export const QUOTA_EXHAUSTED_PERCENT = 100;
 
+/** Claude's OAuth response also contains opaque provider metadata. Only these
+ * explicitly mapped windows have known subscription quota semantics. */
+export function isSupportedClaudeSubscriptionWindow(window: Pick<UsageWindow, "id">): boolean {
+  return ["five_hour", "seven_day", "seven_day_opus", "seven_day_sonnet", "seven_day_haiku"].includes(window.id);
+}
+
+/** Apply at both live and legacy-cache boundaries; other providers retain
+ * their own window contracts. Local token observations are display-only. */
+export function isSupportedProviderUsageWindow(window: Pick<UsageWindow, "id" | "unit" | "usedPercent">, providerId?: string): boolean {
+  return providerId !== "claude-code" || isSupportedClaudeSubscriptionWindow(window)
+    || window.id === "extra_usage"
+    || (["claude-code-local-5h", "claude-code-local-7d"].includes(window.id)
+      && window.unit === "tokens" && window.usedPercent === 0);
+}
+
 /** 이 사용률이면 자동 선택에서 건너뛴다. 사용률을 모르면(null) 건너뛰지 않는다. */
 export function quotaExhausted(usedPercent: number | null | undefined): boolean {
   return typeof usedPercent === "number" && Number.isFinite(usedPercent) && usedPercent >= QUOTA_EXHAUSTED_PERCENT;
@@ -66,7 +81,8 @@ export function providerQuotaExhausted(
   now = Date.now(), model?: string, providerId?: string,
 ): boolean {
   const limits = (usage.limits ?? []).filter(limit => usageWindowMatchesModel(limit, model, providerId));
-  const applicable = usage.windows.filter(window => usageWindowMatchesModel(window, model, providerId)
+  const applicable = usage.windows.filter(window => isSupportedProviderUsageWindow(window, providerId)
+    && usageWindowMatchesModel(window, model, providerId)
     && !(typeof window.resetAt === "number" && Number.isFinite(window.resetAt) && window.resetAt <= now));
   if (usage.spendControlReached === true || limits.some(limit => limit.spendControlReached === true)) return true;
   for (const window of applicable) {

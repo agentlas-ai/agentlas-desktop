@@ -15,6 +15,7 @@ import { MCP_TOOL_CATALOG } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection } from "./client";
 import { readEnvVar } from "../secrets/vault";
+import { KeychainUnavailableError } from "../secrets/keychain-host";
 import { getSource as getMarketSource } from "../marketplace";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { buildToolAccessNotice } from "../../shared/tool-access-notice";
@@ -1006,7 +1007,8 @@ export async function autoSelectMcpTools(input: {
       reason: pinnedReasons.get(entry.id) ?? "resident judgment: the task needs this capability",
       installed: false,
       missingEnv: [],
-      required: false,
+      required: input.toolMode === "browser" && entry.id === "agentlas-browser"
+        || input.toolMode === "computer-use" && entry.id === "cua-driver",
       state: "host-failure",
     };
   });
@@ -1050,12 +1052,23 @@ export async function autoSelectMcpTools(input: {
       && isKeylessPlaywrightMcpDuplicate(server)) continue;
     if (result.some((tool) => tool.id === server.id)) continue;
     const missingEnv: string[] = [];
-    for (const key of server.envKeys) {
-      const value = await deps.readEnvVar(key);
-      if (!value) missingEnv.push(key);
+    let state: AutoSelectedMcpTool["state"] = !server.enabled || server.configurationValid === false
+      ? "disabled" : "ready";
+    if (state === "ready") {
+      try {
+        for (const key of server.envKeys) {
+          const value = await deps.readEnvVar(key);
+          if (!value) missingEnv.push(key);
+        }
+        if (missingEnv.length > 0) state = "missing-key";
+      } catch (error) {
+        if (!(error instanceof KeychainUnavailableError)) throw error;
+        // An unavailable host read is not a missing key. Retain the typed
+        // degradation without blocking other configured capabilities.
+        missingEnv.length = 0;
+        state = "host-failure";
+      }
     }
-    let state: AutoSelectedMcpTool["state"] = missingEnv.length > 0 ? "missing-key" : "ready";
-    if (state === "ready" && (!server.enabled || server.configurationValid === false)) state = "disabled";
     if (state === "ready") {
       try {
         const status = await deps.testServerConnection(server, input.signal);

@@ -5,6 +5,7 @@
  * path). One/Work wakes run on the light no-tools path, where the system prompt REPLACES the CLI's, so this is
  * everything the model sees besides the compact observation: a few hundred tokens, not a CLI harness.
  */
+import { GOAL_SHAPE_LIMITS } from "../../shared/goal-shape";
 import type { AliveRuntimeStart } from "../alive-core/contracts";
 
 export const ALIVE_GOAL_CONTROLLER_PROMPT = `You are the Agentlas Alive orchestrator for one owner Goal (domain "work": a Work project's ongoing Goal; domain "one": a One room's Goal). You have no tools. You read the host observation and return exactly one JSON decision:
@@ -33,6 +34,14 @@ export function compactWakeInput(input: AliveRuntimeStart): string {
           pauseReason: o.pauseReason ?? null, blockedReason: o.blockedReason ?? null,
           objective: typeof o.objective === "string" ? o.objective.slice(0, 240) : null,
           cycleCount: o.cycleCount ?? null, nextSafeRunAt: o.nextSafeRunAt ?? null,
+          planReadiness: o.planReadiness ? { materialDigest: String(o.planReadiness.materialDigest ?? "").slice(0, 80),
+            branches: Array.isArray(o.planReadiness.branches) ? o.planReadiness.branches.slice(0, GOAL_SHAPE_LIMITS.tactics).map((branch: any) => ({
+              nodeId: String(branch.nodeId ?? "").slice(0, 40), inspectable: branch.inspectable === true,
+              workClasses: Array.isArray(branch.workClasses) ? branch.workClasses.filter((kind: unknown) => ["observe", "prepare", "local_write", "external_effect"].includes(String(kind))) : [],
+              prerequisiteState: ["met", "unmet", "unknown"].includes(branch.prerequisiteState) ? branch.prerequisiteState : "unknown",
+              reasonCodes: Array.isArray(branch.reasonCodes) ? branch.reasonCodes.slice(0, 12).map((code: unknown) => String(code).slice(0, 80)) : [],
+              earliestUsefulAt: typeof branch.earliestUsefulAt === "string" ? branch.earliestUsefulAt.slice(0, 40) : null,
+            })) : [] } : null,
           lastRun: o.lastReceipt ? { status: o.lastReceipt.status, errorCode: o.lastReceipt.errorCode ?? null } : null } : null };
     }),
     budget: { tokenLimit: input.context.budget.tokenLimit, tokensUsed: input.context.budget.tokensUsed },

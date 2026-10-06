@@ -22,6 +22,9 @@
  * continuation path. A crash between the effect and the settled receipt is safe: the resume bumps the run
  * version, so a replay of the same packet fails its fence instead of resuming twice.
  */
+import { createHash } from "node:crypto";
+import { projectGoalPlanReadiness } from "../../shared/goal-shape";
+import { readGoalPlan } from "../store/goal-plans";
 import type Database from "better-sqlite3";
 import type { AliveActionPacket, AliveActionResult, AliveAttachment, AliveOwnerWait, AlivePlaygroundObservation, AlivePlaygroundPort } from "../alive-core/contracts";
 import { registerAliveAction } from "../alive-core/action-registry";
@@ -126,7 +129,7 @@ export class GoalAlivePlayground implements AlivePlaygroundPort {
     registerGoalActions();
   }
 
-  observe(attachment: AliveAttachment, _nowMs: number): AlivePlaygroundObservation {
+  observe(attachment: AliveAttachment, nowMs: number): AlivePlaygroundObservation {
     const { goalId, chat } = attachedGoalId(attachment, this.deps);
     if (!chat) return { work: "none", observation: { goal: null }, salience: { chat: "missing" }, blockedBy: "goal.chat-missing" };
     if (this.domain === "work" && (chat.projectId ?? null) !== (attachment.scope.projectId ?? null)) {
@@ -177,16 +180,24 @@ export class GoalAlivePlayground implements AlivePlaygroundPort {
     if (work !== "terminal" && this.deps.pendingApproval(chat.id)) blockedBy = "goal.approval-pending";
     if (work !== "terminal" && work !== "running" && blockedBy) ownerWait = OWNER_WAITS.get(blockedBy) ?? null;
     else if (blockedBy === "goal.approval-pending") ownerWait = "needs-owner";
+    const hasPlan = this.db.prepare("SELECT COUNT(*) n FROM sqlite_master WHERE type='table' AND name IN ('goal_plan_nodes','goal_plan_decisions')").get() as { n: number };
+    const plan = hasPlan.n === 2 ? readGoalPlan(goalId, undefined, this.db) : null;
+    const readiness = plan ? projectGoalPlanReadiness(plan, { nowMs }) : null;
+    const readinessDigest = readiness ? createHash("sha256").update(readiness.materialDigest).digest("hex") : null;
+    const branchReadiness = readiness?.branches.map(branch => ({ nodeId: branch.nodeId, inspectable: branch.inspectable,
+      workClasses: branch.workClasses, prerequisiteState: branch.prerequisiteState, reasonCodes: branch.reasonCodes,
+      earliestUsefulAt: branch.earliestUsefulAt })) ?? [];
     const world = { goalId, runId: run.id, status: run.status, pauseReason: run.pauseReason, blockedReason: run.blockedReason };
     return {
       work,
       blockedBy,
       ...(ownerWait ? { ownerWait } : {}),
-      salience: { ...world, goalRevision: revision, nextSafeRunAt },
+      salience: { ...world, goalRevision: revision, nextSafeRunAt, readinessDigest },
       observation: {
         goalId, runId: run.id, runVersion: run.version, status: run.status, pauseReason: run.pauseReason,
         blockedReason: run.blockedReason, goalRevision: revision, objective: run.objective.slice(0, 600),
         acceptanceCriteria: run.criteriaCount, cycleCount: run.cycleCount, nextSafeRunAt,
+        planReadiness: { materialDigest: readinessDigest, mutationIdentity: readiness?.mutationIdentity ?? null, branches: branchReadiness },
         lastReceipt: receipt, chatTitle: chat.title.slice(0, 120), world,
       },
     };

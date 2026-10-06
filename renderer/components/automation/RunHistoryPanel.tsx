@@ -3,6 +3,9 @@
 // (1) 무엇이 멈췄는지 실제 사유와 (2) 사용자가 지금 누를 수 있는 행동을 함께 준다.
 // 사유도 행동도 없는 "확인이 필요해요"는 사용자를 막다른 길에 세운다.
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import styles from "./GraphWorkspace.module.css";
+import { IconArchive } from "@/components/Icon";
+import { automationRunPresentation } from "@shared/automation-run-presentation";
 import { automationRunNeedsAttention } from "@shared/automation-attention";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
@@ -789,7 +792,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   }
 
   return (
-    <section className="automation-run-panel titlebar-nodrag" data-compact={compact ? "true" : "false"}>
+    <details className={styles.history} data-testid="run-history-disclosure"><summary aria-label={ko ? "실행 기록" : "Run history"} title={ko ? "실행 기록" : "Run history"}><IconArchive size={16}/></summary><section className="automation-run-panel titlebar-nodrag" data-compact={compact ? "true" : "false"}>
       <div className="automation-run-head">
         <div>
           <div className="automation-run-kicker">{ko ? "자동화" : "Automation"}</div>
@@ -1141,7 +1144,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           {message}
         </div>
       ) : null}
-    </section>
+    </section></details>
   );
 }
 
@@ -1224,7 +1227,7 @@ function summarizeSnapshot(
   // A completed graph can still produce a result that the controller rejected
   // or needs a person to resolve. Reuse the same wording as the run-history
   // row so the snapshot and the story never point at different truths.
-  if (history?.status === "ok" && history.outcome && history.outcome !== "accepted") {
+  if (snap.status === "ok" && failed === 0 && history?.status === "ok" && history.outcome && history.outcome !== "accepted") {
     const resultStory = plainRun(history, ko);
     return { title: resultStory.title, detail: resultStory.body };
   }
@@ -1409,7 +1412,7 @@ function plainRun(run: AutomationRunRecord, ko: boolean): { title: string; body:
 function outcomeFirstLabel(run: AutomationRunRecord, ko: boolean): string {
   if (run.outcome === "needs_input") return ko ? "내 확인 필요" : "Needs your decision";
   if (run.outcome === "blocked") return ko ? "바깥에서 막힘" : "Blocked outside";
-  if (run.outcome === "rejected") return ko ? "결과가 기준에 못 미침" : "Result fell short";
+  if (automationRunPresentation(run).result === "unmet") return ko ? "기준 미달" : "Below target";
   if (run.outcome === "unjudged") return ko ? "결과 판정 못 함" : "Result not judged";
   return statusLabel(run.status, ko);
 }

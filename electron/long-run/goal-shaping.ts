@@ -23,6 +23,7 @@ import {
   fallbackGoalShape,
   parseGoalShapeDraft,
   selectActiveTactics,
+  projectGoalPlanReadiness,
   validateGoalShape,
   type GoalShapePlan,
   type LiveGoalPlan,
@@ -36,6 +37,9 @@ import type { RuntimeSelection } from "../../shared/types";
 import { decidePersistenceMove, isPersistenceBoundaryKind, type FailureCause, type PersistenceAttempt } from "../../shared/persistence-policy";
 import {
   goalPlanTacticPayload,
+  withCurrentGoalPlan,
+  goalPlanInvocationReceipts,
+  goalPlanOwnerControlEpoch,
   insertGoalPlanNode,
   listGoalPlanDecisions,
   readGoalPlan,
@@ -44,7 +48,7 @@ import {
   updateGoalPlanNode,
 } from "../store/goal-plans";
 import { getChatGoalRevision } from "../store/chat-goals";
-import { getLongRunByGoalId } from "../store/long-runs";
+import { getLongRunByGoalId, longRunOwnerHold } from "../store/long-runs";
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import { currentUiLocale } from "../ui-locale";
 
@@ -89,6 +93,7 @@ export function goalShapeSystemPrompt(locale: "ko" | "en" = "en"): string {
     "",
     "Rules:",
     "- Every tactic has an id (t1, t2, ...), a concrete description, and done_when: an observable post-condition that proves it is finished. kind is one_off, or recurring for a repeated action (e.g. a daily post).",
+    '- Optional tactic fields: depends_on:["existing tactic id"] (acyclic; [] declares independence), prerequisites:[{"id":"predicate_id","state":"unmet|unknown|met","evidence_refs":["source reference"],"blocks":["prepare|local_write|external_effect"]}]. Missing fields mean unknown historical prerequisite information. References are assertions until the host verifies them; met requires a reference and is not effect/completion proof.',
     "- A tactic must change something. 'Look into it' alone is not a tactic.",
     "- mission_tree needs mission.objective (the owner's intent and end state), mission.diagnosis (one sentence naming the biggest obstacle — the crux), strategies, and tactics where EVERY tactic has strategy_id of an existing strategy — including measurement or tracking tactics (attach them to the strategy they inform). A tactic without a strategy is dropped.",
     "- Strategy: id (s1, s2, ...), hypothesis (the guiding policy: why this approach should move the key results), serves_krs (metric names of the key results it serves), kpi (a leading indicator), budget {actions_per_day} is an advisory activity cadence, only if a sensible daily volume follows from the required pace; it is never a cap on preparation, observation, tool calls or work turns, timebox_hours (minimum observation before judging it), observation_window_hours.",
@@ -322,6 +327,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const nowMs = input.nowMs ?? Date.now();
   const reservedDecisionIds = input.record === false ? input.reservedDecisionIds : undefined;
   const tactics = selectActiveTactics(plan, { nowMs });
+  const readiness = projectGoalPlanReadiness(plan, { nowMs });
   const strategyOf = (id: string | null) => plan.strategies.find((s) => s.id === id) ?? null;
   const lines: string[] = ["## Goal plan (host-owned shape decision · agentlas.goal-shape.v1)"];
   lines.push(`Current plan identity: goal ${plan.goalId} · revision ${plan.revision} · planSeq ${plan.planSeq}. This is the current projection for this Goal revision; earlier plan projections are historical.`);
@@ -345,11 +351,13 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
     if (cadence.length) lines.push(`Planned activity cadence (advisory): ${cadence.join(" | ")}. Context assignments and work turns are not completed activities. Check actual results before repeating an external action; owner and platform boundaries still apply.`);
   }
   if (tactics.length) {
-    lines.push("Current tactic(s) — work on these now, not on the whole plan:");
+    lines.push("Current tactic context (inspection and work classes are distinct):");
     for (const tactic of tactics) {
       const strategy = strategyOf(tactic.strategy_id);
       lines.push(`- ${tactic.id}${strategy ? ` [strategy ${strategy.id}: ${strategy.hypothesis}; KPI: ${strategy.kpi || "—"}]` : ""}: ${tactic.description}`);
       lines.push(`  Done when: ${tactic.done_when}${tactic.kind === "recurring" ? ` (recurring; runs so far ${tactic.runs})` : ""}`);
+      const branch = readiness.branches.find(branch => branch.nodeId === tactic.id)!;
+      lines.push(`  Readiness: work classes [${branch.workClasses.join(", ")}]; prerequisite ${branch.prerequisiteState}; reasons [${branch.reasonCodes.join(", ")}]. This is context, not an authority grant.`);
       const guidance = guidanceLine(tactic);
       if (guidance) lines.push(`  Host guidance (persistence policy): ${guidance}`);
     }
@@ -359,7 +367,7 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
       const current = new Set(tactics.map((t) => t.id));
       const pausedStrategies = new Set(plan.strategies.filter((strategy) => strategy.ownerPaused).map((strategy) => strategy.id));
       const later = [...plan.tactics].filter((t) => (t.status === "active" || t.status === "proposed") && !current.has(t.id)
-        && !t.ownerPaused && !(t.strategy_id && pausedStrategies.has(t.strategy_id))).sort((a, b) => a.ord - b.ord);
+        && readiness.branches.find(branch => branch.nodeId === t.id)?.workClasses.includes("external_effect")).sort((a, b) => a.ord - b.ord);
       // A tool path the AGI unblocker chose applies whenever the tactic is reached in this turn, not only when current.
       if (later.length) lines.push(`Then, in order: ${later.map((t) => `${t.id}: ${t.description} (done when: ${t.done_when})${t.guidance?.move === "switch_tool" && t.guidance.path
         ? ` [host: use the installed alternative "${t.guidance.path}" for this tactic; the previous path failed]` : ""}`).join(" | ")}`);
@@ -381,12 +389,13 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   lines.push('- Tactic cannot proceed: <<agentlas-tactic>>{"id":"t1","status":"blocked","cause":"tool_missing|tool_refused|resource_busy|effect_uncertain|unknown|boundary","boundary":"payment|credential|security_consent|owner_stop|purpose_change","evidence":"..."} — the host picks the next move; never abandon the goal.');
   lines.push('- Plan changes: <<agentlas-plan-op>>{"op":"replace_tactic","id":"t1","with":[{"description":"...","done_when":"..."}]} · {"op":"add_tactic","strategy_id":"s1","description":"...","done_when":"..."}' +
     (plan.shape === "mission_tree" ? ' · {"op":"retire_strategy","id":"s2","evidence":"..."} · {"op":"add_strategy","hypothesis":"...","serves_krs":["kr id"],"kpi":"...","timebox_hours":72,"tactics":[{"description":"...","done_when":"..."}]}' : ""));
+  lines.push('Tactic drafts in add_tactic, replace_tactic.with and add_strategy.tactics accept optional depends_on:["existing tactic id"] and prerequisites:[{"id":"predicate_id","state":"unmet|unknown|met","evidence_refs":["source reference"],"blocks":["prepare|local_write|external_effect"]}]. The host rejects dangling/cyclic dependencies; a retired predecessor does not satisfy one. A claimed met reference remains unverified until host evidence resolution.');
   lines.push("Do not invent caps or pacing limits; only the mission boundaries and the goal's permissions limit you.");
   lines.push(`Plan-op text (description, done_when, hypothesis, kpi, evidence) is shown to the owner: write it in ${(input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en")) === "ko" ? "Korean" : "English"}; ids and op names stay as above.`);
   if (input.record !== false) {
     if (tactics.length) {
       const receipt = recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", createdAt: new Date(nowMs).toISOString(),
-        payload: { runId: input.runId ?? null, tacticIds: tactics.map((t) => t.id),
+        payload: { mutationIdentity: plan.mutationIdentity ?? null, readinessDigest: readiness.materialDigest, runId: input.runId ?? null, tacticIds: tactics.map((t) => t.id),
           strategyIds: [...new Set(tactics.map((t) => t.strategy_id).filter((id): id is string => Boolean(id)))] } });
       input.onDecisionRecorded?.(receipt.id);
     }
@@ -506,7 +515,7 @@ function applyPlanOp(plan: LiveGoalPlan, op: PlanOp, runId: string | null, nowMs
       const id = nextId(plan, "t", taken);
       const strategyId = plan.shape === "mission_tree" ? op.strategy_id : null;
       insertGoalPlanNode(plan, { nodeId: id, kind: "tactic", parentId: strategyId, status: "active", ord: maxOrd,
-        payload: goalPlanTacticPayload({ id, strategy_id: strategyId, description: op.description, done_when: op.done_when, kind: op.kind }) });
+        payload: goalPlanTacticPayload({ id, strategy_id: strategyId, description: op.description, done_when: op.done_when, kind: op.kind, depends_on: op.depends_on, prerequisites: op.prerequisites }) });
       receipt("applied", { added: [id] });
       return `applied:${id}`;
     }
@@ -539,28 +548,71 @@ function applyPlanOp(plan: LiveGoalPlan, op: PlanOp, runId: string | null, nowMs
   }
 }
 
+/** Bind the exact host projection immediately before the real runtime dispatch; no activity is counted. */
+export function bindGoalPlanDispatch(plan: LiveGoalPlan, runId: string | null): void {
+  if (!runId || !plan.mutationIdentity) return;
+  withCurrentGoalPlan(plan.goalId, plan.mutationIdentity, current => {
+    recordGoalPlanDecision({ goalId: current.goalId, revision: current.revision, planSeq: current.planSeq,
+      kind: "marker_context", payload: { runId, mutationIdentity: current.mutationIdentity, ownerControlEpoch: goalPlanOwnerControlEpoch(current.goalId) } });
+  });
+}
+
 /**
  * 한 패스(또는 최종) 본문에서 표식을 떼어 원장에 반영한다. 계획이 없거나 표식이 없으면 본문을 그대로 돌려준다.
  * 실패는 삼키고 본문만 돌려준다 — 계획 원장 오류가 사람의 답을 막지 않는다.
  */
-export function applyGoalPlanMarkers(input: { goalId: string | null; text: string; runId?: string | null; nowMs?: number }): GoalPlanMarkerOutcome {
+export function applyGoalPlanMarkers(input: { goalId: string | null; text: string; runId?: string | null; nowMs?: number; signal?: AbortSignal }): GoalPlanMarkerOutcome {
   const extracted = extractGoalPlanMarkers(input.text);
   if (!input.goalId || (!extracted.tactics.length && !extracted.ops.length)) return { text: extracted.text, applied: [] };
   const applied: GoalPlanMarkerOutcome["applied"] = [];
   const nowMs = input.nowMs ?? Date.now();
   try {
-    for (const marker of extracted.tactics) {
-      const plan = readGoalPlan(input.goalId);
-      if (!plan) break;
-      applied.push({ kind: "tactic", id: marker.id, result: applyTacticMarker(plan, marker, input.runId ?? null, nowMs) });
-    }
-    for (const op of extracted.ops) {
-      const plan = readGoalPlan(input.goalId);
-      if (!plan) break;
-      applied.push({ kind: "plan_op", id: op.op, result: applyPlanOp(plan, op, input.runId ?? null, nowMs) });
-    }
+    if (input.signal?.aborted) throw new Error("goal_plan_dispatch_cancelled");
+    if (!input.runId) throw new Error("goal_plan_context_missing");
+    const receipts = goalPlanInvocationReceipts(input.goalId, input.runId);
+    const context = [...receipts].reverse().find(row => row.kind === "marker_context");
+    if (!context || typeof context.payload.mutationIdentity !== "string") throw new Error("goal_plan_context_missing");
+    const rebase = [...receipts].reverse().find(row => row.kind === "marker_apply" && row.payload.contextId === context.id);
+    const expected = typeof rebase?.payload.mutationIdentity === "string" ? rebase.payload.mutationIdentity : context.payload.mutationIdentity;
+    const seen = new Set(receipts.filter(row => row.kind === "marker_apply").flatMap(row => Array.isArray(row.payload.markerKeys) ? row.payload.markerKeys as string[] : []));
+    const result = withCurrentGoalPlan(input.goalId, expected, (sourcePlan) => {
+      if (input.signal?.aborted) throw new Error("goal_plan_dispatch_cancelled");
+      if (context.payload.ownerControlEpoch !== goalPlanOwnerControlEpoch(input.goalId!)) throw new Error("goal_plan_owner_control_changed");
+      const run = getLongRunByGoalId(input.goalId!);
+      if (run && (run.status === "pausing" || (run.status === "paused" && (run.pauseReason === "user" || run.pauseReason === "budget")) || longRunOwnerHold(run.id))) throw new Error("goal_plan_owner_held");
+      if (run && ["completed", "failed", "cancelled", "cancelling"].includes(run.status)) throw new Error("goal_plan_terminal");
+      if (sourcePlan.deadline_at && Date.parse(sourcePlan.deadline_at) <= nowMs) throw new Error("goal_plan_deadline_reached");
+      const outcome: GoalPlanMarkerOutcome["applied"] = [];
+      const keys: string[] = [];
+      for (const item of [...extracted.tactics.map(marker => ({ kind: "tactic" as const, value: marker })),
+        ...extracted.ops.map(op => ({ kind: "plan_op" as const, value: op }))]) {
+        const key = JSON.stringify(item);
+        const id = item.kind === "tactic" ? item.value.id : item.value.op;
+        if (seen.has(key)) { outcome.push({ kind: item.kind, id, result: "duplicate" }); continue; }
+        const plan = readGoalPlan(input.goalId!)!;
+        const branchId = item.kind === "tactic" ? item.value.id : "id" in item.value ? item.value.id : null;
+        const branch = projectGoalPlanReadiness(plan, { nowMs }).branches.find(branch => branch.nodeId === branchId);
+        const strategyId = item.kind === "plan_op" && item.value.op === "add_tactic" ? item.value.strategy_id : branchId;
+        const pausedStrategy = item.kind === "plan_op" && (item.value.op === "retire_strategy" || item.value.op === "add_tactic") && plan.strategies.find(s => s.id === strategyId)?.ownerPaused;
+        if (branch?.ownerHeld || pausedStrategy) throw new Error("goal_plan_owner_held");
+        const value = item.kind === "tactic" ? applyTacticMarker(plan, item.value, input.runId!, nowMs) : applyPlanOp(plan, item.value, input.runId!, nowMs);
+        outcome.push({ kind: item.kind, id, result: value }); keys.push(key); seen.add(key);
+      }
+      const after = readGoalPlan(input.goalId!)!;
+      recordGoalPlanDecision({ goalId: after.goalId, revision: after.revision, planSeq: after.planSeq, kind: "marker_apply",
+        createdAt: new Date(nowMs).toISOString(), payload: { runId: input.runId, contextId: context.id,
+          sourceIdentity: expected, mutationIdentity: after.mutationIdentity, markerKeys: keys } });
+      return outcome;
+    });
+    applied.push(...result);
   } catch (error) {
-    console.warn("[goal-plan] marker application failed:", error instanceof Error ? error.message : error);
+    const known = new Set(["goal_plan_context_missing", "goal_plan_stale", "goal_revision_stale", "goal_plan_owner_held",
+      "goal_plan_terminal", "goal_plan_deadline_reached", "goal_plan_dispatch_cancelled", "goal_plan_owner_control_changed"]);
+    const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+    const reason = error instanceof Error && known.has(error.message) ? error.message
+      : code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" ? "goal_plan_busy" : "goal_plan_apply_failed";
+    applied.push({ kind: "plan_op", id: "batch", result: `rejected:${reason}` });
+    console.warn("[goal-plan] marker application refused:", reason);
   }
   return { text: extracted.text, applied };
 }
@@ -589,6 +641,7 @@ export function goalPlanView(goalId: string, nowMs = Date.now()): GoalPlanView |
     const current = selectActiveTactics(plan, { nowMs })[0] ?? null;
     const short = (t: LiveTactic) => ({ id: t.id, description: t.description.slice(0, GOAL_SHAPE_LIMITS.shortText), status: t.status });
     return {
+      readiness: projectGoalPlanReadiness(plan, { nowMs }),
       shape: plan.shape, problemNature: plan.problem_nature, fallback: plan.fallback, revision: plan.revision, planSeq: plan.planSeq,
       currentTactic: current ? { id: current.id, description: current.description.slice(0, GOAL_SHAPE_LIMITS.shortText), strategyId: current.strategy_id } : null,
       mission: plan.mission ? { objective: plan.mission.objective, keyResults: missionPaces(plan, nowMs).map(({ metric, target, unit, pace }) => ({

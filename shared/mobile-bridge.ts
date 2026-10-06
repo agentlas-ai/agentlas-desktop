@@ -2,6 +2,8 @@ import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobil
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import { supervisorIdentifier, supervisorObject, supervisorText } from "./one-supervisor";
 import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
+import type { AutomationRunRecord } from "./types";
+import type { automationRunPresentation } from "./automation-run-presentation";
 import {
   ONE_DECISION_CONTRACT_VERSION,
   ONE_DECISION_MULTI_SELECTION_CONTRACT_VERSION,
@@ -1971,6 +1973,11 @@ export interface MobileBridgeToolApprovalDto {
   agentId?: string;
 }
 
+/** Exact historical receipt, distinct from the automation's current live run. */
+export type MobileBridgeAutomationRunReceiptDto = {
+  runId: string;
+} & Pick<AutomationRunRecord, "status" | "outcome"> & ReturnType<typeof automationRunPresentation>;
+
 export interface MobileBridgeAutomationDto {
   id: string;
   name: string;
@@ -2004,6 +2011,9 @@ export interface MobileBridgeAutomationDto {
   runState: "unknown" | "idle" | "queued" | "running" | "completed" | "failed";
   /** Stable marker only; raw scheduler errors may contain local paths. */
   lastError: "automation_failed" | "automation_partial" | "automation_blocked" | "automation_needs_input" | null;
+  /** Additive result semantics; absent when no historical run has been observed.
+   * null outcome is unknown, never inferred accepted from execution completion. */
+  latestRun?: MobileBridgeAutomationRunReceiptDto;
   /** Secret-free topology only. Node configs, prompts, paths and credentials stay on Desktop. */
   graph: {
     nodes: Array<{ id: string; type: string; label: string; x: number; y: number }>;

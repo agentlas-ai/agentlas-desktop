@@ -54,7 +54,10 @@ import {
   runtimeModelFallbackLabel,
   runtimeProviderLabel,
 } from "@/components/dashboard/RuntimeModelPicker";
-import { IconBolt, IconClose, IconPaperclip, IconRefresh } from "@/components/Icon";
+import { IconBolt, IconClose, IconPaperclip, IconRefresh, IconEdit, IconCpu, IconKey, IconMoreHorizontal, IconPlus, IconLayers, IconPower, IconPanelRight, IconChat, IconCheck, IconArchive } from "@/components/Icon";
+import { GraphControl } from "@/components/automation/GraphControl";
+import compactStyles from "@/components/automation/GraphWorkspace.module.css";
+import { automationRunProgress } from "@shared/automation-run-presentation";
 import { ConnectionsDialog } from "@/components/automation/ConnectionsDialog";
 
 function runtimeSelectionPresentation(selection: RuntimeSelection | null | undefined, locale: string): {
@@ -200,7 +203,7 @@ function AutomationFlowPage() {
   // 대화는 할 말이 생겼을 때 여는 것이고, 접기 탭은 그대로 보인다.
   // 사용자가 한 번이라도 편 뒤에는 그 선택이 저장돼 유지된다.
   const [leftOpen, setLeftOpen] = useState(false);
-  const [rightOpen, setRightOpen] = useState(true);
+  const [rightOpen, setRightOpen] = useState(false);
   const seq = useRef(0);
 
   useEffect(() => {
@@ -427,7 +430,7 @@ function AutomationFlowPage() {
      예전에는 대화·로그·상세가 서로 다른 자리에 흩어져 같은 실행을 세 번
      다르게 설명했다. 한 번에 하나만 보이고, 주의가 필요한 탭은 점으로 부른다. */
   const [bottomTab, setBottomTab] = useState<"session" | "log">("session");
-  const [logOpen, setLogOpen] = useState(true);
+  const [logOpen, setLogOpen] = useState(false);
   const [logHeight, setLogHeight] = useState(260);
   useEffect(() => {
     const input = architectInputRef.current;
@@ -924,6 +927,7 @@ function AutomationFlowPage() {
   }, [runStates, automation?.graph]);
   const totalNodes = automation?.graph?.nodes.length ?? 0;
   const doneNodes = Object.values(runStates).filter((st) => st === "done").length;
+  const progress = automationRunProgress(doneNodes, totalNodes);
   // 상세 탭이 지금 펼쳐져 보이는가 — 상태줄이 같은 행동을 두 번 내놓지 않기 위한 조건.
   const detailsShown = rightOpen;
   // 멈췄는가 — 사유가 아직 안 실렸어도 노드가 failed 면 멈춘 것이다. 사유가 없다고
@@ -1941,7 +1945,7 @@ function AutomationFlowPage() {
   );
 
 return (
-    <div className="automation-flow-screen" style={{ flex: 1, display: "flex", flexDirection: "column", background: "var(--paper-2)", minHeight: 0, position: "relative" }}>
+    <div className={`automation-flow-screen ${compactStyles.screen}`} style={{ flex: 1, display: "flex", flexDirection: "column", background: "var(--paper-2)", minHeight: 0, position: "relative" }}>
       <header
         className="automation-flow-header titlebar-drag"
         style={{
@@ -1966,168 +1970,34 @@ return (
               nowrap이 없으면 "Hourly, on the / hour"로 접혀 헤더 높이가 흔들린다. */}
           <div style={{ fontSize: 11, color: "var(--muted-deep)", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
             {humanSchedule(automation.scheduleHuman, locale)}
-            <span
-              data-testid="automation-runtime-chip"
-              title={`${runtimePresentation.label} · ${runtimePresentation.detail}`}
-              style={{
-                display: "inline-flex",
-                flexDirection: "column",
-                alignItems: "flex-start",
-                marginLeft: 8,
-                padding: "2px 7px",
-                borderRadius: 999,
-                border: "1px solid var(--paper-edge)",
-                color: "var(--ink-soft)",
-                background: "var(--paper-2)",
-                fontWeight: 600,
-              }}
-            >
-              <strong>{runtimePresentation.label}</strong>
-              <small>{runtimePresentation.detail}</small>
-            </span>
+            <span data-testid="automation-runtime-chip" aria-label={runtimePresentation.detail} title={`${runtimePresentation.label} · ${runtimePresentation.detail}`} style={{ display:"inline-flex", marginLeft:8, verticalAlign:"middle" }}><IconCpu size={13}/></span>
           </div>
         </div>
         </div>
 
         <div className="automation-flow-header-actions">
-        {editing ? (
-          <>
-            <button onClick={() => setPaletteOpen((v) => !v)} className="titlebar-nodrag" style={pillBtn(paletteOpen)}>
-              {t("auto.flow.add_node")}
-            </button>
-            <button onClick={autoLayoutCanvas} className="titlebar-nodrag" style={pillBtn(false)}>
-              {locale === "en" ? "Auto layout" : "자동 정렬"}
-            </button>
-            <button
-              onClick={() => void save()}
-              disabled={saving || !dirty || errorCount > 0}
-              title={errorCount > 0 ? t("auto.validate.blocked") : undefined}
-              className="titlebar-nodrag"
-              style={{ ...actionBtn, opacity: saving || !dirty || errorCount > 0 ? 0.55 : 1 }}
-            >
-              {t("auto.flow.save")}
-            </button>
-            <button onClick={() => { setEditing(false); setPaletteOpen(false); void load(); }} className="titlebar-nodrag" style={pillBtn(false)}>
-              {t("common.cancel")}
-            </button>
-          </>
-        ) : (
-          <>
-            <button onClick={() => router.push(`/automation/new?id=${encodeURIComponent(automation.id)}`)} className="titlebar-nodrag" style={pillBtn(false)}>
-              {t("auto.flow.edit_meta")}
-            </button>
-            <button
-              data-testid="change-automation-model"
-              onClick={() => router.push(`/automation/new?id=${encodeURIComponent(automation.id)}#execution-ai`)}
-              className="titlebar-nodrag"
-              style={{ ...pillBtn(Boolean(automation.runtimeSelection)), borderColor: "var(--accent-soft)" }}
-              title={locale === "en" ? "Change the model used by this automation" : "이 자동화가 사용할 모델을 변경합니다"}
-            >
-              {locale === "en" ? "Change model" : "모델 변경"}
-            </button>
-            <button onClick={() => setEditing(true)} className="titlebar-nodrag" style={pillBtn(false)}>
-              {t("auto.flow.edit")}
-            </button>
-            {/* 연결이 빠져 있으면 나머지가 다 무의미하다 — 시뮬레이션·실행보다 앞에 둔다. */}
-            <button
-              data-testid="open-connections"
-              onClick={() => setConnectionsOpen(true)}
-              className="titlebar-nodrag"
-              style={pillBtn(false)}
-              title={locale === "en"
-                ? "See what this automation uses, and connect it — one account opens every tool on it."
-                : "이 자동화가 쓰는 것을 보고 연결합니다. 계정 하나로 그 계정의 도구가 함께 열립니다."}
-            >
-              {locale === "en" ? "Connections" : "연결"}
-            </button>
-            <button
-              onClick={() => void publishToHub()}
-              disabled={publishing}
-              className="titlebar-nodrag"
-              style={{ ...pillBtn(false), opacity: publishing ? 0.55 : 1 }}
-              title={locale === "en"
-                ? "Put this graph on the Hub so other people can install and run it."
-                : "이 그래프를 Hub에 올려 다른 사람이 받아 쓸 수 있게 합니다."}
-            >
-              {publishing
-                ? (locale === "en" ? "Publishing…" : "올리는 중…")
-                : (locale === "en" ? "Publish to Hub" : "Hub에 올리기")}
-            </button>
-            <button
-              onClick={() => void openVersions()}
-              className="titlebar-nodrag"
-              style={pillBtn(versionsOpen)}
-              title={locale === "en"
-                ? "Every save keeps the previous version — go back to one if an edit made things worse."
-                : "저장할 때마다 직전 판이 남습니다. 고쳤다가 더 나빠지면 그 판으로 돌아갈 수 있습니다."}
-            >
-              {locale === "en" ? "History" : "이전 판"}
-            </button>
-            <button
-              type="button"
-              data-testid="refresh-automation-run"
-              onClick={() => void refreshRunView()}
-              disabled={refreshing}
-              className="titlebar-nodrag"
-              style={{ ...pillBtn(false), opacity: refreshing ? 0.55 : 1 }}
-              title={locale === "en"
-                ? "Read the saved run snapshot and history again. This does not start a run."
-                : "저장된 실행 스냅샷과 기록만 다시 읽습니다. 실행은 시작하지 않습니다."}
-            >
-              <IconRefresh size={13} style={{ marginRight: 4 }} />
-              {refreshing ? (locale === "en" ? "Refreshing…" : "새로 읽는 중…") : (locale === "en" ? "Refresh" : "새로고침")}
-            </button>
-            <button
-              onClick={() => void runNow(true)}
-              disabled={running}
-              className="titlebar-nodrag"
-              style={pillBtn(false)}
-              title={locale === "en"
-                ? "Run without sending anything outside, then see what a real run would have done."
-                : "바깥으로 아무것도 내보내지 않고 돌려본 뒤, 실전이었으면 무엇이 일어났을지 봅니다."}
-            >
-              {t("auto.flow.simulate")}
-            </button>
-            {/* ★멈춘 실행이 남아 있으면 이 버튼은 처음부터가 아니라 **이어서** 돈다
-                (run-graph 가 같은 occurrence 체크포인트에서 재개한다). 이름이 그 사실을
-                말하지 않아 오너가 "첨부터 실행되는건지 모르겠"다고 했다 — 이름을
-                하는 일에 맞춘다(HE.md 기대와의 일치성). */}
-            <button
-              onClick={() => void runNow()}
-              disabled={running}
-              className="titlebar-nodrag"
-              title={resumable
-                ? (locale === "en"
-                  ? "Continues the stopped run from where it stopped — finished steps do not run twice."
-                  : "멈춘 그 자리부터 이어서 돕니다. 이미 끝난 단계는 다시 실행되지 않습니다.")
-                : undefined}
-              style={{ ...actionBtn, color: running ? "var(--muted-deep)" : "var(--ink)" }}
-            >
-              {running
-                ? <SpinnerLabel text={t("auto.flow.running")} />
-                : resumable
-                  ? (locale === "en" ? "Continue run" : "이어서 실행")
-                  : t("auto.flow.run_now")}
-            </button>
-            {freshStartable ? (
-              <button
-                type="button"
-                data-testid="fresh-automation-run"
-                onClick={() => void runNow(false, undefined, true)}
-                disabled={running || liveRunning}
-                className="titlebar-nodrag"
-                style={{ ...pillBtn(false), opacity: running || liveRunning ? 0.55 : 1 }}
-                title={locale === "en"
-                  ? "Start a separate run from the first step. An unresolved external effect will block it until reconciled."
-                  : "첫 단계부터 별도 실행을 시작합니다. 외부 동작이 미확정이면 재조정할 때까지 시작하지 않습니다."}
-              >
-                {locale === "en" ? "Start fresh" : "처음부터 새 실행"}
-              </button>
-            ) : null}
-            {/* ★도는 것을 사람이 멈춘다. 자동화는 사람이 안 볼 때 도는 것이라,
-                봤을 때 세울 수 있어야 한다(다른 기능은 전부 취소가 있었다). */}
+          {editing ? <>
+            <GraphControl label={t("auto.flow.add_node")} icon={<IconPlus size={17}/>} onClick={() => { setPaletteOpen(v=>!v); setRightOpen(true); }}/>
+            <GraphControl label={locale === "en" ? "Auto layout" : "자동 정렬"} icon={<IconLayers size={17}/>} onClick={autoLayoutCanvas}/>
+            <GraphControl primary label={t("auto.flow.save")} icon={<IconCheck size={17}/>} onClick={()=>void save()} disabled={saving || !dirty || errorCount>0}/>
+            <GraphControl label={t("common.cancel")} icon={<IconClose size={17}/>} onClick={()=>{setEditing(false);setPaletteOpen(false);void load();}}/>
+          </> : <>
+            <GraphControl label={t("auto.flow.edit")} icon={<IconEdit size={17}/>} onClick={()=>setEditing(true)}/>
+            <GraphControl data-testid="open-connections" label={locale === "en" ? "Connections" : "연결"} icon={<IconKey size={17}/>} onClick={()=>setConnectionsOpen(true)}/>
+            <GraphControl data-testid="refresh-automation-run" label={locale === "en" ? "Refresh" : "새로고침"} icon={<IconRefresh size={17}/>} onClick={()=>void refreshRunView()} disabled={refreshing}/>
+            <GraphControl data-testid="inspector-toggle" label={locale === "en" ? "Details" : "상세"} icon={<IconPanelRight size={17}/>} aria-expanded={rightOpen} onClick={()=>setRightOpen(v=>!v)}/>
+            <details className={compactStyles.menu}><summary aria-label={locale === "en" ? "More actions" : "더 보기"} title={locale === "en" ? "More actions" : "더 보기"}><IconMoreHorizontal size={18}/></summary><div className={compactStyles.menuContent}>
+              <button onClick={()=>router.push(`/automation/new?id=${encodeURIComponent(automation.id)}`)}>{t("auto.flow.edit_meta")}</button>
+              <button data-testid="change-automation-model" onClick={()=>router.push(`/automation/new?id=${encodeURIComponent(automation.id)}#execution-ai`)}>{locale === "en" ? "Change model" : "모델 변경"}</button>
+              <button onClick={()=>void openVersions()}>{locale === "en" ? "History" : "이전 판"}</button>
+              <button onClick={()=>void runNow(true)} disabled={running}>{t("auto.flow.simulate")}</button>
+              {freshStartable ? <button data-testid="fresh-automation-run" onClick={()=>void runNow(false,undefined,true)} disabled={running || liveRunning}>{locale === "en" ? "Start fresh" : "처음부터 새 실행"}</button> : null}
+              <button onClick={()=>void publishToHub()} disabled={publishing}>{locale === "en" ? "Publish to Hub" : "Hub에 올리기"}</button>
+            </div></details>
+            <GraphControl data-testid="toggle-enabled" label={automation.enabled ? t("auto.action.disable") : t("auto.action.enable")} icon={<IconPower size={17}/>} aria-pressed={automation.enabled} onClick={()=>void toggleEnabled()} disabled={toggling}/>
+            {!liveRunning ? <GraphControl primary label={resumable ? (locale === "en" ? "Continue run" : "이어서 실행") : t("auto.flow.run_now")} icon={<IconBolt size={18}/>} onClick={()=>void runNow()} disabled={running}/> : null}
             {liveRunning ? (
-              <button
+              <GraphControl primary label={locale === "en" ? "Stop" : "중지"} icon={<IconClose size={17}/>}
                 data-testid="stop-run"
                 className="titlebar-nodrag"
                 disabled={stopping}
@@ -2154,30 +2024,9 @@ return (
                 {stopping
                   ? <SpinnerLabel text={locale === "en" ? "Stopping…" : "멈추는 중…"} />
                   : (locale === "en" ? "Stop" : "중지")}
-              </button>
+              </GraphControl>
             ) : null}
-            <button
-              data-testid="toggle-enabled"
-              onClick={() => void toggleEnabled()}
-              className="titlebar-nodrag"
-              disabled={toggling}
-              style={{ ...pillBtn(automation.enabled), ...(toggling ? { opacity: 0.6, cursor: "default" } : {}) }}
-              title={!automation.enabled && blockedByConnections
-                ? (locale === "en" ? "Connect what it uses first." : "쓰는 것을 먼저 연결해야 켜집니다.")
-                : undefined}
-            >
-              {toggling
-                ? <SpinnerLabel text={automation.enabled
-                  ? (locale === "en" ? "Turning off…" : "끄는 중…")
-                  : (locale === "en" ? "Turning on…" : "켜는 중…")} />
-                : automation.enabled
-                  ? t("auto.action.disable")
-                  : blockedByConnections
-                    ? (locale === "en" ? "Connect to turn on" : "연결해야 켜집니다")
-                    : t("auto.action.enable")}
-            </button>
-          </>
-        )}
+          </>}
         </div>
       </header>
       {architectBusy ? (
@@ -2206,23 +2055,21 @@ return (
           data-testid="run-status-strip"
         >
           <span className="automation-run-status-dot" aria-hidden="true" />
-          <span className="automation-run-status-text">
-            {liveRunning
-                ? (locale === "en"
-                  ? `Running${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${doneNodes}/${totalNodes} done`
-                  : `실행 중${runningNodeLabel ? ` — ${runningNodeLabel}` : ""} · ${totalNodes}단계 중 ${doneNodes}단계 완료`)
-                : stopped
-                  ? (locale === "en"
-                    ? `Stopped · ${doneNodes}/${totalNodes} done. What stopped it is in Details on the right.`
-                    : `멈춰 있습니다 · ${totalNodes}단계 중 ${doneNodes}단계 완료. 무엇 때문인지는 오른쪽 [상세]에 있습니다.`)
-                  : runStartedAt
-                    // ★"안 돌고 있다"만 말하면 사용자는 "그래서 지난번엔 어떻게 됐는데?"를
-                    //   또 찾아 헤맨다(평가의 간극). 마지막 실행 결과를 여기서 끝낸다.
-                    ? (locale === "en"
-                      ? `Last run ${new Date(runStartedAt).toLocaleString("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" })} · ${doneNodes}/${totalNodes} steps done`
-                      : `마지막 실행 ${new Date(runStartedAt).toLocaleString("ko-KR", { month: "long", day: "numeric", hour: "numeric", minute: "2-digit" })} · ${totalNodes}단계 중 ${doneNodes}단계 완료`)
-                    : (locale === "en" ? "Not run yet — press Run now to try it once." : "아직 실행한 적이 없습니다 — [지금 실행]으로 한 번 돌려볼 수 있습니다.")}
+          <span className="automation-run-status-text" title={runStartedAt ? new Date(runStartedAt).toLocaleString(locale === "en" ? "en-US" : "ko-KR") : undefined}>
+            {liveRunning ? (locale === "en" ? "Running" : "실행 중") : stopped ? (locale === "en" ? "Stopped" : "중단") : !automation.enabled ? (locale === "en" ? "Paused" : "정지") : (locale === "en" ? "Waiting" : "대기")}
           </span>
+          {doneNodes > 0 ? (
+            <span
+              role="img"
+              title={locale === "en" ? `${doneNodes} completed steps` : `완료한 단계 ${doneNodes}`}
+              aria-label={locale === "en" ? `${doneNodes} completed steps` : `완료한 단계 ${doneNodes}`}
+              style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
+            >
+              <IconCheck size={12} />
+              {progress.total === null ? doneNodes : `${doneNodes}/${progress.total}`}
+            </span>
+          ) : null}
+          {progress.percent !== null ? <progress className={compactStyles.progress} value={progress.completed} max={progress.total ?? undefined} aria-label={locale === "en" ? "Completed steps" : "완료 단계"}/> : null}
           {/* 주 행동은 언제나 **하나**, 그리고 아래 [상세]가 이미 그 카드를 펼쳐 놓았으면
               여기는 아무 버튼도 두지 않는다: 같은 행동이 두 군데 있으면 사용자는 둘이
               다른 일을 한다고 읽는다(오너 지적 "지금 다시 실행이 왜 2개나 있고"). */}
@@ -2233,7 +2080,7 @@ return (
               className="automation-run-status-action"
               onClick={() => setRightOpen(true)}
             >
-              {locale === "en" ? "Open Details" : "상세 열기"}
+              <IconPanelRight size={14}/>
             </button>
           ) : null}
         </div>
@@ -2311,7 +2158,7 @@ return (
       <div className="automation-flow-overlay-anchor">
       <div className="automation-flow-overlay">
 
-      {cuaPerm && !cuaPerm.ok ? (
+      {rightOpen && cuaPerm && !cuaPerm.ok ? (
         <div
           className="titlebar-nodrag"
           data-testid="cua-permission-card"
@@ -2428,7 +2275,7 @@ return (
               팔레트가 갈 곳이 없었다 — 눌러도 아무 일이 없는 버튼(게이트 실측 2026-08-09). */}
           {(!editing || Boolean(message) || dirty || logRows.length > 0 || paletteOpen || selectedNodeId || selectedEdgeId) ? (
             /* ★터미널처럼 한 패널 — 로그가 위, 챗 입력이 아래 고정(오너 지시: 플로팅 금지·합치기). */
-            <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : (editing ? 30 : 92), display: "flex", flexDirection: "column" }}>
+            <div className="automation-issue-log titlebar-nodrag" style={{ height: logOpen ? logHeight : 38, display: "flex", flexDirection: "column" }}>
               <div
                 className="automation-issue-log-grip"
                 onMouseDown={(e) => {
@@ -2465,7 +2312,7 @@ return (
                       setLogOpen(true);
                     }}
                   >
-                    {tab.label}
+                    <span title={tab.label} aria-label={tab.label}>{tab.id === "session" ? <IconChat size={15}/> : <IconArchive size={15}/>}</span>
                     {tab.badge > 0 ? <em>{tab.badge}</em> : null}
                   </button>
                 ))}
@@ -2751,11 +2598,12 @@ return (
             className="automation-inspector-reopen titlebar-nodrag"
             data-testid="inspector-reopen"
             onClick={() => setRightOpen(true)}
+            aria-label={locale === "en" ? "Show details" : "상세 열기"}
             title={locale === "en" ? "Show details" : "상세 열기"}
           >
             {decisionCount > 0 ? <em>{decisionCount}</em> : null}
             <span aria-hidden="true">⟨</span>
-            <span className="automation-inspector-reopen-label">{locale === "en" ? "Details" : "상세"}</span>
+            <IconPanelRight size={16}/>
           </button>
         )}
 

@@ -7,7 +7,9 @@ import { ipc } from "@/lib/ipc";
 import { pickLocalized, useT } from "@/lib/i18n";
 import { humanSchedule } from "@shared/graph-blueprint";
 import type { Automation, InstalledAgent, InstalledFirm, RuntimeSelection } from "@/lib/types";
-import { IconBolt, IconBuilding, IconPlus, IconTrash } from "@/components/Icon";
+import { IconBolt, IconBuilding, IconPlus, IconTrash, IconEdit, IconPower, IconKey, IconChat, IconLayers, IconDownload } from "@/components/Icon";
+import { GraphControl } from "@/components/automation/GraphControl";
+import styles from "@/components/automation/GraphWorkspace.module.css";
 import { DescribeAutomation } from "@/components/automation/DescribeAutomation";
 import { OneAutomationTable } from "@/components/automation/OneAutomationTable";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -237,266 +239,32 @@ export default function AutomationListPage() {
           }}
         >
           <IconPlus size={14} />
-          {t("auto.new")}
+          <span aria-label={t("auto.new")} title={t("auto.new")}/>
         </Link>
       </header>
 
-      <section style={{ maxWidth: 880, margin: "24px auto", padding: "0 24px" }} data-tour-id="automation.list">
-        {/* 말로 설명해 만드는 입구를 목록 맨 위에 둔다 — 폼을 채우는 것보다 먼저 보여야
-            "무엇을 만들 수 있는지" 모르는 사람이 시작할 수 있다. */}
-        <DescribeAutomation locale={locale} onCreated={() => void refresh()} />
-
-        {/* ★Hub에서 받기. 올리기·받기 둘 다 메인 프로세스에는 처음부터 있었는데
-            누를 자리가 없어 앱에서는 존재하지 않는 기능이었다. */}
-        <div style={{ display: "flex", gap: 8, alignItems: "center", margin: "12px 0 4px" }}>
-          <input
-            value={hubSlug}
-            onChange={(e) => setHubSlug(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter") void installFromHub(); }}
-            placeholder={locale === "en" ? "Install a graph from the Hub — paste its name" : "Hub에서 그래프 받기 — 이름을 붙여 넣으세요"}
-            style={{
-              flex: 1, padding: "9px 12px", borderRadius: "var(--radius-md)",
-              border: "1px solid var(--paper-edge)", background: "var(--paper)", color: "var(--ink)",
-              fontSize: 13, outline: "none",
-            }}
-          />
-          <button
-            onClick={() => void installFromHub()}
-            disabled={installing || !hubSlug.trim()}
-            /* 회색인 이유를 말한다 — 주소를 아직 안 쓴 것은 보면 안다. */
-            data-disabled-reason={!installing && !hubSlug.trim() ? "empty-input" : undefined}
-            title={installing ? (locale === "en" ? "Fetching the automation…" : "자동화를 받는 중입니다…") : undefined}
-            style={{
-              padding: "9px 14px", borderRadius: "var(--radius-md)", border: "1px solid var(--paper-edge)",
-              background: "var(--paper)", color: "var(--ink)", fontSize: 13,
-              opacity: installing || !hubSlug.trim() ? 0.55 : 1,
-            }}
-          >
-            {installing ? (locale === "en" ? "Fetching…" : "받는 중…") : (locale === "en" ? "Install" : "받기")}
-          </button>
+      <section className={styles.list} data-tour-id="automation.list">
+        <div className={styles.listTools}>
+          <GraphControl label={locale === "en" ? "Graphs" : "그래프"} icon={<IconLayers size={17}/>} aria-pressed={tab === "graph"} onClick={()=>setTab("graph")}/>
+          <GraphControl label={locale === "en" ? "One automations" : "One 자동화"} icon={<IconChat size={17}/>} aria-pressed={tab === "one"} onClick={()=>setTab("one")}/>
+          <details className={styles.menu}><summary title={locale === "en" ? "Describe a graph" : "말로 만들기"} aria-label={locale === "en" ? "Describe a graph" : "말로 만들기"}><IconPlus size={17}/></summary><div className={styles.menuContent} style={{left:0,right:"auto",width:420,maxWidth:"80vw"}}><DescribeAutomation locale={locale} onCreated={()=>void refresh()}/></div></details>
+          <details className={styles.menu}><summary title={locale === "en" ? "Install from Hub" : "Hub에서 받기"} aria-label={locale === "en" ? "Install from Hub" : "Hub에서 받기"}><IconDownload size={17}/></summary><div className={styles.menuContent} style={{left:0,right:"auto"}}>
+            <input value={hubSlug} onChange={e=>setHubSlug(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")void installFromHub();}} placeholder={locale === "en" ? "Graph name" : "그래프 이름"} aria-label={locale === "en" ? "Graph name" : "그래프 이름"}/>
+            <button disabled={installing || !hubSlug.trim()} onClick={()=>void installFromHub()}>{locale === "en" ? "Install" : "받기"}</button>
+          </div></details>
         </div>
-        <nav
-          aria-label={locale === "en" ? "Automation views" : "자동화 보기"}
-          style={{ display: "flex", gap: 6 }}
-        >
-          {([["graph", locale === "en" ? "Graphs" : "그래프", graphItems.length],
-             ["one", locale === "en" ? "One automations" : "One 자동화", oneItems.length]] as const).map(
-            ([id, label, count]) => (
-              <button
-                key={id}
-                type="button"
-                aria-pressed={tab === id}
-                onClick={() => setTab(id)}
-                style={{
-                  padding: "7px 14px", fontSize: 12, fontWeight: 650, borderRadius: "var(--radius-md)",
-                  border: "1px solid " + (tab === id ? "var(--muted)" : "var(--paper-edge)"),
-                  background: tab === id ? "var(--paper-3)" : "var(--paper)",
-                  color: tab === id ? "var(--ink)" : "var(--ink-soft)",
-                  cursor: "pointer",
-                }}
-              >{label}{count > 0 ? ` ${count}` : ""}</button>
-            ),
-          )}
-        </nav>
-        {message ? (
-          <div
-            style={{
-              padding: 16,
-              borderRadius: "var(--radius-md)",
-              border: "1px solid var(--paper-edge)",
-              background: "var(--paper)",
-              color: "var(--ink-soft)",
-              fontSize: 13,
-              lineHeight: 1.5,
-            }}
-          >
-            {message}
-          </div>
-        ) : loading ? (
-          <div
-            style={{
-              padding: 16,
-              borderRadius: "var(--radius-md)",
-              border: "1px solid var(--paper-edge)",
-              background: "var(--paper)",
-              color: "var(--muted-deep)",
-              fontSize: 13,
-              display: "grid",
-              gap: 6,
-            }}
-          >
-            <span>{locale === "en" ? "Loading automations…" : "자동화를 불러오는 중입니다…"}</span>
-            <LoadingEstimate locale={locale} operationKey="desktop-automation-list" expectedSeconds={[1, 20]} />
-          </div>
-        ) : tab === "one" ? (
-          <OneAutomationTable
-            items={oneItems}
-            locale={locale}
-            onToggle={(id, enabled) => void toggle(id, enabled)}
-            onRemove={(id) => void remove(id)}
-          />
-        ) : graphItems.length === 0 ? (
-          <div
-            style={{
-              padding: 32,
-              textAlign: "center",
-              color: "var(--muted-deep)",
-              border: "1px dashed var(--paper-edge)",
-              borderRadius: "var(--radius-md)",
-            }}
-          >
-            {t("auto.empty")}
-          </div>
-        ) : (
-          <ul style={{ listStyle: "none", padding: 0, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
-            {graphItems.map((a) => (
-              <li
-                key={a.id}
-                style={{
-                  background: "var(--paper)",
-                  border: "1px solid var(--paper-edge)",
-                  borderRadius: "var(--radius-md)",
-                  padding: "12px 16px",
-                  display: "flex",
-                  alignItems: "center",
-                  gap: 12,
-                }}
-              >
-                <IconBolt size={16} style={{ color: a.enabled ? "var(--accent)" : "var(--muted)" }} />
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <Link
-                    href={`/automation/flow?id=${encodeURIComponent(a.id)}`}
-                    className="titlebar-nodrag"
-                    style={{
-                      display: "block",
-                      fontWeight: 600,
-                      fontSize: 13,
-                      overflow: "hidden",
-                      textOverflow: "ellipsis",
-                      whiteSpace: "nowrap",
-                      color: "var(--ink)",
-                      textDecoration: "none",
-                    }}
-                  >
-                    {a.name}
-                  </Link>
-                  <div style={{ fontSize: 11, color: "var(--muted-deep)", overflowWrap: "anywhere" }}>
-                    {/* ★크론 원문(`daily-09:00`)을 그대로 보여주던 자리 — 캔버스 헤더는
-                        이미 humanSchedule 로 사람 말을 하는데 목록만 안 쓰고 있었다
-                        (실렌더 2026-08-09). 목록이 첫 화면이라 여기가 더 중요하다. */}
-                    {humanSchedule(a.scheduleHuman, locale)} ·{" "}
-                    <span style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                      {targetLabel(a).icon}
-                      {targetLabel(a).name}
-                    </span>
-                    <span
-                      data-testid={`automation-runtime-${a.id}`}
-                      style={{ color: "var(--ink-soft)" }}
-                    >
-                      · {locale === "en" ? "runs on" : "실행 모델"} {runtimeSelectionLabel(a.runtimeSelection, locale)}
-                    </span>
-                  </div>
-                </div>
-                {/* 기다리는 결정이 있으면 그것이 이 행의 주 행동이다 — 켜기/끄기·실행보다 앞. */}
-                {waiting[a.id] ? (
-                  <button
-                    onClick={() => router.push(`/automation/flow?id=${encodeURIComponent(a.id)}`)}
-                    className="titlebar-nodrag"
-                    data-testid={`automation-waiting-${a.id}`}
-                    title={locale === "en"
-                      ? "This run stopped for a decision. Open it to decide — running again stops at the same place."
-                      : "이 실행은 결정을 기다리다 멈췄습니다. 열어서 결정하세요 — 다시 실행하면 같은 자리에서 또 멈춥니다."}
-                    style={{
-                      padding: "4px 10px",
-                      borderRadius: 999,
-                      fontSize: 11,
-                      fontWeight: 700,
-                      border: "1px solid var(--accent)",
-                      background: "var(--accent)",
-                      color: "var(--white)",
-                    }}
-                  >
-                    {locale === "en" ? "Needs your call" : "내가 정해야 함"}
-                  </button>
-                ) : null}
-                {!a.enabled && a.scheduleSpec?.kind === "once" && a.nextRunAt == null ? (
-                  <span
-                    data-testid={`automation-terminal-once-${a.id}`}
-                    style={{
-                      padding: "4px 10px",
-                      borderRadius: 999,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      border: "1px solid var(--paper-edge)",
-                      background: "var(--paper-2)",
-                      color: "var(--muted-deep)",
-                    }}
-                  >
-                    {locale === "en" ? "Ended" : "종료됨"}
-                  </span>
-                ) : (
-                  <button
-                    onClick={() => void toggle(a.id, !a.enabled)}
-                    style={{
-                      padding: "4px 10px",
-                      borderRadius: 999,
-                      fontSize: 11,
-                      fontWeight: 600,
-                      border: "1px solid var(--paper-edge)",
-                      background: a.enabled ? "var(--fill-1)" : "var(--paper-2)",
-                      color: a.enabled ? "var(--accent)" : "var(--muted-deep)",
-                    }}
-                  >
-                    {a.enabled ? t("auto.action.disable") : t("auto.action.enable")}
-                  </button>
-                )}
-                {/* 결정을 기다리는 동안에는 실행을 권하지 않는다 — 눌러 봐야 같은 자리에서
-                    또 멈춘다. 그 자리는 위의 [승인 대기]가 대신한다. */}
-                {waiting[a.id] ? null : (
-                <button
-                  onClick={() => runNow(a.id)}
-                  className="titlebar-nodrag"
-                  title={t("auto.list.run_hint")}
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: "var(--accent)",
-                    padding: "4px 10px",
-                    borderRadius: 999,
-                    border: "1px solid var(--paper-edge)",
-                    background: "var(--paper-2)",
-                  }}
-                >
-                  {t("auto.list.run")}
-                </button>
-                )}
-                <Link
-                  href={`/automation/new?id=${encodeURIComponent(a.id)}`}
-                  className="titlebar-nodrag"
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: "var(--ink-soft)",
-                    padding: "4px 10px",
-                    borderRadius: 999,
-                    border: "1px solid var(--paper-edge)",
-                    textDecoration: "none",
-                  }}
-                >
-                  {t("auto.list.edit")}
-                </Link>
-                <button
-                  onClick={() => void remove(a.id)}
-                  aria-label={t("common.delete")}
-                  title={t("common.delete")}
-                  style={{ color: "var(--muted-deep)", padding: 4 }}
-                >
-                  <IconTrash size={14} />
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
+        {message ? <div role="status">{message}</div> : null}
+        {loading ? <LoadingEstimate locale={locale} operationKey="automation-list" expectedSeconds={[1,8]} compact/> : tab === "one" ? <OneAutomationTable items={oneItems} locale={locale} onToggle={(id,enabled)=>void toggle(id,enabled)} onRemove={id=>void remove(id)}/> : graphItems.length===0 ? <div>{t("auto.empty")}</div> : <ul style={{listStyle:"none",padding:0,margin:0}}>
+          {graphItems.map(a=><li className={styles.row} key={a.id}>
+            <span className={styles.state} data-active={a.enabled} title={a.enabled ? (locale === "en" ? "Enabled" : "켜짐") : (locale === "en" ? "Paused" : "정지")}/>
+            <Link className={styles.rowTitle} href={`/automation/flow?id=${encodeURIComponent(a.id)}`} title={`${humanSchedule(a.scheduleHuman,locale)} · ${targetLabel(a).name} · ${runtimeSelectionLabel(a.runtimeSelection,locale)}`}>{a.name}</Link>
+            <span className={styles.miniGraph} aria-hidden="true"><IconBolt size={16}/><i/><IconBuilding size={16}/><i/><IconLayers size={16}/></span>
+            {waiting[a.id] ? <GraphControl data-testid={`automation-waiting-${a.id}`} primary label={locale === "en" ? "Needs your call" : "내가 정해야 함"} icon={<IconKey size={16}/>} onClick={()=>router.push(`/automation/flow?id=${encodeURIComponent(a.id)}`)}/> : <GraphControl label={t("auto.list.run")} icon={<IconBolt size={16}/>} onClick={()=>runNow(a.id)}/>}
+            {!a.enabled && a.scheduleSpec?.kind==="once" && a.nextRunAt==null ? <span title={locale === "en" ? "Ended" : "종료됨"}>—</span> : <GraphControl label={a.enabled ? t("auto.action.disable") : t("auto.action.enable")} icon={<IconPower size={16}/>} aria-pressed={a.enabled} onClick={()=>void toggle(a.id,!a.enabled)}/>}
+            <GraphControl label={t("auto.list.edit")} icon={<IconEdit size={16}/>} onClick={()=>router.push(`/automation/new?id=${encodeURIComponent(a.id)}`)}/>
+            <GraphControl label={t("common.delete")} icon={<IconTrash size={16}/>} onClick={()=>void remove(a.id)}/>
+          </li>)}
+        </ul>}
       </section>
     </div>
   );

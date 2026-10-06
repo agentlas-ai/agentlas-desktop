@@ -126,7 +126,15 @@ export function goalAdmissionControlFailure(error: unknown, ko: boolean): { code
 export function goalAdmissionControlFailureForCode(code: string | null | undefined, ko: boolean): { code: string; message: string } | null {
   if (!code) return null;
   let message: string;
-  if (code.startsWith("invocation_admission_") && code !== "invocation_admission_chat_pending") {
+  if (code === "invocation_pre_reservation_validation_refused") {
+    message = ko
+      ? "실행 모델 설정이 유효하지 않아 요청을 접수하지 않았습니다. 아무것도 실행되지 않았고 입력은 보존되어 있습니다. 모델 설정을 확인한 뒤 다시 보내 주세요."
+      : "The runtime selection is invalid, so the request was not accepted. Nothing ran and your input is preserved. Review the model selection before sending again.";
+    return { code, message };
+  }
+  // A verified rejected ledger state proves no start. Pending, admitted,
+  // identity conflicts, and failed proof writes never establish that fact.
+  if (code === "invocation_admission_rejected") {
     message = ko
       ? `실행 접수 기록을 안전하게 남기지 못해 시작하지 않았습니다(사유 코드: ${code}). 아무것도 실행되지 않았고 입력은 보존되어 있습니다. 잠시 뒤 다시 보내도 중복 실행되지 않습니다.`
       : `The run could not be recorded safely, so it did not start (reason code: ${code}). Nothing ran and your input is preserved; sending again later cannot run it twice.`;
@@ -213,4 +221,3 @@ export function goalAdmissionControlFailureForCode(code: string | null | undefin
 export function knownStartFailureHuman(error: unknown, ko: boolean): string | null {
   return goalAdmissionControlFailure(error, ko)?.message ?? null;
 }
-

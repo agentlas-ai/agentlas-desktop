@@ -27,6 +27,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { ensureDefaultMcpPluginsInstalled } from "./defaults";
 import { listInstalledServers } from "./registry";
 import { readEnvVar } from "../secrets/vault";
+import { KeychainUnavailableError } from "../secrets/keychain-host";
 import { resolveMcpOAuthAccessToken } from "./oauth";
 import {
   OPENCRAB_CATALOG_ID,
@@ -871,14 +872,25 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     // whole CLI bootstrap.
     const resolvedEnv = new Map<string, string>();
     let missingRequiredValue = false;
-    for (const rawKey of s.envKeys) {
-      const envKey = validateEnvKey(rawKey);
-      const value = await readEnvVar(envKey);
-      if (!value) {
-        missingRequiredValue = true;
-        break;
+    let oauthAccessToken: string | null = null;
+    try {
+      for (const rawKey of s.envKeys) {
+        const envKey = validateEnvKey(rawKey);
+        const value = await readEnvVar(envKey);
+        if (!value) {
+          missingRequiredValue = true;
+          break;
+        }
+        resolvedEnv.set(envKey, value);
       }
-      resolvedEnv.set(envKey, value);
+      if (s.transport !== "stdio") oauthAccessToken = await resolveMcpOAuthAccessToken(s.id);
+    } catch (error) {
+      if (!(error instanceof KeychainUnavailableError)
+        || requiredToolCatalogIds.has(s.id)
+        || Boolean(s.catalogId && requiredToolCatalogIds.has(s.catalogId))) throw error;
+      // Omit only this optional capability. Its unavailable credentials must
+      // never become plaintext fallback values or poison the whole bootstrap.
+      continue;
     }
     if (missingRequiredValue) {
       /*
@@ -889,8 +901,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
        * 없다"로 읽어 서버를 통째로 빼면, 사용자는 방금 로그인까지 마쳤는데 도구가
        * 안 붙는 일을 겪는다. 실제로 붙일 자격증명이 있는지로 판정한다.
        */
-      const authorized = s.transport !== "stdio" && await resolveMcpOAuthAccessToken(s.id);
-      if (!authorized) continue;
+      if (!oauthAccessToken) continue;
     }
 
     const key = mcpConfigKey(s);
@@ -1194,7 +1205,6 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
        * null이 와서 이 서버는 이번 실행에 실리지 않는다(만료 토큰으로 401을 맞아
        * 실행 도중 죽는 것보다 낫다).
        */
-      const oauthAccessToken = await resolveMcpOAuthAccessToken(s.id);
       if (oauthAccessToken) {
         const alias = mcpRuntimeSecretAlias(key, "AUTHORIZATION");
         runtimeEnv[alias] = oauthAccessToken;

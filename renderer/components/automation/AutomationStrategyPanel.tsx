@@ -173,11 +173,7 @@ export function AutomationStrategyPanel({ automationId, locale }: { automationId
   return <details className={styles.panel} data-automation-strategy={automationId}>
     <summary>
       <strong>{ko ? "전략 변경" : "Strategy changes"}</strong>
-      <span>{pending.length > 0
-        ? (ko ? `검토할 제안 ${pending.length}개` : `${pending.length} to review`)
-        : latestKeep ? (ko ? "최근 판단 · 전략 유지" : "Latest review · strategy unchanged")
-          : unconfirmedKeep ? (ko ? "최근 판단 확인 필요" : "Latest review unconfirmed")
-          : latestApplied ? status(latestApplied) : (ko ? "변경 내역" : "History")}</span>
+      <span aria-label={pending.length > 0 ? `${pending.length}` : undefined}>{pending.length > 0 ? pending.length : ""}</span>
     </summary>
     {rows[0]?.automationName && <p className={styles.name}>{rows[0].automationName}</p>}
     {error && <p className={styles.error} role="status">{error} <button type="button" onClick={() => void refreshRef.current?.()}>{ko ? "새로고침" : "Refresh"}</button></p>}

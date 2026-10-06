@@ -29,7 +29,7 @@ import { localTokensFor } from "./local-logs";
 import { readProviderHealth } from "./provider-health";
 import { UsageRetryGate } from "./retry-policy";
 import { userDataPath } from "../runtime-paths";
-import { isPaidOverageUsageWindow, providerQuotaExhausted } from "../../shared/runtime-quota";
+import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow, providerQuotaExhausted } from "../../shared/runtime-quota";
 
 // 하이브리드 사용량(ccusage + agentcat 절충):
 //  - 서버 usage API = 정확한 리밋 %·리셋 시각. 단 rate limit이 짜서 자주 못 친다.
@@ -285,7 +285,10 @@ function loadLastGood(): void {
       { usage: ProviderUsage; at: number }
     >;
     for (const [id, entry] of Object.entries(raw)) {
-      if (entry?.usage && typeof entry.at === "number") lastGood.set(id, entry);
+      if (entry?.usage && typeof entry.at === "number") {
+        entry.usage = { ...entry.usage, windows: entry.usage.windows.filter(window => isSupportedProviderUsageWindow(window, id)) };
+        lastGood.set(id, entry);
+      }
     }
   } catch {
     // 없음/손상 — 무시
@@ -365,6 +368,7 @@ export function peekProviderUsedPercent(providerId: string, now = Date.now(), mo
   const windows = entry.usage?.windows ?? [];
   let max: number | null = null;
   for (const window of windows) {
+    if (!isSupportedProviderUsageWindow(window, providerId)) continue;
     if (isPaidOverageUsageWindow(window, providerId)) continue;
     if (typeof window.usedPercent !== "number" || !Number.isFinite(window.usedPercent)) continue;
     // An expired limit is no longer evidence of current exhaustion. Do not

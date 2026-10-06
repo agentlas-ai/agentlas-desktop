@@ -6,7 +6,7 @@ import path from "node:path";
 
 import { listInstalledAgents } from "../mcp/registry";
 import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
-import { automationRunNeedsAttention } from "../../shared/automation-attention";
+import { automationRunPresentation } from "../../shared/automation-run-presentation";
 import { listMyAgentsCached } from "../marketplace";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
 import { detectRuntimes } from "../runtime/detect";
@@ -1704,10 +1704,10 @@ export function projectMobileBridgeAutomation(
   const latestRun = listRunHistory(automation.id, 1)[0];
   const liveRunState = getAutomationLiveRunState(automation.id);
   const runId = getAutomationLiveRunId(automation.id);
-  // 규칙은 shared/automation-attention.ts 한 벌이 소유한다. 예전에는 여기서
-  // status 만 봐서, 판정이 **반려**한 실행이 폰에 "완료"로 도착하고 알림 종도
-  // 울리지 않았다(데스크탑 패널은 같은 상황을 확인 대상으로 셌다).
-  const latestNeedsAttention = automationRunNeedsAttention(latestRun);
+  // Use the same presentation as Desktop. Completion, result quality and an
+  // owner request remain separate; the raw historical verdict must reach Mobile.
+  const latestPresentation = latestRun ? automationRunPresentation(latestRun) : null;
+  const latestNeedsAttention = latestPresentation?.requiresAttention ?? false;
   return {
     id: automation.id,
     name: displayText(automation.name, 1_024),
@@ -1752,6 +1752,12 @@ export function projectMobileBridgeAutomation(
           : latestRun?.status === "needs_input"
             ? "automation_needs_input"
             : "automation_failed",
+    ...(latestRun && latestPresentation ? { latestRun: {
+      runId: latestRun.id,
+      status: latestRun.status,
+      outcome: latestRun.outcome ?? null,
+      ...latestPresentation,
+    } } : {}),
     graph: automation.graph
       ? {
           nodes: automation.graph.nodes.slice(0, 160).map((node) => {

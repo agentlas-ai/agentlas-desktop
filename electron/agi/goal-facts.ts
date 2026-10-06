@@ -10,6 +10,8 @@
  * The DB handle and the few live-state edges (chat busy, latest receipt, continuation park) are injected so the
  * contracts can drive the real queries on an in-memory store.
  */
+import { projectGoalPlanReadiness, type PlanReadiness } from "../../shared/goal-shape";
+import { readGoalPlan } from "../store/goal-plans";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
 import { isEffectUncertainBlockReason } from "../long-run/effect-observation";
@@ -114,25 +116,15 @@ function exhaustedObservation(db: Database.Database, runId: string): { attemptId
   return { attemptIds, looksAfter, seq: row.seq };
 }
 
-function tactics(db: Database.Database, goalId: string): { tactics: AgiTacticFact[]; blockedNodeId: string | null } {
-  if (!tableExists(db, "goal_plan_nodes")) return { tactics: [], blockedNodeId: null };
-  const head = db.prepare(`SELECT revision, plan_seq FROM goal_plan_nodes WHERE goal_id = ? ORDER BY revision DESC, plan_seq DESC LIMIT 1`)
-    .get(goalId) as { revision: number; plan_seq: number } | undefined;
-  if (!head) return { tactics: [], blockedNodeId: null };
-  const rows = db.prepare(`SELECT node_id, status, payload_json FROM goal_plan_nodes WHERE goal_id = ? AND revision = ? AND plan_seq = ?
-    AND kind = 'tactic' ORDER BY ord`).all(goalId, head.revision, head.plan_seq) as Array<{ node_id: string; status: AgiTacticFact["status"]; payload_json: string }>;
-  let blockedNodeId: string | null = null;
-  const list = rows.map((row) => {
-    let dependsOn: string[] | undefined;
-    try {
-      const payload = JSON.parse(row.payload_json) as { depends_on?: unknown; dependsOn?: unknown; blocked?: unknown };
-      const deps = Array.isArray(payload.depends_on) ? payload.depends_on : Array.isArray(payload.dependsOn) ? payload.dependsOn : undefined;
-      if (deps) dependsOn = deps.filter((value): value is string => typeof value === "string");
-      if (payload.blocked === true && !blockedNodeId) blockedNodeId = row.node_id;
-    } catch { /* payload without structure */ }
-    return { nodeId: row.node_id, status: row.status, ...(dependsOn ? { dependsOn } : {}) };
-  });
-  return { tactics: list, blockedNodeId };
+function tactics(db: Database.Database, goalId: string, nowMs: number): { tactics: AgiTacticFact[]; blockedNodeId: string | null; readiness?: PlanReadiness } {
+  if (!tableExists(db, "goal_plan_nodes") || !tableExists(db, "goal_plan_decisions")) return { tactics: [], blockedNodeId: null };
+  const plan = readGoalPlan(goalId, undefined, db);
+  if (!plan) return { tactics: [], blockedNodeId: null };
+  const readiness = projectGoalPlanReadiness(plan, { nowMs });
+  const blocked = db.prepare(`SELECT node_id FROM goal_plan_nodes WHERE goal_id=? AND revision=? AND plan_seq=?
+    AND kind='tactic' AND CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.blocked') ELSE 0 END=1 ORDER BY ord LIMIT 1`).get(goalId, plan.revision, plan.planSeq) as { node_id: string } | undefined;
+  return { blockedNodeId: blocked?.node_id ?? null, readiness, tactics: plan.tactics.map(t => ({ nodeId: t.id,
+    status: t.status, dependsOn: t.depends_on, readiness: readiness.branches.find(branch => branch.nodeId === t.id) })) };
 }
 
 function missedDueRun(db: Database.Database, goalId: string, nowMs: number): string | null {
@@ -300,12 +292,12 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
       if (due) signals.push({ kind: "missed_due_run", dueAt: due });
     }
   }
-  const plan = tactics(db, goalId);
+  const plan = tactics(db, goalId, deps.nowMs());
   const wake = wakeState(db, run, deps.nowMs());
   const latest = run.rootChatId ? deps.latestReceipt?.(run.rootChatId) : null;
   return { goalId, chatId: run.rootChatId, ...wake,
-    fenceState: JSON.stringify([wake.fenceState, latest?.runId ?? null, latest?.status ?? null]),
+    fenceState: JSON.stringify([wake.fenceState, latest?.runId ?? null, latest?.status ?? null, plan.readiness?.mutationIdentity ?? null]),
     repairInFlight: busy || isGoalObserving(goalId), runId: run.id, runVersion: run.version, status: busy && !terminal && !heldByOwner ? "running" : run.status,
-    pauseReason: run.pauseReason, blockedReason: run.blockedReason, signals, tactics: plan.tactics,
+    pauseReason: run.pauseReason, blockedReason: run.blockedReason, signals, tactics: plan.tactics, planReadiness: plan.readiness,
     blockedNodeId: plan.blockedNodeId, evidenceRefs: refs };
 }

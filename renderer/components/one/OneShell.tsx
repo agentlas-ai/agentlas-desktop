@@ -4,6 +4,7 @@ import { hasInlineVisualBlock } from "@/lib/visual-html";
 import { LinkedLocalFiles } from "@/components/LinkedLocalFiles";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { readStoredRuntimeSelection, selectionForRuntime } from "@shared/runtime-selection";
+import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
 
@@ -2195,14 +2196,22 @@ function OneSessionsShell() {
     }
   }, [messages]);
 
+  const scrollFollow = useMemo(() => createOneScrollFollow(
+    (callback) => window.requestAnimationFrame(callback), (id) => window.cancelAnimationFrame(id),
+  ), []);
+  useEffect(() => () => scrollFollow.cancel(), [scrollFollow]);
+
   const scrollToLatest = useCallback((behavior: ScrollBehavior = "smooth") => {
-    window.requestAnimationFrame(() => {
+    readerLeftLatestRef.current = false;
+    const owner = activeThreadChatIdRef.current;
+    const target = scrollRef.current;
+    scrollFollow.schedule(() => scrollRef.current === target && activeThreadChatIdRef.current === owner, () => {
       const scroller = scrollRef.current;
       if (!scroller) return;
       scroller.scrollTo({ top: scroller.scrollHeight, behavior });
       setShowScrollToLatest(false);
     });
-  }, []);
+  }, [scrollFollow]);
 
   /*
    * ★위로 올린 사람은 흐름이 다시 끌어내리지 않는다 (실측 2026-09-28, X Marketing).
@@ -2222,6 +2231,25 @@ function OneSessionsShell() {
     const hasOverflow = scroller.scrollHeight - scroller.clientHeight > 96;
     setShowScrollToLatest(hasOverflow && distanceFromBottom >= 96);
   }, []);
+
+  useEffect(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const leaveLatest = () => { readerLeftLatestRef.current = true; scrollFollow.cancel(); };
+    const wheel = (event: WheelEvent) => { if (event.deltaY < 0) leaveLatest(); };
+    const key = (event: KeyboardEvent) => {
+      if (["ArrowUp", "PageUp", "Home"].includes(event.key)) leaveLatest();
+    };
+    scroller.addEventListener("wheel", wheel, { passive: true });
+    scroller.addEventListener("touchstart", leaveLatest, { passive: true });
+    scroller.addEventListener("keydown", key);
+    return () => {
+      scrollFollow.cancel();
+      scroller.removeEventListener("wheel", wheel);
+      scroller.removeEventListener("touchstart", leaveLatest);
+      scroller.removeEventListener("keydown", key);
+    };
+  }, [conversation?.id, selected?.chatId, scrollFollow]);
 
   useEffect(() => {
     const scroller = scrollRef.current;
@@ -2248,7 +2276,7 @@ function OneSessionsShell() {
       const grew = height - previousHeight;
       previousHeight = height;
       const scroller = scrollRef.current;
-      if (grew > 0 && scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= grew + 24) {
+      if (grew > 0 && !readerLeftLatestRef.current && scroller && scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <= grew + 24) {
         scroller.scrollTop = scroller.scrollHeight;
       }
     };
@@ -2272,7 +2300,9 @@ function OneSessionsShell() {
   const pinToLatest = useCallback(() => {
     const scroller = scrollRef.current;
     if (!scroller) return;
+    const owner = activeThreadChatIdRef.current;
     let stopped = false;
+    readerLeftLatestRef.current = false;
     const stop = () => { stopped = true; cleanup(); };
     const cleanup = () => {
       for (const id of timers) window.clearTimeout(id);
@@ -2281,16 +2311,17 @@ function OneSessionsShell() {
       window.removeEventListener("keydown", stop);
     };
     const go = () => {
-      if (stopped) return;
+      if (stopped || readerLeftLatestRef.current || activeThreadChatIdRef.current !== owner) return;
       const node = scrollRef.current;
-      if (!node) return;
+      if (!node || node !== scroller) return;
       node.scrollTo({ top: node.scrollHeight, behavior: "auto" });
     };
     const timers = [0, 80, 250, 600].map((delay) => window.setTimeout(go, delay));
     scroller.addEventListener("wheel", stop, { passive: true });
     scroller.addEventListener("touchstart", stop, { passive: true });
     window.addEventListener("keydown", stop);
-    window.setTimeout(cleanup, 900);
+    const cleanupTimer = window.setTimeout(cleanup, 900);
+    return () => { stop(); window.clearTimeout(cleanupTimer); };
   }, []);
 
   /**
@@ -2304,37 +2335,15 @@ function OneSessionsShell() {
     if (!scroller) return;
     const distanceFromBottom = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight;
     if (readerLeftLatestRef.current || distanceFromBottom > 160) return;
-    window.requestAnimationFrame(() => {
-      const live = scrollRef.current;
-      if (!live) return;
-      live.scrollTo({ top: live.scrollHeight, behavior: "auto" });
+    const owner = activeThreadChatIdRef.current;
+    scrollFollow.schedule(() => !readerLeftLatestRef.current
+      && scrollRef.current === scroller && activeThreadChatIdRef.current === owner, () => {
+      scroller.scrollTo({ top: scroller.scrollHeight, behavior: "auto" });
     });
-  }, []);
+  }, [scrollFollow]);
 
-  const scrollResultToTop = useCallback((behavior: ScrollBehavior = "smooth") => {
-    window.requestAnimationFrame(() => {
-      const scroller = scrollRef.current;
-      const result = resultTopRef.current;
-      if (!scroller || !result) return;
-      const scrollerTop = scroller.getBoundingClientRect().top;
-      const resultTop = result.getBoundingClientRect().top;
-      scroller.scrollTo({
-        top: Math.max(0, scroller.scrollTop + resultTop - scrollerTop - 24),
-        behavior,
-      });
-    });
-  }, []);
-
-  useEffect(() => {
-    if (busy || (!surface && !receipt)) return;
-    // Put the useful result at the top as the terminal records settle, then
-    // stop. Late retries used to fight a person's first scroll toward the
-    // actions at the bottom of a result.
-    const timers = [0, 120].map((delay) => window.setTimeout(() => scrollResultToTop("auto"), delay));
-    return () => {
-      timers.forEach((timer) => window.clearTimeout(timer));
-    };
-  }, [busy, receipt?.runId, scrollResultToTop, surface?.manifestId]);
+  // Terminal receipts update content in place. Stream following already owns
+  // the latest edge; only the explicit result action changes the reader's anchor.
 
   const closeSearch = useCallback(() => setSearchOpen(false), []);
   useDismissibleLayer({
@@ -3193,7 +3202,9 @@ function OneSessionsShell() {
 
   useEffect(() => {
     let cancelled = false;
+    let releaseInitialPin: (() => void) | undefined;
     const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+    const openingThread = activeThreadChatId !== shownThreadChatIdRef.current;
     // Conversation -> Task promotion briefly clears both projections while the
     // route already points at the new task. Preserve the just-finished run
     // through that handoff; resetting here made Activity disappear exactly at
@@ -3445,7 +3456,7 @@ function OneSessionsShell() {
         }
       }
       void api.chats.markViewed(chatId).catch(() => undefined);
-      if (attachment) {
+      if (attachment && !settledRunIdsRef.current.has(attachment.runId)) {
         runIdRef.current = attachment.runId;
         activityRunIdRef.current = attachment.runId;
         activityEventRunIdRef.current = null;
@@ -3465,8 +3476,8 @@ function OneSessionsShell() {
        *   가정은 틀렸다 — 흐름 따라가기는 맨 아래 160px 안에서만 움직여, 목표가 돌고 있는 대화를
        *   열면 scrollTop 0(20,700px 위 맨 처음 말)에 머물렀다.
        */
-      if (!cancelled && shownThreadChatIdRef.current === chatId) {
-        pinToLatest();
+      if (!cancelled && openingThread && shownThreadChatIdRef.current === chatId) {
+        releaseInitialPin = pinToLatest();
       }
     }).catch((cause) => {
       if (!cancelled) {
@@ -3484,6 +3495,7 @@ function OneSessionsShell() {
     });
     return () => {
       cancelled = true;
+      releaseInitialPin?.();
     };
   }, [
     pinToLatest,
@@ -4183,19 +4195,13 @@ function OneSessionsShell() {
       void api.invoke.attach(chatId).then(async (attachment) => {
         if (!attachment || runIdRef.current || runChatIdRef.current !== chatId) return;
         if (settledRunIdsRef.current.has(attachment.runId)) {
-          // A run this screen already settled. If Main still runs it (the screen
-          // settled early) follow it again; if it is only winding down (the
-          // interrupted run, cancelling) ask again shortly for the next one.
-          const receipt = await api.invoke.receipt(attachment.runId).catch(() => null);
-          if (runIdRef.current || runChatIdRef.current !== chatId) return;
-          if (receipt?.status !== "running") {
-            if (attempt < 25) {
-              if (followRetry) clearTimeout(followRetry);
-              followRetry = setTimeout(() => { followRetry = null; followActive(attempt + 1); }, 400);
-            }
-            return;
+          // Settlement has an exact terminal receipt/event. A delayed attach
+          // cannot turn that same immutable invocation back into a live run.
+          if (attempt < 25) {
+            if (followRetry) clearTimeout(followRetry);
+            followRetry = setTimeout(() => { followRetry = null; followActive(attempt + 1); }, 400);
           }
-          settledRunIdsRef.current.delete(attachment.runId);
+          return;
         }
         runIdRef.current = attachment.runId;
         activityRunIdRef.current = attachment.runId;
@@ -4255,11 +4261,15 @@ function OneSessionsShell() {
         if (runIdRef.current) {
           const missedRunId = runIdRef.current;
           const missedTaskId = runTaskIdRef.current;
-          idleCheck = setTimeout(() => {
+          idleCheck = setTimeout(async () => {
             idleCheck = null;
             if (runIdRef.current !== missedRunId || runChatIdRef.current !== chatId) return;
             // Still being admitted: it has not started, let alone finished.
             if (admittingRunIdsRef.current.has(missedRunId)) return;
+            const terminal = await api.invoke.receipt(missedRunId).catch(() => null);
+            if (!oneRunReceiptIsTerminal(terminal, missedRunId, chatId)
+              || runIdRef.current !== missedRunId || runChatIdRef.current !== chatId
+              || admittingRunIdsRef.current.has(missedRunId)) return;
             if (cancelNoticeRunIdRef.current === missedRunId) {
               const notice = cancelNoticeTextRef.current;
               cancelNoticeRunIdRef.current = null;
@@ -4368,8 +4378,12 @@ function OneSessionsShell() {
           || activeChatIds.includes(chatId)
           || admittingRunIdsRef.current.has(expectedRunId)
         ) return;
-        // Main has already settled this chat. Clear only this run's renderer
-        // projection, then reload the durable transcript/task receipt.
+        const terminal = await api.invoke.receipt(expectedRunId).catch(() => null);
+        if (cancelled || !oneRunReceiptIsTerminal(terminal, expectedRunId, chatId)
+          || runIdRef.current !== expectedRunId || runChatIdRef.current !== chatId
+          || admittingRunIdsRef.current.has(expectedRunId)) return;
+        // Only an exact terminal receipt settles this renderer projection.
+        // Missing or unreadable evidence retains custody and the subscription.
         runIdRef.current = null;
         streamTextRef.current = "";
         unsubscribeRunRef.current?.();

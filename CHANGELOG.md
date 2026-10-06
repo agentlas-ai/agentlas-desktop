@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.2.72 — 2026-10-07
+
+- One preserves your reading position while replies and saved results update. A delayed scroll no longer overrides a gesture made in the same frame, and a running reply stays attached until its exact run has a final record.
+- Graphs put the canvas and visual controls first, with progress, history, conversation, and advanced actions available when opened. Finishing the steps without meeting the result criteria appears as a result to review, rather than an execution error.
+- An unavailable credential store for an optional, unrelated tool no longer prevents other tools from preparing. Tools required for the chosen work still report their actual connection failure.
+- Claude usage shows recognized subscription windows and extra usage. Unidentified provider buckets no longer appear as a quota or block model selection.
+- Invalid model settings refused before a new run is reserved keep the draft and explain the refusal. Runs with an uncertain acknowledgement continue to wait for their actual record.
+- Goal plan updates use the same work-readiness calculation in scheduling and the UI, and late decisions cannot overwrite a changed plan or user control.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.71 — 2026-10-06
 
 - One teammates' delegated work stays in the original group room. Their own characters identify observed progress and results, their questions can be answered there, and internal work conversations stay out of the conversation list.

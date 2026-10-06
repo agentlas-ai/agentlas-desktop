@@ -84,7 +84,7 @@ import {
   type GoalLedgerSnapshot,
 } from "./goal-ledger";
 import { getAgentById, listInstalledAgents } from "./registry";
-import { applyGoalPlanMarkers, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, recordGoalPlanPassStop } from "../long-run/goal-shaping";
+import { applyGoalPlanMarkers, bindGoalPlanDispatch, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, recordGoalPlanPassStop } from "../long-run/goal-shaping";
 import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
 import { captureNativeGoalEpisode, type NativeGoalEpisodeBinding } from "../long-run/native-goal-pass";
@@ -6028,6 +6028,7 @@ ${effectiveUserPrompt}`;
         dispatchTurnContextParts[goalPlanContextSlot.index] = buildGoalPlanTurnContext(currentPlan,
           { runId: req.runId ?? null, locale, record: false,
             reservedDecisionIds: goalPlanContextSlot.reservedDecisionIds ?? undefined });
+        bindGoalPlanDispatch(currentPlan, req.runId ?? null);
       }
       const dispatchTurnContext = dispatchTurnContextParts.filter((part) => part && part.trim()).join("\n\n");
       const runtimeTurnContext = [dispatchTurnContext, checkpointContext, checkpointAdvisory, ownerExecutionDirectives, progressAdvisory?.()].filter(Boolean).join("\n\n");
@@ -6848,7 +6849,7 @@ ${effectiveUserPrompt}`;
       if (activeGoalId && !executionContext && parseGoalWaitIntent(result.text).request) break;
       const rawContinuation = stripStormbreakerContinueMarker(result.text);
       // 전술·계획 표식은 이 패스에서 원장에 반영하고 본문에서 뗀다(패스 본문은 곧바로 영속된다).
-      rawContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: rawContinuation.text, runId: req.runId ?? null }).text;
+      rawContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: rawContinuation.text, runId: req.runId ?? null, signal }).text;
       const passClaim = stripGoalCompleteMarker(rawContinuation.text);
       if (passClaim.claimed) {
         goalClaimSeen = true;
@@ -7179,7 +7180,7 @@ ${effectiveUserPrompt}`;
     result = { ...result, text: waitProposal.text };
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     // 전술·계획 표식 회수도 모든 경로가 지나는 이 한 지점에서 한다(완료 선언과 같은 이유).
-    finalContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: finalContinuation.text, runId: req.runId ?? null }).text;
+    finalContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: finalContinuation.text, runId: req.runId ?? null, signal }).text;
     // 완료 선언 회수는 **모든 경로가 지나는 이 한 지점**에서 한다. 패스 루프 안에서만
     // 떼면 agentAppMode(maxPasses=1)나 One 복구 패스로 끝난 턴에서 마커가 사용자에게
     // 그대로 나간다 — 제어 표식이 답변에 새는 계열의 결함을 새로 만드는 셈이다.

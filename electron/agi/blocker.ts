@@ -17,6 +17,7 @@
  *
  * Pure: no DB, no clock. The replay contract drives it with the YouTube S1–S8 records.
  */
+import { GOAL_SHAPE_LIMITS, type PlanBranchReadiness, type PlanReadiness } from "../../shared/goal-shape";
 import { createHash } from "node:crypto";
 import type { FailureCauseKind, PersistenceBoundaryKind } from "../../shared/persistence-policy";
 import { goalContinuationAdmissible } from "../../shared/goal-continuation";
@@ -89,7 +90,8 @@ export type AgiBlockerSignalKind = AgiBlockerSignal["kind"];
 export interface AgiTacticFact {
   nodeId: string;
   status: "proposed" | "active" | "done" | "retired";
-  /** Optional payload.depends_on; absent means siblings are independent (plan §3.2). */
+  /** Historical absence is unknown, retained for compatibility. */
+  readiness?: PlanBranchReadiness;
   dependsOn?: readonly string[];
 }
 
@@ -113,6 +115,7 @@ export interface AgiBlockerFacts {
   signals: readonly AgiBlockerSignal[];
   /** Tactics of the current plan (goal_plan_nodes kind=tactic), for the branch andon. */
   tactics?: readonly AgiTacticFact[];
+  planReadiness?: PlanReadiness;
   /** The tactic the blocker sits on, if the ledger names one. */
   blockedNodeId?: string | null;
   /** Evidence refs the fact reader already resolved (long_run_events seq, run ids, log line ids). */
@@ -146,6 +149,7 @@ export interface AgiBlockerDiagnosis {
   altPaths: AgiActionKind[];
   /** Tactics that do not depend on the blocked node and may run now (branch andon, R13). */
   eligibleTactics: string[];
+  branchReadiness?: Array<Omit<PlanBranchReadiness, "evidenceRefs">>;
   evidenceRefs: string[];
   /** Why the class was chosen, a finite vocabulary. */
   reasonCode: string;
@@ -189,7 +193,7 @@ export function agiBlockerStateDigest(facts: Pick<AgiBlockerFacts, "goalId" | "r
   return sha({ schema: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, runId: facts.runId, status: facts.status,
     pauseReason: facts.pauseReason, blockedReason: facts.blockedReason, signals,
     progress: facts.progress ?? null, blockedNodeId: facts.blockedNodeId ?? null,
-    tactics: (facts.tactics ?? []).map(t => ({ id: t.nodeId, status: t.status, deps: [...(t.dependsOn ?? [])].sort() }))
+    tactics: (facts.tactics ?? []).map(t => ({ id: t.nodeId, status: t.status, deps: [...(t.dependsOn ?? [])].sort(), readiness: t.readiness ?? null }))
       .sort((a, b) => a.id.localeCompare(b.id)) });
 }
 
@@ -208,7 +212,8 @@ export function agiEligibleTactics(tactics: readonly AgiTacticFact[] | undefined
       if ((tactic.dependsOn ?? []).some((dep) => held.has(dep))) { held.add(tactic.nodeId); grew = true; }
     }
   }
-  return tactics.filter((tactic) => tactic.status === "active" && !held.has(tactic.nodeId)).map((tactic) => tactic.nodeId);
+  return tactics.filter((tactic) => (tactic.status === "active" || tactic.status === "proposed") && !held.has(tactic.nodeId)
+    && (tactic.readiness ? tactic.readiness.inspectable && tactic.readiness.workClasses.some(kind => kind !== "observe") : true)).map((tactic) => tactic.nodeId);
 }
 
 /** Failed-run receipt codes → cause (typed families only; unknown codes stay unknown). */
@@ -270,7 +275,7 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     // host defers it every time and the refusals come back as defect reports.
     if (!goalContinuationAdmissible(facts.status, facts.pauseReason)) altPaths = altPaths.filter((action) => action !== "start_work_turn");
     else if (rest.attemptDue && boundary !== "owner_stop" && !altPaths.includes("start_work_turn")) altPaths.unshift("start_work_turn");
-    return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, defects, evidenceRefs,
+    return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.slice(0, GOAL_SHAPE_LIMITS.tactics).map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
       ...rest, display: rest.attemptDue && boundary !== "owner_stop" ? "running" : rest.display,
       ownerClass, boundary, altPaths };
   };

@@ -84,9 +84,20 @@ export interface GoalStrategy {
   priority: number;
 }
 
+export type PlanWorkClass = "observe" | "prepare" | "local_write" | "external_effect";
+export interface GoalPrerequisite {
+  id: string;
+  state: "met" | "unmet" | "unknown";
+  evidence_refs: string[];
+  /** Only these work classes wait for this predicate. Observation is always possible. */
+  blocks: Array<Exclude<PlanWorkClass, "observe">>;
+}
 export interface GoalTactic {
   id: string;
   strategy_id: string | null;
+  /** Absent = historical prerequisite information unknown; [] = explicitly independent. */
+  depends_on?: string[];
+  prerequisites?: GoalPrerequisite[];
   description: string;
   done_when: string;
   kind: "one_off" | "recurring";
@@ -219,10 +230,55 @@ function tacticsFrom(raw: unknown, notes: string[]): GoalTactic[] {
     if (!description || !doneWhen) { notes.push(`tactic_${id}_missing_done_when`); continue; }
     seen.add(id);
     tactics.push({ id, strategy_id: idOf(item.strategy_id) || null, description, done_when: doneWhen,
-      kind: item.kind === "recurring" ? "recurring" : "one_off" });
+      kind: item.kind === "recurring" ? "recurring" : "one_off",
+      ...readTacticRequirements(item, notes, id) });
   }
   if (tactics.length > GOAL_SHAPE_LIMITS.tactics) notes.push("tactics_capped");
   return tactics.slice(0, GOAL_SHAPE_LIMITS.tactics);
+}
+
+/** Typed fields only. Invalid persisted fields remain explicitly unknown in the live projection. */
+export function readTacticRequirements(raw: Record<string, unknown>, notes: string[], id: string): Pick<GoalTactic, "depends_on" | "prerequisites"> {
+  const out: Pick<GoalTactic, "depends_on" | "prerequisites"> = {};
+  if (raw.depends_on !== undefined) {
+    if (!Array.isArray(raw.depends_on) || raw.depends_on.some(dep => typeof dep !== "string" || !idOf(dep) || idOf(dep) !== dep) || raw.depends_on.length > GOAL_SHAPE_LIMITS.tactics) notes.push(`prerequisites_invalid:${id}`);
+    else out.depends_on = [...new Set(raw.depends_on as string[])];
+  }
+  if (raw.prerequisites !== undefined) {
+    if (!Array.isArray(raw.prerequisites) || raw.prerequisites.length > GOAL_SHAPE_LIMITS.tactics) notes.push(`prerequisites_invalid:${id}`);
+    else {
+      out.prerequisites = [];
+      const seen = new Set<string>();
+      for (const value of raw.prerequisites) {
+        if (!isRecord(value) || !idOf(value.id) || idOf(value.id) !== value.id || seen.has(String(value.id)) || typeof value.state !== "string" || !["met", "unmet", "unknown"].includes(value.state)
+          || !Array.isArray(value.evidence_refs) || value.evidence_refs.length > GOAL_SHAPE_LIMITS.tactics || value.evidence_refs.some(ref => typeof ref !== "string" || !ref.trim() || ref.length > 600)
+          || (value.state === "met" && !value.evidence_refs.length)
+          || !Array.isArray(value.blocks) || !value.blocks.length || value.blocks.length > 3 || value.blocks.some(kind => typeof kind !== "string" || !["prepare", "local_write", "external_effect"].includes(kind))) {
+          notes.push(`prerequisites_invalid:${id}`); continue;
+        }
+        seen.add(String(value.id));
+        out.prerequisites.push({ id: String(value.id), state: value.state as GoalPrerequisite["state"], evidence_refs: [...new Set(value.evidence_refs as string[])], blocks: [...new Set(value.blocks as GoalPrerequisite["blocks"])] });
+      }
+    }
+  }
+  return out;
+}
+
+export function validateTacticDependencies(tactics: readonly GoalTactic[]): string | null {
+  const byId = new Map(tactics.map(t => [t.id, t]));
+  const visiting = new Set<string>(); const visited = new Set<string>();
+  const walk = (id: string): string | null => {
+    if (visiting.has(id)) return "tactic_dependency_cycle";
+    if (visited.has(id)) return null;
+    visiting.add(id);
+    for (const dep of byId.get(id)?.depends_on ?? []) {
+      if (!byId.has(dep)) return "tactic_dependency_missing";
+      const error = walk(dep); if (error) return error;
+    }
+    visiting.delete(id); visited.add(id); return null;
+  };
+  for (const tactic of tactics) { const error = walk(tactic.id); if (error) return error; }
+  return null;
 }
 
 /**
@@ -240,6 +296,7 @@ export function validateGoalShape(raw: unknown, ownerText: string, createdAtIso:
   if (!rationale) return { ok: false, reason: "rationale_required" };
   let shape = declared as GoalShapeKind;
   const tactics = tacticsFrom(raw.tactics, notes);
+  if (notes.some(note => note.startsWith("prerequisites_invalid:"))) return { ok: false, reason: "prerequisites_invalid" };
   if (!tactics.length) return { ok: false, reason: "tactics_required" };
 
   let mission: GoalMission | null = null;
@@ -350,6 +407,8 @@ export function validateGoalShape(raw: unknown, ownerText: string, createdAtIso:
     if (shape === "single_tactic" && tactics.length > 1) { notes.push("single_with_many_tactics_recorded_as_list"); shape = "tactic_list"; }
     if (shape === "tactic_list" && tactics.length === 1) { notes.push("list_with_one_tactic_recorded_as_single"); shape = "single_tactic"; }
   }
+  const dependencyError = validateTacticDependencies(tactics);
+  if (dependencyError) return { ok: false, reason: dependencyError };
   if (NATURE_SHAPE[nature] !== shape) notes.push(`nature_shape_mismatch:${nature}->${shape}`);
   // The planner reads the owner's time limit; the host only resolves and bounds it (never a keyword guess).
   const goalDeadline = str(raw.deadline, 40) || null;
@@ -386,6 +445,7 @@ export function fallbackGoalShape(objective: string): GoalShapePlan {
 export type PlanNodeStatus = "proposed" | "active" | "done" | "retired";
 
 export interface LiveTactic extends GoalTactic {
+  requirementsInvalid?: boolean;
   status: PlanNodeStatus;
   ord: number;
   runs: number;
@@ -415,6 +475,10 @@ export interface LiveGoalPlan {
   goalId: string;
   revision: number;
   planSeq: number;
+  /** Exact host content identity; never a wake digest. */
+  mutationIdentity?: string;
+  /** Durable observed ledger record; bookkeeping may advance without meaningful world change. */
+  observationCursor?: string;
   shape: GoalShapeKind;
   problem_nature: ProblemNature;
   rationale: string;
@@ -461,7 +525,10 @@ export function liveGoalPlanFromRows(goalId: string, revision: number, decision:
   });
   const tactics: LiveTactic[] = ordered.filter((node) => node.kind === "tactic").map((node) => {
     const p = safeRecord(node.payload_json);
-    return { id: node.node_id, strategy_id: node.parent_id, description: String(p.description ?? ""), done_when: String(p.done_when ?? ""),
+    const notes: string[] = [];
+    const requirements = readTacticRequirements(p, notes, node.node_id);
+    try { if (!isRecord(JSON.parse(node.payload_json))) notes.push("payload_invalid"); } catch { notes.push("payload_invalid"); }
+    return { ...requirements, requirementsInvalid: notes.length > 0, id: node.node_id, strategy_id: node.parent_id, description: String(p.description ?? ""), done_when: String(p.done_when ?? ""),
       kind: p.kind === "recurring" ? "recurring" : "one_off", status: node.status, ord: node.ord,
       runs: Number(p.runs ?? 0) || 0, failures: Number(p.failures ?? 0) || 0, evidence: typeof p.evidence === "string" ? p.evidence : null,
       guidance: (p.guidance && typeof p.guidance === "object" ? p.guidance : null) as LiveTactic["guidance"],
@@ -490,14 +557,13 @@ export const INITIAL_ACTIVE_STRATEGIES = GOAL_SHAPE_LIMITS.strategies;
  */
 export function selectActiveTactics(plan: LiveGoalPlan, input: { nowMs: number; limit?: number }): LiveTactic[] {
   const limit = Math.max(1, input.limit ?? 2);
-  // An owner-paused branch (goal panel) is never dispatched — only an explicit pause stops a sub-goal.
-  const pausedStrategies = new Set(plan.strategies.filter((s) => s.ownerPaused).map((s) => s.id));
-  const open = (tactic: LiveTactic) => (tactic.status === "active" || tactic.status === "proposed")
-    && !tactic.ownerPaused && !(tactic.strategy_id && pausedStrategies.has(tactic.strategy_id));
-  const waiting = (tactic: LiveTactic) => Boolean(
-    (tactic.deferredUntil && Date.parse(tactic.deferredUntil) > input.nowMs) || tactic.guidance?.move === "escalate_boundary");
-  const ordered = [...plan.tactics].filter(open).sort((a, b) => a.ord - b.ord);
-  const rank = (candidates: LiveTactic[]) => [...candidates.filter((t) => !waiting(t)), ...candidates.filter(waiting)];
+  const readiness = projectGoalPlanReadiness(plan, input);
+  const byId = new Map(readiness.branches.map(branch => [branch.nodeId, branch]));
+  const ordered = [...plan.tactics].filter(tactic => byId.get(tactic.id)?.inspectable).sort((a, b) => a.ord - b.ord);
+  // Inspection is not permission for every work class. Prefer executable independent work.
+  const rank = (candidates: LiveTactic[]) => [...candidates].sort((a, b) =>
+    (byId.get(b.id)?.workClasses.length ?? 0) - (byId.get(a.id)?.workClasses.length ?? 0)
+    || Number(byId.get(b.id)?.prerequisiteState === "met") - Number(byId.get(a.id)?.prerequisiteState === "met") || a.ord - b.ord);
   if (plan.shape === "single_tactic") return rank(ordered).slice(0, 1);
   if (plan.shape === "tactic_list") return rank(ordered).slice(0, 1);
   const picks: LiveTactic[] = [];
@@ -511,6 +577,105 @@ export function selectActiveTactics(plan: LiveGoalPlan, input: { nowMs: number; 
   return rank(picks).slice(0, limit);
 }
 
+export interface PlanBranchReadiness {
+  nodeId: string;
+  inspectable: boolean;
+  workClasses: PlanWorkClass[];
+  prerequisiteState: "met" | "unmet" | "unknown";
+  prerequisiteSource: "declared" | "legacy_unknown" | "invalid";
+  ownerHeld: boolean;
+  reasonCodes: string[];
+  evidenceRefs: string[];
+  earliestUsefulAt: string | null;
+}
+export interface PlanReadiness {
+  goalId: string; revision: number; planSeq: number;
+  mutationIdentity: string | null;
+  observationCursor: string | null;
+  /** Canonical semantic value, deliberately independent of cursors and exact mutation identity. */
+  materialDigest: string;
+  branches: PlanBranchReadiness[];
+}
+
+/** Readiness narrows work classes; it grants no authority and never establishes Goal completion. */
+export function projectGoalPlanReadiness(plan: LiveGoalPlan, input: { nowMs: number; observationCursor?: string | null }): PlanReadiness {
+  const byId = new Map(plan.tactics.map(t => [t.id, t]));
+  // Memoized graph walks visit each node/edge once; dense historical DAGs must not enumerate paths on Main.
+  const graphMemo = new Map<string, boolean>();
+  const visiting = new Set<string>();
+  const graphInvalid = (id: string): boolean => {
+    if (graphMemo.has(id)) return graphMemo.get(id)!;
+    const node = byId.get(id);
+    if (!node || node.requirementsInvalid || visiting.has(id)) return true;
+    visiting.add(id);
+    const invalid = (node.depends_on ?? []).some(graphInvalid);
+    visiting.delete(id); graphMemo.set(id, invalid); return invalid;
+  };
+  type Dependency = { state: "met" | "unmet" | "unknown"; refs: string[] };
+  const dependencyMemo = new Map<string, Dependency>();
+  const dependency = (id: string): Dependency => {
+    const cached = dependencyMemo.get(id); if (cached) return cached;
+    const node = byId.get(id);
+    let result: Dependency;
+    if (!node || graphInvalid(id) || node.status === "retired") result = { state: "unknown", refs: [] };
+    else if (node.status !== "done") result = { state: "unmet", refs: [] };
+    else if (!node.evidence) result = { state: "unknown", refs: [] };
+    else {
+      const parents = (node.depends_on ?? []).map(dependency);
+      result = { state: parents.some(p => p.state === "unknown") ? "unknown" : parents.some(p => p.state === "unmet") ? "unmet" : "met",
+        refs: [...new Set([`tactic:${id}`, node.evidence, ...parents.flatMap(p => p.refs)])] };
+    }
+    dependencyMemo.set(id, result); return result;
+  };
+  const branches = [...plan.tactics].sort((a, b) => a.id.localeCompare(b.id)).map((t): PlanBranchReadiness => {
+    const strategy = plan.strategies.find(s => s.id === t.strategy_id);
+    const ownerHeld = t.ownerPaused === true || strategy?.ownerPaused === true;
+    const open = t.status === "active" || t.status === "proposed";
+    const activeStrategy = !t.strategy_id || strategy?.status === "active";
+    const inspectable = open && !ownerHeld && activeStrategy;
+    const reasons: string[] = [];
+    let work: PlanWorkClass[] = inspectable ? ["observe", "prepare", "local_write", "external_effect"] : [];
+    const narrow = (blocked: readonly PlanWorkClass[]) => { work = work.filter(kind => !blocked.includes(kind)); };
+    if (!open) reasons.push(`node_${t.status}`);
+    if (ownerHeld) reasons.push("owner_paused");
+    if (!activeStrategy) reasons.push(strategy ? "strategy_inactive" : "strategy_missing");
+    const declared = t.depends_on !== undefined || t.prerequisites !== undefined;
+    let state: PlanBranchReadiness["prerequisiteState"] = declared ? "met" : "unknown";
+    const refs: string[] = [];
+    if (!declared) reasons.push("prerequisites_legacy_unknown");
+    const invalid = t.requirementsInvalid || graphInvalid(t.id);
+    for (const dep of t.depends_on ?? []) {
+      const result = dependency(dep).state;
+      refs.push(...dependency(dep).refs);
+      if (result !== "met") { state = result === "unknown" ? "unknown" : state === "unknown" ? "unknown" : "unmet";
+        reasons.push(`dependency_${result}`); narrow(["local_write", "external_effect"]); }
+    }
+    for (const prerequisite of t.prerequisites ?? []) {
+      refs.push(...prerequisite.evidence_refs);
+      // A model-written reference is not a resolved host evidence receipt. Keep asserted met
+      // predicates unknown until a host evidence resolver is supplied by a later disposition slice.
+      const observedState = prerequisite.state === "met" ? "unknown" : prerequisite.state;
+      state = observedState === "unknown" || state === "unknown" ? "unknown" : "unmet";
+      reasons.push(prerequisite.state === "met" ? "prerequisite_evidence_unverified" : `prerequisite_${observedState}`);
+      narrow(prerequisite.blocks);
+    }
+    if (invalid) { state = "unknown"; reasons.push("prerequisites_invalid"); narrow(["local_write", "external_effect"]); }
+    const deferred = t.deferredUntil ? Date.parse(t.deferredUntil) : NaN;
+    const earliestUsefulAt = Number.isFinite(deferred) && deferred > input.nowMs ? new Date(deferred).toISOString() : null;
+    if (earliestUsefulAt) { reasons.push("deferred"); narrow(["local_write", "external_effect"]); }
+    if (t.deferredUntil && !Number.isFinite(deferred)) { reasons.push("deferred_invalid"); narrow(["local_write", "external_effect"]); }
+    if (t.guidance?.move === "escalate_boundary") { reasons.push("boundary_hold"); narrow(["local_write", "external_effect"]); }
+    if (t.guidance?.move === "observe" || t.guidance?.cause === "effect_uncertain") { reasons.push("effect_observation_required"); narrow(["external_effect"]); }
+    if (plan.deadline_at && Date.parse(plan.deadline_at) <= input.nowMs) { reasons.push("deadline_reached"); narrow(["prepare", "local_write", "external_effect"]); }
+    return { nodeId: t.id, inspectable, workClasses: work, prerequisiteState: state,
+      prerequisiteSource: invalid ? "invalid" : declared ? "declared" : "legacy_unknown", ownerHeld,
+      reasonCodes: [...new Set(reasons)].sort(), evidenceRefs: [...new Set(refs)].sort(), earliestUsefulAt };
+  });
+  return { goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, mutationIdentity: plan.mutationIdentity ?? null,
+    observationCursor: input.observationCursor ?? plan.observationCursor ?? null, branches,
+    materialDigest: JSON.stringify({ schema: "agentlas.plan-readiness.v1", goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, branches }) };
+}
+
 // ── 표식(산문 파싱 아님) ─────────────────────────────────────────────────────
 
 export const TACTIC_MARKER = "<<agentlas-tactic>>";
@@ -521,21 +686,23 @@ export type TacticBlockCause = (typeof TACTIC_BLOCK_CAUSES)[number];
 
 export interface TacticMarker { id: string; status: "done" | "blocked"; evidence: string; cause: TacticBlockCause; boundary: string | null }
 export type PlanOp =
-  | { op: "replace_tactic"; id: string; with: Array<Pick<GoalTactic, "description" | "done_when" | "kind">> }
-  | { op: "add_tactic"; strategy_id: string | null; description: string; done_when: string; kind: GoalTactic["kind"] }
+  | { op: "replace_tactic"; id: string; with: Array<Pick<GoalTactic, "description" | "done_when" | "kind" | "depends_on" | "prerequisites">> }
+  | { op: "add_tactic"; strategy_id: string | null; description: string; done_when: string; kind: GoalTactic["kind"]; depends_on?: string[]; prerequisites?: GoalPrerequisite[] }
   | { op: "retire_strategy"; id: string; evidence: string }
   | { op: "add_strategy"; hypothesis: string; serves_krs: string[]; kpi: string; timebox_hours: number; observation_window_hours: number;
-      actions_per_day: number | null; tactics: Array<Pick<GoalTactic, "description" | "done_when" | "kind">> };
+      actions_per_day: number | null; tactics: Array<Pick<GoalTactic, "description" | "done_when" | "kind" | "depends_on" | "prerequisites">> };
 
 function parseMarkerJson(line: string): Record<string, unknown> | null {
   try { const value = JSON.parse(line); return isRecord(value) ? value : null; } catch { return null; }
 }
 
-function tacticDraft(value: unknown): Pick<GoalTactic, "description" | "done_when" | "kind"> | null {
+function tacticDraft(value: unknown): Pick<GoalTactic, "description" | "done_when" | "kind" | "depends_on" | "prerequisites"> | null {
   if (!isRecord(value)) return null;
   const description = str(value.description);
   const doneWhen = str(value.done_when);
-  return description && doneWhen ? { description, done_when: doneWhen, kind: value.kind === "recurring" ? "recurring" : "one_off" } : null;
+  const notes: string[] = [];
+  const requirements = readTacticRequirements(value, notes, "draft");
+  return description && doneWhen && !notes.length ? { description, done_when: doneWhen, kind: value.kind === "recurring" ? "recurring" : "one_off", ...requirements } : null;
 }
 
 function planOpOf(raw: Record<string, unknown>): PlanOp | null {
@@ -604,6 +771,11 @@ export function stripGoalPlanMarkers(text: string): string {
  * 트리의 전략 접기는 관찰 기간(timebox) 전에는 금지(뒤집기 방지), 근거 필수. 전략 추가는 KR 인용·상한 6.
  */
 export function checkPlanOp(plan: LiveGoalPlan, op: PlanOp, nowMs: number): { ok: true } | { ok: false; reason: string } {
+  const drafts = op.op === "replace_tactic" ? op.with : op.op === "add_tactic" ? [op] : op.op === "add_strategy" ? op.tactics : [];
+  for (const draft of drafts) {
+    if ((draft.depends_on ?? []).some(dep => !plan.tactics.some(t => t.id === dep))) return { ok: false, reason: "tactic_dependency_missing" };
+    if (op.op === "replace_tactic" && (draft.depends_on ?? []).includes(op.id)) return { ok: false, reason: "tactic_dependency_retired" };
+  }
   const openTactics = plan.tactics.filter((t) => t.status === "active" || t.status === "proposed");
   switch (op.op) {
     case "replace_tactic": {
@@ -648,6 +820,7 @@ export interface GoalPlanView {
   fallback: boolean;
   revision: number;
   planSeq: number;
+  readiness?: PlanReadiness;
   currentTactic: { id: string; description: string; strategyId: string | null } | null;
   mission: { objective: string; keyResults: Array<{ metric: string; target: number; unit: string; requiredPerDay: number | null; daysLeft: number | null; sensor: string }> } | null;
   strategies: Array<{ id: string; hypothesis: string; status: string; tactics: Array<{ id: string; description: string; status: string }> }>;

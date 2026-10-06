@@ -31,6 +31,18 @@ export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
   if (!plan) return null;
   const ko = locale === "ko";
   const shape = SHAPE_LABEL[plan.shape][ko ? "ko" : "en"];
+  const currentReadiness = plan.readiness?.branches.find(branch => branch.nodeId === plan.currentTactic?.id);
+  const readinessLabel = (id: string): string => {
+    const branch = plan.readiness?.branches.find(branch => branch.nodeId === id);
+    if (!branch) return "";
+    if (branch.ownerHeld) return ko ? "사용자 일시정지" : "Paused by owner";
+    if (branch.reasonCodes.includes("strategy_inactive")) return ko ? "전략 대기" : "Strategy inactive";
+    if (branch.reasonCodes.includes("deferred")) return ko ? "예정 시각까지 실행 대기 · 관찰 가능" : "Execution deferred · inspection available";
+    if (branch.reasonCodes.includes("boundary_hold")) return ko ? "경계 판단 대기 · 관찰 가능" : "Boundary hold · inspection available";
+    if (branch.prerequisiteState === "unmet") return ko ? "선행조건 미충족" : "Prerequisite unmet";
+    if (branch.prerequisiteState === "unknown") return ko ? "선행조건 미확인" : "Prerequisites unknown";
+    return ko ? "계획 선행조건 충족" : "Plan prerequisites met";
+  };
   const current = plan.currentTactic
     ? `${plan.currentTactic.id} ${plan.currentTactic.description}`
     : plan.tactics.some((tactic) => tactic.status === "active" || tactic.status === "proposed")
@@ -40,7 +52,9 @@ export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
     <p className={styles.line}>
       <span className={styles.shape}>{ko ? "구조" : "Plan"}: {shape}{plan.fallback ? (ko ? " (임시)" : " (provisional)") : ""}</span>
       <span className={styles.sep} aria-hidden="true"> · </span>
-      <span className={styles.current}>{ko ? "지금" : "Now"}: {current}</span>
+      <span className={styles.current}>{currentReadiness && !currentReadiness.workClasses.includes("external_effect")
+        ? (ko ? "확인할 하위목표" : "Sub-goal to inspect") : (ko ? "지금" : "Now")}: {current}
+        {plan.currentTactic && readinessLabel(plan.currentTactic.id) && ` · ${readinessLabel(plan.currentTactic.id)}`}</span>
     </p>
     {plan.shape === "mission_tree" && <details className={styles.tree}>
       <summary>{ko ? "트리 보기" : "Show tree"}</summary>
@@ -57,7 +71,7 @@ export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
           <span>{STATUS_MARK[strategy.status] ?? "•"} {strategy.id} {strategy.hypothesis}</span>
           {strategy.tactics.length ? <ul className={styles.tactics}>
             {strategy.tactics.map((tactic) => <li key={tactic.id} data-status={tactic.status}>
-              {STATUS_MARK[tactic.status] ?? "•"} {tactic.id} {tactic.description}
+              {STATUS_MARK[tactic.status] ?? "•"} {tactic.id} {tactic.description} · {readinessLabel(tactic.id)}
             </li>)}
           </ul> : null}
         </li>)}

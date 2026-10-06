@@ -16,7 +16,7 @@ import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { LocalModelMiniCards, useLocalModelSnapshot } from "@/components/dashboard/LocalModelMiniCards";
 import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
-import { providerHasUsableCredits, providerHasUsableExtraUsage } from "@shared/runtime-quota";
+import { isSupportedProviderUsageWindow, providerHasUsableCredits, providerHasUsableExtraUsage } from "@shared/runtime-quota";
 import type {
   CliRuntimeVersionStatus,
   EnvVarMeta,
@@ -78,7 +78,8 @@ function windowLabel(w: UsageWindow, ko: boolean): string {
   if (w.kind === "5h") return named(ko ? "5시간" : "5-hour");
   if (w.kind === "daily") return w.label || (ko ? "일일" : "Daily");
   if (w.model === "opus") return ko ? "Opus 7일" : "Opus 7d";
-  if (w.model === "sonnet") return ko ? "Sonnet 7일" : "Sonnet 7d";
+    if (w.model === "sonnet") return ko ? "Sonnet 7일" : "Sonnet 7d";
+  if (w.model === "haiku") return ko ? "Haiku 7일" : "Haiku 7d";
   if (w.kind === "7d") return named(ko ? "주간(7일)" : "Weekly (7d)");
   return w.label || (ko ? "사용량 한도" : "Usage limit");
 }
@@ -511,10 +512,11 @@ export function EngineUsage() {
 
   const renderEngineCard = (e: EngineDef) => {
     const u = usageFor(e.id);
+    const visibleWindows = u?.windows.filter(window => isSupportedProviderUsageWindow(window, e.id)) ?? [];
     const connected = isConnected(e);
     const rt = runtimeFor(e);
     const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
-    const hasBars = connected && (u?.windows.length ?? 0) > 0;
+    const hasBars = connected && visibleWindows.length > 0;
     const creditsLabel = connected && u ? providerCreditsLabel(u, ko) : null;
     const extraUsageLabel = connected && u ? providerExtraUsageLabel(u, ko) : null;
     const terminalError = connected && isTerminalProviderError(u);
@@ -596,11 +598,12 @@ export function EngineUsage() {
         </div>
         {hasBars && (
           <div className="dashboard-engine-card-body">
-            {/* 어댑터가 만든 창은 전부 그린다. 예전 slice(0, 3) 상한은 창이 5개인
+            {/* 알려진 창은 모두 그린다. 이전 캐시의 알 수 없는 Claude 창은 제외한다.
+                예전 slice(0, 3) 상한은 창이 5개인
                 Claude Max에서 유료 초과분(extra_usage)과 Sonnet 7일을 조용히
                 잘라내, 실제로 청구되는 금액을 앱에서 볼 방법이 없게 만들었다.
                 카드는 flex column이라 창 수만큼 자연히 늘어난다. */}
-            {u!.windows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
+            {visibleWindows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
           </div>
         )}
         {creditsLabel && <div className="dashboard-engine-card-status" title={creditsLabel}>{creditsLabel}</div>}
