@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.73 — 2026-10-07
+
+- Graph toolbar buttons and the action menu receive mouse clicks inside the draggable window header. Editing, connections, refresh and details remain available through their existing controls.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.72 — 2026-10-07
 
 - One preserves your reading position while replies and saved results update. A delayed scroll no longer overrides a gesture made in the same frame, and a running reply stays attached until its exact run has a final record.

@@ -7,7 +7,7 @@ export function GraphControl({ label, icon, primary, ...props }: ButtonHTMLAttri
   label: string; icon: ReactNode; primary?: boolean;
 }) {
   return <button {...props} type={props.type ?? "button"} aria-label={label} title={props.title ?? label}
-    className={`${styles.control} ${primary ? styles.primary : ""} ${props.className ?? ""}`}>
+    className={`titlebar-nodrag ${styles.control} ${primary ? styles.primary : ""} ${props.className ?? ""}`}>
     {icon}
   </button>;
 }

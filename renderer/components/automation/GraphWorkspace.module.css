@@ -3,10 +3,10 @@
 .control:focus-visible, .menu>summary:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 .control:disabled { opacity:.45; cursor:default; }
 .primary { background:var(--accent); color:var(--white); border-color:var(--accent); }
-.menu { position:relative; }
-.menu>summary { list-style:none; cursor:pointer; display:flex; align-items:center; justify-content:center; width:36px; height:36px; border:1px solid var(--paper-edge); border-radius:9px; }
+.menu { position:relative; -webkit-app-region:no-drag; }
+.menu>summary { list-style:none; cursor:pointer; display:flex; align-items:center; justify-content:center; width:36px; height:36px; border:1px solid var(--paper-edge); border-radius:9px; -webkit-app-region:no-drag; }
 .menu>summary::-webkit-details-marker { display:none; }
-.menuContent { position:absolute; right:0; top:42px; min-width:230px; padding:8px; border:1px solid var(--paper-edge); border-radius:12px; background:var(--paper); box-shadow:var(--neu-raised); z-index:35; display:grid; gap:4px; }
+.menuContent { position:absolute; right:0; top:42px; min-width:230px; padding:8px; border:1px solid var(--paper-edge); border-radius:12px; background:var(--paper); box-shadow:var(--neu-raised); z-index:35; display:grid; gap:4px; -webkit-app-region:no-drag; }
 .menuContent button { text-align:left; padding:9px 12px; border-radius:6px; font-size:12px; }
 .screen :global(.automation-flow-header) { padding:10px 16px !important; min-height:58px; gap:12px; }
 .screen :global(.automation-flow-header-actions) { display:flex; gap:5px; align-items:center; flex-wrap:nowrap; }
