@@ -4351,13 +4351,22 @@ export class InvocationService {
       // step while a failing one backs off. Only the first case was spaced before, and the same loop came back with
       // another reason: X Marketing 2026-10-05 failed runtime_turn_unsettled every minute for 25 minutes.
       const nothingStarted = reason === "goal_wait_registration_failed";
+      // A turn that ended because its passes stopped doing anything (client goal_idle_pass_yield) completed, yet it
+      // is no progress either: its follow-ups count across completed turns too, so the Goal backs off instead of
+      // being woken again after 30 s. Production 2026-10-06, Youtube launch on 1.2.69: after the idle yield the sweep
+      // resumed the same blocked check 1.5 minutes later, every time.
+      const turnRunId = record.request?.runId;
+      const idleYield = !nothingStarted && Boolean(turnRunId && getDb().prepare(
+        "SELECT 1 FROM run_events WHERE run_id = ? AND kind = 'goal_idle_pass_yield' LIMIT 1").get(turnRunId));
+      const followUpReason = idleYield ? "goal_idle_pass_yield" : reason;
       const ownerSince = (getDb().prepare("SELECT MAX(created_at) AS at FROM chat_messages WHERE chat_id = ? AND role = 'user'")
         .get(record.chatId) as { at: string | null } | undefined)?.at ?? null;
-      const repeats = consecutiveGoalTurnFollowUps(run.id, reason, ownerSince, Date.now(), { sinceCompletedTurn: !nothingStarted });
+      const repeats = consecutiveGoalTurnFollowUps(run.id, followUpReason, ownerSince, Date.now(),
+        { sinceCompletedTurn: !nothingStarted && !idleYield });
       const plan = goalTurnFollowUpPlan({ repeats, requestedNotBefore: options.requestedNotBefore });
       scheduleBlockedGoalRetry({ runId: run.id, expectedVersion: run.version, kind: "resume",
-        fromReason: reason, retryIndex: repeats, nextAt: plan.nextAt, requestedBy: plan.requestedBy,
-        detail: reason, trigger: "goal-turn-background", effectUncertain: unsettledLongRunAttemptCount(run.id) > 0,
+        fromReason: followUpReason, retryIndex: repeats, nextAt: plan.nextAt, requestedBy: plan.requestedBy,
+        detail: followUpReason, trigger: "goal-turn-background", effectUncertain: unsettledLongRunAttemptCount(run.id) > 0,
         appInstanceId: desktopAppInstanceId() });
       setTimeout(() => {
         try { runMainBackgroundTask(() => maybeDispatchEffectObservation(this, goalId, "goal-turn-background")); }
