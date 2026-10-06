@@ -195,12 +195,37 @@ function hostPauseRefusedThisInstance(run: LongRunRecord): boolean {
   return row?.status === "skipped" && row.reason !== "chat_busy";
 }
 
+/**
+ * A Goal run whose chat the owner deleted. long_runs.root_chat_id is ON DELETE SET NULL, so the run outlives the
+ * chat with nothing to resume into. The sweep used to read that as goal_chat_binding_missing and schedule a retry for
+ * ever (index 60, next in 6 h, measured on the owner's DB 2026-10-05) while AGI filed 65 defect reports on it.
+ * No chat holds the Goal any more, so the only honest end is closing it.
+ */
+function goalOfDeletedChat(run: LongRunRecord): boolean {
+  if (run.rootChatId || run.surface === "science") return false;
+  const held = getDb().prepare("SELECT 1 FROM chats WHERE goal_id = ? LIMIT 1").get(run.goalId);
+  return !held;
+}
+
+function closeGoalOfDeletedChat(run: LongRunRecord, trigger: string): BlockedGoalSweepResult {
+  const detail = "goal_chat_deleted";
+  if (liveLongRunAttemptCount(run.id) > 0) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "attempt_running" };
+  let closed = transitionLongRun({ runId: run.id, actorKind: "host", reason: detail,
+    to: ["draft", "paused", "blocked"].includes(run.status) ? "cancelled" : "cancelling" });
+  if (closed.status === "cancelling") closed = transitionLongRun({ runId: run.id, to: "cancelled", actorKind: "host", reason: detail });
+  appendLongRunEvent({ runId: run.id, kind: BLOCKED_GOAL_SWEEP_EVENT_KIND, actorKind: "host",
+    payload: { schemaVersion: BLOCKED_GOAL_SWEEP_SCHEMA, action: "cancelled", fromReason: run.blockedReason, fromStatus: run.status,
+      detail, trigger: trigger.slice(0, 80), appInstanceId: desktopAppInstanceId() } });
+  return { runId: run.id, fromReason: run.blockedReason, action: "cancelled", detail };
+}
+
 function sweepOne(input: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string,
   budget: { dispatches: number }): BlockedGoalSweepResult | null {
   let run = input;
   const defer = (detail: string): BlockedGoalSweepResult => ({ runId: run.id, fromReason: run.blockedReason, action: "deferred", detail });
   // An owner/user pause is a boundary: no observation, retry or resume until the owner resumes it.
   if (longRunOwnerHold(run.id)) return defer(LONG_RUN_OWNER_HOLD_CODE);
+  if (goalOfDeletedChat(run)) return closeGoalOfDeletedChat(run, trigger);
   // An explicit (goal-chip) Goal carries its owner grant in its recorded goal-mode turn, not in a stored revision.
   // Every resume path (effect observation, this sweep, the owner's Resume) needs the revision, so adopt it at the
   // first stop the sweep sees — before any observation is dispatched, because adopting appends a ledger event and
