@@ -2,8 +2,11 @@
 
 ## 1.2.71 — 2026-10-06
 
+- One teammates' delegated work stays in the original group room. Their own characters identify observed progress and results, their questions can be answered there, and internal work conversations stay out of the conversation list.
+- A Goal's planned daily activity no longer blocks unfinished work just because earlier assignments used its planned pace. The plan summary also keeps unfinished work distinct from completed work.
 - Codex runs read your account's model list again when choosing a reasoning effort, and the model picker no longer reports a false "0 models" when Codex refreshes its model list at the same moment.
 - The common run list preserves the status of a Science research session, so a paused session appears paused instead of queued.
+- Claude limit errors retain the provider's detailed explanation and reset hint when the final response contains more detail than the initial limit event.
 
 This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
 
