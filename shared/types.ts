@@ -7517,6 +7517,8 @@ export interface AgentlasIpc {
       role: RuntimeRole,
       selections: RuntimeSelection[],
     ) => Promise<RuntimeRolePoolState>;
+    /** 온보딩이 끝날 때 연결한 것으로 오케스트레이터·워커 풀을 채운다. 사람이 고른 역할은 건드리지 않는다. */
+    seedFirstRunRoles: () => Promise<{ seeded: boolean; reason: "owner-chosen" | "nothing-connected" | null; pool: RuntimeSelection[] }>;
   };
   agentRuntime: {
     list: () => Promise<AgentRuntimeOverride[]>;

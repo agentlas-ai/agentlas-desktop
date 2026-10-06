@@ -490,6 +490,7 @@ const api: AgentlasIpc = {
     listRoleMembers: () => ipcRenderer.invoke("runtime:listRoleMembers"),
     setRoleMembers: (role, selections) =>
       ipcRenderer.invoke("runtime:setRoleMembers", role, selections),
+    seedFirstRunRoles: () => ipcRenderer.invoke("runtime:seedFirstRunRoles"),
   },
   agentRuntime: {
     list: () => ipcRenderer.invoke("agentRuntime:list"),

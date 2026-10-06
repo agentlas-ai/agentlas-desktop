@@ -30,9 +30,11 @@ import {
 import { getDb } from "../store/db";
 import {
   listResolvedModelRoles,
+  markModelRolesOrigin,
   pickModelRoleFromPool,
   setModelRole,
   type ModelRolePoolPick,
+  type ModelRolesOrigin,
 } from "../store/model-roles";
 import { peekProviderQuotaExhausted } from "../usage";
 import type {
@@ -1129,11 +1131,12 @@ export async function resolveRolePoolPicks(): Promise<
   return picks;
 }
 
-export async function setActiveRuntime(input: RuntimeSelection): Promise<RuntimeStatus[]> {
+export async function setActiveRuntime(input: RuntimeSelection, origin: ModelRolesOrigin = "user"): Promise<RuntimeStatus[]> {
   const backend = canonicalRuntimeBackend(input.kind, input.backend);
   const selection: RuntimeSelection = backend ? { ...input, backend } : input;
   const role = selection.role ?? "orchestrator";
   setModelRole({ ...selection, role });
+  markModelRolesOrigin(origin);
   if (role === "orchestrator") {
     // active_runtime is the orchestrator compatibility mirror.
     saveActiveRuntime(selection);

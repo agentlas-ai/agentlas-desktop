@@ -6,6 +6,15 @@ export type ConnectableRuntime = "codex" | "claude-code" | "antigravity" | "grok
 
 export const CONNECTABLE_RUNTIMES: readonly ConnectableRuntime[] = ["codex", "claude-code", "antigravity", "grok", "kimi", "cursor"];
 
+/** 온보딩의 "로컬 모델" 칸이 세는 런타임 — 칸과 첫 역할 배정(first-run-roles)이 같은 목록을 읽는다. */
+export const FIRST_RUN_LOCAL_MODEL_KINDS: ReadonlySet<string> = new Set(["lmstudio", "mlx", "agentlas-local"]);
+
+/** 온보딩의 Agentlas 칸이 "사용 가능"을 켜는 조건(유료 플랜 + 남은 크레딧). 칸과 첫 역할 배정이 같이 읽는다. */
+export function agentlasServingReady(credits: { authenticated: boolean; plan?: string; remainingCredits?: number } | null | undefined): boolean {
+  const plan = credits?.authenticated && credits.plan && credits.plan.toLowerCase() !== "free" ? credits.plan : null;
+  return Boolean(plan && (credits?.remainingCredits ?? 0) > 0);
+}
+
 export type RuntimeAuthState = "signed-in" | "signed-out" | "not-installed" | "unknown";
 
 export interface RuntimeAuthProbe {

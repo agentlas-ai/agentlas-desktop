@@ -34,6 +34,7 @@ import type { AgentMailStatus } from "@shared/agent-mail";
 import { openPricing } from "@/components/UpgradeCta";
 import { PLAN_CHANGED_EVENT } from "@/components/billing/PlanPickerModal";
 import { agentMailOffer } from "@shared/agent-mail-offer";
+import { FIRST_RUN_LOCAL_MODEL_KINDS, agentlasServingReady } from "@shared/runtime-connect";
 import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
 import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 import {
@@ -61,7 +62,6 @@ const PROFILE_CONTEXT_MAX = 4_000;
 const PRINCIPLE_MAX = 500;
 const PRINCIPLES_MAX = 128;
 /** 로컬 모델로 치는 감지 종류(ollama 는 이관용 투영이라 제외 — RuntimeReadiness 와 같은 규칙). */
-const LOCAL_MODEL_KINDS = new Set(["lmstudio", "mlx", "agentlas-local"]);
 
 /** Decide whether this account sees the flow, and keep that decision. */
 async function loadOrClassify(accountFingerprint: string | undefined): Promise<FirstRunRecord> {
@@ -340,16 +340,16 @@ export function FirstRunOnboarding({
     return () => window.removeEventListener(PLAN_CHANGED_EVENT, onPlan);
   }, [step, refreshAi]);
 
-  const localRuntimes = (runtimes ?? []).filter((r) => LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
+  const localRuntimes = (runtimes ?? []).filter((r) => FIRST_RUN_LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
   const plan = credits?.authenticated && credits.plan && credits.plan.toLowerCase() !== "free" ? credits.plan : null;
-  const agentlasReady = Boolean(plan && (credits?.remainingCredits ?? 0) > 0);
+  const agentlasReady = agentlasServingReady(credits);
 
   const checkLocal = async () => {
     if (!api) return;
     setLocalBusy(true); setLocalNote(null);
     const detected = await api.runtime.detect(true).catch(() => null);
     if (detected) setRuntimes(detected);
-    const found = (detected ?? []).some((r) => LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
+    const found = (detected ?? []).some((r) => FIRST_RUN_LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
     if (!found) setLocalNote(copy.localHint);
     setLocalBusy(false);
   };
@@ -437,6 +437,13 @@ export function FirstRunOnboarding({
   };
 
   const anyAiConnected = RUNTIME_CHIPS.some((spec) => auth.probes[spec.kind]?.state === "signed-in") || localRuntimes.length > 0 || agentlasReady;
+  // What was connected here becomes the first orchestrator and worker (owner 2026-10-06). The main
+  // process reads the same facts itself and leaves roles a person already chose alone; a failed
+  // seed keeps the detect-time pick, so it never holds the next step.
+  const finishAi = async () => {
+    if (anyAiConnected) await api?.runtime.seedFirstRunRoles?.().catch(() => null);
+    complete("ai", anyAiConnected ? "done" : "skipped");
+  };
   const cc = useMemo(() => connectCopy(ko), [ko]);
 
   const primary: { label: string; onClick: () => void; disabled?: boolean } = (() => {
@@ -446,7 +453,7 @@ export function FirstRunOnboarding({
         ? { label: copy.next, onClick: () => complete("browser", "done") }
         : { label: copy.skip, onClick: () => complete("browser", "skipped") };
       // 오너 2026-09-29: 큰 검정 버튼은 "다음으로" — 연결을 시작하지 않고, 몇 개를 연결했든(0개여도) 넘어간다.
-      case "ai": return { label: copy.next, onClick: () => complete("ai", anyAiConnected ? "done" : "skipped") };
+      case "ai": return { label: copy.next, onClick: () => void finishAi() };
       case "preferences": return {
         label: busy ? copy.saving : (prefText.trim() || principleText.trim() ? copy.next : copy.skip),
         onClick: () => void savePreferences(),

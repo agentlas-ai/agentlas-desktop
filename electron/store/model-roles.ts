@@ -259,12 +259,44 @@ export function listModelRoleMembers(role: RuntimeRole): ModelRoleMember[] {
 }
 
 /**
+ * 역할을 누가 정했는가. "user" = 사람이 화면·모바일에서 고름, "first-run" = 온보딩이 끝날 때
+ * 연결한 것으로 채움(runtime/first-run-roles.ts). 사람이 한 번 고른 뒤에는 온보딩이 다시 덮지 않는다.
+ */
+export type ModelRolesOrigin = "user" | "first-run";
+const MODEL_ROLES_ORIGIN_KEY = "model_roles_origin";
+
+export function getModelRolesOrigin(): ModelRolesOrigin | null {
+  try {
+    const value = (getDb().prepare("SELECT value FROM meta WHERE key = ?").get(MODEL_ROLES_ORIGIN_KEY) as { value: string } | undefined)?.value;
+    return value === "user" || value === "first-run" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+export function markModelRolesOrigin(origin: ModelRolesOrigin): void {
+  getDb()
+    .prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run(MODEL_ROLES_ORIGIN_KEY, origin);
+}
+
+/** 사람이 고르기 전에 정해진 풀이 있는가 — 기록이 생기기 전 버전에서 사람이 만든 풀을 지킨다. */
+export function hasModelRoleMembers(): boolean {
+  try {
+    return (getDb().prepare("SELECT COUNT(*) AS n FROM model_role_members").get() as { n: number }).n > 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * 역할 풀 전체 교체(순서가 곧 우선순위). 빈 worker 풀 = 오케스트레이터 풀 상속.
  * 쓰기 후 v79 단일 행(model_roles)을 풀 헤드로 미러해 구버전 리더를 지킨다.
  */
 export function setModelRoleMembers(
   role: RuntimeRole,
   selections: RuntimeSelection[],
+  origin: ModelRolesOrigin = "user",
 ): ModelRoleMember[] {
   assertRole(role);
   if (role === "orchestrator" && selections.length === 0) {
@@ -301,6 +333,7 @@ export function setModelRoleMembers(
     });
   });
   replace();
+  markModelRolesOrigin(origin);
   if (selections.length > 0) {
     setModelRole({ ...selections[0], role, inherit: false });
   } else if (role === "worker") {

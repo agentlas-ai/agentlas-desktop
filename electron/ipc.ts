@@ -46,6 +46,7 @@ import {
   resolveRolePoolPicks,
   setActiveRuntime,
 } from "./runtime/detect";
+import { seedFirstRunRoles } from "./runtime/first-run-roles";
 import { disposeAcpSessionPool } from "./runtime/acp";
 import { disposeClaudeSessionPool } from "./runtime/claude-session";
 import { disposeCodexSessionPool } from "./runtime/codex-session";
@@ -3076,6 +3077,12 @@ export function registerIpcHandlers(): void {
       return desktopRuntimeRolePoolState();
     },
   );
+  // 온보딩 AI 단계가 끝날 때 — 연결한 것으로 오케스트레이터·워커 풀을 처음 채운다(오너 2026-10-06).
+  ipcMain.handle("runtime:seedFirstRunRoles", async () => {
+    const seed = await seedFirstRunRoles();
+    if (seed.seeded) emitDesktopStoreChange({ entity: "runtime" });
+    return seed;
+  });
   ipcMain.handle("runtime:installCli", (_e, kind: InstallableCli) => installCli(kind));
   ipcMain.handle("runtime:openCliLogin", async (_e, kind: ManageableCli) => {
     // 로그인 터미널을 여는 시점에 감지/사용량 캐시를 즉시 무효화 — 로그인 완료가
