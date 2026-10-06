@@ -3,6 +3,7 @@
 ## 1.2.71 — 2026-10-06
 
 - Codex runs read your account's model list again when choosing a reasoning effort, and the model picker no longer reports a false "0 models" when Codex refreshes its model list at the same moment.
+- The common run list preserves the status of a Science research session, so a paused session appears paused instead of queued.
 
 This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
 
