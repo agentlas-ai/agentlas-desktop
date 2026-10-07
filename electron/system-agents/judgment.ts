@@ -86,7 +86,39 @@ export interface JudgmentRuntimeAttempt {
   runtimeReceipt: JudgmentRuntimeReceipt;
   outcome: "success" | "refused" | "timeout" | "cancelled" | "invalid_output" | "failed";
   failureKind?: RunnerFailureKind;
+  failureSource?: RunnerFailure["source"];
+  providerCode?: string;
+  /** Original shared deadline, never a new budget for a fallback candidate. */
+  totalBudgetMs?: number;
+  remainingAtStartMs?: number;
+  remainingAtEndMs?: number;
   elapsedMs: number;
+}
+
+export interface JudgmentDiagnostics {
+  runtimeReceipt?: JudgmentRuntimeReceipt;
+  attempts?: JudgmentRuntimeAttempt[];
+  execution?: JudgmentRuntimeReceipt["execution"] | "unknown";
+  failureKind?: RunnerFailureKind;
+  failureSource?: RunnerFailure["source"];
+  providerCode?: string;
+}
+
+function judgmentFailureDiagnostics(failure?: RunnerFailure): Pick<JudgmentDiagnostics, "failureKind" | "failureSource" | "providerCode"> {
+  if (!failure) return {};
+  const providerCode = typeof failure.providerCode === "string"
+    && /^[a-zA-Z0-9_.-]{1,96}$/.test(failure.providerCode) && !looksSecret(failure.providerCode)
+    ? failure.providerCode : undefined;
+  return { failureKind: failure.kind, failureSource: failure.source, ...(providerCode ? { providerCode } : {}) };
+}
+
+function judgmentDiagnostics(detailed: {
+  text: string | null; failure?: RunnerFailure; runtimeReceipt?: JudgmentRuntimeReceipt; attempts?: JudgmentRuntimeAttempt[];
+}): JudgmentDiagnostics {
+  const attempts = detailed.attempts ?? [];
+  const execution = attempts.some((attempt) => attempt.runtimeReceipt.execution === "invoked")
+    ? "invoked" : detailed.runtimeReceipt?.execution ?? (detailed.text === null ? "not_invoked" : "unknown");
+  return { runtimeReceipt: detailed.runtimeReceipt, attempts, execution, ...judgmentFailureDiagnostics(detailed.failure) };
 }
 
 type JudgmentPool = { state: "configured" | "unconfigured" | "unavailable"; selections: RuntimeSelection[]; fingerprint: string };
@@ -267,7 +299,7 @@ export interface Verdict<V extends string> {
  * fallback: an unreachable or invalid model is an explicit unavailable fact,
  * never a fabricated verdict.
  */
-export interface RequiredVerdict<V extends string> {
+export interface RequiredVerdict<V extends string> extends JudgmentDiagnostics {
   /** Exact host references selected by an evidence-bound batch only. */
   evidenceRefs?: string[];
   attempts?: JudgmentRuntimeAttempt[];
@@ -862,13 +894,22 @@ async function callJudgmentModelDetailed(opts: {
       opts.signal?.removeEventListener("abort", onAbort);
     }
   };
+  let attemptBudgetMs: number | undefined;
+  const skippedAttempt = (failure: RunnerFailure, outcome: JudgmentRuntimeAttempt["outcome"] = "failed") => {
+    if (!runtimeReceipt) return;
+    const remaining = Math.max(0, deadlineAt - Date.now());
+    attempts.push({ runtimeReceipt, outcome, elapsedMs: 0, ...judgmentFailureDiagnostics(failure),
+      totalBudgetMs: timeoutMs, remainingAtStartMs: remaining, remainingAtEndMs: remaining });
+  };
   const recordAttempt = (startedAt: number, outcome: JudgmentRuntimeAttempt["outcome"], failure?: RunnerFailure) => {
     if (outcome !== "success") markVerificationEffectFailure(outcome === "timeout" ? "timeout"
       : outcome === "cancelled" ? "cancelled" : outcome === "invalid_output" ? "invalid_output" : "runner_failed");
     if (!runtimeReceipt) return;
     const attempt: JudgmentRuntimeAttempt = {
       runtimeReceipt, outcome, elapsedMs: Math.max(0, Date.now() - startedAt),
-      ...(failure ? { failureKind: failure.kind } : {}),
+      ...judgmentFailureDiagnostics(failure),
+      totalBudgetMs: timeoutMs, remainingAtStartMs: attemptBudgetMs,
+      remainingAtEndMs: Math.max(0, deadlineAt - Date.now()),
     };
     attempts.push(attempt);
     const selection = runtimeReceipt.selection;
@@ -921,6 +962,7 @@ async function callJudgmentModelDetailed(opts: {
           providerCode: capability.reason,
           message: capability.reason,
         };
+        skippedAttempt(lastFailure, "refused");
         continue;
       }
       if (workerFallback && pinnedRuntimeCredentialOrModelUnavailable(runtime)) {
@@ -931,7 +973,7 @@ async function callJudgmentModelDetailed(opts: {
         lastFailure = { kind: credentialUnavailable ? "unavailable" : "unsupported", runtime: runtime.kind, source: "marker",
           providerCode: credentialUnavailable ? "judgment_selected_credential_unavailable" : "runtime_model_unavailable",
           message: credentialUnavailable ? "judgment_selected_credential_unavailable" : "runtime_model_unavailable" };
-        attempts.push({ runtimeReceipt, outcome: "failed", elapsedMs: 0, failureKind: lastFailure.kind });
+        skippedAttempt(lastFailure);
         if (credentialUnavailable && route === "explicit_pin") return { text: null, failure: lastFailure, runtimeReceipt, attempts };
         continue;
       }
@@ -945,22 +987,31 @@ async function callJudgmentModelDetailed(opts: {
           retryAfterHint: new Date(cooldown.until).toISOString() };
         // No runner started: this must not poison an empty verification session
         // or extend the cooldown. A later authorized pool member can still judge.
-        const skipped: JudgmentRuntimeAttempt = { runtimeReceipt, outcome: "failed", elapsedMs: 0, failureKind: cooldown.kind };
+        const remaining = Math.max(0, deadlineAt - Date.now());
+        const skipped: JudgmentRuntimeAttempt = { runtimeReceipt, outcome: "failed", elapsedMs: 0,
+          ...judgmentFailureDiagnostics(lastFailure), totalBudgetMs: timeoutMs,
+          remainingAtStartMs: remaining, remainingAtEndMs: remaining };
         attempts.push(skipped);
         console.info("[judgment-runtime-result]", JSON.stringify(skipped));
         continue;
       }
       const picked = pickRunner(runtime);
       if (!picked) continue;
-      runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "invoked", selection: {
+      runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "not_invoked", selection: {
         ...workerIdentity, kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
       }, longContext: runtime.longContextEnabled,
       ...(runtime.effort ? { effort: runtime.effort } : {}),
       ...(opts.selectionPolicy ? { selectionPolicy: opts.selectionPolicy } : {}), ...(capability ? { capability } : {}) };
-      console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
       const startedAt = Date.now();
       const remainingMs = deadlineAt - Date.now();
-      if (remainingMs <= 0) break;
+      if (remainingMs <= 0) {
+        skippedAttempt({ kind: "timeout", runtime: runtime.kind, source: "marker",
+          providerCode: "judgment_budget_exhausted", message: "judgment_budget_exhausted" }, "timeout");
+        break;
+      }
+      runtimeReceipt = { ...runtimeReceipt, execution: "invoked" };
+      attemptBudgetMs = remainingMs;
+      console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
       // Every attempt may use the whole remaining budget. A timeout ends the judgment (below: a timed-out
       // runner's turn is unsettled, so no other runtime is started), which means time held back for a later
       // candidate could never be spent after one. That reserve (half the budget, at most 30 s) is what failed:
@@ -1061,7 +1112,8 @@ async function callJudgmentModelDetailed(opts: {
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         const startedAt = Date.now();
         const accounting = beginAccountedInference(selection);
-        const bounded = await runBoundedAttempt(Math.max(1, deadlineAt - Date.now()), (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(selection.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(recovery.runner,
+        attemptBudgetMs = Math.max(1, deadlineAt - Date.now());
+        const bounded = await runBoundedAttempt(attemptBudgetMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(selection.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(recovery.runner,
             {
               systemPrompt: opts.systemPrompt,
               history: [],
@@ -1232,12 +1284,12 @@ export async function judgeRequired<V extends string>(
   const cacheKey = `${judgmentCacheKey(spec.kind, judgedInput)}${runtimeScope}`;
   const cached = spec.selectionPolicy ? undefined : cacheGet<V>(cacheKey);
   if (cached) {
-    return { ...cached, source: "llm", redactedInput, containedSecret };
+    return { ...cached, source: "llm", redactedInput, containedSecret, execution: "cached", attempts: [] };
   }
   const durable = spec.selectionPolicy ? undefined : durableGet(spec.kind, signature);
   if (durable && (spec.labels as readonly string[]).includes(durable.verdict)) {
     cacheSet(cacheKey, durable);
-    return { ...(durable as RequiredVerdict<V>), source: "llm", redactedInput, containedSecret };
+    return { ...(durable as RequiredVerdict<V>), source: "llm", redactedInput, containedSecret, execution: "cached", attempts: [] };
   }
   const systemPrompt = [
     "You are Agentlas One making one bounded judgment from observed evidence.",
@@ -1281,7 +1333,7 @@ export async function judgeRequired<V extends string>(
   if (text === null) {
     // ★reason을 비우지 않는다 — 소비자(EVAL_UNAVAILABLE 카드 등)가 "왜"를 말할 유일한 통로다.
     const reason = detailed.failure ? detailed.failure.message.slice(0, 300) : "";
-    return { verdict: null, confidence: 0, reason, source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, failureKind: detailed.failure?.kind };
+    return { verdict: null, confidence: 0, reason, source: "unavailable", redactedInput, containedSecret, ...judgmentDiagnostics(detailed) };
   }
   if (spec.selectionPolicy && !detailed.runtimeReceipt) {
     return {
@@ -1291,19 +1343,19 @@ export async function judgeRequired<V extends string>(
       source: "unavailable",
       redactedInput,
       containedSecret,
-      attempts: detailed.attempts,
-      failureKind: "exit",
+      ...judgmentDiagnostics(detailed),
+      failureKind: "exit", failureSource: "marker", providerCode: "judgment_runtime_receipt_missing",
     };
   }
   const parsed = parseVerdict<V>(text, spec.labels);
   if (!parsed) {
-    return { verdict: null, confidence: 0, reason: "judgment_invalid_output", source: "unavailable", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, failureKind: "exit" };
+    return { verdict: null, confidence: 0, reason: "judgment_invalid_output", source: "unavailable", redactedInput, containedSecret, ...judgmentDiagnostics(detailed), failureKind: "exit", failureSource: "marker", providerCode: "judgment_invalid_output" };
   }
   if (!spec.selectionPolicy && runtimeScope === judgmentCacheScope(spec.runtimeSelection, spec.selectionPolicy, spec.pinFallback)) {
     cacheSet(cacheKey, { ...parsed, source: "llm", runtimeReceipt: detailed.runtimeReceipt });
     durablePut(spec.kind, signature, { ...parsed, source: "llm" });
   }
-  return { ...parsed, source: "llm", redactedInput, containedSecret, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts };
+  return { ...parsed, source: "llm", redactedInput, containedSecret, ...judgmentDiagnostics(detailed) };
 }
 
 /** One evidence snapshot, one model call, independently typed item verdicts.
@@ -1783,7 +1835,7 @@ export interface ChecklistItemVerdict {
   why: string;
 }
 
-export interface ChecklistVerdict {
+export interface ChecklistVerdict extends JudgmentDiagnostics {
   /** null = 판정 자체가 불가(모델 없음·전 항목 unknown). 실패가 아니다. */
   verdict: "pass" | "fail" | null;
   items: ChecklistItemVerdict[];
@@ -1907,7 +1959,8 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
     subject,
   ].join("\u0000");
   const cached = hasActiveVerificationSession() ? undefined : checklistCacheGet(cacheKey);
-  if (cached) return cached;
+  if (cached) return { ...cached, execution: "cached", attempts: [],
+    ...(cached.runtimeReceipt ? { runtimeReceipt: { ...cached.runtimeReceipt, execution: "cached" } } : {}) };
 
   const systemPrompt = [
     "You are Agentlas One grading one result against an explicit checklist.",
@@ -1954,12 +2007,13 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
     const reasonText = detailed.failure ? detailed.failure.message.slice(0, 300) : "";
     return {
       verdict: null, items: [], reasonText, source: "unavailable",
-      ...(detailed.failure ? { failureKind: detailed.failure.kind } : {}),
+      ...judgmentDiagnostics(detailed),
     };
   }
   const verdicts = parseChecklistJson(text, spec.items);
   if (!verdicts) {
-    return { verdict: null, items: [], reasonText: "", source: "unavailable" };
+    return { verdict: null, items: [], reasonText: "", source: "unavailable", ...judgmentDiagnostics(detailed),
+      failureKind: "exit", failureSource: "marker", providerCode: "judgment_invalid_output" };
   }
   const settled = settleChecklist(spec.items, verdicts);
   const result: ChecklistVerdict = {
@@ -1967,6 +2021,7 @@ export async function judgeChecklist(spec: ChecklistJudgeSpec): Promise<Checklis
     items: verdicts,
     reasonText: settled.reasonText,
     source: settled.verdict === null ? "unavailable" : "llm",
+    ...judgmentDiagnostics(detailed),
   };
   if (settled.verdict !== null && runtimeScope === judgmentCacheScope(spec.runtimeSelection, undefined, spec.pinFallback)) checklistCacheSet(cacheKey, result);
   return result;

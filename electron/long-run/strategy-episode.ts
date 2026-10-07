@@ -20,6 +20,9 @@ import { graphExecutionDigest, sha256Value } from "../../shared/graph-execution-
 import type { WorkflowGraph } from "../../shared/types";
 import type { AgiGoalFactsDeps } from "../agi/goal-facts";
 import type { GoalWaitIntent } from "./wait-emitter";
+import { assertAgiDecisionControl, agiDecisionAbortSignal, AGI_DECISION_CONTROL_CHANGED } from "../agi/decision-control";
+import { assertAgiDecisionIngress, type AgiUnblockInput } from "../agi/monitor";
+import { withInvocationJudgmentContext } from "../runtime/judgment-context";
 
 export interface StrategyReorder { op: "reorder"; nodeId: string; ord: number }
 interface SourceRun { id: string; status: "ok" | "error"; graph_digest: string; occurrence_id: string; checkpoint_json: string; dry_run: number; resume_of_run_id: string | null; evidenceDigest?: string }
@@ -204,9 +207,16 @@ function assertIntent(intent: GoalWaitIntent, deadline: string, now: number): vo
     || Date.parse(intent.subject.notBefore) > Date.parse(deadline)) throw new Error("goal_strategy_rest_invalid");
 }
 function requestDigest(captureId: string, op: StrategyReorder, intent: GoalWaitIntent): string { return hash({ captureId, op, intent }); }
+function currentDecision(captureId: string, decision: AgiUnblockInput, now: number): StrategyCapture {
+  assertAgiDecisionControl(decision?.decisionControl, decision);
+  const value = current(captureId,now), custody = assertGoalEpisodeCapture(captureId,now).custody!;
+  if (decision.goalId !== value.goalId || decision.runId !== custody.runId) throw new Error(AGI_DECISION_CONTROL_CHANGED);
+  return value;
+}
 export async function prepareGoalStrategyEpisode(input: { captureId: string; op: StrategyReorder; intent: GoalWaitIntent },
+  decision: AgiUnblockInput,
   cycle: typeof runAutomationStrategyCycle = runAutomationStrategyCycle): Promise<PreparedGoalStrategyEpisode> {
-  const value = current(input.captureId, Date.now()), source = value.source!;
+  const value = currentDecision(input.captureId, decision, Date.now()), source = value.source!, signal = agiDecisionAbortSignal(decision);
   const op = validateStrategyReorder(value.plan!, input.op, Date.now());
   assertIntent(input.intent, value.deadline!, Date.now());
   const target = value.plan!.tactics.find(t => t.id === op.nodeId)!;
@@ -214,15 +224,16 @@ export async function prepareGoalStrategyEpisode(input: { captureId: string; op:
   const custody = assertGoalEpisodeCapture(input.captureId, Date.now()).custody!;
   // Attribute both review calls to the immutable Main producer, including bridged
   // automations whose legacy goal_id column is intentionally null.
-  await withInvocationAccounting({ runId: custody.producerInvocationId, chatId: custody.chatId,
-    readOwner: () => { current(input.captureId, Date.now());
+  await withInvocationJudgmentContext(undefined,signal,() => withInvocationAccounting({ runId: custody.producerInvocationId, chatId: custody.chatId,
+    readOwner: () => { currentDecision(input.captureId, decision, Date.now());
       return { goalId: custody.goalId, attemptId: custody.workerAttemptId }; } }, () => cycle({ automationId: source.automationId, sourceRunId: source.source.id, status: source.source.status, outcome: null,
     goalRecommendation: { proposalId: input.captureId, goalId: value.goalId, goalRevision: value.plan!.revision,
       intent: "change-strategy", rationale: JSON.stringify(op), strategy: { schemaVersion: "agentlas.goal-strategy.v1",
         summary: target.description, change: JSON.stringify({ ...op, description: target.description, done_when: target.done_when }) }, cadence: null },
-    isCurrent: () => { try { current(input.captureId, Date.now()); return true; } catch { return false; } },
-    episodePreparation: { captureId: input.captureId, prepared: receipt => { prepared = receipt; } } }));
-  current(input.captureId, Date.now());
+    signal,
+    isCurrent: () => { try { currentDecision(input.captureId, decision, Date.now()); return true; } catch { return false; } },
+    episodePreparation: { captureId: input.captureId, prepared: receipt => { prepared = receipt; } } })));
+  currentDecision(input.captureId, decision, Date.now());
   const proposal = prepared as AutomationStrategyProposalReceipt | null;
   if (!proposal || proposal.reviewStatus !== "approved" || proposal.adjudication.decision !== "within_scope"
     || proposal.status !== "pending" || proposal.automationId !== source.automationId || proposal.sourceRunId !== source.source.id
@@ -240,12 +251,19 @@ export function readGoalStrategyEpisodeResult(requestId: string, captureId: stri
   return { ...JSON.parse(row.value_json), replayed: true } as GoalEpisodeDisposition;
 }
 export function commitGoalStrategyEpisode(input: { requestId: string; captureId: string; op: StrategyReorder; intent: GoalWaitIntent;
-  prepared: PreparedGoalStrategyEpisode; latestReceipt?: AgiGoalFactsDeps["latestReceipt"]; now?: number }): GoalEpisodeDisposition {
+  prepared: PreparedGoalStrategyEpisode; latestReceipt?: AgiGoalFactsDeps["latestReceipt"]; now?: number }, decision: AgiUnblockInput): GoalEpisodeDisposition {
   schema();
   return desktopStoreTransaction(getDb(), () => {
     const replay = readGoalStrategyEpisodeResult(input.requestId,input.captureId,input.op,input.intent);
     if (replay) return replay;
-    const now = input.now ?? Date.now(), value = current(input.captureId,now);
+    const now = input.now ?? Date.now(), value = currentDecision(input.captureId,decision,now), signal = agiDecisionAbortSignal(decision);
+    // Own synchronous plan/version changes use the existing derived capsule.
+    // Within that transaction only the original private claim/lifetime is checked.
+    const assertLifetime = (): void => {
+      try { if (signal.aborted) throw new Error(AGI_DECISION_CONTROL_CHANGED);
+        assertAgiDecisionIngress(decision.decisionIngress,decision);
+      } catch { throw Object.assign(new Error(AGI_DECISION_CONTROL_CHANGED), { code: AGI_DECISION_CONTROL_CHANGED }); }
+    };
     const op = validateStrategyReorder(value.plan!,input.op,now), digest = requestDigest(input.captureId,op,input.intent);
     assertIntent(input.intent, value.deadline!, now);
     if (!preparationHandles.has(input.prepared) || input.prepared.captureId !== input.captureId || input.prepared.requestDigest !== digest)
@@ -253,12 +271,18 @@ export function commitGoalStrategyEpisode(input: { requestId: string; captureId:
     const derivedId = `${input.captureId}:strategy`;
     let automationRevision: number | null = null;
     withGoalEpisodeSelfChange(input.captureId,derivedId,now,() => {
+      assertLifetime();
       withCurrentGoalPlan(value.goalId,value.plan!.mutationIdentity!,plan => updateGoalPlanNode(plan,op.nodeId,{ ord: op.ord }));
+      assertLifetime();
       automationRevision = applyEpisodeReservedStrategyProposal(input.prepared.proposalId,input.captureId).revisionReceipt?.revision ?? null;
       if (automationRevision === null) throw new Error("goal_strategy_revision_missing");
     });
+    assertLifetime();
     const result = applyGoalEpisodeRest({ requestId: input.requestId, captureId: derivedId, goalId: value.goalId,
-      intent: input.intent, now, latestReceipt: input.latestReceipt },registerGoalWaitSubscription);
+      intent: input.intent, now, signal, latestReceipt: input.latestReceipt },registerGoalWaitSubscription);
+    // A reentrant readback may end the decision while the wait is still tentative.
+    // Refusal here rolls back the owned transaction; committed replay is read first.
+    assertLifetime();
     if (result.status !== "wait_registered" || !result.waitId || !result.checkpointId) throw new Error(result.code);
     Object.assign(result, { strategyEpisode: { sourceCaptureId: input.captureId, derivedCaptureId: derivedId,
       proposalId: input.prepared.proposalId, automationId: value.source!.automationId, automationRevision, op } });

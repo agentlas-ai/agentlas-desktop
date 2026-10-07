@@ -890,8 +890,17 @@ export async function browserCdpOwnerIsLive(): Promise<boolean> {
 
 export interface BrowserCdpIdleCloseResult {
   closed: boolean;
-  reason: "closed" | "not-owned" | "active-leases" | "close-failed";
+  reason: "closed" | "not-owned" | "active-leases" | "close-failed" | "cancelled" | "close-unknown";
   pid: number | null;
+  /** Present on the guarded Main path; absence is not evidence of no effect. */
+  effect?: "not-started" | "closed" | "unknown";
+}
+
+export interface BrowserCdpCloseControl { signal: AbortSignal; assertCurrent(): void }
+function assertBrowserCdpCloseCurrent(control?: BrowserCdpCloseControl): void {
+  if (!control) return;
+  if (control.signal.aborted) throw control.signal.reason ?? new Error("agi.decision.control-changed");
+  control.assertCurrent();
 }
 
 export interface BrowserCdpMaintenanceResult {
@@ -932,13 +941,17 @@ async function browserCdpProfileRootStillAttested(pid: number): Promise<boolean>
  * alive indefinitely. Once the exact PID has already been ownership-attested
  * and the shutdown lock excludes new consumers, reap that root explicitly.
  */
-async function terminateAttestedBrowserCdpRoot(pid: number): Promise<boolean> {
+async function terminateAttestedBrowserCdpRoot(pid: number, control?: BrowserCdpCloseControl, onMutation?: () => void): Promise<boolean> {
+  assertBrowserCdpCloseCurrent(control);
   if (!browserCdpProcessIsLive(pid)) return true;
   if (!(await browserCdpProfileRootStillAttested(pid))) return false;
-  if (!(await terminateBrowserCdpProfileRoot(pid, false))) return false;
+  assertBrowserCdpCloseCurrent(control);
+  if (!(await terminateBrowserCdpProfileRoot(pid, false, control, onMutation))) return false;
   if (await waitForBrowserCdpProcessExit(pid, 2_000)) return true;
+  assertBrowserCdpCloseCurrent(control);
   if (!(await browserCdpProfileRootStillAttested(pid))) return false;
-  if (!(await terminateBrowserCdpProfileRoot(pid, true))) return false;
+  assertBrowserCdpCloseCurrent(control);
+  if (!(await terminateBrowserCdpProfileRoot(pid, true, control, onMutation))) return false;
   return waitForBrowserCdpProcessExit(pid, 2_000);
 }
 
@@ -981,7 +994,8 @@ function readBrowserCdpWebSocketUrl(): Promise<string | null> {
   });
 }
 
-function requestBrowserCdpClose(socketUrl: string): Promise<boolean> {
+function requestBrowserCdpClose(socketUrl: string, control?: BrowserCdpCloseControl, onMutation?: () => void): Promise<boolean> {
+  assertBrowserCdpCloseCurrent(control);
   if (typeof WebSocket !== "function") return Promise.resolve(false);
   return new Promise((resolve) => {
     const socket = new WebSocket(socketUrl);
@@ -991,13 +1005,20 @@ function requestBrowserCdpClose(socketUrl: string): Promise<boolean> {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      control?.signal.removeEventListener("abort", onAbort);
       try { socket.close(); } catch { /* best-effort */ }
       resolve(value);
     };
     const timer = setTimeout(() => finish(false), 3_000);
+    const onAbort = () => finish(false);
+    control?.signal.addEventListener("abort", onAbort, { once: true });
     socket.addEventListener("open", () => {
-      sent = true;
+      if (settled) return;
       try {
+        // The socket opens asynchronously: the original owner must still be current here.
+        assertBrowserCdpCloseCurrent(control);
+        onMutation?.();
+        sent = true; // send may throw after transport admission: its effect is then unknown.
         socket.send(JSON.stringify({ id: 1, method: "Browser.close", params: {} }));
       } catch {
         finish(false);
@@ -1009,8 +1030,10 @@ function requestBrowserCdpClose(socketUrl: string): Promise<boolean> {
         if (message.id === 1) finish(!message.error);
       } catch { /* wait for close/timeout */ }
     });
-    socket.addEventListener("close", () => finish(sent), { once: true });
+    // A transport close without an acknowledged result is not guarded success.
+    socket.addEventListener("close", () => finish(control ? false : sent), { once: true });
     socket.addEventListener("error", () => finish(false), { once: true });
+    if (control?.signal.aborted) onAbort();
   });
 }
 
@@ -1047,12 +1070,16 @@ async function browserCdpProfileRootPidMatches(pid: number): Promise<boolean> {
   }
 }
 
-async function terminateBrowserCdpProfileRoot(pid: number, force = false): Promise<boolean> {
+async function terminateBrowserCdpProfileRoot(pid: number, force = false, control?: BrowserCdpCloseControl, onMutation?: () => void): Promise<boolean> {
+  assertBrowserCdpCloseCurrent(control);
   if (!browserCdpProcessIsLive(pid)) return true;
   if (!(await browserCdpProfileRootPidMatches(pid))) return false;
+  assertBrowserCdpCloseCurrent(control);
   try {
     if (process.platform === "win32") {
       await new Promise<void>((resolve) => {
+        assertBrowserCdpCloseCurrent(control);
+        onMutation?.();
         execFile(
           "taskkill.exe",
           ["/PID", String(pid), "/T", ...(force ? ["/F"] : [])],
@@ -1061,9 +1088,11 @@ async function terminateBrowserCdpProfileRoot(pid: number, force = false): Promi
         );
       });
     } else {
+      assertBrowserCdpCloseCurrent(control);
+      onMutation?.();
       process.kill(pid, force ? "SIGKILL" : "SIGTERM");
     }
-  } catch { /* process already exited */ }
+  } catch (error) { if (control) throw error; /* legacy: process already exited */ }
   return true;
 }
 
@@ -1298,39 +1327,62 @@ export async function sweepAgentlasBrowserOrphans(options: {
 }
 
 /** Close only an attested, idle Agentlas browser before a file import or a headful login launch. */
-export async function closeBrowserCdpIfIdle(maxLiveLeases = 0): Promise<BrowserCdpIdleCloseResult> {
-  const initial = await reconcileBrowserCdpOwnerWithRetry();
-  if (initial.state !== "owned" || !initial.pid) {
-    return { closed: false, reason: "not-owned", pid: initial.pid };
-  }
-  if (!(await acquireBrowserCdpShutdownLock())) {
-    return { closed: false, reason: "close-failed", pid: initial.pid };
-  }
-  const pid = initial.pid;
+export async function closeBrowserCdpIfIdle(maxLiveLeases = 0, control?: BrowserCdpCloseControl): Promise<BrowserCdpIdleCloseResult> {
+  let pid: number | null = null;
+  let locked = false;
+  let mutationStarted = false;
+  const onMutation = () => { mutationStarted = true; };
+  const result = (closed: boolean, reason: BrowserCdpIdleCloseResult["reason"]): BrowserCdpIdleCloseResult => ({
+    closed, reason, pid, ...(control ? { effect: closed ? "closed" as const : mutationStarted ? "unknown" as const : "not-started" as const } : {}),
+  });
   try {
+    assertBrowserCdpCloseCurrent(control);
+    const initial = await reconcileBrowserCdpOwnerWithRetry();
+    pid = initial.pid;
+    assertBrowserCdpCloseCurrent(control);
+    if (initial.state !== "owned" || !pid) return result(false, "not-owned");
+    locked = await acquireBrowserCdpShutdownLock();
+    assertBrowserCdpCloseCurrent(control);
+    if (!locked) return result(false, "close-failed");
     const ownership = await reconcileBrowserCdpOwnerWithRetry();
+    assertBrowserCdpCloseCurrent(control);
     if (ownership.state !== "owned" || ownership.pid !== pid) {
-      return { closed: false, reason: "not-owned", pid: ownership.pid };
+      pid = ownership.pid;
+      return result(false, "not-owned");
     }
-    if (pruneBrowserCdpLeases() > maxLiveLeases) {
-      return { closed: false, reason: "active-leases", pid };
-    }
+    if (pruneBrowserCdpLeases() > maxLiveLeases) return result(false, "active-leases");
 
     const socketUrl = await readBrowserCdpWebSocketUrl();
-    const requested = socketUrl ? await requestBrowserCdpClose(socketUrl) : false;
+    assertBrowserCdpCloseCurrent(control);
+    const requested = socketUrl ? await requestBrowserCdpClose(socketUrl, control, onMutation) : false;
+    assertBrowserCdpCloseCurrent(control);
+    // A possibly sent close with an error/timeout is not permission to kill or restart.
+    if (control && mutationStarted && !requested) return result(false, "close-unknown");
     let closed = requested && await waitForBrowserCdpPortClosed();
+    assertBrowserCdpCloseCurrent(control);
+    if (control && mutationStarted && !closed) return result(false, "close-unknown");
     if (!closed && pruneBrowserCdpLeases() <= maxLiveLeases) {
       const stillOwned = await reconcileBrowserCdpOwnerWithRetry({ attempts: 2, delayMs: 50 });
+      assertBrowserCdpCloseCurrent(control);
       if (stillOwned.state === "owned" && stillOwned.pid === pid) {
-        try { process.kill(pid, "SIGTERM"); } catch { /* already exiting */ }
+        assertBrowserCdpCloseCurrent(control);
+        onMutation();
+        try { process.kill(pid, "SIGTERM"); } catch (error) { if (control) throw error; }
         closed = await waitForBrowserCdpPortClosed();
       }
     }
-    if (closed) closed = await terminateAttestedBrowserCdpRoot(pid);
+    assertBrowserCdpCloseCurrent(control);
+    if (closed) closed = await terminateAttestedBrowserCdpRoot(pid, control, onMutation);
+    assertBrowserCdpCloseCurrent(control);
     if (closed) clearBrowserCdpOwner(pid);
-    return { closed, reason: closed ? "closed" : "close-failed", pid };
+    return result(closed, closed ? "closed" : control && mutationStarted ? "close-unknown" : "close-failed");
+  } catch (error) {
+    if (!control) throw error;
+    let revoked = false;
+    try { assertBrowserCdpCloseCurrent(control); } catch { revoked = true; }
+    return result(false, mutationStarted ? "close-unknown" : revoked ? "cancelled" : "close-failed");
   } finally {
-    releaseBrowserCdpShutdownLock();
+    if (locked) releaseBrowserCdpShutdownLock();
   }
 }
 

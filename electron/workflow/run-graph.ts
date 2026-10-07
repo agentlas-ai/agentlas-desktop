@@ -1,6 +1,7 @@
 import { createGraphWorkerAttempt, readGraphWorkerFailure, readGraphWorkerPool, chooseGraphWorker, graphPinUnavailable, graphWorkerIdentity,
   type GraphWorkerAttempt, type GraphWorkerFailureReceipt, type GraphWorkerPool } from "./graph-worker-fallback";
 import { selectExactRuntime } from "../runtime/selection";
+import { looksSecret } from "../../shared/secret-patterns";
 import { captureFiniteAutomationGoalExecutionOwner, assertAutomationGoalExecutionOwner, bindFiniteGraphRunStop } from "../automation-execution-control";
 import type { BrowserLoginWait } from "../browser/login-prerequisite";
 import { withAutomationNodeAccounting, withAutomationRunAccounting } from "../long-run/accounting-context";
@@ -2980,6 +2981,48 @@ export async function runGraph(
     ok = false;
   };
 
+  /** Value-only diagnostics: each actual call has its own join key even in graph loops. */
+  const recordEvalJudgment = (node: WorkflowNode, phase: "criteria" | "checklist" | "stability",
+    result?: import("../system-agents/judgment").JudgmentDiagnostics & {
+      verdict?: "pass" | "fail" | null; source?: "llm" | "unavailable";
+    }): void => {
+    try {
+      const evaluationCallId = randomUUID();
+      const identifier = (value: unknown, max = 200): string | undefined => typeof value === "string"
+        && value.length <= max && /^[a-zA-Z0-9][a-zA-Z0-9._:/+-]*$/.test(value) && !looksSecret(value)
+        ? value : undefined;
+      const number = (value: unknown): number | undefined => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : undefined;
+      const runtime = (receipt?: import("../system-agents/judgment").JudgmentRuntimeReceipt) => ({
+        runtimeKnown: Boolean(receipt), route: identifier(receipt?.route), fingerprint: identifier(receipt?.fingerprint),
+        runtimeExecution: identifier(receipt?.execution), runtimeKind: identifier(receipt?.selection.kind),
+        backend: identifier(receipt?.selection.backend), runtimeSource: identifier(receipt?.selection.source),
+        model: identifier(receipt?.selection.model), role: identifier(receipt?.selection.role),
+        inherit: receipt?.selection.inherit, acpAgentId: identifier(receipt?.selection.acpAgentId),
+      });
+      const failure = (value?: import("../system-agents/judgment").JudgmentDiagnostics) => {
+        const failureSource = value?.failureSource === "marker" || value?.failureSource === "exit" || value?.failureSource === "heuristic"
+          ? value.failureSource : undefined;
+        const providerCode = typeof value?.providerCode === "string" && /^[a-zA-Z0-9_.-]{1,96}$/.test(value.providerCode)
+          ? identifier(value.providerCode, 96) : undefined;
+        return { failureKind: identifier(value?.failureKind), failureSource, providerCode,
+          failureSourceKnown: failureSource !== undefined, providerCodeKnown: providerCode !== undefined };
+      };
+      const write = (payload: Record<string, unknown>) => tryRecordRunEvent({ runId, chatId: chat.id,
+        automationId: automation.id, nodeId: node.id, kind: "workflow_eval_judgment",
+        payload: { schemaVersion: "agentlas.graph-eval-provenance.v1", evaluationCallId, phase, ...payload } });
+      const attempts = Array.isArray(result?.attempts) ? result.attempts : undefined;
+      attempts?.forEach((attempt, attemptIndex) => write({ record: "attempt", attemptIndex, outcome: attempt.outcome,
+        ...runtime(attempt.runtimeReceipt), ...failure(attempt), elapsedMs: number(attempt.elapsedMs),
+        budgetKnown: number(attempt.totalBudgetMs) !== undefined && number(attempt.remainingAtStartMs) !== undefined,
+        totalBudgetMs: number(attempt.totalBudgetMs), remainingAtStartMs: number(attempt.remainingAtStartMs),
+        remainingAtEndMs: number(attempt.remainingAtEndMs) }));
+      write({ record: "summary", outcome: result ? result.verdict ?? "unavailable" : "threw",
+        judgmentSource: result?.source ?? "unknown", execution: result?.execution ?? "unknown",
+        attemptsKnown: attempts !== undefined, attemptCount: attempts?.length,
+        ...runtime(result?.runtimeReceipt), ...failure(result) });
+    } catch { /* Diagnostics cannot turn a completed judgment into a failed node or a new dispatch. */ }
+  };
+
   const runNode = async (node: (typeof ordered)[number], scopedSignal: AbortSignal): Promise<void> => {
     assertFiniteCurrent();
     const runSignal = scopedSignal;
@@ -3228,6 +3271,7 @@ export async function runGraph(
               ...(runSignal ? { signal: runSignal } : {}),
             })));
           } catch (error) {
+            recordEvalJudgment(node, "checklist");
             assertFiniteCurrent();
             failGraphNode(node, {
               code: "EVAL_UNAVAILABLE",
@@ -3242,6 +3286,7 @@ export async function runGraph(
             });
             return;
           }
+          recordEvalJudgment(node, "checklist", list);
           if (list.verdict === null) {
             // 판정 불가(전 항목 unknown 포함)는 실패가 아니다.
             failGraphNode(node, {
@@ -3291,6 +3336,7 @@ export async function runGraph(
                 ...(corrections.length ? { corrections } : {}),
                 ...(runSignal ? { signal: runSignal } : {}),
               })));
+              recordEvalJudgment(node, "stability", second);
               if (second.verdict !== null) {
                 const firstById = new Map(list.items.map((v) => [v.id, v.verdict]));
                 const disagreed = second.items
@@ -3298,7 +3344,7 @@ export async function runGraph(
                   .map((v) => v.id);
                 stability = { agreed: disagreed.length === 0 && second.verdict === list.verdict, disagreedItems: disagreed };
               }
-            } catch { assertFiniteCurrent(); /* 흔들림 측정 실패는 판정 실패가 아니다 */ }
+            } catch { recordEvalJudgment(node, "stability"); assertFiniteCurrent(); /* 흔들림 측정 실패는 판정 실패가 아니다 */ }
           }
           vars[produces] = list.verdict;
           vars[`${produces}_reason`] = list.reasonText;
@@ -3377,7 +3423,7 @@ export async function runGraph(
           return;
         }
 
-        let verdict: { verdict: "pass" | "fail" | null; reason: string | null };
+        let verdict: import("../system-agents/judgment").RequiredVerdict<"pass" | "fail">;
         try {
           const { judgeRequired } = await import("../system-agents/judgment");
           assertFiniteCurrent();
@@ -3396,6 +3442,7 @@ export async function runGraph(
             ...(runSignal ? { signal: runSignal } : {}),
           })));
         } catch (error) {
+          recordEvalJudgment(node, "criteria");
           assertFiniteCurrent();
           failGraphNode(node, {
             code: "EVAL_UNAVAILABLE",
@@ -3410,6 +3457,7 @@ export async function runGraph(
           });
           return;
         }
+        recordEvalJudgment(node, "criteria", verdict);
         if (!verdict.verdict) {
           // 판정 불가는 실패가 아니다 — 일어나지 않은 판정을 결과로 쓰지 않는다.
           failGraphNode(node, {

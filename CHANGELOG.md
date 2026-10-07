@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.76 — 2026-10-07
+
+- Finite strategy reviews follow the original AGI decision control and roll back tentative changes when that decision is stopped or replaced.
+- Deferred browser recovery retains its original work custody through settlement and checks cancellation at close, send, and owned-process boundaries. Unknown close results remain unknown.
+- Graph evaluations preserve typed runtime attempts, failure codes, cache status, and the original shared time budget in run records. Evaluation unavailability remains distinct from result quality.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.75 — 2026-10-07
 
 - AGI checks the original owner control before later model attempts and deferred actions, including when storing a Stop request fails.

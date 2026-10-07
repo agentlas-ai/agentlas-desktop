@@ -14,7 +14,7 @@
  */
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
-import type { AgiLoginRecoveryOutcome } from "./actions";
+import type { AgiLoginRecoveryOutcome, AgiBrowserRestartControl, AgiBrowserRestartOutcome } from "./actions";
 
 const LADDER_WAIT_MS = 20_000;
 
@@ -63,7 +63,11 @@ export async function agiRunLoginRecovery(input: { domain: string; goalId: strin
   return "not-a-wall";
 }
 
-export async function agiRestartAgentlasBrowser(): Promise<boolean> {
+export function agiRestartAgentlasBrowser(): Promise<boolean>;
+export function agiRestartAgentlasBrowser(control: AgiBrowserRestartControl): Promise<AgiBrowserRestartOutcome>;
+export async function agiRestartAgentlasBrowser(control?: AgiBrowserRestartControl): Promise<boolean | AgiBrowserRestartOutcome> {
+  if (control) return guardedAgiBrowserRestart(control);
+  // Existing fallback-ladder callers retain their zero-argument boolean contract.
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
   const closed = await launcher.closeBrowserCdpIfIdle(0).catch(() => ({ closed: false, reason: "close-failed" as const, pid: null }));
   // Another run holds a lease: do not pull the browser out from under it; only make sure a host answers.
@@ -75,4 +79,46 @@ export async function agiRestartAgentlasBrowser(): Promise<boolean> {
   }
   try { await launcher.ensureBrowserCdpHost(); } catch { return false; }
   return launcher.browserCdpPortReady();
+}
+
+async function guardedAgiBrowserRestart(control: AgiBrowserRestartControl): Promise<AgiBrowserRestartOutcome> {
+  let closeEffect: AgiBrowserRestartOutcome["closeEffect"] = "not-started";
+  let ensureEffect: "not-started" | "unknown" = "not-started";
+  const current = () => {
+    if (control.signal.aborted) throw control.signal.reason ?? new Error("agi.decision.control-changed");
+    control.assertCurrent();
+  };
+  try {
+    current();
+    const launcher = await import("../mcp-tools/browser-cdp-launcher");
+    current();
+    const closed = await launcher.closeBrowserCdpIfIdle(0, control);
+    closeEffect = closed.effect ?? "unknown";
+    // Retain actual close evidence before checking revocation after the await.
+    current();
+    if (closeEffect === "unknown" || closed.reason === "close-unknown") return { state: "unknown", closeEffect };
+    if (closed.reason === "cancelled") return { state: "cancelled", closeEffect };
+    if (closed.reason === "active-leases") {
+      const ownership = await launcher.reconcileBrowserCdpOwnerWithRetry();
+      current();
+      if (ownership.state !== "owned") return { state: "failed", closeEffect };
+      const ready = await launcher.browserCdpPortReady();
+      current();
+      return { state: ready ? "ready" : "failed", closeEffect };
+    }
+    if (!closed.closed && closed.reason !== "not-owned") return { state: "failed", closeEffect };
+    // Entry admission only. A shared ensure flight is not owned/cancelled by this borrower.
+    // Its already-admitted internal spawn lifetime is outside this close-boundary contract.
+    current();
+    ensureEffect = "unknown";
+    await launcher.ensureBrowserCdpHost();
+    current();
+    const ready = await launcher.browserCdpPortReady();
+    current();
+    return { state: ready ? "ready" : "failed", closeEffect, ensureEffect };
+  } catch {
+    let revoked = false;
+    try { current(); } catch { revoked = true; }
+    return { state: closeEffect === "unknown" || ensureEffect === "unknown" ? "unknown" : revoked ? "cancelled" : "failed", closeEffect, ensureEffect };
+  }
 }

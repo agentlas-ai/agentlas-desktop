@@ -58,7 +58,7 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
     const controlRefusal = () => agiDecisionRefusal(input);
     const initialRefusal = controlRefusal();
     if (initialRefusal) return { outcome: "rested", code: initialRefusal };
-    if (input.facts?.repairInFlight || model?.isRunning(input.goalId)) return { outcome: "rested", code: "agi.repair-in-flight" };
+    if (input.facts?.repairInFlight || model?.isRunning(input.goalId) || executor.isDeferredBusy(input.goalId)) return { outcome: "rested", code: "agi.repair-in-flight" };
     const d = input.diagnosis;
     if (!input.runId || input.runVersion === null) return { outcome: "failed", code: "agi.goal-ledger-missing" };
     const incident = executor.incidents.get(input.incidentId);
@@ -73,7 +73,7 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       try { refreshed = input.refreshFence?.(); } catch { refreshed = null; }
       if (input.refreshFence && !refreshed) return { actionId: actionId(input, attempt, action, index), action, ok: false, code: "agi.action.state-changed" };
       const receipt = executor.execute({ schema: AGI_ACTION_SCHEMA, actionId: actionId(input, attempt, action, index), incidentId: input.incidentId,
-        attempt, fence: refreshed ?? runFence, action, args, attemptTokensSoFar: 0 });
+        attempt, fence: refreshed ?? runFence, action, args, attemptTokensSoFar: 0 }, input);
       done.push({ action, result: receipt.ok ? receipt.code : `refused:${receipt.code}` });
       return receipt;
     };
@@ -135,7 +135,9 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
     if (d.ownerClass === "human_only" && d.boundary) return { outcome: "needs-human", code: `agi.boundary.${d.boundary}`, actions: done };
     return { outcome: "rested", code: "agi.no-deterministic-path", actions: done };
   }) as AgiUnblockHandlerWithModel;
-  handler.isBusy = (goalId) => model?.isRunning(goalId) === true;
-  handler.settled = async () => { while (inFlight.size) await Promise.allSettled([...inFlight]); };
+  handler.isBusy = (goalId) => model?.isRunning(goalId) === true || executor.isDeferredBusy(goalId);
+  handler.settled = async () => {
+    while (inFlight.size || executor.isDeferredBusy()) await Promise.allSettled([...inFlight, executor.settledDeferred()]);
+  };
   return handler;
 }

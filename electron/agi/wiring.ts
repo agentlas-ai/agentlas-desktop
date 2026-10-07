@@ -47,13 +47,13 @@ import { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
 
 type LoginSeam = (input: { domain: string; goalId: string; runId: string; chatId: string | null }) => AgiLoginRecoveryOutcome | Promise<AgiLoginRecoveryOutcome>;
 let loginSeam: LoginSeam | null = agiRunLoginRecovery;
-let browserRestartSeam: (() => boolean | Promise<boolean>) | null = agiRestartAgentlasBrowser;
+let browserRestartSeam: AgiExecutorDeps["restartAgentlasBrowser"] | null = agiRestartAgentlasBrowser;
 let defectListener: ((input: { defectId: string; goalId: string; chatId: string | null; code: string }) => void) | null = null;
 
 /** The login-recovery ladder plugs in here (function seam; plan §3.5 run_login_recovery). */
 export function setAgiLoginRecoverySeam(fn: LoginSeam | null): void { loginSeam = fn; }
 /** The Agentlas Browser restart path plugs in here (D6: AGI may restart the browser, never the app). */
-export function setAgiBrowserRestartSeam(fn: (() => boolean | Promise<boolean>) | null): void { browserRestartSeam = fn; }
+export function setAgiBrowserRestartSeam(fn: AgiExecutorDeps["restartAgentlasBrowser"] | null): void { browserRestartSeam = fn; }
 /** The defect chip (D5) listens here. */
 export function onAgiDefectFiled(fn: typeof defectListener): void { defectListener = fn; }
 
@@ -125,11 +125,11 @@ export function createAgiExecutor(): AgiActionExecutor {
       captureGoalStrategyEpisode(captureId, goalId);
     },
     strategy: {
-      prepare: batch => prepareGoalStrategyEpisode(strategyBatchInput(batch)),
-      commit: (batch, prepared) => commitGoalStrategyEpisode({ ...strategyBatchInput(batch), requestId: batch.rest.actionId,
+      prepare: (batch, decision) => prepareGoalStrategyEpisode(strategyBatchInput(batch),decision),
+      commit: (batch, prepared, decision) => commitGoalStrategyEpisode({ ...strategyBatchInput(batch), requestId: batch.rest.actionId,
         prepared: prepared as PreparedGoalStrategyEpisode,
         latestReceipt: chatId => { const receipt = invocationService.latestReceipt(chatId);
-          return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null; } }),
+          return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null; } },decision),
     },
     rest: request => {
       const until = request.args?.untilIso, reason = request.args?.reason;
@@ -200,7 +200,7 @@ export function createAgiExecutor(): AgiActionExecutor {
     recordMove: (goalId, runId, move, detail) => recordAgiMove(goalId, runId, move, detail),
     installedPaths: () => agiInstalledPaths(),
     runLoginRecovery: (input) => loginSeam ? loginSeam(input) : "unavailable",
-    restartAgentlasBrowser: () => browserRestartSeam ? browserRestartSeam() : false,
+    restartAgentlasBrowser: (control) => browserRestartSeam ? browserRestartSeam(control) : false,
     announce: ({ chatId, actionId, text }) => {
       const runId = `agi-action:${actionId}`;
       const already = getDb().prepare("SELECT id FROM chat_messages WHERE chat_id = ? AND host_notice_json LIKE ? LIMIT 1")

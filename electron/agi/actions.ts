@@ -36,6 +36,8 @@ import { MAX_SAME_MOVE_PER_CAUSE, PERSISTENCE_BOUNDARY_KINDS, isPersistenceBound
 import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind } from "./blocker";
 import { AgiIncidentStore } from "./incident-store";
 import { applyDefectResolutions, ensureDefectResolutionColumns } from "./defect-resolutions";
+import { assertAgiDecisionControl, agiDecisionAbortSignal, retainAgiDecisionControl, AGI_DECISION_CONTROL_CHANGED } from "./decision-control";
+import type { AgiUnblockInput } from "./monitor";
 
 export const AGI_ACTION_SCHEMA = "agentlas.agi-unblock.v1" as const;
 export const AGI_MAX_ACTIONS_PER_ATTEMPT = 4;
@@ -80,6 +82,15 @@ export type AgiPlanOp =
 
 export type AgiLoginRecoveryOutcome = "recovered" | "awaiting-owner" | "in-flight" | "not-a-wall" | "unavailable";
 
+/** Main-only original decision boundary, never parsed from model action arguments. */
+export interface AgiBrowserRestartControl { signal: AbortSignal; assertCurrent(): void }
+export interface AgiBrowserRestartOutcome {
+  state: "ready" | "failed" | "cancelled" | "unknown";
+  closeEffect: "not-started" | "closed" | "unknown";
+  /** Shared ensure internals are not owned by this borrower. */
+  ensureEffect?: "not-started" | "unknown";
+}
+
 export interface AgiStrategyBatch { plan: AgiActionRequest; rest: AgiActionRequest }
 
 export interface AgiExecutorDeps {
@@ -88,8 +99,8 @@ export interface AgiExecutorDeps {
   captureEpisode?(captureId: string, goalId: string): void;
   rest?(request: AgiActionRequest): GoalEpisodeDisposition;
   strategy?: {
-    prepare(batch: AgiStrategyBatch): Promise<unknown>;
-    commit(batch: AgiStrategyBatch, prepared: unknown): GoalEpisodeDisposition;
+    prepare(batch: AgiStrategyBatch, decision: AgiUnblockInput): Promise<unknown>;
+    commit(batch: AgiStrategyBatch, prepared: unknown, decision: AgiUnblockInput): GoalEpisodeDisposition;
   };
   afterRest?(): void;
   goal(goalId: string): AgiGoalView | null;
@@ -115,7 +126,7 @@ export interface AgiExecutorDeps {
   /** The login-recovery ladder seam (plugged by electron/browser/*; absent → unavailable). */
   runLoginRecovery?(input: { domain: string; goalId: string; runId: string; chatId: string | null }): AgiLoginRecoveryOutcome | Promise<AgiLoginRecoveryOutcome>;
   /** Agentlas Browser restart seam (D6: allowed without asking). */
-  restartAgentlasBrowser?(): boolean | Promise<boolean>;
+  restartAgentlasBrowser?(control: AgiBrowserRestartControl): boolean | AgiBrowserRestartOutcome | Promise<boolean | AgiBrowserRestartOutcome>;
   /** One owner-visible line in the goal chat (host-notice marker). Idempotent per actionId. */
   announce?(input: { chatId: string; actionId: string; kind: "action" | "ask" | "defect"; text: { ko: string; en: string } }): void;
   /** A defect was filed: surface the chip (D5). */
@@ -154,6 +165,11 @@ function text(value: unknown, max: number): string | null {
 
 export class AgiActionExecutor {
   readonly incidents: AgiIncidentStore;
+  private readonly deferredBrowser = new Map<string, { goalId: string; promise: Promise<void> }>();
+  isDeferredBusy(goalId?: string): boolean {
+    return [...this.deferredBrowser.values()].some(entry => goalId === undefined || entry.goalId === goalId);
+  }
+  settledDeferred(): Promise<unknown> { return Promise.allSettled([...this.deferredBrowser.values()].map(entry => entry.promise)); }
   constructor(private readonly deps: AgiExecutorDeps) {
     ensureAgiActionSchema(deps.db);
     this.incidents = new AgiIncidentStore(deps.db);
@@ -189,7 +205,7 @@ export class AgiActionExecutor {
   captureEpisode(captureId: string, goalId: string): void { this.deps.captureEpisode?.(captureId, goalId); }
 
   /** Two existing actions, one Main transaction. Preparation never executes either action. */
-  async executeStrategyEpisode(batch: AgiStrategyBatch): Promise<AgiActionReceipt[]> {
+  async executeStrategyEpisode(batch: AgiStrategyBatch, decision: AgiUnblockInput): Promise<AgiActionReceipt[]> {
     const requests = [batch.plan, batch.rest];
     const batchDigest = createHash("sha256").update(JSON.stringify(requests.map(r => ({ actionId: r.actionId, action: r.action,
       incidentId: r.incidentId, attempt: r.attempt, goalId: r.fence.goalId, runId: r.fence.runId, captureId: r.episodeCaptureId, args: r.args })))).digest("hex");
@@ -207,6 +223,11 @@ export class AgiActionExecutor {
         || JSON.stringify(batch.plan.fence) !== JSON.stringify(batch.rest.fence)) return "agi.action.invalid";
       const incident = this.incidents.get(batch.plan.incidentId);
       if (!incident || incident.goalId !== batch.plan.fence.goalId) return "agi.action.incident-unknown";
+      // Original Main custody travels separately from model action data. Read-only
+      // settled replay above remains valid after this decision's lifetime ends.
+      if (!decision || decision.goalId !== incident.goalId || decision.runId !== batch.plan.fence.runId
+        || decision.incidentId !== incident.id || incident.attempts !== batch.plan.attempt) return AGI_DECISION_CONTROL_CHANGED;
+      try { assertAgiDecisionControl(decision.decisionControl, decision); } catch { return AGI_DECISION_CONTROL_CHANGED; }
       const goal = this.deps.goal(incident.goalId);
       if (!goal || goal.runId !== batch.plan.fence.runId || goal.version !== batch.plan.fence.runVersion) return "agi.action.stale";
       if (goal.status !== "running" || (goal.pauseReason && OWNER_BOUNDARY_PAUSES.has(goal.pauseReason))) return "agi.action.owner-boundary";
@@ -235,7 +256,7 @@ export class AgiActionExecutor {
     if (hasClaim()) return failed("agi.action.in-flight");
     preparing.set(goalId, { digest: batchDigest, actionIds: requests.map(r => r.actionId) });
     try {
-      const prepared = await this.deps.strategy!.prepare(batch);
+      const prepared = await this.deps.strategy!.prepare(batch,decision);
       const receipts = desktopStoreTransaction(this.deps.db,() => {
         const replay = requests.map(r => this.receipt(r.actionId));
         if (replay.some(Boolean)) {
@@ -247,7 +268,7 @@ export class AgiActionExecutor {
         for (const r of requests) this.deps.db.prepare(`INSERT INTO agi_action_receipts
           (action_id,incident_id,goal_id,attempt,action,status,created_at_ms) VALUES (?,?,?,?,?,'claimed',?)`)
           .run(r.actionId,r.incidentId,r.fence.goalId,r.attempt,r.action,this.deps.now());
-        const result = this.deps.strategy!.commit(batch,prepared);
+        const result = this.deps.strategy!.commit(batch,prepared,decision);
         if (result.status !== "wait_registered" || !result.waitId || !result.checkpointId) throw new Error(result.code);
         return requests.map((r,i) => this.settle(r,{ actionId: r.actionId, action: r.action, ok: true,
           code: i === 0 ? "agi.plan.applied" : "goal_episode_wait_registered", detail: { ...result, batchDigest } }));
@@ -270,7 +291,7 @@ export class AgiActionExecutor {
     }
   }
 
-  execute(request: AgiActionRequest): AgiActionReceipt {
+  execute(request: AgiActionRequest, decision?: AgiUnblockInput): AgiActionReceipt {
     const replay = request && typeof request.actionId === "string" ? this.receipt(request.actionId) : null;
     if (replay) {
       if (request.action === "rest" && replay.detail?.requestDigest && replay.detail.requestDigest !== restRequestDigest(request))
@@ -294,6 +315,12 @@ export class AgiActionExecutor {
     }
     const incident = this.incidents.get(request.incidentId);
     if (!incident || incident.goalId !== request.fence.goalId) return refuse("agi.action.incident-unknown");
+    if (request.action === "restart_agentlas_browser") {
+      if (!decision || decision.goalId !== request.fence.goalId || decision.runId !== request.fence.runId
+        || decision.incidentId !== incident.id || request.attempt !== incident.attempts) return refuse(AGI_DECISION_CONTROL_CHANGED);
+      try { assertAgiDecisionControl(decision.decisionControl, decision); } catch { return refuse(AGI_DECISION_CONTROL_CHANGED); }
+      if (this.isDeferredBusy(decision.goalId)) return refuse("agi.action.in-flight");
+    }
     // 2. fence against the ledger now
     const goal = this.deps.goal(request.fence.goalId);
     if (!goal || goal.runId !== request.fence.runId || goal.version !== request.fence.runVersion) return refuse("agi.action.stale");
@@ -351,7 +378,7 @@ export class AgiActionExecutor {
     if (claimed.changes !== 1) return this.receipt(request.actionId) ?? { actionId: request.actionId, action: request.action, ok: false, code: "agi.action.in-flight" };
     let result: AgiActionReceipt;
     try {
-      result = this.run(request, goal, incident.id);
+      result = this.run(request, goal, incident.id, decision);
     } catch (error) {
       const code = error instanceof Error && /^[a-z][a-z0-9._:-]{2,120}$/.test(error.message) ? error.message : "agi.action.failed";
       result = { actionId: request.actionId, action: request.action, ok: false, code };
@@ -372,12 +399,14 @@ export class AgiActionExecutor {
   }
 
   /** The end of an async action (login ladder, browser restart): a reflection on the incident, never a second receipt. */
-  private later(request: AgiActionRequest, goal: AgiGoalView, incidentId: string, code: string, failed: boolean): void {
+  private later(request: AgiActionRequest, goal: AgiGoalView, incidentId: string, code: string, failed: boolean, browser?: AgiBrowserRestartOutcome): void {
     try {
       this.incidents.reflect(incidentId, { atMs: this.deps.now(), action: request.action, result: failed ? `failed:${code}` : code,
         evidenceRefs: [`agi-action:${request.actionId}`], ruledOut: failed });
       this.deps.db.prepare("UPDATE agi_action_receipts SET result_json = json_set(result_json, '$.detail.completion', ?) WHERE action_id = ?")
         .run(code, request.actionId);
+      if (browser) this.deps.db.prepare("UPDATE agi_action_receipts SET result_json = json_set(result_json, '$.detail.browser', json(?)) WHERE action_id = ?")
+        .run(JSON.stringify(browser), request.actionId);
       if (!failed && goal.chatId && this.deps.announce && (code === "agi.login.recovered" || code === "agi.browser.restarted")) {
         const line = noticeLine(request.action, { actionId: request.actionId, action: request.action, ok: true, code, detail: {} });
         if (line) this.deps.announce({ chatId: goal.chatId, actionId: `${request.actionId}:done`, kind: "action", text: line });
@@ -396,7 +425,7 @@ export class AgiActionExecutor {
     return this.receipt(result.actionId) ?? result;
   }
 
-  private run(request: AgiActionRequest, goal: AgiGoalView, incidentId: string): AgiActionReceipt {
+  private run(request: AgiActionRequest, goal: AgiGoalView, incidentId: string, decision?: AgiUnblockInput): AgiActionReceipt {
     const ok = (code: string, detail?: Record<string, unknown>): AgiActionReceipt => ({ actionId: request.actionId, action: request.action, ok: true, code, ...(detail ? { detail } : {}) });
     const no = (code: string, detail?: Record<string, unknown>): AgiActionReceipt => ({ actionId: request.actionId, action: request.action, ok: false, code, ...(detail ? { detail } : {}) });
     const args = request.args ?? {};
@@ -521,13 +550,40 @@ export class AgiActionExecutor {
       }
       case "restart_agentlas_browser": {
         if (!this.deps.restartAgentlasBrowser) return no("agi.browser.restart-unavailable");
-        const restarted = this.deps.restartAgentlasBrowser();
-        if (isPromise(restarted)) {
-          void restarted.then((done) => this.later(request, goal, incidentId, done ? "agi.browser.restarted" : "agi.browser.restart-failed", !done),
-            () => this.later(request, goal, incidentId, "agi.browser.restart-failed", true));
-          return ok("agi.browser.restart-dispatched");
+        if (!decision) return no(AGI_DECISION_CONTROL_CHANGED);
+        const original = Object.freeze({ ...decision });
+        const release = retainAgiDecisionControl(original);
+        let finish!: () => void;
+        const promise = new Promise<void>(resolve => { finish = resolve; });
+        // Register before calling the seam, including synchronous reentrancy.
+        this.deferredBrowser.set(request.actionId, { goalId: goal.goalId, promise });
+        const cleanup = () => {
+          try { release(); } finally { this.deferredBrowser.delete(request.actionId); finish(); }
+        };
+        const complete = (value: boolean | AgiBrowserRestartOutcome) => {
+          const outcome: AgiBrowserRestartOutcome = typeof value === "boolean"
+            ? { state: value ? "ready" : "unknown", closeEffect: "unknown" } : value;
+          const code = outcome.state === "ready"
+            ? outcome.closeEffect === "closed" ? "agi.browser.restarted" : "agi.browser.ready"
+            : `agi.browser.restart-${outcome.state}`;
+          this.later(request, goal, incidentId, code, outcome.state === "failed", outcome);
+        };
+        let restarted: ReturnType<NonNullable<AgiExecutorDeps["restartAgentlasBrowser"]>>;
+        let admitted = false;
+        try {
+          const control: AgiBrowserRestartControl = { signal: agiDecisionAbortSignal(original),
+            assertCurrent: () => assertAgiDecisionControl(original.decisionControl, original) };
+          control.assertCurrent();
+          admitted = true;
+          restarted = this.deps.restartAgentlasBrowser(control);
+        } catch (error) {
+          if (!admitted) { cleanup(); throw error; }
+          restarted = Promise.reject(error); // A throwing admitted seam does not prove no effect.
         }
-        return restarted ? ok("agi.browser.restarted") : no("agi.browser.restart-failed");
+        // Terminal evidence is unconditional, even after Stop or a failed DB read.
+        void Promise.resolve(restarted).then(complete, () => complete({ state: "unknown", closeEffect: "unknown" }))
+          .finally(cleanup).catch(() => { /* reflection cannot repeat admitted work */ });
+        return ok("agi.browser.restart-dispatched");
       }
       case "request_app_restart": {
         const asked = this.deps.db.prepare("SELECT 1 FROM agi_action_receipts WHERE incident_id = ? AND action = 'request_app_restart' AND ok = 1").get(incidentId);

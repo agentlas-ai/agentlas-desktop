@@ -321,7 +321,7 @@ export class AgiModelAttempt {
         const request = (action: "replan_tree" | "rest", index: number): import("./actions").AgiActionRequest => ({
           schema: AGI_ACTION_SCHEMA, actionId: `${attemptId}:${index}:${action}`, incidentId: input.incidentId, attempt: attemptNo,
           fence: refreshed, action, args: proposed.find(a => a.action === action)!.args, attemptTokensSoFar: tokensUsed, episodeCaptureId });
-        receipts.push(...await d.executor.executeStrategyEpisode({ plan: request("replan_tree",0), rest: request("rest",1) }));
+        receipts.push(...await d.executor.executeStrategyEpisode({ plan: request("replan_tree",0), rest: request("rest",1) },input));
       }
     } else ordered.forEach((entry, index) => {
       {
@@ -334,7 +334,7 @@ export class AgiModelAttempt {
       }
       const receipt = d.executor.execute({ schema: AGI_ACTION_SCHEMA, actionId: `${attemptId}:${index}:${entry.action}`, incidentId: input.incidentId,
         attempt: attemptNo, fence, action: entry.action, args: entry.args, attemptTokensSoFar: tokensUsed,
-        episodeCaptureId, ...(mixedRest ? { episodeRefusal: "goal_episode_mixed_batch" } : {}) });
+        episodeCaptureId, ...(mixedRest ? { episodeRefusal: "goal_episode_mixed_batch" } : {}) }, input);
       receipts.push(receipt);
       if (receipt.ok && !input.refreshFence) {
         const version = d.executor.currentVersion(input.goalId);
