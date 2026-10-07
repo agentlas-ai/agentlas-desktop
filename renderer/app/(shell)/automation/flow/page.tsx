@@ -81,7 +81,7 @@ function runtimeSelectionPresentation(selection: RuntimeSelection | null | undef
   const effort = selection.effort?.trim() || (locale === "en" ? "Default effort" : "기본 작업량");
   return {
     label: locale === "en" ? "Automation pin · overrides role default" : "자동화별 고정 · 역할 기본보다 우선",
-    detail: `${provider} · ${engine} · ${model ?? runtimeModelFallbackLabel(selection.kind, locale === "en" ? "en" : "ko")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "fails closed; no cross-provider fallback" : "사용할 수 없으면 중단 · 다른 공급자로 바꾸지 않음"}`,
+    detail: `${provider} · ${engine} · ${model ?? runtimeModelFallbackLabel(selection.kind, locale === "en" ? "en" : "ko")} · ${locale === "en" ? "effort" : "작업량"} ${effort} · ${locale === "en" ? "Worker if unavailable · review uncertain execution" : "불가 시 Worker · 실행 불확실 시 확인"}`,
   };
 }
 
@@ -407,7 +407,35 @@ function AutomationFlowPage() {
   const [architectAttachmentError, setArchitectAttachmentError] = useState("");
   const architectInputRef = useRef<HTMLTextAreaElement | null>(null);
   const architectFileInputRef = useRef<HTMLInputElement | null>(null);
+  const editorCustodyRef = useRef({ automation, dirty, routeId: id, generation: 0 });
+  const graphRequestGenerationRef = useRef(0);
+  const proposalCustodyRef = useRef<{ request: number; editor: number } | null>(null);
+  if (editorCustodyRef.current.automation !== automation || editorCustodyRef.current.dirty !== dirty || editorCustodyRef.current.routeId !== id) {
+    editorCustodyRef.current = { automation, dirty, routeId: id, generation: editorCustodyRef.current.generation + 1 };
+  }
+  function graphRequestIsCurrent(token: { request: number; editor: number }): boolean {
+    return token.request === graphRequestGenerationRef.current && token.editor === editorCustodyRef.current.generation
+      && !editorCustodyRef.current.dirty;
+  }
+  // A navigation/edit/save/restore owns a new editor generation, even if an ABA
+  // eventually returns to the same graph. Durable host receipts remain readable.
+  useEffect(() => {
+    graphRequestGenerationRef.current += 1;
+    proposalCustodyRef.current = null;
+    setProposal(null);
+    setArchitectBusy(false);
+    setArchitectAction(null);
+    return () => {
+      // An unmounted editor cannot apply a late prepared proposal. Already
+      // persisted Main receipts remain available to the next editor's reader.
+      graphRequestGenerationRef.current += 1;
+      editorCustodyRef.current.generation += 1;
+      proposalCustodyRef.current = null;
+    };
+  }, [automation, dirty, id]);
   const [proposal, setProposal] = useState<{
+    proposalId: string;
+    baseRevision: string;
     patch: { ops: unknown[]; rationale?: string };
     risks: string[];
     summary: { added: string[]; removed: string[]; changed: string[] };
@@ -1308,22 +1336,37 @@ function AutomationFlowPage() {
     setArchitectDraft(scoped);
     const api = ipc();
     if (!api || !automation) return;
+    if (editorCustodyRef.current.dirty) {
+      setMessage(locale === "en" ? "Save or discard local edits before requesting a saved-graph repair." : "저장본 수리를 요청하기 전에 로컬 편집을 저장하거나 취소하세요.");
+      return;
+    }
+    const token = { request: ++graphRequestGenerationRef.current, editor: editorCustodyRef.current.generation };
     setArchitectBusy(true);
     setArchitectAction("propose");
     setProposal(null);
     setMessage(locale === "en" ? "Working out what would change..." : "무엇이 바뀔지 알아보는 중입니다...");
     try {
       const result = await api.automations.requestGraphPatch(automation.id, scoped);
+      if (!graphRequestIsCurrent(token)) return;
       if (!result.ok) { setMessage(`${result.reason} ${result.nextAction}`); return; }
+      proposalCustodyRef.current = token;
       setProposal(result);
+      if (!result.needsApproval && !editorCustodyRef.current.dirty && editorCustodyRef.current.automation?.id === automation.id
+        && sameWorkflowGraph(editorCustodyRef.current.automation.graph, automation.graph)) {
+        await applyProposal(result, true, token);
+        return;
+      }
       setMessage(locale === "en"
         ? "Nothing has changed yet. Review it and apply."
         : "아직 아무것도 바뀌지 않았습니다. 내용을 확인하고 적용하세요.");
     } catch {
+      if (!graphRequestIsCurrent(token)) return;
       setMessage(locale === "en" ? "The change could not be worked out." : "변경 내용을 만들지 못했습니다.");
     } finally {
-      setArchitectBusy(false);
-      setArchitectAction(null);
+      if (token.request === graphRequestGenerationRef.current) {
+        setArchitectBusy(false);
+        setArchitectAction(null);
+      }
     }
   }
 
@@ -1337,50 +1380,90 @@ function AutomationFlowPage() {
     if (!api || !automation) return;
     const sentence = sentenceIn.trim();
     if (!sentence) return;
+    if (editorCustodyRef.current.dirty) {
+      setMessage(locale === "en" ? "Save or discard local edits before requesting a saved-graph repair." : "저장본 수리를 요청하기 전에 로컬 편집을 저장하거나 취소하세요.");
+      return;
+    }
+    const token = { request: ++graphRequestGenerationRef.current, editor: editorCustodyRef.current.generation };
     setArchitectBusy(true);
     setArchitectAction("propose");
     setProposal(null);
     setMessage(locale === "en" ? "Working out what would change..." : "무엇이 바뀔지 알아보는 중입니다...");
     try {
       const result = await api.automations.requestGraphPatch(automation.id, sentence);
+      if (!graphRequestIsCurrent(token)) return;
       if (!result.ok) {
         // 실패는 사유와 다음 행동을 그대로 보여준다 — 코드만 남기지 않는다.
         setMessage(`${result.reason} ${result.nextAction}`);
         return;
       }
+      proposalCustodyRef.current = token;
       setProposal(result);
+      if (!result.needsApproval && !editorCustodyRef.current.dirty && editorCustodyRef.current.automation?.id === automation.id
+        && sameWorkflowGraph(editorCustodyRef.current.automation.graph, automation.graph)) {
+        await applyProposal(result, true, token);
+        return;
+      }
       setMessage(locale === "en"
         ? "Nothing has changed yet. Review it and apply."
         : "아직 아무것도 바뀌지 않았습니다. 내용을 확인하고 적용하세요.");
     } catch {
+      if (!graphRequestIsCurrent(token)) return;
       setMessage(locale === "en" ? "The change could not be worked out." : "변경 내용을 만들지 못했습니다.");
     } finally {
-      setArchitectBusy(false);
-      setArchitectAction(null);
+      if (token.request === graphRequestGenerationRef.current) {
+        setArchitectBusy(false);
+        setArchitectAction(null);
+      }
     }
   }
 
-  async function applyProposal() {
+  async function applyProposal(chosen = proposal, automatic = false, custody = proposalCustodyRef.current) {
     const api = ipc();
-    if (!api || !automation || !proposal) return;
+    if (!api || !automation || !chosen || !custody) return;
+    const token = custody;
+    if (!graphRequestIsCurrent(token)) return;
+    if (editorCustodyRef.current.dirty || editorCustodyRef.current.automation?.id !== automation.id) {
+      setMessage(locale === "en" ? "Your unsaved edits are preserved. Save or discard them before applying this proposal." : "저장하지 않은 편집을 유지했습니다. 먼저 저장하거나 취소한 뒤 제안을 적용하세요.");
+      return;
+    }
     const previous = automation;
     setArchitectBusy(true);
     setArchitectAction("apply");
     try {
-      const result = await api.automations.applyGraphPatch(previous.id, proposal.patch);
+      const result = await api.automations.applyGraphPatch(previous.id, { proposalId: chosen.proposalId, approved: !automatic });
+      if (!graphRequestIsCurrent(token)) return;
       if (!result.ok) {
         setMessage(`${result.reason ?? ""} ${result.nextAction ?? ""}`.trim() || (locale === "en" ? "Not applied." : "적용하지 못했습니다."));
         return;
       }
       const applied = exactAutomationProjection(result.automation, previous.id);
-      if (result.automationId !== previous.id || !applied) throw new Error("automation_patch_receipt_mismatch");
+      if (result.automationId !== previous.id || result.proposalId !== chosen.proposalId || !applied) throw new Error("automation_patch_receipt_mismatch");
+      if (editorCustodyRef.current.dirty || editorCustodyRef.current.automation?.id !== previous.id) {
+        setMessage(locale === "en" ? "The verified repair was saved. Your newer local edits are preserved." : "검증한 수정본을 저장했습니다. 이후의 로컬 편집은 유지했습니다.");
+        return;
+      }
       setProposal(null);
       setArchitectDraft("");
       setAutomation(applied);
       setMessage(locale === "en" ? "Applied." : "적용했습니다.");
     } catch {
+      if (!graphRequestIsCurrent(token)) return;
       try {
+        const receipt=await api.automations.readGraphPatchReceipt(previous.id,chosen.proposalId);
+        if (!graphRequestIsCurrent(token)) return;
+        if (editorCustodyRef.current.dirty || editorCustodyRef.current.automation?.id !== previous.id) {
+          setMessage(locale === "en" ? "Your newer local edits are preserved. The saved receipt can be checked after reopening." : "이후의 로컬 편집을 유지했습니다. 다시 열면 저장된 처리 기록을 확인할 수 있습니다.");
+          return;
+        }
+        if (receipt?.ok && !receipt.superseded && receipt.proposalId===chosen.proposalId && receipt.automationId===previous.id && receipt.automation) {
+          setAutomation(receipt.automation); setProposal(null);
+          setMessage(locale === "en" ? "The saved repair receipt was recovered. Runtime outcome remains unchecked." : "저장된 수정 처리 기록을 확인했습니다. 실제 실행 결과는 아직 확인하지 않았습니다.");
+          return;
+        }
         const current = exactAutomationProjection(await api.automations.get(previous.id), previous.id);
+        if (!graphRequestIsCurrent(token)) return;
+        if (editorCustodyRef.current.dirty || editorCustodyRef.current.automation?.id !== previous.id) return;
         if (!current) throw new Error("automation_patch_readback_missing");
         if (sameWorkflowGraph(current.graph, previous.graph)) {
           setMessage(locale === "en"
@@ -1394,14 +1477,17 @@ function AutomationFlowPage() {
             : "저장된 그래프는 바뀌었지만 응답이 유실되어 이 제안이 정확히 반영된 것인지 증명할 수 없습니다. 현재 그래프를 검토하고 제안을 다시 적용하지 마세요.");
         }
       } catch {
+        if (!graphRequestIsCurrent(token)) return;
         setProposal(null);
         setMessage(locale === "en"
           ? "The proposal may already have changed the graph, but its final state could not be read. Do not apply it again; reopen this automation and inspect the saved graph."
           : "제안이 그래프를 이미 바꿨을 수 있으나 최종 상태를 읽지 못했습니다. 다시 적용하지 말고 자동화를 다시 열어 저장본을 확인하세요.");
       }
     } finally {
-      setArchitectBusy(false);
-      setArchitectAction(null);
+      if (token.request === graphRequestGenerationRef.current) {
+        setArchitectBusy(false);
+        setArchitectAction(null);
+      }
     }
   }
 

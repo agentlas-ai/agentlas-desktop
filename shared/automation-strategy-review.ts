@@ -27,7 +27,7 @@ export interface AutomationStrategyProposalView {
   reviewReason: string | null;
   changes: Array<{ label: string; before: string | null; after: string }>;
   canApply: boolean;
-  unavailableReason: "stale" | "no_executable_change" | "goal_amendment_required" | "ownership_unverified" | null;
+  unavailableReason: "episode_reserved" | "stale" | "no_executable_change" | "goal_amendment_required" | "ownership_unverified" | null;
   goalOwnershipUnverified: boolean;
   /** A human has already adopted this legacy origin for strategy-only changes. */
   originAdoptionRecorded: boolean;

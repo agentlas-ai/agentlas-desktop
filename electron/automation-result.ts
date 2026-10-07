@@ -37,7 +37,7 @@ export interface AutomationResultClassification {
 export interface AutomationJudgeReceipt {
   schemaVersion: "agentlas.automation-judge-receipt.v1";
   /** The route of the judge that produced the verdict, or null when none did. */
-  route: "explicit_pin" | "orchestrator_pool" | "legacy" | null;
+  route: "explicit_pin" | "orchestrator_pool" | "worker_pool" | "legacy" | null;
   kind: string | null;
   model: string | null;
   attempts: Array<{ route: string; kind: string; model: string | null; outcome: string; elapsedMs: number }>;

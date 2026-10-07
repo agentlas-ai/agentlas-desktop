@@ -14,6 +14,8 @@ import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
+  captureGoalProducerAdmission, admitGoalProducer, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, goalWaitRefusalResolvesItself, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
 import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
@@ -2358,6 +2360,14 @@ export class InvocationService {
      * Goal projection exists.
      */
     let lastControllerSelection: RuntimeSelection | null = null;
+    const desktopProducerAdmission = !record.background && !executionContext && !runReq.agentAppMode && !effectObservation;
+    let producerAdmission: GoalProducerAdmission | null | undefined;
+    let producerWorkDispatchSealed = false;
+    const assertProducerServiceLifetime = (): void => {
+      if (!desktopProducerAdmission || producerWorkDispatchSealed || controller.signal.aborted
+        || this.activeRuns.get(runId) !== record || record.chatId !== chat.id
+        || !startBoundary.crossed || startBoundary.runId !== runId) throw new Error("goal_episode_admission_lifetime_stale");
+    };
     /** Preserve the root runtime's typed cause in the durable controller attempt. */
     let observedRuntimeErrorCode: string | null = null;
     const bindGoalControllerAttempt = (selection: RuntimeSelection): void => {
@@ -2390,7 +2400,7 @@ export class InvocationService {
         .slice(0, 32)}`;
       try {
         const longRunRuntimeSelection = captureLongRunRuntimeSelection(selection, { requireExact: true });
-        bindLongRunWorker({
+        const workerBinding: Parameters<typeof bindLongRunWorker>[0] = {
           workerId,
           runId: goalLongRun.id,
           parentWorkerId: null,
@@ -2406,14 +2416,20 @@ export class InvocationService {
           },
           permissionProfile: runReq.permissions ?? "read",
           state: "idle",
-        });
-        goalControllerAttemptId = startLongRunWorkerAttempt({
-          runId: goalLongRun.id,
-          workerId,
-          taskId: goalLongRunTask.id,
-          invocationRunId: runId,
-          runtimeSelection: longRunRuntimeSelection,
-        }).attemptId;
+        };
+        if (desktopProducerAdmission) {
+          if (!producerAdmission) throw new Error("goal_episode_admission_missing");
+          goalControllerAttemptId = admitGoalProducer({ admission: producerAdmission, goalId: goalLongRun.goalId,
+            worker: workerBinding }, assertProducerServiceLifetime).attemptId;
+          // The first owner claim advances the run version without a synthetic status transition.
+          refreshGoalProjection();
+        } else {
+          bindLongRunWorker(workerBinding);
+          goalControllerAttemptId = startLongRunWorkerAttempt({
+            runId: goalLongRun.id, workerId, taskId: goalLongRunTask.id, invocationRunId: runId,
+            runtimeSelection: longRunRuntimeSelection,
+          }).attemptId;
+        }
         goalInvocationProjection?.bindController(workerId, chat.agentId ?? `controller:${chat.id}`);
       } catch (error) {
         console.warn("[long-run] controller attempt binding failed:", error);
@@ -2549,6 +2565,17 @@ export class InvocationService {
           && (!event.modelRole || event.modelRole === "orchestrator")
         ) {
           lastControllerSelection = event.runtimeSelection;
+          // This token survives delayed automatic admission/ledger creation. A later selection or final cannot refresh it.
+          if (desktopProducerAdmission && producerAdmission === undefined
+            && event.kind === "notice" && event.notice?.code === "runtime-selected") {
+            try {
+              producerAdmission = captureGoalProducerAdmission({ invocationId: runId, chatId: chat.id,
+                goalId: projectionGoalId ?? getChat(chat.id)?.goalId ?? null }, assertProducerServiceLifetime);
+            } catch (error) {
+              producerAdmission = null;
+              console.warn("[long-run] producer admission capture unavailable:", error);
+            }
+          }
           bindGoalControllerAttempt(event.runtimeSelection);
         }
         /*
@@ -3523,6 +3550,17 @@ export class InvocationService {
       // foreground work even when their system coordinator is inventory-hidden.
       // Background divisions and external job contexts keep quiet native grants.
       !record.background && chat.kind === "user" && !executionContext && !runReq.agentAppMode ? "foreground" : "background",
+      (goalId) => {
+        if (!desktopProducerAdmission || producerWorkDispatchSealed) return;
+        try {
+          // Last synchronous pre-work opportunity: the client may have materialized the first Goal after selection.
+          if (goalId && (!projectionGoalId || projectionGoalId === goalId)) {
+            projectionGoalId = goalId;
+            refreshGoalProjection();
+            if (lastControllerSelection) bindGoalControllerAttempt(lastControllerSelection);
+          }
+        } finally { producerWorkDispatchSealed = true; }
+      },
     ))
       .then((result) => {
         // The runner promise has settled. Persist host effect completeness
@@ -3671,26 +3709,34 @@ export class InvocationService {
         if (result.goalWaitRequest && !executionContext) {
           // A finite Goal's refused timer ends this turn through the ordinary end-of-turn verification below.
           let finiteTimerEndsTurn = false;
+          let episodeRefused = false;
+          let episodeDecisionRecorded = false;
           try {
             if (controller.signal.aborted || record.steeringInterruptRequested) return;
             if (result.goalWaitRequest.status === "invalid") throw new Error(result.goalWaitRequest.reason);
             const goalId = getChat(chat.id)?.goalId;
             if (!goalId || goalId !== goalLongRun?.goalId) throw new Error("goal_wait_goal_binding_changed");
-            const subscription = registerGoalWaitSubscription({ goalId, invocationRunId: runId,
-              intent: result.goalWaitRequest.intent, hasTransientAttachments: record.hasTransientAttachments,
-              projectDir: executionCwd });
-            const message = pickLocale(runReq) === "ko" ? "대기를 등록했어요. 앱 실행 중 확인하며, 조건이 바뀌면 이어서 진행합니다."
-              : "The wait is registered. While the app is running, the Goal continues when its condition changes.";
-            appendChatMessage(chat.id, "assistant", message, { hostNotice: { purpose: "host-status", runId, status: "wait-registered" } });
-            const event: McpInvocationEvent = { kind: "notice", notice: { code: "goal-wait-registered", level: "info", message } };
-            tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: { waitId: subscription.waitId,
-              goalId, subjectRef: subscription.subjectRef, nextCheckAt: subscription.nextCheckAt, deadline: subscription.deadline, executionAvailability: "app-running" } });
-            this.publishRunEvent(record, { runId, chatId: chat.id, event });
+            episodeRefused = true;
+            const captureId = `goal-wait:${runId}`;
+            captureGoalEpisode({ captureId, goalId, producerInvocationId: runId });
+            const disposition = applyGoalEpisodeRest({ requestId: captureId, captureId, goalId,
+              intent: result.goalWaitRequest.intent, signal: controller.signal,
+              hasTransientAttachments: record.hasTransientAttachments, projectDir: executionCwd,
+              latestReceipt: chatId => { const receipt = this.latestReceipt(chatId);
+                return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null; },
+            }, registerGoalWaitSubscription);
+            episodeDecisionRecorded = disposition.code !== "goal_episode_request_conflict";
+            if (disposition.status !== "wait_registered") { episodeRefused = true; throw new Error(disposition.code); }
+            tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_registered", payload: { waitId: disposition.waitId,
+              goalId, nextCheckAt: disposition.nextCheckAt, executionAvailability: disposition.executionAvailability,
+              episodeRequestId: disposition.requestId } });
+            drainGoalEpisodeNotices();
+            return;
           } catch (error) {
             // Keep typed checkpoint refusals visible. Masking
             // checkpoint_workspace_changed as goal_wait_registration_failed
             // hid the actual projectless-One continuity failure in native QA.
-            const reason = error instanceof Error && /^(?:goal_wait|checkpoint)_[a-z_]+$/.test(error.message)
+            const reason = error instanceof Error && /^(?:goal_episode|goal_plan|goal_revision|goal_wait|checkpoint)_[a-z_]+$/.test(error.message)
               ? error.message : "goal_wait_registration_failed";
             const current = goalLongRun ? getLongRun(goalLongRun.id) : null;
             const revision = current ? getChatGoalRevision(current.goalId) : null;
@@ -3712,7 +3758,7 @@ export class InvocationService {
                 notBefore: requestedIntent?.subject.kind === "timer" ? requestedIntent.subject.notBefore : null } });
               if (!alreadyTold) this.publishRunEvent(record, { runId, chatId: chat.id, event: { kind: "notice",
                 notice: { code: GOAL_WAIT_FINITE_TIMER_NOTICE, level: "info", message } } });
-            } else if (current?.status === "running" && revision?.lifecycle === "ongoing"
+            } else if (!episodeRefused && current?.status === "running" && revision?.lifecycle === "ongoing"
               && !controller.signal.aborted && !record.hasTransientAttachments) {
               let fallbackRegistered = false;
               try {
@@ -3745,6 +3791,19 @@ export class InvocationService {
                 console.warn("[long-run] ongoing wait fallback unavailable:", fallbackError);
                 if (fallbackRegistered) return;
               }
+            }
+            if (episodeRefused && !finiteTimerEndsTurn) {
+              // Leave a typed current blocker for the existing Main/AGI recovery
+              // owner. Never revive this proposal or disturb a newer producer
+              // or a specialist that still owns running work.
+              const latest = current ? getLongRun(current.id) : null;
+              const producer = latest ? latestGoalEpisodeProducer(latest.id) : undefined;
+              if (latest?.status === "running" && !longRunOwnerHold(latest.id) && producer?.invocation_run_id === runId
+                && !controller.signal.aborted && unsettledLongRunAttemptCount(latest.id) === 0) transitionLongRun({ runId: latest.id, expectedVersion: latest.version,
+                  to: "blocked", actorKind: "host", reason });
+              tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_wait_refused", payload: {
+                goalId: current?.goalId ?? null, reasonCode: reason, disposition: episodeDecisionRecorded ? "decision_recorded" : "refused", scheduled: false } });
+              return;
             }
             if (!finiteTimerEndsTurn) {
               const latest = current ? getLongRun(current.id) : null;

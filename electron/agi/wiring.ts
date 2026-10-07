@@ -9,6 +9,11 @@
  *  - Agentlas Browser restart: setAgiBrowserRestartSeam(fn).
  */
 import { randomUUID } from "node:crypto";
+import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices } from "../long-run/episode-disposition";
+import { captureGoalStrategyEpisode, prepareGoalStrategyEpisode, commitGoalStrategyEpisode, type StrategyReorder,
+  type PreparedGoalStrategyEpisode } from "../long-run/strategy-episode";
+import type { GoalWaitIntent } from "../long-run/wait-emitter";
+import { registerGoalWaitSubscription } from "../long-run/wait-subscriptions";
 import { getDb } from "../store/db";
 import { appendChatMessage } from "../store/chats";
 import { reportHostAlertToOne } from "../one/host-alerts";
@@ -33,7 +38,7 @@ import { agiRestartAgentlasBrowser, agiRunLoginRecovery } from "./browser-seams"
 import type { RuntimeSelection } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
 import { PERSISTENCE_DECISION_SCHEMA, type FailureCauseKind } from "../../shared/persistence-policy";
-import { AgiActionExecutor, type AgiExecutorDeps, type AgiGoalView, type AgiLoginRecoveryOutcome, type AgiPlanView } from "./actions";
+import { AgiActionExecutor, type AgiExecutorDeps, type AgiGoalView, type AgiLoginRecoveryOutcome, type AgiPlanView, type AgiStrategyBatch } from "./actions";
 import { createAgiDeterministicHandler, type AgiUnblockHandlerWithModel } from "./unblock-handler";
 
 export { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
@@ -95,10 +100,48 @@ export function readAgiObservationReceipt(runId: string, observationRunId: strin
   } catch { return null; }
 }
 
+function strategyBatchInput(batch: AgiStrategyBatch): { captureId: string; op: StrategyReorder; intent: GoalWaitIntent } {
+  const plan = batch.plan.args, rest = batch.rest.args;
+  if (!plan || Object.keys(plan).join(",") !== "ops" || !Array.isArray(plan.ops) || plan.ops.length !== 1
+    || !rest || Object.keys(rest).sort().join(",") !== "reason,untilIso" || typeof rest.untilIso !== "string"
+    || !Number.isFinite(Date.parse(rest.untilIso)) || Date.parse(rest.untilIso) <= Date.now()
+    || typeof rest.reason !== "string" || !rest.reason.trim() || rest.reason.length > 1000
+    || !batch.plan.episodeCaptureId) throw new Error("goal_strategy_args_invalid");
+  const op = plan.ops[0];
+  if (!op || typeof op !== "object" || Array.isArray(op) || Object.keys(op).sort().join(",") !== "nodeId,op,ord"
+    || op.op !== "reorder" || typeof op.nodeId !== "string" || !Number.isSafeInteger(op.ord)) throw new Error("goal_strategy_ops_invalid");
+  return { captureId: batch.plan.episodeCaptureId, op,
+    intent: { schemaVersion: "agentlas.goal-wait-intent.v1", subject: { kind: "timer", notBefore: rest.untilIso },
+      condition: "due", nextAction: rest.reason, deadline: null } };
+}
+
 export function createAgiExecutor(): AgiActionExecutor {
   const deps: AgiExecutorDeps = {
     db: getDb(),
     now: Date.now,
+    captureEpisode: (captureId, goalId) => {
+      captureGoalEpisode({ captureId, goalId });
+      captureGoalStrategyEpisode(captureId, goalId);
+    },
+    strategy: {
+      prepare: batch => prepareGoalStrategyEpisode(strategyBatchInput(batch)),
+      commit: (batch, prepared) => commitGoalStrategyEpisode({ ...strategyBatchInput(batch), requestId: batch.rest.actionId,
+        prepared: prepared as PreparedGoalStrategyEpisode,
+        latestReceipt: chatId => { const receipt = invocationService.latestReceipt(chatId);
+          return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null; } }),
+    },
+    rest: request => {
+      const until = request.args?.untilIso, reason = request.args?.reason;
+      const intent = typeof until === "string" && Number.isFinite(Date.parse(until)) && typeof reason === "string" && reason.trim()
+        ? { schemaVersion: "agentlas.goal-wait-intent.v1" as const, subject: { kind: "timer" as const, notBefore: until },
+          condition: "due" as const, nextAction: reason.slice(0, 1000), deadline: null } : null;
+      return applyGoalEpisodeRest({ requestId: request.actionId, captureId: request.episodeCaptureId ?? `unavailable:${request.actionId}`,
+        goalId: request.fence.goalId, intent, refusal: request.episodeRefusal,
+        latestReceipt: chatId => { const receipt = invocationService.latestReceipt(chatId);
+          return receipt ? { runId: receipt.runId, status: receipt.status, errorCode: receipt.errorCode ?? null } : null; },
+      }, registerGoalWaitSubscription);
+    },
+    afterRest: drainGoalEpisodeNotices,
     goal: (goalId) => {
       const run = getLongRunByGoalId(goalId);
       return run ? { goalId, runId: run.id, version: run.version, status: run.status, pauseReason: run.pauseReason, blockedReason: run.blockedReason,

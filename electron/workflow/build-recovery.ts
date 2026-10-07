@@ -32,6 +32,7 @@ import type {
   GraphBuildFixKind,
   GraphBuildFixOption,
   GraphBuildRecoveryPlan,
+  RuntimeSelection,
   WorkflowGraph,
   WorkflowNode,
 } from "../../shared/types";
@@ -42,6 +43,7 @@ import { getAuthSession } from "../auth";
 import { checkComputerUsePermissions } from "../mac-permissions";
 import { currentUiLocale } from "../ui-locale";
 import { codeReferencedVars } from "../../shared/graph-code-vars";
+import { runtimeSelectionForGraphNode } from "../../shared/graph-runtime-selection";
 import { nodeDeclaresOutwardEffect } from "../../shared/graph-node-protocol";
 
 /**
@@ -238,9 +240,16 @@ export async function planGraphBuildRecovery(input: {
   /** 막히기 전까지 실제로 돌아간 단계 라벨. */
   ranBefore: string[];
   signal?: AbortSignal;
+  runtimeSelection?: RuntimeSelection;
 }): Promise<GraphBuildRecoveryPlan> {
+  throwIfBuildRecoveryAborted(input.signal);
+  input = { ...input, graph: input.graph ? structuredClone(input.graph) : input.graph,
+    blocked: structuredClone(input.blocked), ranBefore: [...input.ranBefore],
+    runtimeSelection: input.runtimeSelection ? structuredClone(input.runtimeSelection) : undefined };
   const blockedNode = (input.graph?.nodes ?? []).find((n) => n.id === input.blocked.nodeId) ?? null;
   const caps = await capabilities({ graph: input.graph, blocked: input.blocked, blockedNode });
+  throwIfBuildRecoveryAborted(input.signal);
+  const recoverySelection = blockedNode ? runtimeSelectionForGraphNode(blockedNode, input.runtimeSelection) : input.runtimeSelection;
   const decision = await judgeRequiredAction({
     kind: "graph-build-recovery",
     observation: observation({
@@ -252,9 +261,11 @@ export async function planGraphBuildRecovery(input: {
     }),
     actions: caps.map((c) => c.option),
     locale: currentUiLocale(),
+    ...(recoverySelection ? { runtimeSelection: recoverySelection, pinFallback: "pin_then_worker_pool" } : {}),
     ...(input.signal ? { signal: input.signal } : {}),
   });
 
+  throwIfBuildRecoveryAborted(input.signal);
   if (decision.source === "unavailable") {
     return { summary: "", question: null, options: [], unavailable: true };
   }
@@ -330,15 +341,30 @@ export interface GraphBuildFixResult {
   continueInChat?: boolean;
 }
 
+function throwIfBuildRecoveryAborted(signal?: AbortSignal, actionDispatched = false): void {
+  if (signal?.aborted) throw Object.assign(new Error("GRAPH_BUILD_RECOVERY_CANCELLED"), {
+    code: "GRAPH_BUILD_RECOVERY_CANCELLED", retryable: false,
+    // A cancelled response cannot erase an already dispatched browser/login action.
+    ...(actionDispatched ? { actionDispatched: true } : {}),
+  });
+}
+
 export async function applyGraphBuildRecovery(input: {
   graph: WorkflowGraph | null | undefined;
   goal: string;
   blocked: BlockedStepFacts;
   actionId: string;
+  runtimeSelection?: RuntimeSelection;
+  signal?: AbortSignal;
 }): Promise<GraphBuildFixResult> {
+  throwIfBuildRecoveryAborted(input.signal);
+  input = { ...input, graph: input.graph ? structuredClone(input.graph) : input.graph,
+    blocked: structuredClone(input.blocked),
+    runtimeSelection: input.runtimeSelection ? structuredClone(input.runtimeSelection) : undefined };
   const ko = currentUiLocale() === "ko";
   const blockedNode = (input.graph?.nodes ?? []).find((n) => n.id === input.blocked.nodeId) ?? null;
   const caps = await capabilities({ graph: input.graph, blocked: input.blocked, blockedNode });
+  throwIfBuildRecoveryAborted(input.signal);
   const cap = caps.find((c) => c.option.id === input.actionId);
   if (!cap) {
     return {
@@ -350,6 +376,7 @@ export async function applyGraphBuildRecovery(input: {
   if (cap.kind === "repair_step" && blockedNode && input.graph) {
     const { rewriteFailedCodeStep } = await import("./run-graph");
     const { runCodeStep } = await import("./code-runner");
+    throwIfBuildRecoveryAborted(input.signal);
     const code = str(blockedNode.config, "code");
     const lang = str(blockedNode.config, "codeLang") === "js" ? "js" : "python";
     const rewritten = await rewriteFailedCodeStep({
@@ -359,7 +386,10 @@ export async function applyGraphBuildRecovery(input: {
       failure: input.blocked.cause,
       varNames: input.blocked.availableVars,
       varSamples: sampleShapes(input.blocked.varsSnapshot),
+      runtimeSelection: runtimeSelectionForGraphNode(blockedNode, input.runtimeSelection),
+      signal: input.signal,
     });
+    throwIfBuildRecoveryAborted(input.signal);
     if (!rewritten || !rewritten.trim() || rewritten.trim() === code.trim()) {
       return {
         ok: false,
@@ -382,7 +412,9 @@ export async function applyGraphBuildRecovery(input: {
       vars: input.blocked.varsSnapshot,
       effect: "read",
       timeoutSeconds: 45,
+      signal: input.signal,
     });
+    throwIfBuildRecoveryAborted(input.signal);
     if (!proof.ok) {
       return {
         ok: false,
@@ -408,7 +440,9 @@ export async function applyGraphBuildRecovery(input: {
 
   if (cap.kind === "browser_login" && cap.site) {
     const { browserOpenLogin } = await import("../browser/connect");
+    throwIfBuildRecoveryAborted(input.signal);
     const result = await browserOpenLogin(cap.site);
+    throwIfBuildRecoveryAborted(input.signal, true);
     return {
       ok: result.ok,
       message: result.ok
@@ -425,9 +459,11 @@ export async function applyGraphBuildRecovery(input: {
 
   if (cap.kind === "open_mac_permissions") {
     const { shell } = await import("electron");
+    throwIfBuildRecoveryAborted(input.signal);
     await shell.openExternal(
       "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility",
     ).catch(() => undefined);
+    throwIfBuildRecoveryAborted(input.signal, true);
     return {
       ok: true,
       message: ko ? "권한 화면을 열었습니다. 허용한 뒤 다시 저장해 주세요." : "Opened the permission screen. Allow it, then save again.",
@@ -436,7 +472,9 @@ export async function applyGraphBuildRecovery(input: {
 
   if (cap.kind === "agentlas_sign_in") {
     const { signInWithBrowser } = await import("../auth");
+    throwIfBuildRecoveryAborted(input.signal);
     const session = await signInWithBrowser().catch(() => null);
+    throwIfBuildRecoveryAborted(input.signal, true);
     return {
       ok: session?.signedIn === true,
       message: session?.signedIn

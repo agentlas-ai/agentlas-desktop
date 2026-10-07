@@ -295,7 +295,7 @@ function appendEventInDb(input: {
   sourceEventId?: string;
   correlation?: RuntimeCorrelation;
   evidencePhase?: RuntimeEvidencePhase;
-}): number {
+}, mutation: "domain" | "inference_accounting" = "domain"): number {
   const db = getDb();
   const row = db.prepare("SELECT last_event_seq FROM long_runs WHERE id = ?")
     .get(input.runId) as { last_event_seq: number } | undefined;
@@ -341,8 +341,8 @@ function appendEventInDb(input: {
     input.at,
   );
   db.prepare(
-    "UPDATE long_runs SET last_event_seq = ?, updated_at = ?, version = version + 1 WHERE id = ?",
-  ).run(seq, input.at, input.runId);
+    "UPDATE long_runs SET last_event_seq = ?, updated_at = ?, version = version + ? WHERE id = ?",
+  ).run(seq, input.at, mutation === "domain" ? 1 : 0, input.runId);
   return seq;
 }
 
@@ -2544,6 +2544,34 @@ export function longRunContinueDecision(goalId: string, now: Date = new Date()):
   return decision(true, openTaskCount > 0 ? "open_tasks_remain" : "goal_continue_planning");
 }
 
+/** Metered usage changes the accounting ledger, not execution custody. Only a
+ * real Main inference-start receipt can use this path; generic events retain
+ * their version increment, even if a caller supplies an accounting-like kind. */
+export function recordLongRunInferenceStarted(input: {
+  goalId: string; sourceId: string; invocationRunId: string; scopeAnchorId: string; attemptId: string | null;
+}): void {
+  const db = getDb();
+  let changedRunId: string | null = null;
+  db.transaction(() => {
+    const run = getLongRunByGoalId(input.goalId);
+    const source = db.prepare(`SELECT ts,payload_json FROM run_events WHERE run_id=?
+      AND kind='runtime_usage_started'
+      AND json_extract(payload_json,'$.runtimeEvidence.sourceEventId')=? LIMIT 1`)
+      .get(input.invocationRunId, `${input.sourceId}:started`) as { ts: string; payload_json: string } | undefined;
+    const payload = source ? JSON.parse(source.payload_json) : null;
+    if (!run || !payload || payload.schemaVersion !== "agentlas.inference-accounting.v1"
+      || payload.attribution !== "goal" || payload.goalId !== input.goalId || payload.sourceId !== input.sourceId
+      || payload.scopeAnchorId !== input.scopeAnchorId || (payload.attemptId ?? null) !== input.attemptId
+      || !db.prepare("SELECT 1 FROM run_events WHERE id=? AND run_id=?")
+        .get(input.scopeAnchorId,input.invocationRunId)) throw new Error("long_run_usage_start_source_mismatch");
+    appendEventInDb({ runId: run.id, kind: "run.usage_started", actorKind: "host", at: source!.ts,
+      sourceEventId: `${input.sourceId}:started`, payload: { sourceId: input.sourceId,
+        invocationRunId: input.invocationRunId, attemptId: input.attemptId } }, "inference_accounting");
+    changedRunId = run.id;
+  }).immediate();
+  if (changedRunId) emitDesktopStoreChange({ entity: "long-run", id: changedRunId });
+}
+
 /** Usage survives failure/cancellation, but can never dispatch or change task success. */
 export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): void {
   const usage = normalizeLongRunUsage(input);
@@ -2621,7 +2649,7 @@ export function recordLongRunUsage(goalId: string, input: LongRunUsageInput): vo
     db.prepare("UPDATE long_runs SET cost_used_usd = cost_used_usd + ? WHERE id = ?").run(cost, run.id);
     appendEventInDb({runId: run.id, kind: "run.usage_recorded", actorKind: "host", sourceEventId,
       payload: { usage, invocationRunId: usage.invocationRunId, attemptId: usage.attemptId ?? child?.attempt_id ?? null },
-      at: new Date().toISOString() });
+      at: new Date().toISOString() }, "inference_accounting");
     changedRunId = run.id;
   }).immediate();
   if (changedRunId) emitDesktopStoreChange({ entity: "long-run", id: changedRunId });

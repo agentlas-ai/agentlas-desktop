@@ -155,9 +155,11 @@ export function AutomationStrategyPanel({ automationId, locale }: { automationId
       ? (ko ? "실행에 반영됨" : "Used by a run")
       : (ko ? "적용됨 · 실행 반영 확인 전" : "Applied · awaiting run confirmation");
     if (row.status === "rejected") return ko ? "적용하지 않음" : "Not applied";
+    if (row.unavailableReason === "episode_reserved") return ko ? "준비 기록" : "Preparation record";
     if (row.unavailableReason === "stale") return ko ? "이전 계획의 제안" : "Proposal for an older plan";
     if (!row.requiresPaymentApproval && row.goalAmendmentRequired) return ko ? "Goal 계약 변경 보류" : "Goal contract change held";
     if (!row.requiresPaymentApproval && (row.status === "pending" || row.status === "approved")) {
+      if (!row.canApply) return ko ? "변경 기록" : "Change record";
       return ko ? "AI가 자동 전략 적용 중" : "AI applying strategy autonomously";
     }
     if (row.conflict === "needs_user_approval" || (row.conflict === "uncertain" && row.canApply)) return ko ? "사용자 판단 필요" : "Your decision needed";

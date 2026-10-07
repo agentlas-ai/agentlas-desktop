@@ -28,6 +28,9 @@
  *    action a reflection ruled out (R2);
  *  - budget (D1): ≤4 executed actions per attempt; the unblocker's model calls are admitted in model-attempt.ts.
  */
+import { createHash } from "node:crypto";
+import { desktopStoreTransaction } from "../store/change-bus";
+import type { GoalEpisodeDisposition } from "../long-run/episode-disposition";
 import type Database from "better-sqlite3";
 import { MAX_SAME_MOVE_PER_CAUSE, PERSISTENCE_BOUNDARY_KINDS, isPersistenceBoundaryKind, type PersistenceBoundaryKind } from "../../shared/persistence-policy";
 import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind } from "./blocker";
@@ -46,6 +49,9 @@ export interface AgiActionRequest {
   fence: { goalId: string; runId: string; runVersion: number };
   action: AgiActionKind;
   args?: Record<string, unknown>;
+  /** Host-only pre-model capture; never parsed from action args. */
+  episodeCaptureId?: string;
+  episodeRefusal?: string;
   /** Tokens the attempt has spent so far (P4 model loop); 0 for the deterministic handler. */
   attemptTokensSoFar?: number;
 }
@@ -74,9 +80,18 @@ export type AgiPlanOp =
 
 export type AgiLoginRecoveryOutcome = "recovered" | "awaiting-owner" | "in-flight" | "not-a-wall" | "unavailable";
 
+export interface AgiStrategyBatch { plan: AgiActionRequest; rest: AgiActionRequest }
+
 export interface AgiExecutorDeps {
   db: Database.Database;
   now(): number;
+  captureEpisode?(captureId: string, goalId: string): void;
+  rest?(request: AgiActionRequest): GoalEpisodeDisposition;
+  strategy?: {
+    prepare(batch: AgiStrategyBatch): Promise<unknown>;
+    commit(batch: AgiStrategyBatch, prepared: unknown): GoalEpisodeDisposition;
+  };
+  afterRest?(): void;
   goal(goalId: string): AgiGoalView | null;
   /** continueGoalForAlive (blocked-goal-sweep.ts) — the existing continuation path. */
   continueGoal(runId: string, expectedVersion: number): { action: string; detail: string };
@@ -121,6 +136,8 @@ export function ensureAgiActionSchema(db: Database.Database): void {
   ensureDefectResolutionColumns(db);
   try { applyDefectResolutions(db); } catch (error) { console.warn("[agi] defect resolutions not applied:", error); }
 }
+
+const strategyPreparations = new WeakMap<Database.Database, Map<string, { digest: string; actionIds: string[] }>>();
 
 const ACTION_ID = /^[A-Za-z0-9._:-]{8,160}$/;
 function isPromise<T>(value: T | Promise<T>): value is Promise<T> {
@@ -169,9 +186,97 @@ export class AgiActionExecutor {
       .map((row) => ({ action: row.action, ok: row.ok === 1, attempt: row.attempt }));
   }
 
+  captureEpisode(captureId: string, goalId: string): void { this.deps.captureEpisode?.(captureId, goalId); }
+
+  /** Two existing actions, one Main transaction. Preparation never executes either action. */
+  async executeStrategyEpisode(batch: AgiStrategyBatch): Promise<AgiActionReceipt[]> {
+    const requests = [batch.plan, batch.rest];
+    const batchDigest = createHash("sha256").update(JSON.stringify(requests.map(r => ({ actionId: r.actionId, action: r.action,
+      incidentId: r.incidentId, attempt: r.attempt, goalId: r.fence.goalId, runId: r.fence.runId, captureId: r.episodeCaptureId, args: r.args })))).digest("hex");
+    const failed = (code: string) => requests.map(r => ({ actionId: r.actionId, action: r.action, ok: false, code }));
+    const prior = requests.map(r => this.receipt(r.actionId));
+    if (prior.some(Boolean)) return prior.every(r => r?.detail?.batchDigest === batchDigest)
+      ? prior.map(r => ({ ...r!, replayed: true })) : failed("goal_strategy_request_conflict");
+    if (requests.some(r => this.deps.db.prepare("SELECT 1 FROM agi_action_receipts WHERE action_id=? AND status='claimed'").get(r.actionId)))
+      return failed("agi.action.in-flight");
+    const gate = (): string | null => {
+      if (batch.plan.action !== "replan_tree" || batch.rest.action !== "rest"
+        || requests.some(r => r.schema !== AGI_ACTION_SCHEMA || !ACTION_ID.test(r.actionId) || !Number.isSafeInteger(r.attempt) || r.attempt < 1)
+        || batch.plan.actionId === batch.rest.actionId || batch.plan.incidentId !== batch.rest.incidentId
+        || batch.plan.attempt !== batch.rest.attempt || batch.plan.episodeCaptureId !== batch.rest.episodeCaptureId
+        || JSON.stringify(batch.plan.fence) !== JSON.stringify(batch.rest.fence)) return "agi.action.invalid";
+      const incident = this.incidents.get(batch.plan.incidentId);
+      if (!incident || incident.goalId !== batch.plan.fence.goalId) return "agi.action.incident-unknown";
+      const goal = this.deps.goal(incident.goalId);
+      if (!goal || goal.runId !== batch.plan.fence.runId || goal.version !== batch.plan.fence.runVersion) return "agi.action.stale";
+      if (goal.status !== "running" || (goal.pauseReason && OWNER_BOUNDARY_PAUSES.has(goal.pauseReason))) return "agi.action.owner-boundary";
+      if (goal.permission !== "write" && goal.permission !== "full") return "agi.plan.permission-read";
+      const history = this.history(incident.id);
+      if (history.filter(h => h.attempt === batch.plan.attempt && h.action !== "file_defect").length + 2 > AGI_MAX_ACTIONS_PER_ATTEMPT)
+        return "agi.budget.actions-per-attempt";
+      for (const r of requests) {
+        if (history.filter(h => h.action === r.action).length >= MAX_SAME_MOVE_PER_CAUSE) return "agi.action.circuit-open";
+        if (this.incidents.ruledOut(incident.id).has(r.action)) return "agi.action.ruled-out";
+      }
+      return this.deps.strategy ? null : "goal_strategy_unavailable";
+    };
+    const refusal = gate();
+    if (refusal) return failed(refusal).map((r,i) => this.settle(requests[i],{ ...r, detail: { batchDigest } },0));
+    // Preparation has no execution effects. Keep live preparation exclusion local;
+    // a crash may leave reserved audit, but must never leave durable action claims.
+    let preparing = strategyPreparations.get(this.deps.db);
+    if (!preparing) { preparing = new Map(); strategyPreparations.set(this.deps.db, preparing); }
+    const goalId = batch.plan.fence.goalId;
+    const hasClaim = () => requests.some(r => this.deps.db.prepare("SELECT 1 FROM agi_action_receipts WHERE goal_id=? AND action=? AND status='claimed'")
+      .get(r.fence.goalId,r.action));
+    const activePreparation = preparing.get(goalId);
+    if (activePreparation) return failed(activePreparation.digest !== batchDigest
+      && requests.some(r => activePreparation.actionIds.includes(r.actionId)) ? "goal_strategy_request_conflict" : "agi.action.in-flight");
+    if (hasClaim()) return failed("agi.action.in-flight");
+    preparing.set(goalId, { digest: batchDigest, actionIds: requests.map(r => r.actionId) });
+    try {
+      const prepared = await this.deps.strategy!.prepare(batch);
+      const receipts = desktopStoreTransaction(this.deps.db,() => {
+        const replay = requests.map(r => this.receipt(r.actionId));
+        if (replay.some(Boolean)) {
+          if (!replay.every(r => r?.detail?.batchDigest === batchDigest)) throw new Error("goal_strategy_request_conflict");
+          return replay.map(r => ({ ...r!, replayed: true }));
+        }
+        const stale = gate(); if (stale) throw new Error(stale);
+        if (hasClaim()) throw new Error("agi.action.in-flight");
+        for (const r of requests) this.deps.db.prepare(`INSERT INTO agi_action_receipts
+          (action_id,incident_id,goal_id,attempt,action,status,created_at_ms) VALUES (?,?,?,?,?,'claimed',?)`)
+          .run(r.actionId,r.incidentId,r.fence.goalId,r.attempt,r.action,this.deps.now());
+        const result = this.deps.strategy!.commit(batch,prepared);
+        if (result.status !== "wait_registered" || !result.waitId || !result.checkpointId) throw new Error(result.code);
+        return requests.map((r,i) => this.settle(r,{ actionId: r.actionId, action: r.action, ok: true,
+          code: i === 0 ? "agi.plan.applied" : "goal_episode_wait_registered", detail: { ...result, batchDigest } }));
+      }).immediate();
+      try { this.deps.afterRest?.(); } catch { /* Persisted outbox owns delivery; never repeat work. */ }
+      return receipts;
+    } catch (error) {
+      const replay = requests.map(r => this.receipt(r.actionId));
+      if (replay.some(Boolean)) return replay.every(r => r?.detail?.batchDigest === batchDigest)
+        ? replay.map(r => ({ ...r!, replayed: true })) : failed("goal_strategy_request_conflict");
+      // Any surviving claim belongs to another executor: our own commit rolled back.
+      // Never settle a legacy/unknown effect merely because preparation was refused.
+      if (requests.some(r => this.deps.db.prepare("SELECT 1 FROM agi_action_receipts WHERE action_id=? AND status='claimed'").get(r.actionId)))
+        return failed("agi.action.in-flight");
+      const code = error instanceof Error && /^[a-z][a-z0-9._:-]{2,120}$/.test(error.message) ? error.message : "goal_strategy_unavailable";
+      return desktopStoreTransaction(this.deps.db,() => failed(code).map((receipt,i) => this.settle(requests[i],
+        { ...receipt, detail: { batchDigest } },0))).immediate();
+    } finally {
+      preparing.delete(goalId);
+    }
+  }
+
   execute(request: AgiActionRequest): AgiActionReceipt {
     const replay = request && typeof request.actionId === "string" ? this.receipt(request.actionId) : null;
-    if (replay) return { ...replay, replayed: true };
+    if (replay) {
+      if (request.action === "rest" && replay.detail?.requestDigest && replay.detail.requestDigest !== restRequestDigest(request))
+        return { actionId: request.actionId, action: request.action, ok: false, code: "goal_episode_request_conflict" };
+      return { ...replay, replayed: true };
+    }
     // A previously claimed action can have an unknown external effect. Never execute it again.
     if (request && typeof request.actionId === "string" && this.deps.db.prepare(
       "SELECT 1 FROM agi_action_receipts WHERE action_id=? AND status='claimed'").get(request.actionId)) {
@@ -221,6 +326,22 @@ export class AgiActionExecutor {
         AND json_extract(result_json, '$.detail.boundary') = ? AND settled_at_ms > ?`).get(goal.goalId, boundary, this.deps.now() - 24 * 60 * 60_000);
       if (asked) return refuse("agi.ask.already-asked");
     }
+    if (request.action === "rest") {
+      // This local-only action can commit claim, checkpoint, wait, disposition,
+      // notification outbox and action settlement together. No network in here.
+      let settled: AgiActionReceipt;
+      try { settled = desktopStoreTransaction(this.deps.db, () => {
+        const claim = this.deps.db.prepare(`INSERT INTO agi_action_receipts
+          (action_id,incident_id,goal_id,attempt,action,status,created_at_ms) VALUES (?,?,?,?,?,'claimed',?)`)
+          .run(request.actionId, incident.id, goal.goalId, request.attempt, request.action, this.deps.now());
+        if (claim.changes !== 1) throw new Error("goal_episode_claim_failed");
+        return this.settle(request, this.run(request, goal, incident.id));
+      }).immediate(); } catch {
+        return { actionId: request.actionId, action: request.action, ok: false, code: "goal_episode_storage_unavailable" };
+      }
+      try { this.deps.afterRest?.(); } catch { /* A local notice never repeats work. */ }
+      return settled;
+    }
     // 7. durable claim, then the effect
     const claimed = this.deps.db.prepare(`INSERT INTO agi_action_receipts(action_id,incident_id,goal_id,attempt,action,status,created_at_ms)
       SELECT ?,?,?,?,?,'claimed',? WHERE NOT EXISTS
@@ -240,7 +361,7 @@ export class AgiActionExecutor {
       evidenceRefs: Array.isArray(settled.detail?.evidenceRefs) ? settled.detail!.evidenceRefs as string[] : [],
       // A failed effect is ruled out for this incident (R2); a refused precondition is not an attempt.
       ruledOut: !settled.ok && /\.failed$|-failed$|unavailable$/.test(settled.code) });
-    if (settled.ok && goal.chatId && this.deps.announce && request.action !== "rest" && request.action !== "file_defect") {
+    if (settled.ok && goal.chatId && this.deps.announce && request.action !== "file_defect") {
       const line = noticeLine(request.action, settled);
       if (line) {
         try { this.deps.announce({ chatId: goal.chatId, actionId: request.actionId, kind: request.action === "ask_owner_once" || request.action === "request_app_restart" ? "ask" : "action", text: line }); }
@@ -435,8 +556,10 @@ export class AgiActionExecutor {
         return ok("agi.ask.posted", { boundary: args.boundary, ask, resumesWith });
       }
       case "rest": {
-        const until = typeof args.untilIso === "string" && Number.isFinite(Date.parse(args.untilIso)) ? args.untilIso : null;
-        return ok("agi.rest", { untilIso: until, reason: text(args.reason, 120) });
+        if (!this.deps.rest) return no("goal_episode_adapter_unavailable");
+        const disposition = this.deps.rest(request);
+        const detail = { ...disposition, requestDigest: restRequestDigest(request) };
+        return disposition.status === "wait_registered" ? ok(disposition.code, detail) : no(disposition.code, detail);
       }
     }
     return no("agi.action.invalid");
@@ -500,4 +623,10 @@ export function noticeLine(action: AgiActionKind, receipt: AgiActionReceipt): { 
     case "ask_owner_once": return { ko: `AGI: ${String(detail.ask ?? "")} — 확인되면 ${String(detail.resumesWith ?? "")}부터 자동으로 이어가요`, en: `AGI: ${String(detail.ask ?? "")} — once done it resumes with ${String(detail.resumesWith ?? "")}` };
     default: return null;
   }
+}
+
+function restRequestDigest(request: AgiActionRequest): string {
+  return createHash("sha256").update(JSON.stringify({ captureId: request.episodeCaptureId ?? null,
+    goalId: request.fence?.goalId ?? null, untilIso: request.args?.untilIso ?? null,
+    reason: request.args?.reason ?? null, refusal: request.episodeRefusal ?? null })).digest("hex");
 }

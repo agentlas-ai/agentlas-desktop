@@ -11,7 +11,7 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 //  - 압축: 모델 컨텍스트 윈도우 초과 시 compactHistory로 과거 대화를 다이제스트로 접음
 import { readApiKey } from "../secrets/vault";
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
-import { cumulativeSurfaceGateText, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
 import {
   prepareMainToolLoop,
   runLocalOpenAiChat,
@@ -354,6 +354,12 @@ async function runAnthropicMessages(
     });
 
     if (!resp.ok) {
+      const failure = runtimeHttpFailure(resp.status, "byok", "Anthropic");
+      if (failure) {
+        const observedUsage = measuredUsage.total();
+        return { text: acc.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
+          ...(outputTokens > 0 ? { tokens: outputTokens } : {}), workforcePermissionEnforcement: broker?.finish(false) };
+      }
       const errText = await resp.text().catch(() => "");
       throw new Error(`Anthropic API ${resp.status}: ${errText.slice(0, 300)}`);
     }
@@ -817,6 +823,13 @@ export const runGoogleByok: Runner = async (
   const progress = createToolLoopProgress("byok", req, events);
   /** Monotonic across every SSE event in this provider invocation. */
   let responseIndex = 0;
+  const httpFailureResult = (status: number): RunnerResult | null => {
+    const failure = runtimeHttpFailure(status, "byok", "Google");
+    if (!failure) return null;
+    const observedUsage = measuredUsage.total();
+    return { text: acc.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
+      workforcePermissionEnforcement: broker?.finish(false) };
+  };
 
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
     const outgoingBody = () => ({
@@ -847,6 +860,10 @@ export const runGoogleByok: Runner = async (
       signal: req.signal,
       body: JSON.stringify(requestBody),
     });
+    if (!resp.ok) {
+      const terminal = httpFailureResult(resp.status);
+      if (terminal) return terminal;
+    }
     if (!resp.ok && includeTools && resp.status >= 400 && resp.status < 500) {
       // A Workforce grant is for this advertised inventory. A tools-free retry
       // would make any later success evidence describe a different invocation.
@@ -864,6 +881,8 @@ export const runGoogleByok: Runner = async (
       });
     }
     if (!resp.ok) {
+      const terminal = httpFailureResult(resp.status);
+      if (terminal) return terminal;
       const errText = await resp.text().catch(() => "");
       throw new Error(`Google API ${resp.status}: ${errText.slice(0, 300)}`);
     }

@@ -78,6 +78,43 @@ function risksOfNode(
   return risks;
 }
 
+/** Op spelling cannot change authority. Only known local, non-outward edits
+ * qualify for automatic application; unknown configuration remains reviewable. */
+function configChangeRisks(node: WorkflowNode, config: Record<string, unknown>, graph: WorkflowGraph): GraphPatchRisk[] {
+  const changes = Object.entries(config).filter(([key,value]) => JSON.stringify(node.config?.[key]) !== JSON.stringify(value));
+  if (!changes.length) return [];
+  const risks = new Set<GraphPatchRisk>();
+  const outward = nodeDeclaresOutwardEffect(node);
+  const localKeys = node.type === "code" && ["pure", "read"].includes(String(node.config?.effect))
+    ? new Set(["code", "language"]) : node.type === "condition" && !graph.nodes.some(nodeDeclaresOutwardEffect)
+      ? new Set(["expression", "condition"]) : node.type === "agent" && !outward
+        ? new Set(["prompt"]) : new Set<string>();
+  for (const [key] of changes) {
+    if (node.type === "trigger" || ["cron", "schedule", "timezone", "scheduleSpec"].includes(key)) risks.add("cron");
+    if (ENDPOINT_KEYS.includes(key)) risks.add("endpoint");
+    if (VAULT_KEY_RE.test(key)) risks.add("vault");
+    if (["maxTokens", "maxIterations", "timeoutSeconds"].includes(key)) risks.add("budget");
+    if (!localKeys.has(key)) risks.add("mutation");
+  }
+  if (outward) risks.add("publish");
+  return [...risks];
+}
+
+/** Local editor auto-repair is narrower than the existing independently reviewed
+ * strategy patch contract. A risk-free agent prompt still requires editor review. */
+export function graphPatchCanAutoApplyLocal(graph: WorkflowGraph, patch: GraphPatch): boolean {
+  return patch.ops.length > 0 && patch.ops.every(op => {
+    if (op.op !== "editNode" && op.op !== "setPolicy") return false;
+    const node = graph.nodes.find(n => n.id === op.nodeId);
+    if (!node || nodeDeclaresOutwardEffect(node)) return false;
+    const allowed = node.type === "code" && ["pure", "read"].includes(String(node.config?.effect))
+      ? new Set(["code", "language"]) : node.type === "condition" && !graph.nodes.some(nodeDeclaresOutwardEffect)
+        ? new Set(["expression", "condition"]) : new Set<string>();
+    return Object.entries(op.config ?? {}).every(([key,value]) =>
+      JSON.stringify(node.config?.[key]) === JSON.stringify(value) || allowed.has(key));
+  });
+}
+
 function fail(code: string, reason: string, nextAction: string): GraphPatchDecision {
   return { ok: false, code, reason, nextAction };
 }
@@ -114,6 +151,7 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       if (!op.node?.id || nodes.some((n) => n.id === op.node!.id)) {
         return fail("PATCH_NODE_CONFLICT", L("이미 있는 단계와 같은 이름으로 추가하려 했습니다.", "It tried to add a step with the same name as an existing one."), L("다른 이름으로 다시 시도해 주세요.", "Try again with a different name."));
       }
+      risks.add("mutation"); // New executable topology requires review.
       nodes.push(op.node);
       added.push(op.node.label || op.node.id);
       for (const risk of risksOfNode(op.node)) risks.add(risk);
@@ -121,8 +159,7 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       const index = nodes.findIndex((n) => n.id === op.nodeId);
       if (index < 0) return fail("PATCH_NODE_MISSING", L(`고치려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, `The step to edit, "${op.nodeId}", was not found.`), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
       const merged = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
-      // 이미 갖고 있던 위험은 이 패치가 새로 거는 것이 아니다 — **늘어난 것만** 센다.
-      // (안 그러면 발송 단계의 문구 한 줄 고치는 데도 승인이 뜬다.)
+      for (const risk of configChangeRisks(nodes[index], op.config ?? {}, graph)) risks.add(risk);
       const before = new Set(risksOfNode(nodes[index]));
       nodes[index] = merged;
       changed.push(merged.label || merged.id);
@@ -143,11 +180,13 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       if (!nodes.some((n) => n.id === op.edge!.source) || !nodes.some((n) => n.id === op.edge!.target)) {
         return fail("PATCH_EDGE_DANGLING", L("존재하지 않는 단계를 잇는 연결이 포함돼 있습니다.", "The change connects a step that does not exist."), L("연결할 단계를 먼저 만들도록 다시 요청해 주세요.", "Ask again so the steps are created before they are connected."));
       }
+      risks.add("mutation");
       edges.push(op.edge);
       changed.push(`${op.edge.source} → ${op.edge.target}`);
     } else if (op.op === "removeEdge") {
       const index = edges.findIndex((e) => e.id === op.edgeId);
       if (index < 0) return fail("PATCH_EDGE_MISSING", L("지우려는 연결을 찾지 못했습니다.", "The connection to remove was not found."), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
+      risks.add("mutation");
       edges.splice(index, 1);
       changed.push(L("연결 제거", "Connection removed"));
     } else if (op.op === "setTrigger") {
@@ -160,12 +199,11 @@ export function evaluateGraphPatch(graph: WorkflowGraph, patch: GraphPatch): Gra
       // setPolicy
       const index = nodes.findIndex((n) => n.id === op.nodeId);
       if (index < 0) return fail("PATCH_NODE_MISSING", L(`설정을 바꾸려는 단계 "${op.nodeId}"를 찾지 못했습니다.`, `The step whose settings should change, "${op.nodeId}", was not found.`), L("화면을 새로고침한 뒤 다시 시도해 주세요.", "Refresh the screen and try again."));
+      for (const risk of configChangeRisks(nodes[index], op.config ?? {}, graph)) risks.add(risk);
       const policyBefore = new Set(risksOfNode(nodes[index]));
       nodes[index] = { ...nodes[index], config: { ...(nodes[index].config ?? {}), ...(op.config ?? {}) } };
       changed.push(nodes[index].label || nodes[index].id);
       for (const risk of risksOfNode(nodes[index])) if (!policyBefore.has(risk)) risks.add(risk);
-      // 승인 등급을 낮추는 변경은 그 자체가 승인받아야 하는 변경이다.
-      if (op.config?.approval === "auto") risks.add("mutation");
     }
   }
 

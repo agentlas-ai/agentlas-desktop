@@ -17,7 +17,7 @@ import {
   type GraphPatch,
 } from "../workflow/graph-patch";
 import { getDb } from "./db";
-import { getAutomation, snapshotGraphVersion } from "./automations";
+import { getAutomation, snapshotGraphVersion, bumpAutomationGraphEditEpoch } from "./automations";
 import { emitDesktopStoreChange } from "./change-bus";
 import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
 
@@ -629,6 +629,7 @@ export function applyAutomationStrategyRevision(
     if (updated.changes !== 1) {
       throw new AutomationStrategyRevisionError("automation_strategy_graph_stale");
     }
+    bumpAutomationGraphEditEpoch(prepared.automationId);
     const nextDefinitionDigest = getAutomationDefinitionDigest(prepared.automationId) ?? "";
     if (!nextDefinitionDigest) {
       throw new AutomationStrategyRevisionError("automation_strategy_definition_stale");

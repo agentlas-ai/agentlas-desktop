@@ -6,6 +6,8 @@ import type { AutomationStrategyProposalView } from "@shared/automation-strategy
  * this predicate, rather than guessing from summary text or button presence.
  */
 export function requiresAutomationStrategyReview(row: AutomationStrategyProposalView): boolean {
+  // An episode preparation is an internal audit, never a submitted human decision.
+  if (row.unavailableReason === "episode_reserved") return false;
   if (!(row.status === "pending" || row.status === "approved")) return false;
   // A one-time origin adoption is a real human gate: Main refuses to apply
   // until a person records it, so hiding it made the self-correction loop a

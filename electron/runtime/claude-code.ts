@@ -766,6 +766,7 @@ export function claudeFailureFromEvent(
     return {
       kind: "auth",
       message: "authentication_failed",
+      providerCode: "authentication_failed",
       runtime: "claude",
       source: "marker",
     };
@@ -796,7 +797,8 @@ export function claudeFailureFromEvent(
       kind: ev.api_error_status === 429 ? "quota"
         : /not logged in|please run \/login/i.test(finalText) ? "auth"
         : "exit",
-      message, runtime: "claude", source: "marker",
+      message, runtime: "claude",
+      source: ev.api_error_status !== 429 && /not logged in|please run \/login/i.test(finalText) ? "heuristic" : "marker",
       ...(prior?.retryAfterHint ? { retryAfterHint: prior.retryAfterHint } : {}),
     };
   }

@@ -1,3 +1,5 @@
+import { withAdapterEffectObserver } from "../invocation/adapter-effect-context";
+import { assertGraphWorkerAttempt, noteGraphWorkerDispatch, noteGraphWorkerReturnedFailure, noteGraphWorkerAdapterStart, noteGraphWorkerAdapterFinish, noteGraphWorkerCoverageUnknown, noteGraphWorkerActivity, noteGraphWorkerTool, noteGraphWorkerPrepare, noteGraphWorkerSelection, noteGraphWorkerFailure, settleGraphWorkerAttempt, type GraphWorkerAttempt, type GraphWorkerFailureReceipt } from "../workflow/graph-worker-fallback";
 import { prepareWorkAttachmentContext, mainWorkAttachmentContext, redactWorkAttachmentText, isWorkAttachmentInput } from "../invocation/work-attachments";
 import { issueScienceCollectionCapability, assertScienceCollectionRuntimeSelection } from "../runtime/science-collection-boundary";
 import { readScienceCollectionAuthority } from "../science-host/collection-authority";
@@ -117,6 +119,7 @@ import { getChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapsho
 import { goalDeadlineAt } from "../long-run/goal-deadline";
 import { getLongRunByGoalId, longRunOwnerHold, recordLongRunUsage, transitionLongRun } from "../store/long-runs";
 import { getDb } from "../store/db";
+import { desktopStoreTransaction } from "../store/change-bus";
 import { supervisorExcludedHistoryMessages, supervisorIngressMessage } from "../one/supervisor-store";
 import { isOneQuietReply } from "../../shared/one-supervisor";
 import { listAgentSurfaces } from "../store/agent-surfaces";
@@ -124,7 +127,7 @@ import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { findCanonicalTaskForChat } from "../store/tasks";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { latestTaskCheckpoint } from "../long-run/checkpoint";
-import { bindCreatedAutomationToOngoingGoal } from "../long-run/automation-provenance";
+import { bindCreatedAutomationToGoal } from "../long-run/automation-provenance";
 import { compileLongRunCheckpoint } from "../../shared/long-run-checkpoint";
 import { getInterviewMode } from "../store/interview-mode";
 import { isUserFacingProjectAgent } from "../../shared/project-agent-pool";
@@ -925,9 +928,14 @@ async function runInvocationPlanningRunner(
   request: RunnerRequest,
   events: RunnerEvents,
   runtime: RuntimeStatus,
+  assertCurrent?: () => void,
+  graphAttempt?: GraphWorkerAttempt,
 ): Promise<Awaited<ReturnType<Runner>>> {
+  assertCurrent?.();
   const accounting = beginAccountedInference({ kind: runtime.kind, model: runtime.model, source: runtime.source });
   try {
+    assertCurrent?.();
+    noteGraphWorkerDispatch(graphAttempt, selectionForRuntime(runtime));
     const result = await runObservedRunner(runner, request, events);
     accounting?.complete(result.observedUsage,
       request.signal?.aborted ? "cancelled" : result.failure ? "failed" : "returned");
@@ -1620,6 +1628,8 @@ export async function pickActiveRunner(): Promise<
  *  context 미지정(undefined)은 로컬 렌더러 대화형 경로다. 새 원격/헤드리스 통합은 반드시
  *  여기 source를 추가하고 넘겨라 — 안 넘기면 대화형으로 오인된다(fail-open). */
 export interface InvocationExecutionContext {
+  /** Original Graph custody, never renderer/model supplied. */
+  graphWorkerAttempt?: GraphWorkerAttempt;
   /** Main-minted exact-run capability; future Science recovery writer only. */
   scienceRecovery?: object;
   /** Main-minted object identity; serialized fields cannot authorize a reviewer. */
@@ -1664,6 +1674,8 @@ export interface InvocationExecutionContext {
 }
 
 export interface McpInvocationResult {
+  /** Main-only, invocation-owned settlement receipt; never accepted from a model. */
+  graphWorkerFailure?: GraphWorkerFailureReceipt;
   /** Host-owned waiting custody; never serialized as a tool/model result. */
   browserLoginWait?: BrowserLoginWait;
   finalText?: string;
@@ -1901,8 +1913,18 @@ export function runMcpInvocation(
   onDurableUserMessage?: (messageId: string) => Promise<void | DurableUserMessageHookBlock>,
   hostNoticePurpose?: ChatHostNotice["purpose"],
   browserPresentation: "foreground" | "background" = "background",
+  /** Main-only admission boundary before the first root work request and its plan receipt. */
+  onBeforeGoalWorkDispatch?: (goalId: string | null) => void,
 ): Promise<McpInvocationResult> {
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
+  const graphAttempt = executionContext?.graphWorkerAttempt;
+  assertGraphWorkerAttempt(graphAttempt);
+  if (graphAttempt && (executionContext?.source !== "automation" || graphAttempt.runId !== req.runId
+    || graphAttempt.automationId !== req.automationId || graphAttempt.chatId !== req.chatId
+    || graphAttempt.nodeId !== executionContext.nodeId || graphAttempt.occurrenceId !== executionContext.occurrenceId
+    || JSON.stringify(graphAttempt.selection) !== JSON.stringify(req.runtimeSelection))) {
+    throw new Error("graph_worker_invocation_identity_changed");
+  }
   // Native CLI tool loops can make hundreds of provider requests inside one
   // host pass. Guard completed outcomes here, including ordinary chats, rather
   // than relying on the scheduled Graph guard or on model-written progress.
@@ -1919,6 +1941,12 @@ export function runMcpInvocation(
     },
   });
   const invocationSignal = login.signal;
+  if (graphAttempt) {
+    const originalPrepare = executionContext?.onWorkforcePrepareReceipt;
+    executionContext = { ...executionContext!, onWorkforcePrepareReceipt: receipt => {
+      noteGraphWorkerPrepare(graphAttempt); originalPrepare?.(receipt);
+    } };
+  }
   let progressAdvisory: string | null = null;
   const reportedProgress = new Set<string>();
   let goalDispatchObserved = false;
@@ -1935,6 +1963,15 @@ export function runMcpInvocation(
     } catch { /* Missing admission evidence cannot authorize a Goal transition. */ }
   };
   const guardedSink: EventSink = (event) => {
+    // Status/progress also uses tool-use in this legacy channel. Only an
+    // actual tool frame (including start, failed or read tools) is an effect observation.
+    if (event.kind === "tool-use" && event.tool) noteGraphWorkerTool(graphAttempt);
+    if (event.kind === "partial" && event.text) noteGraphWorkerActivity(graphAttempt);
+    if (event.kind === "error") noteGraphWorkerFailure(graphAttempt);
+    if (event.kind === "notice" && event.runtimeSelection &&
+      (event.notice?.code === "runtime-selected" || event.notice?.code === "runtime-fallback")) {
+      noteGraphWorkerSelection(graphAttempt, event.runtimeSelection);
+    }
     if (login.waiting) {
       if (event.kind !== "final" && event.kind !== "error") sink(event);
       return;
@@ -1953,8 +1990,8 @@ export function runMcpInvocation(
       message: pickLocale(req) === "ko" ? "같은 결과가 반복돼 다음 단계에서 접근을 바꾸고 독립 작업을 이어갑니다."
         : "Repeated results detected. The next step will change strategy and continue independent work." } });
   };
-  return withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
-    req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory,
+  const runOwnedInvocation = () => withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
+    req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory, onBeforeGoalWorkDispatch,
   )).then(async result => {
     if (login.waiting && !ownerSignal.aborted) {
       const browserLoginWait = login.seal(await drainAttemptChildren(children));
@@ -1963,8 +2000,12 @@ export function runMcpInvocation(
         goalWaitRequest: undefined, goalPassStop: undefined };
     }
     login.cancel();
-    return result;
+    if (result.workforcePrepareReceipt) noteGraphWorkerPrepare(graphAttempt);
+    const graphWorkerFailure = await settleGraphWorkerAttempt(graphAttempt, () => drainAttemptChildren(children));
+    return graphWorkerFailure ? { ...result, graphWorkerFailure } : result;
   }).catch(async error => {
+    noteGraphWorkerFailure(graphAttempt);
+    await settleGraphWorkerAttempt(graphAttempt, () => drainAttemptChildren(children));
     if (login.waiting && !ownerSignal.aborted) {
       const browserLoginWait = login.seal(await drainAttemptChildren(children));
       if (browserLoginWait) return { browserLoginWait, observedUsage: currentInvocationObservedUsage(),
@@ -1973,6 +2014,11 @@ export function runMcpInvocation(
     login.cancel();
     throw error;
   }), () => bindDispatchedGoal(getChatGoalId(req.chatId) ?? null)));
+  return graphAttempt ? withAdapterEffectObserver({ runId: req.runId!, chatId: req.chatId, rootAgentId: null, source: "automation" }, {
+    begin: admission => noteGraphWorkerAdapterStart(graphAttempt, admission),
+    finish: (scopeId, report) => noteGraphWorkerAdapterFinish(graphAttempt, scopeId, report),
+    recordingFailed: () => noteGraphWorkerCoverageUnknown(graphAttempt),
+  }, runOwnedInvocation) : runOwnedInvocation();
 }
 
 async function runMcpInvocationInContext(
@@ -1991,6 +2037,7 @@ async function runMcpInvocationInContext(
   onGoalDispatched?: (goalId: string | null) => void,
   login?: BrowserLoginPrerequisiteControl,
   progressAdvisory?: () => string | null,
+  onBeforeGoalWorkDispatch?: (goalId: string | null) => void,
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
@@ -1998,6 +2045,7 @@ async function runMcpInvocationInContext(
   // Browser fallback ladder binding (electron/browser/fallback-ladder-runtime.ts): chat/run ids + notice sink.
   let unbindBrowserLadder: (() => void) | undefined;
   let browserLadderSettled = false;
+  let graphDirectFailureError: unknown;
   try {
   // A scheduled invocation is the worker leg of the automation, even though
   // it shares this implementation with an interactive orchestrator turn.
@@ -3360,6 +3408,7 @@ ${effectiveUserPrompt}`;
   let mcpGoalSelectionIsCurrent: (() => boolean) | undefined;
   let mcpGoalSelectionInvalidated = false;
   const assertMcpGoalSelectionCurrent = (): void => {
+    assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
     if (mcpGoalSelectionIsCurrent && !mcpGoalSelectionIsCurrent()) mcpGoalSelectionInvalidated = true;
     if (mcpGoalSelectionInvalidated) {
       throw Object.assign(new Error("mcp_goal_tool_scope_changed"), { code: "mcp-goal-tool-scope-changed" });
@@ -4423,6 +4472,8 @@ ${effectiveUserPrompt}`;
               tool: { name, args, result, id, isError, observationDigest: toolObservationDigest(artifactPaths, imageDataUrl) },
               agentId: "workforce:staffing", phase: "plan" }) },
           active,
+          assertMcpGoalSelectionCurrent,
+          executionContext?.graphWorkerAttempt,
         );
         durableTurnDecision = parseDesktopWorkforceTurnDecision(decisionResult.text, readyPlans);
         if (durableTurnDecision.decision === "reuse") {
@@ -4656,6 +4707,8 @@ ${effectiveUserPrompt}`;
               }),
             },
             active,
+            assertMcpGoalSelectionCurrent,
+            executionContext?.graphWorkerAttempt,
           ));
           workforceLeaderRunnerEvidence.push({
             invocationId: turn.invocationId,
@@ -5942,6 +5995,7 @@ ${effectiveUserPrompt}`;
       // lightweight and plain-text capable.
       forceSurface: oneTeamExecutionPolicy ? true : undefined,
     };
+    let goalWorkAdmissionNotified = false;
     const runnerRequestForRuntime = (
       runtime: RuntimeStatus,
       runtimePicked: { runner: Runner; label: string },
@@ -6010,6 +6064,11 @@ ${effectiveUserPrompt}`;
       // for every dispatch, including checkpoint recovery and runtime fallback.
       const ownerExecutionDirectives = activeGoalId ? goalExecutionDirectivePromptBlock(activeGoalId) : null;
       const dispatchTurnContextParts = [...frozenTurnContextParts];
+      if (!goalWorkAdmissionNotified) {
+        if (signal?.aborted) throw Object.assign(new Error("goal_plan_dispatch_cancelled"), { code: "goal_plan_dispatch_cancelled" });
+        goalWorkAdmissionNotified = true;
+        onBeforeGoalWorkDispatch?.(activeGoalId);
+      }
       if (goalPlanContextSlot) {
         if (signal?.aborted) {
           throw Object.assign(new Error("goal_plan_dispatch_cancelled"), { code: "goal_plan_dispatch_cancelled" });
@@ -6358,7 +6417,7 @@ ${effectiveUserPrompt}`;
       const usageCollector = createRuntimeUsageCollector();
       const recordTerminalUsage: NonNullable<RunnerEvents["onTerminalObservedUsage"]> = (usage, attemptId): void => {
         if (settled || generation !== runnerEventGeneration) return;
-        if (usage && (!Number.isFinite(usage.outputTokens) || usage.outputTokens !== 0)) creditRetryBlocked = true;
+        if (usage && (!Number.isFinite(usage.outputTokens) || usage.outputTokens !== 0)) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
         usageCollector.recordTerminal(usage, attemptId);
       };
       const forward = <T extends unknown[]>(handler: (...args: T) => void) => (...args: T): void => {
@@ -6368,7 +6427,7 @@ ${effectiveUserPrompt}`;
       return {
         events: {
           onPartial: forward((...args: Parameters<RunnerEvents["onPartial"]>) => {
-            if (args[0]) creditRetryBlocked = true;
+            if (args[0]) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
             runnerEvents.onPartial(...args);
           }),
           onStatus: forward(runnerEvents.onStatus),
@@ -6385,7 +6444,7 @@ ${effectiveUserPrompt}`;
           },
           onTerminalObservedUsage: recordTerminalUsage,
           onThinking: forward((...args: Parameters<NonNullable<RunnerEvents["onThinking"]>>) => {
-            if (args[0]) creditRetryBlocked = true;
+            if (args[0]) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
             runnerEvents.onThinking(...args);
           }),
           onNotice: forward(runnerEvents.onNotice),
@@ -6541,7 +6600,7 @@ ${effectiveUserPrompt}`;
         let invocationUsageAttempt: ReturnType<typeof beginInvocationUsageAttempt> | undefined;
         let attemptUsageRecorded = false;
         const persistAttemptUsage = (usage: LongRunUsageInput["observedUsage"], outcome: "returned" | "failed" | "cancelled"): void => {
-          if (usage && (!Number.isFinite(usage.outputTokens) || usage.outputTokens !== 0)) creditRetryBlocked = true;
+          if (usage && (!Number.isFinite(usage.outputTokens) || usage.outputTokens !== 0)) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
           if (attemptUsageRecorded) return;
           attemptUsageRecorded = true;
           invocationUsageAttempt?.complete(usage);
@@ -6585,8 +6644,10 @@ ${effectiveUserPrompt}`;
             });
           }
           invocationUsageAttempt = beginInvocationUsageAttempt();
+          assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
+          noteGraphWorkerDispatch(executionContext?.graphWorkerAttempt, selectionForRuntime(selectedRuntime));
           result = await selected.runner(requestForRuntime, attemptEvents.events);
-          if (result.observedUsage && (!Number.isFinite(result.observedUsage.outputTokens) || result.observedUsage.outputTokens !== 0)) creditRetryBlocked = true;
+          if (result.observedUsage && (!Number.isFinite(result.observedUsage.outputTokens) || result.observedUsage.outputTokens !== 0)) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
           const observedUsage = attemptEvents.observedUsage(result.observedUsage);
           result = { ...result, observedUsage: observedUsage ?? undefined };
           persistAttemptUsage(observedUsage,
@@ -6608,7 +6669,7 @@ ${effectiveUserPrompt}`;
         } finally {
           attemptEvents.settle();
         }
-        if (result.text.trim()) creditRetryBlocked = true;
+        if (result.text.trim()) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
         persistGoalUsage(result.observedUsage);
         // A run that actually worked is the only thing that clears "sign in required".
         if (!result.failure) noteRuntimeSucceeded(selectedRuntime);
@@ -6631,6 +6692,12 @@ ${effectiveUserPrompt}`;
         // its next settled checkpoint still needs the typed quota signal to
         // choose another connected provider before dispatch.
         if (result.failure) noteRuntimeFailure(active, result.failure);
+        if (result.failure && executionContext?.graphWorkerAttempt) {
+          graphDirectFailureError = new InvocationRunnerFailureError(result.failure);
+          noteGraphWorkerReturnedFailure(executionContext.graphWorkerAttempt,
+            selectionForRuntime(selectedRuntime, { longContext: selectedRuntime.longContextEnabled }), result.failure);
+          throw graphDirectFailureError;
+        }
         if (!result.failure || !directRuntimeFallbackAllowed || signal?.aborted) return result;
         const failed = result.failure;
         // First failure: this is when recovery actually begins.
@@ -7623,9 +7690,21 @@ ${effectiveUserPrompt}`;
             });
           } else {
             sink({kind:"tool-use",tool:{id:registrationOperationId,name:"automation.create",args:JSON.stringify({name:a.name})}});
-            const created = createAutomation({
+            const creationRevision = activeGoalId ? getChatGoalRevision(activeGoalId) : null;
+            const finiteCreation = creationRevision?.lifecycle === "finite";
+            // A failed finite binding must roll back creation, never leave an independent automation behind.
+            const created = desktopStoreTransaction(getDb(), () => {
+              const finiteDeadline = finiteCreation && activeGoalId ? goalDeadlineAt(activeGoalId) : null;
+              if (finiteCreation && (!finiteDeadline || Date.parse(finiteDeadline) <= Date.now()
+                || creationRevision.chatId !== chat.id || typeof req.runId !== "string"))
+                throw new Error("goal_automation_binding_source_unverified");
+              if (finiteCreation) assertFiniteGoalLifecycleCurrent({ goalId: activeGoalId!,
+                rootChatId: chat.id, expectedRevision: creationRevision.revision });
+              const created = createAutomation({
               ...monitoring,
               ...(a.monitor ? {endAt:a.monitor.deadline}:{}),
+              ...(finiteDeadline ? { endAt: a.monitor?.deadline && Date.parse(a.monitor.deadline) < Date.parse(finiteDeadline)
+                ? a.monitor.deadline : finiteDeadline } : {}),
               name: a.name,
               // The chat's runtime at this moment is copied as the job's pin. It is a
               // copy, not a separate owner choice: unattended runs follow the owner's
@@ -7642,22 +7721,20 @@ ${effectiveUserPrompt}`;
               timezone: a.tz && a.tz.trim() ? a.tz : null,
               graphJson: a.graph ?? null,
             });
-            if (req.runtimeSelection) recordAutomationPinProvenance(created.id, "agent_copy", "chat_registration");
-            // Only this newly created automation, inside an exact ongoing-Goal
-            // invocation, may acquire a Goal revision provenance receipt.
-            // Existing same-name/goal_id automations are never auto-adopted.
-            if (activeGoalId && typeof req.runId === "string") {
-              const revision = getChatGoalRevision(activeGoalId);
-              if (revision?.lifecycle === "ongoing" && revision.chatId === chat.id) {
-                try {
-                  bindCreatedAutomationToOngoingGoal({ goalId: activeGoalId,
-                    expectedGoalRevision: revision.revision, chatId: chat.id,
-                    invocationRunId: req.runId, automationId: created.id });
-                } catch (error) {
-                  console.warn("[goal-automation-provenance] created automation remains independent:", error);
+              if (req.runtimeSelection) recordAutomationPinProvenance(created.id, "agent_copy", "chat_registration");
+              // Only this newly created row and its genuine invocation may acquire a bridge.
+              if (activeGoalId && typeof req.runId === "string" && creationRevision?.chatId === chat.id) {
+                if (finiteCreation) {
+                  bindCreatedAutomationToGoal({ goalId: activeGoalId, expectedGoalRevision: creationRevision.revision,
+                    chatId: chat.id, invocationRunId: req.runId, automationId: created.id });
+                } else if (creationRevision.lifecycle === "ongoing") {
+                  try { bindCreatedAutomationToGoal({ goalId: activeGoalId, expectedGoalRevision: creationRevision.revision,
+                    chatId: chat.id, invocationRunId: req.runId, automationId: created.id }); }
+                  catch (error) { console.warn("[goal-automation-provenance] created automation remains independent:", error); }
                 }
               }
-            }
+              return created;
+            }).immediate();
             const registration: AutomationRegistrationResult = {
               action: "created",
               enabled: created.enabled,
@@ -8290,6 +8367,8 @@ ${effectiveUserPrompt}`;
         console.error("[memory] terminal turn receipt failed:", ticketError);
       }
     }
+    noteGraphWorkerFailure(executionContext?.graphWorkerAttempt);
+    if (executionContext?.graphWorkerAttempt && err !== graphDirectFailureError) noteGraphWorkerCoverageUnknown(executionContext.graphWorkerAttempt);
     sink({ kind: "error", error: invocationFailure(req, "runner-failed", err, executionContext) });
     return InvocationRunnerFailureError.isMarkedQuota(err)
       ? { ...earlyResult(), markedQuotaFailure: true }

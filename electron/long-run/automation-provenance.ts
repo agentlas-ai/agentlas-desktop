@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import { getDb } from "../store/db";
 import { getAutomation } from "../store/automations";
 import { getChatGoalContract, getChatGoalRevision } from "../store/chat-goals";
-import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding } from "../store/long-runs";
+import { appendLongRunEvent, getLongRunByGoalId, getLongRunGoalRevisionBinding, longRunOwnerHold } from "../store/long-runs";
 import { invocationMatchesGoalRevision } from "./verification-boundary";
 import type { GoalAutomationObservation } from "../../shared/runtime-plan";
+import { goalDeadlineAt } from "./goal-deadline";
 import { graphExecutionDigest } from "../../shared/graph-execution-digest";
 
 const BINDING_KIND = "goal.automation_provenance_bound";
@@ -20,6 +21,8 @@ interface AutomationDefinitionRow {
 }
 
 interface BindingReceipt {
+  lifecycle?: "finite";
+  deadlineAt?: string;
   schemaVersion: "agentlas.goal-automation-provenance.v1";
   goalId: string; goalRevision: number; chatId: string; invocationRunId: string;
   automationId: string; automationCreatedAt: string; definitionDigest: string; graphDigest: string | null;
@@ -31,6 +34,8 @@ interface BindingReceipt {
 
 /** Main-only snapshot of a currently valid Goal-created automation bridge. */
 export interface CurrentGoalAutomationBinding {
+  lifecycle?: "finite";
+  deadlineAt?: string;
   goalId: string;
   goalRevision: number;
   chatId: string;
@@ -98,8 +103,10 @@ function currentGoal(goalId: string, expectedGoalRevision: number, chatId: strin
   const contract = getChatGoalContract(goalId);
   const run = getLongRunByGoalId(goalId);
   const chat = chatBinding(chatId);
-  if (!goal || goal.revision !== expectedGoalRevision || goal.lifecycle !== "ongoing"
-    || goal.chatId !== chatId || contract?.status !== "active" || !run || run.surface === "science"
+  // Association remains readable after pause/deadline for Stop and audit. Execution has its own barrier.
+  const finite = goal?.lifecycle === "finite";
+  if (!goal || goal.revision !== expectedGoalRevision || (goal.lifecycle !== "ongoing" && !finite)
+    || goal.chatId !== chatId || (!finite && contract?.status !== "active") || !run || run.surface === "science"
     || run.rootChatId !== chatId || getLongRunGoalRevisionBinding(run.id)?.revision !== expectedGoalRevision
     || !chat || chat.goal_id !== goalId || chat.origin_surface !== run.surface
     || !invocationMatchesGoalRevision(invocationRunId, goalId, expectedGoalRevision)) return null;
@@ -138,7 +145,7 @@ function currentGoalForAmendment(input: {
 
 /** Only a newly created automation from this exact Goal invocation can acquire
  * this bridge. Legacy goal_id and a matching prompt/name never grant ownership. */
-export function bindCreatedAutomationToOngoingGoal(input: {
+export function bindCreatedAutomationToGoal(input: {
   goalId: string; expectedGoalRevision: number; chatId: string;
   invocationRunId: string; automationId: string;
 }): BindingReceipt {
@@ -149,6 +156,11 @@ export function bindCreatedAutomationToOngoingGoal(input: {
   }
   return getDb().transaction(() => {
     const owner = currentGoal(input.goalId, input.expectedGoalRevision, input.chatId, input.invocationRunId);
+    const revision = getChatGoalRevision(input.goalId), run = getLongRunByGoalId(input.goalId);
+    const finiteDeadline = revision?.lifecycle === "finite" ? goalDeadlineAt(input.goalId) : null;
+    if (revision?.lifecycle === "finite" && (!finiteDeadline || Date.parse(finiteDeadline) <= Date.now()
+      || !run || run.status !== "running" || longRunOwnerHold(run.id) || getChatGoalContract(input.goalId)?.status !== "active"))
+      throw new Error("goal_automation_binding_source_unverified");
     const row = definition(input.automationId);
     const started = getDb().prepare(`SELECT ts FROM run_events WHERE run_id = ? AND chat_id = ?
       AND kind = 'invoke_started' ORDER BY seq ASC LIMIT 1`).get(input.invocationRunId, input.chatId) as
@@ -161,6 +173,7 @@ export function bindCreatedAutomationToOngoingGoal(input: {
     }
     const receipt: BindingReceipt = {
       schemaVersion: "agentlas.goal-automation-provenance.v1",
+      ...(finiteDeadline ? { lifecycle: "finite" as const, deadlineAt: finiteDeadline } : {}),
       goalId: input.goalId, goalRevision: input.expectedGoalRevision,
       chatId: input.chatId, invocationRunId: input.invocationRunId,
       automationId: row.id, automationCreatedAt: row.created_at,
@@ -172,10 +185,17 @@ export function bindCreatedAutomationToOngoingGoal(input: {
   })();
 }
 
+/** Historical API stays ongoing-only; finite creation uses the explicit general Main binder. */
+export function bindCreatedAutomationToOngoingGoal(input: Parameters<typeof bindCreatedAutomationToGoal>[0]): BindingReceipt {
+  if (getChatGoalRevision(input.goalId)?.lifecycle !== "ongoing") throw new Error("goal_automation_binding_source_unverified");
+  return bindCreatedAutomationToGoal(input);
+}
+
 function parseBinding(raw: string): BindingReceipt | null {
   try {
     const value = JSON.parse(raw) as Partial<BindingReceipt>;
-    if (value.schemaVersion !== "agentlas.goal-automation-provenance.v1"
+    if ((value.lifecycle !== undefined && (value.lifecycle !== "finite" || typeof value.deadlineAt !== "string" || !Number.isFinite(Date.parse(value.deadlineAt))))
+      || value.schemaVersion !== "agentlas.goal-automation-provenance.v1"
       || typeof value.goalId !== "string" || typeof value.chatId !== "string"
       || typeof value.invocationRunId !== "string" || typeof value.automationId !== "string"
       || typeof value.automationCreatedAt !== "string"
@@ -256,6 +276,7 @@ export function appendGoalAutomationRevisionBinding(input: {
     sourceEventId: input.sourceEventId,
     payload: {
       schemaVersion: "agentlas.goal-automation-provenance.v1",
+      ...(input.binding.lifecycle === "finite" ? { lifecycle: "finite", deadlineAt: input.binding.deadlineAt } : {}),
       goalId: input.binding.goalId,
       goalRevision: input.binding.goalRevision,
       chatId: input.binding.chatId,

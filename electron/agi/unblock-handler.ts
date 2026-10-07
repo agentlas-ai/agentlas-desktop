@@ -99,7 +99,11 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
       const modelVersion = executor.currentVersion(input.goalId);
       const flight = model.run({ ...input, runVersion: modelVersion ?? input.runVersion }, pre).then((result) => {
         let final: AgiUnblockResult = result;
-        if (!workStarted && result.outcome !== "acted") {
+        // This code is produced only from Main's successful rest receipt with
+        // actual wait/checkpoint IDs. Generic rested output is not a wake promise.
+        const waitRegistered = result.code === "agi.model.wait-registered"
+          && result.actions?.some(action => action.action === "rest" && action.result === "goal_episode_wait_registered") === true;
+        if (!workStarted && result.outcome !== "acted" && !waitRegistered) {
           const version = executor.currentVersion(input.goalId);
           const acted = version !== null && deterministic({ ...fence, runVersion: version });
           final = { ...result, outcome: acted ? "acted" : result.outcome, code: acted ? "agi.model-fallback-acted" : result.code,

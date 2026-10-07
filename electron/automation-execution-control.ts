@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { goalDeadlineAt } from "./long-run/goal-deadline";
 import { getDb } from "./store/db";
 import { getAutomation } from "./store/automations";
 import { getChatGoalContract, getChatGoalRevision } from "./store/chat-goals";
@@ -23,6 +24,7 @@ const nativeGoalOwners = new WeakMap<NativeGoalStopOwner, { goalId: string; root
 const owners = new WeakMap<AutomationGoalExecutionOwner, GoalOwner>();
 interface StopEntry { controller: AbortController; owner?: GoalOwner; definitionSnapshot?: string }
 const controllers = new Map<string, StopEntry>();
+const automationStopGenerations = new Map<string, number>();
 const goalStops = new Map<string, { generation: number; receiptCursor: number; resumeAcknowledged?: boolean }>();
 const admittedGoals = new Map<string, { goalId: string; rootChatId: string; longRunId: string; receiptCursor: number }>();
 const goalKey = (owner: Pick<GoalOwner, "goalId" | "rootChatId" | "longRunId">) =>
@@ -100,6 +102,52 @@ function readOwner(automationId: string): Omit<GoalOwner, "generation"> | undefi
     sourceInvocationId: current.invocationRunId, receiptId: `${bridge!.run_id}:${bridge!.seq}` };
 }
 
+function finiteBinding(automationId: string): { goalId: string; deadlineAt: string } | undefined {
+  const row = getDb().prepare(`SELECT payload_json FROM long_run_events WHERE kind='goal.automation_provenance_bound'
+    AND actor_kind='host' AND json_extract(payload_json,'$.automationId')=? ORDER BY occurred_at DESC,rowid DESC LIMIT 1`)
+    .get(automationId) as { payload_json: string } | undefined;
+  if (!row) return undefined;
+  const raw = JSON.parse(row.payload_json);
+  if (raw.lifecycle !== "finite") return undefined;
+  if (typeof raw.goalId !== "string" || typeof raw.deadlineAt !== "string" || !Number.isFinite(Date.parse(raw.deadlineAt)))
+    refused("automation_finite_goal_dispatch_refused");
+  return { goalId: raw.goalId, deadlineAt: raw.deadlineAt };
+}
+export function isFiniteGoalDispatchRefusal(error: unknown): boolean {
+  return Boolean(error && typeof error === "object" && "code" in error && error.code === "automation_finite_goal_dispatch_refused");
+}
+/** Independent and ongoing paths retain their existing policy. A finite bridge can never fall back to independent. */
+export function captureFiniteAutomationGoalExecutionOwner(automationId: string): AutomationGoalExecutionOwner | undefined {
+  if (!finiteBinding(automationId)) return undefined;
+  try {
+    const owner = captureAutomationGoalExecutionOwner(automationId);
+    if (!owner) refused("automation_finite_goal_dispatch_refused");
+    return owner;
+  } catch { refused("automation_finite_goal_dispatch_refused"); }
+}
+/** Reuse a scheduler Stop handle; direct Graph runs own only their own handle. */
+export function bindFiniteGraphRunStop(automationId: string, controller: AbortController, owner: AutomationGoalExecutionOwner): () => void {
+  const identity = owners.get(owner), prior = controllers.get(automationId);
+  assertAutomationGoalExecutionOwner(owner);
+  if (!identity) refused("automation_finite_goal_dispatch_refused");
+  const deadline = finiteBinding(automationId)!.deadlineAt, current = goalDeadlineAt(identity.goalId);
+  if (!current) refused("automation_finite_goal_dispatch_refused");
+  const delay = Math.min(Date.parse(deadline),Date.parse(current)) - Date.now();
+  let release: () => void;
+  if (prior) {
+    if (!prior.owner || JSON.stringify(prior.owner) !== JSON.stringify(identity)) refused("automation_finite_goal_dispatch_refused");
+    const abort = () => controller.abort(prior.controller.signal.reason);
+    if (prior.controller.signal.aborted) abort();
+    else prior.controller.signal.addEventListener("abort",abort,{ once: true });
+    release = () => prior.controller.signal.removeEventListener("abort",abort);
+  } else { bindAutomationRunStop(automationId,controller,owner); release = () => releaseAutomationRunStop(automationId,controller); }
+  // One bound deadline cancellation, not an autonomous retry or cadence.
+  const timer = delay <= 2_147_483_647 ? setTimeout(() => controller.abort(Object.assign(new Error("automation_finite_goal_dispatch_refused"),
+    { code: "automation_finite_goal_dispatch_refused" })),Math.max(0,delay)) : null;
+  timer?.unref?.();
+  return () => { if (timer) clearTimeout(timer); release(); };
+}
+
 function assertCanonicalGoal(input: { goalId: string; rootChatId: string; longRunId?: string; revision: number }) {
   const run = getLongRunByGoalId(input.goalId), revision = getChatGoalRevision(input.goalId);
   const chat = getDb().prepare("SELECT goal_id, origin_surface, archived_at FROM chats WHERE id = ?")
@@ -115,7 +163,17 @@ function assertGoalDispatch(input: { goalId: string; rootChatId: string; longRun
   const run = getLongRunByGoalId(input.goalId);
   if (!run || run.id !== input.longRunId || !["queued", "running"].includes(run.status)
     || getChatGoalContract(input.goalId)?.status !== "active" || longRunOwnerHold(run.id)) refused();
+  assertGoalExecutionControlGeneration(input, null);
+}
+/** A native Stop remains effective when its durable write fails. A captured
+ * generation also stays stale after an explicit Resume (Stop/Resume ABA).
+ * Registered waits recovered in another Main check the current Stop without
+ * comparing a generation belonging to the previous process. */
+export function assertGoalExecutionControlGeneration(input: { goalId: string; rootChatId: string; longRunId: string },
+  expectedGeneration: number | null): void {
   const stop = goalStops.get(goalKey(input));
+  if (expectedGeneration !== null && (!Number.isSafeInteger(expectedGeneration) || expectedGeneration < 0
+    || (stop?.generation ?? 0) !== expectedGeneration)) refused();
   if (stop && !stop.resumeAcknowledged) {
     // A failed durable pause still fences new dispatch in this Main process.
     // Only a later explicit owner resume can release it, never a host status write.
@@ -123,9 +181,25 @@ function assertGoalDispatch(input: { goalId: string; rootChatId: string; longRun
       AND ((kind = 'run.user_control' AND (json_extract(payload_json, '$.action') = 'resume_with_message'
         OR json_extract(payload_json, '$.command') = 'resume'))
         OR (kind = 'run.status_changed' AND json_extract(payload_json, '$.to') IN ('queued', 'running')))`)
-      .get(run.id) as { seq: number | null } | undefined;
+      .get(input.longRunId) as { seq: number | null } | undefined;
     if (typeof release?.seq !== "number" || release.seq <= stop.receiptCursor) refused();
   }
+}
+/** Read-only snapshot for an already canonical Main decision; this number
+ * does not bind a controller or authorize dispatch by itself. */
+export function captureGoalExecutionControlGeneration(input: { goalId: string; rootChatId: string;
+  longRunId: string; expectedRevision: number }): number {
+  assertCanonicalGoal({ ...input, revision: input.expectedRevision });
+  assertGoalDispatch(input);
+  return peekGoalExecutionControlGeneration(input);
+}
+
+/** Authoring may prepare a local candidate while work is paused or waiting.
+ * Reading this epoch grants no dispatch authority; the original epoch can only
+ * detect a Stop/Resume change during an awaited preparation. */
+export function peekGoalExecutionControlGeneration(input: { goalId: string; rootChatId: string;
+  longRunId: string }): number {
+  return goalStops.get(goalKey(input))?.generation ?? 0;
 }
 /** Synchronous lifecycle barrier for Main's finite-Goal create/re-enable path.
  * A workspace choice is never consulted and cannot release an owner stop. */
@@ -158,6 +232,12 @@ export function nativeGoalStopOwnerMatches(token: NativeGoalStopOwner | undefine
   return Boolean(owner && owner.goalId === goalId && owner.rootChatId === rootChatId);
 }
 function assertOwnerCurrent(owner: GoalOwner): void {
+  const finite = finiteBinding(owner.automationId);
+  if (finite) {
+    const currentDeadline = goalDeadlineAt(owner.goalId);
+    if (finite.goalId !== owner.goalId || !currentDeadline || Date.now() >= Math.min(Date.parse(finite.deadlineAt),Date.parse(currentDeadline)))
+      refused("automation_finite_goal_dispatch_refused");
+  }
   const current = readOwner(owner.automationId);
   const { generation: _generation, ...identity } = owner;
   if (!current || JSON.stringify(current) !== JSON.stringify(identity)) refused();
@@ -169,21 +249,30 @@ function assertOwnerCurrent(owner: GoalOwner): void {
 /** Capture before the first awaited admission check. Copied/JSON tokens cannot
  * bind or assert a run, and a pause during that await invalidates this token. */
 export function captureAutomationGoalExecutionOwner(automationId: string): AutomationGoalExecutionOwner | undefined {
-  const identity = readOwner(automationId);
-  if (!identity) return undefined;
-  const owner: GoalOwner = { ...identity, generation: goalStops.get(goalKey(identity))?.generation ?? 0 };
-  assertOwnerCurrent(owner);
-  admittedGoals.set(goalKey(owner), { goalId: owner.goalId, rootChatId: owner.rootChatId,
-    longRunId: owner.longRunId, receiptCursor: getLongRunByGoalId(owner.goalId)!.lastEventSeq });
-  const token = Object.freeze({}) as AutomationGoalExecutionOwner;
-  owners.set(token, Object.freeze(owner));
-  return token;
+  try {
+    const identity = readOwner(automationId);
+    if (!identity) return undefined;
+    const owner: GoalOwner = { ...identity, generation: goalStops.get(goalKey(identity))?.generation ?? 0 };
+    assertOwnerCurrent(owner);
+    admittedGoals.set(goalKey(owner), { goalId: owner.goalId, rootChatId: owner.rootChatId,
+      longRunId: owner.longRunId, receiptCursor: getLongRunByGoalId(owner.goalId)!.lastEventSeq });
+    const token = Object.freeze({}) as AutomationGoalExecutionOwner;
+    owners.set(token, Object.freeze(owner));
+    return token;
+  } catch (error) {
+    if (finiteBinding(automationId)) refused("automation_finite_goal_dispatch_refused");
+    throw error;
+  }
 }
+
 export function assertAutomationGoalExecutionOwner(owner: AutomationGoalExecutionOwner | undefined): void {
   if (!owner) return;
   const identity = owners.get(owner);
   if (!identity) refused();
-  assertOwnerCurrent(identity);
+  try { assertOwnerCurrent(identity); } catch (error) {
+    if (finiteBinding(identity.automationId)) refused("automation_finite_goal_dispatch_refused");
+    throw error;
+  }
 }
 /** Read-only lifecycle association check; unlike dispatch it remains available
  * while paused, so disabling the exact owned row does not require a live grant. */
@@ -230,7 +319,13 @@ export function bindAutomationRunStop(automationId: string, controller: AbortCon
 export function releaseAutomationRunStop(automationId: string, controller: AbortController): void {
   if (controllers.get(automationId)?.controller === controller) controllers.delete(automationId);
 }
+/** Local preparation may observe Stop without gaining execution authority.
+ * The epoch advances even when no run currently owns a Stop handle. */
+export function peekAutomationStopGeneration(automationId: string): number {
+  return automationStopGenerations.get(automationId) ?? 0;
+}
 export function stopAutomationRun(automationId: string): boolean {
+  automationStopGenerations.set(automationId, peekAutomationStopGeneration(automationId) + 1);
   const entry = controllers.get(automationId);
   if (!entry) return false;
   entry.controller.abort(new Error("automation_stopped_by_user"));

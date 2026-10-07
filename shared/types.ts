@@ -1666,8 +1666,18 @@ export interface AutomationFixPlan {
   unavailable: boolean;
 }
 
+export interface GraphVerificationReceipt {
+  schemaVersion: "agentlas.graph-verification.v1";
+  graphDigest: string;
+  structural: "verified";
+  runtime: "not_checked" | "partially_checked" | "checked";
+  saved: boolean;
+  repairedNodeIds: string[];
+}
+
 export interface AutomationFixResult {
   ok: boolean;
+  verification?: GraphVerificationReceipt;
   /** 사용자에게 보여줄 결과 한 줄. */
   message: string;
   /** 렌더러가 열어야 하는 고정 목적지(자유 URL 아님). */
@@ -8335,14 +8345,16 @@ export interface AgentlasIpc {
       input: { nodeId: string; ref: string; targetType: "agent" | "firm" | "hub"; targetVersion?: string | null; label?: string },
     ) => Promise<import("./graph-tool-binding").GraphSwapOutcome>;
     /** 자연어로 새 자동화를 만드는 인터뷰 한 턴. 질문이 오거나, 지어진 그래프가 온다. */
-    interviewGraph: (state: unknown) => Promise<
+    interviewGraph: (state: unknown, context?: { requestId: string }) => Promise<
       | { ok: true; kind: "ask"; questions: Array<{ id: string; question: string; why: string; choices?: string[] }> }
       | { ok: true; kind: "blueprint"; blueprint: unknown; graph: WorkflowGraph; scheduleHuman: string; triggerType: "schedule" | "manual" }
       | { ok: false; code: string; reason: string; nextAction: string }
     >;
+    /** Cancel only this window's unsaved Graph authoring request. */
+    cancelGraphAuthoring: (requestId: string) => Promise<{ ok: true }>;
     /** 인터뷰로 정해진 그래프를 실제로 만든다(꺼진 상태로). */
     createFromBlueprint: (payload: { name: string; graph: WorkflowGraph; scheduleHuman: string; targetId?: string; goal?: string }) => Promise<
-      { ok: true; id: string; name: string; renamed: boolean } | { ok: false; code: string; reason: string; nextAction: string }
+      { ok: true; id: string; name: string; renamed: boolean; verification?: GraphVerificationReceipt } | { ok: false; code: string; reason: string; nextAction: string }
     >;
     /**
      * 그래프를 고친 뒤 **이전 실패를 잊고 처음부터** 돌릴 수 있게 한다.
@@ -8360,6 +8372,8 @@ export interface AgentlasIpc {
       graph: WorkflowGraph;
       goal?: string;
       initialVars?: Record<string, unknown>;
+      requestId?: string;
+      runtimeSelection?: RuntimeSelection;
     }) => Promise<{
       ok: boolean;
       blocked: {
@@ -8374,6 +8388,8 @@ export interface AgentlasIpc {
     applyBuildRecovery: (payload: {
       graph: WorkflowGraph;
       goal?: string;
+      requestId?: string;
+      runtimeSelection?: RuntimeSelection;
       blocked: {
         nodeId: string; label: string; cause: string;
         availableVars: string[]; upstreamSample: string | null;
@@ -8403,6 +8419,9 @@ export interface AgentlasIpc {
       | { ok: false; code: string; reason: string; nextAction: string }
       | {
         ok: true;
+        proposalId: string;
+        baseRevision: string;
+        verification: GraphVerificationReceipt;
         patch: { ops: unknown[]; rationale?: string };
         risks: string[];
         summary: { added: string[]; removed: string[]; changed: string[] };
@@ -8421,6 +8440,9 @@ export interface AgentlasIpc {
       | { ok: false; code: string; reason: string; nextAction: string }
       | {
         ok: true;
+        proposalId: string;
+        baseRevision: string;
+        verification: GraphVerificationReceipt;
         risks: string[];
         summary: { added: string[]; removed: string[]; changed: string[] };
         needsApproval: boolean;
@@ -8429,11 +8451,12 @@ export interface AgentlasIpc {
     /** 사용자가 diff를 보고 승인한 뒤에만 저장한다. */
     applyGraphPatch: (
       id: string,
-      patch: { ops: unknown[]; rationale?: string },
+      proposal: { proposalId: string; approved?: boolean },
     ) => Promise<
-      | { ok: true; automationId: string; automation: Automation }
+      | { ok: true; automationId: string; proposalId: string; definitionRevision: string; automation: Automation; verification: GraphVerificationReceipt; replayed?: boolean }
       | { ok: false; code?: string; reason?: string; nextAction?: string }
     >;
+    readGraphPatchReceipt: (id: string, proposalId: string) => Promise<{ ok: true; automationId: string; proposalId: string; automation: Automation | null; superseded: boolean; verification: GraphVerificationReceipt } | null>;
     /** 승인 브레이크가 걸린 단계의 결정을 기록한다. 승인은 판정이 아니라 사람의 결정이다. */
     /** 좋은 예시 하나 → 채점표 제안. 제안일 뿐 — 편집기에 채워지고 사람이 고친 뒤 저장된다. */
     proposeChecklistFromExample: (

@@ -505,32 +505,17 @@ export async function applyAutomationFix(
   }
 
   if (cap.kind === "repair_graph_shape") {
-    const { repairGraphContradictions } = await import("../shared/graph-contradictions");
-    const repair = repairGraphContradictions(getAutomation(automationId)?.graph ?? null);
-    if (!repair.changed || !repair.graph) {
-      return {
-        ok: false,
-        message: ko
-          ? "고칠 모양을 찾지 못했습니다 — 이미 고쳐졌거나, 자동으로 옮길 수 없는 형태입니다."
-          : "Nothing to repair — it is already fixed, or the shape cannot be moved automatically.",
-        navigate: null,
-        plan: null,
-      };
-    }
-    const { updateAutomationGraph } = await import("./store/automations");
-    updateAutomationGraph(automationId, repair.graph, {
-      note: ko
-        ? "평상시 실패로 이어지던 검증 위치를 고쳤습니다."
-        : "Fixed the verification placement that was causing routine failures.",
-    });
-    return {
-      ok: true,
-      message: ko
-        ? `검증 ${repair.movedNodeIds.length}개를 값이 있는 쪽 가지 안으로 옮겼습니다. 이제 알릴 것이 없는 날에도 정상으로 끝납니다.`
-        : `Moved ${repair.movedNodeIds.length} verification step(s) inside the branch that has a value. Quiet days now finish normally.`,
-      navigate: null,
-      plan: null,
-    };
+    const { captureGraphProposalBase,superviseGraph,assertGraphProposalBase }=await import("./workflow/graph-supervision");
+    const { desktopStoreTransaction }=await import("./store/change-bus");
+    const { getDb }=await import("./store/db");
+    const { updateAutomationGraph }=await import("./store/automations");
+    try {
+      const base=captureGraphProposalBase(automationId), checked=superviseGraph(base.graph);
+      if (!checked.verification.repairedNodeIds.length) return {ok:false,message:ko?"적용할 구조 수정이 없습니다.":"There is no structural repair to apply.",navigate:null,plan:null};
+      desktopStoreTransaction(getDb(),()=>{assertGraphProposalBase(base);updateAutomationGraph(automationId,checked.graph,{note:"Verified structural repair",strictSnapshot:true});}).immediate();
+      return {ok:true,message:ko?"그래프 구조를 검증하고 수정본을 저장했습니다. 실제 실행 결과는 아직 확인하지 않았습니다.":"The repaired graph passed structural verification and was saved. Its runtime outcome has not been checked.",
+        verification:{...checked.verification,saved:true},navigate:null,plan:null};
+    } catch {return {ok:false,message:ko?"현재 그래프 또는 실행 상태에서 구조 수정을 적용하지 않았습니다.":"The structural repair was not applied to the current graph or execution state.",navigate:null,plan:null};}
   }
 
   if (cap.kind === "retry_run") {

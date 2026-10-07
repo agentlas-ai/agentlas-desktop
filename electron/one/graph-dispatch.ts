@@ -6,6 +6,7 @@ import { readAutomationGraphDefinition, resolveAutomationGraph } from "../../sha
 import { requiredExecutionPermission } from "../../shared/graph-node-protocol";
 import { decideGraphRunRequest } from "../../shared/graph-run-request";
 import { getDb } from "../store/db";
+import { desktopStoreTransaction } from "../store/change-bus";
 import { getChat } from "../store/chats";
 import { createAutomation, getAutomation, hasDurableActiveAutomationExecution, hasGraphLoginWait,
   listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
@@ -359,7 +360,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     }
     const connections = input.enabled === false ? null : await reportGraphConnections(graph, currentUiLocale());
     const enable = input.enabled !== false && connections?.activation.canActivate === true;
-    return getDb().transaction(() => {
+    return desktopStoreTransaction(getDb(), () => {
       const matches = scoped(caller).filter(a => a.name.normalize("NFKC").toLowerCase() === bp.name.normalize("NFKC").toLowerCase());
       if (!existing && matches.length) {
         if (matches.length === 1 && graphSame(matches[0], graph, bp, schedule, triggerType)) {
@@ -415,7 +416,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     }
   }
   fresh(a, input.expected_revision);
-  if (name === "one_graph_patch") return getDb().transaction(() => {
+  if (name === "one_graph_patch") return desktopStoreTransaction(getDb(), () => {
     const current = exact(caller, a.id); fresh(current, input.expected_revision); editable(current);
     const graph = structuredClone(resolveAutomationGraph(current));
     const edits = (input.instructions ?? []) as Array<{ node_id: string; instruction: string }>;

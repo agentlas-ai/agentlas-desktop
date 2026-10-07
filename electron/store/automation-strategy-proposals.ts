@@ -29,7 +29,7 @@ import {
   type AutomationStrategyRevisionReceipt,
   type AutomationStrategyV1,
 } from "./automation-strategy-revisions";
-import { emitDesktopStoreChange } from "./change-bus";
+import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
 import { getAutomation } from "./automations";
 import {
@@ -987,6 +987,45 @@ function strategyReviewInput(
   });
 }
 
+/** Episode reservations are Main custody, never an approval status or a model field. */
+function episodeReservation(proposalId: string): { capture_id: string; consumed: number } | undefined {
+  const db = getDb();
+  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='automation_strategy_episode_reservations'").get()) return undefined;
+  return db.prepare("SELECT capture_id,consumed FROM automation_strategy_episode_reservations WHERE proposal_id=?")
+    .get(proposalId) as { capture_id: string; consumed: number } | undefined;
+}
+function assertUnreserved(proposalId: string): void {
+  if (episodeReservation(proposalId)) throw new AutomationStrategyProposalError("proposal_episode_reserved");
+}
+export function createEpisodeReservedStrategyProposal(input: Parameters<typeof createAutomationStrategyProposalForRun>[0], captureId: string): AutomationStrategyProposalReceipt {
+  const db = getDb();
+  db.exec(`CREATE TABLE IF NOT EXISTS automation_strategy_episode_reservations (
+    proposal_id TEXT PRIMARY KEY, capture_id TEXT NOT NULL, consumed INTEGER NOT NULL DEFAULT 0 CHECK(consumed IN (0,1)))`);
+  return desktopStoreTransaction(db, () => {
+    const proposal = createAutomationStrategyProposalForRun(input);
+    const old = episodeReservation(proposal.id);
+    if (old && old.capture_id !== captureId) throw new AutomationStrategyProposalError("proposal_episode_conflict");
+    db.prepare("INSERT OR IGNORE INTO automation_strategy_episode_reservations(proposal_id,capture_id) VALUES (?,?)").run(proposal.id,captureId);
+    return proposal;
+  }).immediate();
+}
+/** Only the episode's synchronous outer transaction may consume this reviewed preparation. */
+export function applyEpisodeReservedStrategyProposal(proposalId: string, captureId: string): AutomationStrategyProposalReceipt {
+  if (!getDb().inTransaction) throw new AutomationStrategyProposalError("proposal_episode_transaction_required");
+  const reservation = episodeReservation(proposalId), current = getAutomationStrategyProposal(proposalId);
+  if (!reservation || reservation.capture_id !== captureId || reservation.consumed || !current
+    || current.status !== "pending" || current.reviewStatus !== "approved"
+    || current.adjudication.status !== "judged" || current.adjudication.decision !== "within_scope"
+    || current.adjudication.authorization !== "within_scope" || current.requiresPaymentApproval
+    || current.goalOwnershipUnverified || !current.goalBinding || current.intent !== "change"
+    || !current.graphPatch || current.schedulePatch) throw new AutomationStrategyProposalError("proposal_episode_not_prepared");
+  readStrategyReviewBoundary(current);
+  const applied = applyProposalAtomically(current, { expectedStatus: "pending", conflict: "within_scope", episodeCaptureId: captureId });
+  const changed = getDb().prepare("UPDATE automation_strategy_episode_reservations SET consumed=1 WHERE proposal_id=? AND capture_id=? AND consumed=0").run(proposalId,captureId);
+  if (changed.changes !== 1) throw new AutomationStrategyProposalError("proposal_episode_conflict");
+  return applied;
+}
+
 function proposalByRequest(requestId: string): ProposalRow | null {
   return getDb().prepare(
     `SELECT id, request_id, input_digest, receipt_json
@@ -1206,10 +1245,10 @@ export function settleAutomationStrategyProposalBacklog(
   const id = identity(automationId, "automation_id");
   const db = getDb();
   const result = db.transaction((): AutomationStrategyProposalBacklogResult => {
-    const rows = db.prepare(
+    const rows = (db.prepare(
       `SELECT id, receipt_json FROM automation_strategy_proposals
         WHERE automation_id = ? AND state = 'pending' ORDER BY created_at DESC, rowid DESC`,
-    ).all(id) as Array<{ id: string; receipt_json: string }>;
+    ).all(id) as Array<{ id: string; receipt_json: string }>).filter(row => !episodeReservation(row.id));
     if (rows.length === 0) return { liveProposalId: null, superseded: 0, staleResolved: 0 };
     const liveId = liveProposalId && rows.some((row) => row.id === liveProposalId) ? liveProposalId : rows[0]!.id;
     const now = new Date().toISOString();
@@ -1308,7 +1347,7 @@ interface StrategyReviewBoundary {
 
 export interface AutomationStrategyProposalApplicability {
   canApply: boolean;
-  unavailableReason: "stale" | "no_executable_change" | "goal_amendment_required" | "ownership_unverified" | null;
+  unavailableReason: "episode_reserved" | "stale" | "no_executable_change" | "goal_amendment_required" | "ownership_unverified" | null;
 }
 
 function hasExecutableChange(proposal: AutomationStrategyProposalReceipt): boolean {
@@ -1689,6 +1728,8 @@ function applyProposalWithGoalAmendment(
 export function getAutomationStrategyProposalApplicability(
   proposal: AutomationStrategyProposalReceipt,
 ): AutomationStrategyProposalApplicability {
+  if (episodeReservation(proposal.id)) return { canApply: false, unavailableReason: "episode_reserved" };
+  if (proposal.goalId && getChatGoalRevision(proposal.goalId)?.lifecycle === "finite") return { canApply: false, unavailableReason: null };
   if (proposal.status === "applied" || proposal.status === "rejected") {
     return { canApply: false, unavailableReason: null };
   }
@@ -1740,13 +1781,16 @@ function saveReviewUnavailable(
  * enablement and Goal conditions cannot be changed by this route.
  */
 export async function adjudicateAutomationStrategyProposal(
-  input: { automationId: string; proposalId: string },
+  input: { automationId: string; proposalId: string; episodeCaptureId?: string },
   dependencies?: StrategyReviewDependencies,
 ): Promise<AutomationStrategyProposalReceipt> {
   const automationId = identity(input.automationId, "automation_id");
   const proposalId = identity(input.proposalId, "proposal_id");
   const row = proposalById(proposalId);
   if (!row) throw new AutomationStrategyProposalError("proposal_missing");
+  const reservation = episodeReservation(proposalId);
+  if (reservation && reservation.capture_id !== input.episodeCaptureId) throw new AutomationStrategyProposalError("proposal_episode_reserved");
+  if (input.episodeCaptureId && (!reservation || reservation.consumed)) throw new AutomationStrategyProposalError("proposal_episode_conflict");
   const current = parseReceipt(row.receipt_json);
   if (current.automationId !== automationId) throw new AutomationStrategyProposalError("proposal_automation_mismatch");
   if (current.status === "applied" || current.status === "rejected") return current;
@@ -1806,6 +1850,19 @@ export async function adjudicateAutomationStrategyProposal(
   }
   if (verdict.verdict === null || verdict.source === "unavailable") {
     return saveReviewUnavailable(current, verdict.reason || "judgment_unavailable", verdict.runtimeReceipt);
+  }
+  if (input.episodeCaptureId) {
+    // Never enter legacy autonomous apply/adoption, including its approval override.
+    readStrategyReviewBoundary(current);
+    const latestReservation = episodeReservation(current.id);
+    if (!latestReservation || latestReservation.capture_id !== input.episodeCaptureId || latestReservation.consumed)
+      throw new AutomationStrategyProposalError("proposal_episode_conflict");
+    const approved = verdict.verdict === "within_scope" && !current.requiresPaymentApproval
+      && !current.goalOwnershipUnverified && Boolean(current.goalBinding) && current.intent === "change"
+      && Boolean(current.graphPatch) && !current.schedulePatch;
+    return saveAdjudication(current, approved ? "within_scope" : "uncertain", approved ? "approved" : "pending",
+      judgedAdjudication(approved ? "within_scope" : "uncertain", verdict.reason || "proposal_episode_review_refused",
+        verdict.runtimeReceipt, approved ? "within_scope" : undefined));
   }
   if (current.requiresPaymentApproval) {
     // Payment is a hard boundary even when the scope judge otherwise finds
@@ -1959,6 +2016,7 @@ export async function reviewAutomationStrategyProposal(input: {
   }
   const row = proposalById(proposalId);
   if (!row) throw new AutomationStrategyProposalError("proposal_missing");
+  assertUnreserved(row.id);
   const current = parseReceipt(row.receipt_json);
   if (current.automationId !== automationId) throw new AutomationStrategyProposalError("proposal_automation_mismatch");
   if (current.status === "applied" || current.status === "rejected") return current;
@@ -2073,6 +2131,7 @@ export function transitionAutomationStrategyProposal(input: {
   }
   const row = proposalById(identity(input.proposalId, "proposal_id"));
   if (!row) throw new AutomationStrategyProposalError("proposal_missing");
+  assertUnreserved(row.id);
   const current = parseReceipt(row.receipt_json);
   if (current.status !== input.expectedStatus) throw new AutomationStrategyProposalError("proposal_transition_conflict");
   const next = {
@@ -2085,6 +2144,7 @@ export function transitionAutomationStrategyProposal(input: {
 }
 
 interface ApplyProposalOptions {
+  episodeCaptureId?: string;
   expectedStatus: AutomationStrategyProposalStatus;
   conflict: Extract<AutomationStrategyProposalConflict, "within_scope" | "needs_user_approval">;
   adjudication?: AutomationStrategyProposalAdjudication;
@@ -2100,6 +2160,11 @@ function applyProposalAtomically(
   current: AutomationStrategyProposalReceipt,
   options: ApplyProposalOptions,
 ): AutomationStrategyProposalReceipt {
+  const reservation = episodeReservation(current.id);
+  if (current.goalId && getChatGoalRevision(current.goalId)?.lifecycle === "finite" && !options.episodeCaptureId)
+    throw new AutomationStrategyProposalError("proposal_finite_episode_required");
+  if (reservation && (reservation.capture_id !== options.episodeCaptureId || reservation.consumed))
+    throw new AutomationStrategyProposalError("proposal_episode_reserved");
   if (current.status !== options.expectedStatus) {
     throw new AutomationStrategyProposalError("proposal_transition_conflict");
   }
@@ -2197,6 +2262,7 @@ function applyProposalAtomically(
 export function applyAutomationStrategyProposal(proposalId: string): AutomationStrategyProposalReceipt {
   const row = proposalById(identity(proposalId, "proposal_id"));
   if (!row) throw new AutomationStrategyProposalError("proposal_missing");
+  assertUnreserved(row.id);
   const current = parseReceipt(row.receipt_json);
   if (current.status === "applied") return current;
   if (current.status !== "approved") throw new AutomationStrategyProposalError("proposal_not_approved");

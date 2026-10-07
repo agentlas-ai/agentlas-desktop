@@ -16,7 +16,7 @@ import { normalizeRuntimeSelectionInput, RUNTIME_SELECTION_KEYS as SHARED_RUNTIM
 import { createHash, randomUUID } from "node:crypto";
 import type { GraphJournalKindGenerated } from "../../shared/graph-vocabulary.generated";
 import { hostname } from "node:os";
-import { emitDesktopStoreChange } from "./change-bus";
+import { emitDesktopStoreChange, desktopStoreTransaction } from "./change-bus";
 import { AUTOMATION_RUN_STALE_AFTER_MS, getDb } from "./db";
 import { nextRun, specFromStored, defaultTz } from "./schedule";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
@@ -395,6 +395,7 @@ export function pinLegacyAutomationHubVersions(
         "UPDATE automations SET target_version = ?, graph_json = ? WHERE id = ?",
       ).run(targetVersion, graphJson, id);
       if (updated.changes !== 1) throw new Error("automation_hub_version_pin_conflict: row disappeared during migration");
+      bumpAutomationGraphEditEpoch(id);
     }
   });
   commit.immediate();
@@ -513,6 +514,7 @@ export function createAutomation(input: {
   if (input.goalId && input.goalId.trim()) {
     getDb().prepare("UPDATE automations SET goal_id = ? WHERE id = ?").run(input.goalId.trim(), id);
   }
+  bumpAutomationGraphEditEpoch(id);
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
@@ -620,6 +622,7 @@ export function updateAutomation(id: string, patch: AutomationUpdatePatch): Auto
     getDb().prepare("UPDATE automations SET goal_id = ? WHERE id = ?")
       .run(patch.goalId && patch.goalId.trim() ? patch.goalId.trim() : null, id);
   }
+  bumpAutomationGraphEditEpoch(id);
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
@@ -664,6 +667,7 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
   getDb()
     .prepare("UPDATE automations SET enabled = ?, next_run_at = ? WHERE id = ?")
     .run(enabled ? 1 : 0, nextRunAt, id);
+  bumpAutomationGraphEditEpoch(id);
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
@@ -754,12 +758,22 @@ export function restoreGraphVersion(automationId: string, versionId: string): Au
   return updateAutomationGraph(automationId, graph, { note: L("되돌리기", "Restore") });
 }
 
+export function automationGraphEditEpoch(id: string): number {
+  getDb().exec("CREATE TABLE IF NOT EXISTS automation_graph_edit_epochs (automation_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)");
+  return (getDb().prepare("SELECT epoch FROM automation_graph_edit_epochs WHERE automation_id=?").get(id) as {epoch:number}|undefined)?.epoch ?? 0;
+}
+export function bumpAutomationGraphEditEpoch(id: string): void {
+  automationGraphEditEpoch(id);
+  getDb().prepare("INSERT INTO automation_graph_edit_epochs(automation_id,epoch) VALUES (?,1) ON CONFLICT(automation_id) DO UPDATE SET epoch=epoch+1").run(id);
+}
+
 /** 저장된 그래프를 갱신(그래프 편집/생성 경로). null이면 그래프 제거(단일 프롬프트로 복귀). */
 export function updateAutomationGraph(
   id: string,
   graph: WorkflowGraph | null,
-  options?: { note?: string },
+  options?: { note?: string; strictSnapshot?: boolean },
 ): Automation {
+  return desktopStoreTransaction(getDb(), () => {
   const existing = getAutomation(id);
   if (!existing) throw new Error(`Automation not found: ${id}`);
   /*
@@ -769,7 +783,7 @@ export function updateAutomationGraph(
    */
   const changed = JSON.stringify(existing.graph ?? null) !== JSON.stringify(graph ?? null);
   if (changed && existing.graph && existing.graph.nodes?.length) {
-    try { snapshotGraphVersion(id, existing.graph, options?.note); } catch { /* 저장이 우선 */ }
+    try { snapshotGraphVersion(id, existing.graph, options?.note); } catch (error) { if (options?.strictSnapshot) throw error; }
   }
   getDb()
     .prepare("UPDATE automations SET graph_json = ? WHERE id = ?")
@@ -796,9 +810,11 @@ export function updateAutomationGraph(
       updateAutomation(id, { scheduleHuman: token, scheduleJson: null });
     }
   }
+  bumpAutomationGraphEditEpoch(id);
   const automation = getAutomation(id) as Automation;
   emitDesktopStoreChange({ entity: "automation", id });
   return automation;
+  }).immediate();
 }
 
 // ── automation_runs — 그래프 라이브 실행 per-node 상태(설계 §5 P2) ───────────

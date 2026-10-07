@@ -727,6 +727,13 @@ export class RuntimeTurnUnsettledError extends Error {
   }
 }
 
+/** Terminal HTTP status is machine evidence; prose/network errors do not grant replay. */
+export function runtimeHttpFailure(status: number, runtime: string, provider: string): RunnerFailure | null {
+  const kind = status === 401 ? "auth" : status === 429 ? "quota" : status === 403 ? "refused" : null;
+  return kind ? { kind, runtime, source: "marker", providerCode: `http_${status}`,
+    message: `${provider} API returned HTTP ${status}.` } : null;
+}
+
 /** A Main-observed completed-tool loop stop cannot authorize provider replay. */
 export class RuntimeNoProgressError extends Error {
   readonly code = "automation_no_progress_loop";

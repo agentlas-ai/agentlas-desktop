@@ -11,6 +11,9 @@
  * contracts can drive the real queries on an in-memory store.
  */
 import { projectGoalPlanReadiness, type PlanReadiness } from "../../shared/goal-shape";
+import { readEpisodeQuietBaseline } from "../long-run/episode-disposition";
+import { getDb } from "../store/db";
+import { getInvocationRunReceipt } from "../store/run-events";
 import { readGoalPlan } from "../store/goal-plans";
 import type Database from "better-sqlite3";
 import { createHash } from "node:crypto";
@@ -27,6 +30,8 @@ const OWNER_QUESTION = new Set(["goal_owner_answer_required", "auto_goal_owner_r
 
 export interface AgiGoalFactsDeps {
   db: Database.Database;
+  /** Internal baseline read must not consume the receipt it is constructing. */
+  episodeBaselineOnly?: boolean;
   nowMs(): number;
   /** Latest turn receipt of the goal chat (invocation service). */
   latestReceipt?(chatId: string): { status: string; errorCode: string | null; runId?: string | null } | null;
@@ -233,6 +238,44 @@ function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<
     nextWakeAtMs: Math.min(...[...dates, retryAt].filter(at => Number.isFinite(at) && at > nowMs)) };
 }
 
+/** A typed unscheduled result is a current condition, even when the host's
+ * nonblocking policy keeps the run row running. Never infer it from prose or
+ * inherit a refusal from an older producer / Goal revision. */
+function currentUnscheduledRest(db: Database.Database, run: AgiGoalRow): { code: string; ref: string } | null {
+  if (run.status !== "running" || !run.rootChatId
+    || !["run_events", "long_run_worker_attempts", "chat_goal_revisions", "chats"].every(name => tableExists(db, name))) return null;
+  const chat = db.prepare("SELECT goal_id FROM chats WHERE id=?").get(run.rootChatId) as { goal_id: string | null } | undefined;
+  if (chat?.goal_id !== run.goalId) return null;
+  const worker = db.prepare("SELECT id,invocation_run_id FROM long_run_worker_attempts WHERE run_id=? ORDER BY rowid DESC LIMIT 1")
+    .get(run.id) as { id: string; invocation_run_id: string | null } | undefined;
+  if (!worker?.invocation_run_id) return null;
+  const bound = db.prepare(`SELECT json_extract(payload_json,'$.revision') AS revision FROM long_run_events
+    WHERE run_id=? AND kind='run.goal_revision_bound' AND seq <=
+      (SELECT MIN(seq) FROM long_run_events WHERE run_id=? AND kind='worker.attempt_started'
+        AND json_extract(payload_json,'$.attemptId')=?) ORDER BY seq DESC LIMIT 1`)
+    .get(run.id, run.id, worker.id) as { revision: number | null } | undefined;
+  const revision = db.prepare("SELECT MAX(revision) revision FROM chat_goal_revisions WHERE goal_id=?")
+    .get(run.goalId) as { revision: number | null };
+  if (!bound?.revision || bound.revision !== revision.revision) return null;
+  const wait = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id=? AND kind='run.wait_subscription' ORDER BY seq DESC LIMIT 1")
+    .get(run.id) as { payload_json: string } | undefined;
+  if (wait) { try {
+    const subscription = JSON.parse(wait.payload_json)?.subscription;
+    if (subscription?.goalId === run.goalId && subscription.runId === run.id && subscription.chatId === run.rootChatId
+      && subscription.goalRevision === revision.revision && ["pending", "claimed"].includes(subscription.state)) return null;
+  } catch { /* malformed is not a registered wake */ } }
+  const event = db.prepare(`SELECT id,kind,payload_json FROM run_events WHERE run_id=? AND chat_id=?
+    AND kind IN ('goal_wait_refused','goal_wait_registered') ORDER BY seq DESC LIMIT 1`)
+    .get(worker.invocation_run_id, run.rootChatId) as { id: string; kind: string; payload_json: string } | undefined;
+  if (event?.kind !== "goal_wait_refused") return null;
+  try {
+    const value = JSON.parse(event.payload_json);
+    if (value.goalId !== run.goalId || value.scheduled !== false || typeof value.reasonCode !== "string"
+      || !/^(goal_episode|goal_plan|goal_revision|goal_wait|checkpoint)_[a-z_]{1,100}$/.test(value.reasonCode)) return null;
+    return { code: value.reasonCode, ref: `run_event:${event.id}` };
+  } catch { return null; }
+}
+
 export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): AgiBlockerFacts | null {
   const { db } = deps;
   const run = readAgiGoalRow(db, goalId);
@@ -262,6 +305,8 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
         signals.push({ kind: "wait_registration_refused", code: lastWait.reason });
         refs.push(`long_run_event:${run.id}:${lastWait.seq}`);
       }
+      const unscheduled = currentUnscheduledRest(db, run);
+      if (unscheduled) { signals.push({ kind: "blocked_status", reason: unscheduled.code }); refs.push(unscheduled.ref); }
       if (run.status === "waiting_user") signals.push({ kind: "needs_input", code: "waiting_user" });
       // An outward effect whose result is unknown no longer holds a Goal (1.2.58, owner decision 2026-10-05): the next
       // turn reads the previous one and checks for itself, and the looks that ended in "exhausted" are retired. Open
@@ -295,9 +340,60 @@ export function readAgiBlockerFacts(deps: AgiGoalFactsDeps, goalId: string): Agi
   const plan = tactics(db, goalId, deps.nowMs());
   const wake = wakeState(db, run, deps.nowMs());
   const latest = run.rootChatId ? deps.latestReceipt?.(run.rootChatId) : null;
+  const quietBaseline = deps.episodeBaselineOnly ? null : readEpisodeQuietBaseline(goalId, deps.nowMs(), db);
+  const quiet = !terminal && !heldByOwner && run.status === "waiting_tool" && quietBaseline !== null
+    && !signals.some(signal => ["owner_pause", "boundary", "needs_input", "host_pause"].includes(signal.kind))
+    && quietBaseline === episodeFactSignature(deps.db, run.id, run.rootChatId, signals, refs, latest ?? null);
   return { goalId, chatId: run.rootChatId, ...wake,
     fenceState: JSON.stringify([wake.fenceState, latest?.runId ?? null, latest?.status ?? null, plan.readiness?.mutationIdentity ?? null]),
     repairInFlight: busy || isGoalObserving(goalId), runId: run.id, runVersion: run.version, status: busy && !terminal && !heldByOwner ? "running" : run.status,
-    pauseReason: run.pauseReason, blockedReason: run.blockedReason, signals, tactics: plan.tactics, planReadiness: plan.readiness,
+    pauseReason: run.pauseReason, blockedReason: run.blockedReason,
+    // Audit rows and evidence refs remain intact. Only baseline blockers already
+    // superseded by this exact registered wait leave the current diagnosis.
+    signals: quiet ? signals.filter(signal => ["effect_uncertain", "effect_observation_exhausted"].includes(signal.kind)) : signals, tactics: plan.tactics, planReadiness: plan.readiness,
     blockedNodeId: plan.blockedNodeId, evidenceRefs: refs };
+}
+
+function episodeFactSignature(db: Database.Database, longRunId: string | null, chatId: string | null, signals: readonly AgiBlockerSignal[], refs: readonly string[],
+  receipt: { status: string; errorCode: string | null; runId?: string | null } | null): string {
+  // Typed failure IDs distinguish a new failure with the same code. Successful
+  // observations, prompt/context receipts and unrelated ledger sequence churn do not.
+  const faults = chatId ? db.prepare(`SELECT id,run_id,kind,
+    json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.errorCode') AS errorCode,
+    json_extract(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.toolFailureCode') AS toolFailureCode
+    FROM run_events WHERE chat_id=? AND (kind IN ('invoke_failed','invoke_threw','mcp_error')
+      OR json_type(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.errorCode')='text'
+      OR json_type(CASE WHEN json_valid(payload_json) THEN payload_json ELSE '{}' END,'$.toolFailureCode')='text')
+    ORDER BY rowid DESC LIMIT 64`).all(chatId) : [];
+  const failures = chatId ? db.prepare(`SELECT id,run_id,source,error_code FROM failure_events
+    WHERE chat_id=? ORDER BY rowid DESC LIMIT 64`).all(chatId) : [];
+  let status = receipt?.status ?? null;
+  // Normal output is still in the live registry during registration. That
+  // overlay may call this exact already-completed producer "running" until
+  // lifetime cleanup. Only its genuine error-free terminal receipt normalizes
+  // this projection difference; another producer or failed/refused receipt does not.
+  if (receipt?.runId && status === "running" && !receipt.errorCode && chatId) {
+    const worker = db.prepare("SELECT invocation_run_id FROM long_run_worker_attempts WHERE run_id=? ORDER BY rowid DESC LIMIT 1")
+      .get(longRunId) as { invocation_run_id: string | null } | undefined;
+    if (worker?.invocation_run_id === receipt.runId) {
+      const terminal = getInvocationRunReceipt(receipt.runId);
+      if (terminal?.runId === receipt.runId && terminal.chatId === chatId && terminal.status === "completed" && !terminal.errorCode) status = "completed";
+    }
+  }
+  return createHash("sha256").update(JSON.stringify({ signals, refs, faults, failures,
+    receipt: receipt ? { runId: receipt.runId ?? null, status, errorCode: receipt.errorCode ?? null } : null })).digest("hex");
+}
+/** Capture actual production facts after registration, before its receipt commits. */
+export function captureEpisodeQuietBaseline(goalId: string, now: number, hostReceipt?: AgiGoalFactsDeps["latestReceipt"]): string {
+  const db = getDb();
+  const latestReceipt: NonNullable<AgiGoalFactsDeps["latestReceipt"]> = hostReceipt ?? (chatId => {
+    const row = db.prepare(`SELECT run_id FROM run_events WHERE chat_id=? AND kind='invoke_started'
+      AND COALESCE(json_extract(payload_json,'$.background'),0) != 1 ORDER BY ts DESC,rowid DESC LIMIT 1`)
+      .get(chatId) as { run_id: string } | undefined;
+    const value = row ? getInvocationRunReceipt(row.run_id) : null;
+    return value ? { runId: value.runId, status: value.status, errorCode: value.errorCode ?? null } : null;
+  });
+  const facts = readAgiBlockerFacts({ db, nowMs: () => now, latestReceipt, episodeBaselineOnly: true }, goalId);
+  if (!facts) throw new Error("goal_episode_facts_unavailable");
+  return episodeFactSignature(db, facts.runId, facts.chatId ?? null, facts.signals, facts.evidenceRefs ?? [], facts.chatId ? latestReceipt(facts.chatId) : null);
 }

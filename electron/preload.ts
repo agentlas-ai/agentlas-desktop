@@ -1080,7 +1080,8 @@ const api: AgentlasIpc = {
       id: string,
       input: { nodeId: string; ref: string; targetType: "agent" | "firm" | "hub"; targetVersion?: string | null; label?: string },
     ) => ipcRenderer.invoke("automations:swapAgent", id, input),
-    interviewGraph: (state: unknown) => ipcRenderer.invoke("automations:interviewGraph", state),
+    interviewGraph: (state: unknown, context?: { requestId: string }) => ipcRenderer.invoke("automations:interviewGraph", state, context),
+    cancelGraphAuthoring: (requestId: string) => ipcRenderer.invoke("automations:cancelGraphAuthoring", requestId),
     createFromBlueprint: (payload: unknown) => ipcRenderer.invoke("automations:createFromBlueprint", payload),
     /** 그래프를 고친 뒤 이전 실패를 잊고 처음부터 — 그래프가 실제로 바뀐 경우에만 응한다. */
     forgetFailedRun: (id: string) => ipcRenderer.invoke("automations:forgetFailedRun", id),
@@ -1098,8 +1099,9 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("automations:requestGraphPatch", id, request),
     proposeGraphPatch: (id: string, patch: { ops: unknown[]; rationale?: string }) =>
       ipcRenderer.invoke("automations:proposeGraphPatch", id, patch),
-    applyGraphPatch: (id: string, patch: { ops: unknown[]; rationale?: string }) =>
-      ipcRenderer.invoke("automations:applyGraphPatch", id, patch),
+    applyGraphPatch: (id: string, proposal: { proposalId: string; approved?: boolean }) =>
+      ipcRenderer.invoke("automations:applyGraphPatch", id, proposal),
+    readGraphPatchReceipt: (id: string, proposalId: string) => ipcRenderer.invoke("automations:readGraphPatchReceipt",id,proposalId),
     proposeChecklistFromExample: (id: string, example: string) =>
       ipcRenderer.invoke("automations:proposeChecklistFromExample", id, example),
     recordEvalCorrection: (id: string, nodeId: string, correctedVerdict: "pass" | "fail", note?: string) =>

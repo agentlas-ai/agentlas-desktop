@@ -5543,6 +5543,7 @@ export function registerIpcHandlers(): void {
   //   설치는 무엇이 비어 있는지 돌려준다. "됐습니다"만 말하면 사람은 돈다고 믿는다.
   // 도는 실행을 사람이 멈춘다. 멈출 것이 없으면 그대로 false — 멈춘 척하지 않는다.
   ipcMain.handle("automations:stopRun", (_e, id: string) => {
+    try { (require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision")).invalidateGraphSupervision(String(id || "").trim()); } catch { /* Stop remains unconditional. */ }
     const { stopAutomationRun } = require("./automation-scheduler") as typeof import("./automation-scheduler");
     return { ok: true as const, stopped: stopAutomationRun(String(id || "").trim()) };
   });
@@ -5601,86 +5602,68 @@ export function registerIpcHandlers(): void {
   });
   // 그래프 변경 제안 — 평가만 한다. 적용은 사용자가 diff를 보고 누른 뒤 별도 호출로만.
   // 모델 출력이 저장된 그래프에 직접 닿는 경로는 만들지 않는다(설계 D8).
-  const evaluatePatchFor = (id: string, patch: unknown) => {
-    const automation = getAutomation(id);
-    if (!automation) throw new Error(`Automation not found: ${id}`);
-    if (!automation.graph) {
-      return {
-        ok: false as const,
-        code: "PATCH_NO_GRAPH",
-        reason: L("이 자동화에는 아직 고칠 그래프가 없습니다.", "This automation has no graph to fix yet."),
-        nextAction: L("먼저 그래프를 만든 뒤 다시 요청해 주세요.", "Create a graph first, then request this again."),
-      };
-    }
-    const { evaluateGraphPatch } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
-    const parsed = patch && typeof patch === "object" ? (patch as { ops?: unknown; rationale?: string }) : null;
-    const ops = Array.isArray(parsed?.ops) ? parsed!.ops : [];
-    return {
-      automation,
-      decision: evaluateGraphPatch(automation.graph, {
-        ops: ops as never,
-        ...(parsed?.rationale ? { rationale: parsed.rationale } : {}),
-      }),
-    } as const;
-  };
-
   // 사용자의 한 문장 → 변경 제안. 여기서도 **적용은 하지 않는다**.
   ipcMain.handle("automations:requestGraphPatch", async (_e, id: string, request: string) => {
-    const automation = getAutomation(id);
-    if (!automation) throw new Error(`Automation not found: ${id}`);
-    const sentence = String(request ?? "").trim();
-    if (!sentence) {
-      return { ok: false as const, code: "ARCHITECT_NO_REQUEST", reason: L("무엇을 바꿀지 알려주세요.", "Tell us what to change."), nextAction: L("고치고 싶은 내용을 한 문장으로 적어 주세요.", "Write what you want fixed in one sentence.") };
-    }
-    if (!automation.graph) {
-      return { ok: false as const, code: "PATCH_NO_GRAPH", reason: L("이 자동화에는 아직 고칠 그래프가 없습니다.", "This automation has no graph to fix yet."), nextAction: L("먼저 그래프를 만든 뒤 다시 요청해 주세요.", "Create a graph first, then request this again.") };
-    }
-    const architect = require("./workflow/graph-architect") as typeof import("./workflow/graph-architect");
-    const { evaluateGraphPatch, graphPatchNeedsApproval } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
-    const { callConnectedModelDetailed } = require("./system-agents/judgment") as typeof import("./system-agents/judgment");
-    const detailed = await callConnectedModelDetailed({
-      systemPrompt: architect.buildGraphArchitectPrompt(automation.graph, automation.goal),
-      input: sentence.slice(0, 4_000),
-      // 짓는 일이다 — 조회 도구를 연다(판정 통로의 무도구 잠금은 그대로).
-      authoring: true,
-    });
-    const text = detailed.text;
-    if (text === null) {
-      /*
-       * ★인터뷰 수리의 쌍둥이(2026-08-06) — 여기만 안 고쳐져 있었다. 모델이 이유를
-       * 말하며 거절했으면(한도·로그인) 그 문장을 그대로 보여준다. "한 문장으로 다시
-       * 말씀해 주세요"는 사람 문장이 문제일 때만 맞는 말이다.
-       */
-      return {
-        ok: false as const,
-        code: "ARCHITECT_UNAVAILABLE",
-        reason: detailed.failure
-          ? L(`그래프를 고치지 못했습니다 — ${detailed.failure.message}`, `Could not fix the graph — ${detailed.failure.message}`)
-          : L("그래프를 고쳐 줄 모델에 연결하지 못했습니다. 아무것도 바꾸지 않았습니다.", "Could not connect to a model to fix the graph. Nothing was changed."),
-        nextAction: detailed.failure?.kind === "quota"
-          ? L("안내에 적힌 시각 이후에 다시 시도하거나, 다른 모델을 연결해 주세요.", "Try again after the time noted in the message, or connect a different model.")
-          : L("설정에서 모델 연결을 확인한 뒤 다시 시도해 주세요.", "Check the model connection in Settings, then try again."),
-      };
-    }
-    const parsed = architect.parseGraphPatchProposal(text);
-    if (!parsed.ok) return { ok: false as const, code: parsed.code, reason: parsed.reason, nextAction: parsed.nextAction };
-    const decision = evaluateGraphPatch(automation.graph, parsed.patch);
-    if (!decision.ok) return { ok: false as const, code: decision.code, reason: decision.reason, nextAction: decision.nextAction };
-    return {
-      ok: true as const,
-      patch: parsed.patch,
-      risks: decision.risks,
-      summary: decision.summary,
-      needsApproval: graphPatchNeedsApproval(decision),
-      ...(parsed.patch.rationale ? { rationale: parsed.patch.rationale } : {}),
-    };
+    const supervision = await import("./workflow/graph-supervision");
+    const architect = await import("./workflow/graph-architect");
+    const { MAX_SELF_CORRECTIONS } = await import("./workflow/graph-interview");
+    const { callConnectedModelDetailed, awaitConnectedModelRunnerWithAbortGrace } = await import("./system-agents/judgment");
+    const sentence=String(request ?? "").trim();
+    if (!sentence) return {ok:false as const,code:"ARCHITECT_NO_REQUEST",reason:L("변경 요청이 비어 있습니다.","The change request is empty."),nextAction:""};
+    const controller=new AbortController(), release=supervision.bindGraphProposalAbort(id,controller);
+    const deadline=Date.now()+120_000;
+    const timer=setTimeout(()=>controller.abort(new Error("GRAPH_PROPOSAL_TIMEOUT")),Math.max(0,deadline-Date.now()));
+    try {
+      const base=supervision.captureGraphProposalBase(id);
+      let feedback="", lastCode="GRAPH_REPAIR_UNAVAILABLE";
+      const generationRounds: import("./workflow/graph-supervision").GraphGenerationEvidence["rounds"] = [];
+      for (let round=0;round<=MAX_SELF_CORRECTIONS;round++) {
+        supervision.assertGraphProposalBase(base);
+        if (controller.signal.aborted || Date.now()>=deadline) throw new supervision.GraphSupervisionError("GRAPH_PROPOSAL_TIMEOUT");
+        const detailed=await awaitConnectedModelRunnerWithAbortGrace(callConnectedModelDetailed({
+          systemPrompt:architect.buildGraphArchitectPrompt(base.graph,base.goal), input:sentence.slice(0,4000)+feedback,
+          runtimeSelection: base.runtimeSelection,
+          pinFallback: "pin_then_worker_pool",
+          authoring: true, signal:controller.signal,timeoutMs:Math.max(1,deadline-Date.now()),
+        }),controller.signal);
+        supervision.assertGraphProposalBase(base);
+        if (Date.now()>=deadline) {
+          controller.abort(new Error("GRAPH_PROPOSAL_TIMEOUT"));
+          throw new supervision.GraphSupervisionError("GRAPH_PROPOSAL_TIMEOUT");
+        }
+        if (controller.signal.aborted) throw new supervision.GraphSupervisionError("GRAPH_PROPOSAL_CANCELLED");
+        generationRounds.push({ round: round + 1, runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts ?? [] });
+        if (detailed.text===null) return {ok:false as const,code:"ARCHITECT_UNAVAILABLE",reason:detailed.failure?.message ?? L("수정 모델을 사용할 수 없습니다.","The repair model is unavailable."),nextAction:""};
+        const parsed=architect.parseGraphPatchProposal(detailed.text);
+        if (parsed.ok) {
+          try { return supervision.prepareGraphProposal(base,parsed.patch,{ successfulRound: round + 1, rounds: generationRounds }); }
+          catch (error) { if (!(error instanceof supervision.GraphSupervisionError)) throw error; lastCode=error.code;
+            if (["GRAPH_PROPOSAL_STALE","GRAPH_EXECUTION_UNSETTLED"].includes(lastCode)) throw error; }
+        } else lastCode=parsed.code;
+        feedback="\nHost structural verification rejected the previous proposal: "+JSON.stringify({code:lastCode,attempt:round+1})+". Correct the proposal against the same original graph.";
+      }
+      return {ok:false as const,code:lastCode,reason:L("자동 수정 범위 안에서 구조 검증을 마치지 못했습니다. 저장본은 유지했습니다.","Structural verification could not be completed within the repair budget. The saved graph is unchanged."),nextAction:""};
+    } catch (error) {
+      return {ok:false as const,code:error instanceof supervision.GraphSupervisionError?error.code:"GRAPH_REPAIR_UNAVAILABLE",
+        reason:L("수정 요청이 현재 저장본 또는 실행 상태와 더 이상 맞지 않아 적용하지 않았습니다.","The repair could not be applied to the current saved graph or execution state."),nextAction:""};
+    } finally {clearTimeout(timer);release();}
   });
 
   // 자연어로 **새 자동화를 만드는** 인터뷰 한 턴. 화면은 질문을 받아 사람에게 보여주고,
   // 답을 모아 다시 이 자리로 돌아온다. 그래프는 청사진에서 코드가 짓는다 —
   // 모델이 노드와 연결을 직접 쓰면, 사람이 겪은 결함(미선언 분기·고아 노드·상한 없는 반복)이
   // 그대로 재발한다.
-  ipcMain.handle("automations:interviewGraph", async (_e, state: unknown) => {
+  ipcMain.handle("automations:cancelGraphAuthoring", (event, requestId: unknown) => {
+    const { cancelGraphAuthoringRequest } = require("./workflow/graph-authoring-lifecycle") as typeof import("./workflow/graph-authoring-lifecycle");
+    cancelGraphAuthoringRequest(event.sender.id, requestId);
+    return { ok: true as const };
+  });
+  ipcMain.handle("automations:interviewGraph", async (_e, state: unknown, context?: { requestId?: unknown }) => {
+    const { beginGraphAuthoringRequest, GraphAuthoringError } = require("./workflow/graph-authoring-lifecycle") as typeof import("./workflow/graph-authoring-lifecycle");
+    let authoring: ReturnType<typeof beginGraphAuthoringRequest> | undefined;
+    try {
+    authoring = beginGraphAuthoringRequest(_e.sender, context?.requestId);
+    const requestOwner = authoring;
     const {
       buildInterviewPrompt, parseInterviewTurn,
     } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
@@ -5696,7 +5679,7 @@ export function registerIpcHandlers(): void {
     const { MAX_SELF_CORRECTIONS } = require("./workflow/graph-interview") as typeof import("./workflow/graph-interview");
     // 한 번의 사람 답변은 스스로 고치는 재시도까지 모두 합쳐 2분 안에 끝난다.
     // 각 재시도마다 2분을 새로 주면 화면의 남은 시간과 실제 대기가 서로 다른 약속이 된다.
-    const interviewDeadline = Date.now() + 120_000;
+    const interviewDeadline = requestOwner.deadline;
 
     /**
      * 한 턴 안에서 **스스로 고칠 기회**를 정해진 횟수만큼 준다.
@@ -5715,6 +5698,7 @@ export function registerIpcHandlers(): void {
       .map((row) => ({ id: row.id, name: row.name }));
     let attempt = { ...current, knownGraphs, attempts: [...(current.attempts ?? [])] };
     for (let round = 0; round <= MAX_SELF_CORRECTIONS; round += 1) {
+      requestOwner.assertCurrent();
       let text: string | null = null;
       try {
         /*
@@ -5728,30 +5712,32 @@ export function registerIpcHandlers(): void {
          */
         const seenTitles: string[] = [];
         let partialBuf = "";
-        const detailedTurn = await callConnectedModelDetailed({
+        const detailedTurn = await awaitConnectedModelRunnerWithAbortGrace(callConnectedModelDetailed({
           systemPrompt: "You return only compact JSON. No prose.",
           input: buildInterviewPrompt(attempt, currentUiLocale()),
           timeoutMs: Math.max(1, interviewDeadline - Date.now()),
+          signal: requestOwner.signal,
           // 그래프를 **짓는** 호출이다 — 조회 도구와 이미 동의된 MCP 가 함께 간다.
           // (판정 호출부는 이 깃발을 켜지 않으므로 무도구 잠금이 그대로 유지된다.)
           authoring: true,
           onPartial: (chunk) => {
+            if (requestOwner.signal.aborted || Date.now() >= interviewDeadline || _e.sender.isDestroyed()) return;
             partialBuf += chunk;
             for (const m of partialBuf.matchAll(/"title"\s*:\s*"([^"\\]{1,80})"/g)) {
               const title = m[1];
               if (seenTitles.includes(title)) continue;
               seenTitles.push(title);
-              for (const win of BrowserWindow.getAllWindows()) {
-                try {
-                  win.webContents.send("automations:interview:steps", {
-                    index: seenTitles.length - 1,
-                    title,
-                  });
-                } catch { /* 창이 닫혔을 뿐이다 */ }
-              }
+              try {
+                _e.sender.send("automations:interview:steps", {
+                  requestId: requestOwner.requestId,
+                  index: seenTitles.length - 1,
+                  title,
+                });
+              } catch { /* The request's window closed. */ }
             }
           },
-        });
+        }), requestOwner.signal);
+        requestOwner.assertCurrent();
         text = detailedTurn.text;
         /*
          * ★표식이 먼저다 — 240자 문구 추측(graph-interview.ts)은 표식 없는 런타임용
@@ -5768,6 +5754,7 @@ export function registerIpcHandlers(): void {
           };
         }
       } catch (error) {
+        requestOwner.assertCurrent();
         return {
           ok: false,
           code: "INTERVIEW_MODEL_UNAVAILABLE",
@@ -5833,6 +5820,16 @@ export function registerIpcHandlers(): void {
         };
         continue;
       }
+      // The same kernel structure check feeds the existing bounded correction
+      // loop before a blueprint can reach the save card.
+      try {
+        const {superviseGraph}=await import("./workflow/graph-supervision");
+        built.graph=superviseGraph(built.graph).graph;
+      } catch(error) {
+        const code=error instanceof Error ? error.message : "GRAPH_SHAPE_INVALID";
+        attempt={...attempt,attempts:[...attempt.attempts,{round:attempt.round,problems:[JSON.stringify({code})]}]};
+        continue;
+      }
       // ★슬롯 편성 — 단계가 선언한 역할을 **실물 에이전트**로 채운다.
       //   기본은 Hub(생태계가 돌아야 한다). 못 찾은 슬롯은 비워 둔다 — 아무거나
       //   꽂으면 사람은 꽂힌 대로 돌 거라 믿는다. 사람은 저장 확인 화면에서 이 결정을 본다.
@@ -5851,8 +5848,10 @@ export function registerIpcHandlers(): void {
         const staffingTimer = setTimeout(() => {
           staffingController.abort(new Error("Graph staffing timed out"));
         }, staffingBudgetMs);
+        const staffingSignal = AbortSignal.any([staffingController.signal, requestOwner.signal]);
         try {
           staffing = await awaitConnectedModelRunnerWithAbortGrace(staffGraph(built.graph, {
+          signal: staffingSignal,
           installed: installedAgents.map((a) => ({
             id: a.id, name: a.name, ...(a.tagline ? { tagline: a.tagline } : {}),
           })),
@@ -5860,7 +5859,7 @@ export function registerIpcHandlers(): void {
           ...(orchestrator
             ? { defaultRunnerRef: orchestrator.id, defaultRunnerLabel: orchestrator.name }
             : {}),
-          }), staffingController.signal);
+          }), staffingSignal);
         } finally {
           clearTimeout(staffingTimer);
         }
@@ -5869,6 +5868,7 @@ export function registerIpcHandlers(): void {
         // 편성 실패는 그래프 실패가 아니다 — 기본 에이전트로 도는 그래프가 나온다.
         staffing = [];
       }
+      requestOwner.assertCurrent();
       return {
         ok: true as const,
         kind: "blueprint" as const,
@@ -5890,6 +5890,10 @@ export function registerIpcHandlers(): void {
       ),
       nextAction: L("만들고 싶은 것을 다른 말로 적어 주시거나, 캔버스에서 직접 만들어 보세요.", "Describe what you want built in different words, or build it directly on the canvas."),
     };
+    } catch (error) {
+      return { ok: false as const, code: error instanceof GraphAuthoringError ? error.code : "INTERVIEW_MODEL_UNAVAILABLE",
+        reason: L("초안 생성을 마치지 못했습니다. 입력은 유지했습니다.", "The draft could not finish. Your input is preserved."), nextAction: "" };
+    } finally { authoring?.finish(); }
   });
 
 
@@ -5906,16 +5910,39 @@ export function registerIpcHandlers(): void {
    *   **지금 무엇을 하면 이어갈 수 있는지(칩)**. 저장은 하지 않는다 — 사람이 고른다.
    */
   ipcMain.handle("automations:checkBlueprintBeforeSave", async (_e, payload: unknown) => {
-    const input = payload as { graph?: unknown; goal?: string; initialVars?: Record<string, unknown> } | null;
+    const { beginGraphAuthoringRequest, GraphAuthoringError } = require("./workflow/graph-authoring-lifecycle") as typeof import("./workflow/graph-authoring-lifecycle");
+    let authoring: ReturnType<typeof beginGraphAuthoringRequest> | undefined;
+    try {
+    const input = payload as { graph?: unknown; goal?: string; initialVars?: Record<string, unknown>; requestId?: string; runtimeSelection?: RuntimeSelection } | null;
+    authoring = beginGraphAuthoringRequest(_e.sender, input?.requestId);
+    const requestOwner = authoring;
     if (!input?.graph) {
       return { ok: false as const, code: "CREATE_INPUT_INVALID", blocked: null, recovery: null };
     }
-    const graph = input.graph as import("../shared/types").WorkflowGraph;
+    const {superviseGraph,GraphSupervisionError}=await import("./workflow/graph-supervision");
+    let checked:ReturnType<typeof superviseGraph>;
+    try {checked=superviseGraph(input.graph);} catch(error) {return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_SHAPE_INVALID",blocked:null,recovery:null};}
+    const graph = checked.graph;
     const { verifyGraphBeforeSaveWithKernel } = await import("./workflow/verify-before-save");
-    const verification = await verifyGraphBeforeSaveWithKernel(
+    requestOwner.assertCurrent();
+    const { awaitConnectedModelRunnerWithAbortGrace } = await import("./system-agents/judgment");
+    const verification = await awaitConnectedModelRunnerWithAbortGrace(verifyGraphBeforeSaveWithKernel(
       graph,
       input.initialVars && typeof input.initialVars === "object" ? input.initialVars : undefined,
-    );
+      { runtimeSelection: input.runtimeSelection, signal: requestOwner.signal },
+    ), requestOwner.signal);
+    requestOwner.assertCurrent();
+    const testedGraph=structuredClone(graph);
+    for (const step of verification.steps) if (step.state==="repaired" && step.repairedCode) {
+      const node=testedGraph.nodes.find(node=>node.id===step.nodeId); if (node) node.config={...node.config,code:step.repairedCode};
+    }
+    // The verifier omits ineligible execution nodes. Passing its read-only
+    // subset never proves that a mixed graph executed successfully.
+    const checkedNodeIds = new Set(verification.steps.filter(step => step.state === "ran" || step.state === "repaired").map(step => step.nodeId));
+    const executionNodes = testedGraph.nodes.filter(node => node.type !== "trigger");
+    const structuralReceipt = { ...superviseGraph(testedGraph).verification,
+      runtime: (checkedNodeIds.size > 0 && executionNodes.length > 0 && executionNodes.every(node => checkedNodeIds.has(node.id))
+        ? "checked" : checkedNodeIds.size > 0 ? "partially_checked" : "not_checked") as import("../shared/types").GraphVerificationReceipt["runtime"] };
     // 1.2.54부터 검증기는 돌려 봐서 실패한 단계를 "pending"(결과 미검증, 저장 여부는 사람이 고름)으로
     // 낸다. "blocked" 만 찾으면 실패한 그래프가 칩 없이 그대로 저장된다 — 둘 다 이어갈 길이 필요하다.
     const blocked = verification.steps.find((step) => step.state === "blocked" || step.state === "pending") ?? null;
@@ -5923,7 +5950,7 @@ export function registerIpcHandlers(): void {
       .filter((step) => step.state === "repaired")
       .map((step) => ({ nodeId: step.nodeId, label: step.label, code: step.repairedCode ?? "" }));
     if (!blocked) {
-      return { ok: true as const, blocked: null, recovery: null, repaired };
+      return { ok: true as const, blocked: null, recovery: null, repaired, verification:structuralReceipt };
     }
     const { planGraphBuildRecovery, blockedStepFactsFrom } = await import("./workflow/build-recovery");
     const facts = blockedStepFactsFrom({
@@ -5938,12 +5965,15 @@ export function registerIpcHandlers(): void {
     const ranBefore = verification.steps
       .filter((step) => step.state === "ran" || step.state === "repaired")
       .map((step) => step.label);
-    const recovery = await planGraphBuildRecovery({
+    const recovery = await awaitConnectedModelRunnerWithAbortGrace(planGraphBuildRecovery({
       graph,
       goal: String(input.goal ?? ""),
       blocked: facts,
       ranBefore,
-    });
+      runtimeSelection: input.runtimeSelection,
+      signal: requestOwner.signal,
+    }), requestOwner.signal);
+    requestOwner.assertCurrent();
     return {
       ok: false as const,
       blocked: {
@@ -5957,13 +5987,21 @@ export function registerIpcHandlers(): void {
       },
       recovery,
       repaired,
+      verification:structuralReceipt,
     };
+    } catch (error) {
+      const cause = authoring?.signal.aborted ? authoring.signal.reason : error;
+      return { ok: false as const, code: cause instanceof GraphAuthoringError ? cause.code : "GRAPH_CHECK_UNAVAILABLE", blocked: null, recovery: null };
+    } finally { authoring?.finish(); }
   });
 
   /** 짓는 중 복구 칩을 **사람이 누른 순간에만** 실행한다. 계획과 실행을 나눈 이유다. */
   ipcMain.handle("automations:applyBuildRecovery", async (_e, payload: unknown) => {
+    const { beginGraphAuthoringRequest, GraphAuthoringError } = require("./workflow/graph-authoring-lifecycle") as typeof import("./workflow/graph-authoring-lifecycle");
+    let authoring: ReturnType<typeof beginGraphAuthoringRequest> | undefined;
+    try {
     const input = payload as {
-      graph?: unknown; goal?: string; actionId?: string;
+      graph?: unknown; goal?: string; actionId?: string; requestId?: string; runtimeSelection?: RuntimeSelection;
       blocked?: {
         nodeId: string; label: string; cause: string;
         availableVars?: string[]; upstreamSample?: string | null;
@@ -5973,9 +6011,13 @@ export function registerIpcHandlers(): void {
     if (!input?.graph || !input.actionId || !input.blocked?.nodeId) {
       return { ok: false as const, message: L("이 조치를 실행할 수 없습니다.", "This action cannot be run.") };
     }
-    const graph = input.graph as import("../shared/types").WorkflowGraph;
+    authoring = beginGraphAuthoringRequest(_e.sender, input.requestId);
+    const requestOwner = authoring;
+    const graph = structuredClone(input.graph) as import("../shared/types").WorkflowGraph;
     const { applyGraphBuildRecovery, blockedStepFactsFrom } = await import("./workflow/build-recovery");
-    return applyGraphBuildRecovery({
+    const { awaitConnectedModelRunnerWithAbortGrace } = await import("./system-agents/judgment");
+    requestOwner.assertCurrent();
+    const result = await awaitConnectedModelRunnerWithAbortGrace(applyGraphBuildRecovery({
       graph,
       goal: String(input.goal ?? ""),
       blocked: blockedStepFactsFrom({
@@ -5988,7 +6030,16 @@ export function registerIpcHandlers(): void {
         varsSnapshot: input.blocked.varsSnapshot ?? {},
       }),
       actionId: input.actionId,
-    });
+      runtimeSelection: input.runtimeSelection,
+      signal: requestOwner.signal,
+    }), requestOwner.signal);
+    requestOwner.assertCurrent();
+    return result;
+    } catch (error) {
+      const cause = authoring?.signal.aborted ? authoring.signal.reason : error;
+      return { ok: false as const, code: cause instanceof GraphAuthoringError ? cause.code : "GRAPH_RECOVERY_UNAVAILABLE",
+        message: L("복구 요청을 마치지 못했습니다. 초안은 유지했습니다.", "The recovery request did not finish. The draft is preserved.") };
+    } finally { authoring?.finish(); }
   });
 
   /**
@@ -6025,6 +6076,13 @@ export function registerIpcHandlers(): void {
     if (!input?.name?.trim() || !input.graph) {
       return { ok: false, code: "CREATE_INPUT_INVALID", reason: L("만들 내용을 읽지 못했습니다.", "Could not read what to build."), nextAction: L("다시 시도해 주세요.", "Please try again.") };
     }
+    const { superviseGraph,GraphSupervisionError }=require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision");
+    let verified:ReturnType<typeof superviseGraph>;
+    try {verified=superviseGraph(input.graph);} catch(error) {return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_SHAPE_INVALID",reason:L("그래프 구조를 검증하지 못해 저장하지 않았습니다.","The graph was not saved because structural verification did not pass."),nextAction:""};}
+    input.graph=verified.graph;
+    const {desktopStoreTransaction}=require("./store/change-bus") as typeof import("./store/change-bus");
+    const {getDb}=require("./store/db") as typeof import("./store/db");
+    return desktopStoreTransaction(getDb(),()=>{
     const existing = listAutomations().find((a) => a.name === input.name!.trim());
     // ★같은 이름 + 같은 그래프면 새로 만들지 않고 있는 것을 돌려준다.
     //   실측(2026-08-05): 저장 버튼이 전환 피드백 없이 조용해서 사람이 여러 번 눌렀고,
@@ -6032,7 +6090,7 @@ export function registerIpcHandlers(): void {
     if (existing) {
       const prior = getAutomation(existing.id);
       if (prior?.graph && JSON.stringify(prior.graph) === JSON.stringify(input.graph)) {
-        return { ok: true as const, id: existing.id, name: existing.name, renamed: false, reused: true };
+        return { ok: true as const, id: existing.id, name: existing.name, renamed: false, reused: true, verification:{...verified.verification,saved:true} };
       }
     }
     const name = existing ? `${input.name!.trim()} (2)` : input.name!.trim();
@@ -6052,33 +6110,26 @@ export function registerIpcHandlers(): void {
       // ★목적 문장을 함께 저장한다 — 사라지면 AI가 이 그래프를 다시 이해할 수 없다.
       ...(input.goal?.trim() ? { goal: input.goal.trim() } : {}),
     });
-    return { ok: true as const, id: created.id, name, renamed: !!existing };
+    if (JSON.stringify(created.graph)!==JSON.stringify(verified.graph)) throw new GraphSupervisionError("GRAPH_READBACK_MISMATCH");
+    return { ok: true as const, id: created.id, name, renamed: !!existing, verification:{...verified.verification,saved:true} };
+    }).immediate();
   });
 
   ipcMain.handle("automations:proposeGraphPatch", (_e, id: string, patch: unknown) => {
-    const evaluated = evaluatePatchFor(id, patch);
-    if ("ok" in evaluated) return evaluated;
-    const { decision } = evaluated;
-    if (!decision.ok) return decision;
-    const { graphPatchNeedsApproval } = require("./workflow/graph-patch") as typeof import("./workflow/graph-patch");
-    return {
-      ok: true as const,
-      risks: decision.risks,
-      summary: decision.summary,
-      needsApproval: graphPatchNeedsApproval(decision),
-    };
+    const { captureGraphProposalBase,prepareGraphProposal,GraphSupervisionError }=require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision");
+    try { return prepareGraphProposal(captureGraphProposalBase(id),patch as import("./workflow/graph-patch").GraphPatch); }
+    catch(error) { return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_PROPOSAL_INVALID",reason:L("구조 검증을 통과하지 못했습니다.","Structural verification did not pass."),nextAction:""}; }
   });
-
-  ipcMain.handle("automations:applyGraphPatch", (_e, id: string, patch: unknown) => {
-    const evaluated = evaluatePatchFor(id, patch);
-    if ("ok" in evaluated) return evaluated;
-    const { decision } = evaluated;
-    if (!decision.ok) return decision;
-    // 여기 도달했다는 것은 사용자가 diff를 보고 눌렀다는 뜻이다. 검증은 한 번 더 한다 —
-    // 제안과 적용 사이에 그래프가 바뀌었으면 위 평가에서 이미 걸린다.
-    const automation = updateAutomationGraph(id, decision.next, { note: L("말로 고치기", "Fixed by chat") });
-    return { ok: true as const, automationId: automation.id, automation };
+  ipcMain.handle("automations:applyGraphPatch", (_e, id: string, input: unknown) => {
+    const { applyGraphProposal,GraphSupervisionError }=require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision");
+    const request=input as {proposalId?:unknown;approved?:unknown}|null;
+    try {
+      if (typeof request?.proposalId!=="string") throw new GraphSupervisionError("GRAPH_PROPOSAL_MISSING");
+      return applyGraphProposal(id,request.proposalId,request.approved===true);
+    } catch(error) { return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_APPLY_FAILED",reason:L("현재 저장본에 이 제안을 적용하지 않았습니다.","This proposal was not applied to the current saved graph."),nextAction:""}; }
   });
+  ipcMain.handle("automations:readGraphPatchReceipt", (_e,id:string,proposalId:string) =>
+    (require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision")).readGraphProposalReceipt(id,proposalId));
   ipcMain.handle("automations:runNow", async (
     _e,
     id: string,

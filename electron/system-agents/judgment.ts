@@ -24,7 +24,8 @@ import { detectRuntimes } from "../runtime/detect";
 import { invocationJudgmentContext } from "../runtime/judgment-context";
 import { createHash } from "node:crypto";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
-import { runtimeFailureBlocksReplay, pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
+import { runtimeFailureBlocksReplay, pinnedRuntimeCredentialOrModelUnavailable, pickActive, pickRecoveryRunner, pickRunner, selectExactRuntime } from "../runtime/selection";
+import { isRuntimeCredentialUnavailable } from "../runtime/credential-access";
 import { readRuntimeSelectionMirror } from "../runtime/selection-mirror";
 import { noteRuntimeFailure, noteRuntimeSucceeded, runtimeCooldown } from "../runtime/runtime-cooldown";
 import {
@@ -37,8 +38,8 @@ import { looksSecret, redactSecrets } from "../../shared/secret-patterns";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 
 export interface JudgmentRuntimeReceipt {
-  selection: Pick<RuntimeSelection, "kind" | "backend" | "source" | "model">;
-  route: "explicit_pin" | "orchestrator_pool" | "legacy";
+  selection: Pick<RuntimeSelection, "kind" | "backend" | "source" | "model" | "role" | "inherit" | "acpAgentId">;
+  route: "explicit_pin" | "orchestrator_pool" | "worker_pool" | "legacy";
   fingerprint: string;
   execution: "invoked" | "cached" | "not_invoked";
   /** Effective model controls used on the wire; these are not the worker pin. */
@@ -77,7 +78,8 @@ export interface JudgmentSelectionPolicy {
  *   풀 밖의 공급자로는 절대 가지 않는다. 어떤 후보가 판정했는지는 attempt 영수증
  *   (route explicit_pin | orchestrator_pool)으로 남는다. 저장된 핀은 바꾸지 않는다.
  */
-export type JudgmentPinFallback = "pin_then_pool" | "pool_then_pin";
+// Graph authoring may opt into the configured Worker role without changing independent judgment policy.
+export type JudgmentPinFallback = "pin_then_pool" | "pool_then_pin" | "pin_then_worker_pool";
 
 /** Value-free outcome of one actual runner attempt; diagnostic text stays private. */
 export interface JudgmentRuntimeAttempt {
@@ -107,21 +109,37 @@ function uniqueSelections<T extends JudgmentSelectionIdentity>(values: readonly 
 function routingFingerprint(selections: RuntimeSelection[]): string {
   return createHash("sha256").update(JSON.stringify(selections)).digest("hex");
 }
-function readJudgmentPool(): JudgmentPool {
+function readJudgmentPool(role: "orchestrator" | "worker" = "orchestrator"): JudgmentPool {
   try {
     const { getDb } = require("../store/db") as typeof import("../store/db");
     const { listModelRoleMembers } = require("../store/model-roles") as typeof import("../store/model-roles");
     const db = getDb();
     const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'model_role_members'").get();
     if (!exists) return { state: "unconfigured", selections: [], fingerprint: "legacy" };
-    const { n } = db.prepare("SELECT COUNT(*) AS n FROM model_role_members WHERE role = 'orchestrator'").get() as { n: number };
+    const count = (memberRole: "orchestrator" | "worker") =>
+      (db.prepare("SELECT COUNT(*) AS n FROM model_role_members WHERE role = ?").get(memberRole) as { n: number }).n;
+    const ownCount = count(role);
+    // Empty Worker members inherit the configured orchestrator pool, just as
+    // rolePriorityRuntimes does. A failed reader is never an empty-pool grant.
+    const inherited = role === "worker" && ownCount === 0;
+    const memberRole = inherited ? "orchestrator" : role;
+    const n = inherited ? count(memberRole) : ownCount;
     if (!n) return { state: "unconfigured", selections: [], fingerprint: "legacy" };
-    const storedSelections = listModelRoleMembers("orchestrator").map((member) => member.selection);
+    const storedSelections = listModelRoleMembers(memberRole).map((member) => role === "worker"
+      ? { ...member.selection, role, inherit: inherited } : member.selection);
     // The normal UI reader returns [] on errors. That must not authorize an
     // escape to every detected provider when a configured pool cannot be read.
     if (storedSelections.length !== n) throw new Error("judgment_pool_unavailable");
-    const selections = uniqueSelections(storedSelections);
-    return { state: "configured", selections, fingerprint: routingFingerprint(selections) };
+    const seen = new Set<string>();
+    const selections = role === "worker" ? storedSelections.filter(selection => {
+      const key = JSON.stringify([judgmentSelectionIdentity(selection), selection.acpAgentId ?? null]);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    }) : uniqueSelections(storedSelections);
+    return { state: "configured", selections, fingerprint: role === "worker"
+      ? createHash("sha256").update(JSON.stringify({ role, inherited, selections })).digest("hex")
+      : routingFingerprint(selections) };
   } catch {
     return { state: "unavailable", selections: [], fingerprint: "unavailable" };
   }
@@ -454,7 +472,7 @@ function judgmentCacheScope(
 ): string {
   const base = runtimeSelectionCacheScope(selection, selectionPolicy);
   if (!pinFallback || selectionPolicy || !(selection ?? invocationJudgmentContext()?.selection)) return base;
-  const pool = readJudgmentPool();
+  const pool = readJudgmentPool(pinFallback === "pin_then_worker_pool" ? "worker" : "orchestrator");
   return `${base}\u0000pin-fallback:${pinFallback}:${pool.state === "configured" ? pool.fingerprint : pool.state}`;
 }
 
@@ -638,6 +656,19 @@ function configuredJudgmentPoolRefusal(
   }, ...(runtimeReceipt ? { runtimeReceipt } : {}) };
 }
 
+/** A settled typed availability failure is not a permission grant. Unknown
+ * exits, heuristic diagnoses and every refusal remain on the selected runtime. */
+function workerFallbackFailureAllowsNext(failure: RunnerFailure, returned = false): boolean {
+  if (runtimeFailureBlocksReplay(failure) || failure.providerCode === "keychain_unavailable"
+    || failure.providerCode === "credential_read_failed") return false;
+  // Generic thrown errors are regex-normalized as source=exit; their wording
+  // does not prove a settled auth/quota failure. Only a returned typed empty
+  // result has the narrow exit-source exception (for example AGY exit 0).
+  return failure.source === "marker"
+    ? failure.kind === "auth" || failure.kind === "quota" || failure.kind === "unavailable" || failure.kind === "empty"
+    : returned && failure.source === "exit" && failure.kind === "empty";
+}
+
 async function callJudgmentModelDetailed(opts: {
   systemPrompt: string;
   input: string;
@@ -745,21 +776,28 @@ async function callJudgmentModelDetailed(opts: {
   const route: JudgmentRuntimeReceipt["route"] = opts.runtimeSelection ? "explicit_pin" : pool?.state === "configured" ? "orchestrator_pool" : "legacy";
   const fingerprint = opts.runtimeSelection ? routingFingerprint([opts.runtimeSelection]) : pool?.fingerprint ?? "legacy";
   // Each candidate carries its own route so the receipt names who actually judged.
-  type JudgmentCandidate = { runtime: RuntimeStatus; route: JudgmentRuntimeReceipt["route"]; fingerprint: string };
+  type JudgmentCandidate = { runtime: RuntimeStatus; route: JudgmentRuntimeReceipt["route"]; fingerprint: string; poolSelection?: RuntimeSelection };
   let candidates: JudgmentCandidate[] = ordered.map((runtime) => ({ runtime, route, fingerprint }));
   const pinFallback = opts.runtimeSelection && !opts.selectionPolicy ? opts.pinFallback : undefined;
+  const workerFallback = pinFallback === "pin_then_worker_pool";
   let pinFallbackPoolSize = 0;
+  if (workerFallback && active && isRuntimeCredentialUnavailable(active)) return { text: null, failure: {
+    kind: "unavailable", runtime: active.kind, source: "marker", providerCode: "judgment_selected_credential_unavailable",
+    message: "judgment_selected_credential_unavailable",
+  }, runtimeReceipt: { route: "explicit_pin", fingerprint, execution: "not_invoked", selection: { ...opts.runtimeSelection! } } };
   if (pinFallback) {
     // An unreadable/unconfigured pool leaves the pin exactly as it was — never a
     // reason to refuse the pin, never a licence to try every detected provider.
-    const fallbackPool = readJudgmentPool();
+    const fallbackPool = readJudgmentPool(workerFallback ? "worker" : "orchestrator");
     if (fallbackPool.state === "configured") {
       const poolCandidates: JudgmentCandidate[] = fallbackPool.selections
         .filter((selection) => !requiresNoTools
           || inspectJudgmentCapability(selection, "no_tools").status === "verified")
-        .map((selection) => selectExactRuntime(runtimes, selection)?.active)
-        .filter((runtime): runtime is RuntimeStatus => Boolean(runtime))
-        .map((runtime) => ({ runtime, route: "orchestrator_pool" as const, fingerprint: fallbackPool.fingerprint }));
+        .flatMap((selection): JudgmentCandidate[] => {
+          const runtime = selectExactRuntime(runtimes, selection)?.active;
+          return runtime ? [{ runtime, route: workerFallback ? "worker_pool" : "orchestrator_pool",
+            fingerprint: fallbackPool.fingerprint, ...(workerFallback ? { poolSelection: selection } : {}) }] : [];
+        });
       pinFallbackPoolSize = poolCandidates.length;
       // A pin known to be in a quota/auth cooldown goes last: asking a runtime we
       // already know is exhausted spends the whole judgment budget on a known answer.
@@ -769,7 +807,9 @@ async function callJudgmentModelDetailed(opts: {
         : [...candidates, ...poolCandidates];
       const seen = new Set<string>();
       candidates = merged.filter((candidate) => {
-        const identity = judgmentSelectionIdentity(candidate.runtime);
+        const identity = workerFallback
+          ? JSON.stringify([judgmentSelectionIdentity(candidate.runtime), candidate.runtime.acpAgentId ?? null])
+          : judgmentSelectionIdentity(candidate.runtime);
         if (seen.has(identity)) return false;
         seen.add(identity);
         return true;
@@ -844,14 +884,19 @@ async function callJudgmentModelDetailed(opts: {
     timedOut || failure.kind === "timeout" ? "timeout" : opts.signal?.aborted ? "cancelled"
       : failure.kind === "refused" || failure.kind === "unsupported" ? "refused" : "failed";
   for (const candidate of candidates) {
-      const { runtime, route, fingerprint: candidateFingerprint } = candidate;
-      const livePool = !opts.runtimeSelection || route === "orchestrator_pool" ? readJudgmentPool() : null;
+      const { runtime, route, fingerprint: candidateFingerprint, poolSelection } = candidate;
+      const poolRoute = route === "orchestrator_pool" || route === "worker_pool";
+      const livePool = !opts.runtimeSelection || poolRoute
+        ? readJudgmentPool(route === "worker_pool" ? "worker" : "orchestrator") : null;
+      const receiptSelection = poolSelection ?? (workerFallback ? opts.runtimeSelection : undefined);
+      const workerIdentity = receiptSelection ? { role: receiptSelection.role, inherit: receiptSelection.inherit,
+        ...(receiptSelection.acpAgentId ? { acpAgentId: receiptSelection.acpAgentId } : {}) } : {};
       if (opts.selectionPolicy
         ? (livePool?.state !== "configured" || livePool.fingerprint !== opts.selectionPolicy.poolFingerprint)
-        : route === "orchestrator_pool"
+        : poolRoute
           ? livePool?.state !== "configured" || livePool.fingerprint !== candidateFingerprint
           : !opts.runtimeSelection && livePool?.fingerprint !== fingerprint) return { text: null, failure: {
-        kind: "refused", runtime: "judgment", source: "marker", message: "judgment_orchestrator_pool_changed",
+        kind: "refused", runtime: "judgment", source: "marker", message: route === "worker_pool" ? "judgment_worker_pool_changed" : "judgment_orchestrator_pool_changed",
       }, runtimeReceipt, attempts };
       if (opts.signal?.aborted) break;
       const capability = requiresNoTools
@@ -868,7 +913,7 @@ async function callJudgmentModelDetailed(opts: {
           ...(runtime.longContextEnabled !== undefined ? { longContext: runtime.longContextEnabled } : {}),
           ...(runtime.effort ? { effort: runtime.effort } : {}),
           selectionPolicy: opts.selectionPolicy,
-          selection: { kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined },
+          selection: { ...workerIdentity, kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined },
           capability,
         };
         lastFailure = {
@@ -878,10 +923,22 @@ async function callJudgmentModelDetailed(opts: {
         };
         continue;
       }
+      if (workerFallback && pinnedRuntimeCredentialOrModelUnavailable(runtime)) {
+        const credentialUnavailable = isRuntimeCredentialUnavailable(runtime);
+        runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "not_invoked", selection: {
+          ...workerIdentity, kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
+        } };
+        lastFailure = { kind: credentialUnavailable ? "unavailable" : "unsupported", runtime: runtime.kind, source: "marker",
+          providerCode: credentialUnavailable ? "judgment_selected_credential_unavailable" : "runtime_model_unavailable",
+          message: credentialUnavailable ? "judgment_selected_credential_unavailable" : "runtime_model_unavailable" };
+        attempts.push({ runtimeReceipt, outcome: "failed", elapsedMs: 0, failureKind: lastFailure.kind });
+        if (credentialUnavailable && route === "explicit_pin") return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+        continue;
+      }
       const cooldown = runtimeCooldown(runtime);
       if (cooldown) {
         runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "not_invoked", selection: {
-          kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
+          ...workerIdentity, kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
         }, ...(opts.selectionPolicy ? { selectionPolicy: opts.selectionPolicy } : {}), ...(capability ? { capability } : {}) };
         lastFailure = { kind: cooldown.kind, runtime: runtime.kind, source: "marker",
           providerCode: "judgment_runtime_cooldown", message: "judgment_runtime_cooldown",
@@ -896,7 +953,7 @@ async function callJudgmentModelDetailed(opts: {
       const picked = pickRunner(runtime);
       if (!picked) continue;
       runtimeReceipt = { route, fingerprint: candidateFingerprint, execution: "invoked", selection: {
-        kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
+        ...workerIdentity, kind: runtime.kind, backend: runtime.backend, source: runtime.source, model: runtime.model ?? undefined,
       }, longContext: runtime.longContextEnabled,
       ...(runtime.effort ? { effort: runtime.effort } : {}),
       ...(opts.selectionPolicy ? { selectionPolicy: opts.selectionPolicy } : {}), ...(capability ? { capability } : {}) };
@@ -911,6 +968,7 @@ async function callJudgmentModelDetailed(opts: {
       // 23s" with 22 s of its 45 s budget unused, and 10-03 07:19 a 120 s call stopped at 30 s. Fast
       // quota/auth/refusal failures still return early and leave their unused time to the next candidate.
       const attemptTimeoutMs = remainingMs;
+      let toolObserved = false;
       const accounting = beginAccountedInference(runtime);
       const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(runtime.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(picked.runner,
           {
@@ -937,7 +995,7 @@ async function callJudgmentModelDetailed(opts: {
           {
             onPartial: (chunk: string) => { try { opts.onPartial?.(chunk); } catch { /* 화면 사정은 판정을 막지 않는다 */ } },
             onStatus: () => {},
-            onTool,
+            onTool: (...args) => { toolObserved = true; onTool?.(...args); },
           },
         ))), attemptSignal));
       accounting?.complete(bounded.value?.observedUsage ?? observedRunnerUsage(bounded.error), bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
@@ -948,7 +1006,8 @@ async function callJudgmentModelDetailed(opts: {
           ? { ...normalized, kind: "timeout" } : normalized;
         recordAttempt(startedAt, failedOutcome(lastFailure, bounded.timedOut), lastFailure);
         if (bounded.cancelled || bounded.timedOut || runtimeFailureBlocksReplay(lastFailure)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
-        if (requiresNoTools && isJudgmentRefusal(error)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+        if ((requiresNoTools || workerFallback) && isJudgmentRefusal(error)) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+        if (workerFallback && (toolObserved || !workerFallbackFailureAllowsNext(lastFailure))) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
         continue;
       }
       if (bounded.cancelled || bounded.timedOut || opts.signal?.aborted) {
@@ -967,12 +1026,13 @@ async function callJudgmentModelDetailed(opts: {
           lastFailure = result.failure;
           recordAttempt(startedAt, failedOutcome(lastFailure), lastFailure);
           if (runtimeFailureBlocksReplay(lastFailure) || requiresNoTools && (lastFailure.kind === "unsupported" || lastFailure.kind === "refused")) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
+          if (workerFallback && (toolObserved || !workerFallbackFailureAllowsNext(lastFailure, true))) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
           continue;
         }
         const text = result.text ?? "";
         // ★파싱 안 되는 출력도 답이 아니다 — 다음 후보로 간다. agy가 채점표 JSON을 못 맞추면
         //   여기서 걸러 claude 등 규격을 지키는 런타임으로 넘어간다(실측 2026-08-19).
-        if (opts.accept && !opts.accept(text)) {
+        if ((workerFallback && !text.trim()) || (opts.accept && !opts.accept(text))) {
           lastFailure = {
             kind: "exit",
             message: `runtime ${runtime.kind} returned output the judge could not parse`,
@@ -980,6 +1040,7 @@ async function callJudgmentModelDetailed(opts: {
             source: "exit",
           };
           recordAttempt(startedAt, "invalid_output", lastFailure);
+          if (workerFallback && toolObserved) return { text: null, failure: lastFailure, runtimeReceipt, attempts };
           continue;
         }
         recordAttempt(startedAt, "success");
@@ -1430,6 +1491,7 @@ export async function judgeRequiredAction(spec: {
   locale?: RuntimeLocale;
   /** The failed unattended automation's exact runtime also judges its recovery action. */
   runtimeSelection?: RuntimeSelection;
+  pinFallback?: JudgmentPinFallback;
   signal?: AbortSignal;
   timeoutMs?: number;
 }): Promise<RequiredActionDecision> {
@@ -1446,6 +1508,40 @@ export async function judgeRequiredAction(spec: {
     "Write customer language with no internal codes, stack traces, paths, database terms, or implementation jargon.",
     'Return ONLY JSON: {"actionId":"<available id>","summary":"<what One is doing or found>","question":null,"options":[]} or, when person input is required, {"actionId":null,"summary":"<plain context>","question":"<one short question>","options":[{"actionId":"<available id>","label":"<plain choice>"}]}. Every option must map to one available capability id.'
   ].join("\n");
+  const parseDecision = (text: string | null): RequiredActionDecision => {
+    if (!text) return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
+    const match = text.match(/\{[\s\S]*\}/);
+    if (!match) return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
+    try {
+      const raw = JSON.parse(match[0]) as Record<string, unknown>;
+      const actionId = typeof raw.actionId === "string" && ids.includes(raw.actionId) ? raw.actionId : null;
+      const selected = actionId ? spec.actions.find((action) => action.id === actionId) : null;
+      if (selected?.authority === "external-or-destructive") {
+        return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
+      }
+      const summary = typeof raw.summary === "string" ? raw.summary.trim().slice(0, 600) : "";
+      const question = typeof raw.question === "string" && raw.question.trim()
+        ? raw.question.trim().slice(0, 300)
+        : null;
+      const options = Array.isArray(raw.options)
+        ? raw.options.flatMap((option) => {
+          if (!option || typeof option !== "object") return [];
+          const candidate = option as Record<string, unknown>;
+          const optionActionId = typeof candidate.actionId === "string" && ids.includes(candidate.actionId)
+            ? candidate.actionId
+            : null;
+          const label = typeof candidate.label === "string" ? candidate.label.trim().slice(0, 120) : "";
+          return optionActionId && label ? [{ actionId: optionActionId, label }] : [];
+        }).slice(0, 4)
+        : [];
+      if (!summary || (!actionId && (!question || options.length === 0))) {
+        return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
+      }
+      return { actionId, summary, question, options, source: "llm" };
+    } catch {
+      return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
+    }
+  };
   const text = await callJudgmentModel({
     systemPrompt,
     input: spec.observation.slice(0, MAX_INPUT_CHARS),
@@ -1453,39 +1549,10 @@ export async function judgeRequiredAction(spec: {
     signal: spec.signal,
     locale: spec.locale,
     ...(spec.runtimeSelection ? { runtimeSelection: spec.runtimeSelection } : {}),
+    ...(spec.pinFallback ? { pinFallback: spec.pinFallback } : {}),
+    ...(spec.pinFallback === "pin_then_worker_pool" ? { accept: (answer: string) => parseDecision(answer).source === "llm" } : {}),
   });
-  if (!text) return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
-  const match = text.match(/\{[\s\S]*\}/);
-  if (!match) return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
-  try {
-    const raw = JSON.parse(match[0]) as Record<string, unknown>;
-    const actionId = typeof raw.actionId === "string" && ids.includes(raw.actionId) ? raw.actionId : null;
-    const selected = actionId ? spec.actions.find((action) => action.id === actionId) : null;
-    if (selected?.authority === "external-or-destructive") {
-      return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
-    }
-    const summary = typeof raw.summary === "string" ? raw.summary.trim().slice(0, 600) : "";
-    const question = typeof raw.question === "string" && raw.question.trim()
-      ? raw.question.trim().slice(0, 300)
-      : null;
-    const options = Array.isArray(raw.options)
-      ? raw.options.flatMap((option) => {
-        if (!option || typeof option !== "object") return [];
-        const candidate = option as Record<string, unknown>;
-        const optionActionId = typeof candidate.actionId === "string" && ids.includes(candidate.actionId)
-          ? candidate.actionId
-          : null;
-        const label = typeof candidate.label === "string" ? candidate.label.trim().slice(0, 120) : "";
-        return optionActionId && label ? [{ actionId: optionActionId, label }] : [];
-      }).slice(0, 4)
-      : [];
-    if (!summary || (!actionId && (!question || options.length === 0))) {
-      return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
-    }
-    return { actionId, summary, question, options, source: "llm" };
-  } catch {
-    return { actionId: null, summary: "", question: null, options: [], source: "unavailable" };
-  }
+  return parseDecision(text);
 }
 
 export interface SubsetSpec<V extends string> {

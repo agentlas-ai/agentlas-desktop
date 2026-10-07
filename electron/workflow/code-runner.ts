@@ -39,6 +39,18 @@ const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko :
 export type CodeLang = "python" | "js";
 export type CodeIsolationLevel = "os-sandboxed" | "process-isolated" | "unavailable";
 
+export interface CodeExecutionReceipt {
+  schemaVersion: "agentlas.code-execution.v1";
+  /** Spawn evidence, never inferred from a traceback or the script's result. */
+  status: "not-started" | "started";
+  attemptCount: number;
+  effect: "pure" | "read" | "mutation" | "unknown";
+  /** A read declaration permits the existing read retry; it is not a receipt
+   * proving that an arbitrary process left no external effect. */
+  replay: "not-started" | "declared-read" | "unknown-effect";
+  stopped: boolean;
+}
+
 export interface CodeRunInput {
   code: string;
   lang: CodeLang;
@@ -68,6 +80,7 @@ export interface CodeRunResult {
   reason?: string;
   /** 실제로 어떤 격리로 돌았나. 계획이 아니라 결과다. */
   isolation: CodeIsolationLevel;
+  execution?: CodeExecutionReceipt;
   /** 스크립트가 stdout에 남긴 로그(결과 JSON 줄 제외). 소음 칸이라 다음 노드로 안 간다. */
   stdout?: string;
   /**
@@ -82,6 +95,27 @@ export interface CodeRunResult {
     digest: string;
     observedAt: string;
   };
+}
+
+/** Both dependency rescue and Graph code repair use the same host receipt.
+ * Missing/contradictory receipts never authorize replay of a mutation. */
+export function codeExecutionProvesNotStarted(result: CodeRunResult,
+  effect: CodeRunInput["effect"]): boolean {
+  const receipt = result.execution;
+  return !result.ok && receipt?.schemaVersion === "agentlas.code-execution.v1"
+    && receipt.effect === (effect ?? "unknown") && receipt.status === "not-started"
+    && receipt.attemptCount === 0 && receipt.replay === "not-started" && typeof receipt.stopped === "boolean";
+}
+
+export function codeFailureAllowsAutomaticRetry(result: CodeRunResult,
+  effect: CodeRunInput["effect"]): boolean {
+  const receipt = result.execution;
+  if (result.ok || !receipt || receipt.schemaVersion !== "agentlas.code-execution.v1" || receipt.stopped
+    || !Number.isSafeInteger(receipt.attemptCount) || receipt.attemptCount < 0
+    || receipt.effect !== (effect ?? "unknown")) return false;
+  if (receipt.status === "not-started") return codeExecutionProvesNotStarted(result, effect);
+  return receipt.status === "started" && receipt.attemptCount > 0 && receipt.replay === "declared-read"
+    && (effect === "pure" || effect === "read");
 }
 
 const RESULT_MARKER = "__AGENTLAS_CODE_RESULT__";
@@ -263,6 +297,18 @@ function materializeScript(harness: string, lang: CodeLang): { file: string; cle
 export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
   const timeoutMs = Math.max(1, Math.min(600, input.timeoutSeconds ?? 60)) * 1000;
   const cwd = input.cwd ?? agentRunCwd();
+  let executionAttempts = 0;
+  const executionReceipt = (): CodeExecutionReceipt => ({
+    schemaVersion: "agentlas.code-execution.v1",
+    status: executionAttempts > 0 ? "started" : "not-started",
+    attemptCount: executionAttempts,
+    effect: input.effect ?? "unknown",
+    replay: executionAttempts === 0 ? "not-started"
+      : input.effect === "pure" || input.effect === "read" ? "declared-read" : "unknown-effect",
+    stopped: input.signal?.aborted === true,
+  });
+  if (input.signal?.aborted) return { ok: false, isolation: "unavailable", execution: executionReceipt(),
+    reason: L("실행이 중지되었습니다.", "The run was stopped.") };
 
   let interpreter: string;
   let harness: string;
@@ -270,7 +316,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     const py = await resolveHephaestusPython();
     if (!py) {
       return {
-        ok: false, isolation: "unavailable",
+        ok: false, isolation: "unavailable", execution: executionReceipt(),
         reason: L("이 컴퓨터에서 파이썬 실행기를 찾지 못했습니다. 앱을 다시 설치하거나 파이썬을 설치해 주세요.", "No Python runtime was found on this computer. Reinstall the app or install Python."),
       };
     }
@@ -297,7 +343,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
         if (ensured.installedNow.length) provisionNotes.push(L(`[deps] 설치: ${ensured.installedNow.join(", ")}`, `[deps] installed: ${ensured.installedNow.join(", ")}`));
         if (!ensured.ok && ensured.failed) {
           return {
-            ok: false, isolation: "process-isolated", failureCode: "CODE_DEPENDENCY_MISSING",
+            ok: false, isolation: "process-isolated", failureCode: "CODE_DEPENDENCY_MISSING", execution: executionReceipt(),
             reason: L(`이 단계가 선언한 파이썬 패키지 "${ensured.failed.name}"를 설치하지 못했습니다: ${ensured.failed.reason}`, `Could not install the Python package "${ensured.failed.name}" this step declares: ${ensured.failed.reason}`),
           };
         }
@@ -349,12 +395,13 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       if (!fs.existsSync(command)) {
         // ★조용한 폴백 금지 — 울타리 없이 돌리고 "격리했다"고 말하는 것이 최악이다.
         return {
-          ok: false, isolation: "unavailable",
+          ok: false, isolation: "unavailable", execution: executionReceipt(),
           reason: L("macOS 샌드박스 실행기(sandbox-exec)를 찾지 못해 코드를 돌리지 않았습니다.", "The code did not run because the macOS sandbox runner (sandbox-exec) was not found."),
         };
       }
     }
     const runOnce = async (): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+      if (input.signal?.aborted) return { code: -1, stdout: "", stderr: "" };
       const child = spawn(command, args, {
         cwd,
         env,
@@ -362,6 +409,7 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
         ...detachedSpawnOpts(),
       });
       trackRunChild(child);
+      child.once("spawn", () => { executionAttempts += 1; });
       let stdout = "";
       let stderr = "";
       child.stdout.on("data", (d: Buffer) => { stdout += d.toString("utf8"); });
@@ -381,15 +429,18 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
     };
 
     const beforeFiles = input.effect === "mutation" ? fileState(cwd) : null;
+    const observedFileEffect = () => beforeFiles ? effectReceipt(beforeFiles, fileState(cwd)) : undefined;
     let run = await runOnce();
     if (input.signal?.aborted) {
-      return { ok: false, isolation, reason: L("실행이 중지되었습니다.", "The run was stopped.") };
+      return { ok: false, isolation, execution: executionReceipt(), effectReceipt: observedFileEffect(),
+        reason: L("실행이 중지되었습니다.", "The run was stopped.") };
     }
     // ── 미선언 import 구조(救助) — 없는 모듈이면 설치를 시도하고 딱 한 번 다시 돈다 ──
     //   선언이 정답이지만, 이미 저장된 그래프(선언 이전에 지어진 코드)를 원문 traceback으로
     //   죽게 두는 것은 도움이 아니다. 모듈 이름=pip 이름일 때는 이 구조가 그대로 살린다.
     //   (설치는 샌드박스 밖 커널 작업. 재시도는 같은 격리로 다시 돈다.)
-    if (run.code !== 0 && input.lang === "python") {
+    if (run.code !== 0 && input.lang === "python"
+      && codeFailureAllowsAutomaticRetry({ ok: false, isolation, execution: executionReceipt() }, input.effect)) {
       const missing = MISSING_MODULE_RE.exec(run.stderr)?.[1]?.split(".")[0];
       if (missing && safePipName(missing)) {
         const rescue = await ensurePythonPackages(interpreter, [missing], env);
@@ -397,11 +448,13 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
           provisionNotes.push(L(`[deps] 없던 모듈 "${missing}" 설치 후 재시도`, `[deps] installed missing module "${missing}" and retried`));
           run = await runOnce();
           if (input.signal?.aborted) {
-            return { ok: false, isolation, reason: L("실행이 중지되었습니다.", "The run was stopped.") };
+            return { ok: false, isolation, execution: executionReceipt(), effectReceipt: observedFileEffect(),
+              reason: L("실행이 중지되었습니다.", "The run was stopped.") };
           }
         } else if (rescue.failed) {
           return {
-            ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING",
+            ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING", execution: executionReceipt(),
+            effectReceipt: observedFileEffect(),
             reason: L(`코드가 쓰는 파이썬 패키지 "${missing}"가 이 컴퓨터에 없고, 설치도 실패했습니다: `, `The Python package "${missing}" used by the code is not on this computer, and installing it failed: `)
               + `${rescue.failed.reason}`,
           };
@@ -413,20 +466,22 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       const reason = run.stderr.trim() || L(`코드 스텝이 오류로 끝났습니다 (종료 코드 ${run.code}).`, `The code step ended with an error (exit code ${run.code}).`);
       if (stillMissing) {
         return {
-          ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING",
+          ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING", execution: executionReceipt(),
+          effectReceipt: observedFileEffect(),
           reason: L(`코드가 쓰는 파이썬 모듈 "${stillMissing}"를 준비하지 못했습니다. pip 이름이 모듈 이름과 다른 패키지일 수 있습니다 — 원문: `, `Could not prepare the Python module "${stillMissing}" used by the code. Its pip name may differ from the module name — original error: `)
             + reason.slice(0, 800),
         };
       }
-      return { ok: false, isolation, reason: reason.slice(0, 4000) };
+      return { ok: false, isolation, execution: executionReceipt(), effectReceipt: observedFileEffect(), reason: reason.slice(0, 4000) };
     }
     const { result, logs } = splitResult(run.stdout);
     const logOut = [provisionNotes.join("\n"), logs].filter(Boolean).join("\n");
-    const receipt = beforeFiles ? effectReceipt(beforeFiles, fileState(cwd)) : undefined;
+    const receipt = observedFileEffect();
     return {
       ok: true,
       result,
       isolation,
+      execution: executionReceipt(),
       stdout: logOut.slice(0, 4000),
       ...(receipt ? { effectReceipt: receipt } : {}),
     };

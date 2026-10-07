@@ -212,6 +212,10 @@ export class AgiModelAttempt {
         usageComplete ? extra.input ?? null : null, usageComplete ? extra.output ?? null : null,
         JSON.stringify(extra.actions ?? []), d.now(), attemptId);
     };
+    // Custody predates evidence, candidate selection and every model round.
+    // Failure remains unavailable; apply may never replace this with a fresh capture.
+    const episodeCaptureId = `${attemptId}:rest`;
+    try { d.executor.captureEpisode(episodeCaptureId, input.goalId); } catch { /* typed unavailable at apply */ }
     const limits = readAgiTokenLimits(d.db);
     const facts = {
       goalId: input.goalId, stateDigest: input.stateDigest, diagnosis: {
@@ -276,10 +280,23 @@ export class AgiModelAttempt {
       break;
     }
     // Execute in host order with the fence refreshed after each of this attempt's own accepted effects.
-    const ordered = [...(decision?.actions ?? [])].sort((a, b) => EXECUTION_ORDER.indexOf(a.action) - EXECUTION_ORDER.indexOf(b.action));
+    const proposed = decision?.actions ?? [];
+    const strategyBatch = proposed.length === 2 && proposed.filter(a => a.action === "rest").length === 1
+      && proposed.filter(a => a.action === "replan_tree").length === 1;
+    const mixedRest = proposed.some(action => action.action === "rest") && proposed.length > 1;
+    const ordered = [...(mixedRest ? proposed.filter(action => action.action === "rest").slice(0, 1) : proposed)].sort((a, b) => EXECUTION_ORDER.indexOf(a.action) - EXECUTION_ORDER.indexOf(b.action));
     let fence = { goalId: input.goalId, runId: input.runId ?? "", runVersion: input.runVersion ?? -1 };
     const receipts: AgiActionReceipt[] = [];
-    ordered.forEach((entry, index) => {
+    if (strategyBatch) {
+      const refreshed = input.refreshFence ? input.refreshFence() : fence;
+      if (!refreshed) receipts.push({ actionId: `${attemptId}:strategy`, action: "rest", ok: false, code: "agi.action.state-changed" });
+      else {
+        const request = (action: "replan_tree" | "rest", index: number): import("./actions").AgiActionRequest => ({
+          schema: AGI_ACTION_SCHEMA, actionId: `${attemptId}:${index}:${action}`, incidentId: input.incidentId, attempt: attemptNo,
+          fence: refreshed, action, args: proposed.find(a => a.action === action)!.args, attemptTokensSoFar: tokensUsed, episodeCaptureId });
+        receipts.push(...await d.executor.executeStrategyEpisode({ plan: request("replan_tree",0), rest: request("rest",1) }));
+      }
+    } else ordered.forEach((entry, index) => {
       if (input.refreshFence) {
         const refreshed = input.refreshFence();
         if (!refreshed) {
@@ -289,7 +306,8 @@ export class AgiModelAttempt {
         fence = refreshed;
       }
       const receipt = d.executor.execute({ schema: AGI_ACTION_SCHEMA, actionId: `${attemptId}:${index}:${entry.action}`, incidentId: input.incidentId,
-        attempt: attemptNo, fence, action: entry.action, args: entry.args, attemptTokensSoFar: tokensUsed });
+        attempt: attemptNo, fence, action: entry.action, args: entry.args, attemptTokensSoFar: tokensUsed,
+        episodeCaptureId, ...(mixedRest ? { episodeRefusal: "goal_episode_mixed_batch" } : {}) });
       receipts.push(receipt);
       if (receipt.ok && !input.refreshFence) {
         const version = d.executor.currentVersion(input.goalId);
@@ -301,10 +319,15 @@ export class AgiModelAttempt {
         evidenceRefs: [attemptId], ruledOut: false });
     }
     const actions = receipts.map((receipt) => ({ action: receipt.action, result: receipt.ok ? receipt.code : `refused:${receipt.code}` }));
-    settle("completed", "agi.model.completed", { runtime: used?.selection, rounds, input: inputTokens, output: outputTokens, actions });
+    const registeredWait = receipts.some(receipt => receipt.action === "rest" && receipt.ok
+      && receipt.code === "goal_episode_wait_registered" && receipt.detail?.status === "wait_registered"
+      && typeof receipt.detail.waitId === "string" && receipt.detail.waitId.length > 0
+      && typeof receipt.detail.checkpointId === "string" && receipt.detail.checkpointId.length > 0);
+    settle("completed", registeredWait ? "agi.model.wait-registered" : "agi.model.completed",
+      { runtime: used?.selection, rounds, input: inputTokens, output: outputTokens, actions });
     const acted = receipts.some((receipt) => receipt.ok && !AGI_NON_ALTERNATIVE_ACTIONS.has(receipt.action as AgiActionKind));
     const asked = receipts.some((receipt) => receipt.ok && receipt.action === "ask_owner_once");
-    return { attemptId, outcome: acted ? "acted" : asked ? "needs-human" : "rested", code: acted ? "agi.model.acted" : asked ? "agi.model.asked" : "agi.model.rested",
+    return { attemptId, outcome: registeredWait ? "rested" : acted ? "acted" : asked ? "needs-human" : "rested", code: registeredWait ? "agi.model.wait-registered" : acted ? "agi.model.acted" : asked ? "agi.model.asked" : registeredWait ? "agi.model.wait-registered" : "agi.model.rested",
       actions, tokens: tokensUsed };
   }
 

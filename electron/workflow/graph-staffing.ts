@@ -14,6 +14,8 @@
 import type { WorkflowGraph, WorkflowNode, MarketplaceListing } from "../../shared/types";
 
 export interface StaffingCandidateSource {
+  /** The caller owns the complete staffing lifetime, including fit judgments. */
+  signal?: AbortSignal;
   /** 설치된 에이전트 — 이미 있으면 공짜이고 즉시 돈다. */
   installed: Array<{ id: string; name: string; tagline?: string }>;
   /** Hub 검색 — 역할 문구로 실제 공개 에이전트를 찾는다. */
@@ -47,6 +49,7 @@ export interface StaffedSlot {
 export type StaffingFitJudge = (spec: {
   role: string;
   candidate: { name: string; tagline: string };
+  signal?: AbortSignal;
 }) => Promise<"pass" | "fail" | null>;
 
 /** 역할 문구를 검색 질의로. 사람 말 그대로 던지면 잡음이 많아 앞부분만 쓴다. */
@@ -94,13 +97,16 @@ function hubCandidates(rows: MarketplaceListing[]): MarketplaceListing[] {
  * 비운다 — 이미 공인된 동작이다("아무거나 꽂으면 사람은 꽂힌 대로 돌 거라 믿는다").
  */
 /** 프로덕션 판정 — role 문구와 자기소개에서 매번 기준을 만든다(케이스 목록 0). */
-async function defaultFitJudge(spec: { role: string; candidate: { name: string; tagline: string } }): Promise<"pass" | "fail" | null> {
+async function defaultFitJudge(spec: { role: string; candidate: { name: string; tagline: string }; signal?: AbortSignal }): Promise<"pass" | "fail" | null> {
+  spec.signal?.throwIfAborted();
   let judgeChecklist: typeof import("../system-agents/judgment").judgeChecklist;
   try {
     ({ judgeChecklist } = await import("../system-agents/judgment"));
   } catch {
+    spec.signal?.throwIfAborted();
     return null;
   }
+  spec.signal?.throwIfAborted();
   const verdict = await judgeChecklist({
     kind: "graph-staffing-fit",
     subjectText: `Role to staff: ${spec.role} / Candidate agent: ${spec.candidate.name} — ${spec.candidate.tagline}`.slice(0, 900),
@@ -109,7 +115,9 @@ async function defaultFitJudge(spec: { role: string; candidate: { name: string; 
       { id: "wrong-tool", text: "The candidate is specialized for a different file format, platform, or task than the role needs.", kind: "mustNot" },
     ],
     timeoutMs: 20_000,
+    signal: spec.signal,
   });
+  spec.signal?.throwIfAborted();
   return verdict.verdict;
 }
 
@@ -117,17 +125,22 @@ async function judgeHubFit(
   role: string,
   candidates: MarketplaceListing[],
   judge: StaffingFitJudge,
+  signal?: AbortSignal,
 ): Promise<MarketplaceListing | null> {
   for (const candidate of candidates.slice(0, 3)) {
+    signal?.throwIfAborted();
     try {
       const verdict = await judge({
         role,
         candidate: { name: candidate.name, tagline: [candidate.tagline, candidate.taglineEn].filter(Boolean).join(" / ") },
+        signal,
       });
+      signal?.throwIfAborted();
       if (verdict === "pass") return candidate;
       // fail이면 다음 후보 — 판정 불가(null)면 즉시 비운다. 검색 순위로 대신 뽑지 않는다.
       if (verdict === null) return null;
     } catch {
+      signal?.throwIfAborted();
       return null;
     }
   }
@@ -142,9 +155,11 @@ export async function staffGraph(
   graph: WorkflowGraph,
   source: StaffingCandidateSource,
 ): Promise<StaffedSlot[]> {
+  source.signal?.throwIfAborted();
   const slots: StaffedSlot[] = [];
   const seen = new Map<string, StaffedSlot>();
   for (const node of graph.nodes) {
+    source.signal?.throwIfAborted();
     if (node.type !== "agent" && node.type !== "action") continue;
     const role = typeof node.config?.role === "string" ? node.config.role.trim() : "";
     if (!role) continue;
@@ -169,12 +184,15 @@ export async function staffGraph(
       try {
         rows = await source.searchHub(queryFor(roleEn));
       } catch {
+        source.signal?.throwIfAborted();
         rows = []; // 검색 실패는 편성 실패지 그래프 실패가 아니다 — 비워 두고 넘어간다.
       }
+      source.signal?.throwIfAborted();
       const hub = await judgeHubFit(
         roleEn === role ? role : `${role} (${roleEn})`,
         hubCandidates(rows),
         source.judgeFit ?? defaultFitJudge,
+        source.signal,
       );
       slot = hub
         ? {

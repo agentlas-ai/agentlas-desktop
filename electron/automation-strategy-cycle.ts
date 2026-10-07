@@ -15,6 +15,8 @@ import { getAutomation } from "./store/automations";
 import {
   adjudicateAutomationStrategyProposal,
   createAutomationStrategyProposalForRun,
+  createEpisodeReservedStrategyProposal,
+  type AutomationStrategyProposalReceipt,
   getAutomationStrategyGoalOrigin,
   settleAutomationStrategyProposalBacklog,
   type AutomationStrategyProposalObservationV1,
@@ -50,6 +52,8 @@ type StrategyEventCoverage = "complete" | "truncated" | "unavailable";
 export interface AutomationStrategyCycleInput {
   automationId: string;
   sourceRunId: string;
+  /** Main-only preparation: no revision apply, backlog transition or execution. */
+  episodePreparation?: { captureId: string; prepared(receipt: AutomationStrategyProposalReceipt): void };
   status: AutomationRunRecord["status"];
   outcome: AutomationRunRecord["outcome"];
   reasonCode?: string | null;
@@ -228,6 +232,7 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
     || strategyRunSummary.metrics.toolActivityCoverage !== "complete";
 
   const advisoryOnly = input.backgroundAdvisory === true || effectsUnconfirmed || observationCoverageIncomplete;
+  if (input.episodePreparation && advisoryOnly) { unavailable(input, "strategy_episode_evidence_unavailable"); return; }
   if (advisoryOnly) tryRecordRunEvent({ runId: input.sourceRunId, automationId: input.automationId,
     kind: "automation_strategy_evidence_pending", payload: { effectsUnconfirmed,
       coverage: strategyRunSummary.metrics.coverage, toolActivityCoverage: strategyRunSummary.metrics.toolActivityCoverage } });
@@ -298,11 +303,14 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
             })) } : {}),
           });
         } else {
-          const proposal = createAutomationStrategyProposalForRun({
+          const create = input.episodePreparation
+            ? (draft: Parameters<typeof createAutomationStrategyProposalForRun>[0]) => createEpisodeReservedStrategyProposal(draft, input.episodePreparation!.captureId)
+            : createAutomationStrategyProposalForRun;
+          const proposal = create({
             actor: "main",
             automationId: input.automationId,
             sourceRunId: input.sourceRunId,
-            requestId: input.goalRecommendation
+            requestId: input.episodePreparation ? `strategy-episode:${input.episodePreparation.captureId}` : input.goalRecommendation
               ? `strategy-proposal:goal:${input.goalRecommendation.proposalId}:${input.sourceRunId}`
               : `strategy-proposal:reflection:${input.sourceRunId}`,
             intent: reflection.envelope.intent,
@@ -317,8 +325,10 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
           const reviewed = advisoryOnly ? proposal : await adjudicateAutomationStrategyProposal({
             automationId: input.automationId,
             proposalId: proposal.id,
+            ...(input.episodePreparation ? { episodeCaptureId: input.episodePreparation.captureId } : {}),
           });
           if (!current()) { unavailable(input, "reflection_source_changed"); return; }
+          if (input.episodePreparation) { input.episodePreparation.prepared(reviewed); return; }
           tryRecordRunEvent({
             runId: input.sourceRunId,
             kind: "automation_strategy_reflection_proposed",
@@ -364,6 +374,8 @@ export async function runAutomationStrategyCycle(input: AutomationStrategyCycleI
   }
 
   if (!current()) { unavailable(input, "reflection_source_changed"); return; }
+  // Preparation owns no ordinary backlog or follow-up mutation, including failure.
+  if (input.episodePreparation) return;
   // One live proposal per automation (P0-5): retire older drafts and a live draft whose definition moved.
   // Receipt-only; never changes the graph, schedule, Goal, or authority.
   try {

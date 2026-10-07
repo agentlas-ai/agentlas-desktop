@@ -1,3 +1,7 @@
+import { createGraphWorkerAttempt, readGraphWorkerFailure, readGraphWorkerPool, chooseGraphWorker, graphPinUnavailable, graphWorkerIdentity,
+  type GraphWorkerAttempt, type GraphWorkerFailureReceipt, type GraphWorkerPool } from "./graph-worker-fallback";
+import { selectExactRuntime } from "../runtime/selection";
+import { captureFiniteAutomationGoalExecutionOwner, assertAutomationGoalExecutionOwner, bindFiniteGraphRunStop } from "../automation-execution-control";
 import type { BrowserLoginWait } from "../browser/login-prerequisite";
 import { withAutomationNodeAccounting, withAutomationRunAccounting } from "../long-run/accounting-context";
 // 워크플로우 그래프 러너 — 기존 runMcpInvocation dispatch 위의 얇은 위상 워커(설계 §4.4).
@@ -21,6 +25,7 @@ import type {
   RuntimeSelection,
 } from "../../shared/types";
 import { isRuntimeKind as isSharedRuntimeKind } from "../../shared/runtime-kinds";
+import { runtimeSelectionForGraphNode } from "../../shared/graph-runtime-selection";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -831,7 +836,7 @@ export async function rewriteFailedCodeStep(input: {
         input.failure.slice(0, 2000),
       ].join("\n"),
       timeoutMs: 120_000,
-      ...(input.runtimeSelection ? { runtimeSelection: input.runtimeSelection } : {}),
+      ...(input.runtimeSelection ? { runtimeSelection: input.runtimeSelection, pinFallback: "pin_then_worker_pool" } : {}),
       ...(input.signal ? { signal: input.signal } : {}),
     });
     if (!answer) return null;
@@ -1688,6 +1693,17 @@ export async function runGraph(
   graph: WorkflowGraph,
   opts: RunGraphOptions = {},
 ): Promise<RunGraphResult> {
+  const finiteOwner = opts.dryRun ? undefined : captureFiniteAutomationGoalExecutionOwner(automation.id);
+  const assertFiniteCurrent = () => { if (finiteOwner) assertAutomationGoalExecutionOwner(finiteOwner); };
+  const withFiniteDispatch = async <T>(call: () => Promise<T>): Promise<T> => {
+    assertFiniteCurrent();
+    const result = await call();
+    assertFiniteCurrent();
+    return result;
+  };
+  let releaseFinite: () => void = () => {};
+  // Own cleanup from admission through all synchronous initialization and awaits.
+  try {
   const sink: EventSink = opts.sink ?? (() => {});
   const runId = opts.runId ?? `run-${automation.id}-${Date.now()}`;
   const requestedOccurrenceId = opts.occurrenceId?.trim() || null;
@@ -2120,6 +2136,8 @@ export async function runGraph(
     return sealCheckpoint(checkpoint!);
   };
   const runController = new AbortController();
+  assertFiniteCurrent();
+  releaseFinite = finiteOwner ? bindFiniteGraphRunStop(automation.id,runController,finiteOwner) : () => {};
   let detachCallerAbort = () => {};
   if (opts.signal?.aborted) {
     runController.abort(opts.signal.reason);
@@ -2128,6 +2146,8 @@ export async function runGraph(
     opts.signal.addEventListener("abort", relayAbort, { once: true });
     detachCallerAbort = () => opts.signal?.removeEventListener("abort", relayAbort);
   }
+  const detachSignal = detachCallerAbort;
+  detachCallerAbort = () => { detachSignal(); releaseFinite(); };
   const runSignal = runController.signal;
   const backgroundCheckNodes = new Set<string>();
 
@@ -2361,6 +2381,7 @@ export async function runGraph(
       node.id,
       completed.has(node.id) ? "done" : skipped.has(node.id) ? "skipped" : "pending",
     ])) as Record<string, WorkflowNodeRunState>;
+    assertFiniteCurrent();
     startGraphRun({
       runId,
       automationId: automation.id,
@@ -2581,24 +2602,17 @@ export async function runGraph(
   const isRuntimeKind = (value: string): value is RuntimeKind => isSharedRuntimeKind(value);
 
   const quotaRuntimeOverrides = new Map<string, RuntimeSelection>();
+  const workerFallbackState = new Map<string, { pool: GraphWorkerPool | null; attempted: Set<string>; deadline: number; original: RuntimeSelection; predecessor?: Readonly<{ receipt: GraphWorkerFailureReceipt; attempt: GraphWorkerAttempt }> }>();
   const observedRuntimeByNode = new Map<string, RuntimeSelection>();
   const runtimeSelectionForNode = (node: WorkflowNode): RuntimeSelection | undefined => {
     const quotaOverride = quotaRuntimeOverrides.get(node.id);
     if (quotaOverride) return quotaOverride;
     const base = automation.runtimeSelection ?? undefined;
     const declared = str(node.config, "runtime");
-    if (!declared) return base;
-    if (!isRuntimeKind(declared)) {
-      // 모르는 값은 조용히 무시하지 않고 자동화 기본값을 쓴다 — 다만 왜인지 남긴다.
+    if (declared && !isRuntimeKind(declared)) {
       console.warn(`[graph] node ${node.id}: unknown runtime "${declared}", using the automation default`);
-      return base;
     }
-    // RuntimeSelection의 backend/source/model은 kind에 종속된다. 다른 종류를 고를 때
-    // 기본 자동화의 값을 합치면 예컨대 `claude-code + source=agy + gemini`가 되어
-    // exact resolver가 조용히 실패하거나 잘못된 runner로 내려갈 수 있다. 새 종류는
-    // Worker 역할만 명시하고, 실행 시점에 그 종류의 실제 연결·모델을 다시 선택한다.
-    if (base?.kind === declared) return base;
-    return { kind: declared, role: "worker" };
+    return runtimeSelectionForGraphNode(node, base);
   };
 
   /**
@@ -2721,6 +2735,7 @@ export async function runGraph(
   };
 
   const beginNode = (node: WorkflowNode, resolvedPrompt?: string): void => {
+    assertFiniteCurrent();
     checkpoint!.inFlightNodeIds = [...new Set([...checkpoint!.inFlightNodeIds, node.id])].sort();
     checkpoint!.nodeInputDigests[node.id] = sha256Value({
       graphDigest,
@@ -2966,6 +2981,7 @@ export async function runGraph(
   };
 
   const runNode = async (node: (typeof ordered)[number], scopedSignal: AbortSignal): Promise<void> => {
+    assertFiniteCurrent();
     const runSignal = scopedSignal;
     switch (node.type) {
       case "trigger":
@@ -3199,7 +3215,8 @@ export async function runGraph(
           let list: import("../system-agents/judgment").ChecklistVerdict;
           try {
             const { judgeChecklist } = await import("../system-agents/judgment");
-            list = await withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeChecklist({
+            assertFiniteCurrent();
+            list = await withFiniteDispatch(() => withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeChecklist({
               kind: `graph-eval-list:${sha256Value({ items: checklist }).slice(0, 24)}`,
               items: checklist,
               subjectText,
@@ -3209,8 +3226,9 @@ export async function runGraph(
                 ? { evidence: judgeableText(evidenceValue) }
                 : {}),
               ...(runSignal ? { signal: runSignal } : {}),
-            }));
+            })));
           } catch (error) {
+            assertFiniteCurrent();
             failGraphNode(node, {
               code: "EVAL_UNAVAILABLE",
               reason: L(
@@ -3260,7 +3278,8 @@ export async function runGraph(
           if (node.config?.stability === true) {
             try {
               const { judgeChecklist: judgeAgain } = await import("../system-agents/judgment");
-              const second = await withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeAgain({
+              assertFiniteCurrent();
+              const second = await withFiniteDispatch(() => withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeAgain({
                 kind: `graph-eval-list:${sha256Value({ items: checklist }).slice(0, 24)}`,
                 items: checklist,
                 subjectText,
@@ -3271,7 +3290,7 @@ export async function runGraph(
                   : {}),
                 ...(corrections.length ? { corrections } : {}),
                 ...(runSignal ? { signal: runSignal } : {}),
-              }));
+              })));
               if (second.verdict !== null) {
                 const firstById = new Map(list.items.map((v) => [v.id, v.verdict]));
                 const disagreed = second.items
@@ -3279,7 +3298,7 @@ export async function runGraph(
                   .map((v) => v.id);
                 stability = { agreed: disagreed.length === 0 && second.verdict === list.verdict, disagreedItems: disagreed };
               }
-            } catch { /* 흔들림 측정 실패는 판정 실패가 아니다 */ }
+            } catch { assertFiniteCurrent(); /* 흔들림 측정 실패는 판정 실패가 아니다 */ }
           }
           vars[produces] = list.verdict;
           vars[`${produces}_reason`] = list.reasonText;
@@ -3361,7 +3380,8 @@ export async function runGraph(
         let verdict: { verdict: "pass" | "fail" | null; reason: string | null };
         try {
           const { judgeRequired } = await import("../system-agents/judgment");
-          verdict = await withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeRequired<"pass" | "fail">({
+          assertFiniteCurrent();
+          verdict = await withFiniteDispatch(() => withAutomationNodeAccounting({ runId, automationId: automation.id, nodeId: node.id, chatId: chat.id }, () => judgeRequired<"pass" | "fail">({
             kind: `graph-eval:${sha256Value({ criteria: criteria ?? "" }).slice(0, 24)}`,
             question: "Does this result meet the stated criteria?",
             labels: ["pass", "fail"] as const,
@@ -3374,8 +3394,9 @@ export async function runGraph(
             ].join(" "),
             scanSecrets: true,
             ...(runSignal ? { signal: runSignal } : {}),
-          }));
+          })));
         } catch (error) {
+          assertFiniteCurrent();
           failGraphNode(node, {
             code: "EVAL_UNAVAILABLE",
             reason: L(
@@ -3516,11 +3537,12 @@ export async function runGraph(
         for (const name of referenced) if (name in vars) codeVars[name] = vars[name];
 
         const lang = str(node.config, "codeLang") === "js" ? "js" : "python";
-        const { runCodeStep } = await import("./code-runner");
-        const runOnce = (script: string) => runCodeStep({
+        const { runCodeStep, codeFailureAllowsAutomaticRetry, codeExecutionProvesNotStarted } = await import("./code-runner");
+        const executionEffect = codeEffect === "mutation" ? "mutation" : codeEffect === "pure" ? "pure" : "read";
+        const runOnce = (script: string) => { assertFiniteCurrent(); return runCodeStep({
           code: script, lang,
           vars: codeVars,
-          effect: codeEffect === "mutation" ? "mutation" : codeEffect === "pure" ? "pure" : "read",
+          effect: executionEffect,
           // 선언된 서드파티 패키지 — 커널이 실행 전에 설치한다(code-runner의 배경 주석 참고).
           ...(Array.isArray(node.config?.packages)
             ? { packages: (node.config.packages as unknown[]).map((v) => String(v)) }
@@ -3529,8 +3551,33 @@ export async function runGraph(
           // 없으므로 code-runner의 기본 폴더(agentRunCwd)를 쓴다.
           timeoutSeconds: nodeTimeoutMs(node) / 1000,
           ...(runSignal ? { signal: runSignal } : {}),
-        });
-        let run = await runOnce(codeText);
+        }); };
+        const recordCodeEffect = (attempt: Awaited<ReturnType<typeof runCodeStep>>) => {
+          if (!attempt.effectReceipt) return;
+          // A failed/aborted script can still leave a measured local file delta.
+          // This receipt does not settle unobserved network or business effects.
+          tryRecordRunEvent({ runId, kind: "graph_host_effect", automationId: automation.id, payload: {
+            nodeId: node.id, effectKind: attempt.effectReceipt.kind,
+            changedFileCount: attempt.effectReceipt.changedFileCount, digest: attempt.effectReceipt.digest,
+            isolation: attempt.isolation, observedAt: attempt.effectReceipt.observedAt,
+            execution: attempt.execution ?? null, attemptSucceeded: attempt.ok,
+          } });
+        };
+        const dispatchCode = async (script: string) => {
+          const attempt = await runOnce(script);
+          // Record the observed result before the finite post-await barrier can
+          // reject further work. Stop revokes dispatch, never observed evidence.
+          recordCodeEffect(attempt);
+          try { assertFiniteCurrent(); }
+          catch (error) {
+            if (executionEffect === "mutation" && !codeExecutionProvesNotStarted(attempt, executionEffect)
+              && !checkpoint!.ambiguousNodeIds.includes(node.id)) checkpoint!.ambiguousNodeIds.push(node.id);
+            throw error;
+          }
+          return attempt;
+        };
+        let run = await withFiniteDispatch(() => dispatchCode(codeText));
+        assertFiniteCurrent();
         /*
          * ★빌더가 짠 스크립트는 **한 번도 돌아 본 적이 없다.** 실측 2026-08-20: 새로 만든
          *   환율 자동화의 첫 단계가 자료원에서 HTTP 403 을 받고 죽었다. 사람에게는 파이썬
@@ -3544,9 +3591,11 @@ export async function runGraph(
          *     그래프를 말없이 바꾸면 멈춘 실행의 재개가 digest 불일치로 거부된다.
          *   ★의존성 결손은 다시 짜서 될 일이 아니다(패키지 선언 문제) — 그대로 둔다.
          */
-        if (!run.ok && run.failureCode !== "CODE_DEPENDENCY_MISSING" && !codeRepairAttempted.has(node.id)) {
+        if (!run.ok && codeFailureAllowsAutomaticRetry(run, executionEffect)
+          && run.failureCode !== "CODE_DEPENDENCY_MISSING" && !codeRepairAttempted.has(node.id)) {
           codeRepairAttempted.add(node.id);
-          const rewritten = await rewriteFailedCodeStep({
+          assertFiniteCurrent();
+          const rewritten = await withFiniteDispatch(() => rewriteFailedCodeStep({
             instruction: str(node.config, "note") || node.label || node.id,
             lang,
             code: codeText,
@@ -3554,14 +3603,26 @@ export async function runGraph(
             varNames: Object.keys(codeVars),
             runtimeSelection: runtimeSelectionForNode(node),
             signal: runSignal,
-          });
+          }));
           if (rewritten && rewritten.trim() && rewritten.trim() !== codeText.trim()) {
             journal("node_intent", node.id, { codeRepair: "rewrote the script after it failed once" });
-            run = await runOnce(rewritten);
+            run = await withFiniteDispatch(() => dispatchCode(rewritten));
           }
         }
         if (run.stdout?.trim()) journal("node_intent", node.id, { codeLog: run.stdout.slice(0, 500) });
         if (!run.ok) {
+          if (executionEffect === "mutation" && !codeExecutionProvesNotStarted(run, executionEffect)) {
+            if (!checkpoint!.ambiguousNodeIds.includes(node.id)) checkpoint!.ambiguousNodeIds.push(node.id);
+            failGraphNode(node, {
+              code: "MUTATION_UNVERIFIED",
+              reason: codeFailureHeadline(run.reason),
+              nextAction: L(
+                "남긴 결과를 먼저 확인합니다. 수정안은 준비할 수 있지만 이 작업은 자동으로 반복하지 않습니다.",
+                "Check the effects already left behind. A repair can be prepared, but this operation is not automatically repeated.",
+              ),
+            });
+            return;
+          }
           failGraphNode(node, run.failureCode === "CODE_DEPENDENCY_MISSING"
             ? {
               // 의존성 결손은 코드 결함이 아니다 — "다시 짜라"가 아니라 "패키지를 선언하라".
@@ -3599,23 +3660,6 @@ export async function runGraph(
               ),
             });
           return;
-        }
-        if (run.effectReceipt) {
-          // Only a host-measured before/after file delta counts as code-node
-          // effect evidence. `effect: mutation` by itself is merely intent.
-          tryRecordRunEvent({
-            runId,
-            kind: "graph_host_effect",
-            automationId: automation.id,
-            payload: {
-              nodeId: node.id,
-              effectKind: run.effectReceipt.kind,
-              changedFileCount: run.effectReceipt.changedFileCount,
-              digest: run.effectReceipt.digest,
-              isolation: run.isolation,
-              observedAt: run.effectReceipt.observedAt,
-            },
-          });
         }
         const codeText2 = run.result == null
           ? ""
@@ -4027,6 +4071,8 @@ export async function runGraph(
         // 노드 단위 상한 — 실행 전체를 보는 워치독은 "조용해진 것"만 잡지 "끝나지 않는 것"은
         // 못 잡는다. 토큰을 계속 뱉으면서 영원히 도는 노드가 실제로 가능했다.
         const nodeDeadlineMs = nodeTimeoutMs(node);
+        const nodeStartedAt = Date.now();
+        const workerDeadline = workerFallbackState.get(node.id)?.deadline ?? nodeStartedAt + nodeDeadlineMs;
         const nodeAbort = new AbortController();
         let nodeTimedOut = false;
         const relayRunAbort = () => nodeAbort.abort(runSignal.reason);
@@ -4035,8 +4081,12 @@ export async function runGraph(
         const nodeTimer = setTimeout(() => {
           nodeTimedOut = true;
           nodeAbort.abort(new Error("automation_node_timeout"));
-        }, nodeDeadlineMs);
+        }, Math.max(1, Math.min(nodeDeadlineMs, workerDeadline - Date.now())));
         let markedQuotaFailure = false;
+        let graphWorkerAttempt: GraphWorkerAttempt | undefined;
+        let graphWorkerReceipt: GraphWorkerFailureReceipt | null = null;
+        let modelInvocationFailed = false;
+        let modelInvocationStarted = false;
         // Adaptive Toolchain overlay (electron/toolchains/runtime.ts). Inert unless an
         // owner-approved crystallization matches this node's definition digest; every
         // guard failure falls back to the node exactly as it ran before.
@@ -4060,52 +4110,64 @@ export async function runGraph(
           const forceBrowserCredentialRefresh = browserCredentialRefreshPending
             && (node.type === "agent" || node.type === "action" || node.type === "output");
           if (forceBrowserCredentialRefresh) browserCredentialRefreshPending = false;
-          /*
-           * ★저장된 핀이 **지금 한도/인증 쿨다운**이면 시작하기 전에 비켜 간다.
-           *   실측 2026-09-21 15:34Z: agy 한도("this model has hit its usage limit")인 채로
-           *   자동화 단계가 들어가 MUTATION_UNVERIFIED 로 끝났다. One 은 같은 사실로 시작 전에
-           *   오케스트레이터 풀로 비켜 가는데(client.ts runtimeCooldown), 무인 자동화만 이미 아는
-           *   죽은 런타임으로 매 슬롯을 시작했다. 아직 아무 도구도 안 불렀으니 옮겨도 이중 실행이 없다.
-           *   저장된 핀은 그대로 둔다 — 쿨다운(최대 1시간)이 지나면 다음 단계가 원래 모델로 간다.
-           */
-          if (!nativeMcpCall && !quotaRuntimeOverrides.has(node.id)) {
+          // A node keeps its original run/owner and pin; only this invocation's
+          // selected runtime may change through the configured Worker snapshot.
+          if (!nativeMcpCall) {
             const planned = runtimeSelectionForNode(node);
-            const cooling = planned?.source ? runtimeCooldownForSelection(planned) : null;
-            if (planned && cooling && (cooling.kind === "quota" || cooling.kind === "auth")) {
-              try {
-                const alternate = rolePriorityRuntimes(await detectRuntimes(), "worker")
-                  .find((candidate) => candidate.backend !== planned.backend && !runtimeCooldown(candidate));
-                if (alternate) {
-                  // selectionForRuntime carries an ACP seat exactly (c962c79d); a hand-built pin drops it.
-                  const selection: RuntimeSelection = selectionForRuntime(alternate, {
-                    role: "worker",
-                    ...(typeof alternate.longContextEnabled === "boolean" ? { longContext: alternate.longContextEnabled } : {}),
-                  });
-                  quotaRuntimeOverrides.set(node.id, selection);
-                  tryRecordRunEvent({
-                    runId,
-                    kind: "workflow_runtime_cooldown_handoff_planned",
-                    automationId: automation.id,
-                    nodeId: node.id,
-                    payload: {
-                      fromKind: planned.kind,
-                      fromBackend: planned.backend ?? null,
-                      fromModel: planned.model ?? null,
-                      toKind: selection.kind,
-                      toBackend: selection.backend ?? null,
-                      toModel: selection.model ?? null,
-                      cooldownKind: cooling.kind,
-                      cooldownUntil: cooling.until,
-                    },
-                  });
-                }
-              } catch (handoffError) {
-                console.warn(`[graph] cooldown handoff unavailable (${node.id}):`, handoffError);
+            if (planned) {
+              modelInvocationFailed = true; // an admission failure must not enter generic replay
+              let state = workerFallbackState.get(node.id);
+              if (!state) {
+                state = { pool: readGraphWorkerPool(), attempted: new Set(), deadline: workerDeadline,
+                  original: { ...planned } };
+                workerFallbackState.set(node.id, state);
               }
+              const captured = state;
+              // Snapshot the prior pair. Reading mutable state here would let
+              // this attempt become its own ancestor after the next handoff.
+              const predecessor = captured.predecessor;
+              const assertOwner = () => {
+                if (predecessor) {
+                  try {
+                    const prior = readGraphWorkerFailure(predecessor.receipt, predecessor.attempt);
+                    if (prior?.status !== "retryable" || !prior.runtimeQuiesced) throw new Error("graph_worker_predecessor_changed");
+                  } catch (error) {
+                    unsafeToolObserved = true;
+                    throw error;
+                  }
+                }
+                assertFiniteCurrent();
+                if (runSignal.aborted || nodeAbort.signal.aborted || Date.now() >= captured.deadline) throw new Error("graph_worker_owner_stopped");
+                if (getAutomationDefinitionDigest(automation.id) !== definitionDigest) throw new Error("graph_worker_definition_changed");
+                revalidateAutomationWorkspace(automationWorkspace);
+                if (captured.pool && readGraphWorkerPool()?.fingerprint !== captured.pool.fingerprint) throw new Error("graph_worker_pool_changed");
+              };
+              assertOwner();
+              const runtimes = await detectRuntimes();
+              assertOwner();
+              const unavailable = graphPinUnavailable(runtimes, planned, captured.attempted.size === 0);
+              let selected = planned;
+              if (unavailable) {
+                const exact = selectExactRuntime(runtimes, planned);
+                captured.attempted.add(graphWorkerIdentity(exact ? selectionForRuntime(exact.active) : planned));
+                const replacement = captured.pool && chooseGraphWorker(captured.pool, runtimes, captured.attempted, planned, unavailable.failure);
+                if (!replacement) throw new Error("graph_worker_candidates_unavailable");
+                selected = replacement;
+                tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_runtime_worker_handoff",
+                  payload: { phase: "not_invoked", from: planned, to: selected, cause: unavailable.reason,
+                    poolFingerprint: captured.pool!.fingerprint } });
+              }
+              if (captured.attempted.size >= 3) throw new Error("graph_worker_attempt_limit");
+              const exact = selectExactRuntime(runtimes, selected);
+              selected = exact ? selectionForRuntime(exact.active, { role: selected.role, inherit: selected.inherit, longContext: selected.longContext ?? exact.active.longContextEnabled }) : selected;
+              captured.attempted.add(graphWorkerIdentity(selected));
+              quotaRuntimeOverrides.set(node.id, selected);
+              graphWorkerAttempt = createGraphWorkerAttempt({ attemptId: randomUUID(), runId, automationId: automation.id,
+                occurrenceId: checkpoint!.occurrenceId, nodeId: node.id, chatId: nodeChat.id, selection: selected }, assertOwner);
             }
           }
           revalidateAutomationWorkspace(automationWorkspace);
-          const invokeNode: typeof runMcpInvocation = nativeMcpCall
+          const invokeNodeRaw: typeof runMcpInvocation = nativeMcpCall
             ? async (_request, eventSink, signal, binding) => {
               if (!signal || !binding) throw new Error("graph_mcp_scope_required");
               const nativeResult = await runGraphMcpCall({ call: node.config.mcpCall, vars, runId, automationId: automation.id,
@@ -4116,7 +4178,14 @@ export async function runGraph(
               return nativeResult;
             }
             : runMcpInvocation;
-          const result = await withAutomationNodeAccounting({
+          const invokeNode: typeof runMcpInvocation = async (...args) => {
+            assertFiniteCurrent();
+            modelInvocationStarted = !nativeMcpCall;
+            const result = await invokeNodeRaw(...args);
+            assertFiniteCurrent();
+            return result;
+          };
+          const result = await withFiniteDispatch(() => withAutomationNodeAccounting({
             runId, automationId: automation.id, nodeId: node.id, chatId: nodeChat.id,
           }, () => invokeNode(
             {
@@ -4312,11 +4381,12 @@ export async function runGraph(
             automationWorkspace.binding,
             {
               source: "automation",
+              ...(graphWorkerAttempt ? { graphWorkerAttempt } : {}),
               nodeId: node.id,
               occurrenceId: checkpoint.occurrenceId,
               onWorkforcePrepareReceipt: persistWorkforcePrepareReceipt,
             },
-          ));
+          )));
           toolchainSettled = true;
           toolchainSession?.finish({ resultFolder: result.resultFolder ?? null });
           markedQuotaFailure = result.markedQuotaFailure === true;
@@ -4326,6 +4396,8 @@ export async function runGraph(
           // Direct Main tool dispatch makes no model request and consumes no
           // model token allowance; absence of provider usage is not unknown usage.
           if (!nativeMcpCall) settleBudget(node, measuredGraphTokenTotal(result.observedUsage));
+          graphWorkerReceipt = readGraphWorkerFailure(result.graphWorkerFailure, graphWorkerAttempt);
+          modelInvocationFailed = Boolean(graphWorkerAttempt && (result.graphWorkerFailure || runnerError || result.markedQuotaFailure));
           // ★바깥을 바꾸는 노드는 **도구를 부른 사실**이 있어야 성공일 수 있다.
           //
           // 실측 2026-08-19: X 자동화가 gemini 와 claude/opus 두 런타임에서 모두 4/4 로 끝나며
@@ -4486,6 +4558,8 @@ export async function runGraph(
           }
           completeNode(node.id);
           status.set(node.id, "done");
+          workerFallbackState.delete(node.id);
+          quotaRuntimeOverrides.delete(node.id);
         } catch (nodeErr) {
           if (nodeErr instanceof AutomationWorkspaceError) throw nodeErr;
           const rawMessage = nodeErr instanceof Error ? nodeErr.message : String(nodeErr);
@@ -4515,18 +4589,41 @@ export async function runGraph(
           const replaySafeFailure = effectivePermission === "read" ||
             replaySafeTypedFailure || replaySafePreparedFailure || noObservedSideEffect ||
             replaySafeObservedReceipts;
-          const ambiguous = checkpointPersistenceError !== null || unsafeToolRequested ||
-            unsafeToolObserved || !replaySafeFailure;
+          let ambiguous = checkpointPersistenceError !== null || unsafeToolRequested ||
+            unsafeToolObserved || !replaySafeFailure ||
+            (modelInvocationFailed && modelInvocationStarted && (!graphWorkerReceipt || graphWorkerReceipt.status !== "retryable" || !graphWorkerReceipt.runtimeQuiesced));
           // 재시도 레인 — 부수효과가 **확실히 없었을 때만** 다시 시도한다. 모호하면
           // 재시도가 곧 이중 실행이므로, 그 판단은 사람에게 넘긴다.
           const claimedWithoutTools = graphFailureOf(nodeErr)?.code === "NODE_CLAIMED_WITHOUT_TOOLS";
           const attempts = (nodeAttempts.get(node.id) ?? 0) + 1;
           nodeAttempts.set(node.id, attempts);
-          // A quota failure is a typed runtime fact. If every observed action
-          // was read-only, the same node can continue on another connected
-          // provider without replaying a post or changing the saved model pin.
+          // Only an authentic, invocation-owned terminal receipt authorizes
+          // another model. Refusal cannot fall through the old quota retry lane.
           let quotaHandoff = false;
-          if (!ambiguous && markedQuotaFailure &&
+          if (graphWorkerReceipt?.status === "retryable" && !ambiguous && !nodeTimedOut && !runSignal.aborted
+            && !(checkpoint!.prepareReceipts[node.id]?.length)
+            && !(checkpoint!.toolReceipts[node.id]?.some(receipt => !receipt.name.startsWith("error:")))) {
+            const state = workerFallbackState.get(node.id);
+            if (state?.pool && state.attempted.size < 3 && Date.now() < state.deadline) {
+              try {
+                const runtimes = await detectRuntimes(true);
+                readGraphWorkerFailure(graphWorkerReceipt, graphWorkerAttempt); // original owner after discovery
+                const selection = chooseGraphWorker(state.pool, runtimes, state.attempted,
+                  graphWorkerReceipt.selected ?? graphWorkerAttempt?.selection, graphWorkerReceipt.failure ?? undefined);
+                if (selection) {
+                  state.predecessor = Object.freeze({ receipt: graphWorkerReceipt, attempt: graphWorkerAttempt! });
+                  quotaRuntimeOverrides.set(node.id, selection);
+                  quotaHandoff = true;
+                  tryRecordRunEvent({ runId, automationId: automation.id, nodeId: node.id, kind: "workflow_runtime_worker_handoff",
+                    payload: { phase: "returned_failed", attemptId: graphWorkerAttempt!.attemptId,
+                      from: graphWorkerReceipt.selected, to: selection, cause: graphWorkerReceipt.failure?.kind,
+                      poolFingerprint: state.pool.fingerprint, runtimeQuiesced: true } });
+                }
+              } catch { ambiguous = true; /* Original custody or effect proof changed: no replay. */ }
+            }
+          }
+          // Unpinned invocations retain their existing policy; no failed pinned attempt can enter here.
+          if (!graphWorkerAttempt && !modelInvocationFailed && !nativeMcpCall && !ambiguous && markedQuotaFailure &&
               !nodeTimedOut && !runSignal.aborted &&
               attempts < Math.max(3, nodeMaxAttempts(node))) {
             const failedRuntime = observedRuntimeByNode.get(node.id);
@@ -4590,7 +4687,7 @@ export async function runGraph(
             isTypedReplaySafeInvocationError(receipt.name.slice("error:".length)),
           ) || retriesDeclared(node);
           if (
-            transientSignal && !ambiguous && !nodeTimedOut && !contractStop &&
+            transientSignal && (!modelInvocationFailed || quotaHandoff) && !ambiguous && !nodeTimedOut && !contractStop &&
             !runSignal.aborted && attempts < maxAttempts
           ) {
             checkpoint!.inFlightNodeIds = checkpoint!.inFlightNodeIds.filter((id) => id !== node.id);
@@ -4753,9 +4850,10 @@ export async function runGraph(
           if (requirement?.varName) innerVars[requirement.varName] = substituted.text;
         }
         journal("node_intent", node.id, { subgraph: ref, depth });
-        const innerResult = await runGraph(inner, inner.graph, {
+        assertFiniteCurrent();
+        const innerResult = await withFiniteDispatch(() => runGraph(inner, inner.graph!, {
           ...(opts.sink ? { sink: opts.sink } : {}),
-          ...(opts.signal ? { signal: opts.signal } : {}),
+          signal: runSignal,
           runId: `${runId}::sub:${node.id}`,
           ...(Object.keys(innerVars).length ? { initialVars: innerVars } : {}),
           ...(dryRun ? { dryRun: true } : {}),
@@ -4763,7 +4861,7 @@ export async function runGraph(
           // 고리를 잡으려면 지금까지 부른 것을 들고 가야 한다.
           callChain: [...chain, ref],
           loginResumeRunIds,
-        });
+        }));
         // ★안쪽 사유를 그대로 들고 온다 — 바깥에서 "그냥 실패"로 뭉개면 어디서 왜 죽었는지
         //   사람이 알 수 없다. 안쪽 실행 기록으로 가는 길도 함께 준다.
         if (innerResult.needsInput && innerResult.loginWaitSource) {
@@ -5209,4 +5307,7 @@ export async function runGraph(
     }
   }
   return result;
+  } finally {
+    releaseFinite();
+  }
 }

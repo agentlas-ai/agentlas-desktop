@@ -1,6 +1,6 @@
 import { withRunnerSettlementObserver } from "./runtime/observed-runner";
 import { withAutomationRunAccounting } from "./long-run/accounting-context";
-import { stopAutomationRun as stopExecutionAutomationRun, assertAutomationGoalExecutionOwner, automationGoalExecutionHeld, bindAutomationRunStop, captureAutomationGoalExecutionOwner, releaseAutomationRunStop } from "./automation-execution-control";
+import { stopAutomationRun as stopExecutionAutomationRun, assertAutomationGoalExecutionOwner, automationGoalExecutionHeld, bindAutomationRunStop, captureAutomationGoalExecutionOwner, isFiniteGoalDispatchRefusal, releaseAutomationRunStop } from "./automation-execution-control";
 import { goalContinuationSourceChat, settleGoalContinuationRun, settleRefusedGoalContinuation, type GoalContinuationSignals } from "./goal-continuation-hold";
 import { selectionForRuntime } from "../shared/runtime-selection";
 import { pollGoalWaitSubscriptions } from "./long-run/wait-subscriptions";
@@ -1081,6 +1081,10 @@ async function runOne(
   let goalOwner: ReturnType<typeof captureAutomationGoalExecutionOwner>;
   try { assertDefinitionCurrent(); goalOwner = captureAutomationGoalExecutionOwner(a.id); }
   catch (error) {
+    if (isFiniteGoalDispatchRefusal(error)) {
+      if (opts?.preclaimed) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
+      return { accepted: false };
+    }
     // Keep the current automation alive while its Goal projection is checked.
     // An unverified Goal relationship confers no authority over that Goal.
     goalOwner = undefined;
@@ -1194,6 +1198,7 @@ async function runOne(
   } catch {
     /* 이력 조회 실패는 복구 학습만 건너뛴다 */
   }
+  let finiteAdmissionRefused = false;
   let parentMissing = false;
   let leaseOwnershipLost = false;
   let leaseHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -1650,6 +1655,10 @@ async function runOne(
       throw new Error("automation_graph_missing");
     }
   } catch (err) {
+    if (isFiniteGoalDispatchRefusal(err) && (!currentRunId || !getDb().prepare("SELECT 1 FROM automation_runs WHERE id=?").get(currentRunId))) {
+      finiteAdmissionRefused = true;
+      return { accepted: false };
+    }
     if (err instanceof AutomationWorkspaceError) {
       workspaceFailure = err;
       currentRunId ??= opts?.runId ?? `run-${a.id}-${Date.now()}-${randomUUID().slice(0, 8)}`;
@@ -1720,6 +1729,10 @@ async function runOne(
       if (leaseHeartbeatTimer) {
         clearInterval(leaseHeartbeatTimer);
         leaseHeartbeatTimer = null;
+      }
+      if (finiteAdmissionRefused) {
+        if (opts?.preclaimed && !opts?.claim) { try { releaseAutomationRun(a.id, LEASE_OWNER); } catch { /* peer lease */ } }
+        return { accepted: false };
       }
       // 스케줄 전진은 (1) trigger_type==="schedule"이고 (2) 이번 실행이 실제 예약 발사일 때만.
       // run-now·이벤트 트리거는 advanceSchedule=false로 전달돼 next_run_at을 건드리지 않는다

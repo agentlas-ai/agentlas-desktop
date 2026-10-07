@@ -22,7 +22,8 @@
  */
 
 import { codeReferencedVars } from "../../shared/graph-code-vars";
-import type { WorkflowGraph, WorkflowNode } from "../../shared/types";
+import { runtimeSelectionForGraphNode } from "../../shared/graph-runtime-selection";
+import type { RuntimeSelection, WorkflowGraph, WorkflowNode } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
 
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -135,20 +136,29 @@ function isCheapAndSafeToRun(node: WorkflowNode): boolean {
  * `runCode` / `rewrite` 는 주입한다 — 이 파일이 커널의 실행기와 모델 호출에 직접 매이면
  * 시험할 수 없고, 터미널·데스크탑이 각자 다른 경로로 부르게 된다.
  */
+function assertPreSaveNotAborted(signal?: AbortSignal): void {
+  if (signal?.aborted) throw Object.assign(new Error("GRAPH_PRE_SAVE_CANCELLED"), { code: "GRAPH_PRE_SAVE_CANCELLED" });
+}
+
 export async function verifyGraphBeforeSave(
   graph: WorkflowGraph | null | undefined,
   deps: {
     runCode: (input: { code: string; lang: "python" | "js"; vars: Record<string, unknown> })
       => Promise<{ ok: boolean; reason?: string | null; result?: unknown; stdout?: string }>;
     rewrite?: (input: {
+      /** Local ownership only; the kernel strips this before constructing a repair request. */
+      nodeId: string;
       instruction: string; lang: "python" | "js"; code: string; failure: string; varNames: string[];
       /** 그 값들이 실제로 어떻게 생겼는가 — 이름만 주면 모델이 옛 가정을 반복한다. */
       varSamples?: Record<string, string>;
     }) => Promise<string | null>;
     /** 트리거가 주는 시작 값(있으면). 없으면 빈 값으로 둔다 — 그래프가 그렇게 안내한다면 그것이 정상이다. */
     initialVars?: Record<string, unknown>;
+    signal?: AbortSignal;
   },
 ): Promise<PreSaveVerification> {
+  assertPreSaveNotAborted(deps.signal);
+  graph = graph ? structuredClone(graph) : graph;
   const steps: PreSaveStepResult[] = [];
   if (!graph || !Array.isArray(graph.nodes)) return { ok: true, steps };
 
@@ -179,6 +189,7 @@ export async function verifyGraphBeforeSave(
     }).map((upstream) => tasks.get(upstream.id)!);
     const task = (async () => {
     await Promise.all(dependencies);
+    assertPreSaveNotAborted(deps.signal);
     if (!isCheapAndSafeToRun(node)) {
       const produces = str(node.config, "produces");
       if (produces) notRunProduces.add(produces);
@@ -211,14 +222,23 @@ export async function verifyGraphBeforeSave(
     const lang = str(node.config, "codeLang") === "js" ? "js" : "python";
 
     const attemptCode = async (script: string) => {
-      try { return await deps.runCode({ code: script, lang, vars }); }
-      catch (error) { return { ok: false, reason: error instanceof Error ? error.message : String(error) }; }
+      assertPreSaveNotAborted(deps.signal);
+      try {
+        const result = await deps.runCode({ code: script, lang, vars });
+        assertPreSaveNotAborted(deps.signal);
+        return result;
+      } catch (error) {
+        assertPreSaveNotAborted(deps.signal);
+        return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+      }
     };
     let run = await attemptCode(code);
     let repairedCode: string | undefined;
 
     if (!run.ok && deps.rewrite) {
+      assertPreSaveNotAborted(deps.signal);
       const rewritten = await deps.rewrite({
+        nodeId: node.id,
         instruction: str(node.config, "note") || node.label || node.id,
         lang,
         code,
@@ -230,6 +250,7 @@ export async function verifyGraphBeforeSave(
           `${typeof v === "string" ? "text" : typeof v}: ${String(typeof v === "string" ? v : JSON.stringify(v)).slice(0, 300)}`,
         ])),
       }).catch(() => null);
+      assertPreSaveNotAborted(deps.signal);
       if (rewritten && rewritten.trim() && rewritten.trim() !== code.trim()) {
         const second = await attemptCode(rewritten);
         if (second.ok) {
@@ -271,6 +292,7 @@ export async function verifyGraphBeforeSave(
     preceding.push(node);
   }
   await Promise.all(tasks.values());
+  assertPreSaveNotAborted(deps.signal);
   steps.sort((a, b) => graph.nodes.findIndex((node) => node.id === a.nodeId) - graph.nodes.findIndex((node) => node.id === b.nodeId));
   return { ok: true, passed: !steps.some((s) => s.state === "pending" || s.state === "blocked"), steps };
 }
@@ -296,10 +318,17 @@ export function renderPreSaveVerification(v: PreSaveVerification): string[] {
 export async function verifyGraphBeforeSaveWithKernel(
   graph: WorkflowGraph | null | undefined,
   initialVars?: Record<string, unknown>,
+  options: { runtimeSelection?: RuntimeSelection; signal?: AbortSignal } = {},
 ): Promise<PreSaveVerification> {
+  assertPreSaveNotAborted(options.signal);
+  const capturedGraph = graph ? structuredClone(graph) : graph;
+  const base = options.runtimeSelection ? structuredClone(options.runtimeSelection) : undefined;
+  const nodes = new Map(capturedGraph?.nodes.map(node => [node.id, node]) ?? []);
   const { runCodeStep } = await import("./code-runner");
   const { rewriteFailedCodeStep } = await import("./run-graph");
-  return verifyGraphBeforeSave(graph, {
+  assertPreSaveNotAborted(options.signal);
+  return verifyGraphBeforeSave(capturedGraph, {
+    signal: options.signal,
     ...(initialVars ? { initialVars } : {}),
     runCode: async ({ code, lang, vars }) => {
       const run = await runCodeStep({
@@ -310,9 +339,15 @@ export async function verifyGraphBeforeSaveWithKernel(
         // 여기서 한 번 더 못박는다(두 겹이라야 다음 사람이 실수해도 메일이 안 나간다).
         effect: "read",
         timeoutSeconds: 45,
+        signal: options.signal,
       });
       return { ok: run.ok, reason: run.reason ?? null, result: run.result, stdout: run.stdout };
     },
-    rewrite: (input) => rewriteFailedCodeStep(input),
+    rewrite: ({ nodeId, ...input }) => {
+      assertPreSaveNotAborted(options.signal);
+      const node = nodes.get(nodeId);
+      if (!node) throw new Error("GRAPH_PRE_SAVE_NODE_MISSING");
+      return rewriteFailedCodeStep({ ...input, runtimeSelection: runtimeSelectionForGraphNode(node, base), signal: options.signal });
+    },
   });
 }

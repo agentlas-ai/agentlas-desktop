@@ -2,7 +2,7 @@ import { ownsHostGoalLoop } from "./host-goal-surface";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
-import { getLongRunByGoalId, appendLongRunEvent, recordLongRunUsage } from "../store/long-runs";
+import { getLongRunByGoalId, appendLongRunEvent, recordLongRunInferenceStarted, recordLongRunUsage } from "../store/long-runs";
 import { getChatGoalRevision } from "../store/chat-goals";
 import { recordRunEvent } from "../store/run-events";
 import { longRunMonetaryRefusal, normalizeLongRunUsage, type LongRunUsageInput } from "./budget";
@@ -192,8 +192,8 @@ export function beginAccountedInference(input: { kind: string; model?: string | 
         attribution: owner ? "goal" : scope.automationId ? "automation" : "unassigned",
         goalId: owner?.goalId ?? null, attemptId: owner?.attemptId ?? null,
         runtime: { kind: input.kind, model: input.model ?? null, source: input.source ?? null }, costStatus: "unknown" } });
-    if (owner) appendLongRunEvent({ runId: getLongRunByGoalId(owner.goalId)!.id, kind: "run.usage_started", actorKind: "host",
-      sourceEventId: `${sourceId}:started`, payload: { sourceId, invocationRunId: scope.invocationRunId, attemptId: owner.attemptId } });
+    if (owner) recordLongRunInferenceStarted({ goalId: owner.goalId, sourceId, invocationRunId: scope.invocationRunId,
+      scopeAnchorId: scope.anchorId, attemptId: owner.attemptId });
   }).immediate();
   let settled = false;
   let terminal: { tokens: ReturnType<typeof normalizeLongRunUsage>["tokens"];

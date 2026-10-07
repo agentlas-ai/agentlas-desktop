@@ -962,6 +962,24 @@ interface MessageRow {
 const LEGACY_FIRM_SYNTHESIS_MARKER =
   "[Results from your team — synthesize into one final answer for the user]";
 
+/** Local host outbox only: the caller owns the transaction and emits after commit. */
+export function insertHostNoticeInTransaction(input: { id: string; chatId: string; text: string; hostNotice: ChatHostNotice; createdAt: string }): void {
+  const db = getDb();
+  if (!db.inTransaction) throw new Error("host_notice_transaction_required");
+  if (!getChat(input.chatId)) throw new Error("host_notice_chat_missing");
+  db.prepare("INSERT INTO chat_messages (id,chat_id,role,text,created_at,host_notice_json) VALUES (?,?,'assistant',?,?,?)")
+    .run(input.id, input.chatId, input.text, input.createdAt, JSON.stringify(input.hostNotice));
+  db.prepare("UPDATE chats SET updated_at=?,used_at=COALESCE(used_at,?) WHERE id=?").run(input.createdAt, input.createdAt, input.chatId);
+}
+
+/** Notification failure cannot undo a committed host notice or repeat its work. */
+export function emitHostNoticeCommitted(chatId: string): void {
+  if (getDb().inTransaction) throw new Error("host_notice_commit_required");
+  const chat = getChat(chatId);
+  if (chat?.projectId) touchProject(chat.projectId);
+  emitDesktopStoreChange({ entity: "chat", id: chatId });
+}
+
 export function appendChatMessage(
   chatId: string,
   role: "user" | "assistant" | "system",

@@ -26,7 +26,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import { createNoProgressGuard, noteNoProgressEvent } from "../automation-progress-guard";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
-import { RuntimeNoProgressError, workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
+import { RuntimeNoProgressError, runtimeHttpFailure, workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
 import {
   MainWorkforceBroker,
   workforceBrokerDigest,
@@ -1259,6 +1259,13 @@ export async function runLocalOpenAiChat(
   /** The optional Surface fallback is a one-time swap, never a per-turn oscillation. */
   let surfaceFallbackApplied = false;
   let streamUsageUnsupported = false;
+  const httpFailureResult = (status: number): RunnerResult | null => {
+    const failure = runtimeHttpFailure(status, runtimeKind, providerLabel);
+    if (!failure) return null;
+    const observedUsage = usage.total();
+    return { text: finalText.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
+      workforcePermissionEnforcement: broker?.finish(false) };
+  };
 
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
     const requestBody: Record<string, unknown> = {
@@ -1391,6 +1398,8 @@ export async function runLocalOpenAiChat(
       throw new Error(opts.unreachableMessage);
     }
     if (!resp.ok) {
+      const terminal = httpFailureResult(resp.status);
+      if (terminal) return terminal;
       const errText = await resp.text().catch(() => "");
       if (!req.signal?.aborted && Object.hasOwn(requestBody, "stream_options")
         && rejectsStreamUsageOption(resp.status, errText)) {
@@ -1415,6 +1424,8 @@ export async function runLocalOpenAiChat(
           throw new Error(opts.unreachableMessage);
         }
         if (!resp.ok) {
+          const terminal = httpFailureResult(resp.status);
+          if (terminal) return terminal;
           const retryError = await resp.text().catch(() => "");
           throw new Error(`${providerLabel} API ${resp.status}: ${retryError.slice(0, 300)}`);
         }
@@ -1439,6 +1450,8 @@ export async function runLocalOpenAiChat(
               body: JSON.stringify(Object.fromEntries(Object.entries(requestBody).filter(([key])=>key!=="tools"))),
           });
           if (!fallback.ok) {
+            const terminal = httpFailureResult(fallback.status);
+            if (terminal) return terminal;
             const fallbackErrText = await fallback.text().catch(() => "");
             throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
           }

@@ -121,6 +121,31 @@ export function DescribeAutomation({
    */
   const [liveSteps, setLiveSteps] = useState<string[]>([]);
   const [dismissed, setDismissed] = useState(false);
+  const mountedRef = useRef(true);
+  const activeRequestRef = useRef<string | null>(null);
+
+  function cancelRequest() {
+    const id = activeRequestRef.current;
+    activeRequestRef.current = null;
+    if (id) void ipc()?.automations.cancelGraphAuthoring(id).catch(() => undefined);
+  }
+  function beginRequest(): string | null {
+    if (!mountedRef.current || activeRequestRef.current) return null;
+    const id = crypto.randomUUID();
+    activeRequestRef.current = id;
+    return id;
+  }
+  const requestCurrent = (id: string) => mountedRef.current && activeRequestRef.current === id;
+  function finishRequest(id: string) {
+    if (!requestCurrent(id)) return;
+    activeRequestRef.current = null;
+    setBusy(false);
+  }
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; cancelRequest(); };
+  }, []);
 
   useEffect(() => {
     if (!persistenceKey) return;
@@ -144,8 +169,8 @@ export function DescribeAutomation({
     const events = ipcEvents();
     if (!events?.on) return;
     return events.on("automations:interview:steps", (payload: unknown) => {
-      const row = payload as { index?: number; title?: string } | null;
-      if (!row?.title) return;
+      const row = payload as { requestId?: string; index?: number; title?: string } | null;
+      if (!row?.title || row.requestId !== activeRequestRef.current || !mountedRef.current) return;
       setLiveSteps((prev) => (prev.includes(row.title!) ? prev : [...prev, row.title!]));
     });
   }, []);
@@ -153,11 +178,14 @@ export function DescribeAutomation({
   async function turn(next: typeof state) {
     const api = ipc();
     if (!api || !next) return;
+    const requestId = beginRequest();
+    if (!requestId) return;
     setBusy(true);
     setProblem(null);
     setLiveSteps([]);
     try {
-      const res = await api.automations.interviewGraph(next);
+      const res = await api.automations.interviewGraph(next, { requestId });
+      if (!requestCurrent(requestId)) return;
       if (!res.ok) { setProblem({ reason: res.reason, nextAction: res.nextAction }); return; }
       if (res.kind === "ask") {
         setQuestions(res.questions);
@@ -174,12 +202,13 @@ export function DescribeAutomation({
       }
       setState(next);
     } catch {
+      if (!requestCurrent(requestId)) return;
       setProblem({
         reason: ko ? "만들지 못했습니다." : "Could not build it.",
         nextAction: ko ? "잠시 뒤 다시 시도해 주세요." : "Try again in a moment.",
       });
     } finally {
-      setBusy(false);
+      finishRequest(requestId);
     }
   }
 
@@ -187,11 +216,18 @@ export function DescribeAutomation({
     if (!autoStart || autoStartedRef.current || state || ready || saved) return;
     const value = (initialRequest || request).trim();
     if (!value) return;
-    autoStartedRef.current = true;
-    setRequest(value);
-    void turn({ request: value, answers: [], asked: [], round: 0 });
+    let currentEffect = true;
+    // StrictMode's first setup is cleaned up before this microtask. Dispatch
+    // only from the surviving setup, rather than cancelling and starting twice.
+    queueMicrotask(() => {
+      if (!currentEffect || !mountedRef.current || autoStartedRef.current) return;
+      autoStartedRef.current = true;
+      setRequest(value);
+      void turn({ request: value, answers: [], asked: [], round: 0 });
+    });
     // `turn` intentionally owns the request lifecycle for this mount. Re-running
     // because a function identity changed would duplicate the Graph interview.
+    return () => { currentEffect = false; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [autoStart, initialRequest]);
 
@@ -218,19 +254,23 @@ export function DescribeAutomation({
    * 저장 전에 한 번 돌려 본다. 막히면 **저장하지 않고** 이어갈 길을 보여준다.
    * `force` 는 사람이 "지금 상태로 저장(꺼둠)"을 고른 경우다.
    */
-  async function create(force = false) {
+  async function create(force = false, candidateGraph?: WorkflowGraph) {
     const api = ipc();
     if (!api || !ready || saved) return;
+    const requestId = beginRequest();
+    if (!requestId) return;
     setBusy(true);
     try {
-      const graph = graphOverride ?? ready.graph;
+      const graph = candidateGraph ?? graphOverride ?? ready.graph;
       if (!force) {
         setProblem(null);
         setRecovery(null);
         const pre = await api.automations.checkBlueprintBeforeSave({
           graph,
           goal: ready.blueprint.goal,
+          requestId,
         });
+        if (!requestCurrent(requestId)) return;
         /*
          * ★확인이 스스로 고친 단계가 있으면 **그 코드로 저장한다.** 안 그러면 고쳐 놓고
          *   안 되는 원본을 저장하게 되고, 사용자는 왜 여전히 안 되는지 알 수 없다
@@ -245,7 +285,7 @@ export function DescribeAutomation({
             )),
           };
           setGraphOverride(patched);
-          if (pre.ok) { void createWith(patched); return; }
+          if (pre.ok) { await createWith(patched, requestId); return; }
         }
         if (!pre.ok && pre.blocked) {
           // ★고쳐진 단계가 있으면 그것부터 그래프에 반영한다 — 사람이 다시 안 하게.
@@ -260,10 +300,20 @@ export function DescribeAutomation({
           });
           return;
         }
+        if (!pre.ok) {
+          setProblem({ reason: ko ? "초안 확인을 마치지 못했습니다." : "The draft check did not finish.", nextAction: ko ? "초안을 유지했습니다. 다시 확인해 주세요." : "The draft is preserved. Check it again when ready." });
+          return;
+        }
       }
-      await createWith(graphOverride ?? ready.graph);
+      await createWith(graph, requestId);
+    } catch {
+      if (!requestCurrent(requestId)) return;
+      setProblem({
+        reason: ko ? "초안 확인을 마치지 못했습니다." : "The draft check did not finish.",
+        nextAction: ko ? "초안을 유지했습니다. 연결 상태를 확인해 주세요." : "The draft is preserved. Check the connection when ready.",
+      });
     } finally {
-      setBusy(false);
+      finishRequest(requestId);
     }
   }
 
@@ -271,9 +321,9 @@ export function DescribeAutomation({
    * 실제 저장. **넘겨받은 그래프 그대로** 저장한다 — setState 를 기다리면 그 사이에
    * 옛 그래프가 저장된다(React 상태는 다음 렌더에야 보인다).
    */
-  async function createWith(graph: WorkflowGraph) {
+  async function createWith(graph: WorkflowGraph, requestId?: string) {
     const api = ipc();
-    if (!api || !ready) return;
+    if (!api || !ready || (requestId && !requestCurrent(requestId))) return;
     try {
       const res = await api.automations.createFromBlueprint({
         name: ready.blueprint.name || (ko ? "새 자동화" : "New automation"),
@@ -282,6 +332,7 @@ export function DescribeAutomation({
         // ★목적 문장 — 저장 안 하면 "이게 무슨 그래프인지"를 아는 유일한 문장이 여기서 사라진다.
         goal: ready.blueprint.goal,
       });
+      if (requestId && !requestCurrent(requestId)) return;
       if (!res.ok) { setProblem({ reason: res.reason, nextAction: res.nextAction }); return; }
       // ★저장됐다고 먼저 말하고, 화면을 지우지 않은 채 캔버스로 이동한다.
       //   저장 직후 reset()으로 카드를 지우면 — 특히 이동이 느릴 때 — 사람 눈에는
@@ -291,13 +342,14 @@ export function DescribeAutomation({
       onCreated(res.id);
       if (openAfterCreate) router.push(`/automation/flow?id=${res.id}`);
     } catch {
+      if (requestId && !requestCurrent(requestId)) return;
       // 조용한 실패 금지 — 예외가 나가면 버튼만 풀리고 아무 말이 없다.
       setProblem({
         reason: ko ? "저장하지 못했습니다." : "Could not save it.",
         nextAction: ko ? "잠시 뒤 다시 시도해 주세요." : "Try again in a moment.",
       });
     } finally {
-      setBusy(false);
+      if (!requestId) setBusy(false);
     }
   }
 
@@ -305,23 +357,30 @@ export function DescribeAutomation({
   async function applyRecovery(actionId: string) {
     const api = ipc();
     if (!api || !ready || !recovery) return;
+    const requestId = beginRequest();
+    if (!requestId) return;
+    const graph = graphOverride ?? ready.graph;
     setApplying(actionId);
     try {
       const res = await api.automations.applyBuildRecovery({
-        graph: graphOverride ?? ready.graph,
+        graph,
         goal: ready.blueprint.goal,
         blocked: recovery.blocked,
         actionId,
+        requestId,
       });
+      if (!requestCurrent(requestId)) return;
       if (res.graph) {
         // 고쳐진 그래프로 갈아 끼우고 다시 저장을 시도한다 — 사람이 같은 걸 또 누르지 않게.
         setGraphOverride(res.graph);
         setRecovery(null);
         setProblem(null);
-        void create();
+        setApplying(null);
+        finishRequest(requestId);
+        await create(false, res.graph);
         return;
       }
-      if (res.saveNow) { setRecovery(null); void create(true); return; }
+      if (res.saveNow) { setRecovery(null); setApplying(null); finishRequest(requestId); await create(true, graph); return; }
       /*
        * ★한 칩이 안 통했다고 **나머지 칩을 지우지 않는다.** 실측 2026-08-20: 재작성이
        *   실패하자 칩이 전부 사라지고 "대화에서 같이 봐 주세요"만 남았다 — 그 순간
@@ -338,12 +397,13 @@ export function DescribeAutomation({
           : (ko ? "다른 방법을 골라 주세요." : "Pick another way to continue."),
       });
     } catch {
+      if (!requestCurrent(requestId)) return;
       setProblem({
         reason: ko ? "이 조치를 실행하지 못했습니다." : "Could not run that action.",
         nextAction: ko ? "잠시 뒤 다시 시도해 주세요." : "Try again in a moment.",
       });
     } finally {
-      setApplying(null);
+      if (requestCurrent(requestId)) { finishRequest(requestId); setApplying(null); }
     }
   }
 
@@ -366,6 +426,9 @@ export function DescribeAutomation({
   }
 
   function reset() {
+    cancelRequest();
+    setBusy(false);
+    setApplying(null);
     const restartRequest = presentation === "chat" ? initialRequest.trim() : "";
     setRequest(restartRequest); setState(null); setQuestions([]); setDrafts({}); setReady(null); setProblem(null);
     setRecovery(null); setGraphOverride(null); setSaved(false); setSavedId(null); setRevision("");
@@ -402,7 +465,7 @@ export function DescribeAutomation({
             ? (ko ? "One이 이 대화에서 자동화를 설계합니다" : "One is designing this automation in chat")
             : (ko ? "자동으로 돌릴 일을 적어 주세요." : "Tell me what to run for you.")}
         </div>
-        <button type="button" aria-label={ko ? "닫기" : "Close"} onClick={() => setDismissed(true)} style={{ width: 32, height: 32, display: "inline-grid", placeItems: "center", flex: "0 0 auto", marginTop: -8, marginRight: -8, padding: 0, border: 0, borderRadius: 9, background: "transparent", color: "var(--muted-deep)", cursor: "pointer" }}>
+        <button type="button" aria-label={ko ? "닫기" : "Close"} onClick={() => { cancelRequest(); setBusy(false); setApplying(null); setDismissed(true); }} style={{ width: 32, height: 32, display: "inline-grid", placeItems: "center", flex: "0 0 auto", marginTop: -8, marginRight: -8, padding: 0, border: 0, borderRadius: 9, background: "transparent", color: "var(--muted-deep)", cursor: "pointer" }}>
           <IconClose size={14} />
         </button>
       </div>

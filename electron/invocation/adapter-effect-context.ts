@@ -74,6 +74,20 @@ export function bindScienceNativeFailureObserver(input: { chatId?: string; agent
 /** Only Main enters this scope. Providers cannot select a run or borrow another run's receipt. */
 export function withAdapterEffectContext<T>(scope: Scope, action: () => T): T { return context.run(scope, action); }
 
+/** Add a Main observer without replacing the enclosing ledger or its identity. */
+export function withAdapterEffectObserver<T>(
+  fallback: Pick<Scope, "runId" | "chatId" | "rootAgentId" | "source">,
+  observer: Pick<Scope, "begin" | "finish" | "recordingFailed">,
+  action: () => T,
+): T {
+  const parent = context.getStore();
+  return context.run({ ...(parent ?? fallback),
+    begin: admission => { try { observer.begin(admission); } finally { parent?.begin(admission); } },
+    finish: (scopeId, report) => { try { observer.finish(scopeId, report); } finally { parent?.finish(scopeId, report); } },
+    recordingFailed: () => { try { observer.recordingFailed?.(); } finally { parent?.recordingFailed?.(); } },
+  }, action);
+}
+
 /** Only Main dispatch integration may grant a child access to this invocation's ledger. */
 export function withAdapterEffectChildDispatch<T>(dispatchId: string, action: () => T): T {
   const scope = context.getStore();

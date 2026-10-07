@@ -1,3 +1,5 @@
+import { desktopStoreTransaction } from "../store/change-bus";
+import { episodeWaitFenceReason, recordEpisodeWaitTransition, drainGoalEpisodeNotices } from "./episode-disposition";
 import { ownsHostGoalLoop } from "./host-goal-surface";
 import { createHash, randomUUID } from "node:crypto";
 import type { McpInvocationRequest } from "../../shared/types";
@@ -27,6 +29,7 @@ import { getAutomation } from "../store/automations";
 import { readToolchainState } from "../toolchains/store";
 
 export interface GoalWaitSubscription {
+  episodeCaptureId?: string; episodeRequestId?: string;
   schemaVersion: "agentlas.goal-wait-subscription.v1";
   waitId: string; runId: string; goalId: string; goalRevision: number; chatId: string;
   revision: number; sourceInvocationId: string; checkpointId: string; intent: GoalWaitIntent;
@@ -167,6 +170,7 @@ async function boundedWaitCheck<T>(operation: () => T | Promise<T>, timeoutMs = 
 function persist(value: GoalWaitSubscription): void {
   appendLongRunEvent({ runId: value.runId, kind: "run.wait_subscription", actorKind: "host",
     sourceEventId: `wait:${value.waitId}:${value.revision}`, payload: { subscription: value } });
+  recordEpisodeWaitTransition(value);
 }
 export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId" | "sourceInvocationId" | "intent">, now = Date.now()): GoalWaitObservation {
   const chat = getChat(wait.chatId);
@@ -220,7 +224,7 @@ export function observeGoalWaitSubject(wait: Pick<GoalWaitSubscription, "chatId"
  * host effect receipt is settled; waiting is never a model completion claim. */
 export function registerGoalWaitSubscription(input: { goalId: string; invocationRunId: string; intent: GoalWaitIntent; hasTransientAttachments?: boolean; projectDir?: string | null; now?: number;
   recoveryMode?: GoalWaitSubscription["recoveryMode"]; recoveryProgressKey?: string;
-  observationOnly?: boolean }): GoalWaitSubscription {
+  observationOnly?: boolean; episodeCaptureId?: string; episodeRequestId?: string }): GoalWaitSubscription {
   assertDesktopLongRunAdmissionOpen();
   const validated = parseGoalWaitIntent("```agentlas-goal-wait\n" + JSON.stringify(input.intent) + "\n```").request;
   if (validated?.status !== "requested") throw new Error("goal_wait_request_invalid");
@@ -284,6 +288,8 @@ export function registerGoalWaitSubscription(input: { goalId: string; invocation
       subscription.recoveryProgressKey = input.recoveryProgressKey;
     }
     if (input.observationOnly) subscription.observationOnly = true;
+    if (input.episodeCaptureId !== undefined) subscription.episodeCaptureId = input.episodeCaptureId;
+    if (input.episodeRequestId !== undefined) subscription.episodeRequestId = input.episodeRequestId;
     persist(subscription);
     transitionLongRun({ runId: run.id, to: "waiting_tool", actorKind: "host", reason: `goal_wait:${subscription.waitId}` });
     return subscription;
@@ -381,7 +387,7 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
     if (!candidate) continue;
     if (candidate.surface === "science" || !["app_closed", "crash_recovery"].includes(candidate.pauseReason ?? "")) continue;
     let blocked: GoalWaitSubscription | null = null;
-    getDb().transaction(() => {
+    desktopStoreTransaction(getDb(), () => {
       const current = getLongRun(candidate.id), wait = latestGoalWaitSubscription(candidate.goalId);
       if (!current || !ownsWaitRun(current, owner, exactEpoch) || current.appInstanceId !== candidate.appInstanceId
         || current.version !== candidate.version || current.status !== "paused"
@@ -468,6 +474,13 @@ export function reconcileClaimedGoalWaitsAtStartup(target: GoalWaitHost | null =
             effectBoundaryReceiptId: settledRetryReceiptId, outcome: "verified_retry_checkpoint_no_replay" } });
         return;
       }
+      if (wait.episodeRequestId) {
+        // No receipt of a successor is not proof of non-dispatch. Preserve the
+        // exact claim across restart; reconciliation never creates a replacement.
+        if (wait.wakeReason !== "goal_episode_dispatch_unknown") persist({ ...wait, revision: wait.revision + 1,
+          wakeReason: "goal_episode_dispatch_unknown", nextCheckAt: null });
+        return;
+      }
       const reason = bindingExact ? "goal_wait_claimed_dispatch_uncertain" : "goal_wait_claimed_binding_changed";
       const next: GoalWaitSubscription = { ...wait, revision: wait.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: reason };
       persist(next);
@@ -517,6 +530,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
   observe?: (wait: GoalWaitSubscription) => GoalWaitObservation | Promise<GoalWaitObservation>;
   /** Synthetic test seam; production always uses the pinned no-tools runner. */
   reflect?: typeof reflectOngoingStall } = {}): Promise<void> {
+  drainGoalEpisodeNotices();
   const target = options.host ?? host;
   if (!target) return;
   const owner = pollOwner(target);
@@ -557,7 +571,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       // Goal authority changed. Keep the exact pending wait and try the same
       // read later; never dispatch work from a failed observation.
       try {
-        getDb().transaction(() => {
+        desktopStoreTransaction(getDb(), () => {
           const current = getLongRun(candidate.id), latest = latestGoalWaitSubscription(wait.goalId);
           if (!current || !ownsCandidate(current) || !latest || current.version !== candidate.version
             || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending"
@@ -643,12 +657,17 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     // every authority/status/effect check under the transaction below.
     const expectedVersion = getLongRun(wait.runId)?.version ?? candidate.version;
     let dispatch: GoalWaitDispatch | null = null, notice: GoalWaitSubscription | null = null;
-    try { getDb().transaction(() => {
+    try { desktopStoreTransaction(getDb(), () => {
       const current = getLongRun(wait.runId), latest = latestGoalWaitSubscription(wait.goalId);
       try { assertDesktopLongRunAdmissionOpen(); } catch { return; }
       if (!current || !ownsCandidate(current) || !latest || current.version !== expectedVersion || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending"
         || target.isChatBusy(wait.chatId) || !["waiting_tool", "paused"].includes(current.status)) return;
       if (current.status === "paused" && !["app_closed", "crash_recovery"].includes(current.pauseReason ?? "")) return;
+      const episodeRefusal = episodeWaitFenceReason(latest, clock());
+      if (episodeRefusal) {
+        const held: GoalWaitSubscription = { ...latest, revision: latest.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: episodeRefusal };
+        persist(held); notice = held; return;
+      }
       let checkpoint: LongRunTaskCheckpoint | null = null;
       try { checkpoint = candidateCheckpoint(wait); prepareCheckpointContinuation(checkpoint); }
       catch (error) { failure = error instanceof Error && /^checkpoint_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_context_changed"; }
@@ -810,7 +829,7 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       // pending revision intact for a later observation instead of blocking it.
       if (typeof code === "string" && /^SQLITE_(?:BUSY|LOCKED)(?:_|$)/.test(code)) return;
       const reason = error instanceof Error && /^(goal_wait|checkpoint)_[a-z_]+$/.test(error.message) ? error.message : "goal_wait_wake_unavailable";
-      getDb().transaction(() => {
+      desktopStoreTransaction(getDb(), () => {
         const current = getLongRun(wait.runId), latest = latestGoalWaitSubscription(wait.goalId);
         if (!current || !ownsCandidate(current) || current.version !== expectedVersion || !latest || latest.waitId !== wait.waitId || latest.revision !== wait.revision || latest.state !== "pending") return;
         const blocked: GoalWaitSubscription = { ...latest, revision: latest.revision + 1, state: "cancelled", nextCheckAt: null, wakeReason: reason };
@@ -826,13 +845,14 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
       if (!current || current.status !== "running" || !ownsCandidate(current) || !latest || latest.state !== "claimed"
         || !claimOwnedBy(latest, owner) || latest.successorInvocationId !== claimed.invocationRunId
         || current.appInstanceId !== latest.dispatchRunOwnerEpoch) return;
+      if (episodeWaitFenceReason(latest, clock())) return;
       try { assertDesktopLongRunAdmissionOpen(); } catch { return; }
-      let state: "dispatched" | "cancelled" = "dispatched", reason = "goal_wait_dispatched";
+      let state: "dispatched" | "cancelled" | "claimed" = "dispatched", reason = "goal_wait_dispatched";
       try { if (target.dispatch(claimed).runId !== claimed.invocationRunId) throw new Error("goal_wait_dispatch_identity_mismatch"); }
-      catch { state = "cancelled"; reason = "goal_wait_dispatch_failed"; }
+      catch { state = latest.episodeRequestId ? "claimed" : "cancelled"; reason = latest.episodeRequestId ? "goal_episode_dispatch_unknown" : "goal_wait_dispatch_failed"; }
       if (state === "dispatched") recordGoalWake({ runId: current.id, chatId: claimed.request.chatId ?? "", source: "wait",
         invocationRunId: claimed.invocationRunId, cause: latest.wakeReason ?? "goal_wait" });
-      getDb().transaction(() => {
+      desktopStoreTransaction(getDb(), () => {
         const latest = latestGoalWaitSubscription(claimed.goalId), current = getLongRunByGoalId(claimed.goalId);
         if (!latest || latest.state !== "claimed" || !claimOwnedBy(latest, owner)
           || latest.successorInvocationId !== claimed.invocationRunId || !current
@@ -853,4 +873,5 @@ export async function pollGoalWaitSubscriptions(options: { now?: number; clock?:
     if (batch.length === 4) { await Promise.allSettled(batch); batch = []; }
   }
   await Promise.allSettled(batch);
+  drainGoalEpisodeNotices();
 }
