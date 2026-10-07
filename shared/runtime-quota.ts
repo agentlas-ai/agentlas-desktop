@@ -77,10 +77,11 @@ function usageWindowMatchesModel(window: Pick<UsageWindow, "model">, model: stri
  * continue on the same provider's usable credits; monthly/spending caps cannot.
  * The caller owns snapshot freshness and measured runtime failures/cooldowns. */
 export function providerQuotaExhausted(
-  usage: Pick<ProviderUsage, "credits" | "extraUsage" | "spendControlReached" | "limits" | "windows" | "stale">,
+  usage: Pick<ProviderUsage, "credits" | "extraUsage" | "spendControlReached" | "limits" | "windows" | "stale" | "allowPaidUsage">,
   now = Date.now(), model?: string, providerId?: string,
 ): boolean {
   const limits = (usage.limits ?? []).filter(limit => usageWindowMatchesModel(limit, model, providerId));
+  const paidUsageAllowed = usage.allowPaidUsage !== false;
   const applicable = usage.windows.filter(window => isSupportedProviderUsageWindow(window, providerId)
     && usageWindowMatchesModel(window, model, providerId)
     && !(typeof window.resetAt === "number" && Number.isFinite(window.resetAt) && window.resetAt <= now));
@@ -91,6 +92,7 @@ export function providerQuotaExhausted(
     if (isPaidOverageUsageWindow(window, providerId)) continue;
     if (!quotaExhausted(window.usedPercent)) continue;
     if (window.kind === "monthly") return true;
+    if (!paidUsageAllowed) return true;
     const limit = limits.find(item => item.limitId === (window.limitId ?? null));
     const creditUsage = limit ? { credits: limit.credits, spendControlReached: limit.spendControlReached === true, stale: usage.stale } : usage;
     if (!providerHasUsableCredits(creditUsage) && !providerHasUsableExtraUsage(usage)) return true;
@@ -100,6 +102,7 @@ export function providerQuotaExhausted(
     if (limit.limitReached !== true) continue;
     const windows = usage.windows.filter(window => (window.limitId ?? null) === limit.limitId);
     if (windows.length && !applicable.some(window => (window.limitId ?? null) === limit.limitId)) continue;
+    if (!paidUsageAllowed) return true;
     if (!providerHasUsableCredits({ credits: limit.credits, spendControlReached: limit.spendControlReached === true, stale: usage.stale })
       && !providerHasUsableExtraUsage(usage)) return true;
   }

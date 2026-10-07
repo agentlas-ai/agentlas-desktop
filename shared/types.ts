@@ -5309,6 +5309,8 @@ export interface ProviderUsage {
   limits?: ProviderUsageLimit[];
   /** Last successful provider observation reused after a transient read failure. */
   stale?: boolean;
+  /** Main-owned preference for spending subscription credits. API billing is separate. */
+  allowPaidUsage?: boolean;
   /** 정규화된 안전 오류 코드. Provider 응답 원문·URL·로컬 경로는 포함하지 않는다. */
   error?: UsageProviderErrorCode;
   /** rate_limited일 때 Provider가 제시한 재시도 대기(초). Renderer는 표시하지 않아도 된다. */
@@ -5380,6 +5382,8 @@ export interface ModelRoleUsageSnapshot {
 export interface UsageSnapshot {
   providers: ProviderUsage[];
   fetchedAt: number;
+  /** App admission preference; never changes the provider's billing settings. */
+  subscriptionCreditUse?: boolean;
   /** No provider or local account observations were collected in this snapshot. */
   collection?: { status: "suppressed"; reason: "development_effect_policy_disabled" };
   /** Seven-day role split derived from real model-call completion receipts. */
@@ -7316,6 +7320,7 @@ export interface AgentlasIpc {
    *  5시간·주간(7일)·모델별·월 크레딧 조회. main에서 60초 캐시; force로 강제 갱신. */
   usage: {
     snapshot: (opts?: { force?: boolean }) => Promise<UsageSnapshot>;
+    setSubscriptionCreditUse: (enabled: boolean) => Promise<boolean>;
     /** Provider allowlist와 main-owned cooldown 아래 캐시 무효화+재조회를 원자적으로 수행한다. */
     retry: (providerId: UsageRetryProviderId) => Promise<UsageRetryResult>;
   };
@@ -7530,7 +7535,7 @@ export interface AgentlasIpc {
       selections: RuntimeSelection[],
     ) => Promise<RuntimeRolePoolState>;
     /** 온보딩이 끝날 때 연결한 것으로 오케스트레이터·워커 풀을 채운다. 사람이 고른 역할은 건드리지 않는다. */
-    seedFirstRunRoles: () => Promise<{ seeded: boolean; reason: "owner-chosen" | "nothing-connected" | null; pool: RuntimeSelection[] }>;
+    seedFirstRunRoles: (apiChoice?: { backend: RuntimeBackend; model: string }) => Promise<{ seeded: boolean; reason: "owner-chosen" | "nothing-connected" | null; pool: RuntimeSelection[] }>;
   };
   agentRuntime: {
     list: () => Promise<AgentRuntimeOverride[]>;

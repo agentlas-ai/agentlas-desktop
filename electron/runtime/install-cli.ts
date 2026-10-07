@@ -9,7 +9,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawnCli, killCliTree, cliPathValue, setCliPath } from "./exec";
+import { spawnCli, killCliTree, cliPathValue, setCliPath, standardAntigravityBinDirs } from "./exec";
 import { resolveManagedNodeRuntime, type ManagedNodeRuntime } from "./managed-node";
 import { cliSelfUpdateEnv } from "./cli-update-prefix";
 import {
@@ -81,7 +81,7 @@ function searchDirs(): string[] {
   // system shims. Otherwise installation can succeed and login immediately
   // reopen an older broken binary from PATH.
   // 네이티브 설치본이 맨 앞 — 같은 이름의 옛 npm 심이 남아 있어도 검증된 exe 를 먼저 쓴다.
-  return Array.from(new Set([...nativeCliBinDirs(), managedBinDir(), ...fromPath, ...EXTRA_BIN_DIRS]));
+  return Array.from(new Set([...nativeCliBinDirs(), managedBinDir(), ...fromPath, ...EXTRA_BIN_DIRS, ...standardAntigravityBinDirs()]));
 }
 
 /** 실행 가능한 바이너리의 절대경로를 보강된 PATH에서 찾는다(없으면 null). */
@@ -161,6 +161,7 @@ export function augmentedEnv(): NodeJS.ProcessEnv {
     ...cliPathValue(process.env).split(path.delimiter),
     ...(bundledNode ? [bundledNode] : []),
     ...EXTRA_BIN_DIRS,
+    ...standardAntigravityBinDirs(),
   ]))
     .filter(Boolean)
     .join(path.delimiter);

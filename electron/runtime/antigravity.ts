@@ -41,7 +41,7 @@ import {
 } from "./continuity";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
-import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild } from "./exec";
+import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, standardAntigravityBinDirs, windowsCliCommandBudget } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
 import { parseAgyModels, unsupportedDiscovery, type DiscoveryOutcome } from "../../shared/model-discovery";
 import { resolveEffectiveContextWindow, UNKNOWN_CONTEXT_WINDOW } from "../../shared/models";
@@ -97,6 +97,7 @@ export const ANTIGRAVITY_MODEL_DISCOVERY_TIMEOUT_MS = 12_000;
 export function antigravityCandidatePaths(
   platform = process.platform,
   home = os.homedir(),
+  env: NodeJS.ProcessEnv = process.env,
 ): string[] {
   return [
     ...(platform === "win32"
@@ -105,6 +106,7 @@ export function antigravityCandidatePaths(
           "agy.exe",
           path.join(home, ".local", "bin", "agy.exe"),
           path.join(home, ".local", "bin", "agy.cmd"),
+          ...standardAntigravityBinDirs(env, platform).flatMap((dir) => [path.join(dir, "agy.exe"), path.join(dir, "agy.cmd")]),
         ]
       : []),
     "agy",
@@ -973,6 +975,23 @@ export function reduceAgyLine(
 
 export function buildAgyPromptBootstrap(promptFile: string): string {
   return `Read the complete Agentlas request from ${JSON.stringify(promptFile)}, follow it exactly, and do not reveal the file path.`;
+}
+
+function antigravityWindowsBootstrapAllowed(req: RunnerRequest): boolean {
+  return (req.permission === "write" || req.permission === "full")
+    && !req.browserOnly && !req.untrustedNoTools && !req.restrictedReadBoundary
+    && !req.isolatedMcpConfig && !req.ephemeralToolGrant && !req.workforceRuntimeToolGrant
+    && !req.simulation;
+}
+
+function antigravityWindowsPromptFailure(
+  req: RunnerRequest,
+  code: "agy_windows_argv_budget_exceeded" | "agy_windows_prompt_bootstrap_not_authorized",
+): RunnerFailure {
+  return { kind: "refused", source: "marker", runtime: "antigravity", providerCode: code,
+    message: req.locale === "ko"
+      ? "Antigravity 요청이 Windows 명령 길이 경계를 초과했습니다. 현재 권한과 요청 내용을 유지하며 실행할 수 없어 CLI 프로세스를 시작하지 않았습니다."
+      : "The Antigravity CLI process was not started because this request exceeds the Windows command boundary and cannot run with its current content and permissions." };
 }
 
 
@@ -2035,24 +2054,53 @@ async function runPreparedAntigravity(
     prompt = buildPrompt(runReq, browserPromptBudget - Buffer.byteLength(sessionRules, "utf8") - 1);
   }
   spawnPrompt = `${sessionRules}\n${prompt}`;
+  const protectedSpawnPrompt = spawnPrompt;
   const spawnPromptBytes = Buffer.byteLength(spawnPrompt, "utf8");
   if (runReq.browserOnly && spawnPromptBytes > browserPromptBudget) {
     throw new Error(
       `BROWSER_ONLY_PROMPT_TOO_LARGE: ${spawnPromptBytes} UTF-8 bytes exceed the ${browserPromptBudget}-byte model/argv boundary`,
     );
   }
-  const prepareOneShotPrompt = async (): Promise<void> => {
-    if (spawnPromptBytes <= AGY_ARGV_PROMPT_LIMIT || agyPromptDirectory) return;
+  const oneShotSpawnArgs = (): string[] => buildAntigravitySpawnArgs(
+    req.model, spawnPrompt, agyReadDirs, agyToolsAllowed ? req.permission : undefined,
+    req.outputSchema?.schema, agyResumeId ?? undefined, browserProject?.projectId,
+  );
+  const oneShotSpawnEnv = (): NodeJS.ProcessEnv => {
+    const env: NodeJS.ProcessEnv = { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" };
+    if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
+    if (!env.COLORTERM) env.COLORTERM = "truecolor";
+    return env;
+  };
+  const oneShotWindowsBudgetFailure = (): RunnerFailure | null => {
+    if (process.platform !== "win32") return null;
+    const budget = windowsCliCommandBudget(bin, oneShotSpawnArgs(), { env: oneShotSpawnEnv(), cwd: agyWorkDir });
+    return budget && !budget.fits
+      ? antigravityWindowsPromptFailure(req, "agy_windows_argv_budget_exceeded") : null;
+  };
+  const prepareOneShotPrompt = async (): Promise<RunnerFailure | null> => {
+    req.signal?.throwIfAborted();
+    if (process.platform === "win32") {
+      const failure = oneShotWindowsBudgetFailure();
+      if (!failure || agyPromptDirectory) return failure;
+      if (!antigravityWindowsBootstrapAllowed(req)) {
+        return antigravityWindowsPromptFailure(req, "agy_windows_prompt_bootstrap_not_authorized");
+      }
+    } else if (spawnPromptBytes <= AGY_ARGV_PROMPT_LIMIT || agyPromptDirectory) return null;
     agyPromptDirectory = await fs.mkdtemp(path.join(os.tmpdir(), "agentlas-antigravity-prompt-"));
     try {
+      req.signal?.throwIfAborted();
       try {
         await fs.chmod(agyPromptDirectory, 0o700);
       } catch {
         // Windows 등 chmod 미지원 환경
       }
       const agyPromptFile = path.join(agyPromptDirectory, "request.txt");
-      await fs.writeFile(agyPromptFile, prompt, { encoding: "utf8", mode: 0o600 });
-      spawnPrompt = buildAgyPromptBootstrap(agyPromptFile);
+      req.signal?.throwIfAborted();
+      await fs.writeFile(agyPromptFile, process.platform === "win32" ? protectedSpawnPrompt : prompt, { encoding: "utf8", mode: 0o600 });
+      req.signal?.throwIfAborted();
+      spawnPrompt = process.platform === "win32"
+        ? `${sessionRules}\n${buildAgyPromptBootstrap(agyPromptFile)}`
+        : buildAgyPromptBootstrap(agyPromptFile);
       /*
        * ★프롬프트 폴더를 **더한다**. 갈아치우지 않는다.
        *
@@ -2065,6 +2113,7 @@ async function runPreparedAntigravity(
        * the same full prompt over stdin without adding an ephemeral directory.
        */
       agyReadDirs = [agyPromptDirectory, agyWorkDir, ...agyAdditionalDirs];
+      return oneShotWindowsBudgetFailure();
     } catch (error) {
       await fs.rm(agyPromptDirectory, { recursive: true, force: true });
       throw error;
@@ -2195,7 +2244,11 @@ async function runPreparedAntigravity(
       }
     }
     try {
-      if (!residentLease) await prepareOneShotPrompt();
+      if (!residentLease) {
+        const failure = await prepareOneShotPrompt();
+        if (failure) return { text: "", failure };
+      }
+      req.signal?.throwIfAborted();
       const result = await runAgyProcess(residentLease);
       let browserResidentPromoted = false;
       if (residentLease && browserResidentScope && !result.failure && !residentProtocolFallback) {
@@ -2225,7 +2278,9 @@ async function runPreparedAntigravity(
         // text/tool activity. Its effect scope is already closed above, so a
         // one-shot retry cannot duplicate an accepted provider action.
         residentProtocolFallback = false;
-        await prepareOneShotPrompt();
+        const failure = await prepareOneShotPrompt();
+        if (failure) return { text: "", failure };
+        req.signal?.throwIfAborted();
         return await runAgyProcess(null);
       }
       return result;
@@ -2244,6 +2299,11 @@ async function runPreparedAntigravity(
     residentLease: AcpSessionLease<AntigravityResidentSession> | null = null,
   ): Promise<RunnerResult> {
   const residentSession = residentLease?.session ?? null;
+  req.signal?.throwIfAborted();
+  if (!residentSession) {
+    const failure = oneShotWindowsBudgetFailure();
+    if (failure) return Promise.resolve({ text: "", failure });
+  }
   const effectBindings = runReq.mcpConfigPath ? preparedMcpBindings(runReq.mcpConfigPath) : [];
   const effectRun = beginAdapterEffectRun({ adapterKind: "antigravity", chatId: runReq.chatId, agentId: runReq.agentId });
   const hostEffects = new Map<string, MainMcpEffectReceipt>(), claimedEffects = new Set<string>();
@@ -2269,26 +2329,19 @@ async function runPreparedAntigravity(
   return new Promise<RunnerResult>((resolve, reject) => {
     const invocationStartedAtMs = Date.now();
     // Antigravity는 빈 prompt를 거부하므로 긴 요청만 private 파일 bootstrap으로 우회한다.
-    const env: NodeJS.ProcessEnv = { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" };
-    if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
-    if (!env.COLORTERM) env.COLORTERM = "truecolor";
+    const env = oneShotSpawnEnv();
 
     let child: ReturnType<typeof spawnCli>;
     if (residentSession) {
       child = residentSession.child;
     } else {
       try {
+        req.signal?.throwIfAborted();
+        const failure = oneShotWindowsBudgetFailure();
+        if (failure) { resolve({ text: "", failure }); return; }
         child = spawnCli(
           bin,
-          buildAntigravitySpawnArgs(
-            req.model,
-            spawnPrompt,
-            agyReadDirs,
-            agyToolsAllowed ? req.permission : undefined,
-            req.outputSchema?.schema,
-            agyResumeId ?? undefined,
-            browserProject?.projectId,
-          ),
+          oneShotSpawnArgs(),
           {
             stdio: ["ignore", "pipe", "pipe"],
             env,

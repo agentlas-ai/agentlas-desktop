@@ -29,6 +29,7 @@ import type {
   RuntimeConnectSnapshot,
 } from "../../shared/runtime-connect";
 import { CONNECTABLE_RUNTIMES, maskAccount } from "../../shared/runtime-connect";
+import { parseAgyModels } from "../../shared/model-discovery";
 
 interface RuntimeConnectPlan {
   /** 우리가 설치할 수 있나(install-cli 고정 목록). */
@@ -168,7 +169,7 @@ export function interpretProbe(
     }
     case "antigravity":
       if (/sign in/i.test(out)) return { state: "signed-out", account: null, method: null };
-      if (result.code === 0 && /\t/.test(out)) return { state: "signed-in", account: null, method: "Google" };
+      if (result.code === 0 && parseAgyModels(out).length > 0) return { state: "signed-in", account: null, method: "Google" };
       return { state: "unknown", account: null, method: null };
     case "cursor": {
       if (/not logged in|not authenticated/i.test(out)) return { state: "signed-out", account: null, method: null };

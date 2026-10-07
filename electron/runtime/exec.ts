@@ -29,13 +29,26 @@ import { claimAttemptChild, type AttemptChildren } from "./attempt-children";
  * 설치하고 검증한 prefix만 기존 PATH보다 먼저 두고, 그 밖의 사용자/시스템 후보는 원래
  * PATH 우선순위를 유지한다.
  */
-function cliSearchDirs(): string[] {
+/** Official AGY standalone location; keep it behind the inherited/managed PATH. */
+export function standardAntigravityBinDirs(
+  env: NodeJS.ProcessEnv = process.env,
+  platform = process.platform,
+): string[] {
+  if (platform !== "win32") return [];
+  const key = Object.keys(env).filter((name) => name.toLowerCase() === "localappdata").sort()[0];
+  const local = key ? env[key]?.trim() : undefined;
+  if (!local || !path.win32.isAbsolute(local) || /[\u0000\r\n]/u.test(local)) return [];
+  return [path.win32.join(local, "agy", "bin")];
+}
+
+function cliSearchDirs(env: NodeJS.ProcessEnv = process.env): string[] {
   if (process.platform === "win32") {
     return [
       path.join(os.homedir(), ".local", "bin"),
       path.join(os.homedir(), ".agentlas", "npm"),
       path.join(process.env.APPDATA ?? "", "npm"),
       path.join(process.env.LOCALAPPDATA ?? "", "npm"),
+      ...standardAntigravityBinDirs(env),
     ].filter(Boolean);
   }
   const home = os.homedir();
@@ -121,7 +134,7 @@ export function withCliPath(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     ...(managed ? [managed] : []),
     ...existing.filter((entry) => entry !== managed),
     ...(bundledNode ? [bundledNode] : []),
-    ...cliSearchDirs(),
+    ...cliSearchDirs(base),
   ].filter(Boolean)));
   return setCliPath(base, merged.join(sep));
 }
@@ -164,6 +177,65 @@ export function envForCli(command: string, base: NodeJS.ProcessEnv = process.env
   }
   if (isCurrentElectronExecutable(command)) env.ELECTRON_RUN_AS_NODE = "1";
   return env;
+}
+
+interface WindowsCliLaunchPlan {
+  command: string;
+  args: string[];
+  options: SpawnOptions;
+  file?: string;
+}
+
+/** libuv's non-verbatim Windows argv quoting, measured in UTF-16 code units. */
+function quoteWindowsCliArgument(value: string): string {
+  if (!value.length) return '""';
+  if (!/[ \t"]/u.test(value)) return value;
+  let quoted = '"', backslashes = 0;
+  for (const character of value) {
+    if (character === "\\") { backslashes++; continue; }
+    quoted += character === '"'
+      ? "\\".repeat(backslashes * 2 + 1) + '"'
+      : "\\".repeat(backslashes) + character;
+    backslashes = 0;
+  }
+  return quoted + "\\".repeat(backslashes * 2) + '"';
+}
+
+export interface WindowsCliCommandBudget {
+  transport: "cmd" | "native";
+  nativeUtf16WithNull: number;
+  cmdUtf16: number | null;
+  fits: boolean;
+}
+
+/** Counts the actual parsed argv, including executable, flags and shell escaping. */
+export function measureWindowsCliCommand(plan: WindowsCliLaunchPlan): WindowsCliCommandBudget {
+  const verbatim = plan.options.windowsVerbatimArguments === true;
+  const argv = [plan.options.argv0 ?? plan.command, ...plan.args];
+  const serialized = argv.map((value) => verbatim ? value : quoteWindowsCliArgument(value)).join(" ");
+  const cmd = verbatim && plan.args[0] === "/d" && plan.args[1] === "/s" && plan.args[2] === "/c";
+  const nativeUtf16WithNull = serialized.length + 1;
+  const cmdUtf16 = cmd ? serialized.length : null;
+  return { transport: cmd ? "cmd" : "native", nativeUtf16WithNull, cmdUtf16,
+    fits: nativeUtf16WithNull <= 32_767 && (cmdUtf16 === null || cmdUtf16 <= 8_191) };
+}
+
+/** Parse with the same cross-spawn, child env and cwd as spawnCli; never spawn. */
+export function windowsCliCommandBudget(
+  command: string,
+  args: string[],
+  options: SpawnOptions,
+): WindowsCliCommandBudget | null {
+  if (process.platform !== "win32") return null;
+  const parser = crossSpawn as unknown as {
+    _parse(command: string, args: string[], options: SpawnOptions): WindowsCliLaunchPlan;
+  };
+  const parsed = parser._parse(command, args, {
+    ...options, env: envForCli(command, options.env ?? process.env),
+  });
+  // Preserve the original missing-executable path; null is not a proven budget.
+  if (!parsed.file) return null;
+  return measureWindowsCliCommand(parsed);
 }
 
 /** child_process.spawn 대체 — Windows `.cmd`/`.bat` 심 해석 + GUI용 PATH 보강. */

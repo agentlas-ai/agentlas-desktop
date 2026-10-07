@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.2.78 — 2026-10-07
+
+- Separate API-key connections and model labels from subscription CLI engines. Discover provider catalogs dynamically, including paginated Anthropic and Gemini lists, and preserve manual model IDs when listing is unavailable.
+- Connect an API key and choose a model during first-run setup. Seed both Orchestrator and Worker while preserving roles the owner already selected.
+- Display only Claude usage windows with known meaning. Show available provider credit information separately without inventing a percentage when the allowance is unknown.
+- Add an app preference for starting new subscription CLI runs on credits after observed included-usage exhaustion. API billing and spending in an already-started CLI remain provider-controlled.
+- Recognize current AGY model-list formats and Windows installation paths. Check quoted Windows command limits before dispatch and use the existing file bootstrap only where permitted.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
+Source and packaging checks do not establish every provider account or native Windows interaction.
+
 ## 1.2.77 — 2026-10-07
 
 - Shared browser preparation keeps active callers when another task stops, and checks their current work before preparing or dispatching browser commands.

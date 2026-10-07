@@ -16,7 +16,8 @@ import { navigate } from "@/lib/navigation";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
 import { LocalModelMiniCards, useLocalModelSnapshot } from "@/components/dashboard/LocalModelMiniCards";
 import { RUNTIME_CHIPS, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
-import { isSupportedProviderUsageWindow, providerHasUsableCredits, providerHasUsableExtraUsage } from "@shared/runtime-quota";
+import { isPaidOverageUsageWindow, isSupportedProviderUsageWindow, providerHasUsableCredits, providerHasUsableExtraUsage } from "@shared/runtime-quota";
+import type { ByokBackend } from "@shared/models";
 import type {
   CliRuntimeVersionStatus,
   EnvVarMeta,
@@ -51,6 +52,7 @@ interface EngineDef {
   manualSetup?: string;
   retryProviderId?: UsageRetryProviderId;
   keyEnv?: string;
+  apiBackend?: ByokBackend;
   logoSrc: string;
   logoAlt: string;
 }
@@ -59,9 +61,18 @@ const ENGINES: EngineDef[] = [
   { id: "claude-code", label: "Claude Code", auth: "cli", cliKind: "claude-code", retryProviderId: "claude-code", logoSrc: "/brand/llm/claude.svg", logoAlt: "Claude" },
   { id: "codex", label: "Codex", auth: "cli", cliKind: "codex", retryProviderId: "codex", logoSrc: "/brand/llm/openai.svg", logoAlt: "OpenAI" },
   { id: "antigravity", label: "Antigravity", auth: "cli", cliKind: "antigravity", logoSrc: "/brand/llm/googlegemini.svg", logoAlt: "Antigravity" },
-  { id: "deepseek", label: "DeepSeek", auth: "apikey", keyEnv: "DEEPSEEK_API_KEY", logoSrc: "/brand/llm/deepseek.svg", logoAlt: "DeepSeek" },
+  { id: "anthropic-api", label: "(API) Claude", auth: "apikey", apiBackend: "anthropic", keyEnv: "ANTHROPIC_API_KEY", logoSrc: "/brand/llm/claude.svg", logoAlt: "Claude" },
+  { id: "openai-api", label: "(API) OpenAI", auth: "apikey", apiBackend: "openai", keyEnv: "OPENAI_API_KEY", logoSrc: "/brand/llm/openai.svg", logoAlt: "OpenAI" },
+  { id: "google-api", label: "(API) Gemini", auth: "apikey", apiBackend: "google", keyEnv: "GOOGLE_API_KEY", logoSrc: "/brand/llm/googlegemini.svg", logoAlt: "Google" },
+  { id: "deepseek", label: "(API) DeepSeek", auth: "apikey", apiBackend: "deepseek", keyEnv: "DEEPSEEK_API_KEY", logoSrc: "/brand/llm/deepseek.svg", logoAlt: "DeepSeek" },
   { id: "grok", label: "Grok", auth: "cli", cliKind: "grok", retryProviderId: "grok", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
-  { id: "glm", label: "GLM", auth: "apikey", keyEnv: "ZHIPU_API_KEY", logoSrc: "/brand/llm/zhipu.png", logoAlt: "Zhipu GLM" },
+  { id: "glm", label: "(API) GLM", auth: "apikey", apiBackend: "glm", keyEnv: "ZHIPU_API_KEY", logoSrc: "/brand/llm/zhipu.png", logoAlt: "Zhipu GLM" },
+  { id: "kimi-api", label: "(API) Kimi", auth: "apikey", apiBackend: "kimi", keyEnv: "MOONSHOT_API_KEY", logoSrc: "/brand/llm/kimi.svg", logoAlt: "Kimi" },
+  { id: "minimax-api", label: "(API) MiniMax", auth: "apikey", apiBackend: "minimax", keyEnv: "MINIMAX_API_KEY", logoSrc: "/brand/llm/minimax.svg", logoAlt: "MiniMax" },
+  { id: "xai-api", label: "(API) xAI", auth: "apikey", apiBackend: "xai", keyEnv: "XAI_API_KEY", logoSrc: "/brand/llm/x.svg", logoAlt: "xAI" },
+  { id: "openrouter-api", label: "(API) OpenRouter", auth: "apikey", apiBackend: "openrouter", keyEnv: "OPENROUTER_API_KEY", logoSrc: "/brand/agentlas-mark.png", logoAlt: "OpenRouter" },
+  { id: "upstage-api", label: "(API) Upstage", auth: "apikey", apiBackend: "upstage", keyEnv: "UPSTAGE_API_KEY", logoSrc: "/brand/agentlas-mark.png", logoAlt: "Upstage" },
+  { id: "custom-api", label: "(API) Custom", auth: "apikey", apiBackend: "custom", keyEnv: "CUSTOM_API_KEY", logoSrc: "/brand/agentlas-mark.png", logoAlt: "Custom API" },
   { id: "kimi", label: "Kimi Code", auth: "cli", cliKind: "kimi", logoSrc: "/brand/llm/kimi.svg", logoAlt: "Kimi Code" },
   // 실행되는 런타임과 이 목록은 반드시 같아야 한다(오너 결정 2026-08-18). cursor와
   // Copilot CLI는 실제로 실행되는데 여기 없어서 대시보드에서 연결할 길이 없었다.
@@ -72,7 +83,7 @@ const ENGINES: EngineDef[] = [
 
 function windowLabel(w: UsageWindow, ko: boolean): string {
   const named = (label: string) => (w.limitName || w.model) ? `${w.limitName || w.model} · ${label}` : label;
-  if (w.quotaRole === "paid-overage" || w.id === "extra_usage") return ko ? "추가 사용" : "Extra usage";
+  if (w.quotaRole === "paid-overage" || w.id === "extra_usage") return ko ? "크레딧 사용" : "Credit usage";
   if (w.kind === "monthly") return ko ? "월간" : "Monthly";
   if (w.id.includes("-local-")) return ko ? (w.kind === "5h" ? "최근 5시간(로컬)" : "최근 7일(로컬)") : w.kind === "5h" ? "Last 5h (local)" : "Last 7d (local)";
   if (w.kind === "5h") return named(ko ? "5시간" : "5-hour");
@@ -131,7 +142,7 @@ function providerCreditsLabel(usage: ProviderUsage, ko: boolean): string | null 
         ? new Intl.NumberFormat(ko ? "ko-KR" : "en-US", { style: "currency", currency: "USD", maximumFractionDigits: 2 }).format(credits.balance / 100)
         : `${new Intl.NumberFormat(ko ? "ko-KR" : "en-US", { maximumFractionDigits: 2 }).format(credits.balance)}${credits.unit ? ` ${credits.unit}` : ""}`
       : ko ? "잔액 확인 필요" : "balance unavailable";
-  const continuation = !usage.stale && providerHasUsableCredits(usage)
+  const continuation = usage.allowPaidUsage !== false && !usage.stale && providerHasUsableCredits(usage)
     ? ko ? " · 구독 한도 이후 사용" : " · usable after limit"
     : "";
   return `${usage.label} ${ko ? "크레딧" : "credits"} ${balance}${continuation}`;
@@ -144,6 +155,9 @@ function providerExtraUsageLabel(usage: ProviderUsage, ko: boolean): string | nu
   if (!extra.enabled) return `${prefix} ${ko ? "꺼짐" : "off"}`;
   if (usage.stale) return `${prefix} ${ko ? "켜짐 · 마지막 확인 기준" : "on · last observation"}`;
   if (providerHasUsableExtraUsage(usage)) {
+    if (usage.allowPaidUsage === false) {
+      return `${prefix} ${ko ? "공급자 켜짐 · 앱 크레딧 사용 꺼짐" : "provider enabled · app credit use off"}`;
+    }
     return `${prefix} ${ko ? "켜짐 · 구독 한도 이후 허용" : "on · allowed after subscription limit"}`;
   }
   const exhausted = usage.spendControlReached === true || extra.monthlyLimit === 0
@@ -189,6 +203,17 @@ function UsageBar({ w, ko }: { w: UsageWindow; ko: boolean }) {
       <span title={money ?? undefined}>{money ?? formatReset(w.resetAt, ko)}</span>
     </div>
   );
+}
+
+/** A wallet has no known total: show its balance without inventing a percent. */
+function ProviderCreditBar({ usage, ko }: { usage: ProviderUsage; ko: boolean }) {
+  const label = providerCreditsLabel(usage, ko) ?? providerExtraUsageLabel(usage, ko);
+  if (!label) return null;
+  return <div className="dashboard-usage-bar" data-credit-balance="true" title={label}>
+    <span>{ko ? "크레딧" : "Credits"}</span>
+    <div aria-hidden="true" />
+    <span style={{ gridColumn: "3 / 5" }}>{label}</span>
+  </div>;
 }
 
 function ModelRoleUsage({ value, ko }: {
@@ -275,6 +300,8 @@ export function EngineUsage() {
   const [connectSpec, setConnectSpec] = useState<RuntimeChipSpec | null>(null);
   const { probes: runtimeAuth, refresh: refreshAuth } = useRuntimeAuth();
   const [usageLoadError, setUsageLoadError] = useState(false);
+  const [creditPreferencePending, setCreditPreferencePending] = useState(false);
+  const [creditPreferenceError, setCreditPreferenceError] = useState(false);
   const [notice, setNotice] = useState<{ id: string; text: string; command?: string } | null>(null);
   const [keyFor, setKeyFor] = useState<string | null>(null);
   const [keyVal, setKeyVal] = useState("");
@@ -374,6 +401,26 @@ export function EngineUsage() {
   function usageFor(id: string): ProviderUsage | undefined {
     return snap?.providers.find((p) => p.provider === id);
   }
+
+  async function toggleSubscriptionCredits() {
+    const api = ipc();
+    if (!api?.usage.setSubscriptionCreditUse || creditPreferencePending || !snap) return;
+    setCreditPreferencePending(true);
+    setCreditPreferenceError(false);
+    ++usageRequestGen.current;
+    try {
+      const saved = await api.usage.setSubscriptionCreditUse(snap.subscriptionCreditUse !== true);
+      ++usageRequestGen.current;
+      setSnap(previous => {
+        if (!previous) return previous;
+        const next = { ...previous, subscriptionCreditUse: saved, providers: previous.providers.map(provider =>
+          ["claude-code", "codex"].includes(provider.provider) ? { ...provider, allowPaidUsage: saved } : provider) };
+        writeViewData("dashboard.usage", next);
+        return next;
+      });
+    } catch { setCreditPreferenceError(true); }
+    finally { setCreditPreferencePending(false); }
+  }
   function runtimeVersionFor(e: EngineDef): CliRuntimeVersionStatus | undefined {
     if (!e.cliKind) return undefined;
     return snap?.runtimeVersions?.find((version) => version.kind === e.cliKind);
@@ -408,6 +455,7 @@ export function EngineUsage() {
       return kind ? runtimeAuth[kind]?.state === "signed-in" : true;
     }
     if (e.auth === "local") return runtimes.some((r) => r.kind === "agentlas-local");
+    if (e.apiBackend) return runtimeFor(e)?.credentialAccess?.status === "available";
     return !!e.keyEnv && envKeys.has(e.keyEnv);
   }
 
@@ -445,17 +493,18 @@ export function EngineUsage() {
         || (e.acpAgentId && r.kind === "acp" && r.acpAgentId === e.acpAgentId));
     }
     if (e.auth === "local") return runtimes.find((r) => r.kind === "agentlas-local");
-    return undefined; // API키형(BYOK)은 모델 선택이 필요해 세팅의 BYOK 패널이 담당
+    return e.apiBackend ? runtimes.find(runtime => runtime.kind === "byok" && runtime.backend === e.apiBackend) : undefined;
   }
   async function saveKey(e: EngineDef) {
     const api = ipc();
     if (!api || !e.keyEnv || !keyVal.trim() || busy) return;
     setBusy(e.id);
     try {
-      await api.env.set(e.keyEnv, keyVal.trim());
+      if (e.apiBackend) await api.secrets.saveApiKey(e.apiBackend, keyVal.trim());
+      else await api.env.set(e.keyEnv, keyVal.trim());
       setKeyFor(null);
       setKeyVal("");
-      await loadConnections();
+      await loadConnections(true);
     } finally {
       setBusy(null);
     }
@@ -513,10 +562,12 @@ export function EngineUsage() {
   const renderEngineCard = (e: EngineDef) => {
     const u = usageFor(e.id);
     const visibleWindows = u?.windows.filter(window => isSupportedProviderUsageWindow(window, e.id)) ?? [];
+    const subscriptionWindows = visibleWindows.filter(window => !isPaidOverageUsageWindow(window, e.id));
+    const creditWindows = visibleWindows.filter(window => isPaidOverageUsageWindow(window, e.id));
     const connected = isConnected(e);
     const rt = runtimeFor(e);
     const runtimeVersionLabel = runtimeVersionText(runtimeVersionFor(e));
-    const hasBars = connected && visibleWindows.length > 0;
+    const hasBars = connected && (visibleWindows.length > 0 || !!u?.credits || !!u?.extraUsage);
     const creditsLabel = connected && u ? providerCreditsLabel(u, ko) : null;
     const extraUsageLabel = connected && u ? providerExtraUsageLabel(u, ko) : null;
     const terminalError = connected && isTerminalProviderError(u);
@@ -549,7 +600,7 @@ export function EngineUsage() {
         )}
       </>
     ) : !connected ? (
-      <button onClick={() => (e.auth === "local" ? navigate("/local-models") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
+      <button onClick={() => (e.auth === "local" ? navigate("/local-models") : e.apiBackend === "custom" ? navigate("/settings") : e.auth === "apikey" ? setKeyFor(keyFor === e.id ? null : e.id) : void connectCli(e))} disabled={busy === e.id} className="titlebar-nodrag">
         {busy === e.id ? busyLabel() : ko ? "연결" : "Connect"}
       </button>
     ) : null;
@@ -603,11 +654,13 @@ export function EngineUsage() {
                 Claude Max에서 유료 초과분(extra_usage)과 Sonnet 7일을 조용히
                 잘라내, 실제로 청구되는 금액을 앱에서 볼 방법이 없게 만들었다.
                 카드는 flex column이라 창 수만큼 자연히 늘어난다. */}
-            {visibleWindows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
+            {subscriptionWindows.slice(0, 2).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
+            {creditWindows.map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
+            {u && creditWindows.length === 0 && <ProviderCreditBar usage={u} ko={ko} />}
+            {subscriptionWindows.slice(2).map((w) => <UsageBar key={w.id} w={w} ko={ko} />)}
           </div>
         )}
-        {creditsLabel && <div className="dashboard-engine-card-status" title={creditsLabel}>{creditsLabel}</div>}
-        {extraUsageLabel && <div className="dashboard-engine-card-status" title={extraUsageLabel}>{extraUsageLabel}</div>}
+        {creditsLabel && extraUsageLabel && <div className="dashboard-engine-card-status" title={extraUsageLabel}>{extraUsageLabel}</div>}
         {(actions || (keyFor === e.id && !connected)) && (
           <div className="dashboard-engine-card-foot">
             {actions ? <div className="dashboard-engine-actions" style={{ padding: 0 }}>{actions}</div> : <span />}
@@ -656,8 +709,21 @@ export function EngineUsage() {
       />}
       <div className="dashboard-module-head" data-collapsed="false">
         <span>{ko ? "LLM 연결 · 사용량" : "LLM connections · usage"}</span>
+        <button type="button" role="switch" aria-checked={snap?.subscriptionCreditUse === true}
+          aria-label={ko ? "구독 한도 후 크레딧 자동 사용" : "Use credits after subscription limits"}
+          disabled={!snap || creditPreferencePending || !ipc()?.usage.setSubscriptionCreditUse}
+          onClick={() => void toggleSubscriptionCredits()} className="dashboard-runtime-row-switch titlebar-nodrag"
+          style={{ marginLeft: "auto" }} title={ko
+            ? "구독 한도 소진이 확인된 후 크레딧으로 새 작업을 시작할지 선택합니다. API 키 과금은 별도이며, 이미 시작된 CLI의 과금은 공급자 설정을 따릅니다."
+            : "Allow new runs on credits after observed subscription exhaustion. API billing is separate; spending in an already started CLI follows provider settings."}>
+          <span className="dashboard-runtime-row-switch-track" aria-hidden="true"><span /></span>
+          {ko ? "크레딧 자동 사용" : "Use credits"}
+        </button>
         <button onClick={() => void loadUsage(true)} className="titlebar-nodrag dashboard-refresh-button" title={ko ? "새로고침" : "Refresh"}>↻</button>
       </div>
+      {creditPreferenceError && <div className="dashboard-usage-load-error" role="alert">
+        {ko ? "크레딧 자동 사용 설정을 저장하지 못했습니다." : "Could not save the credit-use preference."}
+      </div>}
 
       {connectionsLoadError && (
         <div className="dashboard-usage-load-error" role="alert">

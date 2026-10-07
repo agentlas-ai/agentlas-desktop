@@ -7,7 +7,6 @@ import { getDb } from "../store/db";
 import {
   BYOK_BACKENDS_ALL,
   BYOK_MODELS,
-  byokModels,
   cliModels,
   type ByokBackend,
   type CliModelOption,
@@ -16,7 +15,21 @@ import {
 type ModelOption = CliModelOption;
 
 const TTL_MS = 5 * 60 * 1000;
-const cache = new Map<ByokBackend, { at: number; models: ModelOption[] }>();
+export interface ByokModelDiscovery {
+  backend: ByokBackend;
+  credentialRevision: number;
+  customEndpoint: string | null;
+  models: ModelOption[];
+  /** Only provider-confirmed conversational models; opaque /models IDs are display inventory. */
+  chatModels: string[];
+  status: "ok" | "failed" | "unsupported";
+  reason?: string;
+  stale: boolean;
+  at: number;
+}
+const cache = new Map<ByokBackend, ByokModelDiscovery>();
+const flights = new Map<ByokBackend, { identity: string; promise: Promise<ByokModelDiscovery> }>();
+let cacheGeneration = 0;
 
 /*
  * ★keychain_unavailable is a fact about the credential store, not about this
@@ -33,10 +46,6 @@ const cache = new Map<ByokBackend, { at: number; models: ModelOption[] }>();
 const KEYCHAIN_BACKOFF_MAX_MS = 60 * 60 * 1000;
 type KeychainFailure = { until: number; streak: number; revision: number; signature: string };
 const keychainFailures = new Map<ByokBackend, KeychainFailure>();
-
-function catalogModels(backend: ByokBackend): ModelOption[] {
-  return byokModels(backend).map((m) => ({ id: m.id, label: m.label }));
-}
 
 const BYOK_BACKENDS: readonly ByokBackend[] = BYOK_BACKENDS_ALL;
 
@@ -59,22 +68,36 @@ async function fetchWithTimeout(url: string, init: RequestInit, ms = 4000): Prom
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), ms);
   try {
-    return await fetch(url, { ...init, signal: ctrl.signal });
+    return await fetch(url, { ...init, signal: ctrl.signal, redirect: "error" });
   } finally {
     clearTimeout(timer);
   }
 }
 
 // ── provider별 /models 조회 ───────────────────────────────
+const MAX_MODEL_PAGES = 50;
+
 async function fetchAnthropic(key: string): Promise<ModelOption[]> {
-  const res = await fetchWithTimeout("https://api.anthropic.com/v1/models?limit=100", {
-    headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
-  });
-  if (!res.ok) throw new Error(`models endpoint returned HTTP ${res.status}`);
-  const json = (await res.json()) as { data?: Array<{ id?: string; display_name?: string }> };
-  return (json.data ?? [])
-    .filter((m): m is { id: string; display_name?: string } => typeof m.id === "string")
-    .map((m) => ({ id: m.id, label: m.display_name ?? m.id }));
+  const models: ModelOption[] = [];
+  const cursors = new Set<string>();
+  let after: string | undefined;
+  for (let page = 0; page < MAX_MODEL_PAGES; page += 1) {
+    const url = new URL("https://api.anthropic.com/v1/models");
+    url.searchParams.set("limit", "100");
+    if (after) url.searchParams.set("after_id", after);
+    const res = await fetchWithTimeout(url.href, {
+      headers: { "x-api-key": key, "anthropic-version": "2023-06-01" },
+    });
+    if (!res.ok) throw new Error(`http:${res.status}`);
+    const json = await res.json() as { data?: ModelOption[]; has_more?: boolean; last_id?: string };
+    if (!Array.isArray(json.data)) throw new Error("invalid-response");
+    models.push(...json.data.map((row: ModelOption & { display_name?: string }) => ({ id: row.id, label: row.display_name || row.id })));
+    if (!json.has_more) return models;
+    if (typeof json.last_id !== "string" || !json.last_id || cursors.has(json.last_id)) throw new Error("pagination-invalid");
+    after = json.last_id;
+    cursors.add(after);
+  }
+  throw new Error("pagination-limit");
 }
 
 function customBaseUrl(): string | null {
@@ -88,111 +111,160 @@ function customBaseUrl(): string | null {
   }
 }
 
+function safeBaseUrl(base: string): string | null {
+  try {
+    const url = new URL(base);
+    const host = url.hostname.toLowerCase();
+    const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(host);
+    const privateLan = /^10\./.test(host) || /^192\.168\./.test(host) || /^172\.(1[6-9]|2\d|3[01])\./.test(host);
+    if ((url.protocol !== "https:" && !(url.protocol === "http:" && (loopback || privateLan)))
+      || url.username || url.password || url.search || url.hash) return null;
+    return url.href.replace(/\/$/, "");
+  } catch { return null; }
+}
+
 async function fetchOpenAICompatible(baseUrl: string, key: string): Promise<ModelOption[]> {
-  const res = await fetchWithTimeout(`${baseUrl.replace(/\/$/, "")}/models`, {
-    headers: { authorization: `Bearer ${key}` },
-  });
-  if (!res.ok) throw new Error(`models endpoint returned HTTP ${res.status}`);
-  const json = (await res.json()) as {
+  const base = safeBaseUrl(baseUrl);
+  if (!base) throw new Error("invalid-endpoint");
+  const res = await fetchWithTimeout(`${base}/models`, { headers: { authorization: `Bearer ${key}` } });
+  if (!res.ok) throw new Error(`http:${res.status}`);
+  const json = await res.json() as {
     data?: Array<{ id?: string; name?: string; display_name?: string }>;
     models?: Array<{ id?: string; name?: string; display_name?: string }>;
   };
-  const rows = json.data ?? json.models ?? [];
-  return rows
-    .filter((model): model is { id: string; name?: string; display_name?: string } =>
-      typeof model.id === "string" && model.id.trim().length > 0,
-    )
-    .map((model) => ({
-      id: model.id,
-      label: model.display_name?.trim() || model.name?.trim() || model.id,
-    }));
+  const rows = json.data ?? json.models;
+  if (!Array.isArray(rows)) throw new Error("invalid-response");
+  return rows.filter((model): model is { id: string; name?: string; display_name?: string } => typeof model?.id === "string")
+    .map((model) => ({ id: model.id, label: model.display_name || model.name || model.id }));
 }
 
 async function fetchGoogle(key: string): Promise<ModelOption[]> {
-  const res = await fetchWithTimeout(
-    `https://generativelanguage.googleapis.com/v1beta/models?pageSize=200&key=${encodeURIComponent(key)}`,
-    {},
-  );
-  if (!res.ok) throw new Error(`models endpoint returned HTTP ${res.status}`);
-  const json = (await res.json()) as {
-    models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }>;
-  };
-  return (json.models ?? [])
-    .filter((m) => (m.supportedGenerationMethods ?? []).includes("generateContent"))
-    .map((m) => ({ id: (m.name ?? "").replace(/^models\//, ""), label: m.displayName || (m.name ?? "").replace(/^models\//, "") }))
-    .filter((m) => m.id);
+  const models: ModelOption[] = [];
+  const tokens = new Set<string>();
+  let token: string | undefined;
+  for (let page = 0; page < MAX_MODEL_PAGES; page += 1) {
+    const url = new URL("https://generativelanguage.googleapis.com/v1beta/models");
+    url.searchParams.set("pageSize", "200");
+    if (token) url.searchParams.set("pageToken", token);
+    const res = await fetchWithTimeout(url.href, { headers: { "x-goog-api-key": key } });
+    if (!res.ok) throw new Error(`http:${res.status}`);
+    const json = await res.json() as {
+      models?: Array<{ name?: string; displayName?: string; supportedGenerationMethods?: string[] }>;
+      nextPageToken?: string;
+    };
+    if (!Array.isArray(json.models)) throw new Error("invalid-response");
+    models.push(...json.models.filter((row) => Array.isArray(row?.supportedGenerationMethods)
+      && row.supportedGenerationMethods.includes("generateContent") && typeof row.name === "string")
+      .map((row) => ({ id: row.name!.replace(/^models\//, ""), label: row.displayName || row.name!.replace(/^models\//, "") })));
+    if (!json.nextPageToken) return models;
+    if (typeof json.nextPageToken !== "string" || tokens.has(json.nextPageToken)) throw new Error("pagination-invalid");
+    token = json.nextPageToken;
+    tokens.add(token);
+  }
+  throw new Error("pagination-limit");
 }
 
-/** BYOK 백엔드의 실제 모델 목록 — provider API 조회(키 필요), 실패 시 카탈로그 fallback. now는 캐시 TTL용. */
-export async function fetchByokModels(backend: ByokBackend, now: number): Promise<ModelOption[]> {
-  const hit = cache.get(backend);
-  if (hit && now - hit.at < TTL_MS) return hit.models;
+function discoveryIdentity(backend: ByokBackend): Pick<ByokModelDiscovery, "backend" | "credentialRevision" | "customEndpoint"> {
+  return { backend, credentialRevision: getCredentialStateRevision(),
+    customEndpoint: backend === "custom" ? safeBaseUrl(customBaseUrl() ?? "https://api.openai.com/v1") : null };
+}
 
-  const revision = getCredentialStateRevision();
+function sameIdentity(a: ReturnType<typeof discoveryIdentity>, b: ReturnType<typeof discoveryIdentity>): boolean {
+  return a.backend === b.backend && a.credentialRevision === b.credentialRevision && a.customEndpoint === b.customEndpoint;
+}
+
+function cloneDiscovery(value: ByokModelDiscovery): ByokModelDiscovery {
+  return { ...value, models: value.models.map(model => ({ ...model })), chatModels: [...value.chatModels] };
+}
+
+/** Local cache identity, checked before detect/picker reuse; never contains credential material. */
+export function byokDiscoveryIdentity(): string {
+  return JSON.stringify([getCredentialStateRevision(), safeBaseUrl(customBaseUrl() ?? "https://api.openai.com/v1")]);
+}
+
+async function discoverByokModels(backend: ByokBackend, now: number): Promise<ByokModelDiscovery> {
+  let identity = discoveryIdentity(backend);
+  const hit = cache.get(backend);
+  const previous = hit && sameIdentity(hit, identity) ? hit : undefined;
+  if (previous && now - previous.at < TTL_MS) return cloneDiscovery(previous);
+  const generation = cacheGeneration;
+  const result = (status: ByokModelDiscovery["status"], reason: string | undefined, models: ModelOption[] = [], stale = false): ByokModelDiscovery => {
+    const value: ByokModelDiscovery = { ...identity, status, reason, models, stale, at: now,
+      chatModels: backend === "anthropic" || backend === "google" ? models.map(model => model.id) : [] };
+    // A key/endpoint change during an in-flight request must not return or cache old inventory.
+    if (generation !== cacheGeneration || !sameIdentity(identity, discoveryIdentity(backend))) {
+      return { ...discoveryIdentity(backend), status: "failed", reason: "identity-changed", models: [], chatModels: [], stale: false, at: now };
+    }
+    cache.set(backend, value);
+    return cloneDiscovery(value);
+  };
+  const failed = (reason: string): ByokModelDiscovery => {
+    const retained = previous && sameIdentity(previous, identity) ? previous.models : [];
+    return result("failed", reason, retained, retained.length > 0);
+  };
   const failure = keychainFailures.get(backend);
-  if (failure && failure.revision === revision && now < failure.until) {
-    const models = catalogModels(backend);
-    cache.set(backend, { at: now, models });
-    return models;
-  }
-  // No stored key: nothing to fetch and no reason to touch the keychain.
+  if (failure && failure.revision === identity.credentialRevision && now < failure.until) return failed("keychain_unavailable");
   if (apiKeyPresenceHint(backend) === "missing") {
     keychainFailures.delete(backend);
-    const models = catalogModels(backend);
-    cache.set(backend, { at: now, models });
-    return models;
+    return result("unsupported", "missing-key");
   }
-
-  let models: ModelOption[] = [];
+  if (backend === "custom" && !identity.customEndpoint) return result("unsupported", "invalid-endpoint");
   let keyRead = false;
   try {
     const key = await readApiKey(backend);
     keyRead = true;
     keychainFailures.delete(backend);
-    if (key) {
-      models =
-        backend === "anthropic"
-          ? await fetchAnthropic(key)
-          : backend === "google"
-            ? await fetchGoogle(key)
-            : await fetchOpenAICompatible(
-                backend === "custom" ? customBaseUrl() ?? "" : OPENAI_COMPAT_BASE_URL[backend] ?? "",
-                key,
-              );
-    }
+    // A successful native keychain read itself advances the vault revision.
+    const afterRead = discoveryIdentity(backend);
+    if (afterRead.customEndpoint !== identity.customEndpoint) return failed("identity-changed");
+    identity = afterRead;
+    if (!key) return result("unsupported", "missing-key");
+    const rows = backend === "anthropic" ? await fetchAnthropic(key)
+      : backend === "google" ? await fetchGoogle(key)
+      : await fetchOpenAICompatible(backend === "custom" ? identity.customEndpoint! : OPENAI_COMPAT_BASE_URL[backend] ?? "", key);
+    const models = [...new Map(rows.filter(row => typeof row?.id === "string" && row.id.trim())
+      .map(row => [row.id.trim(), { id: row.id.trim(), label: typeof row.label === "string" && row.label.trim() ? row.label.trim() : row.id.trim() }])).values()];
+    return result("ok", models.length ? undefined : "empty-inventory", models);
   } catch (err) {
     const code = err && typeof err === "object" && "code" in err ? (err as { code?: unknown }).code : undefined;
     if (!keyRead && code === "keychain_unavailable") {
       const suppressed = (err as { automaticRetrySuppressed?: unknown }).automaticRetrySuppressed === true;
       const signature = suppressed ? "keychain_unavailable:latched" : "keychain_unavailable";
-      const streak = (failure?.streak ?? 0) + 1;
-      const until = suppressed
-        ? Number.POSITIVE_INFINITY
-        : now + Math.min(TTL_MS * 2 ** Math.min(streak - 1, 10), KEYCHAIN_BACKOFF_MAX_MS);
-      if (failure?.signature !== signature) {
-        console.warn(
-          `[providers] live ${backend} model fetch skipped: credential store unavailable; manual model selection remains available`
-            + (suppressed ? " (retries when credentials change)" : ` (next attempt in ${Math.round((until - now) / 60_000)}m)`),
-          err instanceof Error ? err.message : err,
-        );
+      const streak = failure?.revision === identity.credentialRevision ? failure.streak + 1 : 1;
+      const until = suppressed ? Number.POSITIVE_INFINITY : now + Math.min(TTL_MS * 2 ** Math.min(streak - 1, 10), KEYCHAIN_BACKOFF_MAX_MS);
+      if (failure?.signature !== signature || failure.revision !== identity.credentialRevision) {
+        console.warn(`[providers] ${backend} discovery: ${signature}; manual model selection remains available`);
       }
-      keychainFailures.set(backend, { until, streak, revision, signature });
-    } else {
-      // 실시간 조회 실패를 조용히 삼키지 않는다. UI는 manual ID 입력을 계속 제공한다.
-      console.warn(
-        `[providers] live ${backend} model fetch failed; manual model selection remains available:`,
-        err instanceof Error ? err.message : err,
-      );
+      keychainFailures.set(backend, { until, streak, revision: identity.credentialRevision, signature });
+      return failed("keychain_unavailable");
     }
+    // Provider errors can contain credentials or endpoint details; expose only bounded machine reasons.
+    const message = err instanceof Error ? err.message : "";
+    const reason = /^(http:\d{3}|invalid-response|pagination-invalid|pagination-limit|invalid-endpoint)$/.test(message)
+      ? message : keyRead ? "discovery-failed" : "credential-read-failed";
+    console.warn(`[providers] ${backend} discovery: ${reason}; manual model selection remains available`);
+    return failed(reason);
   }
-  if (models.length === 0) models = catalogModels(backend);
-  cache.set(backend, { at: now, models });
-  return models;
+}
+
+export async function fetchByokModelDiscovery(backend: ByokBackend, now: number): Promise<ByokModelDiscovery> {
+  const identity = JSON.stringify(discoveryIdentity(backend));
+  const pending = flights.get(backend);
+  if (pending?.identity === identity) return cloneDiscovery(await pending.promise);
+  const flight = { identity, promise: discoverByokModels(backend, now) };
+  flights.set(backend, flight);
+  try { return cloneDiscovery(await flight.promise); }
+  finally { if (flights.get(backend) === flight) flights.delete(backend); }
+}
+
+/** Public picker contract stays an array. Discovery status and identity remain internal. */
+export async function fetchByokModels(backend: ByokBackend, now: number): Promise<ModelOption[]> {
+  return (await fetchByokModelDiscovery(backend, now)).models;
 }
 
 /**
  * 런타임의 모델 옵션 목록 (picker용).
- *   - byok: provider 실시간 조회 (fallback = 카탈로그)
+ *   - byok: provider 실시간 조회 (실패 시 같은 자격의 last-good 또는 빈 목록)
  *   - ollama: 호출부가 넘긴 availableModels
  *   - CLI: 설치된 CLI가 발견한 목록을 우선한다.
  *     정적 카탈로그는 label/tag 보강과 탐색 실패 시 fallback으로만 사용한다.
@@ -218,7 +290,9 @@ export async function listRuntimeModels(
 
 /** 디버그/테스트용 — 캐시 비우기. */
 export function clearModelCache(): void {
+  cacheGeneration += 1;
   cache.clear();
+  flights.clear();
   keychainFailures.clear();
 }
 

@@ -111,12 +111,16 @@ function optionIsUnavailable(option: RuntimeModelPickerOption): boolean {
 }
 
 function optionModelLabel(option: RuntimeModelPickerOption, locale: "ko" | "en"): string {
+  const label = option.runtime.kind === "byok" ? `(API) ${option.label}` : option.label;
   if (option.runtime.credentialAccess?.status === "unavailable") {
-    return `${option.label} · ${locale === "ko" ? "API 키 접근 불가" : "API key unavailable"}`;
+    return `${label} · ${locale === "ko" ? "API 키 접근 불가" : "API key unavailable"}`;
   }
-  if (option.isDefault) return runtimeModelFallbackLabel(option.runtime.kind, locale, option.runtime);
-  if (option.unavailable) return `${option.label} · ${locale === "ko" ? "연결 안 됨" : "unavailable"}`;
-  return option.label;
+  if (option.isDefault) {
+    const fallback = runtimeModelFallbackLabel(option.runtime.kind, locale, option.runtime);
+    return option.runtime.kind === "byok" ? `(API) ${fallback}` : fallback;
+  }
+  if (option.unavailable) return `${label} · ${locale === "ko" ? "연결 안 됨" : "unavailable"}`;
+  return label;
 }
 
 /*

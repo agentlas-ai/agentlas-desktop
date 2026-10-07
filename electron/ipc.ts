@@ -432,7 +432,7 @@ import {
   tryRecordFailureEvent,
   tryRecordRunEvent,
 } from "./store/run-events";
-import { getUsageSnapshot, invalidateUsage, retryUsageProvider } from "./usage";
+import { getUsageSnapshot, invalidateUsage, retryUsageProvider, setSubscriptionCreditUse } from "./usage";
 import { isUsageRetryProviderId } from "./usage/retry-policy";
 import {
   commitPendingConfirmationAnswer,
@@ -2842,6 +2842,12 @@ export function registerIpcHandlers(): void {
   });
 
   // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
+  ipcMain.handle("usage:setSubscriptionCreditUse", (_e, enabled: unknown) => {
+    if (typeof enabled !== "boolean") throw new Error("invalid subscription credit preference");
+    const saved = setSubscriptionCreditUse(enabled);
+    clearDetectCache();
+    return saved;
+  });
   ipcMain.handle("usage:snapshot", async (_e, opts?: unknown) => {
     if (developmentEffectsSuppressed()) return getUsageSnapshot();
     const force = !!opts && typeof opts === "object" && !Array.isArray(opts)
@@ -3110,8 +3116,8 @@ export function registerIpcHandlers(): void {
     },
   );
   // 온보딩 AI 단계가 끝날 때 — 연결한 것으로 오케스트레이터·워커 풀을 처음 채운다(오너 2026-10-06).
-  ipcMain.handle("runtime:seedFirstRunRoles", async () => {
-    const seed = await seedFirstRunRoles();
+  ipcMain.handle("runtime:seedFirstRunRoles", async (_e, apiChoice?: unknown) => {
+    const seed = await seedFirstRunRoles(apiChoice);
     if (seed.seeded) emitDesktopStoreChange({ entity: "runtime" });
     return seed;
   });
@@ -3227,11 +3233,15 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("secrets:saveApiKey", async (_e, backend: RuntimeBackend, key: string) => {
     await saveApiKey(backend, key);
     clearModelCache();
+    clearDetectCache();
+    emitDesktopStoreChange({ entity: "runtime" });
   });
   ipcMain.handle("secrets:hasApiKey", (_e, backend: RuntimeBackend) => hasApiKey(backend));
   ipcMain.handle("secrets:deleteApiKey", async (_e, backend: RuntimeBackend) => {
     await deleteApiKey(backend);
     clearModelCache();
+    clearDetectCache();
+    emitDesktopStoreChange({ entity: "runtime" });
   });
   
   // ── custom backend config ───────────────────────────────
@@ -3248,6 +3258,8 @@ export function registerIpcHandlers(): void {
     const safe = validateCustomBaseUrl(typeof url === "string" ? url : "");
     getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('custom_base_url', ?)").run(safe);
     clearModelCache();
+    clearDetectCache();
+    emitDesktopStoreChange({ entity: "runtime" });
   });
 
   // ── 터미널 프로필(사용자 편집형 CLI 러너) ───────────────────────────

@@ -80,7 +80,7 @@ function modelChipLabel(s: RuntimeStatus, opts: ModelOption[]): string {
   const label = opts.find((o) => o.id === s.model)?.label ?? (s.model || null);
   const localName = LOCAL_RUNTIME_LABEL[s.kind];
   if (localName) return label ? `${localName} · ${label}` : localName;
-  if (s.kind === "byok") return label ?? "API";
+  if (s.kind === "byok") return label ? `(API) ${label}` : "(API)";
   const base = CLI_LABEL[s.kind] ?? s.kind;
   return label ? `${base} · ${label}` : base;
 }
@@ -1829,7 +1829,8 @@ function ChatInputComponent({
 
             {/* 모델·작업량은 권한 바로 뒤에 둔다. 둘 다 이 작업의 실행 범위를 정하는 설정이다. */}
             {runtime &&
-              ((modelOptions?.length ?? 0) > 0 || effortOptionsForModel(runtime).length > 0) && (
+              ((modelOptions?.length ?? 0) > 0 || effortOptionsForModel(runtime).length > 0
+                || (runtime.kind === "byok" && Boolean(runtime.model?.trim()))) && (
                 <button
                   ref={modelTriggerRef}
                   className="chat-input-chip chat-input-model-chip"

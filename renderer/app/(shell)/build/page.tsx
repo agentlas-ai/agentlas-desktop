@@ -56,6 +56,7 @@ import { buildScanDisposition, buildScanFindings, buildScanSeverityBucket } from
 import type { ChatQuestion } from "@/components/ChatStream";
 import type { CloudAgentPublishProgressEvent, CloudAgentPublishStage } from "@shared/types";
 import { selectionForRuntime } from "@shared/runtime-selection";
+import { providerQuotaExhausted } from "@shared/runtime-quota";
 
 type StageState = "pending" | "active" | "done" | "error";
 const OPENCRAB_QUESTION_ID = "opencrab-ontology";
@@ -126,17 +127,23 @@ const BUILD_BLOCKING_USAGE_ERRORS = new Set(["auth_expired", "credentials_corrup
 
 function runtimeUsageProvider(runtime: RuntimeStatus, usage: UsageSnapshot | null) {
   if (!usage) return null;
-  const directIds = new Set([runtime.kind, runtime.source]);
-  const direct = usage.providers.find((provider) => directIds.has(provider.provider));
-  if (direct) return direct;
-  return usage.providers.find((provider) => provider.backend === runtime.backend) ?? null;
+  // These adapters observe the CLI account, never a same-backend API key or ACP source.
+  switch (runtime.kind) {
+    case "claude-code":
+    case "codex":
+    case "kimi":
+    case "grok":
+      return usage.providers.find((provider) => provider.provider === runtime.kind) ?? null;
+    default:
+      return null;
+  }
 }
 
-function runtimeUsageBlocked(runtime: RuntimeStatus, usage: UsageSnapshot | null): boolean {
+function runtimeUsageBlocked(runtime: RuntimeStatus, usage: UsageSnapshot | null, model: string | null | undefined = runtime.model): boolean {
   const provider = runtimeUsageProvider(runtime, usage);
   if (!provider) return false;
   if (provider.status === "error" && provider.error && BUILD_BLOCKING_USAGE_ERRORS.has(provider.error)) return true;
-  return provider.status === "ok" && provider.windows.some((window) => window.usedPercent >= 100);
+  return provider.status === "ok" && providerQuotaExhausted(provider, Date.now(), model ?? undefined, provider.provider);
 }
 
 function fmtLogTime(at: number): string {
@@ -583,10 +590,12 @@ export default function BuildPage() {
   const selectedRuntimeStatus = runtime
     ? runtimes.find((item) => runtimeKey(item) === runtimeKey(runtime)) ?? null
     : runtimes.find((item) => item.active) ?? runtimes[0] ?? null;
+  const selectedRuntimeUsageProvider = selectedRuntimeStatus ? runtimeUsageProvider(selectedRuntimeStatus, usage) : null;
+  const selectedRuntimeBannerRuntime = selectedRuntimeUsageProvider ? selectedRuntimeStatus : null;
   const selectedRuntimeProviderLabel = selectedRuntimeStatus
-    ? runtimeUsageProvider(selectedRuntimeStatus, usage)?.label ?? engineLabel(selectedRuntimeStatus, ko)
+    ? selectedRuntimeUsageProvider?.label ?? engineLabel(selectedRuntimeStatus, ko)
     : null;
-  const selectedRuntimeBlocked = selectedRuntimeStatus ? runtimeUsageBlocked(selectedRuntimeStatus, usage) : false;
+  const selectedRuntimeBlocked = selectedRuntimeStatus ? runtimeUsageBlocked(selectedRuntimeStatus, usage, runtime?.model ?? selectedRuntimeStatus.model) : false;
   const running = phase === "running";
   // 대화형 빌드가 진행 중(엔진 실행 중이거나 인터뷰 답변 대기 중)이면 컴포저 입력을 잠근다.
   const busy = phase === "running" || phase === "mcp-review" || phase === "runtime-approval" || phase === "interview";
@@ -625,12 +634,13 @@ export default function BuildPage() {
               <KeyStatusBanner
                 mode="pill"
                 relevantProvider={selectedRuntimeProviderLabel}
+                relevantRuntime={selectedRuntimeBannerRuntime}
                 problemsInBanner
               />
             </div>
           </header>
 
-          <KeyStatusBanner mode="banner" relevantProvider={selectedRuntimeProviderLabel} />
+          <KeyStatusBanner mode="banner" relevantProvider={selectedRuntimeProviderLabel} relevantRuntime={selectedRuntimeBannerRuntime} />
 
           {/* Ambient status layer — pinned so it is on screen no matter how far
               the log has scrolled. This is the one element that must never go
@@ -828,11 +838,15 @@ export default function BuildPage() {
                         </option>
                       )];
                     }
-                    return models.map((m) => (
-                      <option key={`${key}::${m.id}`} value={`${key}::${m.id}`} disabled={blocked}>
-                        {engineLabel(r, ko)} · {m.label}{suffix}
-                      </option>
-                    ));
+                    return models.map((m) => {
+                      const modelBlocked = runtimeUsageBlocked(r, usage, m.id);
+                      const modelSuffix = `${r.active ? (ko ? " · 활성" : " · active") : ""}${modelBlocked ? (ko ? " · 사용량 소진" : " · usage exhausted") : ""}`;
+                      return (
+                        <option key={`${key}::${m.id}`} value={`${key}::${m.id}`} disabled={modelBlocked}>
+                          {engineLabel(r, ko)} · {m.label}{modelSuffix}
+                        </option>
+                      );
+                    });
                   })}
                 </select>
               </div>

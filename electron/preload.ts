@@ -305,6 +305,7 @@ const api: AgentlasIpc = {
   },
   usage: {
     snapshot: (opts?: { force?: boolean }) => ipcRenderer.invoke("usage:snapshot", opts),
+    setSubscriptionCreditUse: (enabled: boolean) => ipcRenderer.invoke("usage:setSubscriptionCreditUse", enabled),
     retry: (providerId: UsageRetryProviderId) => ipcRenderer.invoke("usage:retry", providerId),
   },
   billing: {
@@ -491,7 +492,7 @@ const api: AgentlasIpc = {
     listRoleMembers: () => ipcRenderer.invoke("runtime:listRoleMembers"),
     setRoleMembers: (role, selections) =>
       ipcRenderer.invoke("runtime:setRoleMembers", role, selections),
-    seedFirstRunRoles: () => ipcRenderer.invoke("runtime:seedFirstRunRoles"),
+    seedFirstRunRoles: (apiChoice) => ipcRenderer.invoke("runtime:seedFirstRunRoles", apiChoice),
   },
   agentRuntime: {
     list: () => ipcRenderer.invoke("agentRuntime:list"),

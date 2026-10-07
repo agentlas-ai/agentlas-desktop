@@ -4,6 +4,7 @@
 //
 // 실측 원칙: UsageSnapshot.providers 의 status/usedPercent 에서만 도출한다. 추측 금지.
 import type { UsageProviderErrorCode, UsageSnapshot } from "./types";
+import { isSupportedProviderUsageWindow } from "@shared/runtime-quota";
 
 export type KeyHealth = "ok" | "warning" | "error" | "unknown";
 
@@ -51,7 +52,8 @@ export function deriveKeyStatus(snap: UsageSnapshot | null | undefined, provider
   const connected = providers.length - dead.length;
 
   const nearLimit = providers
-    .filter((p) => p.status === "ok" && p.windows.some((w) => (w.usedPercent ?? 0) >= NEAR_LIMIT_PERCENT))
+    .filter((p) => p.status === "ok" && p.windows.some((w) =>
+      isSupportedProviderUsageWindow(w, p.provider) && (w.usedPercent ?? 0) >= NEAR_LIMIT_PERCENT))
     .map((p) => p.label);
 
   // 전 프로바이더가 '키 사망'으로 실측된 경우에만 "모든 에이전트가 멈춥니다"를 단언한다.

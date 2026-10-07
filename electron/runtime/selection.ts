@@ -37,7 +37,7 @@ import { acpOrLegacyRunner, acpSessionKind, createAcpRunner } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import { withNativeBrowserGuidance, type Runner, type RunnerFailure } from "./runner";
-import { peekProviderQuotaExhausted } from "../usage";
+import { getSubscriptionCreditUse, peekProviderQuotaExhausted } from "../usage";
 import { peekAgentlasCreditsAvailable } from "../billing";
 import { listModelRoleMembers } from "../store/model-roles";
 import { CONNECTABLE_RUNTIMES, type ConnectableRuntime } from "../../shared/runtime-connect";
@@ -63,6 +63,15 @@ function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
     // Stop/cancel wins even when a probe just failed or completed. The provider remains authoritative for
     // auth failure and runtime fallback; absent status commands (Kimi) and timeouts never block a valid run.
     if (req.signal?.aborted) throw abortReasonError(req);
+    // Re-read after slot/auth waits: the owner may have turned spending off
+    // since selection. Unknown observations do not manufacture exhaustion.
+    if (["claude-code", "codex"].includes(kind) && !getSubscriptionCreditUse()
+      && peekProviderQuotaExhausted(kind, Date.now(), req.model)) {
+      return { text: "", failure: { kind: "refused", source: "marker", runtime: kind,
+        providerCode: "subscription_credits_disabled",
+        message: req.locale === "ko" ? "구독 한도가 소진됐고 크레딧 자동 사용이 꺼져 있어 시작하지 않았습니다."
+          : "This run was not started: the subscription limit is reached and automatic credit use is off." } };
+    }
     return runner(req, events);
   };
 }

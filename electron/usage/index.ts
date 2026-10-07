@@ -53,6 +53,27 @@ const explicitRetryGate = new UsageRetryGate(FORCE_MIN_MS);
 const explicitRetryInFlight = new Map<UsageRetryProviderId, Promise<UsageRetryResult>>();
 const MODEL_ROLE_USAGE_WINDOW_MS = 7 * 24 * 60 * 60_000;
 
+/** Opt-in is local to Agentlas. It does not buy credits or change provider controls. */
+export function getSubscriptionCreditUse(): boolean {
+  try {
+    const row = getDb().prepare("SELECT value FROM meta WHERE key = ?").get("subscription_credit_use") as { value: string } | undefined;
+    return row?.value === "true";
+  } catch { return false; }
+}
+
+export function setSubscriptionCreditUse(enabled: boolean): boolean {
+  if (typeof enabled !== "boolean") throw new Error("invalid subscription credit preference");
+  getDb().prepare("INSERT INTO meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+    .run("subscription_credit_use", String(enabled));
+  return getSubscriptionCreditUse();
+}
+
+function withSubscriptionCreditPolicy(snapshot: UsageSnapshot): UsageSnapshot {
+  const enabled = getSubscriptionCreditUse();
+  return { ...snapshot, subscriptionCreditUse: enabled, providers: snapshot.providers.map(provider =>
+    ["claude-code", "codex"].includes(provider.provider) ? { ...provider, allowPaidUsage: enabled } : provider) };
+}
+
 export function modelRoleUsageSnapshot(now: number): ModelRoleUsageSnapshot {
   const sinceMs = now - MODEL_ROLE_USAGE_WINDOW_MS;
   const since = new Date(sinceMs).toISOString();
@@ -393,7 +414,9 @@ export function peekProviderQuotaExhausted(providerId: string, now = Date.now(),
   if (!entry || !Number.isFinite(entry.usage.fetchedAt)
     || now - entry.usage.fetchedAt > LAST_GOOD_MAX_MS) return false;
   if ((entry.usage.status !== "ok" && entry.usage.status !== "no_quota") || entry.usage.error === "local_estimate") return false;
-  return providerQuotaExhausted(entry.usage, now, model, providerId);
+  return providerQuotaExhausted({ ...entry.usage,
+    ...(["claude-code", "codex"].includes(providerId) ? { allowPaidUsage: getSubscriptionCreditUse() } : {}),
+  }, now, model, providerId);
 }
 
 function codexAccountMatches(usage: ProviderUsage | undefined): boolean {
@@ -575,7 +598,7 @@ async function buildUsageSnapshot(options?: {
   }
   const forced = options?.forceAll === true || options?.forceProviderId != null;
   if (!forced && cache && now - cache.at < TTL_MS) {
-    return cache.snapshot;
+    return withSubscriptionCreditPolicy(cache.snapshot);
   }
   const results = await Promise.allSettled(ADAPTERS.map((adapter) => fetchProvider(
     adapter.id,
@@ -593,7 +616,7 @@ async function buildUsageSnapshot(options?: {
     modelRoleUsage: modelRoleUsageSnapshot(now),
   };
   cache = { snapshot, at: now };
-  return snapshot;
+  return withSubscriptionCreditPolicy(snapshot);
 }
 
 export async function getUsageSnapshot(opts?: { force?: boolean }): Promise<UsageSnapshot> {

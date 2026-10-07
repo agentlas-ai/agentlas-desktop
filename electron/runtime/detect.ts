@@ -3,6 +3,7 @@
 import { probeClaudeCode, probeClaudeEfforts } from "./claude-code";
 import { canonicalRuntimeBackend } from "../../shared/runtime-backends";
 import { runtimeMatchesSelection as exactRuntimeMatchesSelection } from "../../shared/runtime-selection";
+import { byokDiscoveryIdentity, fetchByokModelDiscovery } from "./providers";
 import { allocationAdvertisement } from "./model-advertisement";
 import { clearCodexBinCache, probeCodex } from "./codex";
 import { readCodexModelDiscovery } from "./codex-models";
@@ -44,9 +45,7 @@ import type {
   RuntimeStatus,
 } from "../../shared/types";
 import {
-  byokModels,
   cliModels,
-  defaultByokModel,
   setResolvedCliModelAlias,
   resolvedCliModelAlias,
 } from "../../shared/models";
@@ -64,12 +63,13 @@ type ActiveRuntimeRow = {
   long_context: number;
 };
 
-let detectCache: { at: number; list: RuntimeStatus[] } | null = null;
+let detectCache: { at: number; providerIdentity: string; list: RuntimeStatus[] } | null = null;
 let detectInFlight: Promise<RuntimeStatus[]> | null = null;
-let observationCache: { at: number; generation: number; list: RuntimeStatus[] } | null = null;
-let observationFlight: { generation: number; promise: Promise<RuntimeStatus[]> } | null = null;
+let observationCache: { at: number; generation: number; providerIdentity: string; list: RuntimeStatus[] } | null = null;
+let observationFlight: { generation: number; providerIdentity: string; promise: Promise<RuntimeStatus[]> } | null = null;
 let detectGeneration = 0;
 let detectInFlightGeneration = -1;
+let detectInFlightProviderIdentity: string | null = null;
 
 function runtimeDetectCacheMs(): number {
   return Number(process.env.AGENTLAS_RUNTIME_DETECT_CACHE_MS ?? 10_000);
@@ -169,7 +169,7 @@ function byokModelOf(backend: RuntimeBackend, active: ActiveRuntimeRow | null): 
   if (active?.kind === "byok" && active.backend === backend && active.model) {
     return active.model;
   }
-  return recallRuntimeSelection("byok", backend)?.model ?? defaultByokModel(backend);
+  return recallRuntimeSelection("byok", backend)?.model ?? undefined;
 }
 
 /** BYOK 1M 토글 상태 — 활성 백엔드일 때만 저장값 반영, 그 외엔 off. */
@@ -332,10 +332,11 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
     clearCliVersionProbeCache();
   }
   const now = Date.now();
-  if (detectCache && now - detectCache.at < runtimeDetectCacheMs()) {
+  const providerIdentity = byokDiscoveryIdentity();
+  if (detectCache && detectCache.providerIdentity === providerIdentity && now - detectCache.at < runtimeDetectCacheMs()) {
     return cloneRuntimeStatuses(detectCache.list);
   }
-  if (detectInFlight && detectInFlightGeneration === detectGeneration) {
+  if (detectInFlight && detectInFlightGeneration === detectGeneration && detectInFlightProviderIdentity === providerIdentity) {
     return cloneRuntimeStatuses(await detectInFlight);
   }
 
@@ -359,19 +360,21 @@ export async function detectRuntimes(force = false): Promise<RuntimeStatus[]> {
   }));
   detectInFlight = flight;
   detectInFlightGeneration = requestGeneration;
+  detectInFlightProviderIdentity = providerIdentity;
   try {
     const list = await flight;
     // A runtime update/store change may have invalidated this probe while it
     // was running. Let its caller finish, but never make that old generation
     // the source for a later dashboard read.
     if (requestGeneration === detectGeneration) {
-      detectCache = { at: Date.now(), list: cloneRuntimeStatuses(list) };
+      detectCache = { at: Date.now(), providerIdentity, list: cloneRuntimeStatuses(list) };
     }
     return cloneRuntimeStatuses(list);
   } finally {
     if (detectInFlight === flight) {
       detectInFlight = null;
       detectInFlightGeneration = -1;
+      detectInFlightProviderIdentity = null;
     }
   }
 }
@@ -383,16 +386,17 @@ export async function observeRuntimes(force = false): Promise<RuntimeStatus[]> {
   if (force) clearDetectCache();
   const generation = detectGeneration;
   let raw: RuntimeStatus[];
-  if (observationCache?.generation === generation && Date.now() - observationCache.at < runtimeDetectCacheMs()) {
+  const providerIdentity = byokDiscoveryIdentity();
+  if (observationCache?.generation === generation && observationCache.providerIdentity === providerIdentity && Date.now() - observationCache.at < runtimeDetectCacheMs()) {
     raw = cloneRuntimeStatuses(observationCache.list);
   } else {
-    if (observationFlight?.generation !== generation) {
-      observationFlight = { generation, promise: detectRuntimesUncached(true) };
+    if (observationFlight?.generation !== generation || observationFlight.providerIdentity !== providerIdentity) {
+      observationFlight = { generation, providerIdentity, promise: detectRuntimesUncached(true) };
     }
     const flight = observationFlight;
     try {
       raw = await flight.promise;
-      if (generation === detectGeneration) observationCache = { at: Date.now(), generation, list: cloneRuntimeStatuses(raw) };
+      if (generation === detectGeneration) observationCache = { at: Date.now(), generation, providerIdentity, list: cloneRuntimeStatuses(raw) };
     } finally {
       if (observationFlight === flight) observationFlight = null;
     }
@@ -873,116 +877,35 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
     });
   }
 
-  if (anthropicByok.status === "available") {
-    const selectedModel = byokModelOf("anthropic", active);
-    list.push({
-      kind: "byok",
-      credentialAccess: { status: "available" },
-      backend: "anthropic",
-      source: "byok:anthropic",
-      version: null,
-      active: false,
-      model: selectedModel,
-      availableModels: byokModels("anthropic").map((m) => m.id),
-      // BYOK는 저장된 API 키가 곧 자격이다 — 호스트 카탈로그 전체를 라이브로 광고한다.
-      ...allocationAdvertisement({
-        live: byokModels("anthropic").map((m) => m.id),
-        selected: selectedModel,
-        catalogFallback: false,
-      }),
-      longContextEnabled: byokLongOf("anthropic", active),
-    });
-  }
-  if (openaiByok.status === "available") {
-    const selectedModel = byokModelOf("openai", active);
-    list.push({
-      kind: "byok",
-      credentialAccess: { status: "available" },
-      backend: "openai",
-      source: "byok:openai",
-      version: null,
-      active: false,
-      model: selectedModel,
-      availableModels: byokModels("openai").map((m) => m.id),
-      ...allocationAdvertisement({
-        live: byokModels("openai").map((m) => m.id),
-        selected: selectedModel,
-        catalogFallback: false,
-      }),
-      longContextEnabled: byokLongOf("openai", active),
-    });
-  }
-  if (googleByok.status === "available") {
-    const selectedModel = byokModelOf("google", active);
-    list.push({
-      kind: "byok",
-      credentialAccess: { status: "available" },
-      backend: "google",
-      source: "byok:google",
-      version: null,
-      active: false,
-      model: selectedModel,
-      availableModels: byokModels("google").map((m) => m.id),
-      ...allocationAdvertisement({
-        live: byokModels("google").map((m) => m.id),
-        selected: selectedModel,
-        catalogFallback: false,
-      }),
-      longContextEnabled: byokLongOf("google", active),
-    });
-  }
-
-  // Anthropic/OpenAI 호환 서드파티(GLM/Kimi/DeepSeek/Upstage) + custom(사용자 base URL) —
-  // 키가 저장돼 있으면 엔진으로 노출한다. upstage/custom을 빠뜨리면 Settings에서 고를 수 있어도
-  // detect가 목록에 안 넣어 선택이 조용히 되돌려진다(감사 P0 데드코드).
-  const compatFlags: Record<"glm" | "kimi" | "deepseek" | "minimax" | "xai" | "openrouter" | "upstage" | "custom", RuntimeCredentialProbe> = {
-    glm: glmByok,
-    kimi: kimiByok,
-    deepseek: deepseekByok,
-    minimax: minimaxByok,
-    xai: xaiByok,
-    openrouter: openrouterByok,
-    upstage: upstageByok,
-    custom: customByok,
-  };
-  for (const backend of ["glm", "kimi", "deepseek", "minimax", "xai", "openrouter", "upstage", "custom"] as const) {
-    if (compatFlags[backend].status !== "available") continue;
-    const selectedModel = byokModelOf(backend, active);
-    list.push({
-      kind: "byok",
-      credentialAccess: { status: "available" },
-      backend,
-      source: `byok:${backend}`,
-      version: null,
-      active: false,
-      model: selectedModel,
-      availableModels: byokModels(backend).map((m) => m.id),
-      ...allocationAdvertisement({
-        live: byokModels(backend).map((m) => m.id),
-        selected: selectedModel,
-        catalogFallback: false,
-      }),
-      longContextEnabled: byokLongOf(backend, active),
-    });
-  }
-
   const credentialProbes = {
-    anthropic: anthropicByok, openai: openaiByok, google: googleByok, ...compatFlags,
+    anthropic: anthropicByok, openai: openaiByok, google: googleByok,
+    glm: glmByok, kimi: kimiByok, deepseek: deepseekByok, minimax: minimaxByok,
+    xai: xaiByok, openrouter: openrouterByok, upstage: upstageByok, custom: customByok,
   };
-  for (const backend of Object.keys(credentialProbes) as Array<keyof typeof credentialProbes>) {
+  const apiRuntimes = await Promise.all((Object.keys(credentialProbes) as Array<keyof typeof credentialProbes>).map(async (backend): Promise<RuntimeStatus | null> => {
     const access = credentialProbes[backend];
-    if (access.status !== "unavailable") continue;
-    // Keep the selected provider visible without claiming the key is missing
-    // or granting its display catalog to automatic workload allocation.
-    list.push({
+    if (access.status === "missing") return null;
+    const selectedModel = byokModelOf(backend, active)?.trim() || undefined;
+    const base: RuntimeStatus = {
       kind: "byok", backend, source: `byok:${backend}`, version: null, active: false,
-      credentialAccess: { ...access },
-      model: byokModelOf(backend, active),
-      availableModels: byokModels(backend).map((model) => model.id),
-      allocationModels: [], allocationModelProfiles: {},
+      credentialAccess: { ...access }, model: selectedModel,
       longContextEnabled: byokLongOf(backend, active),
-    });
-  }
+      availableModels: [], allocationModels: [], allocationModelProfiles: {},
+    };
+    if (access.status !== "available") return base;
+    const discovery = await fetchByokModelDiscovery(backend, Date.now());
+    return {
+      ...base,
+      availableModels: discovery.models.map(model => model.id),
+      modelDiscovery: { status: discovery.status, reason: discovery.reason, stale: discovery.stale,
+        count: discovery.models.length, source: "http", at: new Date(discovery.at).toISOString() },
+      // OpenAI-compatible /models lists can include embeddings, audio and images.
+      // Unknown capability permits only the owner's exact provider-scoped selection.
+      ...allocationAdvertisement({ live: discovery.status === "ok" && !discovery.stale ? discovery.chatModels : [],
+        selected: selectedModel, catalogFallback: false }),
+    };
+  }));
+  for (const runtime of apiRuntimes) if (runtime) list.push(runtime);
 
   let activeAssigned = false;
   for (const runtime of list) {
@@ -995,7 +918,8 @@ async function detectRuntimesUncached(observationOnly = false): Promise<RuntimeS
   const activeCredentialUnavailable = active?.kind === "byok" && isRuntimeCredentialUnavailable(
     list.find((runtime) => runtime.kind === "byok" && runtime.backend === active.backend),
   );
-  const firstAvailable = list.find((runtime) => !isRuntimeCredentialUnavailable(runtime));
+  const firstAvailable = list.find((runtime) => !isRuntimeCredentialUnavailable(runtime)
+    && (runtime.kind !== "byok" || Boolean(runtime.model?.trim())));
   if (!observationOnly && !active && !list.some((runtime) => runtime.active) && !activeCredentialUnavailable && firstAvailable) {
     firstAvailable.active = true;
     saveActiveRuntime(firstAvailable);
