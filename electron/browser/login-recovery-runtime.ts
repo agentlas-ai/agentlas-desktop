@@ -110,22 +110,65 @@ async function cdpPages(): Promise<CdpPageTarget[]> {
   return out;
 }
 
+/** Main-only direct-import custody; never accepted from tool/model JSON. */
+export interface LoginImportControl { signal: AbortSignal; assertCurrent(): void }
+export interface GuardedLoginImportReport {
+  state: TargetedImportReport["state"] | "cancelled" | "unknown";
+  effect: "not-started" | "imported" | "unknown";
+  /** Known acknowledgements, not total effects when effect is unknown. */
+  acknowledgedWritten: number;
+}
+interface LoginImportScope {
+  control: LoginImportControl;
+  consentCurrent?: () => boolean;
+  effect: GuardedLoginImportReport["effect"];
+  acknowledgedWritten: number;
+}
+function assertLoginImportCurrent(scope?: LoginImportScope): void {
+  if (!scope) return;
+  if (scope.control.signal.aborted) throw scope.control.signal.reason ?? new Error("login-import-cancelled");
+  scope.control.assertCurrent();
+  if (scope.consentCurrent && !scope.consentCurrent()) throw new Error("login-import-consent-changed");
+}
+/** Guarded direct lane only; existing observer/maintenance callers keep their contracts. */
+export async function guardedLoginTargetedImport(input: { domains: string[]; surface: BrowserCookieSurface }, control: LoginImportControl): Promise<GuardedLoginImportReport> {
+  const scope: LoginImportScope = { control, effect: "not-started", acknowledgedWritten: 0 };
+  try {
+    assertLoginImportCurrent(scope);
+    const report = await targetedImport(input, scope);
+    assertLoginImportCurrent(scope);
+    return { state: scope.effect === "unknown" ? "unknown" : report.state, effect: scope.effect, acknowledgedWritten: scope.acknowledgedWritten };
+  } catch {
+    let cancelled = false;
+    try { assertLoginImportCurrent(scope); } catch { cancelled = true; }
+    return { state: scope.effect === "unknown" ? "unknown" : cancelled ? "cancelled" : "unknown",
+      effect: scope.effect, acknowledgedWritten: scope.acknowledgedWritten };
+  }
+}
+
 /** One CDP session: send commands, optionally wait for one event, then close. */
-async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params?: Record<string, unknown>) => Promise<unknown>, waitFor: (event: string, timeoutMs: number) => Promise<boolean>) => Promise<T>): Promise<T> {
+async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params?: Record<string, unknown>) => Promise<unknown>, waitFor: (event: string, timeoutMs: number) => Promise<boolean>) => Promise<T>, scope?: LoginImportScope): Promise<T> {
+  assertLoginImportCurrent(scope);
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
   // All recovery CDP commands (including evaluation, reload, and cookie feeds)
   // share this boundary. An existing answering port is never sufficient proof.
   if (!loopbackWs(wsUrl, launcher.browserCdpPort())
     || (await launcher.reconcileBrowserCdpOwnerWithRetry()).state !== "owned") throw new Error("browser-ownership-unconfirmed");
+  assertLoginImportCurrent(scope);
   return new Promise<T>((resolve, reject) => {
+    assertLoginImportCurrent(scope);
     const socket = new WebSocket(wsUrl, { perMessageDeflate: false, maxPayload: 8 * 1024 * 1024 });
     let seq = 0;
-    const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void }>();
+    const pending = new Map<number, { resolve: (value: unknown) => void; reject: (error: Error) => void; acknowledged?: () => void }>();
     const waiters = new Map<string, Set<() => void>>();
     let settled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const aborted = () => end(new Error("login-import-cancelled"));
     const end = (error: Error | null, value?: T) => {
       if (settled) return;
       settled = true;
+      if (timer) clearTimeout(timer);
+      scope?.control.signal.removeEventListener("abort", aborted);
       for (const entry of pending.values()) entry.reject(new Error("cdp-session-closed"));
       pending.clear();
       try { socket.close(); } catch { /* closed */ }
@@ -133,8 +176,16 @@ async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params
     };
     const call = (method: string, params: Record<string, unknown> = {}) => new Promise<unknown>((res, rej) => {
       const id = ++seq;
-      pending.set(id, { resolve: res, reject: rej });
-      try { socket.send(JSON.stringify({ id, method, params })); } catch (error) { pending.delete(id); rej(error as Error); }
+      const acknowledged = scope && method === "Storage.setCookies" && Array.isArray(params.cookies)
+        ? () => { scope.effect = "imported"; scope.acknowledgedWritten += (params.cookies as unknown[]).length; } : undefined;
+      pending.set(id, { resolve: res, reject: rej, acknowledged });
+      try {
+        const message = JSON.stringify({ id, method, params });
+        if (settled) throw new Error("cdp-session-closed");
+        assertLoginImportCurrent(scope);
+        if (scope) scope.effect = "unknown";
+        socket.send(message);
+      } catch (error) { pending.delete(id); rej(error as Error); }
     });
     const waitFor = (event: string, timeoutMs: number) => new Promise<boolean>((res) => {
       const set = waiters.get(event) ?? new Set<() => void>();
@@ -151,15 +202,24 @@ async function cdpSession<T>(wsUrl: string, work: (call: (method: string, params
         if (!entry) return;
         pending.delete(message.id);
         if (message.error) entry.reject(new Error(`cdp-error:${message.error.code ?? "unknown"}`));
-        else entry.resolve(message.result);
+        else { entry.acknowledged?.(); entry.resolve(message.result); }
       } else if (typeof message.method === "string") {
         for (const waiter of [...(waiters.get(message.method) ?? [])]) waiter();
       }
     });
     socket.on("error", () => end(new Error("cdp-socket-error")));
     socket.on("close", () => end(new Error("cdp-socket-closed")));
-    socket.on("open", () => { void work(call, waitFor).then((value) => end(null, value), (error) => end(error instanceof Error ? error : new Error(String(error)))); });
-    setTimeout(() => end(new Error("cdp-session-timeout")), 45_000).unref?.();
+    socket.on("open", () => {
+      if (settled) return;
+      try {
+        assertLoginImportCurrent(scope);
+        void work(call, waitFor).then((value) => end(null, value), (error) => end(error instanceof Error ? error : new Error(String(error))));
+      } catch (error) { end(error instanceof Error ? error : new Error(String(error))); }
+    });
+    timer = setTimeout(() => end(new Error("cdp-session-timeout")), 45_000);
+    timer.unref?.();
+    scope?.control.signal.addEventListener("abort", aborted, { once: true });
+    try { assertLoginImportCurrent(scope); } catch (error) { end(error instanceof Error ? error : new Error(String(error))); }
   });
 }
 
@@ -240,22 +300,33 @@ async function settledCdpPage(target: CdpPageTarget): Promise<string | null> {
 type CdpCookieParam = { name: string; value: string; domain: string; path: string; secure: boolean; httpOnly: boolean; sameSite?: "Strict" | "Lax" | "None"; expires?: number };
 
 /** Feed cookies into the running, owned dedicated browser without closing it. */
-async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[]): Promise<number | null> {
+async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[], scope?: LoginImportScope): Promise<number | null> {
+  assertLoginImportCurrent(scope);
   const launcher = await import("../mcp-tools/browser-cdp-launcher");
-  if (!(await launcher.browserCdpPortReady())) return null;
+  assertLoginImportCurrent(scope);
+  const ready = await launcher.browserCdpPortReady();
+  assertLoginImportCurrent(scope);
+  if (!ready) return null;
   const owned = await launcher.reconcileBrowserCdpOwnerWithRetry();
+  assertLoginImportCurrent(scope);
   if (owned.state !== "owned") return null;
   const lease = await launcher.acquireBrowserCdpLease("login-recovery").catch(() => null);
-  if (!lease) return null;
+  if (!lease) { assertLoginImportCurrent(scope); return null; }
   try {
+    assertLoginImportCurrent(scope);
     const { fetchCdpJson } = await import("./native-session-cookie-import");
+    assertLoginImportCurrent(scope);
     const port = launcher.browserCdpPort();
     const version = await fetchCdpJson(port, "/json/version") as { webSocketDebuggerUrl?: unknown } | null;
+    assertLoginImportCurrent(scope);
     const ws = loopbackWs(version?.webSocketDebuggerUrl, port);
     if (!ws) return null;
-    await cdpSession(ws, async (call) => { await call("Storage.setCookies", { cookies }); });
+    await cdpSession(ws, async (call) => { await call("Storage.setCookies", { cookies }); }, scope);
+    assertLoginImportCurrent(scope);
     return cookies.length;
-  } catch {
+  } catch (error) {
+    // A guarded transport failure/cancel is never permission for maintenance import.
+    if (scope) throw error;
     return null;
   } finally {
     launcher.releaseBrowserCdpLease(lease);
@@ -263,10 +334,13 @@ async function feedLiveDedicatedBrowser(cookies: CdpCookieParam[]): Promise<numb
 }
 
 // ── 겨냥 가져오기: 원본 → 에이전트가 쓰는 저장소, 그 도메인만 원본이 이긴다 ──────────────
-async function targetedImport(input: { domains: string[]; surface: BrowserCookieSurface; isCurrent?: () => boolean }): Promise<TargetedImportReport> {
+async function targetedImport(input: { domains: string[]; surface: BrowserCookieSurface; isCurrent?: () => boolean }, custody?: LoginImportScope): Promise<TargetedImportReport> {
+  assertLoginImportCurrent(custody);
   const { browserCredentialConsentRevision, getBrowserCredentialConsent } = await import("./credential-sync");
+  assertLoginImportCurrent(custody);
   const revision = browserCredentialConsentRevision();
   const scope = await consentDomains(input.domains);
+  assertLoginImportCurrent(custody);
   if (!scope) return { state: "not-consented", written: 0 };
   const isCurrent = () => {
     const consent = getBrowserCredentialConsent();
@@ -274,29 +348,67 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
       && consent.granted && consent.profileId === scope.profileId
       && scope.domains.every((domain) => consent.domains.includes(domain));
   };
+  if (custody) custody.consentCurrent = isCurrent;
+  assertLoginImportCurrent(custody);
   if (!isCurrent()) return { state: "not-consented", written: 0 };
   const credential = await import("./credential-import");
+  assertLoginImportCurrent(custody);
   if (!isCurrent()) return { state: "not-consented", written: 0 };
   const source = credential.readSourceSessionCookies(scope.profileId, scope.domains);
   if (!source.ok) {
     if (source.reason !== "unsupported-platform") return { state: "failed", written: 0 };
     // The explicitly selected dedicated surface keeps its maintenance-window importer.
     if (input.surface === "cdp-profile") {
+      assertLoginImportCurrent(custody);
+      if (custody) custody.effect = "unknown";
       const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "dedicated" });
+      if (custody && result.ok) { custody.acknowledgedWritten += result.cookiesAdded + (result.cookiesUpdated ?? 0); custody.effect = "imported"; }
+      assertLoginImportCurrent(custody);
       return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
     }
+    assertLoginImportCurrent(custody);
+    if (custody) custody.effect = "unknown";
     const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "native" });
+    if (custody && result.ok) { custody.acknowledgedWritten += result.cookiesAdded + (result.cookiesUpdated ?? 0); custody.effect = "imported"; }
+    assertLoginImportCurrent(custody);
     return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
   }
   try {
     if (input.surface === "native-partition") {
       const { writeNativeBrowserCookies } = await import("./native-session-cookie-import");
+      assertLoginImportCurrent(custody);
+      const nativeCurrent = () => { try { assertLoginImportCurrent(custody); return isCurrent(); } catch { return false; } };
+      const nativeSession = electronSession.fromPartition(NATIVE_PARTITION);
+      let unacknowledgedWrites = 0;
+      // Observe the real destination ACK, even when the helper later throws after
+      // Stop. Its private error/count shape is neither parsed nor treated as proof.
+      const destination = custody ? {
+        cookies: new Proxy(nativeSession.cookies, {
+          get(target, key) {
+            if (key === "set") return async (details: Parameters<typeof target.set>[0]) => {
+              assertLoginImportCurrent(custody);
+              unacknowledgedWrites += 1;
+              custody.effect = "unknown";
+              await target.set.call(target, details);
+              unacknowledgedWrites -= 1;
+              custody.acknowledgedWritten += 1;
+              custody.effect = unacknowledgedWrites > 0 ? "unknown" : "imported";
+            };
+            const value = Reflect.get(target, key, target);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        }),
+        flushStorageData: () => { assertLoginImportCurrent(custody); return nativeSession.flushStorageData(); },
+      } : nativeSession;
       const counts = await writeNativeBrowserCookies(source.cookies.map((cookie) => ({
         name: cookie.name, value: cookie.value, domain: cookie.domain, path: cookie.path,
         expires: cookie.expires ?? -1, session: cookie.expires === undefined,
         httpOnly: cookie.httpOnly, secure: cookie.secure, sameSite: cookie.sameSite,
-      })), electronSession.fromPartition(NATIVE_PARTITION), Date.now() / 1_000,
-      { isCurrent, explicitImport: true });
+      })), destination, Date.now() / 1_000,
+      { isCurrent: custody ? nativeCurrent : isCurrent, explicitImport: true });
+      // Successful native sets were already counted by the adapter exactly once.
+      if (custody && counts.skipped.writeFailed > 0) custody.effect = "unknown";
+      assertLoginImportCurrent(custody);
       return counts.imported > 0 ? { state: "imported", written: counts.imported } : { state: "failed", written: 0 };
     }
     const params: CdpCookieParam[] = source.cookies.map((cookie) => ({
@@ -305,13 +417,17 @@ async function targetedImport(input: { domains: string[]; surface: BrowserCookie
       ...(cookie.sameSite ? { sameSite: cookie.sameSite } : {}),
       ...(cookie.expires !== undefined ? { expires: cookie.expires } : {}),
     }));
-    const live = await feedLiveDedicatedBrowser(params);
+    const live = await feedLiveDedicatedBrowser(params, custody);
     if (live !== null) return { state: "imported", written: live };
   } finally {
     source.wipe();
   }
   // Dedicated browser not running: nothing to close, so the maintenance import is safe here.
+  assertLoginImportCurrent(custody);
+  if (custody) custody.effect = "unknown";
   const result = await credential.importBrowserCredentials(scope.profileId, scope.domains, { automatic: false, destination: "dedicated" });
+  if (custody && result.ok) { custody.acknowledgedWritten += result.cookiesAdded + (result.cookiesUpdated ?? 0); custody.effect = "imported"; }
+  assertLoginImportCurrent(custody);
   return result.ok ? { state: "imported", written: result.cookiesAdded + (result.cookiesUpdated ?? 0) } : { state: "failed", written: 0 };
 }
 

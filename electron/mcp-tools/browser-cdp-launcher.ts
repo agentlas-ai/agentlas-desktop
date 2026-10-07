@@ -1414,7 +1414,30 @@ export interface BrowserCdpHostEnsureResult {
 
 const BROWSER_CDP_HOST_ENSURE_TIMEOUT_MS = 20_000;
 const BROWSER_CDP_BOOTSTRAP_STDERR_LIMIT = 16 * 1024;
-let browserCdpHostEnsureFlight: Promise<BrowserCdpHostEnsureResult> | null = null;
+export interface BrowserCdpHostEnsureOptions {
+  headed?: boolean;
+  control?: BrowserCdpCloseControl;
+}
+interface BrowserCdpHostEnsureFlight {
+  promise: Promise<BrowserCdpHostEnsureResult>;
+  participants: Set<{ control?: BrowserCdpCloseControl }>;
+}
+let browserCdpHostEnsureFlight: BrowserCdpHostEnsureFlight | null = null;
+
+function assertBrowserCdpHostEnsureCurrent(participants: BrowserCdpHostEnsureFlight["participants"]): void {
+  let refusal: unknown = Object.assign(new Error("Browser host ensure has no current borrower"), {
+    code: "browser.ensure.no-current-borrower",
+  });
+  for (const participant of participants) {
+    try {
+      assertBrowserCdpCloseCurrent(participant.control);
+      return;
+    } catch (error) {
+      refusal = error;
+    }
+  }
+  throw refusal;
+}
 
 interface BrowserCdpHostFailureDetails extends BrowserCdpHostFailureDiagnostic {
   stderrBytes?: number;
@@ -1448,7 +1471,7 @@ type BrowserCdpLauncherMessage = {
  * a bootstrap client: the live-view lease stays in this process and the
  * guardian is rebound to this process before the bootstrap exits.
  */
-async function invokeBrowserTabsListThroughLauncher(launcher: string, options: { headed?: boolean } = {}): Promise<void> {
+async function invokeBrowserTabsListThroughLauncher(launcher: string, options: { headed?: boolean }, assertCurrent: () => void): Promise<void> {
   let stderrBytes = 0;
   let stderrTruncated = false;
   const failure = (stage: BrowserCdpHostFailureStage, code: BrowserCdpHostFailureCode) => new BrowserCdpHostError(
@@ -1456,6 +1479,7 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string, options: {
     code,
     { stderrBytes, stderrTruncated },
   );
+  assertCurrent();
   const child = spawn(process.execPath, [launcher], {
     env: {
       ...process.env,
@@ -1522,6 +1546,7 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string, options: {
     });
   });
   const send = (message: Record<string, unknown>, stage: BrowserCdpHostFailureStage): void => {
+    assertCurrent();
     if (!child.stdin || child.stdin.destroyed || child.stdin.writableEnded) {
       throw failure(stage, "launcher-stdin-closed");
     }
@@ -1562,11 +1587,15 @@ async function invokeBrowserTabsListThroughLauncher(launcher: string, options: {
   }
 }
 
-async function ensureBrowserCdpHostOnce(options: { headed?: boolean } = {}): Promise<BrowserCdpHostEnsureResult> {
+async function ensureBrowserCdpHostOnce(options: { headed?: boolean }, assertCurrent: () => void): Promise<BrowserCdpHostEnsureResult> {
+  assertCurrent();
   try { ensureBrowserCdpProfilePrivate(); }
   catch { throw new BrowserCdpHostError("profile", "profile-unavailable"); }
-  if (await browserCdpPortReady()) {
+  const ready = await browserCdpPortReady();
+  assertCurrent();
+  if (ready) {
     const ownership = await reconcileBrowserCdpOwnerWithRetry();
+    assertCurrent();
     if (ownership.state !== "owned" || !ownership.pid) {
       throw new BrowserCdpHostError("existing-host", "ownership-unverified");
     }
@@ -1575,18 +1604,21 @@ async function ensureBrowserCdpHostOnce(options: { headed?: boolean } = {}): Pro
   }
 
   let launcher = "";
+  assertCurrent();
   try { launcher = ensureBrowserCdpLauncherReady(); }
   catch (error) {
     if (error instanceof BrowserCdpHostError) throw error;
     throw new BrowserCdpHostError("launcher", "launcher-materialize-failed");
   }
-  try { await invokeBrowserTabsListThroughLauncher(launcher, options); }
+  try { await invokeBrowserTabsListThroughLauncher(launcher, options, assertCurrent); }
   catch (error) {
     if (error instanceof BrowserCdpHostError) throw error;
     throw new BrowserCdpHostError("launcher", "unknown");
   }
   if (!(await browserCdpPortReady())) throw new BrowserCdpHostError("port-check", "host-not-ready");
+  assertCurrent();
   const ownership = await reconcileBrowserCdpOwnerWithRetry({ attempts: 6, delayMs: 100 });
+  assertCurrent();
   if (ownership.state !== "owned" || !ownership.pid) {
     throw new BrowserCdpHostError("ownership", "ownership-unverified");
   }
@@ -1595,15 +1627,29 @@ async function ensureBrowserCdpHostOnce(options: { headed?: boolean } = {}): Pro
 }
 
 /** Ensure the exact Agentlas browser host exists without opening a login window. */
-export function ensureBrowserCdpHost(options: { headed?: boolean } = {}): Promise<BrowserCdpHostEnsureResult> {
-  if (browserCdpHostEnsureFlight) return browserCdpHostEnsureFlight;
-  const flight = ensureBrowserCdpHostOnce(options);
+export function ensureBrowserCdpHost(options: BrowserCdpHostEnsureOptions = {}): Promise<BrowserCdpHostEnsureResult> {
+  try { assertBrowserCdpCloseCurrent(options.control); }
+  catch (error) { return Promise.reject(error); }
+  const participant = { control: options.control };
+  if (browserCdpHostEnsureFlight) {
+    browserCdpHostEnsureFlight.participants.add(participant);
+    return browserCdpHostEnsureFlight.promise;
+  }
+  const participants = new Set([participant]);
+  // Publish the flight before its first mutation so a synchronous join cannot
+  // start another host. No borrower owns another participant's lifetime.
+  const promise = Promise.resolve().then(() => ensureBrowserCdpHostOnce(
+    options,
+    () => assertBrowserCdpHostEnsureCurrent(participants),
+  ));
+  const flight: BrowserCdpHostEnsureFlight = { promise, participants };
   browserCdpHostEnsureFlight = flight;
-  void flight.then(
-    () => { if (browserCdpHostEnsureFlight === flight) browserCdpHostEnsureFlight = null; },
-    () => { if (browserCdpHostEnsureFlight === flight) browserCdpHostEnsureFlight = null; },
-  );
-  return flight;
+  const release = () => {
+    participants.clear();
+    if (browserCdpHostEnsureFlight === flight) browserCdpHostEnsureFlight = null;
+  };
+  void promise.then(release, release);
+  return promise;
 }
 
 /**

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.77 — 2026-10-07
+
+- Shared browser preparation keeps active callers when another task stops, and checks their current work before preparing or dispatching browser commands.
+- AGI login recovery keeps its original task attached until already-started recovery settles. Direct live-cookie transfer checks task control and consent before further commands, and preserves acknowledged writes and uncertain outcomes.
+- Stopping a task preserves previously stored cookies and sign-in sessions. Existing sign-in prompt watchers and maintenance import keep their existing behavior.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.76 — 2026-10-07
 
 - Finite strategy reviews follow the original AGI decision control and roll back tentative changes when that decision is stopped or replaced.

@@ -84,6 +84,15 @@ export type AgiLoginRecoveryOutcome = "recovered" | "awaiting-owner" | "in-fligh
 
 /** Main-only original decision boundary, never parsed from model action arguments. */
 export interface AgiBrowserRestartControl { signal: AbortSignal; assertCurrent(): void }
+export type AgiLoginRecoveryControl = AgiBrowserRestartControl;
+export interface AgiLoginRecoveryResult {
+  state: AgiLoginRecoveryOutcome | "cancelled" | "unknown";
+  directEffect: "not-started" | "imported" | "unknown";
+  /** Acknowledged writes only; not a total-effect count when directEffect is unknown. */
+  acknowledgedWritten: number;
+  /** The admitted legacy observer retains its own pending-card scope. */
+  observerEffect: "not-started" | "unknown";
+}
 export interface AgiBrowserRestartOutcome {
   state: "ready" | "failed" | "cancelled" | "unknown";
   closeEffect: "not-started" | "closed" | "unknown";
@@ -124,7 +133,7 @@ export interface AgiExecutorDeps {
   /** Installed alternatives for a capability path (retry_node_with guard). */
   installedPaths?(capability: string): string[];
   /** The login-recovery ladder seam (plugged by electron/browser/*; absent → unavailable). */
-  runLoginRecovery?(input: { domain: string; goalId: string; runId: string; chatId: string | null }): AgiLoginRecoveryOutcome | Promise<AgiLoginRecoveryOutcome>;
+  runLoginRecovery?(input: { domain: string; goalId: string; runId: string; chatId: string | null }, control: AgiLoginRecoveryControl): AgiLoginRecoveryOutcome | AgiLoginRecoveryResult | Promise<AgiLoginRecoveryOutcome | AgiLoginRecoveryResult>;
   /** Agentlas Browser restart seam (D6: allowed without asking). */
   restartAgentlasBrowser?(control: AgiBrowserRestartControl): boolean | AgiBrowserRestartOutcome | Promise<boolean | AgiBrowserRestartOutcome>;
   /** One owner-visible line in the goal chat (host-notice marker). Idempotent per actionId. */
@@ -315,7 +324,7 @@ export class AgiActionExecutor {
     }
     const incident = this.incidents.get(request.incidentId);
     if (!incident || incident.goalId !== request.fence.goalId) return refuse("agi.action.incident-unknown");
-    if (request.action === "restart_agentlas_browser") {
+    if (request.action === "restart_agentlas_browser" || request.action === "run_login_recovery") {
       if (!decision || decision.goalId !== request.fence.goalId || decision.runId !== request.fence.runId
         || decision.incidentId !== incident.id || request.attempt !== incident.attempts) return refuse(AGI_DECISION_CONTROL_CHANGED);
       try { assertAgiDecisionControl(decision.decisionControl, decision); } catch { return refuse(AGI_DECISION_CONTROL_CHANGED); }
@@ -399,7 +408,7 @@ export class AgiActionExecutor {
   }
 
   /** The end of an async action (login ladder, browser restart): a reflection on the incident, never a second receipt. */
-  private later(request: AgiActionRequest, goal: AgiGoalView, incidentId: string, code: string, failed: boolean, browser?: AgiBrowserRestartOutcome): void {
+  private later(request: AgiActionRequest, goal: AgiGoalView, incidentId: string, code: string, failed: boolean, browser?: AgiBrowserRestartOutcome, login?: AgiLoginRecoveryResult): void {
     try {
       this.incidents.reflect(incidentId, { atMs: this.deps.now(), action: request.action, result: failed ? `failed:${code}` : code,
         evidenceRefs: [`agi-action:${request.actionId}`], ruledOut: failed });
@@ -407,6 +416,8 @@ export class AgiActionExecutor {
         .run(code, request.actionId);
       if (browser) this.deps.db.prepare("UPDATE agi_action_receipts SET result_json = json_set(result_json, '$.detail.browser', json(?)) WHERE action_id = ?")
         .run(JSON.stringify(browser), request.actionId);
+      if (login) this.deps.db.prepare("UPDATE agi_action_receipts SET result_json = json_set(result_json, '$.detail.login', json(?)) WHERE action_id = ?")
+        .run(JSON.stringify(login), request.actionId);
       if (!failed && goal.chatId && this.deps.announce && (code === "agi.login.recovered" || code === "agi.browser.restarted")) {
         const line = noticeLine(request.action, { actionId: request.actionId, action: request.action, ok: true, code, detail: {} });
         if (line) this.deps.announce({ chatId: goal.chatId, actionId: `${request.actionId}:done`, kind: "action", text: line });
@@ -536,17 +547,36 @@ export class AgiActionExecutor {
         const domain = text(args.domain, 200);
         if (!domain || !/^[a-z0-9.-]+$/i.test(domain)) return no("agi.login.domain-required");
         if (!this.deps.runLoginRecovery) return no("agi.login.ladder-unavailable");
-        const outcome = this.deps.runLoginRecovery({ domain, goalId: goal.goalId, runId: goal.runId, chatId: goal.chatId });
-        if (isPromise(outcome)) {
-          // The ladder is async (re-import, store feed, event-driven restore). The receipt says dispatched; its end
-          // is written back to the incident as a reflection, and a failed ladder is ruled out for this incident.
-          void outcome.then((end) => this.later(request, goal, incidentId, `agi.login.${end}`, end === "unavailable"), () =>
-            this.later(request, goal, incidentId, "agi.login.ladder-failed", true));
-          return ok("agi.login.dispatched", { domain });
+        if (!decision) return no(AGI_DECISION_CONTROL_CHANGED);
+        const original = Object.freeze({ ...decision });
+        const release = retainAgiDecisionControl(original);
+        let finish!: () => void;
+        const promise = new Promise<void>(resolve => { finish = resolve; });
+        this.deferredBrowser.set(request.actionId, { goalId: goal.goalId, promise });
+        const cleanup = () => {
+          try { release(); } finally { this.deferredBrowser.delete(request.actionId); finish(); }
+        };
+        const complete = (value: AgiLoginRecoveryOutcome | AgiLoginRecoveryResult) => {
+          const outcome: AgiLoginRecoveryResult = typeof value === "string"
+            ? { state: value, directEffect: "unknown", acknowledgedWritten: 0, observerEffect: "unknown" } : value;
+          this.later(request, goal, incidentId, `agi.login.${outcome.state}`, outcome.state === "unavailable", undefined, outcome);
+        };
+        let recovered: ReturnType<NonNullable<AgiExecutorDeps["runLoginRecovery"]>>;
+        let admitted = false;
+        try {
+          const control: AgiLoginRecoveryControl = { signal: agiDecisionAbortSignal(original),
+            assertCurrent: () => assertAgiDecisionControl(original.decisionControl, original) };
+          control.assertCurrent();
+          admitted = true;
+          recovered = this.deps.runLoginRecovery({ domain, goalId: goal.goalId, runId: goal.runId, chatId: goal.chatId }, control);
+        } catch (error) {
+          if (!admitted) { cleanup(); throw error; }
+          recovered = Promise.reject(error);
         }
-        if (outcome === "unavailable") return no("agi.login.ladder-unavailable");
-        // awaiting-owner = the ladder's last rung (Chrome itself signed out) posted its own single card; it auto-resumes.
-        return ok(`agi.login.${outcome}`, { domain });
+        // Acceptance and terminal evidence survive revocation; a throwing admitted seam is not no-action proof.
+        void Promise.resolve(recovered).then(complete, () => complete({ state: "unknown", directEffect: "unknown", acknowledgedWritten: 0, observerEffect: "unknown" }))
+          .finally(cleanup).catch(() => { /* reflection cannot repeat admitted work */ });
+        return ok("agi.login.dispatched", { domain });
       }
       case "restart_agentlas_browser": {
         if (!this.deps.restartAgentlasBrowser) return no("agi.browser.restart-unavailable");

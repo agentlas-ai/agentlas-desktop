@@ -39,13 +39,13 @@ import { agiRestartAgentlasBrowser, agiRunLoginRecovery } from "./browser-seams"
 import type { RuntimeSelection } from "../../shared/types";
 import { currentUiLocale } from "../ui-locale";
 import { PERSISTENCE_DECISION_SCHEMA, type FailureCauseKind } from "../../shared/persistence-policy";
-import { AgiActionExecutor, type AgiExecutorDeps, type AgiGoalView, type AgiLoginRecoveryOutcome, type AgiPlanView, type AgiStrategyBatch } from "./actions";
+import { AgiActionExecutor, type AgiExecutorDeps, type AgiGoalView, type AgiLoginRecoveryOutcome, type AgiLoginRecoveryControl, type AgiLoginRecoveryResult, type AgiPlanView, type AgiStrategyBatch } from "./actions";
 import { createAgiDeterministicHandler, type AgiUnblockHandlerWithModel } from "./unblock-handler";
 
 export { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
 import { AGI_ACTION_NOTICE_AUTOMATION_ID } from "../../shared/chat-host-notice";
 
-type LoginSeam = (input: { domain: string; goalId: string; runId: string; chatId: string | null }) => AgiLoginRecoveryOutcome | Promise<AgiLoginRecoveryOutcome>;
+type LoginSeam = (input: { domain: string; goalId: string; runId: string; chatId: string | null }, control?: AgiLoginRecoveryControl) => AgiLoginRecoveryOutcome | AgiLoginRecoveryResult | Promise<AgiLoginRecoveryOutcome | AgiLoginRecoveryResult>;
 let loginSeam: LoginSeam | null = agiRunLoginRecovery;
 let browserRestartSeam: AgiExecutorDeps["restartAgentlasBrowser"] | null = agiRestartAgentlasBrowser;
 let defectListener: ((input: { defectId: string; goalId: string; chatId: string | null; code: string }) => void) | null = null;
@@ -199,7 +199,7 @@ export function createAgiExecutor(): AgiActionExecutor {
     },
     recordMove: (goalId, runId, move, detail) => recordAgiMove(goalId, runId, move, detail),
     installedPaths: () => agiInstalledPaths(),
-    runLoginRecovery: (input) => loginSeam ? loginSeam(input) : "unavailable",
+    runLoginRecovery: (input, control) => loginSeam ? loginSeam(input, control) : "unavailable",
     restartAgentlasBrowser: (control) => browserRestartSeam ? browserRestartSeam(control) : false,
     announce: ({ chatId, actionId, text }) => {
       const runId = `agi-action:${actionId}`;
