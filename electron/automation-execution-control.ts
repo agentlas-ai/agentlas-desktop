@@ -1,3 +1,4 @@
+import { claimAgiDecisionStopBinding, type AgiUnblockInput } from "./agi/monitor";
 import { createHash } from "node:crypto";
 import { goalDeadlineAt } from "./long-run/goal-deadline";
 import { getDb } from "./store/db";
@@ -25,6 +26,20 @@ const owners = new WeakMap<AutomationGoalExecutionOwner, GoalOwner>();
 interface StopEntry { controller: AbortController; owner?: GoalOwner; definitionSnapshot?: string }
 const controllers = new Map<string, StopEntry>();
 const automationStopGenerations = new Map<string, number>();
+interface DecisionStopEntry { identity: { goalId: string; rootChatId: string; longRunId: string }; controller: AbortController }
+const decisionStops = new Set<DecisionStopEntry>();
+/** Decision-only registration: immutable ownership comes from a real consumed
+ * monitor claim, never a raw Goal tuple or executable scheduler admission. */
+export function bindAgiDecisionStop(input: AgiUnblockInput, generation: number, controller: AbortController): () => void {
+  const binding = claimAgiDecisionStopBinding(input.decisionIngress, input);
+  if (binding.db !== getDb() || !binding.chatId || !binding.runId) refused();
+  const identity = { goalId: binding.goalId, rootChatId: binding.chatId, longRunId: binding.runId };
+  assertGoalExecutionControlGeneration(identity, generation);
+  const entry = { identity, controller };
+  decisionStops.add(entry);
+  // Release is unconditional even when Stop or failed storage revoked authority.
+  return () => { decisionStops.delete(entry); };
+}
 const goalStops = new Map<string, { generation: number; receiptCursor: number; resumeAcknowledged?: boolean }>();
 const admittedGoals = new Map<string, { goalId: string; rootChatId: string; longRunId: string; receiptCursor: number }>();
 const goalKey = (owner: Pick<GoalOwner, "goalId" | "rootChatId" | "longRunId">) =>
@@ -343,6 +358,7 @@ export function snapshotAutomationGoalRunStops(input: {
   goalStops.set(key, { generation: (prior?.generation ?? 0) + 1, receiptCursor: input.receiptCursor });
   const selected = [...controllers].filter(([, entry]) => entry.owner?.goalId === input.goalId
     && entry.owner.rootChatId === input.rootChatId && entry.owner.longRunId === input.longRunId);
+  const decisions = [...decisionStops].filter(entry => goalKey(entry.identity) === key);
   return { automations: selected.map(([id, entry]) => ({ automationId: id, createdAt: entry.owner!.automationCreatedAt })),
     ownsAutomation(automationId, createdAt) {
     return selected.some(([id, entry]) => id === automationId && entry.owner?.automationCreatedAt === createdAt
@@ -350,6 +366,9 @@ export function snapshotAutomationGoalRunStops(input: {
   }, stop() {
     for (const [id, entry] of selected) {
       if (controllers.get(id) === entry) entry.controller.abort(new Error("automation_stopped_by_user"));
+    }
+    for (const entry of decisions) {
+      if (decisionStops.has(entry)) entry.controller.abort(new Error("automation_stopped_by_user"));
     }
   } };
 }
@@ -363,6 +382,12 @@ export function stopKnownAutomationGoalRuns(goalId: string, rootChatId: string,
     if (owner?.goalId === goalId && owner.rootChatId === rootChatId) {
       snapshotAutomationGoalRunStops({ ...owner, receiptCursor: Number.MAX_SAFE_INTEGER }).stop();
     }
+  }
+  const knownDecisions = new Map([...decisionStops]
+    .filter(entry => entry.identity.goalId === goalId && entry.identity.rootChatId === rootChatId)
+    .map(entry => [goalKey(entry.identity), entry.identity]));
+  for (const identity of knownDecisions.values()) {
+    snapshotAutomationGoalRunStops({ ...identity, receiptCursor: Number.MAX_SAFE_INTEGER }).stop();
   }
   for (const admission of admittedGoals.values()) {
     if (admission.goalId === goalId && admission.rootChatId === rootChatId) {

@@ -657,6 +657,12 @@ function runCodexProcess(
   return effects.withScope(() => new Promise((resolve, reject) => {
     let terminalFailure: RunnerFailure | null = null;
     let itemFailure: RunnerFailure | null = null;
+    // Preparation can yield while the owner stops the request. Check again at
+    // child creation so a cancelled one-shot cannot start or receive a prompt.
+    if (req.signal?.aborted) {
+      reject(abortReasonError(req));
+      return;
+    }
     const child = spawnCli(bin, args, {
       stdio: ["pipe", "pipe", "pipe"],
       env: req.env ?? process.env,
@@ -679,7 +685,8 @@ function runCodexProcess(
     }
     const runtimeAttemptId = crypto.randomUUID();
     events.onRuntimeAttemptStarted?.(runtimeAttemptId);
-    writeStdin(child, stdinPayload);
+    // The attempt callback can synchronously stop this admitted child.
+    if (!req.signal?.aborted) writeStdin(child, stdinPayload);
 
     let buffer = "";
     let text = "";

@@ -10,6 +10,7 @@
  * (plan P4) and the handler rests. Action ids are derived from (incident, attempt, action), so a crash replay finds its
  * receipt instead of acting twice.
  */
+import { agiDecisionRefusal, retainAgiDecisionControl } from "./decision-control";
 import type { AgiBlockerFacts, AgiActionKind } from "./blocker";
 import { AGI_NON_ALTERNATIVE_ACTIONS } from "./blocker";
 import { AGI_ACTION_SCHEMA, type AgiActionExecutor, type AgiActionReceipt } from "./actions";
@@ -54,6 +55,9 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
   model?: AgiModelAttempt | null): AgiUnblockHandlerWithModel {
   const inFlight = new Set<Promise<unknown>>();
   const handler = ((input: AgiUnblockInput) => {
+    const controlRefusal = () => agiDecisionRefusal(input);
+    const initialRefusal = controlRefusal();
+    if (initialRefusal) return { outcome: "rested", code: initialRefusal };
     if (input.facts?.repairInFlight || model?.isRunning(input.goalId)) return { outcome: "rested", code: "agi.repair-in-flight" };
     const d = input.diagnosis;
     if (!input.runId || input.runVersion === null) return { outcome: "failed", code: "agi.goal-ledger-missing" };
@@ -63,7 +67,10 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
     const facts = input.facts ?? readFacts?.(input.goalId) ?? null;
     const done: Array<{ action: string; result: string }> = [];
     const run = (action: AgiActionKind, args: Record<string, unknown>, index: number, runFence = fence): AgiActionReceipt => {
-      const refreshed = input.refreshFence?.();
+      const refusal = controlRefusal();
+      if (refusal) return { actionId: actionId(input, attempt, action, index), action, ok: false, code: refusal };
+      let refreshed: ReturnType<NonNullable<AgiUnblockInput["refreshFence"]>> | undefined;
+      try { refreshed = input.refreshFence?.(); } catch { refreshed = null; }
       if (input.refreshFence && !refreshed) return { actionId: actionId(input, attempt, action, index), action, ok: false, code: "agi.action.state-changed" };
       const receipt = executor.execute({ schema: AGI_ACTION_SCHEMA, actionId: actionId(input, attempt, action, index), incidentId: input.incidentId,
         attempt, fence: refreshed ?? runFence, action, args, attemptTokensSoFar: 0 });
@@ -95,24 +102,31 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
     const workStarted = work?.ok === true;
     if (workStarted) return { outcome: "acted", code: "agi.work-continued", actions: done };
     if (model) {
+      const refusal = controlRefusal();
+      if (refusal) return { outcome: "rested", code: refusal, actions: done };
       const pre = [...done];
       const modelVersion = executor.currentVersion(input.goalId);
-      const flight = model.run({ ...input, runVersion: modelVersion ?? input.runVersion }, pre).then((result) => {
+      const release = retainAgiDecisionControl(input);
+      let flight: Promise<void>;
+      try { flight = model.run({ ...input, runVersion: modelVersion ?? input.runVersion }, pre).then((result) => {
         let final: AgiUnblockResult = result;
         // This code is produced only from Main's successful rest receipt with
         // actual wait/checkpoint IDs. Generic rested output is not a wake promise.
         const waitRegistered = result.code === "agi.model.wait-registered"
           && result.actions?.some(action => action.action === "rest" && action.result === "goal_episode_wait_registered") === true;
-        if (!workStarted && result.outcome !== "acted" && !waitRegistered) {
+        const refusal = controlRefusal();
+        if (refusal && result.outcome !== "acted" && result.outcome !== "needs-human" && !waitRegistered) final = { ...result, outcome: "rested", code: refusal };
+        if (!refusal && !workStarted && result.outcome !== "acted" && !waitRegistered) {
           const version = executor.currentVersion(input.goalId);
           const acted = version !== null && deterministic({ ...fence, runVersion: version });
           final = { ...result, outcome: acted ? "acted" : result.outcome, code: acted ? "agi.model-fallback-acted" : result.code,
             actions: [...(result.actions ?? []), ...done.slice(pre.length)] };
         }
         executor.recordAttemptResult(input.goalId, input.stateDigest, final, attempt);
-      }, () => executor.recordAttemptResult(input.goalId, input.stateDigest, { outcome: "failed", code: "agi.model-attempt-threw" }, attempt));
+      }, () => executor.recordAttemptResult(input.goalId, input.stateDigest, { outcome: "failed", code: "agi.model-attempt-threw" }, attempt)).finally(release); }
+      catch (error) { release(); throw error; }
       inFlight.add(flight);
-      void flight.finally(() => inFlight.delete(flight));
+      void flight.then(() => inFlight.delete(flight), () => inFlight.delete(flight));
       return { outcome: workStarted ? "acted" : "rested", code: "agi.model-attempt-dispatched", actions: done };
     }
     if (workStarted) return { outcome: "acted", code: "agi.work-continued", actions: done };

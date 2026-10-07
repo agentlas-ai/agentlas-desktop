@@ -12,6 +12,7 @@
  * attempt cap and the goal's daily cap are admitted before each call with a size estimate and charged with the
  * measured usage afterwards, also against the goal's Alive grant.
  */
+import { agiDecisionRefusal, agiDecisionAbortSignal, AGI_DECISION_CONTROL_CHANGED } from "./decision-control";
 import { currentUiLocale } from "../ui-locale";
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
@@ -180,8 +181,10 @@ export class AgiModelAttempt {
 
   constructor(private readonly deps: AgiModelAttemptDeps) { ensureAgiModelAttemptSchema(deps.db); }
 
-  private evidenceBlock(goalId: string, reads: Array<{ tool: string; args: Record<string, unknown> }>): string {
+  private evidenceBlock(goalId: string, reads: Array<{ tool: string; args: Record<string, unknown> }>, controlRefusal: () => string | null): string {
     return reads.map(({ tool, args }) => {
+      const refusal = controlRefusal();
+      if (refusal) return JSON.stringify({ refused: refusal });
       const result = this.deps.read(goalId, tool, args);
       return `### ${tool}${Object.keys(args).length ? ` ${JSON.stringify(args)}` : ""}\n${result.ok ? result.text : JSON.stringify({ refused: result.code })}`;
     }).join("\n\n");
@@ -212,6 +215,17 @@ export class AgiModelAttempt {
         usageComplete ? extra.input ?? null : null, usageComplete ? extra.output ?? null : null,
         JSON.stringify(extra.actions ?? []), d.now(), attemptId);
     };
+    const controlRefusal = () => agiDecisionRefusal(input);
+    const refreshFence = () => {
+      if (controlRefusal()) return null;
+      try { return input.refreshFence ? input.refreshFence() : { goalId: input.goalId, runId: input.runId ?? "", runVersion: input.runVersion ?? -1 }; }
+      catch { return null; }
+    };
+    const initialRefusal = controlRefusal();
+    if (initialRefusal) { settle("refused", initialRefusal); return { attemptId, outcome: "rested", code: initialRefusal }; }
+    let decisionSignal: AbortSignal;
+    try { decisionSignal = agiDecisionAbortSignal(input); }
+    catch { settle("refused", AGI_DECISION_CONTROL_CHANGED); return { attemptId, outcome: "rested", code: AGI_DECISION_CONTROL_CHANGED }; }
     // Custody predates evidence, candidate selection and every model round.
     // Failure remains unavailable; apply may never replace this with a fresh capture.
     const episodeCaptureId = `${attemptId}:rest`;
@@ -228,21 +242,24 @@ export class AgiModelAttempt {
     let tokensUsed = 0;
     let inputTokens = 0;
     let outputTokens = 0;
-    const evidence = this.evidenceBlock(input.goalId, agiEvidenceReads(input));
+    const evidence = this.evidenceBlock(input.goalId, agiEvidenceReads(input), controlRefusal);
     // Plan text the owner sees in the goal panel (replan_tree split descriptions, ask text) follows the app locale.
     const ownerLanguage = currentUiLocale() === "ko" ? "Korean" : "English";
     let userPrompt = `## Blocker (host facts)\n${JSON.stringify(facts)}\n\n## Evidence (P2 read tools, capped and redacted)\n${evidence}`
       + `\n\nOwner-visible text you write (replan_tree descriptions, ask_owner_once ask, dispatch brief) is in ${ownerLanguage}; ids, actions and codes stay English.`
       + "\n\nRound 1 of 2.";
-    const candidates = await Promise.resolve(d.candidates(input.goalId)).catch(() => [] as AgiModelCandidate[]);
+    const candidates = await Promise.resolve().then(() => controlRefusal() ? [] : d.candidates(input.goalId)).catch(() => [] as AgiModelCandidate[]);
+    const candidateRefusal = controlRefusal();
+    if (candidateRefusal) { settle("refused", candidateRefusal); return { attemptId, outcome: "rested", code: candidateRefusal }; }
     if (!candidates.length) { settle("refused", "agi.model.no-runtime"); return { attemptId, outcome: "failed", code: "agi.model.no-runtime" }; }
     let decision: Decision | null = null;
     let used: AgiModelCandidate | null = null;
     let rounds = 0;
     for (let round = 1; round <= 2; round += 1) {
-      if (input.refreshFence && !input.refreshFence()) {
-        settle("refused", "agi.action.state-changed", { rounds, input: inputTokens, output: outputTokens });
-        return { attemptId, outcome: "rested", code: "agi.action.state-changed", tokens: tokensUsed };
+      if (!refreshFence()) {
+        const code = controlRefusal() ?? "agi.action.state-changed";
+        settle("refused", code, { rounds, input: inputTokens, output: outputTokens });
+        return { attemptId, outcome: "rested", code, tokens: tokensUsed };
       }
       const estimate = estimateTokens(SYSTEM_PROMPT) + estimateTokens(userPrompt) + AGI_MODEL_OUTPUT_TOKENS;
       const refusal = admitAgiTokens(d.db, { goalId: input.goalId, nowMs: d.now(), attemptTokensSoFar: tokensUsed, estimate });
@@ -250,7 +267,7 @@ export class AgiModelAttempt {
         settle("refused", refusal, { rounds, input: inputTokens, output: outputTokens });
         return { attemptId, outcome: "failed", code: refusal, tokens: tokensUsed };
       }
-      const answer = await this.call(round === 1 ? candidates : [used!], userPrompt);
+      const answer = await this.call(round === 1 ? candidates : [used!], userPrompt, controlRefusal, decisionSignal);
       rounds = round;
       if (answer.usage) {
         inputTokens += answer.usage.inputTokens; outputTokens += answer.usage.outputTokens;
@@ -263,6 +280,11 @@ export class AgiModelAttempt {
         tokensUsed += estimate;
         chargeAgiTokens(d.db, input.goalId, estimate, d.now());
       }
+      const answerRefusal = controlRefusal();
+      if (answerRefusal) {
+        settle("refused", answerRefusal, { runtime: answer.candidate?.selection, rounds, input: inputTokens, output: outputTokens });
+        return { attemptId, outcome: "rested", code: answerRefusal, tokens: tokensUsed };
+      }
       if (!answer.text || !answer.candidate) {
         settle("failed", answer.code ?? "agi.model.no-answer", { rounds, input: inputTokens, output: outputTokens });
         return { attemptId, outcome: "failed", code: answer.code ?? "agi.model.no-answer", tokens: tokensUsed };
@@ -274,7 +296,12 @@ export class AgiModelAttempt {
         return { attemptId, outcome: "failed", code: "agi.model.answer-invalid", tokens: tokensUsed };
       }
       if (round === 1 && decision.reads.length && !decision.actions.length) {
-        userPrompt += `\n\n## Your extra reads\n${this.evidenceBlock(input.goalId, decision.reads)}\n\nRound 2 of 2: answer with actions now; "reads" must be empty.`;
+        const readRefusal = controlRefusal();
+        if (readRefusal) {
+          settle("refused", readRefusal, { runtime: used.selection, rounds, input: inputTokens, output: outputTokens });
+          return { attemptId, outcome: "rested", code: readRefusal, tokens: tokensUsed };
+        }
+        userPrompt += `\n\n## Your extra reads\n${this.evidenceBlock(input.goalId, decision.reads, controlRefusal)}\n\nRound 2 of 2: answer with actions now; "reads" must be empty.`;
         continue;
       }
       break;
@@ -288,8 +315,8 @@ export class AgiModelAttempt {
     let fence = { goalId: input.goalId, runId: input.runId ?? "", runVersion: input.runVersion ?? -1 };
     const receipts: AgiActionReceipt[] = [];
     if (strategyBatch) {
-      const refreshed = input.refreshFence ? input.refreshFence() : fence;
-      if (!refreshed) receipts.push({ actionId: `${attemptId}:strategy`, action: "rest", ok: false, code: "agi.action.state-changed" });
+      const refreshed = refreshFence();
+      if (!refreshed) receipts.push({ actionId: `${attemptId}:strategy`, action: "rest", ok: false, code: controlRefusal() ?? "agi.action.state-changed" });
       else {
         const request = (action: "replan_tree" | "rest", index: number): import("./actions").AgiActionRequest => ({
           schema: AGI_ACTION_SCHEMA, actionId: `${attemptId}:${index}:${action}`, incidentId: input.incidentId, attempt: attemptNo,
@@ -297,10 +324,10 @@ export class AgiModelAttempt {
         receipts.push(...await d.executor.executeStrategyEpisode({ plan: request("replan_tree",0), rest: request("rest",1) }));
       }
     } else ordered.forEach((entry, index) => {
-      if (input.refreshFence) {
-        const refreshed = input.refreshFence();
+      {
+        const refreshed = refreshFence();
         if (!refreshed) {
-          receipts.push({ actionId: `${attemptId}:${index}:${entry.action}`, action: entry.action, ok: false, code: "agi.action.state-changed" });
+          receipts.push({ actionId: `${attemptId}:${index}:${entry.action}`, action: entry.action, ok: false, code: controlRefusal() ?? "agi.action.state-changed" });
           return;
         }
         fence = refreshed;
@@ -323,29 +350,38 @@ export class AgiModelAttempt {
       && receipt.code === "goal_episode_wait_registered" && receipt.detail?.status === "wait_registered"
       && typeof receipt.detail.waitId === "string" && receipt.detail.waitId.length > 0
       && typeof receipt.detail.checkpointId === "string" && receipt.detail.checkpointId.length > 0);
-    settle("completed", registeredWait ? "agi.model.wait-registered" : "agi.model.completed",
-      { runtime: used?.selection, rounds, input: inputTokens, output: outputTokens, actions });
     const acted = receipts.some((receipt) => receipt.ok && !AGI_NON_ALTERNATIVE_ACTIONS.has(receipt.action as AgiActionKind));
     const asked = receipts.some((receipt) => receipt.ok && receipt.action === "ask_owner_once");
-    return { attemptId, outcome: registeredWait ? "rested" : acted ? "acted" : asked ? "needs-human" : "rested", code: registeredWait ? "agi.model.wait-registered" : acted ? "agi.model.acted" : asked ? "agi.model.asked" : registeredWait ? "agi.model.wait-registered" : "agi.model.rested",
+    // Revocation denies successors, not the truth of an already accepted result.
+    // Keep completed receipts/accounting even when Stop arrives during an action await.
+    const finalRefusal = receipts.some(receipt => receipt.ok) ? null : controlRefusal();
+    settle(finalRefusal ? "refused" : "completed", finalRefusal ?? (registeredWait ? "agi.model.wait-registered" : "agi.model.completed"),
+      { runtime: used?.selection, rounds, input: inputTokens, output: outputTokens, actions });
+    return { attemptId, outcome: registeredWait ? "rested" : acted ? "acted" : asked ? "needs-human" : "rested", code: finalRefusal ?? (registeredWait ? "agi.model.wait-registered" : acted ? "agi.model.acted" : asked ? "agi.model.asked" : "agi.model.rested"),
       actions, tokens: tokensUsed };
   }
 
-  private async call(candidates: AgiModelCandidate[], userPrompt: string): Promise<{ text: string | null; usage: { inputTokens: number; outputTokens: number } | null;
+  private async call(candidates: AgiModelCandidate[], userPrompt: string, controlRefusal: () => string | null, decisionSignal: AbortSignal): Promise<{ text: string | null; usage: { inputTokens: number; outputTokens: number } | null;
     candidate: AgiModelCandidate | null; started: boolean; code?: string }> {
     let lastCode = "agi.model.runner-unavailable";
     const candidateUsage = createObservedUsageAccumulator();
     let started = false;
     for (const candidate of candidates) {
+      const refusal = controlRefusal();
+      if (refusal) return { text: null, usage: candidateUsage.total() ?? null, candidate: null, started, code: refusal };
       const picked = this.deps.pickRunner(candidate.status);
       if (!picked) { lastCode = "agi.model.runner-unavailable"; continue; }
       const controller = new AbortController();
+      const abortDecision = () => controller.abort(decisionSignal.reason);
+      decisionSignal.addEventListener("abort", abortDecision, { once: true });
+      if (decisionSignal.aborted) abortDecision();
       const timer = setTimeout(() => controller.abort(new Error("agi-model-timeout")), this.deps.timeoutMs ?? AGI_MODEL_TIME_LIMIT_MS);
       timer.unref?.();
       const usage = createRuntimeUsageCollector();
       let nativeEvidence = false;
       let settled = false;
       let recorded = false;
+      let dispatched = false;
       const recordUsage = (returnedUsage?: Parameters<typeof usage.total>[0]): void => {
         if (recorded) return;
         recorded = true;
@@ -353,6 +389,9 @@ export class AgiModelAttempt {
         candidateUsage.record(usage.total(returnedUsage));
       };
       try {
+        const beforeDispatchRefusal = controlRefusal();
+        if (beforeDispatchRefusal) return { text: null, usage: candidateUsage.total() ?? null, candidate, started, code: beforeDispatchRefusal };
+        dispatched = true;
         const result = await picked.runner({
           systemPrompt: SYSTEM_PROMPT, history: [], userPrompt, backendLabel: picked.label, runtimeSource: candidate.status.source,
           model: candidate.selection.model, effort: "medium", longContext: false, permission: "read", untrustedNoTools: true, judgmentOnly: true,
@@ -369,6 +408,8 @@ export class AgiModelAttempt {
         settled = true;
         const observed = usage.total(result.observedUsage);
         recordUsage(result.observedUsage);
+        const refusal = controlRefusal();
+        if (refusal) return { text: null, usage: candidateUsage.total() ?? null, candidate, started, code: refusal };
         if (controller.signal.aborted) {
           return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: "agi.model.timeout" };
         }
@@ -381,6 +422,11 @@ export class AgiModelAttempt {
         return { text: result.text ?? "", usage: candidateUsage.total() ?? null, candidate, started: true };
       } catch (error) {
         settled = true;
+        const refusal = controlRefusal();
+        if (refusal) {
+          if (dispatched) recordUsage();
+          return { text: null, usage: candidateUsage.total() ?? null, candidate, started, code: refusal };
+        }
         const aborted = controller.signal.aborted;
         lastCode = aborted ? "agi.model.timeout" : "agi.model.runner-threw";
         if (!aborted && !nativeEvidence && isJudgmentRefusal(error)) continue;
@@ -388,6 +434,7 @@ export class AgiModelAttempt {
         return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: lastCode };
       } finally {
         clearTimeout(timer);
+        decisionSignal.removeEventListener("abort", abortDecision);
       }
     }
     return { text: null, usage: candidateUsage.total() ?? null, candidate: null, started, code: lastCode };

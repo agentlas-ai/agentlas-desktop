@@ -13,6 +13,7 @@
  *
  * An attempt with no handler installed yet is recorded as no-handler and retried for the same state once one exists.
  */
+import type { AgiDecisionControl } from "./decision-control";
 import type Database from "better-sqlite3";
 import { onDesktopStoreChange } from "../store/change-bus";
 import { AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind, classifyAgiBlocker, type AgiBlockerDiagnosis, type AgiBlockerFacts, type AgiGoalDisplayState } from "./blocker";
@@ -24,7 +25,44 @@ export function agiRetryDelayMs(attempts: number): number {
   return Math.min(60 * 60_000, 5 * 60_000 * 2 ** Math.min(4, Math.max(0, attempts - 1)));
 }
 
+declare const ingressBrand: unique symbol;
+export type AgiDecisionIngress = Readonly<{ [ingressBrand]: true }>;
+interface IngressBinding { db: Database.Database; chatId: string | null; identity: string; current(): void; consumed: boolean; captureOpen: boolean; stopBound: boolean;
+  goalId: string; runId: string | null; onInvalidate(callback: () => void): () => void }
+const decisionIngresses = new WeakMap<AgiDecisionIngress, IngressBinding>();
+const ingressIdentity = (input: Pick<AgiUnblockInput, "goalId" | "runId" | "incidentId" | "stateDigest" | "trigger">) =>
+  JSON.stringify([input.goalId, input.runId, input.incidentId, input.stateDigest, input.trigger]);
+function readDecisionIngress(token: AgiDecisionIngress | undefined, input: AgiUnblockInput): IngressBinding {
+  const binding = token && decisionIngresses.get(token);
+  if (!binding || binding.identity !== ingressIdentity(input)) throw new Error("agi.decision.ingress-invalid");
+  binding.current(); return binding;
+}
+export function assertAgiDecisionIngress(token: AgiDecisionIngress | undefined, input: AgiUnblockInput): void {
+  readDecisionIngress(token, input);
+}
+export function consumeAgiDecisionIngress(token: AgiDecisionIngress | undefined, input: AgiUnblockInput): Readonly<Pick<IngressBinding, "db" | "chatId">> {
+  const binding = readDecisionIngress(token, input);
+  if (binding.consumed || !binding.captureOpen) throw new Error("agi.decision.ingress-consumed");
+  binding.consumed = true; return Object.freeze({ db: binding.db, chatId: binding.chatId });
+}
+
+/** Native Stop may select only a real, consumed claim inside its original handoff. */
+export function claimAgiDecisionStopBinding(token: AgiDecisionIngress | undefined, input: AgiUnblockInput):
+  Readonly<{ db: Database.Database; chatId: string | null; goalId: string; runId: string | null }> {
+  const binding = readDecisionIngress(token, input);
+  if (!binding.consumed || !binding.captureOpen || binding.stopBound) throw new Error("agi.decision.ingress-invalid");
+  binding.stopBound = true;
+  return Object.freeze({ db: binding.db, chatId: binding.chatId, goalId: binding.goalId, runId: binding.runId });
+}
+export function onAgiDecisionIngressInvalidated(token: AgiDecisionIngress | undefined, input: AgiUnblockInput,
+  callback: () => void): () => void {
+  return readDecisionIngress(token, input).onInvalidate(callback);
+}
+
 export interface AgiUnblockInput {
+  /** Main-only opaque evidence from the actual successful monitor claim. */
+  decisionIngress?: AgiDecisionIngress;
+  decisionControl?: AgiDecisionControl;
   kind: "unblock_attempt_due";
   goalId: string;
   runId: string | null;
@@ -82,6 +120,8 @@ export class AgiGoalMonitor {
   readonly incidents: AgiIncidentStore;
   private readonly states = new Map<string, AgiGoalMonitorState>();
   private handler: AgiUnblockHandler | null;
+  private lifecycleGeneration = 0;
+  private readonly decisionInvalidations = new Set<() => void>();
   private readonly sources = new Map<string, { runId: string | null; chatId: string | null }>();
   private readonly pending = new Set<string>();
   private readonly dueTimers = new Map<string, ReturnType<typeof setTimeout>>();
@@ -96,7 +136,13 @@ export class AgiGoalMonitor {
     this.handler = deps.handler ?? null;
   }
 
-  setHandler(handler: AgiUnblockHandler | null): void { this.handler = handler; }
+  private invalidateDecisions(): void {
+    this.lifecycleGeneration += 1;
+    const callbacks = [...this.decisionInvalidations];
+    this.decisionInvalidations.clear();
+    for (const callback of callbacks) { try { callback(); } catch { /* cancellation of other decisions must continue */ } }
+  }
+  setHandler(handler: AgiUnblockHandler | null): void { if (this.handler !== handler) this.invalidateDecisions(); this.handler = handler; }
 
   state(goalId: string): AgiGoalMonitorState | null { return this.states.get(goalId) ?? null; }
 
@@ -119,7 +165,7 @@ export class AgiGoalMonitor {
     });
   }
 
-  stop(): void { if (this.timer) clearInterval(this.timer); this.timer = null; this.unsubscribe?.(); this.unsubscribe = null; this.pending.clear(); for (const timer of this.dueTimers.values()) clearTimeout(timer); this.dueTimers.clear(); }
+  stop(): void { this.invalidateDecisions(); if (this.timer) clearInterval(this.timer); this.timer = null; this.unsubscribe?.(); this.unsubscribe = null; this.pending.clear(); for (const timer of this.dueTimers.values()) clearTimeout(timer); this.dueTimers.clear(); }
 
   /** One reconcile pass over every monitored goal. Returns what it did (for contracts and logs). */
   tick(): { goals: number; attempts: number; diagnoses: AgiBlockerDiagnosis[] } {
@@ -225,9 +271,24 @@ export class AgiGoalMonitor {
       if (claimed) {
         const expectedFenceState = facts.fenceState;
         const expectedRunId = facts.runId;
+        const handler = this.handler!, generation = this.lifecycleGeneration;
+        const claimedAttempt = this.incidents.get(incident.id)?.attempts;
+        const claimedIncidentId = incident.id;
+        const identity = { goalId, runId: facts.runId, incidentId: incident.id, stateDigest: diagnosis.stateDigest, trigger };
+        const decisionIngress = Object.freeze({}) as AgiDecisionIngress;
+        decisionIngresses.set(decisionIngress, { db: this.deps.db, chatId: facts.chatId ?? null,
+          identity: ingressIdentity(identity), goalId, runId: facts.runId, consumed: false, captureOpen: true, stopBound: false,
+          onInvalidate: callback => {
+            this.decisionInvalidations.add(callback);
+            return () => { this.decisionInvalidations.delete(callback); };
+          }, current: () => {
+            if (this.lifecycleGeneration !== generation || this.handler !== handler) throw new Error("agi.decision.monitor-stopped");
+            if (claimedAttempt === undefined || this.incidents.get(claimedIncidentId)?.attempts !== claimedAttempt)
+              throw new Error("agi.decision.claim-superseded");
+          } });
         try {
-          result = this.handler!({ kind: "unblock_attempt_due", goalId, runId: facts.runId, runVersion: facts.runVersion,
-            stateDigest: diagnosis.stateDigest, incidentId: incident.id, diagnosis, facts, trigger,
+          result = handler({ kind: "unblock_attempt_due", ...identity, runVersion: facts.runVersion,
+            diagnosis, facts, decisionIngress,
             refreshFence: () => {
               const live = this.deps.readFacts(goalId);
               if (!live || live.repairInFlight || live.fenceState !== expectedFenceState || live.runId !== expectedRunId || live.runVersion === null
@@ -235,6 +296,7 @@ export class AgiGoalMonitor {
               return { goalId, runId: live.runId!, runVersion: live.runVersion };
             } });
         } catch { result = { outcome: "failed", code: "agi.handler-threw" }; }
+        finally { decisionIngresses.get(decisionIngress)!.captureOpen = false; }
         this.record(goalId, diagnosis.stateDigest, incident.id, trigger, result, nowMs, result.outcome);
         attempted = true;
         incident = this.incidents.get(incident.id);

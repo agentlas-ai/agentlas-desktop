@@ -195,7 +195,8 @@ export function startAliveOrganisms(): AliveOrganismHost {
   });
   const monitor = agiMonitor;
   // P3: the typed executor behind the deterministic handler (one attempt per exact blocked state).
-  monitor.setHandler(createAgiHandler());
+  const agiHandler = createAgiHandler();
+  monitor.setHandler(agiHandler);
   const deps: AliveHostDeps = {
     db: getDb(),
     now: Date.now,
@@ -221,8 +222,10 @@ export function startAliveOrganisms(): AliveOrganismHost {
       if (change.entity === "long-run" || change.entity === "chat") listener();
     }),
     registerShutdown: (stop) => {
-      registerAppRuntimeParticipant("alive-organisms", { closeAdmission: stop, interrupt: () => { stop(); monitor.stop(); },
-        isSettled: () => true });
+      registerAppRuntimeParticipant("alive-organisms", { closeAdmission: stop, interrupt: () => {
+        stop(); monitor.stop();
+        return agiHandler.settled();
+      }, isSettled: () => true });
     },
     // Decision point unblock_attempt_due (6fdcf31b) → the monitor's single per-state attempt for that goal.
     unblockAttempt: (input) => {

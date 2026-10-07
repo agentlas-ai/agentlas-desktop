@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.75 — 2026-10-07
+
+- AGI checks the original owner control before later model attempts and deferred actions, including when storing a Stop request fails.
+- Owner Stop and monitor replacement revoke the original decision signal. App shutdown waits for pending decision bookkeeping within the existing deadline, while late observed usage and accepted work records remain available.
+- Codex one-shot calls reject cancellation after preparation before creating a process, and omit prompt input if an attempt callback stops an already created child. Existing child termination and usage settlement stay in place.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a published installer or installed update; verify those separately.
+
 ## 1.2.74 — 2026-10-07
 
 - Graph creation and automatic repair use configured Worker models with exact API, AGY, Claude Code and Codex runtime selections. Cancellation, deadlines and graph edits invalidate an older proposal before it can be saved.

@@ -1,3 +1,4 @@
+import { captureAgiDecisionControl, assertAgiDecisionControl, releaseAgiDecisionControl, AGI_DECISION_CONTROL_CHANGED } from "./decision-control";
 /**
  * Real Main wiring of the AGI executor (P3) and its deterministic handler — every action goes through a path the
  * product already has. Kept out of monitor/actions so the contracts drive those with stubs.
@@ -309,5 +310,20 @@ export function createAgiHandler(): AgiUnblockHandlerWithModel {
       teamRoster: (chatId) => oneTeamList({ chatId, permission: "read" }) }, { goalId }, tool, args),
     installedPaths: agiInstalledPaths,
   });
-  return createAgiDeterministicHandler(executor, undefined, model);
+  const handler = createAgiDeterministicHandler(executor, undefined, model);
+  const admitted = ((input) => {
+    let decisionControl: ReturnType<typeof captureAgiDecisionControl>;
+    try { decisionControl = captureAgiDecisionControl(input); }
+    catch { return { outcome: "rested", code: AGI_DECISION_CONTROL_CHANGED }; }
+    const refresh = input.refreshFence;
+    try {
+      return handler({ ...input, decisionControl, refreshFence: () => {
+        assertAgiDecisionControl(decisionControl);
+        return refresh ? refresh() : null;
+      } });
+    } finally { releaseAgiDecisionControl(decisionControl); }
+  }) as AgiUnblockHandlerWithModel;
+  admitted.isBusy = handler.isBusy;
+  admitted.settled = handler.settled;
+  return admitted;
 }
