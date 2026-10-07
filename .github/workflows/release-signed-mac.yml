@@ -671,7 +671,7 @@ jobs:
       - release-artifact-barrier
       - assemble-signed-mac-release
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 90
     env:
       AGENTLAS_DESKTOP_GITHUB_REPO: agentlas-ai/agentlas-desktop-releases
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"

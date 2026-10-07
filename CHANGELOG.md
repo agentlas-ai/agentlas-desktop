@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.79 — 2026-10-08
+
+- Preserve already-published metadata bytes when retrying an exact stable release. Fresh signed-artifact checks must agree with every non-timestamp field before reuse; source, payload, asset and update-lineage gates remain required.
+- Give the final signed publisher a bounded 90-minute window to complete artifact verification, production-feed verification and evidence upload.
+- Include the API model discovery, meaningful usage display, subscription-credit preference and first-run role setup improvements from 1.2.78.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
+Source and packaging checks do not establish every provider account or native Windows interaction.
+
 ## 1.2.78 — 2026-10-07
 
 - Separate API-key connections and model labels from subscription CLI engines. Discover provider catalogs dynamically, including paginated Anthropic and Gemini lists, and preserve manual model IDs when listing is unavailable.

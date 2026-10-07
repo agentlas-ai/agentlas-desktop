@@ -4,12 +4,56 @@ import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
+import yaml from "js-yaml";
 
 const modulePath = fileURLToPath(import.meta.url);
 const desktopRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const DEFAULT_ASSET_WAIT_MS = 15 * 60 * 1000;
 const DEFAULT_ASSET_POLL_MS = 10 * 1000;
 export const PUBLIC_CHECKSUM_FILE = "desktop-release-assets.json";
+const RETRY_METADATA = {
+  "desktop-release-verification.json": "generatedAt",
+  "latest-mac.yml": "releaseDate",
+  [PUBLIC_CHECKSUM_FILE]: "generatedAt",
+};
+
+// Called only after the signed local inputs pass the normal release gates.
+// A stable retry may reuse publication times, never provenance or payload data.
+export function assertStableMetadataEquivalent(name, localBytes, remoteBytes) {
+  const timestampKey = RETRY_METADATA[name];
+  if (!Object.hasOwn(RETRY_METADATA, name)) throw new Error(`Unsupported retry metadata: ${name}`);
+  const parse = (bytes) => {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    // JSON.parse enforces JSON syntax; YAML's strict mapping loader also rejects
+    // duplicate keys (including nested keys) that JSON.parse would silently lose.
+    const value = name.endsWith(".json") ? JSON.parse(text) : yaml.load(text, { schema: yaml.JSON_SCHEMA });
+    if (name.endsWith(".json")) yaml.load(text, { schema: yaml.JSON_SCHEMA });
+    if (!value || typeof value !== "object" || Array.isArray(value) ||
+        !Object.hasOwn(value, timestampKey) || typeof value[timestampKey] !== "string" ||
+        !Number.isFinite(Date.parse(value[timestampKey])) ||
+        new Date(value[timestampKey]).toISOString() !== value[timestampKey]) {
+      throw new Error(`Invalid retry metadata timestamp: ${name}`);
+    }
+    delete value[timestampKey];
+    return value;
+  };
+  if (!isDeepStrictEqual(parse(localBytes), parse(remoteBytes))) {
+    throw new Error(`Stable retry metadata differs beyond its publication timestamp: ${name}`);
+  }
+}
+
+function restoreStableMetadata({ repo, tag, releaseDir }) {
+  // Validate the entire set before touching any local file. Never upload or
+  // replace a published asset: the existing full remote-byte gate runs next.
+  const originals = Object.keys(RETRY_METADATA).map((name) => {
+    const result = spawn("gh", ["release", "download", tag, "--repo", repo, "--pattern", name, "--output", "-"], { encoding: null });
+    if (result.status !== 0) throw new Error(`Could not read stable retry metadata ${name}: ${result.output}`);
+    assertStableMetadataEquivalent(name, readFileSync(join(releaseDir, name)), result.stdout);
+    return [name, result.stdout];
+  });
+  for (const [name, bytes] of originals) writeFileSync(join(releaseDir, name), bytes);
+}
 
 /**
  * What the OS build jobs actually produce.  This is the set that exists in
@@ -117,6 +161,12 @@ export function assertStableReleaseIdentity(version, tag) {
 }
 
 export function inspectReleaseState(version, release, requiredAssets = requiredReleaseAssetNames(version)) {
+  const counts = new Map();
+  for (const asset of Array.isArray(release?.assets) ? release.assets : []) {
+    const name = typeof asset === "string" ? asset : asset?.name;
+    counts.set(name, (counts.get(name) || 0) + 1);
+  }
+  const duplicateAssets = [...counts].filter(([, count]) => count > 1).map(([name]) => name);
   const assetNames = new Set(
     Array.isArray(release?.assets)
       ? release.assets
@@ -133,10 +183,11 @@ export function inspectReleaseState(version, release, requiredAssets = requiredR
     isDraft,
     isPrerelease,
     isStable: !isDraft && !isPrerelease,
-    complete: missingAssets.length === 0 && unexpectedAssets.length === 0,
+    complete: missingAssets.length === 0 && unexpectedAssets.length === 0 && duplicateAssets.length === 0,
     requiredAssets,
     missingAssets,
     unexpectedAssets,
+    duplicateAssets,
     assetNames: [...assetNames].sort(),
   };
 }
@@ -187,7 +238,7 @@ function spawn(command, commandArgs, options = {}) {
   const result = spawnSync(command, commandArgs, {
     cwd: desktopRoot,
     stdio: options.stdio || "pipe",
-    encoding: "utf8",
+    encoding: options.encoding === null ? null : "utf8",
     env: process.env,
     maxBuffer: 1024 * 1024 * 12,
   });
@@ -266,6 +317,9 @@ function readLatestStableTag(repo) {
 }
 
 function assertNoPartialStable(state, tag) {
+  if (state?.duplicateAssets?.length) {
+    throw new Error(`Refusing release ${tag} with duplicate assets: ${state.duplicateAssets.join(", ")}`);
+  }
   if (state?.unexpectedAssets?.length) {
     throw new Error(
       `Refusing release ${tag} with assets outside the public allowlist: ${state.unexpectedAssets.join(", ")}`,
@@ -424,6 +478,8 @@ async function main() {
   const initialState = createOrNormalizeStagingRelease({ repo, tag, version, notesPath, keepDraft });
   if (!initialState.isStable) {
     run("gh", ["release", "upload", tag, "--repo", repo, "--clobber", ...publicFiles], { stdio: "inherit" });
+  } else {
+    restoreStableMetadata({ repo, tag, releaseDir });
   }
   cleanupAppleDouble(releaseDir);
 
