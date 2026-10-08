@@ -65,6 +65,9 @@ export function oneSupervisor():OneSupervisorService {
   const workQueue = new OneSupervisorWorkQueue(getDb(), hostsWork);
   const startNative = (req: Parameters<typeof invocationService.start>[0], hostNoticePurpose?: SupervisorHostNoticePurpose) => {
     if (req.runtimeSelection) req={...req,runtimeSelection:normalizeChatRuntimeSelection(req.runtimeSelection) ?? undefined};
+    // The target's persisted surface owns its execution contract. A handoff into
+    // an existing One room must not accidentally enter the Work-only route.
+    if (getChat(req.chatId)?.originSurface === "one") req={...req,oneMode:true,onePermissionMode:req.onePermissionMode ?? req.permissions};
     return invocationService.start(req,undefined,undefined,undefined,hostNoticePurpose,admitMainInvocation(req.chatId,req.runId));
   };
   supervisor=new OneSupervisorService({
@@ -92,7 +95,7 @@ export function oneSupervisor():OneSupervisorService {
       start:startNative,attach:chatId=>invocationService.attach(chatId,{includeEvents:false}),receipt:runId=>invocationService.receipt(runId),
       cancel:runId=>invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>invocationService.pauseGoal(chatId,goalId),
       cancelGoal:(chatId,goalId)=>invocationService.deleteGoal(chatId,goalId),
-      steer:(req,runId)=>invocationService.steer(req,runId,undefined,undefined,admitMainInvocation(req.chatId)),
+      steer:(req,runId)=>invocationService.steerFromSupervisor(req,runId,admitMainInvocation(req.chatId)),
       steerState:id=>queuedSteerState(id),
       onSettled:listener=>invocationService.onSettled(listener),
     },science:{

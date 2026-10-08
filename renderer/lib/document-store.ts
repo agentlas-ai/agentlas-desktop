@@ -1,10 +1,10 @@
 "use client";
+import { readAppUiPreference, writeAppUiPreference } from "@/lib/app-ui-preferences";
 // 문서 스튜디오 로컬 영속 — 소스(참고문헌), 인용 스타일, 작성 중인 문서 초안.
 // 데스크톱 단일 사용자 로컬 앱이라 localStorage로 충분(서버/DB 불필요).
 import type { CitationStyle, Reference } from "./citations";
 
 const REF_KEY = "agentlas.docstudio.references.v1";
-const STYLE_KEY = "agentlas.docstudio.style.v1";
 export const DOCUMENT_DRAFT_KEY = "agentlas.docstudio.draft.v1";
 export const DOCUMENT_DRAFT_VERSION = 1 as const;
 // Keep generated images comfortably below Chromium's per-origin localStorage
@@ -263,20 +263,11 @@ export function saveReferences(refs: Reference[]): void {
 }
 
 export function loadStyle(): CitationStyle | null {
-  try {
-    const s = localStorage.getItem(STYLE_KEY);
-    return (s as CitationStyle) || null;
-  } catch {
-    return null;
-  }
+  return readAppUiPreference("documentCitationStyle");
 }
 
 export function saveStyle(style: CitationStyle): void {
-  try {
-    localStorage.setItem(STYLE_KEY, style);
-  } catch {
-    /* 무시 */
-  }
+  try { writeAppUiPreference("documentCitationStyle", style); } catch { /* local editing remains available */ }
 }
 
 export function newReferenceId(): string {

@@ -198,10 +198,12 @@ const body = [
   "",
 ].join("\n");
 
+const schemaCount = require("./generate-app-control-schemas.cjs").generateAppControlSchemas({ root, operations, check: process.argv.includes("--check") });
+
 if (process.argv.includes("--check")) {
   const current = fs.existsSync(OUT) ? fs.readFileSync(OUT, "utf8") : "";
   if (current !== body) { console.error("app-control catalog is stale: run node scripts/generate-app-control-catalog.cjs"); process.exit(1); }
-  console.log(`app-control catalog fresh: ${operations.length} operations`);
+  console.log(`app-control catalog fresh: ${operations.length} operations, ${schemaCount} argument schemas`);
 } else {
   fs.mkdirSync(path.dirname(OUT), { recursive: true });
   fs.writeFileSync(OUT, body);

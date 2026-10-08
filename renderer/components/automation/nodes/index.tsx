@@ -234,6 +234,12 @@ export function CodeNode({ data, selected }: NodeProps) {
   );
 }
 
+export function ToolchainCallNode({ data, selected }: NodeProps) {
+  const d = data as WorkflowNodeData;
+  const call = d.config.toolchainCall as { toolchainId?: string; version?: number } | undefined;
+  return <NodeCard type="toolchain_call" icon={<IconCode size={13}/>} title={d.label || "Toolchain"} subtitle={call?.toolchainId ? `${call.toolchainId} · v${call.version ?? "?"}` : "Choose asset & version"} selected={selected} connectable={d.connectable} runState={d.runState} progress={d.progress} onAiNote={typeof d.onAiNote === "function" ? d.onAiNote as () => void : undefined} aiHint={d.strings.aiNoteHint}/>;
+}
+
 /** React Flow nodeTypes 맵 — WorkflowNodeType → 컴포넌트. */
 export const workflowNodeTypes = {
   trigger: TriggerNode,
@@ -247,5 +253,6 @@ export const workflowNodeTypes = {
   //   못 그리고, 사용자는 그래프에 구멍이 난 것을 본다.
   eval: EvalNode,
   subgraph: SubgraphNode,
+  toolchain_call: ToolchainCallNode,
   code: CodeNode,
 };

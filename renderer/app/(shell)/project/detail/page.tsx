@@ -1,5 +1,6 @@
 // 프로젝트 상세 — 프로젝트 문맥, 채팅, PM 메모리 기반 작업 타임라인.
 "use client";
+import { useAppUiPreference } from "@/lib/app-ui-preferences";
 import { OneBottomSheet as SharedDialog } from "@/components/one/OneBottomSheet";
 
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type DragEvent, type PointerEvent as ReactPointerEvent } from "react";
@@ -244,7 +245,7 @@ function ProjectPage() {
   const [rentAllowedSlugs, setRentAllowedSlugs] = useState<Set<string>>(new Set());
   // 에이전트 픽커 검색 — 목록이 길어 이름/slug로 즉시 좁힌다(클라이언트 필터).
   const [rosterQuery, setRosterQuery] = useState("");
-  const [inspectorCollapsed, setInspectorCollapsed] = useState(false);
+  const [inspectorCollapsed, setInspectorCollapsed] = useAppUiPreference("projectInspectorCollapsed");
   const [loading, setLoading] = useState(true);
   const [recoveryPending, setRecoveryPending] = useState(false);
   /** "새 채팅" 만들기가 실패한 이유. 읽기 실패(recoveryPending)와 섞지 않는다. */
@@ -426,21 +427,6 @@ function ProjectPage() {
     };
   }, [id, refresh]);
 
-  useEffect(() => {
-    try {
-      setInspectorCollapsed(window.localStorage.getItem("agentlas:project-inspector-collapsed") === "true");
-    } catch {
-      // Local storage is a preference only; the panel remains usable without it.
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem("agentlas:project-inspector-collapsed", String(inspectorCollapsed));
-    } catch {
-      // Preference persistence must not block project work.
-    }
-  }, [inspectorCollapsed]);
 
   /*
    * ★"새 채팅"이 실패하면 **만들기가 실패했다고 말해야 한다** (QA 실측 2026-09-08:

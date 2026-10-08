@@ -26,6 +26,11 @@ interface ProducerAdmissionSource {
   promptMessageId: string | null; taskDigest: string | null; invocationAdmissionDigest: string | null;
 }
 const producerAdmissions = new WeakMap<GoalProducerAdmission, ProducerAdmissionSource>();
+interface AdmittedProducer {
+  goalId: string; runId: string; attemptId: string; workerId: string; taskId: string;
+  taskDigest: string; revisionDigest: string; nativeControlGeneration: number;
+}
+const admittedProducers = new WeakMap<GoalProducerAdmission, AdmittedProducer>();
 function assertProducerLifetime(assertLive: () => void): void {
   if (assertLive.constructor.name === "AsyncFunction") throw new Error("goal_episode_admission_async");
   const result: unknown = assertLive();
@@ -132,7 +137,54 @@ export function admitGoalProducer(input: { admission: GoalProducerAdmission; goa
     const started = startLongRunWorkerAttempt({ runId: run.id, workerId: input.worker.workerId, taskId: input.worker.taskId,
       invocationRunId: custody.invocationId, runtimeSelection: input.worker.runtimeSelection, appInstanceId: custody.appInstanceId });
     if (getLongRunAttemptGoalRevision(run.id, started.attemptId) !== revision.revision) throw new Error("goal_episode_admission_stale");
+    const boundTask = listLongRunTasks(run.id, true).find(row => row.id === task.id)!;
+    admittedProducers.set(input.admission, { goalId: input.goalId, runId: run.id,
+      attemptId: started.attemptId, workerId: input.worker.workerId, taskId: task.id,
+      taskDigest: digest(boundTask), revisionDigest: digest(revision),
+      nativeControlGeneration: captureGoalExecutionControlGeneration({ goalId: input.goalId,
+        rootChatId: custody.chatId, longRunId: run.id, expectedRevision: revision.revision }) });
     return started;
+  }).immediate();
+}
+
+/** The selection token authorizes one genuine controller, not a later owner or
+ * revision. Recheck immediately before work even when early binding succeeded. */
+export function assertGoalProducerDispatch(input: { admission: GoalProducerAdmission; goalId: string;
+  attemptId: string }, assertLive: () => void): void {
+  function refuse(code: string): never { throw Object.assign(new Error(code), { code }); }
+  desktopStoreTransaction(getDb(), () => {
+    assertProducerLifetime(assertLive);
+    const custody = producerAdmissions.get(input.admission), admitted = admittedProducers.get(input.admission);
+    if (!custody || !admitted || admitted.goalId !== input.goalId || admitted.attemptId !== input.attemptId)
+      refuse("goal_episode_admission_missing");
+    const source = producerSource(custody.invocationId, custody.chatId);
+    const run = getLongRunByGoalId(input.goalId), revision = getChatGoalRevision(input.goalId);
+    const task = run ? listLongRunTasks(run.id, true).find(row => row.id === admitted.taskId) : null;
+    if (!run || run.appInstanceId !== custody.appInstanceId || desktopAppInstanceId() !== custody.appInstanceId)
+      refuse("goal_episode_admission_owner_changed");
+    // Accounting and host bookkeeping may advance the run event cursor while
+    // preparing this turn. Validate execution authority itself, not that cursor.
+    if (source.startId !== custody.startId || source.invocationAdmissionDigest !== custody.invocationAdmissionDigest
+      || (custody.promptMessageId && source.promptMessageId !== custody.promptMessageId)
+      || run.id !== admitted.runId || run.status !== "running"
+      || run.executionLocation !== "desktop-local" || run.hostOwnerKind !== "desktop" || !["one", "work"].includes(run.surface)
+      || run.rootChatId !== custody.chatId || getChat(custody.chatId)?.goalId !== input.goalId
+      || longRunOwnerHold(run.id) || !revision || digest(revision) !== admitted.revisionDigest
+      || getLongRunGoalRevisionBinding(run.id)?.revision !== revision.revision
+      || !task || digest(task) !== admitted.taskDigest
+      || goalPlanOwnerControlEpoch(input.goalId) !== custody.ownerControlEpoch)
+      refuse("goal_episode_admission_stale");
+    assertGoalExecutionControlGeneration({ goalId: input.goalId, rootChatId: custody.chatId,
+      longRunId: run.id }, admitted.nativeControlGeneration);
+    const attempt = getDb().prepare(`SELECT a.id FROM long_run_worker_attempts a
+      JOIN long_run_workers w ON w.id=a.worker_id AND w.run_id=a.run_id
+      WHERE a.id=? AND a.run_id=? AND a.worker_id=? AND a.task_id=? AND a.invocation_run_id=?
+        AND a.app_instance_id=? AND a.state='running' AND w.role='controller' AND w.parent_worker_id IS NULL
+        AND w.current_attempt=a.attempt AND w.state='running'`)
+      .get(input.attemptId, run.id, admitted.workerId, admitted.taskId, custody.invocationId, custody.appInstanceId);
+    if (!attempt || latestGoalEpisodeProducer(run.id)?.id !== input.attemptId
+      || getLongRunAttemptGoalRevision(run.id, input.attemptId) !== revision.revision)
+      refuse("goal_episode_admission_stale");
   }).immediate();
 }
 

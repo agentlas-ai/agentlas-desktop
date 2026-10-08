@@ -522,6 +522,7 @@ import { prejudgeOneMemoryIntent } from "./one/memory-detector";
 import { normalizeRuntimeSelectionInput, RuntimeSelectionContractError } from "../shared/runtime-selection";
 import { withInvocationAccounting, withInvocationPreflightAccounting } from "./long-run/accounting-context";
 import { forgetOneRecoveryJudgment, judgeOneAutoRecovery, oneRecoveryRuntimeSelection } from "./one/auto-recovery";
+import { desktopOneRecoveryContext, desktopOneRecoveryOriginalRunId, desktopOneRecoveryScope, pendingDesktopOneRecovery, reserveDesktopOneRecovery } from "./one/desktop-recovery-admission";
 import { oneRunFailureFingerprint } from "../shared/one-auto-recovery";
 import { registerWorkStartIpc } from "./work-start";
 import { registerBrowserAutofillIpc } from "./browser/autofill-ipc";
@@ -5106,7 +5107,8 @@ export function registerIpcHandlers(): void {
         // Auxiliary bookkeeping is not new task evidence. Counting its own
         // usage rows here would make every presentation invalidate itself.
         const facts = getDb().prepare(`SELECT COUNT(*) AS event_count FROM run_events
-          WHERE run_id = ? AND kind NOT IN ('runtime_usage_started','runtime_usage_recorded')`)
+          WHERE run_id = ? AND kind NOT IN ('runtime_usage_started','runtime_usage_recorded',
+            'one_controller_recovery_requested','one_controller_recovery_link')`)
           .get(runId) as { event_count: number };
         const receipt = { ...observedReceipt, eventCount: facts.event_count };
         const anchor = getDb().prepare("SELECT id,chat_id FROM run_events WHERE run_id=? AND kind='invoke_started' LIMIT 1")
@@ -5140,6 +5142,13 @@ export function registerIpcHandlers(): void {
         return { retry: false, reason: "settled", fingerprint: oneRunFailureFingerprint(scope.receipt),
           diagnosis: "", decidedBy: "form" };
       }
+      const capturedRecoveryScope = desktopOneRecoveryScope(runId, chatId);
+      if (!capturedRecoveryScope) return null;
+      const recoveryContext = desktopOneRecoveryContext(runId, chatId);
+      const pending = pendingDesktopOneRecovery(runId, chatId, capturedRecoveryScope);
+      if (pending) return { retry: true, attempt: pending.ordinal, originalRunId: pending.originalRunId,
+        nextRecoveryRunId: pending.nextRunId, fingerprint: oneRunFailureFingerprint(scope.receipt),
+        diagnosis: pending.advice.diagnosis, decidedBy: pending.advice.decidedBy };
       const result = await withInvocationAccounting({ runId, chatId,
         readOwner: () => scope.longRun && scope.longRun.surface !== "science"
           ? { goalId: scope.longRun.goalId, attemptId: null } : null }, () => judgeOneAutoRecovery({
@@ -5148,7 +5157,8 @@ export function registerIpcHandlers(): void {
         controlScope: scope.controlScope,
         locale: currentUiLocale(),
         goal: typeof input?.goal === "string" ? input.goal.slice(0, 4_000) : "",
-        attemptsSpent: Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0,
+        attemptsSpent: Math.max(recoveryContext.attemptsSpent,
+          Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0),
         previousFingerprint: typeof input?.previousFingerprint === "string" ? input.previousFingerprint : null,
       }));
       // A result is advice for the captured authority, never a grant that can
@@ -5162,9 +5172,13 @@ export function registerIpcHandlers(): void {
         || current.receipt.hostStopCause !== scope.receipt.hostStopCause
         || current.receipt.executionPermission !== scope.receipt.executionPermission
         || current.receipt.interruptionCause !== scope.receipt.interruptionCause) return null;
+      const advice = { retry: result.decision.retry, ...(result.decision.retry ? { attempt: result.decision.attempt } : { reason: result.decision.reason }),
+        fingerprint: result.fingerprint, diagnosis: result.diagnosis, decidedBy: result.decidedBy };
+      const reserved = result.decision.retry ? reserveDesktopOneRecovery(runId, chatId, capturedRecoveryScope, advice) : null;
+      if (result.decision.retry && !reserved) return { ...advice, retry: false, reason: "undecided", attempt: undefined };
       return {
         ...(result.decision.retry
-          ? { retry: true as const, attempt: result.decision.attempt }
+          ? { retry: true as const, attempt: reserved!.ordinal, originalRunId: reserved!.originalRunId, nextRecoveryRunId: reserved!.nextRunId }
           : { retry: false as const, reason: result.decision.reason }),
         fingerprint: result.fingerprint,
         diagnosis: result.diagnosis,
@@ -5182,13 +5196,28 @@ export function registerIpcHandlers(): void {
       attemptsSpent?: number;
     }) => {
       const { verifyOneRecoveryOutcome } = await import("./one/recovery-verification");
-      return verifyOneRecoveryOutcome({
-        originalRunId: String(input?.originalRunId ?? ""),
-        recoveryRunId: String(input?.recoveryRunId ?? ""),
-        chatId: String(input?.chatId ?? ""),
+      const recoveryRunId = String(input?.recoveryRunId ?? ""), chatId = String(input?.chatId ?? "");
+      const savedOriginalRunId = desktopOneRecoveryOriginalRunId(recoveryRunId, chatId);
+      if (!savedOriginalRunId) return null;
+      const capturedScope = desktopOneRecoveryScope(recoveryRunId, chatId);
+      if (!capturedScope) return null;
+      const context = desktopOneRecoveryContext(recoveryRunId, chatId);
+      if (input?.originalRunId && context.originalRunId !== input.originalRunId) return null;
+      const pending = pendingDesktopOneRecovery(recoveryRunId, chatId, capturedScope);
+      if (pending) return { ...pending.advice, originalRunId: pending.originalRunId, recoveryRunId,
+        attempt: pending.ordinal, nextRecoveryRunId: pending.nextRunId };
+      const result = await verifyOneRecoveryOutcome({
+        originalRunId: context.originalRunId,
+        recoveryRunId,
+        chatId,
         goal: typeof input?.goal === "string" ? input.goal : "",
-        attemptsSpent: Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0,
+        attemptsSpent: Math.max(context.attemptsSpent, Number.isSafeInteger(input?.attemptsSpent) ? Math.max(0, input!.attemptsSpent!) : 0),
       });
+      if (!result || desktopOneRecoveryScope(recoveryRunId, chatId) !== capturedScope) return null;
+      if (!result.retry) return result;
+      const reserved = reserveDesktopOneRecovery(recoveryRunId, chatId, capturedScope, result);
+      return reserved ? { ...result, attempt: reserved.ordinal, nextRecoveryRunId: reserved.nextRunId }
+        : { ...result, retry: false, reason: "undecided", attempt: undefined };
     },
   );
   ipcMain.handle("oneValueClosure:getState", () => getOneValueClosureState());
@@ -6942,6 +6971,13 @@ export function registerIpcHandlers(): void {
       }
     }
   });
+  invocationService.onSteerQueueCapacity((chatId) => dispatchOnePreflightSteers(undefined, chatId));
+  invocationService.onSettled(({ chatId }) => {
+    setImmediate(() => {
+      try { dispatchOnePreflightSteers(undefined, chatId); }
+      catch { /* Exact queued rows remain durable; no uncertain claim is replayed. */ }
+    });
+  });
   ipcMain.handle("invoke:preflightSubmissionBegin", (_event, input: OnePreflightSubmissionInput) => {
     assertTrustedSitePublishIpcSender(_event);
     return beginOnePreflightSubmission(input, rendererInvocationProcessEpoch);
@@ -6949,8 +6985,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("invoke:preflightSteerEnqueue", (_event, input: OnePreflightSteerInput) => {
     assertTrustedSitePublishIpcSender(_event);
     const receipt = enqueueOnePreflightSteer(input);
-    dispatchOnePreflightSteers(input.submissionId);
-    return listOnePreflightSteers(input.chatId).find((item) => item.steerId === receipt.steerId) ?? receipt;
+    // Commit acceptance before dispatch work. A busy Main must not turn its
+    // provider handoff latency into an uncertain intake acknowledgement.
+    setImmediate(() => {
+      try { dispatchOnePreflightSteers(input.submissionId); }
+      catch { /* The accepted row remains durable and discoverable by its exact ID. */ }
+    });
+    return receipt;
   });
   ipcMain.handle("invoke:preflightSteers", (_event, chatId: string) => {
     assertTrustedSitePublishIpcSender(_event);
@@ -7193,10 +7234,17 @@ export function registerIpcHandlers(): void {
       throw cause;
     }
   });
-  ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest) => {
+  ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest, intentId?: string) => {
     assertTrustedSitePublishIpcSender(_event);
     const request = rendererInvocationRequest(req);
-    return invocationService.steer(request, undefined, undefined, undefined, admitMainInvocation(request.chatId));
+    return invocationService.steerFromOwner(
+      request, intentId, admitMainInvocation(request.chatId),
+    );
+  });
+  ipcMain.handle("invoke:steerReceipt", (_event, input: { chatId: string; intentId: string }) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (!input || typeof input !== "object") throw new Error("invocation_steer_invalid_lookup");
+    return invocationService.ownerSteerReceipt(input.chatId, input.intentId);
   });
   ipcMain.handle("invoke:cancel", (_event, runId: string) => ({
     runId,

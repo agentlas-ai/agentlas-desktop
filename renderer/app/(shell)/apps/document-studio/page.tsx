@@ -1,4 +1,5 @@
 "use client";
+import { subscribeAppUiPreference } from "@/lib/app-ui-preferences";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
 import { ipc } from "@/lib/ipc";
@@ -91,6 +92,7 @@ export default function DocumentStudioPage() {
 
   const [references, setReferences] = useState<Reference[]>([]);
   const [citationStyle, setCitationStyle] = useState<CitationStyle>("APA");
+  useEffect(() => subscribeAppUiPreference("documentCitationStyle", setCitationStyle), []);
   const [citationOpen, setCitationOpen] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [aiOpen, setAiOpen] = useState(false);

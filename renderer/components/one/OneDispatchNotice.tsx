@@ -5,6 +5,7 @@ import type { ChatHostNotice } from "@shared/types";
 import { stripAgentControlBlocks } from "@shared/agent-control-blocks";
 import { flattenAskFences } from "@shared/ask-fence-flatten";
 import { ipc } from "@/lib/ipc";
+import { readOneChatHistory } from "@/lib/one-chat-history";
 import { markChatVisible } from "@/lib/tool-approvals";
 import { Markdown } from "../Markdown";
 import { OneAgentPortrait } from "./OneAgentPortrait";
@@ -35,10 +36,10 @@ export function OneDispatchNotice({ notice, locale }: { notice: Notice; locale: 
     let cancelled = false;
     let busy = false;
     const timer = setInterval(async () => {
-      if (busy) return;
+      if (busy || document.visibilityState === "hidden") return;
       busy = true;
       try {
-        const history = await api.invoke.history(dispatch.parentChatId);
+        const history = await readOneChatHistory(api, dispatch.parentChatId);
         const updated = history.find(row => row.hostNotice?.purpose === current.purpose
           && "dispatch" in row.hostNotice && row.hostNotice.dispatch?.dispatchId === dispatch.dispatchId
           && "runId" in row.hostNotice && row.hostNotice.runId === current.runId)?.hostNotice;

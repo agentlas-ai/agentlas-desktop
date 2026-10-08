@@ -1,4 +1,5 @@
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
+import { WORK_RECOVERY_PROTOCOL } from "../../shared/work-recovery";
 // 모든 런타임(CLI 3종 + BYOK 3종)이 구현해야 하는 통합 인터페이스.
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
 import { runtimeNativeAbilitiesLine } from "./native-capabilities";
@@ -23,6 +24,8 @@ export type BeforeMcpToolResult = (input: {
 }) => Promise<void>;
 
 export interface RunnerRequest {
+  /** Private Host port; canonical task/checkpoint/action identities survive model changes. */
+  canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryContext;
   /** Awaited before an MCP result can reach the next provider dispatch. */
   beforeMcpToolResult?: BeforeMcpToolResult;
   /** Main-minted exact-run recovery authority; never accepted from renderer JSON. */
@@ -1214,13 +1217,14 @@ export function wrapSystemPrompt(
       ? "Use local files, shell and network within the selected full runtime permission and current host grants."
       : permission === "write"
         ? "Read and edit files and run shell commands only within the current working folder and host grants."
-        : "This run is read-only; do not change files or research state.";
+        : "This run is read-only for study files, source data, manuscripts and unrelated research records. You may use host-granted Science tools to record only the findings, checkpoints or peer-review report explicitly required by your current assignment. Submit the assigned report through its typed tool even though filesystem and SDK permissions remain read-only; a prose final is not a stored report. Do not make unrelated research, source, manuscript or file changes; reporting grants no approval, broader write permission or publication authority.";
     return [
       tStatus(locale, "sysHeader"),
       responseLanguageGuide(locale, userPrompt),
       "Agentlas Science owns this invocation. Follow the owner's instructions and the current project context. Use only tools actually available to this run; unavailable connections are a bounded obstacle, never invented access.",
       boundary,
-      "Report measurements, artifacts and research state changes only from their exact returned receipts. Stop immediately when the owner stops or host authority becomes stale. Optional manuals and peer review do not delay independent work unless the owner requested them.",
+      WORK_RECOVERY_PROTOCOL,
+      "Report measurements, artifacts and research state changes only from their exact returned receipts. Stop immediately when the owner stops or host authority becomes stale. Follow the current assignment's review requirement; optional manuals or reviews do not delay unrelated independent work.",
       tStatus(locale, "sysAgentDef"),
       agentSystemPrompt,
     ].join("\n");
@@ -1247,6 +1251,7 @@ export function wrapSystemPrompt(
   // 프레이밍 위에서는 "원인은 ~~ 때문입니다"로 멈추는 상담사 응답이 반복됐다(사용자
   // 실신고). 원인 설명만 하고 끝내는 것을 명시적 실패 모드로 규정한다.
   const toolCompletionGuide = [
+    WORK_RECOVERY_PROTOCOL,
     "Finish the loop. When the user reports something broken or asks for a change, do not stop at explaining the cause: investigate with your tools, apply the fix, verify it actually works, then report what changed and how you verified it. A cause-only answer is a failure — keep going and use every tool and permission available until the task is actually done.",
     "Be resourceful and persistent: if the first approach fails, try another (a different tool, the in-app browser instead of an external one, a shell fallback) rather than giving up. Only stop when the task is genuinely blocked by something outside this machine — then name exactly what is missing (attach the project folder, connect a tool, provide a credential) and take the concrete next step, instead of ending with an explanation.",
     "Boundaries that still hold: never exfiltrate the user's secrets or private data to third parties, and do not attack, intrude on, or bypass the security of systems the user does not own. Everything else the user asks for, you complete.",

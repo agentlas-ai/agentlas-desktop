@@ -253,22 +253,11 @@ export function settledLoginVerificationUrl(wc: WebContents, signal: AbortSignal
   });
 }
 
-function settledUrl(wc: WebContents, timeoutMs = 20_000): Promise<string | null> {
-  return new Promise((resolve) => {
-    if (wc.isDestroyed()) { resolve(null); return; }
-    let done = false;
-    const finish = () => {
-      if (done) return;
-      done = true;
-      clearTimeout(timer);
-      wc.removeListener("did-stop-loading", finish);
-      wc.removeListener("destroyed", finish);
-      resolve(wc.isDestroyed() ? null : wc.getURL());
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    wc.once("did-stop-loading", finish);
-    wc.once("destroyed", finish);
-  });
+/** A stopped load can retain the old URL even after ERR_CONNECTION_REFUSED. */
+export function reloadNativeBrowserPage(wc: WebContents, signal: AbortSignal, timeoutMs = 20_000): Promise<string | null> {
+  const settled = settledLoginVerificationUrl(wc, signal, timeoutMs);
+  if (!wc.isDestroyed() && !signal.aborted) wc.reload();
+  return settled;
 }
 
 export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowserGrantInput): Promise<NativeBrowserRelayGrant> {
@@ -1065,9 +1054,7 @@ export async function createNativeBrowserRelayGrant(input: CanonicalNativeBrowse
           },
           reload: async () => {
             if (wc.isDestroyed()) return null;
-            const settled = settledUrl(wc);
-            wc.reload();
-            return settled;
+            return reloadNativeBrowserPage(wc, input.signal);
           },
           navigate: async (target: string) => {
             const safe = sanitizeWorkLiveUrl(target);

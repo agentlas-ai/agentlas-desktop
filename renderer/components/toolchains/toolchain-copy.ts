@@ -10,10 +10,10 @@ export function toolchainCopy(locale: string) {
   const ko = locale === "ko";
   return {
     title: ko ? "툴체인" : "Toolchains",
-    subtitle: ko ? "반복 실행에서 배운 것 — 확실하지 않으면 원래 방식으로 돕니다" : "What repeated runs taught — anything uncertain runs the original way",
+    subtitle: ko ? "독립된 재사용 도구 — 입력·출력 계약과 고정 버전" : "Independent reusable tools — input/output contracts and pinned versions",
     analyze: ko ? "다시 분석" : "Analyze now",
     analyzing: ko ? "분석 중…" : "Analyzing…",
-    empty: ko ? "아직 배운 것이 없습니다. 자동화가 같은 일을 여러 번 하면 여기에 나타납니다." : "Nothing learned yet. Repeated automation work appears here.",
+    empty: ko ? "등록된 툴체인이 없습니다. 그래프에서 재사용할 기능을 추출하세요." : "No registered toolchains. Extract a reusable capability from a graph.",
     unavailable: ko ? "이 화면에서는 툴체인을 불러올 수 없습니다." : "Toolchains are unavailable here.",
     stateFile: (target: string, lines: number | null) => ko ? `상태 파일 미리 읽기 · ${target} (마지막 ${lines ?? 10}줄)` : `Pre-read state file · ${target} (last ${lines ?? 10} lines)`,
     pageRead: (target: string) => ko ? `페이지 읽기 · ${target}` : `Page read · ${target}`,
@@ -98,8 +98,8 @@ export function toolchainCopy(locale: string) {
     // ── Work management screen ──
     manager: {
       subtitle: ko
-        ? "One이 저장한 그래프를 다른 대화에서도 부를 수 있게 만든 도구, 그리고 반복 실행에서 배운 것"
-        : "Graphs One saved and made callable from other conversations, and what repeated runs taught",
+        ? "독립 ID와 검증된 버전을 가진 재사용 도구"
+        : "Reusable tools with independent IDs and validated versions",
       localOnly: ko ? "학습·시험·실행은 이 컴퓨터에서만 일어납니다" : "Learning, testing and runs stay on this computer",
       search: ko ? "이름·용도로 찾기" : "Find by name or purpose",
       lanes: {
@@ -110,8 +110,8 @@ export function toolchainCopy(locale: string) {
         unregistered: ko ? "등록 안 함" : "Not registered",
       },
       laneEmpty: {
-        all: ko ? "그래프가 있는 자동화가 아직 없습니다. One에게 반복할 일을 자동화로 만들어 달라고 하면 여기에 나타납니다." : "No automation with a graph yet. Ask One to turn repeated work into an automation and it appears here.",
-        callable: ko ? "아직 호출 가능한 툴체인이 없습니다. One이 그래프를 저장하고 등록하거나, 아래 '등록 안 함'에서 직접 만들 수 있습니다." : "No callable toolchain yet. One can publish a graph it saved, or make one callable under Not registered.",
+        all: ko ? "등록된 툴체인이 없습니다. 원본 그래프에서 재사용할 기능을 추출하세요." : "No registered toolchains. Extract a reusable capability from a source graph.",
+        callable: ko ? "아직 검증된 툴체인이 없습니다. 서로 다른 입력 예시로 버전을 검증하세요." : "No validated toolchain yet. Validate a version against distinct input examples.",
         learning: ko ? "지금 배우는 것이 없습니다. 같은 자동화가 10번 넘게 성공하면 반복되는 읽기를 찾기 시작합니다." : "Nothing is being learned. After 10 successful runs of one automation, repeated reads are looked for.",
         draft: ko ? "시험에 떨어졌거나 중단한 툴체인이 없습니다." : "No toolchain failed its test or was withdrawn.",
         unregistered: ko ? "모든 자동화가 툴체인으로 등록돼 있거나 학습 중입니다." : "Every automation is registered or being learned.",

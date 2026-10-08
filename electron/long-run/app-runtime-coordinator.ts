@@ -47,9 +47,19 @@ function closeAdmissionAndInterruptBestEffort(): void {
 
 export function initializeAppRuntimeCoordinator(): { appInstanceId: string; recoveredRunIds: string[] } {
   if (initialized) return { appInstanceId, recoveredRunIds: [] };
+  // Only Electron's exclusive GUI lock proves the previous Desktop epoch has
+  // ended. A dev multi-instance or headless host must never adopt a live owner.
+  const assertExclusive = (): void => {
+    const electron = require("electron") as { app?: { hasSingleInstanceLock?: () => boolean } };
+    if (electron.app?.hasSingleInstanceLock?.() !== true) throw new Error("desktop_startup_custody_not_exclusive");
+  };
+  let recoveredRunIds: string[] = [];
+  let exclusive = false;
+  try { assertExclusive(); exclusive = true; }
+  catch { /* A non-exclusive host may own new work, but cannot adopt old work. */ }
+  if (exclusive) recoveredRunIds = recoverInterruptedDesktopLongRunsAtStartup(appInstanceId, assertExclusive);
   initialized = true;
   admissionOpen = true;
-  const recoveredRunIds = recoverInterruptedDesktopLongRunsAtStartup(appInstanceId);
   /*
    * Say, out loud and per run, which of those may carry on.
    *

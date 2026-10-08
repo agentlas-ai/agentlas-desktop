@@ -13,7 +13,9 @@ import type { OneWorkCell } from "./one-turn-work";
 
 export interface ToolchainSourceRef {
   kind: "run" | "publish";
-  automationId: string;
+  automationId: string | null;
+  toolchainId: string | null;
+  version: number | null;
   name: string | null;
   /** publish only: what the fresh-session test decided. */
   state: "callable" | "draft" | "deprecated" | null;
@@ -166,17 +168,21 @@ function receiptsIn(raw: string): Array<Record<string, unknown>> {
 export function toolchainSourceOf(cell: OneWorkCell): ToolchainSourceRef | null {
   if (cell.kind !== "call" || cell.status === "failed" || !cell.result || cell.result.length > MAX_RESULT_CHARS) return null;
   const tool = oneTeamToolName(cell.toolName ?? cell.label, cell.origin);
-  if (tool !== "one_graph_run" && tool !== "toolchain_publish") return null;
+  if (tool !== "one_graph_run" && tool !== "toolchain_run" && tool !== "toolchain_publish") return null;
   for (const receipt of receiptsIn(cell.result)) {
+    const toolchainId = typeof receipt.toolchainId === "string" && receipt.toolchainId.trim() ? receipt.toolchainId.trim() : null;
+    const version = typeof receipt.version === "number" ? receipt.version : null;
+    const name = typeof receipt.name === "string" && receipt.name.trim() ? receipt.name.trim().slice(0, 120) : null;
+    if (toolchainId && receipt.schemaVersion === "agentlas.toolchain-call.v1" && receipt.ok === true && (tool === "toolchain_run" || tool === "one_graph_run")) return { kind: "run", toolchainId, version, automationId: null, name, state: null };
+    if (toolchainId && tool === "toolchain_publish" && receipt.schemaVersion === "agentlas.toolchain-publish.v2") return { kind: "publish", toolchainId, version, automationId: null, name, state: receipt.status === "callable" ? "callable" : "draft" };
     const automationId = typeof receipt.graph_id === "string" && receipt.graph_id.trim() ? receipt.graph_id.trim() : null;
     if (!automationId) continue;
-    const name = typeof receipt.name === "string" && receipt.name.trim() ? receipt.name.trim().slice(0, 120) : null;
     if (tool === "one_graph_run" && receipt.schemaVersion === RUN_RECEIPT && receipt.invoked_as === "toolchain") {
-      return { kind: "run", automationId, name, state: null };
+      return { kind: "run", automationId, toolchainId: null, version: null, name, state: null };
     }
     if (tool === "toolchain_publish" && receipt.schemaVersion === PUBLISH_RECEIPT) {
       const state = receipt.state === "callable" || receipt.state === "draft" || receipt.state === "deprecated" ? receipt.state : null;
-      return { kind: "publish", automationId, name, state };
+      return { kind: "publish", automationId, toolchainId: null, version: null, name, state };
     }
   }
   return null;
@@ -187,7 +193,7 @@ export function toolchainSourcesOf(cells: readonly OneWorkCell[]): ToolchainSour
   const sources = new Map<string, ToolchainSourceRef>();
   for (const cell of cells) {
     const source = toolchainSourceOf(cell);
-    if (source) sources.set(`${source.kind}:${source.automationId}`, source);
+    if (source) sources.set(`${source.kind}:${source.toolchainId ?? source.automationId}:${source.version ?? "legacy"}`, source);
   }
   return [...sources.values()];
 }

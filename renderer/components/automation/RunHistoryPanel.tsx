@@ -11,6 +11,7 @@ import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
 import { askAutomationSession } from "@/components/automation/AutomationSessionPanel";
+import { AgiIncidentReportButton } from "@/components/agi/AgiBugReport";
 import { IconAlertTriangle, IconClose } from "@/components/Icon";
 import {
   runtimeBackendForSelection,
@@ -792,6 +793,12 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   }
 
   return (
+    <>
+    {latest?.status === "error" && <AgiIncidentReportButton key={latest.runId} locale={locale} draft={{
+      runId: latest.runId, failureCode: "graph_run_failed", category: "other",
+      title: "[Graph] Run failed", summary: current.detail || "The graph run ended with an error.",
+      steps: ["Run the automation graph", "The graph run status became error"],
+    }} />}
     <details className={styles.history} data-testid="run-history-disclosure"><summary aria-label={ko ? "실행 기록" : "Run history"} title={ko ? "실행 기록" : "Run history"}><IconArchive size={16}/></summary><section className="automation-run-panel titlebar-nodrag" data-compact={compact ? "true" : "false"}>
       <div className="automation-run-head">
         <div>
@@ -1145,6 +1152,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         </div>
       ) : null}
     </section></details>
+    </>
   );
 }
 

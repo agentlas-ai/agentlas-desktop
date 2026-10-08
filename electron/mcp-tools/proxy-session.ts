@@ -235,7 +235,19 @@ function expireUnused(handle: string, entry: Registration): void {
     // A promoted handle is owned by the resident CLI, not by the last HTTP
     // wire.  Its child may be idle for hours between turns; expiring the map
     // here would make that child hit terminal 403 and strand the session.
-    if (!entry.connections.size && !entry.resident) { launches.delete(handle); dropIdleUpstream(entry); }
+    if (launches.get(handle) !== entry || entry.connections.size || entry.resident) return;
+    // A wire is only one adapter pass. Its sealed invocation may still own this
+    // launch while thinking, or before the first wire. Keep only live authority,
+    // never a stale seal, changed cwd, or an unactivated registration.
+    if (entry.binding) {
+      try {
+        preparedMcpTargetTransport(entry.binding, entry.binding.server);
+        validateLaunchCwd(entry.cwd);
+        expireUnused(handle, entry);
+        return;
+      } catch { /* Invalid authority cannot extend the launch lifetime. */ }
+    }
+    revokeMcpProxyLaunch(handle);
   }, UNUSED_LAUNCH_MS);
   entry.timer.unref?.();
 }

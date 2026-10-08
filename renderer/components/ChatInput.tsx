@@ -585,7 +585,11 @@ function ChatInputComponent({
     const el = textareaRef.current;
     if (!el) return;
     el.style.height = "auto";
+    el.style.overflowY = "hidden";
+    // Empty input keeps its one-row height; a wrapping placeholder is not content.
+    if (!input) return;
     el.style.height = `${Math.min(el.scrollHeight, 150)}px`;
+    el.style.overflowY = el.scrollHeight > 150 ? "auto" : "hidden";
   }, [input]);
 
   // busy는 제외 — 실행 중에도 Enter/전송 버튼으로 steering 메시지를 보낼 수 있다. 부모가

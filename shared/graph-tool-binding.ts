@@ -686,8 +686,21 @@ export type GraphSwapOutcome =
   | { ok: false; code: string; reason: string; nextAction: string };
 
 /** IPC로 렌더러에 건너가는 보고 형태. 렌더러가 electron/ 을 import 하지 않게 여기에 둔다. */
+export interface GraphToolchainBinding {
+  nodeId: string;
+  nodeLabel: string;
+  toolchainId: string;
+  version: number | null;
+  name?: string;
+  ready: boolean;
+  problems: string[];
+  /** Actual values remain subject to inputSchema validation at invocation. */
+  dynamicInputs: boolean;
+}
+
 export interface GraphConnectionReportShape {
   activation: ActivationDecision;
+  toolchains?: GraphToolchainBinding[];
   tasks: ProviderTask[];
   /** 이 그래프가 쓰는 것 전부(준비된 것 포함) — 교체 화면이 이걸 그린다. */
   bindings: GraphBinding[];

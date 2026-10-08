@@ -1,19 +1,26 @@
 "use client";
+import { readAppUiPreference, writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
+import { MessageActions, MessageReplyPreview } from "../MessageActions";
+import { composeMessageReply, displayMessageReply, type MessageReply } from "@/lib/message-reply";
 
 import { hasInlineVisualBlock } from "@/lib/visual-html";
 import { LinkedLocalFiles } from "@/components/LinkedLocalFiles";
 import { browserAnnotationDraftText } from "@shared/browser-annotation";
-import { readStoredRuntimeSelection, selectionForRuntime } from "@shared/runtime-selection";
+import { runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
+import { readOneChatHistory } from "@/lib/one-chat-history";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
+import { ONE_PREFLIGHT_STEER_REQUEST_KEYS, normalizeOnePreflightSteerRequest } from "@shared/one-preflight-steers";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
 import { ContinuityStatus } from "../ContinuityStatus";
 import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
-import type { ChatHostNotice } from "../../../shared/types";
+import type { ChatHostNotice, InvocationSteerRecovery, McpInvocationRequest } from "../../../shared/types";
 import { agiActionNoticeLine, hostStatusLabel, isQuietHostStatus, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "../automation/AutomationChatActivity";
@@ -298,7 +305,6 @@ function oneTeamPreflightErrorCode(cause: unknown): string | undefined {
 }
 
 const ONE_PERMISSION_STORAGE_KEY = "agentlas.one.permission-mode.v1";
-const ONE_RUNTIME_STORAGE_KEY = "agentlas.one.runtime-selection.v1";
 const ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY = "agentlas.one.left-rail-collapsed.v1";
 /*
  * v2 (2026-08-24): 예전 키에는 "열림" 이 저장돼 있어서, 보여줄 산출물이 하나도
@@ -476,23 +482,12 @@ function readStoredBoolean(key: string, fallback: boolean): boolean {
 }
 
 function readStoredOneRuntimeSelection(): RuntimeSelection | null {
-  if (typeof window === "undefined") return null;
-  try {
-    const value = JSON.parse(window.localStorage.getItem(ONE_RUNTIME_STORAGE_KEY) ?? "null") as Partial<RuntimeSelection> | null;
-    if (!value || typeof value.kind !== "string" || typeof value.backend !== "string") return null;
-    // ACP 좌석(acpAgentId·label)을 보존한다 — 예전 판은 여기서 좌석을 떨궈 재시작 뒤 One 의 ACP 고정이 거절됐다.
-    return readStoredRuntimeSelection(value, { source: undefined, role: "orchestrator", inherit: false });
-  } catch {
-    return null;
-  }
+  return readAppUiPreference("oneRuntimeSelection");
 }
 
 function writeStoredOneRuntimeSelection(selection: RuntimeSelection): void {
-  try {
-    window.localStorage.setItem(ONE_RUNTIME_STORAGE_KEY, JSON.stringify(selection));
-  } catch {
-    // A storage failure must not make the model picker unusable for this turn.
-  }
+  try { writeAppUiPreference("oneRuntimeSelection", selection); }
+  catch { /* A storage failure must not make the model picker unusable for this turn. */ }
 }
 
 function oneEffortLabel(id: string): string {
@@ -649,10 +644,10 @@ type OnePreflightFenceStatus = {
 };
 const ONE_PREFLIGHT_FENCE_COPY: Record<OnePreflightFenceStatus["reason"], { ko: string; en: string }> = {
   checking: { ko: "추가 지시 영수증을 확인하고 있습니다. 작성한 글은 그대로입니다.", en: "Checking the follow-up receipt. Your draft remains." },
-  absent: { ko: "아직 정확한 영수증을 찾지 못했습니다. 접수되지 않았다고 단정할 수 없어 이 대화의 새 제출을 보류합니다.", en: "No exact receipt is visible yet. The earlier send may still be settling, so new submissions in this chat are held." },
-  unavailable: { ko: "영수증을 읽지 못했습니다. 작성한 글을 보관하고 이 대화의 새 제출을 보류합니다.", en: "The receipt could not be read. Your draft is preserved and new submissions in this chat are held." },
-  claimed: { ko: "추가 지시의 전달 여부를 확인 중입니다. 중복 전송하지 않도록 이 대화의 새 제출을 보류합니다.", en: "The follow-up handoff is still being reconciled. New submissions in this chat are held to avoid duplication." },
-  mismatch: { ko: "영수증의 요청 신원이 일치하지 않습니다. 작성한 글을 보관하고 이 대화의 새 제출을 보류합니다.", en: "The receipt does not match this request. Your draft is preserved and new submissions in this chat are held." },
+  absent: { ko: "아직 정확한 영수증을 찾지 못했습니다. 접수되지 않았다고 단정할 수 없어 해당 지시는 계속 확인 중이며 새 글을 작성할 수 있습니다.", en: "No exact receipt is visible yet. The earlier send may still be settling, so this instruction remains unresolved and you can write another message." },
+  unavailable: { ko: "영수증을 읽지 못했습니다. 작성한 글을 보관하고 해당 지시는 계속 확인 중이며 새 글을 작성할 수 있습니다.", en: "The receipt could not be read. Your draft is preserved and this instruction remains unresolved and you can write another message." },
+  claimed: { ko: "추가 지시의 전달 여부를 확인 중입니다. 중복 전송하지 않도록 해당 지시는 계속 확인 중이며 새 글을 작성할 수 있습니다.", en: "The follow-up handoff is still being reconciled. This instruction remains unresolved; you can write another message." },
+  mismatch: { ko: "영수증의 요청 신원이 일치하지 않습니다. 작성한 글을 보관하고 해당 지시는 계속 확인 중이며 새 글을 작성할 수 있습니다.", en: "The receipt does not match this request. Your draft is preserved and this instruction remains unresolved and you can write another message." },
 };
 async function onePreflightTextDigest(text: string): Promise<string> {
   if (!globalThis.crypto?.subtle) throw new Error("one_preflight_digest_unavailable");
@@ -684,7 +679,7 @@ function clearOneUncertainPreflightSteer(value: OneUncertainPreflightSteer): voi
   } catch { /* Main receipt remains authoritative. */ }
 }
 
-type OneUncertainAdmission = { chatId: string; runId: string };
+type OneUncertainAdmission = { chatId: string; runId: string; submissionId?: string };
 
 function readOneUncertainAdmission(chatId: string): OneUncertainAdmission | null {
   try {
@@ -694,7 +689,7 @@ function readOneUncertainAdmission(chatId: string): OneUncertainAdmission | null
     const value = JSON.parse(raw) as Partial<OneUncertainAdmission>;
     return value.chatId === chatId && typeof value.runId === "string"
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.runId)
-      ? { chatId, runId: value.runId }
+      ? { chatId, runId: value.runId, ...(typeof value.submissionId === "string" ? { submissionId: value.submissionId } : {}) }
       : null;
   } catch { return null; }
 }
@@ -1166,7 +1161,7 @@ function readLastRailMode(): OneRailMode {
 function rememberRailMode(mode: OneRailMode): void {
   // 설정은 잠시 들르는 곳이지 머무는 탭이 아니다 — 기억하지 않는다.
   if (mode === "settings") return;
-  try { window.localStorage.setItem(LAST_ONE_RAIL_MODE_KEY, mode); } catch { /* 저장소를 못 써도 화면은 돈다 */ }
+  try { writeAppUiPreference("oneRailMode", mode); } catch { /* 저장소를 못 써도 화면은 돈다 */ }
 }
 
 /*
@@ -1434,9 +1429,13 @@ function OneSessionsShell() {
   const steerQueuedNoticeRef = useRef<string | null>(null);
   const [preflightSteerReceipts, setPreflightSteerReceipts] = useState<import("@shared/one-preflight-steers").OnePreflightSteerReceipt[]>([]);
   const [preflightFenceStatus, setPreflightFenceStatus] = useState<OnePreflightFenceStatus | null>(null);
-  const preflightSubmissionRef = useRef<{ submissionId: string; chatId: string } | null>(null);
+  const preflightSubmissionRef = useRef<{ submissionId: string; chatId: string; ready?: Promise<void> } | null>(null);
   const preflightSubmissionGenerationRef = useRef(0);
-  const preflightSteerEnqueueInFlightRef = useRef(false);
+  const [localFollowupIntents, setLocalFollowupIntents] = useState<OneFollowupIntent[]>([]);
+  const [heldFollowupRecovery, setHeldFollowupRecovery] = useState<InvocationSteerRecovery[]>([]);
+  const locallyStoppedFollowupIdsRef = useRef(new Set<string>());
+  const followupRefreshesRef = useRef(new Map<string, ReturnType<typeof createCoalescedRefresh<undefined>>>());
+  const followupBridgesRef = useRef(new Map<string, ReturnType<typeof ipc>>());
   // Instructions typed while the run is still being prepared (no runId yet).
   // They join the queue strip at once and reach Main as steers the moment the
   // run exists — Codex queues a message typed during the model's first
@@ -1479,6 +1478,7 @@ function OneSessionsShell() {
   // never silently turn the same instruction into a second provider run.
   const uncertainAdmissionRef = useRef(new Map<string, string>());
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
+  const [messageReply, setMessageReply] = useState<MessageReply | null>(null);
   const [composer, setComposerState] = useState(initialComposerDraftRef.current.composer);
   function setComposer(next: string | ((current: string) => string)) {
     if (typeof next === "string") {
@@ -1504,7 +1504,7 @@ function OneSessionsShell() {
      안내로 구분하기 위한 세션 신호 — 조회 실패는 사실로 승격하지 않고
      "모름(null)"으로 남겨 기존 빈 상태 문구를 유지한다. */
   const [accountSignedIn, setAccountSignedIn] = useState<boolean | null>(null);
-  const reconcileUncertainPreflightSteer = useCallback(async (
+  const reconcileLegacyPreflightSteer = useCallback(async (
     chatId: string, bridge = ipc(),
   ): Promise<void> => {
     const fence = readOneUncertainPreflightSteer(chatId);
@@ -1559,6 +1559,98 @@ function OneSessionsShell() {
     }
   }, [appLocale]);
 
+  const reconcileUncertainPreflightSteer = useCallback(async (chatId: string, bridge = ipc()): Promise<void> => {
+    followupBridgesRef.current.set(chatId, bridge);
+    let coordinator = followupRefreshesRef.current.get(chatId);
+    if (!coordinator) {
+      coordinator = createCoalescedRefresh(async (_input: undefined) => {
+        const bridge = followupBridgesRef.current.get(chatId);
+        const showLocal = () => {
+          if (activeThreadChatIdRef.current === chatId) setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, chatId));
+        };
+        const deliveryPaused = (intent: OneFollowupIntent) => locallyStoppedFollowupIdsRef.current.has(intent.intentId)
+          || readOneFollowupOutbox(window.localStorage, chatId).find(item => item.intentId === intent.intentId)?.autoDeliveryPaused === true;
+        try {
+          showLocal();
+          if (!bridge) return;
+          for (const intent of readOneFollowupOutbox(window.localStorage, chatId)) {
+            try {
+              if (deliveryPaused(intent)) continue;
+              if (intent.requiresReprepare) {
+                if (activeThreadChatIdRef.current === chatId) setActionNotice(appLocale === "ko"
+                  ? "팀 선택이 바뀐 추가 지시는 로컬에 보관했습니다. 새 팀의 실행 준비를 확인한 뒤 보내 주세요."
+                  : "The follow-up with a different team is saved locally. Confirm fresh team preparation before sending it.");
+                break;
+              }
+              if (intent.submissionId) {
+                const parent = preflightSubmissionRef.current;
+                if (parent?.submissionId === intent.submissionId) await parent.ready;
+                const request = normalizeOnePreflightSteerRequest(Object.fromEntries(ONE_PREFLIGHT_STEER_REQUEST_KEYS
+                  .flatMap(key => intent.request[key] === undefined ? [] : [[key, intent.request[key]]])));
+                const input = { steerId: intent.intentId, submissionId: intent.submissionId, chatId, userPrompt: intent.userPrompt, request };
+                let receipt = await bridge.invoke.preflightSteerReceipt({ steerId: intent.intentId, submissionId: intent.submissionId, chatId });
+                if (!receipt) {
+                  if (deliveryPaused(intent)) continue;
+                  receipt = await bridge.invoke.preflightSteerEnqueue(input);
+                }
+                if (receipt.steerId !== intent.intentId || receipt.submissionId !== intent.submissionId
+                  || receipt.chatId !== chatId || receipt.userPrompt !== intent.userPrompt
+                  || JSON.stringify(normalizeOnePreflightSteerRequest(receipt.request ?? {})) !== JSON.stringify(request)) throw new Error("one_followup_receipt_mismatch");
+                if (deliveryPaused(intent)) continue;
+                if (activeThreadChatIdRef.current === chatId) setPreflightSteerReceipts(current => [
+                  ...current.filter(item => item.steerId !== receipt.steerId), receipt,
+                ]);
+                removeOneFollowupIntent(window.localStorage, chatId, intent.intentId);
+              } else {
+                // Legacy admission has no submission binding. Preserve the intent
+                // locally until the exact parent is observed; never start over an unknown parent.
+                if (intent.waitingParentRunId) {
+                  const admission = await bridge.invoke.admission(intent.waitingParentRunId);
+                  if (admission.status !== "admitted" || admission.chatId !== chatId) break;
+                  const receipt = await bridge.invoke.receipt(intent.waitingParentRunId);
+                  if (!receipt || receipt.chatId !== chatId || receipt.runId !== intent.waitingParentRunId) break;
+                }
+                let receipt = await bridge.invoke.steerReceipt({ chatId, intentId: intent.intentId });
+                if (!receipt) {
+                  if (deliveryPaused(intent)) continue;
+                  receipt = await bridge.invoke.steer(intent.request, intent.intentId);
+                }
+                if (!receipt.accepted || receipt.chatId !== chatId || receipt.intentId !== intent.intentId
+                  || receipt.promptHash !== await onePreflightTextDigest(intent.userPrompt)) throw new Error("one_followup_receipt_mismatch");
+                if (deliveryPaused(intent)) continue;
+                if (receipt.status === "cancelled" || receipt.status === "failed" || receipt.status === "held") {
+                  if (activeThreadChatIdRef.current === chatId) setActionNotice(appLocale === "ko"
+                    ? "이 추가 지시는 실행되지 않도록 보류되었습니다. 로컬 보관한 글을 검토해 주세요."
+                    : "This follow-up was held. Review its locally saved text.");
+                  continue;
+                }
+                if (activeThreadChatIdRef.current === chatId && receipt.queued) setQueuedSteers(current => current.some(item => item.id === intent.intentId)
+                  ? current : [...current, { id: intent.intentId, chatId, text: intent.userPrompt }]);
+                removeOneFollowupIntent(window.localStorage, chatId, intent.intentId);
+              }
+            } catch {
+              // Keep local intake available, but never overtake an unresolved
+              // earlier intent when handing the room's FIFO queue to Main.
+              if (activeThreadChatIdRef.current === chatId) setActionNotice(appLocale === "ko"
+                ? "추가 지시를 로컬에 보관했습니다. Main의 접수 여부는 아직 확인하지 못했습니다."
+                  : "The follow-up is saved locally. Main acceptance is still unconfirmed.");
+              showLocal();
+              break;
+            }
+            showLocal();
+          }
+        } catch {
+          if (activeThreadChatIdRef.current === chatId) setActionNotice(appLocale === "ko"
+            ? "보관한 추가 지시를 읽지 못했습니다. 작성한 글은 그대로 유지합니다."
+            : "Saved follow-ups could not be read. Your draft is preserved.");
+        }
+      }, () => undefined);
+      followupRefreshesRef.current.set(chatId, coordinator);
+    }
+    await coordinator.request(undefined);
+    await reconcileLegacyPreflightSteer(chatId, bridge);
+  }, [appLocale, reconcileLegacyPreflightSteer]);
+
   useEffect(() => {
     const api = ipc();
     if (!api?.auth) return;
@@ -1590,6 +1682,10 @@ function OneSessionsShell() {
   const [oneRuntimePinned, setOneRuntimePinned] = useState(false);
   const [oneModelOptions, setOneModelOptions] = useState<OneComposerModelOption[]>([]);
   const [oneRuntimeInventory, setOneRuntimeInventory] = useState<RuntimeStatus[]>([]);
+  const [oneRuntimePreferenceRevision, setOneRuntimePreferenceRevision] = useState(0);
+  useEffect(() => subscribeAppUiPreference("oneRuntimeSelection", () => {
+    setOneRuntimePreferenceRevision((revision) => revision + 1);
+  }), []);
   // One is the owner's personal agent. Full access is the explicit product
   // default; the chip remains the per-turn authority control for narrowing it.
   const [onePermission, setOnePermissionState] = useState<OnePermissionMode>(readStoredOnePermission);
@@ -1669,7 +1765,7 @@ function OneSessionsShell() {
   const [homeHistoryOpen, setHomeHistoryOpenState] = useState(() => readStoredBoolean(ONE_HOME_HISTORY_OPEN_STORAGE_KEY, false));
   const setHomeHistoryOpen = useCallback((next: boolean) => {
     setHomeHistoryOpenState(next);
-    try { window.localStorage.setItem(ONE_HOME_HISTORY_OPEN_STORAGE_KEY, String(next)); } catch { /* persistence is best effort */ }
+    try { writeAppUiPreference("oneHomeHistoryOpen", next); } catch { /* persistence is best effort */ }
   }, []);
   const [contextRailWidth, setContextRailWidthState] = useState<number>(readStoredContextRailWidth);
   const contextRailPreferredWidthRef = useRef(contextRailWidth);
@@ -1678,12 +1774,25 @@ function OneSessionsShell() {
       const clamped = clampContextRailWidth(typeof next === "function" ? next(current) : next);
       contextRailPreferredWidthRef.current = clamped;
       try {
-        window.localStorage.setItem(ONE_CONTEXT_RAIL_WIDTH_STORAGE_KEY, String(clamped));
+        writeAppUiPreference("oneContextRailWidth", clamped);
       } catch {
         // The rail stays resizable even when persistence is unavailable.
       }
       return clamped;
     });
+  }, []);
+  useEffect(() => {
+    const unsubscribe = [
+      subscribeAppUiPreference("oneLeftRailCollapsed", setRailCollapsedState),
+      subscribeAppUiPreference("oneRailMode", setRailModeState),
+      subscribeAppUiPreference("oneContextRailOpen", setContextRailOpenState),
+      subscribeAppUiPreference("oneHomeHistoryOpen", setHomeHistoryOpenState),
+      subscribeAppUiPreference("oneContextRailWidth", (width) => {
+        contextRailPreferredWidthRef.current = width;
+        setContextRailWidthState(clampContextRailWidth(width));
+      }),
+    ];
+    return () => unsubscribe.forEach((stop) => stop());
   }, []);
   const requestReadableContextRailWidth = useCallback((requested = readableContextFileWidth()) => {
     setContextRailWidthState((current) => Math.max(current, clampContextRailWidth(requested)));
@@ -1768,14 +1877,14 @@ function OneSessionsShell() {
     window.addEventListener("pointercancel", end);
   }, []);
   const setRailCollapsed = useCallback((collapsed: boolean) => {
-    window.localStorage.setItem(ONE_LEFT_RAIL_COLLAPSED_STORAGE_KEY, String(collapsed));
+    writeAppUiPreference("oneLeftRailCollapsed", collapsed);
     setRailCollapsedState(collapsed);
   }, []);
   const setContextRailOpen = useCallback((next: boolean | ((current: boolean) => boolean)) => {
     setContextRailOpenState((current) => {
       const value = typeof next === "function" ? next(current) : next;
       try {
-        window.localStorage.setItem(ONE_CONTEXT_RAIL_OPEN_STORAGE_KEY, String(value));
+        writeAppUiPreference("oneContextRailOpen", value);
       } catch {
         // The output rail remains operable even when persistence is unavailable.
       }
@@ -2046,7 +2155,20 @@ function OneSessionsShell() {
   }, []);
   /** One handoff has no separate cancel authority; interrupt uses the same
    * Main-owned invocation cancel path as the composer Stop action. */
+  const pauseLocalFollowups = useCallback((chatId: string): boolean => {
+    try {
+      for (const item of readOneFollowupOutbox(window.localStorage, chatId)) locallyStoppedFollowupIdsRef.current.add(item.intentId);
+      pauseOneFollowupOutbox(window.localStorage, chatId);
+      if (activeThreadChatIdRef.current === chatId) setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, chatId));
+      return true;
+    } catch {
+      setActionNotice(appLocale === "ko" ? "로컬 추가 지시의 정지 저장을 확인하지 못했습니다. 이 화면에서는 자동 전달을 중단했지만 다시 열기 전에 글을 확인해 주세요." : "Local follow-up pause could not confirm storage. Delivery is paused in this view; review the saved text before reopening it.");
+      return false;
+    }
+  }, [appLocale]);
   const cancelActiveRun = useCallback((reason: string) => {
+    const chatId = runChatIdRef.current ?? activeThreadChatIdRef.current;
+    const localPauseFailed = chatId ? !pauseLocalFollowups(chatId) : false;
     const api = ipc();
     const runId = runIdRef.current;
     if (!runId) return;
@@ -2057,7 +2179,8 @@ function OneSessionsShell() {
         : "The work could not be stopped because Desktop is unavailable. The run is still active.");
       return;
     }
-    const stopNotice = appLocale === "ko" ? "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…" : "Stop requested. Waiting for the terminal result…";
+    const stopNotice = (appLocale === "ko" ? "중단 요청을 전달했습니다. 종료 결과를 기다리는 중입니다…" : "Stop requested. Waiting for the terminal result…")
+      + (localPauseFailed ? (appLocale === "ko" ? " 로컬 지시의 정지 저장은 확인하지 못했습니다. 다시 열기 전에 확인해 주세요." : " Local pause storage is unconfirmed; review before reopening.") : "");
     // Claim the notice before crossing IPC. Main may publish a terminal event
     // synchronously while cancel() is still waiting for its acknowledgement.
     cancelNoticeRunIdRef.current = runId;
@@ -2089,7 +2212,7 @@ function OneSessionsShell() {
         : "The stop request was rejected. The run and queued directions are unchanged; try again.";
       setActionNotice((current) => current === notice ? rejection : current);
     });
-  }, [appLocale, returnQueuedSteersToComposer]);
+  }, [appLocale, pauseLocalFollowups, returnQueuedSteersToComposer]);
   /*
    * ★화면에 지금 떠 있는 메시지가 **어느 대화의 것인가**.
    *
@@ -2443,7 +2566,7 @@ function OneSessionsShell() {
     return () => window.clearTimeout(timer);
   }, [query, requestOneSearch, searchIncludeArchived, searchOpen]);
 
-  const refreshAll = useCallback(async (options: { includeOrg?: boolean } = {}) => {
+  const refreshAllRead = useCallback(async (options: { includeOrg?: boolean } = {}) => {
     const includeOrg = options.includeOrg !== false;
     const api = ipc();
     if (!api) {
@@ -2661,6 +2784,24 @@ function OneSessionsShell() {
       setLoaded(true);
     }
   }, [appLocale, router]);
+
+  const refreshAllReadRef = useRef(refreshAllRead);
+  refreshAllReadRef.current = refreshAllRead;
+  const refreshAllMountedRef = useRef(true);
+  useEffect(() => {
+    refreshAllMountedRef.current = true;
+    return () => { refreshAllMountedRef.current = false; };
+  }, []);
+  const refreshAllCoordinatorRef = useRef<ReturnType<typeof createCoalescedRefresh<{ includeOrg?: boolean }>> | null>(null);
+  if (!refreshAllCoordinatorRef.current) {
+    refreshAllCoordinatorRef.current = createCoalescedRefresh(
+      (options) => refreshAllMountedRef.current ? refreshAllReadRef.current(options) : Promise.resolve(),
+      (previous, incoming) => ({ includeOrg: previous.includeOrg !== false || incoming.includeOrg !== false }),
+    );
+  }
+  const refreshAll = useCallback((options: { includeOrg?: boolean } = {}) => (
+    refreshAllCoordinatorRef.current!.request(options)
+  ), [appLocale]);
 
   const mutateOneOrg = useCallback(async (operation: () => Promise<OneOrgState>, propagateFailure = false) => {
     try {
@@ -2916,7 +3057,7 @@ function OneSessionsShell() {
      * 화면의 낙관 행을 지우지 않는다 — 없는 것을 사실로 만들지 않기 위해서다.
      */
     if (shownThreadChatIdRef.current === chatId && runChatIdRef.current === chatId && !runIdRef.current) {
-      const history = await api.invoke.history(chatId).catch(() => null);
+      const history = await readOneChatHistory(api, chatId).catch(() => null);
       if (!supersededByNewerRun() && history && shownThreadChatIdRef.current === chatId) {
         const next = toUiMessages(history);
         setMessages((current) => {
@@ -3354,45 +3495,14 @@ function OneSessionsShell() {
     const hydrationRevision = oneTranscriptRevisionRef.current;
     runChatIdRef.current = chatId;
     runTaskIdRef.current = taskId;
-    void Promise.all([
-      api.invoke.history(chatId),
-      api.invoke.attach(chatId).catch(() => null),
-      api.confirm.committedAnswers(chatId).catch(() => []),
-      api.invoke.latestReceipt(chatId).catch(() => null),
-      api.invoke.steeringRecovery(chatId).catch(() => []),
-      api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => []),
-      api.invoke.preflightSteers(chatId).catch(() => []),
-    ]).then(async ([history, attachment, answers, latestReceipt, steeringRecovery, chatTimeline, preflightSteers]) => {
-      if (activeThreadChatIdRef.current === chatId) {
-        setPreflightSteerReceipts(preflightSteers);
-        // Directions waiting behind the live run are kept in Main's queue; this strip is local and is dropped on a
-        // room switch, so coming back rebuilds it from Main (production 2026-10-05: an owner direction to the Thread
-        // room "disappeared" after visiting another room while it was still queued).
-        const waiting = attachment?.queuedSteers ?? [];
-        setQueuedSteers((current) => current.some((item) => item.chatId === chatId) || waiting.length
-          ? [...current.filter((item) => item.chatId !== chatId), ...waiting.map((queued) => ({ id: queued.id, text: queued.text, chatId }))]
-          : current);
-      }
-      const taskReceipt = taskId ? selected?.latestReceipt ?? null : null;
-      const durableReceipt = latestReceipt ?? taskReceipt;
-      const receiptWithSteeringRecovery = durableReceipt && steeringRecovery.length > 0
-        ? { ...durableReceipt, steeringRecovery }
-        : durableReceipt;
-      const ledgerEvents = !attachment && durableReceipt
-        ? await api.runLedger.events(durableReceipt.runId, 500).catch(() => [])
-        : [];
-      const durableSurface = taskId && taskReceipt?.runId
-        ? await api.invoke.latestOneSurface({
-            runId: taskReceipt.runId,
-            chatId,
-            taskId,
-          }).catch(() => null)
-        : null;
-      if (cancelled) return;
+    const screenAlreadyOnThisThread = shownThreadChatIdRef.current === chatId;
+    // Read and paint the conversation before asking Main for auxiliary ledgers.
+    // A slow work block must not hold the person's messages behind a blank pane.
+    void readOneChatHistory(api, chatId).then((history) => {
+      if (cancelled || activeThreadChatIdRef.current !== chatId) return;
       // A newly created conversation can start its first run before this
       // initial history request resolves. Do not replace the optimistic user
       // turn and live response with the earlier empty snapshot.
-      const screenAlreadyOnThisThread = shownThreadChatIdRef.current === chatId;
       if (activeThreadChatIdRef.current !== chatId) return;
       // setState updaters may run immediately. Establish the durable history
       // owner before setMessages checks it; doing this on the following line
@@ -3400,7 +3510,7 @@ function OneSessionsShell() {
       // on the false "no conversation" state until another refresh occurred.
       shownThreadChatIdRef.current = chatId;
       const liveRunOwnsThread = screenAlreadyOnThisThread && Boolean(
-        attachment || (runIdRef.current && runChatIdBeforeSwitch === chatId),
+        runIdRef.current && runChatIdBeforeSwitch === chatId,
       );
       if (!liveRunOwnsThread) {
         const next = toUiMessages(history);
@@ -3427,6 +3537,53 @@ function OneSessionsShell() {
       }
       // 이 대화의 기록이 화면에 도착했다 — 그 전에는 "대화를 시작해 보세요"·추천을 띄우지 않는다.
       setHydratedThreadChatId(chatId);
+      void api.chats.markViewed(chatId).catch(() => undefined);
+      if (openingThread && shownThreadChatIdRef.current === chatId) releaseInitialPin = pinToLatest();
+      return Promise.all([
+        api.invoke.attach(chatId).catch(() => null),
+        api.confirm.committedAnswers(chatId).catch(() => []),
+        api.invoke.latestReceipt(chatId).catch(() => null),
+        api.invoke.steeringRecovery(chatId).catch(() => []),
+        api.runLedger.chatTimeline(chatId, { maxRuns: 40, eventsPerRun: 400 }).catch(() => []),
+        api.invoke.preflightSteers(chatId).catch(() => []),
+      ] as const);
+    }).then(async (auxiliary) => {
+      if (!auxiliary || cancelled || activeThreadChatIdRef.current !== chatId) return;
+      const [attachment, answers, latestReceipt, steeringRecovery, chatTimeline, preflightSteers] = auxiliary;
+      const liveRunOwnsThread = screenAlreadyOnThisThread && Boolean(
+        attachment || (runIdRef.current && runChatIdBeforeSwitch === chatId),
+      );
+      if (activeThreadChatIdRef.current === chatId) {
+        setPreflightSteerReceipts(preflightSteers);
+        // Recovery is independent of a parent receipt; even an uncertain
+        // start without a run receipt must keep each original held text visible.
+        setHeldFollowupRecovery(steeringRecovery);
+        // Directions waiting behind the live run are kept in Main's queue; this strip is local and is dropped on a
+        // room switch, so coming back rebuilds it from Main (production 2026-10-05: an owner direction to the Thread
+        // room "disappeared" after visiting another room while it was still queued).
+        const waiting = attachment?.queuedSteers ?? [];
+        setQueuedSteers((current) => current.some((item) => item.chatId === chatId) || waiting.length
+          ? [...current.filter((item) => item.chatId !== chatId), ...waiting.map((queued) => ({ id: queued.id, text: queued.text, chatId }))]
+          : current);
+      }
+      const taskReceipt = taskId ? selected?.latestReceipt ?? null : null;
+      const durableReceipt = latestReceipt ?? taskReceipt;
+      const receiptWithSteeringRecovery = durableReceipt && steeringRecovery.length > 0
+        ? { ...durableReceipt, steeringRecovery }
+        : durableReceipt;
+      const ledgerEvents = !attachment && durableReceipt
+        ? await api.runLedger.events(durableReceipt.runId, 500).catch(() => [])
+        : [];
+      const durableSurface = taskId && taskReceipt?.runId
+        ? await api.invoke.latestOneSurface({
+            runId: taskReceipt.runId,
+            chatId,
+            taskId,
+          }).catch(() => null)
+        : null;
+      if (cancelled || activeThreadChatIdRef.current !== chatId) return;
+      const newerLiveRunOwnsThread = Boolean(runIdRef.current
+        && runChatIdRef.current === chatId && runIdRef.current !== attachment?.runId);
       // Every settled run of this conversation becomes its own turn block. The
       // live run (attachment) is drawn from live state and excluded at render.
       if (threadRunsChatIdRef.current === chatId) {
@@ -3437,7 +3594,7 @@ function OneSessionsShell() {
       // never the current Activity/timer projection.
       const durableActivityStillOwnsScreen = !activityRunIdRef.current
         || activityRunIdRef.current === durableReceipt?.runId;
-      if (!liveRunOwnsThread && !attachment && durableActivityStillOwnsScreen && ledgerEvents.length > 0) {
+      if (!liveRunOwnsThread && !newerLiveRunOwnsThread && !attachment && durableActivityStillOwnsScreen && ledgerEvents.length > 0) {
         const restoredActivity = projectOneActivityFromLedger(ledgerEvents, durableReceipt);
         activityEventRunIdRef.current = durableReceipt?.runId ?? null;
         setActivityStateRunId(durableReceipt?.runId ?? null);
@@ -3446,7 +3603,7 @@ function OneSessionsShell() {
         setRunStartedAt(durableReceipt?.startedAt ? Date.parse(durableReceipt.startedAt) : null);
       }
       setCommittedAnswers(answers);
-      if (!liveRunOwnsThread) {
+      if (!liveRunOwnsThread && !newerLiveRunOwnsThread) {
         setReceipt(receiptWithSteeringRecovery);
         setSurface(durableSurface?.manifest ?? null);
         if (steeringRecovery.length > 0) {
@@ -3455,8 +3612,7 @@ function OneSessionsShell() {
             : `${steeringRecovery.length} follow-up instruction(s) were held after restart because an external effect is uncertain. Nothing was replayed.`);
         }
       }
-      void api.chats.markViewed(chatId).catch(() => undefined);
-      if (attachment && !settledRunIdsRef.current.has(attachment.runId)) {
+      if (attachment && !newerLiveRunOwnsThread && !settledRunIdsRef.current.has(attachment.runId)) {
         runIdRef.current = attachment.runId;
         activityRunIdRef.current = attachment.runId;
         activityEventRunIdRef.current = null;
@@ -3467,17 +3623,6 @@ function OneSessionsShell() {
         setRunStartedAt(attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now());
         subscribeRun(attachment.runId);
         if (typeof api.invoke.replay !== "function") for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
-      }
-      /*
-       * ★대화를 열면 **가장 최근 말**이 보여야 한다 (실측 2026-09-08).
-       *   60개짜리 대화를 열어 재 보니 One 은 맨 위에 머물렀다(스크롤 0 / 전체 4,628px,
-       *   마지막 메시지는 화면 아래 4,364px 지점). Work 는 같은 조건에서 아래로 내려간다.
-       *   ★실행 중인 대화도 내린다 (실측 2026-09-28, X Marketing): "다른 자리에서 따라 내려간다"는
-       *   가정은 틀렸다 — 흐름 따라가기는 맨 아래 160px 안에서만 움직여, 목표가 돌고 있는 대화를
-       *   열면 scrollTop 0(20,700px 위 맨 처음 말)에 머물렀다.
-       */
-      if (!cancelled && openingThread && shownThreadChatIdRef.current === chatId) {
-        releaseInitialPin = pinToLatest();
       }
     }).catch((cause) => {
       if (!cancelled) {
@@ -3527,6 +3672,7 @@ function OneSessionsShell() {
   }, [projections, selectedTaskId]);
 
   const activeThreadChatId = selected?.chatId ?? conversation?.id ?? null;
+  useEffect(() => setMessageReply(null), [activeThreadChatId]);
   const composerAlwaysApproval = useChatAlwaysApproval(activeThreadChatId);
   const onePermissionLabel = `${onePermission === "auto" ? (appLocale === "ko" ? "자동 모드" : "Auto mode") : onePermission === "read" ? (appLocale === "ko" ? "읽기 전용" : "Read only") : onePermission === "write" ? (appLocale === "ko" ? "파일 편집" : "Accept file edits") : (appLocale === "ko" ? "전체 액세스" : "Full access")}${composerAlwaysApproval.enabled ? (appLocale === "ko" ? " · 항상 승인" : " · Always approve") : ""}`;
   /*
@@ -3589,9 +3735,10 @@ function OneSessionsShell() {
     let disposed = false;
     let historyGeneration = 0;
     return (() => {
-      const refreshHistory = () => {
-        const generation = ++historyGeneration;
-        void api.invoke.history(activeThreadChatId).then((history) => {
+      const historyRefresh = createCoalescedRefresh(async (_input: undefined) => {
+        if (disposed) return;
+        const generation = historyGeneration;
+        await readOneChatHistory(api, activeThreadChatId).then((history) => {
           if (disposed || generation !== historyGeneration || activeThreadChatIdRef.current !== activeThreadChatId) return;
           const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));
           const notices = toUiMessages(history).filter(message => message.hostNotice?.purpose === "automation-report");
@@ -3608,13 +3755,17 @@ function OneSessionsShell() {
             });
           });
         }).catch(() => undefined);
+      }, () => undefined);
+      const refreshHistory = () => {
+        historyGeneration += 1;
+        void historyRefresh.request(undefined);
       };
       const unsubscribe = ipcEvents()?.onStoreChanged?.((change) => {
         if (change.entity === "chat" && change.id === activeThreadChatId) refreshHistory();
       });
       // Catch a report committed while the initial conversation was loading.
       refreshHistory();
-      return () => { disposed = true; unsubscribe?.(); };
+      return () => { disposed = true; historyRefresh.dispose(); unsubscribe?.(); };
     })();
   }, [activeThreadChatId, noticeChatReady]);
   useEffect(() => {
@@ -4058,7 +4209,7 @@ function OneSessionsShell() {
       // explicit One choice, then the globally active runtime.
       const selection = chat?.runtimeSelection ?? readStoredOneRuntimeSelection();
       const matched = selection
-        ? runtimes.find((runtime) => runtime.kind === selection.kind && (!selection.backend || runtime.backend === selection.backend))
+        ? runtimes.find((runtime) => runtimeMatchesSelection(runtime, selection))
         : runtimes.find((runtime) => runtime.active);
       setOneRuntime(matched ? withOneRuntimeSelection({
         ...matched,
@@ -4076,7 +4227,7 @@ function OneSessionsShell() {
       }
     });
     return () => { cancelled = true; };
-  }, [activeThreadChatId, conversation]);
+  }, [activeThreadChatId, conversation, oneRuntimePreferenceRevision]);
 
   useEffect(() => {
     const api = ipc();
@@ -4241,6 +4392,9 @@ function OneSessionsShell() {
     };
     followActiveRunRef.current = (settledChatId: string) => { if (settledChatId === chatId) followActive(0); };
     const unsubscribe = events.onActiveChats((chatIds) => {
+      // An uncertain parent becoming active can now accept its saved follow-ups.
+      // The per-chat coordinator coalesces these broadcasts with explicit retries.
+      void reconcileUncertainPreflightSteer(chatId, api);
       if (idleCheck) { clearTimeout(idleCheck); idleCheck = null; }
       if (handoffRetry) { clearTimeout(handoffRetry); handoffRetry = null; }
       if (!chatIds.includes(chatId)) {
@@ -4354,7 +4508,7 @@ function OneSessionsShell() {
       followActiveRunRef.current = () => undefined;
       unsubscribe();
     };
-  }, [activeThreadChatId, appLocale, selected?.taskId, subscribeRun]);
+  }, [activeThreadChatId, appLocale, reconcileUncertainPreflightSteer, selected?.taskId, subscribeRun]);
 
   // The event channel is the fast path, but a renderer reload can miss both a
   // terminal event and the following active-chat broadcast. Main remains the
@@ -4606,6 +4760,70 @@ function OneSessionsShell() {
     setComposerMenu(null);
   }, [activeThreadChatId, appLocale, busy, oneRuntime, oneRuntimeInventory, oneRuntimeSelection]);
 
+  const restoreUnsentFollowup = useCallback(async (intent: OneFollowupIntent) => {
+    // Only this explicit local state proves there has been no Main handoff.
+    // Unknown receipt states must stay bound to their existing immutable ID.
+    if ((!intent.requiresReprepare && !intent.waitingParentRunId) || intent.chatId !== activeThreadChatIdRef.current
+      || busy || teamPreflightBusy || runIdRef.current || composer.trim()) return;
+    const selection = intent.request.runtimeSelection;
+    const matched = selection ? oneRuntimeInventory.find(runtime => runtimeMatchesSelection(runtime, selection)) : null;
+    if (selection && !matched) {
+      setActionNotice(appLocale === "ko" ? "보관한 모델을 사용할 수 없어 초안을 복원하지 못했습니다. 글은 로컬에 그대로 있습니다." : "The saved model is unavailable. The text remains saved locally.");
+      return;
+    }
+    try {
+      if (!intent.requiresReprepare) {
+        const api = ipc();
+        if (!api || !intent.waitingParentRunId) return;
+        const admission = await api.invoke.admission(intent.waitingParentRunId);
+        if (admission.status !== "rejected" || admission.chatId !== intent.chatId
+          || admission.runId !== intent.waitingParentRunId
+          || await api.invoke.steerReceipt({ chatId: intent.chatId, intentId: intent.intentId })) {
+          setActionNotice(appLocale === "ko" ? "이 글이 전송되지 않았다는 확인이 없어 복원하지 않았습니다. 접수 확인을 유지합니다." : "There is no confirmed no-start receipt for this text. Keep checking acceptance.");
+          return;
+        }
+      }
+      if (intent.chatId !== activeThreadChatIdRef.current || runIdRef.current
+        || preflightSubmissionRef.current?.chatId === intent.chatId
+        || (composerInputRef.current?.value ?? composer).trim()) return;
+      // Read the exact local row again, so a stale card cannot delete another draft.
+      const saved = readOneFollowupOutbox(window.localStorage, intent.chatId).find(item => item.intentId === intent.intentId);
+      if (!saved || JSON.stringify(saved) !== JSON.stringify(intent)) return;
+      setComposer(intent.userPrompt);
+      setMessageReply(null); // The frozen prompt already contains its quoted context.
+      setTurnAgentIds(intent.agentIds ?? []);
+      setTurnOverrides({
+        goalControlEpoch: goalControlEpochRef.current,
+        ...(intent.request.goalMode ? { goalMode: true } : {}),
+        ...(intent.request.planMode ? { planMode: true } : {}),
+        ...(intent.request.fastMode ? { fastMode: true } : {}),
+        ...(intent.request.sessionRouting ? { sessionRouting: true } : {}),
+      });
+      if (intent.request.onePermissionMode) setOnePermission(intent.request.onePermissionMode);
+      setOneRuntimePinned(Boolean(selection));
+      if (matched && selection) setOneRuntime(withOneRuntimeSelection({ ...matched, active: true,
+        longContextEnabled: selection.longContext ?? matched.longContextEnabled }, selection.model ?? matched.model ?? null,
+      selection.effort ?? (selection.model ? undefined : matched.effort)));
+      removeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+      setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, intent.chatId));
+      setActionNotice(appLocale === "ko" ? "보관한 글과 팀·실행 선택을 복원했습니다. 확인 후 보내면 새 팀의 실행 준비를 확인합니다." : "Restored the text, team and execution choices. Review and send it to prepare the changed team.");
+      void reconcileUncertainPreflightSteer(intent.chatId);
+    } catch {
+      setActionNotice(appLocale === "ko" ? "초안 복원 중 저장을 확인하지 못했습니다. 글을 유지하고 자동 전송하지 않습니다." : "Draft restoration could not confirm storage. The text is preserved and is not sent automatically.");
+    }
+  }, [appLocale, busy, composer, oneRuntimeInventory, reconcileUncertainPreflightSteer, setOnePermission, teamPreflightBusy]);
+
+  const resumePausedFollowup = useCallback((intent: OneFollowupIntent) => {
+    try {
+      resumeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+      locallyStoppedFollowupIdsRef.current.delete(intent.intentId);
+      if (activeThreadChatIdRef.current === intent.chatId) setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, intent.chatId));
+      void reconcileUncertainPreflightSteer(intent.chatId);
+    } catch {
+      setActionNotice(appLocale === "ko" ? "추가 지시 전달 재개를 저장하지 못했습니다. 자동 전달은 계속 중단합니다." : "Delivery resume could not be saved. Automatic delivery remains paused.");
+    }
+  }, [appLocale, reconcileUncertainPreflightSteer]);
+
   // 실행 타깃 결정: 좌석(설치행)이 call-only Hub 자산이면 로컬 프롬프트 실행이 아니라
   // Hub borrow 경로로 보낸다({source:"hub", slug}) — 로컬 프롬프트가 없으므로 local 타깃은
   // 빈 지시문 실행이 되어 항상 오답이다. 그 외에는 기존과 동일하게 local 타깃.
@@ -4689,7 +4907,7 @@ function OneSessionsShell() {
         let directionVisible = false;
         if (goalDirection && admission.promptMessageId) {
           try {
-            const history = await api.invoke.history(chatId);
+            const history = await readOneChatHistory(api, chatId);
             const durable = toUiMessages(history);
             const exactSavedDirection = durable.some((message) => message.id === admission.promptMessageId && message.role === "user");
             if (exactSavedDirection && activeThreadChatIdRef.current === chatId && !runIdRef.current) {
@@ -4902,7 +5120,7 @@ function OneSessionsShell() {
     // Persist only the opaque ID and its chat binding, never text or
     // capabilities. A renderer reload while Main preflight is still awaiting
     // its judges must not silently allocate a second run ID for this chat.
-    if (!writeOneUncertainAdmission({ chatId, runId })) {
+    if (!writeOneUncertainAdmission({ chatId, runId, ...(options?.preflightSubmissionId ? { submissionId: options.preflightSubmissionId } : {}) })) {
       if (runIdRef.current === runId) runIdRef.current = null;
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
@@ -5389,8 +5607,10 @@ function OneSessionsShell() {
     const recurrenceSnapshot: OneRecurrenceSelectionV1 | null = null;
     const overrideSnapshot = { ...turnOverrides, goalControlEpoch: goalControlEpochRef.current };
     const taskForceTargetSnapshot: OrchestrationTarget[] = turnAgentIds.map((agentId) => orchestrationTargetForAgentId(agentId));
-    const explicitValue = text.trim();
-    if (!explicitValue && attachmentSnapshot.length === 0) return;
+    const submittedReply = messageReply;
+    const rawReply = text.trim();
+    const explicitValue = composeMessageReply(rawReply, submittedReply);
+    if (!rawReply && attachmentSnapshot.length === 0) return;
     /*
      * Main refuses a turn over its byte budget (store/one-preflight-steers: 200KB for a
      * request, 32KB for a follow-up queued before the first run starts). Measured
@@ -5410,13 +5630,48 @@ function OneSessionsShell() {
       return;
     }
     const currentSubmitChatId = selected?.chatId ?? conversation?.id;
-    if (!teamPreflightBusy && currentSubmitChatId && readOneUncertainPreflightSteer(currentSubmitChatId)) {
-      void reconcileUncertainPreflightSteer(currentSubmitChatId);
-      setActionNotice(appLocale === "ko"
-        ? "이전 추가 지시의 접수 상태가 아직 불확실합니다. 기록을 확인할 때까지 새 요청을 보내지 않았습니다."
-        : "A previous follow-up receipt is still uncertain. No new request was sent; review its record first.");
-      return;
-    }
+    const preserveFollowup = (chatId: string, binding: { submissionId?: string; waitingParentRunId?: string } = {}) => {
+      if (binding.submissionId && promptBytes > 32_000) {
+        setActionNotice(appLocale === "ko" ? "추가 지시는 최대 32KB까지 보낼 수 있습니다. 작성한 글은 그대로입니다." : "Follow-ups before the parent starts are limited to 32 KB. Your draft remains.");
+        return;
+      }
+      const request: McpInvocationRequest = {
+        chatId, userPrompt: explicitValue, steeringMode: "queue",
+        taskIntent: selected ? "task" : "conversation", oneMode: true,
+        locale: normalizedLocale, onePermissionMode: onePermission,
+        permissions: onePermission === "auto" ? selected ? "write" : "read" : onePermission,
+        ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
+        ...(taskForceTargetSnapshot.length ? { taskForceTargets: taskForceTargetSnapshot } : {}),
+        ...(currentOneGoalOverride(overrideSnapshot, goalControlEpochRef.current).goalMode ? { goalMode: true } : {}),
+        ...(overrideSnapshot.planMode ? { planMode: true } : {}),
+        ...(overrideSnapshot.fastMode ? { fastMode: true } : {}),
+        sessionRouting: overrideSnapshot.sessionRouting === true,
+      };
+      const intent: OneFollowupIntent = {
+        intentId: uid(), chatId, userPrompt: explicitValue,
+        createdAt: new Date().toISOString(), request, ...binding,
+        agentIds: turnAgentIds.slice(),
+        ...(turnAgentIds.length !== activeTaskforceAgentIds.length
+          || turnAgentIds.some(agentId => !activeTaskforceAgentIds.includes(agentId)) ? { requiresReprepare: true } : {}),
+      };
+      try {
+        saveOneFollowupIntent(window.localStorage, intent);
+        if (activeThreadChatIdRef.current === chatId) {
+          setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, chatId));
+          setComposer(current => current === text || current === rawReply ? "" : current);
+          setMessageReply(current => current === submittedReply ? null : current);
+          setActionNotice(appLocale === "ko"
+            ? "추가 지시를 로컬에 보관했습니다. Main 접수 확인 중입니다."
+            : "The follow-up is saved locally. Checking Main acceptance.");
+        }
+        void reconcileUncertainPreflightSteer(chatId);
+        scrollToLatest();
+      } catch {
+        setActionNotice(appLocale === "ko"
+          ? "추가 지시를 보관하지 못해 보내지 않았습니다. 작성한 글은 그대로입니다."
+          : "The follow-up could not be saved or sent. Your draft remains.");
+      }
+    };
     const graphRequest = oneGraphRequest(explicitValue);
     if (graphRequest !== null && !graphRequest) {
       setComposer("@graph ");
@@ -5431,65 +5686,27 @@ function OneSessionsShell() {
     // A Graph interview is a local chat surface backed by the Work Graph
     // engine. It must not become a steer for an unrelated running model turn.
     if (graphRequest !== null && (teamPreflightBusy || busy)) return;
-    if (teamPreflightBusy) {
-      // There is no parent run yet. Main must durably acknowledge the exact
-      // submission/steer pair before the person's next instruction leaves the
-      // composer; an in-memory queue disappears on reload or quit.
-      if (!explicitValue || attachmentSnapshot.length > 0) return;
-      if (preflightSteerEnqueueInFlightRef.current) return;
-      const submission = preflightSubmissionRef.current;
-      const bridge = ipc();
-      if (!submission || submission.chatId !== activeThreadChatIdRef.current || !bridge) {
-        setActionNotice(appLocale === "ko"
-          ? "첫 요청의 접수 준비가 끝날 때까지 추가 지시를 작성창에 보관합니다."
-          : "Keep the follow-up in the composer until the first request has a durable submission receipt.");
+    const uncertainRunId = currentSubmitChatId ? uncertainAdmissionRef.current.get(currentSubmitChatId) : undefined;
+    const uncertainParent: OneUncertainAdmission | null = currentSubmitChatId ? readOneUncertainAdmission(currentSubmitChatId)
+      ?? (uncertainRunId ? { chatId: currentSubmitChatId, runId: uncertainRunId } : null) : null;
+    const preparingParent = preflightSubmissionRef.current;
+    const pendingProposalSubmissionId = teamPreflight?.binding.chatId === currentSubmitChatId ? pendingTeamPrompt?.preflightSubmissionId : undefined;
+    if (teamPreflightBusy || uncertainParent || pendingProposalSubmissionId
+      || (preparingParent && preparingParent.chatId === currentSubmitChatId)) {
+      if (!explicitValue || attachmentSnapshot.length > 0) {
+        setActionNotice(appLocale === "ko" ? "현재 요청이 접수 준비 중입니다. 첨부 파일은 작성창에 보관합니다." : "The current request is still being prepared. Attachments remain in the composer.");
         return;
       }
-      const submissionGeneration = preflightSubmissionGenerationRef.current;
-      preflightSteerEnqueueInFlightRef.current = true;
-      try {
-        const textDigest = await onePreflightTextDigest(explicitValue);
-        const uncertain = readOneUncertainPreflightSteer(submission.chatId);
-        if (uncertain && (uncertain.submissionId !== submission.submissionId
-          || uncertain.textDigest !== textDigest)) {
-          throw new Error("one_preflight_previous_steer_unresolved");
-        }
-        const intent: OneUncertainPreflightSteer = uncertain ?? {
-          steerId: uid(), submissionId: submission.submissionId,
-          chatId: submission.chatId, textDigest,
-        };
-        if (!writeOneUncertainPreflightSteer(intent)) {
-          throw new Error("one_preflight_steer_identity_not_durable");
-        }
-        const receipt = await bridge.invoke.preflightSteerEnqueue({
-          steerId: intent.steerId, submissionId: submission.submissionId,
-          chatId: submission.chatId, userPrompt: explicitValue,
-        });
-        if (receipt.steerId !== intent.steerId || receipt.submissionId !== submission.submissionId
-          || receipt.chatId !== submission.chatId
-          || (receipt.status !== "queued" && receipt.status !== "attached")) {
-          throw new Error("one_preflight_steer_receipt_uncertain");
-        }
-        clearOneUncertainPreflightSteer(intent);
-        setPreflightSteerReceipts((current) => [...current.filter((item) => item.steerId !== intent.steerId), receipt]);
-        const currentSubmission = preflightSubmissionRef.current;
-        if (preflightSubmissionGenerationRef.current === submissionGeneration
-          && (!currentSubmission || currentSubmission.submissionId === submission.submissionId)
-          && activeThreadChatIdRef.current === submission.chatId) {
-          setComposer((current) => current === explicitValue ? "" : current);
-        }
-      } catch (cause) {
-        setActionNotice(appLocale === "ko"
-          ? "추가 지시 접수 여부를 확인하지 못했습니다. 중복 실행을 막기 위해 작성창에 그대로 두었습니다."
-          : "The follow-up receipt is uncertain. It remains in the composer; review before sending again.");
-        requestOneOperationalRecovery("one-preflight-steer", cause);
-        // The enqueue may have committed before its acknowledgement failed.
-        // Re-read the exact Main row; absence is still not no-start proof.
-        await reconcileUncertainPreflightSteer(submission.chatId, bridge);
-      } finally {
-        preflightSteerEnqueueInFlightRef.current = false;
+      const chatId = currentSubmitChatId ?? preparingParent?.chatId;
+      if (!chatId) {
+        setActionNotice(appLocale === "ko" ? "대화 생성이 끝날 때까지 작성한 글을 보관합니다." : "Your draft is kept until the conversation is created.");
+        return;
       }
-      scrollToLatest();
+      const submissionId = preparingParent?.chatId === chatId ? preparingParent.submissionId
+        : uncertainParent?.submissionId ?? pendingProposalSubmissionId;
+      preserveFollowup(chatId, submissionId ? { submissionId } : {
+        waitingParentRunId: uncertainParent?.runId ?? uncertainAdmissionRef.current.get(chatId) ?? runIdRef.current ?? undefined,
+      });
       return;
     }
     preflightSubmissionGenerationRef.current += 1;
@@ -5553,55 +5770,21 @@ function OneSessionsShell() {
         if ((await api.invoke.activeChats()).includes(threadChatId)) settlingChatId = threadChatId;
       } catch { /* unknown → the normal start path keeps its own no-start proof */ }
     }
-    if (busy || settlingChatId) {
-      const chatId = busy ? runChatIdRef.current : settlingChatId;
-      const activeRunId = busy ? runIdRef.current : settlingChatId;
-      if (!chatId || !activeRunId || attachmentSnapshot.length > 0) return;
-      // 줄 선 요청이 시작되면 활성 대화 구독이 그 실행에 붙는다 — 구독 대상 대화를 이 대화로 맞춘다.
-      if (!busy) runChatIdRef.current = chatId;
-      const optimisticId = `one-steer:${uid()}`;
-      setComposer("");
-      // Codex keeps a queued instruction in the queue strip above the composer
-      // until the model actually receives it; it becomes a conversation turn
-      // only when its run starts (see the active-chat attach below). Showing it
-      // as a bubble *and* in the queue drew the same words twice.
-      setQueuedSteers((current) => [...current, { id: optimisticId, text: value, chatId }]);
-      scrollToLatest();
-      try {
-        const steerReceipt = await api.invoke.steer({
-          chatId,
-          userPrompt: value,
-          // 검증 중인 턴은 Main 이 끊지 않고 줄만 세운다(service.steer). 오너 요청이 먼저다.
-          steeringMode: "queue",
-          taskIntent: selected ? "task" : "conversation",
-          oneMode: true,
-          locale: normalizedLocale,
-          onePermissionMode: onePermission,
-          permissions: onePermission === "auto" ? selected ? "write" : "read" : onePermission,
-          ...(oneRuntimeSelection ? { runtimeSelection: oneRuntimeSelection } : {}),
-          sessionRouting: false,
-        });
-        if (!steerReceipt.accepted || steerReceipt.chatId !== chatId) {
-          throw new Error("Desktop did not acknowledge steering for the active conversation");
-        }
-        const steerNotice = steerReceipt.queued
-          ? steerReceipt.interruptsCurrent
-            ? (appLocale === "ko"
-              ? "새 지시를 저장했습니다. 현재 실행을 정리한 뒤 이어서 실행합니다."
-              : "The new instruction is saved. The current execution is being settled, then the new instruction will continue.")
-            : (appLocale === "ko"
-              ? "새 지시를 저장했습니다. 현재 실행이 정리되면 이어서 실행합니다."
-              : "The new instruction is saved and will continue after the current execution settles.")
-          : (appLocale === "ko"
-            ? "현재 실행은 이미 끝났습니다. 새 지시를 새 실행으로 시작했습니다."
-            : "The previous execution had already settled, so the new instruction started as a new run.");
-        steerQueuedNoticeRef.current = steerReceipt.queued ? steerNotice : null;
-        setActionNotice(steerNotice);
-      } catch (cause) {
-        setQueuedSteers((current) => current.filter((item) => item.id !== optimisticId));
-        setComposer(value);
-        requestOneOperationalRecovery("one-steer", cause);
+    // React state can lag a second send while the first active-chat read resolves.
+    const latestPreparingParent = preflightSubmissionRef.current;
+    if (currentSubmitChatId && latestPreparingParent?.chatId === currentSubmitChatId) {
+      if (attachmentSnapshot.length === 0) preserveFollowup(currentSubmitChatId, { submissionId: latestPreparingParent.submissionId });
+      else setActionNotice(appLocale === "ko" ? "첨부 파일은 작성창에 보관합니다. 첫 요청의 접수를 기다려 주세요." : "Attachments remain in the composer while the first request is being accepted.");
+      return;
+    }
+    if (busy || settlingChatId || (runIdRef.current && runChatIdRef.current === currentSubmitChatId)) {
+      const chatId = busy || runIdRef.current ? runChatIdRef.current : settlingChatId;
+      if (!chatId || attachmentSnapshot.length > 0) {
+        setActionNotice(appLocale === "ko" ? "첨부 파일은 현재 실행이 끝난 뒤 보낼 수 있습니다. 작성창에 보관합니다." : "Attachments can be sent after the current run settles. They remain in the composer.");
+        return;
       }
+      if (!busy) runChatIdRef.current = chatId;
+      preserveFollowup(chatId);
       return;
     }
     const canContinueInPlace = Boolean(
@@ -5630,6 +5813,9 @@ function OneSessionsShell() {
         : "The earlier team proposal expired. Continuing with what you just sent.");
     }
     let unsupportedInputMessage: string | null = null;
+    let releaseParentReadiness!: () => void;
+    const parentReadiness = new Promise<void>(resolve => { releaseParentReadiness = resolve; });
+    if (currentSubmitChatId) preflightSubmissionRef.current = { submissionId: preflightSubmissionId, chatId: currentSubmitChatId, ready: parentReadiness };
     const prepareOrRun = async (
       chatId: string,
       taskId: string | null,
@@ -5638,6 +5824,7 @@ function OneSessionsShell() {
     ) => {
       setSubmissionBusy(true);
       setError(null);
+      preflightSubmissionRef.current = { submissionId: preflightSubmissionId, chatId, ready: parentReadiness };
       let preparedAttachments: PreparedOneAttachments | null = null;
       let runPrompt = value;
       let awaitingProposal = false;
@@ -5683,7 +5870,8 @@ function OneSessionsShell() {
           || submissionReceipt.chatId !== chatId || submissionReceipt.state !== "open") {
           throw new Error("one_preflight_submission_receipt_mismatch");
         }
-        preflightSubmissionRef.current = { submissionId: preflightSubmissionId, chatId };
+        setMessageReply(current => current === submittedReply ? null : current);
+        releaseParentReadiness();
         const mainIntent = await requestIntentPromise;
         const resolvedIntent = preparedAttachments
           || taskIntent === "task"
@@ -5827,6 +6015,7 @@ function OneSessionsShell() {
         }
         throw cause;
       } finally {
+        releaseParentReadiness();
         setSubmissionBusy(false);
         if (!awaitingProposal && !runIdRef.current) {
           await api.invoke.preflightSubmissionHold(preflightSubmissionId).catch(() => null);
@@ -5930,6 +6119,7 @@ function OneSessionsShell() {
         throw new Error("fresh_chat_receipt_mismatch");
       }
       freshCreatedChatId = chat.id;
+      preflightSubmissionRef.current = { submissionId: preflightSubmissionId, chatId: chat.id, ready: parentReadiness };
       // A later "New conversation" action owns navigation. An older async
       // submission may still finish preparing, but it must not pull the UI
       // back to its chat or restore that chat as the active composer target.
@@ -6090,8 +6280,11 @@ function OneSessionsShell() {
       );
       if (!controlFailure) requestOneOperationalRecovery("one-submit", cause);
       setError(null);
+    } finally {
+      releaseParentReadiness();
+      if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) preflightSubmissionRef.current = null;
     }
-  }, [activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
+  }, [messageReply, activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, pendingTeamPrompt, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
 
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
@@ -6140,8 +6333,8 @@ function OneSessionsShell() {
    * Automatic recovery. A run that stops short is One's problem to route around,
    * so the product retries on its own before it ever shows the person a failure.
    * Main judges whether that is allowed; this effect only carries out the answer.
-   * Attempts are counted per conversation and reset whenever the person speaks
-   * or a run completes, so a new request always starts from a full budget.
+   * Main preserves the original run and its recovery requests across reloads.
+   * This view keeps presentation state; it does not allocate a recovery budget.
    */
   useEffect(() => {
     if (!receipt) return;
@@ -6173,13 +6366,13 @@ function OneSessionsShell() {
     if (receipt.status === "completed") {
       const state = autoRecoveryRef.current;
       if (receipt.runId !== state.recoveryRunId || !state.originalRunId) {
-        // An ordinary successful run needs no recovery proof.
+        // Presentation may have been remounted. Main's saved child link decides
+        // whether this is an ordinary success or still needs recovery proof.
         if (autoRecovery) setAutoRecovery(null);
         state.attemptsSpent = 0;
         state.previousFingerprint = null;
         state.originalRunId = null;
         state.recoveryRunId = null;
-        return;
       }
       // A completed process is not proof of the requested outcome. Main binds
       // the original failure, recovery receipt, and actual assistant result,
@@ -6191,14 +6384,15 @@ function OneSessionsShell() {
       let cancelled = false;
       let verificationSettled = false;
       void api.oneAutoRecovery.verify({
-        originalRunId: state.originalRunId,
+        originalRunId: state.originalRunId ?? undefined,
         recoveryRunId: receipt.runId,
         chatId,
-        goal: state.goal,
+        goal: state.goal || selected?.display.title || conversation?.title || "",
         attemptsSpent: state.attemptsSpent,
       }).then((verification) => {
-        if (cancelled || !verification || admissionRecoveryFenceRef.current.has(chatId)) return;
+        if (cancelled || admissionRecoveryFenceRef.current.has(chatId)) return;
         verificationSettled = true;
+        if (!verification) return;
         const safeDiagnosis = toCustomerSafeText(verification.diagnosis, appLocale);
         if (verification.verified) {
           setAutoRecovery(null);
@@ -6217,7 +6411,9 @@ function OneSessionsShell() {
           return;
         }
         state.attemptsSpent = verification.attempt ?? state.attemptsSpent + 1;
-        const nextRecoveryRunId = uid();
+        const nextRecoveryRunId = verification.nextRecoveryRunId;
+        if (!nextRecoveryRunId) { setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: safeDiagnosis }); return; }
+        state.originalRunId = verification.originalRunId;
         state.recoveryRunId = nextRecoveryRunId;
         setAutoRecovery({ phase: "recovering", attempt: state.attemptsSpent, diagnosis: safeDiagnosis });
         void startRun(
@@ -6286,7 +6482,9 @@ function OneSessionsShell() {
           return;
         }
         state.attemptsSpent = judgement.attempt ?? state.attemptsSpent + 1;
-        const recoveryRunId = uid();
+        const recoveryRunId = judgement.nextRecoveryRunId;
+        if (!recoveryRunId || !judgement.originalRunId) { setAutoRecovery({ phase: "stopped", reason: "undecided", diagnosis: safeDiagnosis }); return; }
+        state.originalRunId = judgement.originalRunId;
         state.recoveryRunId = recoveryRunId;
         setAutoRecovery({ phase: "recovering", attempt: state.attemptsSpent, diagnosis: safeDiagnosis });
         void startRun(
@@ -8272,6 +8470,7 @@ function OneSessionsShell() {
                     // (measured: it dropped links/fences and rendered raw
                     // "[hello.txt]([local path]" and a stray ``` ).
                     const visibleText = visibleOneMessageText(message);
+                    const displayedText = message.role === "user" ? displayMessageReply(visibleText, appLocale) : visibleText;
                     // A quiet host status line folded into its run's work block draws nothing here.
                     const foldedIntoWork = foldedHostNotes.messageIds.has(message.id);
                     const messageHostNotice = normalizeChatHostNotice(message.role, message.hostNotice);
@@ -8285,7 +8484,7 @@ function OneSessionsShell() {
                     const blocksAfter = threadWorkPlan.afterMessage.get(message.id) ?? [];
                     // 첨부만 있는 턴도 대화다 — 텍스트가 없다고 버리면 사진을 보낸 사실 자체가 사라진다.
                     const hasAttachments = (message.images?.length ?? 0) > 0 || (message.files?.length ?? 0) > 0;
-                    if ((foldedIntoWork || (!visibleText && !hasAttachments)) && !liveBefore && blocksAfter.length === 0) return null;
+                    if ((foldedIntoWork || (!displayedText && !hasAttachments)) && !liveBefore && blocksAfter.length === 0) return null;
                     const systemLabel = message.role === "system"
                       ? oneSystemPromptLabel(message)
                       // A phone decision-card Reject is an action, not English the owner typed.
@@ -8308,7 +8507,7 @@ function OneSessionsShell() {
                           {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                           {liveWorkBlock}
                         </>}
-                        {(visibleText || hasAttachments) && !foldedIntoWork && (drawsAsHostNotice
+                        {(displayedText || hasAttachments) && !foldedIntoWork && (drawsAsHostNotice
                           ? (message.hostNotice?.purpose === "automation-report" && !agiActionNoticeLine(message.hostNotice, message.text)
                             // 자동화 보고 = 원장이 센 행동 요약 + 로고, 원문은 펼침 안에(오너 2026-09-28).
                             ? <AutomationReportSummary runId={message.hostNotice.runId} text={message.text} locale={appLocale === "ko" ? "ko" : "en"}
@@ -8322,6 +8521,7 @@ function OneSessionsShell() {
                             <p className={styles.systemTurn} data-role="system" data-one-system-turn="true">{systemLabel}</p>
                           )
                           : (
+                          <MessageActions messageId={message.id} author={message.role === "user" ? (appLocale === "ko" ? "나" : "You") : assistantSpeaker.label} text={displayedText} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
                           <article
                             className={styles.message}
                             data-role={message.role}
@@ -8364,7 +8564,7 @@ function OneSessionsShell() {
                             {message.chatFiles && message.chatFiles.length > 0 && (
                               <ChatFileCards files={message.chatFiles} locale={appLocale} onOpen={openOneChatFile} />
                             )}
-                            {(visibleText || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
+                            {(displayedText || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
                             <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && isDocumentLikeText(message.text) ? "true" : undefined}
                               data-one-visual-answer={message.role === "assistant" && hasInlineVisualBlock(message.text) ? "true" : undefined}>
                               {message.files && message.files.filter((f) => f.kind !== "image").length > 0 && (
@@ -8382,13 +8582,13 @@ function OneSessionsShell() {
                                 * 아직 한 줄인 글을 문서 카드로 세우면 빈 액자가 된다.
                                 */}
                               <GoalResultReport result={message.goalResult} locale={appLocale}>
-                              {visibleText && (message.streaming
-                                ? <StreamingMarkdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} />
+                              {displayedText && (message.streaming
+                                ? <StreamingMarkdown text={displayedText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} />
                                 : (() => {
-                                  const documentMark = readOneDocumentMark(visibleText);
+                                  const documentMark = readOneDocumentMark(displayedText);
                                   return documentMark
                                     ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={message.id} />
-                                    : <Markdown text={visibleText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} />;
+                                    : <Markdown text={displayedText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} />;
                                 })())}
                               {message.role === "assistant" && !message.streaming && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
                               </GoalResultReport>
@@ -8405,6 +8605,7 @@ function OneSessionsShell() {
                             )}
                             </div>
                           </article>
+                          </MessageActions>
                           ))}
                         {graphRequest && activeThreadChatId && (
                           <DescribeAutomation
@@ -8464,9 +8665,11 @@ function OneSessionsShell() {
                   {workBusy && !preflightPrompt && !liveWorkAnchorMessageId && (
                     <>
                       {busy && activeRunPrompt && !livePromptMounted && (
+                        <MessageActions messageId={`one-live-prompt:${activeRunPrompt.runId}`} author={appLocale === "ko" ? "나" : "You"} text={displayMessageReply(promptBubbleContent(activeRunPrompt.text).text, appLocale)} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
                         <article className={styles.message} data-role="user">
-                          <div className={styles.messageBody}><Markdown text={promptBubbleContent(activeRunPrompt.text).text} messageId={`one-live-prompt:${activeRunPrompt.runId}`} onOpenLinkedFile={openOneLinkedFile} /></div>
+                          <div className={styles.messageBody}><Markdown text={displayMessageReply(promptBubbleContent(activeRunPrompt.text).text, appLocale)} messageId={`one-live-prompt:${activeRunPrompt.runId}`} onOpenLinkedFile={openOneLinkedFile} /></div>
                         </article>
+                        </MessageActions>
                       )}
                       {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                       {liveWorkBlock}
@@ -8828,13 +9031,16 @@ function OneSessionsShell() {
               </div>
             )}
             {attachmentError && <p className={styles.attachmentError} role="alert">{attachmentError}</p>}
-            {receipt?.steeringRecovery && receipt.steeringRecovery.length > 0 && (
-              <p className={styles.attachmentError} role="status" aria-live="polite" data-one-steering-recovery="held">
-                {appLocale === "ko"
-                  ? `재시작 뒤 외부 효과가 불확실한 추가 지시 ${receipt.steeringRecovery.length}개를 보류했습니다. 중복 실행하지 않았습니다. 기록을 확인한 뒤 새 지시로 다시 결정해 주세요.`
-                  : `${receipt.steeringRecovery.length} follow-up instruction(s) were held after restart because an external effect is uncertain. Nothing was replayed; review the record before deciding on a new instruction.`}
-              </p>
-            )}
+            {Array.from(new Map([...heldFollowupRecovery, ...(receipt?.steeringRecovery ?? [])]
+              .filter(item => item.chatId === activeThreadChatId).map(item => [item.id, item])).values()).map(item => (
+              <div key={item.id} className={styles.steeringQueue} role="status" data-one-steering-recovery="held">
+                <span>{appLocale === "ko" ? "추가 지시 보류" : "Follow-up held"}</span>
+                <strong>{item.promptText}</strong>
+                <small>{appLocale === "ko"
+                  ? "재시작 뒤 외부 효과가 불확실해 보류했습니다. 자동 재전송하지 않습니다. 이 글을 검토한 뒤 새 지시로 결정하세요."
+                  : "Held after restart because an external effect is uncertain. Not replayed automatically; review this text before deciding on a new instruction."}</small>
+              </div>
+            ))}
             {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true" data-tone={actionNotice === infoActionNoticeRef.current ? "info" : undefined}>{actionNotice}</p>}
             {/* 좁은 대화 열(결과 패널을 연 440px)에서 단추 두 개가 1fr 칸에 0px 로 눌려 글자가
                 서로 겹쳐 그려졌다(오너 1.2.41). 문장 한 덩이 + 단추 묶음으로 두고, 자리가 모자라면
@@ -8869,7 +9075,7 @@ function OneSessionsShell() {
                     let directionVisible = false;
                     if (admission.goalId && admission.promptMessageId) {
                       try {
-                        const history = await api.invoke.history(pending.chatId);
+                        const history = await readOneChatHistory(api, pending.chatId);
                         const durable = toUiMessages(history);
                         directionVisible = durable.some((message) => message.id === admission.promptMessageId && message.role === "user");
                         if (directionVisible && activeThreadChatIdRef.current === pending.chatId && !runIdRef.current) {
@@ -8918,6 +9124,7 @@ function OneSessionsShell() {
                 }).catch(() => setActionNotice(appLocale === "ko" ? "접수 여부를 아직 확인할 수 없습니다. 재전송하지 않았습니다." : "Admission cannot be checked yet. Nothing was resent."));
               }}>{appLocale === "ko" ? "접수 확인" : "Check admission"}</button>
               <button type="button" className={styles.admissionAction} onClick={() => {
+                pauseLocalFollowups(visibleUncertainAdmission.chatId);
                 const api = ipc();
                 if (!api) {
                   setActionNotice(appLocale === "ko" ? "Desktop 연결이 없어 중지를 요청하지 못했습니다." : "Desktop is unavailable; Stop could not be requested.");
@@ -9173,6 +9380,32 @@ function OneSessionsShell() {
                 </button>
               </div>
             ))}
+            {localFollowupIntents.filter(item => item.chatId === activeThreadChatId).map(item => (
+              <div key={item.intentId} className={styles.steeringQueue} role="status" data-one-local-followup={item.intentId}>
+                <span>{item.autoDeliveryPaused || locallyStoppedFollowupIdsRef.current.has(item.intentId)
+                  ? (appLocale === "ko" ? "추가 지시 자동 전달 중단" : "Follow-up delivery paused")
+                  : item.requiresReprepare ? (appLocale === "ko" ? "팀 선택 확인 필요" : "Team preparation required") : (appLocale === "ko" ? "추가 지시 로컬 보관" : "Follow-up saved locally")}</span>
+                <strong>{item.userPrompt}</strong>
+                <small>{item.requiresReprepare ? (appLocale === "ko" ? "바뀐 팀의 실행 권한을 새로 확인해야 합니다. 이 글은 전송되지 않았습니다." : "The changed team needs fresh execution authority. This text has not been sent.") : (appLocale === "ko" ? "Main 접수 여부가 아직 확인되지 않았습니다. 새 글을 작성할 수 있습니다." : "Main acceptance is unconfirmed. You can write another message.")}</small>
+                {(item.autoDeliveryPaused || locallyStoppedFollowupIdsRef.current.has(item.intentId)) && <button type="button" onClick={() => resumePausedFollowup(item)}>
+                  {appLocale === "ko" ? "이 지시의 전달 명시적으로 재개" : "Explicitly resume this instruction"}
+                </button>}
+                {item.requiresReprepare ? (
+                  <button type="button" disabled={busy || teamPreflightBusy || Boolean(composer.trim())} onClick={() => restoreUnsentFollowup(item)}>
+                    {appLocale === "ko" ? "작업 종료 후 초안 복원" : "Restore draft when idle"}
+                  </button>
+                ) : (
+                  <>
+                    <button type="button" onClick={() => void reconcileUncertainPreflightSteer(item.chatId)}>
+                      {appLocale === "ko" ? "접수 다시 확인" : "Check acceptance again"}
+                    </button>
+                    {item.waitingParentRunId && <button type="button" disabled={busy || teamPreflightBusy || Boolean(composer.trim())} onClick={() => void restoreUnsentFollowup(item)}>
+                      {appLocale === "ko" ? "첫 요청 거절 확인 후 초안 복원" : "Restore draft after confirmed rejection"}
+                    </button>}
+                  </>
+                )}
+              </div>
+            ))}
             {preflightSteerReceipts
               .filter((item) => item.chatId === activeThreadChatId
                 && (item.status === "queued" || item.status === "held" || item.status === "cancelled"))
@@ -9223,6 +9456,7 @@ function OneSessionsShell() {
             {firstRequestEntry && !activeSeatDissolved && (
               <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composer.trim().length > 0} />
             )}
+            <MessageReplyPreview reply={messageReply} locale={appLocale} onDismiss={() => setMessageReply(null)} />
             <form className={styles.composer} data-one-composer="true" data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
               event.preventDefault();
               if (activeSeatDissolved || activeDirectSessionUnavailable) return;

@@ -37,6 +37,10 @@ export function assertOneDispatchQuestionBinding(input: {parentChatId:string;dis
 export function oneDispatchParentForRun(childChatId: string, childRunId: string): string | undefined {
   const db = getDb();
   if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_team_dispatches'").get()) return undefined;
+  return dispatchParentForRun(db, childChatId, childRunId);
+}
+
+function dispatchParentForRun(db: ReturnType<typeof getDb>, childChatId: string, childRunId: string): string | undefined {
   return (db.prepare("SELECT parent_chat_id FROM one_team_dispatches WHERE child_chat_id=? AND child_run_id=? LIMIT 1")
     .get(childChatId, childRunId) as {parent_chat_id:string} | undefined)?.parent_chat_id;
 }
@@ -60,11 +64,42 @@ export function oneDispatchSidebarPredicate(): string {
 
 /** Enrich an existing receipt on read. No new historical message, task, or recovery is created. */
 export function projectOneDispatchNotice(parentChatId: string, notice: ChatHostNotice | undefined): ChatHostNotice | undefined {
+  return createOneDispatchNoticeProjector(parentChatId)(notice);
+}
+
+type DispatchNotice = Extract<ChatHostNotice, { purpose: "one-dispatch-link" | "one-dispatch-result" }>;
+type ProjectionContext = { db: ReturnType<typeof getDb>; hasDispatches: boolean; retained: boolean };
+
+/** A history snapshot checks its schema and each exact child projection once. */
+export function createOneDispatchNoticeProjector(parentChatId: string): (notice: ChatHostNotice | undefined) => ChatHostNotice | undefined {
+  let context: ProjectionContext | undefined;
+  const projections = new Map<string, DispatchNotice["dispatch"]>();
+  return (notice) => {
+    if (!notice || (notice.purpose !== "one-dispatch-link" && notice.purpose !== "one-dispatch-result")) return notice;
+    const { dispatch: _untrustedProjection, ...base } = notice;
+    const key = JSON.stringify([notice.purpose, notice.chatId, notice.runId]);
+    if (projections.has(key)) {
+      const dispatch = projections.get(key);
+      return { ...base, ...(dispatch ? { dispatch } : {}) };
+    }
+    if (!context) {
+      const db = getDb();
+      const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name IN ('one_team_dispatches','one_team_dispatch_results')")
+        .all() as Array<{ name: string }>;
+      context = { db, hasDispatches: tables.some(table => table.name === "one_team_dispatches"),
+        retained: tables.some(table => table.name === "one_team_dispatch_results") };
+    }
+    const projected = projectDispatchNotice(parentChatId, notice, context);
+    projections.set(key, projected?.dispatch);
+    return projected;
+  };
+}
+
+function projectDispatchNotice(parentChatId: string, notice: DispatchNotice, context: ProjectionContext): DispatchNotice {
   if (!notice || (notice.purpose !== "one-dispatch-link" && notice.purpose !== "one-dispatch-result")) return notice;
   const { dispatch: _untrustedProjection, ...base } = notice;
-  const db = getDb();
-  if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_team_dispatches'").get()) return base;
-  const retained = db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='one_team_dispatch_results'").get();
+  const { db, hasDispatches, retained } = context;
+  if (!hasDispatches) return base;
   const dispatchSource = retained ? `(SELECT id,parent_chat_id,member_id,member_agent_id,child_chat_id,child_run_id,status,result_text,created_at,updated_at FROM one_team_dispatches
     UNION ALL SELECT id,parent_chat_id,member_id,member_agent_id,child_chat_id,child_run_id,status,result_text,created_at,updated_at FROM one_team_dispatch_results)` : "one_team_dispatches";
   type ProjectionRow = { id:string;member_agent_id:string;member_icon:string|null;status:string;created_at:string;updated_at:string;result_text:string|null };
@@ -105,7 +140,7 @@ export function projectOneDispatchNotice(parentChatId: string, notice: ChatHostN
     WHERE chat_id=? AND json_valid(host_notice_json) AND json_extract(host_notice_json,'$.purpose')='one-dispatch-result'
       AND json_extract(host_notice_json,'$.runId')=? AND json_extract(host_notice_json,'$.chatId')=? LIMIT 1`)
     .get(parentChatId, notice.runId, notice.chatId);
-  const pendingQuestion = !hasResultNotice && oneDispatchParentForRun(notice.chatId,notice.runId) === parentChatId
+  const pendingQuestion = !hasResultNotice && dispatchParentForRun(db, notice.chatId,notice.runId) === parentChatId
     ? oneDispatchPendingQuestion(notice.chatId,notice.runId) : undefined;
   const dispatch = normalizeOneDispatchPresentation({ dispatchId:row.id, parentChatId, memberAgentId:row.member_agent_id,
     memberIcon:row.member_icon ?? "", status:(row.status === "completed" && pendingQuestion)

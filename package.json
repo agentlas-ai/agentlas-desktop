@@ -1,6 +1,6 @@
 {
   "name": "agentlas-desktop",
-  "version": "1.2.79",
+  "version": "1.2.80",
   "description": "Agentlas Desktop — local Apps OS for AI-native tools and agent teams. BYOC: 사용자 Claude/ChatGPT/Antigravity 구독 그대로.",
   "private": true,
   "license": "Apache-2.0",
@@ -15,7 +15,7 @@
     "minimumSourceAppVersion": "0.7.0",
     "minimumRuntimeVersion": "1.0.4",
     "minimumSchemaVersion": 35,
-    "targetSchemaVersion": 127,
+    "targetSchemaVersion": 128,
     "bundledRuntimeVersion": "1.2.56"
   },
   "agentlasBundledRuntimeSource": {
@@ -405,7 +405,8 @@
     "@playwright/mcp": "0.0.78",
     "@rive-app/canvas": "^2.40.1",
     "@xyflow/react": "^12.11.1",
-    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#6fbf3ca8383474cf87c93e8a793394c9f73a0d12",
+    "agentlas-science": "git+ssh://git@github.com/agentlas-ai/agentlas-science.git#5c68e4f771904b11a43c2fef4d3ba459a98a6331",
+    "ajv": "8.20.0",
     "beautiful-mermaid": "^1.1.3",
     "better-sqlite3": "^12.11.1",
     "croner": "^9.1.0",

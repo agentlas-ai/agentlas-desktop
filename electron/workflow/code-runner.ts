@@ -70,6 +70,9 @@ export interface CodeRunInput {
    * 그래프는 복잡하지 않아도 죽는다. 선언된 패키지는 실행 **전에** 커널이 설치한다.
    */
   packages?: string[];
+  /** Host-owned durable admission for each actual script dispatch, including dependency rescue.
+   * Runtime/package discovery never consumes this boundary. A rejected admission must not spawn. */
+  onBeforeStart?: (previous?: CodeRunResult) => void;
 }
 
 export interface CodeRunResult {
@@ -120,23 +123,25 @@ export function codeFailureAllowsAutomaticRetry(result: CodeRunResult,
 
 const RESULT_MARKER = "__AGENTLAS_CODE_RESULT__";
 
-function fileState(root: string): Map<string, string> {
+async function fileState(root: string, signal?: AbortSignal): Promise<Map<string, string>> {
   const out = new Map<string, string>();
   const queue = [root];
   while (queue.length > 0 && out.size < 2_000) {
+    if (signal?.aborted) break;
     const dir = queue.shift()!;
     let entries: fs.Dirent[];
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { continue; }
+    try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { continue; }
     for (const entry of entries) {
-      if (out.size >= 2_000 || entry.isSymbolicLink()) break;
+      if (out.size >= 2_000 || signal?.aborted) break;
+      if (entry.isSymbolicLink()) continue;
       const absolute = path.join(dir, entry.name);
       if (entry.isDirectory()) { queue.push(absolute); continue; }
       if (!entry.isFile()) continue;
       try {
-        const stat = fs.statSync(absolute);
+        const stat = await fs.promises.stat(absolute);
         const relative = path.relative(root, absolute);
         const contentDigest = stat.size <= 2 * 1024 * 1024
-          ? createHash("sha256").update(fs.readFileSync(absolute)).digest("hex")
+          ? createHash("sha256").update(await fs.promises.readFile(absolute)).digest("hex")
           : `${stat.size}:${Math.trunc(stat.mtimeMs)}`;
         out.set(relative, `${stat.size}:${contentDigest}`);
       } catch { /* raced with the child; the after snapshot will capture the stable result */ }
@@ -400,7 +405,10 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
         };
       }
     }
+    let previousAttempt: CodeRunResult | undefined;
     const runOnce = async (): Promise<{ code: number | null; stdout: string; stderr: string }> => {
+      if (input.signal?.aborted) return { code: -1, stdout: "", stderr: "" };
+      input.onBeforeStart?.(previousAttempt);
       if (input.signal?.aborted) return { code: -1, stdout: "", stderr: "" };
       const child = spawn(command, args, {
         cwd,
@@ -425,14 +433,17 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       });
       clearTimeout(timer);
       input.signal?.removeEventListener("abort", onAbort);
+      previousAttempt = { ok: code === 0, isolation, execution: executionReceipt() };
       return { code, stdout, stderr };
     };
 
-    const beforeFiles = input.effect === "mutation" ? fileState(cwd) : null;
-    const observedFileEffect = () => beforeFiles ? effectReceipt(beforeFiles, fileState(cwd)) : undefined;
+    // File evidence can span thousands of files. Yield during I/O so an active
+    // Graph never blocks chat intake while taking its before/after snapshots.
+    const beforeFiles = input.effect === "mutation" ? await fileState(cwd, input.signal) : null;
+    const observedFileEffect = async () => beforeFiles ? effectReceipt(beforeFiles, await fileState(cwd)) : undefined;
     let run = await runOnce();
     if (input.signal?.aborted) {
-      return { ok: false, isolation, execution: executionReceipt(), effectReceipt: observedFileEffect(),
+      return { ok: false, isolation, execution: executionReceipt(), effectReceipt: await observedFileEffect(),
         reason: L("실행이 중지되었습니다.", "The run was stopped.") };
     }
     // ── 미선언 import 구조(救助) — 없는 모듈이면 설치를 시도하고 딱 한 번 다시 돈다 ──
@@ -448,13 +459,13 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
           provisionNotes.push(L(`[deps] 없던 모듈 "${missing}" 설치 후 재시도`, `[deps] installed missing module "${missing}" and retried`));
           run = await runOnce();
           if (input.signal?.aborted) {
-            return { ok: false, isolation, execution: executionReceipt(), effectReceipt: observedFileEffect(),
+            return { ok: false, isolation, execution: executionReceipt(), effectReceipt: await observedFileEffect(),
               reason: L("실행이 중지되었습니다.", "The run was stopped.") };
           }
         } else if (rescue.failed) {
           return {
             ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING", execution: executionReceipt(),
-            effectReceipt: observedFileEffect(),
+            effectReceipt: await observedFileEffect(),
             reason: L(`코드가 쓰는 파이썬 패키지 "${missing}"가 이 컴퓨터에 없고, 설치도 실패했습니다: `, `The Python package "${missing}" used by the code is not on this computer, and installing it failed: `)
               + `${rescue.failed.reason}`,
           };
@@ -467,16 +478,16 @@ export async function runCodeStep(input: CodeRunInput): Promise<CodeRunResult> {
       if (stillMissing) {
         return {
           ok: false, isolation, failureCode: "CODE_DEPENDENCY_MISSING", execution: executionReceipt(),
-          effectReceipt: observedFileEffect(),
+          effectReceipt: await observedFileEffect(),
           reason: L(`코드가 쓰는 파이썬 모듈 "${stillMissing}"를 준비하지 못했습니다. pip 이름이 모듈 이름과 다른 패키지일 수 있습니다 — 원문: `, `Could not prepare the Python module "${stillMissing}" used by the code. Its pip name may differ from the module name — original error: `)
             + reason.slice(0, 800),
         };
       }
-      return { ok: false, isolation, execution: executionReceipt(), effectReceipt: observedFileEffect(), reason: reason.slice(0, 4000) };
+      return { ok: false, isolation, execution: executionReceipt(), effectReceipt: await observedFileEffect(), reason: reason.slice(0, 4000) };
     }
     const { result, logs } = splitResult(run.stdout);
     const logOut = [provisionNotes.join("\n"), logs].filter(Boolean).join("\n");
-    const receipt = observedFileEffect();
+    const receipt = await observedFileEffect();
     return {
       ok: true,
       result,

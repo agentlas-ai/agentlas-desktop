@@ -1,4 +1,5 @@
 import type { InvocationRunReceipt, RunEventUi } from "./types";
+import { MAX_SAME_METHOD_STARTS } from "./work-recovery";
 
 /**
  * Exact durable evidence that an interrupted run was replaced by a person's
@@ -35,14 +36,10 @@ export function isOneSteeringInterruption(
  *   codebase already removed keyword fallbacks on purpose; re-adding one would
  *   hide a disconnected judge exactly the way it did before.
  *
- * WHY TWO AUTOMATIC RETRIES (three attempts total)
- *   Published self-correction results converge: the first correction carries
- *   most of the gain (~62% → ~70% cumulative success), the third is already
- *   small (~75%), and the fifth saturates (~79%) — under ~2% marginal gain per
- *   attempt past the third. LangGraph's RetryPolicy ships the same default
- *   (max_attempts = 3 including the first). Beyond that, extra attempts mostly
- *   buy latency and raise the odds of the agent reinforcing its own wrong
- *   diagnosis.
+ * RECOVERY CONTROLLER BUDGET
+ *   At most two changed-approach recovery turns follow the original request.
+ *   This controller bound does not establish the identity or actual start
+ *   count of opaque provider tool calls inside those turns.
  *
  * WHY WRITE AUTHORITY IS A HARD GATE, NOT A JUDGMENT
  *   Retrying an action with side effects is only safe with an idempotency key
@@ -55,8 +52,8 @@ export function isOneSteeringInterruption(
  *   before judgment.
  */
 
-/** Automatic retries after the original attempt. Three attempts total. */
-export const ONE_AUTO_RECOVERY_MAX_ATTEMPTS = 2;
+/** Changed-approach controller turns after the original request. */
+export const ONE_AUTO_RECOVERY_MAX_ATTEMPTS = MAX_SAME_METHOD_STARTS;
 
 /**
  * The only reasons One may hand a run back to the person (owner direction 2026-09-24: "ask a human only at

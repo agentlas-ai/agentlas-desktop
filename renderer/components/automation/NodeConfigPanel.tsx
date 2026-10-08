@@ -134,6 +134,7 @@ export function NodeConfigPanel({
    * ★자기 자신은 뺀다 — 고를 수 있게 보여 놓고 커널이 거절하면 화면이 거짓말한 것이다
    *   (커널의 SUBGRAPH_SELF_CALL 과 같은 판단을 화면이 먼저 한다).
    */
+  const [toolchainAssets, setToolchainAssets] = useState<Awaited<ReturnType<NonNullable<ReturnType<typeof ipc>>["toolchains"]["listAssets"]>>>([]);
   const [callableGraphs, setCallableGraphs] = useState<Array<{ id: string; name: string }>>([]);
 
   useEffect(() => {
@@ -152,6 +153,7 @@ export function NodeConfigPanel({
       setTools(tl);
       setRuntimes(rt);
       setHubAgents(hub);
+      setToolchainAssets(await api.toolchains.listAssets().catch(() => []));
       const list = await api.automations.list().catch(() => []);
       setCallableGraphs(
         list
@@ -496,6 +498,8 @@ export function NodeConfigPanel({
         </>
       )}
 
+      {node.type === "toolchain_call" && <ToolchainCallFields config={cfg} assets={toolchainAssets} onPatch={onPatch} ko={locale === "ko"} />}
+
       {node.type === "subgraph" && (
         <>
           {/* ★id로 고른다. 이름은 사람이 바꾸고 겹칠 수도 있어서, 이름으로 저장하면
@@ -753,3 +757,20 @@ const inp: React.CSSProperties = {
   fontSize: 13,
   outline: "none",
 };
+
+function ToolchainCallFields({ config, assets, onPatch, ko }: { config: Record<string, unknown>; assets: Awaited<ReturnType<NonNullable<ReturnType<typeof ipc>>["toolchains"]["listAssets"]>>; onPatch: (patch: Record<string, unknown>) => void; ko: boolean }) {
+  const raw = config.toolchainCall && typeof config.toolchainCall === "object" ? config.toolchainCall as { toolchainId?: string; version?: number; args?: Record<string, unknown> } : {};
+  const asset = assets.find((item) => item.id === raw.toolchainId);
+  const version = asset?.versions.find((item) => item.version === Number(raw.version));
+  const [draft, setDraft] = useState(JSON.stringify(raw.args ?? {}, null, 2));
+  const [error, setError] = useState("");
+  useEffect(() => { setDraft(JSON.stringify(raw.args ?? {}, null, 2)); setError(""); }, [JSON.stringify(raw.args), raw.toolchainId, raw.version]);
+  const patch = (next: Record<string, unknown>) => onPatch({ toolchainCall: { ...raw, ...next } });
+  return <>
+    <Field label={ko ? "툴체인 자산" : "Toolchain asset"}><select data-toolchain-call-asset="true" style={inp} value={raw.toolchainId ?? ""} onChange={(event) => { const selected = assets.find((item) => item.id === event.target.value); patch({ toolchainId: event.target.value, version: selected?.stableVersion ?? selected?.versions.at(-1)?.version, args: {} }); }}><option value="">—</option>{assets.filter((item) => item.status === "callable" || item.id === raw.toolchainId).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.id.slice(-8)} · {item.status}</option>)}</select></Field>
+    <Field label={ko ? "고정 버전" : "Pinned version"}><select data-toolchain-call-version="true" style={inp} value={raw.version ?? ""} onChange={(event) => patch({ version: Number(event.target.value) })}><option value="">—</option>{asset?.versions.map((item) => <option key={item.version} value={item.version}>v{item.version}{item.version === asset.stableVersion ? " · stable" : ""}</option>)}</select></Field>
+    <Field label={ko ? "여러 입력 바인딩 (JSON)" : "Multiple argument bindings (JSON)"}><textarea data-toolchain-call-args="true" style={{ ...inp, fontFamily: "var(--font-mono)", resize: "vertical" }} rows={7} value={draft} onChange={(event) => { setDraft(event.target.value); setError(ko ? "입력을 적용해 저장하세요." : "Apply arguments to save."); }} /><p style={{ fontSize: 11, color: "var(--muted-deep)" }}>{ko ? '상수 또는 "{{변수명}}"을 필드별로 넣습니다. 변수만 참조하면 원래 JSON 타입을 유지합니다.' : 'Bind each field to a constant or "{{variable}}". Exact variable references preserve the JSON type.'}</p><button type="button" onClick={() => { try { const args = JSON.parse(draft); if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(ko ? "JSON object가 필요합니다." : "Expected a JSON object."); patch({ args }); setError(""); } catch (cause) { setError(String(cause instanceof Error ? cause.message : cause)); } }}>{ko ? "입력 적용" : "Apply arguments"}</button>{error && <p role="status" style={{ color: "var(--danger)", fontSize: 11 }}>{error}</p>}</Field>
+    {version && <details><summary>{ko ? "입력·출력 계약" : "Input/output contract"}</summary><pre style={{ whiteSpace: "pre-wrap", fontSize: 10 }}>{JSON.stringify({ input: version.contract.inputSchema, output: version.contract.outputSchema }, null, 2)}</pre></details>}
+    <Field label={ko ? "결과 변수" : "Result variable"}><input style={inp} value={typeof config.produces === "string" ? config.produces : ""} onChange={(event) => onPatch({ produces: event.target.value })} placeholder="toolchainResult"/></Field>
+  </>;
+}

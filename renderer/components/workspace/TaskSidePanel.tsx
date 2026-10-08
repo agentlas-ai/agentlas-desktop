@@ -1,4 +1,6 @@
 "use client";
+import { readAppUiPreference, writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
+import type { AppOutputSection } from "@shared/app-ui-preferences";
 
 import { BoundImageArtifacts } from "./BoundImageArtifacts";
 import { scopedBoundImages } from "@/lib/bound-image-artifacts";
@@ -78,8 +80,7 @@ import { GOAL_PANEL_OPEN_EVENT, GoalRailPanel, useGoalPanel } from "../goal/Goal
 import { ArtifactsRailPanel, artifactsRailCount, useArtifactsRail } from "./ArtifactsRailPanel";
 import { WorkbookView } from "./WorkbookView";
 
-const ONE_OUTPUT_SECTIONS_STORAGE_KEY = "agentlas.one.output-sections.v1";
-type OutputSectionKey = "files" | "mcp" | "agents" | "processes" | "computer" | "sources";
+type OutputSectionKey = AppOutputSection;
 type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "automation" | "goal" | "artifacts";
 
 /** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
@@ -106,15 +107,7 @@ function railTabLabel(view: OutputRailView, locale: "ko" | "en"): string {
   return locale === "ko" ? "브라우저" : "Browser";
 }
 function readCollapsedOutputSections(): Set<OutputSectionKey> {
-  if (typeof window === "undefined") return new Set();
-  try {
-    const stored = JSON.parse(window.localStorage.getItem(ONE_OUTPUT_SECTIONS_STORAGE_KEY) ?? "[]") as unknown;
-    if (!Array.isArray(stored)) return new Set();
-    const allowed = new Set<OutputSectionKey>(["files", "mcp", "agents", "processes", "computer", "sources"]);
-    return new Set(stored.filter((value): value is OutputSectionKey => typeof value === "string" && allowed.has(value as OutputSectionKey)));
-  } catch {
-    return new Set();
-  }
+  return new Set(readAppUiPreference("outputCollapsedSections"));
 }
 
 function elapsedLabel(ms: number): string {
@@ -919,6 +912,7 @@ function TaskSidePanelContent({
   }, []);
   const { context: officeContext, error: officeContextError, send: sendOfficeContext, clear: clearOfficeContext } = useOfficeTaskContext(screenChatId);
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
+  useEffect(() => subscribeAppUiPreference("outputCollapsedSections", (sections) => setCollapsedSections(new Set(sections))), []);
   /*
    * 탭은 고정 목록이 아니다(오너 지시 2026-08-24). 무언가 결과가 나오면 그
    * 탭이 하나 생기고, 나머지는 + 로 사람이 직접 연다. 아무것도 안 한 대화에서
@@ -1465,7 +1459,7 @@ function TaskSidePanelContent({
       if (next.has(section)) next.delete(section);
       else next.add(section);
       try {
-        window.localStorage.setItem(ONE_OUTPUT_SECTIONS_STORAGE_KEY, JSON.stringify([...next]));
+        writeAppUiPreference("outputCollapsedSections", [...next]);
       } catch {
         // Section disclosure remains usable even when persistence is unavailable.
       }

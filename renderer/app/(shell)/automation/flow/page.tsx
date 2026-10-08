@@ -5,6 +5,7 @@
 //
 // React Flow는 client-only이고 이 앱은 Next.js static export(file://)이므로 "use client" 필수.
 "use client";
+import { useAppUiPreference } from "@/lib/app-ui-preferences";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { navigate } from "@/lib/navigation";
 import { humanSchedule } from "@shared/graph-blueprint";
@@ -130,9 +131,6 @@ type PendingRunSnapshotRead = {
   promise: Promise<RunSnapshotReadResult>;
 };
 
-/** 좌/우 패널 접힘 상태 — 화면을 다시 열어도 사용자가 정한 레이아웃을 유지한다. */
-const PANEL_STATE_KEY = "agentlas.automation.flow.panels";
-
 /**
  * 캔버스를 맞추는 규칙 — **한 벌만 둔다.**
  * 세 곳(마운트·패널 토글·노드 추가)이 각자 옵션을 들고 있어, 마운트에서 하한을 걸어도
@@ -202,29 +200,15 @@ function AutomationFlowPage() {
   // 이 화면의 주인공인 캔버스가 절반도 못 갖고, 그래프가 축소돼 노드 글자가 작아진다.
   // 대화는 할 말이 생겼을 때 여는 것이고, 접기 탭은 그대로 보인다.
   // 사용자가 한 번이라도 편 뒤에는 그 선택이 저장돼 유지된다.
-  const [leftOpen, setLeftOpen] = useState(false);
-  const [rightOpen, setRightOpen] = useState(false);
+  const [flowPanels, setFlowPanels] = useAppUiPreference("automationFlowPanels");
+  const { left: leftOpen, right: rightOpen } = flowPanels;
+  const setLeftOpen = useCallback((next: boolean | ((current: boolean) => boolean)) => {
+    setFlowPanels((current) => ({ ...current, left: typeof next === "function" ? next(current.left) : next }));
+  }, [setFlowPanels]);
+  const setRightOpen = useCallback((next: boolean | ((current: boolean) => boolean)) => {
+    setFlowPanels((current) => ({ ...current, right: typeof next === "function" ? next(current.right) : next }));
+  }, [setFlowPanels]);
   const seq = useRef(0);
-
-  useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(PANEL_STATE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw) as { left?: boolean; right?: boolean };
-      if (typeof saved.left === "boolean") setLeftOpen(saved.left);
-      if (typeof saved.right === "boolean") setRightOpen(saved.right);
-    } catch {
-      // 저장된 값이 깨졌으면 기본값(둘 다 열림)으로 둔다.
-    }
-  }, []);
-
-  useEffect(() => {
-    try {
-      window.localStorage.setItem(PANEL_STATE_KEY, JSON.stringify({ left: leftOpen, right: rightOpen }));
-    } catch {
-      // 저장 실패는 이 화면의 동작을 막지 않는다.
-    }
-  }, [leftOpen, rightOpen]);
 
   // 패널을 접었는데 그래프가 원래 자리에 그대로 있으면 넓어진 캔버스가 빈 여백으로 보인다.
   // 폭이 바뀐 다음 프레임에 다시 맞춘다.

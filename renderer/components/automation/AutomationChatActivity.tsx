@@ -21,6 +21,7 @@
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { automationReportDisplay } from "@/lib/automation-report-display";
 import {
   automationActionLine,
@@ -138,6 +139,7 @@ export function useAutomationChatActivity(scope: AutomationChatScope): Automatio
 }
 
 const digestCache = new Map<string, AutomationRunDigest>();
+const MAX_DIGEST_CACHE_ENTRIES = 128;
 
 /** A finished run's digest (cached — terminal runs do not change). */
 export function useAutomationRunDigest(runId: string | null | undefined): AutomationRunDigest | null | undefined {
@@ -149,11 +151,20 @@ export function useAutomationRunDigest(runId: string | null | undefined): Automa
     const read = ipc()?.automations?.runDigest;
     if (!read) { setDigest(null); return; }
     let disposed = false;
-    const load = () => void read(runId).then((value) => {
+    const readDigest = () => read(runId).then((value) => {
       if (disposed) return;
-      if (value && value.status !== "running") digestCache.set(runId, value);
+      if (value && value.status !== "running") {
+        digestCache.set(runId, value);
+        while (digestCache.size > MAX_DIGEST_CACHE_ENTRIES) {
+          const oldest = digestCache.keys().next().value;
+          if (oldest === undefined) break;
+          digestCache.delete(oldest);
+        }
+      }
       setDigest(value ?? null);
     }, () => { if (!disposed) setDigest(null); });
+    const coordinator = createCoalescedRefresh<void>(readDigest, () => undefined);
+    const load = () => { void coordinator.request(undefined); };
     load();
     let off: (() => void) | undefined;
     try {
@@ -161,7 +172,7 @@ export function useAutomationRunDigest(runId: string | null | undefined): Automa
         if (change?.entity === "automation" && !digestCache.has(runId)) load();
       });
     } catch { off = undefined; }
-    return () => { disposed = true; off?.(); };
+    return () => { disposed = true; coordinator.dispose(); off?.(); };
   }, [runId]);
   return digest;
 }

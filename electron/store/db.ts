@@ -15,6 +15,7 @@ import { materializeTeamMemberCells, type MaterializableFirmNode } from "./team-
 import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-projection";
 import { currentUiLocale } from "../ui-locale";
 import { pruneLegacyDatabaseBackups } from "./backup-retention";
+import { createOneDomainEventIndexes } from "./one-domain-event-indexes";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -23,7 +24,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 127;
+const SCHEMA_VERSION = 128;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6916,6 +6917,18 @@ export function initStore(options: StoreInitOptions = {}): void {
   // Keep its authority index and all ledger rows; free only a redundant b-tree.
   if (userVersion < 127) {
     _db.transaction(() => { dropRedundantRunSequenceIndex(_db!); })();
+  }
+
+  // v128: domain event identity, version and type/time are indexed projections of
+  // the immutable ledger. Guard malformed legacy JSON; preserve duplicate IDs
+  // and let the existing immediate transaction enforce collision/version rules.
+  if (userVersion < 128) {
+    _db.transaction(() => {
+      createOneDomainEventIndexes(_db!);
+      if (!schemaColumns(_db!, "one_preflight_steers").some(column => column.name === "request_json")) {
+        _db!.exec("ALTER TABLE one_preflight_steers ADD COLUMN request_json TEXT");
+      }
+    })();
   }
 
   } catch (error) {

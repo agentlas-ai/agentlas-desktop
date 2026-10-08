@@ -21,6 +21,7 @@
 // Nothing here writes anything. Callers own persistence and side effects.
 
 import { createHash } from "node:crypto";
+import type { ToolchainAssetsApi } from "./toolchain-asset";
 
 import { canonicalJsonValue } from "./graph-execution-digest";
 import { isHostPreflightTool } from "./tool-activity";
@@ -908,7 +909,7 @@ export type ToolchainHistoryEvent =
   | { kind: "repaired"; at: string }
   | { kind: "withdrawn"; at: string };
 
-export interface ToolchainsApi {
+export interface ToolchainsApi extends ToolchainAssetsApi {
   overview: () => Promise<ToolchainOverview>;
   /** Each Toolchain's app icon drawn so far (data URLs), by automation id. */
   logos: () => Promise<Record<string, string>>;

@@ -76,7 +76,7 @@ export function unproducedVariables(graph: WorkflowGraph | null | undefined): st
     referenced.push(name);
   };
   for (const node of graph?.nodes ?? []) {
-    const text = `${node.config?.prompt ?? ""}\n${node.config?.text ?? ""}\n${node.config?.template ?? ""}`;
+    const text = `${node.config?.prompt ?? ""}\n${node.config?.text ?? ""}\n${node.config?.template ?? ""}\n${JSON.stringify(node.config?.toolchainCall ?? {})}`;
     for (const match of text.matchAll(/\{\{\s*([\w.-]+)\s*\}\}/g)) want(match[1] ?? "");
     // ★코드 단계가 읽는 값도 그래프 어휘다. 이걸 빼면 **코드만 읽는 값**은 아무도
     //   요구하지 않아 빈 채로 돈다 — 말 노드에서 이미 P0로 겪은 함정의 코드판.

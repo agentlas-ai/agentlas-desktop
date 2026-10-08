@@ -1,11 +1,13 @@
+import { createHash } from "node:crypto";
 import { appendChatMessage, listChatMessages, listRecentChats } from "../store/chats";
-import { getLatestInvocationRunReceipt, isMobileOneInvocationChat } from "../store/run-events";
+import { getInvocationRunReceipt, getLatestInvocationRunReceipt, getRunEventBySource, isMobileOneInvocationChat, recordRunEvent } from "../store/run-events";
+import { getDb } from "../store/db";
 import { captureMobileOneInvocationBinding } from "../invocation/workspace-binding";
 import type { InvocationService, InvocationSettledEnvelope } from "../invocation/service";
 import { judgeOneAutoRecovery } from "./auto-recovery";
 import { verifyOneRecoveryOutcome } from "./recovery-verification";
-import { getMeta, setMeta } from "../store/meta";
-import { oneAutoRecoveryTerminalStop } from "../../shared/one-auto-recovery";
+import { getMeta } from "../store/meta";
+import { ONE_AUTO_RECOVERY_MAX_ATTEMPTS, oneAutoRecoveryTerminalStop } from "../../shared/one-auto-recovery";
 
 interface MobileRecoveryState {
   originalRunId: string;
@@ -19,43 +21,78 @@ interface MobileRecoveryState {
 const states = new Map<string, MobileRecoveryState>();
 let restartScanStarted = false;
 
-/**
- * PRD §4.32 — 복구 이력이 메모리에만 있었다. 그래서 데스크탑을 다시 켤 때마다 최근 대화
- * 500개를 훑어 실패한 모바일 One 대화마다 **유료 복구를 처음부터 다시** 시작했고, 계속
- * 실패하는 건은 재시작마다 다시 나갔다. 시도 이력을 지속 저장해 상한을 프로세스 밖에서도 공유한다.
- */
+/** Older counts remain a floor; new admissions and lineage use the existing immutable run ledger. */
 const RECOVERY_LEDGER_KEY = "one.mobile-auto-recovery.attempts.v1";
-/** 이력이 무한히 커지지 않게 최근 것만 남긴다. */
-const RECOVERY_LEDGER_MAX = 200;
-/** 한 실행에 대해 이 횟수를 넘겨 복구하지 않는다(판정기의 회차와 같은 축을 공유한다). */
-const RECOVERY_ATTEMPT_HARD_MAX = 3;
+const RECOVERY_REQUEST_KIND = "one_mobile_recovery_requested";
+const RECOVERY_LINK_SOURCE = "one-mobile-recovery-link";
+const RECOVERY_ATTEMPT_HARD_MAX = ONE_AUTO_RECOVERY_MAX_ATTEMPTS;
+const goalDigest = (goal: string) => createHash("sha256").update(goal.trim().slice(0, 4_000)).digest("hex");
 
 type RecoveryLedger = Record<string, { attempts: number; at: string }>;
 
 function readRecoveryLedger(): RecoveryLedger {
+  const raw = getMeta(RECOVERY_LEDGER_KEY);
+  if (!raw) return {};
   try {
-    const parsed = JSON.parse(getMeta(RECOVERY_LEDGER_KEY) || "{}") as RecoveryLedger;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    const parsed = JSON.parse(raw) as RecoveryLedger;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("invalid ledger");
+    return parsed;
   } catch {
-    return {};
+    throw new Error("mobile_recovery_legacy_ledger_unreadable");
   }
 }
 
-function recordRecoveryAttempt(originalRunId: string, attempts: number): void {
-  try {
-    const ledger = readRecoveryLedger();
-    ledger[originalRunId] = { attempts, at: new Date().toISOString() };
-    const entries = Object.entries(ledger)
-      .sort((a, b) => b[1].at.localeCompare(a[1].at))
-      .slice(0, RECOVERY_LEDGER_MAX);
-    setMeta(RECOVERY_LEDGER_KEY, JSON.stringify(Object.fromEntries(entries)));
-  } catch {
-    // 원장을 못 쓰면 이번 프로세스의 상한만 유효하다 — 조용히 무한 재시도로 돌아가지는 않는다.
-  }
+interface RecoveryLink { originalRunId: string; ordinal: number; goalDigest: string }
+function recoveryLink(runId: string, chatId: string): RecoveryLink | null {
+  const event = getRunEventBySource(runId, RECOVERY_LINK_SOURCE);
+  const p = event?.payload;
+  if (!event || event.chatId !== chatId || event.kind !== "one_mobile_recovery_link" || p?.schemaVersion !== 1
+    || typeof p.originalRunId !== "string" || !p.originalRunId || p.originalRunId === runId
+    || !Number.isSafeInteger(p.ordinal) || Number(p.ordinal) < 1 || Number(p.ordinal) > RECOVERY_ATTEMPT_HARD_MAX
+    || typeof p.goalDigest !== "string" || p.goalDigest.length !== 64
+    || Buffer.from(p.goalDigest, "hex").toString("hex") !== p.goalDigest) return null;
+  return { originalRunId: p.originalRunId, ordinal: Number(p.ordinal), goalDigest: p.goalDigest };
 }
 
 function persistedAttempts(originalRunId: string): number {
-  return Math.max(0, Math.floor(readRecoveryLedger()[originalRunId]?.attempts ?? 0));
+  const legacy = readRecoveryLedger()[originalRunId]?.attempts ?? 0;
+  if (!Number.isSafeInteger(legacy) || legacy < 0) throw new Error("mobile_recovery_legacy_count_unreadable");
+  const row = getDb().prepare(`SELECT max(json_extract(payload_json,'$.ordinal')) AS n
+    FROM run_events WHERE run_id=? AND kind=?`).get(originalRunId, RECOVERY_REQUEST_KIND) as { n: number | null };
+  return Math.max(legacy, row.n ?? 0);
+}
+
+function recoveryAssessment(runId: string, originalRunId: string, chatId: string): "verified" | "retry" | "stopped" | null {
+  const row = getDb().prepare(`SELECT payload_json FROM run_events WHERE run_id=? AND chat_id=?
+    AND kind='one_recovery_outcome_assessed' ORDER BY seq DESC LIMIT 1`).get(runId, chatId) as { payload_json: string } | undefined;
+  if (!row) return null;
+  const p = JSON.parse(row.payload_json);
+  return p.originalRunId === originalRunId && p.recoveryRunId === runId
+    && ["verified", "retry", "stopped"].includes(p.outcome) ? p.outcome : null;
+}
+
+/** Reserve before service.start. A lost dispatch/link is uncertain, so it cannot open a second start. */
+function recordRecoveryAttempt(envelope: InvocationSettledEnvelope, state: MobileRecoveryState): number | null {
+  return getDb().transaction(() => {
+    const latest = getLatestInvocationRunReceipt(envelope.chatId);
+    if (!latest || latest.runId !== envelope.runId) return null;
+    const spent = persistedAttempts(state.originalRunId);
+    if (spent >= RECOVERY_ATTEMPT_HARD_MAX) return null;
+    const previous = getRunEventBySource(state.originalRunId, `one-mobile-recovery:${spent}`);
+    if (previous) {
+      const linked = getDb().prepare(`SELECT run_id FROM run_events WHERE chat_id=? AND kind='one_mobile_recovery_link'
+        AND json_extract(payload_json,'$.originalRunId')=? AND json_extract(payload_json,'$.ordinal')=? LIMIT 1`)
+        .get(envelope.chatId, state.originalRunId, spent) as { run_id: string } | undefined;
+      const receipt = linked ? getInvocationRunReceipt(linked.run_id) : null;
+      if (!receipt?.finishedAt || !["failed", "interrupted", "completed"].includes(receipt.status) || oneAutoRecoveryTerminalStop(receipt)) return null;
+      if (receipt.status === "completed" && recoveryAssessment(receipt.runId, state.originalRunId, envelope.chatId) !== "retry") return null;
+    }
+    const ordinal = spent + 1;
+    const event = recordRunEvent({ runId: state.originalRunId, chatId: envelope.chatId, kind: RECOVERY_REQUEST_KIND,
+      sourceEventId: `one-mobile-recovery:${ordinal}`, payload: { schemaVersion: 1, ordinal, goalDigest: goalDigest(state.goal) } });
+    if (event.payload?.ordinal !== ordinal) throw new Error("mobile_recovery_admission_not_durable");
+    return ordinal;
+  }).immediate();
 }
 
 function recoveryPrompt(input: {
@@ -89,6 +126,12 @@ function startRecovery(
   state: MobileRecoveryState,
   diagnosis: string,
 ): void {
+  if (service.activeRunIds().includes(envelope.runId) || service.hasQueuedOwnerRequest(envelope.chatId)) return;
+  const currentGoal = listChatMessages(envelope.chatId, 200).filter((message) => message.role === "user").at(-1)?.text;
+  if (!currentGoal || goalDigest(currentGoal) !== goalDigest(state.goal)) return;
+  const ordinal = recordRecoveryAttempt(envelope, state);
+  if (ordinal === null) return;
+  state.attemptsSpent = ordinal;
   const result = service.start(
     {
       chatId: envelope.chatId,
@@ -99,6 +142,15 @@ function startRecovery(
     },
     envelope.workspaceBinding,
   );
+  try {
+    const link = recordRunEvent({ runId: result.runId, chatId: envelope.chatId, kind: "one_mobile_recovery_link",
+      sourceEventId: RECOVERY_LINK_SOURCE, payload: { schemaVersion: 1, originalRunId: state.originalRunId,
+        ordinal, goalDigest: goalDigest(state.goal) } });
+    if (link.payload?.originalRunId !== state.originalRunId || link.payload?.ordinal !== ordinal) throw new Error("mobile_recovery_link_not_durable");
+  } catch (error) {
+    service.cancel(result.runId);
+    throw error;
+  }
   state.recoveryRunIds.add(result.runId);
 }
 
@@ -119,7 +171,18 @@ async function handleSettled(
     return;
   }
   let state = states.get(envelope.chatId);
-  const isKnownRecovery = state?.recoveryRunIds.has(envelope.runId) === true;
+  const link = recoveryLink(envelope.runId, envelope.chatId);
+  let isKnownRecovery = state?.recoveryRunIds.has(envelope.runId) === true;
+  if (!isKnownRecovery && link) {
+    const original = getInvocationRunReceipt(link.originalRunId);
+    const goal = listChatMessages(envelope.chatId, 200).filter((message) => message.role === "user").at(-1)?.text.trim().slice(0, 4_000);
+    if (!original || original.chatId !== envelope.chatId || oneAutoRecoveryTerminalStop(original)
+      || !["failed", "interrupted"].includes(original.status) || !goal || goalDigest(goal) !== link.goalDigest) return;
+    state = { originalRunId: link.originalRunId, goal, attemptsSpent: persistedAttempts(link.originalRunId),
+      previousFingerprint: null, recoveryRunIds: new Set([envelope.runId]), processingRunIds: new Set() };
+    states.set(envelope.chatId, state);
+    isKnownRecovery = true;
+  }
 
   if (!isKnownRecovery) {
     if (envelope.receipt.status === "completed" || envelope.receipt.status === "cancelled") {
@@ -149,6 +212,12 @@ async function handleSettled(
   activeState.processingRunIds.add(envelope.runId);
   try {
     if (isKnownRecovery && envelope.receipt.status === "completed") {
+      const assessment = recoveryAssessment(envelope.runId, activeState.originalRunId, envelope.chatId);
+      if (assessment) {
+        if (assessment === "retry") startRecovery(service, envelope, activeState, "");
+        else states.delete(envelope.chatId);
+        return;
+      }
       const verification = await verifyOneRecoveryOutcome({
         originalRunId: activeState.originalRunId,
         recoveryRunId: envelope.runId,
@@ -167,7 +236,6 @@ async function handleSettled(
         states.delete(envelope.chatId);
         return;
       }
-      activeState.attemptsSpent = verification.attempt ?? activeState.attemptsSpent + 1;
       startRecovery(service, envelope, activeState, verification.diagnosis);
       return;
     }
@@ -180,12 +248,6 @@ async function handleSettled(
     // A write-capable attempt is never repeated. A fresh read-only One turn
     // inspects what actually happened and can ask for new authority if needed.
     if (envelope.receipt.executionPermission !== "read") {
-      activeState.attemptsSpent += 1;
-      if (activeState.attemptsSpent > RECOVERY_ATTEMPT_HARD_MAX) {
-        states.delete(envelope.chatId);
-        return;
-      }
-      recordRecoveryAttempt(activeState.originalRunId, activeState.attemptsSpent);
       startRecovery(service, envelope, activeState, "");
       return;
     }
@@ -203,12 +265,6 @@ async function handleSettled(
       states.delete(envelope.chatId);
       return;
     }
-    activeState.attemptsSpent = judgement.decision.attempt;
-    if (activeState.attemptsSpent > RECOVERY_ATTEMPT_HARD_MAX) {
-      states.delete(envelope.chatId);
-      return;
-    }
-    recordRecoveryAttempt(activeState.originalRunId, activeState.attemptsSpent);
     startRecovery(service, envelope, activeState, judgement.diagnosis);
   } finally {
     activeState.processingRunIds.delete(envelope.runId);
@@ -228,7 +284,8 @@ export async function resumeMobileOneAutoRecovery(service: InvocationService): P
   for (const chat of chats) {
     if (!isMobileOneInvocationChat(chat.id)) continue;
     const receipt = getLatestInvocationRunReceipt(chat.id);
-    if (!receipt || (receipt.status !== "failed" && receipt.status !== "interrupted")) continue;
+    if (!receipt || (!["failed", "interrupted"].includes(receipt.status)
+      && !(receipt.status === "completed" && recoveryLink(receipt.runId, chat.id)))) continue;
     const goal = listChatMessages(chat.id, 200)
       .filter((message) => message.role === "user")
       .at(-1)?.text.trim();

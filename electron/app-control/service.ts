@@ -2,6 +2,10 @@ import type { BrowserWindow } from "electron";
 import { APP_CONTROL_CATALOG, type AppControlCatalogEntry, type AppControlInvokeArg } from "./catalog.generated";
 import { AppControlError, appControlHandlerRegistered, invokeAppControlIpc } from "./ipc-registry";
 import { appControlEffectNeedsOwnerTurn, appControlPolicy, type AppControlEffect } from "./policy";
+import { APP_CONTROL_ARGUMENT_SCHEMAS, APP_UI_PREFERENCE_VALUE_SCHEMAS } from "./argument-schemas.generated";
+import type { AppControlRendererOperation, AppControlRendererReply } from "../../shared/app-control";
+import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPreference } from "../../shared/app-ui-preferences";
+import { decodeAppControlArguments } from "./argument-codec";
 
 // One's app-control route: find an operation, then call it as the owner's own screens would. The catalog is generated
 // from the preload bridges; ./policy decides what One may call and on which turns.
@@ -24,6 +28,7 @@ interface Operation {
   doc: string;
   keywords?: readonly string[];
   effect: AppControlEffect;
+  inputSchema?: Record<string, unknown>;
   entry?: AppControlCatalogEntry;
 }
 
@@ -37,11 +42,51 @@ export function configureAppControlHost(next: AppControlHost): void {
 
 // Operations that are not one IPC call: they act on the window itself.
 const HOST_OPERATIONS: Operation[] = [
+  { path: "app.getState", surface: "app", params: [], signature: "()", effect: "read",
+    doc: "Read the actual open screen, display language and theme, sidebar layout and image/video/audio display preferences." },
   { path: "app.navigate", surface: "app", params: ["route"], signature: "(route: string)", effect: "consent",
     doc: "Open a screen in the owner's Agentlas window, e.g. \"/settings\", \"/automation\", \"/library\", \"/marketplace\", \"/local-models\", \"/one\". Moves the owner's view, so only when they ask." },
   { path: "app.setLanguage", surface: "app", params: ["locale"], signature: "(locale: \"ko\" | \"en\" | \"system\")", effect: "write",
     doc: "Set the app's display language, the same setting as Settings > Language." },
+  { path: "app.setTheme", surface: "app", params: ["theme"], signature: "(theme: \"light\" | \"dark\" | \"system\")", effect: "write",
+    doc: "Set the display theme through its live provider. app.getState reports darkThemeAvailable; disabled dark mode is refused." },
+  { path: "app.setSidebar", surface: "app", params: ["collapsed", "width"], signature: "(collapsed?: boolean, width?: number)", effect: "write",
+    doc: "Collapse or expand the app navigation and resize the shared Work sidebar in pixels. Width is clamped to the window's supported range." },
+  { path: "app.setMediaDisplay", surface: "app", params: ["kind", "visible"], signature: "(kind: \"image\" | \"video\" | \"audio\", visible: boolean)", effect: "write",
+    doc: "Show or hide photos, videos or audio players in Work and One results, exactly like Settings > Result media." },
+  { path: "app.getUiPreferences", surface: "app", params: [], signature: "()", effect: "read",
+    doc: "Read supported persistent UI preferences with their descriptions and typed value schemas: One's next-message model, rails, Work outputs, project/firm panels, Graph panels and Document Studio citation style." },
+  { path: "app.setUiPreference", surface: "app", params: ["name", "value"], signature: "(name: AppUiPreferenceName, value: AppUiPreferences[typeof name])", effect: "write",
+    doc: "Set one supported UI preference through the same subscribed storage as its actual screen. First read app.getUiPreferences. oneRuntimeSelection affects the next personal One message; active chat and Goal models use chats.setRuntimeSelection or chats.requestGoalRuntimeSelection with native receipts." },
 ];
+
+const objectSchema = (properties: Record<string, unknown>, required: string[] = []): Record<string, unknown> => ({
+  type: "object", properties, ...(required.length ? { required } : {}), additionalProperties: false,
+});
+const uiPreferenceValueSchema = (name: string): Record<string, unknown> => {
+  if (!isAppUiPreferenceName(name)) return {};
+  const definition = appUiPreferenceDefinitions[name];
+  return { ...APP_UI_PREFERENCE_VALUE_SCHEMAS[name],
+    ...("minimum" in definition ? { minimum: definition.minimum, maximum: definition.maximum } : {}),
+    ...("maxItems" in definition ? { maxItems: definition.maxItems } : {}),
+  };
+};
+const HOST_ARGUMENT_SCHEMAS: Record<string, Record<string, unknown>> = {
+  "app.getState": objectSchema({}),
+  "app.getUiPreferences": objectSchema({}),
+  "app.setUiPreference": { type: "object", required: ["name", "value"], additionalProperties: false,
+    properties: { name: { type: "string", enum: Object.keys(appUiPreferenceDefinitions) }, value: {} },
+    anyOf: Object.keys(appUiPreferenceDefinitions).map(name => ({ properties: {
+      name: { const: name }, value: uiPreferenceValueSchema(name),
+    } })),
+  },
+  "app.navigate": objectSchema({ route: { type: "string", pattern: "^/[A-Za-z0-9/_\\-?=&%.:~]*$", maxLength: 300 } }, ["route"]),
+  "app.setLanguage": objectSchema({ locale: { type: "string", enum: ["ko", "en", "system"] } }, ["locale"]),
+  "app.setTheme": objectSchema({ theme: { type: "string", enum: ["light", "dark", "system"] } }, ["theme"]),
+  "app.setSidebar": { ...objectSchema({ collapsed: { type: "boolean" }, width: { type: "number" } }),
+    anyOf: [{ required: ["collapsed"] }, { required: ["width"] }] },
+  "app.setMediaDisplay": objectSchema({ kind: { type: "string", enum: ["image", "video", "audio"] }, visible: { type: "boolean" } }, ["kind", "visible"]),
+};
 
 function scienceInstalled(): boolean {
   try { return host?.scienceInstalled() ?? false; } catch { return false; }
@@ -74,6 +119,7 @@ const KOREAN_TERMS: Array<[RegExp, string[]]> = [
   [/인터뷰|질문/, ["interview"]], [/드리밍|꿈/, ["dreaming"]], [/도구|툴/, ["tool", "tools", "mcp"]], [/플러그인/, ["plugin"]],
   [/사이트|웹사이트/, ["site"]], [/문서|pdf/i, ["document"]], [/이미지|그림/, ["image"]], [/동영상|비디오|영상/, ["video"]],
   [/로컬/, ["local"]], [/화면|이동|열어/, ["navigate"]], [/켜|끄|꺼|활성|비활성/, ["enabled", "toggle", "set"]],
+  [/패널|사이드바|폭|너비|접기|펼치|표시/, ["sidebar", "layout", "preference", "display", "width"]],
   [/원고|논문/, ["manuscript"]], [/데이터/, ["data", "datasets"]], [/런타임|엔진/, ["runtime"]], [/키체인|백그라운드|데몬/, ["daemon"]],
   // Verbs.
   [/삭제|지워|지우|제거/, ["remove", "delete"]], [/만들|생성|추가/, ["create", "add"]], [/목록|개수|몇/, ["list"]],
@@ -85,30 +131,44 @@ function queryTerms(query: string): string[] {
   return [...terms];
 }
 
-export function appControlOperations(input: { query?: unknown; area?: unknown; limit?: unknown }): {
-  science_installed: boolean; areas?: Array<{ area: string; operations: number }>; operations?: Array<Record<string, unknown>>; total: number;
+export function appControlOperations(input: { query?: unknown; area?: unknown; operation?: unknown; limit?: unknown; offset?: unknown; include_restricted?: unknown }): {
+  science_installed: boolean; areas?: Array<{ area: string; operations: number; available: number }>; operations?: Array<Record<string, unknown>>;
+  total: number; offset?: number; next_offset?: number | null; restricted?: Array<Record<string, unknown>>;
 } {
   const all = operations();
   const science = scienceInstalled();
   let area = typeof input.area === "string" ? input.area.trim() : "";
   let query = typeof input.query === "string" ? input.query.trim().slice(0, 200) : "";
+  const exact = typeof input.operation === "string" ? input.operation.trim() : "";
+  const available = (operation: Operation) => operation.surface === "app"
+    ? !!host?.mainWindow() && !host.mainWindow()!.isDestroyed()
+    : !!operation.entry && appControlHandlerRegistered(operation.entry.channel);
+  const restricted = () => APP_CONTROL_CATALOG.flatMap((entry) => {
+    const policy = appControlPolicy(entry);
+    return !policy.allowed && (!exact || entry.path === exact)
+      ? [{ operation: entry.path, reason: policy.reason, args: entry.params, signature: entry.signature }] : [];
+  });
   const areaList = () => {
     const counts = new Map<string, number>();
     for (const operation of all) {
       const key = operation.surface === "science" ? operation.path.split(".").slice(0, 2).join(".") : operation.path.split(".")[0];
       counts.set(key, (counts.get(key) ?? 0) + 1);
     }
-    return [...counts].map(([key, count]) => ({ area: key, operations: count })).sort((a, b) => a.area.localeCompare(b.area));
+    return [...counts].map(([key, count]) => ({ area: key, operations: count,
+      available: all.filter(operation => (operation.surface === "science" ? operation.path.split(".").slice(0, 2).join(".") : operation.path.split(".")[0]) === key && available(operation)).length,
+    })).sort((a, b) => a.area.localeCompare(b.area));
   };
-  if (!area && !query) return { science_installed: science, total: all.length, areas: areaList() };
+  if (!area && !query && !exact) return { science_installed: science, total: all.length, areas: areaList(),
+    ...(input.include_restricted === true ? { restricted: restricted() } : {}) };
   // An area that is not one ("settings") is read as words to search for.
   if (area && !all.some((operation) => operation.path === area || operation.path.startsWith(`${area}.`))) {
     query = `${area} ${query}`.trim();
     area = "";
   }
   const limit = typeof input.limit === "number" && Number.isInteger(input.limit) ? Math.min(Math.max(input.limit, 1), 80) : 40;
-  let matched = area ? all.filter((operation) => operation.path === area || operation.path.startsWith(`${area}.`)) : all;
-  if (query) {
+  let matched = exact ? all.filter(operation => operation.path === exact)
+    : area ? all.filter((operation) => operation.path === area || operation.path.startsWith(`${area}.`)) : all;
+  if (query && !exact) {
     const terms = queryTerms(query);
     const scored = matched.map((operation) => {
       const haystack = new Set([...words(operation.path), ...words(operation.doc), ...words(operation.signature), ...(operation.keywords ?? []).flatMap(words)]);
@@ -124,13 +184,45 @@ export function appControlOperations(input: { query?: unknown; area?: unknown; l
     // Nothing matched: hand back the map rather than an empty answer.
     if (!matched.length) return { science_installed: science, total: 0, areas: areaList() };
   }
-  return { science_installed: science, total: matched.length,
-    operations: matched.slice(0, limit).map((operation) => ({
+  const offset = typeof input.offset === "number" && Number.isInteger(input.offset) ? Math.min(Math.max(input.offset, 0), 10_000) : 0;
+  return { science_installed: science, total: matched.length, offset, next_offset: offset + limit < matched.length ? offset + limit : null,
+    ...(input.include_restricted === true || exact && !matched.length ? { restricted: restricted() } : {}),
+    operations: matched.slice(offset, offset + limit).map((operation) => ({
       operation: operation.path, args: operation.params, signature: operation.signature, effect: operation.effect,
+      available: available(operation),
+      ...(exact || query === operation.path ? { input_schema: operation.inputSchema ?? HOST_ARGUMENT_SCHEMAS[operation.path] ?? APP_CONTROL_ARGUMENT_SCHEMAS[operation.path] }
+        : { argument_schema_available: !!(operation.inputSchema ?? HOST_ARGUMENT_SCHEMAS[operation.path] ?? APP_CONTROL_ARGUMENT_SCHEMAS[operation.path]) }),
       ...(appControlEffectNeedsOwnerTurn(operation.effect) ? { owner_turn_only: true } : {}),
       ...(operation.keywords?.length ? { fields: operation.keywords } : {}),
       ...(operation.doc ? { doc: operation.doc } : {}),
     })) };
+}
+
+async function rendererCall(window: BrowserWindow, operation: AppControlRendererOperation, args: Record<string, unknown>): Promise<AppControlRendererReply> {
+  // Arguments are JSON data in a fixed script, never executable source supplied by the model.
+  const request = JSON.stringify([operation, args]);
+  const value: unknown = await window.webContents.executeJavaScript(`(async () => {
+    const bridge = window.agentlasAppControl;
+    if (!bridge || typeof bridge.request !== "function") return { ok: false, operation: ${JSON.stringify(operation)}, code: "renderer-unavailable" };
+    return bridge.request(...${request});
+  })()`);
+  const reply = value as AppControlRendererReply | null;
+  const state = reply?.state;
+  const validState = !!state && typeof state.route === "string"
+    && ["ko", "en", "system"].includes(state.localePreference) && ["ko", "en"].includes(state.locale)
+    && ["light", "dark", "system"].includes(state.themePreference) && ["light", "dark"].includes(state.theme)
+    && typeof state.darkThemeAvailable === "boolean" && typeof state.sidebarCollapsed === "boolean"
+    && Number.isFinite(state.sidebarWidth) && !!state.media
+    && ["image", "video", "audio"].every(kind => typeof state.media[kind as keyof typeof state.media] === "boolean")
+    && !!state.uiPreferences && typeof state.uiPreferences === "object"
+    && Object.keys(appUiPreferenceDefinitions).every(name => {
+      if (!isAppUiPreferenceName(name) || !Object.hasOwn(state.uiPreferences, name)) return false;
+      try { normalizeAppUiPreference(name, state.uiPreferences[name]); return true; } catch { return false; }
+    });
+  if (!reply || typeof reply !== "object" || reply.operation !== operation || typeof reply.ok !== "boolean" || reply.ok && !validState) {
+    throw new AppControlError("renderer-reply-invalid", "The app did not return a matching UI acknowledgement.");
+  }
+  return value as AppControlRendererReply;
 }
 
 function build(arg: AppControlInvokeArg, named: Record<string, unknown>): unknown {
@@ -187,18 +279,37 @@ export async function appControlCall(caller: AppControlCaller, input: { operatio
       if (!/^\/[A-Za-z0-9/_\-?=&%.:~]*$/.test(route) || route.length > 300) throw new AppControlError("invalid-arguments", "route must be an app path such as /settings.");
       if (window.isMinimized()) window.restore();
       window.show();
-      window.webContents.send("menu:navigate", route);
-      return { ok: true, operation: path, effect: operation.effect, result: { route } };
+      const result = await rendererCall(window, "app.navigate", { route });
+      return { ...result, effect: operation.effect };
     }
-    const locale = named.locale;
-    if (locale !== "ko" && locale !== "en" && locale !== "system") throw new AppControlError("invalid-arguments", "locale must be ko, en or system.");
-    window.webContents.send("menu:navigate", `__locale__:${locale}`);
-    return { ok: true, operation: path, effect: operation.effect, result: { locale } };
+    if (path === "app.setLanguage" && (typeof named.locale !== "string" || !["ko", "en", "system"].includes(named.locale))) throw new AppControlError("invalid-arguments", "locale must be ko, en or system.");
+    if (path === "app.setTheme" && (typeof named.theme !== "string" || !["light", "dark", "system"].includes(named.theme))) throw new AppControlError("invalid-arguments", "theme must be light, dark or system.");
+    if (path === "app.setSidebar" && (named.collapsed === undefined && named.width === undefined
+      || named.collapsed !== undefined && typeof named.collapsed !== "boolean"
+      || named.width !== undefined && (typeof named.width !== "number" || !Number.isFinite(named.width)))) throw new AppControlError("invalid-arguments", "Provide collapsed (boolean) or width (number).");
+    if (path === "app.setMediaDisplay" && (typeof named.kind !== "string" || !["image", "video", "audio"].includes(named.kind) || typeof named.visible !== "boolean")) throw new AppControlError("invalid-arguments", "Provide kind (image, video, audio) and visible (boolean).");
+    if (path === "app.setUiPreference") {
+      if (!isAppUiPreferenceName(named.name)) throw new AppControlError("invalid-arguments", "Unknown UI preference; read app.getUiPreferences.");
+      try { named.value = normalizeAppUiPreference(named.name, named.value); }
+      catch (error) { throw new AppControlError("invalid-arguments", error instanceof Error ? error.message : "Invalid UI preference."); }
+    }
+    const result = await rendererCall(window, path as AppControlRendererOperation, named);
+    return { ...result, effect: operation.effect, ...(path === "app.getUiPreferences" && result.ok ? {
+      preferences: result.state!.uiPreferences,
+      definitions: Object.fromEntries(Object.entries(appUiPreferenceDefinitions).map(([name, definition]) => [name, {
+        description: definition.description, value_schema: uiPreferenceValueSchema(name),
+      }])),
+    } : {}) };
   }
 
   const entry = operation.entry!;
   if (!appControlHandlerRegistered(entry.channel)) throw new AppControlError("operation-unavailable", `${path} is not available in this app session.`);
-  const args = entry.invokeArgs.map((arg) => build(arg, named));
+  const decoded = decodeAppControlArguments(named, APP_CONTROL_ARGUMENT_SCHEMAS[path]) as Record<string, unknown>;
+  const args = entry.invokeArgs.map((arg) => build(arg, decoded));
   const value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path });
-  return { ok: true, operation: path, effect: operation.effect, ...clipResult(value) };
+  const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
+  const refused = record?.ok === false || record?.success === false || record?.accepted === false
+    || operation.effect !== "read" && (record?.state === "failed" || record?.status === "rejected");
+  return { ok: !refused, operation: path, effect: operation.effect, ...clipResult(value),
+    ...(refused ? { code: typeof record?.code === "string" ? record.code : typeof record?.reasonCode === "string" ? record.reasonCode : "operation-refused" } : {}) };
 }

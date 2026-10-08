@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { DaemonScienceCommand } from "../daemon/science-service";
 import type { SupervisorControlInput, SupervisorTask } from "../../shared/one-supervisor";
@@ -30,7 +31,7 @@ export class SupervisorScienceAdapter {
    * longer lists is dropped.
    */
   async tasks():Promise<SupervisorTask[]> {
-    const deadline=Date.now()+2_000;
+    const deadline=performance.now()+2_000;
     // At most SCIENCE_OBSERVATION_IN_FLIGHT service calls at once. Running every project side by side without a cap
     // sent 19 science.command calls in the same millisecond when the phone connected, and all of them timed out
     // together (production 2026-10-05 20:18:18 UTC, reported by the monitoring peer session). A call whose turn comes
@@ -42,9 +43,9 @@ export class SupervisorScienceAdapter {
       if (inFlight >= SCIENCE_OBSERVATION_IN_FLIGHT) await new Promise<void>(resolve=>waiting.push(resolve));
       else inFlight+=1;
       try {
-        const remaining=deadline-Date.now();
+        const remaining=deadline-performance.now();
         if (remaining <= 0) throw new Error("science_observation_deadline");
-        return await this.client.commandObserved(command,{timeoutMs:remaining});
+        return await this.client.commandObserved(command,{observationDeadlineMs:deadline});
       } finally {
         const next=waiting.shift();
         if (next) next(); else inFlight-=1;

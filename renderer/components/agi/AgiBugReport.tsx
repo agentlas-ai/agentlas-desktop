@@ -26,17 +26,24 @@ function codeOf(error: unknown): string {
   return /agi\.[a-z0-9.-]+/.exec(text)?.[0] ?? text.slice(0, 160);
 }
 
+export function acknowledgedBugReport(row: AgiBugReportRow): boolean {
+  return row.status === "sent" && Boolean(row.serverId?.trim());
+}
+
 function statusLabel(row: AgiBugReportRow, ko: boolean): string {
   if (row.fixedVersion) return ko ? `수리됨 (${row.fixedVersion})` : `Fixed (${row.fixedVersion})`;
   if (row.remoteStatus) return row.remoteStatus;
-  if (row.status === "sent") return ko ? "보냄" : "Sent";
+  if (row.status === "sent") return acknowledgedBugReport(row)
+    ? (ko ? "보냄" : "Sent")
+    : (ko ? "접수 확인 필요 · 같은 보고를 다시 보내지 마세요" : "Receipt unconfirmed · do not resend this report");
   if (row.status === "queued") return ko ? "보내기 대기 중 · 연결되면 자동으로 다시 보내요" : "Waiting to send · retries automatically";
   if (row.status === "failed") return ko ? `보내지 못함 · ${row.error ?? ""}` : `Not sent · ${row.error ?? ""}`;
   return row.status;
 }
 
-export function AgiBugReportDialog({ open, onClose, draft, locale }: {
+export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdated }: {
   open: boolean; onClose: () => void; draft: AgiBugReportDraftInput | null; locale: "ko" | "en";
+  onReportUpdated?: (report: AgiBugReportRow) => void;
 }) {
   const ko = locale === "ko";
   const [tab, setTab] = useState<"new" | "sent">("new");
@@ -57,7 +64,9 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
   const latestDraft = useRef(draft);
   latestDraft.current = draft;
   const draftKey = JSON.stringify(draft ?? {});
-  const fromDefect = Boolean(draft?.defectId);
+  const fromDefect = Boolean(draft?.defectId || (draft?.runId && draft.title && draft.summary));
+  const reportedCallback = useRef(onReportUpdated);
+  reportedCallback.current = onReportUpdated;
 
   useEffect(() => () => { generation.current += 1; operation.current = null; }, []);
 
@@ -76,6 +85,7 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
       currentPreview.current = next;
       setPreview(next);
       setResult(next.report && next.report.status !== "draft" ? next.report : null);
+      if (next.report) reportedCallback.current?.(next.report);
     } catch (e) { if (epoch === generation.current) setError(codeOf(e)); }
     finally { if (operation.current === ticket) { operation.current = null; setBusy(false); } }
   }, [ko]);
@@ -90,7 +100,7 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
     }
     // Reopening refreshes the same persisted report, including queued/sent state.
     // A new parent object with the same draft fields does not recreate a draft.
-    if (latestDraft.current?.defectId) void makePreview(latestDraft.current);
+    if (latestDraft.current && (latestDraft.current.defectId || (latestDraft.current.runId && latestDraft.current.title && latestDraft.current.summary))) void makePreview(latestDraft.current);
     else if (currentPreview.current && lastInput.current) void makePreview(lastInput.current);
   }, [open, draftKey, makePreview]);
 
@@ -110,7 +120,10 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
     setBusy(true); setSending(true); setError(null);
     try {
       const next = await api.bugReportSend({ clientReportId: preview.clientReportId });
-      if (epoch === generation.current) setResult(next);
+      if (epoch === generation.current) {
+        setResult(next);
+        reportedCallback.current?.(next);
+      }
     } catch (e) { if (epoch === generation.current) setError(codeOf(e)); }
     finally { if (operation.current === ticket) { operation.current = null; setBusy(false); setSending(false); } }
   };
@@ -157,7 +170,7 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
           <pre className={styles.preview} data-agi-bug-report-preview="true">{JSON.stringify(preview.payload, null, 2)}</pre>
         </>}
         {sending && <p className={styles.result} role="status">{ko ? "전송 중… 닫아도 계속 보내요." : "Sending… You can close while it continues."}</p>}
-        {!sending && result && <p className={styles.result} role="status" data-agi-bug-report-result={result.status}>{result.status === "sent"
+        {!sending && result && <p className={styles.result} role="status" data-agi-bug-report-result={result.status}>{acknowledgedBugReport(result)
           ? (ko ? `보냈어요 · 번호 ${result.serverId ?? "-"}` : `Sent · id ${result.serverId ?? "-"}`)
           : statusLabel(result, ko)}</p>}
         {error && <p className={styles.error} role="alert">{error}</p>}
@@ -180,36 +193,91 @@ export function AgiBugReportDialog({ open, onClose, draft, locale }: {
   </div>;
 }
 
+/** Read the persisted incident receipt. Previews are local; only Send dispatches it. */
+export function AgiIncidentReportButton({ draft, locale, onAcknowledged }: {
+  draft: AgiBugReportDraftInput; locale: "ko" | "en"; onAcknowledged?: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [acknowledged, setAcknowledged] = useState<string | null>(null);
+  const key = JSON.stringify(draft);
+  const latest = useRef(draft);
+  const queued = useRef(false);
+  const receiptGeneration = useRef(0);
+  const acknowledgedCallback = useRef(onAcknowledged);
+  acknowledgedCallback.current = onAcknowledged;
+  latest.current = draft;
+  useEffect(() => {
+    let live = true;
+    let reading = false;
+    queued.current = false;
+    receiptGeneration.current += 1;
+    const read = async () => {
+      if (reading || !ipc()?.agi) return;
+      reading = true;
+      const generation = receiptGeneration.current;
+      try {
+        const preview = await ipc()!.agi.bugReportPreview(latest.current);
+        if (live && generation === receiptGeneration.current) {
+          queued.current = preview.report?.status === "queued";
+          if (preview.report && acknowledgedBugReport(preview.report)) {
+            setAcknowledged(key);
+            acknowledgedCallback.current?.();
+          }
+        }
+      } catch { /* A failed receipt read must leave the report action reachable. */ }
+      finally { reading = false; }
+    };
+    void read();
+    // Offline reports may be acknowledged by Main's existing retry queue.
+    const timer = window.setInterval(() => { if (queued.current && document.visibilityState !== "hidden") void read(); }, 5_000);
+    return () => { live = false; window.clearInterval(timer); };
+  }, [key]);
+  return <>
+    {acknowledged !== key && <button type="button" className={styles.chip} style={{ alignSelf: "flex-start" }}
+      data-agi-incident-report={draft.failureCode ?? draft.defectId} data-agi-defect-chip={draft.defectId ? draft.failureCode : undefined}
+      onClick={() => setOpen(true)}>{locale === "ko" ? "결함 보고" : "Report defect"}</button>}
+    <AgiBugReportDialog open={open} draft={draft} locale={locale} onClose={() => setOpen(false)}
+      onReportUpdated={(report) => {
+        receiptGeneration.current += 1;
+        queued.current = report.status === "queued";
+        if (acknowledgedBugReport(report)) {
+          setAcknowledged(key);
+          acknowledgedCallback.current?.();
+        }
+      }} />
+  </>;
+}
+
 /** The chip AGI leaves in a chat after it filed our own defect there. Nothing is sent until the owner presses Send. */
 export function AgiDefectChip({ chatId, locale }: { chatId: string | null; locale: "ko" | "en" }) {
   const ko = locale === "ko";
   const [defects, setDefects] = useState<DefectChip[]>([]);
-  const [open, setOpen] = useState(false);
+  const [loadedChat, setLoadedChat] = useState<string | null>(null);
+  const loadGeneration = useRef(0);
   const load = useCallback(() => {
+    const generation = ++loadGeneration.current;
     const api = ipc()?.agi;
-    if (!chatId || !api) { setDefects([]); return; }
-    void api.defectsForChat(chatId).then(setDefects).catch(() => setDefects([]));
+    if (!chatId || !api) { setDefects([]); setLoadedChat(chatId); return; }
+    void api.defectsForChat(chatId).then((rows) => {
+      if (generation === loadGeneration.current) { setDefects(rows); setLoadedChat(chatId); }
+    }).catch(() => { if (generation === loadGeneration.current) setDefects([]); });
   }, [chatId]);
   useEffect(() => {
     load();
     const off = ipcEvents()?.onStoreChanged?.((change) => { if (change.entity === "chat" && (!change.id || change.id === chatId)) load(); });
-    return () => { off?.(); };
+    return () => { off?.(); loadGeneration.current += 1; };
   }, [chatId, load]);
-  const pending = defects.find((defect) => !defect.resolved && (defect.reportStatus === null || defect.reportStatus === "failed"));
+  const visibleDefects = loadedChat === chatId ? defects : [];
+  const pending = visibleDefects.find((defect) => !defect.resolved && defect.reportStatus !== "sent");
   if (!pending) {
     // Nothing left to report here. If AGI filed defects in this chat that a commit has since fixed, say so quietly.
-    const fixed = defects.find((defect) => defect.resolved);
+    const fixed = visibleDefects.find((defect) => defect.resolved);
     if (!fixed?.resolved) return null;
     const commit = fixed.resolved.commit.split(",")[0] ?? "";
     return <span className={styles.chip} data-agi-defect-resolved={fixed.code}
       title={fixed.resolved.note || (ko ? "이 결함은 수정됐어요" : "This defect was fixed")}>
       {ko ? `해결됨${commit ? ` · ${commit}` : ""}` : `Fixed${commit ? ` · ${commit}` : ""}`}</span>;
   }
-  return <>
-    <button type="button" className={styles.chip} data-agi-defect-chip={pending.code}
-      title={ko ? `AGI가 앱 결함으로 분류했어요: ${pending.code}` : `AGI classified this as an app defect: ${pending.code}`}
-      onClick={() => setOpen(true)}>{ko ? "결함 보고" : "Report defect"}</button>
-    <AgiBugReportDialog open={open} locale={locale} draft={{ defectId: pending.defectId, chatId }}
-      onClose={() => { setOpen(false); load(); }} />
-  </>;
+  return <AgiIncidentReportButton key={pending.defectId} locale={locale} onAcknowledged={load}
+    draft={{ defectId: pending.defectId, failureCode: pending.code, chatId }} />;
 }

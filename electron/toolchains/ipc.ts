@@ -11,11 +11,14 @@ import {
   type ToolchainOverview,
 } from "../../shared/toolchain";
 import { listAutomations } from "../store/automations";
-import { exposeAutomation, interfaceIsStale, toolchainTestInProgress, withdrawAutomation } from "./interface";
+import { interfaceIsStale, toolchainTestInProgress, withdrawAutomation } from "./interface";
 import { toolchainHistory } from "./history";
 import { refreshAllToolchains, refreshToolchainForAutomation } from "./learner";
 import { toolchainLogos } from "./logo";
 import { listToolchainStates, mutateToolchainState } from "./store";
+import type { ToolchainAssetCreateInput } from "../../shared/toolchain-asset";
+import { addToolchainVersion, createToolchainAsset, getToolchainAsset, listToolchainAssets, migrateLegacyToolchainAssets, publishToolchainVersion, withdrawToolchainAsset } from "./assets";
+import { callToolchain, listToolchainCalls } from "./calls";
 
 const DECISIONS: ReadonlySet<OwnerDecision> = new Set(["approve", "dismiss", "demote", "retry"]);
 
@@ -57,6 +60,20 @@ function automationIdOf(value: unknown): string {
 }
 
 export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
+  ipc.handle("toolchains:assets-list", () => listToolchainAssets());
+  ipc.handle("toolchains:assets-get", (_event, id: string) => getToolchainAsset(id));
+  ipc.handle("toolchains:assets-create", (_event, input: ToolchainAssetCreateInput) => createToolchainAsset(input));
+  ipc.handle("toolchains:assets-add-version", (_event, input: ToolchainAssetCreateInput & { id: string }) => addToolchainVersion(input.id, input));
+  ipc.handle("toolchains:assets-publish", (_event, input: { id: string; version: number; allowEffectfulValidation?: boolean }) => publishToolchainVersion(input.id, input.version, { permission: "write", allowEffectfulValidation: input.allowEffectfulValidation === true }));
+  ipc.handle("toolchains:assets-withdraw", (_event, id: string) => withdrawToolchainAsset(id));
+  ipc.handle("toolchains:assets-run", (_event, input: { id: string; version?: number; input: Record<string, unknown>; requestId: string }) => {
+    const asset = getToolchainAsset(input.id);
+    const version = input.version ?? asset?.stableVersion;
+    if (!version) throw new Error("toolchain_version_not_callable");
+    return callToolchain({ toolchainId: input.id, version, args: input.input }, { requestId: input.requestId, permission: "write" });
+  });
+  ipc.handle("toolchains:assets-history", (_event, id: string) => listToolchainCalls(id));
+  ipc.handle("toolchains:assets-migrate", () => migrateLegacyToolchainAssets());
   ipc.handle("toolchains:overview", () => toolchainOverview());
   ipc.handle("toolchains:logos", () => toolchainLogos(listAutomations().filter((automation) => automation.graph).map((automation) => automation.id)));
   ipc.handle("toolchains:history", (_event, automationId: unknown) => toolchainHistory(automationIdOf(automationId)));
@@ -85,8 +102,8 @@ export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
     return toolchainOverview();
   });
   ipc.handle("toolchains:expose", async (_event, automationId: unknown) => {
-    await exposeAutomation(automationIdOf(automationId), undefined, { kind: "owner" });
-    return toolchainOverview();
+    automationIdOf(automationId);
+    throw new Error("toolchain_independent_contract_required");
   });
   ipc.handle("toolchains:withdraw", (_event, automationId: unknown) => {
     withdrawAutomation(automationIdOf(automationId));

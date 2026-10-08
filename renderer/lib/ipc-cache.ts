@@ -59,6 +59,24 @@ const READ_TTL_MS: Record<string, number> = {
   // 휘발성 — TTL 없이 in-flight dedup만 (0은 "겹침 제거만" 표식).
   "confirm.listPending": 0,
   "invoke.activeChats": 0,
+  // Room cards, Work and One can observe the same chat concurrently. These
+  // reads must share an in-flight request instead of invalidating their own
+  // namespace as though they were writes. Keep no completed snapshot.
+  "invoke.history": 0,
+  "invoke.receipt": 0,
+  "invoke.latestReceipt": 0,
+  "invoke.steeringRecovery": 0,
+  "invoke.preflightSteers": 0,
+  "invoke.preflightSteerReceipt": 0,
+  "invoke.steerReceipt": 0,
+  "runLedger.events": 0,
+  "runLedger.chatTimeline": 0,
+  "automations.latestRun": 0,
+  "automations.listStrategyProposals": 0,
+  "automations.runDigest": 0,
+  "automations.chatActivity": 0,
+  "chats.getContinuitySnapshot": 0,
+  "oneSupervisor.snapshot": 0,
 };
 
 const MAX_CACHE_ENTRIES = 200;

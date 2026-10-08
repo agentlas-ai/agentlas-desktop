@@ -1,4 +1,7 @@
 "use client";
+import { writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
+import { MessageReplyPreview } from "./MessageActions";
+import { composeMessageReply, type MessageReply } from "@/lib/message-reply";
 
 import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
 import { useWorkStartHandoff } from "@/lib/work-start-intent";
@@ -26,6 +29,7 @@ import { detailForUser, failureCode, failureMessage, isChatBusyFailure, knownSta
 import { Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState, useMemo, type CSSProperties, type Dispatch, type SetStateAction } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
+import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
 import type {
   Chat,
   AgentlasSurfaceAction,
@@ -50,6 +54,8 @@ import type {
   ChatGoalContext,
   ComputerUsePreview,
   InvocationRunReceipt,
+  InvocationSteerResult,
+  McpInvocationRequest,
   OrchestrationTarget,
   Recommendation,
   RecExecChoice,
@@ -108,6 +114,92 @@ function clearWorkUncertainAdmission(chatId: string, runId: string): void {
     }
   } catch { /* The in-memory fence remains authoritative for this renderer. */ }
 }
+
+async function workFollowupReceiptMatches(intent: OneFollowupIntent, receipt: InvocationSteerResult | null): Promise<boolean> {
+  if (!receipt?.accepted || receipt.chatId !== intent.chatId || receipt.intentId !== intent.intentId
+    || !receipt.queuedRequestId || !globalThis.crypto?.subtle) return false;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(intent.userPrompt));
+  const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+  return receipt.promptHash === hash;
+}
+
+/** Retry the immutable owner identity; response loss is resolved by its Main receipt. */
+const workFollowupDeliveries = new Map<string, Promise<InvocationSteerResult | null>>();
+const workFollowupTails = new Map<string, Promise<unknown>>();
+const workFollowupPreparations = new Map<string, Promise<unknown>>();
+const workFollowupStopEpochs = new Map<string, number>();
+const workFollowupAutoBlockedChats = new Set<string>();
+const workFollowupPumps = new Map<string, Promise<void>>();
+type WorkFollowupDeliveryOptions = { automatic?: boolean; stopEpoch?: number; canDeliver?: () => boolean };
+function workFollowupMayDeliver(intent: OneFollowupIntent, options: WorkFollowupDeliveryOptions, stopEpoch: number): boolean {
+  if ((workFollowupStopEpochs.get(intent.chatId) ?? 0) !== stopEpoch || options.canDeliver?.() === false) return false;
+  if (!options.automatic) return true;
+  if (workFollowupAutoBlockedChats.has(intent.chatId)) return false;
+  try {
+    const stored = readOneFollowupOutbox(window.localStorage, intent.chatId).find(item => item.intentId === intent.intentId);
+    return !!stored && !stored.autoDeliveryPaused;
+  } catch { return false; }
+}
+/** Reserve FIFO before asynchronous file snapshots can overtake an earlier input. */
+function prepareWorkFollowup(chatId: string, prepare: () => Promise<void>): Promise<void> {
+  const pending = (workFollowupPreparations.get(chatId) ?? Promise.resolve()).catch(() => undefined).then(prepare);
+  workFollowupPreparations.set(chatId, pending);
+  void pending.finally(() => {
+    if (workFollowupPreparations.get(chatId) === pending) workFollowupPreparations.delete(chatId);
+  }).catch(() => undefined);
+  return pending;
+}
+async function deliverWorkFollowupIntent(api: NonNullable<ReturnType<typeof ipc>>, intent: OneFollowupIntent, options: WorkFollowupDeliveryOptions = {}): Promise<InvocationSteerResult | null> {
+  const stopEpoch = options.stopEpoch ?? workFollowupStopEpochs.get(intent.chatId) ?? 0;
+  const key = `${intent.chatId}:${intent.intentId}`;
+  const existing = workFollowupDeliveries.get(key);
+  if (existing) return existing;
+  const pending = (workFollowupTails.get(intent.chatId) ?? Promise.resolve()).catch(() => undefined).then(async () => {
+    try {
+      let receipt = await api.invoke.steerReceipt({ chatId: intent.chatId, intentId: intent.intentId }).catch(() => null);
+      if (!receipt) {
+        // Stop can arrive while the receipt read or an earlier FIFO item awaits.
+        if (!workFollowupMayDeliver(intent, options, stopEpoch)) return null;
+        try { receipt = await api.invoke.steer(intent.request, intent.intentId); }
+        catch { receipt = await api.invoke.steerReceipt({ chatId: intent.chatId, intentId: intent.intentId }).catch(() => null); }
+      }
+      return await workFollowupReceiptMatches(intent, receipt) ? receipt : null;
+    } catch { return null; }
+  });
+  workFollowupDeliveries.set(key, pending);
+  workFollowupTails.set(intent.chatId, pending);
+  void pending.finally(() => {
+    if (workFollowupDeliveries.get(key) === pending) workFollowupDeliveries.delete(key);
+    if (workFollowupTails.get(intent.chatId) === pending) workFollowupTails.delete(intent.chatId);
+  });
+  return pending;
+}
+/** One unknown intent per lifecycle change; Main queue occupancy is authoritative. */
+function pumpWorkFollowupIntents(api: NonNullable<ReturnType<typeof ipc>>, chatId: string, intents: OneFollowupIntent[],
+  apply: (intent: OneFollowupIntent, receipt: InvocationSteerResult | null) => unknown, canDeliver: () => boolean): Promise<void> {
+  const existing = workFollowupPumps.get(chatId);
+  if (existing) return existing;
+  const stopEpoch = workFollowupStopEpochs.get(chatId) ?? 0;
+  const pending = (async () => {
+    for (const intent of intents) {
+      if (intent.chatId !== chatId || intent.autoDeliveryPaused) continue;
+      const options = { automatic: true, stopEpoch, canDeliver };
+      if (!workFollowupMayDeliver(intent, options, stopEpoch)) return;
+      let receipt = await api.invoke.steerReceipt({ chatId, intentId: intent.intentId }).catch(() => null);
+      if (receipt) {
+        if (!await workFollowupReceiptMatches(intent, receipt)) return;
+        apply(intent, receipt);
+        continue;
+      }
+      receipt = await deliverWorkFollowupIntent(api, intent, options);
+      apply(intent, receipt);
+      return;
+    }
+  })().catch(() => undefined);
+  workFollowupPumps.set(chatId, pending);
+  void pending.finally(() => { if (workFollowupPumps.get(chatId) === pending) workFollowupPumps.delete(chatId); });
+  return pending;
+}
 import { normalizeToolCall, shadowsToolRecordedPath } from "@shared/tool-call-detail";
 import { shellWrittenPaths } from "@shared/shell-written-paths";
 import { runtimeSelectionReceiptMatches } from "@shared/runtime-selection-receipt";
@@ -158,7 +250,7 @@ import { LiveOutputViewer, type LiveOutputKind } from "@/components/LiveOutputVi
 import { agentScreenModeForTool } from "@/lib/agent-screen-mode";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { currentWorkSidebarWidth, WORK_SIDEBAR_WIDTH_EVENT } from "@/lib/work-sidebar-width";
-import { AgiDefectChip } from "./agi/AgiBugReport";
+import { AgiDefectChip, AgiIncidentReportButton } from "./agi/AgiBugReport";
 import {
   appendChatFileMarker,
   chatFileItem,
@@ -1026,7 +1118,7 @@ function readRightPanelPreference(): RightPanelPreference | null {
 
 function writeRightPanelPreference(open: boolean, tab: ChatRightPanelTab) {
   try {
-    window.localStorage.setItem(RIGHT_PANEL_STATE_KEY, JSON.stringify({ open, tab }));
+    writeAppUiPreference("chatRightPanel", { open, tab });
     window.localStorage.removeItem(WORKSPACE_OPEN_KEY);
     window.localStorage.removeItem(NETWORK_OPEN_KEY);
   } catch {
@@ -1090,7 +1182,7 @@ function readRightPanelWidth(): number {
 
 function writeRightPanelWidth(width: number) {
   try {
-    window.localStorage.setItem(RIGHT_PANEL_WIDTH_KEY, String(width));
+    writeAppUiPreference("chatRightPanelWidth", width);
   } catch {
     // ignore
   }
@@ -2312,6 +2404,8 @@ function ChatPage() {
   const lastFinalRunIdRef = useRef<string | null>(null);
   // 프롬프트 저장소 seedOnly 프리필 — 자동 전송 없이 입력창에만 채울 텍스트.
   const [browserDraftRequest, setBrowserDraftRequest] = useState<{ id: string; chatId: string; text: string } | null>(null);
+  const [messageReply, setMessageReply] = useState<MessageReply | null>(null);
+  useEffect(() => setMessageReply(null), [chatId]);
   const [composerPrefill, setComposerPrefill] = useState<string | null>(null);
   // 델타 partial 누적 버퍼 — main이 증분만 보내므로 여기서 전문을 재조립한다.
   // 리셋 지점: 채팅 전환 / 새 실행 시작 / final·error / 전문(text) 이벤트 수신.
@@ -2332,6 +2426,8 @@ function ChatPage() {
     Array<{
       text: string;
       optimisticMessageId: string;
+      intentId?: string;
+      acknowledged?: boolean;
       opts?: {
         images?: ImageAttachment[];
         files?: ChatFileDraft[];
@@ -2348,6 +2444,129 @@ function ChatPage() {
   >([]);
   const cancelRollbackSteersRef = useRef<(typeof steerQueueRef)["current"] | null>(null);
   const [queuedSteers, setQueuedSteers] = useState<string[]>([]);
+  const [workFollowupDrafts, setWorkFollowupDrafts] = useState<OneFollowupIntent[]>([]);
+  const workFollowupDraftsRef = useRef<OneFollowupIntent[]>([]);
+  const workFollowupReviewIdsRef = useRef(new Set<string>());
+  const [workFollowupStates, setWorkFollowupStates] = useState<Record<string, InvocationSteerResult["status"]>>({});
+  const workFollowupOptimisticIds = useCallback(() => new Set([
+    ...steerQueueRef.current.map(item => item.optimisticMessageId),
+    ...workFollowupDraftsRef.current.map(item => `steer:${item.intentId}`),
+  ]), []);
+  const refreshWorkFollowupDrafts = useCallback(() => {
+    if (!chatId || !isCurrentChat()) return;
+    try {
+      const drafts = readOneFollowupOutbox(window.localStorage, chatId).filter(item => item.request.oneMode !== true);
+      workFollowupDraftsRef.current = drafts;
+      setWorkFollowupDrafts(current => JSON.stringify(current) === JSON.stringify(drafts) ? current : drafts);
+    } catch {
+      setSessionNotice(locale === "ko" ? "저장된 추가 지시를 읽지 못했습니다. 기존 저장 내용은 유지했습니다." : "Saved follow-ups could not be read. Their stored contents were retained.");
+    }
+  }, [chatId, isCurrentChat, locale]);
+  const applyWorkFollowupReceipt = useCallback((intent: OneFollowupIntent, receipt: InvocationSteerResult | null) => {
+    const accepted = !!receipt && ["queued", "draining", "started"].includes(receipt.status ?? "");
+    // Queued/draining may become restart-held before execution. Keep the original
+    // locally until Main confirms started; acceptance alone must not hide it.
+    if (receipt?.status === "started") {
+      try { removeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId); }
+      catch { /* Main accepted it; a local cleanup failure cannot undo that receipt. */ }
+    }
+    if (!isCurrentChat() || intent.chatId !== chatId) return accepted;
+    setWorkFollowupStates(current => current[intent.intentId] === receipt?.status ? current : ({ ...current, [intent.intentId]: receipt?.status }));
+    if (["held", "failed", "cancelled"].includes(receipt?.status ?? "")) workFollowupReviewIdsRef.current.add(intent.intentId);
+    const item = steerQueueRef.current.find(item => item.intentId === intent.intentId);
+    if (item) item.acknowledged = accepted;
+    if (receipt?.status === "started") steerQueueRef.current = steerQueueRef.current.filter(item => item.intentId !== intent.intentId);
+    const queued = steerQueueRef.current.filter(item => item.acknowledged !== false).map(item => parseChatFileMessage(item.text).visibleText);
+    setQueuedSteers(current => current.length === queued.length && current.every((text, index) => text === queued[index]) ? current : queued);
+    if (receipt?.status === "started") refreshWorkFollowupDrafts();
+    return accepted;
+  }, [chatId, isCurrentChat, refreshWorkFollowupDrafts]);
+  const dispatchWorkFollowup = useCallback(async (intent: OneFollowupIntent, options: WorkFollowupDeliveryOptions = {}) => {
+    const api = ipc();
+    const receipt = api ? await deliverWorkFollowupIntent(api, intent, options) : null;
+    const accepted = applyWorkFollowupReceipt(intent, receipt);
+    if (isCurrentChat() && intent.chatId === chatId && !accepted) setSessionNotice(
+      receipt && ["held", "failed", "cancelled"].includes(receipt.status ?? "")
+        ? (locale === "ko" ? "추가 지시 원문을 보관했습니다. Main에서 보류·실패·취소 상태를 확인하여 다시 실행하지 않았습니다."
+          : "The original follow-up is retained. Main reports it held, failed or cancelled, so it was not replayed.")
+        : (locale === "ko"
+          ? "추가 지시를 로컬에 보관했습니다. Main 접수는 아직 확인되지 않았습니다. 보관한 글에서 같은 요청의 상태를 확인할 수 있습니다."
+          : "The follow-up is saved locally. Main acceptance is unconfirmed. Check the same request from its saved text."));
+    return receipt;
+  }, [applyWorkFollowupReceipt, chatId, isCurrentChat, locale]);
+  const pumpWorkFollowups = useCallback(async () => {
+    const api = ipc();
+    if (!api || !chatId || !isCurrentChat()) return;
+    await pumpWorkFollowupIntents(api, chatId,
+      workFollowupDraftsRef.current.filter(item => !workFollowupReviewIdsRef.current.has(item.intentId)),
+      applyWorkFollowupReceipt, isCurrentChat);
+  }, [chatId, isCurrentChat, applyWorkFollowupReceipt]);
+  useEffect(() => {
+    if (!chatId || workFollowupDrafts.length === 0) return;
+    const api = ipc(), events = ipcEvents();
+    if (!api || !events) return;
+    let disposed = false, checking = false, changedWhileChecking = false;
+    let fingerprint: string | null = null;
+    const onLifecycle = async () => {
+      if (checking) { changedWhileChecking = true; return; }
+      checking = true;
+      try {
+        do {
+          changedWhileChecking = false;
+          const attached = await api.invoke.attach(chatId, { includeEvents: false });
+          if (disposed || !isCurrentChat()) return;
+          const next = `${attached?.runId ?? "idle"}:${attached?.queuedSteers?.map(item => item.id).join(",") ?? ""}`;
+          if (next !== fingerprint) { fingerprint = next; await pumpWorkFollowups(); }
+        } while (changedWhileChecking && !disposed);
+      } catch { /* Preserve originals when the lifecycle snapshot is unavailable. */ }
+      finally { checking = false; }
+    };
+    const unsubscribe = events.onActiveChats(() => { void onLifecycle(); });
+    void onLifecycle();
+    return () => { disposed = true; unsubscribe(); };
+  }, [chatId, workFollowupDrafts.length > 0, isCurrentChat, pumpWorkFollowups]);
+  useEffect(() => { if (!busy) void pumpWorkFollowups(); }, [busy, pumpWorkFollowups]);
+  const restoreWorkFollowupQueue = useCallback((attached: Awaited<ReturnType<NonNullable<ReturnType<typeof ipc>>["invoke"]["attach"]>>) => {
+    if (!isCurrentChat() || !attached?.queuedSteers) return;
+    const restored = attached.queuedSteers.map(item => {
+      const intentId = item.id.startsWith("owner:") ? item.id.slice(6) : undefined;
+      return { text: item.text, optimisticMessageId: `steer:${intentId ?? item.id}`, intentId,
+        acknowledged: item.recoveryState !== "held" };
+    });
+    const ids = new Set(restored.map(item => item.optimisticMessageId));
+    steerQueueRef.current = [...restored, ...steerQueueRef.current.filter(item => item.acknowledged === false && !ids.has(item.optimisticMessageId))];
+    setQueuedSteers(steerQueueRef.current.filter(item => item.acknowledged !== false).map(item => parseChatFileMessage(item.text).visibleText));
+    if (restored.length) {
+      transcriptRevisionRef.current += 1;
+      setMessages(current => {
+        const existing = new Set(current.map(message => message.id));
+        return [...current, ...restored.filter(item => !existing.has(item.optimisticMessageId)).map(item => ({
+          id: item.optimisticMessageId, role: "user" as const, text: parseChatFileMessage(item.text).visibleText,
+        }))];
+      });
+    }
+  }, [isCurrentChat]);
+  useEffect(() => { refreshWorkFollowupDrafts(); }, [refreshWorkFollowupDrafts]);
+  useEffect(() => {
+    if (!chatId || workFollowupDrafts.length === 0) return;
+    let disposed = false, checking = false;
+    const check = async () => {
+      const api = ipc();
+      if (!api || checking || disposed || document.hidden) return;
+      checking = true;
+      try {
+        for (const intent of workFollowupDraftsRef.current.filter(item => item.chatId === chatId && !workFollowupReviewIdsRef.current.has(item.intentId))) {
+          const receipt = await api.invoke.steerReceipt({ chatId, intentId: intent.intentId }).catch(() => null);
+          if (disposed) return;
+          if (await workFollowupReceiptMatches(intent, receipt)) applyWorkFollowupReceipt(intent, receipt);
+        }
+      } catch { /* Read failures retain the immutable local intent. */ }
+      finally { checking = false; }
+    };
+    void check();
+    const timer = window.setInterval(() => { void check(); }, 5000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [chatId, workFollowupDrafts.length > 0, applyWorkFollowupReceipt]);
   const [artifact, setArtifact] = useState<CodeArtifact | null>(null);
   const [surface, setSurface] = useState<WorkbenchSurface | null>(null);
   const [surfaceConflict, setSurfaceConflict] = useState<{
@@ -2478,6 +2697,18 @@ function ChatPage() {
   const [rightPanelTab, setRightPanelTab] = useState<ChatRightPanelTab>("agent");
   const [rightPanelWidth, setRightPanelWidth] = useState(() => readRightPanelWidth());
   const rightPanelPreferredWidthRef = useRef(rightPanelWidth);
+  useEffect(() => {
+    const unsubscribePanel = subscribeAppUiPreference("chatRightPanel", (panel) => {
+      setRightPanelOpen(panel.open);
+      setRightPanelTab(panel.tab);
+      setWorkerSelection(null);
+    });
+    const unsubscribeWidth = subscribeAppUiPreference("chatRightPanelWidth", (width) => {
+      rightPanelPreferredWidthRef.current = width;
+      setRightPanelWidth(clampRightPanelWidth(width));
+    });
+    return () => { unsubscribePanel(); unsubscribeWidth(); };
+  }, []);
   const requestReadableRightPanelWidth = useCallback((requested = preferredRichResultWidth()) => {
     setRightPanelWidth((current) => Math.max(current, clampRightPanelWidth(requested)));
   }, []);
@@ -3638,7 +3869,7 @@ function ChatPage() {
             lastFinalRunIdRef.current = runId;
             setMessages(current => isCurrentChat() && (!runIdRef.current || runIdRef.current === runId) && lastFinalRunIdRef.current === runId ? reconcileTranscriptSnapshot(current.map(message =>
               message.id === placeholderId && message.runId === runId ? { ...message, busy: false, streaming: false, activityState: state } : message), next, null,
-              new Set(steerQueueRef.current.map(item => item.optimisticMessageId))) : current);
+              workFollowupOptimisticIds()) : current);
             runIdRef.current = null;
             subRef.current?.(); subRef.current = null;
             setBusy(false); setCancelPending(false); setKeyRequestSheet(null);
@@ -3721,6 +3952,8 @@ function ChatPage() {
     cancelRequestedRef.current = false;
     steerQueueRef.current = [];
     setQueuedSteers([]);
+    workFollowupReviewIdsRef.current.clear();
+    setWorkFollowupStates({});
     setArtifact(null);
     setSurface(null);
     setMediaPreview(null);
@@ -3974,7 +4207,11 @@ function ChatPage() {
             // that stream's tool-backed outputs while adopting the durable
             // message IDs/text. Otherwise a late hydration silently removes
             // files, charts, or previews from the right rail.
-            return hasLiveDraft ? current : preserveRichStepsBySignature(current, restoredMessages);
+            if (hasLiveDraft) return current;
+            const restored = preserveRichStepsBySignature(current, restoredMessages);
+            const ids = new Set(restored.map(message => message.id));
+            const pendingIds = workFollowupOptimisticIds();
+            return [...restored, ...current.filter(message => pendingIds.has(message.id) && !ids.has(message.id))];
           });
         }).catch(() => {
           if (!cancelled) setHydratedChatId(chatId);
@@ -4086,6 +4323,7 @@ function ChatPage() {
       // 진행 중 실행 재접속 — 이 채팅이 백그라운드로 돌고 있으면(다른 채팅 갔다 옴) 스트림·정지버튼 복구.
       // 버퍼된 이벤트를 리플레이해 진행 중 버블을 재구성하고, runId 채널을 구독해 이후 스트림을 받는다.
       const attached = await api.invoke.attach(chatId);
+      if (!cancelled) restoreWorkFollowupQueue(attached);
       if (!cancelled && attached && !runIdRef.current && attached.runId !== lastFinalRunIdRef.current) {
         const placeholderId = uid();
         // 원 실행 시작 시각을 우선 — 재진입 시 상태줄 경과가 0s부터 다시 세지 않게.
@@ -4134,7 +4372,7 @@ function ChatPage() {
     };
     // consumeEvent를 deps에서 제외(ref로 접근) — agent/agentGroup 세팅이 이 effect를 재실행시켜
     // attach가 중복 placeholder를 만들고 구독을 갈아치우던 churn을 없앤다. subscribeRun은 이제 안정적.
-  }, [chatId, locale, requestedFocusMessageId, router, subscribeRun, t]);
+  }, [chatId, locale, requestedFocusMessageId, router, subscribeRun, t, restoreWorkFollowupQueue]);
 
   useEffect(
     () =>
@@ -4254,8 +4492,7 @@ function ChatPage() {
                 createdAt: startedAt,
               }],
             }));
-          steerQueueRef.current.shift();
-          setQueuedSteers(steerQueueRef.current.map((item) => item.text));
+          restoreWorkFollowupQueue(attached);
           setBusy(true);
           setCancelPending(false);
           runIdRef.current = attached.runId;
@@ -4315,7 +4552,7 @@ function ChatPage() {
         );
         setMessages((current) => {
           if (transcriptRevisionRef.current !== historyRevision) return current;
-          const optimisticIds = new Set(steerQueueRef.current.map((item) => item.optimisticMessageId));
+          const optimisticIds = workFollowupOptimisticIds();
           // Active-chat removal can beat the frame that consumes the terminal
           // event. Settle only its canonical run before the live-draft guard;
           // a newer run still keeps that guard and its subscription intact.
@@ -4323,7 +4560,7 @@ function ChatPage() {
         });
       });
     });
-  }, [agent, chatId, locale, subscribeRun, t]);
+  }, [agent, chatId, locale, subscribeRun, t, restoreWorkFollowupQueue, workFollowupOptimisticIds]);
 
   // 안전망 보강 (무한 '진행중' 방지) — onActiveChats 브로드캐스트를 놓치는 레이스(빠른/조기 종료 실행이
   // runId 설정·구독 전에 끝나 final/activeChats를 모두 놓친 경우)에 대비한다. busy 동안 main의 활성 실행
@@ -4380,7 +4617,7 @@ function ChatPage() {
                   settleTranscriptRun(current, receipt, endedRunId, chatId, ledgerEvents),
                   next,
                   recovery,
-                  new Set(steerQueueRef.current.map((item) => item.optimisticMessageId)),
+                  workFollowupOptimisticIds(),
                 )
               : current
           ));
@@ -4397,7 +4634,7 @@ function ChatPage() {
       clearTimeout(first);
       clearInterval(iv);
     };
-  }, [busy, chatId, locale]);
+  }, [busy, chatId, locale, workFollowupOptimisticIds]);
 
   /*
    * ★런타임이 바뀔 때마다 모델 목록을 실시간 조회해 **버리고 있었다** (실측 2026-09-08).
@@ -4422,7 +4659,7 @@ function ChatPage() {
         ...steerQueueRef.current.filter((item) => !knownIds.has(item.optimisticMessageId)),
       ];
       steerQueueRef.current = restored;
-      setQueuedSteers(restored.map((item) => item.text));
+      setQueuedSteers(restored.filter(item => item.acknowledged !== false).map(item => parseChatFileMessage(item.text).visibleText));
       cancelRollbackSteersRef.current = null;
       cancelRequestedRef.current = false;
       setCancelPending(false);
@@ -4483,6 +4720,7 @@ function ChatPage() {
         busy ||
         (requestedTaskId && validatedTaskChatId !== chat.id)
       ) return false;
+      const followupStopEpoch = workFollowupStopEpochs.get(chat.id) ?? 0;
       const unresolvedRunId = !opts?.decisionContinuation ? readWorkUncertainAdmission(chat.id) : null;
       if (unresolvedRunId) {
         // A response-loss retry may have started external work. Reconcile the
@@ -4855,7 +5093,7 @@ function ChatPage() {
          *   Main 이 이 runId 를 받아들인 적이 없다는 것이 확인된 때만(거절·미발송) 한다.
          */
         if (isChatBusyFailure(cause) && (admissionStatus === "rejected" || !requestDispatched)) {
-          const steered = await api.invoke.steer({
+          const followupRequest: McpInvocationRequest = {
             chatId: chat.id,
             userPrompt: invocationPrompt,
             steeringMode: "queue",
@@ -4869,9 +5107,21 @@ function ChatPage() {
             sessionRouting: project ? true : opts?.sessionRouting,
             stormbreakerMode: opts?.stormbreakerMode,
             runtimeSelection: chat.runtimeSelection ?? undefined,
-          }).catch(() => null);
+          };
+          const intent: OneFollowupIntent = {
+            intentId: `work:${runId}`, chatId: chat.id, userPrompt: invocationPrompt,
+            createdAt: new Date().toISOString(), request: JSON.parse(JSON.stringify(followupRequest)),
+            ...((workFollowupStopEpochs.get(chat.id) ?? 0) !== followupStopEpoch ? { autoDeliveryPaused: true } : {}),
+          };
+          const steered = await (async () => {
+            try {
+              saveOneFollowupIntent(window.localStorage, intent);
+              refreshWorkFollowupDrafts();
+              return await dispatchWorkFollowup(intent, { automatic: true, stopEpoch: followupStopEpoch });
+            } catch { return null; }
+          })();
           if (!isCurrentChat()) return false;
-          if (steered?.accepted && steered.chatId === chat.id) {
+          if (steered?.accepted && steered.chatId === chat.id && ["queued", "draining", "started"].includes(steered.status ?? "")) {
             clearWorkUncertainAdmission(chat.id, runId);
             const attached = await api.invoke.attach(chat.id).catch(() => null);
             if (!isCurrentChat()) return false;
@@ -4958,6 +5208,8 @@ function ChatPage() {
       t,
       validatedTaskChatId,
       requestRunCancellation,
+      dispatchWorkFollowup,
+      refreshWorkFollowupDrafts,
     ],
   );
 
@@ -4965,6 +5217,12 @@ function ChatPage() {
 
   // 진행 중 실행 취소 — 입력창의 정지 버튼(전송 버튼이 busy일 때 변신) / Cmd/Ctrl+Esc.
   const stop = useCallback(() => {
+    if (chatId) {
+      workFollowupStopEpochs.set(chatId, (workFollowupStopEpochs.get(chatId) ?? 0) + 1);
+      try { pauseOneFollowupOutbox(window.localStorage, chatId); }
+      catch { workFollowupAutoBlockedChats.add(chatId); }
+      refreshWorkFollowupDrafts();
+    }
     const api = ipc();
     if (cancelRequestedRef.current) return;
     if (!api) {
@@ -4984,56 +5242,65 @@ function ChatPage() {
     const runId = runIdRef.current ?? lastRunIdRef.current;
     if (!runId) return;
     requestRunCancellation(runId);
-  }, [locale, requestRunCancellation]);
+  }, [chatId, locale, requestRunCancellation, refreshWorkFollowupDrafts]);
 
   // 실행 중 steering — 사용자의 새 지시는 즉시 대화에 보이지만 현재 모델 턴을
   // 취소하지 않는다. Main이 현재 턴의 terminal settlement를 확인한 뒤 같은 세션의
   // 다음 run으로 순서대로 시작한다.
   const submitOrQueue = useCallback(
-    (text: string, opts?: (typeof steerQueueRef)["current"][number]["opts"]) => {
+    (text: string, opts?: (typeof steerQueueRef)["current"][number]["opts"], onAccepted?: () => void) => {
       if (busy) {
-        const api = ipc();
-        if (!api || !chat) return;
-        const optimisticMessageId = `steer:${uid()}`;
-        void (async () => {
+        if (!chat) return;
+        const intentId = uid();
+        const followupStopEpoch = workFollowupStopEpochs.get(chat.id) ?? 0;
+        const frozenOpts = opts ? JSON.parse(JSON.stringify(opts)) as typeof opts : undefined;
+        const runtimeSelection = chat.runtimeSelection ? JSON.parse(JSON.stringify(chat.runtimeSelection)) as RuntimeSelection : undefined;
+        const optimisticMessageId = `steer:${intentId}`;
+        transcriptRevisionRef.current += 1;
+        setMessages(current => [...current, {
+          id: optimisticMessageId, role: "user", text,
+          imageDataUrls: frozenOpts?.images?.map(image => `data:${image.mediaType};base64,${image.data}`),
+        }]);
+        void prepareWorkFollowup(chat.id, async () => {
           let boundText = text;
           let attachedChatFiles: ChatFileItem[] | undefined;
-          if (opts?.files?.length) {
+          if (frozenOpts?.files?.length) {
             const bridge = chatFilesBridge();
             if (!bridge) throw new Error(locale === "ko" ? "Desktop 파일 연결을 사용할 수 없습니다." : "The Desktop file bridge is unavailable.");
-            const snapshot = await bridge.snapshot({ chatId: chat.id, files: opts.files });
+            const snapshot = await bridge.snapshot({ chatId: chat.id, files: frozenOpts.files });
             attachedChatFiles = snapshot.files.map((file) => chatFileItem(file, "user-attachment"));
-            hydratedChatFileGroupsRef.current.set(snapshot.groupId, attachedChatFiles);
+            if (isCurrentChat()) hydratedChatFileGroupsRef.current.set(snapshot.groupId, attachedChatFiles);
             boundText = appendChatFileMarker(text, snapshot.groupId);
           }
-          steerQueueRef.current.push({ text: boundText, opts, optimisticMessageId });
-          setQueuedSteers(steerQueueRef.current.map((q) => parseChatFileMessage(q.text).visibleText));
-          transcriptRevisionRef.current += 1;
-          setMessages((current) => [...current, {
-            id: optimisticMessageId,
-            role: "user",
-            text,
-            imageDataUrls: opts?.images?.map((image) => `data:${image.mediaType};base64,${image.data}`),
-            chatFiles: attachedChatFiles,
-          }]);
-          const steerReceipt = await api.invoke.steer({
+          if (isCurrentChat()) steerQueueRef.current.push({ text: boundText, opts: frozenOpts, optimisticMessageId, intentId, acknowledged: false });
+          if (isCurrentChat()) setMessages(current => current.map(message => message.id === optimisticMessageId
+            ? { ...message, chatFiles: attachedChatFiles } : message));
+          const request: McpInvocationRequest = {
             chatId: chat.id,
             userPrompt: boundText,
             steeringMode: "queue",
-            images: opts?.images,
+            images: frozenOpts?.images,
             locale,
-            permissions: opts?.permissions ?? DEFAULT_PERMISSION,
-            planMode: opts?.planMode,
-            goalMode: opts?.goalMode,
-            appsGenerateMode: opts?.appsGenerateMode,
-            taskForceTargets: opts?.taskForceTargets,
-            sessionRouting: project ? true : opts?.sessionRouting,
-            stormbreakerMode: opts?.stormbreakerMode,
-            runtimeSelection: chat.runtimeSelection ?? undefined,
-          });
-          if (!steerReceipt.accepted || steerReceipt.chatId !== chat.id) {
-            throw new Error("Desktop did not acknowledge steering for the active task");
-          }
+            permissions: frozenOpts?.permissions ?? DEFAULT_PERMISSION,
+            planMode: frozenOpts?.planMode,
+            goalMode: frozenOpts?.goalMode,
+            appsGenerateMode: frozenOpts?.appsGenerateMode,
+            taskForceTargets: frozenOpts?.taskForceTargets,
+            sessionRouting: project ? true : frozenOpts?.sessionRouting,
+            stormbreakerMode: frozenOpts?.stormbreakerMode,
+            runtimeSelection,
+          };
+          const intent: OneFollowupIntent = {
+            intentId, chatId: chat.id, userPrompt: boundText, createdAt: new Date().toISOString(),
+            request: JSON.parse(JSON.stringify(request)),
+            ...((workFollowupStopEpochs.get(chat.id) ?? 0) !== followupStopEpoch ? { autoDeliveryPaused: true } : {}),
+          };
+          saveOneFollowupIntent(window.localStorage, intent);
+          refreshWorkFollowupDrafts();
+          // Local preservation also preserves the reply selection's exact text.
+          onAccepted?.();
+          const steerReceipt = await dispatchWorkFollowup(intent, { automatic: true, stopEpoch: followupStopEpoch });
+          if (!isCurrentChat() || !steerReceipt || !["queued", "draining", "started"].includes(steerReceipt.status ?? "")) return;
           setSessionNotice(steerReceipt.queued
             ? steerReceipt.interruptsCurrent
               ? (locale === "ko"
@@ -5045,20 +5312,18 @@ function ChatPage() {
             : (locale === "ko"
               ? "현재 실행은 이미 끝났습니다. 새 지시를 새 실행으로 시작했습니다."
               : "The previous execution had already settled, so the new instruction started as a new run."));
-        })().catch((cause) => {
-          steerQueueRef.current = steerQueueRef.current.filter((item) => item.optimisticMessageId !== optimisticMessageId);
-          setQueuedSteers(steerQueueRef.current.map((item) => item.text));
-          transcriptRevisionRef.current += 1;
-          setMessages((current) => current.map((message) => message.id === optimisticMessageId
-            ? { id: message.id, role: "system", text: locale === "ko" ? "방향 전환을 전달하지 못했습니다. 다시 보내 주세요." : "The new direction was not delivered. Please send it again." }
-            : message));
-          setSessionNotice(cause instanceof Error ? cause.message : String(cause));
+        }).catch(() => {
+          if (!isCurrentChat()) return;
+          setComposerPrefill(text);
+          setSessionNotice(locale === "ko"
+            ? `추가 지시를 저장하지 못해 전달하지 않았습니다. 원문과 이미지는 대화에 유지했습니다. 저장 공간과 파일 연결을 확인해 주세요.${frozenOpts?.files?.length ? " 파일 첨부는 다시 선택해 주세요." : ""}`
+            : `The follow-up could not be saved and was not delivered. Its text and images remain in this view. Check storage and the file connection.${frozenOpts?.files?.length ? " Select the file attachments again." : ""}`);
         });
         return;
       }
-      void send(text, opts);
+      void send(text, opts).then(accepted => { if (accepted) onAccepted?.(); });
     },
-    [busy, chat, locale, project, send],
+    [busy, chat, locale, project, send, dispatchWorkFollowup, refreshWorkFollowupDrafts, isCurrentChat],
   );
 
   // 이 채팅의 모델/작업량만 변경한다. 역할 기본값과 다른 채팅은 건드리지 않는다.
@@ -5915,6 +6180,12 @@ function ChatPage() {
     text: string,
     opts: { images?: ImageAttachment[]; permissions?: PermissionLevel; planMode?: boolean; goalMode?: boolean; appsGenerateMode?: boolean },
   ) => {
+    const submittedReply = messageReply;
+    const dispatchReply = (prompt: string, options: Parameters<typeof send>[1]) => {
+      void send(composeMessageReply(prompt, submittedReply), options).then(accepted => {
+        if (accepted) setMessageReply(current => current === submittedReply ? null : current);
+      });
+    };
     const sendOpts = {
       images: opts?.images,
       permissions: opts?.permissions,
@@ -5922,25 +6193,25 @@ function ChatPage() {
       goalMode: opts?.goalMode,
       appsGenerateMode: opts?.appsGenerateMode,
       // The recommendation carries structured execution intent. Prompt text
-      // remains exactly what the user wrote.
+      // carries the user text and any explicitly selected quotation.
       routerAgent: choice.routerAgent,
     };
     switch (choice.kind) {
       case "agent":
         // Auto-routing creates a temporary TF target and never mutates the
         // chat's persistent agent/firm/group binding.
-        void send(text, { ...sendOpts, taskForceTargets: [choice.target] });
+        dispatchReply(text, { ...sendOpts, taskForceTargets: [choice.target] });
         break;
       case "network":
         if (choice.targets && choice.targets.length > 0) {
-          void send(text, { ...sendOpts, taskForceTargets: choice.targets });
+          dispatchReply(text, { ...sendOpts, taskForceTargets: choice.targets });
         } else {
-          void send(text, { ...sendOpts, sessionRouting: true });
+          dispatchReply(text, { ...sendOpts, sessionRouting: true });
         }
         break;
       case "pipeline": {
         // 단계 계획을 플레이스홀더 메시지 상단 스테퍼로 보여준다(PRD→배포 가시화).
-        void send(text, {
+        dispatchReply(text, {
           ...sendOpts,
           pipelineStages: choice.stages?.length ? choice.stages : undefined,
           stormbreakerMode: true,
@@ -5949,10 +6220,10 @@ function ChatPage() {
       }
       case "plain":
       default:
-        void send(text, sendOpts);
+        dispatchReply(text, sendOpts);
         break;
     }
-  }, [send]);
+  }, [send, messageReply]);
 
   async function saveTitle() {
     const api = ipc();
@@ -6094,7 +6365,8 @@ function ChatPage() {
       stormbreakerMode?: boolean;
     },
   ) => {
-    submitOrQueue(text, {
+    const submittedReply = messageReply;
+    submitOrQueue(composeMessageReply(text, submittedReply), {
       images: opts?.images,
       files: opts?.files,
       permissions: opts?.permissions,
@@ -6104,8 +6376,8 @@ function ChatPage() {
       taskForceTargets: opts?.taskForceTargets,
       sessionRouting: opts?.sessionRouting,
       stormbreakerMode: opts?.stormbreakerMode,
-    });
-  }, [submitOrQueue]);
+    }, () => setMessageReply(current => current === submittedReply ? null : current));
+  }, [submitOrQueue, messageReply]);
   const handleToggleGoal = useCallback(() => {
     if (!chat) return;
     if (chat.goalId) {
@@ -6898,6 +7170,7 @@ function ChatPage() {
         <ChatStream
           artifactChatId={chatId || undefined}
           messages={messages}
+          onReply={reply => { setMessageReply(reply); document.querySelector<HTMLTextAreaElement>('[data-tour-id="workspace.input"] textarea')?.focus(); }}
           onInspectWorker={inspectWorkerPanel}
           agentName="Agentlas"
           agentTone={displayAgent?.tone ?? "blue"}
@@ -7000,6 +7273,16 @@ function ChatPage() {
         : <ContinuityStatus chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} />}
       {/* Its own row: the stack stretches its children, which made the chip a full-width grey bar. */}
       <div style={{ display: "flex" }}><AgiDefectChip chatId={chatId || null} locale={locale === "ko" ? "ko" : "en"} /></div>
+      {latestWorkActivityMessage?.failure && latestWorkActivityMessage.failure.code !== "cancelled" && (
+        <AgiIncidentReportButton key={latestWorkActivityMessage.runId ?? latestWorkActivityMessage.id}
+          locale={locale === "ko" ? "ko" : "en"} draft={{
+            chatId, runId: latestWorkActivityMessage.runId ?? latestWorkActivityMessage.recoveryForRunId ?? latestWorkActivityMessage.id,
+            failureCode: latestWorkActivityMessage.failure.code, category: "other",
+            title: `[Work] ${latestWorkActivityMessage.failure.code}`,
+            summary: latestWorkActivityMessage.failure.message || "The Work run ended with a failure.",
+            steps: ["Start a Work request", "The run returned the displayed failure"],
+          }} />
+      )}
       </div>
       {surfaceConflict && surfaceConflict.surfaceId === surface?.id && (
         <div role="alert" data-artifact-state-conflict="true" style={{ padding: "8px 12px", fontSize: 12, background: "var(--paper-2)", borderTop: "var(--hairline)" }}>
@@ -7081,6 +7364,27 @@ function ChatPage() {
         </div>
       )}
       <div data-tour-id="workspace.input" style={{ flexShrink: 0, minWidth: 0 }}>
+        <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={() => setMessageReply(null)} />
+        {workFollowupDrafts.length > 0 && <div data-work-followup-outbox="true" style={{ padding: "8px 12px", maxHeight: 180, overflowY: "auto" }}>
+          {workFollowupDrafts.map(intent => <div key={intent.intentId} data-work-followup-intent={intent.intentId} style={{ marginBottom: 8 }}>
+            <small>{intent.autoDeliveryPaused || ["held", "failed", "cancelled"].includes(workFollowupStates[intent.intentId] ?? "")
+              ? (locale === "ko" ? "보관한 지시 · 검토 필요" : "Saved follow-up · review needed")
+              : ["queued", "draining", "started"].includes(workFollowupStates[intent.intentId] ?? "")
+                ? (locale === "ko" ? "Main 접수 확인 · 로컬 보관" : "Main acceptance confirmed · local copy retained")
+                : (locale === "ko" ? "보관한 지시 · Main 접수 미확인" : "Saved follow-up · Main acceptance unconfirmed")}</small>
+            <p style={{ margin: "4px 0", whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{parseChatFileMessage(intent.userPrompt).visibleText}</p>
+            {!!intent.request.images?.length && <small>{locale === "ko" ? `이미지 ${intent.request.images.length}개 보관` : `${intent.request.images.length} saved image(s)`}</small>}
+            <button type="button" className="btn" onClick={() => {
+              try {
+                resumeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+                refreshWorkFollowupDrafts();
+                void dispatchWorkFollowup(intent);
+              } catch { setSessionNotice(locale === "ko" ? "보관한 요청을 읽지 못해 전달하지 않았습니다. 원문은 유지했습니다." : "The saved request could not be read or resumed. Its original was retained."); }
+            }}>
+              {locale === "ko" ? "같은 요청 확인·전달" : "Check or deliver this request"}
+            </button>
+          </div>)}
+        </div>}
         <ChatInput
           onSend={handleChatInputSend}
           queuedCount={queuedSteers.length}

@@ -37,7 +37,8 @@ import { detectRuntimeRefusal } from "./runtime-refusal";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { builtinShellEnv } from "./builtin-shell-env";
-import { attestMainToolPreDispatchRejection } from "../invocation/adapter-effect-context";
+import { attestMainToolPreDispatchRejection, withDurableMainToolStart } from "../invocation/adapter-effect-context";
+import { assertMainWorkRecoveryContext, mainWorkToolSchema, type MainWorkRecoveryContext, type MainWorkReference } from "../invocation/main-work-recovery";
 import type { InstalledMcpServer } from "../../shared/types";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import {
@@ -79,6 +80,8 @@ export interface MainToolDispatchCall {
 }
 
 export interface MainToolDispatchResult {
+  /** Host canonical reference, independent of provider transport correlation. */
+  canonicalWorkAction?: { action_id:string; step_id:string };
   /** Main-owned Science result preservation; never a new dispatch authority. */
   rawMcpResult?: Record<string, unknown>;
   artifactPaths?: readonly string[];
@@ -330,6 +333,7 @@ export function mainToolBrokerInventory(
  * (acp.ts answerPermission 과 같은 규칙).
  */
 export interface LocalToolApprovalContext {
+  canonicalWorkRecovery?: MainWorkRecoveryContext;
   /** Science bridge only: project the exact response envelope after this approved dispatch. */
   retainMcpToolResult?: true;
   beforeMcpToolResult?: RunnerRequest["beforeMcpToolResult"];
@@ -379,8 +383,7 @@ export async function prepareMainToolLoop(
   // before 2026-09-24 serving in Work had no file/shell tools at all.
   // BYOK adapters use this same Main loop. A signed Science catalog is the
   // complete grant there too; API delivery must not add file/shell/download tools.
-  const catalogMcpOnly = (runtimeKind === "agentlas" || runtimeKind === "byok")
-    && Boolean(req.mcpConfigPath) && req.mcpGrantCatalogOnly === true;
+  const catalogMcpOnly = Boolean(req.mcpConfigPath) && req.mcpGrantCatalogOnly === true;
   if (collection) {
     assertScienceCollectionCapability(collection, req.mcpConfigPath);
     if (!["byok", "ollama", "lmstudio", "mlx", "agentlas-local", "agentlas"].includes(runtimeKind)) {
@@ -424,12 +427,12 @@ export async function prepareMainToolLoop(
       }
     }
   }
-  const indirectToolSurface = !collection && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local"
+  const indirectToolSurface = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local"
     && !req.minimalObservation;
   // Small managed local models keep their ordinary Browser/file/shell tools
   // direct. A single large MCP contract still needs on-demand schema discovery:
   // the statistics server alone has 180 alternatives (>300 KB).
-  const menuAllowed = !collection && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation;
+  const menuAllowed = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation;
   const sessionKey = `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`;
   const tools = installToolResultContext(
     installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, menuAllowed, runtimeKind === "agentlas-local"),
@@ -453,12 +456,13 @@ export async function prepareMainToolLoop(
     mcpToolCallSessions.set(byName, createMcpToolCallSession({ signal: req.signal }));
   }
   return {
-    tools,
+    tools: req.canonicalWorkRecovery ? tools.map(tool=>({...tool,function:{...tool.function,parameters:mainWorkToolSchema(tool.function.parameters)}})) : tools,
     byName,
     ...(req.workforceRuntimeToolGrant && !req.untrustedNoTools
       ? { broker: new MainWorkforceBroker(req, runtimeKind, mainToolBrokerInventory(tools, byName)) }
       : {}),
     approval: {
+      ...(req.canonicalWorkRecovery ? {canonicalWorkRecovery:req.canonicalWorkRecovery} : {}),
       ...(req.beforeMcpToolResult ? { beforeMcpToolResult: req.beforeMcpToolResult } : {}),
       ...(collection ? { scienceCollectionCapability: collection } : {}),
       ...(req.planMode ? { planMode: true as const } : {}),
@@ -543,6 +547,7 @@ export async function runMainToolDispatch(
   broker?: MainWorkforceBroker,
 ): Promise<MainToolDispatchResult> {
   const result = await dispatchMainToolRaw(byName, call, events, approval, broker);
+  if(result.canonicalWorkAction) result.content += `\nHost work reference: ${JSON.stringify(result.canonicalWorkAction)}`;
   // Pages already have their own bounded, exact range protocol. Do not replace
   // a page with another reference or duplicate the screenshot channel.
   return call.toolName === TOOL_RESULT_READ || approval.retainMcpToolResult ? result : {
@@ -663,6 +668,18 @@ async function dispatchMainToolRawUnchecked(
       isError: true,
     };
   }
+  let workReference: MainWorkReference | undefined;
+  if (approval.canonicalWorkRecovery) {
+    assertMainWorkRecoveryContext(approval.canonicalWorkRecovery);
+    const reference=args._agentlas_work;
+    if(reference!==undefined) {
+      if(!reference || typeof reference!=="object" || Array.isArray(reference)
+        || Object.entries(reference).some(([key,value])=>key==="regenerate_read" ? value!==true : !["action_id","step_id"].includes(key) || typeof value!=="string"))throw new Error("main_work_reference_invalid");
+      workReference=reference as MainWorkReference;
+      delete args._agentlas_work;
+      call={...call,arguments:JSON.stringify(args)};
+    }
+  }
   approval.signal?.throwIfAborted();
   const planTransport = resolved.kind === "mcp" ? preparedMcpTransport(resolved.prepared, resolved.server) : null;
   let planReadAuthority: unknown;
@@ -731,7 +748,20 @@ async function dispatchMainToolRawUnchecked(
   // item.started the same way). Without it every host-loop Goal turn (serving,
   // agentlas-local, BYOK) read "outcome-pending" and verification stayed inconclusive
   // (isolated live run 2026-09-25, run_80dc1968: 12 inconclusive receipts).
-  events.onTool?.(call.toolName, call.arguments, undefined, eventCallId, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+  let work:ReturnType<MainWorkRecoveryContext["admit"]>|undefined;
+  try {
+    work=approval.canonicalWorkRecovery?.admit({reference:workReference,methodId:brokerToolId,arguments:args,observational:!planMutation});
+  } catch(error) {
+    const code=error instanceof Error ? error.message : String(error);
+    if(!/^main_work_(?:read_original_outcome|action_not_in_task|action_input_conflict|checkpoint_step_invalid|worker_liveness_unknown|outcome_unconfirmed|result_read_unavailable|read_regeneration_required|same_method_limit|same_method_limit_or_claim_changed)/.test(code))throw error;
+    if(actionId)broker?.finishAction(actionId,"not_dispatched");
+    return {content:JSON.stringify({code,recovery:approval.canonicalWorkRecovery!.packet()}),visionMessage:null,isError:true};
+  }
+  if(work && "reused" in work) {
+    if(actionId)broker?.finishAction(actionId,work.reused.isError ? "failed" : "succeeded");
+    return {...work.reused,canonicalWorkAction:{action_id:work.action.actionId,step_id:work.action.stepId}} as MainToolDispatchResult;
+  }
+  withDurableMainToolStart(() => events.onTool?.(call.toolName, call.arguments, undefined, eventCallId, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
   if (resolved.kind === "builtin") {
     const [{ runBuiltinTool }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
       import("../../shared/builtin-tools"),
@@ -806,7 +836,7 @@ async function dispatchMainToolRawUnchecked(
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
       broker?.finishAction(actionId, outcome.ok ? "succeeded" : "failed");
     }
-    return {
+    const dispatched:MainToolDispatchResult = {
       content: outcome.ok ? outcome.content : `Error: ${outcome.content}`,
       ...(outcome.artifactPaths ? { artifactPaths: outcome.artifactPaths } : {}),
       visionMessage: outcome.ok && outcome.imageDataUrl
@@ -820,6 +850,11 @@ async function dispatchMainToolRawUnchecked(
         : null,
       isError: !outcome.ok,
     };
+    if(work && "unit" in work) {
+      approval.canonicalWorkRecovery!.finish(work,dispatched);
+      dispatched.canonicalWorkAction={action_id:work.action.actionId,step_id:work.action.stepId};
+    }
+    return dispatched;
   }
   let mcpOutcome: MainToolDispatchResult;
   try {
@@ -913,6 +948,10 @@ async function dispatchMainToolRawUnchecked(
   assertMcpResultDelivery(approval);
   approval.signal?.throwIfAborted();
   approval.assertCurrent?.();
+  if(work && "unit" in work) {
+    approval.canonicalWorkRecovery!.finish(work,mcpOutcome);
+    mcpOutcome.canonicalWorkAction={action_id:work.action.actionId,step_id:work.action.stepId};
+  }
   return mcpOutcome;
 }
 

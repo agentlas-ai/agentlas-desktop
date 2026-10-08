@@ -5,6 +5,33 @@ export type GraphCommandDelivery =
   | { ok: true; input: Record<string, string>; dryRun: boolean }
   | { ok: false; code: string; reason: string; nextAction: string };
 
+/** Invocation provenance belongs to the accepted request, not today's registry.
+ * Older same-conversation requests have no such receipt; do not relabel them
+ * from the current contract. Cross-conversation Toolchain source is explicit. */
+export function graphCommandInvocationKind(payload: Record<string, unknown>): "graph" | "toolchain" | null {
+  if (payload.source === "toolchain") return "toolchain";
+  return payload.invokedAs === "graph" || payload.invokedAs === "toolchain" ? payload.invokedAs : null;
+}
+
+/** Re-delivery reads the exact earlier result, never a differently bound input.
+ * Compare all keys as well as values, using the same trimmed string form that
+ * graph input admission saved. This does not consult a changed graph schema. */
+export function graphCommandRequestMatches(payload: Record<string, unknown>, request: {
+  definitionRevision: unknown; ownerChatId: string; input: unknown; dryRun: boolean;
+}): boolean {
+  if (payload.definitionRevision !== request.definitionRevision || payload.ownerChatId !== request.ownerChatId
+    || payload.dryRun !== request.dryRun) return false;
+  const saved = payload.input;
+  const supplied = request.input ?? {};
+  if (!saved || typeof saved !== "object" || Array.isArray(saved)
+    || !supplied || typeof supplied !== "object" || Array.isArray(supplied)) return false;
+  const values = supplied as Record<string, unknown>;
+  const entries = Object.entries(saved);
+  return entries.length === Object.keys(values).length && entries.every(([key, value]) =>
+    typeof value === "string" && Object.hasOwn(values, key)
+      && typeof values[key] === "string" && (values[key] as string).trim() === value);
+}
+
 /** Source commands are data envelopes, not arbitrary trigger variables.
  * Decode at delivery too: a queued request may outlive its saved definition. */
 export function decodeGraphCommandDelivery(

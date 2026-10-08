@@ -31,6 +31,7 @@ export const NODE_ACCENT: Record<string, string> = {
   // 커널이 실행하는 종류는 화면도 알아야 한다 — 모르면 색이 없는 채로 그려진다.
   eval: "var(--accent)",
   subgraph: "var(--ink)",
+  toolchain_call: "var(--ink)",
   code: "var(--muted-deep)",
 };
 
@@ -53,6 +54,7 @@ export const NODE_TAG_COLORS: Record<string, { bg: string; fg: string }> = {
   condition: { bg: "var(--node-branch)", fg: "var(--node-trigger)" },// Mint — 갈림길
   tool: { bg: "var(--node-tool)", fg: "var(--node-trigger)" },       // White — 도구
   subgraph: { bg: "var(--node-tool)", fg: "var(--node-trigger)" },
+  toolchain_call: { bg: "var(--node-tool)", fg: "var(--node-trigger)" },
 };
 
 /**

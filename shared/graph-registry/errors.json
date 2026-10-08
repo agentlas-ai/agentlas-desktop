@@ -905,6 +905,17 @@
       "verbatim": true,
       "status": "specified",
       "spec": "06 §2.3"
+    },
+    {
+      "code": "TOOLCHAIN_CALL_FAILED",
+      "status": "implemented",
+      "layer": "runtime",
+      "reason": "The exact Toolchain release or argument/result contract could not be executed.",
+      "nextActions": [
+        "edit_node"
+      ],
+      "cardKey": "node_failed",
+      "note": "Preserves the canonical call receipt reason. Uncertain effects use MUTATION_UNVERIFIED."
     }
   ]
 }

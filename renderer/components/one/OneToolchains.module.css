@@ -42,3 +42,7 @@
    needs the first panel's top room only, so the history below sits close. */
 .stack { display: grid; align-content: start; min-width: 0; }
 .stack > section:last-child { padding-top: 14px; }
+
+.asset { display:flex; align-items:center; gap:8px; width:100%; padding:9px 11px; border:1px solid var(--paper-edge); border-radius:9px; background:var(--paper); color:var(--ink); text-align:left; cursor:pointer; font-size:11px; }
+.asset span { flex:1; }
+.asset small { color:var(--muted-deep); }

@@ -1,4 +1,5 @@
 "use client";
+import { useAppUiPreference } from "@/lib/app-ui-preferences";
 
 import { useEffect, useState } from "react";
 import { taskTitleForDisplay } from "@/lib/task-title";
@@ -26,24 +27,11 @@ export function ProjectSidebar() {
   const [projects, setProjects] = useState<Project[]>(() => readViewData<Project[]>("dashboard.projects")?.value ?? []);
   const [tasks, setTasks] = useState<CanonicalTask[]>(() => readViewData<CanonicalTask[]>("dashboard.tasks.200")?.value ?? []);
   const [loadFailed, setLoadFailed] = useState(false);
-  const [collapsedProjects, setCollapsedProjects] = useState<Record<string, boolean>>({});
+  const [collapsedProjects, setCollapsedProjects] = useAppUiPreference("projectCollapsed");
   const sidebar = useWorkSidebarWidth();
 
-  useEffect(() => {
-    try {
-      const saved = window.localStorage.getItem("agentlas.project-sidebar.collapsed.v1");
-      if (saved) setCollapsedProjects(JSON.parse(saved) as Record<string, boolean>);
-    } catch {
-      // Project navigation remains usable if local preferences cannot be restored.
-    }
-  }, []);
-
   function toggleProjectChats(projectId: string) {
-    setCollapsedProjects((current) => {
-      const next = { ...current, [projectId]: !current[projectId] };
-      try { window.localStorage.setItem("agentlas.project-sidebar.collapsed.v1", JSON.stringify(next)); } catch {}
-      return next;
-    });
+    setCollapsedProjects((current) => ({ ...current, [projectId]: !current[projectId] }));
   }
 
   useEffect(() => {

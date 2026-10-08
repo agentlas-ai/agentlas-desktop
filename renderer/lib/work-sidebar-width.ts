@@ -46,6 +46,13 @@ function writeWorkSidebarWidth(width: number | null) {
   }
 }
 
+export function setWorkSidebarWidth(width: number): void {
+  const next = clampWorkSidebarWidth(width);
+  writeWorkSidebarWidth(next === WORK_SIDEBAR_DEFAULT_WIDTH ? null : next);
+  window.dispatchEvent(new StorageEvent("storage", { key: WORK_SIDEBAR_WIDTH_KEY, newValue: String(next) }));
+  window.dispatchEvent(new Event(WORK_SIDEBAR_WIDTH_EVENT));
+}
+
 /**
  * 지금 화면에 보이는 Work 좌측 패널 폭. 좁은 창에서 패널이 숨거나 접혀 있으면 그 폭(0·68)을 그대로 돌려준다 —
  * 예전 계산은 274 를 상수로 빼서, 패널이 숨은 821px 미만에서도 그만큼 자리를 비워 뒀다.
@@ -63,8 +70,12 @@ export function useWorkSidebarWidth() {
   const [resizing, setResizing] = useState(false);
   useEffect(() => {
     const onWindowResize = () => setWidthState((current) => clampWorkSidebarWidth(current));
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === WORK_SIDEBAR_WIDTH_KEY) setWidthState(readWorkSidebarWidth());
+    };
     window.addEventListener("resize", onWindowResize);
-    return () => window.removeEventListener("resize", onWindowResize);
+    window.addEventListener("storage", onStorage);
+    return () => { window.removeEventListener("resize", onWindowResize); window.removeEventListener("storage", onStorage); };
   }, []);
   useEffect(() => {
     window.dispatchEvent(new Event(WORK_SIDEBAR_WIDTH_EVENT));
@@ -73,7 +84,7 @@ export function useWorkSidebarWidth() {
   const commit = useCallback((next: number) => {
     const clamped = clampWorkSidebarWidth(next);
     setWidthState(clamped);
-    writeWorkSidebarWidth(clamped === WORK_SIDEBAR_DEFAULT_WIDTH ? null : clamped);
+    setWorkSidebarWidth(clamped);
   }, []);
   const reset = useCallback(() => commit(WORK_SIDEBAR_DEFAULT_WIDTH), [commit]);
   return { width, resizing, setResizing, preview, commit, reset };

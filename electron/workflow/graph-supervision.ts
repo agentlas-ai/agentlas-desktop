@@ -29,7 +29,13 @@ export function superviseGraph(raw: unknown): { graph: WorkflowGraph; verificati
     || graph.nodes.length > 1000 || graph.edges.length > 4000) fail("GRAPH_SHAPE_INVALID");
   const ids = new Set<string>(), edges = new Set<string>();
   for (const n of graph.nodes) {
-    if (!n || !["trigger","condition","transform","eval","code","output","agent","action","subgraph","tool"].includes(n.type) || typeof n.id !== "string" || !n.id || ids.has(n.id) || !n.config || typeof n.config !== "object" || Array.isArray(n.config)) fail("GRAPH_NODE_INVALID");
+    if (!n || !["trigger","condition","transform","eval","code","output","agent","action","subgraph","toolchain_call","tool"].includes(n.type) || typeof n.id !== "string" || !n.id || ids.has(n.id) || !n.config || typeof n.config !== "object" || Array.isArray(n.config)) fail("GRAPH_NODE_INVALID");
+    if (n.type === "toolchain_call") {
+      const call = n.config.toolchainCall as Record<string, unknown> | undefined;
+      if (!call || typeof call.toolchainId !== "string" || !call.toolchainId.trim()
+          || typeof call.version !== "number" || !Number.isSafeInteger(call.version) || call.version < 1
+          || !call.args || typeof call.args !== "object" || Array.isArray(call.args)) fail("GRAPH_NODE_INVALID");
+    }
     ids.add(n.id);
   }
   for (const e of graph.edges) {

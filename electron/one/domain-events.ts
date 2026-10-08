@@ -1,5 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { getDb } from "../store/db";
+import {
+  ONE_DOMAIN_EVENT_ID_SQL,
+  ONE_DOMAIN_EVENT_VERSION_SQL,
+  ONE_DOMAIN_EVENT_TYPE_SQL,
+  ONE_DOMAIN_EVENT_TIME_SQL,
+} from "../store/one-domain-event-indexes";
 import { ONE_DOMAIN_EVENT_KIND, recordRunEvent } from "../store/run-events";
 import {
   ONE_DOMAIN_EVENT_CONTRACT_VERSION,
@@ -40,18 +46,19 @@ function findOneDomainEventById(eventId: string): OneDomainEventV1 | null {
   if (!safeId(eventId)) return null;
   const row = getDb().prepare(
     `SELECT payload_json FROM run_events
-     WHERE kind = ?
-       AND json_extract(json_extract(payload_json, '$.oneDomainEventJson'), '$.eventId') = ?
+     WHERE kind = '${ONE_DOMAIN_EVENT_KIND}'
+       AND ${ONE_DOMAIN_EVENT_ID_SQL} = ?
      ORDER BY rowid DESC LIMIT 1`,
-  ).get(ONE_DOMAIN_EVENT_KIND, eventId) as DomainEventRow | undefined;
+  ).get(eventId) as DomainEventRow | undefined;
   return row ? eventFromRow(row) : null;
 }
 
 function latestEntityVersion(entityId: string): number {
   const row = getDb().prepare(
-    `SELECT MAX(CAST(json_extract(json_extract(payload_json, '$.oneDomainEventJson'), '$.version') AS INTEGER)) AS version
-     FROM run_events WHERE run_id = ? AND kind = ?`,
-  ).get(ledgerRunId(entityId), ONE_DOMAIN_EVENT_KIND) as { version?: number | null } | undefined;
+    `SELECT ${ONE_DOMAIN_EVENT_VERSION_SQL} AS version
+     FROM run_events WHERE run_id = ? AND kind = '${ONE_DOMAIN_EVENT_KIND}'
+     ORDER BY ${ONE_DOMAIN_EVENT_VERSION_SQL} DESC LIMIT 1`,
+  ).get(ledgerRunId(entityId)) as { version?: number | null } | undefined;
   return Number.isSafeInteger(row?.version) ? Number(row?.version) : 0;
 }
 
@@ -144,13 +151,13 @@ export function listOneDomainEventsByType(
   const bounded = Math.max(1, Math.min(500, Math.floor(Number(input.limit) || 500)));
   const rows = getDb().prepare(
     `SELECT payload_json FROM run_events
-     WHERE kind = ?
-       AND json_extract(json_extract(payload_json, '$.oneDomainEventJson'), '$.eventType') = ?
-       AND julianday(json_extract(json_extract(payload_json, '$.oneDomainEventJson'), '$.occurredAt')) >= julianday(?)
-       AND julianday(json_extract(json_extract(payload_json, '$.oneDomainEventJson'), '$.occurredAt')) < julianday(?)
-     ORDER BY julianday(json_extract(json_extract(payload_json, '$.oneDomainEventJson'), '$.occurredAt')) ASC,
+     WHERE kind = '${ONE_DOMAIN_EVENT_KIND}'
+       AND ${ONE_DOMAIN_EVENT_TYPE_SQL} = ?
+       AND ${ONE_DOMAIN_EVENT_TIME_SQL} >= julianday(?)
+       AND ${ONE_DOMAIN_EVENT_TIME_SQL} < julianday(?)
+     ORDER BY ${ONE_DOMAIN_EVENT_TIME_SQL} ASC,
               rowid ASC
      LIMIT ?`,
-  ).all(ONE_DOMAIN_EVENT_KIND, eventType, new Date(startMs).toISOString(), new Date(endMs).toISOString(), bounded) as DomainEventRow[];
+  ).all(eventType, new Date(startMs).toISOString(), new Date(endMs).toISOString(), bounded) as DomainEventRow[];
   return rows.map(eventFromRow).filter((item): item is OneDomainEventV1 => item?.eventType === eventType);
 }

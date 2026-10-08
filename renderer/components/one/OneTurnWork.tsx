@@ -170,7 +170,7 @@ function CellIcon({ cell }: { cell: OneWorkCell }) {
  */
 function ToolchainSourceChip({ source, locale }: { source: ToolchainSourceRef; locale: "ko" | "en" }) {
   const ko = locale === "ko";
-  const label = source.kind === "run"
+  const label = !source.toolchainId ? (ko ? "이전 호출형 그래프" : "Legacy callable graph") : source.kind === "run"
     ? (ko ? "툴체인 사용" : "Used toolchain")
     : source.state === "callable"
       ? (ko ? "툴체인으로 등록" : "Published as toolchain")
@@ -181,12 +181,14 @@ function ToolchainSourceChip({ source, locale }: { source: ToolchainSourceRef; l
       className={styles.toolchainSource}
       data-toolchain-source={source.kind}
       data-toolchain-state={source.state ?? undefined}
-      data-automation-id={source.automationId}
+      data-toolchain-id={source.toolchainId ?? undefined}
+      data-toolchain-version={source.version ?? undefined}
+      data-automation-id={source.automationId ?? undefined}
       title={ko ? "툴체인 화면에서 열기" : "Open in Toolchains"}
-      onClick={() => navigate(`/library/toolchains?automation=${encodeURIComponent(source.automationId)}`)}
+      onClick={() => navigate(source.toolchainId ? `/library/toolchains?asset=${encodeURIComponent(source.toolchainId)}${source.version ? `&version=${source.version}` : ""}` : `/automation/flow?id=${encodeURIComponent(source.automationId ?? "")}`)}
     >
       <IconToolchain size={11} />
-      <span>{label}{source.name ? ` · ${source.name}` : ""}</span>
+      <span>{label}{source.name ? ` · ${source.name}` : ""}{source.version ? ` · v${source.version}` : ""}</span>
     </button>
   );
 }

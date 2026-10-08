@@ -6,6 +6,8 @@
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
+import { runCodexNoTools } from "./codex-no-tools";
+import { resolveEffectiveContextWindow } from "../../shared/models";
 import { accountCodexHome, withCodexProductHome } from "./codex-product-home";
 import os from "node:os";
 import fs from "node:fs/promises";
@@ -2326,8 +2328,12 @@ export const runCodex: Runner = async (
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "codex");
-  // Every product run reads the user's Codex home without their personal AGENTS.md (codex-product-home.ts).
-  req = { ...req, env: withCodexProductHome(req.env ?? process.env) };
+  // Judgment's gateway replaces all model input, so it can keep the actual
+  // account home for keyring identity and CLI-owned refresh without a mirror.
+  const requestEnv = req.env ?? process.env;
+  req = { ...req, env: req.untrustedNoTools && req.judgmentOnly
+    ? { ...requestEnv, CODEX_HOME: accountCodexHome(requestEnv.CODEX_HOME) }
+    : withCodexProductHome(requestEnv) };
   const observeNativeFile = bindNativeFileProofObserver();
   if (
     req.untrustedNoTools &&
@@ -2379,6 +2385,25 @@ export const runCodex: Runner = async (
   const bin = await getBin(req.runtimeSource, req.cwd ?? agentRunCwd(), req.env ?? process.env);
   if (!bin) {
     throw new Error(tStatus(req.locale, "errCliMissingCodex"));
+  }
+  if (req.untrustedNoTools && req.judgmentOnly) {
+    const inventory = await readCodexModelInventory(accountCodexHome(req.env?.CODEX_HOME));
+    const effort = req.effort ? resolveCodexModelEffort(inventory, req.model, req.effort)
+      : defaultCodexModelEffort(inventory, req.model);
+    const capacities = [inventory.find(model => model.id === req.model)?.contextWindow,
+      resolveEffectiveContextWindow("codex", req.model, req.longContext === true).contextWindow]
+      .filter((value): value is number => typeof value === "number" && value > 0);
+    return runCodexNoTools({ ...req, effort: effort ?? undefined }, events, async (args, request) => {
+      const run = await runCodexProcess(bin, args, request.userPrompt, request, events,
+        { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
+      if (request.signal?.aborted) throw abortReasonError(request);
+      if (!run.terminalObserved && !run.failure) {
+        return { text: "", failure: { kind: "unavailable", runtime: KIND, source: "exit",
+          providerCode: `codex_no_tools_cli_exit_${run.code ?? "unknown"}`, message: "codex_no_tools_cli_startup_unsettled" } };
+      }
+      return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
+        ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}), ...(request.effort ? { appliedEffort: request.effort } : {}) };
+    }, { ...(capacities.length ? { contextWindowTokens: Math.min(...capacities) } : {}) });
   }
   if (req.minimalObservation && !req.untrustedNoTools) return runCodexMinimalObservation(bin, req, events, observeNativeFile);
 

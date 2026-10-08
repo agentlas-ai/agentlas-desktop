@@ -283,3 +283,15 @@ export function buildStormbreakerLongRunPrompt(input: {
     .filter((line) => line !== "")
     .join("\n");
 }
+
+/** An unfinished finite Goal retains its mandate while Main owns a wait or
+ * blocker. That state alone cannot authorize another pass of the same live
+ * invocation. A newly admitted owner/event turn still executes its first pass.
+ * This check happens only after a pass settles; it never aborts in-flight tools.
+ */
+export function finiteGoalContinuationIsParked(input: {
+  lifecycle?: string; status: string | null;
+}): boolean {
+  return input.lifecycle === "finite"
+    && (input.status === "waiting_tool" || input.status === "waiting_user" || input.status === "blocked");
+}

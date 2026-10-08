@@ -57,8 +57,11 @@ function consumedVars(node: WorkflowNode): Set<string> {
   for (const v of referencedVars(str(cfg, "prompt"))) set.add(v);
   for (const v of referencedVars(str(cfg, "text"))) set.add(v);
   for (const v of referencedVars(str(cfg, "template"))) set.add(v);
-  const consumes = str(cfg, "consumes");
-  if (consumes) set.add(consumes);
+  const consumes = Array.isArray(cfg.consumes) ? cfg.consumes : [str(cfg, "consumes")];
+  for (const value of consumes) if (typeof value === "string" && value.trim()) set.add(value.trim());
+  if (node.type === "toolchain_call") {
+    for (const value of referencedVars(JSON.stringify(cfg.toolchainCall ?? {}))) set.add(value);
+  }
   if (node.type === "condition") {
     const v = str(cfg, "var");
     if (v) set.add(v);

@@ -86,6 +86,7 @@ export const GRAPH_ERROR_CODES = [
   "SWAP_NOT_AGENT_NODE",
   "SWAP_NO_MATCH",
   "SWAP_UNKNOWN_PROVIDER",
+  "TOOLCHAIN_CALL_FAILED",
   "TOOL_BROKER_CALL_UNREADABLE",
   "TOOL_BROKER_MUTATION_IN_SIMULATION",
   "TOOL_BROKER_PLAN_UNREADABLE",
@@ -125,6 +126,7 @@ export const GRAPH_NODE_KINDS = [
   "output",
   "subgraph",
   "tool",
+  "toolchain_call",
   "transform",
   "trigger",
 ] as const;
@@ -181,6 +183,11 @@ export const GRAPH_BLOCK_UI = {
   "subgraph": {
     "section": "flow",
     "placeable": true
+  },
+  "toolchain_call": {
+    "section": "inventory",
+    "placeable": true,
+    "placeReason": "검증된 독립 툴체인 자산과 고정 버전을 실물 목록에서 골라 놓는다 — 입력은 그 버전의 검증 예시에서 시작한다"
   }
 } as const;
 export type GraphBlockUiKind = keyof typeof GRAPH_BLOCK_UI;
@@ -227,6 +234,7 @@ export const GRAPH_ERROR_CARDS: Record<string, { cardKey: string; nextActions: s
   SUBGRAPH_FAILED: { cardKey: "subgraph_failed", nextActions: ["open_inner_run", "rerun"] },
   SUBGRAPH_NOT_FOUND: { cardKey: "subgraph_not_found", nextActions: ["edit_node"] },
   SUBGRAPH_SELF_CALL: { cardKey: "subgraph_self", nextActions: ["edit_node"] },
+  TOOLCHAIN_CALL_FAILED: { cardKey: "node_failed", nextActions: ["edit_node"] },
   TOOL_NODE_UNATTACHED: { cardKey: "tool_node_unattached", nextActions: ["edit_graph"] },
   TOOL_NODE_UNCONFIGURED: { cardKey: "tool_node_unconfigured", nextActions: ["edit_node"] },
 };
@@ -345,6 +353,7 @@ export const GRAPH_FIELD_GRADES: Record<string, "critical" | "degradable" | "ext
   "text": "degradable",
   "timeoutSeconds": "degradable",
   "to": "critical",
+  "toolchainCall": "critical",
   "type": "critical",
   "value": "degradable",
   "var": "critical",

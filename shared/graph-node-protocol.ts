@@ -399,7 +399,7 @@ export function automationRuntimePermission(options: { simulation: boolean }): "
 export function defaultNodeEffect(nodeType: string): "pure" | "read" | "mutation" {
   // 출력 블록은 "바깥으로 내보내기"다(레지스트리 선언). 안 적혔다고 조회로 보면
   // 시뮬레이션이 실제로 발행하고, 승인도 재시도 정책도 조회 기준으로 돈다.
-  return nodeType === "output" ? "mutation" : "read";
+  return nodeType === "output" || nodeType === "toolchain_call" ? "mutation" : "read";
 }
 
 /*
@@ -452,7 +452,7 @@ export function nodeCouldHaveActedOutside(node: NodeShape): boolean {
   //   ①(선언된 효과)을 이미 물은 뒤, 그보다 넓혀야 하는 이유를 코드로 적는 자리다.
   //   모델을 부르는 단계는 선언이 read 여도 도구를 부를 수 있다. 이 목록을 줄이면
   //   재개가 두 번 보낸다 — 좁히는 쪽의 오류만 사용자를 다치게 한다.
-  return node?.type === "agent" || node?.type === "action" || node?.type === "output";
+  return node?.type === "agent" || node?.type === "action" || node?.type === "output" || node?.type === "toolchain_call";
 }
 
 

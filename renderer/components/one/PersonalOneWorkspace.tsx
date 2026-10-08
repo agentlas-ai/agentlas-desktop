@@ -1,13 +1,16 @@
 "use client";
+import { MessageActions, MessageReplyPreview } from "../MessageActions";
+import { composeMessageReply, displayMessageReply, type MessageReply } from "@/lib/message-reply";
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import { ipc, ipcEvents, grantForDroppedFile } from "@/lib/ipc";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { useT } from "@/lib/i18n";
 import { Markdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconLayers, IconPanelRight, IconPlus, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
 import type { OneSupervisorSnapshot, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation } from "../../../shared/one-supervisor";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor, type OneProfile } from "../../../shared/one-profile";
-import { readStoredRuntimeSelection } from '@shared/runtime-selection';
+import { readAppUiPreference } from "@/lib/app-ui-preferences";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "../../../shared/agent-control-blocks";
 import { ProductModeMenu } from "./ProductModeMenu";
 import { OneBottomSheet } from "./OneBottomSheet";
@@ -28,14 +31,14 @@ import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 import { BrowserActionApprovalSheet } from "@/components/BrowserActionApprovalSheet";
 import { McpKeyRequestSheet } from "@/components/McpKeyRequestSheet";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
+import { AgiDefectChip, AgiIncidentReportButton } from "../agi/AgiBugReport";
 import styles from "./PersonalOneWorkspace.module.css";
 
 const visibleAnswer=(text:string)=>stripAgentRoutingBanners(stripAgentIdentityBadges(stripAgentControlBlocks(text,{streaming:true}))).trim();
 const terminal=(state:string)=>["completed","cancelled","failed","interrupted"].includes(state);
 // Personal One runs every turn with full access and Computer Use; Main decides that (owner 2026-10-05).
 function storedOneRuntime() {
-  if(typeof window==='undefined')return null;
-  try{return readStoredRuntimeSelection(JSON.parse(window.localStorage.getItem('agentlas.one.runtime-selection.v1') ?? 'null'),{source:undefined,role:'orchestrator',inherit:false});}catch{return null;}
+  return readAppUiPreference("oneRuntimeSelection");
 }
 export function PersonalOneWorkspace() {
   const router=useRouter(); const {locale}=useT(); const ko=locale==="ko"; const copy=(a:string,b:string)=>ko?a:b;
@@ -56,6 +59,8 @@ export function PersonalOneWorkspace() {
     }setAttachmentError(null);}catch(cause){setAttachmentError(cause instanceof Error?cause.message:String(cause));}
     setAttachments(next);
   };
+  const [messageReply,setMessageReply]=useState<MessageReply|null>(null);
+  useEffect(()=>setMessageReply(null),[snapshot?.conversationChatId]);
   const [text,setText]=useState(""); const [work,setWork]=useState("");
   const [scienceProject,setScienceProject]=useState(""); const [selected,setSelected]=useState<string|null>(null); const [direction,setDirection]=useState("");
   const [error,setError]=useState(false); const [receipt,setReceipt]=useState<SupervisorCommandReceipt|null>(null);
@@ -86,9 +91,10 @@ export function PersonalOneWorkspace() {
   const [savedRequests,setSavedRequests]=useState<PendingSupervisorWrite[]>([]);
   const [optimistic,setOptimistic]=useState<Array<{commandId:string;text:string;acknowledged:boolean}>>([]);
   const outbox=useRef<SupervisorOutbox|null>(null); const outboxOneId=useRef<string|null>(null); const inFlight=useRef(new Set<string>());
-  const mounted=useRef(true); const generation=useRef(0); const refreshing=useRef(false); const transcript=useRef<HTMLDivElement>(null); const nearBottom=useRef(true);
-  const sync=useCallback(async()=>{
-    if(refreshing.current)return;refreshing.current=true;const current=++generation.current;
+  const mounted=useRef(true); const generation=useRef(0); const transcript=useRef<HTMLDivElement>(null); const nearBottom=useRef(true);
+  const refreshCoordinator=useRef<ReturnType<typeof createCoalescedRefresh<void>>|null>(null);
+  const readSnapshot=useCallback(async()=>{
+    const current=++generation.current;
     try {
       const api=ipc()?.oneSupervisor;if(!api)throw new Error("desktop_unavailable");
       const value=await api.snapshot();if(!mounted.current || current!==generation.current)return;
@@ -97,13 +103,15 @@ export function PersonalOneWorkspace() {
       const visible=new Set(value.messages.map(message=>message.id));
       const observed=new Set(value.turns?.filter(turn=>visible.has(turn.userMessageId)).map(turn=>turn.commandId));
       setOptimistic(prior=>prior.filter(item=>!observed.has(item.commandId)));
-    } catch {if(mounted.current)setError(true);}finally{refreshing.current=false;}
+    } catch {if(mounted.current)setError(true);}
   },[]);
+  const sync=useCallback(()=>refreshCoordinator.current?.request(undefined) ?? Promise.resolve(),[]);
   useEffect(()=>{
+    const coordinator=createCoalescedRefresh<void>(readSnapshot,()=>undefined);refreshCoordinator.current=coordinator;
     mounted.current=true;void sync();const off=ipcEvents()?.onStoreChanged?.(()=>{void sync();});
     const timer=window.setInterval(()=>{if(document.visibilityState!=="hidden")void sync();},5000);const focus=()=>{void sync();};window.addEventListener("focus",focus);
-    return()=>{mounted.current=false;++generation.current;window.clearInterval(timer);off?.();window.removeEventListener("focus",focus);};
-  },[sync]);
+    return()=>{coordinator.dispose();if(refreshCoordinator.current===coordinator)refreshCoordinator.current=null;mounted.current=false;++generation.current;window.clearInterval(timer);off?.();window.removeEventListener("focus",focus);};
+  },[sync,readSnapshot]);
   useEffect(()=>{
     const bridge=chatFilesBridge();if(!snapshot||!bridge)return;
     const groups=[...new Set(snapshot.messages.flatMap(message=>parseChatFileMessage(message.text).groupIds))].filter(group=>!loadedGroups.current.has(group));
@@ -123,7 +131,8 @@ export function PersonalOneWorkspace() {
     const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);setSavedRequests(outbox.current.list());return value;
   };
   const send=async()=>{
-    const message=text.trim();if((!message&&!attachments.length)||!outbox.current||!snapshot||attachmentBusy)return;let intent:PendingSupervisorWrite;
+    const submittedReply=messageReply;const rawMessage=text.trim();const message=composeMessageReply(rawMessage,submittedReply);if((!rawMessage&&!attachments.length)||!outbox.current||!snapshot||attachmentBusy)return;let intent:PendingSupervisorWrite;
+    if(message.length>8000){setAttachmentError(copy("인용을 포함한 메시지가 너무 깁니다 (최대 8,000자). 답장을 줄이거나 인용을 취소해 주세요.","The message including its quotation is too long (8,000 characters maximum). Shorten your reply or cancel the quotation."));return;}
     setAttachmentBusy(true);
     try{const runtimeSelection=storedOneRuntime();let fileGroupId:string|undefined;
       if(attachments.length){const bridge=chatFilesBridge();if(!bridge)throw new Error("attachment_bridge_unavailable");const stored=await bridge.snapshot({chatId:snapshot.conversationChatId,files:attachments.map(item=>item.draft)});fileGroupId=stored.groupId;}
@@ -134,6 +143,7 @@ export function PersonalOneWorkspace() {
     if(inFlight.current.has(intent.commandId))return;inFlight.current.add(intent.commandId);setSavedRequests(outbox.current.list());setText("");nearBottom.current=true;
     setOptimistic(prior=>prior.some(item=>item.commandId===intent.commandId)?prior:[...prior,{commandId:intent.commandId,text:message,acknowledged:false}]);
     try{const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);if(!mounted.current)return;setSavedRequests(outbox.current.list());showReceipt(value);
+      if(value.acknowledgement!=="unknown"&&["stored","dispatching","accepted","completed"].includes(value.state))setMessageReply(current=>current===submittedReply?null:current);
       setOptimistic(prior=>prior.map(item=>item.commandId===intent.commandId?{...item,acknowledged:true}:item));void sync();
     }catch{if(mounted.current)setError(true);}finally{inFlight.current.delete(intent.commandId);}
   };
@@ -215,17 +225,22 @@ export function PersonalOneWorkspace() {
           {personalOneTranscript((snapshot?.messages ?? []).filter(message=>message.role!=="system"),snapshot?.turns ?? []).map(({message,turn,answer})=>{
             const replyPresentation=turn?personalOneReplyPresentation(turn,Boolean(answer),activeReply?.runId):null;
             return <div className={styles.turn} key={message.id} data-command-id={turn?.commandId}>
-            <article className={styles.bubble} data-role={message.role}><Markdown text={message.role==="assistant"?visibleAnswer(message.text):parseChatFileMessage(message.text).visibleText} messageId={message.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>
+            <MessageActions messageId={message.id} author={message.role==="user"?copy("나","You"):name} text={message.role==="assistant"?visibleAnswer(message.text):displayMessageReply(parseChatFileMessage(message.text).visibleText,locale)} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role={message.role}><Markdown text={message.role==="assistant"?visibleAnswer(message.text):displayMessageReply(parseChatFileMessage(message.text).visibleText,locale)} messageId={message.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article></MessageActions>
             {message.role==="user"&&message.imageDataUrls?.map((src,index)=><img key={src} src={src} alt={copy("첨부 이미지 ","Attached image ")+(index+1)} style={{maxWidth:240,maxHeight:180,borderRadius:10}}/>)}
             {parseChatFileMessage(message.text).groupIds.map(group=><ChatFileCards key={group} files={messageFiles[group] ?? []} locale={ko?"ko":"en"} onOpen={requestChatFileOpen}/>)}
-            {answer&&<article className={styles.bubble} data-role="assistant" data-run-id={turn?.runId}><Markdown text={visibleAnswer(answer.text)} messageId={answer.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>}
-            {!answer&&live&&turn&&live.runId===turn.runId&&live.text&&<article className={styles.bubble} data-role="assistant" data-run-id={turn.runId}><Markdown text={visibleAnswer(live.text)} messageId={"live:"+turn.runId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article>}
+            {answer&&<MessageActions messageId={answer.id} author={name} text={visibleAnswer(answer.text)} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role="assistant" data-run-id={turn?.runId}><Markdown text={visibleAnswer(answer.text)} messageId={answer.id} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article></MessageActions>}
+            {!answer&&live&&turn&&live.runId===turn.runId&&live.text&&<MessageActions messageId={"live:"+turn.runId} author={name} text={visibleAnswer(live.text)} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role="assistant" data-run-id={turn.runId}><Markdown text={visibleAnswer(live.text)} messageId={"live:"+turn.runId} chatId={snapshot?.conversationChatId} onOpenLinkedFile={reference=>openFile(reference,snapshot!.conversationChatId)}/></article></MessageActions>}
             {turn&&snapshot?.delegations?.filter(item=>item.originReplyRunId===turn.runId).map(delegation)}
             {/* Owner 2026-10-04: no activity log under a reply ("이런건 없어도 되는"). While One answers, three dots. */}
             {replyPresentation==="answering"&&!(live&&live.runId===turn?.runId&&live.text)&&<div className={styles.typing} role="status" aria-label={copy("답하는 중","Answering")}><span/><span/><span/></div>}
             {replyPresentation&&replyPresentation!=="answering"&&<p className={styles.delivery} role="status" data-reply-state={replyPresentation}>{replyPresentation==="queued"?copy("대기 중","Queued"):replyPresentation==="held"?copy("실행 확인 필요","Checking execution"):replyPresentation==="failed"?copy("답변이 중단되었습니다","Reply interrupted"):copy("취소됨","Cancelled")}</p>}
+            {turn?.state==="failed"&&<AgiIncidentReportButton key={turn.runId} locale={ko?"ko":"en"} draft={{
+              chatId:snapshot?.conversationChatId,runId:turn.runId,failureCode:"one_supervisor_reply_failed",category:"other",
+              title:"[Supervisor] Reply failed",summary:"The Supervisor reply failed before normal completion.",
+              steps:["Send a message to Supervisor","The reply state became failed"],
+            }} />}
           </div>})}
-          {pendingMessages.map(message=><div className={styles.turn} key={message.commandId} data-optimistic-message={message.commandId}><article className={styles.bubble} data-role="user"><Markdown text={message.text} messageId={message.commandId}/></article><p className={styles.delivery}>{message.acknowledged?copy("접수됨","Received"):copy("접수 확인 중","Confirming reception")}</p></div>)}
+          {pendingMessages.map(message=><div className={styles.turn} key={message.commandId} data-optimistic-message={message.commandId}><MessageActions messageId={message.commandId} author={copy("나","You")} text={displayMessageReply(message.text,locale)} locale={locale} onReply={reply=>{setMessageReply(reply);composerDock.current?.querySelector("textarea")?.focus();}}><article className={styles.bubble} data-role="user"><Markdown text={displayMessageReply(message.text,locale)} messageId={message.commandId}/></article></MessageActions><p className={styles.delivery}>{message.acknowledged?copy("접수됨","Received"):copy("접수 확인 중","Confirming reception")}</p></div>)}
           {snapshot?.delegations?.filter(item=>!item.originReplyRunId || !snapshot.turns?.some(turn=>turn.runId===item.originReplyRunId)).map(delegation)}
         </div>
       </div>
@@ -237,6 +252,12 @@ export function PersonalOneWorkspace() {
           <ToolApprovalInline chatId={snapshot?.conversationChatId} compact chip composerWidth={736} />
         </div>
         {error&&<p role="status" className={styles.feedback}>{copy("접수를 확인할 수 없습니다. 저장된 요청과 연결 상태를 확인해 주세요.","Reception could not be confirmed. Review the saved request and connection.")}</p>}
+        <AgiDefectChip chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} />
+        {receipt?.state==="failed"&&receipt.kind!=="reply"&&<AgiIncidentReportButton key={receipt.commandId} locale={ko?"ko":"en"} draft={{
+          chatId:snapshot?.conversationChatId,runId:receipt.runId ?? receipt.commandId,failureCode:"one_supervisor_command_failed",category:"other",
+          title:"[Supervisor] Request failed",summary:receipt.reason || "The Supervisor request state became failed.",
+          steps:["Submit a Supervisor request",`Request kind: ${receipt.kind}`],
+        }} />}
         {savedRequests.filter(intent=>!inFlight.current.has(intent.commandId)).map(intent=><button className={styles.retry} key={intent.commandId} onClick={()=>void outbox.current!.deliver(ipc()!.oneSupervisor,intent).then(value=>{showReceipt(value);setSavedRequests(outbox.current!.list());void sync();}).catch(()=>setError(true))}>{copy("같은 저장 요청 다시 확인","Retry the same saved request")} · {intent.method}</button>)}
         <input ref={attachmentPicker} type="file" multiple hidden onChange={event=>{if(event.target.files)void pickAttachments(Array.from(event.target.files));event.target.value="";}}/>
         {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} key={index}>
@@ -245,6 +266,7 @@ export function PersonalOneWorkspace() {
           <button type="button" aria-label={copy("첨부 삭제: ","Remove attachment: ")+item.draft.name} onClick={()=>{if(item.preview)URL.revokeObjectURL(item.preview);setAttachments(prior=>prior.filter((_,position)=>position!==index));}}><IconClose size={14}/></button>
         </div>)}</div>}
         {attachmentError&&<p role="alert" className={styles.feedback}>{attachmentError}</p>}
+        <MessageReplyPreview reply={messageReply} locale={locale} onDismiss={()=>setMessageReply(null)}/>
         <form className={styles.composer} onSubmit={event=>{event.preventDefault();void send();}}>
           <div ref={plusMenu} className={styles.plus}>
             <button type="button" className={styles.iconButton} aria-label={copy("추가","Add")} aria-haspopup="menu" aria-expanded={plusOpen} data-hover="own" onClick={()=>setPlusOpen(value=>!value)}><IconPlus size={19}/></button>

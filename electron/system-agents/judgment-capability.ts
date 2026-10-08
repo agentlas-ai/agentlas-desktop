@@ -19,7 +19,8 @@ export interface JudgmentCapabilityReceipt {
  * This is an adapter contract, not a provider/model reputation list.  BYOK and
  * local OpenAI-compatible runners share `runLocalOpenAiChat`, which omits the
  * `tools` field and does not inspect or dispatch tools when `untrustedNoTools`
- * is set. Claude has an explicit `--safe-mode --tools ""` path. Other runners
+ * is set. Claude has an explicit `--safe-mode --tools ""` path. Codex uses a Main-owned Responses gateway that removes the tool menu
+ * and validates the complete response before the native dispatcher sees it. Other runners
  * stay fail-closed until their native tool inventory is independently proved.
  */
 export function inspectJudgmentCapability(
@@ -33,6 +34,16 @@ export function inspectJudgmentCapability(
       status: "unknown",
       enforcement: "unknown",
       reason: "judgment_capability_requirement_unknown",
+    };
+  }
+
+  if (selection.kind === "codex") {
+    return {
+      schemaVersion: "agentlas.judgment-capability.v1",
+      requirement: "no_tools",
+      status: "verified",
+      enforcement: "main_tool_payload_omitted",
+      reason: "codex_host_gateway_omits_tools_and_validates_full_response_before_native_dispatch",
     };
   }
 
@@ -63,7 +74,7 @@ export function inspectJudgmentCapability(
     };
   }
 
-  if (["codex", "antigravity", "acp", "kimi", "grok", "cursor", "ollama"].includes(selection.kind)) {
+  if (["antigravity", "acp", "kimi", "grok", "cursor", "ollama"].includes(selection.kind)) {
     return {
       schemaVersion: "agentlas.judgment-capability.v1",
       requirement: "no_tools",

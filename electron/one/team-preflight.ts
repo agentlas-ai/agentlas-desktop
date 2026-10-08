@@ -17,7 +17,7 @@ import {
 } from "../store/tasks";
 import { hasInvocationRunReceipt } from "../store/run-events";
 import { tryRecordOneDomainEvent } from "./domain-events";
-import { oneOrgExecutionGuidance } from "./org";
+import { ensureOneGroupLocalStaff, oneOrgExecutionGuidance } from "./org";
 import { ensureOneTaskforceForPreflight, notifyOneTaskforceFromPreflight, listOneTaskforces } from "./taskforces";
 import { inspectOneAttachmentInput } from "./attachments";
 import { oneTeamDispatchOwnerChat } from "./team-dispatch";
@@ -129,6 +129,8 @@ export interface OneTeamPreflightDependencies {
   afterReservation?: (proposal: OneTeamPreflightProposal) => void;
   /** Injectable resident judge for "does this genuinely need a team?" (tests). */
   judgeTeamNeed?: OneTeamNeedJudge;
+  /** Test seam for the existing Main group-member eligibility boundary. */
+  validateQueuedRoomMembers?: (agentIds: string[]) => void;
 }
 
 export interface PreparedOneTeamPreflightClaim {
@@ -662,6 +664,28 @@ function exactInstalledRoster(
     }
   }
   return { roles, candidates, targets, unresolvedExternal, unresolvedMembers: unresolved };
+}
+
+/** Fresh Main-only room inheritance for an accepted queued successor, without reusing a consumed proposal. */
+export function resolveQueuedOneRoomRoster(
+  chatId: string,
+  deps: OneTeamPreflightDependencies = {},
+): { roomId: string; revision: number; memberAgentIds: string[]; taskForceTargets: OrchestrationTarget[] } | null {
+  const chat = (deps.getChat ?? getChat)(chatId);
+  if (!chat || chat.originSurface !== "one" || chat.archivedAt) return null;
+  const rooms = (deps.listOneTaskforces ?? listOneTaskforces)().filter(room => room.chatId === chatId);
+  if (rooms.length === 0) return null;
+  if (rooms.length !== 1) throw new Error("one_queued_room_binding_ambiguous");
+  const room = rooms[0];
+  if (!room.memberAgentIds.length) return null;
+  if (deps.validateQueuedRoomMembers) deps.validateQueuedRoomMembers(room.memberAgentIds);
+  else getDb().transaction(() => ensureOneGroupLocalStaff(room.memberAgentIds, false))();
+  const roster = exactInstalledRoster(chat, deps, undefined, false, room.memberAgentIds);
+  if (roster.unresolvedMembers.length || roster.unresolvedExternal || !roster.targets.length) {
+    throw new Error("one_queued_room_member_unavailable");
+  }
+  return { roomId: room.id, revision: room.revision, memberAgentIds: [...room.memberAgentIds],
+    taskForceTargets: roster.targets };
 }
 
 function isCandidateSnapshot(value: unknown): value is CandidateSnapshot {

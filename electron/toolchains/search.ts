@@ -15,6 +15,7 @@ import {
   type ToolchainSearchHit,
 } from "../../shared/toolchain";
 import { autoLocalEmbedding, rankHybridLocal } from "../memory/local-embedding";
+import type { ToolchainAsset } from "../../shared/toolchain-asset";
 
 const MAX_CACHED = 256;
 const embeddings = new Map<string, readonly number[]>();
@@ -43,4 +44,21 @@ export function searchToolchains(task: string, contracts: ToolchainInterface[], 
     lexicalScore: entry.lexicalScore,
     semanticEligible: entry.semanticEligible,
   })), limit);
+}
+
+/** Independent asset identities; sharing a ranker does not merge graph identity. */
+export function searchToolchainAssets(task: string, assets: ToolchainAsset[], limit = 5): ToolchainAsset[] {
+  const query = task.trim();
+  if (!query || !assets.length) return [];
+  const ranked = rankHybridLocal(query, assets.flatMap(asset => {
+    const version = asset.versions.find(item => item.version === asset.stableVersion);
+    if (asset.status !== "callable" || version?.validation.state !== "passed") return [];
+    const c = version.contract;
+    const text = [c.name, c.description, ...c.whenToUse, ...c.whenNotToUse,
+      Object.keys((c.inputSchema.properties ?? {}) as Record<string, unknown>).join(" ")].join("\n");
+    return [{ id: asset.id, text, embedding: embeddingOf(text) }];
+  }));
+  const hits = acceptToolchainHits(ranked.map(entry => ({ automationId: entry.item.id, score: entry.score,
+    lexicalScore: entry.lexicalScore, semanticEligible: entry.semanticEligible })), limit);
+  return hits.flatMap(hit => { const asset = assets.find(item => item.id === hit.automationId); return asset ? [asset] : []; });
 }

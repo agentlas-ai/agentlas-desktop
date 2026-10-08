@@ -13,6 +13,7 @@ import type { ProductExtensionPermission } from "../../shared/product-extension"
 import type { ScienceDaemonClient } from "./daemon-client";
 
 export const SCIENCE_STYLE_LIBRARY_IPC_CHANNELS = [
+  "science:styles:templateCatalog", "science:styles:getProjectTemplate", "science:styles:applyTemplate",
   "science:styles:list", "science:styles:import", "science:styles:rename", "science:styles:delete",
   "science:styles:applyToProject", "science:styles:samplePreview", "science:styles:openForEditing", "science:styles:saveEdited",
 ] as const;
@@ -24,6 +25,10 @@ type Row = Record<string, unknown>;
 const row = (value: unknown): Row => value !== null && typeof value === "object" && !Array.isArray(value) ? value as Row : {};
 const sha = (value: unknown): string => { if (typeof value !== "string" || !SHA.test(value)) throw new Error("science-style-id-invalid"); return value; };
 const lang = (value: unknown): "ko" | "en" => value === "en" ? "en" : "ko";
+const projectId = (value: unknown): string => {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(value)) throw new Error("science-paper-template-project-invalid");
+  return value;
+};
 
 export function registerScienceStyleLibraryIpc({ ipc, assertScienceSender, client }: {
   ipc: Pick<IpcMain, "handle">;
@@ -39,6 +44,12 @@ export function registerScienceStyleLibraryIpc({ ipc, assertScienceSender, clien
     });
   };
   handle("science:styles:list", () => client.commandObserved({ op: "styles.list" }));
+  handle("science:styles:templateCatalog", (_event, input) => client.commandObserved({ op: "styles.templateCatalog", input: { lang: lang(input.lang) } }));
+  handle("science:styles:getProjectTemplate", (_event, input) => client.commandObserved({ op: "styles.getProjectTemplate", input: { projectId: projectId(input.projectId) } }));
+  handle("science:styles:applyTemplate", (_event, input) => {
+    if (input.templateId !== null && (typeof input.templateId !== "string" || !/^[a-z][a-z0-9-]{0,79}$/u.test(input.templateId))) throw new Error("science-paper-template-id-invalid");
+    return client.command({ op: "styles.applyTemplate", input: { projectId: projectId(input.projectId), templateId: input.templateId as string | null } });
+  }, "science:artifacts");
   handle("science:styles:import", async (event) => {
     const owner = BrowserWindow.fromWebContents(event.sender);
     const options: Electron.OpenDialogOptions = { properties: ["openFile"], filters: [{ name: "Word / 한글", extensions: ["docx", "dotx", "docm", "dotm", "hwpx"] }] };

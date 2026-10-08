@@ -1,4 +1,5 @@
 import { scienceLocalEmbeddingHost } from "./science-host/local-embedding";
+import { ScienceQuestionRecoveryPresenter } from "./science-host/work-recovery";
 import { inspectScienceRuntimeSelectionAvailability } from "./science-host/runtime-selection-availability";
 import { installScienceSchemaRejectionReader } from "./invocation/science-schema-rejection";
 import { scienceCriterionReviewHost } from "./science-host/criterion-review";
@@ -7,6 +8,7 @@ import { mintForwardSteeringRecoveryCapability } from "./science-host/recovery-m
 import { scienceEvidenceCollectionHost } from "./runtime/science-collection-boundary";
 import { desktopAliveRuntime } from "./alive-runtime";
 import { desktopAliveClock } from "./alive-clock";
+import { projectResearchState } from "./science-host/research-state-projection";
 /*
  * 사이언스가 이 앱에게 요구하는 것을 한 벌로 채워 준다.
  *
@@ -21,6 +23,7 @@ import { desktopAliveClock } from "./alive-clock";
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
+import { app } from "electron";
 
 import { scienceStore, installScienceHost, SCIENCE_HOST_CONTRACT_VERSION, SCIENCE_HOST_REQUIRED_CAPABILITIES } from "agentlas-science";
 import { inspectLegacyForwardRecoveryBoundary, reconcileScienceBoundary, type ScienceRuntimeBoundaryInput } from "./long-run/science-boundary";
@@ -68,6 +71,20 @@ import { persistedWorkbookReadback, readPersistedScienceWorkbook } from "./scien
 
 let installed = false;
 let registeredResearcherQuestionUiRelease: string | null = null;
+let questionRecovery: ScienceQuestionRecoveryPresenter | null = null;
+
+function desktopQuestionRecovery(): ScienceQuestionRecoveryPresenter {
+  if (!questionRecovery) {
+    questionRecovery = new ScienceQuestionRecoveryPresenter({
+      references: () => scienceStore().researcherQuestions().openReferences(),
+      read: ref => scienceStore().researcherQuestions().presentationScope(ref.projectId, ref.conversationId, ref.questionId),
+      available: () => Boolean(registeredResearcherQuestionUiRelease && registeredResearcherQuestionUiRelease === currentScienceUiRelease()),
+      present: notifyScienceResearcherQuestion,
+    });
+    app.once("before-quit", () => questionRecovery?.stop());
+  }
+  return questionRecovery;
+}
 
 function boundScienceRuntimeChatId(input: Omit<ScienceRuntimeBoundaryInput, "expectedRuntimeChatId">): string {
   const store = scienceStore();
@@ -89,6 +106,7 @@ function currentScienceUiRelease(): string | null {
 export function registerDesktopScienceResearcherQuestionUi(): void {
   registeredResearcherQuestionUiRelease = currentScienceUiRelease();
   if (!registeredResearcherQuestionUiRelease) throw new Error("science-researcher-question-ui-release-unavailable");
+  desktopQuestionRecovery().restore();
 }
 
 /**
@@ -167,7 +185,7 @@ export function installDesktopScienceHost(): void {
       // The view need not remain open: questions can be read again when it is reopened.
       isAvailable: () => Boolean(registeredResearcherQuestionUiRelease
         && registeredResearcherQuestionUiRelease === currentScienceUiRelease()),
-      present: (question: unknown) => { notifyScienceResearcherQuestion(question); },
+      present: (question: unknown) => { desktopQuestionRecovery().present(question); },
     },
     // 확장 검증
     activeScienceExtension,
@@ -217,6 +235,7 @@ export function installDesktopScienceHost(): void {
     contractVersion: SCIENCE_HOST_CONTRACT_VERSION,
     capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
     execution: {
+      ...{ projectResearchState },
       ...{ mintForwardSteeringRecoveryCapability },
       ...{ evidenceCollection: scienceEvidenceCollectionHost },
       criterionReview: scienceCriterionReviewHost,

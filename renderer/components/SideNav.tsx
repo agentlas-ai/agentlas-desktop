@@ -13,6 +13,7 @@ import { CreditBalanceWidget } from "./CreditBalanceWidget";
 import { UpdateBanner } from "./UpdateBanner";
 import { SidebarResizeHandle } from "./SidebarResizeHandle";
 import { useWorkSidebarWidth } from "@/lib/work-sidebar-width";
+import { setAppSidebarCollapsed, SIDENAV_COLLAPSE_KEY } from "@/lib/app-control-bridge";
 import { navigate } from "@/lib/navigation";
 import { ipc } from "@/lib/ipc";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
@@ -46,7 +47,7 @@ import type { MarketplaceListing } from "@/lib/types";
 import type { ComponentType } from "react";
 
 type IconType = ComponentType<{ size?: number }>;
-const COLLAPSE_KEY = "agentlas.sidenav.collapsed";
+const COLLAPSE_KEY = SIDENAV_COLLAPSE_KEY;
 
 interface Leaf {
   label: string;
@@ -103,11 +104,17 @@ export function SideNav({
   );
 
   useEffect(() => {
-    try {
-      setCollapsed(window.localStorage.getItem(COLLAPSE_KEY) === "1");
-    } catch {
-      /* ignore */
-    }
+    const sync = (event?: StorageEvent) => {
+      if (event && event.key !== null && event.key !== COLLAPSE_KEY) return;
+      try {
+        const next = window.localStorage.getItem(COLLAPSE_KEY) === "1";
+        setCollapsed(next);
+        if (event) setCompactOpen(!next);
+      } catch { /* Storage is optional. */ }
+    };
+    sync();
+    window.addEventListener("storage", sync);
+    return () => window.removeEventListener("storage", sync);
   }, []);
 
   useEffect(() => {
@@ -165,15 +172,9 @@ export function SideNav({
       setCompactOpen((open) => !open);
       return;
     }
-    setCollapsed((c) => {
-      const next = !c;
-      try {
-        window.localStorage.setItem(COLLAPSE_KEY, next ? "1" : "0");
-      } catch {
-        /* ignore */
-      }
-      return next;
-    });
+    const next = !collapsedPref;
+    setCollapsed(next);
+    try { setAppSidebarCollapsed(next); } catch { /* Storage is optional. */ }
   }
 
   const primary: Leaf[] = useMemo(

@@ -67,7 +67,9 @@ function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
     // since selection. Unknown observations do not manufacture exhaustion.
     if (["claude-code", "codex"].includes(kind) && !getSubscriptionCreditUse()
       && peekProviderQuotaExhausted(kind, Date.now(), req.model)) {
-      return { text: "", failure: { kind: "refused", source: "marker", runtime: kind,
+      // Host admission is unavailable before dispatch, not a request refusal
+      // or a provider quota failure that adds cooldown or paid fallback.
+      return { text: "", failure: { kind: "unavailable", source: "marker", runtime: kind,
         providerCode: "subscription_credits_disabled",
         message: req.locale === "ko" ? "구독 한도가 소진됐고 크레딧 자동 사용이 꺼져 있어 시작하지 않았습니다."
           : "This run was not started: the subscription limit is reached and automatic credit use is off." } };

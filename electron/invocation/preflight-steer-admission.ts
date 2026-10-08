@@ -1,5 +1,6 @@
 import type { McpInvocationRequest } from "../../shared/types";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
+import { normalizeOnePreflightSteerRequest, ONE_PREFLIGHT_STEER_REQUEST_KEYS, type OnePreflightSteerRequest } from "../../shared/one-preflight-steers";
 import { readInvocationEffectBoundary } from "./effect-boundary-reader";
 import { invocationService } from "./service";
 import { admitMainInvocation } from "../runtime/scheduled-root-context";
@@ -13,10 +14,16 @@ import {
 } from "../store/one-preflight-steers";
 import { getInvocationRunReceipt } from "../store/run-events";
 
-function requestForPreflightSteer(templateJson: string, chatId: string, prompt: string): McpInvocationRequest {
+function requestForPreflightSteer(templateJson: string, chatId: string, prompt: string, choices?: OnePreflightSteerRequest): McpInvocationRequest {
   const template = JSON.parse(templateJson) as McpInvocationRequest;
   if (template.chatId !== chatId || template.oneMode !== true || template.userPrompt !== "") {
     throw new Error("one_preflight_steer_template_invalid");
+  }
+  if (choices !== undefined) {
+    // A new gesture supplies a complete choice snapshot. Missing keys mean
+    // defaults; they cannot inherit mutable or different parent choices.
+    for (const key of ONE_PREFLIGHT_STEER_REQUEST_KEYS) delete template[key];
+    Object.assign(template, normalizeOnePreflightSteerRequest(choices));
   }
   return { ...template, userPrompt: prompt,
     permissions: effectiveInvocationPermission(template.permissions, template.planMode), runId: undefined };
@@ -27,15 +34,18 @@ function exactDurable(id: string, chatId: string, parentRunId: string, request: 
 }
 
 /** Never infer permission to replay from a missing acknowledgement. */
-export function dispatchOnePreflightSteers(submissionId?: string): {
+export function dispatchOnePreflightSteers(submissionId?: string, chatId?: string): {
   examined: number; attached: number; held: number;
 } {
-  const candidates = listDispatchableOnePreflightSteers()
-    .filter((item) => !submissionId || item.submissionId === submissionId);
+  const candidates = listDispatchableOnePreflightSteers(submissionId, chatId);
   let attached = 0;
   let held = 0;
-  let materializedForRecovery = false;
+  const materializedChats = new Set<string>();
+  const reservedCapacity = new Map<string, number>();
   for (const item of candidates) {
+    // Intake has already committed this message. Scheduler saturation is a
+    // known no-dispatch condition, so leave it queued and unclaimed.
+    if (invocationService.steerQueueCapacity(item.chatId) <= (reservedCapacity.get(item.chatId) ?? 0)) continue;
     const parent = getOnePreflightSubmission(item.submissionId);
     const parentRunId = parent?.parent_run_id;
     if (!parent || parent.state !== "bound" || !parentRunId || !parent.steer_template_json) {
@@ -67,7 +77,7 @@ export function dispatchOnePreflightSteers(submissionId?: string): {
       continue;
     }
     try {
-      const request = requestForPreflightSteer(parent.steer_template_json, item.chatId, item.userPrompt);
+      const request = requestForPreflightSteer(parent.steer_template_json, item.chatId, item.userPrompt, item.request);
       if (activeParent) {
         invocationService.steer(request, parentRunId, undefined, undefined,
           admitMainInvocation(item.chatId), item.steerId);
@@ -77,7 +87,8 @@ export function dispatchOnePreflightSteers(submissionId?: string): {
         // its existing boot recovery is the sole successor dispatcher.
         persistQueuedSteer({ id: item.steerId, chatId: item.chatId,
           originalRunId: parentRunId, request });
-        materializedForRecovery = true;
+        materializedChats.add(item.chatId);
+        reservedCapacity.set(item.chatId, (reservedCapacity.get(item.chatId) ?? 0) + 1);
       }
       if (!exactDurable(item.steerId, item.chatId, parentRunId, request)) {
         throw new Error("one_preflight_steer_receipt_missing");
@@ -89,14 +100,14 @@ export function dispatchOnePreflightSteers(submissionId?: string): {
       let acknowledged = false;
       try {
         acknowledged = exactDurable(item.steerId, item.chatId, parentRunId,
-          requestForPreflightSteer(parent.steer_template_json, item.chatId, item.userPrompt));
+          requestForPreflightSteer(parent.steer_template_json, item.chatId, item.userPrompt, item.request));
       } catch { /* Template proof was lost. */ }
       if (acknowledged) {
         if (markOnePreflightSteerAttached(item.steerId, parentRunId)) attached += 1;
       } else if (holdOnePreflightSteer(item.steerId)) held += 1;
     }
   }
-  if (materializedForRecovery) invocationService.recoverQueuedSteers();
+  for (const materializedChat of materializedChats) invocationService.recoverQueuedSteers(materializedChat);
   return { examined: candidates.length, attached, held };
 }
 
@@ -111,7 +122,7 @@ export function recoverOnePreflightSteers(currentOwnerEpoch: string): {
     if (!item.parentRunId || !parent?.steer_template_json || parent.parent_run_id !== item.parentRunId) return false;
     try {
       return exactDurable(item.steerId, item.chatId, item.parentRunId,
-        requestForPreflightSteer(parent.steer_template_json, item.chatId, item.userPrompt));
+        requestForPreflightSteer(parent.steer_template_json, item.chatId, item.userPrompt, item.request));
     } catch { return false; }
   });
   const dispatched = dispatchOnePreflightSteers();

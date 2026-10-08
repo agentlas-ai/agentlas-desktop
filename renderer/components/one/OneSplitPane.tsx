@@ -6,6 +6,7 @@ import { HostContinuationNotice } from "@/components/HostContinuationNotice";
 import { normalizeChatHostNotice } from "@shared/chat-host-notice";
 import type { ChatHostNotice } from "@shared/types";
 import { ipc } from "@/lib/ipc";
+import { readOneChatHistory } from "@/lib/one-chat-history";
 import { parseChatFileMessage } from "@/lib/chat-files";
 import { projectOneActivityFromLedger } from "@/lib/one-activity";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
@@ -64,9 +65,11 @@ export function OneSplitPane({
     let cancelled = false;
     const api = ipc();
     if (!api) return;
+    let loading = false;
     const load = () => {
-      void api.invoke
-        .history(chatId)
+      if (cancelled || loading) return;
+      loading = true;
+      void readOneChatHistory(api, chatId)
         .then((rows: unknown) => {
           if (cancelled) return;
           // 칸은 좁다. 오래된 turn 까지 Markdown 으로 다시 그리면 칸 수만큼
@@ -76,7 +79,7 @@ export function OneSplitPane({
         })
         .catch(() => {
           if (!cancelled) setMessages([]);
-        });
+        }).finally(() => { loading = false; });
     };
     load();
     /*
@@ -102,7 +105,10 @@ export function OneSplitPane({
     const api = ipc();
     // 접혀 있는 사이드바 때문에 원장을 읽지 않는다. 열 때 처음 읽는다.
     if (!api || !railOpen) return;
+    let loading = false;
     const load = () => {
+      if (cancelled || loading) return;
+      loading = true;
       void api.runLedger
         .chatTimeline(chatId, { maxRuns: 4, eventsPerRun: 200 })
         .then((runs: unknown) => {
@@ -115,7 +121,8 @@ export function OneSplitPane({
             setArtifacts([]);
           }
         })
-        .catch(() => { if (!cancelled) setArtifacts([]); });
+        .catch(() => { if (!cancelled) setArtifacts([]); })
+        .finally(() => { loading = false; });
     };
     load();
     const timer = window.setInterval(() => {

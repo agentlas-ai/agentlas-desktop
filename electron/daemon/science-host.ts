@@ -1,4 +1,5 @@
 import { scienceLocalEmbeddingHost } from "../science-host/local-embedding";
+import { ScienceQuestionRecoveryPresenter } from "../science-host/work-recovery";
 import { inspectScienceRuntimeSelectionAvailability } from "../science-host/runtime-selection-availability";
 import fs from "node:fs";
 import path from "node:path";
@@ -12,6 +13,7 @@ import { mintForwardSteeringRecoveryCapability } from "../science-host/recovery-
 import { scienceEvidenceCollectionHost } from "../runtime/science-collection-boundary";
 import { inspectLegacyForwardRecoveryBoundary, reconcileScienceBoundary, type ScienceRuntimeBoundaryInput } from "../long-run/science-boundary";
 import { projectScienceLoopLongRun } from "../long-run/science-projection";
+import { projectResearchState } from "../science-host/research-state-projection";
 import { detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, withCliPath } from "../runtime/exec";
 import { resolveManagedNodeRuntime } from "../runtime/managed-node";
 import { isPackagedRuntime, runtimeResourcesPath, userDataPath } from "../runtime-paths";
@@ -55,6 +57,13 @@ export function installDaemonScienceHost(input: {
     const release = activeScienceExtension();
     return release ? createHash("sha256").update(productExtensionSignedPayload(release.manifest)).digest("hex") : null;
   };
+  const questionRecovery = new ScienceQuestionRecoveryPresenter({
+    references: () => scienceStore().researcherQuestions().openReferences(),
+    read: ref => scienceStore().researcherQuestions().presentationScope(ref.projectId, ref.conversationId, ref.questionId),
+    available: () => Boolean(questionUiRelease && questionUiRelease === currentRelease()),
+    assertOwner: input.assertOwner,
+    present: input.presentQuestion,
+  });
   const project = (snapshot: Parameters<typeof projectScienceLoopLongRun>[0]) => {
     projectScienceLoopLongRun(snapshot, { hostOwnerKind: "daemon", appInstanceId: input.ownerEpoch, assertOwner: input.assertOwner });
   };
@@ -127,7 +136,7 @@ export function installDaemonScienceHost(input: {
     registerScienceMcpPreparedConfig: registerPrepared,
     researcherQuestionUi: {
       isAvailable: () => Boolean(questionUiRelease && questionUiRelease === currentRelease()),
-      present: input.presentQuestion,
+      present: (question: unknown) => { input.assertOwner(); questionRecovery.present(question); },
     },
     activeScienceExtension, resolveVerifiedScienceRenderer, resolveExactVerifiedScienceRenderer,
     resolveVerifiedScienceRendererExecutor, resolveExactVerifiedScienceRendererExecutor, resolveExactVerifiedScienceRendererExecutorBinding,
@@ -150,6 +159,16 @@ export function installDaemonScienceHost(input: {
   } as never, {
     contractVersion: SCIENCE_HOST_CONTRACT_VERSION, capabilities: SCIENCE_HOST_REQUIRED_CAPABILITIES,
     execution: {
+      ...{ projectResearchState: async (projectionInput: Parameters<typeof projectResearchState>[0]) => {
+        try {
+          input.assertExecution();
+          const result = await projectResearchState(projectionInput);
+          input.assertExecution();
+          return result;
+        } catch {
+          return { status: "unavailable" as const, code: "research_state_projection_host_unavailable", usage: "unknown" as const };
+        }
+      } },
       mintForwardSteeringRecoveryCapability: (...args: Parameters<typeof mintForwardSteeringRecoveryCapability>) => {
         input.assertExecution(); return mintForwardSteeringRecoveryCapability(...args);
       },
@@ -189,8 +208,9 @@ export function installDaemonScienceHost(input: {
       input.assertExecution();
       questionUiRelease = currentRelease();
       if (!questionUiRelease) throw new Error("science-researcher-question-ui-release-unavailable");
+      questionRecovery.restore();
       return { releaseSha256: questionUiRelease };
     },
-    stopClock() { for (const release of [...releases]) release(); },
+    stopClock() { questionRecovery.stop(); for (const release of [...releases]) release(); },
   };
 }

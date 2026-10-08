@@ -684,6 +684,32 @@
         "section": "flow",
         "placeable": true
       }
+    },
+    {
+      "kind": "toolchain_call",
+      "title": "검증된 도구 묶음의 고정된 버전을 부른다",
+      "status": "implemented",
+      "owns": [
+        "toolchainCall",
+        "produces",
+        "consumes",
+        "effect"
+      ],
+      "emits": "graph/1/port.output",
+      "note": "Calls an independent immutable asset through the canonical calls service. Parent permission, abort, typed arguments, cycle/depth limits and output contract apply.",
+      "functions": [
+        {
+          "id": "toolchain_call.execute",
+          "title": "버전 고정 호출과 계약 검증",
+          "status": "implemented",
+          "sub": []
+        }
+      ],
+      "ui": {
+        "section": "inventory",
+        "placeable": true,
+        "placeReason": "검증된 독립 툴체인 자산과 고정 버전을 실물 목록에서 골라 놓는다 — 입력은 그 버전의 검증 예시에서 시작한다"
+      }
     }
   ]
 }

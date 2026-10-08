@@ -304,6 +304,9 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     getForManuscript: (projectId: string, manuscriptId: string) => ipcRenderer.invoke("science:claimLedgers:getForManuscript", { extensionId, projectId, manuscriptId }),
   }),
   styles: Object.freeze({
+    templateCatalog: (input: unknown) => ipcRenderer.invoke("science:styles:templateCatalog", { extensionId, input }),
+    getProjectTemplate: (input: unknown) => ipcRenderer.invoke("science:styles:getProjectTemplate", { extensionId, input }),
+    applyTemplate: (input: unknown) => ipcRenderer.invoke("science:styles:applyTemplate", { extensionId, input }),
     list: () => ipcRenderer.invoke("science:styles:list", { extensionId, input: {} }),
     import: () => ipcRenderer.invoke("science:styles:import", { extensionId, input: {} }),
     rename: (input: unknown) => ipcRenderer.invoke("science:styles:rename", { extensionId, input }),

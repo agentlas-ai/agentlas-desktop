@@ -20,6 +20,15 @@ const id = string(128);
 export const GRAPH_MCP_CALL_INPUT_SCHEMA = object({ catalogId: string(128), toolName: string(200),
   arguments: { type: "object", additionalProperties: true }, schemaDigest: revision,
 }, ["catalogId", "toolName", "arguments"]);
+export const GRAPH_TOOLCHAIN_CALL_INPUT_SCHEMA = object({ toolchainId: id,
+  version: { type: "integer", minimum: 1 }, args: { type: "object", additionalProperties: true },
+}, ["toolchainId", "version", "args"]);
+const toolchainContract = object({ name: string(160), description: string(4000),
+  whenToUse: array(string(1000), 20), whenNotToUse: array(string(1000), 20),
+  inputSchema: { type: "object", additionalProperties: true }, outputSchema: { type: "object", additionalProperties: true },
+  examples: array(object({ input: { type: "object", additionalProperties: true }, expectedOutput: {} }, ["input", "expectedOutput"]), 20, 2),
+  variationStatement: string(4000),
+}, ["name", "description", "whenToUse", "whenNotToUse", "inputSchema", "outputSchema", "examples", "variationStatement"]);
 
 export const GRAPH_BLUEPRINT_INPUT_SCHEMA = object({
   schema: { const: BLUEPRINT_SCHEMA }, name: string(160), goal: string(4000),
@@ -28,8 +37,9 @@ export const GRAPH_BLUEPRINT_INPUT_SCHEMA = object({
     title: string(160), instruction: string(16000), effect: { enum: ["read", "mutation"] },
     produces: string(80), consumes: array(string(80)),
     uses: array(object({ capability: { enum: CAPABILITIES }, provider: { anyOf: [{ type: "null" }, string(128)] } }, ["capability"])),
-    kind: { enum: ["agent", "code", "runGraph", "mcp_call"] }, graphRef: id,
+    kind: { enum: ["agent", "code", "runGraph", "mcp_call", "toolchain_call"] }, graphRef: id,
     mcpCall: GRAPH_MCP_CALL_INPUT_SCHEMA,
+    toolchainCall: GRAPH_TOOLCHAIN_CALL_INPUT_SCHEMA,
     // The runner contract (electron/workflow/code-runner.ts). Without it a model saving a code step
     // had to guess or read host source (measured 2026-10-04: five source reads before one save).
     code: { ...string(24000), description: "Code step body. Earlier values arrive in `vars` (python dict: vars.get('text'); js object: vars.text) — list the names in consumes. Assign the output to `result`; it becomes this step's produces value. print/console output is a log only." },
@@ -61,9 +71,17 @@ export const ONE_GRAPH_TOOLS = [
   { name: "one_graph_run", annotations: act, description: "Execute an enabled saved graph through the host queue and return its result when ready (wait_seconds default 20, at most 50). Pass current expected_revision and stable request_id; retries never duplicate execution. Input contains named strings; no prompt copy. If still running, retain event_id and use one_graph_result. One owns strategy and may evaluate returned data itself or encode reasoning steps in the blueprint.", inputSchema: object({ graph_id: id, expected_revision: revision, request_id: string(128), wait_seconds: { type: "integer", minimum: 0, maximum: 50 },
     input: { type: "object", additionalProperties: true }, dry_run: { type: "boolean" },
   }, ["graph_id", "expected_revision", "request_id"]) },
-  { name: "toolchain_publish", annotations: act, description: "Make a graph this conversation saved callable from other conversations (a Toolchain) when future requests will reuse it. Host drafts the contract (purpose, when to use and not, input schema, pessimistic effects) and runs a fresh-session test with no tools; only a passing test makes it callable, otherwise it stays a draft and the result says where the test failed. Pass graph_id and its current expected_revision. The owner can withdraw it from Toolchains.", inputSchema: object({ graph_id: id, expected_revision: revision }, ["graph_id", "expected_revision"]) },
-  { name: "toolchain_search", annotations: ro, description: "Find an owner-approved callable automation (Toolchain) for a task before doing the work yourself. Returns at most 5 contracts (purpose, when_to_use, when_not_to_use, input_schema, input_examples, effects, expected_revision) or none. None means do the work normally. To use one, call one_graph_run with its graph_id, expected_revision, a stable request_id and input matching input_schema.", inputSchema: object({ task: string(2000), limit: { type: "integer", minimum: 1, maximum: 5 } }, ["task"]) },
-  { name: "toolchain_report", annotations: act, description: "Tell whoever made a Toolchain that one of your runs of it was wrong for its input. Use it only after a one_graph_run you requested returned a wrong or unusable result: pass that graph_id and event_id, what was wrong (problem), and optionally the expected result. You cannot change a Toolchain you did not make; after reporting, do the request without it. It starts no work and changes nothing outside.", inputSchema: object({ graph_id: id, event_id: id, problem: string(1000), expected: string(1000) }, ["graph_id", "event_id", "problem"]) },
+  { name: "toolchain_create", annotations: act, description: "Extract a generalized capability from this conversation's graph into an independent draft asset. Prepare reusable typed input/output JSON schemas, at least two distinct input examples with expected outputs, and describe what varies. A specific task name alone is not generalization. The graph is frozen as this version's implementation; future source graph edits do not change it. Pass toolchain_id only to append a new immutable version to an asset you created.", inputSchema: object({ graph_id: id, expected_revision: revision, toolchain_id: id, contract: toolchainContract,
+    output_binding: object({ nodeId: id, format: { enum: ["json", "text"] } }, ["nodeId", "format"]),
+  }, ["graph_id", "expected_revision", "contract", "output_binding"]) },
+  { name: "toolchain_publish", annotations: act, description: "Validate an independent draft version with real executions on its distinct examples. Only matching typed outputs make it callable; selection in a fresh conversation alone is not validation. Returns asset id/version and validation state. Effectful example execution needs an effect-specific verification path; ordinary publication never sends example posts or payments.", inputSchema: object({ toolchain_id: id, version: { type: "integer", minimum: 1 } }, ["toolchain_id", "version"]) },
+  { name: "toolchain_search", annotations: ro, description: "Find callable generalized capabilities for this request. Returns independent toolchain_id, pinned version, typed input/output schema and usage examples. An empty result means do the work normally. Use toolchain_run with args matching input_schema, or compose the version in a graph's native toolchain_call step. Toolchain ids are separate from graph ids and MCP tools.", inputSchema: object({ task: string(2000), limit: { type: "integer", minimum: 1, maximum: 5 } }, ["task"]) },
+  { name: "toolchain_inspect", annotations: ro, description: "Read an independent Toolchain contract and its immutable versions. Returns no source graph instructions. Omit version for the stable version.", inputSchema: object({ toolchain_id: id, version: { type: "integer", minimum: 1 } }, ["toolchain_id"]) },
+  { name: "toolchain_run", annotations: act, description: "Execute an exact published Toolchain version with full typed args (objects, arrays, numbers and booleans are retained). Use the toolchain_id/version from search and a stable request_id. Retrying the same request returns its previous receipt; changing its args is refused. If running, retain call_id and read toolchain_result. Caller permissions cap the implementation.", inputSchema: object({ toolchain_id: id, version: { type: "integer", minimum: 1 }, args: { type: "object", additionalProperties: true },
+    request_id: string(128), wait_seconds: { type: "integer", minimum: 0, maximum: 45 }, dry_run: { type: "boolean" },
+  }, ["toolchain_id", "version", "args", "request_id"]) },
+  { name: "toolchain_result", annotations: ro, description: "Read the typed result/status of your exact Toolchain call. Reading never executes work, including after withdrawal. Running/interrupted effects are unresolved, never proof of success.", inputSchema: object({ call_id: id, wait_seconds: { type: "integer", minimum: 0, maximum: 45 } }, ["call_id"]) },
+  { name: "toolchain_report", annotations: act, description: "Record a wrong or unusable result for your own Toolchain call. Pass call_id/problem and optional expected result. It does not start repairs or change other conversations. Create and publish a new version to repair a capability; existing graph version pins stay unchanged.", inputSchema: object({ call_id: id, problem: string(1000), expected: string(1000) }, ["call_id", "problem"]) },
   { name: "one_graph_result", annotations: ro, description: "Result/status of this conversation's exact graph event. Optional wait_seconds waits up to 50 seconds; repeated reads never execute work. Includes bounded node outputs and typed failures. Fetch a longer output by node_id and offset/limit without loading all instructions/history.", inputSchema: object({ graph_id: id, event_id: id, wait_seconds: { type: "integer", minimum: 0, maximum: 50 }, node_id: id, offset: { type: "integer", minimum: 0 }, limit: { type: "integer", minimum: 1, maximum: 32000 } }, ["graph_id", "event_id"]) },
 ] as const;
 export const ONE_GRAPH_TOOL_NAMES = ONE_GRAPH_TOOLS.map(tool => tool.name);

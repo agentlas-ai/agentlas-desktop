@@ -86,6 +86,24 @@ function decode(row: Row): DurableQueuedSteer {
   };
 }
 
+/** Receipt lookup includes consumed/held rows: a lost ACK never grants a second dispatch. */
+export function getDurableQueuedSteer(id: string): DurableQueuedSteer | null {
+  const row = getDb().prepare("SELECT * FROM invocation_steers WHERE id = ?").get(id) as Row | undefined;
+  return row ? decode(row) : null;
+}
+
+/** Object key order is transport detail; array order and every request value remain part of identity. */
+export function canonicalQueuedSteerRequest(request: McpInvocationRequest): string {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value && typeof value === "object") return Object.fromEntries(Object.entries(value)
+      .filter(([, entry]) => entry !== undefined).sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, entry]) => [key, canonical(entry)]));
+    return value;
+  };
+  return JSON.stringify(canonical({ ...request, runId: undefined }));
+}
+
 export function persistQueuedSteer(input: {
   /** Main-owned idempotency key for a preflight direction, never a renderer run id. */
   id?: string;
@@ -155,10 +173,11 @@ export function durableQueuedSteerMatches(input: {
     && row.workspace_binding_json === null && row.execution_context_json === null);
 }
 
-export function listRecoverableQueuedSteers(): DurableQueuedSteer[] {
+export function listRecoverableQueuedSteers(chatId?: string): DurableQueuedSteer[] {
   const rows = getDb().prepare(
-    `SELECT * FROM invocation_steers WHERE status IN ('queued','draining') ORDER BY queued_at, id`,
-  ).all() as Row[];
+    "SELECT * FROM invocation_steers WHERE status IN ('queued','draining') " +
+    (chatId !== undefined ? "AND chat_id = ? " : "") + "ORDER BY rowid",
+  ).all(...(chatId !== undefined ? [chatId] : [])) as Row[];
   const out: DurableQueuedSteer[] = [];
   for (const row of rows) {
     try { out.push(decode(row)); } catch {

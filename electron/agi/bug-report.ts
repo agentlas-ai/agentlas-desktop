@@ -105,7 +105,7 @@ const DEFECT_FAMILY: Array<[RegExp, string]> = [[/browser|cdp/, "cdp"], [/login/
 function reportIdentity(payload: AgiBugReportPayload, defectId: string | null): string {
   // One failed run can file multiple defect records or rebuild its log excerpt.
   // Those previews still describe the same incident and must retain its wire id.
-  if (payload.source === "desktop-agi" && payload.runId && payload.failureCode) {
+  if (payload.runId && payload.failureCode) {
     return JSON.stringify(["incident", payload.runId, payload.failureCode, payload.chatRef ?? null]);
   }
   if (defectId) return JSON.stringify(["defect", defectId]);
@@ -120,11 +120,10 @@ export class AgiBugReports {
   private existing(payload: AgiBugReportPayload, defectId: string | null): QueueRow | undefined {
     const identity = reportIdentity(payload, defectId);
     const candidates = this.deps.db.prepare(`SELECT * FROM agi_bug_report_queue
-      WHERE defect_id = ? OR (json_extract(payload_json, '$.source') = ? AND
-        ((json_extract(payload_json, '$.runId') = ? AND json_extract(payload_json, '$.failureCode') = ?)
-          OR (json_extract(payload_json, '$.title') = ? AND json_extract(payload_json, '$.category') = ?)))
+      WHERE defect_id = ? OR (json_extract(payload_json, '$.runId') = ? AND json_extract(payload_json, '$.failureCode') = ?)
+        OR (json_extract(payload_json, '$.source') = ? AND json_extract(payload_json, '$.title') = ? AND json_extract(payload_json, '$.category') = ?)
       ORDER BY CASE status WHEN 'sent' THEN 0 WHEN 'queued' THEN 1 WHEN 'failed' THEN 2 ELSE 3 END,
-        created_at_ms, client_report_id`).all(defectId, payload.source, payload.runId ?? null, payload.failureCode ?? null,
+        created_at_ms, client_report_id`).all(defectId, payload.runId ?? null, payload.failureCode ?? null, payload.source,
           payload.title, payload.category) as QueueRow[];
     return candidates.find((row) => reportIdentity(JSON.parse(row.payload_json) as AgiBugReportPayload, row.defect_id) === identity);
   }
@@ -137,8 +136,12 @@ export class AgiBugReports {
     const hasResolution = columns.has("resolved_at_ms");
     const rows = this.deps.db.prepare(`SELECT d.id, d.code, d.category, d.goal_id, d.created_at_ms,
         ${hasResolution ? "d.resolved_at_ms, d.resolved_commit, d.resolution_note," : "NULL AS resolved_at_ms, NULL AS resolved_commit, NULL AS resolution_note,"}
-        (SELECT q.status FROM agi_bug_report_queue q WHERE q.defect_id = d.id AND q.status <> 'draft' ORDER BY q.updated_at_ms DESC LIMIT 1) AS report_status
-      FROM agi_defect_reports d WHERE d.chat_id = ? ORDER BY d.created_at_ms DESC LIMIT 5`).all(chatId) as Array<{ id: string; code: string;
+        (SELECT CASE WHEN q.status='sent' AND length(trim(coalesce(q.server_id,'')))=0 THEN NULL ELSE q.status END
+          FROM agi_bug_report_queue q WHERE q.status <> 'draft' AND (q.defect_id = d.id OR
+            (json_extract(q.payload_json, '$.runId') = (SELECT id FROM long_runs WHERE goal_id=d.goal_id LIMIT 1)
+              AND json_extract(q.payload_json, '$.failureCode') = d.code AND json_extract(q.payload_json, '$.chatRef') = ?))
+          ORDER BY CASE q.status WHEN 'sent' THEN 0 WHEN 'queued' THEN 1 ELSE 2 END, q.updated_at_ms DESC LIMIT 1) AS report_status
+      FROM agi_defect_reports d WHERE d.chat_id = ? ORDER BY d.created_at_ms DESC LIMIT 5`).all(agiChatRef(chatId), chatId) as Array<{ id: string; code: string;
       category: string; goal_id: string; created_at_ms: number; report_status: AgiBugReportRow["status"] | null;
       resolved_at_ms: number | null; resolved_commit: string | null; resolution_note: string | null }>;
     return rows.map((row) => ({ defectId: row.id, code: row.code, goalId: row.goal_id, createdAt: new Date(row.created_at_ms).toISOString(),
@@ -315,9 +318,13 @@ export class AgiBugReports {
       clearTimeout(timeout);
     }
     if (response.status === 200 || response.status === 201) {
+      if (typeof body.id !== "string" || !body.id.trim()) {
+        retry("agi.bug-report.acknowledgement-missing");
+        return;
+      }
       this.deps.db.prepare(`UPDATE agi_bug_report_queue SET status='sent', server_id=?, error=NULL, next_attempt_at_ms=NULL, updated_at_ms=?, dispatch_token=NULL, dispatch_until_ms=NULL
         WHERE client_report_id=? AND dispatch_token=? AND status='queued'`)
-        .run(typeof body.id === "string" ? body.id : null, this.deps.now(), clientReportId, dispatchToken);
+        .run(body.id, this.deps.now(), clientReportId, dispatchToken);
       return;
     }
     if (response.status === 400 || response.status === 409 || response.status === 413 || response.status === 403) {

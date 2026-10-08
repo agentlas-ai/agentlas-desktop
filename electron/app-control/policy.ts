@@ -38,11 +38,23 @@ const DENIED: Array<[RegExp, string]> = [
   [/^menu\.setLocale$/, "use app.setLanguage"],
 ];
 
-const CONSENT_SEGMENT = /^(approve|answer|decide|accept|reject|attest|confirm|publish|send|submit|install|upload|unseal|transfer|reauthorize|setTokenLimit|setPrices|bugReportSend|purchase)/;
-const DESTRUCTIVE_SEGMENT = /^(delete|remove|uninstall|forget|revoke|clear|reset|archive|prune|cancel|stop|discard|withdraw|rollback|unload|bookmarkRemove|cloudWithdraw|restartDomain|terminalClose|mutateArchive|disable)/;
+const CONSENT_SEGMENT = /^(approve|answer|decide|accept|reject|attest|confirm|publish|send|submit|install|upload|unseal|transfer|reauthorize|setTokenLimit|setPrices|bugReportSend|purchase|resume)/;
+const DESTRUCTIVE_SEGMENT = /^(delete|remove|uninstall|forget|revoke|clear|reset|archive|prune|cancel|stop|pause|discard|withdraw|rollback|unload|bookmarkRemove|cloudWithdraw|restartDomain|terminalClose|mutateArchive|disable)/;
 const READ_SEGMENT = /^(get|list|status|search|snapshot|inspect|preview|describe|read|has|history|events|timeline|summary|overview|view|state|journal|readiness|available|catalog|library|bookmarks|latest|for[A-Z]|recap|find|check|probe|quote|usage|entries|failures|unread|thread|domains|operations|tastes?$|tasteStatus|unlockStatus|defaultTz|nextRun|validateCron|concurrencyInfo|pdfCapability|contentAvailable|exportTargets|siteIcon|imageProviders|videoKeyStatus|brandMap|recommend|pending|aoGraph|network|routePreview|previewAllocation|doctor|activeBuild|buildReady|chatActivity|runDigest|runPage|runCaptures|connectionReport|inputRequirement|exactBindings|borrowed|ontology|intakeDiagnostics|hubCatalog|dataSnapshot|bounded|path$|closure|context|diff$|observation|statisticsMethods|methods|blocks|citation|evidenceMany|bootstrap|editorModel|selectionContexts?$|editProposals?$|claimLedgers|decisionProjections|messages$|conversations)/;
 
 export function appControlPolicy(entry: Pick<AppControlCatalogEntry, "path">): AppControlPolicy {
+  // These are the native observation/control routes for existing work, not a second way to start One's own turn.
+  if (/^invoke\.(activeChats|goalActiveChats|attach|history|receipt|latestReceipt|admission|workerReport|steeringRecovery|latestOneSurface|replay|preflightSteers|preflightSteerReceipt)$/.test(entry.path)) return { allowed: true, effect: "read" };
+  if (/^invoke\.(cancel|unsteer|clearHistory)$/.test(entry.path)) return { allowed: true, effect: "destructive" };
+  if (/^science\.composer\.(attach|receipt|steering)$/.test(entry.path)) return { allowed: true, effect: "read" };
+  // Connection state and key presence contain no credential material. They are necessary to operate Settings.
+  if (/^(secrets\.hasApiKey|auth\.getSession|runtime\.connectGet|mcpTools\.oauthStatus)$/.test(entry.path)) return { allowed: true, effect: "read" };
+  // The screen's own ownership checks still bind these operations to a real task and view. One can observe or
+  // control an existing view without manufacturing the screen's leases or approving itself.
+  if (/^workLiveView\.(listTabs|capture)$/.test(entry.path)) return { allowed: true, effect: "read" };
+  if (/^workLiveView\.(navigate|goBack|goForward|reload|dispatchInput)$/.test(entry.path)) return { allowed: true, effect: "consent" };
+  if (/^browserUi\.(history|historyAll|downloads|readiness)$/.test(entry.path)) return { allowed: true, effect: "read" };
+  if (/^browserUi\./.test(entry.path)) return { allowed: true, effect: "consent" };
   for (const [pattern, reason] of DENIED) if (pattern.test(entry.path)) return { allowed: false, reason };
   const segment = entry.path.slice(entry.path.lastIndexOf(".") + 1);
   // "uninstallPreview", "removePreview": what would happen, not the act.

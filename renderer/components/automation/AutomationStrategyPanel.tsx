@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { AutomationStrategyProposalView } from "@shared/automation-strategy-review";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { requiresAutomationStrategyReview } from "./automation-strategy-review-surface";
 import styles from "./AutomationStrategyPanel.module.css";
 
@@ -26,7 +27,7 @@ export function AutomationStrategyPanel({ automationId, locale }: { automationId
     let disposed = false;
     let generation = 0;
     setRows([]); setError(""); setBusyId(null); setAmendments({});
-    const load = async () => {
+    const readProposals = async () => {
       const api = ipc();
       if (!api?.automations.listStrategyProposals) return;
       const current = ++generation;
@@ -39,6 +40,8 @@ export function AutomationStrategyPanel({ automationId, locale }: { automationId
         if (!disposed && current === generation) setError(ko ? "전략 변경 내역을 확인하지 못했습니다." : "Could not check strategy changes.");
       }
     };
+    const coordinator = createCoalescedRefresh<void>(readProposals, () => undefined);
+    const load = () => coordinator.request(undefined);
     refreshRef.current = load;
     void load();
     const off = ipcEvents()?.onStoreChanged?.((change) => {
@@ -48,6 +51,7 @@ export function AutomationStrategyPanel({ automationId, locale }: { automationId
     document.addEventListener("visibilitychange", visible);
     const poll = window.setInterval(visible, 20_000);
     return () => {
+      coordinator.dispose();
       disposed = true; ++generation; off?.(); clearInterval(poll);
       document.removeEventListener("visibilitychange", visible);
       refreshRef.current = null;

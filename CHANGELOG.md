@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.80 — 2026-10-08
+
+- Recover interrupted Desktop work under its new Main owner after restart, retaining Stop, pause and uncertain-effect boundaries. Share durable recovery records across Main, Graph, Science and Mobile admission paths.
+- Run configured Codex strategy reflection through the host gateway without model tools, validate the completed response before native dispatch, and classify subscription exhaustion for authorized model-pool fallback while preserving the spending preference.
+- Park finite Goal work awaiting a scheduled wake and deliver pending owner-question directives in both continuation contexts.
+- Accept owner follow-up messages through the current foreground run contract on Desktop and Mobile. Start an empty Desktop composer at one line and expand it with content.
+- Keep successive One inputs in a durable outbox, coordinate refreshes, and reduce repeated chat-history database reads. Connect app controls and message actions to their owning views.
+- Separate reusable Toolchain assets from individual Graph tasks with stable asset identity, versions, input/output contracts and owned call records. Show reusable assets and call results in the shared controls.
+- Pin completed Science Writer and research-state changes: preserve grounded inputs, citation and figure bindings, and captured hypothesis relationships without requiring an active research owner.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a public installer or update feed; the Releases page stays the authority.
+
+Source and packaging checks do not establish every live research result, provider account or native Windows interaction.
+
 ## 1.2.79 — 2026-10-08
 
 - Preserve already-published metadata bytes when retrying an exact stable release. Fresh signed-artifact checks must agree with every non-timestamp field before reuse; source, payload, asset and update-lineage gates remain required.

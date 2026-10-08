@@ -31,7 +31,7 @@ import {
   type LongRunWorkerState,
   type LongRunWorkspaceBinding,
 } from "../../shared/long-run";
-import { emitDesktopStoreChange } from "./change-bus";
+import { desktopStoreTransaction, emitDesktopStoreChange } from "./change-bus";
 import { getDb } from "./db";
 import { getChatGoalContract, getChatGoalRevision } from "./chat-goals";
 import { agentRunCwd } from "../runtime/exec";
@@ -1150,17 +1150,24 @@ export function transitionLongRun(input: {
   const resolvedTo = resolveNonBlockingGoalStatus(current.status, input.to, input.reason, input.actorKind);
   const skipped = requestedTo !== resolvedTo;
   input = { ...input, to: resolvedTo };
+  if (input.expectedVersion != null && current.version !== input.expectedVersion) {
+    throw new Error("long_run_transition_version_conflict");
+  }
   if (!skipped) assertLongRunTransition(current.status, input.to);
-  if (current.status === input.to && !skipped) return current;
+  if (current.status === input.to && !skipped) {
+    // A status no-op is not an ownership grant. Startup takes custody under
+    // the exclusive GUI lock; callers must not silently retain or steal it.
+    if (input.appInstanceId != null && input.appInstanceId !== current.appInstanceId) {
+      throw new Error("long_run_transition_owner_conflict");
+    }
+    return current;
+  }
   // Only the owner lifts an owner hold; every host/worker path that would start the goal again stops here.
   if ((input.actorKind ?? "host") !== "user" && ["queued", "running", "waiting_tool"].includes(input.to)
     && ["paused", "blocked", "waiting_tool"].includes(current.status) && longRunOwnerHold(current.id)) {
     throw new Error(LONG_RUN_OWNER_HOLD_CODE);
   }
   const now = new Date().toISOString();
-  if (input.expectedVersion != null && current.version !== input.expectedVersion) {
-    throw new Error("long_run_transition_version_conflict");
-  }
   const pausedAt = input.to === "paused" ? now : null;
   const completedAt = LONG_RUN_TERMINAL_STATUSES.has(input.to) ? now : null;
   const db = getDb();
@@ -1781,13 +1788,19 @@ export function startLongRunWorkerAttempt(input: {
   if (!run) throw new Error(`long_run_not_found:${input.runId}`);
   if (run.surface === "science") throw new Error("science_projection_read_only");
   const db = getDb();
-  const worker = db.prepare("SELECT run_id, current_attempt, role FROM long_run_workers WHERE id = ?")
-    .get(input.workerId) as { run_id: string; current_attempt: number; role: string } | undefined;
-  if (!worker || worker.run_id !== input.runId) throw new Error("long_run_worker_not_found");
-  const attempt = worker.current_attempt + 1;
+  let attempt = 0;
   const attemptId = `attempt_${randomUUID()}`;
   const now = new Date().toISOString();
   db.transaction(() => {
+    const worker = db.prepare("SELECT run_id, current_attempt, role FROM long_run_workers WHERE id = ?")
+      .get(input.workerId) as { run_id: string; current_attempt: number; role: string } | undefined;
+    if (!worker || worker.run_id !== input.runId) throw new Error("long_run_worker_not_found");
+    if (db.prepare("SELECT 1 FROM long_run_worker_attempts WHERE worker_id=? AND state='running' LIMIT 1")
+      .get(input.workerId)) throw new Error("long_run_worker_attempt_live");
+    attempt = worker.current_attempt + 1;
+    const claimed = db.prepare(`UPDATE long_run_workers SET current_attempt=?,state='running',last_heartbeat_at=?,updated_at=?
+      WHERE id=? AND run_id=? AND current_attempt=?`).run(attempt, now, now, input.workerId, input.runId, worker.current_attempt);
+    if (claimed.changes !== 1) throw new Error("long_run_worker_attempt_claim_lost");
     db.prepare(
       `INSERT INTO long_run_worker_attempts (
         id, worker_id, run_id, task_id, invocation_run_id, attempt, state, runtime_selection_json,
@@ -1805,11 +1818,6 @@ export function startLongRunWorkerAttempt(input: {
       now,
       now,
     );
-    db.prepare(
-      `UPDATE long_run_workers
-       SET current_attempt = ?, state = 'running', last_heartbeat_at = ?, updated_at = ?
-       WHERE id = ?`,
-    ).run(attempt, now, now, input.workerId);
     if (input.taskId && worker.role !== "verifier") {
       db.prepare(
         `UPDATE long_run_tasks
@@ -1825,7 +1833,7 @@ export function startLongRunWorkerAttempt(input: {
       payload: { workerId: input.workerId, attemptId, attempt, taskId: input.taskId ?? null },
       at: now,
     });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   return { attemptId, attempt };
 }
@@ -1841,8 +1849,8 @@ export function settleLongRunWorkerAttempt(input: {
 }): boolean {
   const db = getDb();
   const row = db.prepare(
-    "SELECT a.run_id, a.worker_id, a.task_id, a.state, w.role FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id=a.worker_id WHERE a.id = ?",
-  ).get(input.attemptId) as { run_id: string; worker_id: string; task_id: string | null; state: string; role: string } | undefined;
+    "SELECT a.run_id, a.worker_id, a.task_id, a.state, a.attempt, w.role FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id=a.worker_id WHERE a.id = ?",
+  ).get(input.attemptId) as { run_id: string; worker_id: string; task_id: string | null; state: string; attempt: number; role: string } | undefined;
   if (!row) return false;
   if (row.state !== "running") return row.state === input.state;
   const now = new Date().toISOString();
@@ -1872,9 +1880,9 @@ export function settleLongRunWorkerAttempt(input: {
         : input.state === "cancelled"
           ? "cancelled"
           : "failed";
-    db.prepare("UPDATE long_run_workers SET state = ?, updated_at = ? WHERE id = ?")
-      .run(workerState, now, row.worker_id);
-    if (row.task_id && row.role !== "verifier") {
+    const workerUpdated = db.prepare("UPDATE long_run_workers SET state = ?, updated_at = ? WHERE id = ? AND current_attempt = ?")
+      .run(workerState, now, row.worker_id, row.attempt);
+    if (workerUpdated.changes === 1 && row.task_id && row.role !== "verifier") {
       const taskState: LongRunTaskState = input.state === "completed"
         ? "verifying"
         : input.state === "cancelled"
@@ -1884,13 +1892,14 @@ export function settleLongRunWorkerAttempt(input: {
             : "failed";
       db.prepare(
         `UPDATE long_run_tasks SET state = ?, updated_at = ?, completed_at = ?
-         WHERE run_id = ? AND id = ?`,
+         WHERE run_id = ? AND id = ? AND assigned_worker_id = ? AND state NOT IN ('completed','cancelled')`,
       ).run(
         taskState,
         now,
         ["cancelled", "failed"].includes(taskState) ? now : null,
         row.run_id,
         row.task_id,
+        row.worker_id,
       );
     }
     appendEventInDb({
@@ -1901,7 +1910,7 @@ export function settleLongRunWorkerAttempt(input: {
       payload: { attemptId: input.attemptId, state: input.state, sideEffectState: input.sideEffectState ?? null },
       at: now,
     });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: row.run_id });
   return true;
 }
@@ -2749,11 +2758,13 @@ export function requestLongRunVerification(goalId: string, evidence?: string | n
   })();
 }
 
-function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId?: string): string[] {
+function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId?: string,
+  assertExclusive?: () => void): string[] {
   const db = getDb();
   const placeholders = [...LONG_RUN_ACTIVE_STATUSES].map(() => "?").join(",");
   const now = new Date().toISOString();
   const rows = db.transaction(() => {
+    if (reason === "startup-recovery") assertExclusive?.();
     // Desktop's single-instance startup recovers its previous GUI epoch. A
     // daemon has a separate lifetime even on this same machine and database;
     // neither app quit nor restart is evidence that its process has ended.
@@ -2762,8 +2773,9 @@ function pauseDesktopRuns(reason: "app-quit" | "startup-recovery", appInstanceId
     const ownedRows = db.prepare(
       `SELECT id, status FROM long_runs
        WHERE execution_location = 'desktop-local' AND host_owner_kind = 'desktop'
-         AND surface <> 'science' AND status IN (${placeholders})`,
-    ).all(...LONG_RUN_ACTIVE_STATUSES) as Array<{ id: string; status: LongRunStatus }>;
+         AND surface <> 'science' AND status IN (${placeholders})
+         AND (? <> 'app-quit' OR ? IS NULL OR app_instance_id = ?)`,
+    ).all(...LONG_RUN_ACTIVE_STATUSES, reason, appInstanceId ?? null, appInstanceId ?? null) as Array<{ id: string; status: LongRunStatus }>;
     for (const row of ownedRows) {
       // A durable user stop is never converted into an automatic host resume.
       const userControl = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user' ORDER BY seq DESC LIMIT 1")
@@ -2827,6 +2839,35 @@ export function pauseActiveDesktopLongRunsForAppShutdown(appInstanceId?: string)
   return pauseDesktopRuns("app-quit", appInstanceId);
 }
 
-export function recoverInterruptedDesktopLongRunsAtStartup(appInstanceId?: string): string[] {
-  return pauseDesktopRuns("startup-recovery", appInstanceId);
+export function recoverInterruptedDesktopLongRunsAtStartup(appInstanceId: string,
+  assertExclusive: () => void = () => {
+    const electron = require("electron") as { app?: { hasSingleInstanceLock?: () => boolean } };
+    if (electron.app?.hasSingleInstanceLock?.() !== true) throw new Error("desktop_startup_custody_not_exclusive");
+  }): string[] {
+  const db = getDb();
+  return desktopStoreTransaction(db, () => {
+    assertExclusive();
+    const recovered = pauseDesktopRuns("startup-recovery", appInstanceId, assertExclusive);
+    // Clean shutdown and blocked Goals are already dormant and absent from
+    // ACTIVE. Transfer their ledger custody without resuming them or rewriting
+    // a historical attempt, wait claim, user hold, or uncertain external effect.
+    const dormant = db.prepare(`SELECT id, version, status, app_instance_id FROM long_runs
+      WHERE execution_location='desktop-local' AND host_owner_kind='desktop'
+        AND surface IN ('one','work') AND status IN ('paused','blocked')
+        AND app_instance_id IS NOT NULL AND app_instance_id <> ?
+        AND NOT EXISTS (SELECT 1 FROM long_run_worker_attempts a WHERE a.run_id=long_runs.id AND a.state='running')`)
+      .all(appInstanceId) as Array<{ id: string; version: number; status: string; app_instance_id: string }>;
+    for (const row of dormant) {
+      assertExclusive();
+      const changed = db.prepare(`UPDATE long_runs SET app_instance_id=?,version=version+1
+        WHERE id=? AND version=? AND status=? AND app_instance_id=?
+          AND execution_location='desktop-local' AND host_owner_kind='desktop'`)
+        .run(appInstanceId, row.id, row.version, row.status, row.app_instance_id);
+      if (changed.changes !== 1) throw new Error("long_run_startup_custody_changed");
+      appendLongRunEvent({ runId: row.id, kind: "run.startup_owner_transferred", actorKind: "host",
+        payload: { previousAppInstanceId: row.app_instance_id, appInstanceId, status: row.status, automaticResume: false } });
+      recovered.push(row.id);
+    }
+    return recovered;
+  }).immediate();
 }

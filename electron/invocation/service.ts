@@ -7,15 +7,16 @@ import { withBrowserDownloadProofContext } from "../long-run/download-proof";
 import { admitMainInvocation, takeMainInvocationAdmission, MainInvocationLifetime, runMainBackgroundTask, type MainInvocationAdmission } from "../runtime/scheduled-root-context";
 import { withBuiltinFileProofContext } from "../long-run/file-proof";
 import { goalVerificationReasonCode, TRANSIENT_GOAL_VERIFICATION_REASON_CODES } from "../long-run/verification-effects";
-import { withAdapterEffectContext } from "./adapter-effect-context";
+import { withAdapterEffectContext, mainToolStartRequiresDurability } from "./adapter-effect-context";
 import { RunEventDeliveryJournal } from "./event-delivery";
 import { SemanticRunStepProjector } from "../one/semantic-run-step";
+import { MainWorkRecoveryContext } from "./main-work-recovery";
 import { parseRunEventReplayInput, type RunEventReplay } from "../../shared/run-event-delivery";
 import { withInvocationAccounting } from "../long-run/accounting-context";
 import { longRunMonetaryRefusal } from "../long-run/budget";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { captureGoalEpisode, applyGoalEpisodeRest, drainGoalEpisodeNotices,
-  captureGoalProducerAdmission, admitGoalProducer, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
+  captureGoalProducerAdmission, admitGoalProducer, assertGoalProducerDispatch, latestGoalEpisodeProducer, type GoalProducerAdmission } from "../long-run/episode-disposition";
 import { latestGoalWaitSubscription, registerGoalWaitSubscription, registerOngoingGoalCycle, restoreGoalWaitAfterUndispatchedStart, supersedeGoalWaitForInvocation, type GoalWaitDispatch } from "../long-run/wait-subscriptions";
 import { finiteGoalTimerRefusalEndsTurn, finiteGoalTimerRefusalMessage, goalWaitRefusalAlreadyNotified, goalWaitRefusalMessage, goalWaitRefusalResolvesItself, GOAL_WAIT_FINITE_TIMER_NOTICE } from "../long-run/goal-wait-refusal";
 import { ensureOngoingEpisodeTask } from "../long-run/ongoing-episode-task";
@@ -93,6 +94,7 @@ import {
 import { pickLocale } from "../runtime/status-i18n";
 import { permissionEscalationContinuationRequest } from "./permission-escalation-continuation";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
+import { cancelQueuedOnePreflightSteersForChat } from "../store/one-preflight-steers";
 import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
 import {
   PERMISSION_ESCALATION_TOOL,
@@ -134,7 +136,9 @@ import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAuto
 import { stopWorkspacePreviewsForTaskScope } from "../workspace-preview/control-server";
 import {
   beginQueuedSteerDrain,
+  canonicalQueuedSteerRequest,
   cancelQueuedSteersForChat,
+  getDurableQueuedSteer,
   holdQueuedSteerForRecovery,
   listRecoverableQueuedSteers,
   persistQueuedSteer,
@@ -184,6 +188,7 @@ import {
   claimPreparedOneTeamPreflight,
   failOneTeamPreflightStart,
   prepareOneTeamPreflightClaim,
+  resolveQueuedOneRoomRoster,
   type PreparedOneTeamPreflightClaim,
   type OneTeamRuntimeBinding,
 } from "../one/team-preflight";
@@ -211,6 +216,7 @@ import {
   teamProposalRequiresOneAttachments,
 } from "../one/attachments";
 import { redactMcpInvocationEventSecrets } from "./event-secret-redaction";
+import { invocationErrorDiagnostic } from "./error-diagnostic";
 import { normalizeOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { classifyOneRequestIntent } from "../../shared/one-request-intent";
 import { oneVersionPinRosterIds } from "../../shared/one-team-preflight";
@@ -225,6 +231,7 @@ import type {
   InstalledAgent,
 } from "../../shared/types";
 import { installMobileOneAutoRecovery } from "../one/mobile-auto-recovery";
+import { assertDesktopOneRecoveryStart } from "../one/desktop-recovery-admission";
 import { cacheOneOrgCompletionSummary, setOneOrgMemberStatus } from "../one/org";
 import { adaptLegacySurfaceToOneV1 } from "../../shared/one-surface";
 import { applyOneFriendlyFollowups } from "../../shared/one-friendly-followups";
@@ -528,13 +535,14 @@ function buildOneTaskKindInputRefs(
 }
 
 /**
- * Resolve the execution roster from exactly the owner plus the claimed Main
- * preflight targets. Never infer participants from legacy firms, groups,
+ * Resolve the execution roster from the owner plus claimed Main preflight
+ * targets or freshly validated queued-room targets. Never infer participants from legacy firms, groups,
  * hired-agent cards, prior events, or renderer-supplied targets.
  */
 function exactOneInvocationParticipants(
   ownerAgentId: string,
   preparedTeam: PreparedOneTeamPreflightClaim | null,
+  queuedRoomTargets?: McpInvocationRequest["taskForceTargets"],
 ): InstalledAgent[] | null {
   /*
    * 명단을 만드는 판단은 shared/one-team-preflight.ts 에 있다 — 부수효과가 없어
@@ -547,8 +555,8 @@ function exactOneInvocationParticipants(
    */
   const participantIds = oneVersionPinRosterIds(
     ownerAgentId,
-    preparedTeam ? preparedTeam.mode : null,
-    preparedTeam ? preparedTeam.taskForceTargets : null,
+    preparedTeam ? preparedTeam.mode : queuedRoomTargets?.length ? "team" : null,
+    preparedTeam ? preparedTeam.taskForceTargets : queuedRoomTargets ?? null,
   );
   if (!participantIds) return null;
   const installedById = new Map<string, InstalledAgent>();
@@ -573,6 +581,8 @@ function exactOneInvocationParticipants(
 
 /** 마지막 Task 투영 실패의 이유. 호출부가 사람이 읽을 수 있는 실패를 만들 수 있게 남긴다. */
 let lastTaskProjectionFailure: { chatId: string; status: string; at: string; reason: string } | null = null;
+// Only the durable owner queue can supply this non-serializable start argument.
+const QUEUED_ONE_ROOM_INHERITANCE = Symbol("queued-one-room-inheritance");
 
 function trySetTaskStatus(
   chatId: string,
@@ -944,6 +954,7 @@ export class InvocationService {
   private readonly eventListeners = new Set<InvocationEventListener>();
   private readonly activeChatsListeners = new Set<ActiveChatsListener>();
   private readonly settledListeners = new Set<InvocationSettledListener>();
+  private readonly steerQueueCapacityListeners = new Set<(chatId: string) => void>();
   private readonly pendingGoalVerifications = new Map<string, RunRecord>();
   private readonly settlingRuns = new Map<string, RunRecord>();
   private readonly browserLoginWaitingRuns = new Map<string, RunRecord>();
@@ -972,6 +983,21 @@ export class InvocationService {
   onSettled(listener: InvocationSettledListener): () => void {
     this.settledListeners.add(listener);
     return () => this.settledListeners.delete(listener);
+  }
+
+  onSteerQueueCapacity(listener: (chatId: string) => void): () => void {
+    this.steerQueueCapacityListeners.add(listener);
+    return () => this.steerQueueCapacityListeners.delete(listener);
+  }
+
+  steerQueueCapacity(chatId: string): number {
+    return Math.max(0, MAX_STEER_QUEUE_DEPTH - (this.steerQueues.get(chatId)?.length ?? 0));
+  }
+
+  private publishSteerQueueCapacity(chatId: string): void {
+    for (const listener of this.steerQueueCapacityListeners) {
+      try { listener(chatId); } catch { /* Saved intake stays queued for the next lifecycle boundary. */ }
+    }
   }
 
   activeChatIds(): string[] {
@@ -1177,8 +1203,8 @@ export class InvocationService {
   }
 
   /** Rehydrate exact accepted directions after SQLite is initialized on boot. */
-  recoverQueuedSteers(): InvocationSteerRecoveryReport {
-    const rows = listRecoverableQueuedSteers();
+  recoverQueuedSteers(chatId?: string): InvocationSteerRecoveryReport {
+    const rows = listRecoverableQueuedSteers(chatId);
     let resumed = 0;
     let settled = 0;
     let held = 0;
@@ -1243,7 +1269,7 @@ export class InvocationService {
       this.steerQueues.set(row.chatId, queue);
       resumed += 1;
     }
-    for (const chatId of this.steerQueues.keys()) this.drainSteerQueue(chatId);
+    for (const queuedChatId of chatId !== undefined ? [chatId] : this.steerQueues.keys()) this.drainSteerQueue(queuedChatId);
     if (rows.length > 0) this.publishActiveChats();
     return { examined: rows.length, resumed, settled, held };
   }
@@ -1263,11 +1289,12 @@ export class InvocationService {
     mainAdmission?: MainInvocationAdmission,
     /** Main-only renderer admission identity; never accepted from an IPC request. */
     durableAdmission?: InvocationAdmissionIdentity,
+    queuedRoomInheritance?: typeof QUEUED_ONE_ROOM_INHERITANCE,
   ): InvocationStartResult {
     const startBoundary: StartBoundary = { crossed: false };
     try {
       const started = this.startPrepared(req, workspaceBinding, executionContext, questionContinuation,
-        hostNoticePurpose, mainAdmission, durableAdmission, startBoundary);
+        hostNoticePurpose, mainAdmission, durableAdmission, startBoundary, queuedRoomInheritance);
       // The run is dispatched from here: a failed cleanup of an older parked wait must not report it as not started.
       try {
         for (const [waitingRunId, waiting] of this.browserLoginWaitingRuns) {
@@ -1313,8 +1340,10 @@ export class InvocationService {
     mainAdmission: MainInvocationAdmission | undefined,
     durableAdmission: InvocationAdmissionIdentity | undefined,
     startBoundary: StartBoundary,
+    queuedRoomInheritance?: typeof QUEUED_ONE_ROOM_INHERITANCE,
   ): InvocationStartResult {
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
+    assertDesktopOneRecoveryStart(req);
     if (durableAdmission && (durableAdmission.runId !== req.runId || durableAdmission.chatId !== req.chatId)) {
       throw new Error("invocation_admission_request_identity_mismatch");
     }
@@ -1601,6 +1630,13 @@ export class InvocationService {
     const preparedOneMemoryUseOnce = requestedOneMemoryUseOnceRef
       ? prepareOneMemoryUseOnceClaim(requestedOneMemoryUseOnceRef, chat.id)
       : null;
+    const inheritedOneRoom = queuedRoomInheritance === QUEUED_ONE_ROOM_INHERITANCE
+      && requestedOneMode && !preparedOneTeamPreflight && !preparedOneBriefingAction && !requestedOneAttachmentRef
+      ? resolveQueuedOneRoomRoster(chat.id) : null;
+    if (inheritedOneRoom) {
+      invocationRequest = { ...invocationRequest, taskForceTargets: inheritedOneRoom.taskForceTargets,
+        sessionRouting: false, borrowAgents: undefined, borrowVersions: undefined };
+    }
     const explicitMemoryIntent = requestedOneMode && !preparedOneBriefingAction
       ? detectExplicitOneMemoryIntent(invocationRequest.userPrompt,
           (prompt) => judgedOneMemoryIntent(prompt, invocationRequest.runtimeSelection))
@@ -1897,7 +1933,7 @@ export class InvocationService {
     try {
       let oneParticipantVersionBindings: OneParticipantVersionBinding[] | undefined;
       if (runReq.oneMode) {
-        const participants = exactOneInvocationParticipants(chat.agentId, preparedOneTeamPreflight);
+        const participants = exactOneInvocationParticipants(chat.agentId, preparedOneTeamPreflight, inheritedOneRoom?.taskForceTargets);
         if (!participants) {
           throw new Error("One participant version bindings could not be derived from the exact execution roster");
         }
@@ -1948,6 +1984,7 @@ export class InvocationService {
         record,
         publishActiveState: () => this.publishActiveChats(),
         persistStart: () => {
+          assertDesktopOneRecoveryStart(runReq);
           const persistReceipt = () => recordRunEvent({
           runId,
           kind: "invoke_started",
@@ -1987,6 +2024,8 @@ export class InvocationService {
             hubMode: runReq.hubMode,
             borrowAgents: runReq.borrowAgents,
             taskForceTargets: runReq.taskForceTargets,
+            ...(inheritedOneRoom ? { oneRoomRosterBinding: { roomId: inheritedOneRoom.roomId,
+              revision: inheritedOneRoom.revision, memberAgentIds: inheritedOneRoom.memberAgentIds } } : {}),
             hasImages: Boolean(runReq.images?.length),
             hasOneAttachments: Boolean(claimedOneAttachments),
             oneAttachmentCount: claimedOneAttachments?.receipt.attachments.length,
@@ -2500,6 +2539,11 @@ export class InvocationService {
     }
     const lifetime = record.mainLifetime = new MainInvocationLifetime(mainAdmission, chat.id, runId);
     this.settlingRuns.set(runId, record);
+    const canonicalWorkRecovery = executionContext?.source === "science" || executionContext?.aliveScience ? undefined
+      : new MainWorkRecoveryContext(chat.id,runId,()=>{
+        controller.signal.throwIfAborted();
+        if(this.settlingRuns.get(runId)!==record)throw new Error("main_work_invocation_owner_ended");
+      });
     let retryGoalCheckpoint: { goalId: string; checkpointId: string } | undefined;
     // Defer dispatch inside the captured lifetime/ALS so a synchronous throw
     // reaches the same terminal and registry cleanup as a rejected runner.
@@ -3084,6 +3128,9 @@ export class InvocationService {
         } catch (error) {
           effectBoundary.recordingFailed();
           console.warn("[invocation] effect ledger write failed:", error);
+          if (mainToolStartRequiresDurability()) {
+            throw Object.assign(new Error("main_tool_start_not_durable"), { code: "main_tool_start_not_durable", cause: error });
+          }
         }
         this.publishRunEvent(record, { runId, chatId: runReq.chatId, event: wireEvent });
 
@@ -3551,7 +3598,9 @@ export class InvocationService {
       // Background divisions and external job contexts keep quiet native grants.
       !record.background && chat.kind === "user" && !executionContext && !runReq.agentAppMode ? "foreground" : "background",
       (goalId) => {
-        if (!desktopProducerAdmission || producerWorkDispatchSealed) return;
+        if (!desktopProducerAdmission) return;
+        if (producerWorkDispatchSealed) throw Object.assign(
+          new Error("goal_episode_admission_lifetime_stale"), { code: "goal_episode_admission_lifetime_stale" });
         try {
           // Last synchronous pre-work opportunity: the client may have materialized the first Goal after selection.
           if (goalId && (!projectionGoalId || projectionGoalId === goalId)) {
@@ -3559,8 +3608,18 @@ export class InvocationService {
             refreshGoalProjection();
             if (lastControllerSelection) bindGoalControllerAttempt(lastControllerSelection);
           }
+          // Optional intake may leave an ordinary turn without a Goal. Once
+          // this dispatch names a durable Goal, however, an unbound controller
+          // cannot execute and then fabricate episode custody at completion.
+          if (goalId) {
+            if (!producerAdmission || !goalControllerAttemptId) throw Object.assign(
+              new Error("goal_episode_admission_missing"), { code: "goal_episode_admission_missing" });
+            assertGoalProducerDispatch({ admission: producerAdmission, goalId,
+              attemptId: goalControllerAttemptId }, assertProducerServiceLifetime);
+          }
         } finally { producerWorkDispatchSealed = true; }
       },
+      canonicalWorkRecovery,
     ))
       .then((result) => {
         // The runner promise has settled. Persist host effect completeness
@@ -4050,6 +4109,15 @@ export class InvocationService {
         }
       })
       .catch((error: unknown) => {
+        const diagnostic = invocationErrorDiagnostic(error, {
+          agentAppMode: runReq.agentAppMode,
+          context: { phase: "completion-chain-catch", executionSource: record.executionSource,
+            runtimeKind: runReq.runtimeSelection?.kind, scienceProjectId: record.executionContext?.science?.projectId,
+            scienceTurnId: record.executionContext?.science?.turnId },
+          redactText: value => redactWorkAttachmentText(runReq, redactOneAttachmentText(runReq, value)),
+        });
+        if (diagnostic) tryRecordRunEvent({ runId, chatId: runReq.chatId, agentId: record.actualAgentId,
+          kind: "invoke_error_diagnostic", payload: diagnostic });
         settleGoalControllerAttempt(false);
         effectObservationFailed = true;
         const failedGoalId = record.automaticGoalId ??
@@ -4205,7 +4273,6 @@ export class InvocationService {
         try { effectBoundary.persist(); }
         catch (error) { console.warn("[invocation] effect boundary receipt failed:", error); }
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
-        this.publishSettled(runId, record);
         releaseOneAttachmentRun(requestedOneAttachmentRef);
       })))))).catch((error: unknown) => {
         console.warn("[invocation] execution cleanup failed:", error);
@@ -4216,6 +4283,9 @@ export class InvocationService {
       }).finally(() => lifetime.afterSettled(() => {
         this.settlingRuns.delete(runId);
         this.publishActiveChats();
+        // Recovery listeners can start the next read-only turn only after the
+        // predecessor's full cleanup/lifetime barrier released its chat slot.
+        this.publishSettled(runId, record);
         const hasQueuedSteer = Boolean(this.steerQueues.get(record.chatId)?.length);
         this.drainSteerQueue(runReq.chatId);
         // A turn in a Work project released it: Goals refused as project-busy continue now (event-driven).
@@ -4257,6 +4327,21 @@ export class InvocationService {
    */
   private releaseUndispatchedStart(runId: string, chatId: string, error: unknown, cleanups: Array<() => void>,
     settledRecord?: RunRecord): void {
+    const diagnosticRecord = settledRecord ?? this.activeRuns.get(runId);
+    // Inspect only a known Main request, before cleanup removes attachment aliases.
+    if (diagnosticRecord) {
+      const diagnosticRequest = diagnosticRecord.request;
+      const diagnostic = invocationErrorDiagnostic(error, {
+        agentAppMode: diagnosticRequest.agentAppMode,
+        context: { phase: "undispatched-start", executionSource: diagnosticRecord.executionSource,
+          runtimeKind: diagnosticRequest.runtimeSelection?.kind,
+          scienceProjectId: diagnosticRecord.executionContext?.science?.projectId,
+          scienceTurnId: diagnosticRecord.executionContext?.science?.turnId },
+        redactText: value => redactWorkAttachmentText(diagnosticRequest, redactOneAttachmentText(diagnosticRequest, value)),
+      });
+      if (diagnostic) tryRecordRunEvent({ runId, chatId, agentId: diagnosticRecord.actualAgentId,
+        kind: "invoke_error_diagnostic", payload: diagnostic });
+    }
     console.warn("[invocation] start failed after its durable receipt and before dispatch; releasing the chat", error);
     for (const cleanup of cleanups) {
       try { cleanup(); } catch (cleanupError) { console.warn("[invocation] undispatched start cleanup failed:", cleanupError); }
@@ -4608,6 +4693,7 @@ export class InvocationService {
           }
         }
         cancelQueuedSteersForChat(chatId);
+        cancelQueuedOnePreflightSteersForChat(chatId);
         if (action === "delete") {
           completeChatGoalContract(expectedGoalId, "cancelled");
           setChatGoalBinding(chatId, null);
@@ -4666,6 +4752,13 @@ export class InvocationService {
     }
     if (this.browserLoginWaitingRuns.has(runId)) {
       const preserveWaiting = reason.message === "app_closed" || reason.message === "app_shutdown" || reason.message === "update_restart";
+      if (!preserveWaiting && record?.chatId) {
+        this.steerQueues.delete(record.chatId);
+        try {
+          cancelQueuedSteersForChat(record.chatId);
+          cancelQueuedOnePreflightSteersForChat(record.chatId);
+        } catch { /* The explicit stop must still reach the parked owner. */ }
+      }
       this.cancelParkedBrowserLoginWait(runId, preserveWaiting ? "host_restart" : reason.message, !preserveWaiting);
       if (record?.automaticGoalId) this.settleAutomaticGoalInterruption(record);
       return "requested";
@@ -4674,7 +4767,10 @@ export class InvocationService {
     // queued behind the active turn. Steering itself never calls cancel.
     if (record?.chatId) {
       this.steerQueues.delete(record.chatId);
-      try { cancelQueuedSteersForChat(record.chatId); } catch {
+      try {
+        cancelQueuedSteersForChat(record.chatId);
+        cancelQueuedOnePreflightSteersForChat(record.chatId);
+      } catch {
         // Persistence failure must never prevent the actual stop signal.
       }
     }
@@ -4740,6 +4836,105 @@ export class InvocationService {
   }
 
   /** DESKTOP_MOBILE_BRIDGE: main owns steering so every client gets identical resume semantics. */
+  /** Main-only coordination into an existing run. Keep its sealed workspace and execution contract;
+   * a supervisor's new direction cannot manufacture a binding or replay a consumed preflight. */
+  steerFromSupervisor(
+    req: McpInvocationRequest,
+    expectedRunId: string,
+    mainAdmission?: MainInvocationAdmission,
+  ): InvocationSteerResult {
+    const record = this.activeRuns.get(expectedRunId) ?? this.settlingRuns.get(expectedRunId)
+      ?? this.browserLoginWaitingRuns.get(expectedRunId);
+    if (!record || record.background || record.chatId !== req.chatId) {
+      throw new Error("supervisor_steering_target_stale");
+    }
+    const source = record.request;
+    return this.steer({
+      ...req,
+      permissions: source.permissions,
+      planMode: source.planMode,
+      oneMode: source.oneMode,
+      onePermissionMode: source.onePermissionMode,
+      runtimeSelection: source.runtimeSelection,
+      promptOrigin: "system",
+      steeringMode: "queue",
+    }, expectedRunId, record.workspaceBinding, record.executionContext, mainAdmission);
+  }
+
+  private ownerSteerId(intentId: string): string {
+    if (typeof intentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(intentId)) {
+      throw new Error("invocation_steer_invalid_intent_id");
+    }
+    return `owner:${intentId}`;
+  }
+
+  private durableSteerReceipt(row: DurableQueuedSteer, intentId?: string): InvocationSteerResult {
+    const queue = this.steerQueues.get(row.chatId) ?? [];
+    const position = queue.findIndex((item) => item.id === row.id);
+    return {
+      accepted: true, chatId: row.chatId,
+      queued: row.status === "queued" || row.status === "draining",
+      interruptsCurrent: false, activeRunId: row.originalRunId,
+      queuedRequestId: row.id, promptHash: row.promptHash,
+      ...(row.drainedRunId ? { runId: row.drainedRunId } : {}),
+      ...(position >= 0 ? { position: position + 1 } : {}),
+      ...(intentId ? { intentId } : {}),
+      status: row.recoveryState === "held" ? "held" : row.status,
+    };
+  }
+
+  ownerSteerReceipt(chatId: string, intentId: string): InvocationSteerResult | null {
+    if (typeof chatId !== "string" || !chatId) throw new Error("invocation_steer_invalid_chat_id");
+    const row = getDurableQueuedSteer(this.ownerSteerId(intentId));
+    if (!row) return null;
+    if (row.chatId !== chatId) throw new Error("invocation_steer_identity_conflict");
+    return this.durableSteerReceipt(row, intentId);
+  }
+
+  /** Owner-authored followups have an identity before any provider effect. A retry only reads that identity. */
+  steerFromOwner(req: McpInvocationRequest, intentId: string | undefined, mainAdmission?: MainInvocationAdmission): InvocationSteerResult {
+    if (intentId === undefined) {
+      // Legacy callers retain steer return/throw semantics, with Main's sealed active binding.
+      const active = [...new Map([...this.browserLoginWaitingRuns, ...this.settlingRuns, ...this.activeRuns.entries()])]
+        .find(([, record]) => !record.background && record.chatId === req.chatId);
+      return this.steer(req, active?.[0], active?.[1].workspaceBinding, active?.[1].executionContext, mainAdmission);
+    }
+    const id = this.ownerSteerId(intentId);
+    const request = { ...req, runId: undefined, permissions: effectiveInvocationPermission(req.permissions, req.planMode) };
+    const existing = getDurableQueuedSteer(id);
+    if (existing) {
+      if (existing.chatId !== req.chatId || canonicalQueuedSteerRequest(existing.request) !== canonicalQueuedSteerRequest(request)) {
+        throw new Error("invocation_steer_identity_conflict");
+      }
+      return this.durableSteerReceipt(existing, intentId);
+    }
+    if (req.oneAttachmentRef) throw new Error("One attachments cannot be added through steering in v1; wait for the active run and send a new request");
+    const active = [...this.activeRuns.entries(), ...this.settlingRuns.entries(), ...this.browserLoginWaitingRuns.entries()]
+      .find(([, record]) => !record.background && record.chatId === req.chatId);
+    if (active) {
+      const result = this.steer(request, active[0], active[1].workspaceBinding, active[1].executionContext, mainAdmission, id);
+      return { ...result, intentId, status: "queued" };
+    }
+    // A pending root is not an idle chat. The renderer retains this distinct
+    // message in its durable waiting-parent outbox, or uses its preflight submission.
+    if (getPendingInvocationAdmissionForChat(req.chatId) || this.activeChatIds().includes(req.chatId)) {
+      throw new Error("invocation_steer_parent_pending");
+    }
+    const runId = randomUUID();
+    const row = persistQueuedSteer({ id, chatId: req.chatId, originalRunId: runId, request });
+    if (!beginQueuedSteerDrain(id, runId)) throw new Error("invocation_steer_claim_lost");
+    try {
+      this.start({ ...request, runId }, undefined, undefined, undefined, undefined, mainAdmission, undefined,
+        request.oneMode && request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined);
+      settleQueuedSteer(id, "started");
+    } catch {
+      // A thrown start may already have crossed a provider boundary. Preserve
+      // the one planned run ID; never manufacture another on an ACK retry.
+      holdQueuedSteerForRecovery(id, "drained-run-start-uncertain");
+    }
+    return this.durableSteerReceipt(getDurableQueuedSteer(id) ?? row, intentId);
+  }
+
   steer(
     req: McpInvocationRequest,
     expectedRunId?: string,
@@ -4757,10 +4952,22 @@ export class InvocationService {
       ...req,
       permissions: effectiveInvocationPermission(req.permissions, req.planMode),
     };
+    if (preflightSteerId) {
+      const existing = getDurableQueuedSteer(preflightSteerId);
+      if (existing) {
+        if (existing.chatId !== req.chatId || expectedRunId && existing.originalRunId !== expectedRunId
+          || canonicalQueuedSteerRequest(existing.request) !== canonicalQueuedSteerRequest(steerRequest)
+          || JSON.stringify(existing.workspaceBinding) !== JSON.stringify(workspaceBinding)
+          || JSON.stringify(existing.executionContext) !== JSON.stringify(executionContext)) {
+          throw new Error("invocation_steer_identity_conflict");
+        }
+        return this.durableSteerReceipt(existing);
+      }
+    }
     // 목표 턴이 끝나고 검증을 기다리는 동안에도 대화는 아직 "진행 중"이다. 그 사이 오너가 보낸 요청은
     // 거절(invocation_cleanup_pending·goal_verification_pending)하지 않고 줄 세워, 검증이 끝나는 즉시 돌린다
     // (Codex 의 Tab 대기열·Claude Code 의 작업 중 입력 대기열과 같은 규칙).
-    const active = [...new Map([...this.settlingRuns, ...this.activeRuns.entries()])].filter(([, record]) => !record.background).find(([, record]) => record.chatId === req.chatId);
+    const active = [...new Map([...this.browserLoginWaitingRuns, ...this.settlingRuns, ...this.activeRuns.entries()])].filter(([, record]) => !record.background).find(([, record]) => record.chatId === req.chatId);
     if (expectedRunId && active?.[0] !== expectedRunId && this.browserLoginWaitingRuns.get(expectedRunId)?.chatId !== req.chatId) {
       throw new Error("Steering target is stale; attach to the current Desktop run and retry");
     }
@@ -5181,7 +5388,8 @@ export class InvocationService {
             { ...next.request, runId: drainedRunId },
             next.workspaceBinding,
             next.executionContext,
-            undefined, undefined, next.mainAdmission,
+            undefined, undefined, next.mainAdmission, undefined,
+            next.request.oneMode && next.request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined,
           );
         }
         settleQueuedSteer(next.id, "started");
@@ -5195,6 +5403,7 @@ export class InvocationService {
         });
       } finally {
         // A rejected/CAS-lost row must not strand a second queued direction.
+        this.publishSteerQueueCapacity(chatId);
         this.drainSteerQueue(chatId);
       }
     });

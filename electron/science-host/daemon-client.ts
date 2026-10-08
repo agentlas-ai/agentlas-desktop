@@ -22,6 +22,8 @@ export interface ScienceDaemonRequestOptions {
   signal?: AbortSignal;
   /** Optional caller-selected reply deadline. Zero/omitted means no deadline. */
   timeoutMs?: number;
+  /** Snapshot observation only: absolute performance.now() deadline, including preflight and connection. No recovery. */
+  observationDeadlineMs?: number;
 }
 
 export interface ScienceDaemonSubscriptionOptions {
@@ -121,6 +123,17 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
     } catch { throw failure("science_daemon_local_identity_changed", "identity", "not-dispatched"); }
   };
 
+  const observationExpired = (request: ScienceDaemonRequestOptions) =>
+    request.observationDeadlineMs !== undefined && performance.now() >= request.observationDeadlineMs;
+  const assertObservationBudget = (request: ScienceDaemonRequestOptions) => {
+    const deadline = request.observationDeadlineMs;
+    if (deadline !== undefined && (!Number.isFinite(deadline) || deadline < 0
+      || deadline - performance.now() > 2_147_483_647)) {
+      throw failure("science_daemon_observation_deadline_invalid", "request", "not-dispatched");
+    }
+    if (observationExpired(request)) throw failure("science_daemon_observation_deadline", "request", "not-dispatched");
+  };
+
   // Existing callControlSocket always imposes a reply timeout and does not
   // reject on EOF. Keep the same NDJSON protocol, but separate connection
   // admission from arbitrarily long scientific computation and handle EOF.
@@ -128,6 +141,7 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
     request: ScienceDaemonRequestOptions = {}, stream?: { ownerEpoch: string;
       onEvent(event: DaemonScienceEvent): void; onDisconnect?(error: ScienceDaemonClientError): void }): Promise<unknown> {
     assertIdentity();
+    try { assertObservationBudget(request); } catch (error) { return Promise.reject(error); }
     const timeoutMs = request.timeoutMs ?? 0;
     if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0 || timeoutMs > 2_147_483_647) {
       return Promise.reject(failure("science_daemon_request_timeout_invalid", "request", "not-dispatched"));
@@ -149,12 +163,14 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
       let buffer = "";
       let receivedBytes = 0;
       let responseTimer: ReturnType<typeof setTimeout> | undefined;
+      let observationTimer: ReturnType<typeof setTimeout> | undefined;
       const outcome = () => sent ? "unknown" as const : "not-dispatched" as const;
       const done = (error?: ScienceDaemonClientError, result?: unknown) => {
         if (finished) return;
         finished = true;
         clearTimeout(connectTimer);
         if (responseTimer) clearTimeout(responseTimer);
+        if (observationTimer) clearTimeout(observationTimer);
         request.signal?.removeEventListener("abort", abort);
         pending.delete(cancel);
         socket.destroy();
@@ -166,19 +182,29 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
         } else resolve(result);
       };
       const cancel = (error: ScienceDaemonClientError) => done(new ScienceDaemonClientError({ ...error.failure, outcome: outcome() }));
+      const expireObservation = () => {
+        if (!observationExpired(request)) return false;
+        done(failure("science_daemon_observation_deadline", "request", outcome()));
+        return true;
+      };
       const abort = () => done(failure("science_daemon_wait_aborted", "request", outcome()));
       const connectTimer = setTimeout(() => done(failure("science_daemon_connect_timeout", "connect", "not-dispatched")), options.connectTimeoutMs ?? 3_000);
+      if (request.observationDeadlineMs !== undefined) observationTimer = setTimeout(() => {
+        expireObservation();
+      }, Math.max(1, Math.ceil(request.observationDeadlineMs - performance.now())));
       pending.add(cancel);
       request.signal?.addEventListener("abort", abort, { once: true });
       socket.once("connect", () => {
+        if (finished || expireObservation()) return;
         const connectedAt = performance.now();
         clearTimeout(connectTimer);
         try { assertIdentity(); }
         catch (error) { done(error as ScienceDaemonClientError); return; }
         if (request.signal?.aborted) { abort(); return; }
+        if (expireObservation()) return;
         sent = true; // A disconnect from this point cannot prove non-execution.
         if (timeoutMs) responseTimer = setTimeout(() => {
-          if (finished) return;
+          if (finished || expireObservation()) return;
           const replyElapsedMs = performance.now() - connectedAt;
           try {
             console.warn("[science-daemon-rpc] reply timeout", JSON.stringify({
@@ -193,6 +219,7 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
         socket.write(payload);
       });
       socket.on("data", (chunk: string) => {
+        if (finished || expireObservation()) return;
         receivedBytes += Buffer.byteLength(chunk, "utf8");
         if (receivedBytes > MAX_REPLY_BYTES) { done(failure("science_daemon_reply_too_large", "protocol", outcome())); return; }
         buffer += chunk;
@@ -229,6 +256,7 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
                 ? { remoteSourceCode: record(remote.data)?.sourceCode as string } : {}),
             }));
           } else if (Object.prototype.hasOwnProperty.call(message, "result")) {
+            if (expireObservation()) return;
             if (stream) {
               const receipt = record(message.result);
               if (subscribed || receipt?.subscribed !== true || receipt.ownerEpoch !== stream.ownerEpoch) {
@@ -253,8 +281,8 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
     });
   }
 
-  async function inspectDaemon(): Promise<VerifiedDaemon> {
-    const ping = record(await rpc("daemon.ping", undefined, { timeoutMs: 5_000 }));
+  async function inspectDaemon(request: ScienceDaemonRequestOptions = {}): Promise<VerifiedDaemon> {
+    const ping = record(await rpc("daemon.ping", undefined, { ...request, timeoutMs: 5_000 }));
     if (!ping || ping.ok !== true || ping.serviceProtocolVersion !== 2 || ping.lifetime !== "service"
       || ping.processRole !== "desktop-daemon" || ping.controlSocketReady !== true) {
       throw failure("science_daemon_protocol_incompatible", "identity", "not-dispatched");
@@ -333,11 +361,15 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
    * sent, so ensureStarted() (spawn the daemon if needed, start Science) and one more attempt are safe. A command that
    * was already sent is never retried here: its effect is unknown.
    */
-  async function readyDaemonForCommand(signal?: AbortSignal): Promise<VerifiedDaemon> {
+  async function readyDaemonForCommand(request: ScienceDaemonRequestOptions): Promise<VerifiedDaemon> {
+    const { signal } = request;
     const check = async (): Promise<VerifiedDaemon> => {
-      const daemon = await inspectDaemon();
+      assertObservationBudget(request);
+      const daemon = await inspectDaemon({ signal, observationDeadlineMs: request.observationDeadlineMs });
+      assertObservationBudget(request);
       const current = statusReply(await rpc("science.status", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId },
-        { signal, timeoutMs: 5_000 }), daemon);
+        { signal, timeoutMs: 5_000, observationDeadlineMs: request.observationDeadlineMs }), daemon);
+      assertObservationBudget(request);
       if (current.state !== "ready") throw failure("science_daemon_science_unavailable", "identity", "not-dispatched", {
         remoteMessage: current.errorCode ?? current.state,
       });
@@ -345,6 +377,12 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
     };
     try { return await check(); }
     catch (error) {
+      // These are preflight reads: the requested command has not been dispatched. A bounded snapshot never recovers work.
+      if (request.observationDeadlineMs !== undefined) {
+        assertObservationBudget(request);
+        if (error instanceof ScienceDaemonClientError) throw new ScienceDaemonClientError({ ...error.failure, outcome: "not-dispatched" });
+        throw error;
+      }
       const healable = error instanceof ScienceDaemonClientError && new Set(["science_daemon_reply_timeout", "science_daemon_connect_timeout",
         "science_daemon_connection_failed", "science_daemon_connection_closed", "science_daemon_science_unavailable"]).has(error.code);
       if (!healable || closed || signal?.aborted) throw error;
@@ -356,7 +394,9 @@ export function createScienceDaemonClient(options: ScienceDaemonClientOptions): 
 
   async function commandObserved(command: DaemonScienceCommand, request: ScienceDaemonRequestOptions = {}): Promise<unknown> {
     if (request.signal?.aborted) throw failure("science_daemon_wait_aborted", "request", "not-dispatched");
-    const daemon = await readyDaemonForCommand(request.signal);
+    assertObservationBudget(request);
+    const daemon = await readyDaemonForCommand(request);
+    assertObservationBudget(request);
     // The server rejects a boot/identity mismatch before command admission. A
     // lost connection is unknown execution, never a reason to retry mutations.
     return rpc("science.command", { serviceIdentity: daemon.serviceIdentity, bootId: daemon.bootId, command }, request);

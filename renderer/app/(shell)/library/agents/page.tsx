@@ -1,5 +1,6 @@
 // 에이전트 라이브러리 — 로스터, 큐레이팅 메모리, 승인형 자산 진화, Experience/Ontology 관리.
 "use client";
+import { useAppUiPreference, readAppUiPreference, writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { effortLabel, effortOptions } from "@/lib/effort-label";
 import { detailForUser } from "@/lib/invocation-failure";
@@ -425,7 +426,7 @@ function LibraryAgentsView() {
   const [bookmarkOverrides, setBookmarkOverrides] = useState<Record<string, boolean>>({});
 
   // 왼쪽 조직도 패널 너비 & 접기 상태 (localStorage 영속)
-  const [orgWidth, setOrgWidth] = useState(300);
+  const [orgWidth, setOrgWidth] = useAppUiPreference("firmOrgWidth");
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   // 좌측 로스터 탭 — 멀티(에이전트 팀=firm) / 싱글(개별 에이전트). 대시보드 조직도와 동일한 분리.
   const [rosterTab, setRosterTab] = useState<"all" | "multi" | "single">("all");
@@ -482,29 +483,19 @@ function LibraryAgentsView() {
 
   useEffect(() => {
     const compactRoster = window.matchMedia("(max-width: 1100px)");
-    try {
-      const w = parseInt(window.localStorage.getItem("agentlas.firm.orgWidth") ?? "", 10);
-      if (Number.isFinite(w) && w >= 200 && w <= 500) setOrgWidth(w);
-      const c = window.localStorage.getItem("agentlas.firm.sidebarCollapsed") === "true";
-      setSidebarCollapsed(c || compactRoster.matches);
-    } catch {
-      setSidebarCollapsed(compactRoster.matches);
-    }
+    setSidebarCollapsed(readAppUiPreference("firmSidebarCollapsed") || compactRoster.matches);
+    const unsubscribe = subscribeAppUiPreference("firmSidebarCollapsed", setSidebarCollapsed);
     const collapseOnCompact = (event: MediaQueryListEvent) => {
       if (event.matches) setSidebarCollapsed(true);
     };
     compactRoster.addEventListener?.("change", collapseOnCompact);
-    return () => compactRoster.removeEventListener?.("change", collapseOnCompact);
+    return () => { unsubscribe(); compactRoster.removeEventListener?.("change", collapseOnCompact); };
   }, []);
 
   const toggleSidebar = () => {
     const next = !sidebarCollapsed;
     setSidebarCollapsed(next);
-    try {
-      window.localStorage.setItem("agentlas.firm.sidebarCollapsed", String(next));
-    } catch {
-      // ignore
-    }
+    try { writeAppUiPreference("firmSidebarCollapsed", next); } catch { /* local control remains available */ }
   };
 
   const startResize = useCallback(
@@ -521,11 +512,6 @@ function LibraryAgentsView() {
       function onUp() {
         window.removeEventListener("mousemove", onMove);
         window.removeEventListener("mouseup", onUp);
-        try {
-          window.localStorage.setItem("agentlas.firm.orgWidth", String(finalW));
-        } catch {
-          // ignore
-        }
       }
       window.addEventListener("mousemove", onMove);
       window.addEventListener("mouseup", onUp);
@@ -1987,11 +1973,6 @@ function LibraryAgentsView() {
               const delta = event.key === "ArrowLeft" ? -16 : 16;
               setOrgWidth((current) => {
                 const next = Math.max(200, Math.min(500, current + delta));
-                try {
-                  window.localStorage.setItem("agentlas.firm.orgWidth", String(next));
-                } catch {
-                  // ignore
-                }
                 return next;
               });
             }}

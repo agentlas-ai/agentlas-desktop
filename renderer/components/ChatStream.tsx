@@ -1,4 +1,6 @@
 "use client";
+import { MessageActions } from "./MessageActions";
+import { displayMessageReply, type MessageReply } from "@/lib/message-reply";
 import type { GoalResultPresentation } from "../../shared/goal-result";
 import { VisualChatScope } from "@/lib/visual-artifacts";
 import { GoalResultReport } from "./GoalResultReport";
@@ -314,7 +316,9 @@ export function ChatStream({
   mediaBasePaths = [],
   workspaceRoot,
   focusMessageId,
+  onReply,
 }: {
+  onReply?: (reply: MessageReply) => void;
   messages: StreamMessage[];
   agentName: string;
   agentTone: InstalledAgent["tone"];
@@ -559,8 +563,8 @@ export function ChatStream({
         )}
         <VisualChatScope.Provider value={artifactChatId ?? null}>
         {messages.map((m, index) => (
+          <MessageActions key={m.id} messageId={m.id} author={m.role === "user" ? (locale === "ko" ? "나" : "You") : agentName} text={displayMessageReply(m.role === "user" ? m.text : userFacingAssistantText(m.text, Boolean(m.streaming)), locale)} locale={locale} onReply={onReply}>
           <div
-            key={m.id}
             id={messageDomId(m.id)}
             tabIndex={-1}
             data-chat-message-id={m.id}
@@ -584,6 +588,7 @@ export function ChatStream({
               mediaBasePaths={mediaBasePaths}
             />
           </div>
+          </MessageActions>
         ))}
         </VisualChatScope.Provider>
         {/* 이 대화·프로젝트의 자동화가 숨은 세션에서 도는 동안의 실시간 줄. */}
@@ -1039,7 +1044,7 @@ const Bubble = memo(function Bubble({
               overflowWrap: "anywhere",
             }}
           >
-            {message.text}
+            {displayMessageReply(message.text, locale)}
           </div>
         )}
       </div>

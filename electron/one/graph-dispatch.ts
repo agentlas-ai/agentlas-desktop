@@ -5,12 +5,13 @@ import { graphAuthoringShapeProblems, GRAPH_BLUEPRINT_INPUT_SCHEMA, isGraphContr
 import { readAutomationGraphDefinition, resolveAutomationGraph } from "../../shared/automation-graph-definition";
 import { requiredExecutionPermission } from "../../shared/graph-node-protocol";
 import { decideGraphRunRequest } from "../../shared/graph-run-request";
+import { graphCommandInvocationKind, graphCommandRequestMatches } from "../../shared/graph-command";
 import { getDb } from "../store/db";
 import { desktopStoreTransaction } from "../store/change-bus";
 import { getChat } from "../store/chats";
 import { createAutomation, getAutomation, hasDurableActiveAutomationExecution, hasGraphLoginWait,
   listAutomations, updateAutomation, updateAutomationGraph } from "../store/automations";
-import { getAutomationGraphReconciliation } from "../store/graph-reconciliation";
+import { listAutomationGraphReconciliations } from "../store/graph-reconciliation";
 import { enqueueTriggerEvent, getTriggerEvent } from "../store/trigger-events";
 import { applyAutomationLifecycle, automationDefinitionDigest } from "../automation-lifecycle";
 import { reportGraphConnections } from "../workflow/tool-inventory";
@@ -21,20 +22,13 @@ import { sha256Value } from "../../shared/graph-execution-digest";
 import { graphMcpEffectProblems, inspectGraphMcpTools } from "../workflow/mcp-call";
 import { recordOneGraphAuthority } from "./graph-ownership";
 import { oneTeamDispatchOwnerChat, type OneTeamCaller } from "./team-dispatch";
-import { toolchainInputProblems } from "../../shared/toolchain";
-import { searchToolchains } from "../toolchains/search";
-import { callableContractFor, contractManifest, currentCallableContracts, draftInterface, exposeAutomation, interfaceIsStale, recordToolchainReturned, recordToolchainRun } from "../toolchains/interface";
-import { readToolchainState } from "../toolchains/store";
+import { searchToolchainAssets } from "../toolchains/search";
+import { callableContractFor } from "../toolchains/interface";
+import { addToolchainVersion, createToolchainAsset, getToolchainAsset, listToolchainAssets, publishToolchainVersion } from "../toolchains/assets";
+import { callToolchain, getToolchainCall, listToolchainCalls } from "../toolchains/calls";
+import type { ToolchainAsset, ToolchainAssetCreateInput, ToolchainCallReceipt } from "../../shared/toolchain-asset";
 import { TOOLCHAIN_CONSUMER_TOOLS } from "../toolchains/consumer";
-import { recordToolchainRepair, reportToolchainProblem, toolchainRepairVerdict } from "../toolchains/reports";
-
-/** How long one toolchain_publish call waits for its test before answering "testing" (runtime tool timeouts are ~60 s). */
-const PUBLISH_WAIT_MS = (() => {
-  const supplied = Number(process.env.AGENTLAS_TOOLCHAIN_PUBLISH_WAIT_MS);
-  return Number.isFinite(supplied) && supplied >= 100 && supplied <= 45_000 ? supplied : 45_000;
-})();
-/** An unchanged definition that failed its test this recently is not re-tested on the next call. */
-const PUBLISH_RETEST_AFTER_MS = 10 * 60_000;
+import { recordToolchainRepair, toolchainRepairVerdict } from "../toolchains/reports";
 
 /** A Work task's capability (team-control-server scope "toolchain-consumer"). */
 function isToolchainConsumer(caller: OneTeamCaller): boolean {
@@ -67,15 +61,6 @@ function exact(caller: OneTeamCaller, id: unknown): Automation {
   if (!automation) throw new Error("one_graph_target_not_in_context");
   return automation;
 }
-/** run/result only: a graph outside this conversation is reachable when its owner
- * made it callable (tested contract, current definition, enabled). Inspect and
- * every authoring operation stay scoped to the origin conversation. */
-function exactOrCallable(caller: OneTeamCaller, id: unknown): Automation {
-  if (typeof id === "string" && scoped(caller).some(a => a.id === id)) return exact(caller, id);
-  const automation = typeof id === "string" && callableContractFor(id) ? getAutomation(id) : null;
-  if (!automation) throw new Error("one_graph_target_not_in_context");
-  return automation;
-}
 /** The caller's own Toolchain request: its result stays readable even if the
  * contract is withdrawn or goes stale after the request was accepted. */
 function requestedByCaller(caller: OneTeamCaller, automationId: string, eventId: unknown): boolean {
@@ -93,22 +78,25 @@ function exactOrRequested(caller: OneTeamCaller, id: unknown, eventId: unknown):
 function fresh(a: Automation, expected: unknown): void {
   if (typeof expected !== "string" || expected !== automationDefinitionDigest(a)) throw new Error("one_graph_definition_changed");
 }
-/**
- * toolchain_publish after a test run: the first run pins a runtime (pinAutomationRuntimeIfUnset),
- * which changes the definition digest although nothing One saved changed. Measured 2026-10-04:
- * save -> one_graph_run -> toolchain_publish with the save receipt's revision was refused as
- * one_graph_definition_changed. The publish test never runs the graph (a fresh model only finds
- * and picks it), so the revision One saved still stands when the pin is the only difference.
- */
-function freshForPublish(a: Automation, expected: unknown): void {
-  if (typeof expected === "string" && a.runtimeSelection
-    && expected === automationDefinitionDigest({ ...a, runtimeSelection: undefined })) return;
-  fresh(a, expected);
-}
-function editable(a: Automation): void {
+function editable(a: Automation, affectedNodeIds = resolveAutomationGraph(a).nodes.map(node => node.id)): void {
   if (hasDurableActiveAutomationExecution(a.id) || hasGraphLoginWait(a.id)
-    || getDb().prepare("SELECT 1 FROM automation_trigger_events WHERE automation_id=? AND status IN ('pending','claimed') LIMIT 1").get(a.id)
-    || getAutomationGraphReconciliation(a.id)) throw new Error("one_graph_execution_unsettled");
+    || getDb().prepare("SELECT 1 FROM automation_trigger_events WHERE automation_id=? AND status IN ('pending','claimed') LIMIT 1").get(a.id)) throw new Error("one_graph_execution_unsettled");
+  const held = new Set(listAutomationGraphReconciliations(a.id).flatMap(view => view.nodes.map(node => node.nodeId)));
+  const affected = affectedNodeIds.filter(id => held.has(id));
+  if (affected.length) throw new Error(`one_graph_leaf_unsettled:${affected.join(",")}`);
+}
+/** Preserve unresolved coordinates while allowing an unrelated branch to be repaired. */
+function changedGraphNodes(before: WorkflowGraph, after: WorkflowGraph): string[] {
+  const changed = new Set([...before.nodes, ...after.nodes].filter(node =>
+    JSON.stringify(before.nodes.find(candidate => candidate.id === node.id))
+      !== JSON.stringify(after.nodes.find(candidate => candidate.id === node.id))).map(node => node.id));
+  for (const edge of [...before.edges, ...after.edges]) {
+    if (JSON.stringify(before.edges.find(candidate => candidate.id === edge.id))
+      !== JSON.stringify(after.edges.find(candidate => candidate.id === edge.id))) {
+      changed.add(edge.source); changed.add(edge.target);
+    }
+  }
+  return [...changed];
 }
 function receipt(a: Automation, extra: Record<string, unknown> = {}) {
   return { schemaVersion: "agentlas.one-graph-receipt.v1", graph_id: a.id, name: a.name,
@@ -203,6 +191,108 @@ async function waitForResult(caller: OneTeamCaller, a: Automation, input: Record
     ...(event.lastError ? { error: event.lastError } : {}) };
 }
 
+function assetManifest(asset: ToolchainAsset, version = asset.stableVersion ?? asset.versions.at(-1)?.version) {
+  const release = asset.versions.find(item => item.version === version);
+  if (!release) throw new Error("toolchain_version_not_found");
+  return { toolchain_id: asset.id, toolchainId: asset.id, version: release.version, name: release.contract.name,
+    status: asset.status, stable_version: asset.stableVersion, content_hash: release.contentHash,
+    description: release.contract.description, when_to_use: release.contract.whenToUse, when_not_to_use: release.contract.whenNotToUse,
+    input_schema: release.contract.inputSchema, output_schema: release.contract.outputSchema, examples: release.contract.examples,
+    variation_statement: release.contract.variationStatement, validation: release.validation,
+    effects: { readOnlyHint: requiredExecutionPermission(release.implementation.snapshot.graph) === "read" },
+    versions: asset.versions.map(item => ({ version: item.version, content_hash: item.contentHash, validation: item.validation.state })) };
+}
+
+function assetOwnedBy(caller: OneTeamCaller, asset: ToolchainAsset): void {
+  const chatId = owner(caller).id;
+  if (!asset.versions.every(version => version.provenance.creatorChatId === chatId)) throw new Error("toolchain_creator_scope_required");
+}
+function callerCall(caller: OneTeamCaller, id: unknown): ToolchainCallReceipt {
+  const call = typeof id === "string" ? getToolchainCall(id) : null;
+  if (!call || call.callerChatId !== owner(caller).id) throw new Error("toolchain_call_not_in_context");
+  return call;
+}
+async function waitForCall(caller: OneTeamCaller, id: unknown, seconds: number): Promise<ToolchainCallReceipt> {
+  let call = callerCall(caller, id);
+  const until = Date.now() + seconds * 1000;
+  while (call.status === "running" && Date.now() < until) {
+    await new Promise(resolve => setTimeout(resolve, Math.min(250, until - Date.now())));
+    call = callerCall(caller, id);
+  }
+  return call;
+}
+function callManifest(call: ToolchainCallReceipt) {
+  const name = getToolchainAsset(call.toolchainId)?.versions.find(version => version.version === call.version)?.contract.name;
+  return { ...call, ...(name ? { name } : {}), call_id: call.id, toolchain_id: call.toolchainId };
+}
+
+async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Record<string, unknown>): Promise<unknown> {
+  const chat = owner(caller);
+  if (name === "toolchain_search") return { schemaVersion: "agentlas.toolchain-search.v2",
+    toolchains: searchToolchainAssets(String(input.task), listToolchainAssets(), input.limit as number | undefined).map(asset => assetManifest(asset)) };
+  if (name === "toolchain_inspect") {
+    const asset = getToolchainAsset(String(input.toolchain_id));
+    if (!asset) throw new Error("toolchain_not_found");
+    return { schemaVersion: "agentlas.toolchain-inspect.v1", ...assetManifest(asset, input.version as number | undefined) };
+  }
+  if (name === "toolchain_result") return callManifest(await waitForCall(caller, input.call_id, Number(input.wait_seconds ?? 0)));
+  if (name === "toolchain_report") {
+    const call = callerCall(caller, input.call_id);
+    const reportId = `tcrp_${createHash("sha256").update(`${chat.id}\0${call.id}\0${input.problem}`).digest("hex")}`;
+    getDb().prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING").run(`toolchain.report.v1:${reportId}`,
+      JSON.stringify({ id: reportId, toolchainId: call.toolchainId, version: call.version, callId: call.id,
+        reporterChatId: chat.id, problem: input.problem, expected: input.expected ?? null, at: new Date().toISOString() }));
+    return { schemaVersion: "agentlas.toolchain-report.v2", toolchainId: call.toolchainId, version: call.version, call_id: call.id,
+      report_id: reportId, state: "recorded" };
+  }
+  if (name === "toolchain_run") {
+    if (chat.archivedAt) throw new Error("toolchain_caller_archived");
+    const pending = callToolchain({ toolchainId: String(input.toolchain_id), version: Number(input.version), args: input.args as Record<string, unknown> },
+      { callerChatId: chat.id, requestId: String(input.request_id), permission: caller.permission === "read" ? "read" : "write", dryRun: input.dry_run === true });
+    pending.catch(() => undefined);
+    const settled = await Promise.race([pending, new Promise<null>(resolve => {
+      const timer = setTimeout(() => resolve(null), Number(input.wait_seconds ?? 20) * 1000); timer.unref?.();
+    })]);
+    if (settled) return callManifest(settled);
+    const receipt = listToolchainCalls(String(input.toolchain_id)).find(call => call.callerChatId === chat.id && call.requestId === input.request_id);
+    if (!receipt) throw new Error("toolchain_call_receipt_missing");
+    return callManifest(receipt);
+  }
+  writable(caller);
+  if (name === "toolchain_create") {
+    const source = exact(caller, input.graph_id); fresh(source, input.expected_revision);
+    editable(source);
+    const creation: ToolchainAssetCreateInput = { sourceAutomationId: source.id, contract: input.contract as ToolchainAssetCreateInput["contract"],
+      outputBinding: input.output_binding as ToolchainAssetCreateInput["outputBinding"] };
+    const key = `toolchain.creation.v1:${sha256Value({ chatId: chat.id, revision: input.expected_revision,
+      toolchainId: input.toolchain_id ?? null, creation })}`;
+    return getDb().transaction(() => {
+      const prior = getDb().prepare("SELECT value FROM meta WHERE key=?").get(key) as { value: string } | undefined;
+      if (prior) { const identity = JSON.parse(prior.value) as { id: string; version: number }; const asset = getToolchainAsset(identity.id);
+        if (asset) return { schemaVersion: "agentlas.toolchain-create.v1", ...assetManifest(asset, identity.version), already_created: true }; }
+      const asset = input.toolchain_id ? getToolchainAsset(String(input.toolchain_id)) : null;
+      if (input.toolchain_id && !asset) throw new Error("toolchain_not_found");
+      if (asset) assetOwnedBy(caller, asset);
+      const created = asset ? addToolchainVersion(asset.id, creation, { callerChatId: chat.id }) : createToolchainAsset(creation, { callerChatId: chat.id });
+      const version = created.versions.at(-1)!.version;
+      getDb().prepare("INSERT INTO meta(key,value) VALUES(?,?)").run(key, JSON.stringify({ id: created.id, version }));
+      return { schemaVersion: "agentlas.toolchain-create.v1", ...assetManifest(created, version) };
+    }).immediate();
+  }
+  if (name === "toolchain_publish") {
+    const asset = getToolchainAsset(String(input.toolchain_id));
+    if (!asset) throw new Error("toolchain_not_found");
+    assetOwnedBy(caller, asset);
+    const version = Number(input.version);
+    const pending = publishToolchainVersion(asset.id, version, { callerChatId: chat.id, permission: "write" });
+    pending.catch(() => undefined);
+    const settled = await Promise.race([pending, new Promise<null>(resolve => { const timer = setTimeout(() => resolve(null), 45_000); timer.unref?.(); })]);
+    return { schemaVersion: "agentlas.toolchain-publish.v2", ...assetManifest(settled ?? getToolchainAsset(asset.id)!, version),
+      ...(settled ? {} : { testing: true }) };
+  }
+  throw new Error("toolchain_unknown_operation");
+}
+
 export async function oneGraphDispatch(caller: OneTeamCaller, name: string, input: Record<string, unknown>): Promise<unknown> {
   if (isToolchainConsumer(caller) && !TOOLCHAIN_CONSUMER_TOOLS.includes(name)) throw new Error("one_graph_consumer_scope");
   const tool = ONE_GRAPH_TOOLS.find(t => t.name === name);
@@ -214,63 +304,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     definitionProtocol: "agentlas.automation-graph-definition.v1", execution: "host_compiled_dependency_graph", strategyOwner: "One",
     ...(input.catalog_id ? { inventory: await inspectGraphMcpTools({ chat, catalogId: input.catalog_id as string, permission: caller.permission }) } : {}),
     ...(input.include_registration_protocol === true ? { registrationProtocol: AUTOMATION_PROTOCOL } : {}) };
-  if (name === "toolchain_search") {
-    const pool = currentCallableContracts();
-    const hits = searchToolchains(String(input.task), pool.map(entry => entry.contract),
-      typeof input.limit === "number" ? input.limit : undefined);
-    const toolchains = hits.map(hit => pool.find(entry => entry.automation.id === hit.automationId)!)
-      .map(entry => contractManifest(entry.contract, entry.automation, automationDefinitionDigest(entry.automation)));
-    recordToolchainReturned(toolchains.map(item => item.graph_id));
-    // An empty list is the answer, not a failure: do the work normally.
-    return { schemaVersion: "agentlas.toolchain-search.v1", toolchains };
-  }
-  if (name === "toolchain_publish") {
-    // One may publish only a graph its own conversation saved; the fresh-session test is the gate,
-    // not One's say-so. Owner withdrawal and the Toolchains screen keep the final word.
-    writable(caller);
-    const a = exact(caller, input.graph_id);
-    freshForPublish(a, input.expected_revision);
-    if (!a.graph?.nodes.length) throw new Error("toolchain_graph_required");
-    const base = { schemaVersion: "agentlas.toolchain-publish.v1", graph_id: a.id, name: a.name };
-    const testSummary = (test: NonNullable<ReturnType<typeof readToolchainState>["interface"]>["coldStart"]) => test
-      ? { fresh_session_test: { passed: test.passed, matching_requests: test.positives, found: test.positiveFound ?? null,
-        selected: test.positiveSelected, bound: test.positiveBound, unrelated_requests: test.negatives,
-        wrongly_selected: test.negativeSelected } }
-      : {};
-    const stored = readToolchainState(a.id).interface;
-    const current = stored && !interfaceIsStale(stored, a) ? stored : null;
-    // The owner's withdrawal is the owner's word; only the owner re-registers (Toolchains screen).
-    if (stored?.state === "deprecated") {
-      return { ...base, state: "deprecated", code: "toolchain_withdrawn_by_owner",
-        next: "The owner withdrew this Toolchain. Only the owner can make it callable again (Work › Environment › Toolchains)." };
-    }
-    // Already callable for this exact definition: a retest can only flip a working tool to draft.
-    if (current?.state === "callable") return { ...base, name: current.name, state: "callable", already_callable: true, ...testSummary(current.coldStart) };
-    // One shares only what cannot change anything outside; a graph that can act stays the owner's call.
-    if (!draftInterface(a).effects.readOnlyHint) {
-      return { ...base, state: "not_published", code: "toolchain_owner_registration_required",
-        next: "This graph can change things outside (posts, sends or writes), so One may not share it. Tell the owner: they can make it callable from Work › Environment › Toolchains." };
-    }
-    // The same definition failed recently: answer with that result instead of spending another test.
-    if (current?.state === "draft" && current.coldStart && Date.now() - Date.parse(current.coldStart.at) < PUBLISH_RETEST_AFTER_MS) {
-      return { ...base, name: current.name, state: "draft", already_tested: true, ...testSummary(current.coldStart),
-        next: "This exact definition did not pass a few minutes ago. Improve the graph purpose or input labels (which changes the definition), then publish again." };
-    }
-    // The test is host-owned (single-flight, budgeted). Wait a bounded time; if it is still running, say so.
-    const pending = exposeAutomation(a.id, undefined, { kind: "one", chatId: owner(caller).id });
-    pending.catch(() => undefined);
-    const settled = await Promise.race([
-      pending.then((contract) => ({ contract })),
-      new Promise<null>((resolve) => { const timer = setTimeout(() => resolve(null), PUBLISH_WAIT_MS); timer.unref?.(); }),
-    ]);
-    if (!settled) {
-      return { ...base, state: "testing",
-        next: "The fresh-session test is still running in the host. Call toolchain_publish again with the same graph_id and expected_revision in about a minute to read the result." };
-    }
-    const contract = settled.contract;
-    return { ...base, name: contract.name, state: contract.state, ...testSummary(contract.coldStart),
-      ...(contract.state === "callable" ? {} : { next: "The contract stays a draft. Improve the graph purpose or input labels, then publish again." }) };
-  }
+  if (name.startsWith("toolchain_")) return dispatchToolchain(caller, name, input);
   if (name === "one_graph_inspect") {
     if (!input.graph_id) return { graphs: scoped(caller).map(a => receipt(a, { source: a.graph?.nodes.length ? "stored-graph" : "legacy-prompt", goal: a.goal ?? null })) };
     const a = exact(caller, input.graph_id);
@@ -314,22 +348,6 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     return { ...receipt(a), ...definition };
   }
   if (name === "one_graph_result") return waitForResult(caller, exactOrRequested(caller, input.graph_id, input.event_id), input);
-  if (name === "toolchain_report") {
-    // The caller reports; only the conversation that made the Toolchain changes it (PLAN.md §0 rule 1).
-    if (typeof input.graph_id === "string" && scoped(caller).some(item => item.id === input.graph_id)) {
-      return { schemaVersion: "agentlas.toolchain-report.v1", graph_id: input.graph_id, state: "not_reported", code: "toolchain_report_own_graph",
-        next: "This conversation made this graph: fix it with one_graph_patch (then toolchain_publish), or leave it as it is." };
-    }
-    const automation = typeof input.graph_id === "string" ? getAutomation(input.graph_id) : null;
-    if (!automation || !requestedByCaller(caller, automation.id, input.event_id)) throw new Error("toolchain_report_event_not_in_context");
-    const outcome = reportToolchainProblem({ automation, reporterChatId: chat.id, eventId: String(input.event_id),
-      problem: String(input.problem), expected: typeof input.expected === "string" ? input.expected : null });
-    return { schemaVersion: "agentlas.toolchain-report.v1", graph_id: automation.id,
-      ...(outcome.state === "queue_full"
-        ? { state: "not_reported", code: "toolchain_report_queue_full", open_reports: outcome.open }
-        : { state: outcome.state, report_id: outcome.reportId, delivered_to: outcome.deliveredTo }),
-      next: "Do this request without the Toolchain. Whoever made it decides whether to fix it; do not retry it for this input." };
-  }
   if (name === "one_graph_set_enabled" && input.enabled === false) {
     const a = exact(caller, input.graph_id);
     const result = applyAutomationLifecycle({ parsed: { action: "pause", automationId: a.id, name: a.name, prompt: "", schedule: "", scheduleEmitted: false },
@@ -376,7 +394,7 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
           recordOneGraphAuthority(current, chat.id);
           return receipt(current, { ok: true, action: "unchanged" });
         }
-        editable(current);
+        editable(current, changedGraphNodes(resolveAutomationGraph(current), graph));
         const repair = toolchainRepairVerdict(current, chat.id);
         if (!repair.ok) return { ok: false, code: "toolchain_repair_budget_reached", graph_id: current.id, repairs_today: repair.repairs, retry_at: repair.retryAt,
           next: "Leave the Toolchain as it is. The owner can allow another change by speaking in this conversation." };
@@ -398,29 +416,30 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
       return receipt(saved, { ok: true, action: existing ? "updated" : "created", ...(connections && !enable ? { activation: connections.activation } : {}) });
     }).immediate();
   }
-  const a = name === "one_graph_run" ? exactOrCallable(caller, input.graph_id) : exact(caller, input.graph_id);
   // A lost tool response can be retried after the host pinned a runtime or the
-  // definition was later revised. The old exact event remains the authority;
-  // it must not become a second execution or require the new definition.
-  if (name === "one_graph_run") {
-    const requestHash = createHash("sha256").update(`${chat.id}\0${input.request_id}`).digest("hex");
-    const prior = getDb().prepare("SELECT id, payload_json FROM automation_trigger_events WHERE automation_id=? AND trigger_kind='command' AND dedupe_key=?").get(a.id, `one-graph:${requestHash}`) as { id: string; payload_json: string } | undefined;
-    if (prior) {
-      const payload = JSON.parse(prior.payload_json) as { source?: string; definitionRevision: string; ownerChatId: string; input: Record<string, string>; dryRun: boolean };
-      const raw = input.input as Record<string, unknown> | undefined;
-      if (payload.definitionRevision !== input.expected_revision || payload.ownerChatId !== chat.id || payload.dryRun !== (input.dry_run === true)
-        || Object.entries(payload.input).some(([key, value]) => typeof raw?.[key] !== "string" || (raw[key] as string).trim() !== value)) throw new Error("one_graph_request_identity_conflict");
-      return { ...receipt(a), ok: true, already_requested: true,
-        invoked_as: payload.source === "toolchain" || callableContractFor(a.id) ? "toolchain" : "graph",
-        ...await waitForResult(caller, a, { ...input, event_id: prior.id, wait_seconds: input.wait_seconds ?? 20 }) };
-    }
+  // definition was revised/withdrawn. Look up that exact request BEFORE new-run
+  // admission; it only reads the caller's previous event and cannot queue work.
+  const requestHash = name === "one_graph_run" ? createHash("sha256").update(`${chat.id}\0${input.request_id}`).digest("hex") : null;
+  const prior = requestHash ? getDb().prepare("SELECT id, payload_json FROM automation_trigger_events WHERE automation_id=? AND trigger_kind='command' AND dedupe_key=?")
+    .get(input.graph_id, `one-graph:${requestHash}`) as { id: string; payload_json: string } | undefined : undefined;
+  const a = name === "one_graph_run"
+    ? prior ? exactOrRequested(caller, input.graph_id, prior.id) : exact(caller, input.graph_id)
+    : exact(caller, input.graph_id);
+  if (prior) {
+    const payload = JSON.parse(prior.payload_json) as Record<string, unknown>;
+    if (!graphCommandRequestMatches(payload, { definitionRevision: input.expected_revision, ownerChatId: chat.id,
+      input: input.input, dryRun: input.dry_run === true })) throw new Error("one_graph_request_identity_conflict");
+    return { ...receipt(a), definition_revision: payload.definitionRevision, ok: true, already_requested: true,
+      invoked_as: graphCommandInvocationKind(payload),
+      ...await waitForResult(caller, a, { ...input, event_id: prior.id, wait_seconds: input.wait_seconds ?? 20 }) };
   }
   fresh(a, input.expected_revision);
   if (name === "one_graph_patch") return desktopStoreTransaction(getDb(), () => {
-    const current = exact(caller, a.id); fresh(current, input.expected_revision); editable(current);
+    const current = exact(caller, a.id); fresh(current, input.expected_revision);
     const graph = structuredClone(resolveAutomationGraph(current));
     const edits = (input.instructions ?? []) as Array<{ node_id: string; instruction: string }>;
     const calls = (input.mcp_calls ?? []) as Array<{ node_id: string; call: GraphBlueprint["steps"][number]["mcpCall"] }>;
+    editable(current, [...edits, ...calls].map(edit => edit.node_id));
     if (!edits.length && !calls.length) throw new Error("one_graph_patch_empty");
     if (new Set(edits.map(edit => edit.node_id)).size !== edits.length) throw new Error("one_graph_duplicate_node_patch");
     for (const edit of edits) {
@@ -455,45 +474,31 @@ export async function oneGraphDispatch(caller: OneTeamCaller, name: string, inpu
     return receipt(saved, { ok: true, action: "updated", changed_node_ids: [...new Set([...edits, ...calls].map(edit => edit.node_id))] });
   }).immediate();
   if (name === "one_graph_set_enabled") {
-    editable(a); await connected(caller, a);
+    editable(a, []); await connected(caller, a);
     const result = applyAutomationLifecycle({ parsed: { action: "resume", automationId: a.id, expectedDefinitionDigest: input.expected_revision as string,
       name: a.name, prompt: "", schedule: "", scheduleEmitted: false }, chatId: chat.id, canWrite: true });
     return receipt(result.automation, { ok: true, action: result.action });
   }
   if (name === "one_graph_run") {
-    // The contract check is cheap and deterministic, so it answers first: a caller
-    // binding the wrong input learns exactly which field, not a connection status.
-    const contract = callableContractFor(a.id);
-    if (contract) {
-      const problems = toolchainInputProblems(contract, input.input ?? {});
-      if (problems.length) return { ok: false, code: "toolchain_input_invalid", problems, input_schema: contract.inputSchema };
-    }
-    const inScope = scoped(caller).some(item => item.id === a.id);
-    if (inScope) await connected(caller, a);
-    else {
-      // Cross-conversation call of an owner-approved Toolchain: the saved origin owns scope.
-      validateOneGraphCommandScope(a);
-      const report = await reportGraphConnections(resolveAutomationGraph(a), currentUiLocale());
-      if (!report.activation.canActivate) throw new Error(`one_graph_not_connected:${report.activation.reason}`);
-    }
+    await connected(caller, a);
     const queuedReceipt = getDb().transaction(() => {
-      const current = exactOrCallable(caller, a.id); fresh(current, input.expected_revision);
-      if (hasGraphLoginWait(a.id) || getAutomationGraphReconciliation(a.id)) throw new Error("one_graph_execution_unsettled");
+      const current = exact(caller, a.id); fresh(current, input.expected_revision);
+      // The kernel reads the exact unsettled leaf coordinates at dispatch. A
+      // new request does not authorize replay, and healthy branches remain usable.
+      const heldNodeIds = [...new Set(listAutomationGraphReconciliations(a.id).flatMap(view => view.nodes.map(node => node.nodeId)))];
       const decision = decideGraphRunRequest({ ref: current.id, automations: [current], input: input.input as Record<string, unknown> | undefined, dryRun: input.dry_run === true });
       if (!decision.ok) return decision;
       const requestHash = createHash("sha256").update(`${chat.id}\0${input.request_id}`).digest("hex");
       const dedupeKey = `one-graph:${requestHash}`;
-      // Outside its origin conversation a graph is reachable only as a Toolchain; the
-      // delivery path then checks the contract instead of conversation ownership.
-      const payload = { source: inScope ? "one-mcp" : "toolchain", definitionRevision: input.expected_revision, ownerChatId: chat.id, input: decision.input, dryRun: input.dry_run === true };
+      const payload = { source: "one-mcp", definitionRevision: input.expected_revision, ownerChatId: chat.id,
+        input: decision.input, dryRun: input.dry_run === true, invokedAs: "graph" };
       const prior = getDb().prepare("SELECT payload_json FROM automation_trigger_events WHERE automation_id=? AND trigger_kind='command' AND dedupe_key=?").get(a.id, dedupeKey) as { payload_json: string } | undefined;
       if (prior && prior.payload_json !== JSON.stringify(payload)) throw new Error("one_graph_request_identity_conflict");
       const queued = enqueueTriggerEvent({ automationId: a.id, triggerKind: "command", dedupeKey, payload });
       return { ...receipt(current, { ok: true, status: "requested", event_id: queued.event.id, already_requested: !queued.inserted, event_status: queued.event.status,
-        invoked_as: contract ? "toolchain" : "graph" }), event_id: queued.event.id };
+        invoked_as: graphCommandInvocationKind(payload), held_node_ids: heldNodeIds }), event_id: queued.event.id };
     }).immediate();
     if (!("event_id" in queuedReceipt)) return queuedReceipt;
-    if (contract && (queuedReceipt as { already_requested?: boolean }).already_requested !== true) recordToolchainRun(a.id);
     return { ...queuedReceipt, ...await waitForResult(caller, a, { ...input, event_id: queuedReceipt.event_id, wait_seconds: input.wait_seconds ?? 20 }) };
   }
   throw new Error("one_graph_unknown_operation");

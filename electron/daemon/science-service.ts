@@ -24,6 +24,7 @@ export type DaemonScienceCommand =
   | { op: "loops.start"; input: Parameters<Store["startLoopSession"]>[0] }
   | { op: "loops.transition"; input: Parameters<Store["transitionLoopSession"]>[0] }
   | { op: "composer.start"; input: Parameters<Conversations["start"]>[0] }
+  | { op: "composer.runStatus"; input: Parameters<Conversations["getRunStatus"]>[0] }
   | { op: "composer.steer"; input: Parameters<Conversations["steer"]>[0] }
   | { op: "composer.reconcile" | "composer.cancel" | "composer.receipt"; input: TurnScope }
   | { op: "composer.attach" | "composer.steering" | "questions.list" | "messages.list"; input: Scope }
@@ -46,6 +47,9 @@ export type DaemonScienceCommand =
   | { op: "conversations.list"; input: { projectId: string } }
   | { op: "runtime.adoptSession"; input: { session: { cookieValue: string; userId?: string; workspaceId?: string; expiresAt?: number } | null } }
   | { op: "styles.list" }
+  | { op: "styles.templateCatalog"; input: { lang: "ko" | "en" } }
+  | { op: "styles.getProjectTemplate"; input: { projectId: string } }
+  | { op: "styles.applyTemplate"; input: { projectId: string; templateId: string | null } }
   | { op: "styles.import"; input: { bytesBase64: string; fileName: string; name?: string } }
   | { op: "styles.rename"; input: { sha256: string; name: string } }
   | { op: "styles.delete" | "styles.saveEdited"; input: { sha256: string } }
@@ -382,12 +386,15 @@ export function createDaemonScienceService(options: {
           ?? await api.resolveScienceRuntimeSelection(store, command.input));
         assertExecution();
         if (!runtimeSelection?.model) throw new Error("science-runtime-selection-required");
-        return conversations.start({ ...command.input, runtimeSelection });
+        return typeof conversations.acceptResearcherRun === "function"
+          ? conversations.acceptResearcherRun({ ...command.input, runtimeSelection })
+          : conversations.start({ ...command.input, runtimeSelection });
       }
       case "composer.steer": return conversations.steer(command.input);
       case "composer.reconcile": return conversations.reconcileSteering(command.input);
       case "composer.cancel": return conversations.cancel(command.input);
       case "composer.receipt": return conversations.receipt(command.input);
+      case "composer.runStatus": return conversations.getRunStatus(command.input);
       case "composer.attach": return conversations.attach(command.input);
       case "composer.steering": return store.listSteering(command.input.projectId, command.input.conversationId);
       case "questions.register": return activeHost.registerQuestionUi();
@@ -483,13 +490,15 @@ export function createDaemonScienceService(options: {
         return { adopted };
       }
       case "styles.list": case "styles.import": case "styles.rename": case "styles.delete":
+      case "styles.templateCatalog": case "styles.getProjectTemplate": case "styles.applyTemplate":
       case "styles.applyToProject": case "styles.samplePreview": case "styles.openForEditing": case "styles.saveEdited": {
         // A Science build without the style library answers with an update request, never a crash.
         const provider = (api as unknown as { scienceStyleLibrary?: () => Record<string, (input?: unknown) => unknown> }).scienceStyleLibrary;
         if (!provider) throw new Error("science-style-library-update-required");
         const library = provider();
-        if (command.op === "styles.applyToProject" && !store.getProject(command.input.projectId)) throw new Error("science-project-not-found");
+        if ((command.op === "styles.applyToProject" || command.op === "styles.getProjectTemplate" || command.op === "styles.applyTemplate") && !store.getProject(command.input.projectId)) throw new Error("science-project-not-found");
         const method = command.op.slice("styles.".length);
+        if (typeof library[method] !== "function") throw new Error("science-style-library-update-required");
         return "input" in command ? library[method]!(command.input) : library[method]!();
       }
       case "math.command":

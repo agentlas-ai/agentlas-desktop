@@ -67,6 +67,7 @@ import {
   CONTINUOUS_MODE_MAX_PASSES,
   STORMBREAKER_MAX_IDENTICAL_PASSES,
   idleGoalPassStep,
+  finiteGoalContinuationIsParked,
   goalContinuationSchedule,
   STORMBREAKER_LONG_RUN_SCHEDULE,
   STORMBREAKER_LOOP_PROTOCOL,
@@ -125,6 +126,7 @@ import { isOneQuietReply } from "../../shared/one-supervisor";
 import { listAgentSurfaces } from "../store/agent-surfaces";
 import { listRentAllowedSlugs } from "../store/project-agent-rent";
 import { findCanonicalTaskForChat } from "../store/tasks";
+import { MainWorkRecoveryContext } from "../invocation/main-work-recovery";
 import { touchRuntimeSession } from "../store/runtime-sessions";
 import { latestTaskCheckpoint } from "../long-run/checkpoint";
 import { bindCreatedAutomationToGoal } from "../long-run/automation-provenance";
@@ -1915,6 +1917,7 @@ export function runMcpInvocation(
   browserPresentation: "foreground" | "background" = "background",
   /** Main-only admission boundary before the first root work request and its plan receipt. */
   onBeforeGoalWorkDispatch?: (goalId: string | null) => void,
+  canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryContext,
 ): Promise<McpInvocationResult> {
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
   const graphAttempt = executionContext?.graphWorkerAttempt;
@@ -1941,6 +1944,16 @@ export function runMcpInvocation(
     },
   });
   const invocationSignal = login.signal;
+  // Site, legacy Telegram and scheduler observations use this Host entrance
+  // directly. Reuse their existing canonical Task and the same private leaf
+  // port; the invocation run id only fences this port's lifetime.
+  let directWorkOwnerCurrent = true;
+  const workRecovery = canonicalWorkRecovery ?? (executionContext?.source !== "science"
+    && !executionContext?.aliveScience && findCanonicalTaskForChat(req.chatId)
+    ? new MainWorkRecoveryContext(req.chatId, req.runId!, () => {
+      if (!directWorkOwnerCurrent) throw new Error("main_work_invocation_owner_ended");
+      invocationSignal.throwIfAborted();
+    }) : undefined);
   if (graphAttempt) {
     const originalPrepare = executionContext?.onWorkforcePrepareReceipt;
     executionContext = { ...executionContext!, onWorkforcePrepareReceipt: receipt => {
@@ -1991,7 +2004,8 @@ export function runMcpInvocation(
         : "Repeated results detected. The next step will change strategy and continue independent work." } });
   };
   const runOwnedInvocation = () => withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
-    req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory, onBeforeGoalWorkDispatch,
+    req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory, onBeforeGoalWorkDispatch, workRecovery,
+    () => directWorkOwnerCurrent && !ownerSignal.aborted,
   )).then(async result => {
     if (login.waiting && !ownerSignal.aborted) {
       const browserLoginWait = login.seal(await drainAttemptChildren(children));
@@ -2014,11 +2028,12 @@ export function runMcpInvocation(
     login.cancel();
     throw error;
   }), () => bindDispatchedGoal(getChatGoalId(req.chatId) ?? null)));
-  return graphAttempt ? withAdapterEffectObserver({ runId: req.runId!, chatId: req.chatId, rootAgentId: null, source: "automation" }, {
+  const owned = graphAttempt ? withAdapterEffectObserver({ runId: req.runId!, chatId: req.chatId, rootAgentId: null, source: "automation" }, {
     begin: admission => noteGraphWorkerAdapterStart(graphAttempt, admission),
     finish: (scopeId, report) => noteGraphWorkerAdapterFinish(graphAttempt, scopeId, report),
     recordingFailed: () => noteGraphWorkerCoverageUnknown(graphAttempt),
   }, runOwnedInvocation) : runOwnedInvocation();
+  return owned.finally(() => { directWorkOwnerCurrent = false; });
 }
 
 async function runMcpInvocationInContext(
@@ -2038,10 +2053,22 @@ async function runMcpInvocationInContext(
   login?: BrowserLoginPrerequisiteControl,
   progressAdvisory?: () => string | null,
   onBeforeGoalWorkDispatch?: (goalId: string | null) => void,
+  canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryContext,
+  invocationCurrent?: () => boolean,
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
   let mcpConfigCleanup: (() => void) | undefined;
+  let mcpConfigCurrent = true;
+  const isMcpConfigCurrent = () => mcpConfigCurrent && !signal?.aborted
+    && !login?.ownerSignal.aborted && invocationCurrent?.() !== false;
+  const revokeMcpConfig = () => {
+    mcpConfigCurrent = false;
+    try { mcpConfigCleanup?.(); }
+    catch { console.warn("[mcp] invocation abort config cleanup failed; authority closed"); }
+  };
+  signal?.addEventListener("abort", revokeMcpConfig, { once: true });
+  if (login?.ownerSignal !== signal) login?.ownerSignal.addEventListener("abort", revokeMcpConfig, { once: true });
   // Browser fallback ladder binding (electron/browser/fallback-ladder-runtime.ts): chat/run ids + notice sink.
   let unbindBrowserLadder: (() => void) | undefined;
   let browserLadderSettled = false;
@@ -3870,6 +3897,7 @@ ${effectiveUserPrompt}`;
         // Graph nodes can share a runId. Every preparation, including doctor
         // and unattended runs, needs its own sealed file and launch lifetime.
         configKey: `invocation-${randomUUID()}`,
+        admissionCurrent: isMcpConfigCurrent,
         ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant } : {}),
         ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
         ...(req.mcpBrowserProfileKey ? { browserProfileKey: req.mcpBrowserProfileKey } : {}),
@@ -3915,6 +3943,10 @@ ${effectiveUserPrompt}`;
         },
       });
       mcpConfigCleanup = cfg?.cleanup;
+      if (!isMcpConfigCurrent()) {
+        mcpConfigCleanup?.();
+        throw new Error("mcp_invocation_scope_ended");
+      }
       assertMcpGoalSelectionCurrent();
       if (nativeBrowserGrant && !cfg?.nativeBrowserBound) {
         throw new Error("native-browser-config-unbound");
@@ -5731,14 +5763,14 @@ ${effectiveUserPrompt}`;
   // 지침으로 질문 fence를 금지하고, 안전한 기본값이 없으면 "NEEDS-INPUT:"으로 명시적 실패를
   // 유도한다. automation-result.ts 분류기가 이 계약을 짝으로 감지한다(조용한 가짜 성공 방지).
   if (isUnattendedExecution(executionContext) && !isAliveControllerRun) {
-    systemPrompt = `${systemPrompt}\n\n${UNATTENDED_NO_ASK_DIRECTIVE}`;
+    turnContextParts.push(UNATTENDED_NO_ASK_DIRECTIVE); stableTurnContextParts.push(UNATTENDED_NO_ASK_DIRECTIVE);
   } else if (usesMobileDurableDecision(executionContext)) {
-    systemPrompt = `${systemPrompt}\n\n${MOBILE_DURABLE_ASK_DIRECTIVE}`;
+    turnContextParts.push(MOBILE_DURABLE_ASK_DIRECTIVE); stableTurnContextParts.push(MOBILE_DURABLE_ASK_DIRECTIVE);
   } else if (!req.agentAppMode && chat.kind !== "division") {
     // 사람이 보고 있는 실행에는 **묻는 방법**을 알려 준다. 질문 시트 UI 와 렌더러 파서는
     // 이미 있는데 그 형식을 아는 프롬프트가 태스크포스 합성뿐이라, 기본 경로인 CLI 실행은
     // 구조화해서 물을 수단이 없어 산문으로 되물었다(2026-09-04 실측).
-    systemPrompt = `${systemPrompt}\n\n${ATTENDED_ASK_DIRECTIVE}`;
+    turnContextParts.push(ATTENDED_ASK_DIRECTIVE); stableTurnContextParts.push(ATTENDED_ASK_DIRECTIVE);
   }
 
   // 사용자 메시지 영구화 + 첫 메시지면 제목 자동 생성
@@ -5850,14 +5882,16 @@ ${effectiveUserPrompt}`;
     // turn), preserve the bounded frozen transcript so a fresh model session
     // does not lose the only conversational context available to it.
     const goalCheckpoint = activeGoalId ? latestTaskCheckpoint(activeGoalId) : null;
+    const canonicalWorkPacket=canonicalWorkRecovery?.packet();
     const sessionCapableRuntime =
       active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity";
     const runnerReq = {
       beforeMcpToolResult,
+      ...(canonicalWorkRecovery ? { canonicalWorkRecovery } : {}),
       ...(executionContext?.source === "science" ? { sciencePromptProfile: true as const } : {}),
       systemPrompt: sessionCapableRuntime || !turnContext
-        ? systemPrompt
-        : `${systemPrompt}\n\n${turnContext}`,
+        ? `${systemPrompt}${canonicalWorkPacket ? `\n\n${canonicalWorkPacket}` : ""}`
+        : `${systemPrompt}\n\n${turnContext}${canonicalWorkPacket ? `\n\n${canonicalWorkPacket}` : ""}`,
       ...(sessionCapableRuntime && turnContext ? { turnContext } : {}),
       // Long-run state comes from the versioned goal and checkpoint. Replaying
       // the whole chat into a fresh native session is neither recovery nor state.
@@ -6066,8 +6100,8 @@ ${effectiveUserPrompt}`;
       const dispatchTurnContextParts = [...frozenTurnContextParts];
       if (!goalWorkAdmissionNotified) {
         if (signal?.aborted) throw Object.assign(new Error("goal_plan_dispatch_cancelled"), { code: "goal_plan_dispatch_cancelled" });
-        goalWorkAdmissionNotified = true;
         onBeforeGoalWorkDispatch?.(activeGoalId);
+        goalWorkAdmissionNotified = true;
       }
       if (goalPlanContextSlot) {
         if (signal?.aborted) {
@@ -6879,6 +6913,21 @@ ${effectiveUserPrompt}`;
     // 예산 소진·무진전 정지·명시 종료는 마커가 있어도 정지시킨다(폭주 방지, 사람 호출).
     let latestGoalDecision: GoalLedgerDecision | null = null;
     let goalHardStop: GoalLedgerDecision | null = null;
+    // Local control-flow latch only. Does not complete or pause the durable Goal.
+    let goalLiveContinuationParked = false;
+    const parkFiniteGoalContinuation = (decision: GoalLedgerDecision): boolean => {
+      if (!activeGoalId || executionContext || !finiteGoalContinuationIsParked({
+        lifecycle: getChatGoalRevision(activeGoalId)?.lifecycle, status: decision.status,
+      })) return false;
+      if (!goalLiveContinuationParked) tryRecordRunEvent({
+        runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
+        // Existing follow-up backoff consumes this event; accounting work must
+        // not reset its delay just because the native invocation completed.
+        kind: "goal_idle_pass_yield", payload: { reason: "finite_goal_wait_boundary", status: decision.status },
+      });
+      goalLiveContinuationParked = true;
+      return true;
+    };
     /*
      * 완료 선언은 중간 패스에서 나올 수 있고, 그때 처리하지 않으면 두 가지가 깨진다.
      * ① 이 패스의 본문은 appendChatMessage로 즉시 영속되므로 마커가 대화에 남는다.
@@ -6956,7 +7005,9 @@ ${effectiveUserPrompt}`;
           projectDir: workforceProjectDir,
         }) ?? latestGoalDecision;
         if (latestGoalDecision) {
-          if (!latestGoalDecision.continue) {
+          if (parkFiniteGoalContinuation(latestGoalDecision)) {
+            passShouldContinue = false;
+          } else if (!latestGoalDecision.continue) {
             passShouldContinue = false;
             if (GOAL_HARD_STOP_REASONS.has(latestGoalDecision.reason)) goalHardStop = latestGoalDecision;
           } else if (!passClaim.claimed && !passShouldContinue && latestGoalDecision.continue) {
@@ -7299,8 +7350,11 @@ ${effectiveUserPrompt}`;
           projectDir: workforceProjectDir,
         });
       }
+      if (goalLiveContinuationParked) stormbreakerContinueRequested = false;
       if (latestGoalDecision) {
-        if (!stormbreakerContinueRequested && latestGoalDecision.continue && !finalAsksOwner) {
+        if (goalLiveContinuationParked || parkFiniteGoalContinuation(latestGoalDecision)) {
+          stormbreakerContinueRequested = false;
+        } else if (!stormbreakerContinueRequested && latestGoalDecision.continue && !finalAsksOwner) {
           stormbreakerContinueRequested = true;
         } else if (
           stormbreakerContinueRequested &&
@@ -8375,6 +8429,9 @@ ${effectiveUserPrompt}`;
       : earlyResult();
   }
   } finally {
+    mcpConfigCurrent = false;
+    signal?.removeEventListener("abort", revokeMcpConfig);
+    if (login?.ownerSignal !== signal) login?.ownerSignal.removeEventListener("abort", revokeMcpConfig);
     browserLadderSettled = true;
     try { unbindBrowserLadder?.(); } catch { /* binding already gone */ }
     try { nativeBrowserGrant?.release(); } finally { mcpConfigCleanup?.(); }

@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type {
   OwnerDecision,
-  ToolchainAutomationView,
   ToolchainCrystallizationView,
   ToolchainOverview,
   ToolchainsApi,
@@ -10,7 +9,6 @@ import { IconToolchain } from "@/components/Icon";
 import { navigate } from "@/lib/navigation";
 import {
   crystallizationLabel,
-  interfaceStateLabel,
   toolchainCopy,
   toolchainErrorText,
   type ToolchainCopy,
@@ -58,131 +56,33 @@ function CrystallizationRow({ item, copy, busy, onDecide }: {
   );
 }
 
-function InterfaceBlock({ view, copy, busy, exposing, onExpose, onWithdraw }: {
-  view: ToolchainAutomationView;
-  copy: Copy;
-  busy: boolean;
-  exposing: boolean;
-  onExpose: () => void;
-  onWithdraw: () => void;
-}) {
-  const contract = view.interface;
-  const callable = contract?.state === "callable" && !view.interfaceStale;
-  return (
-    <div className={styles.contract}>
-      <div className={styles.itemHead}>
-        <strong>{copy.callableTitle}</strong>
-        {contract && <span className={styles.badge} data-state={callable ? "active" : "demoted"}>
-          {interfaceStateLabel(view, copy)}
-        </span>}
-      </div>
-      {contract?.coldStart && <span className={styles.metric}>{copy.coldStart(contract.coldStart)}</span>}
-      {contract?.coldStart?.cases && contract.coldStart.cases.length > 0 && <details className={styles.cases}>
-        <summary>{copy.casesTitle}</summary>
-        <ul>
-          {contract.coldStart.cases.map((probe, index) => (
-            <li key={index} data-kind={probe.kind} data-ok={probe.kind === "positive" ? String(probe.bound) : String(!probe.selected)}>
-              <span className={styles.caseVerdict}>{copy.caseKind(probe.kind)} · {copy.caseVerdict(probe)}</span>
-              <span className={styles.caseTask}>{probe.task}</span>
-            </li>
-          ))}
-        </ul>
-      </details>}
-      {contract && <span className={styles.metric}>{copy.usage(contract.usage?.returned ?? 0, contract.usage?.runs ?? 0)}</span>}
-      <div className={styles.actions}>
-        {callable
-          ? <button type="button" disabled={busy} onClick={onWithdraw}>{copy.withdraw}</button>
-          : <button type="button" data-primary="true" disabled={busy || exposing} onClick={onExpose}>{exposing ? copy.exposing : copy.expose}</button>}
-      </div>
-    </div>
-  );
-}
-
 export function OneToolchains({ api, locale }: { api: ToolchainsApi | null | undefined; locale: string }) {
   const copy = useMemo(() => toolchainCopy(locale), [locale]);
+  const ko = locale === "ko";
   const [overview, setOverview] = useState<ToolchainOverview | null>(null);
+  const [assets, setAssets] = useState<Awaited<ReturnType<ToolchainsApi["listAssets"]>>>([]);
   const [busy, setBusy] = useState(false);
-  const [exposingId, setExposingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const run = useCallback(async (action: () => Promise<ToolchainOverview>) => {
-    setBusy(true);
-    setError(null);
-    try { setOverview(await action()); }
-    catch (cause) {
-      setError(toolchainErrorText(cause, copy));
-      // A refused action may mean the state moved underneath; show the current truth.
-      void api?.overview().then(setOverview).catch(() => undefined);
-    }
-    finally { setBusy(false); }
-  }, [api, copy]);
-
-  useEffect(() => {
+  const load = useCallback(async () => {
     if (!api) return;
-    let alive = true;
-    const load = () => { void api.overview().then((next) => { if (alive) setOverview(next); }).catch(() => undefined); };
-    load();
-    const timer = setInterval(load, 60_000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [api]);
-
-  if (!api) return <section className={styles.root} aria-label={copy.title}><p className={styles.empty}>{copy.unavailable}</p></section>;
-
-  const learned = (overview?.automations ?? []).filter((view) => view.crystallizations.some((item) => item.state !== "superseded")
-    || view.interface || view.observations.some((observation) => observation.eligibleEpisodes > 0 && observation.topTargets.length > 0));
-  const others = (overview?.automations ?? []).filter((view) => !learned.includes(view));
-
-  const automationBlock = (view: ToolchainAutomationView) => {
-    const visible = view.crystallizations.filter((item) => item.state !== "superseded");
-    // Strongest signals first, each tied to its step. A share above the threshold on
-    // legacy runs (no step identity recorded yet) is said plainly instead of hidden.
-    const observed = visible.length === 0
-      ? view.observations
-        .flatMap((observation) => observation.topTargets.slice(0, 1).map((target) => ({
-          ...target, nodeId: observation.nodeId, waitingForIdentity: !observation.nodeDigest && target.share >= 0.8,
-        })))
-        .filter((target) => target.share > 0)
-        .sort((left, right) => right.share - left.share)
-        .slice(0, 3)
-      : [];
-    return (
-      <article key={view.automationId} className={styles.automation}>
-        <h3>{view.automationName}</h3>
-        {visible.length > 0 && <ul className={styles.list}>
-          {visible.map((item) => <CrystallizationRow key={item.id} item={item} copy={copy} busy={busy}
-            onDecide={(target, decision) => void run(() => api.decide({ automationId: view.automationId, crystallizationId: target.id, decision }))} />)}
-        </ul>}
-        {observed.map((target) => <span key={`${target.nodeId}:${target.kind}:${target.target}`} className={styles.observed}>
-          {copy.observed(target.nodeId, target.target, target.share, target.waitingForIdentity)}</span>)}
-        <InterfaceBlock view={view} copy={copy} busy={busy} exposing={exposingId === view.automationId}
-          onExpose={() => {
-            setExposingId(view.automationId);
-            void run(() => api.expose(view.automationId)).finally(() => setExposingId(null));
-          }}
-          onWithdraw={() => void run(() => api.withdraw(view.automationId))} />
-      </article>
-    );
+    const [list, learning] = await Promise.allSettled([api.listAssets(), api.overview()]);
+    if (list.status === "fulfilled") { setAssets(list.value); setError(null); } else setError(toolchainErrorText(list.reason, copy));
+    if (learning.status === "fulfilled") setOverview(learning.value);
+  }, [api, copy]);
+  useEffect(() => { void load(); const timer = setInterval(() => void load(), 60_000); return () => clearInterval(timer); }, [load]);
+  const run = async (action: () => Promise<ToolchainOverview>) => {
+    setBusy(true); setError(null);
+    try { setOverview(await action()); }
+    catch (cause) { setError(toolchainErrorText(cause, copy)); }
+    finally { setBusy(false); }
   };
-
-  return (
-    <section className={styles.root} aria-label={copy.title}>
-      <header className={styles.header}>
-        <div><h2>{copy.title}</h2><p>{copy.subtitle}</p></div>
-        <div className={styles.headerActions}>
-          <button type="button" disabled={busy} onClick={() => void run(() => api.refresh())}>{busy ? copy.analyzing : copy.analyze}</button>
-          {/* The rail is a glance; managing every toolchain lives in Work › Environment › Toolchains. */}
-          <button type="button" data-view-all="true" onClick={() => navigate("/library/toolchains")}>
-            <IconToolchain size={11} /> {copy.viewAll}
-          </button>
-        </div>
-      </header>
-      {error && <p className={styles.error} role="status">{error}</p>}
-      {overview && learned.length === 0 && <p className={styles.empty}>{copy.empty}</p>}
-      {learned.map(automationBlock)}
-      {others.length > 0 && <details className={styles.others}>
-        <summary>{copy.others(others.length)}</summary>
-        {others.map(automationBlock)}
-      </details>}
-    </section>
-  );
+  if (!api) return <section className={styles.root}><p className={styles.empty}>{copy.unavailable}</p></section>;
+  const learning = (overview?.automations ?? []).filter((view) => view.crystallizations.some((item) => item.state !== "superseded"));
+  return <section className={styles.root} aria-label={copy.title}>
+    <header className={styles.header}><div><h2>{copy.title}</h2><p>{ko ? "독립된 재사용 도구 · 버전별 호출" : "Independent reusable tools · versioned calls"}</p></div><button onClick={() => navigate("/library/toolchains")}>{copy.viewAll}</button></header>
+    {error && <p className={styles.error} role="status">{error}</p>}
+    {assets.length === 0 && <p className={styles.empty}>{ko ? "등록된 툴체인이 없습니다." : "No registered toolchains."}</p>}
+    {assets.slice(0, 6).map((asset) => <button key={asset.id} className={styles.asset} data-toolchain-asset={asset.id} onClick={() => navigate(`/library/toolchains?asset=${encodeURIComponent(asset.id)}`)}><IconToolchain size={14}/><span>{asset.name}</span><small>{asset.stableVersion ? `v${asset.stableVersion}` : (ko ? "초안" : "Draft")} · {asset.status}</small></button>)}
+    <details className={styles.others}><summary>{ko ? "그래프 실행 학습" : "Graph execution learning"} ({learning.length})</summary><p className={styles.empty}>{ko ? "자동화 단계의 읽기 최적화입니다. 툴체인 자산과 별도로 관리합니다." : "Read optimizations for automation steps, managed separately from toolchain assets."}</p><button disabled={busy} onClick={() => void run(() => api.refresh())}>{copy.analyze}</button>{learning.map((view) => <article key={view.automationId} className={styles.automation}><h3>{view.automationName}</h3><ul className={styles.list}>{view.crystallizations.filter((item) => item.state !== "superseded").map((item) => <CrystallizationRow key={item.id} item={item} copy={copy} busy={busy} onDecide={(target, decision) => void run(() => api.decide({ automationId: view.automationId, crystallizationId: target.id, decision }))}/>)}</ul><button onClick={() => navigate(`/automation/flow?id=${encodeURIComponent(view.automationId)}`)}>{ko ? "그래프 열기" : "Open graph"}</button></article>)}</details>
+  </section>;
 }

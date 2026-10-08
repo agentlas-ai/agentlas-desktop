@@ -4768,7 +4768,7 @@ interface I18nValue {
   locale: Locale;
   /** undefined = system, "ko" / "en" = user override */
   pref: LocalePref;
-  setPref: (p: LocalePref) => void;
+  setPref: (p: LocalePref) => Promise<Locale>;
   t: (key: DictKey, vars?: Record<string, string | number>) => string;
 }
 
@@ -4838,7 +4838,7 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     void api?.menu?.setLocale?.(locale);
   }, [locale, _ready]);
 
-  const setPref = useCallback((p: LocalePref) => {
+  const setPref = useCallback(async (p: LocalePref): Promise<Locale> => {
     // An older system-locale reply must not overwrite a newer user choice.
     const generation = ++localeRequestGeneration.current;
     try {
@@ -4850,10 +4850,11 @@ export function I18nProvider({ children }: { children: ReactNode }) {
     setPrefState(p);
     if (p === "ko" || p === "en") {
       setLocaleState(p);
+      return p;
     } else {
-      void readSystemLocale().then((next) => {
-        if (generation === localeRequestGeneration.current) setLocaleState(next);
-      });
+      const next = await readSystemLocale();
+      if (generation === localeRequestGeneration.current) setLocaleState(next);
+      return next;
     }
   }, []);
 
@@ -4909,7 +4910,7 @@ export function useT(): I18nValue {
     return {
       locale: "en",
       pref: "system",
-      setPref: () => {},
+      setPref: async () => "en",
       t: (k, v) => interpolate((dict.en as Record<string, string>)[k] ?? k, v),
     };
   }

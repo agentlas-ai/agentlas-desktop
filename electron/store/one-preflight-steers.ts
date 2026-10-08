@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { McpInvocationRequest, RuntimeSelection } from "../../shared/types";
 import type { OnePreflightSteerInput, OnePreflightSteerLookupInput, OnePreflightSteerReceipt, OnePreflightSubmissionInput, OnePreflightSubmissionReceipt } from "../../shared/one-preflight-steers";
+import { normalizeOnePreflightSteerRequest } from "../../shared/one-preflight-steers";
 import { getChat, setChatRuntimeSelection } from "./chats";
 import { getChatGoalRevision } from "./chat-goals";
 import { getDb } from "./db";
@@ -17,6 +18,7 @@ type SubmissionRow = {
 type SteerRow = {
   steer_id: string; submission_id: string; chat_id: string; prompt_text: string;
   prompt_digest: string; status: OnePreflightSteerReceipt["status"];
+  request_json: string | null;
   parent_run_id: string | null; created_at: string; updated_at: string;
 };
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
@@ -90,6 +92,7 @@ const submissionReceipt = (row: SubmissionRow): OnePreflightSubmissionReceipt =>
 const steerReceipt = (row: SteerRow): OnePreflightSteerReceipt => ({
   steerId: row.steer_id, submissionId: row.submission_id, chatId: row.chat_id,
   userPrompt: row.prompt_text, status: row.status, parentRunId: row.parent_run_id,
+  ...(row.request_json ? { request: normalizeOnePreflightSteerRequest(JSON.parse(row.request_json)) } : {}),
   createdAt: row.created_at,
 });
 
@@ -135,26 +138,28 @@ export function enqueueOnePreflightSteer(input: OnePreflightSteerInput): OnePref
   validId(input.chatId, "chat_id");
   validPrompt(input.userPrompt, 32_000);
   const promptHash = hash(input.userPrompt);
+  const requestJson = input.request === undefined ? null : JSON.stringify(normalizeOnePreflightSteerRequest(input.request));
   const now = new Date().toISOString();
   return getDb().transaction(() => {
     const old = steerRow(input.steerId);
     if (old) {
       if (old.submission_id !== input.submissionId || old.chat_id !== input.chatId
-        || old.prompt_digest !== promptHash || old.prompt_text !== input.userPrompt) {
+        || old.prompt_digest !== promptHash || old.prompt_text !== input.userPrompt
+        || (old.request_json ?? null) !== requestJson) {
         throw new Error("one_preflight_steer_identity_conflict");
       }
       return steerReceipt(old);
     }
     const submission = submissionRow(input.submissionId);
     if (!submission || submission.chat_id !== input.chatId
-      || !["open", "bound"].includes(submission.state)) throw new Error("one_preflight_submission_not_receiving");
+      || !["open", "reserved", "bound"].includes(submission.state)) throw new Error("one_preflight_submission_not_receiving");
     if (liveRuntimeJson(input.chatId) !== (submission.runtime_selection_json ?? "null")) {
       throw new Error("one_preflight_runtime_changed");
     }
     getDb().prepare("INSERT INTO one_preflight_steers " +
-      "(steer_id,submission_id,chat_id,prompt_text,prompt_digest,status,created_at,updated_at) " +
-      "VALUES (?,?,?,?,?,'queued',?,?)")
-      .run(input.steerId, input.submissionId, input.chatId, input.userPrompt, promptHash, now, now);
+      "(steer_id,submission_id,chat_id,prompt_text,prompt_digest,request_json,status,created_at,updated_at) " +
+      "VALUES (?,?,?,?,?,?,'queued',?,?)")
+      .run(input.steerId, input.submissionId, input.chatId, input.userPrompt, promptHash, requestJson, now, now);
     return steerReceipt(steerRow(input.steerId)!);
   }).immediate();
 }
@@ -163,6 +168,7 @@ export function onePreflightSteerTemplate(request: McpInvocationRequest): McpInv
   return {
     chatId: request.chatId, userPrompt: "", taskIntent: request.taskIntent, oneMode: true,
     locale: request.locale, onePermissionMode: request.onePermissionMode, permissions: request.permissions,
+    ...(request.planMode !== undefined ? { planMode: request.planMode } : {}),
     ...(request.runtimeSelection ? { runtimeSelection: request.runtimeSelection } : {}),
     sessionRouting: false,
   };
@@ -254,7 +260,7 @@ export function bindOnePreflightSubmission(
 export function listOnePreflightSteers(chatId: string): OnePreflightSteerReceipt[] {
   validId(chatId, "chat_id");
   const rows = getDb().prepare("SELECT * FROM one_preflight_steers WHERE chat_id = ? " +
-    "ORDER BY created_at DESC, steer_id DESC LIMIT 100").all(chatId) as SteerRow[];
+    "ORDER BY rowid DESC LIMIT 100").all(chatId) as SteerRow[];
   return rows.reverse().map(steerReceipt);
 }
 
@@ -271,11 +277,15 @@ export function getOnePreflightSteerReceipt(input: OnePreflightSteerLookupInput)
   return steerReceipt(row);
 }
 
-export function listDispatchableOnePreflightSteers(): OnePreflightSteerReceipt[] {
+export function listDispatchableOnePreflightSteers(submissionId?: string, chatId?: string): OnePreflightSteerReceipt[] {
+  if (submissionId !== undefined) validId(submissionId, "submission_id");
+  if (chatId !== undefined) validId(chatId, "chat_id");
   const rows = getDb().prepare("SELECT steer.* FROM one_preflight_steers steer " +
     "JOIN one_preflight_submissions submission ON submission.submission_id = steer.submission_id " +
     "WHERE steer.status = 'queued' AND submission.state = 'bound' " +
-    "ORDER BY steer.created_at, steer.steer_id").all() as SteerRow[];
+    (submissionId ? "AND steer.submission_id = ? " : "") +
+    (chatId ? "AND steer.chat_id = ? " : "") +
+    "ORDER BY steer.rowid").all(...(submissionId ? [submissionId] : []), ...(chatId ? [chatId] : [])) as SteerRow[];
   return rows.map(steerReceipt);
 }
 
@@ -315,6 +325,18 @@ export function holdOnePreflightSteer(steerId: string): boolean {
   return getDb().prepare("UPDATE one_preflight_steers SET status = 'held', updated_at = ? " +
     "WHERE steer_id = ? AND status IN ('queued','claimed')")
     .run(new Date().toISOString(), steerId).changes === 1;
+}
+
+/** Stop closes never-dispatched intake as well as native scheduler entries. Claimed outcomes stay distinct. */
+export function cancelQueuedOnePreflightSteersForChat(chatId: string): void {
+  validId(chatId, "chat_id");
+  getDb().transaction(() => {
+    const now = new Date().toISOString();
+    getDb().prepare("UPDATE one_preflight_steers SET status = 'cancelled', updated_at = ? " +
+      "WHERE chat_id = ? AND status = 'queued'").run(now, chatId);
+    getDb().prepare("UPDATE one_preflight_submissions SET state = 'cancelled', updated_at = ? " +
+      "WHERE chat_id = ? AND state IN ('open','reserved','bound')").run(now, chatId);
+  })();
 }
 
 /** A failed or abandoned preparation remains reviewable, never auto-replayed. */

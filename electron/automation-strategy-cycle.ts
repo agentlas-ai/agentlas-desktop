@@ -24,6 +24,7 @@ import {
 import { getLatestAutomationStrategyRevision } from "./store/automation-strategy-revisions";
 import { readCurrentGoalAutomationBinding } from "./long-run/automation-provenance";
 import { reflectAutomationStrategyProposal, type AutomationStrategyReflectionInput } from "./automation-strategy-reflection";
+import type { JudgmentRuntimeReceipt } from "./system-agents/judgment";
 import { automationNoActionStreak, recentAutomationRunFacts } from "./automation-progress-facts";
 import {
   AUTOMATION_STRATEGY_RUN_EVENT_QUERY_LIMIT,
@@ -154,11 +155,18 @@ function unavailable(
     payload: { reason, status: input.status, outcome: input.outcome,
       ...(input.goalRecommendation ? { goalProposalId: input.goalRecommendation.proposalId } : {}), ...extra },
   });
+  // Log only host-owned execution/capability markers, never provider messages or model output.
+  const runtimeReceipt = extra.runtimeReceipt as Pick<JudgmentRuntimeReceipt, "execution" | "capability"> | undefined;
   console.info("[automation] strategy reflection settled", JSON.stringify({
     automationId: input.automationId,
     sourceRunId: input.sourceRunId,
     status: "unavailable",
     reason,
+    ...(runtimeReceipt ? { runtimeExecution: runtimeReceipt.execution } : {}),
+    ...(runtimeReceipt?.capability ? {
+      capabilityStatus: runtimeReceipt.capability.status,
+      capabilityReason: runtimeReceipt.capability.reason,
+    } : {}),
   }));
 }
 

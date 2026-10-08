@@ -2289,6 +2289,7 @@ export type WorkflowNodeType =
   | "transform" // 노드 간 변수 map/extract/format
   | "output" // Slack post / notification / file write / chat surface
   | "subgraph" // 다른 그래프를 한 단계로 부른다(함수 안의 함수)
+  | "toolchain_call" // version-pinned reusable capability, executed by the canonical calls service
   | "code"; // ★AI가 짠 스크립트를 격리 실행 — 정확한 계산·데이터 가공(주가·엑셀·파싱). 말로는 틀리는 것.
 
 export interface WorkflowNode {
@@ -4749,9 +4750,13 @@ export interface InvocationSteerResult {
   activeRunId?: string;
   position?: number;
   runId?: string;
-  /** Durable queue ledger identity, present only when queued=true. */
+  /** Durable queue ledger identity, retained when the handoff starts or is withdrawn. */
   queuedRequestId?: string;
   promptHash?: string;
+  /** Caller intent identity, distinct from any native run ID. */
+  intentId?: string;
+  /** Durable handoff state, not the eventual model-run completion state. */
+  status?: "queued" | "draining" | "started" | "cancelled" | "failed" | "held";
 }
 
 export interface MobileBridgeDeviceSummary {
@@ -6766,6 +6771,9 @@ export interface OneAutoRecoveryJudgement {
     | "undecided";
   /** 1-based index of the attempt this authorizes, when retry is true. */
   attempt?: number;
+  /** Main's saved original request and exact next run; reload cannot mint another budget. */
+  originalRunId?: string;
+  nextRecoveryRunId?: string;
   /** Identity of this failure, so the caller can detect a repeat next time. */
   fingerprint: string;
   /** Plain-language account of what blocked the run. */
@@ -6779,6 +6787,7 @@ export interface OneAutoRecoveryVerification {
   verified: boolean;
   retry: boolean;
   attempt?: number;
+  nextRecoveryRunId?: string;
   reason?:
     | "settled"
     | "stopped-by-user"
@@ -8184,8 +8193,8 @@ export interface AgentlasIpc {
   };
   /**
    * Main-owned judgment on a run that did not finish: may One route around the
-   * obstacle itself, or must it involve the person? Read-only — deciding does
-   * not start anything.
+   * obstacle itself, or must it involve the person? Main may reserve the exact
+   * next recovery request in its existing ledger; deciding does not start it.
    */
   oneAutoRecovery: {
     judge: (input: {
@@ -8196,7 +8205,8 @@ export interface AgentlasIpc {
       previousFingerprint?: string | null;
     }) => Promise<OneAutoRecoveryJudgement | null>;
     verify: (input: {
-      originalRunId: string;
+      /** Omitted after a view reload; Main derives it only from a saved recovery link. */
+      originalRunId?: string;
       recoveryRunId: string;
       chatId: string;
       goal: string;
@@ -8675,8 +8685,9 @@ export interface AgentlasIpc {
   invoke: {
     replay: (input: import("./run-event-delivery").RunEventReplayInput) => Promise<import("./run-event-delivery").RunEventReplay>;
     run: (req: McpInvocationRequest) => Promise<{ runId: string }>;
-    /** Queue a follow-up, cancel the current turn, then resume this chat after terminal settlement. */
-    steer: (req: McpInvocationRequest) => Promise<InvocationSteerResult>;
+    /** Persist an additive follow-up for this chat. Only steeringMode="interrupt" requests early settlement of the current turn. */
+    steer: (req: McpInvocationRequest, intentId?: string) => Promise<InvocationSteerResult>;
+    steerReceipt: (input: { chatId: string; intentId: string }) => Promise<InvocationSteerResult | null>;
     preflightSubmissionBegin: (input: import("./one-preflight-steers").OnePreflightSubmissionInput) => Promise<import("./one-preflight-steers").OnePreflightSubmissionReceipt>;
     preflightSteerEnqueue: (input: import("./one-preflight-steers").OnePreflightSteerInput) => Promise<import("./one-preflight-steers").OnePreflightSteerReceipt>;
     preflightSteers: (chatId: string) => Promise<import("./one-preflight-steers").OnePreflightSteerReceipt[]>;

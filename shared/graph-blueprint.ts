@@ -44,7 +44,9 @@ export interface BlueprintStep {
    *   숫자 계산·엑셀·파싱은 말로 시키면 조용히 틀리므로 이쪽으로 온다.
    *   ★경계는 사람이 아니라 AI가 스텝마다 고른다(인터뷰 프롬프트가 가르친다).
    */
-  kind?: "agent" | "code" | "runGraph" | "mcp_call";
+  kind?: "agent" | "code" | "runGraph" | "mcp_call" | "toolchain_call";
+  /** Independent asset identity and immutable release; arguments retain JSON types. */
+  toolchainCall?: { toolchainId: string; version: number; args: Record<string, unknown> };
   /** Exact installed tool observed through Main's inventory. This is an
    * execution step, unlike the legacy adjacent tool connector node. */
   mcpCall?: { catalogId: string; toolName: string; arguments: Record<string, unknown>; schemaDigest?: string };
@@ -388,6 +390,23 @@ export function validateBlueprint(
       }
       if (step.codeLang && step.codeLang !== "python" && step.codeLang !== "js") {
         push(`${at}의 코드 언어 "${step.codeLang}"을(를) 이 제품이 모릅니다(python 또는 js).`);
+      }
+    }
+    if (step.kind === "toolchain_call") {
+      const call = step.toolchainCall;
+      if (!call || typeof call.toolchainId !== "string" || !call.toolchainId.trim()
+        || !Number.isSafeInteger(call.version) || call.version < 1
+        || !call.args || typeof call.args !== "object" || Array.isArray(call.args)) {
+        push(`${at} requires an independent Toolchain id, exact release version, and an argument object.`);
+      }
+      if (call?.args) {
+        try {
+          const json = JSON.stringify(call.args);
+          if (!json || json.length > 64 * 1024) push(`${at} Toolchain arguments exceed the limit.`);
+          for (const match of (json ?? "").matchAll(/\{\{\s*([A-Za-z_][\w.-]*)\s*\}\}/g)) {
+            if (!(step.consumes ?? []).includes(match[1])) push(`${at} must declare the argument binding "${match[1]}" in consumes.`);
+          }
+        } catch { push(`${at} Toolchain arguments must be JSON durable.`); }
       }
     }
     if (step.kind === "mcp_call") {
@@ -789,7 +808,7 @@ function promptWithHandoffContract(
    */
   const readers: ValueReader[] = [
     ...all.map((other) => ({
-      kind: other.kind === "code" ? ("code" as const) : ("prose" as const),
+      kind: other.kind === "code" || other.kind === "toolchain_call" ? ("code" as const) : ("prose" as const),
       reads: (other.consumes ?? []).map((name) => String(name)),
     })),
     { kind: "judgment" as const, reads: [...checkSubjects] },
@@ -834,15 +853,18 @@ function promptWithHandoffContract(
     // 다른 자동화를 한 단계로 부른다(커넥터 C46). 캔버스엔 있는데 말로는 못 만들던 구멍.
     const isSub = step.kind === "runGraph";
     const isMcp = step.kind === "mcp_call";
+    const isToolchain = step.kind === "toolchain_call";
     nodes.push({
       id: stepId(index),
       // 코드 스텝은 code 노드로, 아니면 바깥 변경 여부에 따라 action/agent.
-      type: isSub ? "subgraph" : isCode ? "code" : (step.effect === "mutation" ? "action" : "agent"),
+      type: isToolchain ? "toolchain_call" : isSub ? "subgraph" : isCode ? "code" : (step.effect === "mutation" ? "action" : "agent"),
       label: step.title,
       position: { x: column(index + 1), y: 0 },
       config: {
         // 코드 노드는 프롬프트가 아니라 스크립트를 지고 간다. 지시문은 참고용(note)으로 함께.
-        ...(isSub
+        ...(isToolchain
+          ? { toolchainCall: structuredClone(step.toolchainCall), note: step.instruction }
+          : isSub
           ? { graphRef: step.graphRef ?? "", note: step.instruction }
           : isCode
           ? {
@@ -861,7 +883,7 @@ function promptWithHandoffContract(
         ...(step.role?.trim() ? { role: step.role.trim() } : {}),
         ...(step.roleEn?.trim() ? { roleEn: step.roleEn.trim() } : {}),
         ...(step.produces ? { produces: step.produces } : {}),
-        ...(step.consumes?.length ? { consumes: step.consumes[0] } : {}),
+        ...(step.consumes?.length ? { consumes: isToolchain ? [...step.consumes] : step.consumes[0] } : {}),
         // 도구 요구는 노드가 지고 간다 — 켜기 게이트가 이걸 읽어 연결 여부를 계산한다.
         ...(step.uses?.length
           ? {

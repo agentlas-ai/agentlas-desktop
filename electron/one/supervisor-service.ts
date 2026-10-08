@@ -95,11 +95,16 @@ export class OneSupervisorService {
   private settle(row: SupervisorRequestRow, receipt: InvocationRunReceipt): void {
     if (!settled(receipt)) return;
     if (row.kind==='cancel' && JSON.parse(row.payload_json).boundGoalId) return;
+    if (row.kind === "chat-send" && JSON.parse(row.receipt_json).reason === "legacy_chat_delivery_unverified") return;
+    // A desktop direction belongs to its successor, never the run it was queued
+    // behind. This also fences old receipts created before successor binding.
+    if (row.kind === "steer" && !row.task_id?.startsWith("science-")
+      && JSON.parse(row.receipt_json).reason !== "applied_in_next_run") return;
     this.deps.store.db.transaction(() => {
       const cancelRequested = row.kind === "cancel" || row.kind === "stop-reply";
       this.deps.store.update(row, {
         state: receipt.status === "completed" ? "completed" : receipt.status === "cancelled" ? "cancelled" : "failed",
-        acknowledgement: "settled", reason: receipt.status === "interrupted" ? "interrupted_requires_review" : cancelRequested && receipt.status !== "cancelled" ? "cancel_raced_terminal_outcome" : row.kind==='steer' ? "application_not_yet_observed" : null,
+        acknowledgement: "settled", reason: receipt.status === "interrupted" ? "interrupted_requires_review" : cancelRequested && receipt.status !== "cancelled" ? "cancel_raced_terminal_outcome" : row.kind==='steer' ? "applied_in_next_run" : null,
       });
       if (row.kind === "work" || row.kind === "follow-up") this.deps.store.notice(row, receipt.status);
       if (isReview(row)) {
@@ -115,6 +120,9 @@ export class OneSupervisorService {
     const {oneId} = this.binding();
     for (const row of this.deps.store.pending(oneId)) {
       if (!["dispatching","accepted","held"].includes(row.state) || !row.run_id || row.kind === "science" || row.task_id?.startsWith("science-") || JSON.parse(row.payload_json).boundGoalId) continue;
+      // An old direction may still name its predecessor. Its durable queue
+      // cursor, not that run's liveness, owns the application verdict.
+      if (row.kind === "steer" && JSON.parse(row.receipt_json).reason !== "applied_in_next_run") continue;
       const receipt = this.deps.runtime.receipt(row.run_id);
       if (settled(receipt)) this.settle(row, receipt!);
       else if (row.state === "held" && (row.kind === "reply" || row.kind === "work" || row.kind === "follow-up") && receipt?.status === "running"
@@ -400,29 +408,31 @@ export class OneSupervisorService {
     const {oneId,chatId}=this.binding(value.oneId);
     const taskId=`chat:${input.chatId}`;
     if (this.deps.store.get(input.commandId)) {
-      return JSON.parse(this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId}).receipt_json);
+      this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId});
+      this.reconcileSteers(oneId);
+      return JSON.parse(this.deps.store.get(input.commandId)!.receipt_json);
     }
     const exists=this.deps.store.db.prepare("SELECT 1 FROM sqlite_master WHERE name='chats'").get()
       && this.deps.store.db.prepare("SELECT 1 FROM chats WHERE id=?").get(input.chatId);
     const rejected=input.chatId===chatId ? "supervisor_chat_is_personal" : !exists ? "supervisor_chat_missing" : null;
-    const live=rejected ? null : this.deps.runtime.attach(input.chatId);
     const runId=randomUUID();
     const row=this.deps.store.db.transaction(()=>{
-      const saved=this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId,
-        ...(rejected || live ? {} : {runId})});
+      const saved=this.deps.store.receive({commandId:input.commandId,oneId,kind:"chat-send",payload:input,originChatId:chatId,taskId});
       this.bindHandoffOrigin(saved,originReplyRunId);
       return saved;
     })();
     if (rejected) return this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason:rejected});
-    if (live) {
-      // The conversation is working: the message waits for its next step, like an owner's queued direction.
-      const result=this.deps.runtime.steer({chatId:input.chatId,userPrompt:input.text,taskIntent:"task",promptOrigin:"system",locale:this.deps.locale(),steeringMode:"queue"},live.runId);
-      return this.deps.store.update(row,result.queued
-        ? {state:"completed",acknowledgement:"delivered",reason:"queued_for_running_turn"}
-        : {state:"failed",acknowledgement:"settled",reason:"supervisor_chat_direction_refused"});
-    }
     this.deps.store.update(row,{state:"dispatching"});
     try {
+      const live=this.deps.runtime.attach(input.chatId);
+      if (live) {
+        const result=this.deps.runtime.steer({chatId:input.chatId,userPrompt:input.text,taskIntent:"task",promptOrigin:"system",locale:this.deps.locale(),steeringMode:"queue"},live.runId);
+        if (!result.queued || result.activeRunId !== live.runId || !result.queuedRequestId) throw new Error("supervisor_chat_direction_unconfirmed");
+        this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?")
+          .run(JSON.stringify({...input,queuedRequestId:result.queuedRequestId}),row.command_id);
+        return this.deps.store.update(this.deps.store.get(row.command_id)!,{state:"accepted",acknowledgement:"delivered",reason:"application_not_yet_observed"});
+      }
+      this.deps.store.update(this.deps.store.get(row.command_id)!,{runId});
       this.deps.runtime.start({runId,chatId:input.chatId,userPrompt:input.text,taskIntent:"task",permissions:"full",promptOrigin:"system",locale:this.deps.locale()},"one-dispatch-brief");
       const current=this.deps.store.get(row.command_id)!;
       return current.state==='dispatching' ? this.deps.store.update(current,{state:"accepted",acknowledgement:"delivered"}) : JSON.parse(current.receipt_json);
@@ -511,7 +521,11 @@ export class OneSupervisorService {
       ...(value.action === "steer" ? {text:supervisorText(value.text)} : {})};
     const {oneId,chatId}=this.binding(value.oneId);
     const prior=this.deps.store.get(input.commandId);
-    if (prior) return JSON.parse(this.deps.store.receive({commandId:input.commandId,oneId,kind:input.action,payload:input,originChatId:chatId,taskId:input.taskId}).receipt_json);
+    if (prior) {
+      this.deps.store.receive({commandId:input.commandId,oneId,kind:input.action,payload:input,originChatId:chatId,taskId:input.taskId});
+      this.reconcileSteers(oneId);
+      return JSON.parse(this.deps.store.get(input.commandId)!.receipt_json);
+    }
     const task=(await this.snapshot()).tasks.find(item=>item.taskId===input.taskId);
     this.assertConversation(chatId);
     const rejected = !task || task.controlVersion !== input.expectedVersion ? "supervisor_task_version_conflict"
@@ -534,7 +548,8 @@ export class OneSupervisorService {
         return this.deps.store.update(row, {state:"cancelled",acknowledgement:"settled",reason:"cancelled_before_dispatch"});
       }).immediate();
     }
-    const row=this.deps.store.receive({commandId:input.commandId,oneId,kind:input.action,payload:input,originChatId:chatId,taskId:task.taskId,runId:task.runId ?? undefined});
+    const row=this.deps.store.receive({commandId:input.commandId,oneId,kind:input.action,payload:input,originChatId:chatId,taskId:task.taskId,
+      ...(input.action === "steer" && task.surface !== "science" ? {} : {runId:task.runId ?? undefined})});
     this.deps.store.update(row,{state:"dispatching"});
     if (input.action === "cancel" && task.goalId) {
       this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?").run(JSON.stringify({...input,boundGoalId:task.goalId}),row.command_id);
@@ -549,9 +564,10 @@ export class OneSupervisorService {
           else if (this.deps.runtime.cancel(task.runId!) === "not-found") throw new Error("supervisor_task_run_settled");
         } else {
           const result=this.deps.runtime.steer({chatId:task.chatId,userPrompt:input.text!,taskIntent:"task",promptOrigin:"system",locale:this.deps.locale(),steeringMode:"queue"},task.runId!);
-          if (!result.queued || (result.activeRunId && result.activeRunId !== task.runId)) throw new Error("supervisor_task_steer_unconfirmed");
+          if (!result.queued || result.activeRunId !== task.runId || !result.queuedRequestId) throw new Error("supervisor_task_steer_unconfirmed");
           // The apply cursor (UX03/D04): the durable queued direction this receipt waits on.
-          if (result.queuedRequestId) this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?").run(JSON.stringify({...input,queuedRequestId:result.queuedRequestId}),row.command_id);
+          this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?")
+            .run(JSON.stringify({...input,queuedRequestId:result.queuedRequestId,targetChatId:task.chatId,originalRunId:task.runId}),row.command_id);
         }
       }
       const current=this.deps.store.get(row.command_id)!;
@@ -582,17 +598,46 @@ export class OneSupervisorService {
   /** Received, delivered and applied are different facts (I13). A direction is applied once the worker's next run
    * started with it; until then the receipt says "not yet observed". Withdrawn or failed directions say so. */
   private reconcileSteers(oneId: string): void {
+    // Older builds marked a queued handoff complete without saving its apply
+    // cursor, or completed a direction from its predecessor. Those exact flags
+    // do not prove application; retain the intent and never replay it to guess.
+    const legacyRows = this.deps.store.db.prepare(`SELECT * FROM one_supervisor_requests WHERE one_id=? AND state='completed'
+      AND ((kind='chat-send' AND json_extract(receipt_json,'$.acknowledgement')='delivered'
+        AND json_extract(receipt_json,'$.reason')='queued_for_running_turn')
+      OR (kind='steer' AND COALESCE(task_id,'') NOT LIKE 'science-%'
+        AND json_extract(receipt_json,'$.reason')='application_not_yet_observed'))`).all(oneId) as SupervisorRequestRow[];
+    for (const row of legacyRows) {
+      let queued: unknown;
+      try { queued = JSON.parse(row.payload_json).queuedRequestId; } catch { continue; }
+      if (typeof queued === "string" && queued.trim()) {
+        if (row.kind === "steer") this.deps.store.update(row,{state:"accepted",acknowledgement:"delivered"});
+        continue;
+      }
+      this.deps.store.update(row,{state:"held",acknowledgement:"unknown",
+        reason:row.kind === "chat-send" ? "legacy_chat_delivery_unverified" : "legacy_steer_application_unverified"});
+    }
     if (!this.deps.runtime.steerState) return;
-    const rows = this.deps.store.db.prepare(`SELECT * FROM one_supervisor_requests WHERE one_id=? AND kind='steer'
+    const rows = this.deps.store.db.prepare(`SELECT * FROM one_supervisor_requests WHERE one_id=? AND kind IN ('steer','chat-send')
       AND json_extract(receipt_json,'$.reason')='application_not_yet_observed' ORDER BY rowid DESC LIMIT 50`).all(oneId) as SupervisorRequestRow[];
     for (const row of rows) {
       let queued: string | undefined;
       try { queued = JSON.parse(row.payload_json).queuedRequestId; } catch { continue; }
       if (!queued) continue;
       const state = this.deps.runtime.steerState(queued);
-      const reason = state?.status === "started" ? "applied_in_next_run" : state?.status === "cancelled" ? "steer_withdrawn"
-        : state?.status === "failed" ? "steer_not_applied" : null;
-      if (reason) this.deps.store.update(row, {reason});
+      if (row.kind === "chat-send" || row.kind === "steer") {
+        if (state?.status === "cancelled" || state?.status === "failed") {
+          this.deps.store.update(row,{state:state.status === "cancelled" ? "cancelled" : "failed",acknowledgement:"settled",
+            reason:state.status === "cancelled" ? "steer_withdrawn" : "steer_not_applied"});
+        } else if (state?.status === "started" && state.drainedRunId) {
+          const receipt=this.deps.runtime.receipt(state.drainedRunId);
+          const payload=JSON.parse(row.payload_json);
+          const targetChatId=payload.chatId ?? payload.targetChatId ?? (row.run_id ? this.deps.runtime.receipt(row.run_id)?.chatId : null);
+          if (!targetChatId || receipt?.chatId !== targetChatId) continue;
+          this.deps.store.update(row,{state:"accepted",acknowledgement:"delivered",runId:state.drainedRunId,reason:"applied_in_next_run"});
+          if (settled(receipt)) this.settle(this.deps.store.get(row.command_id)!,receipt!);
+        }
+        continue;
+      }
     }
   }
   async snapshot(): Promise<OneSupervisorSnapshot> {

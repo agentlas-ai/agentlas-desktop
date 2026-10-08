@@ -44,8 +44,24 @@ interface Scope {
   childDispatchId?: string;
   parentEffectScopeId?: string;
   activeEffectScopeId?: string;
+  /** Main's synchronous tool-start callback; never serialized or provider-authored. */
+  durableToolStart?: { active: boolean };
 }
 const context = new AsyncLocalStorage<Scope>();
+
+/** The existing start event must be stored before Main leaves for this tool.
+ * The token closes when the synchronous callback returns, including rejection;
+ * detached async work cannot borrow this execution-before-record boundary. */
+export function withDurableMainToolStart<T>(action: () => T): T {
+  const scope = context.getStore();
+  if (!scope) return action();
+  const token = { active: true };
+  try { return context.run({ ...scope, durableToolStart: token }, action); }
+  finally { token.active = false; }
+}
+export function mainToolStartRequiresDurability(): boolean {
+  return context.getStore()?.durableToolStart?.active === true;
+}
 
 /** Capture at dispatch; resident callbacks must not borrow another ALS turn.
  * Nested/preparation/non-Science adapters cannot supply root correlation. */

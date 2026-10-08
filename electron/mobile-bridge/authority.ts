@@ -3450,9 +3450,16 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
         const effectiveInvocation = mobileOneTurn
           ? await bindMobileOneTurn(invocation)
           : invocation;
-        const workspaceBinding = mobileOneTurn
-          ? captureMobileOneInvocationBinding()
-          : captureInvocationWorkspaceBinding(getChatWorkingFolder(invocation.chatId));
+        // An attached Desktop run has no remote workspace capability. Keep that
+        // Main-owned contract; a new Mobile binding would reject its owner steer.
+        const activeDesktopRun = invocationService.activeWorkSummaries().find((run) =>
+          run.runId === expectedRunId && run.chatId === invocation.chatId
+          && run.workspaceSource === null && run.executionSource === null);
+        const workspaceBinding = activeDesktopRun
+          ? undefined
+          : mobileOneTurn
+            ? captureMobileOneInvocationBinding()
+            : captureInvocationWorkspaceBinding(getChatWorkingFolder(invocation.chatId));
         if (decisionAnswer) validateCurrentMobileDecisionAnswer(
           effectiveInvocation, decisionAnswer, this.options.hostIdentity.hostId,
         );

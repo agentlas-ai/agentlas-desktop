@@ -6,7 +6,7 @@ import { normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
-import { oneDispatchSidebarPredicate, projectOneDispatchNotice } from "../one/dispatch-presentation";
+import { oneDispatchSidebarPredicate, createOneDispatchNoticeProjector } from "../one/dispatch-presentation";
 import { getChatGoalRevision } from "./chat-goals";
 import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-result";
 import { emitDesktopStoreChange } from "./change-bus";
@@ -1319,8 +1319,9 @@ function projectChatMessageRows(chatId: string, rows: MessageRow[]): ChatHistory
   const imageUrls = listChatMessageImageUrls(rows.map((row) => row.id));
   const goalResults = storedGoalResults(chatId, rows.filter((row) => row.role === "assistant").map((row) => row.id));
   const legacyResults = legacyGoalResults(chatId, rows.filter((row) => row.role === "assistant" && !goalResults.has(row.id)).map((row) => row.id));
+  const projectDispatchNotice = createOneDispatchNoticeProjector(chatId);
   return rows.map((r) => {
-    const hostNotice = projectOneDispatchNotice(chatId, parseChatHostNotice(r.role, r.host_notice_json));
+    const hostNotice = projectDispatchNotice(parseChatHostNotice(r.role, r.host_notice_json));
     return {
       id: r.id,
       durableMessageId: r.id,

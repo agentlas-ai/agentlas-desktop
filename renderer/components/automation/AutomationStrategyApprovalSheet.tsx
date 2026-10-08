@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AutomationStrategyProposalView } from "@shared/automation-strategy-review";
 import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
+import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { ComposerDecisionPortal } from "@/components/ComposerDecisionPortal";
 import { requiresAutomationStrategyReview } from "./automation-strategy-review-surface";
 import styles from "./AutomationStrategyApprovalSheet.module.css";
@@ -84,6 +85,7 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
   const dismissedRef = useRef<Set<ProposalFingerprint>>(new Set());
   const candidateRef = useRef<AutomationStrategyProposalView | null>(null);
   const loadGenerationRef = useRef(0);
+  const refreshRef = useRef<ReturnType<typeof createCoalescedRefresh<void>> | null>(null);
 
   useEffect(() => {
     candidateRef.current = candidate;
@@ -94,7 +96,7 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
     [allRows],
   );
 
-  const load = useCallback(async () => {
+  const readProposals = useCallback(async () => {
     const api = ipc();
     if (!api?.automations) return;
     const generation = ++loadGenerationRef.current;
@@ -148,8 +150,11 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
       // surface stays quiet rather than presenting a false approval prompt.
     }
   }, [chatId]);
+  const load = useCallback(() => refreshRef.current?.request(undefined) ?? Promise.resolve(), []);
 
   useEffect(() => {
+    const coordinator = createCoalescedRefresh<void>(readProposals, () => undefined);
+    refreshRef.current = coordinator;
     candidateRef.current = null;
     setCandidate(null);
     setAllRows([]);
@@ -160,13 +165,18 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
     const off = events?.onStoreChanged?.((change) => {
       if (change.entity === "automation") void load();
     });
-    const timer = window.setInterval(() => void load(), 20_000);
+    const visible = () => { if (document.visibilityState !== "hidden") void load(); };
+    document.addEventListener("visibilitychange", visible);
+    const timer = window.setInterval(visible, 20_000);
     return () => {
+      coordinator.dispose();
+      if (refreshRef.current === coordinator) refreshRef.current = null;
       off?.();
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", visible);
       ++loadGenerationRef.current;
     };
-  }, [load]);
+  }, [load, readProposals]);
 
   function dismiss(row = candidate) {
     if (!row) return;

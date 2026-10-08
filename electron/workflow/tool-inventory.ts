@@ -21,6 +21,7 @@ import {
   type ToolInventory,
 } from "../../shared/graph-tool-binding";
 import type { WorkflowGraph } from "../../shared/types";
+import { inspectGraphToolchainCalls } from "./toolchain-call-inspector";
 
 /** 지금 이 컴퓨터의 준비 상태. 읽지 못하면 **비어 있는 것으로 친다**(모름을 준비됨으로 읽지 않는다). */
 export async function readToolInventory(): Promise<ToolInventory> {
@@ -65,6 +66,7 @@ export async function readToolInventory(): Promise<ToolInventory> {
 export interface GraphConnectionReport {
   /** 켜도 되는가. */
   activation: ActivationDecision;
+  toolchains: ReturnType<typeof inspectGraphToolchainCalls>;
   /** 공급자 묶음별 할 일 — 화면이 이걸로 "구글 한 번 로그인" 카드를 만든다. */
   tasks: ProviderTask[];
   /** 쓰는 것 **전부**(준비된 것 포함). 교체는 이미 연결된 것에도 걸려야 한다. */
@@ -83,13 +85,26 @@ export async function reportGraphConnections(
   const inventory = await readToolInventory();
   const gaps = collectGaps(graph, inventory);
   const agents = collectAgentBindings(graph);
+  const toolchains = inspectGraphToolchainCalls(graph, { implementationProblems: implementation =>
+    collectGaps(implementation, inventory).filter(gap => gap.requirement.required)
+      .map(gap => `toolchain_dependency_not_connected:${gap.requirement.capability}`) });
+  const unavailable = toolchains.filter(binding => !binding.ready);
+  const ordinaryActivation = decideActivation(graph, inventory, locale);
+  const activation: ActivationDecision = unavailable.length ? {
+    canActivate: false,
+    reason: (locale === "ko" ? "툴체인 호출을 준비하지 못했습니다: " : "Toolchain calls are not ready: ")
+      + unavailable.map(binding => `${binding.nodeLabel}: ${binding.problems.join(", ")}`).join(" · "),
+    nextAction: locale === "ko" ? "호출 단계에서 사용 가능한 검증된 버전을 고르고 입력 계약을 맞춰 주세요." : "Select an available validated release and correct its argument bindings or connect its required tools.",
+    gaps: ordinaryActivation.canActivate ? [] : ordinaryActivation.gaps,
+  } : ordinaryActivation;
   return {
-    activation: decideActivation(graph, inventory, locale),
+    activation,
+    toolchains,
     tasks: groupGapsByProvider(gaps),
     bindings: collectBindings(graph, inventory),
     agents,
     // 에이전트만 부르는 그래프도 이 창에서 바꿀 게 있다 — 그때 "연결할 것 없음"으로 닫지 않는다.
-    hasRequirements: agents.length > 0
+    hasRequirements: toolchains.length > 0 || agents.length > 0
       || (graph?.nodes ?? []).some((node) => Array.isArray(node.config?.needs)
         && (node.config.needs as unknown[]).length > 0),
   };

@@ -24,6 +24,8 @@ import {
   IconSparkles,
   IconCode,
 } from "@/components/Icon";
+import { navigate } from "@/lib/navigation";
+import { requiredExecutionPermission } from "@shared/graph-node-protocol";
 import { GRAPH_BLOCK_UI } from "@shared/graph-vocabulary.generated";
 
 /** 팔레트가 부모에 넘기는 노드 시드(부모가 id/position을 채워 그래프에 삽입). */
@@ -63,6 +65,7 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
   const [agents, setAgents] = useState<InstalledAgent[]>([]);
   const [firms, setFirms] = useState<InstalledFirm[]>([]);
   const [hubAgents, setHubAgents] = useState<MarketplaceListing[]>([]);
+  const [toolchains, setToolchains] = useState<Awaited<ReturnType<NonNullable<ReturnType<typeof ipc>>["toolchains"]["listAssets"]>>>([]);
   const [tools, setTools] = useState<McpToolCatalogEntry[]>([]);
 
   useEffect(() => {
@@ -75,6 +78,7 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
         api.mcpTools.listCatalog(),
         api.marketplace.search("").catch(() => []),
       ]);
+      setToolchains(await api.toolchains.listAssets().catch(() => []));
       setAgents(visibleAgents(ag));
       setFirms(fm);
       setTools(tl);
@@ -138,6 +142,15 @@ export function NodePalette({ onAdd, onClose }: { onAdd: (seed: PaletteNodeSeed)
             onClick={() => onAdd({ type: it.type, config: {}, label: t(it.labelKey) })}
           />
         ))}
+      </Section>
+      <Section title={locale === "ko" ? "툴체인 자산" : "Toolchain assets"}>
+        {toolchains.filter((asset) => asset.status === "callable" && asset.stableVersion != null).map((asset) => {
+          const release = asset.versions.find((version) => version.version === asset.stableVersion && version.validation.state === "passed");
+          if (!release) return null;
+          return <Item key={asset.id} icon={<IconCode size={13}/>} label={`${asset.name} · v${release.version} · ${asset.id.slice(-8)}`} hint={release.contract.description} onClick={() => onAdd({ type: "toolchain_call", label: asset.name, config: { toolchainCall: { toolchainId: asset.id, version: release.version, args: release.contract.examples[0]?.input ?? {} }, produces: "toolchainResult", effect: requiredExecutionPermission(release.implementation.snapshot.graph) === "write" ? "mutation" : "read" } })}/>;
+        })}
+        {!toolchains.some((asset) => asset.status === "callable" && asset.stableVersion != null) && <p style={{ fontSize:11, color:"var(--muted-deep)", margin:0 }}>{locale === "ko" ? "호출 가능한 자산을 먼저 검증하세요." : "Validate a callable asset first."}</p>}
+        <button type="button" style={{ fontSize:11, textAlign:"left" }} onClick={() => navigate("/library/toolchains")}>{locale === "ko" ? "툴체인 관리 열기" : "Manage toolchains"}</button>
       </Section>
       <Section title={t("auto.palette.section.agents")}>
         {agentSeeds.map((a) => (

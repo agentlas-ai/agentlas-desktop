@@ -23,7 +23,7 @@ import {
   type GraphCheckpoint,
 } from "../workflow/run-graph";
 import { emitDesktopStoreChange } from "./change-bus";
-import { computeNextRun, getAutomation } from "./automations";
+import { computeNextRun, getAutomation, hasDurableActiveAutomationExecution } from "./automations";
 import { getDb } from "./db";
 import { recordRunEvent, tryRecordRunEvent } from "./run-events";
 import { resolveAutomationGraph } from "../../shared/automation-graph-definition";
@@ -67,7 +67,7 @@ interface LoadedReconciliation {
   revisedGraph?: true;
 }
 
-function legacyOccurrenceId(run: LatestRunRow): string {
+function legacyOccurrenceId(run: Pick<LatestRunRow, "id" | "automation_id">): string {
   return `legacy-occurrence:${sha256Value({
     automationId: run.automation_id,
     runId: run.id,
@@ -584,16 +584,16 @@ export function suspendAutomationForGraphReconciliation(automationId: string): b
   return result.changes > 0;
 }
 
-export function getAutomationGraphReconciliation(
+export function listAutomationGraphReconciliations(
   automationId: string,
-): AutomationGraphReconciliation | null {
+): AutomationGraphReconciliation[] {
   if (!validId(automationId)) throw new Error("automation_graph_reconciliation_input_invalid");
   // Form-created automations intentionally begin with a renderer-synthesized graph.
   // With no durable graph there can be no receipt-backed node reconciliation yet.
   // This is an ordinary empty state, not a recovery failure.
   const automation = getAutomation(automationId);
   if (!automation) throw new Error("automation_graph_reconciliation_automation_missing");
-  if (!automation.graph) return null;
+  if (!automation.graph) return [];
   // A newer manual/scheduled occurrence must not hide an older parked source
   // occurrence. For each bound event, inspect only its newest run; a later
   // successful resume supersedes older failed snapshots for that occurrence.
@@ -608,17 +608,47 @@ export function getAutomationGraphReconciliation(
   ).all(automationId) as Array<{ id: string; occurrence_id: string | null; status: string | null }>;
   const seenOccurrences = new Set<string>();
   const inspectedRunIds = new Set<string>();
+  const views: AutomationGraphReconciliation[] = [];
   for (const row of boundRows) {
     if (!row.occurrence_id || seenOccurrences.has(row.occurrence_id)) continue;
     seenOccurrences.add(row.occurrence_id);
     if (row.status !== "error") continue;
     inspectedRunIds.add(row.id);
     const loaded = loadReconciliation(automationId, { runId: row.id, occurrenceId: row.occurrence_id });
-    if (loaded) return loaded.view;
+    if (loaded) views.push(loaded.view);
+  }
+  // Manual and scheduled runs also own durable occurrences. A later run of
+  // the same automation cannot erase their unknown effects. A successful
+  // resume supersedes only the same source occurrence, as it does above for
+  // a trigger event. Read identities first; load full checkpoints only for
+  // the newest failed run of each occurrence.
+  const unboundRows = getDb().prepare(
+    `SELECT id, automation_id, occurrence_id, status,
+            CASE WHEN json_valid(checkpoint_json)
+                 THEN json_extract(checkpoint_json, '$.occurrenceId') END AS checkpoint_occurrence_id
+     FROM automation_runs
+     WHERE automation_id = ? AND dry_run = 0
+       AND (occurrence_id IS NULL OR occurrence_id NOT LIKE 'trigger-event:%')
+     ORDER BY started_at DESC, rowid DESC`,
+  ).all(automationId) as Array<Pick<LatestRunRow, "id" | "automation_id" | "occurrence_id" | "status"> & {
+    checkpoint_occurrence_id: string | null;
+  }>;
+  for (const row of unboundRows) {
+    const occurrenceId = row.occurrence_id ?? row.checkpoint_occurrence_id ?? legacyOccurrenceId(row);
+    if (seenOccurrences.has(occurrenceId)) continue;
+    seenOccurrences.add(occurrenceId);
+    if (row.status !== "error") continue;
+    inspectedRunIds.add(row.id);
+    const loaded = loadReconciliation(automationId, { runId: row.id, occurrenceId });
+    if (loaded) views.push(loaded.view);
   }
   const latest = loadReconciliation(automationId);
-  if (!latest || inspectedRunIds.has(latest.run.id)) return null;
-  return latest.view;
+  if (latest && !inspectedRunIds.has(latest.run.id)) views.push(latest.view);
+  return views;
+}
+
+export function getAutomationGraphReconciliation(automationId: string): AutomationGraphReconciliation | null {
+  return listAutomationGraphReconciliations(automationId)[0] ?? null;
 }
 
 /**
@@ -664,20 +694,60 @@ export function forgetStaleGraphCheckpoint(
   currentGraphDigest: string,
 ): { forgot: boolean; reason?: string } {
   const db = getDb();
-  const row = db.prepare(
-    "SELECT id, status, graph_digest FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
-  ).get(automationId) as { id: string; status: string; graph_digest: string | null } | undefined;
-  if (!row) return { forgot: false, reason: "no_run" };
-  if (row.status !== "error") return { forgot: false, reason: "latest_run_did_not_fail" };
-  if (!row.graph_digest) return { forgot: false, reason: "no_recorded_graph" };
-  if (row.graph_digest === currentGraphDigest) return { forgot: false, reason: "graph_unchanged" };
-  db.prepare(
-    `UPDATE automation_runs
-        SET status = 'skipped', node_states_json = '{}', checkpoint_json = NULL,
-            node_failures_json = NULL, graph_digest = ?, resume_consumed_at = NULL
-      WHERE id = ?`,
-  ).run(currentGraphDigest, row.id);
-  return { forgot: true };
+  return db.transaction(() => {
+    const automation = getAutomation(automationId);
+    if (!automation || !SHA256_RE.test(currentGraphDigest)
+      || graphExecutionDigest(automation, resolveAutomationGraph(automation)) !== currentGraphDigest) {
+      return { forgot: false, reason: "current_graph_changed" };
+    }
+    if (hasDurableActiveAutomationExecution(automationId)) return { forgot: false, reason: "active_run" };
+    type Source = { id: string; status: string; occurrence_id: string | null; graph_digest: string | null; resume_of_run_id: string | null; dry_run: number; checkpoint_json: string | null };
+    const latest = db.prepare(
+      "SELECT * FROM automation_runs WHERE automation_id = ? ORDER BY started_at DESC, rowid DESC LIMIT 1",
+    ).get(automationId) as Source | undefined;
+    if (!latest) return { forgot: false, reason: "no_run" };
+    if (latest.status !== "error") return { forgot: false, reason: "latest_run_did_not_fail" };
+    if (!latest.graph_digest) return { forgot: false, reason: "no_recorded_graph" };
+    let source = latest;
+    const visited = new Set<string>();
+    // Follow only the persisted parent coordinate; never search unrelated history
+    // for an older graph or erase it. Every same-graph wrapper must still be held.
+    while (source.graph_digest === currentGraphDigest) {
+      if (!source.resume_of_run_id) return { forgot: false, reason: "graph_unchanged" };
+      if (visited.has(source.id) || visited.size >= 128) return { forgot: false, reason: "source_lineage_invalid" };
+      visited.add(source.id);
+      const graph = resolveAutomationGraph(automation);
+      let checkpoint: GraphCheckpoint | null = null;
+      try {
+        const saved = JSON.parse(source.checkpoint_json ?? "null");
+        checkpoint = parseGraphCheckpoint(saved, currentGraphDigest, source.occurrence_id,
+          new Set(graph.nodes.map(node => node.id)), new Set(graph.edges.map(edge => edge.id)),
+          new Set(graph.nodes.filter(nodeCouldHaveActedOutside).map(node => node.id)));
+      } catch { /* An unbound/corrupt source grants no forgetting authority. */ }
+      if (!checkpoint || checkpoint.ambiguousNodeIds.length === 0) return { forgot: false, reason: "source_lineage_unconfirmed" };
+      const parent = db.prepare("SELECT * FROM automation_runs WHERE id = ? AND automation_id = ?")
+        .get(source.resume_of_run_id, automationId) as Source | undefined;
+      if (!parent || parent.status !== "error" || parent.dry_run !== latest.dry_run || !parent.graph_digest) {
+        return { forgot: false, reason: "source_lineage_invalid" };
+      }
+      try {
+        const saved = JSON.parse(parent.checkpoint_json ?? "null");
+        const { checkpointDigest, ...payload } = saved ?? {};
+        if (!saved || saved.graphDigest !== parent.graph_digest || saved.occurrenceId !== parent.occurrence_id
+          || checkpointDigest !== sha256Value(payload)) return { forgot: false, reason: "source_lineage_unconfirmed" };
+      } catch { return { forgot: false, reason: "source_lineage_unconfirmed" }; }
+      source = parent;
+    }
+    db.prepare(
+      `UPDATE automation_runs
+          SET status = 'skipped', node_states_json = '{}', checkpoint_json = NULL,
+              node_failures_json = NULL, graph_digest = ?, resume_consumed_at = NULL
+        WHERE id = ? AND status = 'error'`,
+    ).run(currentGraphDigest, latest.id);
+    tryRecordRunEvent({ runId: latest.id, automationId, kind: "workflow_stale_checkpoint_forgotten",
+      payload: { sourceRunId: source.id, sourceGraphDigest: source.graph_digest, currentGraphDigest, manual: true } });
+    return { forgot: true };
+  }).immediate();
 }
 
 export function reconcileAutomationGraph(

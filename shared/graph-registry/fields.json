@@ -32,7 +32,8 @@
         "eval",
         "transform",
         "output",
-        "subgraph"
+        "subgraph",
+        "toolchain_call"
       ],
       "writer": "빌더",
       "reader": "커널 디스패치",
@@ -117,7 +118,8 @@
         "eval",
         "transform",
         "trigger",
-        "subgraph"
+        "subgraph",
+        "toolchain_call"
       ],
       "grade": "degradable",
       "type": "string",
@@ -134,7 +136,8 @@
         "agent",
         "action",
         "output",
-        "transform"
+        "transform",
+        "toolchain_call"
       ],
       "grade": "critical",
       "type": "enum",
@@ -155,7 +158,8 @@
       "appliesTo": [
         "agent",
         "action",
-        "output"
+        "output",
+        "toolchain_call"
       ],
       "grade": "critical",
       "type": "enum",
@@ -774,6 +778,18 @@
       "unknown": "role 원문으로 검색(질이 떨어질 뿐 동작한다)",
       "status": "implemented",
       "note": "role의 영어 번역. 카탈로그가 영어라 검색은 이걸로 한다 — 한국어 질의는 같은 대상을 144위로 묻는다(실측). 화면 표시는 여전히 role."
+    },
+    {
+      "name": "toolchainCall",
+      "on": "node.config",
+      "appliesTo": ["toolchain_call"],
+      "grade": "critical",
+      "type": "object",
+      "writer": "Blueprint compiler / editor",
+      "reader": "Canonical Toolchain calls service",
+      "unknown": "Reject missing id, exact version, or argument contract",
+      "status": "implemented",
+      "note": "{toolchainId, version: positive integer, args: JSON object}; id is independent of source Graph identity."
     }
   ]
 }

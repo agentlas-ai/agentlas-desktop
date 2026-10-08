@@ -284,10 +284,34 @@ export function computeNextRun(
   return nextRun(spec, from);
 }
 
+const TOOLCHAIN_IMPLEMENTATION_PREFIX = "toolchain.implementation.v1:";
+
+/** Internal execution carriers are immutable releases, never user task graphs. */
+export function isToolchainImplementationAutomation(id: string): boolean {
+  return Boolean(getDb().prepare("SELECT 1 FROM meta WHERE key=?").get(`${TOOLCHAIN_IMPLEMENTATION_PREFIX}${id}`));
+}
+
+export function markToolchainImplementationAutomation(id: string, toolchainId: string, version: number): void {
+  const automation = getAutomation(id);
+  if (!automation?.graph || automation.enabled || automation.triggerType !== "command" || automation.monitor || automation.goalId
+    || !toolchainId.startsWith("tc_") || !Number.isSafeInteger(version) || version < 1) {
+    throw new Error("toolchain_implementation_invalid");
+  }
+  const key = `${TOOLCHAIN_IMPLEMENTATION_PREFIX}${id}`;
+  const value = JSON.stringify({ toolchainId, version });
+  const existing = getDb().prepare("SELECT value FROM meta WHERE key=?").get(key) as { value: string } | undefined;
+  if (existing && existing.value !== value) throw new Error("toolchain_implementation_immutable");
+  getDb().prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING").run(key, value);
+}
+
+function assertMutableAutomation(id: string): void {
+  if (isToolchainImplementationAutomation(id)) throw new Error("toolchain_implementation_immutable");
+}
+
 export function listAutomations(): Automation[] {
   const rows = getDb()
-    .prepare("SELECT * FROM automations ORDER BY created_at DESC")
-    .all() as AutomationRow[];
+    .prepare("SELECT a.* FROM automations a WHERE NOT EXISTS (SELECT 1 FROM meta m WHERE m.key=? || a.id) ORDER BY a.created_at DESC")
+    .all(TOOLCHAIN_IMPLEMENTATION_PREFIX) as AutomationRow[];
   return rows.map(toAutomation);
 }
 
@@ -310,6 +334,13 @@ export function findAutomationByGoalId(goalId: string): Automation | null {
 
 /** First-run runtime pin must not recalculate schedule state or consume a due slot. */
 export function pinAutomationRuntimeIfUnset(id: string, selection: RuntimeSelection): Automation {
+  if (isToolchainImplementationAutomation(id)) {
+    const automation = getAutomation(id);
+    if (!automation?.runtimeSelection || encodeAutomationRuntimeSelection(automation.runtimeSelection) !== encodeAutomationRuntimeSelection(selection)) {
+      throw new Error("toolchain_implementation_immutable");
+    }
+    return automation;
+  }
   getDb()
     .prepare("UPDATE automations SET runtime_selection_json = ? WHERE id = ? AND runtime_selection_json IS NULL")
     .run(encodeAutomationRuntimeSelection(selection), id);
@@ -335,6 +366,7 @@ export function pinLegacyAutomationHubVersions(
   id: string,
   packageHashes: Readonly<Record<string, string>>,
 ): { automation: Automation; pinned: AutomationHubVersionPinReceipt[] } {
+  assertMutableAutomation(id);
   for (const [slug, packageHash] of Object.entries(packageHashes)) {
     if (!slug || !/^[0-9a-f]{64}$/.test(packageHash)) {
       throw new Error(`automation_hub_version_pin_invalid: ${slug || "missing-slug"}`);
@@ -525,6 +557,7 @@ export function createAutomation(input: {
  * 스케줄/타임존/트리거가 바뀌면 next_run_at을 지금 기준으로 재계산한다(과거 발화 방지).
  */
 export function updateAutomation(id: string, patch: AutomationUpdatePatch): Automation {
+  assertMutableAutomation(id);
   const existing = getAutomation(id);
   if (!existing) throw new Error(`Automation not found: ${id}`);
   const db = getDb();
@@ -641,6 +674,12 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
   }
   const existing = getAutomation(id);
   if (!existing) throw new Error(`Automation not found: ${id}`);
+  // Stopping a release remains unconditional; enabling its carrier would give
+  // the scheduler authority outside the caller's toolchain invocation.
+  if (isToolchainImplementationAutomation(id)) {
+    if (enabled) throw new Error("toolchain_implementation_immutable");
+    return existing;
+  }
   // 다시 켤 때는 과거 시각으로 즉시 발화하지 않도록 next_run_at을 지금 기준으로 재계산.
   // 단 시간 트리거일 때만 — 이벤트 트리거(fs/chain/poll/webhook)는 시계가 없어 next_run_at을
   // null로 유지해야 한다(그러지 않으면 재활성화 즉시 daily 시계로 승격되는 버그).
@@ -674,6 +713,7 @@ export function toggleAutomation(id: string, enabled: boolean): Automation {
 }
 
 export function removeAutomation(id: string): void {
+  assertMutableAutomation(id);
   const db = getDb();
   const remove = db.transaction(() => {
     // Delete first-class automation sessions and their internal ledgers in the
@@ -773,6 +813,7 @@ export function updateAutomationGraph(
   graph: WorkflowGraph | null,
   options?: { note?: string; strictSnapshot?: boolean },
 ): Automation {
+  assertMutableAutomation(id);
   return desktopStoreTransaction(getDb(), () => {
   const existing = getAutomation(id);
   if (!existing) throw new Error(`Automation not found: ${id}`);

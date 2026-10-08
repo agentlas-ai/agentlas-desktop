@@ -2616,7 +2616,10 @@ app.whenReady().then(async () => {
     const release = activeScienceExtension();
     const actualUrl = new URL(event.senderFrame.url);
     actualUrl.hash = "";
-    if (!release || actualUrl.href !== pathToFileURL(release.entryPath).href) throw new Error("science-project-folder-origin-denied");
+    // One's sealed Main event has already passed the active release's permissions in assertScienceSender.
+    // Its document is the owner's main window, rather than the extension view. Folder selections still
+    // belong to this exact sender/document, and native user-gesture operations remain guarded.
+    if (!release || !isAppControlEvent(event) && actualUrl.href !== pathToFileURL(release.entryPath).href) throw new Error("science-project-folder-origin-denied");
     trackScienceFolderDocument(event.sender);
     return `${event.senderFrame.processId}:${event.senderFrame.routingId}:${scienceFolderDocuments.get(event.sender.id)}:${actualUrl.href}`;
   };
