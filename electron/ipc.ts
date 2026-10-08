@@ -1,5 +1,6 @@
 import { answerOneDispatchQuestion } from "./one/team-dispatch";
 import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
+import { registerAgentWorkspaceIpc } from "./agents/workspace-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { goalActiveChatIds } from "./store/goal-active-chats";
 import { registerAutomationChatActivityIpc } from "./automation-chat-activity-ipc";
@@ -446,7 +447,7 @@ import {
   provisionProjectOntology,
   syncProjectOntology,
 } from "./ontology/project-runtime";
-import { getAgentOntologyHubProjection, resolveAgentOntologyHubAttach } from "./ontology/agent-hub-projection";
+import { experienceChipsRetired } from "./experience/retired";
 import { getProjectTimelineSnapshot } from "./memory/project-timeline";
 import {
   createProject,
@@ -1648,6 +1649,7 @@ function goalAutomationOwnershipReview(automationId: string, goalId: string, roo
 
 export function registerIpcHandlers(): void {
   const ipcMain = developmentIpcBoundary(electronIpcMain);
+  registerAgentWorkspaceIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneSupervisorIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserUiIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAutofillIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
@@ -2945,21 +2947,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("memory:import-apply", (_e, agentId: string, sourcePath: string) =>
     importMemoryApply({ agentId, sourcePath: String(sourcePath ?? "").trim() }));
 
-  // ── Experience assets — local ownership + explicit, separate Cloud exchange ─
-  // Pack creation still resolves project roots only through FsPathGrant. Cloud
-  // calls attach the main-owned session cookie; no credential or raw path is
-  // accepted from or returned to the renderer.
+  // Legacy history remains readable. Retired writes stop before probes or Hub calls.
   ipcMain.handle("experience:hubCatalog", () => getExperienceHubCatalog());
-  ipcMain.handle("experience:createPack", async (_e, input: ExperiencePackCreateIpcInput) => {
-    const runtimes = await detectRuntimes();
-    const activeRuntime = runtimes.find((runtime) => runtime.active) ?? runtimes[0];
-    if (!activeRuntime) throw new Error("Experience Pack requires an active runtime.");
-    return createExperiencePack(resolveExperiencePackCreateIpcInput(input, {
-      platform: process.platform,
-      arch: process.arch,
-      runtimeKind: activeRuntime.kind,
-    }));
-  });
+  ipcMain.handle("experience:createPack", () => experienceChipsRetired());
   ipcMain.handle("experience:listPacks", (_e, input) => listExperiencePacks(input));
   ipcMain.handle("experience:ontologySummary", (_e, agentId: string) => getExperienceOntologySummary(agentId));
   ipcMain.handle("experience:ontologyGraph", (_e, agentId: string) =>
@@ -2968,10 +2958,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("agents:exact-bindings", () => listInstalledAgentHubBindings());
   ipcMain.handle("agents:borrowed-ontology-graph", (_e, profileId: string) =>
     getBorrowedAgentOntologyGraph(profileId));
-  ipcMain.handle("experience:hubProjection", (_e, agentId: string, force?: boolean) =>
-    getAgentOntologyHubProjection(agentId, { force: force === true }));
-  ipcMain.handle("experience:hubResolveAttach", (_e, agentId: string, approvalId: string, decision: "approve" | "deny") =>
-    resolveAgentOntologyHubAttach(agentId, approvalId, decision));
+  ipcMain.handle("experience:hubProjection", () => experienceChipsRetired());
+  ipcMain.handle("experience:hubResolveAttach", () => experienceChipsRetired());
   ipcMain.handle("experience:captureFromMemory", (_e, input) => captureExperienceCandidate(input));
   ipcMain.handle("experience:listCandidates", (_e, packId: string) => listExperienceCandidates(packId));
   ipcMain.handle("experience:listOperationalPublicProjections", (_e, packId: string) =>
@@ -2984,22 +2972,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("experience:listTasteWorkflows", (_e, agentId: string) => listTasteChipWorkflows(agentId));
   ipcMain.handle("experience:saveTasteGeneralization", (_e, input) => saveTasteGeneralization(input));
   ipcMain.handle("experience:confirmTasteGeneralization", (_e, input) => confirmTasteGeneralization(input));
-  ipcMain.handle("experience:pickTastePreviews", async (event) => {
-    const win = BrowserWindow.fromWebContents(event.sender);
-    const chipOn = await dialog.showOpenDialog(win ?? undefined!, {
-      title: "Choose CHIP-ON preview (Taste applied)",
-      properties: ["openFile"],
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
-    });
-    if (chipOn.canceled || chipOn.filePaths.length !== 1) return null;
-    const control = await dialog.showOpenDialog(win ?? undefined!, {
-      title: "Choose CONTROL preview (same input, no Taste overlay)",
-      properties: ["openFile"],
-      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "webp"] }],
-    });
-    if (control.canceled || control.filePaths.length !== 1) return null;
-    return [chipOn.filePaths[0], control.filePaths[0]].map((file) => grantPath(file, { durable: true, exactFile: true }));
-  });
+  ipcMain.handle("experience:pickTastePreviews", () => experienceChipsRetired());
   ipcMain.handle("experience:prepareTastePreviews", (_e, input) => prepareTastePreviews(input));
   ipcMain.handle("experience:uploadTasteDraft", (_e, input) => uploadTasteDraft(input));
   ipcMain.handle("experience:promote", (_e, input) => promoteExperienceCandidate(input));

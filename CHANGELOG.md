@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.82 — 2026-10-08
+
+- Manage each agent’s role, tools, model and approved reusable experience in Agent Workspace. Keep revision and approval authority explicit across Desktop and Mobile.
+- Close retired chip creation and upload routes while preserving archived records for read-only history. Keep new Workspace operations within the current capability contract.
+- Apply Science Writer review feedback, reopen completed writing tasks when requested, and preserve content across UTF-8 continuation with renderable document math.
+
+This release binds Agentlas OS v1.2.58 at 33c1e1fe1587aa2e5c9725745e312d5b88c26004; public runtime asset `hephaestus-runtime-v1.2.58.tar.gz` is pinned at SHA-256 `49fda64fc20b0a3396b522c23f29a94bcf29f590cf8baaedab8e77d3d84f854a`.
+
+Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.81 — 2026-10-08
 
 - Let the configured system AI create a reusable Toolchain from a natural-language capability request. Reuse an existing capability or add a version within its stable identity, with checked typed inputs and outputs.

@@ -16,7 +16,6 @@ import {
   MemoryRevokedError,
   type MemoryProjectionWriterLease,
 } from "./revocations";
-import { autoIntakeCuratedMemory } from "../experience/store";
 import {
   parseMemoryEvents,
   stripAllMemoryEventBlocks,
@@ -784,29 +783,6 @@ export function curateEvents(
     // similar_to graph edges are now projected inside insertMemoryEntry on every
     // insert path (curated turns, imports, terminal, mobile), so the curator no
     // longer links a second time — the projection is idempotent regardless.
-    if (effectiveAgentId && ctx.experienceIntake) {
-      try {
-        autoIntakeCuratedMemory({
-          memory: entry,
-          agentId: effectiveAgentId,
-          projectId: ctx.projectId,
-          projectPath: ctx.projectPath,
-          environment: {
-            platform: ctx.experienceIntake.platform,
-            arch: ctx.experienceIntake.arch,
-            runtimeKind: ctx.experienceIntake.runtimeKind,
-          },
-          basePackageHash: ctx.experienceIntake.basePackageHash,
-          taskHint: ctx.experienceIntake.taskHint,
-          // 인터랙티브 런의 durable 식별자 — 성공 턴 완료 시 이 런이 만든 후보를
-          // run-receipt 기반으로 자동 승격할 수 있게 영수증에 남긴다.
-          runId: ctx.runId ?? null,
-        });
-      } catch (error) {
-        console.warn(`[experience] automatic intake deferred: ${error instanceof Error ? error.message : "unknown"}`);
-      }
-    }
-
     if (ctx.projectPath) {
       const projectionLease = beginMemoryProjectionWrite({
         sourceMemoryId: entry.id,
@@ -906,21 +882,11 @@ function hostObservedTurnEvents(ctx: CurationContext): RawMemoryEvent[] {
   const hint = String(ctx.experienceIntake?.taskHint ?? "").replace(/\s+/g, " ").trim();
   if (hint.length < 12) return [];
   const request = hint.length > 220 ? `${hint.slice(0, 220)}…` : hint;
-  /*
-   * ★kind 는 procedure 다 — fact 로 두면 칩이 되지 못한다.
-   *
-   * 경험 후보가 되는 종류는 procedure·decision·risk 뿐이고(experience/store.ts
-   * operationalKinds) fact 는 durable 기억까지만 간다. 첫 판에서 이 기록을 fact 로
-   * 남겼더니 기억은 생기는데 경험칩은 여전히 0이었다 — 고쳤다고 말할 뻔한 자리다.
-   *
-   * 그리고 이것은 실제로 절차다: "이 에이전트는 이런 요청을 처리한다"는 다음 배정과
-   * 다음 실행에서 쓰이는 운영 지식이지, 시간이 지나면 거짓이 되는 상태값이 아니다.
-   */
   return [{
-    memory_kind: "procedure",
-    content: `이 에이전트는 다음과 같은 요청을 수행한다: ${request}`,
-    suggested_scope: "agent_repo",
-    confidence: "medium",
+    memory_kind: "fact",
+    content: `This agent received a request in run ${runId}: ${request}`,
+    suggested_scope: "session",
+    confidence: "high",
     sensitivity: "internal",
     evidence_refs: [runId],
     source: "host-observed",

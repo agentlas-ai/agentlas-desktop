@@ -543,7 +543,6 @@ function MarketplacePage() {
             </div>
             <main className="rd-page hub-web-content">
               <div className="hub-page-root">
-          {/* Experience Chips belong to each agent's Agent Space, reached from a Hub card. */}
           <div
             className="card portal-search-panel rd-card-cream"
             data-tour-id="hub.search"

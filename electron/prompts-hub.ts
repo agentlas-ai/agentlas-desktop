@@ -357,53 +357,7 @@ export async function getHubPromptTasteStatus(
 export async function tasteHubPrompt(
   input: { slug: string; tasteIntentId: string },
 ): Promise<HubPromptOpenResult> {
-  if (!validTasteInput(input)) return { ok: false, code: "invalid_taste_intent" };
-  const cookie = getSessionCookieHeader();
-  if (!cookie) return { ok: false, code: "unauthenticated" };
-  let knownRefusal: HubPromptOpenResult | null = null;
-  try {
-    const base = webBaseUrl();
-    const res = await timedFetch(`${base}/api/prompts/${encodeURIComponent(input.slug)}/taste`, {
-      method: "POST",
-      headers: { cookie, "content-type": "application/json", origin: base },
-      body: JSON.stringify({ tasteIntentId: input.tasteIntentId }),
-    });
-    const raw = await res.json().catch(() => null);
-    if (res.ok) {
-      const exact = normalizeTasteStatus(raw, input);
-      if (exact) return exact;
-    } else {
-      const row = raw && typeof raw === "object" ? raw as Record<string, unknown> : {};
-      const code = typeof row.code === "string" ? row.code : `http_${res.status}`;
-      if ([400, 401, 402, 403, 404, 409, 429].includes(res.status)) {
-        knownRefusal = {
-          ok: false,
-          slug: input.slug,
-          tasteIntentId: input.tasteIntentId,
-          code,
-          error: typeof row.error === "string" ? row.error : undefined,
-          upgradeUrl: typeof row.upgradeUrl === "string" ? row.upgradeUrl : undefined,
-        };
-      }
-    }
-  } catch {
-    // The server may have durably completed the exact intent. Reconcile below.
-  }
-  if (knownRefusal) return knownRefusal;
-
-  const status = await getHubPromptTasteStatus(input);
-  if (!status.ok) return status;
-  if (status.status === "completed") return status;
-  if (status.status === "ready") {
-    return { ...status, ok: false, code: "not_started" };
-  }
-  if (status.status === "consumed") {
-    return { ...status, ok: false, code: "already_tasted" };
-  }
-  if (status.status === "not_required") {
-    return { ...status, ok: false, code: "not_required" };
-  }
-  return { ...status, ok: false, code: "processing", outcomeUnknown: true };
+  throw new Error("experience_chips_retired: Review agent file changes in Manage Agent.");
 }
 
 /** GET /api/prompts/tastes — 내 맛보기 사용 이력(CTA 판단용: 3회 이상이면 구독 유도). */

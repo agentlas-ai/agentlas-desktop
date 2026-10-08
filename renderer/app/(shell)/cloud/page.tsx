@@ -74,6 +74,7 @@ export default function CloudAgentPublishPage() {
   const { locale } = useT();
   const searchParams = useSearchParams();
   const requestedTeamId = searchParams.get("team");
+  const requestedAgentId = searchParams.get("agent");
   const ko = locale !== "en";
   // ★진행 상태는 이 화면이 소유하지 않는다 — 다른 메뉴로 갔다 와도 업로드가
   // 그대로 이어져 보여야 하므로 모듈 스토어(cloud-upload-session)가 소유한다.
@@ -93,14 +94,15 @@ export default function CloudAgentPublishPage() {
     void ipc()?.cloudAgents.listRegisteredUploadOptions().then((options) => {
       if (!cancelled) {
         setRegisteredOptions(options);
-        const requested = requestedTeamId ? options.find((option) => "firmId" in option.target && option.target.firmId === requestedTeamId) : null;
-        if (requested) setCloudUploadRegisteredKey(registeredOptionKey(requested));
+        const requested = requestedTeamId ? options.find((option) => "firmId" in option.target && option.target.firmId === requestedTeamId)
+          : requestedAgentId ? options.find((option) => "agentId" in option.target && option.target.agentId === requestedAgentId) : null;
+        if (requested?.sourceReady && !getCloudUploadSnapshot().running) setCloudUploadRegisteredKey(registeredOptionKey(requested));
       }
     }).catch(() => {
       if (!cancelled) setRegisteredOptions([]);
     });
     return () => { cancelled = true; };
-  }, [requestedTeamId]);
+  }, [requestedTeamId, requestedAgentId]);
 
   const selectedRegistered = registeredOptions.find((option) => registeredOptionKey(option) === registeredKey) ?? null;
 

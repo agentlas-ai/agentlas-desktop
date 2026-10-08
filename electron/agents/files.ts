@@ -22,6 +22,7 @@ import {
 } from "../fs/workspace";
 import { FsAccessDeniedError } from "../fs/access";
 import { userDataPath } from "../runtime-paths";
+import { assertAgentWorkspaceActivationReady } from "./workspace-guard";
 
 interface AgentRow {
   id: string;
@@ -560,6 +561,7 @@ export function listAgentSkillEntries(dir: string): Array<{ root: string; name: 
 }
 
 export function buildAgentSkillsRuntimeContext(agentId: string): string {
+  assertAgentWorkspaceActivationReady(agentId);
   const row = getRow(agentId);
   if (!row) return "";
   const { dir, isLocal } = resolveDir(agentId, row.slug);
@@ -638,6 +640,7 @@ export function appendAgentSkillsToSystemPrompt(agentId: string, systemPrompt: s
 
 /** Canonical package prompt plus active package skills for every owned-agent execution path. */
 export function buildEffectiveAgentSystemPrompt(agentId: string, fallback: string): string {
+  assertAgentWorkspaceActivationReady(agentId);
   const source = readAgentPromptSource(agentId);
   return appendAgentSkillsToSystemPrompt(agentId, source?.content ?? fallback);
 }
@@ -700,6 +703,7 @@ export async function readAgentFile(agentId: string, absPath: string): Promise<T
 
 export function writeAgentFile(agentId: string, absPath: string, content: string): { ok: boolean } {
   const { dir, safe } = resolveAgentFileTarget(agentId, absPath);
+  if (path.basename(safe).toLowerCase() !== "memory.md") throw new Error("reviewed_file_diff_required: Review the file change in Manage Agent before applying it.");
   atomicWriteTextFile(safe, content);
   // system-prompt.md 편집은 DB에도 반영해 새 메시지에 즉시 적용.
   if (isCanonicalSystemPrompt(dir, safe)) {

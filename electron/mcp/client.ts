@@ -92,6 +92,7 @@ import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
 import { captureNativeGoalEpisode, type NativeGoalEpisodeBinding } from "../long-run/native-goal-pass";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
+import { acquireAgentWorkspaceRunLease, releaseAgentWorkspaceRunLease, getAgentWorkspace, readAgentWorkspaceFile } from "../agents/workspace-service";
 import {
   autoRouteStatus,
   autoRouteSystemPreamble,
@@ -2058,6 +2059,21 @@ async function runMcpInvocationInContext(
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
+  const workspaceLeases = new Map<string, string>();
+  const workspacePins = new Map<string, { revisionId: string; treeDigest: string }>();
+  const pinWorkspace = (candidate: InstalledAgent) => {
+    const row = getDb().prepare("SELECT builtin, system_prompt FROM installed_agents WHERE id = ?").get(candidate.id) as { builtin: number; system_prompt: string } | undefined;
+    if (!row || row.builtin || isCallOnlyHubAgent(candidate) || workspaceLeases.has(candidate.id)) return;
+    const leaseId = `${req.runId ?? "invocation"}:${candidate.id}:${randomUUID()}`;
+    const pin = acquireAgentWorkspaceRunLease(candidate.id, leaseId); workspaceLeases.set(candidate.id, leaseId); workspacePins.set(candidate.id, pin);
+    const workspace = getAgentWorkspace(candidate.id);
+    if (workspace.treeDigest !== pin.treeDigest || workspace.currentRevisionId !== pin.revisionId) throw new Error("agent_revision_changed_before_dispatch");
+    const canonical = workspace.canonicalEntry ? readAgentWorkspaceFile(candidate.id, workspace.canonicalEntry) : null;
+    if (canonical?.binary) throw new Error("agent_revision_entry_binary");
+    candidate.systemPrompt = canonical?.content ?? row.system_prompt;
+    recordRunEvent({ runId: req.runId ?? leaseId, chatId: req.chatId, agentId: candidate.id, kind: "agent_revision_run_started",
+      payload: { schemaVersion: "agentlas.revision-run-receipt.v1", ...pin, status: "started" } });
+  };
   let mcpConfigCleanup: (() => void) | undefined;
   let mcpConfigCurrent = true;
   const isMcpConfigCurrent = () => mcpConfigCurrent && !signal?.aborted
@@ -2477,6 +2493,10 @@ async function runMcpInvocationInContext(
     sink({ kind: "error", error: { code: "no-agent", message: tStatus(locale, "errAgentNotFound") } });
     return earlyResult();
   }
+  pinWorkspace(agent);
+  for (const target of req.taskForceTargets ?? []) {
+    if (target.source === "local" && target.entityKind === "agent") { const participant = getAgentById(target.agentId); if (participant) pinWorkspace(participant); }
+  }
   // A call-only Hub seat has no local instructions: its direct chat must run as
   // a Hub borrow (BYOM bundle), never as a local empty-prompt spawn. Explicit
   // targets/borrows and One-policy runs keep their own routing; only the plain
@@ -2543,6 +2563,7 @@ async function runMcpInvocationInContext(
     }
   }
   const effectivePromptFor = (candidate: InstalledAgent): string => {
+    pinWorkspace(candidate);
     if (!oneParticipantEffectivePrompts) {
       return buildEffectiveAgentSystemPrompt(candidate.id, candidate.systemPrompt);
     }
@@ -2554,6 +2575,7 @@ async function runMcpInvocationInContext(
     if (frozen === null) {
       throw new Error(`One participant prompt snapshot is unavailable: ${candidate.id}`);
     }
+    if (workspacePins.has(candidate.id) && frozen !== buildEffectiveAgentSystemPrompt(candidate.id, candidate.systemPrompt)) throw new Error("one_participant_revision_changed");
     return frozen;
   };
   runtimeAgentId = agent.id;
@@ -2908,6 +2930,7 @@ ${effectiveUserPrompt}`;
     : null;
   if (autoRoute) {
     agent = autoRoute.agent;
+    pinWorkspace(agent);
     runtimeAgentId = agent.id;
     sink({ kind: "tool-use", status: autoRouteStatus(autoRoute, locale) });
   }
@@ -6030,6 +6053,8 @@ ${effectiveUserPrompt}`;
       forceSurface: oneTeamExecutionPolicy ? true : undefined,
     };
     let goalWorkAdmissionNotified = false;
+    if (workspacePins.size) runnerReq.sessionFingerprintSeed = JSON.stringify({ base: runnerReq.sessionFingerprintSeed ?? null,
+      revisions: [...workspacePins].sort(([a], [b]) => a.localeCompare(b)) });
     const runnerRequestForRuntime = (
       runtime: RuntimeStatus,
       runtimePicked: { runner: Runner; label: string },
@@ -6660,6 +6685,10 @@ ${effectiveUserPrompt}`;
         try {
           const selected = picked;
           if (!selected) throw new Error("no-runner");
+          for (const [agentId, pin] of workspacePins) {
+            const current = getAgentWorkspace(agentId);
+            if (current.currentRevisionId !== pin.revisionId || current.treeDigest !== pin.treeDigest) throw new Error("agent_revision_changed_before_dispatch");
+          }
           const experienceDispatch = prepareExperienceDispatch({
             request: requestForRuntime, snapshot: experienceApplication,
             contextParts: turnContextParts, partIndex: experienceContextPartIndex,
@@ -8429,6 +8458,12 @@ ${effectiveUserPrompt}`;
       : earlyResult();
   }
   } finally {
+    for (const [agentId, leaseId] of workspaceLeases) {
+      const pin = workspacePins.get(agentId);
+      try { if (pin) recordRunEvent({ runId: req.runId ?? leaseId, chatId: req.chatId, agentId, kind: "agent_revision_run_finished",
+        payload: { schemaVersion: "agentlas.revision-run-receipt.v1", ...pin, status: signal?.aborted ? "cancelled" : "finished" } }); } catch { /* Lease release remains unconditional. */ }
+      try { releaseAgentWorkspaceRunLease(agentId, leaseId); } catch { /* A removed route retains a conservative lease until recovery. */ }
+    }
     mcpConfigCurrent = false;
     signal?.removeEventListener("abort", revokeMcpConfig);
     if (login?.ownerSignal !== signal) login?.ownerSignal.removeEventListener("abort", revokeMcpConfig);

@@ -1,3 +1,4 @@
+import { experienceChipsRetired } from "./retired";
 import { createHash, randomUUID } from "node:crypto";
 import { isIP } from "node:net";
 import path from "node:path";
@@ -614,49 +615,7 @@ function assertPackBaseCurrent(pack: PackRow): void {
 }
 
 export function createExperiencePack(input: ExperiencePackCreateInput): ExperiencePackRecord {
-  assertExactKeys(input, ["agentId", "name", "description", "projectId", "projectPath", "environment", "mcpRequirements"], "Experience Pack input");
-  const agentId = cleanText(input.agentId, "agentId", 120);
-  const agent = getAgentById(agentId);
-  if (!agent) throw new Error("Experience Pack requires an installed agent.");
-  if (!agent.packageHash || !/^[a-f0-9]{64}$/.test(agent.packageHash)) {
-    throw new Error("Experience Pack requires a verified base package hash.");
-  }
-  const name = cleanText(input.name, "Experience Pack name", 80);
-  const description = cleanText(input.description ?? "", "Experience Pack description", 500, false);
-  assertExactKeys(input.environment, ["platform", "arch", "runtimeKind"], "Experience environment");
-  const projectId = typeof input.projectId === "string" && input.projectId.trim() ? input.projectId.trim().slice(0, 120) : null;
-  const projectPath = normalizedProjectPath(input.projectPath);
-  const mcpRequirements = normalizeExperienceMcpRequirements(input.mcpRequirements, agent.mcpServers ?? []);
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const environmentProfile = canonicalEnvironmentProfile(input.environment);
-  getDb().prepare(
-    `INSERT INTO experience_packs (
-       id, agent_id, project_id, project_path, project_scope_key, environment_key,
-       environment_profile_json, auto_managed, name, description, base_package_hash,
-       mcp_requirements_json, status, created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 'active', ?, ?)`,
-  ).run(
-    id,
-    agentId,
-    projectId,
-    projectPath,
-    experienceProjectScopeKey({ projectId, projectPath }),
-    experienceEnvironmentKey(input.environment),
-    JSON.stringify(environmentProfile),
-    name,
-    description,
-    agent.packageHash,
-    JSON.stringify(mcpRequirements),
-    now,
-    now,
-  );
-  try {
-    rebuildExperienceRelationIndex();
-  } catch (error) {
-    console.warn(`[experience-relations] initial rebuild deferred: ${error instanceof Error ? error.message : "unknown"}`);
-  }
-  return packFromRow(getPackRow(id));
+  return experienceChipsRetired();
 }
 
 export function listExperiencePacks(input: ExperiencePackListInput): ExperiencePackRecord[] {
@@ -698,72 +657,7 @@ function taskTerms(memory: MemoryProjectionRow): string[] {
 }
 
 export function captureExperienceCandidate(input: ExperienceCandidateCaptureInput): ExperienceCandidateRecord {
-  assertExactKeys(input, ["packId", "sourceMemoryId"], "Experience candidate capture input");
-  const pack = getPackRow(cleanText(input.packId, "packId", 120));
-  if (pack.status !== "active") throw new Error("Archived Experience Packs cannot accept candidates.");
-  assertPackBaseCurrent(pack);
-  const memoryId = cleanText(input.sourceMemoryId, "sourceMemoryId", 120);
-  const memory = getDb().prepare(
-    `SELECT id, kind, content, project_id, project_path, agent_id, confidence, sensitivity,
-            context_json, superseded_at
-       FROM memory_entries WHERE id = ?`,
-  ).get(memoryId) as MemoryProjectionRow | undefined;
-  if (!memory || memory.superseded_at) throw new Error("Experience capture requires a live curated Memory entry.");
-  if (!new Set(["procedure", "decision", "risk"]).has(memory.kind)) {
-    throw new Error("Operational Experience accepts procedure, decision, or risk Memory only. Preferences belong to private Taste drafts.");
-  }
-  if (memory.agent_id !== pack.agent_id) throw new Error("Experience memory must belong to the same agent as the Pack.");
-  const memoryScopeKey = experienceProjectScopeKey({ projectId: memory.project_id, projectPath: memory.project_path });
-  if (memoryScopeKey !== pack.project_scope_key) throw new Error("Experience memory must belong to the same project scope as the Pack.");
-  const summary = cleanText(memory.content, "Curated experience summary", 1_200);
-  const captureIssues = publicExperienceSafetyIssues(summary);
-  if (captureIssues.length > 0) {
-    throw new Error(`Experience candidates must be generic and cannot contain private, local, prompt, transcript, account, or source-package material (${captureIssues.join(", ")}).`);
-  }
-  if (memory.sensitivity === "secret" || memory.sensitivity === "confidential") {
-    throw new Error("Secret or confidential Memory cannot become an Experience candidate.");
-  }
-  if (memory.sensitivity !== "public" && memory.sensitivity !== "internal" && memory.sensitivity !== "private") {
-    throw new Error("Unsupported Memory sensitivity for Experience capture.");
-  }
-  const existing = getDb().prepare(
-    "SELECT * FROM experience_candidates WHERE pack_id = ? AND source_memory_id = ?",
-  ).get(pack.id, memory.id) as CandidateRow | undefined;
-  if (existing) return candidateFromRow(existing);
-  const confidence = memory.confidence === "high" || memory.confidence === "low" ? memory.confidence : "medium";
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const canonicalTasks = taskTerms(memory);
-  const embedding = autoLocalEmbedding(summary);
-  getDb().prepare(
-    `INSERT INTO experience_candidates (
-       id, pack_id, agent_id, project_scope_key, environment_key, source_memory_id,
-       summary, task_terms_json, sensitivity, confidence, status, outcome_status,
-       public_safe, auto_managed, embedding_model, embedding_adapter,
-       embedding_model_sha256, embedding_content_hash, embedding_dimensions,
-       embedding_json, created_at, updated_at, promoted_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'unverified', 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-  ).run(
-    id,
-    pack.id,
-    pack.agent_id,
-    pack.project_scope_key,
-    pack.environment_key,
-    memory.id,
-    summary,
-    JSON.stringify(canonicalTasks),
-    memory.sensitivity,
-    confidence,
-    embedding.model,
-    embedding.adapter,
-    embedding.modelSha256,
-    embedding.contentHash,
-    embedding.dimensions,
-    JSON.stringify(embedding.vector),
-    now,
-    now,
-  );
-  return candidateFromRow(getCandidateRow(id));
+  return experienceChipsRetired();
 }
 
 export function listExperienceCandidates(packId: string): ExperienceCandidateRecord[] {
@@ -1082,235 +976,7 @@ function propagateSafeExperienceNative(input: AutoExperienceIntakeInput, candida
  * explicit owner actions.
  */
 export function autoIntakeCuratedMemory(input: AutoExperienceIntakeInput): void {
-  // experience_auto_intake_receipts and experience_candidates both FK
-  // agent_id → installed_agents(id). Org-chart team members bind their memory
-  // by agentSlug and have no installed_agents row, so any intake write here
-  // would throw a FOREIGN KEY constraint and abort the caller's curation.
-  // Skip intake for a non-installed owner (its memory still drives runtime
-  // prompts); experience accrual requires a first-class installed agent.
-  const ownerInstalled = getDb()
-    .prepare("SELECT 1 FROM installed_agents WHERE id = ? LIMIT 1")
-    .get(input.agentId);
-  if (!ownerInstalled) return;
-
-  const sourceMemoryHash = autoIntakeSourceMemoryHash(input);
-  const runId = input.runId ?? null;
-  const recordBlocked = (reasons: string[], redactionCount = 0): void => {
-    const duplicate = getDb().prepare(
-      "SELECT 1 FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
-    ).get(input.agentId, sourceMemoryHash);
-    if (duplicate) return;
-    recordAutoIntakeReceipt({
-      agentId: input.agentId,
-      sourceMemoryHash,
-      memoryKind: input.memory.kind,
-      status: "blocked",
-      reasons,
-      runId,
-      redactionCount,
-    });
-  };
-
-  // Hard blocks stay hard: secrets/credentials, prompt/transcript/source
-  // material, labeled account identifiers, IP addresses, and sensitive memory
-  // are never redact-admitted.
-  const hardIssues: string[] = [];
-  if (input.memory.sensitivity === "secret" || input.memory.sensitivity === "confidential") {
-    hardIssues.push("sensitive-memory");
-  } else if (!["public", "internal", "private"].includes(input.memory.sensitivity)) {
-    hardIssues.push("unsupported-sensitivity");
-  }
-  const rawIssues = publicExperienceSafetyIssues(input.memory.content);
-  hardIssues.push(...rawIssues.filter((code) => !REDACTABLE_PRIVACY_CODES.has(code)));
-  if (hardIssues.length > 0) {
-    recordBlocked(hardIssues);
-    return;
-  }
-
-  // Redact-and-admit: span-redact paths/URLs (<경로>/<URL>), emails (<이메일>)
-  // and opaque or phone-shaped numbers (<ID>), then re-scan. Any residue after
-  // redaction is a hard block — never a partial admit. Raw redacted-out text
-  // must not reach the candidate body, relation index, or any receipt.
-  let operationalContent = input.memory.content;
-  let redactionCount = 0;
-  if (rawIssues.length > 0) {
-    const redaction = redactExperiencePrivacySpans(input.memory.content);
-    const residualIssues = publicExperienceSafetyIssues(redaction.text);
-    if (residualIssues.length > 0) {
-      recordBlocked([...residualIssues, "redaction-insufficient"], redaction.redactions);
-      return;
-    }
-    operationalContent = redaction.text;
-    redactionCount = redaction.redactions;
-  }
-
-  // Preference memories take a separate lane. The local row is merely a
-  // private observation and is created before consulting the operational
-  // receipt so legacy "skipped" receipts can be reconciled without rewriting
-  // their append-only decision history.
-  const tasteDraftResult = input.memory.kind === "preference"
-    ? autoIntakeTasteDraft(input)
-    : null;
-  const duplicate = getDb().prepare(
-    "SELECT 1 FROM experience_auto_intake_receipts WHERE agent_id = ? AND source_memory_hash = ? LIMIT 1",
-  ).get(input.agentId, sourceMemoryHash);
-  if (duplicate) {
-    let environmentKey: string;
-    try { environmentKey = experienceEnvironmentKey(input.environment); } catch { return; }
-    const existing = getDb().prepare(`SELECT id FROM experience_candidates
-      WHERE agent_id = ? AND source_memory_id = ? AND auto_managed = 1
-        AND project_scope_key = ? AND environment_key = ? ORDER BY created_at ASC, id ASC LIMIT 1`)
-      .get(input.agentId, input.memory.id, experienceProjectScopeKey(input), environmentKey) as { id: string } | undefined;
-    if (existing) getDb().transaction(() => propagateSafeExperienceNative(input, existing.id))();
-    return;
-  }
-
-  const operationalKinds = new Set(["procedure", "decision", "risk"]);
-  if (!operationalKinds.has(input.memory.kind)) {
-    recordAutoIntakeReceipt({
-      agentId: input.agentId,
-      sourceMemoryHash,
-      memoryKind: input.memory.kind,
-      status: "skipped",
-      reasons: [input.memory.kind === "preference"
-        ? tasteDraftResult === "created" || tasteDraftResult === "existing"
-          ? "preference-captured-as-private-taste-draft"
-          : "preference-requires-taste-evidence"
-        : "non-operational-memory-kind"],
-      runId,
-    });
-    return;
-  }
-
-  const basePackageHash = resolveEffectiveIntakeBase(input);
-  if (!basePackageHash) {
-    recordAutoIntakeReceipt({
-      agentId: input.agentId,
-      sourceMemoryHash,
-      memoryKind: input.memory.kind,
-      status: "skipped",
-      reasons: ["exact-base-unavailable"],
-      runId,
-    });
-    return;
-  }
-
-  const profile = canonicalEnvironmentProfile(input.environment);
-  if (!isRuntimeEligibleExperienceEnvironmentProfile(profile)) {
-    recordAutoIntakeReceipt({
-      agentId: input.agentId,
-      sourceMemoryHash,
-      memoryKind: input.memory.kind,
-      status: "skipped",
-      reasons: ["environment-taxonomy-unavailable"],
-      runId,
-    });
-    return;
-  }
-
-  const tasks = classifyCanonicalTaskIds(
-    input.taskHint,
-    operationalContent,
-    input.memory.requestContext?.userIntent,
-    ...(input.memory.requestContext?.triggerTerms ?? []),
-  );
-  /*
-   * ★분류에 실패했다고 경험을 버리지 않는다(오너 결정 2026-08-16).
-   *
-   * 작업 분류는 23개 낱말 규칙으로 정해진다. 거기 안 걸리는 일은 늘 있고 — 런타임 정산,
-   * 권한 경계, 릴리즈 절차처럼 규칙에 없는 주제 — 예전에는 그런 기억이 통째로 버려졌다
-   * (실측 218건, 그 중 174건이 One). 분류는 나중에 이 칩을 **찾기 위한** 꼬리표이지
-   * 칩이 존재할 자격이 아니다. 꼬리표가 비면 검색이 조금 불편할 뿐, 버리면 경험 자체가
-   * 사라진다. 판정 모델이 붙으면 같은 후보를 다시 분류할 수 있다.
-   *
-   * 영수증에는 분류가 비었다는 사실을 남긴다 — 규칙이 현실을 얼마나 못 따라가는지
-   * 세어 볼 수 있어야 나중에 고칠 수 있다.
-   */
-  const taskTermsUnavailable = tasks.length === 0;
-
-  const pack = ensureAutoExperiencePack({ ...input, basePackageHash });
-  // Historical releases could split one automatic pack when its base changed.
-  // Reuse the same Memory only inside the same project and environment lane;
-  // cross-platform/project candidates intentionally remain distinct.
-  const existingCandidate = getDb().prepare(
-    `SELECT * FROM experience_candidates
-      WHERE agent_id = ? AND source_memory_id = ? AND auto_managed = 1
-        AND project_scope_key = ? AND environment_key = ?
-      ORDER BY created_at ASC, id ASC LIMIT 1`,
-  ).get(input.agentId, input.memory.id, pack.project_scope_key, pack.environment_key) as CandidateRow | undefined;
-  if (existingCandidate) {
-    getDb().transaction(() => propagateSafeExperienceNative(input, existingCandidate.id))();
-    recordAutoIntakeReceipt({
-      agentId: input.agentId,
-      sourceMemoryHash,
-      memoryKind: input.memory.kind,
-      status: "candidate-created",
-      reasons: [
-        ...(redactionCount > 0 ? ["redacted-admit"] : []),
-        // 분류가 비었어도 후보는 만든다 — 세어 볼 수 있게 사실만 남긴다.
-        ...(taskTermsUnavailable ? ["task-taxonomy-empty"] : []),
-      ],
-      // A reused candidate remains owned by its original pack. Keep the
-      // receipt referentially consistent instead of pointing at a newer split.
-      packId: existingCandidate.pack_id,
-      candidateId: existingCandidate.id,
-      runId,
-      redactionCount,
-    });
-    return;
-  }
-
-  const candidateId = randomUUID();
-  const now = new Date().toISOString();
-  const summary = cleanText(operationalContent, "Auto Experience candidate", 1_200);
-  const embedding = autoLocalEmbedding(summary);
-  const transaction = getDb().transaction(() => {
-    getDb().prepare(
-      `INSERT INTO experience_candidates (
-         id, pack_id, agent_id, project_scope_key, environment_key, source_memory_id,
-         summary, task_terms_json, sensitivity, confidence, status, outcome_status,
-         public_safe, auto_managed, embedding_model, embedding_adapter,
-         embedding_model_sha256, embedding_content_hash, embedding_dimensions,
-         embedding_json, created_at, updated_at, promoted_at
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', 'unverified', 0, 1, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
-    ).run(
-      candidateId,
-      pack.id,
-      input.agentId,
-      pack.project_scope_key,
-      pack.environment_key,
-      input.memory.id,
-      summary,
-      JSON.stringify(tasks),
-      input.memory.sensitivity,
-      input.memory.confidence,
-      embedding.model,
-      embedding.adapter,
-      embedding.modelSha256,
-      embedding.contentHash,
-      embedding.dimensions,
-      JSON.stringify(embedding.vector),
-      now,
-      now,
-    );
-    propagateSafeExperienceNative(input, candidateId);
-    recordAutoIntakeReceipt({
-      agentId: input.agentId,
-      sourceMemoryHash,
-      memoryKind: input.memory.kind,
-      status: "candidate-created",
-      reasons: [
-        ...(redactionCount > 0 ? ["redacted-admit"] : []),
-        // 분류가 비었어도 후보는 만든다 — 세어 볼 수 있게 사실만 남긴다.
-        ...(taskTermsUnavailable ? ["task-taxonomy-empty"] : []),
-      ],
-      packId: pack.id,
-      candidateId,
-      runId,
-      redactionCount,
-    });
-  });
-  transaction();
+  return;
 }
 
 function requestContextFromMemory(raw: string | null): AutoExperienceIntakeInput["memory"]["requestContext"] {
@@ -1397,23 +1063,7 @@ export function reconcileExistingCuratedMemoryCandidates(limitValue = 2_000, opt
   skipped: number;
   deferred: number;
 } {
-  const limit = Math.max(1, Math.min(10_000, Math.trunc(limitValue)));
-  // 아키텍처 마이그레이션은 에이전트 한 명씩 돈다(원장이 에이전트 단위라 결과도 그 단위여야
-  // 한다). 인자가 없으면 예전처럼 전체를 훑는다.
-  const only = typeof options.agentId === "string" && options.agentId.trim() ? options.agentId.trim() : null;
-  const rows = getDb().prepare(
-    `SELECT id, kind, content, project_id, project_path, agent_id, confidence,
-            sensitivity, context_json, superseded_at
-       FROM memory_entries
-      WHERE agent_id IS NOT NULL AND superseded_at IS NULL
-        AND (? IS NULL OR agent_id = ?)
-      ORDER BY created_at ASC, id ASC
-      LIMIT ?`,
-  ).all(only, only, limit) as MemoryProjectionRow[];
-  const result = { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
-
-  for (const memory of rows) reconcileCuratedMemoryRow(memory, result);
-  return result;
+  return { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
 }
 
 /** Startup-only sweep: release Main between bounded batches. Snapshot IDs,
@@ -1422,167 +1072,7 @@ export async function reconcileExistingCuratedMemoryCandidatesAtStartup(
   limitValue = 2_000,
   options: { agentId?: string; signal?: AbortSignal } = {},
 ): Promise<CuratedMemoryReconciliationResult> {
-  const { signal } = options;
-  signal?.throwIfAborted();
-  const limit = Math.max(1, Math.min(10_000, Math.trunc(limitValue)));
-  const only = typeof options.agentId === "string" && options.agentId.trim() ? options.agentId.trim() : null;
-  // The existing meta ledger avoids a schema migration (and therefore avoids a
-  // full pre-upgrade SQLite backup) while preserving a durable, policy-scoped
-  // startup boundary. Existing rowid cursors hand off without rereading old
-  // bodies to an immutable created_at + id order that survives VACUUM or a
-  // future table rebuild. A new policy still gets its own independent cursor.
-  const cursorKey = [
-    "experience-startup-memory-rowid",
-    AUTO_INTAKE_POLICY_VERSION,
-    process.platform,
-    process.arch,
-    only ?? "all",
-  ].join(":");
-  const stableCursorKey = cursorKey.replace("experience-startup-memory-rowid", "experience-startup-memory-order");
-  const pendingKey = `${cursorKey}:pending`;
-  const cursorRow = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(cursorKey) as { value?: string } | undefined;
-  const parsedCursor = Number.parseInt(cursorRow?.value ?? "0", 10);
-  const cursor = Number.isSafeInteger(parsedCursor) && parsedCursor >= 0 ? parsedCursor : 0;
-  const stableCursorRow = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(stableCursorKey) as { value?: string } | undefined;
-  let stableCursor: { createdAt: string; id: string } | null = null;
-  try {
-    const parsed = JSON.parse(stableCursorRow?.value ?? "null") as { createdAt?: unknown; id?: unknown } | null;
-    if (parsed && typeof parsed.createdAt === "string" && typeof parsed.id === "string") {
-      stableCursor = { createdAt: parsed.createdAt, id: parsed.id };
-    }
-  } catch {
-    /* A damaged stable cursor falls back to the existing rowid drain. */
-  }
-  if (!stableCursor) {
-    // Convert the physical cursor before doing more work. The oldest logical
-    // row beyond the legacy boundary proves a prefix that was already seen;
-    // rows interleaved after that prefix are harmlessly retried through the
-    // idempotent intake receipt. Only key columns are read for this one-time
-    // handoff, so no Memory bodies or schema migration are required.
-    const firstUnprocessed = getDb().prepare(
-      `SELECT created_at AS createdAt, id FROM memory_entries
-        WHERE rowid > ? AND agent_id IS NOT NULL AND superseded_at IS NULL
-          AND (? IS NULL OR agent_id = ?)
-        ORDER BY created_at ASC, id ASC LIMIT 1`,
-    ).get(cursor, only, only) as { createdAt: string; id: string } | undefined;
-    if (firstUnprocessed) {
-      const predecessor = getDb().prepare(
-        `SELECT created_at AS createdAt, id FROM memory_entries
-          WHERE (created_at < ? OR (created_at = ? AND id < ?))
-            AND agent_id IS NOT NULL AND superseded_at IS NULL
-            AND (? IS NULL OR agent_id = ?)
-          ORDER BY created_at DESC, id DESC LIMIT 1`,
-      ).get(
-        firstUnprocessed.createdAt,
-        firstUnprocessed.createdAt,
-        firstUnprocessed.id,
-        only,
-        only,
-      ) as { createdAt: string; id: string } | undefined;
-      stableCursor = predecessor ?? { createdAt: "", id: "" };
-    } else {
-      const anchor = getDb().prepare(
-        `SELECT created_at AS createdAt, id FROM memory_entries
-          WHERE agent_id IS NOT NULL AND superseded_at IS NULL
-            AND (? IS NULL OR agent_id = ?)
-          ORDER BY created_at DESC, id DESC LIMIT 1`,
-      ).get(only, only) as { createdAt: string; id: string } | undefined;
-      stableCursor = anchor ?? { createdAt: "", id: "" };
-    }
-  }
-  const MAX_PENDING_MEMORY_IDS = 10_000;
-  const pendingRow = getDb().prepare("SELECT value FROM meta WHERE key = ?").get(pendingKey) as { value?: string } | undefined;
-  let parsedPending: unknown = [];
-  try { parsedPending = JSON.parse(pendingRow?.value ?? "[]"); } catch {}
-  const pendingIds = new Set(
-    (Array.isArray(parsedPending) ? parsedPending : [])
-      .filter((id): id is string => typeof id === "string" && id.length > 0 && id.length <= 120)
-      .slice(0, MAX_PENDING_MEMORY_IDS),
-  );
-  // Retry a bounded slice without allowing permanently unavailable agents to
-  // consume the whole startup budget. Failed IDs rotate to the tail; new rows
-  // always retain most of the capacity.
-  const pendingBudget = Math.min(pendingIds.size, 128, Math.max(1, Math.floor(limit / 4)));
-  type StartupMemoryId = {
-    id: string;
-    source: "pending" | "stable";
-    createdAt?: string;
-  };
-  const pendingAttempts: StartupMemoryId[] = [...pendingIds].slice(0, pendingBudget)
-    .map((id) => ({ id, source: "pending" }));
-  const newBudget = Math.max(0, limit - pendingAttempts.length);
-  const newIds: StartupMemoryId[] = (getDb().prepare(
-    `SELECT memory.id, memory.created_at AS createdAt FROM memory_entries memory
-      WHERE (memory.created_at > ? OR (memory.created_at = ? AND memory.id > ?))
-        AND memory.agent_id IS NOT NULL AND memory.superseded_at IS NULL
-        AND (? IS NULL OR memory.agent_id = ?)
-      ORDER BY memory.created_at ASC, memory.id ASC LIMIT ?`,
-  ).all(
-    stableCursor.createdAt,
-    stableCursor.createdAt,
-    stableCursor.id,
-    only,
-    only,
-    newBudget,
-  ) as Array<{ id: string; createdAt: string }>).map((item) => ({ ...item, source: "stable" }));
-  const ids = [...pendingAttempts, ...newIds];
-  const readCurrent = getDb().prepare(
-    `SELECT id, kind, content, project_id, project_path, agent_id, confidence,
-            sensitivity, context_json, superseded_at
-       FROM memory_entries WHERE id = ? AND agent_id IS NOT NULL
-        AND superseded_at IS NULL AND (? IS NULL OR agent_id = ?)`,
-  );
-  const result = { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
-  const persistCursor = getDb().prepare(
-    `INSERT INTO meta (key, value) VALUES (?, ?)
-     ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-  );
-  let persistedStableCursor = stableCursorRow?.value ?? "null";
-  let persistedPending = JSON.stringify([...pendingIds]);
-  const flushState = (): void => {
-    const pendingJson = JSON.stringify([...pendingIds]);
-    const stableCursorJson = JSON.stringify(stableCursor);
-    if (stableCursorJson === persistedStableCursor && pendingJson === persistedPending) return;
-    getDb().transaction(() => {
-      if (stableCursorJson !== persistedStableCursor) persistCursor.run(stableCursorKey, stableCursorJson);
-      if (pendingJson !== persistedPending) persistCursor.run(pendingKey, pendingJson);
-    })();
-    persistedStableCursor = stableCursorJson;
-    persistedPending = pendingJson;
-  };
-  let batchStarted = performance.now();
-  let batchRows = 0;
-  for (let index = 0; index < ids.length; index += 1) {
-    signal?.throwIfAborted();
-    // A user may delete/supersede a Memory or replace an agent while we yield.
-    // Read fresh content and resolve the exact current base inside this turn.
-    const memory = readCurrent.get(ids[index].id, only, only) as MemoryProjectionRow | undefined;
-    const settled = memory ? reconcileCuratedMemoryRow(memory, result) : true;
-    const item = ids[index];
-    if (item.source === "pending") {
-      pendingIds.delete(item.id);
-      if (!settled) pendingIds.add(item.id); // rotate a persistent failure
-    } else {
-      if (!settled) {
-        // Never forget a deferred row. If the bounded retry ledger is full,
-        // stop before moving the high-water mark past an ID we cannot retain.
-        if (pendingIds.size >= MAX_PENDING_MEMORY_IDS) break;
-        pendingIds.add(item.id);
-      }
-      stableCursor = { createdAt: item.createdAt ?? "", id: item.id };
-    }
-    batchRows += 1;
-    if (index + 1 < ids.length && (batchRows >= 32 || performance.now() - batchStarted >= 8)) {
-      flushState();
-      await yieldToMain(undefined, { signal });
-      signal?.throwIfAborted();
-      batchRows = 0;
-      batchStarted = performance.now();
-    }
-  }
-  flushState();
-  signal?.throwIfAborted();
-  return result;
+  return { scanned: 0, candidateCreated: 0, blocked: 0, skipped: 0, deferred: 0 };
 }
 
 function validatedEvidenceRefs(input: ExperiencePromotionInput): string[] {
@@ -1598,74 +1088,7 @@ function validatedEvidenceRefs(input: ExperiencePromotionInput): string[] {
 }
 
 export function promoteExperienceCandidate(input: ExperiencePromotionInput): ExperiencePromotionReceipt {
-  assertExactKeys(input, ["candidateId", "explicitConsent", "verification", "publicSafe"], "Experience promotion input");
-  if (input.explicitConsent !== true) throw new Error("Experience promotion requires explicit consent.");
-  assertExactKeys(input.verification, ["status", "method", "evidenceRefs"], "Experience verification");
-  if (input.verification.status !== "attested" || input.verification.method !== "user-attested") {
-    throw new Error("P0 Experience promotion supports user-attested review only; it is not official verification.");
-  }
-  const refs = validatedEvidenceRefs(input);
-  const candidate = getCandidateRow(cleanText(input.candidateId, "candidateId", 120));
-  const pack = getPackRow(candidate.pack_id);
-  assertPackBaseCurrent(pack);
-  const existing = getDb().prepare(
-    "SELECT * FROM experience_promotion_receipts WHERE candidate_id = ? AND action = 'promote'",
-  ).get(candidate.id) as PromotionReceiptRow | undefined;
-  if (existing) {
-    try {
-      recordExperienceLineageEvent(existing.pack_id, "promotion");
-      refreshExperienceRelationArtifacts(existing.pack_id);
-    } catch (error) {
-      console.warn(`[experience-relations] existing promotion sync deferred: ${error instanceof Error ? error.message : "unknown"}`);
-    }
-    return receiptFromRow(existing);
-  }
-  if (candidate.status !== "candidate") throw new Error("Only pending Experience candidates can be promoted.");
-  // Manual review is only an attestation. It must never mint a verified/public
-  // receipt in the same action: public release is a separate owner action that
-  // re-runs the canonical privacy scan through unsealExperienceCandidatePublic.
-  if (input.publicSafe === true) {
-    throw new Error("Direct user attestation is not an authoritative local verifier. Promote privately, then use the separate public unseal gate.");
-  }
-  const publicSafe = false;
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const evidenceHash = hash("experience-evidence-v1", ...refs);
-  const transaction = getDb().transaction(() => {
-    getDb().prepare(
-      `INSERT INTO experience_promotion_receipts (
-         id, pack_id, candidate_id, agent_id, action, explicit_consent,
-         verification_status, verification_method, evidence_hash, public_safe, created_at
-       ) VALUES (?, ?, ?, ?, 'promote', 1, ?, 'user-attested', ?, ?, ?)`,
-    ).run(
-      id,
-      candidate.pack_id,
-      candidate.id,
-      candidate.agent_id,
-      publicSafe ? "verified" : "attested",
-      evidenceHash,
-      publicSafe ? 1 : 0,
-      now,
-    );
-    getDb().prepare(
-      `UPDATE experience_candidates
-          SET status = 'promoted', outcome_status = ?, public_safe = ?,
-              updated_at = ?, promoted_at = ?
-        WHERE id = ? AND status = 'candidate'`,
-    ).run(publicSafe ? "verified" : "attested", publicSafe ? 1 : 0, now, now, candidate.id);
-    getDb().prepare("UPDATE experience_packs SET updated_at = ? WHERE id = ?")
-      .run(now, candidate.pack_id);
-    recordExperienceLineageEvent(candidate.pack_id, "promotion");
-  });
-  transaction();
-  try {
-    refreshExperienceRelationArtifacts(candidate.pack_id);
-  } catch (error) {
-    console.warn(`[experience-relations] promotion projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
-  }
-  return receiptFromRow(
-    getDb().prepare("SELECT * FROM experience_promotion_receipts WHERE id = ?").get(id) as PromotionReceiptRow,
-  );
+  return experienceChipsRetired();
 }
 
 /** 복구 파이프라인이 방금 만든 후보를 소스 메모리로 되찾는다(자율 승격 경로 전용). */
@@ -1690,7 +1113,7 @@ export function promoteExperienceCandidateFromRunReceipt(input: {
   candidateId: string;
   runId: string;
 }): ExperiencePromotionReceipt {
-  return promoteExperienceCandidateWithRunReceipt(input);
+  return experienceChipsRetired();
 }
 
 function promoteExperienceCandidateWithRunReceipt(input: {
@@ -1778,43 +1201,7 @@ export function promoteWaitingExperienceCandidates(input: {
   runId: string;
   limit?: number;
 }): { eligible: number; promoted: number } {
-  const agentId = cleanText(input.agentId, "agentId", 120);
-  const runId = cleanText(input.runId, "runId", 120);
-  if (!SAFE_EVIDENCE_REF_RE.test(runId)) {
-    throw new Error("Run receipt evidence must be a value-free run id.");
-  }
-  if (!hasDurableRunStartReceipt(runId)) return { eligible: 0, promoted: 0 };
-  // A bound keeps one turn from doing unbounded work on a long-neglected
-  // library; the rest are picked up by the turns that follow.
-  const limit = Math.max(1, Math.min(Number(input.limit ?? 25), 200));
-  const rows = getDb().prepare(
-    `SELECT c.id
-       FROM experience_candidates c
-       JOIN experience_packs p ON p.id = c.pack_id
-      WHERE c.agent_id = ? AND c.status = 'candidate'
-      ORDER BY c.created_at ASC
-      LIMIT ?`,
-  ).all(agentId, limit) as Array<{ id: string }>;
-  if (rows.length === 0) return { eligible: 0, promoted: 0 };
-  let promoted = 0;
-  // Rebuilding the shared graph after each candidate rewrites every Pack's
-  // nodes/edges repeatedly. Keep each receipt and lineage transaction, then
-  // project the committed batch once before returning to the event loop.
-  const relationPacks = new Set<string>();
-  try {
-    for (const row of rows) {
-      try {
-        promoteExperienceCandidateWithRunReceipt({ candidateId: row.id, runId }, relationPacks);
-        promoted += 1;
-      } catch {
-        // A stale pack base or a candidate promoted by a concurrent turn is not a
-        // reason to abandon the rest of the batch.
-      }
-    }
-  } finally {
-    refreshDeferredExperienceRelations(relationPacks);
-  }
-  return { eligible: rows.length, promoted };
+  return { eligible: 0, promoted: 0 };
 }
 
 /**
@@ -1828,36 +1215,7 @@ export function promoteExperienceCandidatesForRun(input: {
   agentId: string;
   runId: string;
 }): { eligible: number; promoted: number } {
-  const agentId = cleanText(input.agentId, "agentId", 120);
-  const runId = cleanText(input.runId, "runId", 120);
-  if (!SAFE_EVIDENCE_REF_RE.test(runId)) {
-    throw new Error("Run receipt evidence must be a value-free run id.");
-  }
-  const rows = getDb().prepare(
-    `SELECT r.candidate_id
-       FROM experience_auto_intake_receipts r
-       JOIN experience_candidates c ON c.id = r.candidate_id AND c.agent_id = r.agent_id
-      WHERE r.agent_id = ? AND r.run_id = ? AND r.status = 'candidate-created'
-        AND r.candidate_id IS NOT NULL AND c.status = 'candidate'
-      ORDER BY r.created_at ASC`,
-  ).all(agentId, runId) as Array<{ candidate_id: string }>;
-  if (rows.length === 0) return { eligible: 0, promoted: 0 };
-  // Failed/cancelled turns never reach this call site, and even a mistaken
-  // call cannot promote: the durable start receipt is re-checked here and
-  // inside the promotion itself.
-  if (!hasDurableRunStartReceipt(runId)) return { eligible: rows.length, promoted: 0 };
-  let promoted = 0;
-  const relationPacks = new Set<string>();
-  try {
-    for (const row of rows) {
-      promoteExperienceCandidateWithRunReceipt({ candidateId: row.candidate_id, runId }, relationPacks);
-      promoted += 1;
-    }
-  } finally {
-    // Earlier receipts remain committed if a later promotion fails.
-    refreshDeferredExperienceRelations(relationPacks);
-  }
-  return { eligible: rows.length, promoted };
+  return { eligible: 0, promoted: 0 };
 }
 
 /**
@@ -1877,53 +1235,7 @@ export function unsealExperienceCandidatePublic(input: {
   candidateId: string;
   explicitConsent: true;
 }): ExperiencePromotionReceipt {
-  assertExactKeys(input, ["candidateId", "explicitConsent"], "Experience public unseal input");
-  if (input.explicitConsent !== true) throw new Error("Public unseal requires explicit owner consent.");
-  const candidate = getCandidateRow(cleanText(input.candidateId, "candidateId", 120));
-  const pack = getPackRow(candidate.pack_id);
-  assertPackBaseCurrent(pack);
-  const receipt = getDb().prepare(
-    "SELECT * FROM experience_promotion_receipts WHERE candidate_id = ? AND action = 'promote'",
-  ).get(candidate.id) as PromotionReceiptRow | undefined;
-  if (!receipt) {
-    throw new Error("Public unseal requires an existing promotion receipt (user-attested or local-run-receipt).");
-  }
-  if (receipt.verification_method !== "user-attested" && receipt.verification_method !== "local-run-receipt") {
-    throw new Error("Public unseal accepts only user-attested or local-run-receipt promotions.");
-  }
-  if (candidate.status !== "promoted") throw new Error("Only promoted Experience candidates can be unsealed.");
-  if (candidate.sensitivity !== "public" && candidate.sensitivity !== "internal") {
-    throw new Error("Private, confidential, or secret candidates can never be unsealed publicly.");
-  }
-  assertPublicExperienceText(candidate.summary);
-  if (receipt.public_safe === 1 && receipt.verification_status === "verified") {
-    return receiptFromRow(receipt);
-  }
-  const now = new Date().toISOString();
-  const transaction = getDb().transaction(() => {
-    getDb().prepare(
-      `UPDATE experience_promotion_receipts
-          SET verification_status = 'verified', public_safe = 1
-        WHERE id = ?`,
-    ).run(receipt.id);
-    getDb().prepare(
-      `UPDATE experience_candidates
-          SET outcome_status = 'verified', public_safe = 1, updated_at = ?
-        WHERE id = ? AND status = 'promoted'`,
-    ).run(now, candidate.id);
-    getDb().prepare("UPDATE experience_packs SET updated_at = ? WHERE id = ?")
-      .run(now, candidate.pack_id);
-    recordExperienceLineageEvent(candidate.pack_id, "promotion");
-  });
-  transaction();
-  try {
-    refreshExperienceRelationArtifacts(candidate.pack_id);
-  } catch (error) {
-    console.warn(`[experience-relations] public unseal projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
-  }
-  return receiptFromRow(
-    getDb().prepare("SELECT * FROM experience_promotion_receipts WHERE id = ?").get(receipt.id) as PromotionReceiptRow,
-  );
+  return experienceChipsRetired();
 }
 
 /** Value-free intake funnel diagnostics for one agent (counts + reason codes only). */
@@ -2000,27 +1312,12 @@ export function listPromotedExperienceSummariesForAgent(
   agentIdValue: string,
   limit = 20,
 ): Array<{ id: string; summary: string; promotedAt: string | null }> {
-  const agentId = cleanText(agentIdValue, "agentId", 120);
-  const capped = Math.max(1, Math.min(200, Math.floor(limit)));
-  const rows = getDb()
-    .prepare(
-      `SELECT id, summary, promoted_at
-         FROM experience_candidates
-        WHERE agent_id = ? AND status = 'promoted'
-        ORDER BY datetime(COALESCE(promoted_at, updated_at)) DESC
-        LIMIT ?`,
-    )
-    .all(agentId, capped) as Array<{ id: string; summary: string; promoted_at: string | null }>;
-  return rows.map((row) => ({ id: row.id, summary: row.summary, promotedAt: row.promoted_at }));
+  return [];
 }
 
 /** 이 에이전트의 승격 경험 총 개수 — 진화 "접기" 임계 버킷 판정에 쓴다(content-free 카운트). */
 export function countPromotedExperiencesForAgent(agentIdValue: string): number {
-  const agentId = cleanText(agentIdValue, "agentId", 120);
-  const row = getDb()
-    .prepare("SELECT COUNT(*) AS n FROM experience_candidates WHERE agent_id = ? AND status = 'promoted'")
-    .get(agentId) as { n?: number } | undefined;
-  return Number(row?.n ?? 0);
+  return 0;
 }
 
 /**
@@ -2064,117 +1361,7 @@ export function listExperiencePromotionReceipts(packId: string): ExperiencePromo
 }
 
 export function createExperienceExportIntent(input: ExperienceExportIntentInput): ExperienceExportIntentRecord {
-  assertExactKeys(input, ["packId", "visibility"], "Experience export intent");
-  if (input.visibility !== "private" && input.visibility !== "public") {
-    throw new Error("Experience export visibility must be private or public.");
-  }
-  const pack = getPackRow(cleanText(input.packId, "packId", 120));
-  if (pack.status !== "active") throw new Error("Archived Experience Packs cannot be exported.");
-  assertPackBaseCurrent(pack);
-  const rows = getDb().prepare(
-    `SELECT c.id, c.source_memory_id, c.summary, c.sensitivity, c.confidence,
-            c.outcome_status, c.public_safe, r.id AS receipt_id,
-            r.verification_status, r.verification_method, r.evidence_hash,
-            r.created_at AS receipt_created_at
-       FROM experience_candidates c
-       JOIN experience_promotion_receipts r ON r.candidate_id = c.id AND r.action = 'promote'
-      WHERE c.pack_id = ? AND c.status = 'promoted'
-        AND c.outcome_status IN ('attested','verified')
-      ORDER BY c.id ASC`,
-  ).all(pack.id) as Array<{
-    id: string;
-    source_memory_id: string;
-    summary: string;
-    sensitivity: string;
-    confidence: string;
-    outcome_status: string;
-    public_safe: number;
-    receipt_id: string;
-    verification_status: string;
-    verification_method: string;
-    evidence_hash: string;
-    receipt_created_at: string;
-  }>;
-  if (rows.length === 0) throw new Error("Experience export requires at least one promoted attested item.");
-  if (input.visibility === "public") {
-    assertPublicExperienceText(pack.name);
-    assertPublicExperienceText(pack.description);
-    for (const row of rows) assertPublicExperienceText(row.summary);
-    if (rows.some((row) => row.public_safe !== 1 || row.verification_status !== "verified")) {
-      throw new Error("Public Experience export requires authoritative verified public-safe receipts; P0 attestation is insufficient.");
-    }
-  }
-  const canonicalManifest = {
-    schemaVersion: "experience-export-intent/1.0",
-    visibility: input.visibility,
-    pack: {
-      id: pack.id,
-      agentId: pack.agent_id,
-      name: pack.name,
-      description: pack.description,
-      basePackageHash: pack.base_package_hash,
-      projectScopeKey: pack.project_scope_key,
-      environmentKey: pack.environment_key,
-      status: pack.status,
-      mcpRequirements: (() => {
-        try {
-          return normalizeExperienceMcpRequirements(JSON.parse(pack.mcp_requirements_json));
-        } catch {
-          return [];
-        }
-      })(),
-    },
-    items: rows.map((row) => ({
-      candidateId: row.id,
-      sourceMemoryId: row.source_memory_id,
-      contentHash: hash("experience-summary-v1", row.summary),
-      sensitivity: row.sensitivity,
-      confidence: row.confidence,
-      outcomeStatus: row.outcome_status,
-      publicSafe: row.public_safe === 1,
-      receipt: {
-        id: row.receipt_id,
-        verificationStatus: row.verification_status,
-        verificationMethod: row.verification_method,
-        evidenceHash: row.evidence_hash,
-        createdAt: row.receipt_created_at,
-      },
-    })),
-  };
-  const manifestHash = hash("experience-export-intent-v1", JSON.stringify(canonicalManifest));
-  const existing = getDb().prepare(
-    `SELECT * FROM experience_export_intents
-      WHERE pack_id = ? AND visibility = ? AND manifest_hash = ?
-      ORDER BY created_at DESC LIMIT 1`,
-  ).get(pack.id, input.visibility, manifestHash) as ExportIntentRow | undefined;
-  if (existing) {
-    try {
-      recordExperienceLineageEvent(pack.id, "export-intent");
-      refreshExperienceRelationArtifacts(pack.id);
-    } catch (error) {
-      console.warn(`[experience-relations] existing export lineage sync deferred: ${error instanceof Error ? error.message : "unknown"}`);
-    }
-    return exportIntentFromRow(existing);
-  }
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const transaction = getDb().transaction(() => {
-    getDb().prepare(
-      `INSERT INTO experience_export_intents (
-         id, pack_id, agent_id, visibility, status, manifest_hash, created_at
-       ) VALUES (?, ?, ?, ?, 'local_intent', ?, ?)`,
-    ).run(id, pack.id, pack.agent_id, input.visibility, manifestHash, now);
-    recordExperienceLineageEvent(pack.id, "export-intent");
-  });
-  transaction();
-  try {
-    refreshExperienceRelationArtifacts(pack.id);
-  } catch (error) {
-    console.warn(`[experience-relations] export projection deferred: ${error instanceof Error ? error.message : "unknown"}`);
-  }
-  return exportIntentFromRow(
-    getDb().prepare("SELECT * FROM experience_export_intents WHERE id = ?").get(id) as ExportIntentRow,
-  );
+  return experienceChipsRetired();
 }
 
 export function listExperienceExportIntents(packId: string): ExperienceExportIntentRecord[] {
@@ -2356,127 +1543,5 @@ export function listPromotedExperienceProjection(input: {
   basePackageHash: string;
   taskTerms?: string[];
 }): PromotedExperienceProjection[] {
-  // The caller must be bound to the currently installed actor. Pack hashes
-  // retain measurement provenance; same-actor assets survive republish/rename,
-  // matching assertPackBaseCurrent without rewriting historical rows.
-  if (!/^[a-f0-9]{64}$/.test(input.basePackageHash)
-    || currentExperienceBaseHash(input.agentId) !== input.basePackageHash) return [];
-  const rows = getDb().prepare(
-    `SELECT c.id, c.pack_id, c.source_memory_id, c.project_scope_key, c.auto_managed,
-            p.base_package_hash AS measured_base_hash, c.environment_key,
-            c.summary, c.confidence, c.task_terms_json, c.updated_at,
-            c.embedding_model, c.embedding_adapter, c.embedding_model_sha256,
-            c.embedding_content_hash, c.embedding_dimensions, c.embedding_json
-       FROM experience_candidates c
-       JOIN experience_packs p ON p.id = c.pack_id AND p.agent_id = c.agent_id
-      WHERE c.agent_id = ? AND c.project_scope_key = ? AND c.environment_key = ?
-        AND p.project_scope_key = c.project_scope_key
-        AND p.environment_key = c.environment_key
-        AND p.status = 'active' AND length(p.base_package_hash) = 64
-        AND p.base_package_hash NOT GLOB '*[^a-f0-9]*'
-        AND c.status = 'promoted' AND c.outcome_status IN ('attested','verified')
-        AND NOT EXISTS (
-          SELECT 1
-            FROM experience_governance_relations governance
-            JOIN experience_candidates replacement
-              ON replacement.id = governance.from_candidate_id
-             AND replacement.pack_id = governance.pack_id
-             AND replacement.agent_id = governance.agent_id
-           WHERE governance.to_candidate_id = c.id
-             AND governance.pack_id = c.pack_id
-             AND governance.agent_id = c.agent_id
-             AND governance.relation_type = 'supersedes'
-             AND replacement.status = 'promoted'
-             AND replacement.outcome_status IN ('attested','verified')
-        )
-      ORDER BY c.updated_at DESC`,
-  ).all(
-    input.agentId,
-    experienceProjectScopeKey(input),
-    input.environmentKey,
-  ) as Array<{
-    id: string;
-    pack_id: string;
-    source_memory_id: string | null;
-    project_scope_key: string;
-    auto_managed: number;
-    measured_base_hash: string;
-    environment_key: string;
-    summary: string;
-    confidence: "high" | "medium" | "low";
-    task_terms_json: string;
-    updated_at: string;
-    embedding_model: string | null;
-    embedding_adapter: string | null;
-    embedding_model_sha256: string | null;
-    embedding_content_hash: string | null;
-    embedding_dimensions: number | null;
-    embedding_json: string | null;
-  }>;
-  let relationScores = new Map<string, number>();
-  try {
-    relationScores = rankExperienceCandidatesByRelations({
-      projectScopeKey: experienceProjectScopeKey(input),
-      environmentKey: input.environmentKey,
-      basePackageHash: input.basePackageHash,
-      agentId: input.agentId,
-      taskTerms: input.taskTerms ?? [],
-    });
-  } catch (error) {
-    console.warn(`[experience-relations] relation ranking unavailable: ${error instanceof Error ? error.message : "unknown"}`);
-  }
-  return rows.filter((row) => experienceCandidateSourceIsLive({
-    sourceMemoryId: row.source_memory_id,
-    candidateId: row.id,
-    agentId: input.agentId,
-    projectScopeKey: row.project_scope_key,
-    autoManaged: row.auto_managed === 1,
-  })).map((row) => {
-    let terms: string[] = [];
-    try {
-      const parsed = JSON.parse(row.task_terms_json) as unknown;
-      if (Array.isArray(parsed)) terms = parsed.filter((item): item is string => typeof item === "string").slice(0, 32);
-    } catch {
-      terms = [];
-    }
-    let embedding = parseLocalEmbedding(row.embedding_model, row.embedding_dimensions, row.embedding_json, {
-      adapter: row.embedding_adapter,
-      modelSha256: row.embedding_model_sha256,
-      contentHash: row.embedding_content_hash,
-      text: row.summary,
-    });
-    if (!embedding) {
-      embedding = autoLocalEmbedding(row.summary);
-      try {
-        getDb().prepare(
-          `UPDATE experience_candidates
-              SET embedding_model = ?, embedding_adapter = ?, embedding_model_sha256 = ?,
-                  embedding_content_hash = ?, embedding_dimensions = ?, embedding_json = ?
-            WHERE id = ?`,
-        ).run(
-          embedding.model,
-          embedding.adapter,
-          embedding.modelSha256,
-          embedding.contentHash,
-          embedding.dimensions,
-          JSON.stringify(embedding.vector),
-          row.id,
-        );
-      } catch {
-        // Keep retrieval read-compatible with a concurrent legacy Desktop peer.
-      }
-    }
-    return {
-      id: row.id,
-      packId: row.pack_id,
-      measuredBaseHash: row.measured_base_hash,
-      measuredEnvironmentKey: row.environment_key,
-      summary: row.summary,
-      confidence: row.confidence,
-      taskTerms: terms,
-      updatedAt: row.updated_at,
-      relationScore: relationScores.get(row.id) ?? 0,
-      embedding: embedding.vector,
-    };
-  }).sort((left, right) => right.relationScore - left.relationScore || right.updatedAt.localeCompare(left.updatedAt));
+  return [];
 }

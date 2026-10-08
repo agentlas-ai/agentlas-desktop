@@ -164,7 +164,7 @@ import {
 } from "./hub-market";
 import { getUsageSnapshot } from "../usage";
 import { getBillingCredits, getFreshProjectAgentLimitGrant } from "../billing";
-import { listInstalledAgentHubBindings } from "../ontology/hub-bindings";
+import { experienceChipsRetired } from "../experience/retired";
 import type { TerminalOntologyLoadoutFeedWriter } from "../ontology/terminal-loadout-feed";
 import type {
   Chat,
@@ -263,10 +263,7 @@ import {
   sanitizeMobileBridgeText,
   stripMobileBridgeControlFences,
 } from "./sanitize";
-import {
-  OntologyHubClient,
-  parseOntologyAttachResolveInput,
-} from "./ontology-hub-client";
+import type { OntologyHubClient } from "./ontology-hub-client";
 import type {
   MobileBridgeAuthority,
   MobileBridgeAuthorityEvent,
@@ -308,10 +305,6 @@ function runtimeCredentialUnavailable(runtime: RuntimeStatus): boolean {
 const MOBILE_RUNTIME_ROLES = ["orchestrator", "worker"] as const;
 const BUILD_APPROVAL_TIMEOUT_MS = 90_000;
 const TERMINAL_PREVIEW_TTL_MS = 60_000;
-// Ontology enriches the Mobile surface, but it is not required to establish a
-// Desktop connection. A fetch implementation that ignores AbortSignal (or a
-// shared stale in-flight request) must never hold bridge.ready indefinitely.
-const INITIAL_ONTOLOGY_BUDGET_MS = 1_500;
 // A paired phone can start a full-authority Hephaestus build. Keep that scarce
 // operation single-flight per Desktop authority so repeated requests cannot
 // fan out unbounded local model/tool processes. Desktop-native builds are not
@@ -4022,38 +4015,9 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           return asJsonValue(projectRouteRecommendation(normalizeRecommendation(null, query)), request.method);
         }
       }
-      case "ontology.projections.list": {
-        noParams(request);
-        const projected = await this.projectOntology(true);
-        if (!projected.supported) {
-          throw new Error("Ontology projection is unavailable on the connected Hub.");
-        }
-        return asJsonValue(projected.projections, request.method);
-      }
+      case "ontology.projections.list":
       case "ontology.attach.resolve": {
-        if (!this.options.ontologyHubClient) {
-          throw new Error("Ontology attachment is unavailable on the connected Hub.");
-        }
-        const input = parseOntologyAttachResolveInput(guardedParams(request, [
-          "schemaVersion",
-          "approvalId",
-          "recommendationId",
-          "agentDefinitionId",
-          "agentReleaseId",
-          "expectedProjectionRevision",
-          "expectedLoadoutRevision",
-          "decision",
-          "selectedChips",
-        ]));
-        const idempotencyKey = request.idempotencyKey;
-        if (!idempotencyKey) throw new TypeError("ontology.attach.resolve requires idempotencyKey");
-        const receipt = await this.options.ontologyHubClient.resolveAttach(input, idempotencyKey);
-        // The receipt is acknowledgement only. Mobile and Desktop do not
-        // mutate a loadout optimistically; a forced authoritative projection
-        // is emitted after this RPC returns.
-        this.ontologyRefreshRequested = true;
-        this.scheduleSnapshotUpdated();
-        return asJsonValue(receipt, request.method);
+        experienceChipsRetired();
       }
       // DESKTOP_MOBILE_BRIDGE: Agent Cloud passthrough. Uploads reuse the exact
       // registered-upload + packageAndReviewCloudAgent internals behind the
@@ -5176,34 +5140,13 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     });
   }
 
-  private async projectOntology(force = false): Promise<{
+  private async projectOntology(_force = false): Promise<{
     supported: boolean;
     projections: import("../../shared/mobile-bridge").MobileBridgeOntologyProjectionDto[];
   }> {
-    const client = this.options.ontologyHubClient;
-    if (!client) return { supported: false, projections: [] };
-    const exactBindings = listInstalledAgentHubBindings(64);
-    const bindings = exactBindings.map((binding) => ({
-      agentDefinitionId: binding.agentDefinitionId,
-      agentReleaseId: binding.agentReleaseId,
-    }));
-    if (bindings.length === 0) return { supported: false, projections: [] };
-    const result = await settleOptionalProjectionWithin(
-      client.query(bindings, force),
-      INITIAL_ONTOLOGY_BUDGET_MS,
-      { supported: false, status: "endpoint-absent" as const, projections: [] },
-    );
-    if (this.options.terminalOntologyLoadoutFeedWriter) {
-      try {
-        this.options.terminalOntologyLoadoutFeedWriter.write({
-          bindings: exactBindings,
-          result,
-        });
-      } catch (error) {
-        this.onError(errorOf(error));
-      }
-    }
-    return { supported: result.supported, projections: result.projections };
+    // Keep archived DTO/cache readers available; snapshots cannot advertise,
+    // fetch or feed retired chip capabilities into any active runtime.
+    return { supported: false, projections: [] };
   }
 
   private attachDesktopSubscriptions(): void {

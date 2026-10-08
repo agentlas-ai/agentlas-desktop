@@ -1,3 +1,4 @@
+import { experienceChipsRetired } from "../experience/retired";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -673,76 +674,7 @@ export class OntologyHubClient {
     input: OntologyAttachResolveInput,
     idempotencyKey: string,
   ): Promise<MobileBridgeOntologyAttachReceiptDto> {
-    const now = this.now();
-    validateAttachInput(input);
-    if (!SAFE_REF_RE.test(idempotencyKey) || idempotencyKey.length > 160) {
-      return fallbackReceipt(input, "conflict", "conflict", "The idempotency key is invalid.", now);
-    }
-    const key = bindingKey(input);
-    const current = this.cache.get(key);
-    if (!current) return fallbackReceipt(input, "stale", "stale", "Refresh the exact agent release before resolving this request.", now);
-    if (current.state !== "live") {
-      const outcome = current.state === "revoked" ? "revoked" : current.state === "offline" ? "offline" : current.state;
-      return fallbackReceipt(input, outcome, current.state, "This projection is not live.", now);
-    }
-    const pending = current.pendingAttachApprovals.find((item) => item.approvalId === input.approvalId);
-    if (!pending) return fallbackReceipt(input, "already-resolved", current.loadout.state, "This approval is no longer pending.", now);
-    if (
-      current.revision !== input.expectedProjectionRevision ||
-      current.loadout.revision !== input.expectedLoadoutRevision ||
-      pending.expectedLoadoutRevision !== input.expectedLoadoutRevision ||
-      pending.recommendationId !== input.recommendationId ||
-      !sameEntries(input.decision === "approve" ? pending.selectedChips : [], input.selectedChips)
-    ) {
-      return fallbackReceipt(input, "conflict", "conflict", "Projection, loadout, or exact chip releases changed.", now);
-    }
-    const cookie = this.cookieProvider();
-    if (!cookie || !/^agentlas_session=[^;\r\n]{8,}$/.test(cookie)) {
-      return fallbackReceipt(input, "offline", "offline", "Agentlas Hub sign-in is unavailable.", now);
-    }
-    let response: Response;
-    try {
-      response = await this.post(ATTACH_RESOLVE_PATH, input, cookie, { "idempotency-key": idempotencyKey });
-    } catch {
-      return fallbackReceipt(input, "outcome-unknown", "conflict", "The acknowledgement was lost. Refresh before retrying.", now);
-    }
-    if ([404, 405, 501].includes(response.status)) {
-      this.availabilityValue = "absent";
-      return fallbackReceipt(input, "offline", "offline", "Ontology attachment is not available on this Hub version.", now);
-    }
-    if (response.status === 401 || response.status === 403) {
-      this.availabilityValue = "available";
-      return fallbackReceipt(input, "offline", "offline", "Agentlas Hub authentication is unavailable.", now);
-    }
-    let raw: unknown;
-    try { raw = await responseJson(response); } catch {
-      return fallbackReceipt(input, "outcome-unknown", "conflict", "Hub returned an invalid acknowledgement. Refresh before retrying.", now);
-    }
-    if (!response.ok) {
-      try {
-        const receipt = decodeReceipt(raw);
-        return receipt.approvalId === input.approvalId
-          ? receipt
-          : fallbackReceipt(input, "outcome-unknown", "conflict", "Hub acknowledgement identity changed.", now);
-      } catch {
-        return fallbackReceipt(
-          input,
-          response.status === 409 || response.status === 412 ? "conflict" : "outcome-unknown",
-          "conflict",
-          "Hub did not return an authenticated attachment receipt.",
-          now,
-        );
-      }
-    }
-    try {
-      const receipt = decodeReceipt(raw);
-      if (receipt.approvalId !== input.approvalId) throw new ContractError("Approval receipt identity mismatch.");
-      this.availabilityValue = "available";
-      this.lastQueryAt = 0;
-      return receipt;
-    } catch {
-      return fallbackReceipt(input, "outcome-unknown", "conflict", "Hub acknowledgement could not be verified.", now);
-    }
+    return experienceChipsRetired();
   }
 
   async resolveRuntimeSession(input: {
@@ -750,27 +682,7 @@ export class OntologyHubClient {
     agentReleaseId: string;
     sessionRef: string;
   }): Promise<DesktopOntologyRuntimeSessionDto> {
-    const binding = normalizeBindings([input])[0];
-    if (!binding || !/^desktop-session-[a-f0-9]{48}$/.test(input.sessionRef)) {
-      throw new ContractError("Desktop runtime session request is invalid.");
-    }
-    const cookie = this.cookieProvider();
-    if (!cookie || !/^agentlas_session=[^;\r\n]{8,}$/.test(cookie)) {
-      throw new ContractError("Agentlas Hub sign-in is unavailable.");
-    }
-    const response = await this.post(DESKTOP_RUNTIME_SESSION_PATH, {
-      schemaVersion: 1,
-      ...binding,
-      sessionRef: input.sessionRef,
-    }, cookie);
-    if (!response.ok) throw new ContractError("Desktop runtime session is unavailable.");
-    const decoded = decodeDesktopOntologyRuntimeSession(await responseJson(response));
-    if (decoded.agentDefinitionId !== binding.agentDefinitionId || decoded.agentReleaseId !== binding.agentReleaseId) {
-      throw new ContractError("Desktop runtime session exact binding changed.");
-    }
-    this.availabilityValue = "available";
-    this.lastQueryAt = 0;
-    return decoded;
+    return experienceChipsRetired();
   }
 
   private async performQuery(bindings: ExactAgentReleaseBinding[]): Promise<OntologyHubProjectionResult> {

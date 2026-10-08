@@ -73,10 +73,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.56
-      HEPHAESTUS_COMMIT: 10dc8acf78f930713dc4d0f3cbca03fc55f56a72
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.56.tar.gz
-      HEPHAESTUS_ASSET_SHA256: b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6
+      HEPHAESTUS_REF: v1.2.58
+      HEPHAESTUS_COMMIT: 33c1e1fe1587aa2e5c9725745e312d5b88c26004
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.58.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 49fda64fc20b0a3396b522c23f29a94bcf29f590cf8baaedab8e77d3d84f854a
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -229,7 +229,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: agentlas-ai/agentlas-science
-          ref: da893984b3ab0254e55557734c1010f3d3ba3935
+          ref: f8e84b57e7e8d383dacf7bddad12db05ad52eecd
           token: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           path: .release-private-verification
           sparse-checkout: release-verification/desktop
@@ -238,7 +238,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
-          test "$(git -C .release-private-verification rev-parse HEAD)" = "da893984b3ab0254e55557734c1010f3d3ba3935"
+          test "$(git -C .release-private-verification rev-parse HEAD)" = "f8e84b57e7e8d383dacf7bddad12db05ad52eecd"
           node <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
@@ -252,7 +252,7 @@ jobs:
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
-            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `da893984b3ab0254e55557734c1010f3d3ba3935:release-verification/desktop/${entry.path}`]);
+            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `f8e84b57e7e8d383dacf7bddad12db05ad52eecd:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
             if (sourcePaths.has(entry.path)) {
               if (!fs.existsSync(entry.path) || !fs.lstatSync(entry.path).isFile()) throw new Error('Committed runtime file is missing from the release source');
@@ -304,6 +304,129 @@ jobs:
             exit 1
           fi
 
+      - name: Verify committed private Workspace and owner contracts
+        timeout-minutes: 60
+        shell: bash
+        run: |
+          node <<'NODE'
+          const cp = require('node:child_process');
+          if (Number(process.versions.node.split('.')[0]) !== 22) throw new Error('Node22 required');
+          const gates = [
+            {
+              "path": "scripts/experience-promotion-contract.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/loadout-editor-contract.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/ontology-retirement-contract.mjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-agent-evolution-trust.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-agent-hub-ontology-projection.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-agent-toolbox-contract.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-automation-honesty-contract.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-build-session-contracts.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-chat-ux-contracts.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-experience-i18n-contract.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-experience-p0.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-first-run-roles-from-onboarding.cjs",
+              "main": true
+            },
+            {
+              "path": "scripts/test-hub-bookmark-ux.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-mobile-ontology-bridge.cjs",
+              "main": true
+            },
+            {
+              "path": "scripts/test-one-activity-contract.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-one-sidebar-contract.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-project-first-v84.cjs",
+              "main": true
+            },
+            {
+              "path": "scripts/test-room-isolation-and-owner-turn.cjs",
+              "main": true
+            },
+            {
+              "path": "scripts/test-system-agent-taste-runtime.cjs",
+              "main": true
+            },
+            {
+              "path": "scripts/test-taste-chip-workflow.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-taste-runtime-application.cjs",
+              "main": true
+            },
+            {
+              "path": "scripts/test-terminal-ontology-loadout-feed.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/test-toolchain-apps.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/verify-agentlas-one-ui.cjs",
+              "main": false
+            },
+            {
+              "path": "scripts/verify-build-recovery.mjs",
+              "main": false
+            },
+            {
+              "path": "scripts/verify-one-team-surface.mjs",
+              "main": false
+            }
+          ];
+          for (const gate of gates) {
+            const env = { ...process.env };
+            if (gate.main) delete env.ELECTRON_RUN_AS_NODE;
+            const command = gate.main ? require('electron') : process.execPath;
+            const argv = gate.path === 'scripts/test-toolchain-apps.cjs' ? ['--experimental-sqlite', gate.path] : [gate.path];
+              const result = cp.spawnSync(command, argv, { cwd: process.cwd(), env, stdio: 'inherit', timeout: 120000 });
+            if (result.error || result.status !== 0) throw new Error(`Required private gate failed: ${gate.path}; code=${result.status}; signal=${result.signal}; error=${result.error?.code || ''}`);
+          }
+          NODE
+
       - name: Record successful macOS release preflight
         run: echo "macOS release tests completed without publishing any release assets"
 
@@ -350,10 +473,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.56
-      HEPHAESTUS_COMMIT: 10dc8acf78f930713dc4d0f3cbca03fc55f56a72
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.56.tar.gz
-      HEPHAESTUS_ASSET_SHA256: b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6
+      HEPHAESTUS_REF: v1.2.58
+      HEPHAESTUS_COMMIT: 33c1e1fe1587aa2e5c9725745e312d5b88c26004
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.58.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 49fda64fc20b0a3396b522c23f29a94bcf29f590cf8baaedab8e77d3d84f854a
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -460,7 +583,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: agentlas-ai/agentlas-science
-          ref: da893984b3ab0254e55557734c1010f3d3ba3935
+          ref: f8e84b57e7e8d383dacf7bddad12db05ad52eecd
           token: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           path: .release-private-verification
           sparse-checkout: release-verification/desktop
@@ -469,7 +592,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
-          test "$(git -C .release-private-verification rev-parse HEAD)" = "da893984b3ab0254e55557734c1010f3d3ba3935"
+          test "$(git -C .release-private-verification rev-parse HEAD)" = "f8e84b57e7e8d383dacf7bddad12db05ad52eecd"
           node <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
@@ -483,7 +606,7 @@ jobs:
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
-            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `da893984b3ab0254e55557734c1010f3d3ba3935:release-verification/desktop/${entry.path}`]);
+            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `f8e84b57e7e8d383dacf7bddad12db05ad52eecd:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
             if (sourcePaths.has(entry.path)) {
               if (!fs.existsSync(entry.path) || !fs.lstatSync(entry.path).isFile()) throw new Error('Committed runtime file is missing from the release source');
@@ -677,10 +800,10 @@ jobs:
       AGENTLAS_MAC_UPDATE_HISTORY_COUNT: "2"
       AGENTLAS_MAC_UPDATE_REQUIRED_HISTORY_TAGS: "v0.8.58,v0.8.65"
       AGENTLAS_MAC_UPDATE_HISTORY_CACHE_DIR: ${{ github.workspace }}/.release-cache/agentlas-mac-update-history
-      HEPHAESTUS_REF: v1.2.56
-      HEPHAESTUS_COMMIT: 10dc8acf78f930713dc4d0f3cbca03fc55f56a72
-      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.56.tar.gz
-      HEPHAESTUS_ASSET_SHA256: b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6
+      HEPHAESTUS_REF: v1.2.58
+      HEPHAESTUS_COMMIT: 33c1e1fe1587aa2e5c9725745e312d5b88c26004
+      HEPHAESTUS_ASSET_NAME: hephaestus-runtime-v1.2.58.tar.gz
+      HEPHAESTUS_ASSET_SHA256: 49fda64fc20b0a3396b522c23f29a94bcf29f590cf8baaedab8e77d3d84f854a
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -749,7 +872,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: agentlas-ai/agentlas-science
-          ref: da893984b3ab0254e55557734c1010f3d3ba3935
+          ref: f8e84b57e7e8d383dacf7bddad12db05ad52eecd
           token: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           path: .release-private-verification
           sparse-checkout: release-verification/desktop
@@ -758,7 +881,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
-          test "$(git -C .release-private-verification rev-parse HEAD)" = "da893984b3ab0254e55557734c1010f3d3ba3935"
+          test "$(git -C .release-private-verification rev-parse HEAD)" = "f8e84b57e7e8d383dacf7bddad12db05ad52eecd"
           node <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
@@ -772,7 +895,7 @@ jobs:
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
-            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `da893984b3ab0254e55557734c1010f3d3ba3935:release-verification/desktop/${entry.path}`]);
+            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `f8e84b57e7e8d383dacf7bddad12db05ad52eecd:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
             if (sourcePaths.has(entry.path)) {
               if (!fs.existsSync(entry.path) || !fs.lstatSync(entry.path).isFile()) throw new Error('Committed runtime file is missing from the release source');

@@ -1,3 +1,4 @@
+import { experienceChipsRetired } from "./retired";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -280,111 +281,20 @@ function revalidateWorkflow(row: WorkflowRow): WorkflowRow {
   return issues.length > 0 ? invalidateWorkflow(row, issues) : row;
 }
 
+/** Archived receipts are historical evidence; reading them never revalidates or rewrites their status. */
 export function listTasteChipWorkflows(agentId: string): TasteChipWorkflowRecord[] {
   const exactAgentId = safeRef(agentId, "agentId");
   return (getDb().prepare(
     "SELECT * FROM taste_chip_workflows WHERE agent_id = ? ORDER BY updated_at DESC, workflow_id ASC",
-  ).all(exactAgentId) as WorkflowRow[]).map(revalidateWorkflow).map(fromRow);
+  ).all(exactAgentId) as WorkflowRow[]).map(fromRow);
 }
 
 export function saveTasteGeneralization(input: TasteGeneralizationInput): TasteChipWorkflowRecord {
-  const draftId = safeRef(input.draftId, "draftId");
-  const agentId = safeRef(input.agentId, "agentId");
-  const draft = getDb().prepare("SELECT * FROM taste_draft_candidates WHERE id = ? AND agent_id = ?")
-    .get(draftId, agentId) as DraftRow | undefined;
-  if (!draft || draft.status !== "observation") throw new Error("The private Taste observation is unavailable.");
-  if (!draft.base_agent_definition_id || !draft.base_agent_release_id || !HASH_RE.test(draft.base_package_hash)) {
-    throw new Error("An exact Hub Agent definition and release binding is required.");
-  }
-  if (!AXES.has(input.axis)) throw new Error("Taste axis is invalid.");
-  const allowedTasks = new Set(jsonArray<string>(draft.task_signatures_json));
-  const taskSignature = safeRef(input.taskSignature, "taskSignature");
-  if (!allowedTasks.has(taskSignature)) throw new Error("Task signature must come from this exact observation.");
-  const contexts = [...new Set((input.contexts ?? []).map((item) => safeRef(item, "context")))].slice(0, 12);
-  if (!contexts.length) throw new Error("At least one portable context is required.");
-  const title = cleanText(input.title, "title", 120);
-  const summary = cleanText(input.summary, "summary", 600);
-  const ruleStatement = cleanText(input.ruleStatement, "ruleStatement", 320);
-  const memory = sourceMemory(draft);
-  if (!memory) throw new Error("The exact private source Memory changed or is unavailable. Create a new Taste observation.");
-  const fields = generalizedFields({ title, summary, ruleStatement, taskSignature, contexts });
-  const issues = [...new Set([...privacyIssues(fields), ...sourceCopyIssues(fields, memory)])].sort();
-  if (issues.length) throw new Error(`Generalized Taste text is not public-safe: ${issues.join(", ")}`);
-  const seed = `${draft.id}\0${draft.base_agent_definition_id}\0${draft.base_agent_release_id}`;
-  const workflowId = stableId("twf", seed);
-  const tasteStyleId = stableId("tst", `${draft.agent_id}\0${draft.base_package_hash}`);
-  const releaseId = stableId("tsr", seed);
-  const exact = {
-    draftId, agentId, basePackageHash: draft.base_package_hash,
-    baseAgentDefinitionId: draft.base_agent_definition_id,
-    baseAgentReleaseId: draft.base_agent_release_id,
-    environmentKey: draft.environment_key,
-    title, summary, ruleStatement, axis: input.axis, taskSignature, contexts,
-  };
-  const hash = generalizationHash(exact);
-  const existing = getDb().prepare("SELECT * FROM taste_chip_workflows WHERE draft_id = ?").get(draftId) as WorkflowRow | undefined;
-  if (existing?.remote_revision && existing.generalization_hash !== hash) {
-    throw new Error("A Hub draft already exists. Create a new Taste observation for changed rules.");
-  }
-  const now = new Date().toISOString();
-  getDb().prepare(
-    `INSERT INTO taste_chip_workflows (
-       workflow_id, draft_id, agent_id, base_package_hash, base_agent_definition_id,
-       base_agent_release_id, environment_key, taste_style_id, release_id, title,
-       summary, rule_statement, axis, task_signature, contexts_json,
-       generalization_hash, privacy_issue_codes_json, status, confirmed_at,
-       preview_grants_json, preview_names_json, preview_digests_json, preview_rights,
-       remote_preview_asset_ids_json, remote_revision, remote_error_code,
-       created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', 'proposal', NULL,
-       NULL, NULL, NULL, NULL, NULL, NULL, NULL, ?, ?)
-     ON CONFLICT(draft_id) DO UPDATE SET
-       title = excluded.title, summary = excluded.summary,
-       rule_statement = excluded.rule_statement, axis = excluded.axis,
-       task_signature = excluded.task_signature, contexts_json = excluded.contexts_json,
-       generalization_hash = excluded.generalization_hash,
-       privacy_issue_codes_json = '[]',
-       status = CASE WHEN taste_chip_workflows.generalization_hash = excluded.generalization_hash
-         THEN taste_chip_workflows.status ELSE 'proposal' END,
-       confirmed_at = CASE WHEN taste_chip_workflows.generalization_hash = excluded.generalization_hash
-         THEN taste_chip_workflows.confirmed_at ELSE NULL END,
-       preview_grants_json = CASE WHEN taste_chip_workflows.generalization_hash = excluded.generalization_hash
-         THEN taste_chip_workflows.preview_grants_json ELSE NULL END,
-       preview_names_json = CASE WHEN taste_chip_workflows.generalization_hash = excluded.generalization_hash
-         THEN taste_chip_workflows.preview_names_json ELSE NULL END,
-       preview_digests_json = CASE WHEN taste_chip_workflows.generalization_hash = excluded.generalization_hash
-         THEN taste_chip_workflows.preview_digests_json ELSE NULL END,
-       preview_provenance_json = CASE WHEN taste_chip_workflows.generalization_hash = excluded.generalization_hash
-         THEN taste_chip_workflows.preview_provenance_json ELSE NULL END,
-       preview_rights = CASE WHEN taste_chip_workflows.generalization_hash = excluded.generalization_hash
-         THEN taste_chip_workflows.preview_rights ELSE NULL END,
-       remote_preview_asset_ids_json = CASE WHEN taste_chip_workflows.generalization_hash = excluded.generalization_hash
-         THEN taste_chip_workflows.remote_preview_asset_ids_json ELSE NULL END,
-       updated_at = excluded.updated_at`,
-  ).run(
-    workflowId, draftId, agentId, draft.base_package_hash, draft.base_agent_definition_id,
-    draft.base_agent_release_id, draft.environment_key, tasteStyleId, releaseId,
-    title, summary, ruleStatement, input.axis, taskSignature, JSON.stringify(contexts), hash, now, now,
-  );
-  return fromRow(getWorkflow(workflowId));
+  return experienceChipsRetired();
 }
 
 export function confirmTasteGeneralization(input: TasteGeneralizationConfirmInput): TasteChipWorkflowRecord {
-  if (input.explicitConsent !== true) throw new Error("Explicit confirmation is required.");
-  const row = revalidateWorkflow(getWorkflow(input.workflowId));
-  if (jsonArray<string>(row.privacy_issue_codes_json).length > 0) {
-    throw new Error("Taste proposal material changed or failed the privacy/generalization scan; review it again.");
-  }
-  if (input.generalizationHash !== row.generalization_hash) throw new Error("Taste proposal changed; review it again.");
-  const issues = privacyIssues([row.title, row.summary, row.rule_statement, row.task_signature, ...jsonArray<string>(row.contexts_json)]);
-  if (issues.length) throw new Error(`Generalized Taste text is not public-safe: ${issues.join(", ")}`);
-  const now = new Date().toISOString();
-  getDb().prepare(
-    `UPDATE taste_chip_workflows SET status = CASE WHEN status IN ('moderation-pending','ab-ready') THEN status ELSE 'confirmed' END,
-       confirmed_at = COALESCE(confirmed_at, ?), privacy_issue_codes_json = '[]', remote_error_code = NULL, updated_at = ?
-     WHERE workflow_id = ? AND generalization_hash = ?`,
-  ).run(now, now, row.workflow_id, row.generalization_hash);
-  return fromRow(getWorkflow(row.workflow_id));
+  return experienceChipsRetired();
 }
 
 function previewMetadata(grant: TastePreviewGrant): { grant: TastePreviewGrant; name: string; bytes: Buffer; mimeType: string; digest: string } {
@@ -406,84 +316,7 @@ function previewMetadata(grant: TastePreviewGrant): { grant: TastePreviewGrant; 
 }
 
 export function prepareTastePreviews(input: TastePreviewPrepareInput): TasteChipWorkflowRecord {
-  if (input.rightsAttested !== true || !RIGHTS.has(input.rightsStatus)) throw new Error("Explicit preview rights attestation is required.");
-  if (input.externalGenerationAttested !== true) throw new Error("Explicit external generation attestation is required.");
-  if (!/^sha256:[a-f0-9]{64}$/.test(input.canonicalTaskInputHash)) throw new Error("Canonical task input SHA-256 is required.");
-  const generationCohortRef = cleanText(input.generationCohortRef, "generationCohortRef", 200);
-  const row = revalidateWorkflow(getWorkflow(input.workflowId));
-  if (jsonArray<string>(row.privacy_issue_codes_json).length > 0) {
-    throw new Error("Taste proposal material changed or failed the privacy/generalization scan; review it again.");
-  }
-  if (!row.confirmed_at || row.status === "proposal") throw new Error("Confirm the generalized Taste proposal before selecting previews.");
-  if (!Array.isArray(input.previews) || input.previews.length !== 2) throw new Error("Exactly two previews are required.");
-  const previews = input.previews.map(previewMetadata) as ReturnType<typeof previewMetadata>[];
-  if (previews[0].digest === previews[1].digest) throw new Error("A/B previews must be two different images.");
-  const material = {
-    schemaVersion: "agentlas.taste-style-release.v1",
-    kind: "agentlas-taste-style-release",
-    tasteStyleId: row.taste_style_id,
-    releaseId: row.release_id,
-    version: "0.1.0",
-    title: row.title,
-    summary: row.summary,
-    baseCompatibility: { agentDefinitionId: row.base_agent_definition_id, compatibleBaseReleaseIds: [row.base_agent_release_id] },
-    taskSignatures: [row.task_signature],
-    preferenceAxes: [row.axis],
-    rules: [{
-      ruleId: stableId("tsr_rule", `${row.release_id}\0${row.axis}`),
-      axis: row.axis,
-      polarity: "prefer",
-      statement: row.rule_statement,
-      contexts: jsonArray<string>(row.contexts_json),
-      confidence: row.axis ? 0.65 : 0.5,
-    }],
-    audienceTags: [],
-  };
-  const materialHash = canonicalHash(material);
-  const generationCohortHash = /^sha256:[a-f0-9]{64}$/.test(generationCohortRef)
-    ? generationCohortRef
-    : `sha256:${sha256(`agentlas-taste-generation-cohort-v1\0${generationCohortRef}`)}`;
-  const provenance: [TastePreviewTreatmentProvenance, TastePreviewTreatmentProvenance] = [
-    {
-      role: "chip-on",
-      canonicalTaskInputHash: input.canonicalTaskInputHash,
-      generationCohortHash,
-      baseAgentDefinitionId: row.base_agent_definition_id,
-      baseAgentReleaseId: row.base_agent_release_id,
-      tasteStyleReleaseId: row.release_id,
-      tasteMaterialHash: materialHash,
-      noTasteOverlay: false,
-      evidenceLevel: "owner-attested-external",
-      ownerAttested: true,
-    },
-    {
-      role: "control",
-      canonicalTaskInputHash: input.canonicalTaskInputHash,
-      generationCohortHash,
-      baseAgentDefinitionId: row.base_agent_definition_id,
-      baseAgentReleaseId: row.base_agent_release_id,
-      tasteStyleReleaseId: row.release_id,
-      tasteMaterialHash: null,
-      noTasteOverlay: true,
-      evidenceLevel: "owner-attested-external",
-      ownerAttested: true,
-    },
-  ];
-  const now = new Date().toISOString();
-  getDb().prepare(
-    `UPDATE taste_chip_workflows SET preview_grants_json = ?, preview_names_json = ?, preview_digests_json = ?, preview_provenance_json = ?, preview_rights = ?,
-       remote_preview_asset_ids_json = NULL, status = 'confirmed', remote_error_code = NULL, updated_at = ?
-     WHERE workflow_id = ?`,
-  ).run(
-    JSON.stringify(previews.map((item) => item.grant)),
-    JSON.stringify(previews.map((item) => item.name)),
-    JSON.stringify(previews.map((item) => item.digest)),
-    JSON.stringify(provenance),
-    input.rightsStatus,
-    now,
-    row.workflow_id,
-  );
-  return fromRow(getWorkflow(row.workflow_id));
+  return experienceChipsRetired();
 }
 
 function baseUrl(value: string, injected: boolean): string {
@@ -541,124 +374,5 @@ async function uploadPreview(fetcher: typeof globalThis.fetch, origin: string, c
 }
 
 export async function uploadTasteDraft(input: TasteHubUploadInput, deps: TasteHubDependencies = {}): Promise<TasteChipWorkflowRecord> {
-  if (input.explicitUpload !== true) throw new Error("Explicit Taste upload is required.");
-  const row = revalidateWorkflow(getWorkflow(input.workflowId));
-  if (jsonArray<string>(row.privacy_issue_codes_json).length > 0) {
-    throw new Error("Taste proposal material changed or failed the privacy/generalization scan; upload is blocked.");
-  }
-  if (!row.confirmed_at || input.generalizationHash !== row.generalization_hash) throw new Error("Confirm the current generalized Taste proposal before upload.");
-  const grants = pair<TastePreviewGrant>(row.preview_grants_json);
-  if (!grants || !row.preview_rights) throw new Error("Exactly two rights-attested previews are required.");
-  const previews = grants.map(previewMetadata) as ReturnType<typeof previewMetadata>[];
-  if (previews[0].digest === previews[1].digest) throw new Error("A/B previews must be different.");
-  const preparedDigests = pair<string>(row.preview_digests_json);
-  if (!preparedDigests || previews.some((preview, index) => preview.digest !== preparedDigests[index])) {
-    throw new Error("A selected preview changed after preparation; review the two files again.");
-  }
-  const provenance = pair<TastePreviewTreatmentProvenance>(row.preview_provenance_json);
-  if (!provenance || provenance[0].role !== "chip-on" || provenance[1].role !== "control" ||
-      provenance.some((item) => item.evidenceLevel !== "owner-attested-external" || item.ownerAttested !== true) ||
-      provenance[0].canonicalTaskInputHash !== provenance[1].canonicalTaskInputHash ||
-      provenance[0].generationCohortHash !== provenance[1].generationCohortHash) {
-    throw new Error("Prepare one chip-on and one control preview with matching hashed generation provenance.");
-  }
-  const cookie = deps.cookieHeader ?? getSessionCookieHeader();
-  const actor = deps.actor ?? getAuthenticatedActorIds();
-  if (!cookie || !actor) throw new Error("Sign in to Agentlas Hub before uploading a Taste draft.");
-  const fetcher = deps.fetch ?? globalThis.fetch;
-  const origin = baseUrl(deps.baseUrl ?? process.env.AGENTLAS_WEB_BASE_URL ?? "https://agentlas.cloud", Boolean(deps.fetch));
-  const confidence = row.axis ? 0.65 : 0.5;
-  const rule = {
-    ruleId: stableId("tsr_rule", `${row.release_id}\0${row.axis}`), axis: row.axis,
-    polarity: "prefer" as const, statement: row.rule_statement,
-    contexts: jsonArray<string>(row.contexts_json), confidence,
-  };
-  const draft = {
-    schemaVersion: "agentlas.taste-style-release.v1" as const,
-    kind: "agentlas-taste-style-release" as const,
-    tasteStyleId: row.taste_style_id,
-    releaseId: row.release_id,
-    ownerRef: ownerRef(actor),
-    version: "0.1.0",
-    title: row.title,
-    summary: row.summary,
-    baseCompatibility: { agentDefinitionId: row.base_agent_definition_id, compatibleBaseReleaseIds: [row.base_agent_release_id] },
-    taskSignatures: [row.task_signature], preferenceAxes: [row.axis], rules: [rule],
-    pairwiseEvidenceReceiptIds: [], previewAssetRefs: [], audienceTags: [],
-    aggregate: { sampleCount: 0, distinctRaterCount: 0, ruleAlignedCount: 0, alternativeCount: 0, tieCount: 0, skipCount: 0, disagreement: 0 },
-    privacy: { rawRaterIdentityIncluded: false, rawLocalPathsIncluded: false, rawOutputsIncluded: false, credentialValuesIncluded: false, privateAssetBytesIncluded: false },
-    contentHash: "sha256:" + "0".repeat(64), visibility: "private" as const, status: "draft" as const,
-    createdAt: row.created_at,
-  };
-  const release = { ...draft, contentHash: canonicalHash(draft, ["contentHash"]) };
-  try {
-    const list = await responseJson(await fetcher(`${origin}/api/ontology/v1/taste-style-releases`, { headers: { cookie } }));
-    const existing = (Array.isArray(list.releases) ? list.releases : []).map(record)
-      .find((item) => record(item.release).releaseId === row.release_id);
-    let revision = typeof existing?.revision === "string" ? existing.revision : null;
-    const existingRelease = record(existing?.release);
-    if (existing) {
-      const withoutPreviews = { ...existingRelease, previewAssetRefs: [], contentHash: "sha256:" + "0".repeat(64) };
-      const baseContentHash = canonicalHash(withoutPreviews, ["contentHash"]);
-      if (baseContentHash !== release.contentHash) {
-        throw Object.assign(new Error("The remote Taste draft conflicts with this local generalization."), { code: "remote_release_conflict" });
-      }
-    }
-    if (!existing) {
-      const created = await responseJson(await fetcher(`${origin}/api/ontology/v1/taste-style-releases`, {
-        method: "POST", headers: { cookie, "content-type": "application/json" },
-        body: JSON.stringify({ release, precondition: { kind: "create" } }),
-      }));
-      revision = typeof record(created.record).revision === "string" ? String(record(created.record).revision) : null;
-    }
-    let assetIds = pair<string>(row.remote_preview_asset_ids_json);
-    if (!assetIds) {
-      const uploaded = await Promise.all(previews.map((preview) => uploadPreview(fetcher, origin, cookie, preview, row.preview_rights!)));
-      const ids = uploaded.map((item) => String(record(item.asset).assetId ?? ""));
-      if (ids.length !== 2 || ids.some((id) => !SAFE_REF_RE.test(id)) || ids[0] === ids[1]) throw new Error("Taste Hub did not return two distinct preview assets.");
-      assetIds = [ids[0], ids[1]];
-      getDb().prepare("UPDATE taste_chip_workflows SET remote_preview_asset_ids_json = ?, remote_revision = ?, updated_at = ? WHERE workflow_id = ?")
-        .run(JSON.stringify(assetIds), revision, new Date().toISOString(), row.workflow_id);
-    }
-    const assetsPayload = await responseJson(await fetcher(`${origin}/api/ontology/v1/taste-preview-assets`, { headers: { cookie } }));
-    const assets = Array.isArray(assetsPayload.assets) ? assetsPayload.assets.map(record) : [];
-    const selected = assetIds.map((id) => assets.find((asset) => asset.assetId === id));
-    const allPassed = selected.every((asset) => asset?.moderationState === "passed" && asset.storageState === "active");
-    let status: TasteChipWorkflowRecord["status"] = "moderation-pending";
-    if (allPassed) {
-      const latestList = await responseJson(await fetcher(`${origin}/api/ontology/v1/taste-style-releases`, { headers: { cookie } }));
-      const current = (Array.isArray(latestList.releases) ? latestList.releases : []).map(record)
-        .find((item) => record(item.release).releaseId === row.release_id);
-      const currentRefs = Array.isArray(record(current?.release).previewAssetRefs) ? record(current?.release).previewAssetRefs as unknown[] : [];
-      revision = typeof current?.revision === "string" ? current.revision : revision;
-      const currentTreatments = currentRefs.map((value) => record(record(value).treatment));
-      const exactTreatmentReady = currentRefs.length === 2 && currentTreatments[0].role === "chip-on" && currentTreatments[1].role === "control";
-      if (!exactTreatmentReady) {
-        if (!revision) throw new Error("Taste Hub draft revision is unavailable.");
-        const selectedResult = await responseJson(await fetcher(
-          `${origin}/api/ontology/v1/taste-style-releases/${encodeURIComponent(row.release_id)}/preview-selection`,
-          {
-            method: "PUT",
-            headers: { cookie, "content-type": "application/json" },
-            body: JSON.stringify({
-              revision,
-              comparisons: assetIds.map((assetId, index) => ({ assetId, ...provenance[index] })),
-            }),
-          },
-        ));
-        revision = typeof record(selectedResult.record).revision === "string" ? String(record(selectedResult.record).revision) : revision;
-      }
-      status = "ab-ready";
-    }
-    const now = new Date().toISOString();
-    getDb().prepare(
-      "UPDATE taste_chip_workflows SET status = ?, remote_revision = ?, remote_error_code = NULL, updated_at = ? WHERE workflow_id = ?",
-    ).run(status, revision, now, row.workflow_id);
-    return fromRow(getWorkflow(row.workflow_id));
-  } catch (error) {
-    const code = typeof error === "object" && error !== null && "code" in error ? String((error as { code?: unknown }).code) : "taste_hub_error";
-    getDb().prepare("UPDATE taste_chip_workflows SET status = 'error', remote_error_code = ?, updated_at = ? WHERE workflow_id = ?")
-      .run(code.slice(0, 96), new Date().toISOString(), row.workflow_id);
-    throw error;
-  }
+  return experienceChipsRetired();
 }

@@ -1,3 +1,4 @@
+import { experienceChipsRetired } from "./retired";
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import type {
@@ -389,27 +390,7 @@ export class ExperienceCloudHttpClient {
     bundle: PortableExperienceBundle,
     idempotencyKey: string,
   ): Promise<ExperienceCloudUploadReceipt> {
-    const response = await this.request("/api/experience/v1/uploads", {
-      method: "POST",
-      headers: {
-        "Idempotency-Key": idempotencyKey,
-        // A same-key replay is still create-only safe on the server. Keeping the
-        // precondition fixes the case where the first POST never reached it.
-        "If-None-Match": "*",
-      },
-      body: JSON.stringify({ bundle }),
-    });
-    if (!response.ok) throw await errorFromResponse(response);
-    const receipt = validateExperienceCloudReceipt(await readResponseJson(response), {
-      bundleId: bundle.bundleId,
-      bundleHash: bundle.bundleHash,
-      experiencePackId: bundle.pack.experiencePackId,
-      experienceReleaseId: bundle.pack.releaseId,
-      requestedVisibility: bundle.requestedVisibility,
-      allowedStatuses: legalStatuses(bundle.requestedVisibility, true),
-    });
-    assertEtag(response, receipt);
-    return receipt;
+    return experienceChipsRetired();
   }
 
   async findUpload(bundle: PortableExperienceBundle, idempotencyKey: string): Promise<ExperienceCloudUploadReceipt | null> {
@@ -731,71 +712,7 @@ export async function saveExperienceToCloud(
   input: ExperienceCloudSaveInput,
   deps: ExperienceCloudDependencies = {},
 ): Promise<ExperienceCloudUploadRecord> {
-  if (!input || typeof input !== "object" || !new Set(["private", "public"]).has(input.requestedVisibility)) {
-    throw new Error("Experience Cloud save requires private or public requested visibility.");
-  }
-  const pack = getPack(input.packId);
-  const identity = packageIdentity(pack);
-  const client = clientFromDependencies(deps);
-  const now = (deps.now?.() ?? new Date()).toISOString();
-
-  let resolution: ExperienceBaseReleaseResolution;
-  try {
-    resolution = await client.resolveBase(identity);
-    storeBaseResolution(pack.id, resolution);
-  } catch (error) {
-    // If this exact base was resolved before, retain it only to create a
-    // recoverable offline row. It is never submitted without a fresh server
-    // resolution in this call.
-    if (pack.base_agent_definition_id && pack.base_agent_release_id && pack.base_package_hash_version) {
-      const bundle = materializePortableExperienceBundle(pack.id, input.requestedVisibility);
-      const row = ensureUploadRecord(pack.id, bundle, now);
-      return persistFailure(row.id, isOfflineError(error) ? "offline" : "error", failureCode(error), "Base release could not be revalidated; nothing was uploaded.", now);
-    }
-    throw error;
-  }
-
-  const bundle = materializePortableExperienceBundle(pack.id, input.requestedVisibility);
-  let row = ensureUploadRecord(pack.id, bundle, now);
-
-  // A previous process may have committed remotely and crashed before saving
-  // its response. Query by bundle + idempotency before any replay.
-  if (row.attempt_count > 0 && !row.remote_upload_id) {
-    const recovered = await tryLostResponseRecovery(client, row, bundle);
-    if (recovered) return persistReceipt(row.id, recovered, now);
-  }
-
-  const pendingState = input.requestedVisibility === "public" ? "requesting-verification" : "saving-private";
-  getDb().prepare(
-    `UPDATE experience_cloud_uploads
-        SET remote_status = ?, remote_error_code = NULL, remote_error_message = NULL,
-            attempt_count = attempt_count + 1, updated_at = ?
-      WHERE id = ?`,
-  ).run(pendingState, now, row.id);
-  row = getUploadRow(row.id);
-  try {
-    const receipt = await client.upload(bundle, row.idempotency_key);
-    return persistReceipt(row.id, receipt, now);
-  } catch (error) {
-    const recovered = await tryLostResponseRecovery(client, row, bundle);
-    if (recovered) return persistReceipt(row.id, recovered, now);
-    if (error instanceof ExperienceCloudHttpError && error.currentReceipt) {
-      persistReceipt(row.id, error.currentReceipt, now);
-      return persistFailure(row.id, "conflict", "stale_revision", "Cloud state changed; reconcile before retrying.", now);
-    }
-    const state = error instanceof ExperienceCloudHttpError && (error.status === 409 || error.status === 412)
-      ? "conflict"
-      : isOfflineError(error)
-        ? "offline"
-        : "error";
-    return persistFailure(
-      row.id,
-      state,
-      failureCode(error),
-      state === "offline" ? "Connection was unavailable; the same idempotent upload can be resumed." : "Experience Cloud rejected the request.",
-      now,
-    );
-  }
+  return experienceChipsRetired();
 }
 
 export async function reconcileExperienceCloudUpload(
@@ -827,9 +744,7 @@ export async function exportExperienceFromCloud(
   localUploadId: string,
   deps: ExperienceCloudDependencies = {},
 ): Promise<ExperienceCloudExportResult> {
-  const row = getUploadRow(localUploadId);
-  if (!row.remote_upload_id) throw new Error("Experience has not been saved to Cloud yet.");
-  return clientFromDependencies(deps).exportUpload(row.remote_upload_id, uploadFromRow(row).bundle);
+  return experienceChipsRetired();
 }
 
 export async function withdrawExperienceFromCloud(

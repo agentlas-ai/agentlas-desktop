@@ -1,3 +1,4 @@
+import { experienceChipsRetired } from "./retired";
 import { createHash } from "node:crypto";
 import type {
   OperationalPublicProjectionConfirmInput,
@@ -310,173 +311,25 @@ function invalidateChangedSource(row: ProjectionRow): ProjectionRow {
     .get(row.projection_id) as ProjectionRow;
 }
 
+/** Reading retired projections preserves their original confirmation evidence. */
 export function listOperationalPublicProjections(packIdValue: string): OperationalPublicProjectionRecord[] {
   const packId = cleanId(packIdValue, "packId");
   const rows = getDb().prepare(
     "SELECT * FROM experience_public_projections WHERE pack_id = ? ORDER BY updated_at DESC",
   ).all(packId) as ProjectionRow[];
-  return rows.map(invalidateChangedSource).map(rowRecord);
+  return rows.map(rowRecord);
 }
 
 export function saveOperationalPublicProjection(
   input: OperationalPublicProjectionSaveInput,
 ): OperationalPublicProjectionRecord {
-  exactKeys(input, ["packId", "sourceCandidateIds", "title", "instructions", "taskSignatures", "environmentConstraints"], "Operational public projection");
-  const pack = getPack(cleanId(input.packId, "packId"));
-  if (!Array.isArray(input.sourceCandidateIds)) throw new Error("sourceCandidateIds must be a list.");
-  const sources = sourceRows(pack, input.sourceCandidateIds);
-  const bindings = sources.map(sourceBinding);
-  const liveSourceHash = sourceSnapshotHash(pack, bindings);
-  const title = cleanText(input.title, "Portable title", 320);
-  if (!Array.isArray(input.instructions) || input.instructions.length < 1 || input.instructions.length > 8) {
-    throw new Error("Portable instructions require 1-8 steps.");
-  }
-  const instructions = input.instructions.map((value, index) => cleanText(value, `Instruction ${index + 1}`, 600));
-  if (!Array.isArray(input.taskSignatures)) throw new Error("taskSignatures must be a list.");
-  const tasks = uniqueSorted(input.taskSignatures.map((value) => cleanText(value, "taskSignature", 120)));
-  if (tasks.length < 1 || tasks.length > 32 || tasks.some((value) => !isCanonicalTaskId(value))) {
-    throw new Error("Public projection requires 1-32 canonical task signatures.");
-  }
-  const sourceTasks = new Set(sources.flatMap((source) => parseStringArray(source.task_terms_json).filter(isCanonicalTaskId)));
-  if (tasks.some((task) => !sourceTasks.has(task))) {
-    throw new Error("Public projection task signatures must be evidenced by the selected private items.");
-  }
-  if (!Array.isArray(input.environmentConstraints)) throw new Error("environmentConstraints must be a list.");
-  const constraints = input.environmentConstraints.map((value) => cleanText(value, "environmentConstraint", 240));
-  const exactConstraints = environmentConstraints(pack);
-  if (canonical(constraints) !== canonical(exactConstraints)) {
-    throw new Error("Public projection environment must match the Pack's exact canonical environment.");
-  }
-  const issues = privacyIssues(title, instructions, sources);
-  const nextProposalHash = proposalHash({
-    pack,
-    sourceSnapshotHash: liveSourceHash,
-    title,
-    instructions,
-    taskSignatures: tasks,
-    environmentConstraints: constraints,
-  });
-  const existing = getDb().prepare("SELECT * FROM experience_public_projections WHERE pack_id = ?")
-    .get(pack.id) as ProjectionRow | undefined;
-  if (
-    existing && existing.source_snapshot_hash === liveSourceHash && existing.proposal_hash === nextProposalHash &&
-    canonical(parseStringArray(existing.privacy_issue_codes_json)) === canonical(issues)
-  ) return rowRecord(existing);
-
-  const now = new Date().toISOString();
-  const projectionId = existing?.projection_id ?? `opx_${digest("operational-public-projection-id-v1", pack.id).slice(0, 48)}`;
-  getDb().prepare(
-    `INSERT INTO experience_public_projections (
-       projection_id, pack_id, agent_id, base_package_hash,
-       base_agent_definition_id, base_agent_release_id, environment_key,
-       source_bindings_json, source_snapshot_hash, title, instructions_json,
-       task_signatures_json, environment_constraints_json, proposal_hash,
-       privacy_issue_codes_json, status, confirmation_hash, confirmed_at,
-       created_at, updated_at
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'proposal', NULL, NULL, ?, ?)
-     ON CONFLICT(pack_id) DO UPDATE SET
-       agent_id = excluded.agent_id,
-       base_package_hash = excluded.base_package_hash,
-       base_agent_definition_id = excluded.base_agent_definition_id,
-       base_agent_release_id = excluded.base_agent_release_id,
-       environment_key = excluded.environment_key,
-       source_bindings_json = excluded.source_bindings_json,
-       source_snapshot_hash = excluded.source_snapshot_hash,
-       title = excluded.title,
-       instructions_json = excluded.instructions_json,
-       task_signatures_json = excluded.task_signatures_json,
-       environment_constraints_json = excluded.environment_constraints_json,
-       proposal_hash = excluded.proposal_hash,
-       privacy_issue_codes_json = excluded.privacy_issue_codes_json,
-       status = 'proposal', confirmation_hash = NULL, confirmed_at = NULL,
-       updated_at = excluded.updated_at`,
-  ).run(
-    projectionId,
-    pack.id,
-    pack.agent_id,
-    pack.base_package_hash,
-    pack.base_agent_definition_id,
-    pack.base_agent_release_id,
-    pack.environment_key,
-    JSON.stringify(bindings),
-    liveSourceHash,
-    title,
-    JSON.stringify(instructions),
-    JSON.stringify(tasks),
-    JSON.stringify(constraints),
-    nextProposalHash,
-    JSON.stringify(issues),
-    existing?.created_at ?? now,
-    now,
-  );
-  getDb().prepare("UPDATE experience_packs SET updated_at = ? WHERE id = ?").run(now, pack.id);
-  return rowRecord(getDb().prepare("SELECT * FROM experience_public_projections WHERE projection_id = ?")
-    .get(projectionId) as ProjectionRow);
+  return experienceChipsRetired();
 }
 
 export function confirmOperationalPublicProjection(
   input: OperationalPublicProjectionConfirmInput,
 ): OperationalPublicProjectionRecord {
-  exactKeys(input, ["projectionId", "proposalHash", "explicitConsent"], "Operational public projection confirmation");
-  if (input.explicitConsent !== true) throw new Error("Public projection confirmation requires explicit consent.");
-  const projectionId = cleanId(input.projectionId, "projectionId");
-  if (!HASH_RE.test(input.proposalHash)) throw new Error("proposalHash is invalid.");
-  let row = getDb().prepare("SELECT * FROM experience_public_projections WHERE projection_id = ?")
-    .get(projectionId) as ProjectionRow | undefined;
-  if (!row) throw new Error("Operational public projection not found.");
-  const pack = getPack(row.pack_id);
-  const record = rowRecord(row);
-  const sources = sourceRows(pack, record.sourceBindings.map((binding) => binding.candidateId));
-  const bindings = sources.map(sourceBinding);
-  const liveSourceHash = sourceSnapshotHash(pack, bindings);
-  const liveProposalHash = proposalHash({
-    pack,
-    sourceSnapshotHash: liveSourceHash,
-    title: record.title,
-    instructions: record.instructions,
-    taskSignatures: record.taskSignatures,
-    environmentConstraints: record.environmentConstraints,
-  });
-  const exact = row.agent_id === pack.agent_id && row.base_package_hash === pack.base_package_hash &&
-    row.base_agent_definition_id === pack.base_agent_definition_id &&
-    row.base_agent_release_id === pack.base_agent_release_id && row.environment_key === pack.environment_key;
-  if (
-    !exact || canonical(record.sourceBindings) !== canonical(bindings) ||
-    row.source_snapshot_hash !== liveSourceHash || row.proposal_hash !== liveProposalHash ||
-    input.proposalHash !== liveProposalHash
-  ) {
-    row = invalidateChangedSource(row);
-    throw new Error("The source or generalized proposal changed. Save and review it again before confirming.");
-  }
-  const issues = privacyIssues(record.title, record.instructions, sources);
-  if (issues.length > 0) {
-    getDb().prepare(
-      `UPDATE experience_public_projections
-          SET status = 'proposal', confirmation_hash = NULL, confirmed_at = NULL,
-              privacy_issue_codes_json = ?, updated_at = ?
-        WHERE projection_id = ?`,
-    ).run(JSON.stringify(issues), new Date().toISOString(), row.projection_id);
-    throw new Error(`Public projection privacy/generalization scan failed (${issues.join(", ")}).`);
-  }
-  const confirmationHash = digest(
-    "operational-public-confirmation-v1",
-    row.proposal_hash,
-    row.source_snapshot_hash,
-    row.base_agent_definition_id,
-    row.base_agent_release_id,
-    row.environment_key,
-  );
-  if (row.status === "confirmed" && row.confirmation_hash === confirmationHash) return rowRecord(row);
-  const now = new Date().toISOString();
-  const result = getDb().prepare(
-    `UPDATE experience_public_projections
-        SET status = 'confirmed', confirmation_hash = ?, confirmed_at = ?,
-            privacy_issue_codes_json = '[]', updated_at = ?
-      WHERE projection_id = ? AND proposal_hash = ? AND source_snapshot_hash = ?`,
-  ).run(confirmationHash, now, now, row.projection_id, liveProposalHash, liveSourceHash);
-  if (result.changes !== 1) throw new Error("Public projection changed before confirmation; no confirmation was recorded.");
-  return rowRecord(getDb().prepare("SELECT * FROM experience_public_projections WHERE projection_id = ?")
-    .get(row.projection_id) as ProjectionRow);
+  return experienceChipsRetired();
 }
 
 /** Fail-closed read used only by public/unlisted portable materialization. */

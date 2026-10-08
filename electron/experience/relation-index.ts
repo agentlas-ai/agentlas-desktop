@@ -653,12 +653,6 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
     embedding_dimensions: number | null;
     embedding_json: string | null;
   }>;
-  const backfill = getDb().prepare(
-    `UPDATE experience_candidates
-        SET embedding_model = ?, embedding_adapter = ?, embedding_model_sha256 = ?,
-            embedding_content_hash = ?, embedding_dimensions = ?, embedding_json = ?
-      WHERE id = ?`,
-  );
   const candidateAdapters = new Map<string, string>();
   for (const row of candidateRows) {
     let embedding = parseLocalEmbedding(row.embedding_model, row.embedding_dimensions, row.embedding_json, {
@@ -669,15 +663,7 @@ export function rebuildExperienceRelationIndex(): ExperienceRelationIndexStatus 
     });
     if (!embedding) {
       embedding = autoLocalEmbedding(row.summary);
-      backfill.run(
-        embedding.model,
-        embedding.adapter,
-        embedding.modelSha256,
-        embedding.contentHash,
-        embedding.dimensions,
-        JSON.stringify(embedding.vector),
-        row.id,
-      );
+      // Derived caches may be rebuilt; historical candidate rows remain immutable.
     }
     candidateVectors.set(row.id, embedding.vector);
     candidateAdapters.set(row.id, embedding.adapter);

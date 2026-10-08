@@ -287,6 +287,33 @@ export function readCloudAgentRestoreMarker(destinationDir: string): CloudAgentR
   }
 }
 
+/** Advance only a per-scope CAS baseline; runtime-only sync does not restamp a full-package restore receipt. */
+export function updateCloudAgentRegistrationBaseline(input: {
+  rootPath: string; registration: CloudAgentRevisionIdentity; expectedRevision: string;
+}): boolean {
+  try {
+  const rootStat = fs.lstatSync(input.rootPath);
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) return false;
+  const root = fs.realpathSync.native(input.rootPath);
+  if (root !== path.resolve(input.rootPath)) return false;
+  const existing = readCloudAgentRestoreMarker(root);
+  const registration = normalizeRegistrationIdentity(input.registration, input.registration.scope);
+  const previous = existing?.registrations?.[input.registration.scope];
+  if (!existing || !registration || registration.slug !== existing.slug || previous?.cloudId !== registration.cloudId
+    || previous.revision !== input.expectedRevision) return false;
+  const markerPath = path.join(root, MARKER_FILE);
+  const before = readStableRegularFile(markerPath, root, MAX_MARKER_BYTES).content;
+  const marker = { ...existing, registrations: { ...existing.registrations, [registration.scope]: registration } };
+  const temporary = path.join(root, `.${MARKER_FILE}.tmp-${process.pid}-${randomUUID()}`);
+  try {
+    const fd = fs.openSync(temporary, "wx", 0o600);
+    try { fs.writeFileSync(fd, JSON.stringify(marker) + "\n"); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+    if (!readStableRegularFile(markerPath, root, MAX_MARKER_BYTES).content.equals(before)) return false;
+    fs.renameSync(temporary, markerPath); fsyncDirectoryBestEffort(root); return true;
+  } finally { removeFileBestEffort(temporary); }
+  } catch { return false; }
+}
+
 /** Persist the exact server revision returned after a successful save/publish.
  * The marker is excluded from Cloud package bytes and is the next request's
  * local If-Match authority. */

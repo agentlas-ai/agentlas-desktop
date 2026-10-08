@@ -2,6 +2,7 @@
 // renderer/lib/types.ts에서 re-export.
 import type { AutomationMonitorContract, AutomationPollState } from "./automation-monitor";
 import type { OneSupervisorAPI } from "./one-supervisor";
+import type { AgentWorkspaceIpc } from "./agent-workspace";
 import type { LocalModelHubAPI } from "./local-model-hub";
 import type { LocalModelMigrationAPI } from "./local-model-migration";
 import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "./credential-recovery";
@@ -7438,6 +7439,7 @@ export interface AgentlasIpc {
     failures: (input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) => Promise<FailureEventUi[]>;
   };
   /** 에이전트 자가진화 proposal 원장 — 제안/승인/적용/측정/롤백 상태를 로컬 DB에 남긴다. */
+  agentWorkspace: AgentWorkspaceIpc;
   agentEvolution: {
     list: (agentId: string, limit?: number) => Promise<AgentEvolutionProposalUi[]>;
     /** Candidate collection only; this call never writes an agent package file. */

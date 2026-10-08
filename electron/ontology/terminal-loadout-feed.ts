@@ -1,3 +1,4 @@
+import { experienceChipsRetired } from "../experience/retired";
 import { createHash, randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -256,84 +257,20 @@ export function writeTerminalOntologyLoadoutFeed(input: {
   result: OntologyHubProjectionResult;
   now?: Date;
 }): TerminalOntologyLoadoutFeedReceipt {
-  const now = input.now ?? new Date();
-  const nowMs = now.getTime();
-  if (!Number.isFinite(nowMs)) throw new Error("Terminal loadout receipt time is invalid.");
-  const projections = new Map(
-    input.result.supported && (input.result.status === "live" || input.result.status === "stale")
-      ? input.result.projections.map((projection) => [projectionKey(projection), projection] as const)
-      : [],
-  );
-  const entries = input.bindings.flatMap((binding) => {
-    const entry = projectionEntry(binding, projections.get(projectionKey(binding)), nowMs);
-    return entry ? [entry] : [];
-  });
-  const expected = new Set(input.bindings.map((binding) => installedAgentFingerprint(binding.installedAgentId)));
-  const unique = new Set(entries.map((entry) => entry.installedAgentFingerprint));
-  if (unique.size !== entries.length || entries.some((entry) => !expected.has(entry.installedAgentFingerprint))) {
-    throw new Error("Terminal loadout receipt contains an ambiguous local agent binding.");
+    return experienceChipsRetired();
   }
-  const status: TerminalOntologyLoadoutFeedReceipt["status"] = entries.length === 0
-    ? "unavailable"
-    : entries.length === input.bindings.length && input.result.status === "live"
-      ? "live"
-      : "partial";
-  const authority = nextLocalAuthorityState();
-  const draft: Omit<TerminalOntologyLoadoutFeedReceipt, "receiptHash"> = {
-    schemaVersion: 2,
-    contract: TERMINAL_ONTOLOGY_LOADOUT_CONTRACT,
-    producer: "agentlas-desktop",
-    ...authority,
-    status,
-    generatedAt: now.toISOString(),
-    expiresAt: new Date(nowMs + TERMINAL_ONTOLOGY_LOADOUT_VALIDITY_MS).toISOString(),
-    entries,
-  };
-  const receipt: TerminalOntologyLoadoutFeedReceipt = {
-    ...draft,
-    receiptHash: feedReceiptHash(draft),
-  };
-  if (!RECEIPT_HASH_RE.test(receipt.receiptHash)) throw new Error("Terminal loadout receipt hash is invalid.");
-  writePrivateAtomic(input.file, receipt);
-  return receipt;
-}
 
-/**
- * One lifecycle owner per running Desktop bridge. Disposing the old owner
- * before a network rebind prevents a slower query from the retired bridge from
- * overwriting a newer receipt.
- */
+/** Compatibility lifecycle never rewrites historical chip receipts. */
 export class TerminalOntologyLoadoutFeedWriter {
-  private active = true;
+  constructor(readonly file: string) {}
 
-  constructor(readonly file: string) {
-    // Close any prior-process freshness window before the first authenticated
-    // query of this Desktop lifecycle finishes.
-    this.invalidate();
-  }
-
-  write(input: {
+  write(_input: {
     bindings: readonly InstalledAgentHubBinding[];
     result: OntologyHubProjectionResult;
     now?: Date;
   }): TerminalOntologyLoadoutFeedReceipt | null {
-    if (!this.active) return null;
-    return writeTerminalOntologyLoadoutFeed({ file: this.file, ...input });
+    return null;
   }
 
-  dispose(): void {
-    if (!this.active) return;
-    this.invalidate();
-    this.active = false;
-  }
-
-  private invalidate(): void {
-    try {
-      writeTerminalOntologyLoadoutFeed({
-        file: this.file,
-        bindings: [],
-        result: { supported: false, status: "endpoint-absent", projections: [] },
-      });
-    } catch {}
-  }
+  dispose(): void {}
 }

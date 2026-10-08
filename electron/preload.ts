@@ -611,6 +611,22 @@ const api: AgentlasIpc = {
     expose: (automationId: string) => ipcRenderer.invoke("toolchains:expose", automationId),
     withdraw: (automationId: string) => ipcRenderer.invoke("toolchains:withdraw", automationId),
   },
+  agentWorkspace: {
+    getWorkspace: (agentId) => ipcRenderer.invoke("agentWorkspace:get", agentId),
+    listFiles: (agentId, relativeDir) => ipcRenderer.invoke("agentWorkspace:listFiles", agentId, relativeDir),
+    readFile: (agentId, relativePath) => ipcRenderer.invoke("agentWorkspace:readFile", agentId, relativePath),
+    prepareFromMemory: (input) => ipcRenderer.invoke("agentWorkspace:prepareFromMemory", input),
+    prepareFileChange: (input) => ipcRenderer.invoke("agentWorkspace:prepareFileChange", input),
+    prepareRollback: (input) => ipcRenderer.invoke("agentWorkspace:prepareRollback", input),
+    prepareFileOperation: (input) => ipcRenderer.invoke("agentWorkspace:prepareFileOperation", input),
+    getRecoveryDiff: (agentId) => ipcRenderer.invoke("agentWorkspace:getRecoveryDiff", agentId),
+    acknowledgeRecovery: (input) => ipcRenderer.invoke("agentWorkspace:acknowledgeRecovery", input),
+    getDiff: (proposalId) => ipcRenderer.invoke("agentWorkspace:getDiff", proposalId),
+    approveAndApply: (input) => ipcRenderer.invoke("agentWorkspace:approveAndApply", input),
+    reject: (input) => ipcRenderer.invoke("agentWorkspace:reject", input),
+    compare: (input) => ipcRenderer.invoke("agentWorkspace:compare", input),
+    sync: (input) => ipcRenderer.invoke("agentWorkspace:sync", input),
+  },
   agentFiles: {
     list: (agentId: string) => ipcRenderer.invoke("agentFiles:list", agentId),
     read: (agentId: string, absPath: string) =>
