@@ -229,7 +229,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: agentlas-ai/agentlas-science
-          ref: f8e84b57e7e8d383dacf7bddad12db05ad52eecd
+          ref: 488c3429979e8677d5500a705acbc46fcdaed67a
           token: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           path: .release-private-verification
           sparse-checkout: release-verification/desktop
@@ -238,7 +238,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
-          test "$(git -C .release-private-verification rev-parse HEAD)" = "f8e84b57e7e8d383dacf7bddad12db05ad52eecd"
+          test "$(git -C .release-private-verification rev-parse HEAD)" = "488c3429979e8677d5500a705acbc46fcdaed67a"
           node <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
@@ -252,7 +252,7 @@ jobs:
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
-            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `f8e84b57e7e8d383dacf7bddad12db05ad52eecd:release-verification/desktop/${entry.path}`]);
+            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `488c3429979e8677d5500a705acbc46fcdaed67a:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
             if (sourcePaths.has(entry.path)) {
               if (!fs.existsSync(entry.path) || !fs.lstatSync(entry.path).isFile()) throw new Error('Committed runtime file is missing from the release source');
@@ -583,7 +583,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: agentlas-ai/agentlas-science
-          ref: f8e84b57e7e8d383dacf7bddad12db05ad52eecd
+          ref: 488c3429979e8677d5500a705acbc46fcdaed67a
           token: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           path: .release-private-verification
           sparse-checkout: release-verification/desktop
@@ -592,7 +592,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
-          test "$(git -C .release-private-verification rev-parse HEAD)" = "f8e84b57e7e8d383dacf7bddad12db05ad52eecd"
+          test "$(git -C .release-private-verification rev-parse HEAD)" = "488c3429979e8677d5500a705acbc46fcdaed67a"
           node <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
@@ -606,7 +606,7 @@ jobs:
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
-            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `f8e84b57e7e8d383dacf7bddad12db05ad52eecd:release-verification/desktop/${entry.path}`]);
+            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `488c3429979e8677d5500a705acbc46fcdaed67a:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
             if (sourcePaths.has(entry.path)) {
               if (!fs.existsSync(entry.path) || !fs.lstatSync(entry.path).isFile()) throw new Error('Committed runtime file is missing from the release source');
@@ -872,7 +872,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: agentlas-ai/agentlas-science
-          ref: f8e84b57e7e8d383dacf7bddad12db05ad52eecd
+          ref: 488c3429979e8677d5500a705acbc46fcdaed67a
           token: ${{ secrets.AGENTLAS_DESKTOP_RELEASE_TOKEN }}
           path: .release-private-verification
           sparse-checkout: release-verification/desktop
@@ -881,7 +881,7 @@ jobs:
       - name: Install hash-bound private verification files
         shell: bash
         run: |
-          test "$(git -C .release-private-verification rev-parse HEAD)" = "f8e84b57e7e8d383dacf7bddad12db05ad52eecd"
+          test "$(git -C .release-private-verification rev-parse HEAD)" = "488c3429979e8677d5500a705acbc46fcdaed67a"
           node <<'NODE'
           const fs = require('node:fs');
           const path = require('node:path');
@@ -895,7 +895,7 @@ jobs:
           for (const entry of manifest.files) {
             if (!/^scripts\/(?:[A-Za-z0-9_-]+\/)*[A-Za-z0-9_.-]+$/.test(entry.path) || entry.path.includes('..') || seen.has(entry.path)) throw new Error('Invalid verification path');
             seen.add(entry.path);
-            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `f8e84b57e7e8d383dacf7bddad12db05ad52eecd:release-verification/desktop/${entry.path}`]);
+            const bytes = require('node:child_process').execFileSync('git', ['-C', '.release-private-verification', 'show', `488c3429979e8677d5500a705acbc46fcdaed67a:release-verification/desktop/${entry.path}`]);
             if (crypto.createHash('sha256').update(bytes).digest('hex') !== entry.sha256) throw new Error('Verification file digest mismatch');
             if (sourcePaths.has(entry.path)) {
               if (!fs.existsSync(entry.path) || !fs.lstatSync(entry.path).isFile()) throw new Error('Committed runtime file is missing from the release source');
