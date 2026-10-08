@@ -31,7 +31,7 @@ const INLINE_GRAPH_DESCRIPTIONS: Record<string, string> = {
   one_graph_set_enabled: "Enable exact inspected revision after connection/effect checks, or disable and Stop. Stop works with read permission. Never replaces a job.",
   one_graph_run: "Execute enabled graph with current expected_revision/stable request_id and named string input. Retries reuse execution. Wait up to 50s (default20); retain event_id and read one_graph_result if running.",
   one_graph_result: "Read your exact graph event; reads never execute. Wait up to50s; outputs/failures bounded. Page longer node output with node_id/offset/limit.",
-  toolchain_create: "Extract graph into independent frozen draft/version. Provide reusable typed input/output schemas, two distinct examples/expected outputs and variation statement. toolchain_id appends your asset's immutable version.",
+  toolchain_create: "Delegate natural-language request to system orchestrator for generalized inputs/typed contracts/implementation/examples. It reuses existing capability or improves same ID; no task-graph migration. Stable request_id prevents retries duplicating assets.",
   toolchain_publish: "Validate draft version by real example executions and typed expected outputs. Only passed validation makes callable. Effectful validation needs explicit owner verification; never implicitly sends posts/payments.",
   toolchain_search: "Find callable capabilities; returns independent toolchain_id/version, typed schemas/examples. Check when_not_to_use; empty means work normally. Call toolchain_run or compose native toolchain_call; graph/MCP IDs differ.",
   toolchain_inspect: "Read independent asset contract/immutable versions, without source instructions. Omit version for stable release.",

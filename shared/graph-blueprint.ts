@@ -271,6 +271,8 @@ export interface BlueprintContext {
   knownGraphs?: Array<{ id: string; name: string }>;
   /** 지금 고치고 있는 자동화 — 자기를 부르면 무한 재귀다. */
   selfId?: string;
+  /** Host-declared typed Toolchain arguments, separate from the trigger value. */
+  inputVariables?: string[];
 }
 
 export function validateBlueprint(
@@ -341,7 +343,11 @@ export function validateBlueprint(
     push(`단계가 ${steps.length}개입니다. 한 번에 만들 수 있는 것은 ${MAX_STEPS}개까지입니다.`);
   }
   const produced = new Set<string>();
-  if (trigger?.kind === "input" && trigger.varName) produced.add(trigger.varName);
+  if (trigger?.kind === "input" && trigger.varName && ctx.inputVariables === undefined) produced.add(trigger.varName);
+  for (const name of ctx.inputVariables ?? []) {
+    if (VAR_RE.test(name)) produced.add(name);
+    else push(`Invalid external input variable: ${name}`);
+  }
   steps.forEach((step, index) => {
     const at = `${index + 1}번째 단계`;
     if (!step || typeof step !== "object") { push(`${at}를 읽지 못했습니다.`); return; }

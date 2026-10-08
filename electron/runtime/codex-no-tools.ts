@@ -206,7 +206,10 @@ export async function runCodexNoTools(
           : [401, 403].includes(response.status) ? "auth" : "unavailable"));
         throw new Error(gatewayFailure!.providerCode);
       }
-      if (!response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream") || !response.body) {
+      const contentType = response.headers.get("content-type");
+      // The fixed provider may omit MIME on a valid SSE response. Admission still
+      // requires the complete bounded stream to pass the validator below.
+      if (contentType && !contentType.toLowerCase().startsWith("text/event-stream") || !response.body) {
         throw new Error("codex_no_tools_response_encoding_unknown");
       }
       const reader = response.body.getReader();

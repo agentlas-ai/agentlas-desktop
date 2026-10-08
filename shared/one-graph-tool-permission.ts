@@ -1,3 +1,5 @@
+import { TOOLCHAIN_GENERATION_TIMEOUT_MS } from "./toolchain-asset";
+
 /** Only Main's authenticated one-team binding may use this read-run exception.
  * Stop is a control operation that must remain available after permission drops;
  * enabling and every definition/execution mutation retain ordinary approval. */
@@ -18,13 +20,18 @@ export function oneGraphReadPermissionCall(input: {
     && Object.keys(args).every(key => ["graph_id", "enabled", "expected_revision"].includes(key));
 }
 
-/** These two host tools have a bounded wait contract; other MCP calls retain
+/** These host tools have a bounded wait contract; other MCP calls retain
  * the ordinary timeout. Invalid caller values never extend the lifetime. */
 export function oneGraphToolTimeoutMs(input: {
   catalogId?: string | null; toolName: string; args?: unknown;
 }): number {
   // toolchain_publish waits at most 45 s for its fresh-session test, then answers "testing".
   if (input.catalogId === "one-team" && input.toolName === "toolchain_publish") return 60_000;
+  if (input.catalogId === "one-team" && input.toolName === "toolchain_create" && input.args && typeof input.args === "object" && !Array.isArray(input.args)) {
+    const args = input.args as Record<string, unknown>;
+    if (typeof args.request === "string" && args.request.trim().length > 0 && args.request.length <= 8000
+      && typeof args.request_id === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(args.request_id)) return TOOLCHAIN_GENERATION_TIMEOUT_MS + 15_000;
+  }
   if (input.catalogId !== "one-team"
     || !["one_graph_run", "one_graph_result"].includes(input.toolName)
     || !input.args || typeof input.args !== "object" || Array.isArray(input.args)) return 30_000;

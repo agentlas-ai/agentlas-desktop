@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.2.81 — 2026-10-08
+
+- Let the configured system AI create a reusable Toolchain from a natural-language capability request. Reuse an existing capability or add a version within its stable identity, with checked typed inputs and outputs.
+- Apply generalization to new work. Preserve existing task Graphs, freeze new implementation revisions, and keep concurrent or repeated creation requests within one capability.
+- Accept a completed Codex streaming response when its content type is absent, while retaining bounded response, tool-free and completion validation.
+
+This release binds Agentlas OS v1.2.56 at 10dc8acf78f930713dc4d0f3cbca03fc55f56a72; public runtime asset `hephaestus-runtime-v1.2.56.tar.gz` is pinned at SHA-256 `b303969fdda400435450bcd838fad36af95e9446d72fb89743a320620d8c33f6`.
+
+Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.80 — 2026-10-08
 
 - Recover interrupted Desktop work under its new Main owner after restart, retaining Stop, pause and uncertain-effect boundaries. Share durable recovery records across Main, Graph, Science and Mobile admission paths.

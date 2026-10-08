@@ -24,9 +24,10 @@ import { recordOneGraphAuthority } from "./graph-ownership";
 import { oneTeamDispatchOwnerChat, type OneTeamCaller } from "./team-dispatch";
 import { searchToolchainAssets } from "../toolchains/search";
 import { callableContractFor } from "../toolchains/interface";
-import { addToolchainVersion, createToolchainAsset, getToolchainAsset, listToolchainAssets, publishToolchainVersion } from "../toolchains/assets";
+import { getToolchainAsset, listToolchainAssets, publishToolchainVersion } from "../toolchains/assets";
 import { callToolchain, getToolchainCall, listToolchainCalls } from "../toolchains/calls";
-import type { ToolchainAsset, ToolchainAssetCreateInput, ToolchainCallReceipt } from "../../shared/toolchain-asset";
+import type { ToolchainAsset, ToolchainCallReceipt } from "../../shared/toolchain-asset";
+import { generateToolchain } from "../toolchains/generalizer";
 import { TOOLCHAIN_CONSUMER_TOOLS } from "../toolchains/consumer";
 import { recordToolchainRepair, toolchainRepairVerdict } from "../toolchains/reports";
 
@@ -203,9 +204,12 @@ function assetManifest(asset: ToolchainAsset, version = asset.stableVersion ?? a
     versions: asset.versions.map(item => ({ version: item.version, content_hash: item.contentHash, validation: item.validation.state })) };
 }
 
-function assetOwnedBy(caller: OneTeamCaller, asset: ToolchainAsset): void {
-  const chatId = owner(caller).id;
-  if (!asset.versions.every(version => version.provenance.creatorChatId === chatId)) throw new Error("toolchain_creator_scope_required");
+function assetOwnedBy(caller: OneTeamCaller, _asset: ToolchainAsset): void {
+  // Assets belong to this local owner's library. A release's creator chat is
+  // provenance, not ownership: the owner's UI or another authenticated One
+  // conversation may improve it. Work consumers retain read/call-only scope.
+  if (isToolchainConsumer(caller)) throw new Error("toolchain_owner_scope_required");
+  writable(caller);
 }
 function callerCall(caller: OneTeamCaller, id: unknown): ToolchainCallReceipt {
   const call = typeof id === "string" ? getToolchainCall(id) : null;
@@ -260,24 +264,11 @@ async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Rec
   }
   writable(caller);
   if (name === "toolchain_create") {
-    const source = exact(caller, input.graph_id); fresh(source, input.expected_revision);
-    editable(source);
-    const creation: ToolchainAssetCreateInput = { sourceAutomationId: source.id, contract: input.contract as ToolchainAssetCreateInput["contract"],
-      outputBinding: input.output_binding as ToolchainAssetCreateInput["outputBinding"] };
-    const key = `toolchain.creation.v1:${sha256Value({ chatId: chat.id, revision: input.expected_revision,
-      toolchainId: input.toolchain_id ?? null, creation })}`;
-    return getDb().transaction(() => {
-      const prior = getDb().prepare("SELECT value FROM meta WHERE key=?").get(key) as { value: string } | undefined;
-      if (prior) { const identity = JSON.parse(prior.value) as { id: string; version: number }; const asset = getToolchainAsset(identity.id);
-        if (asset) return { schemaVersion: "agentlas.toolchain-create.v1", ...assetManifest(asset, identity.version), already_created: true }; }
-      const asset = input.toolchain_id ? getToolchainAsset(String(input.toolchain_id)) : null;
-      if (input.toolchain_id && !asset) throw new Error("toolchain_not_found");
-      if (asset) assetOwnedBy(caller, asset);
-      const created = asset ? addToolchainVersion(asset.id, creation, { callerChatId: chat.id }) : createToolchainAsset(creation, { callerChatId: chat.id });
-      const version = created.versions.at(-1)!.version;
-      getDb().prepare("INSERT INTO meta(key,value) VALUES(?,?)").run(key, JSON.stringify({ id: created.id, version }));
-      return { schemaVersion: "agentlas.toolchain-create.v1", ...assetManifest(created, version) };
-    }).immediate();
+    const result = await generateToolchain({ request: String(input.request), requestId: String(input.request_id),
+      ...(input.toolchain_id ? { toolchainId: String(input.toolchain_id) } : {}), ...(chat.projectId ? { projectId: chat.projectId } : {}) },
+    { callerChatId: chat.id, assertCurrent: () => writable(caller) });
+    return { schemaVersion: "agentlas.toolchain-create.v2", ...assetManifest(result.asset, result.version),
+      decision: result.decision, rationale: result.rationale, generalization_id: result.generalizationId };
   }
   if (name === "toolchain_publish") {
     const asset = getToolchainAsset(String(input.toolchain_id));

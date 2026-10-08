@@ -17,8 +17,11 @@ import { refreshAllToolchains, refreshToolchainForAutomation } from "./learner";
 import { toolchainLogos } from "./logo";
 import { listToolchainStates, mutateToolchainState } from "./store";
 import type { ToolchainAssetCreateInput } from "../../shared/toolchain-asset";
-import { addToolchainVersion, createToolchainAsset, getToolchainAsset, listToolchainAssets, migrateLegacyToolchainAssets, publishToolchainVersion, withdrawToolchainAsset } from "./assets";
+import { getToolchainAsset, listToolchainAssets, publishToolchainVersion, withdrawToolchainAsset } from "./assets";
 import { callToolchain, listToolchainCalls } from "./calls";
+import { generateToolchain } from "./generalizer";
+import type { ToolchainGenerationInput } from "../../shared/toolchain-asset";
+import { sha256Value } from "../../shared/graph-execution-digest";
 
 const DECISIONS: ReadonlySet<OwnerDecision> = new Set(["approve", "dismiss", "demote", "retry"]);
 
@@ -62,8 +65,15 @@ function automationIdOf(value: unknown): string {
 export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
   ipc.handle("toolchains:assets-list", () => listToolchainAssets());
   ipc.handle("toolchains:assets-get", (_event, id: string) => getToolchainAsset(id));
-  ipc.handle("toolchains:assets-create", (_event, input: ToolchainAssetCreateInput) => createToolchainAsset(input));
-  ipc.handle("toolchains:assets-add-version", (_event, input: ToolchainAssetCreateInput & { id: string }) => addToolchainVersion(input.id, input));
+  ipc.handle("toolchains:assets-generate", (_event, input: ToolchainGenerationInput) => generateToolchain(input));
+  // Compatibility callers delegate to the same AI authoring path. Their old
+  // source graph is never inspected, converted or changed.
+  const legacyRequest = (input: ToolchainAssetCreateInput & { id?: string }): ToolchainGenerationInput => ({
+    request: JSON.stringify({ capability: input.contract, improvementOf: input.id ?? null }),
+    requestId: `compat-${sha256Value(input).slice(7)}`, ...(input.id ? { toolchainId: input.id } : {}),
+  });
+  ipc.handle("toolchains:assets-create", async (_event, input: ToolchainAssetCreateInput) => (await generateToolchain(legacyRequest(input))).asset);
+  ipc.handle("toolchains:assets-add-version", async (_event, input: ToolchainAssetCreateInput & { id: string }) => (await generateToolchain(legacyRequest(input))).asset);
   ipc.handle("toolchains:assets-publish", (_event, input: { id: string; version: number; allowEffectfulValidation?: boolean }) => publishToolchainVersion(input.id, input.version, { permission: "write", allowEffectfulValidation: input.allowEffectfulValidation === true }));
   ipc.handle("toolchains:assets-withdraw", (_event, id: string) => withdrawToolchainAsset(id));
   ipc.handle("toolchains:assets-run", (_event, input: { id: string; version?: number; input: Record<string, unknown>; requestId: string }) => {
@@ -73,7 +83,6 @@ export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
     return callToolchain({ toolchainId: input.id, version, args: input.input }, { requestId: input.requestId, permission: "write" });
   });
   ipc.handle("toolchains:assets-history", (_event, id: string) => listToolchainCalls(id));
-  ipc.handle("toolchains:assets-migrate", () => migrateLegacyToolchainAssets());
   ipc.handle("toolchains:overview", () => toolchainOverview());
   ipc.handle("toolchains:logos", () => toolchainLogos(listAutomations().filter((automation) => automation.graph).map((automation) => automation.id)));
   ipc.handle("toolchains:history", (_event, automationId: unknown) => toolchainHistory(automationIdOf(automationId)));
