@@ -1412,3 +1412,12 @@
   cursor: pointer;
 }
 .dangerButton:focus-visible { outline: 2px solid var(--danger); outline-offset: 2px; }
+
+/* Compose and destructive confirmations share compact visual actions. */
+.form { gap: 12px; }
+.form .field input, .form .field textarea { border-radius: 10px; }
+.form .primaryButton, .form .sendButton { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; }
+.confirmBody { margin: 0; font-size: 13px; line-height: 1.5; }
+.confirmActions button { min-height: 44px; }
+
+.formActions .primary { display: inline-flex; align-items: center; justify-content: center; gap: 7px; }

@@ -7,6 +7,7 @@ import { pickLocalized, useT } from "@/lib/i18n";
 import type { FirmListing, MarketplaceListing } from "@/lib/types";
 import { IconCheck, IconClose, IconSparkles, IconBuilding, IconFolder } from "@/components/Icon";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
+import { PopupAction, PopupDetails, PopupFrame } from "./Popup";
 
 const BUILD_URL = "https://agentlas.cloud/build";
 
@@ -66,16 +67,7 @@ export function ImportAgentsModal({
     if (open) void load();
   }, [open, load]);
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-    };
-  }, [open, onClose]);
+
 
   async function signIn() {
     const api = ipc();
@@ -154,55 +146,15 @@ export function ImportAgentsModal({
   if (!open) return null;
 
   return (
-    <div
-      role="dialog"
-      aria-modal
-      aria-label={locale === "ko" ? "에이전트 가져오기" : "Import agents"}
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 200,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        background: "rgba(11,11,15,0.32)",
-        backdropFilter: "blur(2px)",
-      }}
-      onClick={onClose}
-    >
-      <div
-        className="glass-lift"
-        onClick={(e) => e.stopPropagation()}
-        style={{
-          width: "var(--popup-3-width)",
-          maxHeight: "82vh",
-          display: "flex",
-          flexDirection: "column",
-          borderRadius: "var(--radius-xl)",
-          background: "var(--paper)",
-          border: "1px solid var(--glass-border)",
-          boxShadow: "0 20px 60px rgba(11,11,15,0.24)",
-          overflow: "hidden",
-        }}
-      >
-        <header style={{ padding: "18px 20px 12px", borderBottom: "1px solid var(--paper-edge)" }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            <h2 style={{ margin: 0, fontFamily: "var(--font-head)", fontSize: 17, fontWeight: 700, flex: 1 }}>
-              {t("import.title")}
-            </h2>
-            <button
-              onClick={onClose}
-              aria-label={t("import.skip")}
-              style={{ color: "var(--muted-deep)", background: "transparent", border: "none", padding: 4 }}
-            >
-              <IconClose size={16} />
-            </button>
-          </div>
-          <p style={{ margin: "6px 0 0", fontSize: 12.5, color: "var(--muted-deep)", lineHeight: 1.5 }}>
-            {t("import.subtitle")}
-          </p>
-        </header>
-
+    <PopupFrame title={t("import.title")} icon={<IconFolder size={20} />}
+      description={t("import.subtitle")} closeLabel={locale === "ko" ? "닫기" : "Close"} onClose={onClose}
+      footer={signedIn && !loading ? <>
+        <PopupAction onClick={onClose}>{t("import.skip")}</PopupAction>
+        <PopupAction primary icon={<IconCheck size={16} />} onClick={() => void importSelected()}
+          disabled={totalSelected === 0 || importing}>
+          {importing ? t("import.importing") : t("import.import_selected", { n: totalSelected })}
+        </PopupAction>
+      </> : undefined}>
         <div style={{ flex: 1, overflowY: "auto", padding: "14px 20px" }}>
           <LocalImportPanel
             title={t("import.local_title")}
@@ -308,50 +260,7 @@ export function ImportAgentsModal({
           )}
         </div>
 
-        {signedIn && !loading && (
-          <footer
-            style={{
-              padding: "12px 20px",
-              borderTop: "1px solid var(--paper-edge)",
-              display: "flex",
-              alignItems: "center",
-              gap: 10,
-            }}
-          >
-            <button
-              onClick={onClose}
-              style={{
-                fontSize: 12.5,
-                color: "var(--muted-deep)",
-                background: "transparent",
-                border: "1px solid var(--paper-edge)",
-                borderRadius: 999,
-                padding: "8px 14px",
-              }}
-            >
-              {t("import.skip")}
-            </button>
-            <div style={{ flex: 1 }} />
-            <button
-              onClick={() => void importSelected()}
-              disabled={totalSelected === 0 || importing}
-              style={{
-                fontSize: 13,
-                fontWeight: 600,
-                padding: "8px 18px",
-                borderRadius: 999,
-                background: totalSelected > 0 ? "var(--paper)" : "var(--paper-2)",
-                color: totalSelected > 0 ? "var(--ink)" : "var(--muted-deep)",
-                border: "1px solid var(--paper-edge)",
-                boxShadow: totalSelected > 0 ? "var(--neu-raised)" : "none",
-              }}
-            >
-              {importing ? t("import.importing") : t("import.import_selected", { n: totalSelected })}
-            </button>
-          </footer>
-        )}
-      </div>
-    </div>
+    </PopupFrame>
   );
 }
 
@@ -368,10 +277,12 @@ function LocalImportPanel({
   busy: boolean;
   onImport: () => void;
 }) {
+  const { locale } = useT();
   return (
     <div
       style={{
         display: "flex",
+        flexWrap: "wrap",
         alignItems: "center",
         gap: 12,
         padding: 12,
@@ -398,15 +309,14 @@ function LocalImportPanel({
       </span>
       <span style={{ flex: 1, minWidth: 0 }}>
         <span style={{ display: "block", fontSize: 13, fontWeight: 700, color: "var(--ink)" }}>{title}</span>
-        <span style={{ display: "block", marginTop: 2, fontSize: 11.5, color: "var(--muted-deep)", lineHeight: 1.45 }}>
-          {body}
-        </span>
+        <PopupDetails label={locale === "ko" ? "지원 형식" : "Supported formats"}>{body}</PopupDetails>
       </span>
       <button
         onClick={onImport}
         disabled={busy}
         style={{
           flexShrink: 0,
+          minHeight: 44,
           padding: "7px 12px",
           borderRadius: 8,
           border: "1px solid var(--accent)",
@@ -432,7 +342,7 @@ function SectionLabel({ icon, text }: { icon: React.ReactNode; text: string }) {
         alignItems: "center",
         gap: 6,
         fontSize: 10.5,
-        fontFamily: "var(--font-mono)",
+        fontFamily: "var(--font-body)",
         textTransform: "uppercase",
         letterSpacing: 0.6,
         color: "var(--muted-deep)",

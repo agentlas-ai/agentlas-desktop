@@ -1315,6 +1315,24 @@
   color: var(--ink-soft);
 }
 
+.historyDisclosure {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 8px 0 16px;
+}
+.historyDisclosure button {
+  padding: 7px 12px;
+  border: 1px solid var(--one-line);
+  border-radius: 8px;
+  background: var(--one-soft);
+  color: var(--one-muted);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.historyDisclosure button:hover { color: var(--one-ink); }
+
 .messages {
   display: grid;
   gap: 30px;
@@ -3482,13 +3500,13 @@
   line-height: 1.58 !important;
 }
 
-.messageBody :global(h1) { margin: 10px 0 6px !important; font-size: 17px !important; line-height: 1.28 !important; }
-.messageBody :global(h2) { margin: 9px 0 5px !important; font-size: 15px !important; line-height: 1.32 !important; }
-.messageBody :global(h3) { margin: 8px 0 4px !important; font-size: 13.5px !important; line-height: 1.36 !important; }
-.messageBody :global(p) { margin: 4px 0 !important; }
-.messageBody :global(ul),
-.messageBody :global(ol) { margin: 5px 0 !important; padding-left: 20px !important; }
-.messageBody :global(blockquote) { margin: 7px 0 !important; padding: 7px 10px !important; }
+.messageBody :global(h1:not(:where([data-intellect-ui] *))) { margin: 10px 0 6px !important; font-size: 17px !important; line-height: 1.28 !important; }
+.messageBody :global(h2:not(:where([data-intellect-ui] *))) { margin: 9px 0 5px !important; font-size: 15px !important; line-height: 1.32 !important; }
+.messageBody :global(h3:not(:where([data-intellect-ui] *))) { margin: 8px 0 4px !important; font-size: 13.5px !important; line-height: 1.36 !important; }
+.messageBody :global(p:not(:where([data-intellect-ui] *))) { margin: 4px 0 !important; }
+.messageBody :global(ul:not(:where([data-intellect-ui] *))),
+.messageBody :global(ol:not(:where([data-intellect-ui] *))) { margin: 5px 0 !important; padding-left: 20px !important; }
+.messageBody :global(blockquote:not(:where([data-intellect-ui] *))) { margin: 7px 0 !important; padding: 7px 10px !important; }
 
 .body[data-task-active="true"] .composer,
 .body[data-task-active="true"] .steeringQueue,
@@ -3622,13 +3640,13 @@
   box-shadow: 0 10px 28px rgba(28, 43, 34, .05);
   line-height: 1.72;
 }
-.messageBody[data-doc="true"] :global(h1),
-.messageBody[data-doc="true"] :global(h2) { margin: 18px 0 8px; font-size: 17px; line-height: 1.3; }
-.messageBody[data-doc="true"] :global(h3),
-.messageBody[data-doc="true"] :global(h4) { margin: 15px 0 6px; font-size: 14px; }
-.messageBody[data-doc="true"] :global(h1:first-child),
-.messageBody[data-doc="true"] :global(h2:first-child),
-.messageBody[data-doc="true"] :global(h3:first-child) { margin-top: 0; }
+.messageBody[data-doc="true"] :global(h1:not(:where([data-intellect-ui] *))),
+.messageBody[data-doc="true"] :global(h2:not(:where([data-intellect-ui] *))) { margin: 18px 0 8px; font-size: 17px; line-height: 1.3; }
+.messageBody[data-doc="true"] :global(h3:not(:where([data-intellect-ui] *))),
+.messageBody[data-doc="true"] :global(h4:not(:where([data-intellect-ui] *))) { margin: 15px 0 6px; font-size: 14px; }
+.messageBody[data-doc="true"] :global(h1:first-child:not(:where([data-intellect-ui] *))),
+.messageBody[data-doc="true"] :global(h2:first-child:not(:where([data-intellect-ui] *))),
+.messageBody[data-doc="true"] :global(h3:first-child:not(:where([data-intellect-ui] *))) { margin-top: 0; }
 
 /* ── 레일 탭: 조직 | 세션 ──────────────────────────────────────────────────
    대화 목록은 하루에 수십 번 오가는 곳이라 화면 뒤로 숨기지 않는다. 레일이 조직도로
@@ -4461,3 +4479,25 @@
   flex: 0 0 auto;
   margin-left: 2px;
 }
+
+/* Visual option density shared by One composer and mailbox menus. */
+.composerPopoverRow { min-height: 44px; }
+.composerPopoverCopy small { font-size: 11px; line-height: 1.35; }
+.effortBars { height: 18px; display: inline-flex; align-items: flex-end; gap: 2px; }
+.effortBars i { width: 3px; height: 5px; border-radius: 2px; background: var(--paper-edge-strong); }
+.effortBars i:nth-child(2) { height: 9px; }
+.effortBars i:nth-child(3) { height: 13px; }
+.effortBars i:nth-child(4) { height: 17px; }
+.effortBars i[data-filled="true"] { background: var(--ink); }
+.sessionSheet { width: min(540px, calc(100vw - 32px)); border-radius: 18px; }
+.sessionSheetHeader { padding: 14px 16px; }
+.sessionSheetList { padding: 8px; }
+.sessionSheetSplit { min-width: 44px; min-height: 44px; display: inline-flex; justify-content: center; align-items: center; gap: 6px; }
+.searchSheet { width: min(620px, calc(100vw - 32px)); max-height: min(620px, calc(100dvh - 64px)); border-radius: 18px; }
+.taskToolbarMenuPopover button { min-height: 44px; display: flex; align-items: center; gap: 10px; }
+.popupIconTitle { display: inline-flex; align-items: center; gap: 9px; }
+
+
+.searchHeader { grid-template-columns: 20px minmax(0,1fr) auto; align-items: center; color: var(--muted-deep); }
+
+.sessionSplitMeter{display:flex;align-items:center;gap:6px;padding:4px 8px 14px;color:var(--ink-soft);font-size:12px}.sessionSplitMeter>span{flex:1}.sessionSplitMeter i{display:block;width:15px;height:15px;border-radius:5px;border:1px solid var(--paper-edge-strong);background:var(--popup-control-bg)}.sessionSplitMeter i[data-filled=true]{background:var(--accent);border-color:var(--accent)}.sessionSplitMeter small{margin-left:4px;color:var(--muted-deep)}

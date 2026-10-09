@@ -4,6 +4,7 @@
 //   · 접기(collapsed) 모드: 아이콘만 + hover 툴팁. 상태는 localStorage 영속.
 //   · 최상단은 titlebar-drag(맥 신호등 회피 + 창 드래그).
 "use client";
+import popupMenu from "./PanelPopover.module.css";
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -358,7 +359,7 @@ export function SideNav({
           {searchSuggestionsOpen && (
             <div
               id="sidenav-hub-search-suggestions"
-              role="listbox"
+              className={popupMenu.panelPopover} role="listbox"
               aria-label={locale === "ko" ? "Hub 자동완성" : "Hub suggestions"}
               style={{
                 position: "absolute",
@@ -369,10 +370,10 @@ export function SideNav({
                 maxHeight: 300,
                 overflowY: "auto",
                 padding: 6,
-                borderRadius: 12,
-                background: "var(--paper)",
+                borderRadius: "var(--popup-radius)",
+                background: "var(--popup-card-bg)",
                 border: "1px solid var(--paper-edge)",
-                boxShadow: "0 16px 42px rgba(11,11,15,0.16)",
+                boxShadow: "var(--popup-shadow)",
               }}
             >
               {searchLoading && currentSearchSuggestions.length === 0 ? (

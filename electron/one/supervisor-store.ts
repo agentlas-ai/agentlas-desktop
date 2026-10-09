@@ -1,6 +1,8 @@
+import { supervisorError } from "../../shared/one-supervisor";
 import { createHash } from "node:crypto";
 import type Database from "better-sqlite3";
 import { ONE_CHECKIN_LIMITS, nextCheckinAt, type OneCheckin, type OneCheckinCadence, type SupervisorCommandReceipt, type SupervisorNotice, type SupervisorRequestState } from "../../shared/one-supervisor";
+import { ONE_SUPERVISOR_JOURNAL_SCHEMA, type SupervisorJournalPage, type SupervisorJournalEvent } from "../../shared/one-supervisor-runtime";
 
 export interface SupervisorRequestRow {
   command_id: string; one_id: string; kind: SupervisorCommandReceipt["kind"]; payload_json: string;
@@ -93,6 +95,26 @@ export class OneSupervisorStore {
         created_at TEXT NOT NULL, command_id TEXT NOT NULL UNIQUE
       );
       CREATE INDEX IF NOT EXISTS one_supervisor_checkin_due ON one_supervisor_checkins(one_id,active,next_at);`);
+    // Receipts and their ordered change records commit in the same SQLite transaction,
+    // including writes made by existing native adapters. Notification delivery is not authority.
+    db.exec(`CREATE TABLE IF NOT EXISTS one_supervisor_command_events (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT, one_id TEXT NOT NULL, command_id TEXT NOT NULL,
+      receipt_json TEXT NOT NULL, recorded_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS one_supervisor_command_event_scope ON one_supervisor_command_events(one_id,cursor);
+    CREATE INDEX IF NOT EXISTS one_supervisor_command_event_command ON one_supervisor_command_events(command_id);
+    CREATE TRIGGER IF NOT EXISTS one_supervisor_request_insert_event AFTER INSERT ON one_supervisor_requests BEGIN
+      INSERT INTO one_supervisor_command_events(one_id,command_id,receipt_json,recorded_at)
+      VALUES(NEW.one_id,NEW.command_id,NEW.receipt_json,NEW.updated_at);
+    END;
+    CREATE TRIGGER IF NOT EXISTS one_supervisor_request_update_event AFTER UPDATE OF receipt_json ON one_supervisor_requests
+    WHEN NEW.receipt_json<>OLD.receipt_json BEGIN
+      INSERT INTO one_supervisor_command_events(one_id,command_id,receipt_json,recorded_at)
+      VALUES(NEW.one_id,NEW.command_id,NEW.receipt_json,NEW.updated_at);
+    END;
+    INSERT INTO one_supervisor_command_events(one_id,command_id,receipt_json,recorded_at)
+      SELECT r.one_id,r.command_id,r.receipt_json,r.updated_at FROM one_supervisor_requests r
+      WHERE NOT EXISTS(SELECT 1 FROM one_supervisor_command_events e WHERE e.command_id=r.command_id);`);
   }
   conversation(oneId: string): string | null {
     return (this.db.prepare("SELECT chat_id FROM one_supervisor_conversations WHERE one_id=?").get(oneId) as {chat_id: string} | undefined)?.chat_id ?? null;
@@ -109,16 +131,32 @@ export class OneSupervisorStore {
   get(commandId: string): SupervisorRequestRow | null {
     return this.db.prepare("SELECT * FROM one_supervisor_requests WHERE command_id=?").get(commandId) as SupervisorRequestRow | undefined ?? null;
   }
+  cursor(oneId: string): number {
+    return (this.db.prepare("SELECT COALESCE(MAX(cursor),0) AS cursor FROM one_supervisor_command_events WHERE one_id=?").get(oneId) as {cursor:number}).cursor;
+  }
+  journal(oneId:string,afterCursor:number,limit=100):SupervisorJournalPage {
+    if(!Number.isSafeInteger(afterCursor)||afterCursor<0||!Number.isSafeInteger(limit)||limit<1||limit>200)throw supervisorError('supervisor_journal_cursor_invalid');
+    return this.db.transaction(()=>{
+      const latestCursor=this.cursor(oneId);
+      if(afterCursor>latestCursor)return {schema:ONE_SUPERVISOR_JOURNAL_SCHEMA,oneId,events:[],nextCursor:latestCursor,latestCursor,hasMore:false,resetRequired:true};
+      const rows=this.db.prepare(`SELECT cursor,command_id,receipt_json,recorded_at FROM one_supervisor_command_events
+        WHERE one_id=? AND cursor>? ORDER BY cursor LIMIT ?`).all(oneId,afterCursor,limit) as Array<{cursor:number;command_id:string;receipt_json:string;recorded_at:string}>;
+      const events:SupervisorJournalEvent[]=rows.map(row=>({cursor:row.cursor,commandId:row.command_id,receipt:JSON.parse(row.receipt_json),recordedAt:row.recorded_at}));
+      const nextCursor=events.at(-1)?.cursor ?? afterCursor;
+      return {schema:ONE_SUPERVISOR_JOURNAL_SCHEMA,oneId,events,nextCursor,latestCursor,hasMore:nextCursor<latestCursor,resetRequired:false};
+    })();
+  }
   receive(input: { commandId: string; oneId: string; kind: SupervisorCommandReceipt["kind"]; payload: unknown; originChatId: string; taskId?: string; runId?: string }, persist?: () => string | void): SupervisorRequestRow {
     const hash = supervisorHash([input.oneId,input.kind,input.payload]);
     return this.db.transaction(() => {
       const prior = this.get(input.commandId);
       if (prior) {
-        if (prior.one_id !== input.oneId || prior.payload_hash !== hash) throw new Error("supervisor_command_identity_conflict");
+        if (prior.one_id !== input.oneId || prior.payload_hash !== hash) throw supervisorError('supervisor_command_identity_conflict');
         return prior;
       }
       const now = new Date().toISOString();
-      const receipt: SupervisorCommandReceipt = { commandId: input.commandId, kind: input.kind, state: "stored", taskId: input.taskId ?? null, runId: input.runId ?? null, acknowledgement: "stored", reason: null };
+      const receipt: SupervisorCommandReceipt = { commandId: input.commandId, kind: input.kind, state: "stored", taskId: input.taskId ?? null, runId: input.runId ?? null, acknowledgement: "stored", reason: null,
+        ...(["cancel","stop-reply"].includes(input.kind)?{control:{phase:"requested" as const,requestedAt:now,observedAt:now}}:{}) };
       const messageId = persist?.(); // message and ACK are committed together; disk failure emits no success
       this.db.prepare(`INSERT INTO one_supervisor_requests(command_id,one_id,kind,payload_json,payload_hash,state,task_id,run_id,origin_chat_id,user_message_id,receipt_json,created_at,updated_at)
         VALUES(?,?,?,?,?,'stored',?,?,?,?,?,?,?)`).run(input.commandId,input.oneId,input.kind,JSON.stringify(input.payload),hash,input.taskId ?? null,input.runId ?? null,input.originChatId,messageId ?? null,JSON.stringify(receipt),now,now);
@@ -127,9 +165,15 @@ export class OneSupervisorStore {
   }
   update(row: SupervisorRequestRow, patch: Partial<SupervisorCommandReceipt>, expectedState = row.state): SupervisorCommandReceipt {
     const receipt = {...JSON.parse(row.receipt_json) as SupervisorCommandReceipt,...patch};
+    if(receipt.kind==="cancel"||receipt.kind==="stop-reply")receipt.control={
+      phase:receipt.state==="cancelled"?"stopped":receipt.state==="held"?"unknown":receipt.state==="completed"?"settled"
+        :receipt.state==="failed"?(receipt.reason==="cancel_raced_terminal_outcome"||receipt.reason==="interrupted_requires_review"?"settled":"rejected")
+        :receipt.acknowledgement==="delivered"?"delivered":"requested",
+      requestedAt:receipt.control?.requestedAt ?? row.created_at,observedAt:new Date().toISOString(),
+    };
     const changed = this.db.prepare(`UPDATE one_supervisor_requests SET state=?,task_id=?,run_id=?,receipt_json=?,updated_at=? WHERE command_id=? AND one_id=? AND state=?`)
       .run(receipt.state,receipt.taskId,receipt.runId,JSON.stringify(receipt),new Date().toISOString(),row.command_id,row.one_id,expectedState);
-    if (changed.changes !== 1) throw new Error("supervisor_request_state_conflict");
+    if (changed.changes !== 1) throw supervisorError('supervisor_request_state_conflict');
     return receipt;
   }
   list(oneId: string, state?: SupervisorRequestState): SupervisorRequestRow[] {
@@ -156,9 +200,9 @@ export class OneSupervisorStore {
   addCheckin(oneId: string, input: {commandId: string; instruction: string; cadence: OneCheckinCadence; notify: "important" | "always"}, now = Date.now()): OneCheckin {
     return this.db.transaction(() => {
       const prior = this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE command_id=?").get(input.commandId) as Parameters<OneSupervisorStore["checkinRow"]>[0] & {one_id:string} | undefined;
-      if (prior) { if (prior.one_id !== oneId) throw new Error("supervisor_command_identity_conflict"); return this.checkinRow(prior); }
+      if (prior) { if (prior.one_id !== oneId) throw supervisorError('supervisor_command_identity_conflict'); return this.checkinRow(prior); }
       if ((this.db.prepare("SELECT count(*) AS n FROM one_supervisor_checkins WHERE one_id=? AND active=1").get(oneId) as {n:number}).n >= ONE_CHECKIN_LIMITS.active) {
-        throw new Error("supervisor_checkin_limit");
+        throw supervisorError('supervisor_checkin_limit');
       }
       const id = `checkin_${supervisorHash([oneId,input.commandId]).slice(0,24)}`;
       this.db.prepare(`INSERT INTO one_supervisor_checkins(id,one_id,instruction,cadence_json,notify,next_at,created_at,command_id) VALUES(?,?,?,?,?,?,?,?)`)

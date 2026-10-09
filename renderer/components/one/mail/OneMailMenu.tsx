@@ -4,7 +4,7 @@
 // (same classes, same tokens) so it looks like the One (+) and model menus.
 import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
-import { IconCheck } from "@/components/Icon";
+import { IconCheck, IconChevronRight, IconTrash } from "@/components/Icon";
 import shell from "../OneShell.module.css";
 
 export interface OneMailMenuItem {
@@ -106,7 +106,7 @@ export function OneMailMenu({
             disabled={item.disabled}
             onClick={() => { item.onSelect(); onClose(); }}
           >
-            <span className={shell.composerPopoverIcon} aria-hidden="true">{item.icon ?? null}</span>
+            <span className={shell.composerPopoverIcon} aria-hidden="true">{item.icon ?? (item.danger ? <IconTrash size={15} /> : <IconChevronRight size={15} />)}</span>
             <span className={shell.composerPopoverCopy}>
               <strong style={item.danger ? { color: "var(--danger)" } : undefined}>{item.label}</strong>
               {item.detail ? <small>{item.detail}</small> : null}

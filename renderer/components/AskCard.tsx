@@ -2,6 +2,7 @@
 
 import { useRef, useState, type ReactNode } from "react";
 import { askCardFooterLabel } from "@shared/ask-card-footer";
+import { IconChat, IconCheck, IconChevronRight, IconClose, IconEdit, IconSend } from "./Icon";
 import styles from "./AskCard.module.css";
 
 /**
@@ -15,6 +16,7 @@ import styles from "./AskCard.module.css";
  */
 export interface AskCardOption {
   id: string;
+  icon?: ReactNode;
   title: string;
   /** 한 줄 설명. 없으면 제목만 보인다. */
   note?: string;
@@ -46,6 +48,7 @@ export interface AskCardActionRow {
 
 export function AskCard({
   title,
+  icon = <IconChat size={18} />,
   options,
   onChoose,
   onClose,
@@ -60,6 +63,7 @@ export function AskCard({
   "data-testid": testId,
 }: {
   title: string;
+  icon?: ReactNode;
   /** 제목 아래 한 줄 — 질문 본문. 제목이 짧은 머리말(header)일 때 무엇을 묻는지 보인다. */
   subtitle?: string;
   /** 아래 동작 줄. 있으면 footer 의 단일 단추 대신 이 줄이 답을 보내고 건너뛴다. */
@@ -120,6 +124,7 @@ export function AskCard({
   return (
     <section className={styles.card} role="group" aria-label={title} data-ask-card="true" data-testid={testId}>
       <div className={styles.head}>
+        <span className={styles.headingIcon} aria-hidden="true">{icon}</span>
         <div className={styles.titleBlock}>
           <p className={styles.title}>{title}</p>
           {subtitle && subtitle !== title && <p className={styles.subtitle}>{subtitle}</p>}
@@ -131,7 +136,7 @@ export function AskCard({
             aria-label={locale === "ko" ? "닫기" : "Close"}
             onClick={onClose}
           >
-            ×
+            <IconClose size={16} />
           </button>
         )}
       </div>
@@ -149,7 +154,7 @@ export function AskCard({
             disabled={option.disabled}
             onClick={() => onChoose(option.id, currentFreeText.trim())}
           >
-            <span className={styles.index} aria-hidden="true">{index + 1}</span>
+            <span className={styles.index} aria-hidden="true">{option.icon ?? index + 1}</span>
             <span className={styles.optionText}>
               <span className={styles.optionTitleRow}>
                 <span className={styles.optionTitle}>{option.title}</span>
@@ -158,8 +163,8 @@ export function AskCard({
               {option.note && <span className={styles.optionNote}>{option.note}</span>}
             </span>
             {option.checked !== undefined
-              ? <span className={styles.check} data-checked={option.checked ? "true" : "false"} aria-hidden="true">{option.checked ? "✓" : ""}</span>
-              : option.active && <span className={styles.arrow} aria-hidden="true">→</span>}
+              ? <span className={styles.check} data-checked={option.checked ? "true" : "false"} aria-hidden="true">{option.checked && <IconCheck size={13} />}</span>
+              : option.active && <span className={styles.arrow} aria-hidden="true"><IconChevronRight size={16} /></span>}
           </button>
         ))}
         {otherOption && (
@@ -171,19 +176,19 @@ export function AskCard({
             data-active={currentFreeText.trim() ? "true" : "false"}
             onClick={() => footerInputRef.current?.focus()}
           >
-            <span className={styles.index} aria-hidden="true">{options.length + 1}</span>
+            <span className={styles.index} aria-hidden="true"><IconEdit size={14} /></span>
             <span className={styles.optionText}>
               <span className={styles.optionTitleRow}><span className={styles.optionTitle}>{otherOption.title}</span></span>
               {otherOption.note && <span className={styles.optionNote}>{otherOption.note}</span>}
             </span>
-            {currentFreeText.trim() && <span className={styles.arrow} aria-hidden="true">→</span>}
+            {currentFreeText.trim() && <span className={styles.arrow} aria-hidden="true"><IconChevronRight size={16} /></span>}
           </button>
         )}
       </div>
 
       {footer && (
         <div className={styles.footer}>
-          <span className={styles.footerMark} aria-hidden="true">✎</span>
+          <span className={styles.footerMark} aria-hidden="true"><IconEdit size={14} /></span>
           {!footer.hideInput && <input
               ref={footerInputRef}
               className={styles.footerInput}
@@ -238,6 +243,7 @@ export function AskCard({
                 title={actionRow.primary.disabled && actionRow.reason ? actionRow.reason : undefined}
                 onClick={() => actionRow.onAction(actionRow.primary!.id, currentFreeText.trim())}
               >
+                <IconSend size={14} />
                 {actionRow.primary.label}
               </button>
             )}

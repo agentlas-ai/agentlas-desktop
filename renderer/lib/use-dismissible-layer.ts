@@ -31,13 +31,20 @@ export function useDismissibleLayer({
 
   useEffect(() => {
     if (!open) return;
-    const dismiss = () => dismissRef.current();
+    const coveredByModal = () => {
+      if (document.querySelector('[data-popup-host="true"]')) return true;
+      const mountedRoots = rootsRef.current.flatMap(ref => ref.current ? [ref.current] : []);
+      return mountedRoots.length > 0 && mountedRoots.every(root => root.closest("[inert]"));
+    };
+    const dismiss = () => { if (!coveredByModal()) dismissRef.current(); };
     const onPointerDown = (event: PointerEvent) => {
+      if (coveredByModal()) return;
       const path = event.composedPath();
       if (rootsRef.current.some((ref) => ref.current && path.includes(ref.current))) return;
       dismiss();
     };
     const onKeyDown = (event: KeyboardEvent) => {
+      if (coveredByModal()) return;
       if (event.key !== "Escape" || event.metaKey || event.ctrlKey || event.altKey) return;
       event.preventDefault();
       event.stopPropagation();

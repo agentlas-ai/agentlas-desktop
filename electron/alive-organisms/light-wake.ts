@@ -18,6 +18,8 @@
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import type { Runner, RunnerFailure } from "../runtime/runner";
+import { RuntimeTurnUnsettledError, runnerFailureFromError, runtimeFailureIsClosedHttpRefusal } from "../runtime/runner";
+import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { createRuntimeUsageCollector } from "../../shared/observed-usage";
 
@@ -127,6 +129,7 @@ export class LightWakeRunner {
     const toolIds = new Map<string, string>();
     const usage = createRuntimeUsageCollector();
     let nativeEvidence = false;
+    let partialText = "";
     let settled = false;
     void Promise.resolve().then(() => picked.runner({
       systemPrompt: input.systemPrompt, history: [], userPrompt: input.userPrompt, backendLabel: picked.label,
@@ -138,7 +141,12 @@ export class LightWakeRunner {
       // tokens per wake measured 2026-09-24. Other runners already exclude user config on this path.
       ...(input.status.kind === "codex" ? { isolatedMcpConfig: true as const } : {}),
     }, {
-      onPartial: (text) => { if (!settled && text) nativeEvidence = true; }, onStatus: () => {},
+      onPartial: (text) => {
+        if (!settled && text) { nativeEvidence = true; partialText = (partialText + text).slice(0, 4_096); }
+      }, onStatus: () => {},
+      onThinking: () => { if (!settled) nativeEvidence = true; },
+      onUsage: () => { if (!settled) nativeEvidence = true; },
+      onNativeTurnController: (controller) => { if (!settled && controller) nativeEvidence = true; },
       onTool: (name, _args, _result, id) => {
         if (settled) return;
         nativeEvidence = true;
@@ -152,13 +160,25 @@ export class LightWakeRunner {
       if (controller.signal.aborted) {
         const reason = String((controller.signal.reason as Error)?.message ?? "");
         const cancelled = reason === "alive-wake-cancelled" || reason === "alive-wake-shutdown";
-        this.settle(input.wakeId, cancelled ? "cancelled" : "failed", observed, null,
-          cancelled ? reason : "alive-wake-timeout");
+        if (!cancelled) {
+          try { this.deps.noteFailure(input.status, runnerFailureFromError(controller.signal.reason, input.status.kind)); } catch { /* diagnostic only */ }
+        }
+        this.settle(input.wakeId, cancelled ? "cancelled" : "failed", observed, cancelled ? null : result.text || partialText || null,
+          cancelled ? reason : new RuntimeTurnUnsettledError(input.status.kind, "en").code);
+        return;
+      }
+      if (result.ownerControlTerminal !== "completed" && !runtimeFailureIsClosedHttpRefusal(result.failure, {
+        text: result.text, nativeActivity: nativeEvidence, aborted: false, observedUsage: result.observedUsage,
+      })) {
+        const failure = runnerFailureFromError(new RuntimeTurnUnsettledError(input.status.kind, "en"), input.status.kind);
+        try { this.deps.noteFailure(input.status, result.failure ?? failure); } catch { /* telemetry cannot prevent settlement */ }
+        this.settle(input.wakeId, "failed", observed, result.text || partialText || null, failure.providerCode!);
         return;
       }
       if (result.failure) {
         try { this.deps.noteFailure(input.status, result.failure); } catch { /* telemetry cannot prevent settlement */ }
-        this.settle(input.wakeId, "failed", observed, null, `runtime-${result.failure.kind}`);
+        this.settle(input.wakeId, "failed", observed, null,
+          runtimeFailureBlocksReplay(result.failure) ? result.failure.providerCode! : `runtime-${result.failure.kind}`);
       } else {
         if (!observed) this.learn(input.status, "usage-unmeasured");
         this.settle(input.wakeId, "completed", observed, result.text ?? "", null);
@@ -173,9 +193,11 @@ export class LightWakeRunner {
       }
       const reason = controller.signal.aborted ? String((controller.signal.reason as Error)?.message ?? "") : "";
       const cancelled = reason === "alive-wake-cancelled" || reason === "alive-wake-shutdown";
-      this.settle(input.wakeId, cancelled ? "cancelled" : "failed", usage.total() ?? null, null,
-        reason === "alive-wake-timeout" ? "alive-wake-timeout" : cancelled ? reason : "alive-runner-threw");
-      void error;
+      const failure = runnerFailureFromError(error, input.status.kind);
+      this.settle(input.wakeId, cancelled ? "cancelled" : "failed", usage.total() ?? null, partialText || null,
+        cancelled ? reason
+          : runtimeFailureBlocksReplay(failure) ? failure.providerCode!
+            : new RuntimeTurnUnsettledError(input.status.kind, "en").code);
     }).finally(() => { clearTimeout(timer); this.active.delete(input.wakeId); });
     const toolCallsOf = () => [...toolIds.values()].filter((name) => !ANSWER_CHANNEL_TOOLS.has(name)).length;
     const toolNames = () => [...new Set(toolIds.values())];

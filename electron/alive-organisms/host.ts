@@ -25,7 +25,7 @@ import { GoalAliveRuntime } from "./goal-runtime";
 import { LightWakeRunner, type LightWakeDeps } from "./light-wake";
 import { ALIVE_POOL_RUNTIME_POLICY, aliveSelectionFromPool, type AliveModelOrderEntry } from "./model-order";
 import { ALIVE_DEFAULT_TOKEN_LIMIT, ALIVE_MAX_TOKEN_LIMIT, type AliveChangedEvent, type AliveModelOrderItem,
-  type AliveSetEnabledInput, type AliveSetTokenLimitInput, type AliveState, type AliveStatus, type AliveSurface } from "../../shared/alive";
+  type AliveSetEnabledInput, type AliveSetTokenLimitInput, type AliveResumeUncertainWakeInput, type AliveState, type AliveStatus, type AliveSurface } from "../../shared/alive";
 
 export type AliveOrganism = "work" | "one";
 
@@ -120,9 +120,9 @@ export class AliveOrganismHost {
       const service = new AliveLifetimeService(store, runtime, new Map([[kind, playground]]), {
         clock: deps.now,
         // No member can run now: a visible wait, re-checked every beat (cooldowns expire on their own).
-        admission: () => this.planAccess !== "allowed"
+        admission: (agent) => this.ownerResumeAdmission(kind,agent) ?? (this.planAccess !== "allowed"
           ? this.planAccess
-          : aliveSelectionFromPool(deps.cachedModelOrder()) ? null : "model.order-exhausted",
+          : aliveSelectionFromPool(deps.cachedModelOrder()) ? null : "model.order-exhausted"),
         actionAdmission: () => this.planAccess === "allowed" ? null : this.planAccess,
         refreshActionAdmission: async () => {
           const access = await this.refreshPlanAccess();
@@ -388,6 +388,11 @@ export class AliveOrganismHost {
     }
     base.enabled = agent.status === "enabled";
     if (!base.enabled) return base;
+    const resumeBarrier = organism.store.resumeBarrier(agent.agentId);
+    const run = resolved.goalId ? this.deps.playground.runForGoal(resolved.goalId) : null;
+    if (resumeBarrier && run && resolved.goalId && !organism.store.activeWakes().some(w=>w.agentId===agent.agentId)
+      && !organism.store.pendingActions().some(a=>a.agentId===agent.agentId)) base.resumeBarrier = {...resumeBarrier,
+        goalBinding:{goalId:resolved.goalId,runId:run.id,runVersion:run.version}};
     const status = this.statusOf(organism, agent);
     base.status = status.status;
     if (status.code) base.statusReasonCode = status.code;
@@ -395,6 +400,43 @@ export class AliveOrganismHost {
   }
 
   // ── owner controls ────────────────────────────────────────────────────────
+
+  private ownerResumeAdmission(surface:AliveSurface,agent:AliveAgent): string|null {
+    const auth = agent.state.ownerResume as {consumedWakeId?:unknown;expected?:{goalBinding?:{goalId:string;runId:string;runVersion:number}}}|undefined;
+    if (!auth || auth.consumedWakeId !== null) return null;
+    const attachment = this.organisms[surface].store.attachments(agent.agentId).find(row=>row.status==="attached");
+    const binding = auth.expected?.goalBinding;
+    const goalId = attachment ? attachedGoalId(attachment,this.deps.playground).goalId : null;
+    const run = goalId ? this.deps.playground.runForGoal(goalId) : null;
+    return binding && goalId===binding.goalId && run?.id===binding.runId && run.version===binding.runVersion
+      ? null : "alive-resume-binding-invalid";
+  }
+
+  resumeUncertainWake(input:AliveResumeUncertainWakeInput): AliveState {
+    const organism = this.organisms[input.surface];
+    this.deps.db.transaction(() => {
+      const resolved = this.scopeFor(input.surface,input.chatId);
+      if (!resolved.available || resolved.needsGoal || !resolved.goalId || resolved.agentId !== input.expected.agentId)
+        throw new AliveHostError("alive-resume-binding-invalid");
+      if (this.planAccess !== "allowed") throw new AliveHostError(this.planAccess);
+      const agent = organism.store.get(input.expected.agentId);
+      const run = this.deps.playground.runForGoal(resolved.goalId);
+      const goalBinding = input.expected.goalBinding;
+      if (!goalBinding || goalBinding.goalId !== resolved.goalId || goalBinding.runId !== run?.id || goalBinding.runVersion !== run?.version)
+        throw new AliveHostError("alive-resume-binding-invalid");
+      const attachment = agent ? organism.store.attachments(agent.agentId).find(row=>row.status==="attached") : undefined;
+      if (!agent || agent.status !== "enabled" || !attachment || attachment.scope.chatId !== input.chatId
+        || attachedGoalId(attachment,this.deps.playground).goalId !== resolved.goalId) throw new AliveHostError("alive-resume-binding-invalid");
+      if ((agent.budget.deadlineMs !== null && this.deps.now() >= agent.budget.deadlineMs)
+        || (agent.budget.tokenLimit !== null && (agent.state.usageUnknown === true || agent.budget.tokensUsed >= agent.budget.tokenLimit)))
+        throw new AliveHostError("alive-resume-budget-blocked");
+      try { organism.store.authorizeOwnerResume(agent.agentId,input.intentId,input.expected,this.deps.now()); }
+      catch (error) { throw new AliveHostError(error instanceof Error ? error.message : "alive-resume-stale"); }
+    })();
+    this.emitChanges(input.surface,input.expected.agentId);
+    if (this.running) setImmediate(() => { void this.beat(input.surface); });
+    return this.getState(input.surface,input.chatId);
+  }
 
   setEnabled(input: AliveSetEnabledInput): AliveState {
     const { surface, chatId, enabled } = input;

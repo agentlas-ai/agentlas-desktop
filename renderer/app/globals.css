@@ -12,6 +12,15 @@
   src: url("./fonts/pretendard/PretendardVariable.woff2") format("woff2");
 }
 
+/* Windows UI uses bundled SUIT, including Korean, without an installed font or CDN. */
+@font-face {
+  font-family: "SUIT Variable";
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: swap;
+  src: url("./fonts/suit/SUIT-Variable.woff2") format("woff2");
+}
+
 /* Ontology map: motion and transparency are optional presentation layers. */
 @media (prefers-reduced-motion: reduce) {
   [data-testid="agent-ontology-graph"] button {
@@ -236,9 +245,8 @@
   /* Agentlas Web redesign tokens. Keep these in lockstep with
      agentlas/AgentsAtlas/app/src/app/redesign.css so Desktop Hub renders with
      the same paper, ink, hairline, radius, and elevation values as Web Hub. */
-  /* Pretendard Variable을 번들(위 @font-face)하므로 1순위로 둔다 — Windows/macOS 모두 동일한
-     타이포그래피로 렌더된다(일관성이 번들의 목적). 시스템 폰트는 폰트 로드 전 스왑용 폴백으로 뒤에 유지.
-     macOS를 SF Pro로 되돌리려면 각 스택의 맨 앞 "Pretendard Variable"만 제거하면 된다. */
+  /* 기본 UI는 번들 Pretendard, Windows는 아래 플랫폼 토큰의 번들 SUIT를 사용한다.
+     시스템 폰트는 로컬 글꼴이 준비되기 전의 폴백으로 유지한다. */
   --rd-f-display: "Pretendard Variable", "Pretendard", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", "Inter Tight", "Malgun Gothic", system-ui, sans-serif;
   --rd-f-body: "Pretendard Variable", "Pretendard", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", "Inter", "Noto Sans KR", "Malgun Gothic", system-ui, sans-serif;
   --rd-f-mono: "JetBrains Mono", "SF Mono", "Cascadia Mono", "Consolas", ui-monospace, monospace;
@@ -410,6 +418,21 @@
   --neu-raised: 0 1px 2px rgba(20, 22, 45, 0.05), 0 4px 12px -2px rgba(20, 22, 45, 0.08);
   --neu-raised-strong: 0 2px 4px rgba(20, 22, 45, 0.06), 0 10px 26px -6px rgba(20, 22, 45, 0.13);
   --neu-inset: inset 0 1px 3px rgba(20, 22, 45, 0.10), inset 0 -1px 2px rgba(255, 255, 255, 0.55);
+}
+
+:root[data-platform="windows"] {
+  --font-body: "SUIT Variable", "Pretendard Variable", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --font-head: "SUIT Variable", "Pretendard Variable", "Segoe UI Variable Display", "Segoe UI", system-ui, sans-serif;
+  --rd-f-body: var(--font-body);
+  --rd-f-display: var(--font-head);
+}
+
+:root {
+  --popup-radius: 18px;
+  --popup-backdrop: color-mix(in srgb, var(--ink) 24%, transparent);
+  --popup-shadow: inset 0 1px 0 var(--white-soft), 0 4px 12px color-mix(in srgb, var(--ink) 7%, transparent), 0 24px 64px -16px color-mix(in srgb, var(--ink) 22%, transparent);
+  --popup-card-bg: linear-gradient(155deg, var(--paper), color-mix(in oklch, var(--green) 14%, var(--paper)));
+  --popup-control-bg: linear-gradient(155deg, color-mix(in oklch, var(--green) 18%, var(--paper)), color-mix(in oklch, var(--green) 42%, var(--paper)));
 }
 
 /* ── Dark theme — 동일 토큰을 재정의 (data-theme="dark" on <html>) ──── */
@@ -3187,8 +3210,9 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
   gap: 14px;
   padding: 9px 9px 9px 14px;
   border: 1px solid var(--paper-edge);
-  border-radius: 12px;
-  background: var(--paper);
+  border-radius: var(--popup-radius);
+  background: var(--popup-card-bg);
+  box-shadow: var(--popup-shadow);
   color: var(--ink);
 }
 
@@ -3236,7 +3260,11 @@ button.dashboard-local-model-card:hover { background: color-mix(in oklch, var(--
 }
 
 .tool-approval-chip-action {
-  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 44px;
   flex: 0 0 auto;
   padding: 0 12px;
   border: 1px solid var(--paper-edge);
@@ -10213,66 +10241,61 @@ button[data-toggle-state="on"] {
   width: 100%;
   min-height: 44px;
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 8px;
-  border: 1px solid color-mix(in oklch, var(--accent) 28%, var(--paper-edge));
-  border-radius: 9px;
-  background: color-mix(in oklch, var(--accent) 7%, var(--paper));
+  padding: 4px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 12px;
+  background: linear-gradient(155deg, var(--paper), var(--paper-2));
   color: var(--ink);
-  box-shadow: 0 8px 24px rgba(0, 21, 25, 0.08);
+  box-shadow: inset 0 1px 0 var(--white-soft), var(--shadow-1);
   container-type: inline-size;
 }
 .sidenav-update-card[data-downloaded="true"] {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 10px;
-  padding: 10px;
-  background: color-mix(in oklch, var(--accent) 6%, var(--paper));
-  border-color: color-mix(in oklch, var(--accent) 30%, var(--paper-edge));
-  color: var(--ink);
-}
-.sidenav-update-card[data-downloaded="false"] {
-  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0;
+  border-color: color-mix(in oklch, var(--accent) 24%, var(--paper-edge));
 }
 .sidenav-update-card[data-action-required="true"] {
-  grid-template-columns: auto minmax(0, 1fr);
+  grid-template-columns: 32px minmax(0, 1fr) auto;
   align-items: start;
-  border-color: color-mix(in oklch, var(--accent) 42%, var(--paper-edge));
-  background: color-mix(in oklch, var(--accent) 9%, var(--paper));
+  padding: 8px;
+  border-color: color-mix(in oklch, var(--warn) 35%, var(--paper-edge));
+  background: color-mix(in oklch, var(--warn) 5%, var(--paper));
 }
 .sidenav-update-card[data-collapsed="true"] {
   display: grid;
   grid-template-columns: 1fr;
   justify-items: center;
-  gap: 6px;
-  padding: 8px 6px;
+  gap: 0;
+  padding: 2px;
 }
 .sidenav-update-head {
   min-width: 0;
-  display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) 44px;
-  align-items: start;
-  gap: 8px;
+  display: flex;
+  align-items: center;
+  gap: 2px;
 }
 .sidenav-update-icon {
+  flex: 0 0 auto;
   width: 32px;
   height: 32px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 9px;
-  color: var(--accent);
-  background: color-mix(in oklch, var(--accent) 13%, var(--paper));
-}
-.sidenav-update-dot {
-  width: 9px;
-  height: 9px;
   border-radius: 50%;
-  background: currentColor;
-  box-shadow: 0 0 0 4px color-mix(in oklch, currentColor 18%, transparent);
+  color: var(--rd-accent-text);
+  background: linear-gradient(155deg,
+    color-mix(in oklch, var(--green) 12%, var(--paper)),
+    color-mix(in oklch, var(--green) 26%, var(--paper)));
+  box-shadow: inset 0 1px 0 var(--white-soft), 0 1px 2px color-mix(in oklch, var(--accent) 12%, transparent);
+}
+.sidenav-update-card[data-action-required="true"] .sidenav-update-icon {
+  color: var(--warn);
+  background: color-mix(in oklch, var(--warn) 10%, var(--paper));
 }
 .sidenav-update-copy {
   min-width: 0;
@@ -10280,8 +10303,9 @@ button[data-toggle-state="on"] {
   flex-direction: column;
   gap: 2px;
   color: inherit;
-  font-size: 11.5px;
-  line-height: 1.22;
+  font-size: 10px;
+  line-height: 1.3;
+  text-align: left;
 }
 .sidenav-update-copy strong,
 .sidenav-update-copy span {
@@ -10292,17 +10316,19 @@ button[data-toggle-state="on"] {
   overflow-wrap: anywhere;
 }
 .sidenav-update-copy strong {
-  font-size: 12.5px;
-  font-weight: 800;
+  font-size: 11.5px;
+  font-weight: 650;
 }
 .sidenav-update-copy span {
   color: var(--muted-deep);
-  font-weight: 600;
+  font-weight: 500;
 }
 .sidenav-update-copy .sidenav-update-version {
-  color: var(--accent);
-  font-size: 10.5px;
-  font-weight: 750;
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
 }
 .sidenav-update-action,
 .sidenav-update-dismiss,
@@ -10312,34 +10338,40 @@ button[data-toggle-state="on"] {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  border-radius: 8px;
+  flex-shrink: 0;
+  border-radius: 10px;
   border: none;
   cursor: pointer;
   font: inherit;
-  font-size: 11.5px;
-  font-weight: 850;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
 }
 .sidenav-update-action {
-  padding: 0 12px;
-  border: 1px solid var(--accent);
-  background: var(--accent);
-  color: var(--paper);
-  box-shadow: 0 1px 3px rgba(0, 21, 25, 0.12);
+  position: relative;
+  width: 44px;
+  padding: 0;
+  border: 1px solid color-mix(in oklch, var(--accent) 16%, var(--paper));
+  background: linear-gradient(155deg,
+    color-mix(in oklch, var(--green) 18%, var(--paper)),
+    color-mix(in oklch, var(--green) 48%, var(--paper)));
+  color: var(--rd-accent-text);
+  box-shadow:
+    inset 0 1px 0 var(--white-soft),
+    inset 0 -1px 0 color-mix(in oklch, var(--accent) 16%, transparent),
+    0 2px 4px -1px color-mix(in oklch, var(--accent) 20%, transparent),
+    0 6px 12px -4px color-mix(in oklch, var(--accent) 24%, transparent);
 }
 .sidenav-update-card[data-action-required="true"] .sidenav-update-action {
-  grid-column: 2;
-  justify-self: start;
-  width: 100%;
-  min-height: 44px;
-  height: auto;
-  padding: 7px 10px;
-  white-space: normal;
-  line-height: 1.3;
-  text-align: center;
+  background: color-mix(in oklch, var(--warn) 12%, var(--paper));
+  color: var(--warn);
 }
-.sidenav-update-card[data-collapsed="true"] .sidenav-update-action {
-  grid-column: auto;
-  width: auto;
+.sidenav-update-ready-dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
 }
 .sidenav-update-dismiss {
   padding: 0;
@@ -10347,30 +10379,32 @@ button[data-toggle-state="on"] {
   color: var(--muted-deep);
   border: 0;
 }
-.sidenav-update-action:hover,
-.sidenav-update-dismiss:hover,
-.sidenav-update-secondary:hover {
+.sidenav-update-action:hover {
+  background: linear-gradient(155deg,
+    color-mix(in oklch, var(--green) 24%, var(--paper)),
+    color-mix(in oklch, var(--green) 56%, var(--paper)));
+  box-shadow: inset 0 1px 0 var(--white-soft), var(--neu-raised-strong);
   transform: translateY(-1px);
 }
-.sidenav-update-actions {
-  display: grid;
-  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
-  gap: 8px;
+.sidenav-update-action:active {
+  box-shadow: var(--neu-inset);
+  transform: translateY(1px);
 }
-.sidenav-update-actions > button:only-child {
-  grid-column: 1 / -1;
+.sidenav-update-card[data-action-required="true"] .sidenav-update-action:hover {
+  background: color-mix(in oklch, var(--warn) 20%, var(--paper));
 }
 .sidenav-update-secondary {
-  padding: 0 10px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  background: var(--paper);
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 0 4px;
+  justify-content: flex-start;
+  background: transparent;
   color: var(--ink);
-  cursor: pointer;
-  font: inherit;
-  font-size: 11.5px;
-  font-weight: 750;
-  gap: 5px;
+  gap: 8px;
+}
+.sidenav-update-dismiss:hover,
+.sidenav-update-secondary:hover {
+  background: color-mix(in oklch, var(--ink) 5%, transparent);
 }
 .sidenav-update-chevron {
   flex: 0 0 auto;
@@ -10380,13 +10414,13 @@ button[data-toggle-state="on"] {
   transform: rotate(180deg);
 }
 .sidenav-update-changelog {
-  padding: 9px 10px;
-  border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  background: color-mix(in oklch, var(--paper) 90%, var(--paper-2));
+  margin-top: 4px;
+  padding: 10px 8px 0;
+  border-top: 1px solid var(--paper-edge);
   color: var(--ink);
   font-size: 11.5px;
   line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .sidenav-update-changelog > strong {
   display: block;
@@ -10401,6 +10435,16 @@ button[data-toggle-state="on"] {
 .sidenav-update-changelog p {
   margin: 0;
   color: var(--muted-deep);
+}
+.sidenav-update-changelog .sidenav-update-description {
+  margin-bottom: 10px;
+}
+.sidenav-update-feedback {
+  margin: 4px 8px 6px;
+  color: var(--muted-deep);
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 .sidenav-update-changelog li + li {
   margin-top: 3px;
@@ -10417,6 +10461,7 @@ button[data-toggle-state="on"] {
   font-size: 11px;
   font-weight: 800;
   text-align: left;
+  overflow-wrap: anywhere;
 }
 .sidenav-update-release-link:hover {
   text-decoration: underline;
@@ -10429,19 +10474,72 @@ button[data-toggle-state="on"] {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+.sidenav-update-progress {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent);
+}
+.sidenav-update-progress-ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  fill: none;
+  stroke-width: 2;
+  transform: rotate(-90deg);
+}
+.sidenav-update-progress-track {
+  stroke: var(--paper-edge);
+}
+.sidenav-update-progress-fill {
+  stroke: currentColor;
+  stroke-linecap: round;
+  transition: stroke-dashoffset 0.25s ease;
+}
+.sidenav-update-percent {
+  padding-right: 6px;
+  color: var(--muted-deep);
+  font-family: var(--font-body);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: no-preference) {
+  .sidenav-update-progress[data-indeterminate="true"] .sidenav-update-progress-ring {
+    animation: agentlas-spin 1.2s linear infinite;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .sidenav-update-card button,
+  .sidenav-update-progress-fill,
+  .sidenav-update-chevron {
+    transition: none;
+  }
+}
 @container (max-width: 218px) {
-  .sidenav-update-head {
-    grid-template-columns: minmax(0, 1fr) 44px;
+  .sidenav-update-secondary {
+    gap: 4px;
+    padding: 0;
   }
   .sidenav-update-icon {
+    width: 28px;
+    height: 28px;
+  }
+}
+@container (max-width: 190px) {
+  .sidenav-update-chevron {
     display: none;
   }
-  .sidenav-update-actions {
-    grid-template-columns: 1fr;
+  .sidenav-update-icon {
+    width: 24px;
+    height: 24px;
   }
-  .sidenav-update-actions > button {
-    width: 100%;
-    grid-column: 1;
+  .sidenav-update-card[data-action-required="true"][data-collapsed="false"] .sidenav-update-action {
+    grid-column: 2;
+    justify-self: end;
   }
 }
 .sidenav-account {
@@ -11895,10 +11993,11 @@ button[data-toggle-state="on"] {
  */
 :root {
   /* 카드: 테두리 1px #E8E8E8, 넉넉한 패딩, 반경 18px, 약한 그림자. */
-  --ask-card-radius: 13px;
-  --ask-card-bg: #ffffff;
-  --ask-card-line: #e8e8e8;
-  --ask-card-shadow: 0 12px 30px rgba(20, 25, 30, .07);
+  --ask-card-radius: var(--popup-radius);
+  --ask-card-bg: var(--popup-card-bg);
+  --ask-card-line: var(--line);
+  --ask-card-shadow: var(--popup-shadow);
+  --ask-heading-icon-size: 36px;
   --ask-card-pad-top: 12px;
   --ask-card-pad-side: 12px;
   --ask-card-pad-bottom: 12px;
@@ -11912,10 +12011,10 @@ button[data-toggle-state="on"] {
   /* 선택지: 높이 56px, 반경 12px, 서로 1px 간격. */
   --ask-option-height: 44px;
   --ask-option-radius: 12px;
-  --ask-option-gap: 1px;
+  --ask-option-gap: 4px;
   --ask-option-pad-side: 12px;
-  --ask-option-hover: #f8f8f8;
-  --ask-option-active: #f3f3f3;
+  --ask-option-hover: color-mix(in oklch, var(--green) 12%, var(--paper));
+  --ask-option-active: color-mix(in oklch, var(--green) 22%, var(--paper));
 
   /* 번호 배지: 지름 26px. 배경보다 한 단계 짙다. */
   --ask-index-size: 26px;
@@ -11954,6 +12053,15 @@ button[data-toggle-state="on"] {
   --popup-2-width: calc(min(1040px, calc(100vw - 96px)) * .7);
   --popup-3-width: calc(min(1040px, calc(100vw - 96px)) * .5);
   --popup-max-height: min(calc(100dvh - 48px), 880px);
+}
+
+@media (max-width: 640px) {
+  :root {
+    --popup-1-width: calc(100vw - 24px);
+    --popup-2-width: calc(100vw - 24px);
+    --popup-3-width: calc(100vw - 24px);
+    --popup-max-height: calc(100dvh - 24px);
+  }
 }
 
 /* ── 보고서 문서 토큰 — 오너 지시 2026-08-24 ──────────────────────────────

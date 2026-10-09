@@ -10,9 +10,62 @@ import {
 import {
   claimOnePreflightSteer, getOnePreflightSubmission, holdOnePreflightSteer,
   recoverOnePreflightSubmissionParents, listDispatchableOnePreflightSteers,
-  markOnePreflightSteerAttached, reconcileClaimedOnePreflightSteers,
+  markOnePreflightSteerAttached, reconcileClaimedOnePreflightSteers, listOnePreflightSteers,
 } from "../store/one-preflight-steers";
 import { getInvocationRunReceipt } from "../store/run-events";
+
+type NativePreflightPort = Readonly<{
+  captureGesture(event: object, receipt: import("../../shared/one-preflight-steers").OnePreflightSteerReceipt): void;
+  ownsParent(chatId: string, runId: string): boolean;
+  intake(parentRunId: string, steerId: string, request: McpInvocationRequest): Promise<boolean>;
+  receipt(parentRunId: string, steerId: string, request: McpInvocationRequest): Promise<boolean>;
+}>;
+let nativePreflightPort: NativePreflightPort | undefined;
+const nativeIntakes = new Map<string, { acknowledged: boolean; pending?: Promise<void> }>();
+/** Protected Main bootstrap installs once; this port only delivers an exact
+ * original preflight row to the captured native parent. It cannot start a run. */
+export function installNativePreflightSteerPort(port: NativePreflightPort): void {
+  if (nativePreflightPort) throw new Error("native_preflight_port_already_installed");
+  nativePreflightPort = Object.freeze({ ...port });
+}
+export function captureNativePreflightSteerGesture(event: object, receipt: import("../../shared/one-preflight-steers").OnePreflightSteerReceipt): void { nativePreflightPort?.captureGesture(event, receipt); }
+function dispatchNativePreflightSteers(submissionId?: string, chatId?: string): Set<string> {
+  const owned = new Set<string>(), port = nativePreflightPort;
+  if (!port) return owned;
+  const explicitParent = submissionId ? getOnePreflightSubmission(submissionId) : undefined;
+  const targetChat = chatId ?? explicitParent?.chat_id;
+  if (!targetChat) return owned;
+  for (const item of listOnePreflightSteers(targetChat)) {
+    if (submissionId && item.submissionId !== submissionId || !["queued", "claimed"].includes(item.status)) continue;
+    const parent = getOnePreflightSubmission(item.submissionId), runId = parent?.parent_run_id;
+    if (!parent || !runId || !parent.steer_template_json || !port.ownsParent(item.chatId, runId)) continue;
+    if (parent.state === "held" || parent.state === "cancelled") { holdOnePreflightSteer(item.steerId); nativeIntakes.delete(item.steerId); owned.add(item.steerId); continue; }
+    owned.add(item.steerId);
+    const state = nativeIntakes.get(item.steerId) ?? { acknowledged: false };
+    nativeIntakes.set(item.steerId, state);
+    if (state.pending) continue;
+    if (state.acknowledged) {
+      // Original store checks bound+admitted+runtime before claiming; pending
+      // source acceptance cannot fabricate an admitted/bound parent.
+      if (parent.state === "bound" && (item.status === "claimed" || claimOnePreflightSteer(item.steerId, runId))) {
+        if (markOnePreflightSteerAttached(item.steerId, runId)) nativeIntakes.delete(item.steerId);
+      }
+      continue;
+    }
+    state.pending = (async () => {
+      let exact = false;
+      try {
+        const request = requestForPreflightSteer(parent.steer_template_json!, item.chatId, item.userPrompt, item.request);
+        try { exact = await port.intake(runId, item.steerId, request); }
+        catch { exact = await port.receipt(runId, item.steerId, request); }
+      } catch { /* Unknown remains held; there is no automatic resend. */ }
+      if (!exact) { holdOnePreflightSteer(item.steerId); nativeIntakes.delete(item.steerId); return; }
+      state.acknowledged = true;
+    })();
+    void state.pending.finally(() => { state.pending = undefined; if (state.acknowledged) dispatchOnePreflightSteers(item.submissionId); }).catch(() => {});
+  }
+  return owned;
+}
 
 function requestForPreflightSteer(templateJson: string, chatId: string, prompt: string, choices?: OnePreflightSteerRequest): McpInvocationRequest {
   const template = JSON.parse(templateJson) as McpInvocationRequest;
@@ -37,12 +90,14 @@ function exactDurable(id: string, chatId: string, parentRunId: string, request: 
 export function dispatchOnePreflightSteers(submissionId?: string, chatId?: string): {
   examined: number; attached: number; held: number;
 } {
+  const nativeOwned = dispatchNativePreflightSteers(submissionId, chatId);
   const candidates = listDispatchableOnePreflightSteers(submissionId, chatId);
   let attached = 0;
   let held = 0;
   const materializedChats = new Set<string>();
   const reservedCapacity = new Map<string, number>();
   for (const item of candidates) {
+    if (nativeOwned.has(item.steerId)) continue;
     // Intake has already committed this message. Scheduler saturation is a
     // known no-dispatch condition, so leave it queued and unclaimed.
     if (invocationService.steerQueueCapacity(item.chatId) <= (reservedCapacity.get(item.chatId) ?? 0)) continue;

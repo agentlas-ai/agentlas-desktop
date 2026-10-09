@@ -86,3 +86,15 @@
 @media (prefers-reduced-motion: reduce) {
   .sheet { animation: none; }
 }
+
+/* Paper popup elevation shares the desktop popup palette. */
+.sheet { border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }
+
+
+
+.kicker { display:inline-flex; align-items:center; gap:6px; }
+.rationale { margin-top:8px; font-size:11px; color:var(--ink-soft); }
+.rationale summary { cursor:pointer; }
+.diff>summary { display:flex; align-items:center; gap:7px; }
+.diff>summary>span { margin-left:auto; font-size:10px; padding:2px 7px; border-radius:99px; background:var(--paper-3); }
+.change { border-radius:12px; background:var(--paper-2); }

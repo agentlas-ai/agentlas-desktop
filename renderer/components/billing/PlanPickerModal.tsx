@@ -12,6 +12,7 @@
  *     disabled "Current plan" button.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { IconCircleDollar, IconAlertTriangle } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
 import { invalidateIpcCache } from "@/lib/ipc-cache";
 import { useT } from "@/lib/i18n";
@@ -223,7 +224,7 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
     <div className={styles.scrim} role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }} data-plan-picker data-plan-picker-source={source}>
       <div className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="plan-picker-title">
         <button ref={closeRef} type="button" className={styles.close} onClick={onClose} aria-label={copy.close}>×</button>
-        <h2 id="plan-picker-title" className={styles.title}>{copy.title}</h2>
+        <div className={styles.planMark} aria-hidden="true"><IconCircleDollar size={23}/></div><h2 id="plan-picker-title" className={styles.title}>{copy.title}</h2>
 
         {plans && (
           <div className={styles.cycle} role="radiogroup" aria-label={copy.title}>
@@ -245,7 +246,7 @@ export function PlanPickerModal({ open, source, onClose }: { open: boolean; sour
         {!plans && !loadFailed && <p className={styles.status} role="status">{copy.loading}</p>}
         {loadFailed && (
           <div className={styles.failed} role="alert" data-plan-picker-failed>
-            <p>{copy.loadFailed}</p>
+            <IconAlertTriangle size={25} aria-hidden="true" /><p>{copy.loadFailed}</p>
             <div className={styles.failedActions}>
               <button type="button" className={styles.primary} onClick={() => void loadPlans()}>{copy.retry}</button>
               <button type="button" className={styles.secondary} onClick={() => window.open(PRICING_PAGE_URL, "_blank", "noopener,noreferrer")}>{copy.openWeb}</button>

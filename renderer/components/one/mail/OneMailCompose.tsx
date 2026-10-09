@@ -5,7 +5,7 @@
 // = one idempotency key, and a draft sends by its server version, so a double
 // click is still one email.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconPaperclip, IconClose } from "@/components/Icon";
+import { IconPaperclip, IconClose, IconMail, IconArrowUp } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
 import { mailErrorText } from "./mailErrorText";
 import { tFor, type Locale } from "@/lib/i18n";
@@ -242,6 +242,7 @@ export function OneMailComposeSheet({ compose, mail, locale, onDone }: {
       ariaLabelledBy="one-mail-compose-title"
       titleId="one-mail-compose-title"
       title={title}
+      icon={<IconMail size={20} />}
       size="wide"
       closeOnBackdrop={!sending}
       closeOnEscape={!sending}
@@ -322,7 +323,7 @@ export function OneMailComposeSheet({ compose, mail, locale, onDone }: {
           <div className={styles.formActions}>
             {draft.id && <button type="button" className={styles.secondary} disabled={sending} onClick={() => void discard()}>{tFor(locale, "one.mail.compose.discard")}</button>}
             <button type="submit" className={styles.primary} disabled={sending || !canSend || overLimit || !ready || attachTooLarge}>
-              {sending ? tFor(locale, "one.mail.compose.sending") : tFor(locale, "one.mail.compose.send")}
+              <IconArrowUp size={15} />{sending ? tFor(locale, "one.mail.compose.sending") : tFor(locale, "one.mail.compose.send")}
             </button>
           </div>
         </div>

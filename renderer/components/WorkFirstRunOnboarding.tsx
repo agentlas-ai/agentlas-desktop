@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
-import { IconCheck, IconClose } from "@/components/Icon";
+import { IconCheck, IconClose, IconCpu, IconApps, IconPuzzle, IconSmartphone, IconMonitor, IconLock } from "@/components/Icon";
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import { openPricing } from "@/components/UpgradeCta";
 import {
@@ -462,7 +462,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
         <main className={styles.content}>
           {step === 1 && (
             <>
-              <h1 id="work-onboarding-title">{copy.s1}</h1>
+              <span className={styles.stepMark} aria-hidden="true"><IconCpu size={24}/></span><h1 id="work-onboarding-title">{copy.s1}</h1>
               <p>{copy.s1sub}</p>
               <div className={styles.aiList} role="radiogroup" aria-labelledby="work-onboarding-title">
                 {PRIMARY_CHOICES.map(renderChoice)}
@@ -478,20 +478,20 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
           )}
           {step === 2 && (
             <>
-              <h1>{copy.s2}</h1>
+              <span className={styles.stepMark} aria-hidden="true"><IconApps size={24}/></span><h1>{copy.s2}</h1>
               <p>{copy.s2sub}</p>
               <div className={styles.featureGrid}>
                 <Feature title={copy.build} body={copy.buildSub} image="/brand/agentlas-mark.png" />
                 <Feature title={copy.automation} body={copy.automationSub} image="/apps/document-studio.png" />
                 <Feature title={copy.hub} body={copy.hubSub} image="/brand/agentlas-mark.png" />
               </div>
-              <div className={styles.mobileCard}><div className={styles.mobileIcon}>QR</div><div><strong>{copy.mobile}</strong><span>{copy.mobileSub}</span></div></div>
+              <div className={styles.mobileCard}><div className={styles.mobileIcon}><IconSmartphone size={26}/></div><div><strong>{copy.mobile}</strong><details className={styles.help}><summary>{ko ? "연결 방법" : "How to connect"}</summary><span>{copy.mobileSub}</span></details></div></div>
             </>
           )}
 
           {step === LAST_STEP && !inToolStage && (
             <>
-              <h1>{copy.s8}</h1>
+              <span className={styles.stepMark} aria-hidden="true"><IconPuzzle size={24}/></span><h1>{copy.s8}</h1>
               <p>{copy.s8sub}</p>
 
               <div className={styles.searchRow}>
@@ -600,7 +600,7 @@ export function WorkFirstRunOnboarding({ onVisibilityChange }: { onVisibilityCha
               <div className={styles.modal} role="dialog" aria-modal="true" aria-labelledby="onboarding-confirm-title" onClick={(event) => event.stopPropagation()}>
                 <img className={styles.modalLogo} src={confirming.logo} alt="" />
                 <h2 id="onboarding-confirm-title">{copy.confirmTitle(name)}</h2>
-                <p>{copy.confirmBody(name)}</p>
+                <div className={styles.confirmFacts}><span><IconMonitor size={16}/>{ko ? `${name} 구독 연결` : `Use your ${name} subscription`}</span><span><IconLock size={16}/>{ko ? "공식 로그인 화면" : "Official sign-in screen"}</span></div><details className={styles.help}><summary>{ko ? "연결 안내" : "Connection details"}</summary><p>{copy.confirmBody(name)}</p></details>
                 <div className={styles.modalActions}>
                   <button type="button" className={styles.secondary} onClick={() => setConfirming(null)}>{copy.cancel}</button>
                   <button type="button" className={styles.next} onClick={() => void connectChoice(confirming)}>{copy.connectCta} ↗</button>

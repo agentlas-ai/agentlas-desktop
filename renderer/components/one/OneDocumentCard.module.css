@@ -222,3 +222,10 @@
 
 /* 읽는 화면에서는 한 줄 길이를 눈에 편한 폭으로 묶는다. */
 .readerBody > .body { max-width: 74ch; margin: 0 auto; }
+
+.menu { min-width: 180px; border-radius: 12px; padding: 5px; }
+.menu button { min-height: 44px; display: flex; align-items: center; gap: 9px; }
+.menu button span { flex: 1; text-align: left; }
+.menu button small { color: var(--muted-deep); font-size: 10px; }
+.reader { width: min(840px, calc(100vw - 32px)); max-height: calc(100dvh - 48px); border-radius: 18px; }
+.readerIcon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--paper-3); color: var(--muted-deep); }

@@ -83,6 +83,28 @@ import { WorkbookView } from "./WorkbookView";
 type OutputSectionKey = AppOutputSection;
 type OutputRailView = "worker" | "result" | "activity" | "terminal" | "browser" | "screen" | "automation" | "goal" | "artifacts";
 
+const RAIL_DISMISSALS_KEY = "agentlas.output.dismissed-tabs.v1";
+const RAIL_VIEWS: readonly OutputRailView[] = ["worker", "result", "activity", "terminal", "browser", "screen", "automation", "goal", "artifacts"];
+
+/** Retain explicit dismissals across task switches without an unbounded room registry. */
+function readRailDismissals(): Array<[string, OutputRailView[]]> {
+  try {
+    const stored: unknown = JSON.parse(window.localStorage.getItem(RAIL_DISMISSALS_KEY) ?? "[]");
+    if (!Array.isArray(stored)) return [];
+    return stored.filter((entry): entry is [string, OutputRailView[]] => Array.isArray(entry)
+      && typeof entry[0] === "string" && entry[0].length <= 1024 && Array.isArray(entry[1]))
+      .slice(-64).map(([scope, views]) => [scope, [...new Set(views.filter((view) => RAIL_VIEWS.includes(view)))]]);
+  } catch { return []; }
+}
+
+function writeRailDismissals(scope: string, views: Set<OutputRailView>): void {
+  try {
+    const retained = readRailDismissals().filter(([key]) => key !== scope);
+    if (views.size) retained.push([scope, [...views]]);
+    window.localStorage.setItem(RAIL_DISMISSALS_KEY, JSON.stringify(retained.slice(-64)));
+  } catch { /* In-memory dismissals still apply when storage is unavailable. */ }
+}
+
 /** 탭마다 제 아이콘 — 글자만 있으면 어느 탭인지 눈으로 못 고른다. */
 function RailTabIcon({ view }: { view: OutputRailView }) {
   if (view === "browser") return <IconNetwork size={12} />;
@@ -384,6 +406,7 @@ export function OneActivityTimeline({
 }) {
   const active = busy || preparing;
   const [expanded, setExpanded] = useState(active);
+  const manualDisclosureRef = useRef(false);
   /*
    * ★증거는 다 갖되, 한 번에 다 그리지는 않는다 (오너 실사용 2026-09-08: "48G 맥에서 렉").
    *
@@ -431,19 +454,10 @@ export function OneActivityTimeline({
       ...state.items.filter((item) => item.kind === "run"),
     ];
   }, [busy, state.items]);
-  /*
-   * ★ 끝난 작업은 접힌다 — One 설계는 실행 중엔 펼쳐 보여 주고, 끝나면 "27초 동안 작업 ›"
-   * 한 줄로 접히는 것이다. 그런데 여기엔 펼치는 쪽만 있고 접는 쪽이 없어서, 한 번 펼쳐진
-   * 활동 블록이 대화 내내 그대로 남았다. 턴이 쌓일수록 화면이 활동 로그로 덮인다.
-   *
-   * 접을지 말지의 판정은 이미 renderer/lib/run-receipt-state.ts 에 있었는데 **부르는 곳이
-   * 하나도 없었다.** Work 전용 영수증 카드를 이 타임라인으로 합칠 때(97df0295) 판정만
-   * 남고 호출이 사라진 것이다. 그 함수를 다시 부른다 — 실패·취소는 펼친 채 남고
-   * (복구할 것이 있다), 완료만 접힌다.
-   *
-   * deps 가 active 와 terminalStatus 뿐이라, 사람이 손으로 다시 펼친 것은 그대로 남는다.
-   */
+  // Lifecycle defaults apply until this Activity component receives a manual
+  // toggle. Later failures and tool events must preserve that disclosure choice.
   useEffect(() => {
+    if (manualDisclosureRef.current) return;
     const next = receiptAutoExpanded(active, active ? "running" : state.terminalStatus);
     if (next !== null) setExpanded(next);
   }, [active, state.terminalStatus]);
@@ -479,7 +493,7 @@ export function OneActivityTimeline({
       <button
         type="button"
         className={styles.header}
-        onClick={() => setExpanded((current) => !current)}
+        onClick={() => { manualDisclosureRef.current = true; setExpanded((current) => !current); }}
         aria-expanded={expanded}
       >
         <span className={styles.pulse} data-active={active ? "true" : "false"} aria-hidden="true" />
@@ -739,7 +753,8 @@ export function isBrowserDocumentUrl(value: string): value is string {
 }
 
 export function taskBrowserUrl(items: OneActivityItem[]): string | undefined {
-  for (const item of [...items].reverse()) {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index];
     if (item.kind !== "tool" || !item.tool?.args || item.tool.isError) continue;
     const toolName = item.tool.name ?? "";
     const isExactNavigation = /browser.*navigate/iu.test(toolName);
@@ -839,15 +854,17 @@ export type TaskSidePanelProps = {
   screenChatId: string | null;
   /** Stable Taskforce/thread identity used to retain only its own browser URL across turns. */
   browserScopeKey?: string;
+  /** Invalidate pending presentation reads before a route's chat has loaded. */
+  navigationKey?: string;
   /** Latest proven Browser navigation from this thread's durable run history. */
   browserHistoryUrl?: string;
   /** Browser URL carried by the current result preview; live URLs belong in Browser. */
   browserPreviewUrl?: string;
-  /** Present the scoped Browser rail when this thread observes a real navigation. */
+  /** Observe scoped Browser metadata; navigation alone must not reveal the rail. */
   onBrowserObserved?: (url: string) => void;
   /** The structured/live result retained in both chat and this in-app rail. */
   result?: ReactNode;
-  /** Stable identity used to present a newly arrived result automatically. */
+  /** Stable identity used to retain newly arrived result metadata. */
   resultKey?: string | null;
   /** Result kind drives the same comfortable in-app width for map/media/docs/code. */
   resultKind?: OutputPresentationKind;
@@ -887,6 +904,7 @@ function TaskSidePanelContent({
   screenChatId,
   onRequestOpen,
   browserScopeKey,
+  navigationKey,
   browserHistoryUrl,
   browserPreviewUrl,
   onBrowserObserved,
@@ -913,12 +931,27 @@ function TaskSidePanelContent({
   const { context: officeContext, error: officeContextError, send: sendOfficeContext, clear: clearOfficeContext } = useOfficeTaskContext(screenChatId);
   const [collapsedSections, setCollapsedSections] = useState<Set<OutputSectionKey>>(readCollapsedOutputSections);
   useEffect(() => subscribeAppUiPreference("outputCollapsedSections", (sections) => setCollapsedSections(new Set(sections))), []);
-  /*
-   * 탭은 고정 목록이 아니다(오너 지시 2026-08-24). 무언가 결과가 나오면 그
-   * 탭이 하나 생기고, 나머지는 + 로 사람이 직접 연다. 아무것도 안 한 대화에서
-   * "결과 / Activity / Terminal / Browser" 네 개가 늘 떠 있을 이유가 없다.
-   */
+  // Background output may offer a tab, but only the person can reopen a
+  // dismissed view. Scope this choice to the exact task/chat pair.
+  const dismissalScope = JSON.stringify([browserScopeKey ?? null, screenChatId]);
+  const [dismissedTabs] = useState(() => new Set(readRailDismissals().find(([scope]) => scope === dismissalScope)?.[1] ?? []));
+  const dismissedTabsRef = useRef(dismissedTabs);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
+  const panelGenerationRef = useRef(0);
+  useLayoutEffect(() => {
+    panelGenerationRef.current += 1;
+    return () => { panelGenerationRef.current += 1; };
+  }, [browserScopeKey, screenChatId, navigationKey]);
   const [openTabs, setOpenTabs] = useState<OutputRailView[]>([]);
+  const observeRailTab = useCallback((view: OutputRailView) => {
+    if (dismissedTabsRef.current.has(view)) return;
+    setOpenTabs((tabs) => tabs.includes(view) ? tabs : [...tabs, view]);
+  }, []);
+  const reopenRailTab = useCallback((view: OutputRailView) => {
+    if (dismissedTabsRef.current.delete(view)) writeRailDismissals(dismissalScope, dismissedTabsRef.current);
+    setOpenTabs((tabs) => tabs.includes(view) ? tabs : [...tabs, view]);
+  }, [dismissalScope]);
   const [addMenuOpen, setAddMenuOpen] = useState(false);
   const addMenuButtonRef = useRef<HTMLButtonElement>(null);
   const addMenuRef = useRef<HTMLDivElement>(null);
@@ -951,7 +984,12 @@ function TaskSidePanelContent({
   useEffect(() => { if (!visible) setAddMenuOpen(false); }, [visible]);
   const [browserHeaderHost, setBrowserHeaderHost] = useState<HTMLDivElement | null>(null);
   const [browserNewTabRequest, setBrowserNewTabRequest] = useState(0);
+  const [browserNewTabUrl, setBrowserNewTabUrl] = useState<string>();
+  const browserNewTabConsumedRef = useRef(0);
   const [railView, setRailView] = useState<OutputRailView | null>(null);
+  useEffect(() => {
+    if (visible) setRailView((current) => current ?? openTabs[0] ?? null);
+  }, [visible, openTabs]);
   /*
    * 브라우저와 앱은 좁은 칸에서 아무것도 못 읽는다(실측 324px 에서 페이지가
    * 찌그러졌다). 그 탭을 실제로 보기 시작할 때만 읽을 수 있는 폭을 확보한다 —
@@ -965,9 +1003,10 @@ function TaskSidePanelContent({
     (onRequestReadableWidth ?? onResize)?.(Math.max(width ?? defaultWidth, readable));
   }, [defaultWidth, maxWidth, onRequestReadableWidth, onResize, width]);
   const openRailTab = useCallback((view: OutputRailView) => {
-    setOpenTabs((tabs) => (tabs.includes(view) ? tabs : [...tabs, view]));
+    reopenRailTab(view);
     selectRailView(view);
-  }, [selectRailView]);
+    onRequestOpen?.();
+  }, [reopenRailTab, selectRailView, onRequestOpen]);
   const nativeBrowserObservedRef = useRef(onBrowserObserved);
   nativeBrowserObservedRef.current = onBrowserObserved;
   const [presentedBrowser, setPresentedBrowser] = useState<{ viewId: string; id: string }>();
@@ -978,87 +1017,95 @@ function TaskSidePanelContent({
     const api = ipc();
     const off = api?.workLiveView?.onStatus((status) => {
       const presentation = status.presentation;
+      const presentationKey = JSON.stringify([presentation?.id, status.viewId, status.url]);
       if (status.taskScopeId !== screenChatId || !presentation?.id || !presentation.runId
-        || !status.url || status.state === "closed" || latestPresentation === presentation.id) return;
-      latestPresentation = presentation.id;
+        || !status.url || status.state === "closed" || latestPresentation === presentationKey) return;
+      latestPresentation = presentationKey;
       // Main's live invocation is authoritative, including nested worker actions.
       // Never reopen another run's historical tab or a completed/cancelled run.
       void api.invoke.attach(screenChatId, { includeEvents: false }).then((attached) => {
-        if (disposed || latestPresentation !== presentation.id || attached?.runId !== presentation.runId || !status.url) return;
-        setPresentedBrowser({ viewId: status.viewId, id: presentation.id });
-        openRailTab("browser");
+        if (disposed || latestPresentation !== presentationKey || attached?.runId !== presentation.runId || !status.url) return;
+        setPresentedBrowser((current) => current?.viewId === status.viewId && current.id === presentation.id
+          ? current : { viewId: status.viewId, id: presentation.id });
+        const scope = browserScopeKey ?? "unscoped";
+        setBrowserUrlsByScope((current) => current[scope] === status.url ? current : { ...current, [scope]: status.url! });
+        observeRailTab("browser");
         nativeBrowserObservedRef.current?.(status.url);
       }).catch(() => undefined);
     });
     return () => { disposed = true; off?.(); };
-  }, [screenChatId, openRailTab]);
+  }, [screenChatId, browserScopeKey, observeRailTab]);
   // 이 대화(Work 는 프로젝트까지)에 걸린 자동화 — 있을 때만 "자동화" 탭이 선다(오너 2026-09-28).
   const automationSnapshot = useAutomationChatActivity({ chatId: screenChatId ?? null });
   const hasAutomations = (automationSnapshot?.automations.length ?? 0) > 0;
   const automationRunning = automationTabRunning(automationSnapshot);
   useEffect(() => {
-    setOpenTabs((tabs) => hasAutomations
-      ? (tabs.includes("automation") ? tabs : [...tabs, "automation"])
-      : (tabs.includes("automation") ? tabs.filter((tab) => tab !== "automation") : tabs));
-    if (hasAutomations) setRailView((current) => current ?? "automation");
-    else setRailView((current) => (current === "automation" ? null : current));
-  }, [hasAutomations]);
+    if (hasAutomations) observeRailTab("automation");
+    else {
+      setOpenTabs((tabs) => tabs.includes("automation") ? tabs.filter((tab) => tab !== "automation") : tabs);
+      setRailView((current) => current === "automation" ? null : current);
+    }
+  }, [hasAutomations, observeRailTab]);
   useEffect(() => {
     const open = (event: Event) => {
       const chatId = (event as CustomEvent<{ chatId?: string }>).detail?.chatId;
       if (!screenChatId || chatId !== screenChatId) return;
       openRailTab("automation");
-      onRequestOpen?.();
     };
     window.addEventListener(AUTOMATION_TAB_OPEN_EVENT, open);
     return () => window.removeEventListener(AUTOMATION_TAB_OPEN_EVENT, open);
-  }, [screenChatId, openRailTab, onRequestOpen]);
+  }, [screenChatId, openRailTab]);
   // 이 대화의 목표 — 목표가 있으면 "목표" 탭이 선다(선택은 빼앗지 않는다). 목표 칩의 편집이 이 탭을 연다(오너 2026-09-28).
   const goalPanel = useGoalPanel(screenChatId ?? null);
   const hasGoal = goalPanel.view !== null;
   useEffect(() => {
-    setOpenTabs((tabs) => hasGoal
-      ? (tabs.includes("goal") ? tabs : [...tabs, "goal"])
-      : (tabs.includes("goal") ? tabs.filter((tab) => tab !== "goal") : tabs));
-    if (!hasGoal) setRailView((current) => (current === "goal" ? null : current));
-  }, [hasGoal]);
+    if (hasGoal) observeRailTab("goal");
+    else {
+      setOpenTabs((tabs) => tabs.includes("goal") ? tabs.filter((tab) => tab !== "goal") : tabs);
+      setRailView((current) => current === "goal" ? null : current);
+    }
+  }, [hasGoal, observeRailTab]);
   useEffect(() => {
     const open = (event: Event) => {
       const detail = (event as CustomEvent<{ chatId?: string; handled?: boolean }>).detail;
       if (!screenChatId || !detail || detail.chatId !== screenChatId) return;
       detail.handled = true;
       openRailTab("goal");
-      onRequestOpen?.();
       goalPanel.refresh();
     };
     window.addEventListener(GOAL_PANEL_OPEN_EVENT, open);
     return () => window.removeEventListener(GOAL_PANEL_OPEN_EVENT, open);
-  }, [screenChatId, openRailTab, onRequestOpen, goalPanel.refresh]);
+  }, [screenChatId, openRailTab, goalPanel.refresh]);
   // 이 대화의 산출물(차트·시각물·파일 칩·실행 결과) — 하나라도 있으면 "산출물" 탭이 선다(선택은 빼앗지 않는다).
   // 대화 안 차트의 "패널에서 열기" 가 이 탭을 연다(오너 2026-09-29 비주얼라이즈).
   const artifactsRail = useArtifactsRail(screenChatId ?? null);
   const hasArtifacts = artifactsRailCount({ items, files: artifactsRail.files, visuals: artifactsRail.visuals }) > 0;
   useEffect(() => {
-    setOpenTabs((tabs) => hasArtifacts
-      ? (tabs.includes("artifacts") ? tabs : [...tabs, "artifacts"])
-      : (tabs.includes("artifacts") ? tabs.filter((tab) => tab !== "artifacts") : tabs));
-    if (!hasArtifacts) setRailView((current) => (current === "artifacts" ? null : current));
-  }, [hasArtifacts]);
+    if (hasArtifacts) observeRailTab("artifacts");
+    else {
+      setOpenTabs((tabs) => tabs.includes("artifacts") ? tabs.filter((tab) => tab !== "artifacts") : tabs);
+      setRailView((current) => current === "artifacts" ? null : current);
+    }
+  }, [hasArtifacts, observeRailTab]);
   useEffect(() => {
     if (artifactsRail.openRequest === 0) return;
-    setOpenTabs((tabs) => (tabs.includes("artifacts") ? tabs : [...tabs, "artifacts"]));
+    reopenRailTab("artifacts");
     setRailView("artifacts");
     (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
     onRequestOpen?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [artifactsRail.openRequest]);
-  const closeRailTab = useCallback((view: OutputRailView) => {
+  const closeRailTab = useCallback((view: OutputRailView, manual = true) => {
+    if (manual) {
+      dismissedTabsRef.current.add(view);
+      writeRailDismissals(dismissalScope, dismissedTabsRef.current);
+    }
     setOpenTabs((tabs) => {
       const next = tabs.filter((tab) => tab !== view);
       setRailView((current) => (current === view ? next[next.length - 1] ?? null : current));
       return next;
     });
-  }, []);
+  }, [dismissalScope]);
   const workerKey = workerSelection?.chatId === screenChatId
     ? JSON.stringify([workerSelection.chatId, workerSelection.runId, workerSelection.agentId]) : null;
   const presentedWorkerRef = useRef<string | null>(null);
@@ -1068,14 +1115,16 @@ function TaskSidePanelContent({
   useEffect(() => {
     if (workerKey) {
       if (railViewRef.current !== "worker") workerReturnViewRef.current = railViewRef.current;
-      setOpenTabs((tabs) => tabs.includes("worker") ? tabs : [...tabs, "worker"]);
+      reopenRailTab("worker");
       setRailView("worker");
     } else if (!workerKey && presentedWorkerRef.current) {
-      closeRailTab("worker");
+      closeRailTab("worker", false);
     }
     presentedWorkerRef.current = workerKey;
-  }, [workerKey, workerSelection, closeRailTab]);
+  }, [workerKey, closeRailTab, reopenRailTab]);
   const closeWorkerTab = () => {
+    dismissedTabsRef.current.add("worker");
+    writeRailDismissals(dismissalScope, dismissedTabsRef.current);
     const next = openTabs.filter((tab) => tab !== "worker");
     setOpenTabs(next);
     const previous = workerReturnViewRef.current;
@@ -1100,6 +1149,7 @@ function TaskSidePanelContent({
   const clampWidth = (value: number) => Math.min(maxWidth, Math.max(minWidth, Math.round(value)));
   const collapseThreshold = Math.max(120, Math.min(220, minWidth - 48));
   const agents = useMemo(() => {
+    if (!visible) return [];
     const candidates = activity?.items.filter((item) => item.kind === "agent" || (item.kind === "tool" && item.agentName)) ?? [];
     const unique = new Map<string, OneActivityItem>();
     for (const item of candidates) {
@@ -1107,24 +1157,34 @@ function TaskSidePanelContent({
       if (!unique.has(key)) unique.set(key, item);
     }
     return [...unique.values()];
-  }, [activity?.items, locale]);
-  const mcpResults = useMemo(
-    () => (activity?.items ?? []).filter((item) => (
-      item.kind === "tool"
-      && item.tool?.isError !== true
-      && typeof item.tool?.result === "string"
-      && parseMcpResult(item.tool.result, item.tool.name).blocks.length > 0
-    )).slice(-8),
-    [activity?.items],
-  );
+  }, [activity?.items, locale, visible]);
+  const mcpResults = useMemo(() => {
+    // Keep background receipts and explicit-open listeners alive, while only
+    // interpreting output payloads when the person can see the panel.
+    if (!visible) return [];
+    const results: OneActivityItem[] = [];
+    const activityItems = activity?.items ?? [];
+    for (let index = activityItems.length - 1; index >= 0 && results.length < 8; index -= 1) {
+      const item = activityItems[index];
+      if (item.kind === "tool"
+        && item.tool?.isError !== true
+        && typeof item.tool?.result === "string"
+        && parseMcpResult(item.tool.result, item.tool.name).blocks.length > 0) results.push(item);
+    }
+    return results.reverse();
+  }, [activity?.items, visible]);
   /*
    * 분류는 도구 이름의 단어가 아니라 그 도구가 한 일로 한다 — shared/tool-taxonomy.ts.
    * 단어 매칭은 claude 의 `Bash` 하나만 잡고 codex `bash`(소문자 통과), grok `write`,
    * agy `write_to_file`, ACP 의 kind 는 전부 놓쳤다. 그래서 이 두 칸은 대부분의
    * 런타임에서 늘 0 이었다.
    */
-  const processes = activity?.items.filter((item) => item.kind === "tool" && isCommandTool(item.tool?.name)) ?? [];
-  const computerUse = activity?.items.filter((item) => item.kind === "tool" && isComputerUseTool(item.tool?.name)) ?? [];
+  const processes = useMemo(() => visible
+    ? activity?.items.filter((item) => item.kind === "tool" && isCommandTool(item.tool?.name)) ?? []
+    : [], [activity?.items, visible]);
+  const computerUse = useMemo(() => visible
+    ? activity?.items.filter((item) => item.kind === "tool" && isComputerUseTool(item.tool?.name)) ?? []
+    : [], [activity?.items, visible]);
   const currentBrowserUrl = useMemo(() => taskBrowserUrl(activity?.items ?? []), [activity?.items]);
   useEffect(() => {
     if (!browserScopeKey || !currentBrowserUrl) return;
@@ -1132,14 +1192,18 @@ function TaskSidePanelContent({
       ? current
       : { ...current, [browserScopeKey]: currentBrowserUrl });
   }, [browserScopeKey, currentBrowserUrl]);
-  const latestTool = useMemo(
-    () => [...(activity?.items ?? [])].reverse().find((item) => item.kind === "tool" && item.tool) ?? null,
-    [activity?.items],
-  );
+  const latestTool = useMemo(() => {
+    const activityItems = activity?.items ?? [];
+    for (let index = activityItems.length - 1; index >= 0; index -= 1) {
+      const item = activityItems[index];
+      if (item.kind === "tool" && item.tool) return item;
+    }
+    return null;
+  }, [activity?.items]);
   const [screenMode, setScreenMode] = useState<"browser" | "computer">("computer");
 
-  const boundImages = scopedBoundImages(items, screenChatId);
-  const fileArtifacts = items.filter((item) => item.kind !== "image");
+  const boundImages = useMemo(() => visible ? scopedBoundImages(items, screenChatId) : [], [items, screenChatId, visible]);
+  const fileArtifacts = useMemo(() => visible ? items.filter((item) => item.kind !== "image") : [], [items, visible]);
   const latestArtifactId = items.at(-1)?.id ?? null;
   const activeChatFile = chatFileTabs.find((file) => file.tabId === activeChatFileTabId) ?? null;
   const openedArtifactKind = openedArtifact ? outputPresentationKindForName(openedArtifact.label) : "standard";
@@ -1183,25 +1247,18 @@ function TaskSidePanelContent({
   useEffect(() => {
     if (!latestTool || activity?.terminalStatus || presentedToolIdRef.current === latestTool.id) return;
     presentedToolIdRef.current = latestTool.id;
-    onRequestOpen?.();
-
     const screen = agentScreenModeForTool(latestTool.tool?.name);
     if (screen === "computer") {
       setScreenMode("computer");
-      setOpenTabs((tabs) => (tabs.includes("screen") ? tabs : [...tabs, "screen"]));
-      setRailView("screen");
+      observeRailTab("screen");
       return;
     }
 
-    // Agentlas Browser owns a live, task-scoped WebContents and its status
-    // event below selects Browser as soon as the actual view exists. Until
-    // then keep the tool receipt visible instead of fabricating an empty tab.
+    // Keep the tool receipt available. Native Browser status independently
+    // retains its scoped presentation without changing the person's view.
     const nextView: OutputRailView = isCommandTool(latestTool.tool?.name) ? "terminal" : "activity";
-    setOpenTabs((tabs) => (tabs.includes(nextView) ? tabs : [...tabs, nextView]));
-    setRailView((current) => (
-      current === "browser" || current === "screen" || current === "worker" ? current : nextView
-    ));
-  }, [activity?.terminalStatus, latestTool, onRequestOpen]);
+    observeRailTab(nextView);
+  }, [activity?.terminalStatus, latestTool, observeRailTab]);
 
   useEffect(() => {
     const handleOpen = (event: Event) => {
@@ -1209,18 +1266,18 @@ function TaskSidePanelContent({
       if (!isOneArtifactOpenRequest(detail) || !screenChatId || detail.binding.chatId !== screenChatId) return;
       (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
       onRequestOpen?.();
-      setOpenTabs((tabs) => tabs.includes("result") ? tabs : [...tabs, "result"]);
+      reopenRailTab("result");
       setOpenedArtifact(detail);
       setActiveChatFileTabId(null);
       setRailView("result");
     };
     window.addEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
     return () => window.removeEventListener(ONE_ARTIFACT_OPEN_EVENT, handleOpen);
-  }, [screenChatId, maxWidth, onRequestReadableWidth, onResize, onRequestOpen]);
+  }, [screenChatId, maxWidth, onRequestReadableWidth, onResize, onRequestOpen, reopenRailTab]);
   useEffect(() => {
     setChatFileTabs([]);
     setActiveChatFileTabId(null);
-    onRestorePreferredWidth?.();
+    if (visibleRef.current) onRestorePreferredWidth?.();
   }, [browserScopeKey, onRestorePreferredWidth]);
   useEffect(() => {
     const handleChatFile = (event: Event) => {
@@ -1229,6 +1286,7 @@ function TaskSidePanelContent({
       // 표는 넓게 — Claude 의 xlsx 뷰어는 화면 절반쯤을 쓴다(레퍼런스 f014). 나머지 파일은 읽을 만한 폭.
       const wide = detail.viewer.viewerKind === "spreadsheet" || detail.viewer.viewerKind === "presentation";
       (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, wide ? 760 : 560));
+      onRequestOpen?.();
       setChatFileTabs((current) => current.some((file) => file.tabId === detail.tabId)
         ? current.map((file) => file.tabId === detail.tabId ? detail : file)
         : [...current, detail]);
@@ -1243,7 +1301,7 @@ function TaskSidePanelContent({
     };
     window.addEventListener(CHAT_FILE_OPEN_EVENT, handleChatFile);
     return () => window.removeEventListener(CHAT_FILE_OPEN_EVENT, handleChatFile);
-  }, [screenChatId, maxWidth, onRequestReadableWidth, onResize]);
+  }, [screenChatId, maxWidth, onRequestReadableWidth, onResize, onRequestOpen]);
   const selectChatFileTab = useCallback((id: string) => {
     if (!chatFileTabs.some((file) => file.tabId === id)) return;
     (onRequestReadableWidth ?? onResize)?.(Math.min(maxWidth, 560));
@@ -1287,61 +1345,53 @@ function TaskSidePanelContent({
         onRequestOpen?.();
         announceChatFiles([linked.item]);
         if (linked.textPath) {
+          const panelGeneration = panelGenerationRef.current;
           void ipc()?.fs.readTextFile(linked.textPath, { kind: "chat-assets", chatId: screenChatId })
-            .then((preview) => requestChatFileOpen(preview && !preview.reason
-              ? { ...linked.item, size: preview.size, viewer: { ...linked.item.viewer, content: preview.content, truncated: preview.truncated, size: preview.size, available: true, reason: undefined } }
-              : { ...linked.item, viewer: { ...linked.item.viewer, available: false } }))
-            .catch(() => requestChatFileOpen({ ...linked.item, viewer: { ...linked.item.viewer, available: false } }));
+            .then((preview) => {
+              if (panelGenerationRef.current !== panelGeneration) return;
+              requestChatFileOpen(preview && !preview.reason
+                ? { ...linked.item, size: preview.size, viewer: { ...linked.item.viewer, content: preview.content, truncated: preview.truncated, size: preview.size, available: true, reason: undefined } }
+                : { ...linked.item, viewer: { ...linked.item.viewer, available: false } });
+            })
+            .catch(() => {
+              if (panelGenerationRef.current !== panelGeneration) return;
+              requestChatFileOpen({ ...linked.item, viewer: { ...linked.item.viewer, available: false } });
+            });
         } else requestChatFileOpen(linked.item);
         return;
       }
       const scope = browserScopeKey ?? "unscoped";
       setBrowserUrlsByScope((current) => current[scope] === url ? current : { ...current, [scope]: url });
-      setOpenTabs((tabs) => tabs.includes("browser") ? tabs : [...tabs, "browser"]);
-      setRailView("browser");
+      setBrowserNewTabUrl(url);
+      setBrowserNewTabRequest((value) => value + 1);
+      openRailTab("browser");
     };
     window.addEventListener("agentlas:in-app-linked-file", handleInAppLink);
     return () => window.removeEventListener("agentlas:in-app-linked-file", handleInAppLink);
-  }, [browserScopeKey, screenChatId, maxWidth, onRequestOpen, onRequestReadableWidth, onResize]);
+  }, [browserScopeKey, screenChatId, maxWidth, onRequestOpen, onRequestReadableWidth, onResize, openRailTab]);
   useEffect(() => {
     if (!latestArtifactId || presentedArtifactIdRef.current === latestArtifactId) return;
     presentedArtifactIdRef.current = latestArtifactId;
-    setOpenTabs((tabs) => tabs.includes("result") ? tabs : [...tabs, "result"]);
-    // 자동 표시는 Browser 를 빼앗지 않는다 — 브라우저 작업 자체가 산출물이고, 새 아티팩트가
-    // 도착할 때마다 Activity 로 튕기면 사람이 보던 화면이 사라진다(P0: 재열람 시 Browser 유지).
-    setRailView((current) => (items.at(-1)?.kind === "image" || current === "browser" || current === "worker") ? current : "activity");
-  }, [latestArtifactId, result, items]);
+    observeRailTab("result");
+  }, [latestArtifactId, observeRailTab]);
   useEffect(() => {
     const latest = mcpResults.at(-1)?.id ?? null;
     if (!latest || presentedMcpResultIdRef.current === latest) return;
     presentedMcpResultIdRef.current = latest;
-    setOpenTabs((tabs) => (tabs.includes("activity") ? tabs : [...tabs, "activity"]));
-    // Keep a user-selected Result/Browser view stable; otherwise expose
-    // the new MCP result in the activity tab as soon as the rail is opened.
-    setRailView((current) => current ?? "activity");
-  }, [mcpResults]);
+    observeRailTab("activity");
+  }, [mcpResults, observeRailTab]);
   useEffect(() => {
     if (!preferredBrowserUrl) return;
     const targetKey = `${browserScopeKey ?? "unscoped"}\u0000${preferredBrowserUrl}`;
     if (presentedBrowserTargetRef.current === targetKey) return;
     presentedBrowserTargetRef.current = targetKey;
-    // Browser work is itself the output. A person should not have to discover
-    // a hidden tab after the agent opens a page, and the external Chrome window
-    // is never the One presentation surface.
-    // 브라우저 작업 자체가 결과다 — 탭이 없으면 이때 하나 생긴다.
-    setOpenTabs((tabs) => (tabs.includes("browser") ? tabs : [...tabs, "browser"]));
-    setRailView((current) => (current === "worker") ? current : "browser");
-    // Stored URLs restore tabs, but only the scoped live native event above
-    // reveals the panel. Reopening an old conversation is not a new action.
-  }, [browserScopeKey, preferredBrowserUrl]);
+    observeRailTab("browser");
+  }, [browserScopeKey, preferredBrowserUrl, observeRailTab]);
   useEffect(() => {
     if (!result || !resultKey || presentedResultKeyRef.current === resultKey) return;
     presentedResultKeyRef.current = resultKey;
-    // 결과가 나오면 그 탭이 하나 생긴다. 다만 확인된 Browser 표면 위로는
-    // 올라오지 않는다 — 탭만 만들고 보고 있던 것을 빼앗지 않는다.
-    setOpenTabs((tabs) => (tabs.includes("result") ? tabs : [...tabs, "result"]));
-    setRailView((current) => (current === "browser" || current === "worker" ? current : "result"));
-  }, [result, resultKey]);
+    observeRailTab("result");
+  }, [result, resultKey, observeRailTab]);
   /*
    * 폭을 저 혼자 넓히던 자리(제거, 오너 지시 2026-08-24 "디폴트로 접히고
    * 켜져도 지금의 반만"). 넓은 산출물이 뜰 때마다 화면의 43% 로 벌어지고
@@ -1438,6 +1488,7 @@ function TaskSidePanelContent({
     };
   }, [resizing]);
   const sources = useMemo(() => {
+    if (!visible) return [];
     const current = activity?.sources ?? [];
     if (!preferredBrowserUrl || current.some((source) => source.url === preferredBrowserUrl)) return current;
     return [...current, {
@@ -1452,7 +1503,7 @@ function TaskSidePanelContent({
       toolName: "browser_navigate",
       status: "completed" as const,
     }];
-  }, [activity?.sources, preferredBrowserUrl]);
+  }, [activity?.sources, preferredBrowserUrl, visible]);
   const toggleSection = (section: OutputSectionKey) => {
     setCollapsedSections((current) => {
       const next = new Set(current);
@@ -1536,7 +1587,7 @@ function TaskSidePanelContent({
       )}
       <nav className={styles.artifactTabs} aria-label={locale === "ko" ? "출력 보기" : "Output views"} role="tablist">
         <div className={styles.artifactTabList}>
-          {openTabs.filter((view) => view !== "browser" || !screenChatId).map((view) => (
+          {openTabs.filter((view) => view !== "browser" || !screenChatId || railView !== "browser").map((view) => (
             <span key={view} className={styles.artifactTab} data-active={railView === view ? "true" : "false"}>
               <button
                 type="button"
@@ -1588,20 +1639,22 @@ function TaskSidePanelContent({
                     : event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : null;
                   if (next !== null) { event.preventDefault(); buttons[next]?.focus(); }
                 }}>
-                {([...(hasGoal ? ["goal"] as const : []), "activity", "terminal", "browser", "screen"] as const).map((view) => (
+                {([...(hasGoal ? ["goal"] as const : []), ...(hasAutomations ? ["automation"] as const : []), ...(hasArtifacts ? ["artifacts"] as const : []), ...(result || items.length ? ["result"] as const : []), "activity", "terminal", "browser", "screen"] as const).map((view) => (
                   <button
                     key={view}
                     type="button"
                     role="menuitem"
                     className={panelMenu.panelMenuRow}
                     disabled={view !== "browser" && openTabs.includes(view)}
-                    onClick={() => { setAddMenuOpen(false); if (view === "browser") setBrowserNewTabRequest((value) => value + 1); openRailTab(view); }}
+                    onClick={() => { setAddMenuOpen(false); if (view === "browser" && (openTabs.includes("browser") || (!preferredBrowserUrl && !presentedBrowser))) { setBrowserNewTabUrl(undefined); setBrowserNewTabRequest((value) => value + 1); } openRailTab(view); }}
                   >
+                    <span className={panelMenu.panelMenuIcon} aria-hidden="true">{view === "terminal" ? <IconCode size={16} /> : view === "browser" ? <IconNetwork size={16} /> : view === "goal" ? <IconTarget size={16} /> : view === "automation" ? <IconRefresh size={16} /> : view === "artifacts" || view === "result" ? <IconFileUp size={16} /> : view === "screen" ? <IconExpand size={16} /> : <IconClock size={16} />}</span>
                     {railTabLabel(view, locale)}
                   </button>
                 ))}
                 {onAdd && (
                   <button type="button" role="menuitem" className={panelMenu.panelMenuRow} onClick={() => { setAddMenuOpen(false); onAdd(); }}>
+                    <IconPlus size={16} />
                     {locale === "ko" ? "파일 추가" : "Add file"}
                   </button>
                 )}
@@ -1639,7 +1692,7 @@ function TaskSidePanelContent({
             <summary title={locale === "ko" ? "작업에 전달할 문서 선택" : "Document context for this chat"} aria-label={locale === "ko" ? "작업에 전달할 문서 선택" : "Document context for this chat"} style={{ display: "grid", placeItems: "center", width: 28, height: 28, cursor: "pointer", listStyle: "none", color: "var(--accent)" }}><IconFileUp size={15} /></summary>
             <div role="dialog" aria-label={locale === "ko" ? "문서 선택" : "Document selection"} className={panelMenu.panelPopover} style={{ position: "absolute", right: 0, top: "calc(100% + 5px)", zIndex: 25, lineHeight: 1.6, overflowWrap: "anywhere" }}>
               <p className={panelMenu.panelMenuLabel}>{locale === "ko" ? `${officeContext.fileName} · ${officeContext.edit ? "편집 요청" : "선택 전달"}` : `${officeContext.fileName} · ${officeContext.edit ? "Edit request" : "Shared selection"}`}</p>
-              <button type="button" className={panelMenu.panelMenuRow} onClick={() => void clearOfficeContext()}>{locale === "ko" ? "전달 해제" : "Remove from context"}</button>
+              <button type="button" className={panelMenu.panelMenuRow} onClick={() => void clearOfficeContext()}><IconClose size={16} />{locale === "ko" ? "전달 해제" : "Remove from context"}</button>
               {officeContextError && <p role="alert">{locale === "ko" ? "해제하지 못했습니다. 다시 시도하세요." : "Could not remove it. Try again."}</p>}
             </div>
           </details>}
@@ -1652,12 +1705,12 @@ function TaskSidePanelContent({
           <p className={styles.artifactEmptyTitle}>{locale === "ko" ? "여기에 결과가 쌓입니다" : "Outputs appear here"}</p>
           <p className={styles.artifactEmptyNote}>
             {locale === "ko"
-              ? "무언가 만들어지면 그 탭이 저절로 생깁니다. 지금 바로 열 수도 있습니다."
-              : "A tab appears on its own when something is produced. You can also open one now."}
+              ? "보기 추가로 작업이나 결과를 열 수 있습니다. 닫은 보기는 직접 다시 열 때까지 유지됩니다."
+              : "Use Add view to open activity or results. Closed views stay closed until you reopen them."}
           </p>
           <div className={styles.artifactEmptyList}>
             {(["activity", "terminal", "browser", "screen"] as const).map((view) => (
-              <button key={view} type="button" onClick={() => { if (view === "browser") setBrowserNewTabRequest((value) => value + 1); openRailTab(view); }}>{railTabLabel(view, locale)}</button>
+              <button key={view} type="button" onClick={() => { if (view === "browser" && !preferredBrowserUrl && !presentedBrowser) { setBrowserNewTabUrl(undefined); setBrowserNewTabRequest((value) => value + 1); } openRailTab(view); }}>{railTabLabel(view, locale)}</button>
             ))}
           </div>
         </div>
@@ -1744,9 +1797,12 @@ function TaskSidePanelContent({
             chatId={screenChatId}
           />
         )}
-        {openTabs.includes("browser") && <div className={styles.browserPane} hidden={railView !== "browser"}>
+        {openTabs.includes("browser") && railView === "browser" && <div className={styles.browserPane}>
           {screenChatId ? <TaskBrowser onAnnotation={onBrowserAnnotation} key={screenChatId} active={railView === "browser"} locale={locale} preferredUrl={preferredBrowserUrl} taskScopeId={screenChatId}
-            presentation={presentedBrowser} headerHost={browserHeaderHost} onActivate={() => selectRailView("browser")} newTabRequest={browserNewTabRequest} />
+            presentation={presentedBrowser} headerHost={browserHeaderHost} onActivate={() => selectRailView("browser")} onDismiss={() => closeRailTab("browser")}
+            newTabRequest={browserNewTabRequest > browserNewTabConsumedRef.current ? browserNewTabRequest : 0}
+            newTabUrl={browserNewTabUrl}
+            onNewTabRequestConsumed={(request) => { browserNewTabConsumedRef.current = request; }} />
             : <p className={styles.artifactEmpty}>{locale === "ko" ? "작업이 연결되면 브라우저를 열 수 있습니다." : "The browser becomes available when this conversation is bound to a task."}</p>}
         </div>}
       </div>

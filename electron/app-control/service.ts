@@ -1,6 +1,6 @@
 import type { BrowserWindow } from "electron";
 import { APP_CONTROL_CATALOG, type AppControlCatalogEntry, type AppControlInvokeArg } from "./catalog.generated";
-import { AppControlError, appControlHandlerRegistered, invokeAppControlIpc } from "./ipc-registry";
+import { AppControlError, appControlDomainHandlerRegistered, appControlHandlerRegistered, appControlInteractionWindowAvailable, invokeAppControlIpc } from "./ipc-registry";
 import { appControlEffectNeedsOwnerTurn, appControlPolicy, type AppControlEffect } from "./policy";
 import { APP_CONTROL_ARGUMENT_SCHEMAS, APP_UI_PREFERENCE_VALUE_SCHEMAS } from "./argument-schemas.generated";
 import type { AppControlRendererOperation, AppControlRendererReply } from "../../shared/app-control";
@@ -12,6 +12,8 @@ import { decodeAppControlArguments } from "./argument-codec";
 
 export interface AppControlHost {
   mainWindow(): BrowserWindow | null;
+  interactionWindow?(): BrowserWindow | null;
+  showMain?(route: string): Promise<BrowserWindow | null>;
   scienceInstalled(): boolean;
 }
 
@@ -141,8 +143,9 @@ export function appControlOperations(input: { query?: unknown; area?: unknown; o
   let query = typeof input.query === "string" ? input.query.trim().slice(0, 200) : "";
   const exact = typeof input.operation === "string" ? input.operation.trim() : "";
   const available = (operation: Operation) => operation.surface === "app"
-    ? !!host?.mainWindow() && !host.mainWindow()!.isDestroyed()
-    : !!operation.entry && appControlHandlerRegistered(operation.entry.channel);
+    ? !!(host?.interactionWindow?.() ?? host?.mainWindow()) && !(host?.interactionWindow?.() ?? host?.mainWindow())!.isDestroyed()
+    : !!operation.entry && appControlHandlerRegistered(operation.entry.channel)
+      && (appControlDomainHandlerRegistered(operation.entry.channel) || appControlInteractionWindowAvailable(host?.interactionWindow?.() ?? host?.mainWindow() ?? null));
   const restricted = () => APP_CONTROL_CATALOG.flatMap((entry) => {
     const policy = appControlPolicy(entry);
     return !policy.allowed && (!exact || entry.path === exact)
@@ -190,6 +193,8 @@ export function appControlOperations(input: { query?: unknown; area?: unknown; o
     operations: matched.slice(offset, offset + limit).map((operation) => ({
       operation: operation.path, args: operation.params, signature: operation.signature, effect: operation.effect,
       available: available(operation),
+      execution_surface: operation.surface === "app" ? operation.path === "app.navigate" ? "main-presentation" : "existing-renderer"
+        : operation.entry && appControlDomainHandlerRegistered(operation.entry.channel) ? "domain-service" : "owner-interaction",
       ...(exact || query === operation.path ? { input_schema: operation.inputSchema ?? HOST_ARGUMENT_SCHEMAS[operation.path] ?? APP_CONTROL_ARGUMENT_SCHEMAS[operation.path] }
         : { argument_schema_available: !!(operation.inputSchema ?? HOST_ARGUMENT_SCHEMAS[operation.path] ?? APP_CONTROL_ARGUMENT_SCHEMAS[operation.path]) }),
       ...(appControlEffectNeedsOwnerTurn(operation.effect) ? { owner_turn_only: true } : {}),
@@ -202,6 +207,11 @@ async function rendererCall(window: BrowserWindow, operation: AppControlRenderer
   // Arguments are JSON data in a fixed script, never executable source supplied by the model.
   const request = JSON.stringify([operation, args]);
   const value: unknown = await window.webContents.executeJavaScript(`(async () => {
+    // A newly created presentation can finish navigation before React mounts
+    // MenuBridge. Wait for that real bridge, without starting a second action.
+    const until = Date.now() + 5000;
+    while ((!window.agentlasAppControl || typeof window.agentlasAppControl.request !== "function") && Date.now() < until)
+      await new Promise(resolve => setTimeout(resolve, 50));
     const bridge = window.agentlasAppControl;
     if (!bridge || typeof bridge.request !== "function") return { ok: false, operation: ${JSON.stringify(operation)}, code: "renderer-unavailable" };
     return bridge.request(...${request});
@@ -270,18 +280,20 @@ export async function appControlCall(caller: AppControlCaller, input: { operatio
   }
   const unknown = Object.keys(named).filter((key) => !operation.params.includes(key));
   if (unknown.length) throw new AppControlError("invalid-arguments", `Unknown argument ${unknown.join(", ")}; ${path} takes ${operation.params.length ? operation.params.join(", ") : "no arguments"}.`);
-  const window = host?.mainWindow() ?? null;
-  if (!window || window.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas window is closed.");
+  const window = host?.interactionWindow?.() ?? host?.mainWindow() ?? null;
 
   if (operation.surface === "app") {
     if (path === "app.navigate") {
       const route = typeof named.route === "string" ? named.route.trim() : "";
       if (!/^\/[A-Za-z0-9/_\-?=&%.:~]*$/.test(route) || route.length > 300) throw new AppControlError("invalid-arguments", "route must be an app path such as /settings.");
-      if (window.isMinimized()) window.restore();
-      window.show();
-      const result = await rendererCall(window, "app.navigate", { route });
+      const presentation = await host?.showMain?.(route) ?? host?.mainWindow() ?? null;
+      if (!presentation || presentation.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas presentation window is closed.");
+      if (presentation.isMinimized()) presentation.restore();
+      presentation.show();
+      const result = await rendererCall(presentation, "app.navigate", { route });
       return { ...result, effect: operation.effect };
     }
+    if (!window || window.isDestroyed()) throw new AppControlError("app-window-closed", "The Agentlas interaction window is closed.");
     if (path === "app.setLanguage" && (typeof named.locale !== "string" || !["ko", "en", "system"].includes(named.locale))) throw new AppControlError("invalid-arguments", "locale must be ko, en or system.");
     if (path === "app.setTheme" && (typeof named.theme !== "string" || !["light", "dark", "system"].includes(named.theme))) throw new AppControlError("invalid-arguments", "theme must be light, dark or system.");
     if (path === "app.setSidebar" && (named.collapsed === undefined && named.width === undefined
@@ -306,7 +318,7 @@ export async function appControlCall(caller: AppControlCaller, input: { operatio
   if (!appControlHandlerRegistered(entry.channel)) throw new AppControlError("operation-unavailable", `${path} is not available in this app session.`);
   const decoded = decodeAppControlArguments(named, APP_CONTROL_ARGUMENT_SCHEMAS[path]) as Record<string, unknown>;
   const args = entry.invokeArgs.map((arg) => build(arg, decoded));
-  const value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path });
+  const value = await invokeAppControlIpc({ window, channel: entry.channel, args, operation: path, ownerInteraction: caller.ownerTurn });
   const record = value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
   const refused = record?.ok === false || record?.success === false || record?.accepted === false
     || operation.effect !== "read" && (record?.state === "failed" || record?.status === "rejected");

@@ -1,4 +1,6 @@
 "use client";
+
+import { PopupFrame, PopupDetails, PopupFacts } from "@/components/Popup";
 // 프롬프트 저장소 — Hub(마켓) 메뉴와 동형 구조: 검색창 + 카테고리 탭 + 카드 그리드 + 상세 모달.
 // marketplace/page.tsx의 시각 언어(카드/칩/버튼/오버레이)를 그대로 따른다.
 //
@@ -22,7 +24,7 @@ import {
 import type { HubPromptSummary, HubPromptViewer } from "@shared/types";
 import { UpgradeCta, openPricing } from "@/components/UpgradeCta";
 import { PromptInputsConfirmDialog, startChatWithPrompt } from "@/components/PromptPickerDialog";
-import { IconClose, IconLock } from "@/components/Icon";
+import { IconLock, IconSparkles } from "@/components/Icon";
 
 const C = {
   purple: "color-mix(in oklch, var(--rd-accent) 18%, var(--rd-surface))",
@@ -928,39 +930,16 @@ function PromptDetailDialog({
     || (gate !== "taste-pending" && !body && !paid && signedIn && merged.tasted === true);
 
   return (
-    <div style={detailOverlay} role="dialog" aria-modal="true" aria-label={title}>
-      <div style={detailDialog}>
-        <div style={{ display: "flex", alignItems: "flex-start", gap: 10 }}>
-          <div style={{ flex: 1, minWidth: 0, display: "grid", gap: 4 }}>
-            <div className="hub-card-kicker">
-              {ko ? "프롬프트" : "PROMPT"}
-              {merged.category ? ` · ${merged.category}` : ""}
-            </div>
-            <div style={{ fontFamily: "var(--rd-f-display)", fontSize: 21, color: "var(--rd-ink)" }}>{title}</div>
-            {merged.authorName && (
-              <div style={{ fontSize: 12, color: "var(--rd-ink-3)" }}>
-                {ko ? `${merged.authorName} 제공` : `by ${merged.authorName}`}
-              </div>
-            )}
-          </div>
-          <button
-            type="button"
-            className="btn sm"
-            onClick={onClose}
-            aria-label={ko ? "닫기" : "Close"}
-            style={{ display: "inline-flex", alignItems: "center", gap: 4 }}
-          >
-            <IconClose size={13} />
-          </button>
-        </div>
-
-        {summary && <div style={{ fontSize: 13, lineHeight: 1.6, color: "var(--rd-ink-2)" }}>{summary}</div>}
+    <PopupFrame title={title} icon={<IconSparkles size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={onClose} size="wide">
+      <div style={{ display: "grid", gap: 14 }}>
+        <PopupFacts items={[{ label: merged.category || (ko ? "프롬프트" : "Prompt"), value: merged.authorName || undefined }]} />
+        {summary && <PopupDetails label={ko ? "설명" : "About"}><div>{summary}</div></PopupDetails>}
 
         {detailLoadError && (
           <div role="alert" style={{ ...detailBlock, color: "var(--rd-warn)" }}>
             {ko
-              ? "상세 정보를 불러오지 못했습니다. 목록의 기본 정보는 유지되지만 본문 상태는 확인되지 않았습니다."
-              : "Could not load prompt details. The catalog summary is preserved, but the body state is unverified."}
+              ? "상세 로드 실패 · 본문 확인 불가"
+              : "Details unavailable · prompt body unverified."}
           </div>
         )}
 
@@ -994,12 +973,7 @@ function PromptDetailDialog({
           </div>
         )}
 
-        {exampleResult && (
-          <div style={detailBlock}>
-            <div style={detailBlockTitle}>{ko ? "예시 결과" : "Example result"}</div>
-            <div style={{ whiteSpace: "pre-wrap" }}>{exampleResult}</div>
-          </div>
-        )}
+        {exampleResult && <PopupDetails label={ko ? "예시 결과" : "Example result"}><div style={{ whiteSpace: "pre-wrap" }}>{exampleResult}</div></PopupDetails>}
 
         {/* ── 열람/맛보기/써보기 액션 영역 ── */}
         {body ? (
@@ -1010,12 +984,7 @@ function PromptDetailDialog({
                 {body}
               </pre>
             </div>
-            {tips && (
-              <div style={detailBlock}>
-                <div style={detailBlockTitle}>{ko ? "활용 팁" : "Tips"}</div>
-                <div style={{ whiteSpace: "pre-wrap" }}>{tips}</div>
-              </div>
-            )}
+            {tips && <PopupDetails label={ko ? "활용 팁" : "Tips"}><div style={{ whiteSpace: "pre-wrap" }}>{tips}</div></PopupDetails>}
             {!paid && !merged.unlocked && (
               <div style={{ fontSize: 12, color: "var(--rd-warn)", lineHeight: 1.5 }}>
                 {ko
@@ -1059,7 +1028,7 @@ function PromptDetailDialog({
                   ? ko ? "채팅 만드는 중…" : "Creating chat…"
                   : startFailed
                     ? ko ? "다시 시도" : "Retry"
-                    : ko ? "이 프롬프트로 새 채팅 시작" : "Start a new chat with this prompt"}
+                    : ko ? "새 채팅 시작" : "Start a new chat"}
               </button>
             </div>
           </div>
@@ -1068,7 +1037,7 @@ function PromptDetailDialog({
             {gate === "unauthenticated" || !signedIn ? (
               <div style={{ display: "grid", gap: 8 }}>
                 <span style={{ fontSize: 12.5, color: "var(--rd-ink-2)", lineHeight: 1.5 }}>
-                  {ko ? "프롬프트를 열람하려면 먼저 로그인하세요." : "Sign in first to open this prompt."}
+                  {ko ? "로그인 후 열람" : "Sign in to open"}
                 </span>
                 <button
                   type="button"
@@ -1083,7 +1052,7 @@ function PromptDetailDialog({
               <div style={{ display: "grid", gap: 8 }} role="alert">
                 <span style={{ fontSize: 12.5, color: "var(--rd-warn)", lineHeight: 1.5 }}>
                   {ko
-                    ? "같은 맛보기 요청은 저장됐지만 완료 본문을 아직 확인하지 못했습니다. 새 요청을 만들지 말고 같은 요청을 이어가세요."
+                    ? "맛보기 결과 미확인 · 저장된 요청 이어가기"
                     : "The same taste request is saved, but its completed body is not confirmed yet. Resume this request; do not create another one."}
                 </span>
                 <button
@@ -1100,8 +1069,8 @@ function PromptDetailDialog({
               <div style={{ display: "grid", gap: 8 }} role="alert">
                 <span style={{ fontSize: 12.5, color: "var(--rd-warn)", lineHeight: 1.5 }}>
                   {ko
-                    ? "같은 열람 요청은 저장됐지만 실제 소유권과 본문을 아직 확인하지 못했습니다. 새 요청을 만들지 말고 같은 요청 상태를 다시 확인하세요."
-                    : "This open request is saved, but ownership and the exact body are not confirmed yet. Check the same request instead of creating a new one."}
+                    ? "소유권·본문 미확인 · 저장된 요청 확인"
+                    : "Ownership and body unconfirmed · Check the saved request."}
                 </span>
                 <button
                   type="button"
@@ -1134,8 +1103,8 @@ function PromptDetailDialog({
               <div style={{ display: "grid", gap: 8 }}>
                 <span style={{ fontSize: 12.5, color: "var(--rd-ink-2)", lineHeight: 1.5 }}>
                   {ko
-                    ? "맛보기는 1회만 제공돼요. 이 프롬프트를 다시 열람하려면 구독이 필요해요."
-                    : "Tastes are one-time only. Subscribe to reopen this prompt."}
+                    ? "맛보기 사용됨 · 다시 열려면 구독"
+                    : "Taste used · Subscribe to reopen"}
                 </span>
                 <UpgradeCta variant="banner" />
               </div>
@@ -1144,8 +1113,8 @@ function PromptDetailDialog({
               <div style={{ display: "grid", gap: 8 }}>
                 <span style={{ fontSize: 12.5, color: "var(--rd-ink-2)", lineHeight: 1.5 }}>
                   {ko
-                    ? "무제한 열람은 구독 회원 전용이에요. 무료 플랜은 이 프롬프트를 1회 맛보기로 열람할 수 있어요."
-                    : "Unlimited opens are for subscribers. On the free plan you can taste this prompt once."}
+                    ? "무료: 맛보기 1회 · 구독: 무제한 열람"
+                    : "Free: one taste · Subscription: unlimited opens"}
                 </span>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {!merged.tasted && (
@@ -1185,8 +1154,8 @@ function PromptDetailDialog({
               <div style={{ display: "grid", gap: 8 }}>
                 <span style={{ fontSize: 12.5, color: "var(--rd-ink-2)", lineHeight: 1.5 }}>
                   {ko
-                    ? "무료 플랜은 프롬프트당 1회 맛보기로 열람할 수 있어요. 맛보기 내용은 그 자리에서만 제공됩니다."
-                    : "On the free plan you can taste each prompt once. The body is shown only at that moment."}
+                    ? "무료 맛보기 1회 · 본문은 이번 열람에만 표시"
+                    : "One free taste · Body shown for this open only"}
                 </span>
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button type="button" className="btn sm primary" onClick={() => void doTaste()} disabled={busy != null}>
@@ -1201,33 +1170,9 @@ function PromptDetailDialog({
           </div>
         )}
       </div>
-    </div>
+    </PopupFrame>
   );
 }
-
-const detailOverlay: CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  zIndex: 90,
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  padding: 20,
-  background: "rgba(20, 24, 32, 0.28)",
-};
-
-const detailDialog: CSSProperties = {
-  width: "var(--popup-2-width)",
-  maxHeight: "min(760px, 90vh)",
-  overflowY: "auto",
-  borderRadius: 8,
-  border: "1px solid var(--rd-hair)",
-  background: "var(--rd-surface)",
-  boxShadow: "0 18px 60px rgba(20, 24, 32, 0.24)",
-  display: "grid",
-  gap: 14,
-  padding: 18,
-};
 
 const detailBlock: CSSProperties = {
   padding: "9px 11px",

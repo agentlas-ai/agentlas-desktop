@@ -15,6 +15,7 @@ import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useOrphanAttentionRevealed } from "@/lib/attention";
 import type { BrowserApprovalRequestEvent, BrowserApprovalDecision } from "@/lib/types";
+import { IconShield, IconCheck, IconClose, IconClock, IconTarget } from "./Icon";
 
 const ACTION_LABEL: Record<string, { ko: string; en: string }> = {
   send: { ko: "메시지 전송", en: "Send message" },
@@ -219,10 +220,10 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
       : (ko ? "승인 필요" : "Approval needed");
   const summaryLine = isUnsafeCode ? (unsafeCodeDetail || req.summary) : req.summary;
   const safetyNote = isPayment
-    ? (ko ? "결제는 안전을 위해 매번 확인합니다." : "Payments are confirmed every time for safety.")
+    ? (ko ? "결제는 매번 확인" : "Confirm each payment")
     : isUnsafeCode
-      ? (ko ? "임의 코드는 페이지에서 여러 동작을 한 번에 실행할 수 있어 확인합니다. 이 대화를 ‘항상 허용’으로 켜 두면 다시 묻지 않습니다."
-            : "Arbitrary code can perform multiple page actions, so it is confirmed. Turn on Always allow for this conversation to stop these prompts.")
+      ? (ko ? "여러 페이지 동작을 실행할 수 있습니다. 이 대화의 ‘항상 허용’을 켜면 확인을 생략합니다."
+            : "Code can perform multiple page actions. Always allow in this conversation skips this check.")
       : null;
 
   const content = (
@@ -232,20 +233,23 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
             두면 짧은 카운트다운용으로 만든 자리(flex 0 0 auto · nowrap)를 긴 문장이 차지해
             정작 무엇을 승인하는지(제목·코드)가 줄임표로 잘린다. */}
         <div className="baa-chip-copy">
-          <span className="baa-chip-kicker">{approvalKicker}</span>
+          <span className="baa-chip-kicker"><IconShield size={15} />{approvalKicker}</span>
           <strong>{askTitle}</strong>
-          <small>{summaryLine || (ko ? "실행 전에 확인하세요." : "Confirm before running.")}</small>
+          <small className={isUnsafeCode ? "baa-code-preview" : undefined}>{summaryLine || (ko ? "실행 전에 확인하세요." : "Confirm before running.")}</small>
+          {req.target && <div className="baa-chip-target"><IconTarget size={14} /><small><b>{ko ? "대상" : "Target"}</b>{req.target}</small></div>}
           {safetyNote && <small className="baa-chip-note">{safetyNote}</small>}
         </div>
         {/* 남은 시간은 안전 문구가 있어도 사라지면 안 된다 — 만료되면 이 요청은
             fail-closed 로 조용히 죽으므로, 매번 묻는 종류일수록 더 필요하다. */}
         <span className="baa-chip-timer">
+          <IconClock size={14} />
           {ko ? `${remainingSeconds}초 · 대기 ${visibleQueue.length}건` : `${remainingSeconds}s · ${visibleQueue.length} pending`}
         </span>
         <div className="baa-chip-actions" role="group" aria-label={ko ? "승인 선택" : "Approval choices"}>
-          <button type="button" className="baa-chip-once" onClick={() => resolve("once")}>{ko ? "이번만 허용" : "Allow once"}</button>
+          <button type="button" className="baa-chip-once" onClick={() => resolve("once")}><IconCheck size={14} />{ko ? "이번만 허용" : "Allow once"}</button>
           {req.allowAlways && <button type="button" onClick={() => resolve("always")}>{ko ? "항상 허용" : "Always allow"}</button>}
           <button type="button" className="baa-chip-deny" onClick={() => resolve("deny")}>
+            <IconClose size={14} />
             {ko ? "거부" : "Deny"}
           </button>
         </div>
@@ -282,24 +286,29 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
           box-sizing: border-box;
           padding: 8px 10px 8px 12px;
           border: 1px solid var(--paper-edge, rgba(25, 31, 36, .14));
-          border-radius: 13px;
-          background: var(--paper, #fff);
+          border-radius: var(--popup-radius);
+          background: var(--popup-card-bg);
           color: var(--ink, #202428);
-          box-shadow: 0 7px 20px rgba(25, 31, 36, .12);
+          box-shadow: var(--popup-shadow);
         }
         .baa-chip-copy { min-width: 0; flex: 1 1 auto; display: grid; gap: 2px; }
-        .baa-chip-kicker { color: var(--warn, #a26a00); font-size: 9px; font-weight: 800; letter-spacing: .04em; }
-        .baa-chip-copy strong, .baa-chip-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-        .baa-chip-copy strong { font-size: 11px; font-weight: 720; }
-        .baa-chip-copy small, .baa-chip-timer { color: var(--muted-deep, #667078); font-size: 9px; line-height: 1.3; }
+        .baa-chip-kicker { display: inline-flex; align-items: center; gap: 6px; color: var(--warn, #a26a00); font-size: 11px; font-weight: 750; }
+        .baa-chip-copy strong, .baa-chip-copy small { overflow-wrap: anywhere; white-space: normal; }
+        .baa-chip-copy .baa-code-preview { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
+        .baa-chip-copy strong { font-size: 13px; font-weight: 720; }
+        .baa-chip-copy small, .baa-chip-timer { color: var(--muted-deep, #667078); font-size: 12px; line-height: 1.4; }
+        .baa-chip-target { display: flex; align-items: flex-start; gap: 6px; padding-top: 5px; }
+        .baa-chip-target :global(svg) { flex: 0 0 auto; margin-top: 2px; }
+        .baa-chip-target small { min-width: 0; white-space: pre-wrap; }
+        .baa-chip-target b { margin-right: 6px; color: var(--ink-soft); font-weight: 650; }
         /* 안전 문구는 한 줄에 안 들어가는 문장이다 — 줄바꿈을 허용하고 제목처럼 자르지 않는다. */
         .baa-chip-copy .baa-chip-note { white-space: normal; overflow: visible; }
         .baa-chip-actions { display: flex; flex: 0 0 auto; gap: 5px; align-items: center; margin-left: auto; }
-        .baa-chip-actions button { min-height: 32px; padding: 0 10px; border: 1px solid var(--paper-edge-strong, #ccd2d6); border-radius: 9px; background: var(--paper, #fff); color: var(--ink-soft, #374047); font: inherit; font-size: 10px; font-weight: 680; white-space: nowrap; cursor: pointer; }
+        .baa-chip-actions button { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: 44px; padding: 0 10px; border: 1px solid var(--paper-edge-strong, #ccd2d6); border-radius: 10px; background: var(--paper, #fff); color: var(--ink-soft, #374047); font: inherit; font-size: 12px; font-weight: 680; white-space: nowrap; cursor: pointer; }
         .baa-chip-actions button:hover, .baa-chip-actions button:focus-visible { outline: 2px solid rgba(42, 47, 50, .12); }
-        .baa-chip-actions .baa-chip-once { border-color: var(--black, #202428); background: var(--black, #202428); color: var(--white, #fff); }
+        .baa-chip-actions .baa-chip-once { background: var(--popup-control-bg); color: var(--ink); }
         .baa-chip-actions .baa-chip-deny { border-color: var(--danger-soft, #e9b8b8); color: var(--danger, #9f3030); }
-        .baa-chip-timer { flex: 0 0 auto; white-space: nowrap; }
+        .baa-chip-timer { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; white-space: nowrap; }
         @media (max-width: 700px) {
           .baa-chip { align-items: stretch; flex-direction: column; gap: 7px; padding: 9px; }
           .baa-chip-actions { width: 100%; overflow-x: auto; }
@@ -316,8 +325,6 @@ export function BrowserActionApprovalSheet({ chatId, onStandaloneHeightChange }:
         data-browser-action-approval-wrap="true"
         data-browser-action-approval-placement={usesConversationComposer ? "conversation" : "standalone"}
         data-composer-decision-card="true"
-        role="alertdialog"
-        aria-live="assertive"
       >
         {content}
       </div>

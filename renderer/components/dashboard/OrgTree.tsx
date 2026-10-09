@@ -5,6 +5,7 @@
 //   - 허브(북마크)는 로컬 설치와 별개인 Hub 라우팅 참조.
 //   - 가져오기: 폴더 선택 → team.importLocalFolder → 리로드.
 "use client";
+import { confirmPopup } from "@/lib/popup";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { classifyHubEntity, classifyInstalledAgent, entityClassShortLabel } from "@/lib/agent-entity-kind";
@@ -259,6 +260,12 @@ export function OrgTree() {
     return ko ? "Agentlas Hub 북마크" : "Agentlas Hub bookmark";
   }
 
+  function sourceRemovalText(source: Source): string {
+    if (source === "local") return ko ? "원본 폴더를 휴지통으로 옮깁니다." : "The source folder moves to Trash.";
+    if (source === "cloud") return ko ? "Agent Cloud 원본을 영구 삭제합니다." : "The Agent Cloud source is permanently deleted.";
+    return ko ? "조직도의 Hub 북마크를 해제합니다." : "The Hub bookmark is removed from the org chart.";
+  }
+
   async function removeAgentCore(api: NonNullable<ReturnType<typeof ipc>>, agent: InstalledAgent): Promise<void> {
     const source = agentSource(agent);
     if (source === "cloud") await api.marketplace.deleteMine(agent.slug);
@@ -304,9 +311,9 @@ export function OrgTree() {
         ? ` 좌석 ${preview.seatCount}곳이 빈 자리가 됩니다. 대화 ${preview.chatCount}개는 그대로 남습니다.`
         : ` ${preview.seatCount} seat${preview.seatCount === 1 ? "" : "s"} become${preview.seatCount === 1 ? "s" : ""} empty. ${preview.chatCount} conversation${preview.chatCount === 1 ? "" : "s"} stay${preview.chatCount === 1 ? "s" : ""}.`;
     } catch { /* 수를 못 세면 수 없는 보존 문구로 낸다 */ }
-    if (!window.confirm(ko
-      ? `${name}을(를) 조직도에서 삭제할까요? 출처: ${sourceLabel(source)}. 로컬이면 원본 폴더를 휴지통으로 옮기고, Cloud/Hub이면 원본 또는 북마크도 함께 정리합니다.${preservation}`
-      : `Remove ${name} from the org chart? Source: ${sourceLabel(source)}. Local sources move to Trash; Cloud/Hub also removes the owned source or bookmark.${preservation}`)) return;
+    if (!(await confirmPopup(ko
+      ? `${name}을(를) 조직도에서 삭제할까요? 출처: ${sourceLabel(source)}. ${sourceRemovalText(source)}${preservation}`
+      : `Remove ${name} from the org chart? Source: ${sourceLabel(source)}. ${sourceRemovalText(source)}${preservation}`, { locale: ko ? "ko" : "en", title: name, tone: "danger" }))) return;
     setBusy(true);
     try {
       if (agent) await removeAgentCore(api, agent);
@@ -323,9 +330,9 @@ export function OrgTree() {
     if (!api || busy) return;
     const firm = firms.find((item) => item.id === id);
     const source = firm ? firmSource(firm) : "local";
-    if (!window.confirm(ko
-      ? `${name} 팀을 조직도에서 삭제할까요? 출처: ${sourceLabel(source)}. 팀 구성원 설치와 로컬 원본/Cloud 원본/Hub 북마크 정리를 함께 처리합니다.`
-      : `Remove team ${name} from the org chart? Source: ${sourceLabel(source)}. This removes member installs and cleans the local source, Cloud source, or Hub bookmark.`)) return;
+    if (!(await confirmPopup(ko
+      ? `${name} 팀을 조직도에서 삭제할까요? 출처: ${sourceLabel(source)}. 팀 구성원 설치를 제거합니다. ${sourceRemovalText(source)}`
+      : `Remove team ${name} from the org chart? Source: ${sourceLabel(source)}. This removes member installs. ${sourceRemovalText(source)}`, { locale: ko ? "ko" : "en", title: name, tone: "danger" }))) return;
     setBusy(true);
     try {
       if (firm) await removeFirmCore(api, firm);
@@ -344,7 +351,7 @@ export function OrgTree() {
     const gAgents = (mode === "multi" ? roster.standaloneMultiAgents : roster.standaloneSingleAgents).filter((a) => agentSource(a) === src);
     const total = gFirms.length + gAgents.length;
     if (total === 0) return;
-    if (!window.confirm(t("org.confirm.remove_group", { name: label, count: total }))) return;
+    if (!(await confirmPopup(`${t("org.confirm.remove_group", { name: label, count: total })} ${sourceRemovalText(src)}`, { locale: ko ? "ko" : "en", title: label, tone: "danger" }))) return;
     setBusy(true);
     try {
       for (const f of gFirms) await removeFirmCore(api, f);
@@ -361,7 +368,7 @@ export function OrgTree() {
     const api = ipc();
     if (!api || busy) return;
     const name = ko ? listing.name : listing.nameEn || listing.name;
-    if (!window.confirm(ko ? `${name}을 Agent Cloud에서 영구 삭제할까요?` : `Delete ${name} permanently from Agent Cloud?`)) return;
+    if (!(await confirmPopup(ko ? `${name}을 Agent Cloud에서 영구 삭제할까요?` : `Delete ${name} permanently from Agent Cloud?`, { locale: ko ? "ko" : "en", title: name, tone: "danger" }))) return;
     setBusy(true);
     try {
       await api.marketplace.deleteMine(listing.slug);
@@ -377,7 +384,7 @@ export function OrgTree() {
     const api = ipc();
     if (!api || busy) return;
     const name = ko ? listing.name : listing.nameEn || listing.name;
-    if (!window.confirm(ko ? `${name}의 Hub 북마크를 조직도에서 삭제할까요?` : `Remove the Hub bookmark for ${name} from the org chart?`)) return;
+    if (!(await confirmPopup(ko ? `${name}의 Hub 북마크를 조직도에서 삭제할까요?` : `Remove the Hub bookmark for ${name} from the org chart?`, { locale: ko ? "ko" : "en", title: name, tone: "warning" }))) return;
     setBusy(true);
     try {
       await api.marketplace.bookmarkRemove(slug, listing.entityKind);

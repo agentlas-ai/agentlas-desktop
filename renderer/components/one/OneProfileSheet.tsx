@@ -7,6 +7,7 @@ import {
   type FormEvent,
 } from "react";
 import { ipc } from "@/lib/ipc";
+import { confirmPopup } from "@/lib/popup";
 import { OneMailSettings } from "./mail/OneMailSettings";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
@@ -15,6 +16,7 @@ import type {
   OneOperatingPrincipleScope,
   OneProfile,
 } from "@/lib/types";
+import { IconUser, IconMail, IconShield, IconCheck } from "@/components/Icon";
 import { OneBottomSheet } from "./OneBottomSheet";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor } from "@shared/one-profile";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
@@ -221,7 +223,7 @@ export function OneProfileSheet({
       requestOneOperationalRecovery("one-profile", new Error("Desktop bridge unavailable"));
       return;
     }
-    const confirmed = window.confirm(tFor(locale, "one.prof.confirm.delete"));
+    const confirmed = await confirmPopup(tFor(locale, "one.prof.confirm.delete"), { locale, title: locale === "ko" ? "원칙 삭제" : "Delete principle", confirmLabel: locale === "ko" ? "삭제" : "Delete", tone: "danger" });
     if (!confirmed) return;
     await mutate(
       () => api.oneProfile.deletePrinciple({
@@ -245,7 +247,7 @@ export function OneProfileSheet({
       eyebrow={tFor(locale, "one.prof.eyebrow")}
       title={tFor(locale, "one.prof.title")}
       titleId="one-profile-title"
-      description={profileSubtitle(locale)}
+      icon={<IconUser size={20} />}
     >
         {!profile ? (
           <div className={styles.loading} role="status"><span>{tFor(locale, "one.prof.loading")}</span><LoadingEstimate locale={locale} operationKey="one-profile-load" expectedSeconds={[1, 15]} /></div>
@@ -258,8 +260,8 @@ export function OneProfileSheet({
             <form className={styles.section} onSubmit={saveProfile}>
               <div className={styles.sectionHeading}>
                 <div>
-                  <h3>{tFor(locale, "one.prof.basics.title")}</h3>
-                  <p>{tFor(locale, "one.prof.basics.desc")}</p>
+                  <h3><IconUser size={16} />{tFor(locale, "one.prof.basics.title")}</h3>
+                  <details className={styles.details}><summary>{locale === "ko" ? "안내" : "Details"}</summary><p>{tFor(locale, "one.prof.basics.desc")}</p></details>
                 </div>
               </div>
               <label>
@@ -272,9 +274,9 @@ export function OneProfileSheet({
               </label>
               <label>
                 <span>{locale==='ko'?'말풍선 색':'Bubble color'}</span>
-                <select value={bubbleColor} onChange={event=>setBubbleColor(event.target.value as OneBubbleColor)} disabled={busy}>
-                  {Object.keys(ONE_BUBBLE_COLORS).map(color=><option key={color} value={color}>{color}</option>)}
-                </select>
+                <span className={styles.colorChoices} role="group" aria-label={locale === "ko" ? "말풍선 색" : "Bubble color"}>
+                  {(Object.keys(ONE_BUBBLE_COLORS) as OneBubbleColor[]).map(color => <button type="button" key={color} title={color} aria-label={color} aria-pressed={bubbleColor === color} disabled={busy} onClick={() => setBubbleColor(color)} style={{ background: ONE_BUBBLE_COLORS[color] }}>{bubbleColor === color && <IconCheck size={16} />}</button>)}
+                </span>
               </label>
               <label>
                 <span>{tFor(locale, "one.prof.field.context")}</span>
@@ -288,8 +290,8 @@ export function OneProfileSheet({
             <section className={styles.section} aria-labelledby="one-mail-title" data-one-profile-mail>
               <div className={styles.sectionHeading}>
                 <div>
-                  <h3 id="one-mail-title">{tFor(locale, "one.mail.settings.title")}</h3>
-                  <p>{tFor(locale, "one.mail.settings.desc")}</p>
+                  <h3 id="one-mail-title"><IconMail size={16} />{tFor(locale, "one.mail.settings.title")}</h3>
+                  <details className={styles.details}><summary>{locale === "ko" ? "안내" : "Details"}</summary><p>{tFor(locale, "one.mail.settings.desc")}</p></details>
                 </div>
               </div>
               <OneMailSettings
@@ -302,8 +304,8 @@ export function OneProfileSheet({
             <section className={styles.section} aria-labelledby="one-principles-title">
               <div className={styles.sectionHeading}>
                 <div>
-                  <h3 id="one-principles-title">{tFor(locale, "one.prof.principles.title")}</h3>
-                  <p>{tFor(locale, "one.prof.principles.desc")}</p>
+                  <h3 id="one-principles-title"><IconShield size={16} />{tFor(locale, "one.prof.principles.title")}</h3>
+                  <details className={styles.details}><summary>{locale === "ko" ? "안내" : "Details"}</summary><p>{tFor(locale, "one.prof.principles.desc")}</p></details>
                 </div>
               </div>
 

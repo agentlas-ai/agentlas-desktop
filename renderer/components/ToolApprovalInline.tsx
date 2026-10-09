@@ -16,6 +16,7 @@
 import { redactSecrets } from "@shared/secret-patterns";
 import { useEffect, useState } from "react";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
+import { IconShield, IconCheck, IconClose, IconFolder } from "./Icon";
 import { useT } from "@/lib/i18n";
 import type { ToolApprovalRequestEvent } from "@/lib/types";
 import {
@@ -258,15 +259,15 @@ export function ToolApprovalCard({
     );
   }
 
+  const chipDetail = request.detail?.trim()
+    ? `${runtimeName} · ${redactSecrets(request.detail.trim())}`
+    : escalation
+      ? (ko ? "지금은 읽기 전용 — 허용하면 이 요청을 이어서 합니다" : "Read-only now — allowing continues this request")
+      : runtimeName;
   if (compact && chip) {
     // The second line says what is being allowed, not that something is being asked (the
     // question already says that). A runtime-blocked call carries the command or path it
     // tried; an escalation request carries none, so it states the boundary it would widen.
-    const chipDetail = request.detail?.trim()
-      ? `${runtimeName} · ${redactSecrets(request.detail.trim())}`
-      : escalation
-        ? (ko ? "지금은 읽기 전용 — 허용하면 이 요청을 이어서 합니다" : "Read-only now — allowing continues this request")
-        : runtimeName;
     return (
       <section
         className="tool-approval-chip"
@@ -293,6 +294,7 @@ export function ToolApprovalCard({
               disabled={locked}
               onClick={() => choose(option.id)}
             >
+              {option.id === "deny" ? <IconClose size={14} /> : <IconCheck size={14} />}
               {option.title}
             </button>
           ))}
@@ -305,12 +307,18 @@ export function ToolApprovalCard({
   return (
     <div data-testid="tool-approval-card-shell">
       <AskCard
+        icon={<IconShield size={18} />}
         title={askTitle}
+        subtitle={chipDetail}
         locale={ko ? "ko" : "en"}
         options={askOptions}
         onChoose={choose}
         data-testid="tool-approval-card"
-      />
+      >
+        {request.cwd && <div style={{display: "flex", alignItems: "center", gap: 8, marginBottom: 8, color: "var(--muted-deep)", fontSize: 12, overflowWrap: "anywhere"}}>
+          <IconFolder size={15} /><span>{redactSecrets(request.cwd)}</span>
+        </div>}
+      </AskCard>
       {feedbackNode}
     </div>
   );

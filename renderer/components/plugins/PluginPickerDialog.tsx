@@ -18,7 +18,7 @@
 //    (미입력 서버는 MCP 화면에 "키 필요"로 남아 스스로를 설명한다).
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { IconFilter } from "@/components/Icon";
+import { IconFilter, IconPuzzle } from "@/components/Icon";
 import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
 import type { MarketplaceListing, PluginKind } from "@/lib/types";
 import {
@@ -34,6 +34,7 @@ import {
   type PluginPickerResult,
 } from "./PluginPickerCore";
 import styles from "./PluginPickerDialog.module.css";
+import { PluginSetupReview, bundledSetupFor, usesLiveSetup } from "./PluginSetupReview";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 
 export type { PluginPickerResult } from "./PluginPickerCore";
@@ -48,26 +49,31 @@ type OwnershipFilter = "all" | "installed" | "not-installed";
 export function PluginPickerDialog({
   ko,
   variant = "browse",
+  initialSlugs = [],
   onClose,
   onCompleted,
+  onCustomSetup,
 }: {
   ko: boolean;
   /** onboarding이면 대표 항목만 먼저 보이고 "더 찾아보기"로 전체를 편다. */
   variant?: "browse" | "onboarding";
+  /** The MCP catalog can open a reviewed install with a specific choice. */
+  initialSlugs?: string[];
   onClose: () => void;
   onCompleted?: (result: PluginPickerResult) => void;
+  onCustomSetup?: () => void;
 }) {
   const brandMap = usePluginBrandMap();
   const catalog = usePluginCatalog();
-  const { listings, loaded, loadError, refresh, isInstalled, hasBrowserLogin } = catalog;
+  const { listings, loaded, loadError, installedKnown, refresh, isInstalled, hasBrowserLogin } = catalog;
 
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() => initialSlugs.length === 1 ? initialSlugs[0] : "");
   const [typeFilter, setTypeFilter] = useState<TypeFilter>("all");
   const [ownership, setOwnership] = useState<OwnershipFilter>("all");
   const [filterOpen, setFilterOpen] = useState(false);
   const [expanded, setExpanded] = useState(variant !== "onboarding");
 
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [selected, setSelected] = useState<Set<string>>(() => new Set(initialSlugs));
   const [installing, setInstalling] = useState(false);
   const [keyStep, setKeyStep] = useState<KeyStepState | null>(null);
   const [loginStep, setLoginStep] = useState<LoginStepState | null>(null);
@@ -148,6 +154,8 @@ export function PluginPickerDialog({
     [listings, selected],
   );
 
+  const guidedOnly = chosen.length > 0 && chosen.every((listing) => !usesLiveSetup(listing) && !!bundledSetupFor(listing.slug)?.connectSetup && !(bundledSetupFor(listing.slug)?.mcp?.length));
+
   const install = async () => {
     if (chosen.length === 0 || installing) return;
     setInstalling(true);
@@ -219,7 +227,7 @@ export function PluginPickerDialog({
     <div className={styles.overlay} role="dialog" aria-modal="true" aria-labelledby="plugin-picker-title">
       <div className={styles.panel} ref={dialogRef}>
         <header className={styles.header}>
-          <h2 id="plugin-picker-title" className={styles.title}>
+          <h2 id="plugin-picker-title" className={styles.title}><span className={styles.titleIcon} aria-hidden="true"><IconPuzzle size={21}/></span>
             {variant === "onboarding"
               ? ko ? "어떤 도구를 자주 쓰세요?" : "What do you use every day?"
               : ko ? "도구 추가" : "Add tools"}
@@ -230,11 +238,11 @@ export function PluginPickerDialog({
         </header>
 
         {variant === "onboarding" && (
-          <p className={styles.subtitle}>
+          <details className={styles.explanation}><summary>{ko ? "모든 에이전트와 함께 사용" : "Shared with every agent"}</summary><p className={styles.subtitle}>
             {ko
               ? "고른 도구는 모든 에이전트가 함께 씁니다. 지금 고르지 않아도 나중에 환경설정에서 추가할 수 있어요."
               : "Every agent shares the tools you pick. You can also add them later in Settings."}
-          </p>
+          </p></details>
         )}
 
         <div className={styles.toolbar}>
@@ -304,9 +312,10 @@ export function PluginPickerDialog({
 
         <div className={styles.body}>
           {!loaded && <div className={styles.hint} style={{ display: "grid", gap: 5 }}><span>{ko ? "목록을 불러오는 중…" : "Loading…"}</span><LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-plugin-catalog" expectedSeconds={[2, 20]} /></div>}
+          {loaded && !installedKnown && <p className={styles.error}>{ko ? "설치 상태를 읽지 못했습니다. 추가 전 기존 연결을 확인하세요." : "Installed state could not be read. Review existing connections before adding."}</p>}
           {loaded && loadError && (
             <p className={styles.error}>
-              {ko ? "목록을 불러오지 못했습니다: " : "Could not load the catalog: "}
+              {ko ? "실시간 목록 갱신 실패 · 포함된 카탈로그를 표시합니다: " : "Live refresh failed · showing the bundled catalog: "}
               {loadError}
             </p>
           )}
@@ -318,12 +327,14 @@ export function PluginPickerDialog({
             </p>
           )}
 
+          {chosen.map((listing) => <PluginSetupReview key={listing.slug} listing={listing} ko={ko} />)}
+
           {grouped.map(([category, rows]) => (
             <section key={category} className={styles.group}>
               <h3 className={styles.groupTitle}>{category}</h3>
               <div className={styles.grid}>
                 {rows.map((listing) => {
-                  const already = isInstalled(listing);
+                  const already = installedKnown && isInstalled(listing);
                   const picked = selected.has(listing.slug);
                   return (
                     <button
@@ -348,7 +359,9 @@ export function PluginPickerDialog({
                         <SetupHint listing={listing} ko={ko} hasLogin={hasBrowserLogin(listing)} />
                       </span>
                       <span className={styles.cardAction}>
-                        {already
+                        {!installedKnown
+                          ? ko ? "상태 확인 필요" : "State unverified"
+                          : already
                           ? ko ? "설치됨" : "Installed"
                           : picked
                             ? ko ? "선택됨" : "Selected"
@@ -379,6 +392,7 @@ export function PluginPickerDialog({
                 : ko ? "여러 개를 함께 고를 수 있어요" : "You can pick more than one"}
           </span>
           <div className={styles.footerActions}>
+            {guidedOnly && onCustomSetup && <button type="button" className={styles.primary} onClick={onCustomSetup}>{ko ? "MCP 연결 직접 추가" : "Add custom MCP connection"}</button>}
             <button type="button" className={styles.ghost} onClick={onClose} disabled={installing}>
               {variant === "onboarding"
                 ? ko ? "건너뛰기" : "Skip"
@@ -388,9 +402,11 @@ export function PluginPickerDialog({
               type="button"
               className={styles.primary}
               onClick={() => void install()}
-              disabled={installing || selected.size === 0}
+              disabled={installing || selected.size === 0 || guidedOnly}
             >
-              {installing
+              {guidedOnly
+                ? ko ? "제공사 설정 필요" : "Provider setup required"
+                : installing
                 ? ko ? "추가하는 중…" : "Adding…"
                 : ko ? `${selected.size || ""}개 추가`.trim() : `Add ${selected.size || ""}`.trim()}
             </button>

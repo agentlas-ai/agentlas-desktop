@@ -6,7 +6,8 @@ import { app } from "electron";
 export type NativeInputAction =
   | { action: "status" }
   | { action: "listApps" }
-  | { action: "focusApp"; app: string }
+  | { action: "listCaptureTargets" }
+  | { action: "focusApp"; app: string; windowId?:number; processStartMs?:number }
   | { action: "move"; x: number; y: number }
   | { action: "click"; x: number; y: number; button?: "left" | "right" | "middle"; clickCount?: 1 | 2 }
   | {

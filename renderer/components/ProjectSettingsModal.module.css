@@ -84,3 +84,6 @@
   .content { padding:0 16px 18px; }
   .footer { padding:12px 16px; }
 }
+
+/* Paper popup elevation shares the desktop popup palette. */
+.dialog { border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }

@@ -159,9 +159,9 @@
   gap: 2px;
   padding: 6px;
   border: 1px solid var(--design-line);
-  border-radius: 8px;
-  background: var(--design-bg);
-  box-shadow: 0 14px 34px rgba(15, 23, 42, .18);
+  border-radius: var(--popup-radius);
+  background: var(--popup-card-bg);
+  box-shadow: var(--popup-shadow);
 }
 .imageContextMenu button { min-height: 32px; padding: 0 9px; border: 0; border-radius: 6px; background: transparent; color: var(--design-ink); font: inherit; font-size: 11px; text-align: left; cursor: pointer; }
 .imageContextMenu button:hover, .imageContextMenu button:focus-visible { background: var(--design-panel-muted); outline: none; }

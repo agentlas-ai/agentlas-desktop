@@ -1,7 +1,9 @@
 import { answerOneDispatchQuestion } from "../one/team-dispatch";
 import type { MobilePushService, MobilePushNotice } from "./push";
 import { MobileGoalControl, type MobileGoalControlServices } from "./goal-control";
-import { oneSupervisor } from "../one/supervisor";
+import { oneSupervisor as localOneSupervisor, supervisorRunsInDaemon } from "../one/supervisor";
+import { oneSupervisorEndpoint } from "../one/supervisor-native-runtime";
+const oneSupervisor=()=>supervisorRunsInDaemon()?localOneSupervisor():oneSupervisorEndpoint();
 import { ONE_SUPERVISOR_SCHEMA, type SupervisorSendInput, type SupervisorWorkInput, type SupervisorScienceInput, type SupervisorControlInput, type SupervisorCommandReceipt } from "../../shared/one-supervisor";
 import { MOBILE_GOAL_CONTROL_CAPABILITY, isMobileGoalControlMethod } from "../../shared/mobile-goal-control";
 import { onGoalControlChange } from "../goal-control-events";
@@ -62,6 +64,7 @@ import { MobileChatAttachmentUploads } from "./chat-attachment-upload";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, readBoundChatMessageAttachment } from "../store/chat-message-attachments";
 import { performOneMobileSuggestionAction } from "../one/mobile-suggestions";
 import { invocationService } from "../invocation/service";
+import type { InvocationCurrentTurnPort } from "../runtime/invocation-owner-router";
 import { readMobileBridgeHistoryPage } from "./history-page";
 import {
   captureMobileOneInvocationBinding,
@@ -185,6 +188,8 @@ import type {
 } from "../../shared/types";
 import {
   MOBILE_BRIDGE_PROTOCOL_VERSION,
+  MOBILE_CURRENT_TURN_PARAM_KEYS,
+  validateMobileCurrentTurnParams,
   isMobileBridgeJsonValue,
   type MobileBridgeBuildEventDto,
   type MobileBridgeBuildQuestionDto,
@@ -199,6 +204,7 @@ import {
   type MobileBridgeInvocationArtifactDto,
   type MobileBridgeBrowserApprovalDto,
   type MobileBridgeInvokeSteerParams,
+  type MobileBridgeCurrentTurnSteerReceipt,
   type MobileBridgeJsonValue,
   type MobileBridgeOneInvokeStartReceiptDto,
   type MobileBridgeOneDecisionClarifyReceiptDto,
@@ -219,6 +225,7 @@ import {
   type MobileBridgeVisualInputActionDto,
   type MobileBridgeVisualSessionRefusalDto,
   ONE_SUPERVISOR_PARAM_KEYS,
+  MOBILE_SCIENCE_CHAT_PARAM_KEYS,
 } from "../../shared/mobile-bridge";
 import { buildToolCallDisplay, normalizeToolCall } from "../../shared/tool-call-detail";
 import type { MobileBridgeHostIdentity } from "./pairing";
@@ -264,6 +271,7 @@ import {
   stripMobileBridgeControlFences,
 } from "./sanitize";
 import type { OntologyHubClient } from "./ontology-hub-client";
+import { MobileScienceChat } from "./science-chat";
 import type {
   MobileBridgeAuthority,
   MobileBridgeAuthorityEvent,
@@ -320,6 +328,11 @@ function activeMobileBuildStatus(status: InternalMobileBuildStatus): boolean {
 
 export interface AgentlasDesktopMobileBridgeAuthorityOptions {
   mobilePush?: MobilePushService;
+  /** Host composition routes the exact run to its leased process owner. */
+  currentTurnControl?: InvocationCurrentTurnPort;
+  /** Cancellation remains callable independently of pending intake/receipts. */
+  cancelInvocationRun?: (runId: string) => "requested" | "already-requested" | "not-found"
+    | Promise<"requested" | "already-requested" | "not-found">;
   /** Explicit injection advertises the callable Desktop goal-control capability. */
   goalControl?: MobileGoalControlServices;
   /** DESKTOP_MOBILE_BRIDGE: Stable identity loaded from the Desktop userData store. */
@@ -2035,6 +2048,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   private readonly visualSessions: MobileVisualSessionManager;
   private readonly agentMail: MobileBridgeAgentMailService;
   private readonly goalControl: MobileGoalControl | null;
+  private readonly scienceChat: MobileScienceChat;
   private readonly mailAccountVerdicts = new Map<string, "ok" | "mismatch" | "signed-out" | "unknown">();
   private readonly projectFilePreviews = new MobileProjectFilePreviewRegistry();
   /**
@@ -2091,6 +2105,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     this.visualSessions = new MobileVisualSessionManager(options.visualSessionControl);
     this.agentMail = options.agentMail ?? createMobileBridgeAgentMailService();
     this.goalControl = options.goalControl ? new MobileGoalControl(options.hostIdentity.hostId, options.goalControl) : null;
+    this.scienceChat = new MobileScienceChat(options.hostIdentity.hostId);
     queueMicrotask(() => {
       void resumeMobileOneAutoRecovery(invocationService).catch((error) => this.onError(errorOf(error)));
     });
@@ -2150,6 +2165,7 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
   capabilities(): MobileBridgeJsonValue {
     return {
       oneSupervisorV1: ONE_SUPERVISOR_SCHEMA,
+      currentTurnSteeringV1: true,
       ...(this.options.mobilePush ? { mobilePush: true } : {}),
       visualSessionV2: this.visualSessions.capability(),
       ...(this.goalControl ? { goalControlV1: MOBILE_GOAL_CONTROL_CAPABILITY } : {}),
@@ -2508,6 +2524,21 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     if (mailRefusal) return mailRefusal;
 
     switch (request.method) {
+      case "science.chat.list":
+      case "science.chat.read":
+      case "science.chat.send":
+      case "science.chat.cancel": {
+        const params = guardedParams(request, MOBILE_SCIENCE_CHAT_PARAM_KEYS[request.method]);
+        return asJsonValue(await this.scienceChat.request(request.method, params, {
+          idempotencyKey: request.idempotencyKey,
+          assertAccount: () => {
+            // Pairing checks account ownership before opening the socket. Recheck on each await to close account-switch races.
+            const verdict = this.options.mailAccountGuard?.(context.deviceId);
+            if (verdict === "signed-out") throw new Error("sign_in_required");
+            if (verdict !== "ok") throw new Error("account_mismatch");
+          },
+        }), request.method);
+      }
       case "visualSession.create": {
         guardedParams(request, ["schemaVersion", "requestedWidth", "requestedHeight", "devicePixelRatio"]);
         return asJsonValue(this.visualSessions.create(context), request.method);
@@ -2618,18 +2649,18 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
           this.attachmentUploads.bind(context.deviceId,requiredIdentifier(params,"fileGroupId"),snapshot.conversationChatId);
         }
         const images=optionalImages(params);
-        return supervisorReceiptValue(oneSupervisor().send({...params,...(images ? {images} : {})} as unknown as SupervisorSendInput),request.method);
+        return supervisorReceiptValue(await oneSupervisor().send({...params,...(images ? {images} : {})} as unknown as SupervisorSendInput),request.method);
       }
       case "one.supervisor.startWork":
-        return supervisorReceiptValue(oneSupervisor().startWork(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startWork"]) as unknown as SupervisorWorkInput),request.method);
+        return supervisorReceiptValue(await oneSupervisor().startWork(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startWork"]) as unknown as SupervisorWorkInput),request.method);
       case "one.supervisor.startScience":
         return supervisorReceiptValue(await oneSupervisor().startScience(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.startScience"]) as unknown as SupervisorScienceInput),request.method);
       case "one.supervisor.control":
         return supervisorReceiptValue(await oneSupervisor().control(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.control"]) as unknown as SupervisorControlInput),request.method);
       case "one.supervisor.stopReply":
-        return supervisorReceiptValue(oneSupervisor().stopReply(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.stopReply"]) as unknown as {commandId:string;runId:string}),request.method);
+        return supervisorReceiptValue(await oneSupervisor().stopReply(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.stopReply"]) as unknown as {commandId:string;runId:string}),request.method);
       case "one.supervisor.appearance":
-        return supervisorReceiptValue(oneSupervisor().appearance(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.appearance"]) as unknown as Parameters<ReturnType<typeof oneSupervisor>['appearance']>[0]),request.method);
+        return supervisorReceiptValue(await oneSupervisor().appearance(guardedParams(request,ONE_SUPERVISOR_PARAM_KEYS["one.supervisor.appearance"]) as unknown as Parameters<ReturnType<typeof oneSupervisor>['appearance']>[0]),request.method);
       case "one.org.get": {
         noParams(request);
         return asJsonValue(getOneOrgState(), request.method);
@@ -3290,6 +3321,45 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
 
       // DESKTOP_MOBILE_BRIDGE: Invocation requests call only the shared
       // main-process InvocationService. Mobile never starts a parallel runtime.
+      case "invoke.currentTurn":
+      case "invoke.steerCurrentTurn":
+      case "invoke.currentTurnSteerReceipt": {
+        assertMobileOneDeviceAuthority(context);
+        // Recheck an already-open socket against the same paired-account guard
+        // used for owner data. Unknown legacy bindings defer to pairing auth.
+        const guard = this.options.mailAccountGuard;
+        if (guard && !context.devBootstrap) {
+          let verdict: ReturnType<typeof guard>;
+          try { verdict = guard(context.deviceId); } catch { verdict = "mismatch"; }
+          if (verdict === "signed-out" || verdict === "mismatch") {
+            const code = verdict === "signed-out" ? "sign_in_required" : "account_mismatch";
+            throw Object.assign(new Error(code), { code });
+          }
+        }
+        const params = guardedParams(request, MOBILE_CURRENT_TURN_PARAM_KEYS[request.method]);
+        const error = validateMobileCurrentTurnParams(request.method, params);
+        if (error) throw new TypeError(error);
+        const chatId = requiredIdentifier(params, "chatId");
+        if (!getChat(chatId)) throw new Error("Chat not found");
+        const control = this.options.currentTurnControl ?? invocationService;
+        if (request.method === "invoke.currentTurn") {
+          const current = await control.currentTurn(chatId);
+          return current ? { runId: current.runId } : null;
+        }
+        const intentId = params.intentId as string;
+        const receipt = request.method === "invoke.steerCurrentTurn"
+          ? await control.steerCurrentTurn({ chatId, intentId,
+              expectedRunId: params.expectedRunId as string, text: params.text as string })
+          : await control.currentTurnSteerReceipt(chatId, intentId);
+        if (!receipt) return null;
+        // Project exact public receipt fields, never native session or grants.
+        const projected: MobileBridgeCurrentTurnSteerReceipt = {
+          chatId: receipt.chatId, intentId: receipt.intentId, runId: receipt.runId,
+          promptHash: receipt.promptHash, messageId: receipt.messageId, status: receipt.status,
+          ...(receipt.code ? { code: receipt.code } : {}),
+        };
+        return asJsonValue(projected, request.method);
+      }
       case "invoke.history": {
         const params = guardedParams(request, ["chatId", "limit"]);
         const chatId = requiredIdentifier(params, "chatId");
@@ -3476,7 +3546,10 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       }
       case "invoke.cancel": {
         const params = guardedParams(request, ["runId"]);
-        const result = invocationService.cancel(requiredIdentifier(params, "runId", RUN_ID_RE));
+        const runId = requiredIdentifier(params, "runId", RUN_ID_RE);
+        const result = this.options.cancelInvocationRun
+          ? await this.options.cancelInvocationRun(runId)
+          : invocationService.cancel(runId);
         if (result === "not-found") throw new Error("Invocation run is no longer active");
         if (result === "requested") this.scheduleSnapshotUpdated();
         return result;

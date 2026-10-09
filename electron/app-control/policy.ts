@@ -25,7 +25,7 @@ const DENIED: Array<[RegExp, string]> = [
   [/^(hephaestus\.coreAuthLogin|runtime\.(openCliLogin|connectStart|connectCancel|connectGet)|mobileBridge\.issuePairing)$/, "sign-in and device pairing stay with the owner"],
   [/^(agentLeases\.purchase|cloudAgents\.setPrices|appFactory\.(approveProviderPayment|resolveProviderCredentials|captureProviderBrowserSessions|launchProviderBrowserSession|openProviderBrowser))$/, "payments, prices and provider accounts stay with the owner"],
   // One's own run plumbing: it has dedicated tools for these.
-  [/^(invoke|oneSupervisor|workStart|oneTeamPreflight|attention)\./, "One's own conversation plumbing; use the one_supervisor_* / one_team_* tools"],
+  [/^(invoke|oneSupervisor|oneHarness|oneWindow|oneContext|workStart|oneTeamPreflight|attention)\./, "One's own conversation plumbing; use the one_supervisor_* / one_team_* tools"],
   [/^chats\.appendOneUserMessage$/, "never write a message as the owner"],
   [/^science\.composer\./, "use one_supervisor_start_science / one_supervisor_control to work in Science"],
   // Views, live frames, watchers and leases belong to a screen that opened them.

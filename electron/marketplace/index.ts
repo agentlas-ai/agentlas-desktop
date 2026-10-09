@@ -1,7 +1,8 @@
 // 마켓 소스 진입점. Hub-only wrapper.
 //
 // 모든 caller는 `getSource()`를 호출하고 인터페이스만 알면 됨.
-// MCP 호출 실패 시 하드코딩 카탈로그로 대체하지 않는다. Desktop Hub는 실제 Hub 결과만 표시한다.
+// Agent listings remain live Hub data. Public plugin discovery includes the release-owned catalog snapshot.
+import { listBundledHubPlugins } from "../../shared/bundled-hub-catalog";
 import fs from "node:fs";
 import path from "node:path";
 import { McpSource, PartialHubResultError } from "./mcp-source";
@@ -156,7 +157,25 @@ class HubOnlySource implements MarketplaceSource {
       "searchAgents",
       [],
     ).then((attempt) => {
-      const listings = publicListings(attempt.value);
+      const live = publicListings(attempt.value);
+      const byIdentity = new Map<string, MarketplaceListing>();
+      const query = q.trim().toLowerCase();
+      for (const row of listBundledHubPlugins()) {
+        if (query && ![row.slug, row.name, row.nameEn, row.tagline, row.taglineEn].join(" ").toLowerCase().includes(query)) continue;
+        byIdentity.set(`plugin:${row.slug.toLowerCase()}`, row);
+      }
+      for (const row of live) {
+        const plugin = row.entityKind === "plugin" || row.source === "hub-plugin";
+        const identity = `${plugin ? "plugin" : row.entityKind || "agent"}:${row.slug.toLowerCase()}`;
+        const builtin = byIdentity.get(identity);
+        const remoteRevision = (row as MarketplaceListing & { catalogRevision?: string }).catalogRevision;
+        const builtinRevision = (builtin as MarketplaceListing & { catalogRevision?: string } | undefined)?.catalogRevision;
+        const newer = remoteRevision && builtinRevision && Date.parse(remoteRevision) > Date.parse(builtinRevision);
+        if (builtin && !newer) {
+          byIdentity.set(identity, { ...row, ...builtin });
+        } else byIdentity.set(identity, row);
+      }
+      const listings = [...byIdentity.values()];
       if (attempt.cacheable) this.searchCache.set(key, { value: listings, at: Date.now() });
       return listings;
     }).finally(() => {

@@ -8,6 +8,7 @@
 import { useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import type { AgiTokenLimitsView } from "@shared/agi";
+import { IconLock } from "../Icon";
 import styles from "./AgiBugReport.module.css";
 
 const toK = (value: number) => String(Math.round(value / 1_000));
@@ -49,9 +50,9 @@ export function AgiUnblockLimits({ locale }: { locale: "ko" | "en" }) {
       </span>
     </label>;
   return <div className={styles.limits} data-agi-unblock-limits="true">
-    <strong>{ko ? "막힘 해제 한도" : "Unblocking limits"}</strong>
-    <p className={styles.muted}>{ko ? "AGI가 막힌 목표를 직접 살펴보고 푸는 데 쓰는 토큰이에요. 위 한도에서도 함께 빠져요."
-      : "Tokens AGI may spend looking into and clearing a stuck goal. They also count against the limit above."}</p>
+    <strong style={{ display: "flex", alignItems: "center", gap: 8 }}><IconLock size={15} />{ko ? "막힘 해제 한도" : "Unblocking limits"}</strong>
+    <p className={styles.muted}>{ko ? "목표 막힘 해제용 · AGI 한도에서 차감"
+      : "Stuck goal recovery · Counts toward the AGI limit"}</p>
     {field(ko ? "한 번 시도" : "Per attempt", attempt, setAttempt, "attemptTokenLimit")}
     {field(ko ? "목표당 하루" : "Per goal per day", daily, setDaily, "dailyGoalTokenLimit")}
     {error && <p className={styles.error} role="alert">{error}</p>}

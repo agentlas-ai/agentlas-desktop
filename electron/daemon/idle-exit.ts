@@ -23,6 +23,10 @@ export interface DaemonResidencyInput {
   localModel: { state: string; pendingOperations: number; settled: boolean } | null;
   /** Background tasks this service started and is still running (backgroundTasks.start). */
   backgroundTasks?: number;
+  /** Foreground harnesses owned here, or actively connected through this broker. */
+  invocationRuns?: number;
+  /** Authenticated durable One domain custody includes future check-ins. */
+  supervisorDomain?: boolean;
 }
 
 /** Work that would be cut if the service stopped now. Attachment/continuity are not work. */
@@ -31,6 +35,7 @@ export function daemonActiveWorkReasons(input: DaemonResidencyInput): string[] {
   if (input.graphRuns > 0) reasons.push("graph-run");
   if (input.runChildren > 0) reasons.push("run-children");
   if ((input.backgroundTasks ?? 0) > 0) reasons.push("background-tasks");
+  if ((input.invocationRuns ?? 0) > 0) reasons.push("invocation-runs");
   const science = input.science;
   if (science && (science.state === "starting"
     || (science.state === "ready" && (!science.settled || (science.activeToolRequests ?? 0) > 0)))) {
@@ -46,6 +51,7 @@ export function daemonResidencyReasons(input: DaemonResidencyInput): string[] {
   const reasons: string[] = [];
   if (input.desktopAttached) reasons.push("desktop-attached");
   if (input.loginContinuity) reasons.push("login-continuity");
+  if (input.supervisorDomain) reasons.push("one-supervisor");
   return [...reasons, ...daemonActiveWorkReasons(input)];
 }
 

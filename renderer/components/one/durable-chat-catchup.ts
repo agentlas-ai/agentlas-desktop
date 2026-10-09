@@ -6,6 +6,7 @@
 export type DurableChatCatchupMessage = {
   id: string;
   durableMessageId?: string;
+  intellectUiMessageId?: string;
 };
 
 function identities(message: DurableChatCatchupMessage): string[] {
@@ -29,5 +30,11 @@ export function mergeDurableChatCatchup<T extends DurableChatCatchupMessage>(
     isPendingSettledAnswer(message)
     && !identities(message).some((identity) => durableIdentities.has(identity))
   ));
-  return pending.length ? [...durable, ...pending] : [...durable];
+  const uiOwners = new Map(current.flatMap(message => message.intellectUiMessageId
+    ? identities(message).map(identity => [identity, message.intellectUiMessageId!] as const) : []));
+  const hydrated = durable.map(message => {
+    const uiIdentity = identities(message).map(identity => uiOwners.get(identity)).find(Boolean);
+    return uiIdentity ? { ...message, intellectUiMessageId: uiIdentity } : message;
+  });
+  return pending.length ? [...hydrated, ...pending] : hydrated;
 }

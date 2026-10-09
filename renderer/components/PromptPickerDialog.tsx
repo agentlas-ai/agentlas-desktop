@@ -18,8 +18,10 @@ import {
 import { useT } from "@/lib/i18n";
 import type { Chat, HubPromptSummary, HubPromptViewer } from "@shared/types";
 import { UpgradeCta } from "./UpgradeCta";
-import { IconClose, IconLock, IconSearch, IconSparkles } from "./Icon";
+import { IconCheck, IconLock, IconSearch, IconSparkles } from "./Icon";
 import { LoadingEstimate } from "./LoadingEstimate";
+import { PopupAction, PopupFacts, PopupFrame } from "./Popup";
+import { IconFileUp, IconSend } from "./Icon";
 
 /** 다국어 필드에서 현재 언어 텍스트를 뽑는다(영어 사용자에게 한국어 누수 방지). */
 function pickText(ko: boolean, koText?: string, enText?: string): string {
@@ -108,129 +110,21 @@ export async function startChatWithPrompt(
  * 입력물 안내 다이얼로그 — 프롬프트에 필요 입력물(inputsKo/En)이 있으면
  * 새 채팅 시작 전에 반드시 이 확인을 거친다. [그래도 시작] / [취소].
  */
-export function PromptInputsConfirmDialog({
-  inputs,
-  ko,
-  onConfirm,
-  onCancel,
-  busy = false,
-  error = null,
-  retry = false,
-}: {
-  inputs: string;
-  ko: boolean;
-  onConfirm: () => void;
-  onCancel: () => void;
-  busy?: boolean;
-  error?: string | null;
-  retry?: boolean;
+export function PromptInputsConfirmDialog({ inputs, ko, onConfirm, onCancel, busy = false, error = null, retry = false }: {
+  inputs: string; ko: boolean; onConfirm: () => void; onCancel: () => void; busy?: boolean; error?: string | null; retry?: boolean;
 }) {
-  return (
-    <div
-      className="titlebar-nodrag"
-      role="dialog"
-      aria-modal="true"
-      aria-label={ko ? "필요 입력물 안내" : "Required inputs notice"}
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 95,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 20,
-        background: "rgba(0, 21, 25, 0.24)",
-      }}
-      onMouseDown={(e) => {
-        if (!busy && e.currentTarget === e.target) onCancel();
-      }}
-    >
-      <div
-        style={{
-          width: "var(--popup-3-width)",
-          border: "1px solid var(--paper-edge)",
-          borderRadius: 12,
-          background: "var(--paper)",
-          boxShadow: "0 18px 60px rgba(0, 21, 25, 0.20)",
-          padding: 16,
-          display: "grid",
-          gap: 10,
-        }}
-      >
-        <strong style={{ fontSize: 15, color: "var(--ink)" }}>
-          {ko ? "이 프롬프트는 입력물이 필요해요" : "This prompt needs inputs"}
-        </strong>
-        <div
-          style={{
-            padding: "9px 11px",
-            borderRadius: 10,
-            border: "1px dashed var(--paper-edge)",
-            background: "var(--fill-1)",
-            fontSize: 12.5,
-            color: "var(--ink)",
-            lineHeight: 1.55,
-            whiteSpace: "pre-wrap",
-          }}
-        >
-          {"\u{1F4CE} "}
-          {inputs}
-        </div>
-        <p style={{ margin: 0, fontSize: 12.5, color: "var(--muted-deep)", lineHeight: 1.5 }}>
-          {ko
-            ? "첨부 없이 시작하면 결과가 이상할 수 있어요."
-            : "Starting without these attachments may produce odd results."}
-        </p>
-        {error && (
-          <div
-            role="alert"
-            data-testid="prompt-start-error"
-            style={{
-              padding: "8px 10px",
-              borderRadius: 9,
-              border: "1px solid color-mix(in srgb, var(--red-deep) 28%, var(--paper-edge))",
-              background: "color-mix(in srgb, var(--red-deep) 7%, var(--paper))",
-              color: "var(--red-deep)",
-              fontSize: 12,
-              lineHeight: 1.5,
-            }}
-          >
-            {error}
-          </div>
-        )}
-        <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
-          <button
-            type="button"
-            onClick={onCancel}
-            disabled={busy}
-            style={{
-              padding: "7px 12px",
-              borderRadius: 9,
-              border: "1px solid var(--paper-edge)",
-              background: "var(--paper)",
-              color: "var(--ink-soft)",
-              fontSize: 12.5,
-              cursor: "pointer",
-            }}
-          >
-            {ko ? "취소" : "Cancel"}
-          </button>
-          <button
-            type="button"
-            className="neu-btn-primary"
-            onClick={onConfirm}
-            disabled={busy}
-            style={{ padding: "7px 12px", borderRadius: 9, fontSize: 12.5 }}
-          >
-            {busy
-              ? ko ? "채팅 만드는 중…" : "Creating chat…"
-              : retry
-                ? ko ? "다시 시도" : "Retry"
-                : ko ? "그래도 시작" : "Start anyway"}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+  return <PopupFrame title={ko ? "필요한 첨부" : "Required attachments"} icon={<IconFileUp size={20} />}
+    closeLabel={ko ? "닫기" : "Close"} onClose={onCancel} busy={busy}
+    footer={<>
+      <PopupAction onClick={onCancel} disabled={busy}>{ko ? "취소" : "Cancel"}</PopupAction>
+      <PopupAction primary icon={<IconSend size={16} />} onClick={onConfirm} disabled={busy}>
+        {busy ? ko ? "채팅 만드는 중…" : "Creating chat…" : retry ? ko ? "다시 시도" : "Retry" : ko ? "그래도 시작" : "Start anyway"}
+      </PopupAction>
+    </>}>
+    <PopupFacts items={inputs.split("\n").filter(Boolean).map(label => ({label, icon: <IconFileUp size={17} />}))} />
+    <span style={{color: "var(--muted-deep)", fontSize: 12}}>{ko ? "첨부 없이 시작하면 결과가 달라질 수 있습니다." : "Results may vary without these attachments."}</span>
+    {error && <div role="alert" data-testid="prompt-start-error" style={{ color: "var(--danger)", fontSize: 13, lineHeight: 1.5 }}>{error}</div>}
+  </PopupFrame>;
 }
 
 type PickerNotice =
@@ -301,14 +195,6 @@ export function PromptPickerDialog({
     }, q ? 200 : 0);
     return () => clearTimeout(timer);
   }, [q, reloadGeneration]);
-
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
 
   // 내 북마크 + 소장(unlocked) 우선 정렬.
   const sorted = [...prompts].sort((a, b) => {
@@ -499,62 +385,8 @@ export function PromptPickerDialog({
   const paid = viewer?.paidAccess === true;
 
   return (
-    <div
-      className="titlebar-nodrag"
-      role="dialog"
-      aria-modal="true"
-      aria-label={ko ? "프롬프트 불러오기" : "Load prompt"}
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 80,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        padding: 20,
-        background: "rgba(0, 21, 25, 0.18)",
-      }}
-      onMouseDown={(e) => {
-        if (e.currentTarget === e.target) onClose();
-      }}
-    >
-      <div
-        style={{
-          width: "var(--popup-3-width)",
-          maxHeight: "min(620px, 90vh)",
-          border: "1px solid var(--paper-edge)",
-          borderRadius: 12,
-          background: "var(--paper)",
-          boxShadow: "0 18px 60px rgba(0, 21, 25, 0.20)",
-          padding: 14,
-          display: "flex",
-          flexDirection: "column",
-          gap: 10,
-        }}
-      >
-        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <IconSparkles size={16} />
-          <strong style={{ flex: 1, fontSize: 15, color: "var(--ink)" }}>
-            {ko ? "프롬프트 불러오기" : "Load a prompt"}
-          </strong>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={ko ? "닫기" : "Close"}
-            style={{
-              display: "inline-flex",
-              padding: 6,
-              borderRadius: 8,
-              border: "none",
-              background: "transparent",
-              color: "var(--muted-deep)",
-              cursor: "pointer",
-            }}
-          >
-            <IconClose size={14} />
-          </button>
-        </div>
-
+    <PopupFrame title={ko ? "프롬프트" : "Prompts"} icon={<IconSparkles size={20} />}
+      closeLabel={ko ? "닫기" : "Close"} onClose={onClose}>
         <div
           style={{
             display: "flex",
@@ -568,6 +400,7 @@ export function PromptPickerDialog({
         >
           <IconSearch size={14} />
           <input
+            data-popup-autofocus
             value={q}
             onChange={(e) => setQ(e.target.value)}
             placeholder={ko ? "북마크·소장 프롬프트 검색" : "Search saved and unlocked prompts"}
@@ -637,10 +470,11 @@ export function PromptPickerDialog({
               </button>
             </div>
           ) : sorted.length === 0 ? (
-            <div style={{ padding: "10px 8px", color: "var(--muted-deep)", fontSize: 12.5, lineHeight: 1.5 }}>
+            <div style={{ padding: "20px 8px", display: "grid", justifyItems: "center", gap: 10, color: "var(--muted-deep)", fontSize: 12.5, lineHeight: 1.5 }}>
+              <IconSparkles size={28} />
               {ko
-                ? "표시할 프롬프트가 없습니다. 프롬프트 저장소에서 먼저 찾아보세요."
-                : "No prompts to show. Browse the Prompt Store first."}
+                ? "저장된 프롬프트 없음"
+                : "No saved prompts"}
             </div>
           ) : (
             sorted.map((p) => {
@@ -660,7 +494,7 @@ export function PromptPickerDialog({
                       width: "100%",
                       minWidth: 0,
                       display: "grid",
-                      gridTemplateColumns: "minmax(0, 1fr) auto",
+                      gridTemplateColumns: "30px minmax(0, 1fr) auto",
                       alignItems: "center",
                       gap: 10,
                       padding: "9px 11px",
@@ -673,6 +507,7 @@ export function PromptPickerDialog({
                       opacity: busy ? 0.7 : 1,
                     }}
                   >
+                    <span aria-hidden style={{display: "grid", placeItems: "center", height: 30, borderRadius: 9, background: "var(--popup-control-bg)"}}><IconSparkles size={16} /></span>
                     <span style={{ minWidth: 0, display: "grid", gap: 2 }}>
                       <strong
                         style={{
@@ -685,7 +520,7 @@ export function PromptPickerDialog({
                         {title}
                       </strong>
                       {summary && (
-                        <span
+                        <span title={summary}
                           style={{
                             fontSize: 11.5,
                             color: "var(--muted-deep)",
@@ -699,7 +534,7 @@ export function PromptPickerDialog({
                       )}
                     </span>
                     <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 10.5, color: "var(--muted-deep)" }}>
-                      {saved && <span title={ko ? "북마크됨" : "Bookmarked"}>{"★"}</span>}
+                      {saved && <span title={ko ? "북마크됨" : "Bookmarked"}><IconCheck size={14} /></span>}
                       {p.unlocked && (
                         <span
                           style={{ color: "var(--green-deep)", fontWeight: 700 }}
@@ -842,7 +677,6 @@ export function PromptPickerDialog({
             })
           )}
         </div>
-      </div>
 
       {pendingStart && (
         <PromptInputsConfirmDialog
@@ -861,6 +695,6 @@ export function PromptPickerDialog({
           }
         />
       )}
-    </div>
+    </PopupFrame>
   );
 }

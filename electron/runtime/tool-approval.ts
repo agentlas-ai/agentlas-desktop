@@ -1,3 +1,4 @@
+import { withNativeApprovalAsk, stampNativeToolApproval, stampNativeDeniedApproval, nativeToolApprovalOwner, assertNativeToolApproval, assertNativeToolApprovalJoin } from "./native-approval-provenance";
 /**
  * 도구 승인 계약 — 런타임이 제각각 말하는 "승인"을 한 모양으로 모은다.
  *
@@ -105,6 +106,17 @@ export type RuntimeToolPermissionArbiter = (
 ) => Promise<RuntimeToolPermissionDecision>;
 
 let runtimeToolPermissionArbiter: RuntimeToolPermissionArbiter | null = null;
+/** A native relay selects by private provenance, never by a caller's label.
+ * Selection is synchronous; a claimed request must not fall back after failure. */
+export type RuntimeToolPermissionRelay = (
+  ask: RuntimeToolPermissionAsk,
+) => RuntimeToolPermissionArbiter | undefined;
+const runtimeToolPermissionRelays = new Set<RuntimeToolPermissionRelay>();
+
+export function registerRuntimeToolPermissionRelay(select: RuntimeToolPermissionRelay): () => void {
+  runtimeToolPermissionRelays.add(select);
+  return () => { runtimeToolPermissionRelays.delete(select); };
+}
 
 export function setRuntimeToolPermissionArbiter(arbiter: RuntimeToolPermissionArbiter | null): void {
   runtimeToolPermissionArbiter = arbiter;
@@ -192,9 +204,24 @@ export function setToolApprovalLedger(ledger: ToolApprovalLedger | null): void {
 }
 
 export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter | null {
-  const arbiter = runtimeToolPermissionArbiter;
-  return arbiter ? (ask) => ask.planMode && ask.mutating
-    ? Promise.resolve("deny") : arbiter(ask) : null;
+  if (!runtimeToolPermissionArbiter && runtimeToolPermissionRelays.size === 0) return null;
+  return async (ask) => {
+    if ((ask.planMode && ask.mutating) || ask.signal?.aborted) return "deny";
+    try {
+      let selected: RuntimeToolPermissionArbiter | undefined;
+      for (const select of runtimeToolPermissionRelays) {
+        const claimed = select(ask);
+        if (claimed === undefined) continue;
+        if (selected || typeof claimed !== "function") return "deny";
+        selected = claimed;
+      }
+      const arbiter = selected ?? runtimeToolPermissionArbiter;
+      if (!arbiter) return "deny";
+      const decision = await withNativeApprovalAsk(ask.signal, () => arbiter(ask));
+      if (ask.signal?.aborted) return "deny";
+      return decision === "allow_once" || decision === "allow_session" ? decision : "deny";
+    } catch { return "deny"; }
+  };
 }
 
 /**
@@ -430,7 +457,7 @@ export function requestToolApproval(
   const existingId = pendingByKey.get(dedupeKey);
   if (existingId) {
     const existing = pending.get(existingId);
-    if (existing) return joinApproval(existing, sessionKey, signal);
+    if (existing) { assertNativeToolApprovalJoin(existing.request, signal); return joinApproval(existing, sessionKey, signal); }
     pendingByKey.delete(dedupeKey);
   }
   const requestedAt = new Date();
@@ -445,6 +472,8 @@ export function requestToolApproval(
   if (toolApprovalLedger && request.chatId) {
     try { toolApprovalLedger.persist(request); entry.durable = true; } catch { /* in-process only, as before */ }
   }
+  try { stampNativeToolApproval(request, signal, toolApprovalLedger); }
+  catch (error) { clearTimeout(entry.timer); if (entry.durable) { try { toolApprovalLedger?.cancel(request.id); } catch {} } throw error; }
   pending.set(request.id, entry);
   pendingByKey.set(dedupeKey, request.id);
   const promise = joinApproval(entry, sessionKey, signal);
@@ -472,9 +501,9 @@ const ANNOUNCED_LIMIT = 200;
  * 답을 기다리지 않는다(기다릴 대상이 없다). 선택은 다음 실행의 허용 범위에만 쓰인다.
  */
 export function announceToolDenied(
-  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "expiresAt" | "mode"> & { sessionKey?: string },
+  input: Omit<ToolApprovalRequest, "id" | "requestedAt" | "expiresAt" | "mode"> & { sessionKey?: string; signal?: AbortSignal },
 ): ToolApprovalRequest {
-  const { sessionKey, ...rest } = input;
+  const { sessionKey, signal, ...rest } = input;
   const dedupeKey = approvalDedupeKey(sessionKey ?? "", rest);
   const existingId = announcedByKey.get(dedupeKey);
   if (existingId) {
@@ -488,6 +517,7 @@ export function announceToolDenied(
     mode: "post-denial",
     requestedAt: new Date().toISOString(),
   };
+  stampNativeDeniedApproval(request, signal, toolApprovalLedger);
   announced.set(request.id, { request, sessionKey });
   announcedByKey.set(dedupeKey, request.id);
   // 오래된 고지부터 버린다 — 삽입 순서가 곧 시간 순서다.
@@ -697,6 +727,7 @@ export async function runApprovedBuiltinTool(
     : ("other" as const);
   const ask: RuntimeToolPermissionAsk = {
     runtime: ctx.runtimeKind,
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
     sessionKey: ctx.sessionKey,
     tool: toolName,
     kind,
@@ -736,4 +767,19 @@ export async function runApprovedBuiltinTool(
   });
   events.onTool?.(toolName, JSON.stringify(args), outcome.content, callId, !outcome.ok, outcome.artifactPaths);
   return outcome;
+}
+
+/** Native daemon reply route only: retains actual pending object and provenance,
+ * then delegates to the original ledger/permission resolver without fallback. */
+export function resolveNativeToolApproval(request: ToolApprovalRequest, decision: ToolApprovalDecision, actionId: string): ToolApprovalResolutionReceipt {
+  if (pending.get(request.id)?.request !== request && announced.get(request.id)?.request !== request) throw new Error("native_approval_original_pending_required");
+  assertNativeToolApproval(request, toolApprovalLedger);
+  return resolveToolApproval(request.id, decision, actionId);
+}
+
+/** Source-owned requests for a newly attached native observation stream. */
+export function listNativeToolApprovalRequests(): ToolApprovalRequest[] {
+  return [...pending.values(), ...announced.values()].map(entry => entry.request).filter(request => {
+    try { return !!nativeToolApprovalOwner(request); } catch { return false; }
+  });
 }

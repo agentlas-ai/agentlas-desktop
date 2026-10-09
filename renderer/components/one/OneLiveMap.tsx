@@ -100,6 +100,15 @@ export function OneLiveMap({
   }, []);
 
   useEffect(() => {
+    const closePopup = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || !popupRef.current) return;
+      popupRef.current.remove(); popupRef.current = null;
+    };
+    document.addEventListener("keydown", closePopup);
+    return () => document.removeEventListener("keydown", closePopup);
+  }, []);
+
+  useEffect(() => {
     const container = containerRef.current;
     if (!container || ordered.length === 0) {
       setState("error");
@@ -181,9 +190,16 @@ export function OneLiveMap({
           const feature = event.features?.[0];
           if (!feature || feature.geometry.type !== "Point") return;
           popupRef.current?.remove();
-          const popup = new maplibre.Popup({ closeButton: false, closeOnClick: true, offset: 14 })
+          const content = document.createElement("div");
+          content.className = styles.locationPopupRow;
+          const sequence = document.createElement("b");
+          sequence.textContent = String(feature.properties?.sequence ?? "");
+          const label = document.createElement("span");
+          label.textContent = String(feature.properties?.label ?? "");
+          content.append(sequence, label);
+          const popup = new maplibre.Popup({ closeButton: false, closeOnClick: true, offset: 14, className: styles.locationPopup })
             .setLngLat(feature.geometry.coordinates as [number, number])
-            .setText(String(feature.properties?.label ?? ""))
+            .setDOMContent(content)
             .addTo(map);
           popupRef.current = popup;
         };

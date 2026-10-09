@@ -32,7 +32,7 @@ export interface HostScopeState {
 
 export type HostLoopReason = 'aborted' | 'scope_changed' | 'deadline' | 'step_limit' | 'replay'
   | 'invalid_proposal' | 'unsupported_capability' | 'invalid_input' | 'model_failed' | 'provider_failed'
-  | 'invalid_result' | 'already_started';
+  | 'invalid_result' | 'already_started' | 'runtime_turn_unsettled' | 'serving_reconciliation_required' | 'automation_no_progress_loop';
 
 export interface HostActionReceipt {
   readonly step: number;
@@ -81,6 +81,12 @@ export type HostActionLoopResult = Readonly<{
 
 class LoopFailure extends Error {
   constructor(readonly reason: HostLoopReason) { super(reason); }
+}
+
+function noReplayReason(value: unknown): HostLoopReason | null {
+  const code = value instanceof Error && "code" in value ? value.code : value;
+  return code === 'runtime_turn_unsettled' || code === 'serving_reconciliation_required'
+    || code === 'automation_no_progress_loop' ? code : null;
 }
 
 function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
@@ -218,7 +224,7 @@ export function createHostActionLoop(options: HostActionLoopOptions): Readonly<{
         return result;
       } catch (error) {
         guard();
-        throw error instanceof LoopFailure ? error : new LoopFailure(failure);
+        throw error instanceof LoopFailure ? error : new LoopFailure(noReplayReason(error) ?? failure);
       } finally {
         controller.signal.removeEventListener('abort', onAbort);
       }
@@ -277,7 +283,7 @@ export function createHostActionLoop(options: HostActionLoopOptions): Readonly<{
           }
         } catch (error) {
           const reason = error instanceof LoopFailure ? error.reason : 'invalid_proposal';
-          if (['aborted', 'scope_changed', 'deadline'].includes(reason)) throw error;
+          if (['aborted', 'scope_changed', 'deadline'].includes(reason) || noReplayReason(reason)) throw error;
           advisories.push(Object.freeze({ step, reason, detail: 'Choose another authorized independent action. An error receipt does not authorize replay of that action.' }));
         }
       }

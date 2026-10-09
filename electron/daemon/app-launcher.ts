@@ -1,3 +1,4 @@
+import { parseNativeInvocationResources } from "./native-invocation-config";
 // Desktop attaches to a persistent local agentlasd service. Its identity is the
 // installation and canonical store, not whichever GUI process is currently open.
 // Before GUI migrations, quiesceDaemonBeforeStoreMigration proves that an older
@@ -9,6 +10,7 @@
 // 이 모듈은 의도적으로 electron 을 import 하지 않는다 — 버전·경로를 인자로 받아
 // 게이트(scripts/test-daemon-autospawn.cjs)가 순수 Node(ELECTRON_RUN_AS_NODE)에서
 // 실제 스폰/스큐 시나리오를 잴 수 있다.
+import { writePreparedNativeEnrollment, type NativeGuiEnrollment } from "../invocation/native-gui-startup";
 import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
@@ -45,6 +47,9 @@ import {
 } from "./service-identity";
 
 export interface EnsureDaemonOptions extends DaemonServiceOptions {
+  /** Opaque protected Main enrollment, never a wire/native authority boolean. */
+  nativeEnrollment?: NativeGuiEnrollment;
+  nativeInvocationResources?: Readonly<{ maxTransferBytes: number; maxRecords: number }>;
   /** 앱과 데몬이 같은 DB 를 보게 하는 단일 진실 — 앱의 userData 디렉터리. */
   userDataDir: string;
   /** 앱 버전(app.getVersion()). 데몬 핑의 version 과 다르면 스큐로 판정한다. */
@@ -209,11 +214,11 @@ interface SpawnedDaemon {
   pid: number | null;
 }
 
-function spawnDaemonForDesktop(
+async function spawnDaemonForDesktop(
   opts: EnsureDaemonOptions & DaemonServiceIdentity,
   diagnostics: DaemonDiagnosticLog | null,
   reason: "initial" | "version_skew" | "owner_mismatch",
-): SpawnedDaemon {
+): Promise<SpawnedDaemon> {
   const entry = opts.daemonEntry ?? defaultDaemonEntry();
   if (!fs.existsSync(entry)) {
     throw new Error("daemon_entry_not_found");
@@ -225,13 +230,14 @@ function spawnDaemonForDesktop(
   });
   // `--user-data` repeats AGENTLAS_USER_DATA in argv so a process listing can
   // attribute a service to its user-data directory (QA cleanup matches by it).
-  const child = spawn(opts.execPath ?? process.execPath, [entry, "--user-data", opts.userDataDir], {
+  const child = spawn(opts.execPath ?? process.execPath, [entry, "--user-data", opts.userDataDir, ...(opts.nativeEnrollment ? ["--native-enrollment-fd", "3"] : []),
+    ...(opts.nativeInvocationResources ? ["--native-invocation-resources", JSON.stringify(parseNativeInvocationResources(opts.nativeInvocationResources))] : [])], {
     detached: true,
     // Windows: a detached child gets its own console unless hidden.
     windowsHide: true,
     // Raw runtime output can contain private tool arguments. The service writes
     // structured lifecycle diagnostics itself; no pipe depends on the GUI.
-    stdio: "ignore",
+    stdio: opts.nativeEnrollment ? ["ignore", "ignore", "ignore", "pipe"] : "ignore",
     env: {
       ...process.env,
       ELECTRON_RUN_AS_NODE: "1",
@@ -254,6 +260,12 @@ function spawnDaemonForDesktop(
       AGENTLAS_EXPECTED_STORE_IDENTITY: opts.expectedStoreIdentity ?? "",
     },
   });
+  if (opts.nativeEnrollment) {
+    const pipe = child.stdio[3];
+    if (!pipe || !("end" in pipe)) { child.kill(); throw new Error("native_gui_enrollment_pipe_unavailable"); }
+    try { await writePreparedNativeEnrollment(pipe as import("node:stream").Writable, opts.nativeEnrollment); }
+    catch (error) { child.kill(); throw error; }
+  }
   const pid = child.pid ?? null;
   (opts.log ?? console.log)(`[daemon] spawn requested pid=${pid ?? "?"} parent=${opts.parentPid ?? process.pid}`);
   child.once("exit", (exitCode, signal) => {
@@ -493,7 +505,7 @@ async function ensureDaemonRunningOnce(
     }
 
     phase = "spawn";
-    const spawned = spawnDaemonForDesktop(opts, diagnostics, previousVersion ? "version_skew" : "initial");
+    const spawned = await spawnDaemonForDesktop(opts, diagnostics, previousVersion ? "version_skew" : "initial");
     phase = "readiness";
     const readiness = await waitForSpawnedDaemonReadiness(spawned, socketPath, diagnostics,
       opts.startupTimeoutMs, opts.serviceIdentity, opts.appInstanceId, log);
@@ -733,4 +745,17 @@ export function suspendDaemonAutostart(command: AutostartCommand, runtime?: Auto
     }
   }
   return { suspended: true, wasInstalled, wasLoaded };
+}
+
+/** Discovery has zero admission authority. Caller must authenticate this exact
+ * boot on the separately enrolled channel before consuming any native reply. */
+export async function discoverNativeDaemonBoot(options: EnsureDaemonOptions): Promise<string> {
+  const identity = resolveDaemonServiceIdentity(options);
+  const ping = await pingDaemon(daemonControlSocketPath(identity.userDataDir));
+  if (!ping?.ok || ping.serviceIdentity !== identity.serviceIdentity || ping.version !== options.appVersion
+    || ping.serviceProtocolVersion !== 2 || typeof ping.bootId !== "string"
+    || !/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(ping.bootId)) {
+    throw new Error("native_gui_daemon_discovery_unavailable");
+  }
+  return ping.bootId;
 }

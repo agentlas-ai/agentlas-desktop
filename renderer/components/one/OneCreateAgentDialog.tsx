@@ -6,6 +6,7 @@ import {
   IconFileUp,
   IconImage,
   IconPlus,
+  IconUsers,
   IconSparkles,
   IconWand,
 } from "@/components/Icon";
@@ -813,17 +814,8 @@ export function OneCreateAgentDialog({
     title={editOne ? (ko ? "One 편집" : "Edit One") : edit ? (ko ? "팀원 편집" : "Edit Teammate") : (ko ? "새 에이전트" : "New Agent")}
     titleId="one-create-agent-title"
     ariaLabelledBy="one-create-agent-title"
-    description={editOne
-      ? (ko
-        ? "팀원을 만들 때와 같은 창입니다. 여기에 적고 저장한 내용만 다음 대화에도 사용합니다."
-        : "The same window you use to create a teammate. Only what you save here is used in future conversations.")
-      : edit
-      ? (ko
-        ? "만들 때와 같은 창입니다. 지금 값이 적혀 있고, 고쳐서 저장하면 그게 수정입니다."
-        : "The same window you used to create it. Everything is filled in with what it is now — change and save.")
-      : (ko
-        ? "독립 채팅과 기억을 가진 팀원을 One Team 안에서 바로 만듭니다. 창을 닫아도 작성 내용과 생성된 캐릭터는 임시저장됩니다."
-        : "Create a teammate with its own chat and memory directly inside One Team. Your form and generated character stay saved if you close this window.")}
+    icon={<IconUsers size={20} />}
+    description={creating ? (ko ? "저장 중…" : "Saving…") : !edit && !editOne ? (ko ? "작성 내용은 임시저장됩니다." : "Your draft is saved automatically.") : undefined}
   >
     {editOne && oneTab !== "profile" ? (
       <div className={styles.oneTabPanel} role="tabpanel" data-one-edit-panel={oneTab}>

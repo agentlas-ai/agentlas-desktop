@@ -27,15 +27,19 @@ export function splitStreamingSegments(
   }
   // tail 구간만 라인 단위 스캔 — 펜스 밖의 빈 줄에서 자른다. 마지막 미완 라인은 판단 보류.
   let appended: string[] | null = null;
-  let inFence = false;
+  let fence: { marker: string; length: number } | null = null;
   let lineStart = segStart;
   while (lineStart < text.length) {
     const nl = text.indexOf("\n", lineStart);
     if (nl < 0) break;
     const line = text.slice(lineStart, nl);
-    if (line.startsWith("```")) {
-      inFence = !inFence;
-    } else if (!inFence && line.trim() === "") {
+    const fenceLine = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (fenceLine && !fence) {
+      fence = { marker: fenceLine[1][0], length: fenceLine[1].length };
+    } else if (fenceLine && fence && fenceLine[1][0] === fence.marker
+      && fenceLine[1].length >= fence.length && !fenceLine[2].trim()) {
+      fence = null;
+    } else if (!fence && line.trim() === "") {
       const seg = text.slice(segStart, nl + 1);
       if (seg.trim() !== "") {
         if (!appended) appended = [];
@@ -49,4 +53,31 @@ export function splitStreamingSegments(
   const tail = text.slice(segStart);
   const segments = tail.trim() !== "" ? nextClosed.concat(tail) : nextClosed.slice();
   return { segments, cache: { source: text, closed: nextClosed, tailStart: segStart } };
+}
+
+/** A tool row can never split the data inside a code or native UI fence. */
+export function snapMarkdownAnchor(text: string, raw: number): number {
+  let anchor = Math.min(Math.max(raw, 0), text.length);
+  if (anchor !== 0 && anchor !== text.length && text[anchor - 1] !== "\n" && text[anchor] !== "\n") {
+    const newline = text.indexOf("\n", anchor);
+    anchor = newline < 0 ? text.length : newline + 1;
+  }
+  let fence: { marker: string; length: number; start: number } | null = null;
+  let lineStart = 0;
+  while (lineStart < text.length) {
+    const newline = text.indexOf("\n", lineStart);
+    const next = newline < 0 ? text.length : newline + 1;
+    const line = text.slice(lineStart, newline < 0 ? text.length : newline);
+    const match = line.match(/^ {0,3}(`{3,}|~{3,})(.*)$/);
+    if (match && !fence && lineStart < anchor) {
+      fence = { marker: match[1][0], length: match[1].length, start: lineStart };
+    } else if (match && fence && match[1][0] === fence.marker && match[1].length >= fence.length && !match[2].trim()) {
+      if (lineStart >= anchor) return next;
+      fence = null;
+    }
+    if (next >= anchor && !fence) return anchor;
+    if (newline < 0) break;
+    lineStart = next;
+  }
+  return fence ? fence.start : anchor;
 }

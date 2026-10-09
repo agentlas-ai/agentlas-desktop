@@ -4,6 +4,7 @@
 // domain). Replaces window.confirm, whose buttons follow the OS language ("Cancel"
 // / "OK" on a Korean screen) and cannot be styled. Rendered in its own root so any
 // mail surface (mailbox, contacts, the One edit dialog) can ask without a host.
+import { IconTrash } from "@/components/Icon";
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
 import type { Locale } from "@/lib/i18n";
@@ -33,6 +34,7 @@ function ConfirmSheet({ locale, title, body, confirmLabel, onDone }: {
       size="compact"
       dialogRole="alertdialog"
       title={title}
+      icon={<IconTrash size={20} />}
       titleId="one-mail-confirm-title"
       hideHeaderClose
       footer={(

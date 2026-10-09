@@ -150,6 +150,7 @@ export function claudeArtifactPathsFromToolResult(name: string, content: unknown
 /** Stop → protocol interrupt → tree kill if the CLI has not ended the turn by then (Paseo: 3s). */
 const CLAUDE_INTERRUPT_GRACE_MS = 3_000;
 const KIND = "claude-code";
+const terminalResultReceipts = new Map<string, Set<string>>();
 const AGENT_APP_MCP_SECRET_ALIAS_RE = /^AGENTLAS_MCP_SECRET_[A-F0-9]{32}$/;
 
 type NativeFileProofObserver = ReturnType<typeof bindNativeFileProofObserver>;
@@ -1501,6 +1502,7 @@ const runClaudeTurn = async (
     let runnerFailure: import("./runner").RunnerFailure | null = null;
     let lastEmit = 0;
     let sessionId: string | undefined;
+    let terminalSessionId = contextSessionId ?? null;
     let accCapped = false;
     // 런어웨이 출력(예: 장기 실행 GUI/서버 로그가 끝없이 스트리밍되는 명령)으로부터
     // 메모리를 보호한다. acc를 무제한 누적 + 매 partial마다 전체를 렌더러로 보내면
@@ -1630,6 +1632,7 @@ const runClaudeTurn = async (
       if (announcedApprovalBlocks.has(key)) return;
       announcedApprovalBlocks.add(key);
       announceToolDenied({
+                ...(runReq.signal ? { signal: runReq.signal } : {}),
         runtime: KIND,
         // 선택("다음부터 허용")을 반영하려면 어느 세션의 결정인지 알아야 한다.
         sessionKey: `${KIND}:${runReq.chatId ?? runReq.cwd ?? "default"}`,
@@ -1682,6 +1685,7 @@ const runClaudeTurn = async (
         if (announcedApprovalBlocks.has(key)) return;
         announcedApprovalBlocks.add(key);
         announceToolDenied({
+                ...(runReq.signal ? { signal: runReq.signal } : {}),
           runtime: KIND,
           sessionKey: `${KIND}:${runReq.chatId ?? runReq.cwd ?? "default"}`,
           tool: call?.name ?? "Bash",
@@ -1699,6 +1703,7 @@ const runClaudeTurn = async (
       if (announcedApprovalBlocks.has(key)) return;
       announcedApprovalBlocks.add(key);
       announceToolDenied({
+                ...(runReq.signal ? { signal: runReq.signal } : {}),
         runtime: KIND,
         sessionKey: `${KIND}:${runReq.chatId ?? runReq.cwd ?? "default"}`,
         tool: call?.name ?? "Bash",
@@ -1838,6 +1843,8 @@ const runClaudeTurn = async (
       error?: unknown;
       is_error?: boolean;
       terminal_reason?: string;
+      origin?: { kind?: unknown } | null;
+      deferred_tool_use?: unknown;
       api_error_status?: number;
       rate_limit_info?: { status?: string; resetsAt?: number };
       event?: {
@@ -1857,6 +1864,9 @@ const runClaudeTurn = async (
       }
       if (agentAppMcpInitFailed) return;
       const isAgentAppMcpInit = ev.type === "system" && ev.subtype === "init";
+      if (isAgentAppMcpInit && !terminalSessionId && typeof ev.session_id === "string" && ev.session_id.trim()) {
+        terminalSessionId = ev.session_id;
+      }
       if (isAgentAppMcpInit) recordClaudeCapabilityInit(ev.tools);
       if (
         hasExactUntrustedMcpGrant &&
@@ -2081,15 +2091,38 @@ const runClaudeTurn = async (
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
       } else if (ev.type === "result") {
         sawResult = true;
+        // Older SDK results used success/is_error:false; newer versions also
+        // distinguish completed from interrupted/deferred runs in terminal_reason.
         // The root result's native UUID, positive turn count and exact session
         // bind delivery to this prompt. system/init, stdin writes and host status do not.
-        if (ev.is_error !== true && !runnerFailure && !structuredRuntimeError && !broken
+        const rootResult = ev.is_error === false && !runnerFailure && !structuredRuntimeError && !broken
           && !ev.parent_tool_use_id && ev.isSidechain !== true
-          && typeof ev.session_id === "string" && typeof ev.uuid === "string" && ev.uuid.trim()
-          && Number.isSafeInteger(ev.num_turns) && ev.num_turns! > 0 && !req.signal?.aborted) {
-          stableContextAcknowledged = acknowledgeStableTurnContext(resumeContext?.delivery,
-            { sessionId: ev.session_id, acknowledgementId: ev.uuid }) || stableContextAcknowledged;
+          && (ev.origin == null || ev.origin.kind === "human")
+          && typeof ev.session_id === "string" && Boolean(ev.session_id.trim())
+          && (!terminalSessionId || ev.session_id === terminalSessionId)
+          && typeof ev.uuid === "string" && Boolean(ev.uuid.trim())
+          && Number.isSafeInteger(ev.num_turns) && ev.num_turns! > 0 && !req.signal?.aborted;
+        const receiptKey = JSON.stringify([runReq.chatId ?? null, runtimeSessionOwnerId ?? null, ev.session_id]);
+        const seenResults = terminalResultReceipts.get(receiptKey);
+        const freshResult = rootResult && !seenResults?.has(ev.uuid!);
+        let acknowledgedResult = false;
+        if (freshResult) {
+          acknowledgedResult = acknowledgeStableTurnContext(resumeContext?.delivery,
+            { sessionId: ev.session_id!, acknowledgementId: ev.uuid! });
+          stableContextAcknowledged = acknowledgedResult || stableContextAcknowledged;
+          if (!seenResults && terminalResultReceipts.size >= 500) {
+            const oldest = terminalResultReceipts.keys().next();
+            if (!oldest.done) terminalResultReceipts.delete(oldest.value);
+          }
+          const receipts = seenResults ?? new Set<string>();
+          if (receipts.size >= 256) receipts.delete(receipts.values().next().value!);
+          receipts.add(ev.uuid!);
+          terminalResultReceipts.set(receiptKey, receipts);
         }
+        terminalSucceeded = freshResult && ev.subtype === "success"
+          && (ev.terminal_reason === undefined || ev.terminal_reason === "completed")
+          && ev.deferred_tool_use == null
+          && (!resumeContext?.delivery || acknowledgedResult);
         const resultShape = ev as { subtype?: unknown; num_turns?: unknown };
         if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
           && resultShape.num_turns === 0) resumedConversationMissing = true;
@@ -2138,6 +2171,7 @@ const runClaudeTurn = async (
     let settled = false;
     /** 이 턴이 result 까지 갔는가(상주 세션을 되돌려도 되는가의 판정). */
     let sawResult = false;
+    let terminalSucceeded = false;
     const detachTurn = () => {
       stopHeartbeat();
       if (session) {
@@ -2271,6 +2305,8 @@ const runClaudeTurn = async (
         events.onStatus(`[runtime-session] ${resumeSessionId ? "resumed" : "created"} kind=${KIND}`);
         resolve({
           text: display.trim(),
+          ownerControlTerminal: terminalSucceeded && !runnerFailure && !structuredRuntimeError && display.trim()
+            ? "completed" : "uncertain",
           // ★exit 0이어도 표식이 실패를 말했으면 그대로 싣는다 — 소비자는 이 칸으로 판정한다.
           //   (실측: 한도 거절은 exit 1이었지만 종료코드는 버전·경로 따라 가변 — 이벤트가 진실.)
           ...(runnerFailure ? { failure: runnerFailure } : {}),
@@ -2301,6 +2337,7 @@ const runClaudeTurn = async (
           const observedModel = turnModel.observedModel;
           resolve({
             text: (combined() || finalText || runnerFailure.message).trim(),
+            ownerControlTerminal: "uncertain",
             failure: runnerFailure,
             tokens,
             observedUsage,

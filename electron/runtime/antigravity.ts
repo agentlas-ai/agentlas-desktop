@@ -708,6 +708,7 @@ export function reduceAgyLine(
     conversationId?: string;
     /** result 이벤트의 status/error — 표식이지 문구 판별이 아니다. */
     resultStatus?: string;
+    resultConversationId?: string;
     resultError?: string;
     resultErrorCode?: string;
     resultRetryAfterHint?: string;
@@ -798,7 +799,9 @@ export function reduceAgyLine(
    */
   if (ev.event === "result" && ev.result) {
     if (typeof ev.result.response === "string") state.finalResponse = ev.result.response;
-    if (typeof ev.result.status === "string") state.resultStatus = ev.result.status;
+    state.resultStatus = typeof ev.result.status === "string" ? ev.result.status : undefined;
+    state.resultConversationId = typeof (ev.result.conversation_id ?? ev.conversation_id) === "string"
+      ? ev.result.conversation_id ?? ev.conversation_id : undefined;
     const structuredError = ev.result.error && typeof ev.result.error === "object" && !Array.isArray(ev.result.error)
       ? ev.result.error
       : undefined;
@@ -2139,7 +2142,7 @@ async function runPreparedAntigravity(
     req.signal?.throwIfAborted();
     if (agyToolsAllowed) mcpReconcile = await reconcileAgyMcpServers(req.mcpConfigPath, events.onStatus, req.env ?? process.env, req.signal);
     req.signal?.throwIfAborted();
-    if (mcpReconcile.failure) return { text: "", failure: mcpReconcile.failure };
+    if (mcpReconcile.failure) return { text: "", ownerControlTerminal: "uncertain", failure: mcpReconcile.failure };
     if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE === "task") {
       if (!req.mcpConfigPath) throw new Error("native_browser_mcp_config_required");
       for (const row of preparedMcpBindings(req.mcpConfigPath)) preparedMcpTransport(row, row.server);
@@ -2148,7 +2151,7 @@ async function runPreparedAntigravity(
       try { await mcpReconcile.assertReady?.(); }
       catch (error) {
         if (req.signal?.aborted) throw error;
-        return { text: "", failure: { kind: "refused", source: "marker", runtime: "antigravity",
+        return { text: "", ownerControlTerminal: "uncertain", failure: { kind: "refused", source: "marker", runtime: "antigravity",
         providerCode: "agy_mcp_configuration_drift", message: "Antigravity MCP scope changed before model execution." } }; }
     }
     req.signal?.throwIfAborted();
@@ -2246,7 +2249,7 @@ async function runPreparedAntigravity(
     try {
       if (!residentLease) {
         const failure = await prepareOneShotPrompt();
-        if (failure) return { text: "", failure };
+        if (failure) return { text: "", ownerControlTerminal: "uncertain", failure };
       }
       req.signal?.throwIfAborted();
       const result = await runAgyProcess(residentLease);
@@ -2279,7 +2282,7 @@ async function runPreparedAntigravity(
         // one-shot retry cannot duplicate an accepted provider action.
         residentProtocolFallback = false;
         const failure = await prepareOneShotPrompt();
-        if (failure) return { text: "", failure };
+        if (failure) return { text: "", ownerControlTerminal: "uncertain", failure };
         req.signal?.throwIfAborted();
         return await runAgyProcess(null);
       }
@@ -2302,7 +2305,7 @@ async function runPreparedAntigravity(
   req.signal?.throwIfAborted();
   if (!residentSession) {
     const failure = oneShotWindowsBudgetFailure();
-    if (failure) return Promise.resolve({ text: "", failure });
+    if (failure) return Promise.resolve({ text: "", ownerControlTerminal: "uncertain", failure });
   }
   const effectBindings = runReq.mcpConfigPath ? preparedMcpBindings(runReq.mcpConfigPath) : [];
   const effectRun = beginAdapterEffectRun({ adapterKind: "antigravity", chatId: runReq.chatId, agentId: runReq.agentId });
@@ -2338,7 +2341,7 @@ async function runPreparedAntigravity(
       try {
         req.signal?.throwIfAborted();
         const failure = oneShotWindowsBudgetFailure();
-        if (failure) { resolve({ text: "", failure }); return; }
+        if (failure) { resolve({ text: "", ownerControlTerminal: "uncertain", failure }); return; }
         child = spawnCli(
           bin,
           oneShotSpawnArgs(),
@@ -2378,6 +2381,7 @@ async function runPreparedAntigravity(
       deniedTools?: AntigravityDenial[];
       conversationId?: string;
       resultStatus?: string;
+      resultConversationId?: string;
       resultError?: string;
       resultErrorCode?: string;
       resultRetryAfterHint?: string;
@@ -2477,6 +2481,7 @@ async function runPreparedAntigravity(
         } else {
           // 시트로도 올린다 — onNotice 는 대화에 남는 사실이고, 이건 지금 결정할 자리다.
           announceToolDenied({
+                ...(runReq.signal ? { signal: runReq.signal } : {}),
             runtime: "antigravity",
             sessionKey: `antigravity:${runReq.chatId ?? runReq.cwd ?? "default"}`,
             tool,
@@ -2696,6 +2701,11 @@ async function runPreparedAntigravity(
         }
         resolve({
           text: trimmed,
+          ownerControlTerminal: resultSeen && agyState.resultStatus === "SUCCESS" && !failure && trimmed
+            && Boolean(agyState.conversationId?.trim())
+            && (!agyResumeId || agyState.conversationId === agyResumeId)
+            && (!agyState.resultConversationId || agyState.resultConversationId === agyState.conversationId)
+            ? "completed" : "uncertain",
           ...(failure ? { failure } : {}),
           ...(resultSeen && agyState.usagePairObserved
             ? {
@@ -2715,6 +2725,7 @@ async function runPreparedAntigravity(
         const resultFailure = antigravityResultFailure(agyState)!;
         resolve({
           text: "",
+          ownerControlTerminal: "uncertain",
           failure: {
             kind: resultFailure.kind,
             message: resultFailure.message,
@@ -2731,6 +2742,7 @@ async function runPreparedAntigravity(
       } else {
         resolve({
           text: "",
+          ownerControlTerminal: "uncertain",
           failure: {
             kind: "exit",
             message: "Antigravity exited without a structured provider failure.",
@@ -2826,7 +2838,7 @@ export const runAntigravity: Runner = async (
     );
   }
   const readToolFailure = antigravityReadToolFailure(req);
-  if (readToolFailure) return { text: "", failure: readToolFailure };
+  if (readToolFailure) return { text: "", ownerControlTerminal: "uncertain", failure: readToolFailure };
   const bin = await getBin({ source: req.runtimeSource });
   if (!bin) throw new Error(tStatus(req.locale, "errCliMissingAntigravity"));
   const executableIdentity = observeCliExecutableIdentity({

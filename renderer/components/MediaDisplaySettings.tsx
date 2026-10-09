@@ -24,7 +24,7 @@ export function MediaDisplaySettings({ locale, compact = false }: { locale: stri
       <div className={styles.heading}>
         <div>
           <h2>{ko ? "결과 미디어" : "Result media"}</h2>
-          <p>{ko ? "Work와 One의 결과 영역에서 사진·영상·음성을 보이거나 숨깁니다." : "Choose which photos, videos, and audio appear in Work and One result areas."}</p>
+          <p>{ko ? "Work · One 결과 미리보기" : "Work · One result previews"}</p>
         </div>
       </div>
       <div className={styles.list} role="group" aria-label={ko ? "결과 미디어 표시 설정" : "Result media display settings"}>
@@ -33,7 +33,7 @@ export function MediaDisplaySettings({ locale, compact = false }: { locale: stri
           return (
             <div className={styles.row} key={option.kind}>
               <span className={styles.icon} aria-hidden="true"><KindIcon kind={option.kind} /></span>
-              <span className={styles.copy}><strong>{ko ? option.ko : option.en}</strong><small>{ko ? option.detailKo : option.detailEn}</small></span>
+              <span className={styles.copy}><strong>{ko ? option.ko : option.en}</strong></span>
               <button
                 type="button"
                 role="switch"
@@ -49,7 +49,7 @@ export function MediaDisplaySettings({ locale, compact = false }: { locale: stri
           );
         })}
       </div>
-      <p className={styles.note}>{ko ? "기본값은 모두 표시입니다. 끄면 결과 미리보기에서 해당 미디어만 숨겨집니다." : "All media is shown by default. Turning a switch off hides only that media type from result previews."}</p>
+      <p className={styles.note}>{ko ? "기본: 모두 표시 · 결과 미리보기에만 적용" : "Default: show all · Applies only to result previews"}</p>
     </section>
   );
 }

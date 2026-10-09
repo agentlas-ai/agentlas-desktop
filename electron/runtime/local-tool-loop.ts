@@ -26,7 +26,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import { createNoProgressGuard, noteNoProgressEvent } from "../automation-progress-guard";
 import type { RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
-import { RuntimeNoProgressError, runtimeHttpFailure, workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
+import { RuntimeNoProgressError, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceNativeToolEnforcement, workforceZeroToolsEnforcement } from "./runner";
 import {
   MainWorkforceBroker,
   workforceBrokerDigest,
@@ -998,6 +998,7 @@ async function* iterSseLines(resp: Response): AsyncGenerator<string, void, unkno
 }
 
 interface StreamTurnResult {
+  terminalObserved: boolean;
   finishReason?: string;
   text: string;
   toolCalls: OpenAiToolCall[];
@@ -1023,6 +1024,7 @@ async function streamChatTurn(
 ): Promise<StreamTurnResult> {
   let acc = "";
   let finishReason: string | undefined;
+  let conflictingFinishReason = false;
   let sawDone = false;
   let terminalUsage: StreamTurnResult["terminalUsage"];
   let terminalUsageChunks = 0;
@@ -1067,7 +1069,11 @@ async function streamChatTurn(
           lastChunkWasUsage = true;
         }
       }
-      if (typeof event.choices?.[0]?.finish_reason === "string") finishReason = event.choices[0].finish_reason;
+      const nextFinishReason = event.choices?.[0]?.finish_reason;
+      if (typeof nextFinishReason === "string") {
+        if (finishReason !== undefined && finishReason !== nextFinishReason) conflictingFinishReason = true;
+        finishReason = nextFinishReason;
+      }
       const delta = event.choices?.[0]?.delta;
       const thought = delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking;
       if (typeof thought === "string" && thought) {
@@ -1111,10 +1117,17 @@ async function streamChatTurn(
       function: { name: entry.name, arguments: entry.args },
     }));
   return { text: acc.trim(), toolCalls, finishReason,
+    terminalObserved: sawDone && Boolean(finishReason) && !conflictingFinishReason,
     ...(sawDone && finishReason && terminalUsageChunks === 1 && lastChunkWasUsage && terminalUsage
       ? { terminalUsage } : {}),
     missingToolCallIds: pendingCalls.some((entry) => !entry.id),
-    incompleteToolCalls: pendingCalls.some((entry) => !entry.name),
+    incompleteToolCalls: pendingCalls.some((entry) => {
+      if (!entry.name) return true;
+      try {
+        const args: unknown = JSON.parse(entry.args || "{}");
+        return !args || typeof args !== "object" || Array.isArray(args);
+      } catch { return true; }
+    }) || new Set(pendingCalls.map((entry) => entry.id)).size !== pendingCalls.length,
   };
 }
 
@@ -1298,6 +1311,41 @@ export async function runLocalOpenAiChat(
   /** The optional Surface fallback is a one-time swap, never a per-turn oscillation. */
   let surfaceFallbackApplied = false;
   let streamUsageUnsupported = false;
+  let ownerControlPending: string[] | null = null;
+  let ownerControlDispatched = false;
+  let ownerControlTerminal: "completed" | "uncertain" = "uncertain";
+  const ownerControlSeen = new Set<string>();
+  const observeOwnerControlResponse = (result: StreamTurnResult): void => {
+    const validTerminal = result.terminalObserved && !result.missingToolCallIds && !result.incompleteToolCalls
+      && ((result.finishReason === "stop" && result.toolCalls.length === 0)
+        || (result.finishReason === "tool_calls" && result.toolCalls.length > 0));
+    if (!validTerminal) {
+      ownerControlTerminal = "uncertain";
+      // Unknown reasons and truncated responses cannot authorize tools or a
+      // new brain request, even when this invocation has no live mailbox.
+      throw new RuntimeTurnUnsettledError(runtimeKind, req.locale);
+    }
+    if (req.signal?.aborted) throw abortReasonError(req);
+    ownerControlTerminal = "completed";
+    if (ownerControlPending) {
+      req.ownerControlInbox!.settle(ownerControlPending, "applied");
+      ownerControlPending = null;
+      ownerControlDispatched = false;
+    }
+  };
+  const terminalFailure = (result: StreamTurnResult): RunnerResult | null => {
+    if (result.finishReason === "length" && opts.contextWindow !== undefined) {
+      return { text: "", ownerControlTerminal: "uncertain",
+        failure: localContextFailure("local_output_limit_exceeded", runtimeKind, req.locale) };
+    }
+    if (result.terminalObserved && result.finishReason === "content_filter") {
+      return { text: result.text, ownerControlTerminal: "uncertain",
+        failure: { kind: "refused", runtime: runtimeKind, source: "marker", providerCode: "content_filter",
+          message: req.locale === "ko" ? "모델이 콘텐츠 필터로 응답을 중단했습니다." : "The model stopped the response due to its content filter." },
+        workforcePermissionEnforcement: broker?.finish(false) };
+    }
+    return null;
+  };
   const httpFailureResult = (status: number): RunnerResult | null => {
     const failure = runtimeHttpFailure(status, runtimeKind, providerLabel);
     if (!failure) return null;
@@ -1306,7 +1354,22 @@ export async function runLocalOpenAiChat(
       workforcePermissionEnforcement: broker?.finish(false) };
   };
 
+  try {
   for (let turn = 0; turn < MAX_TOOL_LOOP_TURNS; turn += 1) {
+    if (req.signal?.aborted) throw abortReasonError(req);
+    if (turn > 0 && req.ownerControlInbox) {
+      const batch = req.ownerControlInbox.take("current-boundary").filter((entry) => {
+        if (ownerControlSeen.has(entry.intentId)) return false;
+        ownerControlSeen.add(entry.intentId);
+        return true;
+      });
+      if (batch.length) {
+        ownerControlPending = batch.map((entry) => entry.intentId);
+        // Previous assistant/tool responses and screenshots are already
+        // complete. Owner text stays user input, after that whole group.
+        for (const entry of batch) messages.push({ role: "user", content: entry.text });
+      }
+    }
     const requestBody: Record<string, unknown> = {
             model,
             stream: true,
@@ -1420,6 +1483,8 @@ export async function runLocalOpenAiChat(
     let resp: Response;
     let usageAttempt = usage.start();
     try {
+      if (req.signal?.aborted) throw abortReasonError(req);
+      ownerControlDispatched = ownerControlPending !== null;
       resp = await fetch(chatEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json", ...opts.headers },
@@ -1440,7 +1505,7 @@ export async function runLocalOpenAiChat(
       const terminal = httpFailureResult(resp.status);
       if (terminal) return terminal;
       const errText = await resp.text().catch(() => "");
-      if (!req.signal?.aborted && Object.hasOwn(requestBody, "stream_options")
+      if (!ownerControlPending && !req.signal?.aborted && Object.hasOwn(requestBody, "stream_options")
         && rejectsStreamUsageOption(resp.status, errText)) {
         // This structured validation refusal precedes generation. Retry the
         // identical request once without the unsupported usage option. Since
@@ -1472,7 +1537,7 @@ export async function runLocalOpenAiChat(
         const failureClass = localHttpFailureClass(errText);
         if (failureClass === "context") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
         // Only explicit structured unsupported-tools markers permit the legacy downgrade.
-        if (failureClass === "tools" && tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
+        if (!ownerControlPending && failureClass === "tools" && tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
           // A host-broker receipt must describe the inventory admitted to the
           // provider invocation. Retrying this Workforce turn without that
           // inventory would make a later success receipt false.
@@ -1496,6 +1561,9 @@ export async function runLocalOpenAiChat(
           }
           const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
           usage.complete(usageAttempt, result.terminalUsage);
+          const failure = terminalFailure(result);
+          if (failure) return failure;
+          observeOwnerControlResponse(result);
           if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
           finalText = result.text;
           reachedAnswer = true;
@@ -1507,6 +1575,9 @@ export async function runLocalOpenAiChat(
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
     usage.complete(usageAttempt, result.terminalUsage);
+    const failure = terminalFailure(result);
+    if (failure) return failure;
+    observeOwnerControlResponse(result);
     if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
     if (approvalContext.scienceCollectionCapability && (result.missingToolCallIds || result.incompleteToolCalls
       || result.finishReason === "tool_calls" && result.toolCalls.length === 0)) {
@@ -1605,8 +1676,14 @@ export async function runLocalOpenAiChat(
     // 실패일 때도 원문은 지우지 않는다 — 표식을 안 읽는 소비자에게 빈 말풍선을
     // 주지 않기 위해서다. 판정은 어디까지나 failure 칸이 한다.
     text: answer || (failure ? failure.message : ""),
+    ownerControlTerminal: failure ? "uncertain" : ownerControlTerminal,
     ...(failure ? { failure } : {}),
     ...(observedUsage ? { observedUsage } : {}),
     workforcePermissionEnforcement: enforcement,
   };
+  } finally {
+    if (ownerControlPending) req.ownerControlInbox!.settle(ownerControlPending,
+      ownerControlDispatched ? "uncertain" : "rejected",
+      ownerControlDispatched ? "owner_control_brain_reply_lost" : "owner_control_not_dispatched");
+  }
 }

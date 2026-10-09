@@ -39,10 +39,10 @@ function admitMainRoot(domain: MainAdmissionDomain, ownerId: string, runId?: str
 
 /** Transfer ownership at method entry, so a pre-start refusal burns the caller's
  * token too. The replacement remains private even when validation throws. */
-export function takeMainInvocationAdmission(admission: MainInvocationAdmission | undefined): MainInvocationAdmission | undefined {
+export function takeMainInvocationAdmission(admission: MainInvocationAdmission | undefined, expected?: { chatId: string; runId: string | undefined }): MainInvocationAdmission | undefined {
   const binding = admission && admissions.get(admission);
   if (admission) admissions.delete(admission);
-  if (!binding) return undefined;
+  if (!binding || (expected && (binding.domain !== "invocation" || binding.ownerId !== expected.chatId || !expected.runId || binding.runId !== expected.runId))) return undefined;
   const owned = Object.freeze({}) as MainInvocationAdmission;
   admissions.set(owned, binding);
   return owned;

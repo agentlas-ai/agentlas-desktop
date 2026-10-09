@@ -29,6 +29,7 @@ import { removeRoute, setRoute } from "../agents/routes";
 import { appendChatMessage, createChat, getOrCreateOneMemberChat } from "../store/chats";
 import { closeAgentOccupancies, replaceSeatOccupant } from "../store/seats";
 import { seatEventText } from "../../shared/one-seat-events";
+import { invocationHostStopCause, invocationHostStopCopy } from "../../shared/invocation-host-stop";
 import { currentUiLocale } from "../ui-locale";
 import {
   decodeOneTeamAvatarDataUrl,
@@ -440,12 +441,35 @@ function lastActivityLabel(iso: string | null, now = Date.now()): { ko: string; 
   };
 }
 
+/** Read the exact cached settlement; never clear a failure from display prose. */
+function cachedHostStopStatus(row: Row): StatusLine | null {
+  if (!row.last_activity_at || (row.status_kind !== "failed" && row.status_kind !== "quiet")) return null;
+  const terminal = getDb().prepare(`
+    SELECT event.ts,
+      CASE WHEN json_valid(event.payload_json) THEN json_extract(event.payload_json, '$.hostStopCause') END AS host_stop_cause,
+      CASE WHEN json_valid(event.payload_json) THEN json_extract(event.payload_json, '$.errorMessage') END AS error_message
+    FROM one_org_completion_cache cache
+    JOIN run_events event ON event.id = (
+      SELECT id FROM run_events WHERE run_id = cache.run_id
+        AND kind IN ('invoke_waiting', 'invoke_completed', 'mcp_final', 'invoke_cancelled', 'invoke_interrupted', 'invoke_failed', 'invoke_threw', 'mcp_error')
+      ORDER BY seq DESC LIMIT 1
+    )
+    WHERE cache.installed_agent_id = ?
+      AND event.kind IN ('invoke_interrupted', 'invoke_failed', 'invoke_threw', 'mcp_error')
+  `).get(row.installed_agent_id) as { ts: string; host_stop_cause: unknown; error_message: unknown } | undefined;
+  if (!terminal || terminal.ts !== row.last_activity_at) return null;
+  const cause = invocationHostStopCause(terminal.host_stop_cause) ?? invocationHostStopCause(terminal.error_message);
+  if (!cause) return null;
+  return { kind: "quiet", ko: invocationHostStopCopy(cause, "ko").short, en: invocationHostStopCopy(cause, "en").short };
+}
+
 function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSummary = { produced: [], pending: [] }): StatusLine {
   if (row.archived_at) return { kind: "locked", ko: STATUS_TEMPLATES.archived.ko, en: STATUS_TEMPLATES.archived.en };
+  const hostStop = cachedHostStopStatus(row);
   // Failure is sticky until a new run/retry explicitly changes the row. This
   // keeps an actionable failure from being hidden behind a stale pending or
   // residency hint.
-  if (row.status_kind === "failed") {
+  if (row.status_kind === "failed" && !hostStop) {
     return {
       kind: "failed",
       ko: STATUS_TEMPLATES.failed.ko,
@@ -465,6 +489,8 @@ function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSumm
     (entry) => entry.agentId === row.installed_agent_id && entry.holdsSession,
   );
   if (residency.some((entry) => entry.inUse)) return { kind: "working", ko: STATUS_TEMPLATES.working.ko, en: STATUS_TEMPLATES.working.en };
+  // A paused run can have tool activity, but that does not mean its task completed.
+  if (hostStop) return hostStop;
   const produced = completion.produced[0];
   if (produced) {
     const producedKo = STATUS_TEMPLATES.produced.ko.replace("{label}", produced.label).replace("{count}", String(produced.count));

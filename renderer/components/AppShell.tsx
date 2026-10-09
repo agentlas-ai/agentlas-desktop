@@ -640,11 +640,12 @@ function FirstRunTour({
         left: "50%",
         transform: "translateX(-50%)",
         width: "var(--popup-3-width)",
+        maxWidth: "calc(100vw - 32px)",
         zIndex: 200,
         border: "1px solid var(--paper-edge)",
-        borderRadius: 10,
+        borderRadius: 18,
         background: "var(--paper)",
-        boxShadow: "0 16px 40px rgba(11, 11, 15, 0.16)",
+        boxShadow: "var(--popup-shadow)",
         padding: 14,
       }}
     >
@@ -664,11 +665,11 @@ function FirstRunTour({
       />
       <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
         <div style={{ width: 28, height: 28, borderRadius: 8, background: "var(--fill-1)", color: "var(--accent)", display: "inline-flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, flexShrink: 0 }}>
-          {step + 1}
+          <IconLayers size={17}/>
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <h2 style={{ margin: 0, fontSize: 14, fontWeight: 800, color: "var(--ink)" }}>{current.title}</h2>
-          <p style={{ margin: "5px 0 0", fontSize: 12.5, color: "var(--ink-soft)", lineHeight: 1.5 }}>{locale === "ko" ? current.body : current.bodyEn}</p>
+          <details style={{marginTop:7,fontSize:11,color:"var(--ink-soft)",lineHeight:1.6}}><summary style={{cursor:"pointer"}}>{locale === "ko" ? "사용 방법" : "How it works"}</summary><p style={{margin:"7px 0 0"}}>{locale === "ko" ? current.body : current.bodyEn}</p></details>
         </div>
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 12 }}>

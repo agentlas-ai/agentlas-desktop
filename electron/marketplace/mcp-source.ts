@@ -936,6 +936,7 @@ function marketPublicPluginToListing(
     ...(absoluteHubAssetUrl(raw.brandGlyph, origin) ? { brandGlyphUrl: absoluteHubAssetUrl(raw.brandGlyph, origin) } : {}),
     ...(cleanString(raw.brandColor) ? { brandColor: cleanString(raw.brandColor) } : {}),
     ...(typeof raw.featured === "boolean" ? { featured: raw.featured } : {}),
+    ...(cleanIsoString(raw.catalogRevision) ? { catalogRevision: cleanIsoString(raw.catalogRevision) } : {}),
     ...readAuthKind(raw),
     ...readPluginKind(raw),
   };

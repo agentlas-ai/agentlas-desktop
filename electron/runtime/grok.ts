@@ -545,6 +545,9 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     let buffer = "";
     let text = "";
     let stderr = "";
+    let terminalCompleted = false;
+    let terminalError = false;
+    let terminalStopReason: string | undefined;
     let tokens: number | undefined;
     let lastEmit = 0;
     /** 같은 도구의 승인 거부를 한 번만 알린다. */
@@ -625,6 +628,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
             if (!announcedGrokDenials.has(key)) {
               announcedGrokDenials.add(key);
               announceToolDenied({
+                ...(req.signal ? { signal: req.signal } : {}),
                 runtime: "grok",
                 sessionKey: `grok:${req.chatId ?? req.cwd ?? "default"}`,
                 tool: String(name),
@@ -643,6 +647,12 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
           toolFailed,
         );
       } else if (type === "step_finish" || type === "done" || type === "final" || type === "end") {
+        // streaming-json's last `end` is the turn boundary. A step finish or
+        // usage line only closes one model response, never the whole turn.
+        if (type === "end") {
+          terminalStopReason = ev.stopReason;
+          terminalCompleted = ev.stopReason === "end_turn" && !terminalError;
+        }
         if (thoughtActive) events.onThinking?.("end", Date.now() - thoughtStartedAt);
         thoughtActive = false;
         const fin = ev.text ?? ev.content ?? ev.output ?? (typeof ev.data === "string" ? ev.data : undefined);
@@ -650,6 +660,8 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         const tk = ev.usage?.output_tokens ?? ev.usage?.completion_tokens ?? ev.tokens;
         if (typeof tk === "number") tokens = tk;
       } else if (type === "error") {
+        terminalError = true;
+        terminalCompleted = false;
         stderr += `${ev.message ?? stringify(ev.error) ?? "grok error"}\n`;
       }
     };
@@ -729,7 +741,10 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
         clearProviderHealth("grok");
         invalidateUsage("grok");
         if (req.chatId && fingerprint && sessionId) saveRuntimeSession(req.chatId, KIND, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner });
-        resolve({ text: text.trim(), tokens, sessionId });
+        resolve({ text: text.trim(), tokens, sessionId,
+          ...(terminalStopReason === "refusal" ? { failure: { kind: "refused" as const, runtime: KIND,
+            source: "marker" as const, providerCode: "refusal", message: "Grok stopReason=refusal" } } : {}),
+          ownerControlTerminal: terminalCompleted && text.trim() ? "completed" : "uncertain" });
         return;
       }
       // Partial output is evidence, not a successful terminal receipt. Keep it

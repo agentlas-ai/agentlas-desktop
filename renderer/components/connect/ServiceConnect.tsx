@@ -83,8 +83,8 @@ export function ServiceConnectPopup({ name, icon, ko, run, onClose, onDone, setu
     <div className={styles.popupHead}>{icon}<h2 id={titleId}>{ko ? `${name} 연결` : `Connect ${name}`}</h2></div>
     <ConnectSteps labels={labels} current={order.indexOf(progress.step)} failed={phase === "failed" || phase === "cancelled"} done={phase === "done"} />
     <p className={styles.note} role={phase === "failed" ? "alert" : "status"} data-tone={phase === "failed" ? "error" : undefined}>{phase === "failed" ? error : phase === "cancelled" ? (ko ? "이 창의 연결 확인을 취소했어요. 이미 열린 로그인 창과 시작된 설정은 남아 있을 수 있어요." : "Stopped checking here. An already opened sign-in window or started setup may remain.") : progress.note}</p>
-    {progress.evidence?.map((fact) => <p key={fact} className={styles.note}>{fact}</p>)}
-    {progress.manualUrl && <a className={styles.link} href={progress.manualUrl} target="_blank" rel="noopener noreferrer">{ko ? "공식 로그인 페이지 열기" : "Open the official sign-in page"}</a>}
+    {Boolean(progress.evidence?.length) && <details className={styles.evidence}><summary>{ko ? "연결 근거" : "Connection evidence"}<span>{progress.evidence?.length}</span></summary>{progress.evidence?.map((fact) => <p key={fact} className={styles.note}>{fact}</p>)}</details>}
+    {phase === "running" && progress.manualUrl && <a className={styles.link} href={progress.manualUrl} target="_blank" rel="noopener noreferrer">{ko ? "공식 로그인 페이지 열기" : "Open the official sign-in page"}</a>}
     {phase === "failed" && setupLink && <a className={styles.link} href={setupLink.href}>{setupLink.label}</a>}
     <div className={styles.actions}>{phase === "running" ? <button type="button" className={styles.button} onClick={cancel}>{ko ? "취소" : "Cancel"}</button> : <><button type="button" className={styles.button} onClick={onClose}>{ko ? "닫기" : "Close"}</button>{phase !== "done" && <button type="button" className={styles.button} data-variant="primary" onClick={start}>{ko ? "다시 시도" : "Retry"}</button>}</>}</div>
   </div></div>;

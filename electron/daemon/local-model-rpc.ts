@@ -74,6 +74,11 @@ export function createDaemonLocalModelRpc(options: {
     return { clientId, id: itemId, material: digest, controller: new AbortController(), state: "running",
       result: null, errorCode: null, errorMessage: null, waiters: new Set(), bytes: 0 };
   }
+  function cancellationDiagnostic(row: Entry): { code: string; message: string } {
+    const info = diagnostic(row.controller.signal.reason);
+    return info.code === "local_model_remote_operation_failed"
+      ? diagnostic(localModelRemoteError("local_model_remote_cancelled")) : info;
+  }
   function launch(row: Entry, operation: () => Promise<unknown>): void {
     const task = Promise.resolve().then(() => {
       row.controller.signal.throwIfAborted();
@@ -84,9 +89,15 @@ export function createDaemonLocalModelRpc(options: {
       row.bytes = Buffer.byteLength(encoded);
       if (row.bytes > MAX_RESULT_BYTES) throw localModelRemoteError("local_model_remote_result_too_large");
       row.result = result ?? null;
-      row.state = "completed";
+      // A late result is diagnostic evidence, not permission to reverse Stop.
+      // Preserve its bounded text/usage and the run's measured child drain.
+      if (row.controller.signal.aborted) {
+        const info = cancellationDiagnostic(row);
+        row.state = "cancelled";
+        row.errorCode = info.code; row.errorMessage = info.message;
+      } else row.state = "completed";
     }).catch(error => {
-      const info = diagnostic(error);
+      const info = row.controller.signal.aborted ? cancellationDiagnostic(row) : diagnostic(error);
       row.state = row.controller.signal.aborted ? "cancelled" : "failed";
       row.errorCode = info.code; row.errorMessage = info.message; row.bytes = 0;
     }).finally(() => { pending.delete(task); wake(row); });

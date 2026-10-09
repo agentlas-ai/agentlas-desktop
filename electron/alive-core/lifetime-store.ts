@@ -15,6 +15,8 @@ import type Database from "better-sqlite3";
 import { createHash, randomUUID } from "node:crypto";
 import type { AliveActionPacket, AliveActionProposal, AliveActionResult, AliveAgent, AliveAttachment, AliveBudget, AliveRuntimeReceipt } from "./contracts";
 import { validAliveAction } from "./action-registry";
+import type { AliveResumeBarrier } from "../../shared/alive";
+import { readAliveResumeBarrier, aliveResumeMatches, aliveResumeAuthorized, type AliveResumeAuthorization } from "./owner-resume";
 
 type Row = Record<string, any>;
 const SHA256 = /^[a-f0-9]{64}$/i;
@@ -136,9 +138,32 @@ export class AliveLifetimeStore {
     return (this.db.prepare("SELECT * FROM alive_attachments WHERE agent_id=? ORDER BY attachment_id").all(agentId) as Row[])
       .map((r) => ({ attachmentId: r.attachment_id, agentId, domain: r.domain, scope: JSON.parse(r.scope_json), status: r.status }));
   }
-  event(agentId: string, kind: string, payload: unknown, nowMs: number): void {
-    this.db.prepare("INSERT INTO alive_events(event_id,agent_id,sequence,kind,payload_json,created_at_ms) SELECT ?,?,COALESCE(MAX(sequence),0)+1,?,?,? FROM alive_events WHERE agent_id=?")
-      .run(randomUUID(), agentId, kind, JSON.stringify(payload), nowMs, agentId);
+  event(agentId: string, kind: string, payload: unknown, nowMs: number): number {
+    const row = this.db.prepare("INSERT INTO alive_events(event_id,agent_id,sequence,kind,payload_json,created_at_ms) SELECT ?,?,COALESCE(MAX(sequence),0)+1,?,?,? FROM alive_events WHERE agent_id=? RETURNING sequence")
+      .get(randomUUID(), agentId, kind, JSON.stringify(payload), nowMs, agentId) as {sequence:number};
+    return row.sequence;
+  }
+  resumeBarrier(agentId: string): AliveResumeBarrier | null {
+    const agent = this.get(agentId); return agent && this.owns(agentId) ? readAliveResumeBarrier(this.db,agent) : null;
+  }
+  authorizeOwnerResume(agentId:string, intentId:string, expected:AliveResumeBarrier, nowMs:number): void {
+    this.db.transaction(() => {
+      const old = this.db.prepare("SELECT payload_json FROM alive_events WHERE agent_id=? AND kind='owner.resume-uncertain' AND json_extract(payload_json,'$.intentId')=?").get(agentId,intentId) as {payload_json:string}|undefined;
+      if (old) {
+        const original = JSON.parse(old.payload_json);
+        if (JSON.stringify(original.expected) !== JSON.stringify(expected)) throw new Error("alive-resume-intent-conflict");
+        return;
+      }
+      const agent = this.get(agentId); const barrier = agent ? this.resumeBarrier(agentId) : null;
+      if (agent && ((agent.budget.deadlineMs !== null && nowMs >= agent.budget.deadlineMs)
+        || (agent.budget.tokenLimit !== null && (agent.state.usageUnknown === true || agent.budget.tokensUsed >= agent.budget.tokenLimit))))
+        throw new Error("alive-resume-budget-blocked");
+      if (!agent || !barrier || agent.status !== "enabled" || !aliveResumeMatches(this.db,barrier,expected)
+        || this.activeWakes().some(w=>w.agentId===agentId) || this.pendingActions().some(a=>a.agentId===agentId)) throw new Error("alive-resume-stale");
+      const observed = {...barrier,...(expected.goalBinding ? {goalBinding:expected.goalBinding} : {})};
+      const sequence = this.event(agentId,"owner.resume-uncertain",{intentId,observed,expected},nowMs);
+      this.update(agentId,{state:{...agent.state,ownerResume:{intentId,sequence,observed,expected,consumedWakeId:null},nextWakeAtMs:nowMs}},nowMs);
+    })();
   }
   events(agentId: string): Array<{ kind: string; payload: any }> {
     return (this.db.prepare("SELECT kind,payload_json FROM alive_events WHERE agent_id=? ORDER BY sequence").all(agentId) as Row[]).map((r) => ({ kind: r.kind, payload: JSON.parse(r.payload_json) }));
@@ -250,6 +275,13 @@ export class AliveLifetimeStore {
         || this.activeWakes().some((w) => w.agentId === agentId)
         || this.pendingActions().some((action) => action.agentId === agentId)) return null;
       const wakeId = randomUUID();
+      const barrier = this.resumeBarrier(agentId);
+      if (barrier) {
+        if (!aliveResumeAuthorized(this.db,agent,barrier)) return null;
+        const authorization = agent.state.ownerResume as AliveResumeAuthorization;
+        this.update(agentId,{state:{...agent.state,ownerResume:{...authorization,consumedWakeId:wakeId}}},nowMs);
+        this.event(agentId,"owner.resume-consumed",{authorizationSequence:authorization.sequence,previousWakeId:barrier.wakeId,wakeId},nowMs);
+      }
       this.db.prepare("INSERT INTO alive_wakes(wake_id,agent_id,control_epoch,status,runtime_binding_json,created_at_ms) VALUES (?,?,?,'reserved',?,?)")
         .run(wakeId, agentId, expectedEpoch, JSON.stringify(agent.runtimeBinding), nowMs);
       this.event(agentId, "wake.reserved", { wakeId, reasonCode, controlEpoch: expectedEpoch }, nowMs);

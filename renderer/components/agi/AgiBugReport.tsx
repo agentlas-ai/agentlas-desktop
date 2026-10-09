@@ -12,6 +12,8 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { AGI_BUG_REPORT_CATEGORIES, type AgiBugReportCategory, type AgiBugReportDraftInput, type AgiBugReportPreview,
   type AgiBugReportRow, type AgiDefectChip as DefectChip } from "@shared/agi";
+import { PopupFrame } from "../Popup";
+import { IconBug } from "../Icon";
 import styles from "./AgiBugReport.module.css";
 
 const CATEGORY_KO: Record<AgiBugReportCategory, string> = {
@@ -128,17 +130,11 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
     finally { if (operation.current === ticket) { operation.current = null; setBusy(false); setSending(false); } }
   };
 
-  return <div className={styles.backdrop} role="presentation" onClick={onClose}>
-    <div className={styles.dialog} role="dialog" aria-modal="true" aria-label={ko ? "결함 보고" : "Report a defect"} data-agi-bug-report="true"
-      onClick={(event) => event.stopPropagation()}>
-      <header className={styles.head}>
-        <strong>{ko ? "결함 보고" : "Report a defect"}</strong>
-        <div className={styles.tabs} role="tablist">
-          <button type="button" role="tab" aria-selected={tab === "new"} onClick={() => setTab("new")}>{ko ? "새 보고" : "New"}</button>
-          <button type="button" role="tab" aria-selected={tab === "sent"} onClick={() => setTab("sent")}>{ko ? "보낸 결함 보고" : "Sent reports"}</button>
-        </div>
-        <button type="button" className={styles.close} aria-label={ko ? "닫기" : "Close"} onClick={onClose}>×</button>
-      </header>
+  return <PopupFrame title={ko ? "결함 보고" : "Report a defect"} icon={<IconBug size={18} />} closeLabel={ko ? "닫기" : "Close"} onClose={onClose} size="wide" dataAttributes={{ "data-agi-bug-report": "true" }}>
+      <div className={styles.tabs} role="tablist" aria-label={ko ? "보고 목록" : "Reports"}>
+        <button type="button" role="tab" aria-selected={tab === "new"} onClick={() => setTab("new")}>{ko ? "새 보고" : "New"}</button>
+        <button type="button" role="tab" aria-selected={tab === "sent"} onClick={() => setTab("sent")}>{ko ? "보낸 보고" : "Sent"}</button>
+      </div>
       {tab === "sent" ? <div className={styles.body}>
         {!sent ? <p className={styles.muted}>{ko ? "불러오는 중…" : "Loading…"}</p>
           : !sent.length ? <p className={styles.muted}>{ko ? "보낸 결함 보고가 없어요." : "No reports sent yet."}</p>
@@ -150,10 +146,10 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
           event.preventDefault();
           void makePreview({ ...(draft ?? {}), title, summary, category });
         }}>
-          <label>{ko ? "무엇이 잘못됐나요? (제목)" : "What went wrong? (title)"}
+          <label>{ko ? "제목" : "Title"}
             <input value={title} maxLength={140} onChange={(event) => setTitle(event.target.value)} required />
           </label>
-          <label>{ko ? "자세히 (무엇을 하다가, 무엇을 기대했는데, 무엇이 일어났는지)" : "Details (what you did, expected, and saw)"}
+          <label>{ko ? "상황 · 기대 · 실제 결과" : "Context · Expected · Actual"}
             <textarea value={summary} maxLength={4000} rows={5} onChange={(event) => setSummary(event.target.value)} required />
           </label>
           <label>{ko ? "종류" : "Kind"}
@@ -161,7 +157,7 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
               {AGI_BUG_REPORT_CATEGORIES.map((value) => <option key={value} value={value}>{(ko ? CATEGORY_KO : CATEGORY_EN)[value]}</option>)}
             </select>
           </label>
-          <button type="submit" disabled={busy || !title.trim() || !summary.trim()}>{ko ? "보낼 내용 미리 보기" : "Preview what will be sent"}</button>
+          <button type="submit" disabled={busy || !title.trim() || !summary.trim()}>{ko ? "전송 미리보기" : "Preview send"}</button>
         </form>}
         {preview && <>
           <p className={styles.muted}>{ko
@@ -189,8 +185,7 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
               : result?.status === "failed" || error ? (ko ? "다시 보내기" : "Retry") : (ko ? "보내기" : "Send")}</button>}
         </footer>
       </div>}
-    </div>
-  </div>;
+  </PopupFrame>;
 }
 
 /** Read the persisted incident receipt. Previews are local; only Send dispatches it. */

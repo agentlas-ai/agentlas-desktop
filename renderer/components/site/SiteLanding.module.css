@@ -17,6 +17,10 @@
   letter-spacing: -0.012em;
 }
 
+:global(html[data-platform="windows"]) .root {
+  font-family: var(--font-body);
+}
+
 .root *,
 .root *::before,
 .root *::after { box-sizing: border-box; }
@@ -330,3 +334,12 @@
   .thumbnailSpinner,
   .progressSpinner { animation: none; }
 }
+
+/* Paper popup elevation shares the desktop popup palette. */
+.dialogBackdrop { background: var(--popup-backdrop, rgb(31 42 34 / 24%)); backdrop-filter: blur(5px); }
+.dialog { border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }
+.pickerMark { display:grid; place-items:center; width:44px; height:44px; flex:none; border-radius:14px; background:var(--popup-sage,var(--paper-2)); color:var(--ink); }
+.dialogHeader>div { flex:1; min-width:0; }
+.pickerDetails { color:var(--ink-soft); font-size:11px; }
+.pickerDetails summary { cursor:pointer; }
+.choice { box-shadow:inset 0 1px 0 #fff9,0 3px 10px #26312708; }

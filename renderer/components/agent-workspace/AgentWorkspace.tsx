@@ -5,7 +5,7 @@ import Link from "next/link";
 import {
   IconAlertTriangle, IconBrain, IconCheck, IconChevronDown, IconChevronRight, IconClock, IconClose,
   IconFileText, IconFileUp, IconFolder, IconGithub, IconLayers, IconMonitor, IconMoreHorizontal, IconPlus, IconRefresh, IconSearch,
-  IconSettings, IconShield, IconSidebar,
+  IconSettings, IconShield, IconSidebar, IconTrash,
 } from "@/components/Icon";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { ipc } from "@/lib/ipc";
@@ -19,7 +19,8 @@ import { AgentWorkspaceDiff } from "./AgentWorkspaceDiff";
 import { AgentWorkspaceInspector } from "./AgentWorkspaceInspector";
 import { AgentWorkspaceRecoveryReview } from "./AgentWorkspaceRecoveryReview";
 import { AgentMemoryImportDialog } from "./AgentMemoryImportDialog";
-import { useWorkspaceDialog } from "./use-workspace-dialog";
+import { PopupAction, PopupFacts, PopupFrame, PopupSteps } from "@/components/Popup";
+import { confirmPopup } from "@/lib/popup";
 import styles from "./AgentWorkspace.module.css";
 
 export type AgentWorkspaceView = "files" | "memory" | "changes" | "sync" | "history";
@@ -148,7 +149,9 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   const codeGutter = useRef<HTMLPreElement>(null);
   const codeInput = useRef<HTMLTextAreaElement>(null);
   const root = useRef<HTMLElement>(null);
-  useWorkspaceDialog(quickOpen || newPathDialog || renamePathDialog, root, () => { if (!busy) { setQuickOpen(false); setNewPathDialog(false); setRenamePathDialog(false); } });
+  const currentDraft = useRef({ agentId: agent.id, path, content, newFile });
+  currentDraft.current = { agentId: agent.id, path, content, newFile };
+  const discardPending = useRef(false);
   const dirty = Boolean(fileRead && (content !== fileRead.content || newFile));
   const api = () => {
     const bridge = ipc()?.agentWorkspace;
@@ -187,10 +190,25 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     window.addEventListener("beforeunload", handle);
     return () => window.removeEventListener("beforeunload", handle);
   }, [dirty]);
-  const mayLeaveFile = () => !dirty || window.confirm(ko ? "아직 변경안으로 저장하지 않은 파일 초안을 버릴까요?" : "Discard the file draft that has not been saved as a proposal?");
+  const mayLeaveFile = async () => {
+    if (!dirty) return true;
+    if (discardPending.current) return false;
+    const draft = currentDraft.current;
+    const generation = fileGeneration.current;
+    discardPending.current = true;
+    try {
+      const accepted = await confirmPopup(ko ? "변경안으로 저장하지 않은 초안이 사라집니다." : "The draft has not been saved as a proposal and will be lost.", {
+        locale: ko ? "ko" : "en", title: ko ? "초안을 버릴까요?" : "Discard draft?",
+        confirmLabel: ko ? "초안 버리기" : "Discard draft", tone: "warning", detail: draft.path,
+      });
+      const current = currentDraft.current;
+      return accepted && generation === fileGeneration.current && draft.agentId === current.agentId
+        && draft.path === current.path && draft.content === current.content && draft.newFile === current.newFile;
+    } finally { discardPending.current = false; }
+  };
   const openFile = async (nextPath: string, force = false) => {
-    if (!force && nextPath === path && fileRead) return;
-    if (!force && !mayLeaveFile()) return;
+    if (!force && nextPath === path && fileRead) return true;
+    if (!force && (busy || !await mayLeaveFile())) return false;
     const generation = ++fileGeneration.current;
     setPath(nextPath); setFileRead(null); setContent(""); setNewFile(false); setFileLoading(true); setError("");
     try {
@@ -199,6 +217,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       setFileRead(result); setContent(result.content);
       const parts = nextPath.split("/");
       setExpanded((previous) => new Set([...previous, ...parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"))]));
+      return true;
     } catch (failure) { if (fileGeneration.current === generation) setError(detailForUser(failure)); }
     finally { if (fileGeneration.current === generation) setFileLoading(false); }
   };
@@ -230,6 +249,14 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     setBusy(label); setError(""); setNotice("");
     try { await task(); } catch (failure) { setError(detailForUser(failure)); } finally { setBusy(""); }
   };
+  const draftPath = newPath.trim();
+  const validNewPath = Boolean(draftPath) && !draftPath.startsWith("/") && !draftPath.split("/").includes("..") && !files.some((file) => file.path === draftPath);
+  const openDraft = async () => {
+    if (busy || !validNewPath || !snapshot?.writable || snapshot.activation === "recovery_required" || !await mayLeaveFile()) return;
+    fileGeneration.current++;
+    setPath(draftPath); setFileRead({ path: draftPath, content: "", blobHash: "", byteLength: 0, binary: false, truncated: false });
+    setContent(""); setNewFile(true); setFileLoading(false); setNewPathDialog(false); setView("files");
+  };
   const prepareFile = () => run("prepare-file", async () => {
     if (!fileRead || !snapshot?.writable || snapshot.activation === "recovery_required" || fileRead.binary || fileRead.truncated || !dirty) return;
     const proposal = await api().prepareFileChange({ agentId: agent.id, targetPath: path, currentContent: fileRead.content, proposedContent: content });
@@ -241,7 +268,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   useEffect(() => {
     const key = (event: KeyboardEvent) => {
       if (!(event.metaKey || event.ctrlKey)) return;
-      if (quickOpen || newPathDialog || renamePathDialog || memoryImportPreview || root.current?.querySelector('[role="dialog"][aria-modal="true"]')) { if (["p", "s"].includes(event.key.toLowerCase())) event.preventDefault(); return; }
+      if (quickOpen || newPathDialog || renamePathDialog || memoryImportPreview || document.querySelector('[aria-modal="true"]')) { if (["p", "s"].includes(event.key.toLowerCase())) event.preventDefault(); return; }
       if (event.key.toLowerCase() === "p") { event.preventDefault(); setQuickOpen(true); setQuickQuery(""); }
       if (event.key.toLowerCase() === "s") { event.preventDefault(); if (view === "files") void prepareFileRef.current(); }
       if (event.key === "\\") { event.preventDefault(); setInspector((current) => !current); }
@@ -399,7 +426,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
               {!rows.length && <div className={styles.empty}>{ko ? "파일 없음" : "No files"}</div>}
             </div>
           </aside><button className={styles.resizeHandle} aria-label={ko ? "파일 트리 너비" : "Resize file tree"} onPointerDown={startResize} onKeyDown={(event) => { if (event.key === "ArrowLeft") setTreeWidth((width) => Math.max(160, width - 10)); if (event.key === "ArrowRight") setTreeWidth((width) => Math.min(300, width + 10)); }} />
-          <div className={styles.editor}>{path ? <><div className={styles.fileToolbar}><IconFileText size={14} /><span className={styles.filePath} title={path}>{path}{dirty ? " ●" : ""}</span><span className={styles.fileRole}>{newFile ? (ko ? "새 파일 초안" : "New draft") : files.find((file) => file.path === path)?.role}</span>{!newFile && files.some((file) => file.path === path) && <button className={styles.iconButton} data-agent-file-actions aria-label={ko ? "파일 작업" : "File actions"} title={ko ? "파일 작업" : "File actions"} aria-expanded={fileMenu} disabled={Boolean(busy) || !snapshot.writable || snapshot.activation === "recovery_required"} onClick={() => setFileMenu((current) => !current)}><IconMoreHorizontal size={16} /></button>}<button className={`${styles.button} ${styles.primary}`} disabled={!dirty || Boolean(busy) || !snapshot.writable || snapshot.activation === "recovery_required" || !fileRead || fileRead.binary || fileRead.truncated} onClick={() => void prepareFile()}>{busy === "prepare-file" && <span className={styles.loading} />}{ko ? "변경 검토" : "Review change"}</button></div>{fileMenu && <div className={styles.fileMenu} data-agent-file-menu role="menu"><button role="menuitem" onClick={() => { setFileMenu(false); setRenamePathDialog(true); setNewPath(path); }}>{ko ? "이름 변경 검토…" : "Review rename…"}</button><button role="menuitem" className={styles.danger} onClick={() => { setFileMenu(false); if (!mayLeaveFile()) return; void run("prepare-delete", async () => { const proposal = await api().prepareFileOperation({ agentId: agent.id, operation: "delete", path }); setContent(fileRead?.content ?? ""); await refresh(); await openReview(proposal.id); }); }}>{ko ? "삭제 검토…" : "Review deletion…"}</button></div>}
+          <div className={styles.editor}>{path ? <><div className={styles.fileToolbar}><IconFileText size={14} /><span className={styles.filePath} title={path}>{path}{dirty ? " ●" : ""}</span><span className={styles.fileRole}>{newFile ? (ko ? "새 파일 초안" : "New draft") : files.find((file) => file.path === path)?.role}</span>{!newFile && files.some((file) => file.path === path) && <button className={styles.iconButton} data-agent-file-actions aria-label={ko ? "파일 작업" : "File actions"} title={ko ? "파일 작업" : "File actions"} aria-expanded={fileMenu} disabled={Boolean(busy) || !snapshot.writable || snapshot.activation === "recovery_required"} onClick={() => setFileMenu((current) => !current)}><IconMoreHorizontal size={16} /></button>}<button className={`${styles.button} ${styles.primary}`} disabled={!dirty || Boolean(busy) || !snapshot.writable || snapshot.activation === "recovery_required" || !fileRead || fileRead.binary || fileRead.truncated} onClick={() => void prepareFile()}>{busy === "prepare-file" && <span className={styles.loading} />}{ko ? "변경 검토" : "Review change"}</button></div>{fileMenu && <div className={styles.fileMenu} data-agent-file-menu role="menu"><button role="menuitem" onClick={() => { setFileMenu(false); setRenamePathDialog(true); setNewPath(path); }}><IconFileText size={16} />{ko ? "이름 변경 검토…" : "Review rename…"}</button><button role="menuitem" className={styles.danger} onClick={() => { setFileMenu(false); void run("prepare-delete", async () => { if (!snapshot.writable || snapshot.activation === "recovery_required" || !await mayLeaveFile()) return; const proposal = await api().prepareFileOperation({ agentId: agent.id, operation: "delete", path }); setContent(fileRead?.content ?? ""); await refresh(); await openReview(proposal.id); }); }}><IconTrash size={16} />{ko ? "삭제 검토…" : "Review deletion…"}</button></div>}
             {fileLoading ? <div className={styles.empty}><span className={styles.loading} /></div> : fileRead?.binary ? <div className={styles.empty}><IconFileText size={28} />{ko ? "바이너리 파일 · 텍스트 편집 불가" : "Binary file · Text editing unavailable"}<span>{fileRead.byteLength.toLocaleString()} bytes</span></div> : fileRead ? <>{fileRead.truncated && <div className={styles.banner}>{ko ? "파일이 커서 일부만 표시합니다. 편집은 잠겨 있습니다." : "Partial preview of a large file. Editing is locked."}</div>}<div className={styles.codeEditor}><pre className={styles.editorGutter} ref={codeGutter} aria-hidden="true">{Array.from({ length: lineCount }, (_, index) => index + 1).join("\n")}</pre><textarea ref={codeInput} className={styles.codeInput} value={content} spellCheck={false} autoCapitalize="off" autoCorrect="off" aria-label={`${path} ${ko ? "파일 내용" : "file content"}`} readOnly={!snapshot.writable || snapshot.activation === "recovery_required" || fileRead.truncated || Boolean(busy)} onChange={(event) => setContent(editorContent(event.target.value, fileRead.content))} onScroll={(event) => { if (codeGutter.current) codeGutter.current.scrollTop = event.currentTarget.scrollTop; }} onKeyDown={(event) => {
               if (event.key === "Tab" && !event.currentTarget.readOnly) { event.preventDefault(); const element = event.currentTarget; const start = element.selectionStart; const end = element.selectionEnd; setContent(editorContent(element.value.slice(0, start) + "  " + element.value.slice(end), fileRead.content)); requestAnimationFrame(() => { element.selectionStart = element.selectionEnd = start + 2; }); }
             }} /></div></> : <div className={styles.empty}>{ko ? "파일 읽기 실패" : "Could not read the file"}</div>}</> : <div className={styles.empty}><IconFolder size={35} /><strong>{ko ? "파일을 선택하세요" : "Select a file"}</strong></div>}</div>
@@ -408,9 +435,20 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       {inspector && <><button className={`${styles.scrim} ${styles.inspectorScrim}`} aria-label={ko ? "속성 닫기" : "Close inspector"} onClick={() => setInspector(false)} /><AgentWorkspaceInspector agent={agent} name={name} locale={locale} snapshot={snapshot} firm={firm} org={org} binding={binding} runtimes={runtimes} overrides={overrides} onClose={() => setInspector(false)} onRename={onRename} onRemove={onRemove} onOverridesChange={onOverridesChange} onNotice={setNotice} /></>}
     </div>
     <footer className={styles.statusbar}><span>{busy ? (ko ? "처리 중…" : "Working…") : dirty ? (ko ? "저장 전 파일 초안" : "Unsaved file draft") : snapshot?.activation === "run_active" ? (ko ? "실행 중 · 새 변경은 다음 실행부터" : "Run active · Changes apply to the next run") : snapshot ? (ko ? "로컬 파일 확인됨" : "Local files read") : (ko ? "파일 상태 미확인" : "File state unknown")}</span><span>{path ? `${lineCount} ${ko ? "줄" : "lines"}` : ""}</span><code title={snapshot?.treeDigest}>{shortHash(snapshot?.treeDigest)}</code></footer>
-    {quickOpen && <div className={styles.modalBackdrop} onClick={() => setQuickOpen(false)}><div className={styles.modal} role="dialog" aria-modal="true" aria-label={ko ? "파일 찾기" : "Find file"} onClick={(event) => event.stopPropagation()}><div className={styles.search}><IconSearch size={15} /><input autoFocus value={quickQuery} aria-label={ko ? "파일 이름" : "File name"} placeholder={ko ? "파일 이름을 입력하세요…" : "Find a file…"} onChange={(event) => setQuickQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setQuickOpen(false); if (event.key === "Enter") { const first = files.find((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())); if (first) { setQuickOpen(false); setView("files"); void openFile(first.path); } } }} /><button className={styles.iconButton} onClick={() => setQuickOpen(false)} aria-label={ko ? "파일 찾기 닫기" : "Close file finder"}><IconClose size={14} /></button></div><div className={styles.listRows}>{files.filter((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())).map((file) => <button className={styles.treeRow} key={file.path} onClick={() => { setQuickOpen(false); setView("files"); void openFile(file.path); }}><IconFileText size={14} /><span className={styles.treeName}>{file.path}</span></button>)}</div></div></div>}
-    {newPathDialog && <div className={styles.modalBackdrop} onClick={() => setNewPathDialog(false)}><div className={styles.modal} role="dialog" aria-modal="true" aria-label={ko ? "새 파일 초안" : "New file draft"} onClick={(event) => event.stopPropagation()}><div className={styles.paneHeader}><strong>{ko ? "새 파일 초안" : "New file draft"}</strong><button className={styles.iconButton} onClick={() => setNewPathDialog(false)} aria-label={ko ? "닫기" : "Close"}><IconClose size={14} /></button></div><div className={styles.inspectorBody}><label className={styles.field}>{ko ? "에이전트 폴더 내 경로" : "Path inside the agent folder"}<input autoFocus value={newPath} placeholder="skills/my-skill/SKILL.md" onChange={(event) => setNewPath(event.target.value)} onKeyDown={(event) => { if (event.key === "Escape") setNewPathDialog(false); }} /></label><button className={`${styles.button} ${styles.primary}`} disabled={!newPath.trim() || newPath.startsWith("/") || newPath.split("/").includes("..") || files.some((file) => file.path === newPath.trim())} onClick={() => { if (!mayLeaveFile()) return; fileGeneration.current++; const draftPath = newPath.trim(); setPath(draftPath); setFileRead({ path: draftPath, content: "", blobHash: "", byteLength: 0, binary: false, truncated: false }); setContent(""); setNewFile(true); setFileLoading(false); setNewPathDialog(false); setView("files"); }}>{ko ? "초안 열기" : "Open draft"}</button></div></div></div>}
-    {renamePathDialog && <div className={styles.modalBackdrop} onClick={() => { if (!busy) setRenamePathDialog(false); }}><div className={styles.modal} role="dialog" aria-modal="true" aria-label={ko ? "파일 이름 변경 검토" : "Review file rename"} onClick={(event) => event.stopPropagation()}><div className={styles.paneHeader}><strong>{ko ? "이름 변경 검토" : "Review rename"}</strong><button className={styles.iconButton} disabled={Boolean(busy)} onClick={() => setRenamePathDialog(false)} aria-label={ko ? "닫기" : "Close"}><IconClose size={14} /></button></div><div className={styles.inspectorBody}><label className={styles.field}>{path}<input autoFocus value={newPath} aria-label={ko ? "새 파일 경로" : "New file path"} onChange={(event) => setNewPath(event.target.value)} /></label><button className={`${styles.button} ${styles.primary}`} disabled={Boolean(busy) || !newPath.trim() || newPath === path || files.some((file) => file.path === newPath.trim())} onClick={() => void run("prepare-rename", async () => { if (!mayLeaveFile()) return; const proposal = await api().prepareFileOperation({ agentId: agent.id, operation: "rename", path, newPath: newPath.trim() }); setRenamePathDialog(false); setContent(fileRead?.content ?? ""); await refresh(); await openReview(proposal.id); })}>{busy && <span className={styles.loading} />}{ko ? "변경 검토" : "Review change"}</button></div></div></div>}
+    {quickOpen && <PopupFrame title={ko ? "파일 찾기" : "Find file"} icon={<IconSearch size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={() => setQuickOpen(false)} busy={Boolean(busy)}>
+      <div className={styles.popupSearch}><IconSearch size={17} /><input autoFocus value={quickQuery} aria-label={ko ? "파일 이름" : "File name"} placeholder={ko ? "이름 또는 경로" : "Name or path"} onChange={(event) => setQuickQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { const first = files.find((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())); if (first) void openFile(first.path).then((opened) => { if (opened) { setQuickOpen(false); setView("files"); } }); } }} /><kbd>↵</kbd></div>
+      <div className={styles.popupFiles}>{files.filter((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())).map((file) => <button className={styles.popupFile} key={file.path} onClick={() => void openFile(file.path).then((opened) => { if (opened) { setQuickOpen(false); setView("files"); } })}><IconFileText size={18} /><span><strong>{file.path.split("/").at(-1)}</strong><small>{file.path}</small></span></button>)}{!files.some((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())) && <div className={styles.empty}><IconSearch size={24} />{ko ? "일치하는 파일 없음" : "No matching files"}</div>}</div>
+    </PopupFrame>}
+    {newPathDialog && <PopupFrame title={ko ? "새 파일 초안" : "New file draft"} icon={<IconPlus size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={() => setNewPathDialog(false)} busy={Boolean(busy)} footer={<><PopupAction onClick={() => setNewPathDialog(false)} disabled={Boolean(busy)}>{ko ? "취소" : "Cancel"}</PopupAction><PopupAction primary icon={<IconFileText size={16} />} disabled={Boolean(busy) || !validNewPath || !snapshot?.writable || snapshot.activation === "recovery_required"} onClick={() => void openDraft()}>{ko ? "초안 열기" : "Open draft"}</PopupAction></>}>
+      <label className={styles.popupPath}>{ko ? "폴더 내 경로" : "Path inside folder"}<input autoFocus value={newPath} placeholder="skills/my-skill/SKILL.md" onChange={(event) => setNewPath(event.target.value)} /></label>
+      <PopupSteps steps={[{label: ko ? "초안" : "Draft", icon:<IconFileText size={18} />,active:true},{label: ko ? "변경 검토" : "Review diff",icon:<IconLayers size={18} />},{label: ko ? "승인·저장" : "Approve & save",icon:<IconCheck size={18} />}]} />
+      <p className={styles.popupNote}><IconShield size={15} />{ko ? "승인 전 실제 파일은 바뀌지 않습니다." : "Actual files change only after approval."}</p>
+    </PopupFrame>}
+    {renamePathDialog && <PopupFrame title={ko ? "이름 변경 검토" : "Review rename"} icon={<IconFileText size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={() => setRenamePathDialog(false)} busy={Boolean(busy)} footer={<><PopupAction disabled={Boolean(busy)} onClick={() => setRenamePathDialog(false)}>{ko ? "취소" : "Cancel"}</PopupAction><PopupAction primary icon={busy ? <span className={styles.loading} /> : <IconLayers size={16} />} disabled={Boolean(busy) || !validNewPath || newPath.trim() === path || !snapshot?.writable || snapshot.activation === "recovery_required"} onClick={() => void run("prepare-rename", async () => { if (!validNewPath || !await mayLeaveFile()) return; const proposal = await api().prepareFileOperation({ agentId: agent.id, operation: "rename", path, newPath: newPath.trim() }); setRenamePathDialog(false); setContent(fileRead?.content ?? ""); await refresh(); await openReview(proposal.id); })}>{ko ? "변경 검토" : "Review change"}</PopupAction></>}>
+      <PopupFacts items={[{label:ko ? "현재 파일" : "Current file",value:<code>{path}</code>,icon:<IconFileText size={17} />}]}/>
+      <label className={styles.popupPath}>{ko ? "새 경로" : "New path"}<input autoFocus value={newPath} placeholder="skills/my-skill/SKILL.md" onChange={(event) => setNewPath(event.target.value)} /></label>
+      <p className={styles.popupNote}><IconShield size={15} />{ko ? "변경안을 먼저 검토합니다. 승인 후 이름이 바뀝니다." : "Review the proposal first. Rename happens after approval."}</p>
+    </PopupFrame>}
     {memoryImportPreview && <AgentMemoryImportDialog preview={memoryImportPreview} agentId={agent.id} locale={locale} onClose={() => setMemoryImportPreview(null)} onImported={async (count) => { await refresh(); setNotice(ko ? `메모리 ${count}건을 가져왔습니다.` : `Imported ${count} memories.`); }} />}
   </section>;
 }

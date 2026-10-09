@@ -5,6 +5,7 @@ import type { AutomationStrategyProposalView } from "@shared/automation-strategy
 import { useT } from "@/lib/i18n";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
+import { IconCircleDollar, IconLayers } from "@/components/Icon";
 import { ComposerDecisionPortal } from "@/components/ComposerDecisionPortal";
 import { requiresAutomationStrategyReview } from "./automation-strategy-review-surface";
 import styles from "./AutomationStrategyApprovalSheet.module.css";
@@ -271,7 +272,7 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
         <section className={styles.sheet}>
           <div className={styles.head}>
             <div className={styles.headCopy}>
-              <span className={styles.kicker}>{ko ? "결제 승인 필요" : "Payment approval needed"}</span>
+              <span className={styles.kicker}><IconCircleDollar size={14} />{ko ? "결제 승인 필요" : "Payment approval needed"}</span>
               <h2>{ko ? "결제가 필요한 전략 변경" : "A strategy change needs payment approval"}</h2>
               <p>{candidate.automationName || (ko ? "자동화" : "Automation")}{hasNext && ` · ${ko ? `대기 ${pendingRows.length}건` : `${pendingRows.length} waiting`}`}</p>
             </div>
@@ -280,13 +281,13 @@ export function AutomationStrategyApprovalSheet({ chatId = null }: { chatId?: st
 
           <div className={styles.summary}>
             <strong>{candidate.summary}</strong>
-            {candidate.rationale !== candidate.summary && <p>{candidate.rationale}</p>}
+            {candidate.rationale !== candidate.summary && <details className={styles.rationale}><summary>{ko ? "제안 이유" : "Rationale"}</summary><p>{candidate.rationale}</p></details>}
             {candidate.reviewReason && <p className={styles.reason}>{candidate.reviewReason}</p>}
           </div>
 
           {candidate.changes.length > 0 && (
             <details className={styles.diff} open>
-              <summary>{ko ? "변경 내용" : "What changes"}</summary>
+              <summary><IconLayers size={14} />{ko ? "변경 내용" : "What changes"}<span>{candidate.changes.length}</span></summary>
               {candidate.changes.map((change, index) => <div key={`${change.label}:${index}`} className={styles.change}>
                 <strong>{change.label}</strong>
                 {change.before !== null && <><small>{ko ? "현재" : "Current"}</small><pre>{change.before}</pre></>}

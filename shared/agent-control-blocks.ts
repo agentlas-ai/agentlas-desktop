@@ -26,6 +26,8 @@
  * 빠진다 — telegram/connect.ts에 같은 사고가 이미 기록돼 있다.
  */
 
+import { mapIntellectUiProse } from "./intellect-ui";
+
 export const AGENT_CONTROL_HEADINGS = [
   "## Memory Events",
   "## Delegate",
@@ -66,6 +68,10 @@ export const AGENT_LINE_MARKERS = [
 const IDENTITY_BADGE = /(^|\s)(?:\*\*)?\[\s*(?:[A-Z][A-Za-z .'-]{0,31}|[\u3131-\u318e\uac00-\ud7a3]{1,16})\s*\](?:\*\*)?(?=\s|$)/gu;
 
 export function stripAgentIdentityBadges(value: string): string {
+  return mapIntellectUiProse(value, stripProseIdentityBadges);
+}
+
+function stripProseIdentityBadges(value: string): string {
   // Remove the badge and, when it sat between two blanks on a line, one of
   // them — and nothing else. The old `[ \t]{2,} → " "` pass ran over the whole
   // answer and dedented it: nested list items ("   - …") became paragraphs with
@@ -181,6 +187,10 @@ function pairedHit(
  * 그 조각까지 감춘다. 완성된 응답에는 적용하지 않는다 — 정상 본문을 자르면 안 된다.
  */
 export function stripAgentControlBlocks(value: string, options?: { streaming?: boolean }): string {
+  return mapIntellectUiProse(value, prose => stripProseControlBlocks(prose, options));
+}
+
+function stripProseControlBlocks(value: string, options?: { streaming?: boolean }): string {
   let visible = stripLineMarkers(value).replace(GOAL_COMPLETE_RE, "");
   for (const marker of BARE_MARKERS) visible = visible.split(marker).join("");
 
@@ -375,5 +385,5 @@ const ROUTING_BANNER_LINE = /^[ \t]*(?:\*\*)?(?:(?:사용|적용)\s*(?:에이전
 const ROUTING_BANNER_WITH_REASON = /^[ \t]*(?:\*\*)?(?:Skills|Agents)(?:\*\*)?[ \t]*:[^\n]*\b(?:Reason|이유)[ \t]*:[^\n]*(?:\n[ \t]*)*/gim;
 
 export function stripAgentRoutingBanners(value: string): string {
-  return value.replace(ROUTING_BANNER_LINE, "").replace(ROUTING_BANNER_WITH_REASON, "");
+  return mapIntellectUiProse(value, prose => prose.replace(ROUTING_BANNER_LINE, "").replace(ROUTING_BANNER_WITH_REASON, ""));
 }

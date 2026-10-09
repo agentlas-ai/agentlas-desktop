@@ -1,5 +1,5 @@
 import { toolObservationDigest } from "../automation-progress-guard";
-import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError, copyObservedRunnerEvidence } from "../runtime/observed-runner";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { withRuntimeCapabilityReceipt } from "../runtime/capability-receipt";
@@ -64,7 +64,7 @@ import {
   UNTRUSTED_RUNTIME_FAILURE_MESSAGE,
 } from "../runtime/untrusted-error";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
-import { runnerFailureFromError, SURFACE_INTENT_MARKER } from "../runtime/runner";
+import { runnerFailureFromError, RuntimeTurnUnsettledError, SURFACE_INTENT_MARKER } from "../runtime/runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { recordWorkerReport, tryRecordRunEvent } from "../store/run-events";
@@ -4610,6 +4610,13 @@ async function runBorrowedAgentTurn(
             },
           };
         } catch (error) {
+          if (error instanceof RuntimeTurnUnsettledError) {
+            const typed = new TaskForceRuntimeFailureError(
+              runnerFailureFromError(error, observedWorkerRuntime.kind), observedWorkerRuntime,
+            );
+            copyObservedRunnerEvidence(error, typed);
+            throw typed;
+          }
           const typedRuntimeFailure = error instanceof TaskForceRuntimeFailureError ? error : null;
           if (typedRuntimeFailure && runtimeFailureBlocksReplay(typedRuntimeFailure.failure)) throw error;
           return {
@@ -5087,6 +5094,13 @@ async function runBorrowedAgentTurn(
     };
   } catch (err) {
     if (p.signal?.aborted) throw err;
+    if (err instanceof RuntimeTurnUnsettledError) {
+      const typed = new TaskForceRuntimeFailureError(
+        runnerFailureFromError(err, observedDirectRuntime.kind), observedDirectRuntime,
+      );
+      copyObservedRunnerEvidence(err, typed);
+      throw typed;
+    }
     if ((err instanceof ObservedRunnerFailureError || err instanceof TaskForceRuntimeFailureError)
       && runtimeFailureBlocksReplay(err.failure)) {
       p.sink(tag({ kind: "tool-use", done: true,

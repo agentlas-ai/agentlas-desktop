@@ -11,6 +11,7 @@ import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import { tStatus } from "./status-i18n";
 import { resolveEffectiveContextWindow } from "../../shared/models";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
+import { ownerControlHistoryImages } from "./owner-control-pump";
 
 /** 기본 로컬 호스트. env OLLAMA_HOST로 재정의 가능(원격 Ollama도 지원). */
 export function ollamaHost(): string {
@@ -93,8 +94,14 @@ export const runOllama: Runner = async (
     ),
   }];
   for (const m of recent) {
-    if (m.role === "user" || m.role === "assistant") {
-      messages.push({ role: m.role, content: m.text });
+    if (m.role === "user") {
+      const images = ownerControlHistoryImages(m);
+      messages.push({ role: m.role, content: images.length ? [
+        ...images.map(image => ({ type: "image_url" as const, image_url: { url: `data:${image.mediaType};base64,${image.data}` } })),
+        { type: "text" as const, text: m.text },
+      ] : m.text });
+    } else if (m.role === "assistant") {
+      messages.push({ role: "assistant", content: m.text });
     }
   }
 

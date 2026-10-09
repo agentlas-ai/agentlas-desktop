@@ -247,6 +247,8 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     let buffer = "";
     let text = "";
     let stderr = "";
+    let terminalCompleted = false;
+    let terminalError = false;
     let settled = false;
     const finishReject = (error: Error) => {
       if (settled) return;
@@ -257,6 +259,13 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
     const consume = (line: string) => {
       try {
         const event = JSON.parse(line);
+        if (event?.type === "result") {
+          terminalCompleted = !terminalError && event.subtype === "success" && event.is_error === false
+            && typeof event.result === "string" && Boolean(event.result.trim());
+        } else if (event?.type === "error") {
+          terminalError = true;
+          terminalCompleted = false;
+        }
         const chunk = eventText(event);
         if (!chunk) return;
         if (typeof (event as Record<string, unknown>).delta === "string") text += chunk;
@@ -282,7 +291,8 @@ export const runCursor: Runner = async (req: RunnerRequest, events: RunnerEvents
       if (buffer.trim()) consume(buffer);
       if (req.signal?.aborted) return reject(abortReasonError(req));
       if (code !== 0) return reject(new Error(`Cursor Agent CLI exit ${code}${stderr ? `\n${stderr}` : ""}`));
-      resolve({ text: text.trim() || stderr.trim() || "(Cursor Agent returned no text)" });
+      resolve({ text: text.trim() || stderr.trim() || "(Cursor Agent returned no text)",
+        ownerControlTerminal: terminalCompleted ? "completed" : "uncertain" });
     });
   });
 };

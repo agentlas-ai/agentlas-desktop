@@ -9,6 +9,7 @@ import {
   type FormEvent,
 } from "react";
 import { ipc } from "@/lib/ipc";
+import { confirmPopup } from "@/lib/popup";
 import { requestOneOperationalRecovery } from "@/lib/one-operational-recovery";
 import { tFor, type Locale } from "@/lib/i18n";
 import type {
@@ -32,7 +33,7 @@ import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type { OneDurableMemoryEntryUi } from "@shared/types";
 import type { OneMemoryMapSnapshot } from "@shared/one-memory-map";
 import { OneMemoryMap, ONE_MEMORY_KIND_COLORS } from "./OneMemoryMap";
-import { IconAlertTriangle, IconFileText, IconLayers, IconRoute, IconSearch, IconSparkles, IconTarget, IconTrash, IconUser } from "@/components/Icon";
+import { IconBrain, IconAlertTriangle, IconFileText, IconLayers, IconRoute, IconSearch, IconSparkles, IconTarget, IconTrash, IconUser } from "@/components/Icon";
 import styles from "./OneMemorySheet.module.css";
 
 interface OneMemorySheetProps {
@@ -405,7 +406,7 @@ export function OneMemorySheet({
       requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
       return;
     }
-    if (!window.confirm(tFor(locale, "one.mem.confirm.delete_memory"))) return;
+    if (!await confirmPopup(tFor(locale, "one.mem.confirm.delete_memory"), { locale, title: locale === "ko" ? "기억 삭제" : "Delete memory", confirmLabel: locale === "ko" ? "삭제" : "Delete", tone: "danger" })) return;
     await mutate(memory.id, () => api.oneMemory.deleteAsset({
       expectedStoreVersion: state.version,
       memoryId: memory.id,
@@ -421,7 +422,7 @@ export function OneMemorySheet({
       requestOneOperationalRecovery("one-memory", new Error("Desktop bridge unavailable"));
       return;
     }
-    if (!window.confirm(tFor(locale, "one.mem.confirm.delete_record"))) return;
+    if (!await confirmPopup(tFor(locale, "one.mem.confirm.delete_record"), { locale, title: locale === "ko" ? "기록 삭제" : "Delete record", confirmLabel: locale === "ko" ? "삭제" : "Delete", tone: "danger" })) return;
     await mutate(candidate.id, () => api.oneMemory.deleteCandidate({
       expectedStoreVersion: state.version,
       candidateId: candidate.id,
@@ -441,6 +442,7 @@ export function OneMemorySheet({
       closeOnEscape={!busyId}
       closeDisabled={Boolean(busyId)}
       title={tFor(locale, "one.mem.header.title")}
+      icon={<IconBrain size={20} />}
       titleId="one-memory-title"
     >
         {!state ? (

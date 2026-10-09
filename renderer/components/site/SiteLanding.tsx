@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import { ipc } from "@/lib/ipc";
+import { IconUsers } from "@/components/Icon";
 import { ElapsedClock } from "@/components/ElapsedClock";
 import { visibleAgents } from "@/lib/agent-visibility";
 import type { InstalledAgent, InstalledFirm } from "@shared/types";
@@ -825,7 +826,7 @@ export function SiteLanding({
         }}>
           <section className={styles.dialog} role="dialog" aria-modal="true" aria-labelledby="agent-picker-title">
             <div className={styles.dialogHeader}>
-              <div><span className={styles.dialogEyebrow}>AGENT APP</span><h2 id="agent-picker-title">{ko ? "앱으로 만들 에이전트 선택" : "Choose an agent for this app"}</h2><p>{ko ? "선택한 에이전트의 입력과 출력에 맞춰 Astryx 웹앱을 만듭니다." : "We will shape an Astryx web app around this agent's inputs and outputs."}</p></div>
+              <span className={styles.pickerMark} aria-hidden="true"><IconUsers size={22}/></span><div><span className={styles.dialogEyebrow}>AGENT APP</span><h2 id="agent-picker-title">{ko ? "에이전트 선택" : "Choose an agent"}</h2><details className={styles.pickerDetails}><summary>{ko ? "Agent App 안내" : "Agent App details"}</summary><p>{ko ? "선택한 에이전트의 입력과 출력에 맞춰 Astryx 웹앱을 만듭니다." : "We will shape an Astryx web app around this agent's inputs and outputs."}</p></details></div>
               <button type="button" className={styles.dialogClose} aria-label={ko ? "닫기" : "Close"} onClick={() => setPickerOpen(false)}>×</button>
             </div>
             <div className={styles.pickerTabs} role="tablist">

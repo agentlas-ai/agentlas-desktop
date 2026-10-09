@@ -1,3 +1,4 @@
+import { NATIVE_INVOCATION_PRODUCTION_RESOURCES, nativeInvocationResourcesFromArgv, parseNativeInvocationResources } from "./native-invocation-config";
 // `agentlasd` is the persistent local host. Desktop is an attachable client;
 // closing the GUI does not end daemon-owned work. Updates and explicit service
 // stop use the fenced control socket and drain owned work before process exit.
@@ -31,6 +32,7 @@ import {
 } from "../runtime/agent-residency";
 import { sweepOrphanedRunChildren } from "../runtime/spawn-registry";
 import { drainRunChildrenForHostShutdown, liveRunChildCount } from "../runtime/exec";
+import { drainInvocationService } from "../runtime/invocation-lifecycle";
 import { MainInvocationLifetime, admitMainAutomation, captureMainRootContinuation } from "../runtime/scheduled-root-context";
 import {
   createIdleExitClock,
@@ -43,6 +45,10 @@ import { startControlSocket, type ControlSocketHandle, type ControlSocketPeer } 
 import { WarmProcessPool } from "./process-pool";
 import { DaemonDiagnosticLog, storeIdentityDigest, validAppInstanceId } from "./diagnostic-log";
 import { captureDaemonSocketFence, canonicalDaemonPath, resolveDaemonServiceIdentity } from "./service-identity";
+import { createInvocationOwnerBroker } from "./invocation-owner-broker";
+import { validateMobileCurrentTurnParams, type MobileBridgeCurrentTurnMethod } from "../../shared/mobile-bridge";
+import type { InvocationRunOwner } from "../store/invocation-owner-core";
+import type { NativeInvocationRuntimeOptions } from "./native-invocation-runtime";
 
 /**
  * 데몬이 쓸 사용자 데이터 경로. **추측하지 않는다** — 잘못 고르면 사용자의 실제 DB 가
@@ -112,18 +118,52 @@ function loginContinuityEnabled(): boolean {
 
 let backgroundTasks: BackgroundTaskRegistry | null = null;
 const backgroundTaskSubscribers = new Set<ControlSocketPeer>();
+let invocationOwners: typeof import("../store/invocation-run-owners")["invocationRunOwners"] | null = null;
+let invocationBroker: ReturnType<typeof createInvocationOwnerBroker> | null = null;
+let daemonInvocationService: typeof import("../invocation/service")["invocationService"] | null = null;
+let daemonNativeInvocation: Awaited<ReturnType<typeof import("./native-invocation-runtime")["createNativeInvocationRuntime"]>> | null = null;
+let nativeInvocationUnavailableCode: string | null = "native_invocation_not_configured";
+let daemonInvocationControl: typeof import("../runtime/invocation-owner-control") | null = null;
+
+async function getDaemonInvocationControl() {
+  if (!daemonInvocationControl) {
+    const control = await import("../runtime/invocation-owner-control");
+    control.configureInvocationOwnerTransport((owner, method, params) => {
+      if (!invocationBroker) throw new Error("invocation_owner_unavailable");
+      return invocationBroker.dispatch(owner, method, params);
+    });
+    daemonInvocationControl = control;
+    daemonInvocationService = (await import("../invocation/service")).invocationService;
+  }
+  return daemonInvocationControl;
+}
+
+function invocationOwnerObservation(): { count: number; known: boolean } {
+  try {
+    return { count: invocationOwners?.listActiveOwners().filter(owner => owner.ownerId === bootId
+      || invocationBroker?.isRegisteredOwner(owner.ownerId)).length ?? 0, known: true };
+  } catch {
+    // A storage failure is not proof of idleness. Connected owners may still
+    // be waiting on API/tools with no child process in this daemon.
+    return { count: Math.max(daemonInvocationService?.activeRunIds().length ?? 0,
+      invocationBroker?.registeredOwnerCount() ?? 0), known: false };
+  }
+}
 
 function residencyInput(): DaemonResidencyInput {
   const science = scienceService?.status() ?? null;
   const local = localModelService?.status() ?? null;
   return {
     desktopAttached: desktopParentPid !== null,
+    supervisorDomain: daemonNativeInvocation?.supervisorActive ?? false,
     loginContinuity: loginContinuityEnabled(),
     graphRuns: graphRunsInFlight + graphLoginWaits.size,
     runChildren: liveRunChildCount(),
     science: science ? { state: science.state, settled: science.settled, activeToolRequests: science.activeToolRequests } : null,
     localModel: local ? { state: local.state, pendingOperations: local.pendingOperations, settled: local.settled } : null,
     backgroundTasks: backgroundTasks?.running() ?? 0,
+    invocationRuns: Math.max(invocationOwnerObservation().count, daemonInvocationService?.activeRunIds().length ?? 0,
+      daemonNativeInvocation?.pendingCount ?? 0),
   };
 }
 const bootId = randomUUID();
@@ -278,6 +318,7 @@ function startDaemonMobileBridge(): Promise<void> {
   mobileBridgeStartPromise = (async () => {
     const runtime = await import("../mobile-bridge/runtime");
     mobileBridgeRuntime = runtime;
+    await getDaemonInvocationControl();
     const { mobileBridgeRuntimeStatus, startAgentlasMobileBridge } = runtime;
     // The owner can change while the dynamic import is resolving. Never race a
     // late daemon start against a Desktop that already received the lease.
@@ -327,6 +368,7 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
     // In Electron's Node mode importing those services may fail before a
     // listener exists; that must not hide an otherwise healthy daemon.
     const mobileBridge = mobileBridgeRuntime?.mobileBridgeRuntimeStatus();
+    const ownerObservation = invocationOwnerObservation();
     return {
       ok: true,
       version: daemonVersion(),
@@ -352,7 +394,13 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
       controlSocketReady: controlSocket !== null,
       // The daemon's liveness is not evidence that Main-owned chat/Goal
       // invocations have advanced. Consumers must query Main's run ledger.
-      invocationProgressOwner: "desktop-main",
+      invocationProgressOwner: "leased-harness-owner",
+      invocationControlBroker: { protocolVersion: 1, ready: invocationBroker !== null,
+        activeOwners: ownerObservation.known ? ownerObservation.count : null },
+      nativeInvocation: daemonNativeInvocation ? { ...daemonNativeInvocation.status(), address: daemonNativeInvocation.address,
+        pendingCount: daemonNativeInvocation.pendingCount, unavailableCode: null } : { version: "agentlas.native-attach.v1",
+        bootId, serviceIdentity, address: null, ready: false, capabilities: { start: false, stop: false, events: false, approvals: false, recovery: false },
+        pendingCount: 0, unavailableCode: nativeInvocationUnavailableCode },
       // ★어느 DB 를 열었는지 말한다. 터미널은 `AGENTLAS_STORE_PATH` 로 사본을 열 수 있는데
       //   그 값은 이 프로세스까지 오지 않는다 — 서로 다른 DB 를 보면서 일을 주고받으면
       //   한쪽은 사본에, 다른 쪽은 라이브에 쓰는 상태가 조용히 성립한다. 넘기기 전에
@@ -371,6 +419,42 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
         endpoint: mobileBridge?.endpoint ?? null,
       },
     };
+  }
+  if (method === "invoke.ownerRegister" || method === "invoke.ownerComplete"
+    || ["invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel"].includes(method)) {
+    assertServiceControl(params);
+    if (!invocationBroker || !invocationOwners) throw new Error("invocation_owner_unavailable");
+    const input = params as Record<string, unknown>;
+    if (method === "invoke.ownerRegister") {
+      if (Object.keys(input).some(key => !["serviceIdentity", "bootId", "ownerId", "ownerKind"].includes(key))) throw new Error("invocation_owner_control_invalid");
+      return invocationBroker.register(peer, input as unknown as { ownerId: string; ownerKind: "desktop" | "terminal" });
+    }
+    if (method === "invoke.ownerComplete") {
+      if (Object.keys(input).some(key => !["serviceIdentity", "bootId", "completion"].includes(key))) throw new Error("invocation_owner_control_invalid");
+      if (!input.completion || typeof input.completion !== "object" || Array.isArray(input.completion)
+        || Object.keys(input.completion).some(key => !["requestId", "ownerId", "leaseId", "result", "error"].includes(key))) throw new Error("invocation_owner_control_invalid");
+      return { accepted: invocationBroker.complete(peer, input.completion as import("./invocation-owner-broker").InvocationOwnerCompletion) };
+    }
+    if (Object.keys(input).some(key => !["serviceIdentity", "bootId", "owner", "control"].includes(key))) throw new Error("invocation_owner_control_invalid");
+    const expected = input.owner as Partial<InvocationRunOwner> | undefined;
+    const control = input.control as Record<string, unknown> | undefined;
+    if (!expected || !control || Array.isArray(expected) || Array.isArray(control)
+      || Object.keys(expected).some(key => !["chatId", "runId", "ownerId", "ownerKind", "leaseId"].includes(key))
+      || typeof control.chatId !== "string" || expected.chatId !== control.chatId || typeof expected.runId !== "string") throw new Error("invocation_owner_control_invalid");
+    const owner = invocationOwners.getRunOwner(control.chatId, expected.runId);
+    if (!owner || owner.ownerId !== expected.ownerId || owner.ownerKind !== expected.ownerKind
+      || owner.leaseId !== expected.leaseId || (owner.state !== "active" && owner.state !== "settling")) throw new Error("invocation_owner_unavailable");
+    if (method === "invoke.cancel") {
+      if (Object.keys(control).some(key => !["chatId", "runId"].includes(key)) || control.runId !== owner.runId) throw new Error("invocation_owner_control_invalid");
+      return owner.ownerId === bootId ? (await import("../invocation/service")).invocationService.cancel(owner.runId)
+        : invocationBroker.dispatch(owner, "invoke.cancel", control);
+    }
+    if (validateMobileCurrentTurnParams(method as MobileBridgeCurrentTurnMethod, control)) throw new Error("invocation_owner_control_invalid");
+    if (owner.ownerId !== bootId) return invocationBroker.dispatch(owner, method as import("./invocation-owner-broker").InvocationOwnerBrokerMethod, control);
+    const local = await getDaemonInvocationControl();
+    if (method === "invoke.currentTurn") return local.invocationCurrentTurnControl.currentTurn(owner.chatId);
+    if (method === "invoke.steerCurrentTurn") return local.invocationCurrentTurnControl.steerCurrentTurn(control as unknown as Parameters<typeof local.invocationCurrentTurnControl.steerCurrentTurn>[0]);
+    return local.invocationCurrentTurnControl.currentTurnSteerReceipt(owner.chatId, control.intentId as string);
   }
   if (method === "daemon.attach") {
     assertServiceControl(params);
@@ -664,6 +748,7 @@ let shutdownPromise: Promise<void> | null = null;
 function performShutdown(reason: string): Promise<void> {
   if (shutdownPromise) return shutdownPromise;
   closing = true;
+  daemonNativeInvocation?.closeAdmission();
   for (const controller of graphLoginWaits.values()) controller.abort(new Error("app_closed"));
   graphLoginWaits.clear();
   console.log(`[agentlasd] ${reason} — running shutdown hooks`);
@@ -688,6 +773,21 @@ function performShutdown(reason: string): Promise<void> {
   shutdownPromise = (async () => {
     let timeout: NodeJS.Timeout | null = null;
     localModelRpc?.closeAdmission();
+    // Mobile may have loaded the singleton without a control request. Close
+    // that actual service too, and retain its full lifetime even for API work
+    // that never spawned an OS child. Attach a rejection handler immediately.
+    const invocationsDrained = (async () => {
+      daemonInvocationService ??= (await import("../invocation/service")).invocationService;
+      await drainInvocationService(daemonInvocationService);
+      await daemonNativeInvocation?.settleDispatched();
+      return true;
+    })().catch(error => {
+      console.error("[agentlasd] invocation shutdown unsettled:", error);
+      // Failure is not a completed drain. The existing shutdown deadline
+      // bounds this unknown lifetime without releasing its durable run lease.
+      return new Promise<boolean>(() => {});
+    });
+    invocationBroker?.close();
     // Science closes while it still holds the fence, so it can persist final
     // receipts. A non-settling service must not make explicit stop permanent.
     if (scienceService) {
@@ -716,18 +816,18 @@ function performShutdown(reason: string): Promise<void> {
     try { runHostShutdownHooks(); }
     catch (error) { console.error("[agentlasd] shutdown hooks failed:", error); }
     const socket = controlSocket;
-    controlSocket = null;
-    socketFence = null;
-    processPool.dispose();
     try {
       const drained = await Promise.race([
         Promise.all([
+          invocationsDrained,
           childrenDrained.then((result) => {
             if (result.timedOut) console.warn("[agentlasd] child shutdown drain reached deadline", result);
           }),
-          socket?.close(),
           mobileBridgeStartPromise?.catch(() => {}),
-        ]).then(async () => { await mobileBridgeRuntime?.stopAgentlasMobileBridge(); return true; }),
+        ]).then(async ([invocationsSettled]) => {
+          await mobileBridgeRuntime?.stopAgentlasMobileBridge();
+          return invocationsSettled;
+        }),
         new Promise<false>((resolve) => { timeout = setTimeout(() => resolve(false), 8_000); }),
       ]);
       if (!drained) console.warn("[agentlasd] shutdown drain reached deadline");
@@ -737,6 +837,18 @@ function performShutdown(reason: string): Promise<void> {
       await childrenDrained;
     } finally {
       if (timeout) clearTimeout(timeout);
+      // Keep the socket/store fence while owned settlement is still running.
+      // A deadline is an unsettled exit, never permission to release its lease.
+      // Native callbacks stay available throughout actual invocation drain.
+      // Only full service shutdown closes this signed transport.
+      try { await daemonNativeInvocation?.close(); }
+      catch (error) { console.error("[agentlasd] native invocation socket shutdown failed:", error); }
+      daemonNativeInvocation = null;
+      try { await socket?.close(); }
+      catch (error) { console.error("[agentlasd] control socket shutdown failed:", error); }
+      controlSocket = null;
+      socketFence = null;
+      processPool.dispose();
       process.exit(0);
     }
   })();
@@ -750,7 +862,14 @@ function installSignalHandlers(): void {
   }
 }
 
-export async function startDaemon(): Promise<void> {
+export interface DaemonStartupOptions {
+  /** Caller-owned explicit transfer/custody resource admission; no renderer JSON.
+   * General native GUI remains unavailable until all capability dependencies close. */
+  nativeInvocationResources?: NativeInvocationRuntimeOptions["resources"];
+  nativeInvocation?: false;
+}
+
+export async function startDaemon(options: DaemonStartupOptions = {}): Promise<void> {
   const requestedDir = resolveDaemonUserDataDir();
   fs.mkdirSync(requestedDir, { recursive: true, mode: 0o700 });
   const dir = canonicalDaemonPath(requestedDir);
@@ -809,6 +928,10 @@ export async function startDaemon(): Promise<void> {
   // 돌리면 앱이 자기 DB 를 못 알아본다.
   const { initStore } = await import("../store/db");
   initStore({ migrationRole: "follower" });
+  const runOwners = await import("../store/invocation-run-owners");
+  runOwners.configureInvocationProcessOwner("daemon", bootId);
+  invocationOwners = runOwners.invocationRunOwners;
+  invocationBroker = createInvocationOwnerBroker({ owners: invocationOwners });
   if (process.env.AGENTLAS_EXPECTED_STORE_IDENTITY) {
     const { openedStorePath } = await import("../store/db");
     const actualStoreIdentity = storeIdentityDigest(openedStorePath(), appInstanceId);
@@ -816,6 +939,11 @@ export async function startDaemon(): Promise<void> {
       throw new Error("agentlasd_store_identity_mismatch");
     }
   }
+  // Load the shared policy before opening the control socket; importing it
+  // does not retire any approval owner. Installation follows the socket fence.
+  const [{ installHostToolPermissionPolicy }, { getAuthenticatedActorIds }] = await Promise.all([
+    import("../runtime/host-tool-permission-policy"), import("../auth"),
+  ]);
   console.log("[agentlasd] store ready");
   recordServicePhase("store_ready");
   try {
@@ -856,6 +984,10 @@ export async function startDaemon(): Promise<void> {
     const socket = await startControlSocket(dir, { handle: handleControlMethod });
     controlSocket = socket;
     socketFence = captureDaemonSocketFence(socket.address);
+    // A duplicate helper must not retire the active daemon's approvals before
+    // it wins ownership. No await separates this fence from policy installation.
+    // Science's existing session handoff updates this host's authenticated cache.
+    installHostToolPermissionPolicy({ hostKind: "daemon", getAuthenticatedActorIds });
     recordServicePhase("control_socket_ready");
     console.log(`[agentlasd] control socket: ${socket.address}`);
   } catch (error) {
@@ -864,6 +996,52 @@ export async function startDaemon(): Promise<void> {
     console.error("[agentlasd] control socket failed to start:", error);
     await performShutdown("control socket unavailable");
     throw error;
+  }
+
+  // Optional general invocation host beside Science. Protected credentials and
+  // service imports follow the exact winning socket fence/shared policy.
+  // No default producer size cap is invented here: the application must supply
+  // its explicit resource admission before this endpoint is configured.
+  if (options.nativeInvocation !== false) {
+    try {
+      assertServiceOwner();
+      const resources = parseNativeInvocationResources(options.nativeInvocationResources
+        ?? nativeInvocationResourcesFromArgv(process.argv) ?? NATIVE_INVOCATION_PRODUCTION_RESOURCES);
+      const [credentials, channel, runtime, auth, detect] = await Promise.all([
+        import("./native-auth-credentials"), import("./native-auth-channel"), import("./native-invocation-runtime"),
+        import("../auth"), import("../runtime/detect"),
+      ]);
+      const binding = credentials.captureNativeAuthBinding();
+      const flag = process.argv.indexOf("--native-enrollment-fd");
+      if (flag >= 0 && (process.argv[flag + 1] !== "3" || process.argv.lastIndexOf("--native-enrollment-fd") !== flag)) {
+        throw Object.assign(new Error("native_auth_enrollment_fd_invalid"), { code: "native_auth_enrollment_fd_invalid" });
+      }
+      const credential = flag >= 0
+        ? await channel.readNativeEnrollment(fs.createReadStream("", { fd: 3, autoClose: true }), binding)
+        : await credentials.loadNativeDaemonCredential(binding);
+      assertServiceOwner();
+      await getDaemonInvocationControl();
+      if (closing) throw new Error("daemon_shutting_down");
+      daemonNativeInvocation = await runtime.createNativeInvocationRuntime({ address: channel.nativeAuthSocketPath(dir),
+        binding, credential, bootId, service: daemonInvocationService!, assertOwner: assertServiceOwner,
+        resources, adoptSession: auth.adoptHostSessionHandoff, clearDetectCache: detect.clearDetectCache,
+        science:{commandObserved:async(command,request)=>{
+          assertServiceOwner();
+          if(request?.signal?.aborted)throw new Error("science_daemon_wait_aborted");
+          // Domain discovery never opens or starts an unrequested Science host.
+          if(!scienceService || scienceService.status().state!=="ready")throw new Error("science_daemon_not_ready");
+          if(request?.observationDeadlineMs!==undefined && performance.now()>=request.observationDeadlineMs)throw new Error("science_observation_deadline");
+          return scienceService.dispatch(command);
+        }} });
+      nativeInvocationUnavailableCode = null;
+      recordServicePhase("native_invocation_socket_ready");
+    } catch (error) {
+      nativeInvocationUnavailableCode = typeof (error as { code?: unknown })?.code === "string"
+        ? (error as { code: string }).code : "native_invocation_bootstrap_failed";
+      // Preserve existing Science/control service behavior while exposing exact
+      // native readiness failure. No native request has been issued/replayed.
+      console.warn("[agentlasd] native invocation unavailable:", nativeInvocationUnavailableCode);
+    }
   }
 
   try {
@@ -955,7 +1133,7 @@ export async function startDaemon(): Promise<void> {
 
 // 직접 실행됐을 때만 시작한다(테스트는 위 함수들만 부른다).
 if (require.main === module) {
-  startDaemon().catch((error) => {
+  startDaemon({ nativeInvocationResources: nativeInvocationResourcesFromArgv(process.argv) ?? NATIVE_INVOCATION_PRODUCTION_RESOURCES }).catch((error) => {
     console.error("[agentlasd] failed to start:", error);
     process.exit(1);
   });

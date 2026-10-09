@@ -11,7 +11,7 @@
 .editRow { position:absolute; top:calc(100% + 4px); right:6px; width:min(360px,calc(100vw - 24px)); z-index:10; display: flex; align-items: flex-end; flex-wrap: wrap; gap: 6px; padding: 7px 9px; border-top: 1px solid #e5e7eb; }
 .editRow label { min-width: 180px; flex: 1 1 240px; display: grid; gap: 3px; }
 .editRow label > span { color: #5f6874; }
-.editRow input { min-width: 0; height: 28px; padding: 0 8px; border: 1px solid #cfd5dc; border-radius: 6px; background: #fff; color: #252a31; font: inherit; }
+.editRow input { min-width: 0; height: 28px; padding: 0 8px; border: 1px solid #cfd5dc; border-radius: 6px; background: var(--popup-control-bg); color: var(--ink); font: inherit; }
 .editRow small { flex: 1 0 100%; color: #6b7280; }
 .conflict { position:absolute; top:calc(100% + 4px); right:6px; z-index:10; }
 .conflict p { margin:0; padding:8px 10px; overflow-wrap:anywhere; }

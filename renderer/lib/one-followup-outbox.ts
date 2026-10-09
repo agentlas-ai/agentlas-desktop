@@ -9,6 +9,8 @@ export type OneFollowupIntent = {
   request: McpInvocationRequest;
   submissionId?: string;
   waitingParentRunId?: string;
+  /** Once chosen, the harness run is fixed; a retry cannot become a new queued run. */
+  currentTurnRunId?: string;
   /** A new explicit roster needs fresh Main preflight authority, never inherited grants. */
   requiresReprepare?: boolean;
   /** Renderer roster choices for restoring a known-unsent draft, including One-only []. */
@@ -18,6 +20,19 @@ export type OneFollowupIntent = {
 };
 const PREFIX = "agentlas.one-followup-outbox.v1:";
 type StoragePort = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
+/** A missing IPC reply must release the delivery coordinator. The original
+ * request can still be accepted by Main, so callers retry its existing ID. */
+export async function waitForOneFollowupDelivery<T>(pending: Promise<T>, timeoutMs = 5_000): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([pending, new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("one_followup_delivery_timeout")), timeoutMs);
+    })]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
 
 export function readOneFollowupOutbox(storage: StoragePort, chatId: string): OneFollowupIntent[] {
   const raw = storage.getItem(`${PREFIX}${chatId}`);

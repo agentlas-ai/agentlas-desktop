@@ -289,7 +289,7 @@ export function RuntimeConnectPopup({
         {running && snap?.step === "installing" && (
           <>
             <p className={styles.note}>{copy.installNote}</p>
-            <pre className={styles.log} aria-label="install log">{logTail.slice(-6).join("\n") || "…"}</pre>
+            <details className={styles.evidence}><summary>{copy.showLog}</summary><pre className={styles.log} aria-label="install log">{logTail.slice(-6).join("\n") || "…"}</pre></details>
           </>
         )}
         {running && snap?.step === "login" && (

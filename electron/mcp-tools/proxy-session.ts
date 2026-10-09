@@ -100,6 +100,20 @@ const BROWSER_LADDER_WAIT_MS = 55_000;
 function browserCallFailed(frame: Frame): boolean {
   return Boolean(frame && (frame.error || frame.result?.isError === true));
 }
+/** Input and approval refusals remain failed calls, but cannot be repaired by changing browser capability. */
+function browserFailureNeedsRecovery(frame: Frame, toolName: string): boolean {
+  if (!browserCallFailed(frame)) return false;
+  const result = frame.result;
+  if (!frame.error && result?.isError === true) {
+    if (["approval_required", "approval_declined", "approval_expired", "cancelled"].includes(result.code)) return false;
+    if (result._meta?.agentlasToolDispatch === "not-dispatched") {
+      const code = result._meta.agentlasFailureCode;
+      if (toolName === "browser_evaluate" && code === "browser_evaluate_function_required") return false;
+      if (toolName === "browser_find" && ["browser_find_query_required", "browser_find_query_ambiguous", "browser_find_snapshot_ref_as_text"].includes(code)) return false;
+    }
+  }
+  return true;
+}
 function browserFailureText(frame: Frame): string {
   const parts: string[] = [];
   if (typeof frame.error?.message === "string") parts.push(frame.error.message);
@@ -562,7 +576,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     // bounded ladder, which may bring the surface back (then a read-only call is replayed once) or annotate the
     // error with a machine block and one line for the agent. Never more than one ladder per call.
     const browserCall = pending.browserCall;
-    if (browserCall && !browserCall.laddered && browserCallFailed(frame)) {
+    if (browserCall && !browserCall.laddered && browserFailureNeedsRecovery(frame, String(browserCall.frame.params?.name ?? ""))) {
       browserCall.laddered = true;
       void browserLadderAnswer(frame, browserCall).then((answer) => {
         if (closed || native.get(wireId) !== pending) return;

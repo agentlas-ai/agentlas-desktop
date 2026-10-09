@@ -1,4 +1,6 @@
 "use client";
+
+import { confirmPopup } from "@/lib/popup";
 import { subscribeAppUiPreference } from "@/lib/app-ui-preferences";
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import Link from "next/link";
@@ -256,14 +258,15 @@ export default function DocumentStudioPage() {
     setStatusMsg({ kind: "error", text });
   }
 
-  function startNewDocument() {
+  async function startNewDocument() {
     const hasDraft = Boolean(title || documentText || figureSrc || figureCaption);
     if (
       hasDraft &&
-      !window.confirm(
+      !await confirmPopup(
         locale === "en"
           ? "Start a new document? The current title, body, figure, and caption will be cleared."
           : "새 문서를 시작할까요? 현재 제목, 본문, 도표, 캡션이 지워집니다.",
+        { locale, tone: "warning", confirmLabel: locale === "ko" ? "새 문서" : "New document" },
       )
     ) {
       return;
@@ -555,6 +558,7 @@ export default function DocumentStudioPage() {
           </button>
           {aiOpen && (
             <div style={{ ...citationMenu, width: 320, display: "grid", gap: 10 }} role="dialog" aria-label={locale === "en" ? "AI writing controls" : "AI 작성 도구"}>
+              <strong style={{ display: "flex", alignItems: "center", gap: 8 }}><IconSparkles size={17} />{locale === "en" ? "Write with AI" : "AI 작성"}</strong>
               <label style={formField}>
                 <span style={formLabel}>{locale === "en" ? "Document goal" : "문서 목표"}</span>
                 <input value={goal} onChange={(event) => setGoal(event.target.value)} style={formInput} />
@@ -603,7 +607,7 @@ export default function DocumentStudioPage() {
             <IconChevronDown size={13} />
           </button>
           {citationOpen && (
-            <div style={citationMenu}>
+            <div style={citationMenu} role="menu" aria-label={locale === "en" ? "Citation style" : "인용 스타일"}>
               <div style={citationList}>
                 {CITATION_STYLES.map((style) => (
                   <button key={style} type="button" onClick={() => pickStyle(style)} style={citationOption}>
@@ -620,7 +624,7 @@ export default function DocumentStudioPage() {
             <IconFileUp size={14} />
           </button>
           {exportOpen && (
-            <div style={{ ...citationMenu, width: 180 }}>
+            <div style={{ ...citationMenu, width: 180 }} role="menu" aria-label={locale === "en" ? "Export" : "내보내기"}>
               <div style={citationList}>
                 <button type="button" onClick={exportMarkdown} style={citationOption}>
                   <span>Markdown (.md)</span>
@@ -1052,7 +1056,7 @@ const shell: CSSProperties = { flex: 1, minHeight: 0, display: "flex", flexDirec
 const topToolbar: CSSProperties = { minHeight: 42, borderBottom: "1px solid var(--paper-edge)", background: "var(--paper)", display: "flex", alignItems: "center", gap: 6, padding: "6px 16px 6px 90px", flexShrink: 0 };
 const toolbarIconButton: CSSProperties = { width: 30, height: 30, border: "1px solid var(--paper-edge)", borderRadius: 7, background: "var(--paper)", color: "var(--ink-soft)", display: "inline-grid", placeItems: "center", padding: 0, textDecoration: "none", cursor: "pointer" };
 const citationButton: CSSProperties = { height: 32, minWidth: 84, border: "1px solid var(--paper-edge)", borderRadius: 999, background: "var(--paper)", display: "inline-flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "0 12px", color: "var(--ink)", fontWeight: 800 };
-const citationMenu: CSSProperties = { position: "absolute", top: 38, right: 0, width: 200, maxHeight: 360, border: "1px solid var(--paper-3)", borderRadius: 8, background: "var(--paper)", boxShadow: "0 18px 48px rgba(15,23,42,.16)", padding: 8, zIndex: 20 };
+const citationMenu: CSSProperties = { position: "absolute", top: 38, right: 0, width: 200, maxHeight: 360, border: "1px solid var(--paper-3)", borderRadius: "var(--popup-radius)", background: "var(--popup-card-bg)", boxShadow: "var(--popup-shadow)", padding: 8, zIndex: 20 };
 const citationList: CSSProperties = { display: "grid", gap: 1, maxHeight: 320, overflowY: "auto" };
 const citationOption: CSSProperties = { minHeight: 32, border: "none", background: "transparent", color: "var(--ink)", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, padding: "0 8px", borderRadius: 6, textAlign: "left", fontSize: 13, cursor: "pointer" };
 const exportStatusStyle: CSSProperties = { color: "var(--green-deep)", fontSize: 11.5, fontWeight: 800, whiteSpace: "nowrap" };

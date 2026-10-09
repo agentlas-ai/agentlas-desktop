@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { IconCheck, IconClose } from "@/components/Icon";
+import { IconCheck, IconClose, IconLibrary, IconLayers, IconTarget } from "@/components/Icon";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { OPEN_SCIENCE_INSTALL_EVENT } from "@/lib/science-install-entry";
 import { scienceCoreInstalled, scienceCoreReady } from "@/lib/use-science-suite-status";
@@ -372,17 +372,17 @@ export function ScienceInstallExperience({
             <div className={styles.promoBody}>
               <span className={styles.kicker}>{ko ? "새 제품" : "NEW PRODUCT"}</span>
               <h2 id="science-install-title">
-                {ko ? "연구에 필요한 도구를 한 번에 설치하세요." : "Install the complete research workspace."}
+                {ko ? "연구 도구를 한곳에" : "Your research workspace"}
               </h2>
               <p id="science-install-description">
                 {ko
-                  ? "선행연구 조사, 가설과 근거 관리, 데이터 분석, 화학 구조 편집, 분자 시각화를 하나의 프로젝트에서 실행합니다."
-                  : "Run literature review, hypothesis and evidence tracking, data analysis, chemistry editing, and molecular visualization in one project."}
+                  ? "논문에서 분석, 연구 결과까지."
+                  : "From literature to analysis and research results."}
               </p>
               <ul className={styles.promoPoints}>
-                <li>{ko ? "논문과 데이터 출처를 프로젝트에 기록" : "Keep paper and data sources with the project"}</li>
-                <li>{ko ? "주장과 근거의 연결 상태를 확인" : "Review how claims connect to evidence"}</li>
-                <li>{ko ? "Ketcher와 Mol* 연구 도구 포함" : "Includes Ketcher and Mol* research tools"}</li>
+                <li><IconLibrary size={21} /><strong>{ko ? "논문 · 데이터" : "Papers & data"}</strong><span>{ko ? "출처를 프로젝트에 기록" : "Sources kept with your project"}</span></li>
+                <li><IconTarget size={21} /><strong>{ko ? "가설 · 근거" : "Claims & evidence"}</strong><span>{ko ? "주장과 근거 연결 확인" : "Review evidence connections"}</span></li>
+                <li><IconLayers size={21} /><strong>{ko ? "분자 · 화학" : "Molecules & chemistry"}</strong><span>Ketcher · Mol*</span></li>
               </ul>
               <div className={`${styles.actions} ${styles.promoActions}`}>
                 <button ref={primaryRef} type="button" className={styles.primary} data-testid="science-promo-download" onClick={() => setSurface("plan")}>

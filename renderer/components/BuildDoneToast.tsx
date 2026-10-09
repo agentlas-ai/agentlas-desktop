@@ -10,7 +10,7 @@ import { navigate } from "@/lib/navigation";
 import { useT } from "@/lib/i18n";
 import { buildScanDisposition } from "@/lib/build-scan";
 import { clearBuildDoneUnseen, markBuildDoneUnseen } from "@/lib/attention";
-import { IconBuilding, IconCheck, IconStore } from "@/components/Icon";
+import { IconBuilding, IconCheck, IconStore, IconFileUp } from "@/components/Icon";
 
 /**
  * The build page turns engine failures into instructions for a person.  This
@@ -131,7 +131,7 @@ export function BuildDoneToast() {
   };
 
   return (
-    <div className="build-done-toast titlebar-nodrag" role="status">
+    <div className="build-done-toast titlebar-nodrag" role="status" style={{ background: "var(--popup-card-bg)", boxShadow: "var(--popup-shadow)", borderRadius: "var(--popup-radius)" }}>
       <div className="build-done-toast-head">
         <span className="build-done-toast-check"><IconCheck size={14} /></span>
         <strong>{ko ? "빌드 완료" : "Build complete"}</strong>
@@ -142,7 +142,7 @@ export function BuildDoneToast() {
       <div className="build-done-toast-name" title={workspace}>{name}</div>
       <div className="build-done-toast-actions">
         <button type="button" disabled={busy} onClick={() => void upload("private-link")}>
-          {ko ? "Cloud에 비공개 저장" : "Save privately to Cloud"}
+          <IconFileUp size={12} /> {ko ? "Cloud · 비공개 저장" : "Cloud · Private save"}
         </button>
         <button type="button" disabled={busy} onClick={() => void upload("marketplace")}>
           <IconStore size={12} /> {ko ? "허브 업로드" : "Upload to Hub"}
@@ -153,7 +153,7 @@ export function BuildDoneToast() {
       </div>
       {hasSecurityAdvisory && (
         <div className="build-done-toast-msg">
-          {ko ? "안전 점검 결과는 참고용이며 설치·업로드를 막지 않습니다." : "Safety findings are advisory and do not block install or upload."}
+          {ko ? "안전 점검: 참고용 · 설치/업로드 가능" : "Safety findings are advisory and do not block install or upload."}
         </div>
       )}
       {msg && <div className="build-done-toast-msg">{msg}</div>}

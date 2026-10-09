@@ -13,6 +13,7 @@ export interface BackgroundHoldHost {
   continuity(): boolean;
   /** Show the product window again (and leave background mode). */
   open(): void;
+  openOne?(): void;
   /** Full quit: stop work and the service. */
   quitCompletely(): void;
 }
@@ -59,6 +60,7 @@ export function enterBackgroundHold(host: BackgroundHoldHost, options: { autoQui
       { label: text.status, enabled: false },
       { type: "separator" },
       { label: text.open, click: () => host.open() },
+      ...(host.openOne ? [{ label: host.locale() === "ko" ? "One 열기" : "Open One", click: () => host.openOne?.() }] : []),
       { label: text.quit, click: () => host.quitCompletely() },
     ]));
   };

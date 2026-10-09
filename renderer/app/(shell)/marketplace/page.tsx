@@ -602,14 +602,14 @@ function MarketplacePage() {
                   overflowY: "auto",
                   padding: 6,
                   borderRadius: 12,
-                  background: "var(--rd-surface)",
+                  background: "var(--popup-card-bg)",
                   border: "1px solid var(--rd-hair)",
-                  boxShadow: "0 18px 46px rgba(11,11,15,0.16)",
+                  boxShadow: "var(--popup-shadow)",
                 }}
               >
                 {hubSuggestions.length === 0 ? (
                   <div style={{ padding: "10px 9px", fontSize: 12, color: "var(--rd-ink-3)" }}>
-                    {ko ? "입력 중 자동으로 찾고 있습니다. 일치 항목이 없으면 아래 Hephaestus 후보를 확인하세요." : "Searching as you type. If nothing matches, check the Hephaestus suggestions below."}
+                    {ko ? "일치 항목 없음 · 아래 AI 추천을 확인하세요." : "No match · Check the AI suggestions below."}
                   </div>
                 ) : (
                   hubSuggestions.map((listing, index) => {

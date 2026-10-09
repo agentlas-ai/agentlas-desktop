@@ -135,10 +135,16 @@ export class OneSupervisorApprovalStore {
     assertCurrent(JSON.parse(row.request_json) as ToolApprovalRequestEvent);
     return {decision: row.decision, decidedAt: row.decided_at};
   }
-  /** A new Main run owns no earlier run's waiter: what an earlier run left pending can no longer be answered. */
-  retireEarlierOwners(ownerEpoch: string): number {
+  /** Restart retires this native host's waiters, never the other host's live requests. */
+  retireEarlierOwners(ownerEpoch: string, hostKind: "main" | "daemon" = "main"): number {
+    const prefix = `${hostKind}:`;
+    if ((hostKind !== "main" && hostKind !== "daemon") || !ownerEpoch.startsWith(prefix)
+      || ownerEpoch.length <= prefix.length || ownerEpoch.length > 200) {
+      throw new Error("supervisor_approval_host_invalid");
+    }
     return Number(this.db.prepare(`UPDATE one_supervisor_tool_approvals SET status='expired',decision='deny',decided_at=?,reason='owner_restarted'
-      WHERE status='pending' AND owner_epoch!=?`).run(new Date(this.now()).toISOString(), ownerEpoch).changes);
+      WHERE status='pending' AND owner_epoch!=? AND substr(owner_epoch,1,?)=?`)
+      .run(new Date(this.now()).toISOString(), ownerEpoch, prefix.length, prefix).changes);
   }
   /** Keeps the newest settled receipts; pending rows are never pruned. */
   prune(keepSettled = 1000): number {

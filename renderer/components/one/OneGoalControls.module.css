@@ -41,3 +41,12 @@
 .modelNoteHint { color: var(--muted-deep); }
 .root { container-type: inline-size; }
 @container (max-width: 470px) { .root .modelChip { padding: 0 6px; } .modelChipText { display: none; } }
+
+.help { border-radius: 14px; padding: 14px; }
+.modelTimeline { display: grid; grid-template-columns: minmax(0,1fr) auto minmax(0,1fr); align-items: center; gap: 10px; margin: 12px 0; }
+.modelTimeline > span { display: grid; gap: 5px; padding: 11px; border: 1px solid var(--paper-edge); border-radius: 10px; font-size: 10px; color: var(--muted-deep); }
+.modelTimeline strong { font-size: 11px; color: var(--ink); overflow-wrap: anywhere; }
+.modelTimeline b { color: var(--muted-deep); }
+
+.help[data-placement="below"] { top: calc(100% + 6px); bottom: auto; }
+.help { background: var(--popup-card-bg, var(--paper)); box-shadow: var(--popup-shadow); }

@@ -1,4 +1,5 @@
 "use client";
+import popupMenu from "./PanelPopover.module.css";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import type { InstalledAgent } from "@/lib/types";
@@ -158,7 +159,7 @@ export function AgentPicker({
 
       {open && (
         <div
-          role="listbox"
+          className={popupMenu.panelPopover} role="listbox"
           aria-label={ariaLabel}
           style={{
             position: "absolute",
@@ -171,10 +172,10 @@ export function AgentPicker({
             flexDirection: "column",
             overflow: "hidden",
             padding: 6,
-            borderRadius: 12,
-            background: "var(--paper)",
+            borderRadius: "var(--popup-radius)",
+            background: "var(--popup-card-bg)",
             border: "1px solid var(--paper-edge)",
-            boxShadow: "0 18px 48px rgba(11, 11, 15, 0.16), var(--shadow-2)",
+            boxShadow: "var(--popup-shadow)",
             zIndex: 90,
           }}
         >

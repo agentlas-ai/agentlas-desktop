@@ -1,3 +1,4 @@
+import { supervisorError } from "../../shared/one-supervisor";
 import type Database from "better-sqlite3";
 import { supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
 
@@ -45,7 +46,7 @@ export class OneSupervisorWorkQueue {
     // condition, not permission to start a second migration authority.
     for (const name of ["one_supervisor_work_jobs", "one_supervisor_host_identity"]) {
       if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(name)) {
-        throw new Error("supervisor_work_schema_not_ready");
+        throw supervisorError('supervisor_work_schema_not_ready');
       }
     }
   }
@@ -75,17 +76,17 @@ export class OneSupervisorWorkQueue {
     return this.db.prepare("SELECT * FROM one_supervisor_work_jobs WHERE phase IN ('starting','running','held') LIMIT 100").all() as SupervisorWorkLease[];
   }
   enqueue(row: SupervisorRequestRow, chatId: string): SupervisorWorkLease {
-    if (row.kind !== "work" || row.state !== "stored" || !row.task_id || !row.run_id) throw new Error("supervisor_work_ingress_invalid");
+    if (row.kind !== "work" || row.state !== "stored" || !row.task_id || !row.run_id) throw supervisorError('supervisor_work_ingress_invalid');
     return this.write(() => {
       const prior = this.get(row.command_id);
       if (prior) {
         if (prior.one_id !== row.one_id || prior.chat_id !== chatId || prior.run_id !== row.run_id || prior.task_id !== row.task_id) {
-          throw new Error("supervisor_work_binding_conflict");
+          throw supervisorError('supervisor_work_binding_conflict');
         }
         return prior;
       }
       if ((this.db.prepare(`SELECT count(*) AS n FROM one_supervisor_work_jobs WHERE one_id=? AND phase NOT IN ('completed','failed','cancelled')`)
-        .get(row.one_id) as {n: number}).n >= 20) throw new Error("supervisor_work_queue_full");
+        .get(row.one_id) as {n: number}).n >= 20) throw supervisorError('supervisor_work_queue_full');
       this.db.prepare(`INSERT INTO one_supervisor_work_jobs(command_id,one_id,task_id,chat_id,run_id,phase,updated_at)
         VALUES(?,?,?,?,?,'queued',?)`).run(row.command_id, row.one_id, row.task_id, chatId, row.run_id, this.now());
       return this.get(row.command_id)!;
@@ -96,7 +97,7 @@ export class OneSupervisorWorkQueue {
     const capacity = input.capacity ?? 2;
     if (!input.ownerEpoch || input.ownerEpoch.length > 200 || !["desktop-main", "work-daemon"].includes(input.ownerKind)
       || !Number.isSafeInteger(leaseMs) || leaseMs < 100 || leaseMs > 120_000
-      || !Number.isInteger(capacity) || capacity < 1 || capacity > 2) throw new Error("supervisor_work_claim_invalid");
+      || !Number.isInteger(capacity) || capacity < 1 || capacity > 2) throw supervisorError('supervisor_work_claim_invalid');
     return this.write(() => {
       if ((this.db.prepare(`SELECT count(*) AS n FROM one_supervisor_work_jobs WHERE phase IN (${LIVE})`).get() as {n: number}).n >= capacity) return null;
       const candidate = this.db.prepare(`SELECT * FROM one_supervisor_work_jobs WHERE phase='queued'

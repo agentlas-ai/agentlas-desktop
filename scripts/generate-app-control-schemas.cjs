@@ -2,7 +2,7 @@
 // Build JSON argument documentation from the same TypeScript API that the app uses, including imported interfaces.
 const fs = require("node:fs"), path = require("node:path"), ts = require("typescript");
 
-function generateAppControlSchemas({ root, operations, check }) {
+function generateAppControlSchemas({ root, operations, check, outputDirectory = path.join(root, "electron/app-control") }) {
   const hostSources = fs.readdirSync(path.join(root, "electron/science-host"))
     .filter(name => name.endsWith("-ipc.ts")).sort()
     .map(name => path.join(root, "electron/science-host", name));
@@ -443,8 +443,9 @@ function generateAppControlSchemas({ root, operations, check }) {
           return;
         }
       }
-      if (ts.isCallExpression(node) && (["register", "handle"].includes(node.expression.getText()) || /\.handle$/.test(node.expression.getText()))) {
-        const channel = constant(node.arguments[0], bindings), handler = node.arguments[1];
+      if (ts.isCallExpression(node) && (["register", "handle", "registerAppControlDomainIpc"].includes(node.expression.getText()) || /\.handle$/.test(node.expression.getText()))) {
+        const offset = node.expression.getText() === "registerAppControlDomainIpc" ? 1 : 0;
+        const channel = constant(node.arguments[offset], bindings), handler = node.arguments[offset + 1];
         if (typeof channel === "string" && channel.startsWith("science:") && handler) {
           const op = constant(handler, bindings);
           const ops = typeof op === "string" && nativeInputs.has(op) ? [op] : commandOps(handler, bindings);
@@ -506,7 +507,7 @@ function generateAppControlSchemas({ root, operations, check }) {
     const declaration = field.valueDeclaration ?? field.declarations?.[0] ?? preferenceInterface;
     preferenceSchemas[field.name] = schema(checker.getTypeOfSymbolAtLocation(field, declaration));
   }
-  const output = path.join(root, "electron/app-control/argument-schemas.generated.ts");
+  const output = path.join(outputDirectory, "argument-schemas.generated.ts");
   const body = "// Generated from the app's TypeScript bridges by scripts/generate-app-control-catalog.cjs.\n"
     + "export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string, unknown>>> = "
     + JSON.stringify(docs, null, 0).replace(/\},\"([^\"]+)\":\{\"type\":\"object\",\"properties\"/g, "},\n\"$1\":{\"type\":\"object\",\"properties\"") + ";\n"
@@ -514,7 +515,7 @@ function generateAppControlSchemas({ root, operations, check }) {
     + JSON.stringify(preferenceSchemas, null, 0) + ";\n";
   if (check) {
     if (!fs.existsSync(output) || fs.readFileSync(output, "utf8") !== body) throw new Error("app-control argument schemas are stale: run node scripts/generate-app-control-catalog.cjs");
-  } else fs.writeFileSync(output, body);
+  } else { fs.mkdirSync(path.dirname(output), { recursive: true }); fs.writeFileSync(output, body); }
   return Object.keys(docs).length;
 }
 

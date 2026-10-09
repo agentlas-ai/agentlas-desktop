@@ -35,10 +35,16 @@ function tabCreateFailureNotice(reason: string | undefined, ko: boolean): string
 }
 
 /** Main owns the tabs. One, Work and their tools attach to the same scoped guests. */
-export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, headerHost, onActivate, newTabRequest = 0, presentation, onAnnotation }: {
+export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, headerHost, onActivate, onDismiss, newTabRequest = 0, newTabUrl, onNewTabRequestConsumed, presentation, onAnnotation }: {
   onAnnotation?: (receipt: BrowserAnnotationReceipt) => boolean | Promise<boolean>;
   taskScopeId: string; preferredUrl?: string; locale: "ko" | "en"; active?: boolean;
   headerHost?: HTMLElement | null; onActivate?: () => void; newTabRequest?: number; presentation?: { viewId: string; id: string };
+  /** The last native page was explicitly and successfully closed by the person. */
+  onDismiss?: () => void;
+  /** Keep an explicit new-tab request from replaying after the rail unmounts. */
+  onNewTabRequestConsumed?: (request: number) => void;
+  /** A directly clicked link; background preferredUrl changes never navigate. */
+  newTabUrl?: string;
 }) {
   const ko = locale === "ko";
   const [tabs, setTabs] = useState<BrowserTab[]>([]);
@@ -69,16 +75,19 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   currentId.current = current?.id;
   const newTabRequestRef = useRef(newTabRequest);
   newTabRequestRef.current = newTabRequest;
-  const observedUrl = useRef(preferredUrl);
   const knownTabs = useRef(new Set<string>());
+  const dismissedTabs = useRef(new Set<string>());
+  const initialPresentation = useRef(presentation);
+  const userSelectedTab = useRef(false);
 
   const consumedPresentation = useRef<string | null>(null);
   useEffect(() => {
-    if (!presentation || consumedPresentation.current === presentation.id
-      || !tabs.some((tab) => tab.id === presentation.viewId)) return;
-    consumedPresentation.current = presentation.id;
-    setSelectedId(presentation.viewId);
-  }, [presentation, tabs.length]);
+    const initial = initialPresentation.current;
+    if (!initial || userSelectedTab.current || consumedPresentation.current === initial.id
+      || !tabs.some((tab) => tab.id === initial.viewId)) return;
+    consumedPresentation.current = initial.id;
+    setSelectedId(initial.viewId);
+  }, [tabs]);
   const refreshImportReadiness = useCallback(async () => {
     try {
       if (window.localStorage.getItem(IMPORT_DISMISSED) === "1") return;
@@ -113,11 +122,11 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
   const openImport = () => { void prepareOverlay().finally(() => setImporting(true)); };
 
   const acceptStatus = useCallback((status: WorkLiveViewStatus) => {
-    if (status.taskScopeId !== taskScopeId) return;
+    if (status.taskScopeId !== taskScopeId || dismissedTabs.current.has(status.viewId)) return;
     if (status.state === "closed") knownTabs.current.delete(status.viewId);
     else if (!knownTabs.current.has(status.viewId)) {
       knownTabs.current.add(status.viewId);
-      setSelectedId(status.viewId);
+      setSelectedId((current) => current ?? status.viewId);
     }
     setTabs((prior) => {
       if (status.state === "closed") return prior.filter((tab) => tab.id !== status.viewId);
@@ -142,9 +151,9 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       if (disposed) return;
       if (!result.ok) { setNotice(result.reason || (ko ? "이 작업의 브라우저에 연결하지 못했습니다." : "Could not connect this task browser.")); return; }
       setConnected(true);
-      for (const tab of result.tabs) if (tab.taskScopeId === taskScopeId && !closed.has(tab.viewId)) knownTabs.current.add(tab.viewId);
+      for (const tab of result.tabs) if (tab.taskScopeId === taskScopeId && !closed.has(tab.viewId) && !dismissedTabs.current.has(tab.viewId)) knownTabs.current.add(tab.viewId);
       setTabs((current) => {
-        const merged = new Map(result.tabs.filter((tab) => tab.taskScopeId === taskScopeId && !closed.has(tab.viewId))
+        const merged = new Map(result.tabs.filter((tab) => tab.taskScopeId === taskScopeId && !closed.has(tab.viewId) && !dismissedTabs.current.has(tab.viewId))
           .map((status) => [status.viewId, { id: status.viewId, initialUrl: status.url || "about:blank", status }]));
         for (const tab of current) if (!closed.has(tab.id)) merged.set(tab.id, { ...tab, status: { ...tab.status, taskScopeId, url: tab.status.url || tab.initialUrl } });
         return [...merged.values()];
@@ -165,7 +174,8 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       }
     }).catch(() => { if (!disposed) setNotice(ko ? "브라우저 연결을 확인해 주세요." : "Check the browser connection."); });
     return () => { disposed = true; mounted.current = false; navigation.current += 1; off?.(); };
-  // Initial connection owns its captured URL; later proven navigation is handled below.
+  // Initial connection belongs to an explicit rail open. Later navigation is
+  // metadata and cannot replace the person's selected native page.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [taskScopeId, acceptStatus]);
 
@@ -187,6 +197,7 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
       const result = await window.agentlas.workLiveView.createTab({ taskScopeId, url });
       if (!mounted.current) return;
       if (result.tab) {
+        userSelectedTab.current = true;
         acceptStatus(result.tab);
         setSelectedId(result.tab.viewId);
         return result.tab;
@@ -227,22 +238,21 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
     }
   }, [pendingUrl, connected, creating, current?.id, navigate, create]);
 
-  useEffect(() => {
-    if (!connected || !preferredUrl || observedUrl.current === preferredUrl) return;
-    observedUrl.current = preferredUrl;
-    const tab = tabsRef.current.find((item) => item.status.url === preferredUrl)
-      ?? tabsRef.current.find((item) => !item.status.url && item.initialUrl === preferredUrl);
-    if (tab) setSelectedId(tab.id);
-    else if (knownTabs.current.size === 0) void create(preferredUrl);
-  }, [preferredUrl, connected, navigate, create]);
-
   const close = async (id: string) => {
     navigation.current += 1;
     setPendingUrl(null);
     try {
       const result = await window.agentlas?.workLiveView.close(id, taskScopeId);
       if (!mounted.current) return;
-      if (result?.ok) setTabs((prior) => prior.filter((tab) => tab.id !== id));
+      if (result?.ok) {
+        dismissedTabs.current.add(id);
+        knownTabs.current.delete(id);
+        const remaining = tabsRef.current.filter((tab) => tab.id !== id);
+        tabsRef.current = remaining;
+        setTabs((prior) => prior.filter((tab) => tab.id !== id));
+        setSelectedId((current) => current === id ? remaining[0]?.id ?? null : current);
+        if (remaining.length === 0) onDismiss?.();
+      }
       else setNotice(ko ? "탭을 닫지 못했습니다." : "Could not close this tab.");
     } catch { if (mounted.current) setNotice(ko ? "브라우저 연결이 끊겼습니다." : "Browser connection lost."); }
   };
@@ -263,14 +273,15 @@ export function TaskBrowser({ taskScopeId, preferredUrl, locale, active = true, 
 
   const lastNewTabRequest = useRef(0);
   useEffect(() => {
-    if (!connected || creating || lastNewTabRequest.current === newTabRequest) return;
+    if (!connected || creating || newTabRequest <= 0 || lastNewTabRequest.current === newTabRequest) return;
     lastNewTabRequest.current = newTabRequest;
-    void create();
-  }, [newTabRequest, connected, creating, create]);
+    onNewTabRequestConsumed?.(newTabRequest);
+    void create(newTabUrl);
+  }, [newTabRequest, newTabUrl, connected, creating, create, onNewTabRequestConsumed]);
   const header = (
     <div className={styles.tabs} data-inline={Boolean(headerHost)} role={headerHost ? "presentation" : "tablist"} aria-label={headerHost ? undefined : ko ? "브라우저 탭" : "Browser tabs"}>
       {tabs.map((tab) => <div key={tab.id} className={styles.tab} data-selected={active && tab.id === current?.id}>
-        <button role="tab" type="button" aria-selected={active && tab.id === current?.id} onClick={() => { setSelectedId(tab.id); onActivate?.(); }}>
+        <button role="tab" type="button" aria-selected={active && tab.id === current?.id} onClick={() => { userSelectedTab.current = true; setSelectedId(tab.id); onActivate?.(); }}>
           <span className={styles.dot} data-state={tab.status?.state ?? "closed"} />
           <span>{tab.status.url === "about:blank" ? (ko ? "새 탭" : "New tab") : tab.status.title || tabHost(tab.status.url || tab.initialUrl)}</span>
         </button>

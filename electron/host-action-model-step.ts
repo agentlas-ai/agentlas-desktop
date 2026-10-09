@@ -1,5 +1,6 @@
 import type { HostActionProposal, HostModelSnapshot } from "./host-action-loop";
 import type { Runner, RunnerEvents, RunnerRequest } from "./runtime/runner";
+import { RuntimeTurnUnsettledError, runtimeFailureIsClosedHttpRefusal } from "./runtime/runner";
 
 /** Runtime families whose Main-owned runner has a verified zero-tool branch. */
 export type HostProposalRuntimeKind = "byok" | "agentlas-local" | "lmstudio" | "mlx";
@@ -65,13 +66,22 @@ export function createHostActionModelStep(options: HostActionModelStepOptions):
       maxOutputTokens: 2_048,
     };
     let toolObserved = false;
+    let nativeActivity = false;
     const events: RunnerEvents = {
-      onPartial: () => {},
+      onPartial: (text) => { if (text.length) nativeActivity = true; },
       onStatus: options.onStatus ?? (() => {}),
-      onTool: () => { toolObserved = true; },
+      onTool: () => { toolObserved = true; nativeActivity = true; },
+      onThinking: () => { nativeActivity = true; },
+      onRuntimeAttemptStarted: () => { nativeActivity = true; },
+      onTerminalObservedUsage: () => { nativeActivity = true; },
     };
     const result = await options.runner(request, events);
     signal.throwIfAborted();
+    if (result.ownerControlTerminal !== "completed" && !runtimeFailureIsClosedHttpRefusal(result.failure, {
+      text: result.text, nativeActivity, aborted: signal.aborted, observedUsage: result.observedUsage,
+    })) {
+      throw new RuntimeTurnUnsettledError(options.runtimeKind, options.locale);
+    }
     if (toolObserved) throw new Error("host-action-model-tool-observed");
     if (result.failure) throw new Error(`host-action-model-failed:${result.failure.kind}`);
     if (Buffer.byteLength(result.text, "utf8") > maxResponseBytes) throw new Error("host-action-model-response-too-large");

@@ -432,7 +432,7 @@ export function RuntimeModelPicker({
         <div
           className="dashboard-runtime-model-picker-popover"
           style={popover
-            ? { position: "fixed", top: popover.top, left: popover.left, width: popover.width }
+            ? { position: "fixed", top: popover.top, left: popover.left, width: popover.width, background: "var(--popup-card-bg)", borderRadius: "var(--popup-radius)", boxShadow: "var(--popup-shadow)" }
             : { visibility: "hidden" }}
         >
           <div

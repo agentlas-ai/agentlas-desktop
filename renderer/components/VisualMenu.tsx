@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { IconCopy, IconDownload, IconMoreHorizontal, IconPanelRight } from "./Icon";
 import styles from "./VisualBlock.module.css";
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 
 export type VisualMenuItem = { key: string; label: string; run: () => Promise<boolean | void> | boolean | void };
 
@@ -14,13 +15,11 @@ export function VisualMenu({ items, ko, label }: { items: VisualMenuItem[]; ko: 
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  useDismissibleLayer({open, roots: [rootRef], onDismiss: () => setOpen(false), restoreFocusRef: triggerRef});
   useEffect(() => {
-    if (!open) return undefined;
-    const close = (event: Event) => { if (!rootRef.current?.contains(event.target as Node)) setOpen(false); };
-    const esc = (event: KeyboardEvent) => { if (event.key === "Escape") setOpen(false); };
-    document.addEventListener("pointerdown", close);
-    document.addEventListener("keydown", esc);
-    return () => { document.removeEventListener("pointerdown", close); document.removeEventListener("keydown", esc); };
+    if (open) menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
   }, [open]);
   useEffect(() => {
     if (!status) return undefined;
@@ -29,11 +28,19 @@ export function VisualMenu({ items, ko, label }: { items: VisualMenuItem[]; ko: 
   }, [status]);
   return <div ref={rootRef} className={styles.menuRoot} data-open={open ? "true" : "false"} data-visual-menu="true">
     {status && <span className={styles.menuStatus} role="status">{status}</span>}
-    <button type="button" className={styles.menuButton} aria-haspopup="menu" aria-expanded={open} aria-label={label}
+    <button ref={triggerRef} type="button" className={styles.menuButton} aria-haspopup="menu" aria-expanded={open} aria-label={label}
       onClick={() => setOpen((value) => !value)} data-visual-menu-button="true">
       <IconMoreHorizontal size={16} />
     </button>
-    {open && <div className={styles.menu} role="menu">
+    {open && <div ref={menuRef} className={styles.menu} role="menu" aria-label={label} onKeyDown={event => {
+      const items = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)')];
+      if (!items.length) return;
+      const current = items.indexOf(document.activeElement as HTMLButtonElement);
+      const next = event.key === "ArrowDown" ? (current + 1) % items.length
+        : event.key === "ArrowUp" ? (current - 1 + items.length) % items.length
+        : event.key === "Home" ? 0 : event.key === "End" ? items.length - 1 : null;
+      if (next !== null) { event.preventDefault(); items[next]?.focus(); }
+    }}>
       {items.map((item) => (
         <button key={item.key} type="button" role="menuitem" data-visual-menu-item={item.key}
           onClick={async () => {

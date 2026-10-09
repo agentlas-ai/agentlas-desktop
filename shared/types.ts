@@ -2,6 +2,9 @@
 // renderer/lib/types.ts에서 re-export.
 import type { AutomationMonitorContract, AutomationPollState } from "./automation-monitor";
 import type { OneSupervisorAPI } from "./one-supervisor";
+import type { OneWindowAPI } from "./one-window";
+import type { OneHarnessAPI } from "./one-harness";
+import type { OneContextAPI } from "./one-context";
 import type { AgentWorkspaceIpc } from "./agent-workspace";
 import type { LocalModelHubAPI } from "./local-model-hub";
 import type { LocalModelMigrationAPI } from "./local-model-migration";
@@ -1418,6 +1421,8 @@ export interface McpServerStatus {
   /** 아직 값이 없는 필수 env 키 — 연결 막힘 원인 */
   missingEnv: string[];
   checkedAt: string;
+  /** Typed transport observation; callers must never classify prose errors. */
+  failureCode?: 'authentication_required' | 'configuration_missing' | 'connection_unavailable' | 'connection_cancelled';
   /**
    * A configured server whose health check would visibly launch a user-facing
    * application is intentionally not spawned by passive status surfaces.
@@ -2066,6 +2071,17 @@ export type HostStatusKind =
   | "goal-closed"
   | "runtime-kept"
   | "needs-owner";
+
+export interface ChatMessagesCursor {
+  id: string;
+  createdAt: string;
+}
+
+/** Ascending stable keyset page; fetching a page does not expand its UI. */
+export interface ChatMessagesPage {
+  messages: ChatHistoryEntry[];
+  hasOlder: boolean;
+}
 
 export interface ChatHistoryEntry {
   goalResult?: import("./goal-result").GoalResultPresentation;
@@ -4740,7 +4756,25 @@ export interface McpInvocationRequest {
   fastMode?: boolean;
 }
 
-/** Main-owned Codex-style steering acknowledgement shared by Desktop and Mobile. */
+/** An owner input targets one logical harness invocation, independent of its brain. */
+export interface InvocationCurrentTurnSteerRequest {
+  chatId: string;
+  intentId: string;
+  expectedRunId: string;
+  text: string;
+}
+
+/** Main's durable receipt distinguishes intake from native application. */
+export interface InvocationCurrentTurnSteerReceipt {
+  chatId: string;
+  intentId: string;
+  runId: string;
+  promptHash: string;
+  messageId: string;
+  status: "queued" | "dispatching" | "applied" | "rejected" | "uncertain";
+  code?: string;
+}
+
 export interface InvocationSteerResult {
   accepted: true;
   /** Exact conversation whose queue/run accepted this direction. */
@@ -7778,12 +7812,24 @@ export interface AgentlasIpc {
     }>>;
     /**
      * 이 원격 서버가 로그인(OAuth)을 요구하는가, 그리고 이미 연결됐는가.
-     * 읽기만 한다 — 부작용 없이 화면이 상태를 말할 수 있게 하는 용도다.
+     * 저장된 자격증명의 유효 여부만 읽는다. 토큰 갱신이나 동의 창을 시작하지 않으며,
+     * 자동 갱신과 실제 tools/list 성공은 별도로 test에서 확인한다.
      */
     oauthStatus: (serverId: string) => Promise<
       | { supported: true; connected: boolean; resource?: string; expiresAt?: number | null }
       | { supported: false; connected: false; reason: string; message?: string }
     >;
+    /** 동의 완료를 기다리지 않고 시도 ID와 수동 로그인 URL을 반환한다. */
+    oauthStart: (serverId: string) => Promise<
+      { ok: true; attemptId: string; manualUrl: string } | { ok: false; error: string }
+    >;
+    /** 토큰 값 없이 해당 시도의 진행만 읽는다. connected는 저장 완료를 뜻한다. */
+    oauthPoll: (serverId: string, attemptId: string) => Promise<{
+      status: "waiting" | "exchanging" | "connected" | "failed" | "cancelled" | "unknown";
+      error?: string;
+    }>;
+    /** 설치 행의 현재 상태와 무관하게 해당 시도의 콜백과 저장 작업을 정리한다. */
+    oauthCancel: (serverId: string, attemptId: string) => Promise<{ ok: boolean }>;
     /**
      * 인가 흐름을 돌린다. 동의 창은 Agentlas 전용 Chrome(브라우저 자격증명 프로필)에서
      * 열리므로, 이미 그 서비스에 로그인해 둔 사용자는 동의만 누르면 끝난다.
@@ -7989,6 +8035,7 @@ export interface AgentlasIpc {
     openInbox: (projectId: string) => Promise<{ ok: boolean; path: string | null; message: string }>;
   };
   chats: {
+    messagesPage: (input: { chatId: string; limit?: number; before?: ChatMessagesCursor }) => Promise<ChatMessagesPage>;
     /** 최신순 활성 채팅 (보관된 것 제외). 사이드바 "최근 채팅" 섹션에서 사용 */
     listRecent: (limit?: number) => Promise<Chat[]>;
     /** One 홈 전용 — 전체 최근 목록을 잘라 쓰면 Work 대화가 One 대화를 밀어낸다. */
@@ -8125,6 +8172,12 @@ export interface AgentlasIpc {
   };
   /** Persistent One identity and user-approved operating principles. */
   oneSupervisor: OneSupervisorAPI;
+  /** Independent One presentation; it never owns execution. */
+  oneWindow: OneWindowAPI;
+  /** Exact task/run results and host-authorized artifact actions. */
+  oneHarness: OneHarnessAPI;
+  /** Explicit, expiring OS context and task-bound interaction state. */
+  oneContext: OneContextAPI;
   oneProfile: {
     get: () => Promise<OneProfile>;
     /** 계정 하나 = One 하나 — 이 계정의 One 이 기계 전역 프로필을 이어받았는지("inherited"), 새로 시작했는지("fresh"). */
@@ -8279,6 +8332,7 @@ export interface AgentlasIpc {
   };
   /** One/Work Alive (AGI toggle). Main owns the lives; see shared/alive.ts. */
   alive: {
+    resumeUncertainWake: (input: import("./alive").AliveResumeUncertainWakeInput) => Promise<import("./alive").AliveState>;
     getState: (input: import("./alive").AliveGetStateInput) => Promise<import("./alive").AliveState>;
     /** Throws `[agentlas:code=alive-goal-required]` when the chat has no Goal yet. */
     setEnabled: (input: import("./alive").AliveSetEnabledInput) => Promise<import("./alive").AliveState>;
@@ -8685,6 +8739,10 @@ export interface AgentlasIpc {
   officeTaskContext: import("./office-task-context").OfficeTaskContextAPI;
   /** invoke:run의 chatId가 firm 채팅인지 일반 채팅인지로 자동 라우팅 */
   invoke: {
+    /** Current harness invocation only; never silently starts a replacement run. */
+    steerCurrentTurn: (input: InvocationCurrentTurnSteerRequest) => Promise<InvocationCurrentTurnSteerReceipt>;
+    currentTurnSteerReceipt: (input: { chatId: string; intentId: string }) => Promise<InvocationCurrentTurnSteerReceipt | null>;
+    currentTurn: (chatId: string) => Promise<{ runId: string } | null>;
     replay: (input: import("./run-event-delivery").RunEventReplayInput) => Promise<import("./run-event-delivery").RunEventReplay>;
     run: (req: McpInvocationRequest) => Promise<{ runId: string }>;
     /** Persist an additive follow-up for this chat. Only steeringMode="interrupt" requests early settlement of the current turn. */

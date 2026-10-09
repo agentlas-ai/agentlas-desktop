@@ -1,4 +1,5 @@
 import { AliveOwnerIntentGate } from "./owner-intent";
+import { isAppControlEvent } from "../app-control/ipc-registry";
 import { emitGoalControlChange } from "../goal-control-events";
 /**
  * Real wiring of the One/Work Alive organisms (Main only) and their IPC surface.
@@ -29,7 +30,7 @@ import { cachedAliveModelOrder, refreshAliveModelOrder } from "./model-order";
 import { runAliveServingDecision } from "./serving-wake";
 import { AliveHostError, AliveOrganismHost, parseAliveSurfaceChat, parseAliveTokenLimit, type AliveHostDeps } from "./host";
 import type { GoalPlaygroundDeps, GoalRunView } from "./goal-playground";
-import type { AliveChangedEvent, AliveState, AliveSurface } from "../../shared/alive";
+import type { AliveChangedEvent, AliveState, AliveSurface, AliveResumeBarrier } from "../../shared/alive";
 import { AgiGoalMonitor } from "../agi/monitor";
 import { listAgiMonitoredGoalIds, readAgiBlockerFacts } from "../agi/goal-facts";
 import { effectiveGoalIdForChat } from "../store/goal-binding-repair";
@@ -274,6 +275,11 @@ function requireHost(): AliveOrganismHost {
 }
 
 export function registerAliveIpc(deps: { ipc: Pick<IpcMain, "handle">; assertTrustedSender: (event: IpcMainInvokeEvent) => unknown }): void {
+  deps.ipc.handle("alive:resumeUncertainWake", (event,input:unknown) => {
+    deps.assertTrustedSender(event);
+    if (isAppControlEvent(event)) throw new AliveHostError("alive-resume-human-required");
+    return resumeAliveUncertainWake(input);
+  });
   deps.ipc.handle("alive:getState", (event, input: unknown) => { deps.assertTrustedSender(event); return readAliveState(input); });
   deps.ipc.handle("alive:setEnabled", (event, input: unknown) => { deps.assertTrustedSender(event); return setAliveEnabled(input); });
   deps.ipc.handle("agi:getTokenLimits", (event) => { deps.assertTrustedSender(event); return getAgiTokenLimits(); });
@@ -327,6 +333,30 @@ export async function setAliveEnabled(input: unknown): Promise<AliveState> {
     read: () => target.getState(next.surface, next.chatId),
     apply: () => target.setEnabled(next),
   });
+}
+
+export async function resumeAliveUncertainWake(input:unknown): Promise<AliveState> {
+  const row = parseAliveSurfaceChat(input,["surface","chatId","intentId","expected"]);
+  if (typeof row.intentId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(row.intentId)
+    || !row.expected || typeof row.expected !== "object" || Array.isArray(row.expected)) throw new AliveHostError("alive-input-invalid");
+  const value = row.expected as Record<string,unknown>;
+  const keys = ["agentId","agentVersion","controlEpoch","wakeId","settledSequence","latestSequence","receiptDigest","errorCode","goalBinding"];
+  if (Object.keys(value).length !== keys.length || Object.keys(value).some(key=>!keys.includes(key))
+    || ["agentId","wakeId","errorCode"].some(key=>typeof value[key]!=="string" || !(value[key] as string).length || (value[key] as string).length>200)
+    || ["agentVersion","controlEpoch","settledSequence","latestSequence"].some(key=>!Number.isSafeInteger(value[key]) || Number(value[key])<0)
+    || typeof value.receiptDigest!=="string" || !/^[a-f0-9]{64}$/.test(value.receiptDigest)) throw new AliveHostError("alive-input-invalid");
+  const binding = value.goalBinding as Record<string,unknown>|undefined;
+  if (!binding || typeof binding!=="object" || Array.isArray(binding)
+    || Object.keys(binding).length!==3 || Object.keys(binding).some(key=>!["goalId","runId","runVersion"].includes(key))
+    || ["goalId","runId"].some(key=>typeof binding[key]!=="string" || !(binding[key] as string).length || (binding[key] as string).length>200)
+    || !Number.isSafeInteger(binding.runVersion) || Number(binding.runVersion)<0) throw new AliveHostError("alive-input-invalid");
+  value.goalBinding = {goalId:binding.goalId,runId:binding.runId,runVersion:binding.runVersion};
+  const expected = Object.fromEntries(keys.map(key=>[key,value[key]])) as unknown as AliveResumeBarrier;
+  const target = requireHost(); const surface = row.surface as AliveSurface; const chatId = row.chatId as string;
+  const current = target.getState(surface,chatId);
+  const scopeKey = `${surface}:${current.scope?.kind ?? "chat"}:${current.scope?.id ?? chatId}`;
+  return ownerIntentGate.run(scopeKey,true,{refreshAccess:()=>target.refreshPlanAccess(),read:()=>target.getState(surface,chatId),
+    apply:()=>target.resumeUncertainWake({surface,chatId,intentId:row.intentId as string,expected})});
 }
 
 export function setAgiTokenLimits(input: unknown): AgiTokenLimitsView {

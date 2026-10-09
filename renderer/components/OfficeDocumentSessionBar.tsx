@@ -119,12 +119,12 @@ export function OfficeDocumentSessionBar({
             try { await onSendEdit(intent); }
             catch { /* The document session preserves the failed draft for retry. */ }
           })();
-        }}>{ko ? "현재 작업에 편집 요청" : "Request edit in current task"}</button>
+        }}>{ko ? "편집 요청" : "Request edit"}</button>
       </> : null}
     </div> : null}
 
     {session.conflict && popup === "conflict" ? <div className={`${menu.panelPopover} ${styles.conflict}`} role="dialog" aria-label={ko ? "초안 확인" : "Review draft"} data-office-revision-conflict="true">
-      <p>{ko ? "파일이 변경됐습니다. 초안은 보존했습니다." : "The file changed. Your draft is preserved."}</p>
+      <p>{ko ? "파일 변경 · 초안 보존됨" : "File changed · Draft preserved"}</p>
       <p className={styles.conflictDraft}>{pending?.replacementValue ?? ""}</p>
       <button type="button" className={menu.panelMenuRow} onClick={() => setPopup(null)}>{ko ? "초안 유지" : "Keep draft"}</button>
       <button type="button" className={menu.panelMenuRow} onClick={() => { onDiscardDraftAndLoad(); setPopup(null); }}>{ko ? "초안을 지우고 파일 열기" : "Discard draft and open file"}</button>

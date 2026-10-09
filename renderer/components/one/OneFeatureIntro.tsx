@@ -161,14 +161,14 @@ export function OneFeatureIntro({
               total: slides.length,
             })}
           >
-            {index + 1} / {slides.length}
+            {slides.map((_, step) => <i key={step} className={styles.progressDot} data-active={index === step ? "true" : "false"} />)}
           </span>
         </header>
         <div className={styles.body}>
           <div className={styles.copy}>
             <p className={styles.eyebrow}>{slide.eyebrow}</p>
             <h2 id="one-intro-title">{slide.title}</h2>
-            <p id="one-intro-body">{slide.body}</p>
+            <details className={styles.details} key={slide.preview}><summary>{locale === "ko" ? "자세히" : "Details"}</summary><p id="one-intro-body">{slide.body}</p></details>
           </div>
           <div className={styles.preview} aria-hidden="true">
             <IntroPreview kind={slide.preview} locale={locale} />

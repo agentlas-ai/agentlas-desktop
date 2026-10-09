@@ -69,7 +69,7 @@ export const GOAL_SPINNING_STATUSES = ["queued", "running", "waiting_worker", "w
 
 export function stoppedGoalMessageReopens(goal: { status: string; blockedReason?: string | null },
   taskIntent: string | undefined): { reopens: boolean; ownerAnswer: boolean } {
-  if (goal.status !== "blocked" && goal.status !== "paused") return { reopens: false, ownerAnswer: false };
+  if (goal.status !== "blocked" && goal.status !== "paused" && goal.status !== "waiting_tool") return { reopens: false, ownerAnswer: false };
   const ownerAnswer = goal.status === "blocked" && GOAL_OWNER_QUESTION_REASONS.has(goal.blockedReason ?? "");
   return { reopens: taskIntent !== "conversation" || ownerAnswer, ownerAnswer };
 }

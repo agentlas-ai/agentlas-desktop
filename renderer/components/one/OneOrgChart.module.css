@@ -421,8 +421,8 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 /* Add-agent and Tools use the large floating-dialog geometry from the supplied
    reference. Their lists scroll inside the dialog so the action footer never
    disappears below the viewport. */
-.addDialog,
-.toolsDialog { height: min(820px, calc(100dvh - 16px)); }
+.addDialog { height: min(720px, calc(100dvh - 64px)); }
+.toolsDialog { height: auto; max-height: min(640px, calc(100dvh - 48px)); }
 .addDialogBody,
 .toolsDialogBody { display: flex; flex-direction: column; }
 .addSheet,
@@ -503,3 +503,26 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 
 /* 좌석 배치 시트의 캐릭터 고르기는 제거됐다(오너 지적 2026-08-25 — 만들기 창에서
    이미 정한 것을 또 묻던 자리). 얼굴은 원본 패키지 것을 쓰고, 바꾸는 곳은 편집 창이다. */
+
+/* Tools size to their content, with one readable list. */
+.toolsDialogBody, .toolsSheet { flex: initial; }
+.toolsSheet { gap: 12px; }
+.toolsSheet .toolList { flex: initial; grid-template-columns: 1fr; max-height: 280px; }
+.toolsSheet .sheetEmpty { min-height: 112px; flex: initial; padding: 18px; border-style: dashed; }
+.emptyToolIcon { display: grid; place-items: center; width: 48px; height: 48px; border-radius: 14px; background: var(--paper-3); }
+.toolsSheet .toolTabs button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; min-height: 44px; }
+.toolTabs small { min-width: 20px; padding: 3px 5px; border-radius: 6px; background: var(--paper-3); font-size: 10px; }
+.autoSelectRow { display: grid; grid-template-columns: 34px minmax(0,1fr) auto; gap: 9px; padding: 10px 12px; border: 1px solid var(--one-sheet-line); border-radius: 12px; }
+.autoIcon { display: grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--paper-3); }
+.autoSelectRow .toggle { position: relative; min-width: 40px; width: 40px; height: 24px; min-height: 24px; padding: 3px; border: 0; border-radius: 99px; background: var(--paper-edge-strong); }
+.autoSelectRow .toggle span { display: block; width: 18px; height: 18px; border-radius: 50%; background: var(--white); transition: transform 120ms ease; }
+.autoSelectRow .toggle[data-on="true"] { background: var(--ink); }
+.autoSelectRow .toggle[data-on="true"] span { transform: translateX(16px); }
+.toolPermission { display: flex; align-items: center; gap: 6px; margin: 0; color: var(--muted-deep); font-size: 11px; }
+.toolsSheet .sheetActions { justify-content: stretch; }
+.toolsSheet .sheetActions > button:first-child { flex: 1; justify-content: center; }
+
+
+.popupDetails { color: var(--muted-deep); font-size: 11px; line-height: 1.5; }
+.popupDetails summary { width: fit-content; cursor: pointer; }
+.popupDetails p { margin: 8px 0 0; }

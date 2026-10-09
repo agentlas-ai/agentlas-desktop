@@ -1,6 +1,7 @@
 "use client";
 import { writeAppUiPreference, subscribeAppUiPreference } from "@/lib/app-ui-preferences";
 import { MessageReplyPreview } from "./MessageActions";
+import { alertPopup, confirmPopup } from "@/lib/popup";
 import { composeMessageReply, type MessageReply } from "@/lib/message-reply";
 
 import { goalPlanOf } from "@/components/goal/GoalPlanSummary";
@@ -746,7 +747,10 @@ async function ensureSurfaceApproval(
      단 하나 남긴 것: **실제 돈이 나가는 결제.** 그건 되돌릴 수 없고 법적 책임이 따르므로
      "기계적으로 누르는 관문"의 범주가 아니다. */
   if (approval.kind === "payment") {
-    const ok = window.confirm(approval.message);
+    const ok = await confirmPopup(approval.message, {
+      locale, title: locale === "ko" ? "결제 확인" : "Confirm payment", tone: "warning",
+      confirmLabel: locale === "ko" ? "결제 승인" : "Approve payment",
+    });
     if (!ok) return false;
   }
   try {
@@ -767,9 +771,9 @@ async function ensureSurfaceApproval(
      *   엔진이 말한 이유를 그대로 붙인다.
      */
     const reason = detailForUser(cause);
-    window.alert(locale === "ko"
+    await alertPopup(locale === "ko"
       ? `승인을 적용하지 못했습니다.${reason ? `\n\n이유: ${reason}` : ""}`
-      : `The approval was not applied.${reason ? `\n\nReason: ${reason}` : ""}`);
+      : `The approval was not applied.${reason ? `\n\nReason: ${reason}` : ""}`, { locale, tone: "warning" });
     return false;
   }
   return true;
@@ -1199,12 +1203,15 @@ function inferPermissionFromAnswer(answers: string[]): PermissionLevel | undefin
   return undefined;
 }
 
-function confirmFullPermissionFromUrl(locale: string): boolean {
-  return window.confirm(
-    locale === "ko"
-      ? "이 링크가 전체 권한 실행을 요청합니다.\n\n파일 변경, 셸 명령, 외부 도구 호출까지 허용될 수 있습니다. 계속할까요?"
-      : "This link requests full-permission execution.\n\nIt may allow file changes, shell commands, and external tool calls. Continue?",
-  );
+async function confirmFullPermissionFromUrl(locale: string): Promise<boolean> {
+  const ko = locale === "ko";
+  return confirmPopup(ko
+    ? "파일 변경 · 셸 명령 · 외부 도구 호출을 허용합니다."
+    : "Allows file changes, shell commands, and external tool calls.", {
+    locale: ko ? "ko" : "en", tone: "warning",
+    title: ko ? "링크 요청: 전체 권한" : "Linked request: full access",
+    confirmLabel: ko ? "전체 권한으로 실행" : "Run with full access",
+  });
 }
 
 function appendTimeline(
@@ -1501,6 +1508,7 @@ function mergeStreamMessageDuplicate(existing: StreamMessage, candidate: StreamM
     ...existing,
     ...preferred,
     id: existing.id,
+    intellectUiMessageId: existing.intellectUiMessageId ?? existing.id,
     text: preferred.text.trim() ? preferred.text : existing.text || candidate.text,
     goalResult: mergeGoalResults(existing.goalResult, candidate.goalResult),
     ...(preferred.durableMessageId || existing.durableMessageId || candidate.durableMessageId
@@ -1600,6 +1608,9 @@ function reconcileTranscriptSnapshot(
   optimisticIds: ReadonlySet<string> = new Set<string>(),
 ): StreamMessage[] {
   if (current.some((message) => message.busy || message.streaming)) return current;
+  const uiOwners = new Map(current.filter(message => message.role === "agent").flatMap(message =>
+    [message.id, ...(message.durableMessageId ? [message.durableMessageId] : [])]
+      .map(id => [id, message.intellectUiMessageId ?? message.id] as const)));
   const signature = (message: StreamMessage) => `${message.role}\u0000${message.text.trim()}`;
   // History rows intentionally store only the assistant text. Preserve the
   // rich tool steps and host notices that arrived live when a terminal
@@ -1648,6 +1659,9 @@ function reconcileTranscriptSnapshot(
           ...(canonicalLive?.activityRuns?.length ? { activityRuns: canonicalLive.activityRuns } : {}),
         }
       : message;
+    }).map(message => {
+      const uiIdentity = uiOwners.get(message.id) ?? (message.durableMessageId ? uiOwners.get(message.durableMessageId) : undefined);
+      return message.role === "agent" && uiIdentity ? { ...message, intellectUiMessageId: uiIdentity } : message;
     });
   const durableIndexById = new Map(durableWithRichSteps.map((message, index) => [message.id, index]));
   // Anchor at the newest row both snapshots genuinely share. Comparing every
@@ -2929,7 +2943,7 @@ function ChatPage() {
     restorePreferredRightPanelWidth();
     writeRightPanelPreference(false, rightPanelTab);
   }, [restorePreferredRightPanelWidth, rightPanelTab]);
-  const openWorkspaceFilePreview = useCallback(async (preview: WorkspaceFilePreview) => {
+  const openWorkspaceFilePreview = useCallback(async (preview: WorkspaceFilePreview, presentation: "open" | "observe" = "open") => {
     if (!isCurrentChat()) return;
     const requestChatId = chatId;
     let next = preview;
@@ -2961,7 +2975,7 @@ function ChatPage() {
     setSurface(null);
     setArtifact(null);
     setMediaPreview(next);
-    openPanelTab("panel");
+    if (presentation === "open") openPanelTab("panel");
     const shouldReadText =
       api &&
       Boolean(requestChatId) &&
@@ -3002,8 +3016,8 @@ function ChatPage() {
 
   // Restore the latest rich result when a conversation is reopened. The
   // transcript is durable, so this also covers route changes and app restarts
-  // where the live completion event is no longer available. A user close is
-  // respected until a different output key arrives.
+  // where the live completion event is no longer available. Observing a new
+  // output never overrides the person's explicit rail visibility choice.
   const autoPresentedWorkspaceOutputRef = useRef<string | null>(null);
   useEffect(() => {
     if (!chatId || hydratedChatId !== chatId || busy || linkedOutputFiles.length === 0) return;
@@ -3015,7 +3029,7 @@ function ChatPage() {
     const key = `${chatId}\u0000${candidate.viewerKind}\u0000${candidate.path || candidate.fileUrl}`;
     if (autoPresentedWorkspaceOutputRef.current === key) return;
     autoPresentedWorkspaceOutputRef.current = key;
-    void openWorkspaceFilePreview(candidate);
+    void openWorkspaceFilePreview(candidate, "observe");
   }, [busy, chatId, hydratedChatId, linkedOutputFiles, openWorkspaceFilePreview]);
   const openLinkedFile = useCallback((file: LinkedFileArtifact) => {
     void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(file));
@@ -3399,7 +3413,6 @@ function ChatPage() {
         const screenMode = computerUseModeForTool(ev.tool.name);
         if (screenMode) {
           setAgentScreen({ mode: screenMode });
-          openPanelTab("panel");
         }
         for (const text of [ev.tool.result, ev.tool.args]) {
           if (!text) continue;
@@ -3469,7 +3482,6 @@ function ChatPage() {
           if (!isCurrentChat() || !record || record.chatId !== chatId) return;
           setSurface((current) => current?.id === record.id ? record : current);
         }).catch(() => { /* Remains read-only until its revision handshake succeeds. */ });
-        openPanelTab("panel");
         transcriptRevisionRef.current += 1;
         setMessages((m) =>
           m.map((msg) =>
@@ -3553,13 +3565,14 @@ function ChatPage() {
           return [
             {
               id: `turn:${committedId}`,
+              intellectUiMessageId: msg.intellectUiMessageId ?? msg.id,
               role: msg.role,
               text: msg.text,
               durableMessageId: committedId,
               createdAt: new Date().toISOString(),
               ...(msg.goalResult ? { goalResult: msg.goalResult } : {}),
             },
-            { ...msg, text: "", questions: undefined },
+            { ...msg, text: "", questions: undefined, intellectUiMessageId: `ui:${uid()}` },
           ];
         }));
       } else if (ev.kind === "partial") {
@@ -3715,12 +3728,10 @@ function ChatPage() {
           setSurface(null);
           setArtifact(null);
           setMediaPreview(autoImage);
-          openPanelTab("panel");
         } else if (autoMedia) {
           setSurface(null);
           setArtifact(null);
           setMediaPreview(workspacePreviewFromMedia(autoMedia));
-          openPanelTab("panel");
         } else {
           // A runnable local web result is the thing the user wants to inspect,
           // not merely its source file. Keep it in this BrowserWindow's right
@@ -3729,10 +3740,10 @@ function ChatPage() {
           const liveUrl = localServerUrlsInText(resultText).map(normalizeLocalServerUrl)[0]
             ?? runServerUrlsRef.current[0];
           if (liveUrl) {
-            void openWorkspaceFilePreview(workspacePreviewFromLocalServer(liveUrl));
+            void openWorkspaceFilePreview(workspacePreviewFromLocalServer(liveUrl), "observe");
           } else {
             const produced = linkedFileArtifactsInText(resultText, mediaBasePaths)[0];
-            if (produced) void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(produced));
+            if (produced) void openWorkspaceFilePreview(workspacePreviewFromLinkedFile(produced), "observe");
           }
         }
         // 첫 메시지였으면 main이 자동 제목 생성 → 갱신해서 사이드바도 반영
@@ -4169,10 +4180,11 @@ function ChatPage() {
           : Promise.resolve([]),
       ])
         .then(async ([history, committedReplies, receipt, chatTimeline]) => {
-          if (cancelled) return;
+          if (cancelled || !isCurrentChat()) return;
           const ledgerEvents = receipt && receipt.status !== "running" && receipt.status !== "cancelling"
             ? await api.runLedger.events(receipt.runId, 500).catch(() => [])
             : [];
+          if (cancelled || !isCurrentChat()) return;
           const mcpSteps = mcpStepsFromLedger(ledgerEvents);
           if (
             requestedFocusMessageId
@@ -4200,6 +4212,7 @@ function ChatPage() {
           const restoredMessages = appendReceiptRecovery(historyWithMcp, recovery);
           setHydratedChatId(chatId);
           setMessages((current) => {
+            if (cancelled || !isCurrentChat()) return current;
             if (transcriptRevisionRef.current !== hydrationRevision) return current;
             const hasLiveDraft = current.some((msg) => msg.busy || msg.streaming);
             // History and the redacted run ledger are separate reads. If the
@@ -4214,8 +4227,8 @@ function ChatPage() {
             return [...restored, ...current.filter(message => pendingIds.has(message.id) && !ids.has(message.id))];
           });
         }).catch(() => {
-          if (!cancelled) setHydratedChatId(chatId);
-          if (cancelled) return;
+          if (cancelled || !isCurrentChat()) return;
+          setHydratedChatId(chatId);
           /*
            * ★대화를 못 읽었는데 화면이 **아무 말도 안 했다** (실측 2026-09-08).
            *   그러면 빈 대화와 구별되지 않아 사용자는 자기 기록이 사라진 줄 안다.
@@ -5797,7 +5810,7 @@ function ChatPage() {
             // The generated index is a real HTML output. Keep it in the same
             // BrowserWindow and hydrate it through the existing browser viewer
             // instead of handing it to Finder/Chrome.
-            void openWorkspaceFilePreview(workspacePreviewFromLocalFile(result.indexPath));
+            void openWorkspaceFilePreview(workspacePreviewFromLocalFile(result.indexPath), "observe");
             setFolderReload((n) => n + 1);
             return;
           }
@@ -6095,16 +6108,21 @@ function ChatPage() {
         router.replace(`/workspace/task?id=${chatId}`);
         return;
       }
-      if (seedPermission === "full" && !confirmFullPermissionFromUrl(locale)) {
+      void (async () => {
+        const allowed = seedPermission !== "full" || await confirmFullPermissionFromUrl(locale);
+        // An asynchronous choice must never start the previous chat after navigation.
+        if (!isCurrentChat()) return;
+        if (!allowed) {
+          router.replace(`/workspace/task?id=${chatId}`);
+          return;
+        }
+        void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION }).then((accepted) => {
+          if (accepted && promptStartIntent) completePromptStartIntent(promptStartIntent);
+        });
         router.replace(`/workspace/task?id=${chatId}`);
-        return;
-      }
-      void send(seedPrompt, { permissions: seedPermission ?? DEFAULT_PERMISSION }).then((accepted) => {
-        if (accepted && promptStartIntent) completePromptStartIntent(promptStartIntent);
-      });
-      router.replace(`/workspace/task?id=${chatId}`);
+      })();
     }
-  }, [chat, agent, chatId, locale, messages.length, send, router, searchParams]);
+  }, [chat, agent, chatId, locale, messages.length, send, router, searchParams, isCurrentChat]);
 
   useEffect(
     () =>
@@ -6242,8 +6260,12 @@ function ChatPage() {
         : "You cannot delete a running task. Stop it and wait for the run to finish first.");
       return;
     }
-    if (!confirm(locale === "ko" ? "이 작업을 삭제할까요?" : "Delete this task?")) return;
     const removedId = chat.id;
+    const confirmed = await confirmPopup(taskTitleForDisplay(chat.title, locale === "ko"), {
+      locale, tone: "danger", title: locale === "ko" ? "작업 삭제" : "Delete task",
+      confirmLabel: locale === "ko" ? "삭제" : "Delete",
+    });
+    if (!confirmed || !isCurrentChat() || currentChatIdRef.current !== removedId) return;
     try {
       // Main이 active-run registry를 다시 확인한다. 삭제가 실제로 끝난 뒤에만 화면의
       // 로컬 사본을 비워서 거절된 삭제가 빈 화면으로 보이지 않게 한다.
@@ -6275,6 +6297,15 @@ function ChatPage() {
   // 아래 값들이 렌더마다 새 참조(인라인 화살표·객체 리터럴)로 내려가면 memo(Bubble)가
   // 무력화돼 파셜(초당 최대 ~16회)마다 모든 말풍선·ChatInput·우측 패널이 다시 그려진다.
   // 조건부 return보다 앞(훅 구역)에서 참조를 고정한다.
+  const handleUiFollowup = useCallback((prompt: string) => {
+    if (!chatId || busy || cancelPending || !agent) return false;
+    setBrowserDraftRequest({ id: `ui:${crypto.randomUUID()}`, chatId, text: prompt });
+    return true;
+  }, [chatId, busy, cancelPending, agent]);
+  const handleMessageReply = useCallback((reply: MessageReply) => {
+    setMessageReply(reply);
+    document.querySelector<HTMLTextAreaElement>('[data-tour-id="workspace.input"] textarea')?.focus();
+  }, []);
   const pickerAgents = useMemo(() => visibleAgents(allAgents, { includeTeams: true }), [allAgents]);
   const boundTeamMember = useMemo(
     () => (agent && agent.visibility === "background" && agent.parentTeamId ? agent : null),
@@ -6495,6 +6526,7 @@ function ChatPage() {
         setSessionNotice(ko ? `목표를 이어가지 못했습니다. ${explained}` : `The goal was not resumed. ${explained}`);
       });
   }, [chat, goalContext?.version, locale]);
+  const handleChatInputResumeGoal = useCallback(() => handleResumeGoal(), [handleResumeGoal]);
   const handleEditGoal = useCallback(async (objective: string): Promise<boolean> => {
     if (!chat || !goalContext?.version || !goalContext.goalRevision) return false;
     try {
@@ -7169,8 +7201,9 @@ function ChatPage() {
       <div data-tour-id="workspace.chat" style={{ minHeight: 0, minWidth: 0, width: "100%", flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
         <ChatStream
           artifactChatId={chatId || undefined}
+          onUiFollowup={handleUiFollowup}
           messages={messages}
-          onReply={reply => { setMessageReply(reply); document.querySelector<HTMLTextAreaElement>('[data-tour-id="workspace.input"] textarea')?.focus(); }}
+          onReply={handleMessageReply}
           onInspectWorker={inspectWorkerPanel}
           agentName="Agentlas"
           agentTone={displayAgent?.tone ?? "blue"}
@@ -7415,7 +7448,7 @@ function ChatPage() {
           goalPauseReason={goalContext?.pauseReason}
           goalBlockedReason={goalContext?.blockedReason}
           goalStatusStale={goalContextStale}
-          onResumeGoal={() => handleResumeGoal()}
+          onResumeGoal={handleChatInputResumeGoal}
           onPauseGoal={handlePauseGoal}
           onEditGoal={handleEditGoal}
           goalBarPlacement="none"
@@ -7451,7 +7484,6 @@ function ChatPage() {
         browserScopeKey={chatId || undefined}
         browserHistoryUrl={workBrowserHistoryUrl}
         browserPreviewUrl={mediaPreview?.viewerKind === "browser" ? mediaPreview.browserUrl : undefined}
-        onBrowserObserved={() => openPanelTab("panel")}
         result={(
           <WorkRailResult
             artifact={artifact}

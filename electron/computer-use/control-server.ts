@@ -1,3 +1,5 @@
+import { captureOneContextExecution } from "../one/context-platform";
+import { configuredOneOsLeaseBroker, oneOsLeaseBroker, markOneOsHostAvailable } from "../one/context-lease";
 import { handleNativeGuestComputerUse, revokeNativeGuestComputerUseScopes } from "./native-guest";
 import http from "node:http";
 import fs from "node:fs";
@@ -55,6 +57,7 @@ const observations = new Map<string, {
   app: string;
   expiresAt: number;
   refs: NativeElementReference[];
+  frames: Array<{x:number;y:number;width:number;height:number}|undefined>;
 }>();
 
 function pruneObservations(now = Date.now()): void {
@@ -80,6 +83,7 @@ function serializeObservation(app: string, observation: NativeAppObservation): R
     app,
     expiresAt: Date.now() + OBSERVATION_TTL_MS,
     refs: observation.elements.map((element) => element.ref),
+    frames: observation.elements.map((element) => element.frame),
   });
   return {
     ok: true,
@@ -168,6 +172,11 @@ function recordAudit(action: string, result: NativeInputResult, textLength?: num
   }
 }
 
+function osFailure(error: unknown): NativeInputResult { return {ok:false,error:error && typeof error === "object" && "code" in error ? String(error.code) : "one-os-authority-unavailable"}; }
+async function observationAuthority(body:Record<string,unknown>):Promise<{assertCurrent():void;binding?:import("../one/context-lease").OneOsExecutionBinding}> {
+  if(body.oneOsExecution!==undefined)return oneOsLeaseBroker().authorizeObservation(body.oneOsExecution,{appTarget:typeof body.app==="string"?body.app:undefined,sourceId:typeof body.sourceId==="string"?body.sourceId:undefined});
+  return {assertCurrent:()=>{if(configuredOneOsLeaseBroker()?.snapshot().state==="held")throw Object.assign(new Error("one-os-resource-busy"),{code:"one-os-resource-busy"});}};
+}
 function safeString(value: unknown, max: number): string | null {
   return typeof value === "string" && value.length > 0 && value.length <= max ? value : null;
 }
@@ -196,7 +205,9 @@ async function observeApp(body: Record<string, unknown>): Promise<Record<string,
   }
   const denied = await checkComputerUseWindowScope({ route: "observe", app });
   if (denied) { recordAudit("observeApp", denied as NativeInputResult); return denied; }
+  let authority;try {authority=await observationAuthority(body);authority.assertCurrent();}catch(error){return osFailure(error) as unknown as Record<string,unknown>;}
   const result = await invokeNativeInputDriver({ action: "observeApp", app, maxDepth, maxNodes });
+  try {authority.assertCurrent();}catch(error){return osFailure(error) as unknown as Record<string,unknown>;}
   recordAudit("observeApp", result);
   if (!result.ok || !result.observation) return result as unknown as Record<string, unknown>;
   return serializeObservation(app, result.observation);
@@ -274,13 +285,6 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
     observedElement = { observationId, ref };
   }
   let targetPid: number | undefined;
-  if (appName && action !== "focusApp" && action !== "listApps" && action !== "status") {
-    const focused = await invokeNativeInputDriver({ action: "focusApp", app: appName });
-    recordAudit("focusApp", focused);
-    if (!focused.ok) return focused;
-    if (typeof focused.pid === "number" && Number.isInteger(focused.pid) && focused.pid > 0) targetPid = focused.pid;
-    if (action !== "elementAction") await new Promise((resolve) => setTimeout(resolve, 280));
-  }
 
   let request: NativeInputAction | null = null;
   switch (action) {
@@ -371,7 +375,7 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
       };
       // Every supported element operation can mutate state. Consume the opaque
       // observation before dispatch so retries cannot replay a stale element.
-      observations.delete(observedElement.observationId);
+      // Consumed immediately before the leased dispatch below.
       break;
     }
     case "key": {
@@ -403,12 +407,41 @@ async function runAction(body: Record<string, unknown>): Promise<NativeInputResu
     }
     return { ok: false, error: "invalid-arguments", message: "Computer Use action arguments were rejected." };
   }
-  // App labels can alias the same process (localized name, bundle id, pid).
-  // Conservatively invalidate every host observation after any mutation.
-  if (action !== "status" && action !== "listApps" && action !== "move") observations.clear();
-  const result = await invokeNativeInputDriver(request);
-  recordAudit(action, result, action === "typeText" && typeof body.text === "string" ? body.text.length : undefined);
-  return result;
+  let lease: {checkpoint():Promise<void>;release():void}|undefined;
+  let actionTarget:import("../one/context-lease").OneOsActionTarget|undefined;
+  try {
+    if(action!=="status" && action!=="listApps") {
+      const broker=configuredOneOsLeaseBroker();
+      if(body.oneOsExecution!==undefined) {
+        if(!appName)return {ok:false,error:"one-os-action-target-required"};
+        const points=[mapPoint(body),mapPoint(body,"from_"),mapPoint(body,"to_")].filter((point):point is Point=>point!==null);
+        const frame=action==="elementAction" && observedElement ? observations.get(observedElement.observationId)?.frames[Number(body.element_index)] : undefined;
+        if(action==="elementAction"&&oneOsLeaseBroker().hasContextGrant(body.oneOsExecution)&&!frame)return {ok:false,error:"one-os-element-frame-unavailable"};
+        // Explicit focus tool or an owner-selected interaction scope may activate its exact target.
+        actionTarget={appTarget:appName,allowFocus:action==="focusApp" || oneOsLeaseBroker().hasContextGrant(body.oneOsExecution),sourceId:typeof body.sourceId==="string"?body.sourceId:undefined,points,...(frame?{elementFrame:frame}:{})};
+        lease=await oneOsLeaseBroker().acquireForAction(body.oneOsExecution,actionTarget);
+      } else if(broker)lease=broker.acquireLegacyAction();
+      await lease?.checkpoint();
+      if(appName && action!=="focusApp" && (body.oneOsExecution===undefined || actionTarget?.allowFocus)) {
+        const focused=await invokeNativeInputDriver({action:"focusApp",app:actionTarget?.resolvedPid?`pid:${actionTarget.resolvedPid}`:appName,...(actionTarget?{windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs}:{})});
+        if(actionTarget)actionTarget.allowFocus=false;
+        await lease?.checkpoint();recordAudit("focusApp",focused);if(!focused.ok)return focused;
+        if(typeof focused.pid==="number"&&Number.isInteger(focused.pid)&&focused.pid>0)targetPid=focused.pid;
+        if(request.action==="typeText"||request.action==="selectText")request={...request,...(targetPid?{targetPid}:{})};
+        if(action!=="elementAction")await new Promise(resolve=>setTimeout(resolve,280));
+      }
+    } else if(body.oneOsExecution!==undefined) { const authority=await observationAuthority(body);authority.assertCurrent(); }
+    await lease?.checkpoint();
+    if(action!=="status"&&action!=="listApps"&&action!=="move")observations.clear();
+    if(request.action==="focusApp" && actionTarget)request={...request,app:`pid:${actionTarget.resolvedPid}`,windowId:actionTarget.resolvedWindowId,processStartMs:actionTarget.resolvedProcessStartMs};
+    const result=await invokeNativeInputDriver(request);
+    if(actionTarget?.allowFocus){actionTarget.allowFocus=false;await lease?.checkpoint();}
+    // Revocation cannot persist audit/history after native work returns.
+    if(body.oneOsExecution!==undefined)oneOsLeaseBroker().assertExecutionCurrent(body.oneOsExecution);
+    recordAudit(action,result,action==="typeText"&&typeof body.text==="string"?body.text.length:undefined);
+    return result;
+  } catch(error) {return osFailure(error);} finally {lease?.release();}
+
 }
 
 function writePrivateInfoFile(): void {
@@ -470,7 +503,10 @@ export function startComputerUseControlServer(): Promise<number> {
         }
         if (req.url === "/capture") {
           const sourceId = typeof body.sourceId === "string" ? body.sourceId.slice(0, 256) : undefined;
-          void captureComputerUsePreview(sourceId).then((preview) => {
+          void observationAuthority(body).then(async authority=>{
+            authority.assertCurrent();
+            const preview=authority.binding?.contextGrantId ? await captureOneContextExecution(authority.binding) : await captureComputerUsePreview(sourceId);
+            authority.assertCurrent();
             for (const source of preview.sources) {
               if (source.bounds && source.width > 0 && source.height > 0) {
                 sourceGeometries.set(source.id, {
@@ -499,7 +535,7 @@ export function startComputerUseControlServer(): Promise<number> {
              */
             let savedPath: string | null = null;
             try {
-              savedPath = saveScreenCaptureArtifact(preview.dataUrl);
+              if(!authority.binding?.contextGrantId){authority.assertCurrent();savedPath = saveScreenCaptureArtifact(preview.dataUrl);}
             } catch {
               // 증거 파일을 못 남겨도 에이전트는 화면을 받아야 한다.
             }
@@ -507,16 +543,15 @@ export function startComputerUseControlServer(): Promise<number> {
               // Computer History has a separate, explicit-consent retention
               // policy. General CUA evidence remains governed by its own 300-file
               // cap; only an opted-in capture receives the seven-day local copy.
-              recordComputerHistoryCapture(preview.dataUrl);
+              if(!authority.binding?.contextGrantId){authority.assertCurrent();recordComputerHistoryCapture(preview.dataUrl);}
             } catch {
               // 보관은 동의 기반 부가 기능이다 — 실패해도 캡처를 삼키지 않는다.
             }
+            authority.assertCurrent();
             writeJson(res, 200, { ok: true, preview: savedPath ? { ...preview, savedPath } : preview });
-          }, () => {
-            writeJson(res, 500, { ok: false, error: "capture-failed" });
-          }).catch(() => {
+          }).catch((error) => {
             // 여기까지 왔다면 응답 쓰기 자체가 실패한 것이다. 그래도 매달아 두지 않는다.
-            try { writeJson(res, 500, { ok: false, error: "capture-failed" }); } catch { /* 소켓이 이미 닫혔다 */ }
+            try { writeJson(res, 409, osFailure(error)); } catch { /* 소켓이 이미 닫혔다 */ }
           });
           return;
         }
@@ -562,6 +597,7 @@ export function startComputerUseControlServer(): Promise<number> {
         server = null;
         boundPort = 0;
       }
+      markOneOsHostAvailable(boundPort>0);
       resolve(boundPort);
     });
   });
@@ -571,6 +607,7 @@ export function startComputerUseControlServer(): Promise<number> {
 }
 
 export function stopComputerUseControlServer(): void {
+  markOneOsHostAvailable(false); configuredOneOsLeaseBroker()?.suspend("one-os-host-unavailable");
   generation++; starting = null; revokeNativeGuestComputerUseScopes();
   if (server) {
     try { server.close(); } catch { /* ignore */ }

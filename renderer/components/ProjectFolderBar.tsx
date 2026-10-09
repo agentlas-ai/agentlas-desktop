@@ -3,6 +3,7 @@
 // 없으면 전역 대화로 파일 작업 안 함)를 한눈에 보여주고 바꾼다.
 // 폴더 선택/해제는 working_folder(IPC, api.workspace.set/get)에 저장 → 러너 cwd로 직결(#4).
 "use client";
+import popupMenu from "./PanelPopover.module.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
@@ -154,16 +155,16 @@ export function ProjectFolderBar({ chatId, onChanged, onOpenPanel, reloadToken }
 
       {open && (
         <div
-          role="menu"
+          className={popupMenu.panelPopover} role="menu"
           style={{
             position: "absolute",
             bottom: "calc(100% + 6px)",
             left: 0,
             minWidth: 248,
-            background: "var(--paper)",
+            background: "var(--popup-card-bg)",
             border: "1px solid var(--paper-edge)",
             borderRadius: "var(--radius-md)",
-            boxShadow: "var(--shadow-2)",
+            boxShadow: "var(--popup-shadow)",
             padding: 6,
             zIndex: 40,
           }}

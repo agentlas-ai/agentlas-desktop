@@ -8,7 +8,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import { createHash } from "node:crypto";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, RuntimeTurnUnsettledError } from "./runner";
 import { cumulativeSurfaceGateText, wrapSystemPrompt } from "./runner";
 import {
   CLI_HISTORY_CONTEXT_TOKENS,
@@ -434,21 +434,20 @@ export const runKimi: Runner = async (req, events): Promise<RunnerResult> => {
       }
     }
     events.onStatus(`[runtime-session] ${resumeSessionId ? "resumed" : "created"} kind=${KIND}`);
-    return { text: result.text || (runReq.locale === "ko" ? "Kimi Code가 빈 응답을 반환했습니다." : "Kimi Code returned an empty response."), sessionId: nextSessionId };
+    // Legacy print JSONL contains assistant/tool messages, but no per-turn
+    // terminal proof. ACP supplies that proof on the preferred Kimi path.
+    return { text: result.text || (runReq.locale === "ko" ? "Kimi Code가 빈 응답을 반환했습니다." : "Kimi Code returned an empty response."),
+      sessionId: nextSessionId, ownerControlTerminal: "uncertain" };
   }
 
-  if (resumeSessionId && runReq.unattended) {
-    throw new Error("Automation runtime session resume failed for kimi; refusing to create a fresh CLI session.");
-  }
-  if (resumeSessionId && runReq.chatId) {
-    // Interactive recovery preserves the same Agentlas chat and seeds a fresh
-    // provider session from its complete durable history.
-    clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });
-    events.onStatus(runReq.locale === "ko" ? "대화 기록을 그대로 유지해 다시 연결하는 중..." : "Reconnecting while preserving this conversation...");
-    return runKimi({ ...runReq, runtimeSessionId: undefined }, events);
-  }
   if (/no model configured|login|auth|unauthori[sz]ed|forbidden/i.test(result.stderr)) {
     await clearConnectionReceipt();
   }
-  throw new Error(`Kimi Code exit ${result.code ?? "unknown"}${result.stderr ? `\n${result.stderr.slice(0, 500)}` : ""}`);
+  // Dispatch already happened. Neither exit failure nor a missing terminal
+  // frame proves that the resumed request made no model/tool call.
+  const error = new RuntimeTurnUnsettledError(KIND, runReq.locale);
+  return { text: result.text, sessionId: result.sessionId ?? resumeSessionId ?? undefined,
+    ownerControlTerminal: "uncertain", failure: { kind: "exit", runtime: KIND, source: "marker",
+      providerCode: error.code, ...(result.code != null ? { exitCode: result.code } : {}),
+      message: `${error.message}${result.stderr ? `\n${result.stderr.slice(0, 500)}` : ""}` } };
 };

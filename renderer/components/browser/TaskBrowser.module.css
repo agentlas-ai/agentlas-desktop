@@ -64,3 +64,7 @@
 .importAction { padding:6px 8px; color:var(--accent,#615bcb); background:color-mix(in srgb,var(--accent,#615bcb) 8%,transparent); font:inherit; font-weight:550; }
 .importDismiss { display:grid; place-items:center; padding:4px; color:var(--muted-deep,#777); background:transparent; }
 @media(max-width:520px) { .importBanner { flex-wrap:wrap; gap:6px; padding:8px 10px; } .importBanner>span { flex:1 1 100%; } .importBannerSpace { padding:6px 8px; } }
+.controlPopover { border:1px solid var(--paper-edge); border-radius:15px; background:var(--paper); color:var(--ink); box-shadow:var(--popup-shadow,0 18px 48px #20312424,0 3px 12px #2031240d); }
+.popupIcon { display:grid; place-items:center; flex:none; width:29px; height:29px; border-radius:9px; background:var(--popup-sage,var(--paper-2)); color:var(--ink-soft); }
+.popupHeading { display:flex; align-items:center; gap:9px; }
+.popupEmpty { display:flex; flex-direction:column; align-items:center; justify-content:center; gap:9px; min-height:108px; }

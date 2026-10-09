@@ -1,4 +1,5 @@
 import { contextBridge, ipcRenderer } from "electron";
+import type { UpdateScienceProjectDeliverableInput, UpdateScienceProjectDeliverableResult } from "agentlas-science";
 
 const extensionId = process.argv
   .find((argument) => argument.startsWith("--agentlas-extension-id="))
@@ -84,6 +85,8 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
     get: (projectId: string) => ipcRenderer.invoke("science:projects:get", { extensionId, projectId }),
     updateRelatedDomains: (input: unknown) => ipcRenderer.invoke("science:projects:updateRelatedDomains", { extensionId, input }),
     updateOutputLanguage: (input: unknown) => ipcRenderer.invoke("science:projects:updateOutputLanguage", { extensionId, input }),
+    updateDeliverable: (input: UpdateScienceProjectDeliverableInput): Promise<UpdateScienceProjectDeliverableResult> =>
+      ipcRenderer.invoke("science:projects:updateDeliverable", { extensionId, input }),
     discoverData: (input: unknown) => ipcRenderer.invoke("science:projects:discoverData", { extensionId, input }),
     activate: (projectId: string) => ipcRenderer.invoke("science:projects:activate", { extensionId, input: { projectId } }),
     refreshData: (input: unknown) => ipcRenderer.invoke("science:projects:refreshData", { extensionId, input }),
@@ -160,6 +163,11 @@ contextBridge.exposeInMainWorld("agentlasScience", Object.freeze({
   evidence: Object.freeze({
     get: (projectId: string, evidenceId: string) => ipcRenderer.invoke("science:evidence:get", { extensionId, projectId, evidenceId }),
     getMany: (projectId: string, evidenceIds: string[]) => ipcRenderer.invoke("science:evidence:getMany", { extensionId, projectId, evidenceIds }),
+  }),
+  projectSpace: Object.freeze({
+    inspect: (projectId: string, options: unknown = {}) => ipcRenderer.invoke("science:projectSpace:inspect", { extensionId, input: { projectId, options } }),
+    snapshot: (projectId: string) => ipcRenderer.invoke("science:projectSpace:snapshot", { extensionId, input: { projectId } }),
+    link: (projectId: string, link: unknown) => ipcRenderer.invoke("science:projectSpace:link", { extensionId, input: { projectId, link } }),
   }),
   evidenceGraph: Object.freeze({
     get: (projectId: string) => ipcRenderer.invoke("science:evidenceGraph:get", { extensionId, projectId }),

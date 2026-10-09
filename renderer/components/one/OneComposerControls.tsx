@@ -87,10 +87,10 @@ type Props = {
 };
 
 const permissionOptions: Array<{ id: OnePermissionMode; ko: string; en: string; descriptionKo: string; descriptionEn: string }> = [
-  { id: "auto", ko: "자동 모드", en: "Auto mode", descriptionKo: "대화는 읽기로, 작업은 파일 편집으로 실행하고 적용 권한을 Activity에 기록합니다", descriptionEn: "Conversations use read access; task work allows file edits. Activity records the effective mode" },
-  { id: "read", ko: "읽기 전용", en: "Read only", descriptionKo: "파일이나 외부 상태를 바꾸지 않습니다", descriptionEn: "Does not change files or external state" },
-  { id: "write", ko: "파일 편집", en: "Accept file edits", descriptionKo: "현재 작업 폴더의 파일 편집을 허용합니다", descriptionEn: "Allows edits in the current workspace" },
-  { id: "full", ko: "전체 액세스", en: "Full access", descriptionKo: "모든 로컬 파일, 명령, 네트워크와 도구 실행을 허용합니다", descriptionEn: "Allows all local files, commands, network, and tools" },
+  { id: "auto", ko: "자동 모드", en: "Auto mode", descriptionKo: "대화: 읽기 · 작업: 편집 · Activity 기록", descriptionEn: "Chat: read · Work: edit · Activity records access" },
+  { id: "read", ko: "읽기 전용", en: "Read only", descriptionKo: "파일·외부 변경 없음", descriptionEn: "No file or external changes" },
+  { id: "write", ko: "파일 편집", en: "Accept file edits", descriptionKo: "현재 폴더 편집", descriptionEn: "Edit this workspace" },
+  { id: "full", ko: "전체 액세스", en: "Full access", descriptionKo: "파일 · 명령 · 네트워크 · 도구", descriptionEn: "Files · Commands · Network · Tools" },
 ];
 
 export function OneComposerControls({
@@ -311,8 +311,8 @@ export function OneComposerControls({
             {activeMenu === "effort" && (
               <>
                 <ComposerRow icon={<IconRoute size={15} />} title={locale === "ko" ? "기본" : "Default"} checked={!runtime?.effort} onClick={() => onSelectEffort("")} />
-                {efforts.map((item) => (
-                  <ComposerRow key={item.id} icon={<IconRoute size={15} />} title={item.label} checked={runtime?.effort === item.id} onClick={() => onSelectEffort(item.id)} />
+                {efforts.map((item, index) => (
+                  <ComposerRow key={item.id} icon={<span className={styles.effortBars} aria-hidden="true">{[0, 1, 2, 3].map(bar => <i key={bar} data-filled={bar <= Math.round(index * 3 / Math.max(1, efforts.length - 1)) ? "true" : "false"} />)}</span>} title={item.label} checked={runtime?.effort === item.id} onClick={() => onSelectEffort(item.id)} />
                 ))}
               </>
             )}
@@ -330,7 +330,6 @@ export function OneComposerControls({
                 subtitle={locale === "ko" ? item.descriptionKo : item.descriptionEn}
                 dataPermission={item.id}
                 checked={permission === item.id}
-                compactDetails
                 onClick={() => onSelectPermission(item.id)}
               />
             ))}
@@ -339,7 +338,7 @@ export function OneComposerControls({
               <ComposerRow
                 icon={<IconCheck size={15} />}
                 title={locale === "ko" ? "항상 승인" : "Always approve"}
-                subtitle={locale === "ko" ? "이 대화의 승인 요청을 자동으로 허용합니다" : "Automatically allow approval requests in this conversation"}
+                subtitle={locale === "ko" ? "이 대화의 요청 자동 승인" : "Auto-approve requests in this chat"}
                 checked={alwaysApproval.enabled}
                 toggle
                 disabled={!alwaysApproval.available || alwaysApproval.pending}

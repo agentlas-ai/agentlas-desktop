@@ -85,3 +85,5 @@
 .described { display: grid; gap: 4px; }
 .described strong { font-size: 10.5px; font-weight: 650; color: var(--muted-deep); }
 .described p { margin: 0; font-size: 12px; line-height: 1.45; color: var(--ink); display: -webkit-box; -webkit-line-clamp: 4; -webkit-box-orient: vertical; overflow: hidden; }
+
+.tooltip { border-radius: 12px; box-shadow: var(--popup-shadow); background: var(--popup-card-bg, var(--paper)); }

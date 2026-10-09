@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.2.83 — 2026-10-09
+
+- Open One in its own window and tray, with durable Supervisor work, results, questions, approvals, follow-up and Stop controls.
+- Preserve the reading anchor in long and sliding transcripts, restore stream following in short histories, and keep newer follow-up edits when an older action settles.
+- Select completed work within checked task, run and receipt identity boundaries, including malformed non-text receipt identifiers.
+- Improve native invocation ownership and browser preparation recovery, Intellect labels and isolated plugin materialization; retain the locked UI dependency graph.
+
+This release binds Agentlas OS v1.2.58 at 33c1e1fe1587aa2e5c9725745e312d5b88c26004; public runtime asset `hephaestus-runtime-v1.2.58.tar.gz` is pinned at SHA-256 `49fda64fc20b0a3396b522c23f29a94bcf29f590cf8baaedab8e77d3d84f854a`.
+
+Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.82 — 2026-10-08
 
 - Manage each agent’s role, tools, model and approved reusable experience in Agent Workspace. Keep revision and approval authority explicit across Desktop and Mobile.

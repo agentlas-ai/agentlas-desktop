@@ -1935,6 +1935,21 @@ function snapshotRefShapedQuery(args) {
 }
 function browserFindArgumentFailure(name, args) {
   if (name !== 'browser_find') return null;
+  // Preserve the bundled tool's argument contract before dispatch. A wrong
+  // query key is an input error, not a failed native browser capability.
+  const input = args && typeof args === 'object' ? args : {};
+  const missing = !input.text && !input.regex;
+  const ambiguous = input.text && input.regex;
+  if (missing || ambiguous) return {
+    content: [{ type: 'text', text: missing
+      ? 'Provide either "text" or "regex" to search for. The tool call was not dispatched.'
+      : 'Provide only one of "text" or "regex", not both. The tool call was not dispatched.' }],
+    isError: true,
+    _meta: {
+      agentlasToolDispatch: 'not-dispatched',
+      agentlasFailureCode: missing ? 'browser_find_query_required' : 'browser_find_query_ambiguous',
+    },
+  };
   const ref = snapshotRefShapedQuery(args);
   if (!ref) return null;
   return {

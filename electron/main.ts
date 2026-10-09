@@ -1,4 +1,7 @@
+import { initializeOneContext } from "./one/context-platform";
+import { getOneProfile } from "./store/one-profile";
 import { configureOneSupervisorScience } from "./one/supervisor";
+import { configureMobileScienceChatClient } from "./mobile-bridge/science-chat";
 import { reviewScienceAnalysisPlanWithFreshness } from "agentlas-science";
 // Electron 진입점.
 // dev:  ELECTRON_START_URL = http://localhost:3100 (Next.js dev server)
@@ -39,15 +42,16 @@ import {
   resolveInstallIdentity,
   type InstallIdentity,
 } from "./install-identity";
-import { registerIpcHandlers, assertTrustedSitePublishIpcSender, recoverRendererPreflightSteers } from "./ipc";
+import { registerIpcHandlers, assertTrustedSitePublishIpcSender, recoverRendererPreflightSteers, authorizeNativeGuiRenderer, initializeNativeGuiInvocationOwner } from "./ipc";
 import { LocalModelHubManager } from "./local-model-hub/manager";
 import { configureLocalModelHubManager, configureLocalModelRuntime } from "./local-model-hub/runtime-adapter";
 import { createLocalModelDaemonClient } from "./local-model-hub/daemon-client";
 import { createOllamaMigrationService } from "./local-model-hub/migration-runtime";
 import { registerOllamaMigrationIpc } from "./local-model-hub/migration-ipc";
 import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
-import { isAppControlEvent } from "./app-control/ipc-registry";
+import { isAppControlEvent, recordAppControlRendererEvent } from "./app-control/ipc-registry";
 import { configureAppControlHost } from "./app-control/service";
+import { assertOneWindowChannel, configureOneWindowHost, getOneWindow, oneOnlyLaunch, oneWindowShellActive, openOneWindow, registerOneWindowIpc } from "./one-window-manager";
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { installDesktopScienceHost } from "./science-host";
@@ -68,13 +72,16 @@ import { expireOrphanedSurfaceJobs } from "./store/agent-surface-jobs";
 import { reconcileAbandonedGoalContracts } from "./store/chat-goals";
 import { repairDetachedGoalBindings } from "./store/goal-binding-repair";
 import { appendLongRunEvent } from "./store/long-runs";
-import { settleInterruptedTasksOnBoot } from "./store/tasks";
+import { getCanonicalTask, findCanonicalTaskForChat, settleInterruptedTasksOnBoot } from "./store/tasks";
 import { scrubLegacyRunEventSecrets, tryRecordRunEvent } from "./store/run-events";
 import { automationWorkInFlight, closeAutomationDispatchForShutdown, quiesceAutomationSchedulerForUpdate, startAutomationScheduler } from "./automation-scheduler";
 import { setGoalWaitHost, pollGoalWaitSubscriptions, reconcileClaimedGoalWaitsAtStartup,
   interruptGoalWaitReplans, goalWaitReplansSettled } from "./long-run/wait-subscriptions";
 import { claimOneBriefingDesktopNotification, configureOneBriefingRuntime } from "./one/briefing";
 import { invocationService } from "./invocation/service";
+import { createInvocationOwnerClient } from "./daemon/invocation-owner-client";
+import { configureInvocationOwnerTransport, handleInvocationOwnerControl } from "./runtime/invocation-owner-control";
+import { invocationProcessOwner } from "./store/invocation-run-owners";
 import { startAgentMailSync } from "./agent-mail/sync";
 import {
   armQaUpdaterSeamIfRequested,
@@ -277,8 +284,6 @@ import type {
   ConfirmScienceJournalIdentityInput,
   ConfirmScienceJournalHumanAttestationInput,
   CreateScienceProjectInput,
-  ReplaceScienceProjectWorkspaceTabsInput,
-  UpdateScienceProjectNavigationInput,
   UpdateScienceProjectRelatedDomainsInput,
   UpsertScienceProjectLabBindingInput,
   ApproveScienceResearchContractInput,
@@ -346,7 +351,15 @@ if (app.isPackaged && process.argv.slice(1).some((arg) =>
 }
 
 const isDev = process.env.NODE_ENV === "development";
-const ipcMain = developmentIpcBoundary(electronIpcMain);
+const mainIpcBoundary = developmentIpcBoundary(electronIpcMain);
+const ipcMain = new Proxy(mainIpcBoundary, {
+  get(target, property) {
+    if (property === "handle") return (channel: string, listener: (event: Electron.IpcMainInvokeEvent, ...args: unknown[]) => unknown) =>
+      target.handle(channel, (event, ...args) => { assertOneWindowChannel(event, channel); recordAppControlRendererEvent(event); return listener(event, ...args); });
+    const value = Reflect.get(target, property);
+    return typeof value === "function" ? value.bind(target) : value;
+  },
+});
 let localModelHubControl: ReturnType<typeof registerLocalModelHubIpc> | null = null;
 let localModelDaemonClient: ReturnType<typeof createLocalModelDaemonClient> | null = null;
 let localModelOwnerCleanup: (() => Promise<void>) | null = null;
@@ -699,8 +712,24 @@ const STARTUP_PLACEHOLDER_HTML = `<!doctype html>
 const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURIComponent(STARTUP_PLACEHOLDER_HTML)}`;
 
 let mainWindow: BrowserWindow | null = null;
+let pendingOneNotification: { taskId?: string; chatId?: string } | null = null;
 // One operates the app through the same handlers the window calls (electron/app-control).
-configureAppControlHost({ mainWindow: () => mainWindow, scienceInstalled: () => scienceExtensionStatus().phase === "installed" });
+configureAppControlHost({ mainWindow: () => mainWindow, interactionWindow: () => getOneWindow() ?? mainWindow,
+  showMain: async (route) => { leaveBackgroundHold(); if (!mainWindow || mainWindow.isDestroyed()) await createWindow({ initialRoute: route }); return mainWindow; },
+  scienceInstalled: () => scienceExtensionStatus().phase === "installed" });
+configureOneWindowHost({ mainWindow: () => mainWindow, locale: () => currentUiLocale() === "ko" ? "ko" : "en",
+  externalEffectsAllowed: () => !developmentEffectsSuppressed(),
+  showMain: async (route) => {
+    leaveBackgroundHold();
+    const created = !mainWindow || mainWindow.isDestroyed();
+    if (created) await createWindow({ initialRoute: route });
+    if (!mainWindow || mainWindow.isDestroyed()) return;
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show(); mainWindow.focus();
+    if (route && !created) mainWindow.webContents.send("menu:navigate", route);
+  },
+  quit: () => { quitFullConfirmed = true; noteQuitIntent("menu-quit", { from: "one-tray" }); commitQuit({ kind: "quit", daemon: "stop" }); },
+});
 let lastStartupNavigationFailure: {
   kind: ReturnType<typeof classifyStartupNavigationFailure>;
   target: string;
@@ -741,13 +770,19 @@ async function presentStartupRecovery(presentation: StartupRecoveryPresentation)
   })()`);
 }
 
-async function openOneFromNotification(): Promise<void> {
-  if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
-  if (!mainWindow || mainWindow.isDestroyed()) return;
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
-  mainWindow.webContents.send("menu:navigate", "/one");
+async function openOneFromNotification(input: { taskId?: string; chatId?: string } = {}): Promise<void> {
+  // Second-instance/OS events can arrive before controller registration. Keep
+  // the last requested focus until the real IPC surface is available.
+  if (!shellReadyForWindows) { pendingOneNotification = input; return; }
+  leaveBackgroundHold();
+  const taskId = input.taskId ?? (input.chatId ? findCanonicalTaskForChat(input.chatId)?.id : undefined);
+  await openOneWindow({ taskId });
+}
+async function flushPendingOneNotification(): Promise<void> {
+  if (!pendingOneNotification) return;
+  const requested = pendingOneNotification;
+  pendingOneNotification = null;
+  await openOneFromNotification(requested);
 }
 
 function checkOneBriefingDesktopNotification(): void {
@@ -767,7 +802,7 @@ function checkOneBriefingDesktopNotification(): void {
         : "One found something that may need your attention. Open Agentlas to review it.",
       silent: true,
     });
-    notification.on("click", () => { void openOneFromNotification(); });
+    notification.on("click", () => { void openOneFromNotification({ taskId: candidate.source.kind === "canonical_task" ? candidate.source.refId : undefined }); });
     notification.show();
   } catch (error) {
     console.warn("[one-briefing] desktop notification check failed", error);
@@ -801,7 +836,7 @@ function startRunAlertBridge(): void {
   disposeRunAlertBridge = invocationService.onSettled((envelope) => {
     try {
       const settings = getRunAlerts();
-      const focused = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused());
+      const focused = Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused() || getOneWindow()?.isFocused());
       const decision = decideRunAlert(settings, {
         status: envelope.receipt.status,
         startedAt: envelope.receipt.startedAt,
@@ -821,7 +856,7 @@ function startRunAlertBridge(): void {
         // main 이 아는 유일한 사실이라 그것을 쓴다 — 짐작 대신 관측값.
         locale: app.getLocale().toLowerCase().startsWith("ko") ? "ko" : "en",
         goal: envelope.goal,
-        onClick: () => { void openOneFromNotification(); },
+        onClick: () => { void openOneFromNotification({ chatId: envelope.chatId }); },
       });
     } catch {
       // 알람은 부가 기능이다 — 무슨 일이 있어도 실행 정산을 건드리지 않는다.
@@ -843,7 +878,7 @@ function startOneTeamNotificationBridge(): void {
     if (!reason || !getAuthSession().signedIn || !Notification.isSupported()) return;
     // Focused Desktop is the foreground host and owns the in-app indication;
     // avoid the duplicate OS toast. A hidden/minimized host gets one toast.
-    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()) return;
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused() || getOneWindow()?.isFocused()) return;
     const key = `${receipt.runId}:${reason}`;
     if (oneTeamNotificationKeys.has(key)) return;
     oneTeamNotificationKeys.add(key);
@@ -855,7 +890,7 @@ function startOneTeamNotificationBridge(): void {
         ? (notificationLocale === "ko" ? "확인이 필요한 실패한 작업이 있어요." : "One had a failed run to review.")
         : (notificationLocale === "ko" ? "오래 걸린 작업을 끝냈어요." : "One finished a long-running task.")
     const notification = new Notification({ title: "Agentlas One", body, silent: true });
-    notification.on("click", () => { void openOneFromNotification(); });
+    notification.on("click", () => { void openOneFromNotification({ chatId: envelope.chatId }); });
     notification.show();
   });
 }
@@ -998,6 +1033,7 @@ app.on("open-url", (event, url) => {
 app.on("second-instance", (_event, argv, _workingDirectory, additionalData) => {
   // Update lock retries must not repeatedly bring the old window to front.
   if ((additionalData as { startupIntent?: string } | undefined)?.startupIntent === "update-relaunch") return;
+  if (argv.includes("--one") || argv.includes("--one-only") || oneOnlyLaunch) { void openOneFromNotification(); return; }
   // Windows/Linux 는 두 번째 인스턴스의 argv 에 URL 을 실어 보낸다.
   const link = argv.find((arg) => typeof arg === "string" && arg.startsWith("agentlas://"));
   if (link) routeAgentlasDeepLink(link);
@@ -1154,11 +1190,11 @@ function armOsMaintenanceAfterProductLoad(window: BrowserWindow): void {
   });
 }
 
-async function loadMainRendererIntoWindow(): Promise<void> {
+async function loadMainRendererIntoWindow(initialRoute?: string): Promise<void> {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const startUrl = process.env.ELECTRON_START_URL;
   if (isDev && startUrl) {
-    await loadMainUrl(startUrl);
+    await loadMainUrl(initialRoute ? new URL(initialRoute, startUrl).href : startUrl);
     // Keep normal local QA launches to one visible Agentlas window. Detached
     // DevTools are opt-in so restarting the renderer does not accumulate extra
     // Electron windows beside the product under test.
@@ -1166,7 +1202,7 @@ async function loadMainRendererIntoWindow(): Promise<void> {
       mainWindow.webContents.openDevTools({ mode: "detach" });
     }
   } else {
-    await loadMainUrl("agentlas://app/dashboard");
+    await loadMainUrl(new URL(initialRoute ?? "/dashboard", "agentlas://app").href);
   }
 }
 
@@ -1202,7 +1238,7 @@ async function loadMainUrl(target: string): Promise<void> {
   }
 }
 
-async function createWindow(options: { startupPlaceholder?: boolean } = {}): Promise<void> {
+async function createWindow(options: { startupPlaceholder?: boolean; initialRoute?: string } = {}): Promise<void> {
   mainWindow = new BrowserWindow({
     width: 1240,
     height: 820,
@@ -1333,10 +1369,11 @@ async function createWindow(options: { startupPlaceholder?: boolean } = {}): Pro
   });
 
   if (options.startupPlaceholder) await loadMainUrl(STARTUP_PLACEHOLDER_URL);
-  else await loadMainRendererIntoWindow();
+  else await loadMainRendererIntoWindow(options.initialRoute);
 }
 
 app.on("window-all-closed", () => {
+  if (oneWindowShellActive()) return; // One's tray remains reachable; closing a surface does not stop work.
   // macOS first — 마지막 윈도우가 닫혀도 dock에 남아있는 게 표준
   if (process.platform !== "darwin") {
     noteQuitIntent("window-all-closed");
@@ -1346,6 +1383,7 @@ app.on("window-all-closed", () => {
 
 app.on("activate", () => {
   if (!shellReadyForWindows) return;
+  if (oneOnlyLaunch || getOneWindow()) { void openOneFromNotification(); return; }
   // Hiding the Dock icon for background mode re-activates the app on macOS;
   // that is not the person asking for the window. The tray's "열기" and a second
   // launch (second-instance) are the ways back.
@@ -1844,9 +1882,8 @@ function commitQuit(plan: Extract<QuitPlan, { kind: "quit" }>): void {
 
 function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>): void {
   clearQuitIntent();
-  for (const window of BrowserWindow.getAllWindows()) {
-    if (!window.isDestroyed()) window.hide();
-  }
+  // Backgrounding Desktop changes its own surface, never unrelated One/dialog/browser windows.
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
   console.info("[quit] continuing in background", { activeWork: plan.activeWork, autoQuitWhenIdle: plan.autoQuitWhenIdle });
   // Any way the window comes back (tray, second launch, notification) ends background mode.
   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.once("show", () => leaveBackgroundHold());
@@ -1854,6 +1891,7 @@ function holdInBackground(plan: Extract<QuitPlan, { kind: "background" }>): void
     locale: () => (currentUiLocale() === "ko" ? "ko" : "en"),
     activeWork: countQuitWork,
     continuity: loginContinuityOn,
+    openOne: () => { void openOneFromNotification(); },
     open: () => {
       leaveBackgroundHold();
       if (!mainWindow || mainWindow.isDestroyed()) { void createWindow(); return; }
@@ -1967,8 +2005,10 @@ app.on("will-quit", (event) => {
   }
   event.preventDefault();
   void finishQuitCleanup().finally(() => {
-    disarmQuitCleanupDeadline();
-    app.quit();
+    setImmediate(() => {
+      disarmQuitCleanupDeadline();
+      app.quit();
+    });
   });
 });
 
@@ -2026,7 +2066,7 @@ app.whenReady().then(async () => {
   // GUI launches get it; headless entries below never open a window.
   const headlessEntry = process.argv.includes("--graph-surface") || process.argv.includes("--headless-automations");
   let startupPlaceholderShown = false;
-  if (!headlessEntry) {
+  if (!headlessEntry && !oneOnlyLaunch) {
     await createWindow({ startupPlaceholder: true });
     startupPlaceholderShown = true;
     traceUpdaterStartup("startup-window-visible");
@@ -2157,7 +2197,7 @@ app.whenReady().then(async () => {
   // screen first so a locked or slow Keychain never makes Agentlas look dead.
   // The application renderer and IPC surface still load only after migration,
   // continuity, authentication, and bootstrap gates have completed.
-  if (!startupPlaceholderShown || !mainWindow || mainWindow.isDestroyed()) {
+  if (!oneOnlyLaunch && (!startupPlaceholderShown || !mainWindow || mainWindow.isDestroyed())) {
     await createWindow({ startupPlaceholder: true });
     traceUpdaterStartup("startup-window-visible");
     traceStartup("startup-window-visible");
@@ -2192,6 +2232,14 @@ app.whenReady().then(async () => {
     interrupt: () => { invocationService.beginAppShutdown(); },
     isSettled: () => invocationService.activeRunIds().length === 0,
   });
+  const invocationOwnerClient = developmentEffectsSuppressed() ? null : createInvocationOwnerClient({
+    ...desktopDaemonClientOptions(), ...invocationProcessOwner() as { ownerId: string; ownerKind: "desktop" },
+    onControl: handleInvocationOwnerControl,
+  });
+  if (invocationOwnerClient) {
+    configureInvocationOwnerTransport((owner, method, control) => invocationOwnerClient.dispatch(owner, method, control));
+    registerAppRuntimeParticipant("invocation-owner-controls", { interrupt: () => invocationOwnerClient.close(), isSettled: () => true });
+  }
   registerAppRuntimeParticipant("long-run-verifier", {
     closeAdmission: closeLongRunVerifierAdmission,
     interrupt: interruptLongRunVerifiers,
@@ -2305,6 +2353,7 @@ app.whenReady().then(async () => {
   if (!developmentEffectsSuppressed()) {
     scienceDaemonClient = createScienceDaemonClient(desktopDaemonClientOptions());
     configureOneSupervisorScience(scienceDaemonClient);
+    configureMobileScienceChatClient(scienceDaemonClient);
   }
   // A native update target must reconcile its durable install journal before
   // optional keychain/session restoration. On a locked or headless machine
@@ -2385,6 +2434,14 @@ app.whenReady().then(async () => {
       console.error("[opencrab] inactive updater recovery credential URL scrub failed");
     }
   }
+  initializeOneContext({activeOneId:()=>getOneProfile().oneId,assertTask:scope=>{
+    const task=getCanonicalTask(scope.taskId),chat=task?.originChatId?getChat(task.originChatId):null;
+    if(scope.oneId!==getOneProfile().oneId || !task || task.archivedAt || !chat || chat.archivedAt || chat.projectId!==task.projectId || chat.firmId!==task.firmId)throw new Error("one-context-task-unavailable");
+    const db=getDb();
+    const personal=db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_conversations'").get() && db.prepare("SELECT 1 FROM one_supervisor_conversations WHERE one_id=? AND chat_id=?").get(scope.oneId,chat.id);
+    const requested=db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_requests'").get() && db.prepare(`SELECT 1 FROM one_supervisor_requests r JOIN one_supervisor_conversations c ON c.one_id=r.one_id AND c.chat_id=r.origin_chat_id WHERE r.one_id=? AND r.task_id=? AND json_extract(r.payload_json,'$.workerChatId')=?`).get(scope.oneId,task.id,chat.id);
+    if(!personal&&!requested)throw new Error("one-context-task-source-unavailable");
+  }});
   registerIpcHandlers();
   // DESKTOP_MOBILE_BRIDGE: Desktop main is the sole authority. Renderer IPC
   // can issue/revoke pairing, but never receives a persisted bearer token.
@@ -2807,21 +2864,6 @@ app.whenReady().then(async () => {
     assertScienceSender(event, envelope);
     const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
     return scienceStore().updateProjectRelatedDomains(input as UpdateScienceProjectRelatedDomainsInput);
-  });
-  ipcMain.handle("science:workspace:get", (event, input: unknown) => {
-    assertScienceSender(event, input);
-    const projectId = input && typeof input === "object" && "projectId" in input ? String((input as { projectId?: unknown }).projectId ?? "") : "";
-    return scienceStore().getProjectWorkspaceState(projectId);
-  });
-  ipcMain.handle("science:workspace:updateNavigation", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    return scienceStore().updateProjectNavigation(input as UpdateScienceProjectNavigationInput);
-  });
-  ipcMain.handle("science:workspace:replaceTabs", (event, envelope: unknown) => {
-    assertScienceSender(event, envelope);
-    const input = envelope && typeof envelope === "object" && "input" in envelope ? (envelope as { input?: unknown }).input : null;
-    return scienceStore().replaceProjectWorkspaceTabs(input as ReplaceScienceProjectWorkspaceTabsInput);
   });
   ipcMain.handle("science:researchContracts:get", (event, input: unknown) => {
     assertScienceSender(event, input);
@@ -4259,11 +4301,26 @@ app.whenReady().then(async () => {
     applyAppMenu(nextLocale);
   });
   shellReadyForWindows = true;
+  registerOneWindowIpc();
   if (developmentEffectsSuppressed()) {
     // Keep the real Main/preload/renderer and the honest signed-out AuthGate.
-    // The remaining bootstrap materializes agents, repairs host-wide state,
+    // The ordinary built-in seed is local DB + userData/agents files only. A
+    // fresh isolated QA profile needs the real One identity before snapshot;
+    // never materialize packages through an owner's profile or imported paths.
+    const profile = fs.realpathSync(app.getPath("userData"));
+    const tempRoot = fs.realpathSync(os.tmpdir());
+    const storeRelative = path.relative(profile, fs.realpathSync(getDb().name));
+    const isolatedSeed = installIdentity.channel === "qa" && !app.isPackaged
+      && path.dirname(profile) === tempRoot && path.basename(profile).startsWith("agentlas-")
+      && installIdentity.userDataOverride !== null && fs.realpathSync(installIdentity.userDataOverride) === profile
+      && storeRelative !== "" && !storeRelative.startsWith("..") && !path.isAbsolute(storeRelative)
+      && !fs.existsSync(path.join(profile, "agents")) && !fs.existsSync(path.join(profile, "agent-routes.json"));
+    if (isolatedSeed) seedBuiltinAgents();
+    // The remaining bootstrap repairs host-wide state,
     // starts listeners and schedulers, and synchronizes external accounts.
-    if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
+    await flushPendingOneNotification();
+    if (oneOnlyLaunch) await openOneWindow();
+    else if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
     else await loadMainRendererIntoWindow();
     traceStartup("development-external-effects-suppressed");
     return;
@@ -4403,7 +4460,9 @@ app.whenReady().then(async () => {
   // services below (Mobile Bridge, Telegram workers, browser helpers) restore
   // independently and must never keep a healthy local Desktop invisible.
   osMaintenanceReady = true;
-  if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
+  await flushPendingOneNotification();
+  if (oneOnlyLaunch) await openOneWindow();
+  else if (!mainWindow || mainWindow.isDestroyed()) await createWindow();
   else await loadMainRendererIntoWindow();
   traceStartup("window-loaded");
   if (!quitServicesStopPromise && !quitCleanupPromise) startMemoryRevocationCleanup();
@@ -4450,18 +4509,68 @@ app.whenReady().then(async () => {
    * listener for the same user-data and whichever process wrote endpoint.json
    * last silently redirected newly paired phones away from the other one.
    */
+  let nativeEnrollmentPromise: Promise<import("./invocation/native-gui-startup").NativeGuiEnrollment> | undefined;
+  let nativePublicBridge: ReturnType<typeof import("./invocation/native-gui-public").createNativeGuiPublicBridge> | undefined;
+  let nativeGuiControls: ReturnType<typeof import("./invocation/native-gui-controls").createNativeGuiControls> | undefined;
   const ensureDesktopDaemon = () => import("./daemon/app-launcher")
     .then(async (module) => {
-      const outcome = await module.ensureDaemonRunning(desktopDaemonClientOptions());
+      const native = await import("./invocation/native-gui-startup");
+      const policy = await import("./daemon/native-invocation-policy");
+      // Protected Main-only enrollment. Failure before any native issuer exists
+      // leaves the original legacy path intact; it cannot downgrade a captured
+      // native run or manufacture daemon human authority from public ping.
+      let enrollment: Awaited<ReturnType<typeof native.prepareNativeGuiEnrollment>> | undefined;
+      if (!native.configuredNativeGuiOwner()) {
+        try {
+          nativeEnrollmentPromise ??= native.prepareNativeGuiEnrollment();
+          enrollment = await nativeEnrollmentPromise;
+        }
+        catch (error) { console.warn("[native-invocation] protected enrollment unavailable", error); }
+      }
+      const options = desktopDaemonClientOptions();
+      const outcome = await module.ensureDaemonRunning({ ...options, nativeInvocationResources: policy.NATIVE_DAEMON_INVOCATION_POLICY, ...(enrollment ? { nativeEnrollment: enrollment } : {}) });
       if (outcome.status === "failed") console.error("[daemon] ensure failed:", outcome.reason);
       else console.info(`[daemon] ${outcome.status}`);
-      return { module, outcome };
+      let nativeAttachment: Awaited<ReturnType<typeof native.attachNativeGuiDaemon>> | undefined;
+      if (enrollment && outcome.status !== "failed" && outcome.status !== "disabled") {
+        try {
+          const bootId = await module.discoverNativeDaemonBoot(options);
+          nativePublicBridge ??= (await import("./invocation/native-gui-public")).createNativeGuiPublicBridge(policy.NATIVE_PUBLIC_EVENT_POLICY, (channel, identity) => native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity));
+          const bridge = nativePublicBridge;
+          nativeGuiControls ??= (await import("./invocation/native-gui-controls")).createNativeGuiControls({ authorizeRenderer: authorizeNativeGuiRenderer,
+            onRecoveryChatIds: (await import("./invocation/native-gui-public")).publishNativeRecoveryActiveChats,
+            onUnavailable: (channel, identity) => native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity) });
+          const controls = nativeGuiControls;
+          const originalEnrollment = enrollment;
+          const attachment = await native.attachNativeGuiDaemon(enrollment, bootId, (method, params) => { bridge.accept(method, params); controls.accept(method, params); }, {
+            onAuthenticated(channel, identity) {
+              bridge.bind(channel, identity); controls.bind(channel, identity);
+              invocationService.setForeignNativeStartFence(chatId => !!native.configuredNativeGuiOwner()?.retainedChatIds().includes(chatId)
+                || controls.retainedChatIds().includes(chatId) || bridge.activeChatIds().includes(chatId));
+            },
+          });
+          await controls.refresh();
+          if (attachment.ready && bridge.available && controls.available && !native.configuredNativeGuiOwner()) {
+            initializeNativeGuiInvocationOwner(enrollment, policy.NATIVE_MAIN_PREPARATION_POLICY);
+          }
+          nativeAttachment = attachment;
+          // General starts remain blocked until actual event/replay, approval,
+          // recovery and original service cwd/noBrain observers are integrated.
+          // The original Main guards/router, source observations, public receiver
+          // and readonly controls are installed; false daemon capability blocks start.
+          console.info("[native-invocation] authenticated attach", { ready: attachment.ready, capabilities: attachment.capabilities });
+        } catch (error) { console.warn("[native-invocation] authenticated attach unavailable", error); }
+      }
+      return { module, outcome, nativeEnrollment: enrollment, nativeAttachment };
     })
     .catch((error) => {
       console.error("[daemon] launcher wiring failed:", error);
       return null;
     });
   let daemonStartupPromise = ensureDesktopDaemon();
+  if (invocationOwnerClient) void daemonStartupPromise.then(daemon => {
+    if (daemon && daemon.outcome.status !== "failed" && daemon.outcome.status !== "disabled") return invocationOwnerClient.connect();
+  }).catch(error => console.warn("[invocation-owner] broker attach unavailable:", error));
   // Startup IPC can ask for a local-model snapshot before built-ins finish.
   // Release those requests only after the one shared daemon launch settles.
   void daemonStartupPromise.then(releaseLocalModelDaemonStartup, releaseLocalModelDaemonStartup);
@@ -4706,7 +4815,7 @@ app.whenReady().then(async () => {
               : attention.state === "expired" ? "The result you were waiting for did not arrive within the time limit."
               : "Confirmation is needed before the waiting task continues.");
           const notification = new Notification({ title: "Agentlas", body, silent: true });
-          notification.on("click", () => { void openOneFromNotification(); });
+          notification.on("click", () => { void openOneFromNotification({ chatId: attention.chatId }); });
           notification.show();
         },
       });

@@ -8,7 +8,7 @@ import { getDb } from "./db";
 
 const ATTACHMENT_ID_RE = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 const ALLOWED_IMAGE_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const BASE64_RE = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
+const BASE64_RE = /^[A-Za-z0-9+/]*={0,2}$/;
 
 type AttachmentRow = {
   id: string;
@@ -218,6 +218,7 @@ function decodeImage(image: ImageAttachment, index: number): {
     typeof image.data !== "string"
     || image.data.length < 4
     || image.data.length > Math.ceil(ONE_ATTACHMENT_LIMITS.maxImageBytes / 3) * 4
+    || image.data.length % 4 !== 0
     || !BASE64_RE.test(image.data)
   ) throw new TypeError("Invalid chat image encoding");
   const bytes = Buffer.from(image.data, "base64");

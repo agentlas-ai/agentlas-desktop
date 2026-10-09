@@ -2,6 +2,8 @@
 import { cloneElement, useEffect, useRef, useState, type ReactElement, type HTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import type { MessageReply } from "../lib/message-reply";
+import { IconCopy, IconFileText, IconReply } from "./Icon";
+import { PopupFrame, PopupAction } from "./Popup";
 import styles from "./MessageActions.module.css";
 
 async function copyText(text: string) {
@@ -66,11 +68,11 @@ export function MessageActions({ messageId, author, text, locale, onReply, child
     onClickCapture: event => { if (longPressed.current) { event.preventDefault(); event.stopPropagation(); longPressed.current = false; } else children.props.onClickCapture?.(event); },
   }, children.props.children, <button key="message-menu" ref={triggerRef} type="button" className={styles.trigger} aria-label={ko ? "메시지 메뉴" : "Message menu"} aria-haspopup="menu" aria-expanded={Boolean(menu)} onClick={event => { const r = event.currentTarget.getBoundingClientRect(); open(r.right, r.bottom); }} onKeyDown={event => { if (event.key === "F10" && event.shiftKey) { event.preventDefault(); const r = event.currentTarget.getBoundingClientRect(); open(r.right, r.bottom); } }}><svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><circle cx="3" cy="8" r="1" fill="currentColor"/><circle cx="8" cy="8" r="1" fill="currentColor"/><circle cx="13" cy="8" r="1" fill="currentColor"/></svg></button>);
   return <>{action}{menu && createPortal(<div ref={menuRef} className={styles.menu} style={{ left: menu.x, top: menu.y }} role="menu" aria-label={ko ? "메시지 메뉴" : "Message menu"}>
-    <button role="menuitem" onClick={() => void copyText(text).then(() => { setStatus(ko ? "복사했습니다" : "Copied"); }).catch(() => setStatus(ko ? "복사하지 못했습니다. 텍스트를 선택해 복사해 주세요." : "Copy failed. Select the text to copy it."))}><span aria-hidden>▢</span>{ko ? "복사" : "Copy"}</button>
-    <button role="menuitem" onClick={() => { setMenu(null); setStatus(null); setSelecting(true); }}><span aria-hidden>☰</span>{ko ? "텍스트 선택" : "Select text"}</button>
-    {onReply && <button role="menuitem" onClick={() => { onReply({ messageId, author, text }); setMenu(null); }}><span aria-hidden>↪</span>{ko ? "회신하기" : "Reply"}</button>}
+    <button role="menuitem" onClick={() => void copyText(text).then(() => { setStatus(ko ? "복사했습니다" : "Copied"); }).catch(() => setStatus(ko ? "복사하지 못했습니다. 텍스트를 선택해 복사해 주세요." : "Copy failed. Select the text to copy it."))}><IconCopy size={16} />{ko ? "복사" : "Copy"}</button>
+    <button role="menuitem" onClick={() => { setMenu(null); setStatus(null); setSelecting(true); }}><IconFileText size={16} />{ko ? "텍스트 선택" : "Select text"}</button>
+    {onReply && <button role="menuitem" onClick={() => { onReply({ messageId, author, text }); setMenu(null); }}><IconReply size={16} />{ko ? "회신하기" : "Reply"}</button>}
     {status && <p className={styles.status} role="status">{status}</p>}
-  </div>, document.body)}{selecting && createPortal(<div className={styles.backdrop} onPointerDown={event => { if (event.target === event.currentTarget) dismiss(); }}><section className={styles.selection} role="dialog" aria-modal="true" aria-label={ko ? "텍스트 선택" : "Select text"}><header><strong>{ko ? "텍스트 선택" : "Select text"}</strong><button type="button" onClick={dismiss} aria-label={ko ? "닫기" : "Close"}>✕</button></header><textarea ref={selectionRef} readOnly value={text} aria-label={ko ? "선택할 메시지 텍스트" : "Message text to select"}/><button type="button" onClick={() => void copyText(selectionRef.current?.value.substring(selectionRef.current.selectionStart, selectionRef.current.selectionEnd) || text).then(() => setStatus(ko ? "복사했습니다" : "Copied")).catch(() => setStatus(ko ? "복사하지 못했습니다" : "Copy failed"))}>{ko ? "선택한 텍스트 복사" : "Copy selected text"}</button>{status && <p role="status">{status}</p>}</section></div>, document.body)}</>;
+  </div>, document.body)}{selecting && <PopupFrame title={ko ? "텍스트 선택" : "Select text"} icon={<IconFileText size={18} />} closeLabel={ko ? "닫기" : "Close"} onClose={dismiss} size="wide"><div className={styles.selection}><textarea ref={selectionRef} readOnly value={text} aria-label={ko ? "선택할 메시지 텍스트" : "Message text to select"}/><PopupAction primary icon={<IconCopy size={16} />} onClick={() => void copyText(selectionRef.current?.value.substring(selectionRef.current.selectionStart, selectionRef.current.selectionEnd) || text).then(() => setStatus(ko ? "복사했습니다" : "Copied")).catch(() => setStatus(ko ? "복사하지 못했습니다" : "Copy failed"))}>{ko ? "선택한 텍스트 복사" : "Copy selected text"}</PopupAction>{status && <p role="status">{status}</p>}</div></PopupFrame>}</>;
 }
 
 export function MessageReplyPreview({ reply, locale, onDismiss }: { reply: MessageReply | null; locale: string; onDismiss: () => void }) {

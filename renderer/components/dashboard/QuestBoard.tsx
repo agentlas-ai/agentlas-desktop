@@ -5,6 +5,7 @@
 //     증거가 없으면 확인 다이얼로그를 거쳐 클레임 허용(서버가 워크스페이스당 1회만 수락).
 // 시각적으로 다른 대시보드 카드(--dash-surface)와 구분되는 앰버 액센트 카드 — 왼쪽 컬럼 최상단.
 "use client";
+import { confirmPopup } from "@/lib/popup";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
@@ -146,10 +147,11 @@ export function QuestBoard() {
       if (!api?.quests || claimingId) return;
       // client-attested인데 로컬 증거가 없으면 자기확인 다이얼로그 — 클레임 자체는 막지 않는다.
       if (q.verification === "client-attested" && evidence[q.id] !== true) {
-        const confirmed = window.confirm(
+        const confirmed = await confirmPopup(
           ko
             ? "이 작업을 완료하셨나요? 완료하셨다면 확인을 눌러 보상을 받으세요."
             : "Have you completed this task? Press OK to claim the reward.",
+          { locale: ko ? "ko" : "en", title: ko ? q.titleKo : q.titleEn, detail: `${q.rewardCredits} ${ko ? "크레딧" : "credits"}`, tone: "warning", confirmLabel: ko ? "완료 확인 · 보상 받기" : "Confirm completion · Claim" },
         );
         if (!confirmed) return;
       }

@@ -1,4 +1,5 @@
 "use client";
+import popupMenu from "./PanelPopover.module.css";
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
@@ -75,11 +76,11 @@ export function TopNavbar() {
         >
           {/* An explicit invisible bridge to block Electron drag region mouseleave bug */}
           <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 16, background: "rgba(255,255,255,0.01)" }} />
-          <div 
+          <div role="menu" aria-label={label} className={popupMenu.panelPopover}
             style={{
-              background: "var(--paper)", border: "1px solid var(--paper-edge)",
-              borderRadius: 12,
-              boxShadow: "0 8px 30px rgba(0,0,0,0.12)",
+              background: "var(--popup-card-bg)", border: "1px solid var(--paper-edge)",
+              borderRadius: "var(--popup-radius)",
+              boxShadow: "var(--popup-shadow)",
               padding: 6,
               minWidth: dropdown === "environment" ? 260 : 220,
               display: "flex", flexDirection: "column", gap: 2,

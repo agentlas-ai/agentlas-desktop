@@ -1,35 +1,41 @@
-// 외부 MCP 툴 플러그인 매니저 — Slack/Discord/GitHub 등을 실제로 연결한다(Codex 스타일).
-// 한 번 연결하면 모든 에이전트·팀이 공유한다 (에이전트별 연결 개념 없음 — 전역 원터치).
-// 세 갈래: 연결됨(설치된 서버 + 상태/테스트/제거) · 커스텀 도구 추가(URL·명령 직접
-// 등록) · 허브에서 찾아보기(카탈로그 전체는 허브 화면이 담당 — 웹이 정본이라
-// 카탈로그를 여기 복제하지 않는다).
-// 키는 환경변수 vault에 저장되고 자동 주입 — LLM 무관.
 "use client";
+
+import { confirmPopup } from "@/lib/popup";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { ChipGrid, ConnectChip } from "@/components/connect/RuntimeConnect";
-import { ServiceConnectPopup, waitForConnectPoll, type ServiceConnectRun } from "@/components/connect/ServiceConnect";
-import { PluginLogo, usePluginBrandMap } from "@/components/PluginLogo";
+import { ServiceConnectPopup, type ServiceConnectRun } from "@/components/connect/ServiceConnect";
+import { PluginLogo, pluginSlugCandidates, usePluginBrandMap } from "@/components/PluginLogo";
 import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
+import { groupByCategory, usePluginCatalog } from "@/components/plugins/PluginPickerCore";
+import Link from "next/link";
+import { mcpOAuthAPI, runMcpOAuthAttempt } from "@/components/plugins/McpOAuthAttempt";
+import { LocalExecutionReview } from "@/components/plugins/PluginSetupReview";
+import styles from "./page.module.css";
 import { useT } from "@/lib/i18n";
 import type {
   InstalledMcpServer,
   McpServerStatus,
-  McpToolCatalogEntry,
 } from "@/lib/types";
 import {
   IconLock,
-  IconShield,
-  IconWand,
+  IconWand, IconSearch, IconRefresh, IconSettings, IconPlus, IconChevronDown,
 } from "@/components/Icon";
 
-type Tab = "installed" | "catalog";
+type Tab = "public" | "private";
 
 export default function LibraryMcpsPage() {
   const { t, locale } = useT();
   const ko = locale === "ko";
   const brandMap = usePluginBrandMap();
-  const [tab, setTab] = useState<Tab>("installed");
+  const [tab, setTab] = useState<Tab>("public");
+  const hub = usePluginCatalog();
+  const [query, setQuery] = useState("");
+  const [addOpen, setAddOpen] = useState(false);
+  const [pickerSlugs, setPickerSlugs] = useState<string[]>([]);
+  const [selectedServerId, setSelectedServerId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
   const [pickerOpen, setPickerOpen] = useState(false);
   /**
    * 마지막 추가에서 **못 붙은 것들**. 화면에 안 나오면 "추가했는데 없다"가 된다.
@@ -40,7 +46,7 @@ export default function LibraryMcpsPage() {
    * 것처럼 보이고, 왜인지 알 길이 없었다.
    */
   const [addSkipped, setAddSkipped] = useState<Array<{ slug: string; reason: string }>>([]);
-  const [catalog, setCatalog] = useState<McpToolCatalogEntry[]>([]);
+
   const [installed, setInstalled] = useState<InstalledMcpServer[]>([]);
   const [statuses, setStatuses] = useState<Record<string, McpServerStatus>>({});
   const [connecting, setConnecting] = useState<InstalledMcpServer | null>(null);
@@ -53,20 +59,22 @@ export default function LibraryMcpsPage() {
   const [loadFailed, setLoadFailed] = useState(false);
   // 커스텀 MCP 추가 폼
   const [cName, setCName] = useState("");
-  const [cTransport, setCTransport] = useState<"stdio" | "sse" | "http">("stdio");
+  const [cTransport, setCTransport] = useState<"stdio" | "sse" | "http">("http");
   const [cCommand, setCCommand] = useState("npx");
   const [cArgs, setCArgs] = useState("");
   const [cUrl, setCUrl] = useState("");
   const [cEnv, setCEnv] = useState("");
   const [cBusy, setCBusy] = useState(false);
+  const customValid = !!cName.trim() && (cTransport === "stdio" ? !!cCommand.trim() : /^https?:\/\//i.test(cUrl.trim()));
   const customOpenCrabUrl = cTransport !== "stdio" && isOpenCrabCredentialUrl(cUrl);
 
   async function addCustom() {
     const api = ipc();
-    if (!api || !cName.trim() || customOpenCrabUrl) return;
+    if (!api || !customValid || customOpenCrabUrl) return;
     setCBusy(true);
+    setActionError(null);
     try {
-      await api.mcpTools.installCustom({
+      const server = await api.mcpTools.installCustom({
         name: cName.trim(),
         transport: cTransport,
         command: cTransport === "stdio" ? cCommand.trim() || "npx" : undefined,
@@ -79,7 +87,9 @@ export default function LibraryMcpsPage() {
       setCUrl("");
       setCEnv("");
       await refresh();
-      setTab("installed");
+      setSelectedServerId(server.id);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : "custom_install_failed");
     } finally {
       setCBusy(false);
     }
@@ -111,7 +121,7 @@ export default function LibraryMcpsPage() {
 
   const refresh = useCallback(async () => {
     const api = ipc();
-    if (!api) return;
+    if (!api) { setLoadFailed(true); setLoaded(true); return; }
     /*
      * ★못 읽었는데 화면은 "아직 연결한 도구가 없습니다" 를 그렸다 (읽기 실패 실측
      *   2026-09-08). 도구를 연결해 둔 사람에게는 거짓말이고, 다시 연결하러 가게 만든다.
@@ -120,7 +130,6 @@ export default function LibraryMcpsPage() {
     let loadedRows;
     try {
       loadedRows = await Promise.all([
-        api.mcpTools.listCatalog(),
         api.mcpTools.listInstalled(),
         api.mcpTools.status(),
       ]);
@@ -129,9 +138,8 @@ export default function LibraryMcpsPage() {
       setLoaded(true);
       return;
     }
-    const [c, i, s] = loadedRows;
+    const [i, s] = loadedRows;
     setLoadFailed(false);
-    setCatalog(c);
     setInstalled(i);
     setStatuses(Object.fromEntries(s.map((status) => [status.id, status])));
     setLoaded(true);
@@ -141,17 +149,13 @@ export default function LibraryMcpsPage() {
     void refresh();
   }, [refresh]);
 
-  const byCatalogId = useMemo(() => {
-    const m = new Map<string, McpToolCatalogEntry>();
-    for (const e of catalog) m.set(e.id, e);
-    return m;
-  }, [catalog]);
+
 
   async function remove(server: InstalledMcpServer) {
     const api = ipc();
     if (!api) return;
     const name = locale === "en" ? server.nameEn || server.name : server.name;
-    if (!confirm(t("mcps.confirm_remove", { name }))) return;
+    if (!await confirmPopup(t("mcps.confirm_remove", { name }), { locale, tone: "danger", confirmLabel: locale === "ko" ? "제거" : "Remove" })) return;
     await api.mcpTools.remove(server.id);
     setStatuses((s) => {
       const next = { ...s };
@@ -182,201 +186,95 @@ export default function LibraryMcpsPage() {
       return result;
     };
     let status = await probe();
-    if (status.missingEnv.length) throw new Error(`${ko ? "필수 키를 설정해 주세요" : "Set the required keys"}: ${status.missingEnv.join(", ")} (missing_env)`);
-    if (!status.connected) {
+    // A failed live probe can mean an expired/401 token even if a stored session
+    // still exists. Supported OAuth gets a fresh authorization before key setup.
+    if (!status.connected || status.missingEnv.length) {
       const auth = await api.mcpTools.oauthStatus(connecting.id);
       assertActive();
-      if (auth.supported && !auth.connected) {
-        update({ step: "login", note: ko ? "공식 로그인·동의 페이지를 열고 있어요. 브라우저에서 마쳐 주세요." : "Opening official sign-in and consent. Finish in the browser." });
-        const result = await api.mcpTools.oauthConnect(connecting.id);
+      if (auth.supported) {
+        update({ step: "login", note: ko ? "공식 로그인·동의 페이지를 열고 있어요." : "Opening official sign-in and consent." });
+        await runMcpOAuthAttempt({ api: mcpOAuthAPI(api.mcpTools), serverId: connecting.id, signal, update: (progress) => {
+          update({ step: "login", note: progress.status === "exchanging" ? ko ? "로그인 응답을 확인하고 있어요." : "Confirming the sign-in response." : ko ? "브라우저에서 로그인을 마쳐 주세요. 아래 공식 페이지로 직접 진행할 수도 있어요." : "Finish sign-in in the browser. You can also open the official page below.", manualUrl: progress.manualUrl });
+        } });
         assertActive();
-        if (!result.ok) throw new Error(`${result.error} (oauth_failed)`);
-        if (result.manualUrl) {
-          update({ step: "login", note: ko ? "아래 공식 페이지를 열어 로그인을 마쳐 주세요." : "Open the official page below to finish sign-in.", manualUrl: result.manualUrl });
-          for (let attempt = 0; attempt < 60; attempt += 1) {
-            await waitForConnectPoll(signal);
-            const current = await api.mcpTools.oauthStatus(connecting.id);
-            assertActive();
-            if (current.supported && current.connected) break;
-            if (attempt === 59) throw new Error(ko ? "로그인을 제한 시간 안에 확인하지 못했어요. (login_timeout)" : "Sign-in was not verified in time. (login_timeout)");
-          }
-        }
-        update({ step: "verifying", note: ko ? "서버에 실제로 연결해 도구 목록을 확인하고 있어요." : "Connecting to the server to read its live tool list." });
+        update({ step: "verifying", note: ko ? "서버에 실제로 연결해 도구 목록을 확인하고 있어요." : "Connecting to the server to read its live tool list.", manualUrl: null });
         status = await probe();
       }
     }
+    if (status.missingEnv.length) throw new Error(`${ko ? "필수 키를 설정해 주세요" : "Set the required keys"}: ${status.missingEnv.join(", ")} (missing_env)`);
     if (!status.connected) throw new Error(`${status.error || (ko ? "서버에 연결하지 못했어요." : "Could not connect to the server.")} (probe_failed)`);
     if (!status.tools.length) throw new Error(ko ? "서버 응답은 있지만 사용 가능한 도구가 없어요. (empty_tools)" : "The server responded but supplied no tools. (empty_tools)");
     return { evidence: [`tools/list · ${status.tools.length} ${ko ? "개 도구" : "tools"}`, status.tools.slice(0, 3).map((tool) => tool.name).join(", "), new Date(status.checkedAt).toLocaleTimeString()] };
   }, [connecting, ko]);
 
+  const matches = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    return hub.listings.filter((listing) => !needle || [listing.name, listing.nameEn, listing.slug, listing.tagline, listing.taglineEn, listing.category, listing.developer].filter(Boolean).join(" ").toLowerCase().includes(needle));
+  }, [hub.listings, query]);
+  const featured = matches.filter((listing) => listing.featured);
+  const groups = groupByCategory(matches.filter((listing) => !listing.featured), ko);
+  const catalogGroups = featured.length ? [[ko ? "추천 플러그인" : "Featured plugins", featured] as (typeof groups)[number], ...groups] : groups;
+  const selectedServer = installed.find((server) => server.id === selectedServerId);
+  const serverForListing = (slug: string, name: string) => {
+    const candidates = pluginSlugCandidates({ slug, name });
+    return installed.find((server) => pluginSlugCandidates({ catalogId: server.catalogId, name: server.name }).some((candidate) => candidates.includes(candidate)));
+  };
+  const openPicker = (slugs: string[] = []) => { setPickerSlugs(slugs); setPickerOpen(true); setAddOpen(false); };
+  const refreshAll = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try { await Promise.all([refresh(), hub.refresh()]); } finally { setRefreshing(false); }
+  };
+  const displayName = (server: InstalledMcpServer) => ko ? server.name : server.nameEn || server.name;
+  const serverReady = (server: InstalledMcpServer) => {
+    const status = statuses[server.id];
+    return !loadFailed && server.enabled && !!status?.connected && !!status.tools.length && status.missingEnv.length === 0;
+  };
+  const connectionBadge = (server: InstalledMcpServer) => {
+    if (loadFailed) return ko ? "상태 확인 불가" : "State unverified";
+    const status = statuses[server.id];
+    if (!server.enabled) return ko ? "꺼짐" : "Off";
+    if (status?.missingEnv.length) return ko ? "키 필요" : "Keys needed";
+    if (status?.connected && status.tools.length > 0) return ko ? "연결됨" : "Connected";
+    return ko ? "연결 확인 필요" : "Unverified";
+  };
+
   return (
-    <section style={{ padding: "24px 32px", maxWidth: 880, margin: "0 auto" }}>
-      <h2
-        style={{
-          fontFamily: "var(--font-head)",
-          fontSize: 18,
-          margin: "0 0 4px",
-          display: "inline-flex",
-          alignItems: "center",
-          gap: 8,
-        }}
-      >
-        <IconWand size={18} style={{ color: "var(--accent)" }} />
-        {t("mcps.title")}
-      </h2>
-      <p style={{ margin: "0 0 16px", fontSize: 13, color: "var(--muted-deep)", lineHeight: 1.6 }}>
-        {t("mcps.subtitle")}
-      </p>
+    <section className={styles.workspace}>
+      <aside className={styles.sidebar} aria-label={ko ? "플러그인 관리" : "Plugin management"}>
+        <h2 className={styles.sidebarTitle}>{ko ? "도구 설정" : "Tool settings"}</h2>
+        <button type="button" className={styles.navItem} data-active={!selectedServerId && tab === "public"} onClick={() => { setSelectedServerId(null); setTab("public"); }}><IconWand size={15} />{ko ? "플러그인" : "Plugins"}</button>
+        <Link href="/library/env" className={styles.navItem}><IconLock size={15} />{ko ? "API 키" : "API keys"}</Link>
+        <p className={styles.sidebarLabel}>{ko ? "설치됨" : "Installed"}</p>
+        {!loaded ? <p className={styles.sidebarHint}>{ko ? "불러오는 중…" : "Loading…"}</p> : loadFailed ? <p className={styles.sidebarHint}>{ko ? "설치 상태를 읽지 못했어요" : "Could not read installed state"}</p> : installed.length === 0 ? <p className={styles.sidebarHint}>{ko ? "아직 설치된 MCP가 없어요" : "No MCP servers installed yet"}</p> : installed.map((server) => <button key={server.id} type="button" className={styles.installedItem} data-active={selectedServerId === server.id} onClick={() => setSelectedServerId(server.id)} title={`${displayName(server)} · ${connectionBadge(server)}`} aria-label={`${displayName(server)} · ${connectionBadge(server)}`}><PluginLogo catalogId={server.catalogId} name={server.name} size={20} brandMap={brandMap} /><span>{displayName(server)}</span><span className={styles.statusDot} data-ready={serverReady(server)} aria-label={connectionBadge(server)} /></button>)}
+        <p className={styles.sidebarFoot}>{ko ? "설치한 도구는 모든 에이전트가 함께 사용해요." : "Every agent shares your installed tools."}</p>
+      </aside>
+      <div className={styles.main}>
+        <header className={styles.header}>
+          <div><h1 className={styles.title}>{ko ? "플러그인" : "Plugins"}</h1><p className={styles.subtitle}>{ko ? "자주 쓰는 앱과 도구를 연결하고, Agentlas의 작업 범위를 넓히세요." : "Connect your everyday apps and tools to work with Agentlas."}</p></div>
+          <div className={styles.toolbar}>
+            <label className={styles.search}><IconSearch size={15} /><input value={query} onChange={(event) => { setQuery(event.target.value); setSelectedServerId(null); setTab("public"); }} placeholder={ko ? "플러그인 검색" : "Search plugins"} aria-label={ko ? "플러그인 검색" : "Search plugins"} /></label>
+            <button type="button" className={styles.iconButton} disabled={refreshing} onClick={() => void refreshAll()} aria-label={ko ? "목록 새로고침" : "Refresh catalog"} title={ko ? "새로고침" : "Refresh"}><IconRefresh size={16} /></button>
+            <button type="button" className={styles.iconButton} onClick={() => { setSelectedServerId(null); setTab("private"); }} aria-label={ko ? "커스텀 MCP 설정" : "Custom MCP settings"} title={ko ? "커스텀 MCP 설정" : "Custom MCP settings"}><IconSettings size={16} /></button>
+            <div className={styles.addWrap}><button type="button" className={styles.addButton} onClick={() => setAddOpen((open) => !open)} aria-expanded={addOpen}>{ko ? "추가" : "Add"}<IconChevronDown size={13} /></button>{addOpen && <><button className={styles.menuDismiss} aria-label={ko ? "추가 메뉴 닫기" : "Close add menu"} onClick={() => setAddOpen(false)} /><div className={styles.addMenu}><button type="button" onClick={() => openPicker()}>{ko ? "플러그인 고르기" : "Choose plugins"}</button><button type="button" onClick={() => { setTab("private"); setSelectedServerId(null); setAddOpen(false); }}>{ko ? "커스텀 MCP 추가" : "Add custom MCP"}</button></div></>}</div>
+          </div>
+        </header>
+        <div className={styles.tabs} role="tablist" aria-label={ko ? "플러그인 출처" : "Plugin source"}>{(["public", "private"] as Tab[]).map((value) => <button key={value} type="button" role="tab" aria-selected={tab === value && !selectedServerId} className={styles.tab} data-active={tab === value && !selectedServerId} onClick={() => { setTab(value); setSelectedServerId(null); }}>{value === "public" ? ko ? "공개" : "Public" : ko ? "개인용" : "Private"}</button>)}</div>
+        {actionError && <p className={styles.notice} role="alert">{actionError}</p>}
+        {addSkipped.length > 0 && <div className={styles.notice} role="status"><strong>{ko ? "일부 플러그인을 추가하지 못했어요" : "Some plugins could not be added"}</strong>{addSkipped.map((row) => <p key={row.slug}>{row.slug} — {row.reason}</p>)}<button type="button" onClick={() => setAddSkipped([])}>{ko ? "닫기" : "Dismiss"}</button></div>}
+        {selectedServer ? <div className={styles.serverDetail}><h2>{displayName(selectedServer)}</h2><p className={styles.detailNote}>{ko ? "등록 상태와 실제 연결 상태를 확인하세요." : "Review configuration and verify the live connection."}</p>{selectedServer.transport === "stdio" && <LocalExecutionReview server={selectedServer} ko={ko} />}<ChipGrid label={ko ? "MCP 연결" : "MCP connection"}><ConnectChip icon={<PluginLogo catalogId={selectedServer.catalogId} name={selectedServer.name} size={28} brandMap={brandMap} />} name={displayName(selectedServer)} sub={selectedServer.transport === "http" ? "Streamable HTTP" : selectedServer.transport === "sse" ? "SSE" : ko ? "로컬 명령" : "Local command"} ready={serverReady(selectedServer)} badge={connectionBadge(selectedServer)} facts={loadFailed ? [] : serverReady(selectedServer) ? [`tools/list · ${statuses[selectedServer.id].tools.length}`, statuses[selectedServer.id].tools.slice(0, 3).map((tool) => tool.name).join(", ")] : statuses[selectedServer.id]?.missingEnv || []} action={{ label: selectedServer.transport === "stdio" && !selectedServer.enabled ? ko ? "실행 패키지 설치 후 연결" : "Install execution package and connect" : ko ? "연결 확인" : "Verify connection", onClick: () => setConnecting(selectedServer) }} secondaryActions={[{ label: selectedServer.enabled ? t("mcps.off") : selectedServer.transport === "stdio" ? ko ? "로컬 실행 허용" : "Allow local execution" : t("mcps.on"), onClick: () => void toggle(selectedServer).catch((error) => setActionError(String(error))) }, { label: t("mcps.remove"), onClick: () => void remove(selectedServer).then(() => setSelectedServerId(null)).catch((error) => setActionError(String(error))) }]} /></ChipGrid>{selectedServer.envKeys.length > 0 && <Link href="/library/env" className={styles.textLink}>{ko ? "필수 키 설정" : "Set required keys"}</Link>}</div> : tab === "public" ? <>
+          {hub.loadError && <p className={styles.notice} role="status">{ko ? "실시간 목록을 갱신하지 못했어요. 앱에 포함된 카탈로그를 표시합니다." : "The live catalog could not be refreshed. Showing the bundled catalog."}</p>}
+          {loadFailed && <p className={styles.notice} role="status">{ko ? "설치 상태를 읽지 못했어요. 새로고침으로 다시 확인해 주세요." : "Installed state could not be read. Refresh to check again."}</p>}
+          <p className={styles.catalogNote}>{ko ? "전체 Hub 카탈로그 · 필요한 도구를 고르면 연결 설정을 안내해요." : "The full Hub catalog · choose a tool to review its setup."}</p>
+          {catalogGroups.map(([category, rows]) => <section className={styles.group} key={category}><h2 className={styles.groupTitle}>{category}<span>{rows.length}</span></h2><div className={styles.grid}>{rows.map((listing) => {
+            const server = serverForListing(listing.slug, listing.name);
+            const already = !loadFailed && hub.installedKnown && (!!server || hub.isInstalled(listing));
+            const name = !ko ? listing.nameEn || listing.name : listing.name;
+            return <button key={listing.slug} type="button" className={styles.pluginRow} onClick={() => server ? setSelectedServerId(server.id) : openPicker([listing.slug])} aria-label={`${name} · ${already ? ko ? "설치 관리" : "Manage installation" : ko ? "추가 설정" : "Review setup"}`}><PluginLogo slug={listing.slug} name={name} size={36} brandColor={listing.brandColor} brandMap={brandMap} /><span className={styles.rowText}><strong>{name}</strong><span>{!ko ? listing.taglineEn || listing.tagline : listing.tagline}</span></span><span className={styles.rowAction} title={already ? ko ? "설치됨" : "Installed" : ko ? "추가 설정" : "Review setup"}>{already ? "···" : <IconPlus size={19} />}</span></button>;
+          })}</div></section>)}
+          {matches.length === 0 && <Empty text={query.trim() ? ko ? `“${query.trim()}”과 맞는 플러그인이 없어요.` : `No plugins match “${query.trim()}”.` : ko ? "카탈로그를 불러오는 중…" : "Loading the catalog…"} />}
+        </> : <div className={styles.customSection}><h2>{ko ? "나만의 MCP 연결" : "Your custom MCP connection"}</h2><p className={styles.detailNote}>{ko ? "Streamable HTTP 주소 또는 로컬 실행 명령을 등록하세요. 키는 별도로 안전하게 저장됩니다." : "Add a Streamable HTTP endpoint or a local command. Keys are stored separately and securely."}</p>
 
-      {/* 전역 공유 안내 — Codex/Claude 런타임 연결처럼 한 번 켜면 모두가 쓴다 */}
-      <div
-        className="glass-strong"
-        style={{
-          marginBottom: 16,
-          padding: "10px 14px",
-          borderRadius: "var(--radius-md)",
-          fontSize: 11.5,
-          color: "var(--ink-soft)",
-          display: "flex",
-          gap: 10,
-          alignItems: "flex-start",
-        }}
-      >
-        <IconShield size={13} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 2 }} />
-        <span>{t("mcps.shared_note")}</span>
-      </div>
-
-      {/* 탭 — 세 번째는 탭이 아니라 허브 화면으로 나가는 문이다.
-          카탈로그의 정본은 웹(허브)이므로 여기에 사본을 두지 않는다. */}
-      <div style={{ display: "flex", gap: 6, marginBottom: 18, alignItems: "center", flexWrap: "wrap" }}>
-        {(["installed", "catalog"] as Tab[]).map((id) => {
-          const active = tab === id;
-          const label =
-            id === "installed"
-              ? `${ko ? "설치된 도구" : "Installed tools"}${installed.length ? ` · ${installed.length}` : ""}`
-              : t("mcps.tab.catalog");
-          return (
-            <button
-              key={id}
-              onClick={() => setTab(id)}
-              style={{
-                padding: "6px 14px",
-                borderRadius: 999,
-                fontSize: 12.5,
-                fontWeight: active ? 700 : 500,
-                background: active ? "var(--paper)" : "var(--paper-2)",
-                color: active ? "var(--ink)" : "var(--ink-soft)",
-                border: "1px solid var(--paper-edge)",
-                boxShadow: active ? "var(--neu-raised)" : "none",
-              }}
-            >
-              {label}
-            </button>
-          );
-        })}
-        {/* 예전에는 이 자리가 마켓플레이스로 나가는 문이었다. 도구 하나를 붙이려던
-            사람이 에이전트·팀·그래프가 섞인 장터로 튕겨 나가 하려던 일을 잃었으므로,
-            고르는 화면을 이 자리에 띄운다(라우팅 없음). */}
-        <button
-          onClick={() => setPickerOpen(true)}
-          style={{
-            padding: "6px 14px",
-            borderRadius: 999,
-            fontSize: 12.5,
-            fontWeight: 600,
-            background: "var(--one-primary)",
-            color: "var(--white)",
-            border: "1px solid transparent",
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 5,
-          }}
-        >
-          {locale === "en" ? "Add tools" : "도구 추가"}
-        </button>
-      </div>
-
-      {pickerOpen && (
-        <PluginPickerDialog
-          ko={locale !== "en"}
-          // 닫기로도 새로고침한다. 로그인·키 단계에서 X 나 Esc 로 나가면 onCompleted 가
-          // 오지 않는데, 그때도 서버는 이미 등록돼 있다 — 새로고침을 안 하면 방금 깐 것이
-          // 목록에 없는 것처럼 보인다.
-          onClose={() => { setPickerOpen(false); void refresh(); }}
-          onCompleted={(result) => {
-            // 팝업이 등록한 서버는 이 목록에 즉시 나타나야 한다. 새로고침을 사용자가
-            // 직접 하게 두면 "추가했는데 없다"로 읽힌다.
-            void refresh();
-            setTab("installed");
-            setAddSkipped(result?.skipped ?? []);
-          }}
-        />
-      )}
-
-      {addSkipped.length > 0 && (
-        <div
-          role="status"
-          style={{
-            marginBottom: 12,
-            padding: "12px 14px",
-            borderRadius: "var(--radius-md)",
-            border: "1px solid var(--paper-edge)",
-            background: "var(--paper)",
-            fontSize: 12.5,
-            lineHeight: 1.55,
-          }}
-        >
-          <strong style={{ display: "block", marginBottom: 6 }}>
-            {locale === "en"
-              ? `${addSkipped.length} of the tools you picked could not be connected`
-              : `고른 것 중 ${addSkipped.length}개는 연결하지 못했어요`}
-          </strong>
-          <ul style={{ margin: 0, paddingLeft: 16, color: "var(--ink-soft)" }}>
-            {addSkipped.map((row) => (
-              <li key={row.slug}>{`${row.slug} — ${row.reason}`}</li>
-            ))}
-          </ul>
-          <button
-            type="button"
-            onClick={() => setAddSkipped([])}
-            style={{
-              marginTop: 8, border: 0, background: "transparent",
-              color: "var(--ink-soft)", cursor: "pointer", padding: 0, fontSize: 12.5,
-            }}
-          >
-            {locale === "en" ? "Dismiss" : "닫기"}
-          </button>
-        </div>
-      )}
-
-      {tab === "installed" ? (
-        !loaded ? (
-          <Empty text={t("mcps.installed_loading")} />
-        ) : loadFailed ? (
-          <Empty text={locale === "ko"
-            ? "도구 목록을 불러오지 못했습니다. 연결이 끊긴 것이 아니라 읽지 못한 것입니다 — 잠시 뒤 다시 열어 보세요."
-            : "The tool list could not be loaded. Nothing was disconnected — the read failed. Try again in a moment."} />
-        ) : installed.length === 0 ? (
-          <Empty text={t("mcps.installed_empty")} />
-        ) : (
-          <ChipGrid label={ko ? "MCP 연결" : "MCP connections"}>
-            {installed.map((server) => {
-              const name = locale === "en" ? server.nameEn || server.name : server.name;
-              const status = statuses[server.id];
-              const ready = server.enabled && Boolean(status?.connected && status.tools.length > 0 && status.missingEnv.length === 0);
-              const badge = !server.enabled ? (ko ? "꺼짐" : "Off") : ready ? (ko ? "연결됨" : "Connected") : status?.missingEnv.length ? (ko ? "키 필요" : "Keys needed") : status?.deferred ? (ko ? "확인 필요" : "Check needed") : (ko ? "연결 확인 필요" : "Unverified");
-              return <ConnectChip key={server.id} icon={<PluginLogo catalogId={server.catalogId} name={server.name} size={26} brandColor={server.catalogId ? byCatalogId.get(server.catalogId)?.brandColor : undefined} mark={server.catalogId ? byCatalogId.get(server.catalogId)?.mark : undefined} brandMap={brandMap} />}
-                name={name} sub={t(`mcps.transport.${server.transport}` as "mcps.transport.stdio")} ready={ready} badge={badge} badgeTone={ready ? "ok" : status?.missingEnv.length ? "warn" : undefined}
-                facts={ready && status ? [`tools/list · ${status.tools.length} ${ko ? "개 도구" : "tools"}`, status.tools.slice(0, 3).map((tool) => tool.name).join(", "), new Date(status.checkedAt).toLocaleTimeString()] : status?.missingEnv.length ? [status.missingEnv.join(", ")] : []}
-                action={{ label: ready ? (ko ? "다시 확인" : "Recheck") : (ko ? "연결" : "Connect"), onClick: () => setConnecting(server) }}
-                secondaryActions={[{ label: server.enabled ? t("mcps.off") : t("mcps.on"), onClick: () => void toggle(server) }, { label: t("mcps.remove"), onClick: () => void remove(server) }]} />;
-            })}
-          </ChipGrid>
-        )
-      ) : (
-        <>
-        {/* 커스텀 MCP 추가 — 이 탭의 본체다. 카탈로그에서 고르는 길은 허브 화면이 맡는다. */}
         <div style={{ marginBottom: 12 }}>
           {(
             <div
@@ -429,8 +327,8 @@ export default function LibraryMcpsPage() {
                     <div role="alert" style={{ fontSize: 11.5, lineHeight: 1.5, color: "var(--peach-ink)" }}>
                       {/* 카탈로그가 허브 화면으로 옮겨졌으므로 "아래 카드"가 아니라 그 화면을 가리킨다. */}
                       {locale === "en"
-                        ? "Private OpenCrab URLs contain a credential. Connect OpenCrab from “Browse the Hub” so the URL stays in Keychain."
-                        : "OpenCrab 개인 URL에는 인증정보가 들어 있습니다. URL이 키체인에만 남도록 ‘허브에서 찾아보기’에서 OpenCrab을 연결하세요."}
+                        ? "Private OpenCrab URLs contain a credential. Connect OpenCrab from the Public tab so the URL stays in Keychain."
+                        : "OpenCrab 개인 URL에는 인증정보가 들어 있습니다. URL이 키체인에만 남도록 공개 탭에서 OpenCrab을 찾아 연결하세요."}
                     </div>
                   )}
                 </>
@@ -443,7 +341,7 @@ export default function LibraryMcpsPage() {
               />
               <button
                 onClick={() => void addCustom()}
-                disabled={!cName.trim() || cBusy || customOpenCrabUrl}
+                disabled={!customValid || cBusy || customOpenCrabUrl}
                 style={{
                   alignSelf: "flex-start",
                   padding: "7px 16px",
@@ -462,56 +360,11 @@ export default function LibraryMcpsPage() {
           )}
         </div>
 
-        {/* 카탈로그의 정본은 여전히 허브다 — 사본을 두지 않고 그 목록을 팝업으로
-            읽어 온다. 달라진 것은 화면을 떠나지 않는다는 점뿐이다. */}
-        <button
-          onClick={() => setPickerOpen(true)}
-          style={{
-            width: "100%",
-            textAlign: "left",
-            padding: "16px 18px",
-            borderRadius: "var(--radius-md)",
-            border: "1px dashed var(--paper-edge)",
-            background: "var(--paper-2)",
-            display: "flex",
-            alignItems: "center",
-            gap: 12,
-            cursor: "pointer",
-          }}
-        >
-          <IconWand size={18} style={{ color: "var(--accent)", flexShrink: 0 }} />
-          <span style={{ flex: 1, minWidth: 0 }}>
-            <span style={{ display: "block", fontSize: 13, fontWeight: 700 }}>{t("mcps.tab.hub")}</span>
-            <span style={{ display: "block", fontSize: 11.5, color: "var(--muted-deep)", marginTop: 2 }}>
-              {t("mcps.tab.hub_note")}
-            </span>
-          </span>
-          <span aria-hidden style={{ color: "var(--muted-deep)" }}>→</span>
-        </button>
-        </>
-      )}
 
-      {connecting && <ServiceConnectPopup name={locale === "en" ? connecting.nameEn || connecting.name : connecting.name} icon={<PluginLogo catalogId={connecting.catalogId} name={connecting.name} size={28} brandMap={brandMap} />} ko={ko} run={connectServer}
-        setupLink={connecting.envKeys.length ? { label: ko ? "필수 키 설정" : "Set required keys", href: "/library/env" } : undefined}
-        onClose={() => { setConnecting(null); void refresh(); }} onDone={() => { setConnecting(null); void refresh(); }} />}
-
-      {/* 보안 노트 */}
-      <div
-        className="glass-strong"
-        style={{
-          marginTop: 18,
-          padding: "10px 14px",
-          borderRadius: "var(--radius-md)",
-          fontSize: 11.5,
-          color: "var(--ink-soft)",
-          display: "flex",
-          gap: 10,
-          alignItems: "flex-start",
-        }}
-      >
-        <IconLock size={13} style={{ color: "var(--accent)", flexShrink: 0, marginTop: 2 }} />
-        <span>{t("env.security_note")}</span>
+        <p className={styles.securityNote}><IconLock size={13} />{t("env.security_note")}</p></div>}
       </div>
+      {pickerOpen && <PluginPickerDialog ko={ko} initialSlugs={pickerSlugs} onCustomSetup={() => { setPickerOpen(false); setSelectedServerId(null); setTab("private"); }} onClose={() => { setPickerOpen(false); void refreshAll(); }} onCompleted={(result) => { setAddSkipped(result?.skipped ?? []); void refreshAll(); }} />}
+      {connecting && <ServiceConnectPopup name={displayName(connecting)} icon={<PluginLogo catalogId={connecting.catalogId} name={connecting.name} size={28} brandMap={brandMap} />} ko={ko} run={connectServer} setupLink={connecting.envKeys.length ? { label: ko ? "필수 키 설정" : "Set required keys", href: "/library/env" } : undefined} onClose={() => { setConnecting(null); void refresh(); }} onDone={() => { setConnecting(null); void refresh(); }} />}
     </section>
   );
 }

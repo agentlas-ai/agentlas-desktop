@@ -68,6 +68,50 @@ export interface InvocationLifecycleRecord {
 
 export type InvocationCancelResult = "requested" | "already-requested" | "not-found";
 
+export interface InvocationShutdownPorts {
+  beginAppShutdown(): string[];
+  activeRunIds(): string[];
+  onSettled(listener: () => void): () => void;
+  onNativePreparationQuiesced?(listener: () => void): () => void;
+}
+
+/** Service settlement includes runner, tools and retained children. An abort
+ * request or an empty OS-child list cannot prove that an API run has drained. */
+export function drainInvocationService(service: InvocationShutdownPorts): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let unsubscribe: (() => void) | undefined;
+    let unsubscribePreparation: (() => void) | undefined;
+    let finished = false;
+    let admissionClosed = false;
+    let stopFailed = false;
+    let stopError: unknown;
+    const finish = (failed: boolean, error?: unknown): void => {
+      if (finished) return;
+      finished = true;
+      try { unsubscribe?.(); }
+      catch (cleanupError) { if (!failed) { failed = true; error = cleanupError; } }
+      try { unsubscribePreparation?.(); }
+      catch (cleanupError) { if (!failed) { failed = true; error = cleanupError; } }
+      if (failed) reject(error);
+      else resolve();
+    };
+    const check = (): void => {
+      if (finished || !admissionClosed) return;
+      try { if (service.activeRunIds().length === 0) finish(stopFailed, stopError); }
+      catch (error) { finish(true, error); }
+    };
+    try {
+      // Subscribe before cancellation: a parked wait may settle synchronously.
+      unsubscribe = service.onSettled(check);
+      unsubscribePreparation = service.onNativePreparationQuiesced?.(check);
+      try { service.beginAppShutdown(); }
+      catch (error) { stopFailed = true; stopError = error; }
+      admissionClosed = true;
+      check();
+    } catch (error) { finish(true, error); }
+  });
+}
+
 export class InvocationLifecycleRegistry<T extends InvocationLifecycleRecord> {
   private readonly active = new Map<string, T>();
   private readonly settled = new Set<string>();

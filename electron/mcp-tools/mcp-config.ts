@@ -54,6 +54,8 @@ import {
   isCanonicalComputerUseMcpServer,
 } from "../computer-use/mcp-server";
 import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
+import {ONE_OS_EXECUTION_ENV} from "../one/context-lease";
+import {prepareSupervisorOsExecution} from "../one/supervisor-os-execution";
 import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
 import {
   MCP_PROXY_CONTROL_FILE_ENV,
@@ -751,6 +753,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const residentProxyHandles: string[] = [];
   const activatedResidentProxyHandles = new Set<string>();
   const browserAuthorityCleanup: Array<() => void> = [];
+  let osExecution:ReturnType<typeof prepareSupervisorOsExecution>|undefined;
   let releasePrepared: (() => boolean) | undefined;
   let released = false;
   const cleanup = () => {
@@ -766,6 +769,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       else cancelMcpProxyLaunchPreparation(handle);
     }
     for (const revoke of browserAuthorityCleanup) revoke();
+    osExecution?.dispose();
     for (const revoke of agentMailCapabilityCleanup) revoke();
     for (const revoke of oneTeamCapabilityCleanup) revoke();
     try { workspacePreviewCapabilityCleanup?.(); } finally {
@@ -873,17 +877,28 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     const resolvedEnv = new Map<string, string>();
     let missingRequiredValue = false;
     let oauthAccessToken: string | null = null;
+    const remoteVaultKey = s.transport !== "stdio" && s.url ? vaultUrlKey(s.url) : null;
+    let resolvedRemoteUrl: string | null = s.url ?? null;
     try {
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
         const value = await readEnvVar(envKey);
         if (!value) {
           missingRequiredValue = true;
-          break;
+          continue;
         }
         resolvedEnv.set(envKey, value);
       }
-      if (s.transport !== "stdio") oauthAccessToken = await resolveMcpOAuthAccessToken(s.id);
+      if (s.transport !== "stdio") {
+        if (remoteVaultKey) {
+          const rawUrl = resolvedEnv.get(remoteVaultKey)?.trim();
+          resolvedRemoteUrl = rawUrl ? resolveVaultRemoteUrl(s, rawUrl) : null;
+        }
+        // Endpoint credentials remain mandatory even when OAuth replaces
+        // manual authentication headers. Bind the token to the resolved URL.
+        if (!resolvedRemoteUrl) continue;
+        oauthAccessToken = await resolveMcpOAuthAccessToken(s.id, resolvedRemoteUrl);
+      }
     } catch (error) {
       if (!(error instanceof KeychainUnavailableError)
         || requiredToolCatalogIds.has(s.id)
@@ -1036,6 +1051,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         builtInEnv.PATH = preparedEnv.PATH ?? "";
       }
       const secretAliases: Record<string, string> = {};
+      if(!opts?.nativeBrowser && canonicalComputerUseSelected && ["cua-driver","agentlas-browser"].includes(s.catalogId??"")) {
+        osExecution??=prepareSupervisorOsExecution({runId:opts?.supervisorReplyRunId,chatId:opts?.toolGate?.chatId,
+          permission:opts?.toolGate?.permission,admissionCurrent:opts?.admissionCurrent});
+        if(osExecution){const alias=mcpRuntimeSecretAlias(key,ONE_OS_EXECUTION_ENV);secretAliases[ONE_OS_EXECUTION_ENV]=alias;runtimeEnv[alias]=JSON.stringify(osExecution.capability);}
+      }
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);
         const value = resolvedEnv.get(envKey);
@@ -1183,14 +1203,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // runtimeEnv의 불투명 alias로만 옮기고, 설정 파일에는 `${ALIAS}` 참조를 쓴다.
       // Claude Code가 시작 시 자기 프로세스 env로 참조를 보간하므로 stdio vault
       // secret과 동일하게 파일/argv에는 값이 남지 않는다.
-      const vaultKey = vaultUrlKey(s.url);
+      const vaultKey = remoteVaultKey;
       let serializedUrl = s.url;
       if (vaultKey) {
-        const rawUrl = resolvedEnv.get(vaultKey)?.trim();
-        const resolvedUrl = rawUrl ? resolveVaultRemoteUrl(s, rawUrl) : null;
-        if (!resolvedUrl) continue; // vault 값이 없거나 검증 실패면 서버를 싣지 않는다
+        if (!resolvedRemoteUrl) continue; // vault 값이 없거나 검증 실패면 서버를 싣지 않는다
         const alias = mcpRuntimeSecretAlias(key, vaultKey);
-        runtimeEnv[alias] = resolvedUrl;
+        runtimeEnv[alias] = resolvedRemoteUrl;
         serializedUrl = envReference(alias);
       }
       const headers: Record<string, string> = {};
@@ -1212,7 +1230,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         codexBearerAlias = alias;
       }
       // URL 자체의 vault 키는 헤더 자격증명이 아니므로 헤더 직렬화에서 제외한다.
-      const headerKeys = s.envKeys.filter((headerKey) => headerKey !== vaultKey);
+      const headerKeys = s.envKeys.filter((headerKey) => headerKey !== vaultKey
+        && (!oauthAccessToken || (resolvedEnv.has(headerKey) && headerKey.toLowerCase() !== "authorization")));
       // 선언된 헤더가 없는 원격 http 서버는 Codex가 표현할 수 있다. OAuth 토큰만 실린
       // 경우도 여기에 해당하고, 그때는 위에서 잡아 둔 codexBearerAlias 가 함께 나간다.
       let codexRemoteSupported = s.transport === "http" && headerKeys.length === 0;

@@ -1582,6 +1582,10 @@ export function tryRecordFailureEvent(input: RecordFailureEventInput): void {
 }
 
 export function recordMcpInvocationEvent(runId: string, req: McpInvocationRequest, ev: McpInvocationEvent, options?: { requireDurable?: boolean; hostControl?: MainHostControlObservation }): void {
+  // Live-only signals have no durable row to deduplicate. Keep them off the
+  // synchronous SQLite/hash path while tools and terminal facts stay durable.
+  if (ev.kind === "partial" || ev.kind === "usage") return;
+  if (ev.kind === "reasoning" && ev.reasoning?.phase === "delta") return;
   // Skip the entire already-committed projection, including selection/failure
   // companion rows. The host assigns the source sequence before delivery.
   if (Number.isSafeInteger(ev.sequence)) {
@@ -1592,9 +1596,6 @@ export function recordMcpInvocationEvent(runId: string, req: McpInvocationReques
   // Reasoning boundaries are different: they contain no chain-of-thought text,
   // only start/end timing. Persist those typed facts so Activity does not lose
   // its Thought row after a route change or app restart.
-  if (ev.kind === "partial" || ev.kind === "usage") return;
-  // reasoning delta는 partial과 같은 고빈도 live 스트림 — end의 전문만 남긴다.
-  if (ev.kind === "reasoning" && ev.reasoning?.phase === "delta") return;
   // The runtime-selected notice is a host fact, not model prose. Keep it in a
   // dedicated row so history can prove the provider/model that received the
   // prompt even when the run emits no tool call or fails immediately.

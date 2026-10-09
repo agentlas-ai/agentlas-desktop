@@ -513,3 +513,21 @@
     padding: 12px;
   }
 }
+
+/* Paper popup elevation shares the desktop popup palette. */
+.overlay { background: var(--popup-backdrop, rgb(31 42 34 / 24%)); backdrop-filter: blur(5px); }
+.panel, .keyPanel { border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }
+
+
+
+.explanation { margin:0 24px 12px; color:var(--ink-soft); font-size:11px; }
+.explanation summary { cursor:pointer; padding:6px 0; }
+.explanation .subtitle { margin:6px 0; padding:0; }
+.title { display:flex; align-items:center; gap:11px; }
+.titleIcon { display:grid; place-items:center; flex:none; width:42px; height:42px; border-radius:13px; background:var(--popup-sage,var(--paper-2)); color:var(--ink); box-shadow:inset 0 1px 0 #fff9,0 3px 10px #26312708; }
+.card { box-shadow:inset 0 1px 0 #fff9,0 3px 9px #26312708; }
+.card[data-selected] { background:var(--popup-sage,var(--paper-2)); }
+
+/* A long catalog description must not enlarge a narrow choice column. */
+.card { min-width:0; }
+@media(max-width:640px) { .grid { grid-template-columns:minmax(0,1fr); } }

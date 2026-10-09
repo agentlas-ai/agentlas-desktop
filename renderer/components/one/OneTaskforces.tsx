@@ -237,15 +237,15 @@ export function OneTaskforceDialog({
     closeOnBackdrop={!busy}
     closeOnEscape={!busy}
     size="wide"
-    eyebrow="Taskforce"
+    icon={<IconUsers size={20} />}
     title={taskforce ? (locale === "ko" ? "태스크포스 멤버" : "Taskforce members") : (locale === "ko" ? "태스크포스 만들기" : "Create Taskforce")}
     titleId="one-taskforce-dialog-title"
     ariaLabelledBy="one-taskforce-dialog-title"
-    description={locale === "ko" ? "One은 항상 참여합니다. 동료를 추가하거나 사용할 수 없는 멤버의 자리를 재선택할 수 있습니다. 이전 대화의 작성자는 바뀌지 않습니다." : "One always participates. Add staff or reselect an unavailable member's place. Past message authors stay unchanged."}
+    description={locale === "ko" ? "One은 항상 참여합니다." : "One always participates."}
   >
     <div className={styles.dialogBody} aria-busy={busy ? "true" : "false"}>
       <label className={styles.titleField}>{locale === "ko" ? "이름" : "Name"}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} placeholder={locale === "ko" ? "예: Launch Team" : "e.g. Launch Team"} /></label>
-      <label className={styles.descriptionField}>{locale === "ko" ? "설명" : "Description"}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={600} rows={3} placeholder={locale === "ko" ? "이 팀의 역할, 목적, 협업 방식을 설명하세요." : "Describe this team's purpose, responsibilities, and way of working."} /></label>
+      <details className={styles.descriptionDetails} open={Boolean(taskforce?.description)}><summary>{locale === "ko" ? "팀 설명" : "Team description"}</summary><label className={styles.descriptionField}>{locale === "ko" ? "설명" : "Description"}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={600} rows={3} placeholder={locale === "ko" ? "이 팀의 역할, 목적, 협업 방식을 설명하세요." : "Describe this team's purpose, responsibilities, and way of working."} /></label></details>
       {busy && <div className={styles.busyState} role="status" aria-live="polite"><span aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
       <section className={styles.memberList} aria-label={locale === "ko" ? "태스크포스 멤버" : "Taskforce members"}>
         <div className={styles.memberRow} data-fixed="true">

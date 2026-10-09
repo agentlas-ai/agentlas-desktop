@@ -17,7 +17,9 @@ import { currentUiLocale } from "../ui-locale";
 import type Database from "better-sqlite3";
 import type { RuntimeSelection, RuntimeStatus } from "../../shared/types";
 import type { Runner, RunnerFailure } from "../runtime/runner";
-import { isJudgmentRefusal } from "../runtime/judgment-refusal";
+import { RuntimeTurnUnsettledError, runnerFailureFromError, runtimeFailureIsClosedHttpRefusal } from "../runtime/runner";
+import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { RuntimeJudgmentRefusal } from "../runtime/judgment-refusal";
 import { createObservedUsageAccumulator, createRuntimeUsageCollector } from "../../shared/observed-usage";
 import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind } from "./blocker";
 import { AGI_ACTION_SCHEMA, AGI_MAX_ACTIONS_PER_ATTEMPT, type AgiActionExecutor, type AgiActionReceipt } from "./actions";
@@ -402,6 +404,7 @@ export class AgiModelAttempt {
         }, {
           onPartial: (text) => { if (!settled && text) nativeEvidence = true; }, onStatus: () => {},
           onTool: () => { if (!settled) nativeEvidence = true; },
+          onThinking: () => { if (!settled) nativeEvidence = true; },
           onRuntimeAttemptStarted: (id) => { if (!settled) { nativeEvidence = true; usage.start(id); } },
           onTerminalObservedUsage: (observed, id) => { if (!settled) { nativeEvidence = true; usage.recordTerminal(observed, id); } },
         });
@@ -413,10 +416,21 @@ export class AgiModelAttempt {
         if (controller.signal.aborted) {
           return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: "agi.model.timeout" };
         }
-        if (result.failure) {
-          this.deps.noteFailure?.(candidate.status, result.failure);
-          lastCode = `agi.model.runtime-${result.failure.kind}`;
-          if (NEXT_CANDIDATE_FAILURES.has(result.failure.kind) && !observed) continue;
+        const failure = result.failure;
+        // A bounded HTTP rejection is a definitive refusal before model work;
+        // other failed/partial returns cannot authorize another candidate.
+        const rejectedBeforeWork = runtimeFailureIsClosedHttpRefusal(failure, {
+          text: result.text, nativeActivity: nativeEvidence, aborted: controller.signal.aborted, observedUsage: observed });
+        if (result.ownerControlTerminal !== "completed" && !rejectedBeforeWork) {
+          const unsettled = runnerFailureFromError(new RuntimeTurnUnsettledError(candidate.status.kind, "en"), candidate.status.kind);
+          this.deps.noteFailure?.(candidate.status, failure ?? unsettled);
+          return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: unsettled.providerCode };
+        }
+        if (failure) {
+          this.deps.noteFailure?.(candidate.status, failure);
+          if (runtimeFailureBlocksReplay(failure)) return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: failure.providerCode };
+          lastCode = `agi.model.runtime-${failure.kind}`;
+          if (NEXT_CANDIDATE_FAILURES.has(failure.kind) && !observed) continue;
           return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: lastCode };
         }
         return { text: result.text ?? "", usage: candidateUsage.total() ?? null, candidate, started: true };
@@ -429,8 +443,19 @@ export class AgiModelAttempt {
         }
         const aborted = controller.signal.aborted;
         lastCode = aborted ? "agi.model.timeout" : "agi.model.runner-threw";
-        if (!aborted && !nativeEvidence && isJudgmentRefusal(error)) continue;
+        const failure = runnerFailureFromError(error, candidate.status.kind);
+        if (!aborted && runtimeFailureBlocksReplay(failure)) {
+          recordUsage();
+          this.deps.noteFailure?.(candidate.status, failure);
+          return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: failure.providerCode };
+        }
+        if (!aborted && !nativeEvidence && error instanceof RuntimeJudgmentRefusal) continue;
         recordUsage();
+        if (!aborted && dispatched) {
+          this.deps.noteFailure?.(candidate.status, failure);
+          return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true,
+            code: new RuntimeTurnUnsettledError(candidate.status.kind, "en").code };
+        }
         return { text: null, usage: candidateUsage.total() ?? null, candidate, started: true, code: lastCode };
       } finally {
         clearTimeout(timer);

@@ -16,6 +16,8 @@ import type { LongRunRecord } from "../store/long-runs";
 import { buildAutomaticGoalCriteria } from "../../shared/automatic-goal-criteria";
 import { goalResumeRecoveryBlockerCode } from "../../shared/long-run";
 import { currentUiLocale } from "../ui-locale";
+import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { createHash } from "node:crypto";
 
 /** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
  * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
@@ -209,6 +211,60 @@ export async function prepareInvocationAutomaticGoal(input: {
   }
 }
 
+/** A typed failed controller turn is not permission for an automatic new brain
+ * episode. Use its durable receipt, including after restart or an old retry.
+ * An explicit later owner resume can authorize new work without pretending the
+ * previous turn's external effects were proved. */
+function automaticGoalReplayBarrier(runId: string) {
+  const db = getDb();
+  const attempt = db.prepare(`SELECT a.id, a.error_code, a.invocation_run_id, l.root_chat_id,
+      COALESCE((SELECT MAX(e.seq) FROM long_run_events e WHERE e.run_id = a.run_id
+        AND e.kind IN ('worker.attempt_started','worker.attempt_settled')
+        AND json_extract(e.payload_json, '$.attemptId') = a.id), 0) AS attempt_seq
+    FROM long_run_worker_attempts a JOIN long_run_workers w ON w.id = a.worker_id
+    JOIN long_runs l ON l.id = a.run_id
+    WHERE a.run_id = ? AND w.role = 'controller'
+    ORDER BY (SELECT MAX(e.seq) FROM long_run_events e WHERE e.run_id = a.run_id
+      AND e.kind = 'worker.attempt_started'
+      AND json_extract(e.payload_json, '$.attemptId') = a.id) DESC, a.started_at DESC, a.id DESC
+    LIMIT 1`).get(runId) as { id: string; error_code: string | null; invocation_run_id: string | null;
+      root_chat_id: string | null; attempt_seq: number } | undefined;
+  if (!attempt) return null;
+  // A successful brain result does not prove a lost native steering ACK. Only
+  // this controller's exact invocation/chat can hold its next automatic turn.
+  const controls = attempt.invocation_run_id && attempt.root_chat_id
+    ? db.prepare(`SELECT intent_id, status, code, updated_at FROM invocation_current_turn_steers
+        WHERE run_id = ? AND chat_id = ? AND status IN ('dispatching','uncertain') ORDER BY intent_id`)
+        .all(attempt.invocation_run_id, attempt.root_chat_id) as Array<{
+          intent_id: string; status: string; code: string | null; updated_at: string }>
+    : [];
+  const blocker = runtimeFailureBlocksReplay({ providerCode: attempt.error_code ?? undefined })
+    ? attempt.error_code : controls.length ? "runtime_turn_unsettled" : null;
+  if (!blocker) return null;
+  return { code: blocker, attemptSeq: attempt.attempt_seq,
+    observed: { schemaVersion: "agentlas.goal-runtime-replay-barrier.v1", runId,
+      attemptId: attempt.id, invocationRunId: attempt.invocation_run_id,
+      digest: `sha256:${createHash("sha256").update(JSON.stringify({ runId, attempt, controls })).digest("hex")}` } };
+}
+
+export function automaticGoalReplayBlockerCode(runId: string): string | null {
+  const barrier = automaticGoalReplayBarrier(runId);
+  if (!barrier) return null;
+  // Only the actual Main user-resume producer can capture this exact receipt
+  // set. Wall clocks and generic user messages cannot acknowledge a later ACK.
+  const resumed = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ? AND seq > ?
+    AND kind = 'run.user_control' AND actor_kind = 'user'
+    AND json_extract(payload_json, '$.command') = 'resume'
+    AND json_extract(payload_json, '$.runtimeReplayBarrier.schemaVersion') = ?
+    AND json_extract(payload_json, '$.runtimeReplayBarrier.runId') = ?
+    AND json_extract(payload_json, '$.runtimeReplayBarrier.attemptId') = ?
+    AND json_extract(payload_json, '$.runtimeReplayBarrier.invocationRunId') IS ?
+    AND json_extract(payload_json, '$.runtimeReplayBarrier.digest') = ?
+    ORDER BY seq DESC LIMIT 1`).get(runId, barrier.attemptSeq, barrier.observed.schemaVersion,
+      runId, barrier.observed.attemptId, barrier.observed.invocationRunId, barrier.observed.digest);
+  return resumed ? null : barrier.code;
+}
+
 /** Explicit UI resume reuses the same campaign and remaining budget. It never
  * reclassifies the synthetic continuation as a new user request. */
 /**
@@ -229,6 +285,10 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
   if (run.version !== expectedVersion) throw new Error("long_run_resume_version_conflict");
   if (!["paused", "blocked", "queued", "running", "waiting_tool", "waiting_user", "verifying"].includes(run.status)) throw new Error("auto_goal_resume_not_stopped");
   if (liveLongRunAttemptCount(run.id)) throw new Error("auto_goal_resume_attempt_live");
+  if (actor === "host") {
+    const blocker = automaticGoalReplayBlockerCode(run.id);
+    if (blocker) throw new Error(blocker);
+  }
   const authority = revision.authorityRefs.map((ref) => /^invocation:([^:]+):permission:(read|write|full)$/.exec(ref)).find(Boolean);
   if (!authority) throw new Error("auto_goal_resume_authority_missing");
   return { chatId, promptOrigin: "system", taskIntent: "task", permissions: authority[2] as "read" | "write" | "full",
@@ -276,9 +336,12 @@ export async function queueAutomaticGoalResume(
     if (!version) throw new Error("long_run_resume_dispatch_unavailable");
     const request = automaticGoalResumeRequest(chatId, version, "user");
     if (!request) throw new Error("long_run_resume_dispatch_unavailable");
+    const barrier = automaticGoalReplayBarrier(before.id);
+    if (barrier) appendLongRunEvent({ runId: before.id, kind: "run.user_control", actorKind: "user",
+      payload: { command: "resume", runtimeReplayBarrier: barrier.observed } });
     getDb().prepare("UPDATE chat_goal_contracts SET status = 'active', completed_at = NULL, updated_at = ? WHERE goal_id = ? AND status = 'blocked'")
       .run(new Date().toISOString(), before.goalId);
     return { request,
-      queued: resumeDesktopLongRunManually(before.id, version) };
+      queued: resumeDesktopLongRunManually(before.id, getLongRun(before.id)!.version) };
   })();
 }

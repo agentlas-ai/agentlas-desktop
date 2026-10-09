@@ -336,3 +336,16 @@
 @media (prefers-reduced-motion: reduce) {
   .backdrop { backdrop-filter: none; }
 }
+
+.dialog { width: min(720px, calc(100vw - 32px)); border-radius: 18px; }
+.body { min-height: 0; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); gap: 20px; padding: 24px; }
+.copy h2 { font-size: 26px; line-height: 1.2; }
+.copy p { font-size: 12px; margin: 10px 0 0; line-height: 1.55; }
+.details { margin-top: 16px; color: var(--muted-deep); font-size: 12px; }
+.details summary { cursor: pointer; }
+.count { display: flex; gap: 5px; }
+.progressDot { width: 6px; height: 6px; border-radius: 50%; background: var(--paper-edge-strong); }
+.progressDot[data-active="true"] { width: 18px; border-radius: 9px; background: var(--ink); }
+@media(max-width: 600px) { .body { grid-template-columns: 1fr; } .preview { min-height: 180px; } }
+
+.backdrop { padding: 16px; }

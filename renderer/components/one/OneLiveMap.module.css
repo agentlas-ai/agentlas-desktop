@@ -50,3 +50,7 @@
 .overlay small { color: var(--map-muted); }
 .overlay { background: color-mix(in srgb, var(--map-bg) 92%, transparent); }
 .overlay button { border-color: var(--map-accent); background: var(--map-accent); color: var(--design-accent-ink); }
+
+.locationPopup :global(.maplibregl-popup-content) { padding: 10px 12px; border: 1px solid var(--paper-edge); border-radius: 12px; background: var(--popup-card-bg, var(--paper)); color: var(--ink); box-shadow: var(--popup-shadow); }
+.locationPopupRow { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.locationPopupRow b { width: 24px; height: 24px; display: grid; place-items: center; flex: none; border-radius: 8px; background: var(--paper-3); color: var(--ink-soft); font-size: 10px; }

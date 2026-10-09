@@ -12,6 +12,7 @@
 //    즉 "원격 MCP 연결은 사람이 명시적으로 해야 한다"는 요건은 값 단계에서 이미 지켜지고
 //    있고, 여기서 자동화하는 건 등록(연결 가능하다는 사실)뿐이다.
 // 이 모듈의 실패는 런을 오염시키지 않는다(전부 격리, 결과는 영수증으로 보고).
+import { BUNDLED_HUB_CATALOG_REVISION, getBundledHubManifest } from "../../shared/bundled-hub-catalog";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -308,43 +309,67 @@ export interface HubPluginManifestPayload {
   version?: string | null;
 }
 
-export async function fetchHubPluginManifest(manifestUrl: string): Promise<HubPluginManifestPayload | null> {
-  let url: URL;
-  try {
-    url = new URL(manifestUrl);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== "https:") return null;
+function normalizeManifestPayload(parsed: Record<string, unknown>): HubPluginManifestPayload {
+  return {
+    mcp: normalizeManifestMcpRows(parsed.mcp),
+    skills: normalizeManifestSkillRows(parsed.skills),
+    ...(typeof parsed.name === "string" ? { name: parsed.name } : {}),
+    ...(typeof parsed.family === "string" ? { family: parsed.family } : {}),
+    version: typeof parsed.version === "string" ? parsed.version : null,
+  };
+}
+
+async function fetchRemoteManifest(url: URL): Promise<Record<string, unknown> | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), MANIFEST_TIMEOUT_MS);
   try {
-    const response = await fetch(url, {
-      signal: controller.signal,
-      headers: { accept: "application/json" },
-    });
+    const response = await fetch(url, { signal: controller.signal, redirect: "error", headers: { accept: "application/json" } });
     if (!response.ok) return null;
     const text = await response.text();
     if (Buffer.byteLength(text, "utf8") > MANIFEST_MAX_BYTES) return null;
-    const parsed = JSON.parse(text) as {
-      mcp?: unknown;
-      skills?: unknown;
-      name?: unknown;
-      family?: unknown;
-      version?: unknown;
-    };
-    return {
-      mcp: normalizeManifestMcpRows(parsed?.mcp),
-      skills: normalizeManifestSkillRows(parsed?.skills),
-      ...(typeof parsed?.name === "string" ? { name: parsed.name } : {}),
-      ...(typeof parsed?.family === "string" ? { family: parsed.family } : {}),
-      ...(typeof parsed?.version === "string" ? { version: parsed.version } : { version: null }),
-    };
+    const parsed: unknown = JSON.parse(text);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
   } catch {
     return null;
-  } finally {
-    clearTimeout(timer);
+  } finally { clearTimeout(timer); }
+}
+
+const bundledManifestUpdates = new Map<string, { at: number; manifest: Record<string, unknown> | null }>();
+const pendingManifestUpdates = new Map<string, Promise<Record<string, unknown> | null>>();
+const MANIFEST_UPDATE_CACHE_MS = 5 * 60_000;
+const MANIFEST_UPDATE_RETRY_MS = 30_000;
+
+export async function fetchHubPluginManifest(manifestUrl: string): Promise<HubPluginManifestPayload | null> {
+  let url: URL;
+  let bundled: Record<string, unknown> | null = null;
+  try {
+    url = new URL(manifestUrl);
+    if (url.protocol !== "https:" || url.username || url.password) return null;
+    const slug = url.origin === "https://agentlas.cloud" ? /^\/api\/plugins\/([^/]+)$/.exec(url.pathname)?.[1] : undefined;
+    bundled = slug ? getBundledHubManifest(decodeURIComponent(slug)) : null;
+  } catch { return null; }
+  if (!bundled) {
+    const remote = await fetchRemoteManifest(url);
+    return remote ? normalizeManifestPayload(remote) : null;
   }
+  // Only the chosen plugin is refreshed. The shipped payload remains available
+  // offline and an older deployed Hub cannot restore deprecated definitions.
+  const key = url.toString();
+  const cached = bundledManifestUpdates.get(key);
+  if (cached && Date.now() - cached.at < (cached.manifest ? MANIFEST_UPDATE_CACHE_MS : MANIFEST_UPDATE_RETRY_MS)) {
+    return normalizeManifestPayload(cached.manifest || bundled);
+  }
+  let pending = pendingManifestUpdates.get(key);
+  if (!pending) {
+    pending = fetchRemoteManifest(url).then((remote) => {
+      const revision = typeof remote?.catalogRevision === "string" ? Date.parse(remote.catalogRevision) : NaN;
+      const newer = Number.isFinite(revision) && revision > Date.parse(BUNDLED_HUB_CATALOG_REVISION) ? remote : null;
+      bundledManifestUpdates.set(key, { at: Date.now(), manifest: newer });
+      return newer;
+    }).finally(() => pendingManifestUpdates.delete(key));
+    pendingManifestUpdates.set(key, pending);
+  }
+  return normalizeManifestPayload(await pending || bundled);
 }
 
 /**

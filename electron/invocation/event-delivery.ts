@@ -50,8 +50,26 @@ export class RunEventDeliveryJournal {
     if (input.afterOrdinal > journal.ordinal) throw new Error("run-event-replay-cursor-ahead");
     const first = journal.entries.keys().next().value ?? journal.ordinal + 1;
     const complete = input.afterOrdinal >= first - 1;
+    const events: McpInvocationEvent[] = [];
+    if (complete && input.afterOrdinal < journal.ordinal) {
+      // Most polls are caught up or need only a short tail. Avoid allocating
+      // and scanning the entire retained journal on each observer request.
+      const span = journal.ordinal - input.afterOrdinal;
+      if (span <= journal.entries.size) {
+        for (let ordinal = input.afterOrdinal + 1; ordinal <= journal.ordinal; ordinal++) {
+          const row = journal.entries.get(ordinal);
+          if (row) events.push(row.event);
+        }
+      } else {
+        // A sparse publisher remains bounded by retained entries, not the
+        // numerical distance between cursors.
+        for (const row of journal.entries.values()) {
+          if (row.event.delivery!.ordinal > input.afterOrdinal) events.push(row.event);
+        }
+      }
+    }
     return { ...base, status: complete ? "complete" : "truncated", latestOrdinal: journal.ordinal,
-      events: complete ? structuredClone([...journal.entries.values()].filter(row => row.event.delivery!.ordinal > input.afterOrdinal).map(row => row.event)) : [],
+      events: events.length ? structuredClone(events) : [],
       terminalEvent: structuredClone(journal.terminalEvent) };
   }
   private prune(): void {

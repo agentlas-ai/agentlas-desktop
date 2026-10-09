@@ -49,9 +49,12 @@ const CORE_CHANNELS = [
   "science:researcherQuestions:register", "science:researcherQuestions:list", "science:researcherQuestions:answer",
   "science:toolApprovals:state", "science:toolApprovals:setAlwaysApproved", "science:toolApprovals:resolve",
   "science:askUser:list", "science:askUser:answer",
+  "science:projectSpace:inspect", "science:projectSpace:snapshot", "science:projectSpace:link",
+  "science:projects:updateDeliverable",
+  "science:workspace:get", "science:workspace:updateNavigation", "science:workspace:replaceTabs",
 ] as const;
 
-/** Main removes its old handlers for exactly this set before registering once. */
+/** Channels owned by this daemon IPC registration; Main must not keep parallel handlers for them. */
 export const SCIENCE_DAEMON_EXECUTION_IPC_CHANNELS: readonly string[] = [
   ...CORE_CHANNELS, "science:math:command", "science:math:cancel", ...SCIENCE_PUBLICATION_IPC_CHANNELS, ...SCIENCE_STYLE_LIBRARY_IPC_CHANNELS,
 ];
@@ -385,6 +388,51 @@ export function registerScienceDaemonExecutionIpc(options: {
     const payload = input(envelope); scope(payload);
     return dispatch(`runtime.${action}`, payload);
   });
+  for (const action of ["inspect", "snapshot", "link"] as const) register(`science:projectSpace:${action}`, (_event, envelope) => {
+    const payload = input(envelope);
+    id(payload.projectId);
+    // The daemon owns both retrieval-cache writes and explicit relation writes.
+    return dispatch(`space.${action}`, payload, false);
+  }, "science:projects");
+  register("science:projects:updateDeliverable", (_event, envelope) => {
+    const payload = input(envelope);
+    const exactKeys = (value: Row, keys: readonly string[]) => Object.keys(value).every(key => keys.includes(key));
+    if (!exactKeys(payload, ["requestId", "projectId", "deliverable"])) throw new Error("science-project-deliverable-input-invalid");
+    const uuid = (value: unknown) => typeof value === "string"
+      && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(value);
+    if (!uuid(payload.requestId) || !uuid(payload.projectId)) throw new Error("science-project-deliverable-input-invalid");
+    const deliverable = payload.deliverable;
+    if (deliverable !== null) {
+      const value = row(deliverable);
+      if (!value || !exactKeys(value, ["kind", "pagesMin", "pagesMax"])
+        || !["paper", "consulting-report", "gaejosik-report"].includes(String(value.kind))) {
+        throw new Error("science-project-deliverable-invalid");
+      }
+      for (const page of [value.pagesMin, value.pagesMax]) {
+        if (page !== undefined && page !== null && (!Number.isSafeInteger(page) || Number(page) < 1 || Number(page) > 2000)) {
+          throw new Error("science-project-deliverable-pages-invalid");
+        }
+      }
+      if (value.pagesMin != null && value.pagesMax != null && Number(value.pagesMin) > Number(value.pagesMax)) {
+        throw new Error("science-project-deliverable-pages-invalid");
+      }
+    }
+    return dispatch("projects.updateDeliverable", payload, false);
+  }, "science:projects");
+  register("science:workspace:get", (_event, envelope) => {
+    const projectId = id(row(envelope)?.projectId);
+    return dispatch("workspace.get", { projectId }, false);
+  }, "science:projects");
+  register("science:workspace:updateNavigation", (_event, envelope) => {
+    const payload = input(envelope);
+    id(payload.projectId);
+    return dispatch("workspace.updateNavigation", payload, false);
+  }, "science:projects");
+  register("science:workspace:replaceTabs", (_event, envelope) => {
+    const payload = input(envelope);
+    id(payload.projectId);
+    return dispatch("workspace.replaceTabs", payload, false);
+  }, "science:projects");
   register("science:researchLoops:inspect", (_event, envelope) => dispatch("loops.inspect", { projectId: id(row(envelope)?.projectId) }), "science:projects");
   register("science:researchLoops:start", (_event, envelope) => dispatch("loops.start", input(envelope), false));
   register("science:researchLoops:transition", (_event, envelope) => {

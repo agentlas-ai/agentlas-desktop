@@ -7,7 +7,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
-import { IconClose, IconRefresh, IconSearch } from "@/components/Icon";
+import { IconClose, IconRefresh, IconSearch, IconCpu } from "@/components/Icon";
 import type { HuggingFaceModelFile, HuggingFaceRepositoryInspection, HuggingFaceSearchResult, LocalModelHubSnapshot } from "@shared/local-model-hub";
 import { classifyModelRole, estimateFit, estimateModelBytes, fitLabel, parseParameterCount, roleLabel, type LocalModelFitLevel, type LocalModelRole } from "@/lib/local-model-fit";
 import styles from "./HuggingFaceModelBrowser.module.css";
@@ -258,16 +258,16 @@ export function HuggingFaceModelBrowser({ ko, onInstalled, onOperationStarted }:
     {registering && !selected && <div className={styles.downloadStatus} role="status"><span>{ko ? "파일 확인 중…" : "Checking file…"}</span><button type="button" onClick={() => void cancel()}>{ko ? "중지" : "Stop"}</button></div>}
     {operation && !selected && <div className={styles.downloadStatus} role="status"><span data-download-package={operation.packageId}>{operation.fileName} · {size(progress?.downloaded ?? 0)} / {size(progress?.total ?? null)}</span><button type="button" onClick={() => void cancel()}>{ko ? "취소" : "Cancel"}</button></div>}
     {selected && <div className={styles.backdrop} aria-hidden={!!confirmation} onPointerDown={event => { if (event.target === event.currentTarget) close(); }}><div ref={dialog} className={styles.detail} role="dialog" aria-modal="true" aria-labelledby="hf-model-detail-title">
-      <header><div><span>{inspection?.publisher ?? selected.split("/")[0]}</span><h2 id="hf-model-detail-title">{selected.split("/").slice(1).join("/")}</h2></div><button type="button" aria-label={ko ? "닫기" : "Close"} onClick={close}><IconClose size={18} /></button></header>
+      <header><span className={styles.detailIcon} aria-hidden="true"><IconCpu size={22}/></span><div><span>{inspection?.publisher ?? selected.split("/")[0]}</span><h2 id="hf-model-detail-title">{selected.split("/").slice(1).join("/")}</h2></div><button type="button" aria-label={ko ? "닫기" : "Close"} onClick={close}><IconClose size={18} /></button></header>
       {inspecting ? <p role="status" className={styles.pendingText}>{ko ? "파일 확인 중…" : "Checking files…"}</p> : inspection && <>
         <p className={styles.detailMeta}>{[inspection.license ?? (ko ? "라이선스 확인 필요" : "license unconfirmed"), inspection.architecture, inspection.stale ? (ko ? "저장된 목록 · 연결 확인 필요" : "saved list · check connection") : null].filter(Boolean).join(" · ")}</p>
         {inspection.files.length > 0 && <table className={styles.table} data-hf-files>
           <thead><tr><th>{ko ? "파일" : "File"}</th><th>{ko ? "양자화" : "Quant"}</th><th>{ko ? "크기" : "Size"}</th><th>{ko ? "추천" : "Fit"}</th><th><span className="sr-only">{ko ? "다운로드" : "Download"}</span></th></tr></thead>
           <tbody>{inspection.files.map(file => { const fit = fileFit(file); return <tr key={file.fileName} data-hf-file={file.fileName} data-fit={fit.level}>
             <td className={styles.model} title={file.fileName}><strong>{file.fileName}</strong>{!file.downloadable && <small>{inspection.gated === true ? (ko ? "원본 저장소에서 접근 승인 필요" : "Access approval required at the source") : (ko ? "지원하지 않는 파일" : "Unsupported file")}</small>}</td>
-            <td>{file.quantization ?? "GGUF"}</td>
-            <td className={styles.num}>{size(file.byteLength)}</td>
-            <td><span className={styles.fit} data-level={fit.level} title={fit.reason}>{fitLabel(fit.level, ko)}</span></td>
+            <td data-label={ko ? "양자화" : "Quant"}>{file.quantization ?? "GGUF"}</td>
+            <td className={styles.num} data-label={ko ? "크기" : "Size"}>{size(file.byteLength)}</td>
+            <td data-label={ko ? "추천" : "Fit"}><span className={styles.fit} data-level={fit.level} title={fit.reason}>{fitLabel(fit.level, ko)}</span></td>
             <td className={styles.action}><button type="button" disabled={!file.downloadable || registering || operation !== null || confirmation !== null || !inspection.revision} onClick={() => void install(file)}>{ko ? "다운로드" : "Download"}</button></td>
           </tr>; })}</tbody>
         </table>}

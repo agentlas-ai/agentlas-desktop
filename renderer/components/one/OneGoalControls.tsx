@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useId, useRef, useState, type ReactNode } from "react";
 import type { AgentlasIpc, ChatContinuitySnapshot, ChatGoalContext, GoalResumeConfirmation, GoalResumeReview, GoalRuntimeSelectionReceipt } from "../../../shared/types";
 import { goalObjectiveText } from "../../../shared/auto-goal";
 import { confirmGoalResumeReview } from "../../../shared/goal-resume-review";
@@ -197,6 +197,18 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
   const modelChipRef = useRef<HTMLButtonElement>(null);
   const modelNoteId = useId();
   const rootRef = useRef<HTMLElement>(null);
+  const [helpPlacement, setHelpPlacement] = useState<"above" | "below">("above");
+  useLayoutEffect(() => {
+    if (!helpOpen && !modelNoteOpen) return;
+    const place = () => {
+      const rect = rootRef.current?.getBoundingClientRect();
+      if (rect) setHelpPlacement(rect.top < Math.min(360, window.innerHeight / 2) ? "below" : "above");
+    };
+    place();
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
+    return () => { window.removeEventListener("resize", place); window.removeEventListener("scroll", place, true); };
+  }, [helpOpen, modelNoteOpen]);
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   const callbacks = useRef({ isCurrent, onDeleted, onStopped });
@@ -436,14 +448,12 @@ export function OneGoalControls({ chatId, locale, isCurrent, onDeleted, onStoppe
       const wake = goalNextWakeOf(view.context);
       return wake ? <p className={styles.nextWake} data-goal-next-wake={wake.requestedBy}>{goalNextWakeLabel(wake, locale)}</p> : null;
     })()}
-    {modelPending && modelNoteOpen && <div id={modelNoteId} className={styles.help} role="tooltip" data-goal-model-note="true">
+    {modelPending && modelNoteOpen && <div id={modelNoteId} className={styles.help} data-placement={helpPlacement} role="tooltip" data-goal-model-note="true">
       <p><strong>{ko ? "모델 변경 대기 중" : "Model change pending"}</strong>{pendingModel ? ` · ${pendingModel}` : ""}</p>
-      <p>{ko
-        ? "이 목표의 다음 안전한 실행부터 새 모델이 적용됩니다. 지금 실행은 그대로 끝나고, 이 목표가 만든 자동화도 다음 실행부터 따라갑니다(직접 모델을 지정한 자동화는 그대로)."
-        : "The new model applies from this Goal's next safe run. The current run finishes as is, and automations this Goal created follow from their next run (automations with a model you set yourself stay unchanged)."}</p>
-      <p className={styles.modelNoteHint}>{ko ? "적용되면 이 표시는 사라집니다." : "This chip disappears once the change is applied."}</p>
+      <div className={styles.modelTimeline}><span>{ko ? "현재 실행" : "Current run"}<strong>{ko ? "기존 모델" : "Current model"}</strong></span><b aria-hidden="true">→</b><span>{ko ? "다음 안전한 실행" : "Next safe run"}<strong>{pendingModel || (ko ? "새 모델" : "New model")}</strong></span></div>
+      <details className={styles.helpMore}><summary>{ko ? "자동화 적용 범위" : "Automation scope"}</summary><p>{ko ? "이 목표가 만든 자동화도 다음 실행부터 적용됩니다. 직접 모델을 지정한 자동화는 유지됩니다." : "Automations created by this Goal follow from their next run. Explicit automation model choices stay unchanged."}</p></details>
     </div>}
-    {helpOpen && <div className={styles.help} role="dialog" data-goal-help="true" aria-label={ko ? "목표 상태 설명" : "Goal status explained"}>
+    {helpOpen && <div className={styles.help} data-placement={helpPlacement} role="dialog" data-goal-help="true" aria-label={ko ? "목표 상태 설명" : "Goal status explained"}>
       <p>{label}</p>
       <GoalPlanSummary plan={goalPlanOf(view.context)} locale={locale} />
       {view.context?.acceptanceCriteria.length ? <ul className={styles.helpCriteria} aria-label={ko ? "성공 기준" : "Success criteria"}>

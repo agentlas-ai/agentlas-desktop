@@ -1,3 +1,4 @@
+import { registerNativeApprovalChildSignal } from "../runtime/native-approval-provenance";
 import type { LoginPrerequisiteRef, LoginRecoveryOutcome } from "./login-recovery";
 
 export type { LoginPrerequisiteRef } from "./login-recovery";
@@ -21,6 +22,8 @@ export function createBrowserLoginPrerequisite(input: {
 }) {
   const owner = new AbortController();
   const execution = new AbortController();
+  registerNativeApprovalChildSignal(input.signal, owner.signal);
+  registerNativeApprovalChildSignal(input.signal, execution.signal);
   const pending = new Map<string, LoginPrerequisiteRef>();
   const restored = new Set<string>();
   const listeners = new Set<() => void>();

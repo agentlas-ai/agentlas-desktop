@@ -776,3 +776,34 @@ export function isSafeOneAttachmentReceipt(value: OneAttachmentSafeItem): boolea
     && (value.kind === "image" || value.kind === "file" || value.kind === "directory")
     && SHA256_RE.test(value.digest);
 }
+
+/** Main-only prepared claim bound to the original attachment grant. */
+export interface PreparedOneAttachmentClaim {
+  readonly receipt: Readonly<{ attachments: ReadonlyArray<OneAttachmentSafeItem>; totalBytes: number }>;
+}
+const preparedAttachmentClaims = new WeakMap<PreparedOneAttachmentClaim, {
+  ref: OneAttachmentRef; chatId: string; userPrompt: string; teamProposalId: string | null;
+}>();
+export function prepareOneAttachmentClaim(input: {
+  ref: OneAttachmentRef; chatId: string; userPrompt: string; teamProposalId: string | null;
+}): PreparedOneAttachmentClaim {
+  const record = validatedRecord(input.ref);
+  if (record.chatId !== input.chatId || record.promptDigest !== sha256Text(input.userPrompt)
+    || record.teamProposalId !== input.teamProposalId) {
+    throw new OneAttachmentError("stale_grant", "The attachment capability does not match this chat, prompt and team proposal.");
+  }
+  const proof: PreparedOneAttachmentClaim = Object.freeze({ receipt: Object.freeze({
+    attachments: Object.freeze(record.items.map(item => Object.freeze({ ...item.safe }))),
+    totalBytes: record.items.reduce((sum, item) => sum + item.safe.size, 0),
+  }) });
+  preparedAttachmentClaims.set(proof, { ...input, ref: Object.freeze({ ...input.ref }) }); return proof;
+}
+export function claimPreparedOneAttachments(proof: PreparedOneAttachmentClaim, binding: { runId: string; resultFolder: string }): ClaimedOneAttachments {
+  const input = preparedAttachmentClaims.get(proof);
+  if (!input) throw new OneAttachmentError("stale_grant", "The Main attachment claim is unavailable.");
+  return claimOneAttachments({ ...input, ...binding });
+}
+export function releasePreparedOneAttachments(proof: PreparedOneAttachmentClaim): void {
+  const input = preparedAttachmentClaims.get(proof); if (!input) return;
+  releaseOneAttachmentRun(input.ref); preparedAttachmentClaims.delete(proof);
+}

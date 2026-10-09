@@ -107,3 +107,14 @@
   .trigger,
   .panel button { transition: none; }
 }
+
+.panel { width: min(310px, calc(100vw - 40px)); padding: 16px; border-radius: 14px; }
+.keyHint { display: flex; align-items: center; justify-content: center; gap: 10px; padding: 20px 0 16px; }
+.keyHint kbd { padding: 9px 12px; border: 1px solid var(--paper-edge-strong); border-bottom-width: 3px; border-radius: 9px; background: var(--paper-2); color: var(--ink); font: 600 15px var(--font-body); }
+.keyHint > span { color: var(--muted-deep); font-size: 13px; }
+.steps { display: flex; justify-content: space-between; gap: 8px; padding-bottom: 14px; font-size: 10px; color: var(--ink-soft); }
+.details { color: var(--muted-deep); font-size: 11px; line-height: 1.5; }
+.details summary { cursor: pointer; }
+.details p { font-size: 11px; }
+.screenReaderOnly { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px !important; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; }
+.panel > button { width: 100%; background: var(--ink); color: var(--paper); border-color: var(--ink); }

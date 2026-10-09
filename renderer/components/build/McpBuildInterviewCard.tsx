@@ -1,4 +1,7 @@
 "use client";
+
+import { IconPuzzle } from "@/components/Icon";
+import styles from "./BuildPopup.module.css";
 // 빌드 MCP 인터뷰 카드 — grill-me 원칙(한 번에 하나, 추천 답변 동봉, 확실하면 안 물어봄)을 따른다.
 // 이전 "전체 후보 한 번에 승인" 카드(McpBuildPlanCard) 대신, 실제로 판단이 필요한 후보만
 // 하나씩 순서대로 묻는다:
@@ -158,11 +161,11 @@ export function McpBuildInterviewCard(props: {
             );
           })}
         </div>
-        <p className="build-mcp-hint">
+        <details><summary>{ko ? "권한 안내" : "Permission details"}</summary><p className="build-mcp-hint">
           {ko
             ? "표시 권한은 예상치입니다. 실제 API 키·서버·DB 계정 권한은 더 넓을 수 있으며, 권한 확대 감지는 아직 자동 강제하지 않습니다."
             : "Shown permissions are estimates. Actual API-key, server, or database-account access can be broader; permission widening is not yet automatically enforced."}
-        </p>
+        </p></details>
       </>
     );
   };
@@ -193,9 +196,9 @@ export function McpBuildInterviewCard(props: {
       .filter((candidate) => approvedIds.includes(candidate.id))
       .map((candidate) => candidate.name);
     return (
-      <section className="build-card build-mcp-plan-card build-mcp-interview-card titlebar-nodrag" role="dialog" aria-label={ko ? "MCP 연결 확인" : "Confirm MCP attachment"}>
+      <section className={`build-card build-mcp-plan-card build-mcp-interview-card titlebar-nodrag ${styles.interview}`} role="dialog" aria-label={ko ? "MCP 연결 확인" : "Confirm MCP attachment"}>
         <div className="build-mcp-interview-head">
-          <strong className="build-mcp-interview-question">{ko ? "MCP 연결을 확인해 주세요" : "Confirm MCP attachment"}</strong>
+          <strong className="build-mcp-interview-question"><IconPuzzle size={17} />{ko ? "MCP 연결을 확인해 주세요" : "Confirm MCP attachment"}</strong>
         </div>
         <p className="build-mcp-hint">
           {ko
@@ -234,10 +237,10 @@ export function McpBuildInterviewCard(props: {
         : "This tool is currently disabled.";
 
   return (
-    <section className="build-card build-mcp-plan-card build-mcp-interview-card titlebar-nodrag" role="dialog" aria-label={ko ? "MCP 연결 질문" : "MCP attachment question"}>
+    <section className={`build-card build-mcp-plan-card build-mcp-interview-card titlebar-nodrag ${styles.interview}`} role="dialog" aria-label={ko ? "MCP 연결 질문" : "MCP attachment question"}>
       <div className="build-mcp-interview-head">
         {steps.length > 1 && <span className="build-mcp-interview-step">{active + 1}/{steps.length}</span>}
-        <strong className="build-mcp-interview-question">{step.candidate.name}</strong>
+        <strong className="build-mcp-interview-question"><IconPuzzle size={17} />{step.candidate.name}</strong>
       </div>
       <p className="build-mcp-hint">
         {candidateLabel(step.candidate, ko)} · {blockerNote}

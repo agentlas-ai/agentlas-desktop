@@ -3,6 +3,8 @@
 import { useEffect, useRef, type KeyboardEvent } from "react";
 import { IconBuilding, IconCheck, IconFileUp, IconLock, IconRefresh } from "@/components/Icon";
 
+import styles from "./BuildPopup.module.css";
+
 interface CloudSaveChoiceDialogProps {
   open: boolean;
   choiceId: string;
@@ -79,11 +81,11 @@ export function CloudSaveChoiceDialog({
       }}
     >
       <section
-        className="build-cloud-choice-dialog"
+        className={`build-cloud-choice-dialog ${styles.choice}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="build-cloud-choice-title"
-        aria-describedby="build-cloud-choice-description build-cloud-choice-boundary"
+        aria-describedby="build-cloud-choice-description"
         aria-busy={busy}
         onKeyDown={onKeyDown}
       >
@@ -156,12 +158,11 @@ export function CloudSaveChoiceDialog({
           </div>
         )}
 
-        <p id="build-cloud-choice-boundary" className="build-cloud-choice-boundary">
-          <IconLock size={12} />
+        <details className="build-cloud-choice-details"><summary><IconLock size={12} />{ko ? "내 계정에 비공개 · 사용 안내" : "Private to your account · usage details"}</summary><p id="build-cloud-choice-boundary" className="build-cloud-choice-boundary">
           {ko
             ? "Agent Cloud 비공개 · Hub 공개 아님 · 호스팅 LLM 아님. 다른 Desktop에서 복원·설치한 뒤, 그 Desktop에 연결된 Mobile이 호출해요."
             : "Private Agent Cloud · not public Hub · not a hosted LLM. After another Desktop restores and installs it, Mobile calls it through that paired Desktop."}
-        </p>
+        </p></details>
       </section>
     </div>
   );

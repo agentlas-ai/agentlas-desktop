@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { IconClose, IconEdit, IconPlus, IconTrash, IconWand } from "@/components/Icon";
+import { IconClose, IconLock, IconEdit, IconPlus, IconTrash, IconWand } from "@/components/Icon";
 import type {
   BrowserAutofillAPI,
   BrowserAutofillSnapshot,
@@ -167,14 +167,14 @@ export function BrowserAutofill({ open, mode, target, ko, onClose, onPrepareOver
       summary: `${item.availableFields.length}${ko ? "개 항목" : " fields"}${item.maskedEmail ? ` · ${item.maskedEmail}` : ""}` }));
   return <div ref={root} className={`${menu.panelPopover} ${styles.panel}`} role="dialog" tabIndex={-1}
     aria-label={ko ? (mode === "passwords" ? "비밀번호" : "연락처 자동 완성") : mode === "passwords" ? "Passwords" : "Contact autofill"}>
-    <div className={styles.header}><strong>{ko ? (mode === "passwords" ? "비밀번호" : "연락처") : mode === "passwords" ? "Passwords" : "Contacts"}</strong><button className={styles.iconButton} type="button" onClick={close} title={ko ? "닫기" : "Close"} aria-label={ko ? "닫기" : "Close"}><IconClose size={15}/></button></div>
+    <div className={styles.header}><span className={styles.titleMark} aria-hidden="true"><IconLock size={17}/></span><strong>{ko ? (mode === "passwords" ? "비밀번호" : "연락처") : mode === "passwords" ? "Passwords" : "Contacts"}</strong><button className={styles.iconButton} type="button" onClick={close} title={ko ? "닫기" : "Close"} aria-label={ko ? "닫기" : "Close"}><IconClose size={15}/></button></div>
     {unavailable && <p className={styles.notice}>{ko ? "보안 저장소를 사용할 수 없습니다." : "Secure storage is unavailable."}</p>}
     {!unavailable && rows.map((item) => <div className={styles.item} key={item.id}>
       <div><strong>{item.label}</strong><span>{item.summary}</span></div>
       {removePending === item.id ? <div className={styles.actions}><button type="button" disabled={busy} onClick={() => setRemovePending(null)}>{ko ? "취소" : "Cancel"}</button><button type="button" disabled={busy} onClick={() => void remove(item.id)}>{ko ? "삭제 확인" : "Delete"}</button></div>
         : <div className={styles.actions}><button className={styles.iconButton} type="button" disabled={busy || !target} onClick={() => void fill(item.id)} title={ko ? "채우기" : "Fill"} aria-label={ko ? "채우기" : "Fill"}><IconWand size={15}/></button><button className={styles.iconButton} type="button" disabled={busy} onClick={() => mode === "passwords" ? beginCredential(item.id) : beginContact(item.id)} title={ko ? "전체 교체" : "Replace"} aria-label={ko ? "전체 교체" : "Replace"}><IconEdit size={15}/></button><button className={styles.iconButton} type="button" disabled={busy} onClick={() => setRemovePending(item.id)} title={ko ? "삭제" : "Delete"} aria-label={ko ? "삭제" : "Delete"}><IconTrash size={15}/></button></div>}
     </div>)}
-    {!unavailable && rows.length === 0 && <p className={styles.notice}>{ko ? "저장된 항목이 없습니다." : "No saved items."}</p>}
+    {!unavailable && rows.length === 0 && <p className={`${styles.notice} ${styles.empty}`}><IconLock size={24} aria-hidden="true"/>{ko ? "저장된 항목이 없습니다." : "No saved items."}</p>}
     {!unavailable && editing === null && <button className={menu.panelMenuRow} type="button" disabled={busy} onClick={() => mode === "passwords" ? beginCredential("new") : beginContact("new")}>{ko ? "새로 저장" : "Save new"}<IconPlus size={15}/></button>}
     {!unavailable && editing !== null && <div className={styles.form}>
       <p>{editing === "new" ? (ko ? "새 항목" : "New item") : (ko ? "기존 값은 표시하지 않습니다. 새 값으로 전체 교체합니다." : "Saved values stay hidden. Enter a complete replacement.")}</p>

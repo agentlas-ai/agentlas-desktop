@@ -24,7 +24,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 128;
+const SCHEMA_VERSION = 129;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -5404,6 +5404,39 @@ export function initStore(options: StoreInitOptions = {}): void {
       ON invocation_steers(status, queued_at, id);
     CREATE INDEX IF NOT EXISTS idx_invocation_steers_chat
       ON invocation_steers(chat_id, queued_at, id);
+
+    -- The common invocation harness accepts owner directions independently
+    -- of its CLI/API brain. Dispatch claims never replay after a restart.
+    CREATE TABLE IF NOT EXISTS invocation_current_turn_steers (
+      intent_id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      prompt_text TEXT NOT NULL,
+      prompt_hash TEXT NOT NULL,
+      message_id TEXT NOT NULL,
+      binding_json TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('queued','dispatching','applied','rejected','uncertain')),
+      code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_current_turn_steers_chat
+      ON invocation_current_turn_steers(chat_id, created_at, intent_id);
+
+    -- v129: every interactive harness has one exact execution owner. Retain
+    -- released identities so a late acknowledgement can never reopen a run.
+    CREATE TABLE IF NOT EXISTS invocation_run_owners (
+      run_id TEXT PRIMARY KEY,
+      chat_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      owner_kind TEXT NOT NULL CHECK(owner_kind IN ('desktop','daemon','terminal')),
+      lease_id TEXT NOT NULL UNIQUE,
+      state TEXT NOT NULL CHECK(state IN ('active','settling','released')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_invocation_active_owner_chat
+      ON invocation_run_owners(chat_id) WHERE state IN ('active','settling');
 
     -- Prompt Store creates the durable chat before the renderer can navigate.
     -- The stable renderer intent makes an IPC response loss replay the exact

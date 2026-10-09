@@ -3,6 +3,7 @@
 // in-app right-side workspace. Surface manifests remain declarative; registered
 // live apps run in a sandboxed native web surface with no Desktop IPC.
 "use client";
+import { confirmPopup } from "@/lib/popup";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { CSSProperties, ReactNode } from "react";
 import { buildSurfaceDelegationPlan } from "@shared/surface-delegation";
@@ -44,6 +45,7 @@ import {
   IconWand,
 } from "./Icon";
 import { useT } from "@/lib/i18n";
+import { PopupFrame, PopupAction, PopupFacts, PopupDetails } from "./Popup";
 import menu from "./PanelPopover.module.css";
 import { LiveDeviceMockup } from "./LiveDeviceMockup";
 import { OneLiveMap } from "./one/OneLiveMap";
@@ -1177,9 +1179,9 @@ function DelegationPanel({
      *   한국어로 쓰는 사람에게 결제 승인을 영어로 묻는 자리다. 그리고 이 물음은
      *   네이티브 대화상자라 화면 훑기에 안 잡힌다 — 한국어 훑기가 0건이었던 이유다.
      */
-    const ok = window.confirm(ko
+    const ok = await confirmPopup(ko
       ? `결제 단계를 승인할까요?\n\n${summary}\n\n카드 정보는 결제사 화면이나 보안 입력창에만 남고 여기에는 저장되지 않습니다.`
-      : `Approve payment step?\n\n${summary}\n\nCard details stay in provider checkout or secure UI.`);
+      : `Approve payment step?\n\n${summary}\n\nCard details stay in provider checkout or secure UI.`, { locale: ko ? "ko" : "en", title: request.merchant, tone: "warning", confirmLabel: ko ? "결제 단계 승인" : "Approve payment step" });
     if (!ok) return;
     const action = (surface.manifest.actions ?? []).find((item) => item.type === "request-payment-approval");
     if (typeof window !== "undefined" && window.agentlas?.surfaces && !isPreviewSurfaceId(surface.id)) {
@@ -1285,74 +1287,32 @@ function DelegationPanel({
       )}
 
       {activeCredential && (
-        <div style={secureCredentialOverlay} role="dialog" aria-modal="true" aria-label="Secure credential input">
-          <div style={secureCredentialDialog}>
-            <div style={secureCredentialHeader}>
-              <span style={secureCredentialMark}>
-                <IconShield size={15} />
-              </span>
-              <div style={{ minWidth: 0 }}>
-                <strong>Secure credential save</strong>
-                <span>Agentlas vault · {activeCredential.envKey}</span>
-              </div>
-              <button
-                type="button"
-                style={iconButton}
-                aria-label="Close credential dialog"
-                onClick={() => setActiveCredentialId(null)}
-              >
-                <IconClose size={15} />
-              </button>
-            </div>
-            <div style={secureCredentialFacts}>
-              <div>
-                <span>Requested by</span>
-                <strong>{activeCredential.provider || activeCredential.label}</strong>
-              </div>
-              <div>
-                <span>Allowed host</span>
-                <strong>{credentialHostText(activeCredential)}</strong>
-              </div>
-              <div>
-                <span>Use</span>
-                <strong>{activeCredential.scope || activeCredential.purpose || activeCredential.requiredWhen || "not declared"}</strong>
-              </div>
-              <div>
-                <span>Storage</span>
-                <strong>{credentialStorageText(activeCredential)}</strong>
-              </div>
-            </div>
-            <div style={secureCredentialNotice(activeCredential.brokerMode)}>
-              {credentialBrokerText(activeCredential)}
-            </div>
-            <div style={credentialInputRow}>
-              <input
-                type="password"
-                autoComplete="off"
-                autoFocus
-                value={draftSecrets[activeCredential.id] ?? ""}
-                placeholder="Paste secret into Agentlas vault"
-                style={credentialInput}
-                onChange={(event) =>
-                  setDraftSecrets((prev) => ({ ...prev, [activeCredential.id]: event.currentTarget.value }))
-                }
-              />
-              <button type="button" style={compactActionButton} onClick={() => void saveCredential(activeCredential)}>
-                Save
-              </button>
-            </div>
-            {activeCredential.setupUrl && (
-              <button
-                type="button"
-                style={linkLikeButton}
-                onClick={() => window.open(activeCredential.setupUrl, "_blank", "noopener,noreferrer")}
-              >
-                Open provider setup page
-              </button>
-            )}
-            {saveStatus[activeCredential.id] && <span style={delegationDetail}>{saveStatus[activeCredential.id]}</span>}
+        <PopupFrame title={ko ? "보안 자격 증명 저장" : "Save secure credential"} icon={<IconShield size={22} />}
+          closeLabel={ko ? "닫기" : "Close"} onClose={() => setActiveCredentialId(null)}
+          description={`Agentlas vault · ${activeCredential.envKey}`}
+          dataAttributes={{ "data-credential-id": activeCredential.id }}
+          footer={<PopupAction primary onClick={() => void saveCredential(activeCredential)}>{ko ? "저장" : "Save"}</PopupAction>}>
+          <PopupFacts items={[
+            { label: ko ? "요청한 서비스" : "Requested by", value: activeCredential.provider || activeCredential.label, icon: <IconStore size={18} /> },
+            { label: ko ? "허용 호스트" : "Allowed host", value: credentialHostText(activeCredential), icon: <IconRoute size={18} /> },
+            { label: ko ? "사용 범위" : "Use", value: activeCredential.scope || activeCredential.purpose || activeCredential.requiredWhen || "not declared", icon: <IconTarget size={18} /> },
+            { label: ko ? "저장 위치" : "Storage", value: credentialStorageText(activeCredential), icon: <IconLock size={18} /> },
+          ]} />
+          <div style={secureCredentialNotice(activeCredential.brokerMode)}>
+            <strong>{activeCredential.brokerMode || "runtime-env-injection"}</strong>
+            <PopupDetails label={ko ? "자격 증명 처리 방식" : "Credential handling"}>{credentialBrokerText(activeCredential)}</PopupDetails>
           </div>
-        </div>
+          <label style={{display: "grid", gap: 6}}>
+            <span>{activeCredential.label || activeCredential.envKey}</span>
+            <input type="password" autoComplete="off" autoFocus value={draftSecrets[activeCredential.id] ?? ""}
+              placeholder={ko ? "Agentlas 보관함에 비밀값 붙여넣기" : "Paste secret into Agentlas vault"} style={credentialInput}
+              onChange={(event) => { const value = event.currentTarget.value; setDraftSecrets((prev) => ({ ...prev, [activeCredential.id]: value })); }} />
+          </label>
+          {activeCredential.setupUrl && <PopupAction onClick={() => window.open(activeCredential.setupUrl, "_blank", "noopener,noreferrer")}>
+            {ko ? "서비스 설정 페이지" : "Open provider setup page"}
+          </PopupAction>}
+          {saveStatus[activeCredential.id] && <span role="status" style={delegationDetail}>{saveStatus[activeCredential.id]}</span>}
+        </PopupFrame>
       )}
 
       {plan.paymentRequests.length > 0 && (
@@ -2804,53 +2764,6 @@ const credentialMetaGrid: CSSProperties = {
   gap: "4px 8px",
   alignItems: "baseline",
   minWidth: 0,
-};
-
-const secureCredentialOverlay: CSSProperties = {
-  position: "fixed",
-  inset: 0,
-  background: "rgba(20, 24, 32, 0.22)",
-  display: "flex",
-  alignItems: "center",
-  justifyContent: "center",
-  zIndex: 80,
-  padding: 18,
-};
-
-const secureCredentialDialog: CSSProperties = {
-  width: "var(--popup-3-width)",
-  borderRadius: 8,
-  border: "1px solid var(--paper-edge)",
-  background: "var(--paper)",
-  boxShadow: "0 18px 60px rgba(20, 24, 32, 0.24)",
-  display: "grid",
-  gap: 12,
-  padding: 14,
-};
-
-const secureCredentialHeader: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "34px minmax(0, 1fr) auto",
-  alignItems: "center",
-  gap: 10,
-};
-
-const secureCredentialMark: CSSProperties = {
-  width: 34,
-  height: 34,
-  borderRadius: 8,
-  background: "var(--fill-1)",
-  color: "var(--accent)",
-  border: "1px solid var(--accent-soft)",
-  display: "inline-flex",
-  alignItems: "center",
-  justifyContent: "center",
-};
-
-const secureCredentialFacts: CSSProperties = {
-  display: "grid",
-  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
-  gap: 8,
 };
 
 function secureCredentialNotice(mode: string | undefined): CSSProperties {

@@ -7,15 +7,20 @@ import { setToolApprovalLedger, type ToolApprovalRequest } from "../runtime/tool
 const LOCAL_OWNER_IDENTITY = "local-owner";
 
 /**
- * Main seals every live tool approval into the scoped SQLite store, so a decision is committed before
- * the waiting run hears it and its receipt survives a renderer, phone or app restart (Hope Stage 2
- * handover item 4; acceptance R05/S03, invariant I07). Each Main run is its own owner epoch: what an
- * earlier run left pending is retired at install, and an earlier run's decision is never consumed.
+ * Native hosts seal live tool approvals before the waiting run hears the decision.
+ * Each process generation has its own epoch. Restart retires that host's earlier
+ * pending requests while preserving the other host's live waiters in the shared DB.
+ * An earlier process's receipt never authorizes a replacement run.
  */
-export function installDurableToolApprovalLedger(db: Database.Database, now: () => number = Date.now): OneSupervisorApprovalStore {
+export function installDurableToolApprovalLedger(
+  db: Database.Database,
+  now: () => number = Date.now,
+  hostKind: "main" | "daemon" = "main",
+): OneSupervisorApprovalStore {
+  if (hostKind !== "main" && hostKind !== "daemon") throw new Error("supervisor_approval_host_invalid");
   const store = new OneSupervisorApprovalStore(db, true, now);
-  const epoch = `main:${randomUUID()}`;
-  store.retireEarlierOwners(epoch);
+  const epoch = `${hostKind}:${randomUUID()}`;
+  store.retireEarlierOwners(epoch, hostKind);
   store.prune();
   const identityOf = (request: ToolApprovalRequest) => request.consentBinding?.userIdentity || LOCAL_OWNER_IDENTITY;
   setToolApprovalLedger({

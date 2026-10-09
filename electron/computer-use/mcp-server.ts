@@ -175,6 +175,12 @@ function controlRequest(route, body, timeoutMs = 8000) {
   const nativeSource = typeof body.sourceId === "string" && body.sourceId.startsWith("native-guest:");
   const info = readControlInfo(nativeTarget || nativeSource || body.nativeScope === true);
   if (info.scopeId) { route = "/native-guest" + route; body = { ...body, scopeId: info.scopeId }; }
+  if (!info.scopeId && process.env.AGENTLAS_ONE_OS_EXECUTION) {
+    let capability;
+    try { capability = JSON.parse(process.env.AGENTLAS_ONE_OS_EXECUTION); } catch { return Promise.reject(new Error("one-os-execution-capability-invalid")); }
+    if (!capability || capability.version !== "agentlas.one-os-execution.v1" || typeof capability.executionId !== "string" || !/^[a-f0-9]{64}$/.test(capability.token)) return Promise.reject(new Error("one-os-execution-capability-invalid"));
+    body = { ...body, oneOsExecution: capability };
+  }
   const bytes = Buffer.from(JSON.stringify(body), "utf8");
   if (bytes.length > 64 * 1024) return Promise.reject(new Error("Computer Use request is too large."));
   return new Promise((resolve, reject) => {

@@ -536,3 +536,20 @@
   .dialog { border: 2px solid CanvasText; }
   .heroBrand { backdrop-filter: none; }
 }
+
+
+.backdrop { background: var(--popup-backdrop, rgb(31 42 34 / 24%)); backdrop-filter: blur(5px); }
+.dialog { background: var(--paper); border-color: var(--paper-edge); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }
+.hero { height: 180px; }
+.promoBody { padding: 24px 28px; gap: 12px; }
+.promoBody h2 { font-size: 25px; }
+.kicker { color: var(--ink-soft); }
+.promoPoints { grid-template-columns: repeat(3,minmax(0,1fr)); gap: 9px; margin: 6px 0; }
+.promoPoints li { display: grid; align-content: start; gap: 8px; padding: 14px 11px; border: 1px solid var(--paper-edge); border-radius: 14px; background: var(--popup-sage, color-mix(in srgb, var(--ok) 7%, var(--paper))); box-shadow: inset 0 1px 0 #fff9, 0 3px 10px #26312708; }
+.promoPoints li::before { display: none; }
+.promoPoints li strong { color: var(--ink); font-size: 11.5px; }
+.promoPoints li span { color: var(--ink-soft); font-size: 10px; }
+.primary { background: var(--ink); border-color: var(--ink); color: var(--paper); }
+.packageMark,.brandHeader span { background: var(--popup-sage, var(--paper-2)); border-color: var(--paper-edge); }
+.progressTrack span { background: var(--ok); }
+@media(max-width:460px) { .promoPoints { grid-template-columns: 1fr; } .promoPoints li { grid-template-columns: 25px minmax(0,1fr); padding: 10px 12px; } .promoPoints li span { grid-column:2; } }

@@ -1,12 +1,12 @@
 import { Suspense } from "react";
 import { AskUserSheet } from "@/components/AskUserSheet";
 import { ToolApprovalSheet } from "@/components/ToolApprovalSheet";
-import { OneShell } from "@/components/one/OneShell";
+import { OneEntry } from "@/components/one/OneEntry";
 
 export default function AgentlasOnePage() {
   return (
     <Suspense fallback={null}>
-      <OneShell />
+      <OneEntry />
       {/*
         One renders outside AppShell, so the runner's synchronous questions (ask_user,
         Codex MCP approval elicitations) had no surface here at all: the Work badge sent

@@ -18,7 +18,9 @@ type OneBottomSheetProps = {
   closeOnEscape?: boolean;
   panelClassName?: string;
   bodyClassName?: string;
+  dataAttributes?: Record<`data-${string}`, string | boolean | undefined>;
   eyebrow?: ReactNode;
+  icon?: ReactNode;
   title?: ReactNode;
   titleId?: string;
   description?: ReactNode;
@@ -114,7 +116,7 @@ function releaseInert(element: HTMLElement) {
 
 function getFocusableElements(root: HTMLElement): HTMLElement[] {
   return Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR)).filter(
-    (element) => element.getAttribute("aria-hidden") !== "true",
+    (element) => element.getAttribute("aria-hidden") !== "true" && element.getClientRects().length > 0 && !element.closest("[inert]"),
   );
 }
 
@@ -138,7 +140,9 @@ export function OneBottomSheet({
   closeOnEscape = true,
   panelClassName,
   bodyClassName,
+  dataAttributes,
   eyebrow,
+  icon,
   title,
   titleId,
   description,
@@ -181,7 +185,7 @@ export function OneBottomSheet({
     // Focusing the panel first vacates the trigger, so the inert loop below
     // never hides a focused ancestor. (Was a setTimeout(…, 0) that fired after
     // the loop, which is what created the gap.)
-    dialog.focus();
+    (dialog.querySelector<HTMLElement>("[data-popup-autofocus]") ?? dialog).focus();
 
     // Keep the rest of the One surface out of the accessibility tree while the
     // modal is open. This also prevents background controls from being tabbed.
@@ -266,6 +270,7 @@ export function OneBottomSheet({
       />
       <div
         ref={dialogRef}
+        {...dataAttributes}
         className={[styles.sheet, styles[size], panelClassName].filter(Boolean).join(" ")}
         data-one-modal={size}
         data-one-bottom-sheet={size}
@@ -278,6 +283,7 @@ export function OneBottomSheet({
       >
         {title !== undefined && (
           <header className={styles.header}>
+            {icon !== undefined && <span className={styles.headingIcon} aria-hidden="true">{icon}</span>}
             <div className={styles.headingCopy}>
               {eyebrow !== undefined && <p className={styles.eyebrow}>{eyebrow}</p>}
               <h2 id={titleId}>{title}</h2>

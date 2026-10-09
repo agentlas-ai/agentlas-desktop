@@ -229,3 +229,10 @@
     animation: none;
   }
 }
+
+.art { height: clamp(160px, 29dvh, 205px); }
+.body { padding: 18px 24px 16px; gap: 12px; }
+.close { width: 40px; height: 40px; }
+.details { width: 100%; color: var(--muted-deep); font-size: 12px; }
+.details summary { cursor: pointer; }
+.details p { margin-top: 8px; font-size: 12px; }

@@ -1,3 +1,4 @@
+import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
 import { assertScienceRecoveryAcpRequest } from "../science-host/recovery-authority";
@@ -35,7 +36,7 @@ import {
   type AcpMcpTranslation,
 } from "./acp-protocol";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
-import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, RuntimeTurnUnsettledError } from "./runner";
+import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, RuntimeTurnUnsettledError, runnerFailureFromError } from "./runner";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
@@ -304,6 +305,7 @@ export class AcpSessionClient {
    * run with bypassPermissions and never ask.
    */
   async answerPermission(params: any): Promise<any> {
+    if (this.approval.signal?.aborted) return { outcome: { outcome: "cancelled" } };
     const options: any[] = Array.isArray(params?.options) ? params.options : [];
     const readOnly = this.permission === "read" || this.permission === undefined;
     const kind = normalizeToolKind(params?.toolCall?.kind);
@@ -911,6 +913,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
      * killed the agent and left its card on screen for the 5-minute expiry.
      */
     const approvalTurn = new AbortController();
+  registerNativeApprovalChildSignal(req.signal, approvalTurn.signal);
     const endApprovalTurn = () => approvalTurn.abort(req.signal?.reason ?? new Error("acp_turn_settled"));
     if (req.signal?.aborted) endApprovalTurn();
     else req.signal?.addEventListener("abort", endApprovalTurn, { once: true });
@@ -1021,10 +1024,27 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     let promptDispatchAttempted = false;
     let agentRequestObserved = false;
     let effectRun: ReturnType<typeof beginAdapterEffectRun> = null, effectTerminal: string | null = null;
+    let promptCancellation: AbortController | null = null;
+    let cancelFallback: ReturnType<typeof setTimeout> | undefined;
     const ensureEffectRun = (): ReturnType<typeof beginAdapterEffectRun> => {
       return effectRun ??= beginAdapterEffectRun({ adapterKind: "acp", chatId: req.chatId, agentId: req.agentId });
     };
-    const onAbort = () => { broken = true; if (session) killCliTree(session.child); };
+    const onAbort = () => {
+      broken = true;
+      if (!session) return;
+      // ACP cancellation belongs to the active prompt. Retain its response
+      // channel briefly so the agent can finish tool cancellation and persist
+      // the native turn before Main retires this resident process.
+      if (promptDispatchAttempted && promptCancellation && session.acpSessionId
+        && session.state.active === turnSink && acpSessionAlive(session)) {
+        session.conn.notify("session/cancel", { sessionId: session.acpSessionId });
+        cancelFallback = setTimeout(() => {
+          promptCancellation?.abort(req.signal?.reason);
+          if (session) killCliTree(session.child);
+        }, 3_000);
+        cancelFallback.unref?.();
+      } else killCliTree(session.child);
+    };
     req.signal?.addEventListener("abort", onAbort, { once: true });
     try {
       if (poolKey && executableOwner) {
@@ -1242,13 +1262,16 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         throw new StaleAcpSessionError(new Error("acp_session_closed_before_prompt"));
       }
       effectRun = ensureEffectRun();
+      req.signal?.throwIfAborted();
+      promptCancellation = new AbortController();
       // Mark before calling transport: an exception cannot prove nothing was sent.
       promptDispatchAttempted = true;
       const result = await session.conn.request(
         "session/prompt",
         { sessionId, prompt: [{ type: "text", text: promptText }, ...imageBlocks] },
-        { signal: req.signal },
+        { signal: promptCancellation.signal },
       );
+      if (cancelFallback !== undefined) clearTimeout(cancelFallback);
       const stopReason = result?.stopReason;
       if (typeof stopReason !== "string" || !["end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"].includes(stopReason)) {
         throw new RuntimeTurnUnsettledError(spec.id, locale);
@@ -1265,6 +1288,12 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         return { text, failure: { kind: "refused", message: "ACP stopReason=refusal", runtime: spec.id, source: "marker" }, sessionId };
       }
       if (stopReason === "cancelled") throw abortReasonError(req);
+      // Kimi's ACP bridge maps ordinary native failures to end_turn and drops
+      // truncation evidence. It cannot certify a complete control episode.
+      if (stopReason === "end_turn" && (spec.id === "kimi" || spec.registryId === "kimi")) {
+        return { text, sessionId, ownerControlTerminal: "uncertain",
+          failure: runnerFailureFromError(new RuntimeTurnUnsettledError(spec.id, locale), spec.id) };
+      }
       if (!text) {
         return { text: "", failure: { kind: "empty", message: session.conn.lastStderr.slice(-500) || `ACP stopReason=${stopReason || "unknown"}`, runtime: spec.id, source: "marker" }, sessionId };
       }
@@ -1273,7 +1302,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         events.onStatus(locale === "ko" ? `컨텍스트 ${pct}% 사용` : `Context ${pct}% used`);
       }
       // observedUsage intentionally absent: ACP v1 gives context occupancy, not tokens.
-      return { text, sessionId };
+      return { text, sessionId, ownerControlTerminal: stopReason === "end_turn" ? "completed" : "uncertain" };
     } catch (err) {
       // 실패한 세션은 풀에 되돌리지 않는다 — 상태를 모르는 세션을 물려주면 다음 턴이
       // 원인 없는 실패를 겪는다. 다시 여는 비용이 그보다 싸다.
@@ -1340,6 +1369,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       throw err;
     } finally {
+      if (cancelFallback !== undefined) clearTimeout(cancelFallback);
       effectRun?.complete(client.effectReport(req.signal?.aborted ? "cancelled" : effectTerminal));
       req.signal?.removeEventListener("abort", onAbort);
       req.signal?.removeEventListener("abort", endApprovalTurn);

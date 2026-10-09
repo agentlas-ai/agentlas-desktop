@@ -1,5 +1,7 @@
 "use client";
 
+import { PopupFrame, PopupFacts } from "@/components/Popup";
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
 import { useT } from "@/lib/i18n";
@@ -626,9 +628,9 @@ function SiteEditor({
   const [username, setUsername] = useState(site?.username ?? "");
 
   return (
-    <div className="be-backdrop" onClick={onClose}>
+    <PopupFrame title={site ? (ko ? "사이트 수정" : "Edit site") : ko ? "사이트 추가" : "Add site"} icon={<IconLock size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={onClose}>
       <div className="be" onClick={(e) => e.stopPropagation()}>
-        <h2>{site ? (ko ? "사이트 수정" : "Edit site") : ko ? "사이트 추가" : "Add site"}</h2>
+
         <label>
           {ko ? "사이트 주소" : "Site address"}
           <input
@@ -646,11 +648,7 @@ function SiteEditor({
           {ko ? "아이디(선택)" : "Username (optional)"}
           <input value={username} onChange={(e) => setUsername(e.target.value)} placeholder="myid" />
         </label>
-        <p className="hint">
-          {ko
-            ? "저장 후 사이트 칩의 ‘연결’을 눌러 공식 페이지에서 로그인하세요. 이 화면에는 비밀번호를 입력하지 않습니다."
-            : "After saving, click Connect on the site chip and sign in on the provider page. Do not enter passwords on this screen."}
-        </p>
+        <PopupFacts items={[{ label: ko ? "저장 → 연결 → 공식 사이트 로그인" : "Save → Connect → Sign in on the provider site", icon: <IconLock size={16} /> }, { label: ko ? "이 화면에는 비밀번호를 입력하지 않습니다. 공식 사이트에서 로그인하세요." : "Do not enter passwords on this screen. Sign in on the provider site." }]} />
         <div className="be-actions">
           <button className="ghost" onClick={onClose}>
             {ko ? "취소" : "Cancel"}
@@ -682,14 +680,14 @@ function SiteEditor({
           z-index: 70;
         }
         .be {
-          width: var(--popup-3-width);
+          width: 100%;
           max-height: calc(100vh - 32px);
           overflow-y: auto;
-          background: var(--rd-bg);
+          background: transparent;
           color: var(--rd-ink);
-          border: 1px solid var(--rd-hair);
-          border-radius: 16px;
-          padding: 22px 22px 18px;
+          border: 0;
+          border-radius: 0;
+          padding: 0;
           display: flex;
           flex-direction: column;
           gap: 12px;
@@ -746,7 +744,7 @@ function SiteEditor({
           border-color: transparent;
         }
       `}</style>
-    </div>
+    </PopupFrame>
   );
 }
 

@@ -5,6 +5,10 @@
 //
 // React Flow는 client-only이고 이 앱은 Next.js static export(file://)이므로 "use client" 필수.
 "use client";
+
+import { PopupFrame, PopupFacts } from "@/components/Popup";
+
+import { confirmPopup } from "@/lib/popup";
 import { useAppUiPreference } from "@/lib/app-ui-preferences";
 import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { navigate } from "@/lib/navigation";
@@ -1617,9 +1621,9 @@ function AutomationFlowPage() {
         }
         return false;
       }
-      const confirmed = window.confirm(locale === "en"
+      const confirmed = await confirmPopup(locale === "en"
         ? `Review run ${currentRun.runId} and confirm its external result before starting a separate run? Any action that already completed may happen again. The old run will remain in history.`
-        : `${currentRun.runId} 실행의 외부 결과를 확인했습니까? 이미 완료된 동작은 새 실행에서 다시 일어날 수 있습니다. 이전 실행 기록은 남겨 둔 채 별도 실행을 시작합니다.`);
+        : `${currentRun.runId} 실행의 외부 결과를 확인했습니까? 이미 완료된 동작은 새 실행에서 다시 일어날 수 있습니다. 이전 실행 기록은 남겨 둔 채 별도 실행을 시작합니다.`, { locale, tone: "warning", confirmLabel: locale === "ko" ? "검토 완료 · 새 실행" : "Reviewed · New run" });
       if (!confirmed) return false;
       try {
         const terminalCloseApi = api.automations as unknown as {
@@ -2147,6 +2151,7 @@ return (
             <button
               type="button"
               data-testid="status-open-details"
+              aria-label={locale === "en" ? "Open run details" : "실행 상세 열기"}
               className="automation-run-status-action"
               onClick={() => setRightOpen(true)}
             >
@@ -2309,11 +2314,10 @@ return (
                 검증 결과는 아래 로그 패널이 담당한다. */}
           </ReactFlow>
           {aiNote ? (
-            <div className="automation-ai-note-pop titlebar-nodrag" role="dialog" aria-label="AI note">
-              <div className="automation-ai-note-title">
-                {locale === "en" ? `Tell AI about “${aiNote.label}”` : `“${aiNote.label}” 단계에 메모`}
-              </div>
+            <PopupFrame title={aiNote.label} closeLabel={locale === "en" ? "Close" : "닫기"} onClose={() => setAiNote(null)}>
+              <PopupFacts items={[{ label: locale === "en" ? "Step note" : "단계 메모", value: locale === "en" ? "AI changes require approval" : "AI 변경은 승인 후 적용" }]} />
               <textarea
+                style={{ width: "100%", minHeight: 100, padding: 12, border: "1px solid var(--paper-edge)", borderRadius: 12, background: "var(--popup-control-bg)", color: "var(--ink)", resize: "vertical" }}
                 autoFocus
                 value={aiNote.text}
                 onChange={(e) => setAiNote({ ...aiNote, text: e.target.value })}
@@ -2330,12 +2334,7 @@ return (
                   {locale === "en" ? "Have AI set this step" : "AI로 바로 세팅"}
                 </button>
               </div>
-              <p>
-                {locale === "en"
-                  ? "Save keeps the note on the step for the AI to read. “Have AI set this step” proposes a change to this step only — nothing applies until you approve it."
-                  : "주석 저장은 이 단계에 메모로 남습니다(AI가 읽는 메모). “AI로 바로 세팅”은 이 단계만 고치는 제안을 만들고, 승인 전에는 아무것도 바뀌지 않습니다."}
-              </p>
-            </div>
+            </PopupFrame>
           ) : null}
           {/* ★검증 로그 패널 — 에러·경고를 상단 팝업이 아니라 VS Code 하단 패널처럼.
               위 팝업은 캔버스를 밀어내고, 읽기 전에 사라지고, 줄이 많으면 잘렸다. */}

@@ -2,7 +2,7 @@ import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobil
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import { supervisorIdentifier, supervisorObject, supervisorText } from "./one-supervisor";
 import type { AgentlasOneTaskProjectionV1 } from "./one-task-projection";
-import type { AutomationRunRecord } from "./types";
+import type { AutomationRunRecord, InvocationCurrentTurnSteerRequest, InvocationCurrentTurnSteerReceipt } from "./types";
 import type { automationRunPresentation } from "./automation-run-presentation";
 import {
   ONE_DECISION_CONTRACT_VERSION,
@@ -125,6 +125,10 @@ export const MOBILE_BRIDGE_METHODS = [
   "projects.get",
   "projects.filePreview",
   "projects.setAgentPool",
+  "science.chat.list",
+  "science.chat.read",
+  "science.chat.send",
+  "science.chat.cancel",
   "chats.listRecent",
   "chats.get",
   "chats.rename",
@@ -170,6 +174,9 @@ export const MOBILE_BRIDGE_METHODS = [
   "one.invoke.start",
   "invoke.start",
   "invoke.steer",
+  "invoke.currentTurn",
+  "invoke.steerCurrentTurn",
+  "invoke.currentTurnSteerReceipt",
   "invoke.cancel",
   "invoke.attach",
   "invoke.receipt",
@@ -264,12 +271,114 @@ export const ONE_SUPERVISOR_PARAM_KEYS = {
   "one.supervisor.appearance": ["commandId", "oneId", "expectedVersion", "displayName", "bubbleColor"],
 } as const satisfies Record<string, readonly string[]>;
 
+/** Existing Science author conversations only; the phone cannot create a runtime or change its grants. */
+export const MOBILE_SCIENCE_CHAT_PARAM_KEYS = {
+  "science.chat.list": ["schemaVersion", "projectId", "limit"],
+  "science.chat.read": ["schemaVersion", "projectId", "conversationId", "limit"],
+  "science.chat.send": ["schemaVersion", "projectId", "conversationId", "requestId", "text", "locale"],
+  "science.chat.cancel": ["schemaVersion", "projectId", "conversationId", "turnId"],
+} as const;
+export type MobileScienceChatMethod = keyof typeof MOBILE_SCIENCE_CHAT_PARAM_KEYS;
+
+export interface MobileScienceConversationDto {
+  conversationId: string;
+  projectId: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+export interface MobileScienceMessageDto {
+  messageId: string;
+  projectId: string;
+  conversationId: string;
+  role: "user" | "assistant";
+  content: string;
+  createdAt: string;
+}
+export interface MobileScienceTurnDto {
+  turnId: string;
+  requestId: string;
+  projectId: string;
+  conversationId: string;
+  userMessageId: string;
+  assistantMessageId: string | null;
+  status: "queued" | "running" | "cancelling" | "completed" | "failed" | "cancelled" | "interrupted";
+  lastSequence: number;
+  partialText: string;
+  errorCode: string | null;
+  errorMessage: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+interface MobileScienceChatIdentityDto {
+  schemaVersion: 1;
+  hostId: string;
+  projectId: string;
+}
+export interface MobileScienceChatListDto extends MobileScienceChatIdentityDto {
+  ok: true;
+  conversations: MobileScienceConversationDto[];
+  hasMore: boolean;
+}
+export interface MobileScienceChatReadDto extends MobileScienceChatIdentityDto {
+  ok: true;
+  conversationId: string;
+  messages: MobileScienceMessageDto[];
+  turn: MobileScienceTurnDto | null;
+  hasMore: boolean;
+}
+export interface MobileScienceChatSendDto extends MobileScienceChatIdentityDto {
+  ok: true;
+  conversationId: string;
+  requestId: string;
+  accepted: true;
+  replayed: boolean;
+  turn: MobileScienceTurnDto;
+  userMessage: MobileScienceMessageDto;
+}
+export interface MobileScienceChatCancelDto extends MobileScienceChatIdentityDto {
+  ok: true;
+  conversationId: string;
+  disposition: "requested" | "already-requested" | "terminal";
+  turn: MobileScienceTurnDto;
+}
+export interface MobileScienceChatRefusalDto {
+  schemaVersion: 1;
+  hostId: string;
+  ok: false;
+  code: string;
+  message: string;
+  outcome: "not-dispatched" | "unknown" | "rejected";
+  retryable: boolean;
+  projectId?: string;
+  conversationId?: string;
+  requestId?: string;
+  turnId?: string;
+}
+export type MobileScienceChatResultDto = MobileScienceChatListDto | MobileScienceChatReadDto
+  | MobileScienceChatSendDto | MobileScienceChatCancelDto | MobileScienceChatRefusalDto;
+
+export function validateMobileScienceChatParams(method: MobileScienceChatMethod, params: Record<string, unknown>): string | null {
+  if (!hasOnlyKeys(params, MOBILE_SCIENCE_CHAT_PARAM_KEYS[method]) || params.schemaVersion !== 1) return "science_chat_params_invalid";
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+  if (typeof params.projectId !== "string" || !uuid.test(params.projectId)) return "science_chat_project_invalid";
+  if (method !== "science.chat.list" && (typeof params.conversationId !== "string" || !uuid.test(params.conversationId))) return "science_chat_conversation_invalid";
+  if (method === "science.chat.list" || method === "science.chat.read") return optionalInteger(params, "limit", 1, method === "science.chat.list" ? 50 : 200);
+  if (method === "science.chat.cancel") return typeof params.turnId === "string" && uuid.test(params.turnId) ? null : "science_chat_turn_invalid";
+  if (typeof params.requestId !== "string" || !uuid.test(params.requestId)) return "science_chat_request_invalid";
+  if (typeof params.text !== "string" || !params.text.trim() || params.text.length > 20_000 || /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u.test(params.text)) return "science_chat_text_invalid";
+  return params.locale === undefined || params.locale === "ko" || params.locale === "en" ? null : "science_chat_locale_invalid";
+}
+
 /** State-changing methods require durable replay protection in Desktop main. */
 export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new Set([
   "notifications.register", "notifications.unregister",
   "chat.attachments.begin", "chat.attachments.chunk", "chat.attachments.finish",
   "one.supervisor.send", "one.supervisor.startWork", "one.supervisor.startScience",
   "one.supervisor.control", "one.supervisor.stopReply", "one.supervisor.appearance",
+  "science.chat.send", "science.chat.cancel",
   ...MOBILE_GOAL_CONTROL_WRITE_METHODS,
   "device.revokeSelf",
   "hub.invoke",
@@ -302,6 +411,7 @@ export const MOBILE_BRIDGE_WRITE_METHODS: ReadonlySet<MobileBridgeMethod> = new 
   "one.invoke.start",
   "invoke.start",
   "invoke.steer",
+  "invoke.steerCurrentTurn",
   "invoke.cancel",
   "one.decision.clarify",
   "one.decision.clarifyAnswer",
@@ -349,6 +459,35 @@ export interface MobileBridgeRpcRequest {
   idempotencyKey?: string;
   method: MobileBridgeMethod;
   params: MobileBridgeJsonObject;
+}
+
+/** Paired owner input inherits the exact active invocation's authority. */
+export type MobileBridgeCurrentTurnSteerParams = InvocationCurrentTurnSteerRequest;
+export type MobileBridgeCurrentTurnSteerReceipt = InvocationCurrentTurnSteerReceipt;
+export const MOBILE_CURRENT_TURN_PARAM_KEYS = {
+  "invoke.currentTurn": ["chatId"],
+  "invoke.steerCurrentTurn": ["chatId", "intentId", "expectedRunId", "text"],
+  "invoke.currentTurnSteerReceipt": ["chatId", "intentId"],
+} as const;
+export type MobileBridgeCurrentTurnMethod = keyof typeof MOBILE_CURRENT_TURN_PARAM_KEYS;
+
+/** Shared parser and native authority both validate this closed contract. */
+export function validateMobileCurrentTurnParams(method: MobileBridgeCurrentTurnMethod,
+  params: Record<string, unknown>): string | null {
+  if (!hasOnlyKeys(params, MOBILE_CURRENT_TURN_PARAM_KEYS[method])) return `${method} contains unsupported fields`;
+  const chatError = requiredString(params, "chatId");
+  if (chatError || !(params.chatId as string).trim()) return chatError ?? "chatId must contain visible text";
+  if (method === "invoke.currentTurn") return null;
+  if (typeof params.intentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(params.intentId)) {
+    return "intentId must be a bounded intent identifier";
+  }
+  if (method === "invoke.currentTurnSteerReceipt") return null;
+  const runError = requiredString(params, "expectedRunId", 160);
+  if (runError || !(params.expectedRunId as string).trim()) return runError ?? "expectedRunId must contain visible text";
+  if (typeof params.text !== "string" || !params.text.trim()
+    || /[\u0000\u000b\u000c\u000e-\u001f]/.test(params.text)
+    || new TextEncoder().encode(params.text).byteLength > 200_000) return "text must be visible text of at most 200000 UTF-8 bytes";
+  return null;
 }
 
 /** DESKTOP_MOBILE_BRIDGE: Steering always targets the run the phone actually observed. */
@@ -3605,6 +3744,11 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
       return hasOnlyKeys(params, ["chatId"])
         ? requiredString(params, "chatId")
         : "composer.context accepts only chatId";
+    case "science.chat.list":
+    case "science.chat.read":
+    case "science.chat.send":
+    case "science.chat.cancel":
+      return validateMobileScienceChatParams(method, params);
     case "one.supervisor.send":
     case "one.supervisor.startWork":
     case "one.supervisor.startScience":
@@ -3656,6 +3800,10 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
           ? null
           : validateRuntimeSelectionValue(params.runtimeSelection, "orchestrator"),
       );
+    case "invoke.currentTurn":
+    case "invoke.steerCurrentTurn":
+    case "invoke.currentTurnSteerReceipt":
+      return validateMobileCurrentTurnParams(method, params);
     case "invoke.start":
       if (!hasOnlyKeys(params, ["runId", "chatId", "userPrompt", "locale", "permissions", "planMode", "goalMode", "networkMode", "appsGenerateMode", "stormbreakerMode", "taskForceTargets", "images", "fileGroupId", "runtimeSelection", "expectedQuestionMessageId", "expectedTaskId", "expectedTaskVersion", "expectedDecisionContractVersion", "expectedAuthoritativeHostRef", "expectedDecisionCreatedAt", "expectedDecisionOptionLabels", "expectedDecisionSelectionIndexes", "expectedDecisionOtherText", "expectedDecisionBindingDigest", "expectedDecisionOwnerConfirmed"])) {
         return "invoke.start contains unsupported fields";

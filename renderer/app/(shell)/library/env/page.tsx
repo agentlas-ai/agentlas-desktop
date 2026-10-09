@@ -3,6 +3,8 @@
 // 출처(에이전트/도구)별 접고 펴는 섹션. 펴면 각 변수에 edit/delete가 바로 보인다.
 // 로컬 .env 파일을 드래그&드롭하면 KEY=VALUE를 파싱해 일괄 등록한다.
 "use client";
+
+import { confirmPopup } from "@/lib/popup";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
@@ -89,7 +91,7 @@ export default function LibraryEnvPage() {
   async function remove(key: string) {
     const api = ipc();
     if (!api) return;
-    if (!confirm(t("env.confirm_delete", { key }))) return;
+    if (!await confirmPopup(t("env.confirm_delete", { key }), { locale, tone: "danger", confirmLabel: locale === "ko" ? "삭제" : "Delete" })) return;
     await api.env.remove(key);
     await refresh();
   }

@@ -230,7 +230,8 @@ export function OneWhatsNew({
         <div className={styles.body}>
           <span className={styles.kicker}>{text(slide.kicker)}</span>
           <h2 id="one-whats-new-title">{text(slide.title)}</h2>
-          <p id="one-whats-new-body">{text(slide.body)}</p>
+          {slide.id === "mail" && <p>{ko ? "메일 주소는 한 번 정하면 변경할 수 없습니다." : "Your email address cannot be changed once chosen."}</p>}
+          <details className={styles.details} key={slide.id}><summary>{ko ? "자세히" : "Details"}</summary><p id="one-whats-new-body">{text(slide.body)}</p></details>
           <button type="button" className={styles.primary} data-one-whats-new-primary={slide.id} onClick={onPrimary}>
             {ctaLabel}
           </button>

@@ -1,0 +1,9 @@
+
+.backdrop { backdrop-filter:blur(5px); }
+.dialog { max-width:calc(100vw - 32px); overscroll-behavior:contain; }
+.header { display:flex; align-items:center; gap:12px; padding-bottom:12px; border-bottom:1px solid var(--paper-edge); }
+.header>div { display:grid; gap:5px; flex:1; min-width:0; }
+.mark { width:44px; height:44px; flex:none; display:grid; place-items:center; border-radius:14px; background:var(--popup-sage,var(--paper-2)); box-shadow:inset 0 1px 0 #fff9,0 3px 10px #26312708; }
+.close { width:32px; height:32px; display:grid; place-items:center; background:var(--paper-2); color:var(--ink-soft); border:1px solid var(--paper-edge); border-radius:10px; cursor:pointer; }
+.state { display:flex; align-items:center; gap:12px; padding:18px 14px; border-radius:14px; background:var(--popup-sage,var(--paper-2)); color:var(--ink); font-size:12px; }
+.dialog button:focus-visible,.dialog input:focus-visible,.dialog select:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }

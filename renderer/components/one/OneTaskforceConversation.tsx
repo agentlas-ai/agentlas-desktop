@@ -1,8 +1,9 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { memo, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Markdown } from "@/components/Markdown";
 import { isDocumentLikeText } from "@/lib/one-doc-like";
+import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import type { OneOrgMember, OneOrgState, OneOrgStatusKind } from "@shared/one-org";
 import type { OneActivityHandoff, OneActivityHandoffMessage, OneActivityState } from "@/lib/one-activity";
 import { OneAgentPortrait } from "./OneAgentPortrait";
@@ -79,13 +80,15 @@ function speakerFor(org: OneOrgState | null, handoff: OneActivityHandoff, id: st
   };
 }
 
+const timeFormatters: Record<Locale, Intl.DateTimeFormat> = {
+  ko: new Intl.DateTimeFormat("ko-KR", { hour: "2-digit", minute: "2-digit" }),
+  en: new Intl.DateTimeFormat("en-US", { hour: "2-digit", minute: "2-digit" }),
+};
+
 function timeLabel(value: string, locale: Locale): string {
   const parsed = new Date(value);
   if (!Number.isFinite(parsed.getTime())) return "";
-  return parsed.toLocaleTimeString(locale === "ko" ? "ko-KR" : "en-US", {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return timeFormatters[locale].format(parsed);
 }
 
 /**
@@ -220,7 +223,7 @@ function visibleCoordinatorText(value: string, locale: Locale, speakerName?: str
     .trim();
 }
 
-function MessageText({
+const MessageText = memo(function MessageText({
   text,
   messageId,
   locale,
@@ -265,20 +268,25 @@ function MessageText({
           : (locale === "ko" ? "더 보기" : "Show more")}
     </button>}
   </>;
-}
+});
 
 /**
  * Human-facing projection of the typed One ↔ worker message envelopes.
  * Machine execution metadata intentionally remains in the durable ledger.
+ * Composer edits and unrelated activity updates leave the handoff array
+ * unchanged; keep those updates from redrawing every historical teammate row.
  */
-export function OneTaskforceConversation({
+export const OneTaskforceConversation = memo(function OneTaskforceConversation({
   state,
   org,
   locale,
+  historyIdentity,
 }: {
   state: OneActivityState;
   org: OneOrgState | null;
   locale: Locale;
+  /** Stable conversation/run identity supplied by the containing turn. */
+  historyIdentity?: string;
 }) {
   const messages = useMemo(() => {
     const seen = new Set<string>();
@@ -305,7 +313,10 @@ export function OneTaskforceConversation({
     }
     const sorted = rows.sort((left, right) => left.message.observedAt.localeCompare(right.message.observedAt));
     const byMessageId = new Map(sorted.map((row) => [row.message.id, row]));
-    return sorted.map((row, index) => {
+    const previousBySpeaker = new Map<string, ConversationMessage>();
+    return sorted.map((row) => {
+      const previousRecipient = previousBySpeaker.get(row.recipient.id);
+      previousBySpeaker.set(row.speaker.id, row);
       const explicitParent = row.message.replyToMessageId
         ? byMessageId.get(row.message.replyToMessageId)
         : undefined;
@@ -316,17 +327,47 @@ export function OneTaskforceConversation({
       // teammate addresses a peer who already spoke, present that relationship
       // as a Buzz-style comment instead of inventing a second chat protocol.
       if (row.speaker.one || row.recipient.one) return row;
-      const parent = sorted.slice(0, index).reverse().find((candidate) => candidate.speaker.id === row.recipient.id);
+      const parent = previousRecipient;
       return parent ? { ...row, replyTarget: { message: parent.message, speaker: parent.speaker } } : row;
     });
   }, [locale, org, state.handoffs]);
 
+  // Null follows a bounded live tail. An explicitly revealed oldest message
+  // anchors the window so a live append cannot silently hide loaded history.
+  const identity = historyIdentity ?? state.handoffs[0]?.messages[0]?.id ?? "empty";
+  const PAGE_SIZE = 40;
+  const [history, setHistory] = useState<{ identity: string; oldestId: string | null }>({ identity, oldestId: null });
+  const oldestId = history.identity === identity ? history.oldestId : null;
+  const messageIds = useMemo(() => messages.map(row => row.message.id), [messages]);
+  const anchorIndex = oldestId == null ? -1 : messageIds.indexOf(oldestId);
+  const historyStart = oneHistoryWindowStart(messageIds, oldestId, PAGE_SIZE);
+  const visibleMessages = useMemo(() => messages.slice(historyStart), [messages, historyStart]);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const scrollAnchorRef = useRef<{ element: HTMLElement; top: number; scrollParent: HTMLElement | null } | null>(null);
+  const rememberScrollAnchor = () => {
+    const element = containerRef.current?.querySelector<HTMLElement>("[data-one-taskforce-message]");
+    if (!element) return;
+    let scrollParent = containerRef.current?.parentElement ?? null;
+    while (scrollParent && !(scrollParent.scrollHeight > scrollParent.clientHeight
+      && /auto|scroll/.test(window.getComputedStyle(scrollParent).overflowY))) scrollParent = scrollParent.parentElement;
+    scrollAnchorRef.current = { element, top: element.getBoundingClientRect().top, scrollParent };
+  };
+  useLayoutEffect(() => {
+    const anchor = scrollAnchorRef.current;
+    scrollAnchorRef.current = null;
+    if (!anchor?.element.isConnected) return;
+    const delta = anchor.element.getBoundingClientRect().top - anchor.top;
+    if (anchor.scrollParent) anchor.scrollParent.scrollTop += delta;
+    else window.scrollBy(0, delta);
+  }, [historyStart, identity]);
+
   const threads = useMemo(() => {
     const childrenByParent = new Map<string, typeof messages>();
     const topLevel: typeof messages = [];
-    for (const row of messages) {
+    const visibleIds = new Set(visibleMessages.map(row => row.message.id));
+    for (const row of visibleMessages) {
       const parentId = row.replyTarget?.message.id;
-      if (parentId) {
+      if (parentId && visibleIds.has(parentId)) {
         const list = childrenByParent.get(parentId) ?? [];
         list.push(row);
         childrenByParent.set(parentId, list);
@@ -335,8 +376,13 @@ export function OneTaskforceConversation({
       }
     }
     return { topLevel, childrenByParent };
-  }, [messages]);
-  const [expandedThreads, setExpandedThreads] = useState<ReadonlySet<string>>(new Set());
+  }, [visibleMessages]);
+  const [threadExpansion, setThreadExpansion] = useState<{ identity: string; ids: ReadonlySet<string> }>({ identity, ids: new Set() });
+  const expandedThreads = threadExpansion.identity === identity ? threadExpansion.ids : new Set<string>();
+  useLayoutEffect(() => {
+    setHistory(current => current.identity === identity ? current : { identity, oldestId: null });
+    setThreadExpansion(current => current.identity === identity ? current : { identity, ids: new Set() });
+  }, [identity]);
 
   if (messages.length === 0) return null;
 
@@ -423,18 +469,18 @@ export function OneTaskforceConversation({
     const open = expandedThreads.has(row.message.id);
     const nextSeen = new Set(seen).add(row.message.id);
     return (
-      <div key={row.message.id} className={styles.thread}>
+      <div key={`${identity}:${row.message.id}`} className={styles.thread}>
         {renderEntry(row)}
         {children.length > 0 && (
           <button
             type="button"
             className={styles.replies}
             aria-expanded={open}
-            onClick={() => setExpandedThreads((current) => {
-              const next = new Set(current);
+            onClick={() => setThreadExpansion((current) => {
+              const next = new Set(current.identity === identity ? current.ids : []);
               if (next.has(row.message.id)) next.delete(row.message.id);
               else next.add(row.message.id);
-              return next;
+              return { identity, ids: next };
             })}
           >
             {open
@@ -447,7 +493,22 @@ export function OneTaskforceConversation({
     );
   };
 
-  return <div className={styles.conversation} role="list" aria-label={locale === "ko" ? "태스크포스 대화" : "Taskforce conversation"}>
+  return <div ref={containerRef} className={styles.conversation} role="list" aria-label={locale === "ko" ? "태스크포스 대화" : "Taskforce conversation"}>
+    {historyStart > 0 && <button type="button" className={styles.more} data-one-taskforce-history="earlier"
+      onClick={() => {
+        rememberScrollAnchor();
+        setHistory({ identity, oldestId: revealOneHistoryPage(messageIds, historyStart, PAGE_SIZE) });
+      }}>
+      {locale === "ko" ? `이전 대화 ${historyStart}개 · ${Math.min(PAGE_SIZE, historyStart)}개 더 보기`
+        : `${historyStart} earlier messages · Show ${Math.min(PAGE_SIZE, historyStart)} more`}
+    </button>}
+    {anchorIndex >= 0 && <button type="button" className={styles.more} data-one-taskforce-history="collapse"
+      onClick={() => setHistory({ identity, oldestId: null })}>
+      {locale === "ko" ? "이전 대화 접기" : "Hide earlier messages"}
+    </button>}
     {threads.topLevel.map((row) => renderThread(row, 0, new Set<string>()))}
   </div>;
-}
+}, (previous, next) => previous.state.handoffs === next.state.handoffs
+  && previous.org === next.org
+  && previous.locale === next.locale
+  && previous.historyIdentity === next.historyIdentity);

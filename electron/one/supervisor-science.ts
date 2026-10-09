@@ -1,3 +1,4 @@
+import { supervisorError } from "../../shared/one-supervisor";
 import { performance } from "node:perf_hooks";
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { DaemonScienceCommand } from "../daemon/science-service";
@@ -16,7 +17,7 @@ export class SupervisorScienceAdapter {
   private targets=new Map<string,{projectId:string;conversationId?:string;turnId?:string;loop?:Row}>();
   private observedProjects:Array<{projectId:string;title:string}>=[];
   projects():Array<{projectId:string;title:string}> {return this.observedProjects.map(project=>({...project}));}
-  constructor(private readonly client:ScienceDaemonClient) {}
+  constructor(private readonly client:Pick<ScienceDaemonClient,"commandObserved">) {}
   private command(command:DaemonScienceCommand):Promise<unknown> {
     return this.client.commandObserved(command,{timeoutMs:3_000});
   }
@@ -109,28 +110,28 @@ export class SupervisorScienceAdapter {
   }
   async start(input:{commandId:string;projectId:string;text:string;conversationId?:string}):Promise<{taskId:string;runId:string}> {
     const projects=rows(await this.command({op:"projects.list"}));
-    if (!projects.some(project=>project.id===input.projectId)) throw new Error("supervisor_science_project_missing");
+    if (!projects.some(project=>project.id===input.projectId)) throw supervisorError('supervisor_science_project_missing');
     const conversations=rows(await this.command({op:"conversations.list",input:{projectId:input.projectId}}));
     // A named conversation (thread) is the owner's choice; without one, the project's open conversation.
     const conversation=input.conversationId
       ? conversations.find(item=>id(item.id)===input.conversationId && !item.archivedAt)
       : conversations.find(item=>!item.archivedAt);
-    if (input.conversationId && !conversation) throw new Error("supervisor_science_conversation_missing");
-    if (!id(conversation?.id)) throw new Error("supervisor_open_science_conversation_first");
+    if (input.conversationId && !conversation) throw supervisorError('supervisor_science_conversation_missing');
+    if (!id(conversation?.id)) throw supervisorError('supervisor_open_science_conversation_first');
     const result=row(await this.command({op:"composer.start",input:{requestId:input.commandId,projectId:input.projectId,conversationId:id(conversation!.id),mode:"append-user-message",content:input.text}}));
     const turn=row(result.turn);
-    if (!id(turn.id) || !id(turn.invocationRunId)) throw new Error("supervisor_science_start_unconfirmed");
+    if (!id(turn.id) || !id(turn.invocationRunId)) throw supervisorError('supervisor_science_start_unconfirmed');
     return {taskId:`science-turn:${id(turn.id)}`,runId:id(turn.invocationRunId)};
   }
   async control(input:SupervisorControlInput,current:SupervisorTask):Promise<unknown> {
     const target=this.targets.get(current.taskId);
-    if (!target) throw new Error("supervisor_science_target_missing");
+    if (!target) throw supervisorError('supervisor_science_target_missing');
     if (input.action==="cancel" && target.loop) {
       const loop=target.loop;
       return this.command({op:"loops.transition",input:{requestId:input.commandId,projectId:target.projectId,loopSessionId:id(loop.id),action:"cancel",
         expectedLoopVersion:Number(loop.version),expectedLoopStateSha256:id(loop.stateSha256),reason:"Explicit cancellation from the personal agent workspace"}});
     }
-    if (!target.conversationId || !target.turnId) throw new Error("supervisor_science_turn_unavailable");
+    if (!target.conversationId || !target.turnId) throw supervisorError('supervisor_science_turn_unavailable');
     if (input.action==="cancel") return this.command({op:"composer.cancel",input:{projectId:target.projectId,conversationId:target.conversationId,turnId:target.turnId}});
     return this.command({op:"composer.steer",input:{requestId:input.commandId,projectId:target.projectId,conversationId:target.conversationId,targetTurnId:target.turnId,content:input.text!,intent:"steer"}});
   }

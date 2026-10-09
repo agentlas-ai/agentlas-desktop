@@ -1,4 +1,5 @@
 import { withAdapterEffectObserver } from "../invocation/adapter-effect-context";
+import { runWithOwnerControl } from "../runtime/owner-control-pump";
 import { assertGraphWorkerAttempt, noteGraphWorkerDispatch, noteGraphWorkerReturnedFailure, noteGraphWorkerAdapterStart, noteGraphWorkerAdapterFinish, noteGraphWorkerCoverageUnknown, noteGraphWorkerActivity, noteGraphWorkerTool, noteGraphWorkerPrepare, noteGraphWorkerSelection, noteGraphWorkerFailure, settleGraphWorkerAttempt, type GraphWorkerAttempt, type GraphWorkerFailureReceipt } from "../workflow/graph-worker-fallback";
 import { prepareWorkAttachmentContext, mainWorkAttachmentContext, redactWorkAttachmentText, isWorkAttachmentInput } from "../invocation/work-attachments";
 import { issueScienceCollectionCapability, assertScienceCollectionRuntimeSelection } from "../runtime/science-collection-boundary";
@@ -288,6 +289,7 @@ import {
 } from "../invocation/workspace-binding";
 import {
   runnerFailureFromError,
+  runtimeFailureIsClosedHttpRefusal,
   RuntimeTurnUnsettledError,
   RuntimeNoProgressError,
   RUNTIME_TURN_UNSETTLED_CODE,
@@ -939,7 +941,11 @@ async function runInvocationPlanningRunner(
   try {
     assertCurrent?.();
     noteGraphWorkerDispatch(graphAttempt, selectionForRuntime(runtime));
-    const result = await runObservedRunner(runner, request, events);
+    let result = await runObservedRunner(runner, request, events);
+    if (result.ownerControlTerminal !== "completed") {
+      result = { ...result, ownerControlTerminal: "uncertain",
+        failure: result.failure ?? runnerFailureFromError(new RuntimeTurnUnsettledError(runtime.kind, request.locale), runtime.kind) };
+    }
     accounting?.complete(result.observedUsage,
       request.signal?.aborted ? "cancelled" : result.failure ? "failed" : "returned");
     if (request.signal?.aborted) throw request.signal.reason ?? new Error("invocation_cancelled");
@@ -1919,6 +1925,9 @@ export function runMcpInvocation(
   /** Main-only admission boundary before the first root work request and its plan receipt. */
   onBeforeGoalWorkDispatch?: (goalId: string | null) => void,
   canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryContext,
+  /** Main-only native controller; never carried in model or renderer input. */
+  onNativeTurnController?: RunnerEvents["onNativeTurnController"],
+  ownerControlInbox?: RunnerRequest["ownerControlInbox"],
 ): Promise<McpInvocationResult> {
   if (!req.runId) req = { ...req, runId: `direct-${randomUUID()}` };
   const graphAttempt = executionContext?.graphWorkerAttempt;
@@ -2006,7 +2015,7 @@ export function runMcpInvocation(
   };
   const runOwnedInvocation = () => withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
     req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory, onBeforeGoalWorkDispatch, workRecovery,
-    () => directWorkOwnerCurrent && !ownerSignal.aborted,
+    () => directWorkOwnerCurrent && !ownerSignal.aborted, onNativeTurnController, ownerControlInbox,
   )).then(async result => {
     if (login.waiting && !ownerSignal.aborted) {
       const browserLoginWait = login.seal(await drainAttemptChildren(children));
@@ -2056,6 +2065,8 @@ async function runMcpInvocationInContext(
   onBeforeGoalWorkDispatch?: (goalId: string | null) => void,
   canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryContext,
   invocationCurrent?: () => boolean,
+  onNativeTurnController?: RunnerEvents["onNativeTurnController"],
+  ownerControlInbox?: RunnerRequest["ownerControlInbox"],
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
@@ -6466,16 +6477,20 @@ ${effectiveUserPrompt}`;
     // A CLI can resolve its promise before a buffered stream callback arrives.
     // Seal each runner's callbacks to its own generation so a late callback
     // cannot mutate the next runtime's counters, artifacts, or transcript.
+    const runtimeTerminalEvidence = { closedHttpRefusal: false, locallyRejected: false };
     const createAttemptRunnerEvents = (): {
       events: RunnerEvents; settle: () => void;
       observedUsage: (returnedUsage?: LongRunUsageInput["observedUsage"]) => LongRunUsageInput["observedUsage"];
       creditRetrySafe: () => boolean;
+      nativeActivity: () => boolean;
     } => {
       const generation = ++runnerEventGeneration;
       let settled = false;
+      let nativeActivity = false;
       const usageCollector = createRuntimeUsageCollector();
       const recordTerminalUsage: NonNullable<RunnerEvents["onTerminalObservedUsage"]> = (usage, attemptId): void => {
         if (settled || generation !== runnerEventGeneration) return;
+        nativeActivity = true;
         if (usage && (!Number.isFinite(usage.outputTokens) || usage.outputTokens !== 0)) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
         usageCollector.recordTerminal(usage, attemptId);
       };
@@ -6486,33 +6501,48 @@ ${effectiveUserPrompt}`;
       return {
         events: {
           onPartial: forward((...args: Parameters<RunnerEvents["onPartial"]>) => {
+            if (args[0]) nativeActivity = true;
             if (args[0]) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
             runnerEvents.onPartial(...args);
           }),
           onStatus: forward(runnerEvents.onStatus),
           onTool: forward((...args: Parameters<NonNullable<RunnerEvents["onTool"]>>) => {
+            nativeActivity = true;
             creditRetryBlocked = true;
             runnerEvents.onTool(...args);
           }),
-          onUsage: forward(runnerEvents.onUsage),
+          onUsage: forward((...args: Parameters<NonNullable<RunnerEvents["onUsage"]>>) => {
+            nativeActivity = true;
+            runnerEvents.onUsage?.(...args);
+          }),
           // A provider can send its terminal usage after cancellation. The
           // display callbacks stop then, but this exact accounting fact may
           // still settle the already-dispatched wake without replaying it.
           onRuntimeAttemptStarted: (attemptId) => {
-            if (!settled && generation === runnerEventGeneration) usageCollector.start(attemptId);
+            if (!settled && generation === runnerEventGeneration) { nativeActivity = true; usageCollector.start(attemptId); }
+          },
+          onNativeTurnController: (controller) => {
+            if (settled || generation !== runnerEventGeneration) return;
+            // Withdrawal must still pass after Stop; it has no provider effect.
+            if (controller && signal?.aborted) return;
+            if (controller) nativeActivity = true;
+            onNativeTurnController?.(controller);
           },
           onTerminalObservedUsage: recordTerminalUsage,
           onThinking: forward((...args: Parameters<NonNullable<RunnerEvents["onThinking"]>>) => {
+            nativeActivity = true;
             if (args[0]) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
             runnerEvents.onThinking(...args);
           }),
           onNotice: forward(runnerEvents.onNotice),
         },
         settle: () => {
+          if (!settled && generation === runnerEventGeneration) onNativeTurnController?.(null);
           settled = true;
         },
         observedUsage: (returnedUsage) => usageCollector.total(returnedUsage),
         creditRetrySafe: () => !creditRetryBlocked,
+        nativeActivity: () => nativeActivity,
       };
     };
     const directRuntimeFallbackAllowed =
@@ -6525,7 +6555,7 @@ ${effectiveUserPrompt}`;
     let goalResultOrdinal = 0;
     const goalUsageInvocationId = req.runId ?? randomUUID();
     let lastGoalUsage: LongRunUsageInput | undefined;
-    const invokeCurrentRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
+    const invokeBrainRuntime = async (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> => {
       const currentPicked = picked;
       if (!currentPicked) throw new Error("no-runner");
       /*
@@ -6547,6 +6577,9 @@ ${effectiveUserPrompt}`;
       let terminalNoticeEmitted = false;
       let requestForRuntime: RunnerRequest = {
         ...runnerRequestForRuntime(active, currentPicked, request.userPrompt),
+        history: request.history,
+        runtimeSessionId: request.runtimeSessionId,
+        ownerControlInbox,
         images: scienceRecovery ? undefined : request.images,
       };
       const emitTerminalRecoveryFailure = (
@@ -6651,6 +6684,9 @@ ${effectiveUserPrompt}`;
             payload: { schemaVersion: "agentlas.alive-provider-usage.v1", attempt: aliveUsageAttempt } });
         }
         const attemptEvents = createAttemptRunnerEvents();
+        let runnerInvoked = false;
+        runtimeTerminalEvidence.closedHttpRefusal = false;
+        runtimeTerminalEvidence.locallyRejected = false;
         let result: Awaited<ReturnType<Runner>>;
         const usageSourceId = `${goalUsageInvocationId}:provider-result:${++goalResultOrdinal}`;
         const automationAccounting = picked && executionContext?.source === "automation"
@@ -6709,7 +6745,18 @@ ${effectiveUserPrompt}`;
           invocationUsageAttempt = beginInvocationUsageAttempt();
           assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
           noteGraphWorkerDispatch(executionContext?.graphWorkerAttempt, selectionForRuntime(selectedRuntime));
+          runnerInvoked = true;
           result = await selected.runner(requestForRuntime, attemptEvents.events);
+          runtimeTerminalEvidence.closedHttpRefusal = runtimeFailureIsClosedHttpRefusal(result.failure, {
+            text: result.text, nativeActivity: attemptEvents.nativeActivity(), aborted: signal?.aborted === true,
+            observedUsage: result.observedUsage,
+          });
+          // Dispatch is not completion. Preserve partial text, session and
+          // usage while fencing authentication-success and provider recovery.
+          if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal) {
+            result = { ...result, ownerControlTerminal: "uncertain",
+              failure: result.failure ?? runnerFailureFromError(new RuntimeTurnUnsettledError(selectedRuntime.kind, locale), selectedRuntime.kind) };
+          }
           if (result.observedUsage && (!Number.isFinite(result.observedUsage.outputTokens) || result.observedUsage.outputTokens !== 0)) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
           const observedUsage = attemptEvents.observedUsage(result.observedUsage);
           result = { ...result, observedUsage: observedUsage ?? undefined };
@@ -6720,10 +6767,19 @@ ${effectiveUserPrompt}`;
           if (signal?.aborted) throw signal.reason ?? new Error(tStatus(locale, "aborted"));
         } catch (error) {
           persistAttemptUsage(attemptEvents.observedUsage(), signal?.aborted ? "cancelled" : "failed");
+          if (runnerInvoked && !signal?.aborted) {
+            const observedUsage = attemptEvents.observedUsage();
+            persistGoalUsage(observedUsage);
+            if (runtimeFailureBlocksReplay(runnerFailureFromError(error, selectedRuntime.kind))) throw error;
+            const unsettled = new RuntimeTurnUnsettledError(selectedRuntime.kind, locale);
+            unsettled.cause = { error, observedUsage };
+            throw unsettled;
+          }
           if (!directRuntimeFallbackAllowed || signal?.aborted) {
             persistGoalUsage(attemptEvents.observedUsage());
             throw error;
           }
+          runtimeTerminalEvidence.locallyRejected = true;
           result = {
             text: "",
             failure: runnerFailureFromError(error, active.kind),
@@ -6734,6 +6790,9 @@ ${effectiveUserPrompt}`;
         }
         if (result.text.trim()) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
         persistGoalUsage(result.observedUsage);
+        // A partial reply without a proven terminal is an unknown effect,
+        // never permission to retry this request on another brain.
+        if (result.ownerControlTerminal === "uncertain" && !runtimeTerminalEvidence.closedHttpRefusal) return result;
         // A run that actually worked is the only thing that clears "sign in required".
         if (!result.failure) noteRuntimeSucceeded(selectedRuntime);
         // Image incompatibility is a capability outcome, not a temporary
@@ -6908,6 +6967,8 @@ ${effectiveUserPrompt}`;
         status: locale === "ko" ? "실제 이미지 결과를 채팅과 결과 탭에 연결했습니다." : "The real image result is attached to the chat and Results rail.",
       });
     }
+    const invokeCurrentRuntime = (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> =>
+      runWithOwnerControl({ ...request, ownerControlInbox }, invokeBrainRuntime);
     let activeRunnerReq = runnerRequestForRuntime(active, picked);
     if (hostGeneratedImageAttachment) {
       activeRunnerReq = {
@@ -6921,6 +6982,11 @@ ${effectiveUserPrompt}`;
       ? captureNativeGoalEpisode(activeGoalId, chat.id, req.runId) : null;
     let goalEpisodeYield: NativeGoalEpisodeBinding | null = null;
     let result = await invokeCurrentRuntime(activeRunnerReq);
+    if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
+      const error = new RuntimeTurnUnsettledError(active.kind, locale);
+      error.cause = result;
+      throw error;
+    }
     /*
      * ★런타임이 표식으로 실패를 말했으면 그 text는 답이 아니다 — 거절 고지문이다.
      * 여기서 막지 않으면 고지문이 assistant 챗 답변으로 영속되고(appendChatMessage),
@@ -7176,6 +7242,11 @@ ${effectiveUserPrompt}`;
       };
       const toolCallsBeforePass = completedToolCalls;
       result = await invokeCurrentRuntime(activeRunnerReq);
+      if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
+        const error = new RuntimeTurnUnsettledError(active.kind, locale);
+        error.cause = result;
+        throw error;
+      }
       // A failed pass is retried or handed on below; it is not an idle pass.
       lastPassToolCalls = result.failure ? null : completedToolCalls - toolCallsBeforePass;
       if (result.failure) {

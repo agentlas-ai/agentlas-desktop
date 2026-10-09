@@ -7,6 +7,7 @@ import styles from "./GraphWorkspace.module.css";
 import { IconArchive } from "@/components/Icon";
 import { automationRunPresentation } from "@shared/automation-run-presentation";
 import { automationRunNeedsAttention } from "@shared/automation-attention";
+import { confirmPopup } from "@/lib/popup";
 import { ipc } from "@/lib/ipc";
 import { navigate } from "@/lib/navigation";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
@@ -607,9 +608,9 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
           }
           : null;
         if ((!reconciliationRead || !reconciliation) && terminalCloseInput) {
-          const confirmed = window.confirm(ko
+          const confirmed = await confirmPopup(ko
             ? `${currentRun.runId} 실행의 외부 결과를 확인했습니까? 이미 완료된 동작은 새 실행에서 다시 일어날 수 있습니다. 이전 실행 기록은 남겨 둔 채 별도 실행을 시작합니다.`
-            : `Review run ${currentRun.runId} and confirm its external result before starting a separate run? Any action that already completed may happen again. The old run will remain in history.`);
+            : `Review run ${currentRun.runId} and confirm its external result before starting a separate run? Any action that already completed may happen again. The old run will remain in history.`, { locale: ko ? "ko" : "en", tone: "warning" });
           if (confirmed) {
             try {
               const terminalCloseApi = api.automations as unknown as {
@@ -674,10 +675,11 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
     if (!api || !reconciliation || reconciling || !graphDecisionReady) return;
     const completedCount = reconciliation.nodes.filter((node) => nodeDecisions[node.nodeId]?.resolution === "completed").length;
     const retryCount = reconciliation.nodes.length - completedCount;
-    const confirmed = window.confirm(
+    const confirmed = await confirmPopup(
       ko
         ? `실제 외부 상태를 확인했습니까? 완료 ${completedCount}개, 재시도 ${retryCount}개로 확정합니다. 잘못 선택하면 중복 동작이 생길 수 있습니다.`
         : `Did you verify the real external state? This will confirm ${completedCount} completed and ${retryCount} to retry. A wrong choice can duplicate an external action.`,
+      { locale: ko ? "ko" : "en", tone: "warning" },
     );
     if (!confirmed) return;
     setReconciling(true);
@@ -741,7 +743,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
   async function reconcileEvent(attention: AutomationTriggerEventAttention, resolution: "completed" | "retry") {
     const api = ipc();
     if (!api || eventActionId) return;
-    const confirmed = window.confirm(
+    const confirmed = await confirmPopup(
       resolution === "completed"
         ? ko
           ? "외부 동작이 실제로 완료된 것을 확인했습니까? 이 발생은 다시 실행하지 않습니다."
@@ -749,6 +751,7 @@ export function RunHistoryPanel({ automation, locale, compact = false }: RunHist
         : ko
           ? "외부 동작이 실행되지 않은 것을 확인했습니까? 이 발생을 다시 시도합니다."
           : "Did you verify that the external action did not run? This occurrence will be retried.",
+      { locale: ko ? "ko" : "en", tone: "warning" },
     );
     if (!confirmed) return;
     setEventActionId(attention.id);

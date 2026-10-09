@@ -10,3 +10,6 @@
 .actions button { width:auto; white-space:nowrap; }
 .message { margin:0; padding:6px 12px; color:var(--muted-deep,#777); font:inherit; }
 .notice { position:absolute; top:100%; right:0; min-width:190px; max-width:280px; padding:6px 8px; background:var(--paper,#fff); color:var(--muted-deep,#777); font-size:12px; font-weight:400; z-index:10; }
+
+/* Paper popup elevation shares the desktop popup palette. */
+.popover { border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }

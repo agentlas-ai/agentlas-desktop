@@ -73,10 +73,10 @@
   overscroll-behavior: contain;
   padding: 6px;
   border: 1px solid var(--paper-edge);
-  border-radius: 12px;
-  background: var(--paper);
+  border-radius: var(--popup-radius);
+  background: var(--popup-card-bg);
   color: var(--ink);
-  box-shadow: 0 14px 38px rgba(20, 25, 20, 0.12);
+  box-shadow: var(--popup-shadow);
   scrollbar-width: thin;
   box-sizing: border-box;
   /* 한국어는 낱말 가운데서 끊지 않는다. */

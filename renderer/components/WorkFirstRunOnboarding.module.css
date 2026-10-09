@@ -98,3 +98,15 @@
 .planCard small{color:var(--muted-deep);font-size:11.5px;text-align:center}
 .planCard .next,.planCard .secondary{width:100%}
 @media(max-width:720px){.planGrid{grid-template-columns:1fr}.planModal{padding:22px}}
+.panel,.modal,.planModal { background:var(--paper); color:var(--ink); box-shadow:var(--popup-shadow,0 28px 72px #20312424,0 3px 12px #2031240d); border:1px solid var(--paper-edge); }
+.modalScrim { background:var(--popup-backdrop,rgb(31 42 34 / 24%)); }
+.stepMark { display:grid; place-items:center; width:52px; height:52px; margin:0 auto 16px; border-radius:17px; background:var(--popup-sage,var(--paper-2)); color:var(--ink); box-shadow:inset 0 1px 0 #fff9,0 5px 14px #26312709; }
+.content>p { font-size:12px; }
+.feature { background:var(--popup-sage,var(--paper-2)); box-shadow:inset 0 1px 0 #fff9,0 4px 14px #26312708; }
+.feature img { height:72px; }
+.help { color:var(--ink-soft); font-size:11px; margin-top:8px; }
+.help summary { cursor:pointer; padding:5px 0; }
+.confirmFacts { display:grid; gap:8px; margin-top:16px; }
+.confirmFacts>span { display:flex; align-items:center; gap:8px; padding:10px 12px; border-radius:10px; background:var(--popup-sage,var(--paper-2)); color:var(--ink); font-size:11px; }
+.aiRow { box-shadow:inset 0 1px 0 #fff9,0 3px 9px #26312708; }
+@media(max-width:520px) { .content { padding:22px 18px; } .content h1 { font-size:23px; } .header { padding:14px 18px; } .featureGrid { grid-template-columns:1fr; gap:9px; margin-top:18px; } .feature img { display:none; } .feature { padding:12px; } .mobileCard { margin:18px auto; padding:14px; } .footer { padding:14px 18px; } }

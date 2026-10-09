@@ -270,6 +270,7 @@
 }
 
 .artifactTabs {
+  position: relative;
   min-height: 44px;
   display: flex;
   align-items: stretch;
@@ -301,7 +302,7 @@
   align-items: flex-start;
   gap: 2px;
 }
-.artifactHeaderActions button {
+.artifactHeaderActions > button {
   width: 38px;
   height: 38px;
   display: grid;
@@ -313,9 +314,9 @@
   color: var(--muted-deep);
   cursor: pointer;
 }
-.artifactHeaderActions button:hover,
-.artifactHeaderActions button:focus-visible { background: var(--paper-3); color: var(--ink-soft); outline: none; }
-.artifactHistoryDetails { position: relative; }
+.artifactHeaderActions > button:hover,
+.artifactHeaderActions > button:focus-visible { background: var(--paper-3); color: var(--ink-soft); outline: none; }
+.artifactHistoryDetails { position: static; }
 .artifactHistoryDetails > summary {
   width: 38px;
   height: 38px;
@@ -333,15 +334,15 @@
 .artifactHistoryPopup {
   position: absolute;
   top: calc(100% + 5px);
-  right: 0;
+  right: 12px;
   z-index: 30;
-  width: min(360px, calc(100vw - 32px));
+  width: min(360px, calc(100% - 24px));
   max-height: min(70vh, 520px);
   overflow: auto;
   border: 1px solid var(--paper-edge);
-  border-radius: 8px;
-  background: var(--paper);
-  box-shadow: 0 14px 36px rgba(24, 29, 32, .16);
+  border-radius: var(--popup-radius);
+  background: var(--popup-card-bg);
+  box-shadow: var(--popup-shadow);
 }
 .artifactHistoryDetails:not([open]) > .artifactHistoryPopup { display: none; }
 

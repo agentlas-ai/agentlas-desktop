@@ -68,3 +68,10 @@ button.memberRow:hover, button.memberRow:focus-visible { border-color: var(--mut
 
 @keyframes oneTaskforceSpin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .busyState > span { animation-duration: 1.8s; } }
+
+.descriptionDetails { color: var(--muted-deep); font-size: 12px; }
+.descriptionDetails summary { cursor: pointer; }
+.descriptionDetails .descriptionField { margin-top: 9px; }
+.memberList { display: grid; gap: 6px; }
+.memberRow { min-height: 58px; border-radius: 12px; }
+.dialogActions button { min-height: 44px; }

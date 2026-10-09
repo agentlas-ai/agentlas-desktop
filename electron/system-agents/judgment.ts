@@ -1,3 +1,4 @@
+import { retainNativePreparation, runNativePreparation } from "../runtime/native-preparation-lifetime";
 import { runObservedRunner, observedRunnerUsage } from "../runtime/observed-runner";
 import { runnerFailureFromError } from "../runtime/runner";
 import { beginAccountedInference } from "../long-run/accounting-context";
@@ -368,7 +369,7 @@ export function awaitConnectedModelRunnerWithAbortGrace<T>(
   signal: AbortSignal,
   settleGraceMs = RUNNER_ABORT_GRACE_MS,
 ): Promise<T> {
-  const observedRunner = Promise.resolve(runner);
+  const observedRunner = retainNativePreparation(Promise.resolve(runner));
   let removeAbortListener = () => {};
   let settleTimer: ReturnType<typeof setTimeout> | null = null;
   const abortBoundary = new Promise<never>((_resolve, reject) => {
@@ -1021,7 +1022,7 @@ async function callJudgmentModelDetailed(opts: {
       const attemptTimeoutMs = remainingMs;
       let toolObserved = false;
       const accounting = beginAccountedInference(runtime);
-      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(runtime.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(picked.runner,
+      const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runNativePreparation(() => runVerificationEffectDispatch(runtime.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(picked.runner,
           {
             systemPrompt: opts.systemPrompt,
             history: [],
@@ -1048,7 +1049,7 @@ async function callJudgmentModelDetailed(opts: {
             onStatus: () => {},
             onTool: (...args) => { toolObserved = true; onTool?.(...args); },
           },
-        ))), attemptSignal));
+        )))), attemptSignal));
       accounting?.complete(bounded.value?.observedUsage ?? observedRunnerUsage(bounded.error), bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
       if (bounded.error !== undefined) {
         const error = bounded.error;
@@ -1113,7 +1114,7 @@ async function callJudgmentModelDetailed(opts: {
         const startedAt = Date.now();
         const accounting = beginAccountedInference(selection);
         attemptBudgetMs = Math.max(1, deadlineAt - Date.now());
-        const bounded = await runBoundedAttempt(attemptBudgetMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runVerificationEffectDispatch(selection.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(recovery.runner,
+        const bounded = await runBoundedAttempt(attemptBudgetMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runNativePreparation(() => runVerificationEffectDispatch(selection.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(recovery.runner,
             {
               systemPrompt: opts.systemPrompt,
               history: [],
@@ -1133,7 +1134,7 @@ async function callJudgmentModelDetailed(opts: {
               locale: opts.locale ?? "en",
             },
             { onPartial: () => {}, onStatus: () => {}, onTool },
-          ))), attemptSignal));
+          )))), attemptSignal));
         accounting?.complete(bounded.value?.observedUsage ?? observedRunnerUsage(bounded.error), bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
         if (bounded.error !== undefined) {
           const error = bounded.error;

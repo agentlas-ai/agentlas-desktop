@@ -21,6 +21,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { pickLocalized } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
+import { IconCheck, IconClose, IconRoute, IconPuzzle } from "@/components/Icon";
+import styles from "./ConnectionsDialog.module.css";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import type {
   GraphAgentBinding,
@@ -93,6 +95,7 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
   return (
     <div
       data-testid="connections-dialog"
+      className={styles.backdrop}
       role="dialog"
       aria-modal="true"
       aria-label={locale === "ko" ? "연결 설정" : "Connections"}
@@ -100,27 +103,27 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
       style={{
         position: "fixed", inset: 0, zIndex: 400, display: "flex",
         alignItems: "center", justifyContent: "center", padding: 24,
-        background: "rgb(0 0 0 / 32%)",
+        background: "var(--popup-backdrop, rgb(31 42 34 / 24%))",
       }}
     >
       <section
-        className="titlebar-nodrag"
+        className={`titlebar-nodrag ${styles.dialog}`}
         style={{
           width: "var(--popup-3-width)", maxHeight: "82vh", overflowY: "auto",
           background: "var(--paper)", border: "1px solid var(--paper-edge)",
           borderRadius: "var(--radius-md)", padding: 20, display: "grid", gap: 14,
-          boxShadow: "0 24px 60px -24px rgb(0 0 0 / 45%)",
+          boxShadow: "var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d)",
         }}
       >
-        <header style={{ display: "grid", gap: 4 }}>
+        <header className={styles.header}><span className={styles.mark} aria-hidden="true"><IconRoute size={22} /></span><div>
           <div style={{ fontSize: 15, fontWeight: 700, color: "var(--ink)" }}>
-            {ko ? "이 자동화가 쓰는 것들" : "What this automation uses"}
+            {ko ? "필요한 연결" : "Required connections"}
           </div>
           <div style={{ fontSize: 12, color: "var(--muted-deep)" }}>
             {ko
-              ? "계정 하나를 연결하면 그 계정의 도구가 함께 열립니다."
-              : "Connect one account and every tool on it opens together."}
-          </div>
+              ? "계정별 도구와 에이전트"
+              : "Accounts, tools and agents"}
+          </div></div><button type="button" className={styles.close} onClick={onClose} aria-label={ko ? "닫기" : "Close"}><IconClose size={17} /></button>
         </header>
 
         {loading ? (
@@ -138,18 +141,18 @@ export function ConnectionsDialog({ automationId, locale, onClose }: {
             </div>
           </div>
         ) : !report?.hasRequirements ? (
-          <div data-testid="connections-none" style={{ fontSize: 13, color: "var(--ink)" }}>
+          <div data-testid="connections-none" className={styles.state}><IconPuzzle size={24} aria-hidden="true" />
             {ko
-              ? "이 자동화는 바깥 서비스를 쓰지 않습니다. 연결할 것이 없습니다."
-              : "This automation uses no outside service. Nothing to connect."}
+              ? "연결할 외부 서비스가 없어요."
+              : "No external service required."}
           </div>
         ) : (
           <div style={{ display: "grid", gap: 12 }}>
             {ready ? (
-              <div data-testid="connections-ready" style={{ fontSize: 13, color: "var(--ink)" }}>
+              <div data-testid="connections-ready" className={styles.state}><IconCheck size={24} aria-hidden="true" />
                 {ko
-                  ? "필요한 것이 모두 연결돼 있습니다. 이제 켤 수 있습니다."
-                  : "Everything it needs is connected. You can turn it on."}
+                  ? "연결 준비 완료 · 자동화를 켤 수 있어요"
+                  : "Connections ready · automation can start"}
               </div>
             ) : (
               (report?.tasks ?? []).map((task) => (

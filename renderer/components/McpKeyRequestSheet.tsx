@@ -12,6 +12,7 @@ import { useEffect, useMemo, useState, type CSSProperties } from "react";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import type { McpRunKeyRequest } from "@/lib/types";
+import { IconKey, IconLock, IconSend, IconCheck } from "./Icon";
 
 export function McpKeyRequestSheet({
   request,
@@ -89,20 +90,15 @@ export function McpKeyRequestSheet({
     <>
       <div className={`mkr ${presentation === "one" ? "mkr-one" : ""}`} data-testid="mcp-key-request-sheet">
         <div className="mkr-top">
-          <span className="mkr-tag">{ko ? "API 키 필요" : "API keys needed"}</span>
+          <span className="mkr-tag"><IconKey size={17} /> {ko ? "API 키" : "API keys"}</span>
           <span className="mkr-timer">
             {ko ? `${secondsLeft}초 안에 선택` : `Choose within ${secondsLeft}s`}
           </span>
         </div>
-        <div className="mkr-summary">
-          {ko
-            ? "이 작업에 필요한 도구가 API 키를 요구합니다. 키를 저장하면 이번 실행부터 바로 사용됩니다."
-            : "A tool needed for this task requires API keys. Saved keys are used starting with this run."}
-        </div>
+        <div className="mkr-summary"><IconCheck size={15} />{ko ? "저장하면 이번 실행부터 사용" : "Saved keys apply to this run"}</div>
         <div className="mkr-note">
-          {ko
-            ? "키가 없거나 건너뛰면 남은 도구로 대안을 찾아 계속 진행합니다. 값은 키체인에만 저장됩니다."
-            : "If you skip, the agent continues with an alternative from the available tools. Values are stored only in your keychain."}
+          <span><IconLock size={15} />{ko ? "키체인에만 저장" : "Stored only in keychain"}</span>
+          <span><IconSend size={15} />{ko ? "키 없이도 대안으로 진행" : "Continue with alternatives without keys"}</span>
         </div>
         <div className="mkr-tools">
           {request.tools.map((tool) => (
@@ -155,6 +151,7 @@ export function McpKeyRequestSheet({
             disabled={busy || filledCount === 0}
             data-testid="mcp-key-save"
           >
+            <IconLock size={15} />
             {ko ? "저장하고 계속" : "Save and continue"}
           </button>
         </div>
@@ -179,9 +176,9 @@ export function McpKeyRequestSheet({
           background: var(--paper);
           color: var(--ink);
           border: 1px solid var(--paper-edge);
-          border-radius: 13px;
+          border-radius: var(--popup-radius);
           padding: 10px 12px;
-          box-shadow: 0 7px 20px rgba(25, 31, 36, .12);
+          box-shadow: var(--popup-shadow);
           animation: mkr-in 0.16s ease-out;
         }
         @keyframes mkr-in {
@@ -206,6 +203,9 @@ export function McpKeyRequestSheet({
           margin-bottom: 8px;
         }
         .mkr-tag {
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
           font-size: 11.5px;
           font-weight: 800;
           padding: 2px 9px;
@@ -218,16 +218,23 @@ export function McpKeyRequestSheet({
           opacity: 0.6;
         }
         .mkr-summary {
+          display: flex;
+          align-items: center;
+          gap: 6px;
           font-size: 12px;
           line-height: 1.5;
           font-weight: 600;
           margin-bottom: 4px;
         }
         .mkr-note {
-          font-size: 10px;
+          display: flex;
+          flex-wrap: wrap;
+          gap: 8px 14px;
+          font-size: 12px;
           color: var(--muted-deep);
           margin-bottom: 10px;
         }
+        .mkr-note span { display: inline-flex; align-items: center; gap: 5px; }
         .mkr-tool {
           border: 1px solid var(--rd-hair, rgba(255, 255, 255, 0.1));
           border-radius: 12px;
@@ -280,6 +287,11 @@ export function McpKeyRequestSheet({
           margin-top: 12px;
         }
         .mkr-actions button {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          min-height: 44px;
           border-radius: 9px;
           padding: 8px 15px;
           font-size: 13px;
@@ -297,9 +309,9 @@ export function McpKeyRequestSheet({
           margin-right: auto;
         }
         .mkr-actions .save {
-          background: var(--rd-accent);
-          color: var(--white);
-          border-color: transparent;
+          background: var(--popup-control-bg);
+          color: var(--ink);
+          border-color: var(--line);
         }
         .mkr-one {
           width: auto;
@@ -313,8 +325,7 @@ export function McpKeyRequestSheet({
           box-shadow: none;
           animation: none;
         }
-        .mkr-one .mkr-tag,
-        .mkr-one .mkr-summary {
+        .mkr-one .mkr-tag {
           display: none;
         }
         .mkr-one .mkr-top {
@@ -367,6 +378,7 @@ export function McpKeyRequestSheet({
       data-composer-decision-card="true"
       className="mkr-wrap"
       role="alertdialog"
+      aria-label={ko ? "API 키" : "API keys"}
       aria-live="assertive"
       style={presentation === "one" ? ({ "--agentlas-composer-width": "720px" } as CSSProperties) : undefined}
     >

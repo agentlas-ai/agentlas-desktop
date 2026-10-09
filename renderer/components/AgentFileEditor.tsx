@@ -1,5 +1,6 @@
 "use client";
 
+import { confirmPopup } from "@/lib/popup";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 
@@ -122,9 +123,9 @@ export function AgentFileEditor({ agentId, locale, source, title, subtitle }: {
     const api = ipc();
     if (!api) return;
     if (dirty && activePath && path !== activePath) {
-      const proceed = window.confirm(ko
-        ? "저장하지 않은 편집이 있습니다. 버리고 다른 파일을 열까요?"
-        : "You have unsaved edits. Discard them and open another file?");
+      const proceed = await confirmPopup(ko
+        ? `저장하지 않은 편집이 있습니다. 버리고 다른 파일을 열까요?\n\n${activePath} → ${path}`
+        : `You have unsaved edits. Discard them and open another file?\n\n${activePath} → ${path}`, { locale: ko ? "ko" : "en", title: ko ? "편집 버리기" : "Discard edits", tone: "warning", confirmLabel: ko ? "버리고 열기" : "Discard and open" });
       if (!proceed) return;
     }
     setBusy(true);

@@ -66,6 +66,7 @@ export const CODEX_CLIENT_REQUESTS = [
   "thread/start",
   "turn/interrupt",
   "turn/start",
+  "turn/steer",
 ] as const;
 
 /** 실행 승인을 묻는 서버 요청. MCP form elicitation은 정보 입력이며 별도 경계다. */

@@ -18,6 +18,9 @@ import { useT } from "@/lib/i18n";
 import { splitStreamingSegments, type SegmentCache } from "@shared/streaming-segments";
 import { designOutputSurfaceProps } from "@/lib/design-output-tokens";
 import { absoluteFileRefsWithSpaces, maskSpans } from "@/lib/local-file-refs";
+import { IntellectUI } from "./IntellectUI";
+import { IntellectUiActions, type IntellectUiFollowup } from "@/lib/intellect-ui-actions";
+import { INTELLECT_UI_LIMITS } from "@shared/intellect-ui";
 
 export interface CodeArtifact {
   /** 채팅 내 안정적 id — 메시지id + 블록 인덱스 조합 */
@@ -65,6 +68,8 @@ export const Markdown = memo(function Markdown({
   onOpenArtifact,
   onOpenMedia,
   onOpenLinkedFile,
+  onUiFollowup,
+  uiActionsDisabled,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
 }: {
   /** Exact chat scope for links without an owning callback. Unbound links cannot select another task panel. */
@@ -78,6 +83,9 @@ export const Markdown = memo(function Markdown({
   onOpenMedia?: (a: MediaArtifact) => void;
   /** PDF/SVG/HTML 등 로컬 파일 링크를 우측 패널로 열기 */
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
+  /** Explicit user action: prepare a draft in this message's owning conversation. */
+  onUiFollowup?: IntellectUiFollowup;
+  uiActionsDisabled?: boolean;
   /** 상대 이미지 경로를 해석할 로컬 기준 폴더들. */
   mediaBasePaths?: string[];
 }) {
@@ -92,6 +100,7 @@ export const Markdown = memo(function Markdown({
     [text, mediaBasePaths],
   );
   const blocks = useMemo(() => parseBlocks(text, messageId), [text, messageId]);
+  const uiActions = useMemo(() => ({ prepareFollowup: onUiFollowup, disabled: uiActionsDisabled }), [onUiFollowup, uiActionsDisabled]);
   const body = (
     <div
       {...designOutputSurfaceProps("report")}
@@ -101,7 +110,8 @@ export const Markdown = memo(function Markdown({
     </div>
   );
   // 차트·시각물이 "이 대화"의 산출물 탭에 알리려면 대화 id 가 필요하다. 셸이 준 것을 넘긴다.
-  return chatId ? <VisualChatScope.Provider value={chatId}>{body}</VisualChatScope.Provider> : body;
+  const interactiveBody = onUiFollowup ? <IntellectUiActions.Provider value={uiActions}>{body}</IntellectUiActions.Provider> : body;
+  return chatId ? <VisualChatScope.Provider value={chatId}>{interactiveBody}</VisualChatScope.Provider> : interactiveBody;
 });
 
 // 완결 세그먼트 렌더 — props가 안 바뀌면(텍스트 불변) 재파싱/재렌더를 통째로 건너뛴다.
@@ -144,6 +154,8 @@ export function StreamingMarkdown({
   onOpenArtifact,
   onOpenMedia,
   onOpenLinkedFile,
+  onUiFollowup,
+  uiActionsDisabled,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
 }: {
   /** 차트·시각물이 이 대화의 산출물 탭에 알릴 때 쓰는 대화 id. */
@@ -153,6 +165,8 @@ export function StreamingMarkdown({
   onOpenArtifact?: (a: CodeArtifact) => void;
   onOpenMedia?: (a: MediaArtifact) => void;
   onOpenLinkedFile?: (a: LinkedFileArtifact) => void;
+  onUiFollowup?: IntellectUiFollowup;
+  uiActionsDisabled?: boolean;
   mediaBasePaths?: string[];
 }) {
   // 콜백 identity를 고정 — 부모가 매 렌더 새 함수를 넘겨도 memo 세그먼트가 깨지지 않게.
@@ -165,6 +179,7 @@ export function StreamingMarkdown({
   const stableArtifact = useCallback((a: CodeArtifact) => artifactRef.current?.(a), []);
   const stableMedia = useCallback((a: MediaArtifact) => mediaRef.current?.(a), []);
   const stableLinkedFile = useCallback((a: LinkedFileArtifact) => linkedFileRef.current?.(a), []);
+  const uiActions = useMemo(() => ({ prepareFollowup: onUiFollowup, disabled: uiActionsDisabled }), [onUiFollowup, uiActionsDisabled]);
 
   // Main batches delivery at the frame boundary. Artificial per-character reveal
   // adds unbounded visible lag after receipt; segmentation below already limits
@@ -190,13 +205,14 @@ export function StreamingMarkdown({
       ))}
     </>
   );
-  return chatId ? <VisualChatScope.Provider value={chatId}>{body}</VisualChatScope.Provider> : body;
+  const interactiveBody = onUiFollowup ? <IntellectUiActions.Provider value={uiActions}>{body}</IntellectUiActions.Provider> : body;
+  return chatId ? <VisualChatScope.Provider value={chatId}>{interactiveBody}</VisualChatScope.Provider> : interactiveBody;
 }
 
 // ── 파서 ─────────────────────────────────────────────────
 type TableAlign = "left" | "center" | "right" | "default";
 type Block =
-  | { type: "code"; lang: string; code: string; id: string; info?: string }
+  | { type: "code"; lang: string; code: string; id: string; info?: string; complete?: boolean }
   | { type: "math"; tex: string }
   | { type: "h1" | "h2" | "h3"; text: string }
   | { type: "ul" | "ol"; items: ListItem[]; start?: number }
@@ -224,25 +240,35 @@ function parseBlocks(input: string, messageId: string): Block[] {
   const out: Block[] = [];
   let i = 0;
   let codeIdx = 0;
+  let uiFenceCount = 0;
 
   while (i < lines.length) {
     const line = lines[i];
 
     // 펜스 코드 블록
-    const fence = line.match(/^```([\w+.-]*)(?:[ \t]+([^`]*?))?\s*$/);
+    const fence = line.match(/^ {0,3}(`{3,}|~{3,})([\w+.-]*)(?:[ \t]+([^`]*?))?\s*$/);
     if (fence) {
-      const lang = fence[1] || "text";
+      const lang = fence[2] || "text";
       // 정보 줄(```visual title=q3_summary)은 언어 뒤에 남는다 — 시각물 제목·저장 파일명에 쓴다.
-      const info = fence[2]?.trim() || undefined;
+      const info = fence[3]?.trim() || undefined;
+      const closesFence = (candidate: string) => {
+        const close = candidate.match(/^ {0,3}(`{3,}|~{3,})[ \t]*$/);
+        return Boolean(close && close[1][0] === fence[1][0] && close[1].length >= fence[1].length);
+      };
       const codeLines: string[] = [];
       i++;
-      while (i < lines.length && !/^```\s*$/.test(lines[i])) {
+      while (i < lines.length && !closesFence(lines[i])) {
         codeLines.push(lines[i]);
         i++;
       }
       // closing ```
-      if (i < lines.length) i++;
+      const complete = i < lines.length;
+      if (complete) i++;
       const code = codeLines.join("\n");
+      if (lang.toLowerCase() === "agentlas-ui" && ++uiFenceCount > INTELLECT_UI_LIMITS.fences) {
+        if (uiFenceCount === INTELLECT_UI_LIMITS.fences + 1) out.push({ type: "code", lang, code: "{}", id: `${messageId}-ui-limit`, complete: true });
+        continue;
+      }
       // A fenced block with nothing inside draws as an empty dark box labelled
       // by its language ("JSON · 1줄" — user report 2026-08-16). Whatever left
       // it empty (a stripped control block, a model that opened a fence and
@@ -253,6 +279,7 @@ function parseBlocks(input: string, messageId: string): Block[] {
         type: "code",
         lang,
         code,
+        complete,
         ...(info ? { info } : {}),
         id: `${messageId}-c${codeIdx++}`,
       });
@@ -395,7 +422,7 @@ function parseBlocks(input: string, messageId: string): Block[] {
 
 function isBlockStart(line: string): boolean {
   return (
-    /^```/.test(line) ||
+    /^ {0,3}(?:`{3,}|~{3,})/.test(line) ||
     /^#{1,3}\s/.test(line) ||
     /^>\s?/.test(line) ||
     /^[-*]\s/.test(line) ||
@@ -461,6 +488,9 @@ function renderBlock(
     case "math":
       return <MathSpan key={i} tex={b.tex} display />;
     case "code":
+      if (b.lang.trim().toLowerCase() === "agentlas-ui") {
+        return <IntellectUI key={b.id} code={b.code} blockId={b.id} complete={b.complete === true} />;
+      }
       // ```mermaid 는 코드가 아니라 그림으로 보여준다. 그리지 못하면(문법 오류·스트리밍
       // 중간·미지원 종류) 원래의 코드블록이 그대로 남는다 — 내용을 잃지 않는다.
       // ```chart / ```vega-lite 는 대화 안의 차트로(안전 관문 통과분만), ```visual 은 격리된

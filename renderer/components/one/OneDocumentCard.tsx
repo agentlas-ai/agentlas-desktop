@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Markdown } from "@/components/Markdown";
-import { IconClose, IconExpand, IconFileUp } from "@/components/Icon";
+import { IconClose, IconExpand, IconFileUp, IconFileText } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
 import { documentFileSlug, type OneDocumentMark } from "@/lib/one-document-mark";
 import styles from "./OneDocumentCard.module.css";
@@ -117,10 +117,10 @@ export function OneDocumentCard({
             {menuOpen && (
               <div className={styles.menu} role="menu">
                 <button type="button" role="menuitem" onClick={() => void saveMarkdown()}>
-                  {ko ? "마크다운(.md)으로 저장" : "Save as Markdown (.md)"}
+                  <IconFileText size={16} /><span>Markdown</span><small>.md</small>
                 </button>
                 <button type="button" role="menuitem" onClick={() => void savePdf()}>
-                  {ko ? "PDF로 저장" : "Save as PDF"}
+                  <IconFileText size={16} /><span>PDF</span><small>.pdf</small>
                 </button>
               </div>
             )}
@@ -159,7 +159,7 @@ export function OneDocumentCard({
         >
           <section className={styles.reader} role="dialog" aria-modal="true" aria-label={title}>
             <header className={styles.head}>
-              <span className={styles.title} title={title}>{title}</span>
+              <span className={styles.readerIcon} aria-hidden="true"><IconFileText size={18} /></span><span className={styles.title} title={title}>{title}</span>
               <button
                 type="button"
                 className={styles.headAction}

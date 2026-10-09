@@ -212,19 +212,122 @@ function mergeSources(current: OneActivitySource[], event: McpInvocationEvent): 
   return next;
 }
 
+interface ActivityItemIndex {
+  /** Bounded recent IDs for live state; complete IDs only inside owned replay. */
+  recent: Map<string, number>;
+  open: Set<number>;
+}
+
+/** Exists only during a synchronous ledger projection; never retained by UI state. */
+interface ActivityReplayBuilder {
+  items?: OneActivityItem[];
+  index?: ActivityItemIndex;
+  tools?: Map<string, Set<number>>;
+}
+
+const ITEM_LOOKUP_CACHE_LIMIT = 64;
+const activityItemIndexes = new WeakMap<OneActivityItem[], ActivityItemIndex>();
+
+function itemIsOpen(item: OneActivityItem): boolean {
+  return item.status === "running" || item.status === "cancelling";
+}
+
+function itemIndex(items: OneActivityItem[], replay?: ActivityReplayBuilder): ActivityItemIndex {
+  if (replay) {
+    if (replay.items === items && replay.index) return replay.index;
+    const recent = new Map<string, number>();
+    const open = new Set<number>();
+    const tools = new Map<string, Set<number>>();
+    for (let position = 0; position < items.length; position += 1) {
+      const item = items[position];
+      if (!recent.has(item.id)) recent.set(item.id, position);
+      if (itemIsOpen(item)) open.add(position);
+      if (item.kind === "tool" && item.tool?.id) {
+        let matches = tools.get(item.tool.id);
+        if (!matches) tools.set(item.tool.id, matches = new Set());
+        matches.add(position);
+      }
+    }
+    replay.items = items;
+    replay.index = { recent, open };
+    replay.tools = tools;
+    return replay.index;
+  }
+  const cached = activityItemIndexes.get(items);
+  if (cached) return cached;
+  // Replayed, restored, or windowed arrays have their own identity. Build once
+  // from that exact snapshot rather than reusing positions from another run.
+  const open = new Set<number>();
+  for (let index = 0; index < items.length; index += 1) {
+    if (itemIsOpen(items[index])) open.add(index);
+  }
+  const result = { recent: new Map<string, number>(), open };
+  activityItemIndexes.set(items, result);
+  return result;
+}
+
+function rememberItemIndex(index: ActivityItemIndex, id: string, position: number, replay?: ActivityReplayBuilder): void {
+  index.recent.delete(id);
+  index.recent.set(id, position);
+  if (!replay && index.recent.size > ITEM_LOOKUP_CACHE_LIMIT) {
+    const oldest = index.recent.keys().next().value;
+    if (oldest !== undefined) index.recent.delete(oldest);
+  }
+}
+
+function findItemIndex(items: OneActivityItem[], id: string, replay?: ActivityReplayBuilder): number {
+  const index = itemIndex(items, replay);
+  const remembered = index.recent.get(id);
+  if (remembered !== undefined) return remembered;
+  if (replay) return -1;
+  const position = items.findIndex((item) => item.id === id);
+  if (position >= 0) rememberItemIndex(index, id, position);
+  return position;
+}
+
+function findItem(items: OneActivityItem[], id: string, replay?: ActivityReplayBuilder): OneActivityItem | undefined {
+  return items[findItemIndex(items, id, replay)];
+}
+
+function replaceItem(
+  items: OneActivityItem[],
+  id: string,
+  update: (item: OneActivityItem) => OneActivityItem,
+  replay?: ActivityReplayBuilder,
+): OneActivityItem[] {
+  const position = findItemIndex(items, id, replay);
+  if (position < 0) return items;
+  const replacement = update(items[position]);
+  if (replacement === items[position]) return items;
+  const next = replay ? items : items.slice();
+  const previous = items[position];
+  next[position] = replacement;
+  const currentIndex = itemIndex(items, replay);
+  const nextIndex = replay ? currentIndex : { recent: new Map(currentIndex.recent), open: new Set(currentIndex.open) };
+  if (replay) updateReplayToolIndex(replay, position, previous, replacement);
+  if (itemIsOpen(replacement)) nextIndex.open.add(position);
+  else nextIndex.open.delete(position);
+  if (!replay) activityItemIndexes.set(next, nextIndex);
+  return next;
+}
+
 function closeRunning(
   items: OneActivityItem[],
   completedAt: string,
   status: "completed" | "failed" | "cancelled" = "completed",
   onlyReasoning = false,
+  replay?: ActivityReplayBuilder,
 ): OneActivityItem[] {
-  let changed = false;
+  const currentIndex = itemIndex(items, replay);
+  const positions = [...currentIndex.open].filter((position) => !onlyReasoning || items[position].kind === "reasoning");
+  if (positions.length === 0) return items;
   const completedMs = Date.parse(completedAt);
-  const next = items.map((item) => {
-    if ((item.status !== "running" && item.status !== "cancelling") || (onlyReasoning && item.kind !== "reasoning")) return item;
-    changed = true;
+  const next = replay ? items : items.slice();
+  const nextIndex = replay ? currentIndex : { recent: new Map(currentIndex.recent), open: new Set(currentIndex.open) };
+  for (const position of positions) {
+    const item = items[position];
     const startedMs = Date.parse(item.observedAt);
-    return {
+    next[position] = {
       ...item,
       status,
       completedAt,
@@ -232,16 +335,58 @@ function closeRunning(
         ? { durationMs: Math.max(0, completedMs - startedMs) }
         : {}),
     };
-  });
-  return changed ? next : items;
+    nextIndex.open.delete(position);
+  }
+  if (!replay) activityItemIndexes.set(next, nextIndex);
+  return next;
 }
 
-function upsertItem(items: OneActivityItem[], item: OneActivityItem): OneActivityItem[] {
-  const index = items.findIndex((candidate) => candidate.id === item.id);
-  const next = index >= 0
-    ? items.map((candidate, candidateIndex) => candidateIndex === index ? { ...candidate, ...item } : candidate)
-    : [...items, item];
+function upsertItem(items: OneActivityItem[], item: OneActivityItem, replay?: ActivityReplayBuilder): OneActivityItem[] {
+  const index = findItemIndex(items, item.id, replay);
+  if (index >= 0) return replaceItem(items, item.id, (current) => ({ ...current, ...item }), replay);
+  const next = replay ? items : items.slice();
+  const position = items.length;
+  next.push(item);
+  const currentIndex = itemIndex(items, replay);
+  const nextIndex = replay ? currentIndex : { recent: new Map(currentIndex.recent), open: new Set(currentIndex.open) };
+  rememberItemIndex(nextIndex, item.id, position, replay);
+  if (replay) updateReplayToolIndex(replay, position, undefined, item);
+  if (itemIsOpen(item)) nextIndex.open.add(position);
+  if (!replay) activityItemIndexes.set(next, nextIndex);
   return next;
+}
+
+function updateReplayToolIndex(replay: ActivityReplayBuilder, position: number, previous: OneActivityItem | undefined, item: OneActivityItem): void {
+  const previousId = previous?.kind === "tool" ? previous.tool?.id : undefined;
+  const nextId = item.kind === "tool" ? item.tool?.id : undefined;
+  if (previousId === nextId) return;
+  if (previousId) {
+    const matches = replay.tools?.get(previousId);
+    matches?.delete(position);
+    if (matches?.size === 0) replay.tools?.delete(previousId);
+  }
+  if (nextId) {
+    let matches = replay.tools?.get(nextId);
+    if (!matches) replay.tools?.set(nextId, matches = new Set());
+    matches?.add(position);
+  }
+}
+
+function replayToolMatches(items: OneActivityItem[], id: string, actor: string | undefined, replay: ActivityReplayBuilder): OneActivityItem[] {
+  itemIndex(items, replay);
+  return [...(replay.tools?.get(id) ?? [])].map(position => items[position])
+    .filter(item => !actor || item.agentId === actor);
+}
+
+function replayRunningTool(items: OneActivityItem[], name: string, actor: string | undefined, replay: ActivityReplayBuilder): OneActivityItem | undefined {
+  const index = itemIndex(items, replay);
+  let position = -1;
+  for (const candidate of index.open) {
+    const item = items[candidate];
+    if (candidate > position && item.kind === "tool" && item.status === "running"
+      && item.agentId === actor && item.tool?.name === name) position = candidate;
+  }
+  return position >= 0 ? items[position] : undefined;
 }
 
 function handoffId(fromAgentId: string, toAgentId: string): string {
@@ -456,9 +601,14 @@ function mergeVerifiedSurfaceArtifacts(
  * One activity is a projection of the structured runtime protocol only.
  * Free-form status strings never choose a stage or become progress copy.
  */
-export function reduceOneActivity(
+export function reduceOneActivity(state: OneActivityState, event: McpInvocationEvent): OneActivityState {
+  return reduceOneActivityInternal(state, event);
+}
+
+function reduceOneActivityInternal(
   state: OneActivityState,
   event: McpInvocationEvent,
+  replay?: ActivityReplayBuilder,
 ): OneActivityState {
   const hasTypedSequence = Number.isSafeInteger(event.sequence);
   const incomingSequence = hasTypedSequence ? Number(event.sequence) : null;
@@ -526,7 +676,7 @@ export function reduceOneActivity(
       status: "running",
       ...(event.status === "queued" ? { activityCode: "queue_wait" as const } : {}),
       observedAt,
-    });
+    }, replay);
   } else if (event.kind === "lifecycle" && event.lifecycle?.phase === "cancel_requested") {
     items = items.map((item) => item.kind === "run" && item.status === "running"
       ? { ...item, status: "cancelling" }
@@ -543,7 +693,7 @@ export function reduceOneActivity(
       status: "running",
       observedAt,
       ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
-    });
+    }, replay);
     activeReasoningId = id;
   } else if (event.kind === "reasoning" && event.reasoning?.phase === "delta") {
     // A delta can arrive before the runner's explicit start (some runtimes emit
@@ -551,15 +701,16 @@ export function reduceOneActivity(
     let id = activeReasoningId;
     if (!id) {
       id = `reasoning:${sequence}`;
-      items = upsertItem(items, { id, kind: "reasoning", status: "running", observedAt });
+      items = upsertItem(items, { id, kind: "reasoning", status: "running", observedAt }, replay);
       activeReasoningId = id;
     }
     const chunk = typeof event.reasoning.text === "string" ? event.reasoning.text : "";
     if (chunk) {
-      const target = id;
-      items = items.map((item) => item.id === target
-        ? { ...item, text: `${item.text ?? ""}${chunk}`.slice(0, REASONING_TEXT_CAP) }
-        : item);
+      items = replaceItem(items, id, (item) => {
+        const current = item.text ?? "";
+        const text = `${current}${chunk.slice(0, Math.max(0, REASONING_TEXT_CAP - current.length))}`.slice(0, REASONING_TEXT_CAP);
+        return text === item.text ? item : { ...item, text };
+      }, replay);
     }
   } else if (event.kind === "reasoning" && event.reasoning?.phase === "end") {
     const id = activeReasoningId;
@@ -567,7 +718,7 @@ export function reduceOneActivity(
       ? event.reasoning.text.slice(0, REASONING_TEXT_CAP)
       : undefined;
     if (id) {
-      items = items.map((item) => item.id === id ? {
+      items = replaceItem(items, id, (item) => ({
         ...item,
         status: "completed",
         completedAt: observedAt,
@@ -575,7 +726,7 @@ export function reduceOneActivity(
           ? { durationMs: Math.max(0, event.reasoning.durationMs) }
           : {}),
         ...(fullText ? { text: fullText } : {}),
-      } : item);
+      }), replay);
       activeReasoningId = undefined;
     } else if (fullText) {
       // Ledger replay: the start row may be older than the retained window, or
@@ -590,7 +741,7 @@ export function reduceOneActivity(
         ...(typeof event.reasoning?.durationMs === "number"
           ? { durationMs: Math.max(0, event.reasoning.durationMs) }
           : {}),
-      });
+      }, replay);
     }
   } else if (event.kind === "thinking") {
     // The legacy provider bridge emits one generic owner `thinking` pulse for
@@ -603,7 +754,7 @@ export function reduceOneActivity(
     ) {
       const agentId = event.agentId || event.runtimeAgentId;
       const id = agentId ? `agent:${agentId}:${event.phase || "work"}` : `agent:unattributed:${sequence}`;
-      const existing = items.find((item) => item.id === id);
+      const existing = findItem(items, id, replay);
       items = upsertItem(items, {
         id,
         kind: "agent",
@@ -619,13 +770,13 @@ export function reduceOneActivity(
         ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
         ...(event.role?.trim() ? { role: event.role.trim() } : {}),
         ...(event.phase ? { phase: event.phase } : {}),
-      });
+      }, replay);
     } else if (
       !(event.agentId || event.runtimeAgentId || event.agentName)
       && !activeReasoningId
     ) {
       const id = `reasoning:${sequence}`;
-      items = upsertItem(items, { id, kind: "reasoning", status: "running", observedAt });
+      items = upsertItem(items, { id, kind: "reasoning", status: "running", observedAt }, replay);
       activeReasoningId = id;
     }
   } else if (
@@ -652,14 +803,16 @@ export function reduceOneActivity(
       toolFailureCode === "cancelled"
       || items.some((item) => item.kind === "run" && item.status === "cancelling")
     );
-    items = closeRunning(items, observedAt, "completed", true);
+    items = closeRunning(items, observedAt, "completed", true, replay);
     activeReasoningId = undefined;
     const toolActor = event.agentId || event.runtimeAgentId;
-    const matchingIds = event.tool.id ? items.filter((item) => item.kind === "tool"
-      && item.tool?.id === event.tool?.id && (!toolActor || item.agentId === toolActor)) : [];
+    const matchingIds = event.tool.id ? replay
+      ? replayToolMatches(items, event.tool.id, toolActor, replay)
+      : items.filter((item) => item.kind === "tool"
+        && item.tool?.id === event.tool?.id && (!toolActor || item.agentId === toolActor)) : [];
     const existing = event.tool.id
       ? matchingIds.length === 1 ? matchingIds[0] : undefined
-      : [...items].reverse().find((item) => (
+      : replay ? replayRunningTool(items, event.tool.name, toolActor, replay) : [...items].reverse().find((item) => (
           item.kind === "tool"
           && item.status === "running"
           && item.agentId === toolActor
@@ -698,11 +851,11 @@ export function reduceOneActivity(
         ...Object.fromEntries(Object.entries(event.tool).filter(([, value]) => value !== undefined)),
         ...(failureCode ? { failureCode } : {}),
       } as OneActivityTool,
-    });
+    }, replay);
   } else if (event.kind === "tool-use" && event.activity) {
     const activityActor = event.agentId || event.runtimeAgentId;
     const id = activityActor ? `notice:${JSON.stringify([activityActor, event.activity.code])}` : `notice:${event.activity.code}`;
-    const existing = items.find((item) => item.id === id);
+    const existing = findItem(items, id, replay);
     items = upsertItem(items, {
       id,
       kind: "notice",
@@ -713,7 +866,7 @@ export function reduceOneActivity(
       ...(event.agentId || event.runtimeAgentId ? { agentId: event.agentId || event.runtimeAgentId } : {}),
       ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
       noticeLevel: "info",
-    });
+    }, replay);
   } else if (event.kind === "notice" && event.notice?.message) {
     items = upsertItem(items, {
       id: `notice:${sequence}`,
@@ -734,9 +887,9 @@ export function reduceOneActivity(
         ? { noticeI18n: { ko: event.notice.i18n.ko.trim(), en: event.notice.i18n.en.trim() } }
         : {}),
       ...(event.agentName?.trim() ? { agentName: event.agentName.trim() } : {}),
-    });
+    }, replay);
   } else if (event.kind === "surface") {
-    items = closeRunning(items, observedAt);
+    items = closeRunning(items, observedAt, "completed", false, replay);
     activeReasoningId = undefined;
     items = upsertItem(items, {
       id: `result:${event.surfaceId || event.oneSurface?.manifestId || sequence}`,
@@ -744,9 +897,9 @@ export function reduceOneActivity(
       status: "completed",
       observedAt,
       completedAt: observedAt,
-    });
+    }, replay);
   } else if (event.kind === "partial") {
-    items = closeRunning(items, observedAt, "completed", true);
+    items = closeRunning(items, observedAt, "completed", true, replay);
     activeReasoningId = undefined;
     // The answer is streaming. Without this the timeline sat on the run row's
     // generic "Working" for the whole generation (measured: 45s of "Working"
@@ -759,14 +912,14 @@ export function reduceOneActivity(
       : typeof event.text === "string"
         ? event.text.length
         : 0;
-    const existing = items.find((item) => item.id === "answer:stream");
+    const existing = findItem(items, "answer:stream", replay);
     items = upsertItem(items, {
       id: "answer:stream",
       kind: "result",
       status: "running",
       observedAt: existing?.observedAt || observedAt,
       answerChars: Math.max(existing?.answerChars ?? 0, answerLength),
-    });
+    }, replay);
   } else if (event.kind === "final") {
     // The answer row is closed by closeRunning below; settle its final size.
     // A ledger replay never saw the live partials (they are not persisted),
@@ -778,16 +931,16 @@ export function reduceOneActivity(
         ? event.text.length
         : null;
     if (finalAnswerChars != null && finalAnswerChars > 0) {
-      const existing = items.find((item) => item.id === "answer:stream");
+      const existing = findItem(items, "answer:stream", replay);
       items = upsertItem(items, {
         id: "answer:stream",
         kind: "result",
         status: existing?.status ?? "running",
         observedAt: existing?.observedAt || observedAt,
         answerChars: Math.max(existing?.answerChars ?? 0, finalAnswerChars),
-      });
+      }, replay);
     }
-    items = closeRunning(items, observedAt);
+    items = closeRunning(items, observedAt, "completed", false, replay);
     activeReasoningId = undefined;
     if (!items.some((item) => item.kind === "run")) {
       items = upsertItem(items, {
@@ -796,7 +949,7 @@ export function reduceOneActivity(
         status: "completed",
         observedAt,
         completedAt: observedAt,
-      });
+      }, replay);
     }
     if (typeof event.tokens === "number" && Number.isFinite(event.tokens)) {
       tokens = Math.max(tokens ?? 0, event.tokens);
@@ -818,7 +971,7 @@ export function reduceOneActivity(
       ? classifyToolFailure({ explicitCode: event.error?.code, result: event.error?.message })
       : "cancelled" as const;
     const meaningfulFailureCode = failureCode === "tool_failed" ? undefined : failureCode;
-    items = closeRunning(items, observedAt, status);
+    items = closeRunning(items, observedAt, status, false, replay);
     activeReasoningId = undefined;
     // Keep the reason on the run row so the turn block can say why it failed
     // (Codex shows the runtime's error inline; a bare "failed" is not enough).
@@ -838,7 +991,7 @@ export function reduceOneActivity(
         message: event.error?.message,
         errorCode: event.error?.code,
         ...(meaningfulFailureCode ? { failureCode: meaningfulFailureCode } : {}),
-      });
+      }, replay);
     }
     terminalStatus = status;
   }
@@ -1011,16 +1164,20 @@ function ledgerNoticeI18n(payload: Record<string, unknown>): { ko: string; en: s
 /** Rebuild the latest Activity from Main's redacted append-only run ledger. */
 export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: InvocationRunReceipt | null): OneActivityState {
   let state = initialOneActivityState();
+  // All rows are created inside this call. Own their array while replaying,
+  // then discard the builder; later live reductions retain copy-on-write.
+  const replay: ActivityReplayBuilder = {};
   let projectedSequence = 0;
   const observedToolIds = new Set<string>();
   const apply = (event: Omit<McpInvocationEvent, "sequence" | "observedAt">, observedAt: string) => {
     projectedSequence += 1;
-    state = reduceOneActivity(state, { ...event, sequence: projectedSequence, observedAt });
+    state = reduceOneActivityInternal(state, { ...event, sequence: projectedSequence, observedAt }, replay);
   };
 
   // A stop arrives as mcp_error followed by invoke_cancelled. The first row
   // would otherwise seal the run as "failed" before the cancel row is read.
   const cancelledRun = events.some((row) => row.kind === "invoke_cancelled" || row.kind === "invoke_interrupted");
+  const finalizedRunIds = new Set(events.filter((row) => row.kind === "mcp_final").map((row) => row.runId));
   for (const row of events) {
     const payload = row.payload ?? {};
     if (row.kind === "invoke_waiting") {
@@ -1246,7 +1403,7 @@ export function projectOneActivityFromLedger(events: RunEventUi[], receipt?: Inv
     if (row.kind === "mcp_final" || row.kind === "invoke_completed") {
       // Main may persist settlement immediately before the richer final event.
       // Do not freeze replay before its actual model receipt is consumed.
-      if (row.kind === "invoke_completed" && events.some((event) => event.kind === "mcp_final" && event.runId === row.runId)) continue;
+      if (row.kind === "invoke_completed" && finalizedRunIds.has(row.runId)) continue;
       const tokenValue = Number(payload.tokens);
       const textLenValue = Number(payload.textLen);
       const executedModel = ledgerString(payload, "observedModel");

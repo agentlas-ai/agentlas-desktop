@@ -13,8 +13,9 @@
 // 경계는 그대로다: 키 "값"은 여기를 지나 곧바로 env.set(키체인 vault)으로만 간다.
 // 설치 IPC는 값을 싣지 않는다.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
+import { BUNDLED_HUB_CATALOG_REVISION, listBundledHubPlugins } from "../../../shared/bundled-hub-catalog";
 import { PluginLogo, pluginSlugCandidates } from "@/components/PluginLogo";
 import type {
   BrowserSite,
@@ -24,6 +25,8 @@ import type {
   PluginBrandAsset,
 } from "@/lib/types";
 import styles from "./PluginPickerDialog.module.css";
+import { mcpOAuthAPI, runMcpOAuthAttempt } from "./McpOAuthAttempt";
+import { bundledSetupFor } from "./PluginSetupReview";
 
 export interface PluginPickerResult {
   /** 이번에 실제로 서버가 등록된 플러그인. */
@@ -43,6 +46,7 @@ export interface PluginCatalog {
   /** 첫 응답이 도착했는가. false 동안 "결과 없음"을 그리면 빈 화면과 구분되지 않는다. */
   loaded: boolean;
   loadError: string | null;
+  installedKnown: boolean;
   refresh: () => Promise<void>;
   isInstalled: (listing: MarketplaceListing) => boolean;
   hasBrowserLogin: (listing: MarketplaceListing) => boolean;
@@ -58,31 +62,40 @@ export interface PluginCatalog {
 export function usePluginCatalog(options?: { enabled?: boolean }): PluginCatalog {
   const enabled = options?.enabled ?? true;
   const api = ipc();
-  const [listings, setListings] = useState<MarketplaceListing[]>([]);
+  const [listings, setListings] = useState<MarketplaceListing[]>(() => listBundledHubPlugins());
   const [installed, setInstalled] = useState<InstalledMcpServer[]>([]);
   const [linkedSites, setLinkedSites] = useState<BrowserSite[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [installedKnown, setInstalledKnown] = useState(false);
 
   const refresh = useCallback(async () => {
-    if (!api || !enabled) return;
-    try {
-      const [rows, servers, sites] = await Promise.all([
-        api.marketplace.search(""),
-        api.mcpTools.listInstalled().catch(() => [] as InstalledMcpServer[]),
-        // 이미 브라우저 자격증명을 붙여 둔 사이트. 로그인이 필요한 도구가 "이미
-        // 로그인돼 있다"를 말할 수 있는 유일한 근거다.
-        api.browser.listSites().catch(() => [] as BrowserSite[]),
-      ]);
-      setListings((Array.isArray(rows) ? rows : []).filter(isPluginListing));
-      setInstalled(servers ?? []);
-      setLinkedSites(sites ?? []);
+    if (!enabled) return;
+    if (!api) { setLoaded(true); setLoadError("bridge_unavailable"); return; }
+    const [catalogResult, installedResult, sitesResult] = await Promise.allSettled([
+      api.marketplace.search(""), api.mcpTools.listInstalled(), api.browser.listSites(),
+    ]);
+    if (catalogResult.status === "fulfilled") {
+      const merged = new Map<string, MarketplaceListing>(listBundledHubPlugins().map((row) => [row.slug, row]));
+      for (const row of (Array.isArray(catalogResult.value) ? catalogResult.value : []).filter(isPluginListing)) {
+        const bundled = merged.get(row.slug);
+        const revision = (row as MarketplaceListing & { catalogRevision?: string }).catalogRevision;
+        const newer = !!revision && Date.parse(revision) > Date.parse(BUNDLED_HUB_CATALOG_REVISION);
+        merged.set(row.slug, bundled && !newer ? { ...row, ...bundled } : row);
+      }
+      setListings([...merged.values()]);
       setLoadError(null);
-    } catch (error) {
-      setLoadError(error instanceof Error ? error.message : "load failed");
-    } finally {
-      setLoaded(true);
+    } else {
+      setLoadError(catalogResult.reason instanceof Error ? catalogResult.reason.message : "catalog_read_failed");
     }
+    if (installedResult.status === "fulfilled") {
+      setInstalled(installedResult.value ?? []);
+      setInstalledKnown(true);
+    } else {
+      setInstalledKnown(false);
+    }
+    if (sitesResult.status === "fulfilled") setLinkedSites(sitesResult.value ?? []);
+    setLoaded(true);
   }, [api, enabled]);
 
   useEffect(() => {
@@ -130,7 +143,7 @@ export function usePluginCatalog(options?: { enabled?: boolean }): PluginCatalog
     [linkedSites],
   );
 
-  return { listings, installed, linkedSites, loaded, loadError, refresh, isInstalled, hasBrowserLogin };
+  return { listings, installed, linkedSites, loaded, loadError, installedKnown, refresh, isInstalled, hasBrowserLogin };
 }
 
 // ── 설치 실행 ─────────────────────────────────────────────────────────────────
@@ -195,8 +208,9 @@ async function resolveSetupStep(input: {
   if (remote && serverId) {
     try {
       const status = await api.mcpTools.oauthStatus(serverId);
-      // 이미 인가돼 있으면 더 물을 것이 없다. 인가를 요구하면 선언과 무관하게 로그인이다.
-      if (status?.supported) return status.connected ? "none" : "login";
+      // 저장된 인가 상태와 무관하게 실제 연결을 먼저 확인한다. 이 probe가
+      // 기존 refresh credential이나 수동 API 키로 연결되면 새 동의가 필요 없다.
+      if (status?.supported) return await alreadyConnects(api, serverId) ? "none" : "login";
       // supported=false 는 "인증이 필요 없다" 또는 "discovery 실패"다. 전자면 끝이고,
       // 후자면 아래 선언값 판단이 받는다 — 둘 다 여기서 단정하지 않는다.
     } catch {
@@ -231,13 +245,13 @@ export async function installPlugins(input: {
         if (!preview || (preview.rows.length === 0 && previewSkills.length === 0)) {
           result.skipped.push({
             slug: listing.slug,
-            reason: listing.connectSetupRequired
+            reason: (ko ? bundledSetupFor(listing.slug)?.connectSetup?.noteKo || bundledSetupFor(listing.slug)?.connectSetup?.note : bundledSetupFor(listing.slug)?.connectSetup?.note) || (listing.connectSetupRequired
               ? ko
                 ? "계정별로 연결 주소가 달라 자동 설치할 수 없습니다. 제공사 안내를 따라 연결하세요."
                 : "Its connection is minted per account, so it cannot be installed automatically. Follow the provider's setup guide."
               : ko
                 ? "연결할 수 있는 MCP 서버 정보도 스킬 콘텐츠도 아직 없습니다."
-                : "No connectable MCP server information or skill content yet.",
+                : "No connectable MCP server information or skill content yet."),
           });
           continue;
         }
@@ -347,13 +361,13 @@ export function LoginStep({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [manualUrl, setManualUrl] = useState<string | null>(null);
-  const [connected, setConnected] = useState(false);
+  const [note, setNote] = useState<string | null>(null);
+  const controllerRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    setError(null);
-    setManualUrl(null);
-    setConnected(false);
-  }, [state.index]);
+    setError(null); setManualUrl(null); setNote(null); setBusy(false);
+    return () => { controllerRef.current?.abort(); controllerRef.current = null; };
+  }, [current?.serverId]);
 
   if (!current) {
     onDone(state.result, state.keyQueue);
@@ -361,29 +375,44 @@ export function LoginStep({
   }
 
   const advance = () => {
+    controllerRef.current?.abort();
+    controllerRef.current = null;
     if (state.index + 1 >= state.queue.length) onDone(state.result, state.keyQueue);
     else onAdvance({ ...state, index: state.index + 1 });
   };
 
   const connect = async () => {
     if (!api || busy) return;
-    setBusy(true);
-    setError(null);
+    const controller = new AbortController();
+    controllerRef.current?.abort(); controllerRef.current = controller;
+    setBusy(true); setError(null); setManualUrl(null);
+    setNote(ko ? "공식 로그인 페이지를 열고 있어요." : "Opening the official sign-in page.");
+    const stillCurrent = () => controllerRef.current === controller && !controller.signal.aborted;
     try {
-      const out = await api.mcpTools.oauthConnect(current.serverId);
-      if (out.ok) {
-        setManualUrl(out.manualUrl);
-        setConnected(true);
-        // 창이 정상으로 열려 인가까지 끝났으면 바로 다음으로. 수동 URL이 남았다면
-        // 사용자가 그 주소를 볼 수 있게 화면을 유지한다.
-        if (!out.manualUrl) advance();
-      } else {
-        setError(out.error);
+      await runMcpOAuthAttempt({ api: mcpOAuthAPI(api.mcpTools), serverId: current.serverId, signal: controller.signal, update: (progress) => {
+        if (!stillCurrent()) return;
+        setManualUrl(progress.manualUrl);
+        setNote(progress.status === "exchanging" ? ko ? "로그인 응답을 확인하고 있어요." : "Confirming the sign-in response." : ko ? "브라우저 로그인을 기다리고 있어요." : "Waiting for browser sign-in.");
+      } });
+      if (!stillCurrent()) return;
+      setManualUrl(null);
+      setNote(ko ? "서버의 실제 도구 목록을 확인하고 있어요." : "Reading the server's live tool list.");
+      const status = await api.mcpTools.test(current.serverId);
+      if (!stillCurrent()) return;
+      if (status.missingEnv.length) {
+        const keyQueue = [...state.keyQueue, { slug: current.slug, name: current.name, envKeys: status.missingEnv }];
+        controllerRef.current = null;
+        if (state.index + 1 >= state.queue.length) onDone(state.result, keyQueue);
+        else onAdvance({ ...state, index: state.index + 1, keyQueue });
+        return;
       }
+      if (!status.connected) throw new Error(`${status.error || "Live connection was not verified"} (probe_failed)`);
+      if (!status.tools.length) throw new Error(ko ? "사용 가능한 실제 도구가 없습니다. (empty_tools)" : "No live tools are available. (empty_tools)");
+      advance();
     } catch (connectError) {
-      setError(connectError instanceof Error ? connectError.message : "connection failed");
+      if (stillCurrent()) { setManualUrl(null); setNote(null); setError(connectError instanceof Error ? connectError.message : "connection failed"); }
     } finally {
-      setBusy(false);
+      if (stillCurrent()) { controllerRef.current = null; setBusy(false); }
     }
   };
 
@@ -403,21 +432,19 @@ export function LoginStep({
         </div>
       </header>
 
-      {error && <p className={styles.error}>{error}</p>}
+      {error && <p className={styles.error} role="alert">{error}</p>}
 
       {manualUrl && (
         <p className={styles.keyNote}>
           {ko
-            ? "Agentlas 브라우저를 열지 못했습니다. 아래 주소를 직접 열어 로그인하세요:"
-            : "The Agentlas browser could not be opened. Open this address yourself to sign in:"}
+            ? "브라우저에서 로그인을 마치거나 아래 공식 페이지를 직접 열어 주세요:"
+            : "Finish sign-in in the browser, or open the official page below:"}
           <br />
-          <code style={{ wordBreak: "break-all" }}>{manualUrl}</code>
+          <a href={manualUrl} target="_blank" rel="noopener noreferrer" style={{ overflowWrap: "anywhere" }}>{ko ? "공식 로그인 페이지 직접 열기" : "Open the official sign-in page directly"}</a>
         </p>
       )}
 
-      {connected && !manualUrl && (
-        <p className={styles.keyNote}>{ko ? "연결됐습니다." : "Connected."}</p>
-      )}
+      {note && <p className={styles.keyNote} role="status">{note}</p>}
 
       <footer className={styles.footer}>
         <span className={styles.count}>
@@ -426,26 +453,22 @@ export function LoginStep({
             : ""}
         </span>
         <div className={styles.footerActions}>
-          <button type="button" className={styles.ghost} disabled={busy} onClick={advance}>
-            {ko ? "나중에 로그인" : "Sign in later"}
+          <button type="button" className={styles.ghost} onClick={advance}>
+            {busy ? ko ? "로그인 취소·나중에 연결" : "Cancel sign-in and connect later" : ko ? "나중에 로그인" : "Sign in later"}
           </button>
           {/*
-            수동 URL 이 뜬 상태에서는 라벨이 "다음"이므로 **실제로 다음으로 가야 한다.**
-            예전에는 라벨만 바뀌고 onClick 이 그대로 connect() 였다 — 눌러도 같은 화면에서
-            연결을 다시 시도할 뿐이라 큐가 영영 전진하지 않았고, 빠져나가는 길이
-            "나중에 로그인" 하나뿐이었다. 버튼이 말한 것과 하는 일이 달랐다.
+            로그인 완료는 callback 성공 뒤 실제 tools/list 검사로만 확정한다.
+            수동 URL을 제공했다는 이유로 다음 단계로 건너뛰지 않는다.
           */}
           <button
             type="button"
             className={styles.primary}
-            onClick={() => (manualUrl ? advance() : void connect())}
+            onClick={() => void connect()}
             disabled={busy}
           >
             {busy
               ? ko ? "연결하는 중…" : "Connecting…"
-              : manualUrl
-                ? ko ? "다음" : "Next"
-                : ko ? "로그인하고 연결" : "Sign in and connect"}
+              : ko ? "로그인하고 연결" : "Sign in and connect"}
           </button>
         </div>
       </footer>

@@ -1,4 +1,5 @@
 import { MobilePushService } from "./push";
+import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "../runtime/invocation-owner-control";
 import { desktopGoalControlServices } from "./goal-control";
 import os from "node:os";
 import { randomBytes } from "node:crypto";
@@ -235,6 +236,8 @@ async function startBridgeInternal(
     });
   } catch { console.warn("[mobile-push] registration store unavailable; push capability disabled"); }
   const authority = createMobileBridgeAuthority({
+    currentTurnControl: invocationCurrentTurnControl,
+    cancelInvocationRun: cancelInvocationOwnerRun,
     ...(push ? { mobilePush: push } : {}),
     goalControl: desktopGoalControlServices(),
     hostIdentity: identity,

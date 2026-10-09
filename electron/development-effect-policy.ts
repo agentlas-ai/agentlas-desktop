@@ -128,6 +128,13 @@ export function developmentRendererRequestAllowed(rawUrl: string, devStartUrl?: 
 const DEVELOPMENT_LOCAL_IPC_CHANNELS = new Set([
   "auth:getSession", "app:getLocale", "menu:setLocale", "confirm:listPendingAskUser",
   "surfaces:get", "workspace:get",
+  "oneSupervisor:snapshot", "oneSupervisor:journal", "oneSupervisor:receipt",
+  "oneSupervisor:budgets", "oneContext:snapshot", "oneContext:revoke",
+  "oneHarness:getResult", "oneProfile:get", "oneProfile:origin",
+  "oneWindow:getState", "oneWindow:open", "oneWindow:hide", "oneWindow:setAlwaysOnTop", "oneWindow:showMain",
+  "tasks:list", "tasks:get", "tasks:getProjection", "tasks:listProjections", "projects:list", "projects:get",
+  "invoke:activeChats", "confirm:listPending", "browser:listPendingApprovals", "oneOrg:get",
+  "automations:chatActivity", "workLiveView:listTabs",
   "fs:listDirectory", "fs:readTextFile", "chatFiles:listGroup", "oneArtifacts:issuePreview",
   "localModelHub:snapshot", "localModelHub:cancelOperation", "localModelHub:unload",
   "workLiveView:releaseLease",
@@ -140,6 +147,7 @@ const DEVELOPMENT_LOCAL_IPC_CHANNELS = new Set([
   "appFactory:stopLivePreview", "workLiveView:close", "invoke:cancel", "hephaestus:cancelBuild",
   "hephaestus:stopStudio", "productExtensions:closeScienceView", "science:composer:cancel", "science:renderers:dispose", "science:manuscripts:cancelRenderJob",
   "browserAnnotation:stop", "browserUi:stopFind",
+  "oneSupervisor:stopTask", "oneSupervisor:stopReply",
 ]);
 
 export function assertDevelopmentIpcAllowed(channel: string, args: readonly unknown[]): void {

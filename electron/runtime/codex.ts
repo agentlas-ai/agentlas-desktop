@@ -1,3 +1,4 @@
+import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 // Codex CLI — 감지 + 실호출.
 // 사용자의 ChatGPT Plus/Pro 구독으로 돌아간다 (PRD §3.1 6-A).
 //
@@ -13,6 +14,7 @@ import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import { ToolRequestReplayGuard } from "../../shared/tool-request-replay";
+import { createCodexNativeTurnController, probeCodexNativeSteering } from "./codex-native-steering";
 import type { ObservedTokenUsage } from "../../shared/observed-usage";
 import { StringDecoder } from "node:string_decoder";
 import { codexSystemPromptWithSchemaFallback, openAiStrictSchemaOrNull } from "./strict-output-schema";
@@ -1517,10 +1519,13 @@ async function runCodexResidentTurn(input: {
   let lastEmit = 0;
   let turnId = "";
   let confirmedTurnId = "";
+  let acknowledgedTurnId = "";
+  const pendingTurnCompletions = new Map<string, unknown>();
   let stableContextDelivery: StableTurnContextDelivery | undefined;
   let turnRequestInFlight = false;
   let turnDispatchAttempted = false;
   let terminalObserved = false;
+  let terminalSucceeded = false;
   const runtimeAttemptId = crypto.randomUUID();
   let nativeThreadCreated = false;
   let turnUsageBaseline: CodexUsageBaseline = { input: null, output: null, cachedInput: null };
@@ -1548,11 +1553,19 @@ async function runCodexResidentTurn(input: {
   let settleTurn: ((reason: "completed" | "closed") => void) | null = null;
   let closedReason = "";
   let modelSelectionError: CodexModelSelectionError | null = null;
+  let nativeTurnController: ReturnType<typeof createCodexNativeTurnController> | null = null;
+  const withdrawNativeTurnController = (): void => {
+    if (!nativeTurnController) return;
+    nativeTurnController.revoke();
+    nativeTurnController = null;
+    try { events.onNativeTurnController?.(null); } catch { /* Stop and native settlement remain unconditional. */ }
+  };
   // Every blocking MCP elicitation belongs to this one turn, even when the
   // underlying app-server process survives for later turns. Stop, transport
   // close, or checkout release must cancel the question before the session can
   // be reused by another chat/turn.
   const elicitationAbort = new AbortController();
+  registerNativeApprovalChildSignal(req.signal, elicitationAbort.signal);
 
   const openThinking = (): void => {
     if (thinkingOpen) return;
@@ -1575,6 +1588,7 @@ async function runCodexResidentTurn(input: {
   };
 
   const rejectModelReroute = (fromModel: unknown, toModel: unknown): void => {
+    withdrawNativeTurnController();
     const acknowledged = session.modelAcknowledgement;
     modelSelectionError = new CodexModelSelectionError(
       "rerouted",
@@ -1784,14 +1798,24 @@ async function runCodexResidentTurn(input: {
         const message = typeof params?.error?.message === "string" ? params.error.message : "";
         if (message) events.onStatus(`codex: ${message.slice(0, 400)}`);
         if (params?.willRetry !== true && !failure) {
+          withdrawNativeTurnController();
           failure = codexFailureFromTurn({ status: "failed", error: params?.error }) ?? failure;
         }
         break;
       }
       case "turn/completed": {
         const turn = params?.turn;
-        if (!turn || fromOtherThread(params) || (turnId && String(turn.id ?? "") !== turnId)) break;
+        if (!turn || params?.threadId !== session.threadId || typeof turn.id !== "string" || !turn.id) break;
+        // Notifications may precede the turn/start response. Only its exact
+        // acknowledged ID can bind a terminal result to this submitted prompt.
+        if (!acknowledgedTurnId) {
+          if (turnRequestInFlight && pendingTurnCompletions.size < 64) pendingTurnCompletions.set(turn.id, params);
+          break;
+        }
+        if (turn.id !== acknowledgedTurnId) break;
+        withdrawNativeTurnController();
         terminalObserved = true;
+        terminalSucceeded = turn.status === "completed";
         if (usage.observed) events.onTerminalObservedUsage?.(usage.observed, runtimeAttemptId);
         workforceObservation?.completeTurn(params);
         if (turn.status === "interrupted") interrupted = true;
@@ -1959,6 +1983,7 @@ async function runCodexResidentTurn(input: {
     },
     onStatus: (status) => events.onStatus(status),
     onTransportClosed: (reason) => {
+      withdrawNativeTurnController();
       closedReason = reason;
       elicitationAbort.abort(new Error(reason));
       settleTurn?.("closed");
@@ -1968,6 +1993,7 @@ async function runCodexResidentTurn(input: {
   /** 취소가 보낸 `turn/interrupt` 의 응답 — 세션을 죽이기 **전에** 이것을 기다린다. */
   let interruptAck: Promise<unknown> | null = null;
   const onAbort = (): void => {
+    withdrawNativeTurnController();
     broken = true;
     interrupted = true;
     elicitationAbort.abort(req.signal?.reason);
@@ -1987,10 +2013,13 @@ async function runCodexResidentTurn(input: {
     settleTurn?.("closed");
   };
   req.signal?.addEventListener("abort", onAbort, { once: true });
+  if (req.signal?.aborted) onAbort();
 
   return effects.withScope(async () => {
   try {
     session.active = sink;
+    const nativeSteeringCapability = events.onNativeTurnController && !req.signal?.aborted
+      ? await probeCodexNativeSteering({ bin, cwd, env }) : null;
     if (req.workforceRuntimeToolGrant) workforceObservation = new CodexWorkforceObservation(req, session.init, req.workforceRuntimeToolGrant.canonicalConfigSha256);
     /* ── 스레드: 살아 있는 세션이면 그대로, 새 프로세스면 resume 또는 start ── */
     // Model selection belongs to the thread protocol, not the resident process
@@ -2146,12 +2175,38 @@ async function runCodexResidentTurn(input: {
     if (typeof started?.turn?.id === "string" && started.turn.id.trim()) {
       turnId = started.turn.id;
       confirmedTurnId = started.turn.id;
+      acknowledgedTurnId = started.turn.id;
       acknowledgeStableTurnContext(stableContextDelivery, { sessionId: session.threadId, acknowledgementId: started.turn.id });
+    } else {
+      throw new RuntimeTurnUnsettledError(KIND, req.locale);
     }
+    const earlyCompletion = pendingTurnCompletions.get(acknowledgedTurnId);
+    pendingTurnCompletions.clear();
+    if (earlyCompletion) onNotification("turn/completed", earlyCompletion);
     const bufferedReroute = confirmedTurnId ? pendingModelReroutes.get(confirmedTurnId) : undefined;
     pendingModelReroutes.clear();
     if (bufferedReroute) {
       rejectModelReroute(bufferedReroute.fromModel, bufferedReroute.toModel);
+    }
+    // A notification alone cannot publish authority: the exact turn/start response
+    // and the installed executable schema must both be confirmed first.
+    if (nativeSteeringCapability && session.threadId && confirmedTurnId && !terminalObserved
+      && !broken && !failure && !modelSelectionError && !req.signal?.aborted
+      && /^[^\r\n\x00]{1,256}$/.test(confirmedTurnId)) {
+      const nativeThreadId = session.threadId;
+      const nativeTurnId = confirmedTurnId;
+      nativeTurnController = createCodexNativeTurnController({
+        binding: { runtime: KIND, chatId, runtimeSessionOwnerId: runtimeSessionOwnerId ?? null,
+          threadId: nativeThreadId, turnId: nativeTurnId, model: session.modelAcknowledgement?.model ?? null,
+          permission: req.permission ?? "read", cwd },
+        capability: nativeSteeringCapability,
+        isActive: () => session.active === sink && session.threadId === nativeThreadId
+          && confirmedTurnId === nativeTurnId && !terminalObserved && !broken && !failure
+          && !modelSelectionError && !req.signal?.aborted && codexResidentSessionAlive(session),
+        request: session.conn.request.bind(session.conn),
+      });
+      try { events.onNativeTurnController?.(nativeTurnController.controller); }
+      catch { withdrawNativeTurnController(); }
     }
     events.onStatus(`[runtime-session] ${continuing ? "resumed" : "created"} kind=${KIND}`);
     if (modelSelectionError) throw modelSelectionError;
@@ -2208,6 +2263,7 @@ async function runCodexResidentTurn(input: {
       return {
         result: {
           text: "",
+          ownerControlTerminal: "uncertain",
           failure: { kind: "empty", message: session.conn.lastStderr.slice(-500) || "codex app-server returned no message", runtime: KIND, source: "marker" },
           sessionId: session.threadId,
           appliedEffort,
@@ -2217,6 +2273,8 @@ async function runCodexResidentTurn(input: {
     return {
       result: {
         text,
+        ownerControlTerminal: terminalSucceeded && !failure && !interrupted && !req.signal?.aborted
+          ? "completed" : "uncertain",
         ...(failure ? { failure } : {}),
         sessionId: session.threadId,
         tokens: usage.observed?.outputTokens ?? Math.ceil(estChars / 4),
@@ -2242,6 +2300,7 @@ async function runCodexResidentTurn(input: {
     if (!emitted && !bodyText()) return { retryOneShot: true };
     throw err;
   } finally {
+    withdrawNativeTurnController();
     req.signal?.removeEventListener("abort", onAbort);
     elicitationAbort.abort(new Error("Codex turn settled"));
     closeThinking();
@@ -2317,6 +2376,8 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
     if (!run.terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale);
     if (run.code !== 0 && !run.text.trim()) throw new Error(`codex CLI exit ${run.code}${run.stderr ? `\n${run.stderr.slice(0, 500)}` : ""}`);
     return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
+      ownerControlTerminal: run.code === 0 && run.turnCompleted && !run.failure && run.text.trim()
+        ? "completed" : "uncertain",
       ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}) };
   } finally {
     await fs.rm(home, { recursive: true, force: true }).catch(() => {});
@@ -2398,10 +2459,12 @@ export const runCodex: Runner = async (
         { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
       if (request.signal?.aborted) throw abortReasonError(request);
       if (!run.terminalObserved && !run.failure) {
-        return { text: "", failure: { kind: "unavailable", runtime: KIND, source: "exit",
+        return { text: "", ownerControlTerminal: "uncertain", failure: { kind: "unavailable", runtime: KIND, source: "exit",
           providerCode: `codex_no_tools_cli_exit_${run.code ?? "unknown"}`, message: "codex_no_tools_cli_startup_unsettled" } };
       }
       return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
+        ownerControlTerminal: run.code === 0 && run.turnCompleted && !run.failure && run.text.trim()
+          ? "completed" : "uncertain",
         ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}), ...(request.effort ? { appliedEffort: request.effort } : {}) };
     }, { ...(capacities.length ? { contextWindowTokens: Math.min(...capacities) } : {}) });
   }
@@ -2702,6 +2765,8 @@ export const runCodex: Runner = async (
       events.onStatus(`[runtime-session] resumed kind=${KIND}`);
       return {
         text: r.text.trim(),
+        ownerControlTerminal: r.turnCompleted && !r.failure && r.text.trim()
+          ? "completed" : "uncertain",
         ...(r.failure ? { failure: r.failure } : {}),
         sessionId: r.threadId ?? resumeSessionId,
         tokens: r.tokens,
@@ -2725,6 +2790,7 @@ export const runCodex: Runner = async (
     // original session and let Main reconcile instead of replaying it fresh.
     return {
       text: r.text.trim(),
+      ownerControlTerminal: "uncertain",
       failure: r.failure ?? { kind: "exit", message: `codex CLI exit ${r.code}`, runtime: KIND, source: "exit", ...(r.code != null ? { exitCode: r.code } : {}) },
       sessionId: r.threadId ?? resumeSessionId,
       tokens: r.tokens,
@@ -2772,6 +2838,8 @@ export const runCodex: Runner = async (
     events.onStatus(`[runtime-session] created kind=${KIND}`);
     return {
       text: created.text.trim(),
+      ownerControlTerminal: created.turnCompleted && !created.failure && created.text.trim()
+          ? "completed" : "uncertain",
       ...(created.failure ? { failure: created.failure } : {}),
       sessionId: created.threadId ?? undefined,
       tokens: created.tokens,
@@ -2785,6 +2853,7 @@ export const runCodex: Runner = async (
   if (created.failure) {
     return {
       text: created.text.trim(),
+      ownerControlTerminal: "uncertain",
       failure: created.failure,
       sessionId: created.threadId ?? undefined,
       tokens: created.tokens,

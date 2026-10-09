@@ -1,3 +1,10 @@
+import { nativeOwnerTextChoices, NATIVE_OWNER_TEXT_CONTEXT_OMITTED } from "./native-owner-text";
+import type { NativeOwnerTextBinding, NativeOwnerTextInput, NativeOwnerTextReceipt } from "./native-owner-text";
+import { withNativeApprovalExecution } from "../runtime/native-approval-provenance";
+import { getAuthenticatedActorIds } from "../auth";
+import { takeNativeInvocationIngressSource, validateNativeIngressRequest, type NativeInvocationIngressSource, type NativeIngressBinding } from "./native-ingress-source";
+import { createNativePreparationLifetime, withNativePreparationLifetime, runNativePreparation, type NativePreparationLifetime } from "../runtime/native-preparation-lifetime";
+import { assertNativeOneStartPort, isLocalInvocationPreparationPort, driveLocalOneStart, driveNativeOneStart, oneStartCheckpoint, type NativeOneStartCheckpoint, type NativeOneStartPort, type NativeOneStartBinding } from "./native-start-checkpoints";
 import { canResumeInvocationBrowserLoginWait, claimInvocationBrowserLoginWait, registerInvocationBrowserLoginWait, settleInvocationBrowserLoginWait,
   type BrowserLoginWaitHandle, type InvocationBrowserLoginWait } from "./browser-login-wait";
 import { isOneQuietReply } from "../../shared/one-supervisor";
@@ -32,6 +39,8 @@ import { recordAgentSurface } from "../store/agent-surfaces";
 import type { ChatHostNotice } from "../../shared/types";
 import { isHostPreflightTool } from "../../shared/tool-activity";
 import { createHash, randomUUID } from "node:crypto";
+import { assertInvocationRunOwner, claimInvocationRunOwner, invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
+import type { InvocationRunOwner } from "../store/invocation-owner-core";
 import path from "node:path";
 import { agentRunCwd } from "../runtime/exec";
 import { resolveInvocationRunId } from "../runtime/run-id";
@@ -45,7 +54,7 @@ import {
   registerDurableInvocationStart,
   STOPPED_BY_USER,
 } from "../runtime/invocation-lifecycle";
-import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
+import { invocationHostStopCause, invocationHostStopCopy, isOwnerGoalStopCause, isNonFailureInvocationStop } from "../../shared/invocation-host-stop";
 import {
   appendLongRunEvent,
   bindCurrentGoalRevisionToLongRun,
@@ -62,7 +71,7 @@ import {
   transitionLongRun, liveLongRunAttemptCount, unsettledLongRunAttemptCount,
   longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
-import { prepareInvocationAutomaticGoal } from "./automatic-goal";
+import { automaticGoalReplayBlockerCode, prepareInvocationAutomaticGoal } from "./automatic-goal";
 import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
 import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
@@ -95,6 +104,10 @@ import { pickLocale } from "../runtime/status-i18n";
 import { permissionEscalationContinuationRequest } from "./permission-escalation-continuation";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { cancelQueuedOnePreflightSteersForChat } from "../store/one-preflight-steers";
+import type { RunnerNativeTurnController, RunnerOwnerControlInbox } from "../runtime/runner";
+import type { InvocationCurrentTurnSteerRequest, InvocationCurrentTurnSteerReceipt } from "../../shared/types";
+import { claimCurrentTurnSteer, countPendingCurrentTurnSteers, existingCurrentTurnSteer, getCurrentTurnSteer,
+  settleCurrentTurnSteer, takeCurrentTurnSteers } from "../store/current-turn-steers";
 import { getRuntimeToolPermissionArbiter } from "../runtime/tool-approval";
 import {
   PERMISSION_ESCALATION_TOOL,
@@ -104,7 +117,7 @@ import {
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { advanceMainLivePartial, markInterruptedPartial } from "./interrupted-partial";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
-import { RUNTIME_TURN_UNSETTLED_CODE } from "../runtime/runner";
+import { RUNTIME_TURN_UNSETTLED_CODE, RuntimeTurnUnsettledError } from "../runtime/runner";
 import {
   getInvocationRunReceipt,
   getLatestInvocationRunReceipt,
@@ -125,6 +138,9 @@ import { adoptExplicitGoalGrant } from "../long-run/explicit-goal-authority";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   admitInvocationWithStartReceipt,
+  canonicalInvocationRequestJson,
+  INVOCATION_ADMISSION_DIGEST_VERSION,
+  getInvocationAdmission,
   decideInvocationAdmission,
   getPendingInvocationAdmissionForChat,
   type InvocationAdmissionIdentity,
@@ -309,9 +325,14 @@ interface StartBoundary {
   runId?: string;
   handedOff?: boolean;
   cleanups?: Array<() => void>;
+  ownerLease?: InvocationRunOwner;
 }
 
 interface RunRecord {
+  /** Original immutable native choices, never effective mutable UI settings. */
+  nativeOwnerTextChoices?: string;
+  ownerLease?: InvocationRunOwner;
+  nativeTurnController?: RunnerNativeTurnController;
   /** Main verification owns this yielded native episode's next scheduling step. */
   nativeGoalEpisodePending?: boolean;
   mainLifetime?: MainInvocationLifetime;
@@ -476,7 +497,8 @@ function oneTaskKindImageRef(image: ImageAttachment): string | null {
     || typeof image.data !== "string"
     || image.data.length < 4
     || image.data.length > Math.ceil(ONE_ATTACHMENT_LIMITS.maxImageBytes / 3) * 4
-    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(image.data)
+    || image.data.length % 4 !== 0
+    || !/^[A-Za-z0-9+/]*={0,2}$/.test(image.data)
   ) return null;
   const bytes = Buffer.from(image.data, "base64");
   if (
@@ -946,9 +968,28 @@ function checkpointProducerHadNoEffects(goalId: string, invocationRunId: string 
   return row?.state === "interrupted" && row.side_effect_state === "none" ? { errorCode: row.error_code } : null;
 }
 
+interface NativeIngressPending {
+  source: ReturnType<typeof takeNativeInvocationIngressSource>;
+  original: NativeInvocationIngressSource;
+  actorSnapshot: Readonly<{ userId: string; workspaceId: string }> | null;
+  selectedCwd?: string;
+  undispatchedLease?: InvocationRunOwner;
+  observedKinds: Set<string>;
+  controller: AbortController;
+  lifetime: NativePreparationLifetime;
+  retained: Set<Promise<unknown>>;
+  handedOff: boolean;
+  port?: NativeOneStartPort;
+  cancelPromise?: Promise<void>;
+  cancelSettled: boolean;
+  frontier: "open" | "closed-no-start";
+  proofMinted: boolean;
+}
+
 export class InvocationService {
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
+  private readonly currentTurnSteerDispatches = new Set<string>();
   /** Machine marker for turns this process interrupts at shutdown (see markShutdownForUpdate). */
   private appShutdownCause: "app_closed" | "update_restart" = "app_closed";
   private readonly eventListeners = new Set<InvocationEventListener>();
@@ -959,7 +1000,251 @@ export class InvocationService {
   private readonly settlingRuns = new Map<string, RunRecord>();
   private readonly browserLoginWaitingRuns = new Map<string, RunRecord>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
+  private readonly nativePreparing = new Map<string, { request: Readonly<McpInvocationRequest>; actorSnapshot: Readonly<{ userId: string; workspaceId: string }> | null; binding: NativeOneStartBinding; controller: AbortController; port: NativeOneStartPort; retained: Set<Promise<unknown>>; preparationLifetime: NativePreparationLifetime }>();
+  private readonly nativeIngress = new Map<string, NativeIngressPending>();
+  private readonly nativeIngressOriginals = new WeakMap<NativeInvocationIngressSource, { pending: NativeIngressPending; controller: AbortController; lifetime: NativePreparationLifetime }>();
+  private readonly nativeServiceObservationProofs = new WeakMap<object, { original: NativeInvocationIngressSource; pending: NativeIngressPending; kind: "native-execution-cwd-selected-v1" | "native-undispatched-start-v1" }>();
+  private readonly nativeIngressNoStartProofs = new WeakMap<object, { original: NativeInvocationIngressSource; pending: NativeIngressPending; controller: AbortController; lifetime: NativePreparationLifetime }>();
+  private readonly nativePreparationListeners = new Set<(event: { runId: string; chatId: string; status: "handed-off" | "rejected" | "cancelled" | "uncertain" }) => void>();
   private acceptingStarts = true;
+  private foreignNativeStartFence?: (chatId: string) => boolean;
+
+  /** Trusted host bootstrap only. A negative observer never grants execution
+   * authority or infers quiescence from a disconnected native viewer. */
+  setForeignNativeStartFence(fence: (chatId: string) => boolean): void {
+    if (this.foreignNativeStartFence || typeof fence !== "function") throw new Error("invocation_native_fence_already_configured");
+    this.foreignNativeStartFence = fence;
+  }
+
+
+  /** Additive quiescence fact; never a fabricated invocation terminal receipt. */
+  onNativePreparationQuiesced(listener: (event: { runId: string; chatId: string; status: "handed-off" | "rejected" | "cancelled" | "uncertain" }) => void): () => void {
+    this.nativePreparationListeners.add(listener);
+    return () => this.nativePreparationListeners.delete(listener);
+  }
+
+  /** Cache before invoking the original callback: synchronous reentry cannot create a second cancellation. */
+  private cancelNativeIngress(pending: NativeIngressPending): Promise<void> {
+    if (!pending.cancelPromise) {
+      const cancel = Promise.resolve().then(() => pending.source.cancel());
+      pending.cancelPromise = cancel;
+      pending.retained.add(cancel);
+      const settled = () => { pending.cancelSettled = true; };
+      void cancel.then(settled, settled);
+    }
+    return pending.cancelPromise;
+  }
+
+  private async drainNativeIngressRetained(pending: NativeIngressPending): Promise<void> {
+    let size: number;
+    do { size = pending.retained.size; await Promise.allSettled([...pending.retained]); }
+    while (pending.retained.size !== size);
+  }
+
+  private assertNativeIngressNoStart(original: NativeInvocationIngressSource, pending: NativeIngressPending): void {
+    const originalRecord = this.nativeIngressOriginals.get(original);
+    if (originalRecord?.pending !== pending || originalRecord.controller !== pending.controller || originalRecord.lifetime !== pending.lifetime
+      || this.nativeIngress.get(pending.source.binding.runId) !== pending
+      || pending.frontier !== "closed-no-start" || pending.handedOff || pending.port !== undefined
+      || !pending.lifetime.admissionClosed || pending.lifetime.pendingCount !== 0
+      || !pending.cancelPromise || !pending.cancelSettled) {
+      throw Object.assign(new Error("native_ingress_no_start_not_closed"), { code: "native_ingress_no_start_not_closed" });
+    }
+    pending.source.assertCurrent();
+  }
+
+  /** Native host observer only. This token is not serializable authority or an admission/DB decision. */
+  takeNativeIngressNoStartProof(original: NativeInvocationIngressSource): object {
+    const pending = this.nativeIngressOriginals.get(original)?.pending;
+    if (!pending) throw Object.assign(new Error("native_ingress_no_start_source_required"), { code: "native_ingress_no_start_source_required" });
+    this.assertNativeIngressNoStart(original, pending);
+    if (pending.proofMinted) throw Object.assign(new Error("native_ingress_no_start_proof_consumed"), { code: "native_ingress_no_start_proof_consumed" });
+    pending.proofMinted = true;
+    const proof = Object.freeze({});
+    this.nativeIngressNoStartProofs.set(proof, { original, pending, controller: pending.controller, lifetime: pending.lifetime });
+    return proof;
+  }
+
+  /** Burn before revalidation. The passive signing projection never substitutes for this local consume. */
+  consumeNativeIngressNoStartProof(original: NativeInvocationIngressSource, proof: object): Readonly<{ kind: "native-ingress-closed-before-prepared-v1"; binding: Readonly<NativeIngressBinding> }> {
+    const record = this.nativeIngressNoStartProofs.get(proof);
+    this.nativeIngressNoStartProofs.delete(proof);
+    if (!record || record.original !== original || record.controller !== record.pending.controller || record.lifetime !== record.pending.lifetime) {
+      throw Object.assign(new Error("native_ingress_no_start_proof_required"), { code: "native_ingress_no_start_proof_required" });
+    }
+    this.assertNativeIngressNoStart(original, record.pending);
+    return Object.freeze({ kind: "native-ingress-closed-before-prepared-v1", binding: Object.freeze({ ...record.pending.source.binding }) });
+  }
+
+  private assertNativeServiceObservationSelection(pending: NativeIngressPending): void {
+    const held = this.nativeIngressOriginals.get(pending.original), prepared = this.nativePreparing.get(pending.source.binding.runId);
+    if (held?.pending !== pending || held.controller !== pending.controller || held.lifetime !== pending.lifetime
+      || !prepared || prepared.controller !== pending.controller || prepared.port !== pending.port || prepared.preparationLifetime !== pending.lifetime
+      || pending.controller.signal.aborted || pending.lifetime.admissionClosed) throw new Error("native_service_cwd_source_required");
+    pending.source.assertCurrent();
+  }
+
+  private assertNativeServiceObservation(original: NativeInvocationIngressSource, pending: NativeIngressPending, kind: "native-execution-cwd-selected-v1" | "native-undispatched-start-v1"): void {
+    const held = this.nativeIngressOriginals.get(original), prepared = this.nativePreparing.get(pending.source.binding.runId);
+    if (held?.pending !== pending || held.controller !== pending.controller || held.lifetime !== pending.lifetime
+      || this.nativeIngress.get(pending.source.binding.runId) !== pending || !pending.handedOff || !pending.port
+      || !prepared || prepared.controller !== pending.controller || prepared.port !== pending.port
+      || prepared.preparationLifetime !== pending.lifetime) throw new Error("native_service_observation_source_required");
+    pending.source.assertCurrent();
+    if (kind === "native-execution-cwd-selected-v1") {
+      if (!pending.selectedCwd || pending.controller.signal.aborted || pending.lifetime.admissionClosed) throw new Error("native_service_cwd_not_selected");
+    } else {
+      const lease = pending.undispatchedLease, current = lease && invocationRunOwners.getRunOwner(lease.chatId, lease.runId);
+      if (!lease || !pending.lifetime.admissionClosed || pending.lifetime.pendingCount !== 0
+        || !current || current.state !== "released" || current.leaseId !== lease.leaseId || current.ownerId !== lease.ownerId
+        || current.ownerKind !== "daemon" || current.runId !== pending.source.binding.runId || current.chatId !== pending.source.binding.chatId
+        || current.ownerId !== pending.source.binding.ownerProcessEpoch) throw new Error("native_service_undispatched_not_released");
+    }
+  }
+
+  /** Native bootstrap observes exact generator selection/failure, never caller JSON. */
+  takeNativeServiceObservationProof(original: NativeInvocationIngressSource, kind: "native-execution-cwd-selected-v1" | "native-undispatched-start-v1"): object | undefined {
+    const pending = this.nativeIngressOriginals.get(original)?.pending;
+    if (!pending) throw new Error("native_service_observation_source_required");
+    if (kind === "native-undispatched-start-v1" && !pending.undispatchedLease) return undefined;
+    this.assertNativeServiceObservation(original, pending, kind);
+    if (pending.observedKinds.has(kind)) throw new Error("native_service_observation_already_consumed");
+    pending.observedKinds.add(kind);
+    const proof = Object.freeze({});
+    this.nativeServiceObservationProofs.set(proof, { original, pending, kind });
+    return proof;
+  }
+
+  consumeNativeServiceObservationProof(original: NativeInvocationIngressSource, proof: object) {
+    const held = this.nativeServiceObservationProofs.get(proof);
+    this.nativeServiceObservationProofs.delete(proof);
+    if (!held || held.original !== original) throw new Error("native_service_observation_proof_required");
+    this.assertNativeServiceObservation(original, held.pending, held.kind);
+    const binding = Object.freeze({ ...held.pending.source.binding });
+    return held.kind === "native-execution-cwd-selected-v1"
+      ? Object.freeze({ kind: held.kind, binding, cwd: held.pending.selectedCwd! })
+      : Object.freeze({ kind: held.kind, binding, leaseId: held.pending.undispatchedLease!.leaseId });
+  }
+
+  /** Source capability, not a request/JSON switch. Registration precedes every chunk await. */
+  async startNativeIngress(source: NativeInvocationIngressSource): Promise<InvocationStartResult> {
+    const owned = takeNativeInvocationIngressSource(source), binding = owned.binding;
+    const backgroundObservation=Boolean(effectObservationTicket(binding.runId));
+    if (this.nativeIngress.has(binding.runId) || this.nativePreparing.has(binding.runId)) throw new Error("invocation_cleanup_pending");
+    const chatBusy = !backgroundObservation && ([...this.nativeIngress.values()].some(p=>p.source.binding.chatId===binding.chatId && !effectObservationTicket(p.source.binding.runId))
+      || [...this.nativePreparing.values()].some(p=>p.binding.chatId===binding.chatId && !effectObservationTicket(p.binding.runId))
+      || this.activeChatIds().includes(binding.chatId));
+    const controller=new AbortController(), lifetime=createNativePreparationLifetime(binding), retained=new Set<Promise<unknown>>();
+    const nativeActor = getAuthenticatedActorIds();
+    const pending: NativeIngressPending={actorSnapshot:nativeActor ? Object.freeze({ ...nativeActor }) : null,source:owned,original:source,observedKinds:new Set(),controller,lifetime,retained,handedOff:false,port:undefined,cancelSettled:false,frontier:"open",proofMinted:false};
+    this.nativeIngressOriginals.set(source,{pending,controller,lifetime});
+    this.nativeIngress.set(binding.runId,pending);this.publishActiveChats();
+    let status:"handed-off"|"cancelled"|"uncertain"="uncertain";
+    try {
+      // A distinct busy-chat capsule still owns genuine cancellation/quiescence
+      // and a closed-before-prepared proof; it never leaks an unregistered source.
+      if (chatBusy) throw new Error("invocation_cleanup_pending");
+      if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
+      const admission=await withNativePreparationLifetime(lifetime,()=>runNativePreparation(()=>owned.authorize(controller.signal)));
+      await lifetime.awaitRetained();owned.assertCurrent();controller.signal.throwIfAborted();
+      const prepared=await withNativePreparationLifetime(lifetime,()=>runNativePreparation(()=>owned.read(controller.signal)));
+      await lifetime.awaitRetained();
+      owned.assertCurrent();controller.signal.throwIfAborted();
+      const durable=validateNativeIngressRequest(binding,prepared.request);
+      pending.handedOff=true;pending.port=prepared.port;
+      const result=await this.startNativePrepared(prepared.request,prepared.port,admission,durable,undefined,undefined,prepared.hostNoticePurpose);
+      status="handed-off";return result;
+    } catch(cause) {
+      status=controller.signal.aborted?"cancelled":"uncertain";
+      if(controller.signal.aborted) throw controller.signal.reason;
+      const error=new RuntimeTurnUnsettledError("native-ingress");Object.defineProperty(error,"cause",{value:cause});throw error;
+    } finally {
+      if (!pending.handedOff) this.cancelNativeIngress(pending);
+      lifetime.closeAdmission();await lifetime.quiescent();await this.drainNativeIngressRetained(pending);
+      try {
+        await owned.quiesce();
+        await this.drainNativeIngressRetained(pending);
+        if (!pending.handedOff) pending.frontier="closed-no-start";
+        await owned.finish(status);
+      } catch(cause) { const error=new RuntimeTurnUnsettledError("native-ingress-cleanup");Object.defineProperty(error,"cause",{value:cause});throw error; }
+      this.nativeIngress.delete(binding.runId);this.publishActiveChats();
+      for(const listener of this.nativePreparationListeners){try{listener({runId:binding.runId,chatId:binding.chatId,status});}catch{}}
+    }
+  }
+
+  /** Private native bootstrap gate. The daemon host reserves exact input before this call, without await. */
+  async startNativePrepared(req: McpInvocationRequest, port: NativeOneStartPort, mainAdmission: MainInvocationAdmission, durableAdmission: InvocationAdmissionIdentity,
+    workspaceBinding?: InvocationWorkspaceBinding, executionContext?: InvocationExecutionContext, hostNoticePurpose?: ChatHostNotice["purpose"]): Promise<InvocationStartResult> {
+    assertNativeOneStartPort(port);
+    const admission = takeMainInvocationAdmission(mainAdmission, { chatId: req.chatId, runId: req.runId });
+    if (!admission) throw new Error("native_one_main_admission_required");
+    if (!req.runId || durableAdmission.runId !== req.runId || durableAdmission.chatId !== req.chatId) throw new Error("invocation_admission_request_identity_mismatch");
+    const nativeRunId = req.runId;
+    req = structuredClone(req);
+    const freezeRequest = (value: unknown): void => { if (value && typeof value === "object") { for (const item of Object.values(value)) freezeRequest(item); Object.freeze(value); } };
+    freezeRequest(req);
+    if (canonicalInvocationRequestJson(req) !== durableAdmission.canonicalRequestJson) throw new Error("invocation_admission_request_identity_mismatch");
+    const reservation = getInvocationAdmission(nativeRunId);
+    if (!reservation || reservation.chatId !== req.chatId || reservation.ownerProcessEpoch !== durableAdmission.ownerProcessEpoch || reservation.status !== "pending"
+      || reservation.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(durableAdmission.canonicalRequestJson).digest("hex")) throw new Error("native_one_input_reservation_required");
+    const ingress=this.nativeIngress.get(nativeRunId);
+    if (ingress && (!ingress.handedOff || ingress.port!==port)) throw new Error("invocation_cleanup_pending");
+    if (this.nativePreparing.has(nativeRunId) || (!effectObservationTicket(nativeRunId) && [...this.nativePreparing.values()].some(p => p.binding.chatId === req.chatId && !effectObservationTicket(p.binding.runId)))) throw new Error("invocation_cleanup_pending");
+    const binding = Object.freeze({ chatId: req.chatId, runId: nativeRunId, admission: Object.freeze({ ...durableAdmission }) });
+    port.assertCurrent(binding);
+    const controller = ingress?.controller ?? new AbortController(), retained = ingress?.retained ?? new Set<Promise<unknown>>();
+    const preparationLifetime = ingress?.lifetime ?? createNativePreparationLifetime(binding);
+    const nativeActor = ingress ? ingress.actorSnapshot : !isLocalInvocationPreparationPort(port) ? getAuthenticatedActorIds() : null;
+    const pending = { request:req, actorSnapshot: nativeActor ? Object.freeze({ ...nativeActor }) : null, binding, controller, port, retained, preparationLifetime };
+    this.nativePreparing.set(nativeRunId, pending);
+    this.publishActiveChats();
+    const boundary: StartBoundary = { crossed: false };
+    let status: "handed-off" | "rejected" | "cancelled" | "uncertain" = "rejected";
+    let nativeFailure: unknown;
+    try {
+      const steps = this.startPreparedSteps(req, workspaceBinding, executionContext, undefined, hostNoticePurpose, admission, durableAdmission, boundary, undefined, controller);
+      const started = await withNativePreparationLifetime(preparationLifetime, () => driveNativeOneStart(steps, port, binding, controller.signal, preparationLifetime));
+      status = "handed-off";
+      try {
+        for (const [waitingRunId, waiting] of this.browserLoginWaitingRuns) {
+          if (waiting.chatId === req.chatId && waitingRunId !== started.runId) this.cancelParkedBrowserLoginWait(waitingRunId, "new_invocation", true);
+        }
+      } catch (error) { console.warn("[invocation] parked browser-login wait cleanup failed after a dispatched start:", error); }
+      return started;
+    } catch (error) {
+      nativeFailure = error;
+      status = controller.signal.aborted ? "cancelled" : "uncertain";
+      if (durableAdmission && !boundary.crossed) decideInvocationAdmission({ ...durableAdmission, decision: "rejected", reasonCode: preDispatchRefusalReasonCode(error),
+        noStartProof: { kind: "owner-start-boundary-not-crossed", verifiedOwnerProcessEpoch: durableAdmission.ownerProcessEpoch } });
+      if (boundary.crossed && !boundary.handedOff && boundary.runId) {
+        tryRecordRunEvent({ runId: boundary.runId, chatId: req.chatId, kind: "invoke_threw", payload: { errorCode: controller.signal.aborted ? "native_preparation_cancelled" : RUNTIME_TURN_UNSETTLED_CODE, providerDispatched: false } });
+        // Keep the slot and custody until exact Main preparation/claim quiescence.
+      }
+      // Unknown remote claims do not release custody or restore original capabilities.
+      throw error;
+    } finally {
+      preparationLifetime.closeAdmission();
+      await preparationLifetime.quiescent();
+      await Promise.allSettled([...retained]);
+      // A failed finish retains the pending barrier/custody for explicit reconciliation.
+      // Root transport must supply actual Main quiescence; missing ACK is not success.
+      try { await port.quiesce(binding, status); }
+      catch (cause) { const error = new RuntimeTurnUnsettledError("native-one-quiescence"); Object.defineProperty(error, "cause", { value: cause }); throw error; }
+      if (boundary.crossed && !boundary.handedOff && boundary.runId) this.releaseUndispatchedStart(boundary.runId, req.chatId, nativeFailure, isLocalInvocationPreparationPort(port) ? boundary.cleanups ?? [] : []);
+      if (!boundary.handedOff && boundary.ownerLease) invocationRunOwners.release(boundary.ownerLease);
+      if (ingress && boundary.crossed && !boundary.handedOff && boundary.ownerLease && boundary.runId === nativeRunId) {
+        ingress.undispatchedLease = Object.freeze({ ...boundary.ownerLease });
+      }
+      try { await port.finish(binding, status); }
+      catch (cause) { const error = new RuntimeTurnUnsettledError("native-one-cleanup"); Object.defineProperty(error, "cause", { value: cause }); throw error; }
+      this.nativePreparing.delete(nativeRunId);
+      this.publishActiveChats();
+      for (const listener of this.nativePreparationListeners) {
+        try { listener({ runId: nativeRunId, chatId: req.chatId, status }); } catch { /* machine fact remains owned */ }
+      }
+    }
+  }
+
 
   constructor() {
     // A resident CLI can close independently of the current runner callback.
@@ -1001,9 +1286,9 @@ export class InvocationService {
   }
 
   activeChatIds(): string[] {
-    return [...new Set([...this.activeRuns.activeChatIds(), ...[...this.settlingRuns.values(),
+    return [...new Set([...this.nativeIngress.values()].map(pending => pending.source.binding.chatId).concat([...this.nativePreparing.values()].map(pending => pending.binding.chatId)).concat([...this.activeRuns.activeChatIds(), ...[...this.settlingRuns.values(),
       ...[...this.pendingGoalVerifications.values()].filter(record => record.nativeGoalEpisodePending),
-    ].filter((record) => !record.background).map((record) => record.chatId)])];
+    ].filter((record) => !record.background).map((record) => record.chatId)]))];
   }
 
   /** 오너가 보낸 요청이 이 대화에서 차례를 기다린다 — 자동 재개는 그 뒤로 미룬다. */
@@ -1020,7 +1305,7 @@ export class InvocationService {
   }
 
   activeRunIds(): string[] {
-    return [...new Set([...this.activeRuns.entries()].map(([runId]) => runId).concat([...this.pendingGoalVerifications.keys(), ...this.settlingRuns.keys(), ...this.browserLoginWaitingRuns.keys()]))];
+    return [...new Set([...this.activeRuns.entries()].map(([runId]) => runId).concat([...this.nativeIngress.keys(), ...this.nativePreparing.keys(), ...this.pendingGoalVerifications.keys(), ...this.settlingRuns.keys(), ...this.browserLoginWaitingRuns.keys()]))];
   }
 
   /**
@@ -1155,7 +1440,14 @@ export class InvocationService {
   beginAppShutdown(): string[] {
     this.acceptingStarts = false;
     const runIds = this.activeRunIds();
-    for (const runId of runIds) this.cancelWithReason(runId, new Error(this.appShutdownCause));
+    let failed = false;
+    let firstError: unknown;
+    for (const runId of runIds) {
+      try { this.cancelWithReason(runId, new Error(this.appShutdownCause)); }
+      catch (error) { if (!failed) { failed = true; firstError = error; } }
+    }
+    // A failed receipt write for one run must not leave another run unstopped.
+    if (failed) throw firstError;
     return runIds;
   }
 
@@ -1308,6 +1600,10 @@ export class InvocationService {
       if (startBoundary.crossed && !startBoundary.handedOff && startBoundary.runId) {
         this.releaseUndispatchedStart(startBoundary.runId, req.chatId, error, startBoundary.cleanups ?? []);
       }
+      if (!startBoundary.handedOff && startBoundary.ownerLease) {
+        try { invocationRunOwners.release(startBoundary.ownerLease); }
+        catch (cleanupError) { console.warn("[invocation] owner release remains unconfirmed:", cleanupError); }
+      }
       if (durableAdmission && !startBoundary.crossed) {
         // Direct control flow proves no provider dispatch occurred. Absence of
         // a receipt alone would not prove that, especially across epochs.
@@ -1342,6 +1638,22 @@ export class InvocationService {
     startBoundary: StartBoundary,
     queuedRoomInheritance?: typeof QUEUED_ONE_ROOM_INHERITANCE,
   ): InvocationStartResult {
+    return driveLocalOneStart(this.startPreparedSteps(req, workspaceBinding, executionContext, questionContinuation, hostNoticePurpose, mainAdmission, durableAdmission, startBoundary, queuedRoomInheritance));
+  }
+
+  private *startPreparedSteps(
+    req: McpInvocationRequest,
+    workspaceBinding: InvocationWorkspaceBinding | undefined,
+    executionContext: InvocationExecutionContext | undefined,
+    questionContinuation: { sourceMessageId: string; requestHash: string } | undefined,
+    hostNoticePurpose: ChatHostNotice["purpose"] | undefined,
+    mainAdmission: MainInvocationAdmission | undefined,
+    durableAdmission: InvocationAdmissionIdentity | undefined,
+    startBoundary: StartBoundary,
+    queuedRoomInheritance?: typeof QUEUED_ONE_ROOM_INHERITANCE,
+    nativeController?: AbortController,
+  ): Generator<NativeOneStartCheckpoint, InvocationStartResult, unknown> {
+    const nativePreparation = nativeController ? this.nativePreparing.get(req.runId!) : undefined;
     mainAdmission = takeMainInvocationAdmission(mainAdmission);
     assertDesktopOneRecoveryStart(req);
     if (durableAdmission && (durableAdmission.runId !== req.runId || durableAdmission.chatId !== req.chatId)) {
@@ -1350,7 +1662,27 @@ export class InvocationService {
     assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
     if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
     const backgroundObservation = Boolean(effectObservationTicket(req.runId));
+    if ((!nativeController || !nativePreparation || isLocalInvocationPreparationPort(nativePreparation.port)) && !backgroundObservation) {
+      const foreignOwner = invocationRunOwners.getActiveOwner(req.chatId), localOwner = invocationProcessOwner();
+      if (foreignOwner && (foreignOwner.ownerId !== localOwner.ownerId || foreignOwner.ownerKind !== localOwner.ownerKind)) throw new Error("invocation_cleanup_pending");
+      if (this.foreignNativeStartFence) {
+        let blocked: unknown;
+        try { blocked = this.foreignNativeStartFence(req.chatId); }
+        catch { throw new Error("invocation_cleanup_pending"); }
+        if (blocked !== false) throw new Error("invocation_cleanup_pending");
+      }
+    }
+    // The shared pending reservation fences every ingress, including Mobile and
+    // host resumes in another process, before any preparation/claim/owner lease.
+    const pendingAdmission = !backgroundObservation ? getPendingInvocationAdmissionForChat(req.chatId) : null;
+    if (pendingAdmission && (!durableAdmission || pendingAdmission.runId !== req.runId
+      || pendingAdmission.ownerProcessEpoch !== durableAdmission.ownerProcessEpoch
+      || pendingAdmission.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(durableAdmission.canonicalRequestJson).digest("hex"))) throw new Error("invocation_cleanup_pending");
+    if (!backgroundObservation && [...this.nativeIngress.values()].some(pending => pending.source.binding.chatId === req.chatId && pending.controller !== nativeController && !effectObservationTicket(pending.source.binding.runId))) throw new Error("invocation_cleanup_pending");
+    if (!backgroundObservation && [...this.nativePreparing.values()].some(pending => pending.binding.chatId === req.chatId && pending.controller !== nativeController)) throw new Error("invocation_cleanup_pending");
     if (!backgroundObservation && [...this.settlingRuns.values()].some((record) => !record.background && record.chatId === req.chatId)) throw new Error("invocation_cleanup_pending");
+    if (nativeController) yield oneStartCheckpoint("judge", { request: req, workspaceBinding, executionContext }, () => undefined);
+    nativeController?.signal.throwIfAborted();
     const incoming = req as OneInvocationRequest;
     const {
       oneProfileContext: _untrustedOneProfileContext,
@@ -1417,7 +1749,7 @@ export class InvocationService {
     if (boundGoal?.status === "paused" && !resumesPausedGoal) {
       throw new Error("goal_explicit_resume_required");
     }
-    let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked"; ownerAnswer?: boolean } | null = null;
+    let stoppedGoalReactivation: { runId: string; version: number; status: "paused" | "blocked" | "waiting_tool"; ownerAnswer?: boolean } | null = null;
     // The request's taskIntent is only a claim for One: semantic intake may
     // promote a conversation to a task below. Defer blocked-goal eligibility
     // until runReq carries that effective intent; otherwise a valid One task
@@ -1521,7 +1853,7 @@ export class InvocationService {
     // keeps its local persistence/projection while sharing directory identity checks.
     const remoteWorkspaceBinding = Boolean(runWorkspaceBinding
       && isRemoteInvocationWorkspaceBindingSource(runWorkspaceBinding.source));
-    const controller = new AbortController();
+    const controller = nativeController ?? new AbortController();
     const startedAt = new Date().toISOString();
     /*
      * ★청구가 실패하면 **예약을 반드시 풀어 준다** (오너 기기 로그 실측 2026-09-07:
@@ -1538,17 +1870,17 @@ export class InvocationService {
     let preparedOneTeamPreflight: PreparedOneTeamPreflightClaim | null = null;
     if (requestedOneTeamPreflightRef) {
       try {
-        preparedOneTeamPreflight = prepareOneTeamPreflightClaim(requestedOneTeamPreflightRef, chat.id);
+        preparedOneTeamPreflight = (yield oneStartCheckpoint("team.prepare", { ref: requestedOneTeamPreflightRef, chatId: chat.id }, () => prepareOneTeamPreflightClaim(requestedOneTeamPreflightRef, chat.id))) as ReturnType<typeof prepareOneTeamPreflightClaim>;
       } catch (error) {
         try {
-          failOneTeamPreflightStart(requestedOneTeamPreflightRef);
+          (yield oneStartCheckpoint("team.fail-start", { ref: requestedOneTeamPreflightRef }, () => failOneTeamPreflightStart(requestedOneTeamPreflightRef)));
         } catch {
           // 예약 해제 실패가 원래 사유를 덮으면 안 된다 — 아래에서 원래 오류를 던진다.
         }
         throw error;
       }
     }
-    if (preparedOneTeamPreflight && teamProposalRequiresOneAttachments(preparedOneTeamPreflight.proposalId) && !requestedOneAttachmentRef) {
+    if (preparedOneTeamPreflight && (yield oneStartCheckpoint("team.attachments-required", { proposalId: preparedOneTeamPreflight.proposalId }, () => teamProposalRequiresOneAttachments(preparedOneTeamPreflight!.proposalId))) as boolean && !requestedOneAttachmentRef) {
       throw new Error("This team proposal requires its exact prepared One attachment capability");
     }
     if (preparedOneTeamPreflight) {
@@ -1604,7 +1936,7 @@ export class InvocationService {
       };
     }
     const preparedOneBriefingAction = requestedOneBriefingActionRef
-      ? prepareOneBriefingActionClaim(requestedOneBriefingActionRef, chat.id)
+      ? (yield oneStartCheckpoint("briefing.prepare", { ref: requestedOneBriefingActionRef, chatId: chat.id }, () => prepareOneBriefingActionClaim(requestedOneBriefingActionRef, chat.id))) as ReturnType<typeof prepareOneBriefingActionClaim>
       : null;
     if (preparedOneBriefingAction) {
       if (runId !== preparedOneBriefingAction.ref.reservedRunId) {
@@ -1628,7 +1960,7 @@ export class InvocationService {
       };
     }
     const preparedOneMemoryUseOnce = requestedOneMemoryUseOnceRef
-      ? prepareOneMemoryUseOnceClaim(requestedOneMemoryUseOnceRef, chat.id)
+      ? (yield oneStartCheckpoint("memory.prepare", { ref: requestedOneMemoryUseOnceRef, chatId: chat.id }, () => prepareOneMemoryUseOnceClaim(requestedOneMemoryUseOnceRef, chat.id))) as ReturnType<typeof prepareOneMemoryUseOnceClaim>
       : null;
     const inheritedOneRoom = queuedRoomInheritance === QUEUED_ONE_ROOM_INHERITANCE
       && requestedOneMode && !preparedOneTeamPreflight && !preparedOneBriefingAction && !requestedOneAttachmentRef
@@ -1778,16 +2110,17 @@ export class InvocationService {
       : targetAppFolder
         ? path.resolve(targetAppFolder)
         : storedWorkingFolder ?? projectFolder ?? promptFolder ?? agentRunCwd();
+    if (nativeController && !isLocalInvocationPreparationPort(nativePreparation!.port) && requestedOneAttachmentRef) {
+      const ingress = this.nativeIngress.get(runId);
+      if (!ingress || ingress.controller !== nativeController || ingress.selectedCwd !== undefined) throw new Error("native_service_cwd_source_required");
+      this.assertNativeServiceObservationSelection(ingress);
+      ingress.selectedCwd = executionCwd;
+    }
     const resultFolder = executionCwd;
     const claimedOneAttachments = requestedOneAttachmentRef
-      ? claimOneAttachments({
-          ref: requestedOneAttachmentRef,
-          chatId: chat.id,
-          userPrompt: invocationRequest.userPrompt,
-          runId,
-          resultFolder,
-          teamProposalId: preparedOneTeamPreflight?.proposalId ?? null,
-        })
+      ? (yield oneStartCheckpoint("attachments.claim", { ref: requestedOneAttachmentRef, chatId: chat.id, userPrompt: invocationRequest.userPrompt, runId, resultFolder, teamProposalId: preparedOneTeamPreflight?.proposalId ?? null }, () => claimOneAttachments({
+          ref: requestedOneAttachmentRef, chatId: chat.id, userPrompt: invocationRequest.userPrompt, runId, resultFolder, teamProposalId: preparedOneTeamPreflight?.proposalId ?? null,
+        }))) as ReturnType<typeof claimOneAttachments>
       : null;
     validateChatAttachmentSelection(chat.id,invocationRequest.fileGroupId,invocationRequest.images);
     if (invocationRequest.fileGroupId) invocationRequest.userPrompt=chatFilePrompt(chat.id,invocationRequest.userPrompt,invocationRequest.fileGroupId);
@@ -1836,7 +2169,10 @@ export class InvocationService {
     // goal_owner_answer_required from 2026-09-28 11:51Z until a manual resume the next day.
     const reopen = boundGoal ? stoppedGoalMessageReopens(boundGoal, runReq.taskIntent) : { reopens: false, ownerAnswer: false };
     const ownerAnswersGoalQuestion = reopen.ownerAnswer;
-    if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused")
+    // A host continuation or retry may wait between turns without a pending
+    // wait subscription. The owner's task still needs the durable resume below
+    // before a new controller can acquire this Goal's execution authority.
+    if (boundGoal && (boundGoal.status === "blocked" || boundGoal.status === "paused" || boundGoal.status === "waiting_tool")
       && localUserTurn && reopen.reopens) {
       // A new task message must not silently reactivate a claimed wait whose
       // successor may already have reached an external runtime before crash.
@@ -1849,6 +2185,7 @@ export class InvocationService {
         ...(ownerAnswersGoalQuestion ? { ownerAnswer: true } : {}) };
     }
     const record: RunRecord = {
+      ...(nativePreparation ? {nativeOwnerTextChoices:canonicalInvocationRequestJson(nativeOwnerTextChoices(nativePreparation.request) as unknown as McpInvocationRequest)} : {}),
       controller,
       background: backgroundObservation,
       chatId: req.chatId,
@@ -1978,6 +2315,9 @@ export class InvocationService {
         });
         if (!oneTaskKindRef) throw new Error("One Task-kind intent is invalid or exceeds safe limits");
       }
+      if (!record.background) {
+        record.ownerLease = startBoundary.ownerLease = claimInvocationRunOwner(runReq.chatId, runId);
+      }
       registerDurableInvocationStart({
         registry: this.activeRuns,
         runId,
@@ -2051,9 +2391,9 @@ export class InvocationService {
       });
       startBoundary.crossed = true;
       startBoundary.runId = runId;
-      startBoundary.cleanups = [() => releaseOneAttachmentRun(requestedOneAttachmentRef)];
+      startBoundary.cleanups = nativeController && !isLocalInvocationPreparationPort(nativePreparation!.port) ? [] : [() => releaseOneAttachmentRun(requestedOneAttachmentRef)];
     } catch (error) {
-      releaseOneAttachmentRun(requestedOneAttachmentRef);
+      (yield oneStartCheckpoint("attachments.release", { ref: requestedOneAttachmentRef }, () => releaseOneAttachmentRun(requestedOneAttachmentRef)));
       throw error;
     }
     if (claimedOneAttachments) {
@@ -2076,7 +2416,7 @@ export class InvocationService {
     }
     if (preparedOneTeamPreflight) {
       try {
-        const claimed = claimPreparedOneTeamPreflight(preparedOneTeamPreflight);
+        const claimed = (yield oneStartCheckpoint("team.claim", { leaseId: record.ownerLease?.leaseId }, () => claimPreparedOneTeamPreflight(preparedOneTeamPreflight!))) as ReturnType<typeof claimPreparedOneTeamPreflight>;
         tryRecordRunEvent({
           runId,
           kind: "one_team_preflight_claimed",
@@ -2092,8 +2432,8 @@ export class InvocationService {
         });
       } catch (error) {
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
-        failOneTeamPreflightStart(preparedOneTeamPreflight.ref);
-        releaseOneAttachmentRun(requestedOneAttachmentRef);
+        (yield oneStartCheckpoint("team.fail-start", { ref: preparedOneTeamPreflight.ref }, () => failOneTeamPreflightStart(preparedOneTeamPreflight.ref)));
+        (yield oneStartCheckpoint("attachments.release", { ref: requestedOneAttachmentRef }, () => releaseOneAttachmentRun(requestedOneAttachmentRef)));
         tryRecordRunEvent({
           runId,
           kind: "one_team_preflight_claim_failed",
@@ -2108,7 +2448,7 @@ export class InvocationService {
     }
     if (preparedOneBriefingAction) {
       try {
-        const claimed = claimPreparedOneBriefingAction(preparedOneBriefingAction);
+        const claimed = (yield oneStartCheckpoint("briefing.claim", { leaseId: record.ownerLease?.leaseId }, () => claimPreparedOneBriefingAction(preparedOneBriefingAction!))) as ReturnType<typeof claimPreparedOneBriefingAction>;
         tryRecordRunEvent({
           runId,
           kind: "one_briefing_action_claimed",
@@ -2129,7 +2469,7 @@ export class InvocationService {
         // invoke_started is already durable, so this is an explicit recovery
         // state rather than permission to dispatch or retry the model run.
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
-        releaseOneAttachmentRun(requestedOneAttachmentRef);
+        (yield oneStartCheckpoint("attachments.release", { ref: requestedOneAttachmentRef }, () => releaseOneAttachmentRun(requestedOneAttachmentRef)));
         tryRecordRunEvent({
           runId,
           kind: "one_briefing_action_claim_failed",
@@ -2147,12 +2487,12 @@ export class InvocationService {
       // after this point, including runtime failure/cancellation.
       let claimed: ReturnType<typeof claimPreparedOneMemoryUseOnce>;
       try {
-        claimed = claimPreparedOneMemoryUseOnce(preparedOneMemoryUseOnce);
+        claimed = (yield oneStartCheckpoint("memory.claim", { leaseId: record.ownerLease?.leaseId }, () => claimPreparedOneMemoryUseOnce(preparedOneMemoryUseOnce!))) as ReturnType<typeof claimPreparedOneMemoryUseOnce>;
       } catch (error) {
         // Attachments have already crossed their own one-shot claim boundary.
         // A later Main-owned capability failure must not strand staged copies.
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
-        releaseOneAttachmentRun(requestedOneAttachmentRef);
+        (yield oneStartCheckpoint("attachments.release", { ref: requestedOneAttachmentRef }, () => releaseOneAttachmentRun(requestedOneAttachmentRef)));
         throw error;
       }
       tryRecordRunEvent({
@@ -2191,6 +2531,11 @@ export class InvocationService {
         });
       }
     }
+    if (nativeController && claimedOneAttachments) {
+      runReq.images = (yield oneStartCheckpoint("images.transfer", { leaseId: record.ownerLease?.leaseId, attachments: claimedOneAttachments.receipt.attachments }, () => claimedOneAttachments.images)) as NonNullable<McpInvocationRequest["images"]>;
+      controller.signal.throwIfAborted();
+    }
+    if (nativeController) yield oneStartCheckpoint("preparation.handoff", { leaseId: record.ownerLease?.leaseId }, () => undefined);
     if (oneProfileReceipt) {
       tryRecordRunEvent({
         runId,
@@ -2555,7 +2900,17 @@ export class InvocationService {
         source: executionContext?.source, nativeScienceTool: binding => effectBoundary.nativeScienceTool(binding),
         nativeScienceFailure: observation => effectBoundary.nativeScienceFailure(observation),
         begin: admission => { effectBoundary.adapterStarted(admission); record.semanticSteps.admitAdapter(admission); }, finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report),
-        hostControl: observation => effectBoundary.hostControl(observation), recordingFailed: () => effectBoundary.recordingFailed() }, () => Promise.resolve().then(() => runMcpInvocation(
+        hostControl: observation => effectBoundary.hostControl(observation), recordingFailed: () => effectBoundary.recordingFailed() }, () => Promise.resolve().then(() => {
+        if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
+        const nativeApprovalOwner = nativeController && record.ownerLease && (!isLocalInvocationPreparationPort(nativePreparation!.port) || record.ownerLease.ownerKind === "daemon")
+          ? { originalRequest: runReq, runId, chatId: chat.id, ownerId: record.ownerLease.ownerId, leaseId: record.ownerLease.leaseId,
+              signal: controller.signal, actor: nativePreparation!.actorSnapshot, assertCurrent: () => {
+                if (this.activeRuns.get(runId) !== record || record.controller !== controller || record.request !== runReq
+                  || controller.signal.aborted || !record.ownerLease) throw new Error("native_approval_execution_ended");
+                assertInvocationRunOwner(record.ownerLease);
+              } } : undefined;
+        if (nativeApprovalOwner && !lifetime.ownsActiveRoot()) throw new Error("native_approval_execution_root_required");
+        return withNativeApprovalExecution(nativeApprovalOwner, () => runMcpInvocation(
       runReq,
       (rawEvent) => {
         const hostControl = mainHostControlForEvent(rawEvent);
@@ -3288,7 +3643,9 @@ export class InvocationService {
           && chat.kind === "user" && ["one", "work"].includes(chat.originSurface ?? "")
           && legacyGoalId && getLegacyGoalLifecycleSnapshot(legacyGoalId)) {
           let reasonCode = "legacy-lifecycle-stopped-native-resume-required";
-          if (stoppedGoalReactivation && lifetime.ownsActiveRoot()) {
+          // A between-turn owner task resumes the existing lifecycle. Only a
+          // paused or blocked legacy Goal may enter lifecycle migration here.
+          if (stoppedGoalReactivation && stoppedGoalReactivation.status !== "waiting_tool" && lifetime.ownsActiveRoot()) {
             legacyLifecycle = await prepareLegacyGoalLifecycle({
               goalId: legacyGoalId, longRunId: stoppedGoalReactivation.runId,
               expectedVersion: stoppedGoalReactivation.version, expectedStatus: stoppedGoalReactivation.status,
@@ -3620,7 +3977,16 @@ export class InvocationService {
         } finally { producerWorkDispatchSealed = true; }
       },
       canonicalWorkRecovery,
-    ))
+      (nativeController) => {
+        if (!nativeController) { record.nativeTurnController = undefined; return; }
+        if (!record.background && !controller.signal.aborted && this.activeRuns.get(runId) === record
+          && nativeController.binding.chatId === record.chatId) {
+          record.nativeTurnController = nativeController;
+          this.deliverNativeOwnerControls(runId, record);
+        }
+      },
+      this.ownerControlInbox(runId, record),
+    )); })
       .then((result) => {
         // The runner promise has settled. Persist host effect completeness
         // before a fast verifier can produce or claim a retry checkpoint.
@@ -4273,14 +4639,28 @@ export class InvocationService {
         try { effectBoundary.persist(); }
         catch (error) { console.warn("[invocation] effect boundary receipt failed:", error); }
         if (this.activeRuns.settle(runId)) this.publishActiveChats();
-        releaseOneAttachmentRun(requestedOneAttachmentRef);
+        if (!nativeController || isLocalInvocationPreparationPort(nativePreparation!.port)) releaseOneAttachmentRun(requestedOneAttachmentRef);
       })))))).catch((error: unknown) => {
         console.warn("[invocation] execution cleanup failed:", error);
         // The inner chain settles the slot in its own finally. Still registered here means a lifetime wrapper rejected
         // before that chain was attached (or its finally threw first): start() already returned, so settle and
         // publish here or the chat stays "running" and refuses every later start (independent review 2026-10-04).
         if (this.activeRuns.has(runId)) this.releaseUndispatchedStart(runId, runReq.chatId, error, startBoundary.cleanups ?? [], record);
-      }).finally(() => lifetime.afterSettled(() => {
+      }).finally(() => lifetime.afterSettled(async () => {
+        if (record.ownerLease) {
+          try { invocationRunOwners.release(record.ownerLease); }
+          catch (error) { console.warn("[invocation] drained owner release remains unconfirmed:", error); }
+        }
+        if (nativePreparation) {
+          try { await nativePreparation.port.finish(nativePreparation.binding, "settled"); }
+          catch (cause) {
+            // The owned brain has drained, but Main custody is still unknown.
+            // Keep this settling slot and prevent successor/queued dispatch.
+            // Observe the rejection here so GUI loss cannot crash the daemon.
+            console.warn("[invocation] native preparation cleanup remains unconfirmed:", cause);
+            return;
+          }
+        }
         this.settlingRuns.delete(runId);
         this.publishActiveChats();
         // Recovery listeners can start the next read-only turn only after the
@@ -4362,6 +4742,10 @@ export class InvocationService {
     }
     this.settlingRuns.delete(runId);
     if (this.activeRuns.settle(runId)) this.publishActiveChats();
+    if (diagnosticRecord?.ownerLease) {
+      try { invocationRunOwners.release(diagnosticRecord.ownerLease); }
+      catch (cleanupError) { console.warn("[invocation] undispatched owner release remains unconfirmed:", cleanupError); }
+    }
     if (settledRecord) this.publishSettled(runId, settledRecord);
   }
 
@@ -4480,11 +4864,13 @@ export class InvocationService {
     const stop = record.controller.signal.reason;
     const ownerStop = record.controller.signal.aborted && stop instanceof Error
       && (stop.message === STOPPED_BY_USER || isOwnerGoalStopCause(stop.message) || Boolean(invocationHostStopCause(stop.message)));
-    if (!goalId || record.background || ownerStop || record.steeringInterruptRequested) return;
+    if (!goalId || record.background || ownerStop || record.steeringInterruptRequested
+      || runtimeFailureBlocksReplay({ providerCode: reason })) return;
     try {
       const run = getLongRunByGoalId(goalId);
       if (!run || run.surface === "science" || LONG_RUN_TERMINAL_STATUSES.has(run.status)
         || longRunOwnerHold(run.id) || getChat(record.chatId)?.goalId !== goalId) return;
+      if (automaticGoalReplayBlockerCode(run.id)) return;
       const wait = latestGoalWaitSubscription(goalId);
       if (wait && ["pending", "claimed"].includes(wait.state)) return;
       if (pendingBlockedGoalRetry(run.id)) return;
@@ -4716,11 +5102,40 @@ export class InvocationService {
     return this.cancelWithReason(runId, new Error(STOPPED_BY_USER));
   }
 
+  /** Native owner transport uses the held memory identity for unconditional
+   * Stop even if the durable store cannot be read during shutdown. */
+  liveRunOwner(runId: string): InvocationRunOwner | null {
+    const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId)
+      ?? this.settlingRuns.get(runId) ?? this.browserLoginWaitingRuns.get(runId);
+    return record?.ownerLease ? { ...record.ownerLease } : null;
+  }
+
   private cancelWithReason(
     runId: string,
     reason: Error,
   ): "requested" | "already-requested" | "not-found" {
+    const ingress=this.nativeIngress.get(runId);
+    if(ingress && (!ingress.handedOff || (!this.nativePreparing.has(runId) && !this.activeRuns.get(runId) && !this.pendingGoalVerifications.has(runId) && !this.settlingRuns.has(runId) && !this.browserLoginWaitingRuns.has(runId)))){
+      ingress.lifetime.closeAdmission();const already=ingress.controller.signal.aborted;
+      if(!already) ingress.controller.abort(reason);
+      this.cancelNativeIngress(ingress);
+      return already?"already-requested":"requested";
+    }
+    const preparing = this.nativePreparing.get(runId);
+    if (preparing) {
+      preparing.preparationLifetime.closeAdmission();
+      const already = preparing.controller.signal.aborted;
+      if (!already) {
+        preparing.controller.abort(reason);
+        try { const pending = Promise.resolve(preparing.port.cancel(preparing.binding)); pending.catch(() => {}); preparing.retained.add(pending); } catch { /* actual awaited claim still owns the barrier */ }
+      }
+      if (!this.activeRuns.get(runId)) return already ? "already-requested" : "requested";
+    }
     const record = this.activeRuns.get(runId) ?? this.pendingGoalVerifications.get(runId) ?? this.settlingRuns.get(runId) ?? this.browserLoginWaitingRuns.get(runId);
+    // Store refusal must never block the actual AbortController or child stop.
+    if (record?.ownerLease) {
+      try { invocationRunOwners.markSettling(record.ownerLease); } catch { /* Stop remains unconditional. */ }
+    }
     if (record?.automaticGoalId && !["goal_paused_by_user", "goal_deleted_by_user"].includes(reason.message)) {
       try {
         const goal = getLongRunByGoalId(record.automaticGoalId);
@@ -4859,6 +5274,226 @@ export class InvocationService {
       promptOrigin: "system",
       steeringMode: "queue",
     }, expectedRunId, record.workspaceBinding, record.executionContext, mainAdmission);
+  }
+
+  currentTurn(chatId: string): { runId: string } | null {
+    for (const [runId, record] of this.activeRuns.entries()) {
+      if (record.chatId === chatId && !record.background && !record.controller.signal.aborted
+        && !this.pendingGoalVerifications.has(runId)) return { runId };
+    }
+    return null;
+  }
+
+  currentTurnSteerReceipt(chatId: string, intentId: string): InvocationCurrentTurnSteerReceipt | null {
+    const row = getCurrentTurnSteer(chatId, intentId);
+    if (row && (row.status === "queued" || row.status === "dispatching")) {
+      const owner = invocationRunOwners.getRunOwner(chatId, row.runId);
+      if (owner && owner.ownerId !== invocationProcessOwner().ownerId) {
+        throw new Error("invocation_owner_unavailable");
+      }
+    }
+    const record = row ? this.activeRuns.get(row.runId) : undefined;
+    if (row?.status === "queued" && (!record || record.chatId !== chatId || record.controller.signal.aborted
+      || this.pendingGoalVerifications.has(row.runId))) {
+      return settleCurrentTurnSteer(chatId, intentId, "rejected", "owner_control_run_settled");
+    }
+    if (row?.status === "dispatching" && !this.currentTurnSteerDispatches.has(intentId)) {
+      return settleCurrentTurnSteer(chatId, intentId, "uncertain", "native_steer_dispatch_interrupted");
+    }
+    return row;
+  }
+
+  /** The original native service source must still own this exact input and controller. */
+  private nativeOwnerTextTarget(binding: NativeOwnerTextBinding): AbortController | undefined {
+    const pending = this.nativeIngress.get(binding.runId);
+    if (pending) {
+      const source = pending.source.binding;
+      if (source.chatId !== binding.chatId || source.inputDigest !== binding.inputDigest) throw Object.assign(new Error("native_owner_text_binding_changed"),{code:"native_owner_text_binding_changed"});
+      if (!pending.handedOff) { try { pending.source.assertCurrent(); } catch { return undefined; } }
+      return pending.controller;
+    }
+    const preparation = this.nativePreparing.get(binding.runId);
+    const record = this.activeRuns.get(binding.runId) ?? this.settlingRuns.get(binding.runId);
+    const admission = getInvocationAdmission(binding.runId);
+    if (!admission || admission.chatId !== binding.chatId || admission.inputDigest !== binding.inputDigest) throw Object.assign(new Error("native_owner_text_binding_changed"),{code:"native_owner_text_binding_changed"});
+    if (preparation) {
+      if (preparation.binding.chatId !== binding.chatId || preparation.binding.admission.ownerProcessEpoch !== admission.ownerProcessEpoch) throw Object.assign(new Error("native_owner_text_binding_changed"),{code:"native_owner_text_binding_changed"});
+      return preparation.controller;
+    }
+    if (!record || record.background || record.chatId !== binding.chatId || !record.ownerLease
+      || record.ownerLease.ownerKind !== "daemon" || record.ownerLease.ownerId !== admission.ownerProcessEpoch) return undefined;
+    const owner = invocationRunOwners.getRunOwner(binding.chatId,binding.runId);
+    if (!owner || owner.state === "released" || owner.leaseId !== record.ownerLease.leaseId) return undefined;
+    assertInvocationRunOwner(record.ownerLease);
+    return record.controller;
+  }
+
+  nativeOwnerTextCompatible(binding: NativeOwnerTextBinding, choices: unknown): boolean {
+    const controller = this.nativeOwnerTextTarget(binding);
+    if (!controller || controller.signal.aborted) throw Object.assign(new Error("native_owner_text_parent_unavailable"),{code:"native_owner_text_parent_unavailable"});
+    const preparation = this.nativePreparing.get(binding.runId), record = this.activeRuns.get(binding.runId);
+    const original = preparation ? canonicalInvocationRequestJson(nativeOwnerTextChoices(preparation.request) as unknown as McpInvocationRequest) : record?.nativeOwnerTextChoices;
+    if (!original) throw Object.assign(new Error("native_owner_text_context_unavailable"),{code:"native_owner_text_context_unavailable"});
+    if (!choices || typeof choices !== "object" || Array.isArray(choices) || (Object.getPrototypeOf(choices) !== Object.prototype && Object.getPrototypeOf(choices) !== null)
+      || Object.keys(choices).some(key => NATIVE_OWNER_TEXT_CONTEXT_OMITTED.includes(key))) return false;
+    try { return canonicalInvocationRequestJson(choices as McpInvocationRequest) === original; } catch { return false; }
+  }
+
+  private nativeOwnerTextRows(binding: NativeOwnerTextBinding) {
+    return (getDb().prepare(`SELECT * FROM invocation_current_turn_steers WHERE chat_id = ? AND run_id = ? ORDER BY rowid`)
+      .all(binding.chatId, binding.runId) as Array<{intent_id:string;prompt_text:string;prompt_hash:string;message_id:string;binding_json:string;status:InvocationCurrentTurnSteerReceipt["status"];code:string|null;created_at:string}>)
+      .filter(row => { const saved = JSON.parse(row.binding_json); return saved.source === "native-owner-text" && saved.inputDigest === binding.inputDigest; });
+  }
+
+  nativeOwnerTextReceipt(binding: NativeOwnerTextBinding, intentId: string): NativeOwnerTextReceipt | null {
+    const row = this.nativeOwnerTextRows(binding).find(item => item.intent_id === intentId);
+    if (!row) {
+      if (getDb().prepare("SELECT intent_id FROM invocation_current_turn_steers WHERE intent_id = ?").get(intentId)) throw Object.assign(new Error("native_owner_text_binding_changed"),{code:"native_owner_text_binding_changed"});
+      return null;
+    }
+    const saved = JSON.parse(row.binding_json);
+    let receipt = getCurrentTurnSteer(binding.chatId, intentId)!;
+    // A cancelled/unknown old source never becomes a next-run dispatch opportunity.
+    const target = this.nativeOwnerTextTarget(binding);
+    if (receipt.status === "queued" && (!target || target.signal.aborted)) receipt = settleCurrentTurnSteer(binding.chatId, intentId, "uncertain", "native_owner_text_held");
+    if (receipt.status === "dispatching" && !this.currentTurnSteerDispatches.has(intentId)) receipt = settleCurrentTurnSteer(binding.chatId, intentId, "uncertain", "native_steer_dispatch_interrupted");
+    const position = this.nativeOwnerTextRows(binding).filter(item => item.status === "queued" || item.status === "uncertain").findIndex(item => item.intent_id === intentId);
+    const withdrawn = receipt.code === "native_owner_text_withdrawn";
+    return { version:"agentlas.native-owner-text.v1", chatId:binding.chatId,runId:binding.runId,inputDigest:binding.inputDigest, intentId, deliveryKind:saved.requestedMode,
+      promptHash:receipt.promptHash,messageId:receipt.messageId,sourceStatus:receipt.status,...(receipt.code ? {code:receipt.code}:{}),
+      result:{accepted:true,chatId:binding.chatId,intentId,queued:receipt.status === "queued" || receipt.status === "dispatching",
+        interruptsCurrent:saved.requestedMode === "interrupt",activeRunId:binding.runId,queuedRequestId:`native-owner:${intentId}`,promptHash:receipt.promptHash,
+        ...(position >= 0 ? {position:position+1}:{}),...(receipt.status === "applied" ? {runId:binding.runId}:{}),
+        status:withdrawn ? "cancelled" : receipt.status === "applied" ? "started" : receipt.status === "queued" ? "queued" : receipt.status === "dispatching" ? "draining" : "held"} };
+  }
+
+  /** Synchronous durable intake, including original source registration before payload awaits. */
+  nativeOwnerText(input: NativeOwnerTextInput): NativeOwnerTextReceipt {
+    if (!["current","queue","interrupt"].includes(input.deliveryKind)) throw Object.assign(new Error("native_owner_text_kind_invalid"),{code:"native_owner_text_kind_invalid"});
+    const request = {chatId:input.chatId,expectedRunId:input.runId,intentId:input.intentId,text:input.text};
+    if (typeof input.chatId !== "string" || !input.chatId || typeof input.runId !== "string" || !input.runId
+      || typeof input.inputDigest !== "string" || !/^[a-f0-9]{64}$/.test(input.inputDigest)
+      || typeof input.intentId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.intentId)
+      || typeof input.text !== "string" || !input.text.trim() || Buffer.byteLength(input.text,"utf8") > 200_000) {
+      throw Object.assign(new Error("native_owner_text_invalid"),{code:"native_owner_text_invalid"});
+    }
+    const existing = getDb().prepare("SELECT chat_id,run_id,prompt_text FROM invocation_current_turn_steers WHERE intent_id = ?").get(input.intentId) as {chat_id:string;run_id:string;prompt_text:string}|undefined;
+    if (existing && (existing.chat_id !== input.chatId || existing.run_id !== input.runId || existing.prompt_text !== input.text)) {
+      throw Object.assign(new Error("native_owner_text_identity_conflict"),{code:"native_owner_text_identity_conflict"});
+    }
+    if (existing) {
+      const prior = this.nativeOwnerTextRows(input).find(row => row.intent_id === input.intentId);
+      if (!prior || JSON.parse(prior.binding_json).requestedMode !== input.deliveryKind) throw Object.assign(new Error("native_owner_text_identity_conflict"),{code:"native_owner_text_identity_conflict"});
+      return this.nativeOwnerTextReceipt(input,input.intentId)!;
+    }
+    const controller = this.nativeOwnerTextTarget(input);
+    if (!controller || controller.signal.aborted || this.pendingGoalVerifications.has(input.runId)) throw Object.assign(new Error("native_owner_text_parent_unavailable"),{code:"native_owner_text_parent_unavailable"});
+    if (countPendingCurrentTurnSteers(input.chatId,input.runId) >= 64) throw Object.assign(new Error("invocation_current_turn_steer_limit"),{code:"invocation_current_turn_steer_limit"});
+    claimCurrentTurnSteer(request,{source:"native-owner-text",chatId:input.chatId,runId:input.runId,inputDigest:input.inputDigest,
+      requestedMode:input.deliveryKind,deliveryKind:input.deliveryKind === "current" ? "current" : "queue"});
+    if (input.deliveryKind === "interrupt") {
+      this.cancel(input.runId); // unconditional Stop; no source-safe successor is manufactured.
+      settleCurrentTurnSteer(input.chatId,input.intentId,"uncertain","native_owner_text_interrupt_held");
+    } else if (input.deliveryKind === "current") {
+      const record = this.activeRuns.get(input.runId); if (record) this.deliverNativeOwnerControls(input.runId,record);
+    }
+    return this.nativeOwnerTextReceipt(input,input.intentId)!;
+  }
+
+  nativeOwnerTextUnsteer(binding: NativeOwnerTextBinding, position: number, text: string): boolean {
+    if (!Number.isSafeInteger(position) || position < 1 || typeof text !== "string") return false;
+    const row = this.nativeOwnerTextRows(binding).filter(item => item.status === "queued" || item.status === "uncertain")[position-1];
+    if (!row || row.status !== "queued" || row.prompt_text !== text) return false;
+    settleCurrentTurnSteer(binding.chatId,row.intent_id,"rejected","native_owner_text_withdrawn"); return true;
+  }
+
+  nativeOwnerTextAttach(binding: NativeOwnerTextBinding, includeEvents: boolean) {
+    const record = this.activeRuns.get(binding.runId) ?? this.settlingRuns.get(binding.runId);
+    const pending = this.nativeIngress.get(binding.runId) ?? this.nativePreparing.get(binding.runId);
+    if (!record && !pending) return null;
+    const queue = this.nativeOwnerTextRows(binding).filter(row => row.status === "queued" || row.status === "uncertain");
+    return {runId:binding.runId,events:includeEvents ? record?.events ?? [] : [],startedAt:record?.startedAt ?? getInvocationAdmission(binding.runId)?.pendingAt ?? null,
+      queuedSteers:queue.map((row,index)=>({id:`native-owner:${row.intent_id}`,text:row.prompt_text,queuedAt:row.created_at,position:index+1,
+        ...(row.status === "uncertain" ? {recoveryState:"held",recoveryReason:"original-run-effect-boundary-unconfirmed"}: {})}))};
+  }
+
+  nativeOwnerTextRecovery(binding: NativeOwnerTextBinding): InvocationSteerRecovery[] {
+    // Read each exact receipt first so stopped/settled queue rows are explicitly held.
+    for (const row of this.nativeOwnerTextRows(binding)) this.nativeOwnerTextReceipt(binding,row.intent_id);
+    return this.nativeOwnerTextRows(binding).filter(row=>row.status === "uncertain").map(row=>({id:`native-owner:${row.intent_id}`,chatId:binding.chatId,
+      originalRunId:binding.runId,promptText:row.prompt_text,promptHash:row.prompt_hash,queuedAt:row.created_at,reason:"original-run-effect-boundary-unconfirmed"}));
+  }
+
+  /** Durable local intake returns promptly. Only the exact native ACK marks it applied. */
+  steerCurrentTurn(input: InvocationCurrentTurnSteerRequest): InvocationCurrentTurnSteerReceipt {
+    if (existingCurrentTurnSteer(input)) return this.currentTurnSteerReceipt(input.chatId, input.intentId)!;
+    const record = this.activeRuns.get(input.expectedRunId);
+    if (!record || record.background || record.chatId !== input.chatId || record.controller.signal.aborted
+      || this.pendingGoalVerifications.has(input.expectedRunId)) {
+      throw new Error("invocation_current_turn_unavailable");
+    }
+    if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
+    if (countPendingCurrentTurnSteers(input.chatId, input.expectedRunId) >= 64) throw new Error("invocation_current_turn_steer_limit");
+    const intake = claimCurrentTurnSteer(input, { chatId: record.chatId, runId: input.expectedRunId,
+      ...(record.ownerLease ? { ownerId: record.ownerLease.ownerId, leaseId: record.ownerLease.leaseId } : {}),
+      agentId: record.actualAgentId, workspaceBinding: record.workspaceBinding,
+      permission: record.request.permissions, runtime: record.request.runtimeSelection });
+    this.deliverNativeOwnerControls(input.expectedRunId, record);
+    return intake;
+  }
+
+  private ownerControlInbox(runId: string, record: RunRecord): RunnerOwnerControlInbox {
+    const claimedIds = new Set<string>();
+    return {
+      take: (phase) => {
+        if (record.controller.signal.aborted || this.activeRuns.get(runId) !== record) return [];
+        if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
+        const directions = takeCurrentTurnSteers(record.chatId, runId, phase);
+        for (const direction of directions) {
+          claimedIds.add(direction.intentId);
+          this.currentTurnSteerDispatches.add(direction.intentId);
+        }
+        return directions;
+      },
+      settle: (intentIds, status, code) => {
+        // Validate the whole batch before writing any receipt. A late callback
+        // from this run cannot settle a newer run in the same conversation.
+        if (intentIds.some(intentId => !claimedIds.has(intentId)
+          || getCurrentTurnSteer(record.chatId, intentId)?.runId !== runId)) {
+          throw new Error("owner_control_receipt_identity_mismatch");
+        }
+        for (const intentId of intentIds) {
+          settleCurrentTurnSteer(record.chatId, intentId, status, code);
+          claimedIds.delete(intentId);
+          this.currentTurnSteerDispatches.delete(intentId);
+          if (status === "applied") tryRecordRunEvent({ runId, chatId: record.chatId,
+            agentId: record.actualAgentId, kind: USER_STEERING_EVENT_KIND });
+        }
+      },
+    };
+  }
+
+  /** A native adapter can consume the same harness inbox during its active episode. */
+  private deliverNativeOwnerControls(runId: string, record: RunRecord): void {
+    const nativeController = record.nativeTurnController;
+    if (!nativeController || record.controller.signal.aborted) return;
+    const inbox = this.ownerControlInbox(runId, record);
+    for (const direction of inbox.take("current-boundary")) {
+      void Promise.resolve().then(async () => {
+        if (record.controller.signal.aborted || record.nativeTurnController !== nativeController
+          || this.activeRuns.get(runId) !== record) {
+          inbox.settle([direction.intentId], "rejected", "native_turn_stale");
+          return;
+        }
+        const result = await nativeController.steer({ requestId: direction.intentId, text: direction.text,
+          expectedThreadId: nativeController.binding.threadId, expectedTurnId: nativeController.binding.turnId });
+        inbox.settle([direction.intentId], result.status === "accepted" ? "applied" : result.status,
+          result.status === "accepted" ? undefined : result.code);
+      }).catch(() => {
+        try { inbox.settle([direction.intentId], "uncertain", "native_steer_ack_unknown"); }
+        catch { /* A lost settlement remains uncertain and never replays. */ }
+      });
+    }
   }
 
   private ownerSteerId(intentId: string): string {
@@ -5333,8 +5968,7 @@ export class InvocationService {
     if (record.oneMode && record.actualAgentId) {
       // 사람이 멈춘 실행(중지·Goal 일시정지/삭제)과 방향 전환은 실패가 아니다 — 조직도에 붉은
       // "실패 · 확인 필요"로 남기지 않는다(2026-09-26 실측: Goal 삭제 직후 좌석이 실패로 표시).
-      const stopped = receipt.status === "cancelled" || receipt.interruptionCause === "steering"
-        || receipt.hostStopCause === "update_restart";
+      const stopped = isNonFailureInvocationStop(receipt);
       const failed = !stopped && (receipt.status === "failed" || receipt.status === "interrupted");
       const creditBlocked = receipt.errorCode === "insufficient_credits" || /insufficient[_ -]?credits/i.test(receipt.errorMessage || "");
       cacheOneOrgCompletionSummary({ installedAgentId: record.actualAgentId, runId });
@@ -5352,7 +5986,7 @@ export class InvocationService {
         installedAgentId: record.actualAgentId,
         statusKind: record.browserLoginWait ? "waiting" : failed ? "failed" : record.pendingQuestion ? "waiting" : "quiet",
         statusLine,
-        unreadCount: failed ? 0 : 1,
+        unreadCount: failed || stopped ? 0 : 1,
         // Preserve the machine-readable balance marker for diagnostics, and clear it after success.
         creditState: creditBlocked ? ("insufficient" as const) : ("ok" as const),
         ...((record.pendingQuestion || record.browserLoginWait) ? { pendingCount: 1, pendingKind: "input" as const } : { pendingCount: 0 }),

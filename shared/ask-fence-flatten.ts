@@ -9,6 +9,7 @@
 import { AGENT_ASK_OPEN, AGENT_ASK_CLOSE } from "./agent-control-blocks";
 import { renderPlainAskBody } from "./ask-plaintext";
 import { isUnfilledQuestionTemplate } from "./types";
+import { mapIntellectUiProse } from "./intellect-ui";
 
 export interface AgentlasAskQuestion {
   question: string;
@@ -68,6 +69,17 @@ export function parseAskFenceBody(body: string): AgentlasAskQuestion | null {
  * once the closing marker arrives.
  */
 export function extractAskFences(text: unknown): ExtractedAskFences {
+  if (typeof text !== "string") return { text: "", questions: [] };
+  let questions: AgentlasAskQuestion[] = [];
+  const visible = mapIntellectUiProse(text, prose => {
+    const extracted = extractProseAskFences(prose);
+    questions = extracted.questions;
+    return extracted.text;
+  });
+  return { text: visible, questions };
+}
+
+function extractProseAskFences(text: string): ExtractedAskFences {
   if (typeof text !== "string" || !text.includes(AGENT_ASK_OPEN)) {
     return { text: typeof text === "string" ? text : "", questions: [] };
   }
@@ -116,6 +128,10 @@ export function flattenAskFenceBody(body: string, replyLocale: "ko" | "en"): str
  * - 본문 파싱 실패 시 펜스를 통째 제거(raw 노출 방지).
  */
 export function flattenAskFences(text: string, replyLocale: "ko" | "en"): string {
+  return mapIntellectUiProse(text, prose => flattenProseAskFences(prose, replyLocale));
+}
+
+function flattenProseAskFences(text: string, replyLocale: "ko" | "en"): string {
   if (!text.includes(AGENT_ASK_OPEN)) return text;
   let result = "";
   let rest = text;

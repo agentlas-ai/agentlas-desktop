@@ -53,6 +53,7 @@ interface Pending {
   reject: (err: Error) => void;
   timer?: NodeJS.Timeout;
   method: string;
+  cleanup?: () => void;
 }
 
 /** One JSON-RPC connection over a child's stdio. */
@@ -74,7 +75,7 @@ export class AcpConnection {
       this.closed = true;
       const err = new Error(`ACP agent closed (exit ${code ?? "?"})${this.stderrTail ? `: ${this.stderrTail.trim().slice(-300)}` : ""}`);
       for (const p of this.pending.values()) {
-        if (p.timer) clearTimeout(p.timer);
+        p.cleanup?.();
         p.reject(err);
       }
       this.pending.clear();
@@ -112,7 +113,7 @@ export class AcpConnection {
       const p = this.pending.get(Number(msg.id));
       if (!p) return;
       this.pending.delete(Number(msg.id));
-      if (p.timer) clearTimeout(p.timer);
+      p.cleanup?.();
       if (msg.error) p.reject(new AcpRpcError(msg.error));
       else p.resolve(msg.result ?? {});
       return;
@@ -143,17 +144,23 @@ export class AcpConnection {
     const id = this.nextId++;
     return new Promise((resolve, reject) => {
       const pending: Pending = { resolve, reject, method };
+      let onAbort: (() => void) | undefined;
+      pending.cleanup = () => {
+        if (pending.timer) clearTimeout(pending.timer);
+        if (onAbort) opts?.signal?.removeEventListener("abort", onAbort);
+      };
       if (opts?.timeoutMs && opts.timeoutMs > 0) {
         pending.timer = setTimeout(() => {
           this.pending.delete(id);
+          pending.cleanup?.();
           reject(new AcpTimeoutError(method, opts.timeoutMs!));
         }, opts.timeoutMs);
         pending.timer.unref?.();
       }
       if (opts?.signal) {
-        const onAbort = () => {
+        onAbort = () => {
           this.pending.delete(id);
-          if (pending.timer) clearTimeout(pending.timer);
+          pending.cleanup?.();
           reject(new Error("aborted"));
         };
         if (opts.signal.aborted) return onAbort();
@@ -164,7 +171,7 @@ export class AcpConnection {
         this.send({ jsonrpc: "2.0", id, method, params });
       } catch (err) {
         this.pending.delete(id);
-        if (pending.timer) clearTimeout(pending.timer);
+        pending.cleanup?.();
         reject(err instanceof Error ? err : new Error(String(err)));
       }
     });

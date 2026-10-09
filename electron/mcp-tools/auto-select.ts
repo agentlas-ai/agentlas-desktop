@@ -13,10 +13,13 @@ import path from "node:path";
 import { pluginSlugForToolId, supersededByLivePeer } from "../plugins/builtin";
 import { MCP_TOOL_CATALOG } from "./catalog";
 import { installFromCatalog, listInstalledServers } from "./registry";
-import { testServerConnection } from "./client";
+import { testServerConnection, requiredMcpManualEnvKeys } from "./client";
+import { resolveMcpOAuthAccessToken } from "./oauth";
+import { vaultUrlKey } from "../opencrab/constants";
 import { readEnvVar } from "../secrets/vault";
 import { KeychainUnavailableError } from "../secrets/keychain-host";
 import { getSource as getMarketSource } from "../marketplace";
+import { listBundledHubPlugins } from "../../shared/bundled-hub-catalog";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
 import { buildToolAccessNotice } from "../../shared/tool-access-notice";
 import { listPendingHubPluginApprovals } from "./hub-plugin-bridge";
@@ -138,6 +141,7 @@ export interface AutoSelectMcpDependencies {
   listInstalledServers: () => InstalledMcpServer[];
   installFromCatalog: (catalogId: string) => InstalledMcpServer;
   readEnvVar: (key: string) => Promise<string | null>;
+  resolveOAuthAccessToken: (serverId: string, serverUrl?: string) => Promise<string | null>;
   testServerConnection: (server: InstalledMcpServer, signal?: AbortSignal) => Promise<{
     connected: boolean;
     missingEnv: string[];
@@ -205,6 +209,7 @@ const DEFAULT_AUTO_SELECT_DEPS: AutoSelectMcpDependencies = {
   listInstalledServers,
   installFromCatalog,
   readEnvVar,
+  resolveOAuthAccessToken: resolveMcpOAuthAccessToken,
   // The browser host may need to open Chrome and attach over CDP on its first
   // run. Three seconds was shorter than a warm local probe and made clean
   // installs look unavailable before the bundled host could answer tools/list.
@@ -255,6 +260,13 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
   ]).finally(() => {
     if (timer) clearTimeout(timer);
   });
+}
+
+async function serverHasOAuth(server: InstalledMcpServer, deps: AutoSelectMcpDependencies): Promise<boolean> {
+  if (server.transport === "stdio" || !server.url) return false;
+  const endpointKey = vaultUrlKey(server.url);
+  const endpoint = endpointKey ? await deps.readEnvVar(endpointKey) : server.url;
+  return endpoint ? Boolean(await deps.resolveOAuthAccessToken(server.id, endpoint)) : false;
 }
 
 async function missingRequiredEnv(
@@ -409,9 +421,10 @@ export async function fetchHubPluginInventory(hubAllowed: boolean): Promise<{
     const plugins = listings.filter(isHubPluginListing);
     return { listings: plugins, hubPluginCount: plugins.length };
   } catch (err) {
+    const bundled = listBundledHubPlugins();
     return {
-      listings: [],
-      hubPluginCount: 0,
+      listings: bundled,
+      hubPluginCount: bundled.length,
       hubPluginError: err instanceof Error ? err.message : String(err),
     };
   }
@@ -543,7 +556,9 @@ export async function autoSelectMcpTools(input: {
   const memoKey = structuralKey ? `${structuralKey}\u0000${shortHash(taskText)}\u0000${requestedPluginSlugs.join(",")}` : "";
   if (memoKey && !activeGoalScope) {
     const hit = selectionMemo.get(memoKey);
-    if (hit && Date.now() - hit.at < SELECTION_MEMO_TTL_MS) return cloneContext(hit.context);
+    const selectedRemote = hit && initialInstalledServers.some(server => server.transport !== "stdio"
+      && hit.context.tools.some(tool => tool.id === server.id || tool.id === server.catalogId));
+    if (hit && !selectedRemote && Date.now() - hit.at < SELECTION_MEMO_TTL_MS) return cloneContext(hit.context);
     if (hit) selectionMemo.delete(memoKey);
   }
 
@@ -643,36 +658,11 @@ export async function autoSelectMcpTools(input: {
         : "Agentlas policy selected Computer Use for human web/social automation",
     );
   }
-  // Everything pinned so far is a host binding or the routing resolver — these outrank both
-  // the judge's picks and the installed-convenience pins added next.
+  // Host bindings and the routing resolver outrank optional capabilities.
   const hostBindingPins = new Set(pinnedReasons.keys());
-  // Anything the user already installed and enabled stays available every run. Dropping the
-  // keyword scorer must never REMOVE a capability the user set up — it only stops unconfigured
-  // tools from being force-attached. A pin here can still be dropped below if it turns out to
-  // need a credential, so this can never produce a key prompt on its own.
-  for (const server of initialInstalledServers) {
-    if (!server.catalogId || !server.enabled) continue;
-    if (server.catalogId === "brave-search"
-      && runtimeCapabilities.nativeWebSearch === "available"
-      && !(input.requiredToolCatalogIds ?? []).includes("brave-search")) continue;
-    // `local-only` is an execution boundary, not merely a catalog filter. The
-    // Network resolver starts the federated Workforce runtime and was being
-    // re-attached as an installed convenience pin even after Hub routing had
-    // been explicitly disabled. Besides violating the boundary, its cold
-    // connection probe dominated ordinary One Team startup. One may opt into
-    // Network on a later host-owned turn; local standing workers must not.
-    if (server.catalogId === "hephaestus-network" && !hubAllowed) continue;
-    // In automatic mode these are mutually exclusive host bindings, not
-    // convenience tools. Leave them in the one resident judgment's candidate
-    // menu instead of silently pinning both before the decision exists.
-    if (
-      automaticHostDecision
-      && effectiveToolMode === "auto"
-      && (server.catalogId === "agentlas-browser" || server.catalogId === "cua-driver" || server.catalogId === "playwright")
-    ) continue;
-    if (pinnedReasons.has(server.catalogId) || blockedByHostBinding(server.catalogId)) continue;
-    pinnedReasons.set(server.catalogId, "already installed and enabled by the user");
-  }
+  // Installed integrations remain eligible in the resident judge's menu. Only
+  // host bindings, explicit requests and the active Goal are pinned; enabling a
+  // hundred catalog entries must not attach a hundred servers to every turn.
 
   const pluginToolIds = new Set(pluginCandidates.flatMap((plugin) => plugin.toolIds));
   // Capability priority (owner 2026-09-24): built-in and Agentlas-published providers
@@ -779,6 +769,14 @@ export async function autoSelectMcpTools(input: {
     timeoutMs: 15_000,
   });
   const neededIds = new Set(needs.needed);
+  const explicitlyAssignedIds = new Set<string>();
+  for (const id of requiredServerIds) {
+    const server = initialInstalledServers.find((candidate) => candidate.id === id || candidate.catalogId === id);
+    const selectedId = server?.catalogId || server?.id || id;
+    neededIds.add(selectedId);
+    explicitlyAssignedIds.add(selectedId);
+    pinnedReasons.set(selectedId, "explicitly assigned to this run");
+  }
   // ── Deterministic fallback — selection must never be empty merely because the
   // judge timed out or could not run. Same candidates, local relevance only, and
   // only installed credential-free entries: no install, no key prompt, no change
@@ -899,8 +897,9 @@ export async function autoSelectMcpTools(input: {
   // capability the judge said the task actually needs.
   const pickRank = (id: string): number => {
     if (hostBindingPins.has(id)) return 0;
-    if (neededIds.has(id)) return 1;
-    return 2;
+    if (explicitlyAssignedIds.has(id)) return 1;
+    if (neededIds.has(id)) return 2;
+    return 3;
   };
   const picked = MCP_TOOL_CATALOG.filter((entry) => {
     if (!pinnedReasons.has(entry.id) && !neededIds.has(entry.id)) return false;
@@ -922,7 +921,7 @@ export async function autoSelectMcpTools(input: {
     return true;
   })
     .sort((a, b) => pickRank(a.id) - pickRank(b.id))
-    .slice(0, 10);
+    .filter((entry, index) => index < 10 || hostBindingPins.has(entry.id) || explicitlyAssignedIds.has(entry.id));
 
   const resolved = await Promise.allSettled(picked.map(async (entry): Promise<AutoSelectedMcpTool> => {
     // `required` is a host binding, never a selection outcome — so it follows the mode the
@@ -945,7 +944,13 @@ export async function autoSelectMcpTools(input: {
           : `resident judgment: ${needs.reason || "the task needs this capability"}`),
       required,
     };
-    const missingEnv = await missingRequiredEnv(entry, deps.readEnvVar);
+    const existingServer = deps.listInstalledServers().find(candidate => candidate.catalogId === entry.id || candidate.id === entry.id);
+    const hasOAuth = existingServer && existingServer.transport !== "stdio"
+      ? await serverHasOAuth(existingServer, deps) : false;
+    const manualKeys = existingServer && hasOAuth ? requiredMcpManualEnvKeys(existingServer, true) : null;
+    const missingEnv = await missingRequiredEnv(manualKeys
+      ? { ...entry, envRequirements: entry.envRequirements.filter(requirement => manualKeys.includes(requirement.key)) }
+      : entry, deps.readEnvVar);
     if (missingEnv.length > 0) return { ...base, installed: false, missingEnv, state: "missing-key" };
 
     let server = deps.listInstalledServers().find((candidate) =>
@@ -975,12 +980,12 @@ export async function autoSelectMcpTools(input: {
     if (!server.enabled || server.configurationValid === false) return { ...base, installed: false, missingEnv: [], state: "disabled" };
     if (activeGoalScope) {
       const missingConfiguredEnv: string[] = [];
-      for (const key of server.envKeys) if (!await deps.readEnvVar(key)) missingConfiguredEnv.push(key);
+      for (const key of requiredMcpManualEnvKeys(server, hasOAuth)) if (!await deps.readEnvVar(key)) missingConfiguredEnv.push(key);
       if (missingConfiguredEnv.length) return { ...base, installed: false, missingEnv: missingConfiguredEnv, state: "missing-key" };
     }
     // 이 대화에서 방금 붙었던 서버는 다시 띄우지 않는다. **성공만** 기억한다.
     const probeKey = structuralKey ? `${structuralKey}\u0000${server.id}` : "";
-    if (probeKey && !activeGoalScope) {
+    if (probeKey && !activeGoalScope && server.transport === "stdio") {
       const lastOk = probeMemo.get(probeKey);
       if (lastOk !== undefined && Date.now() - lastOk < SELECTION_MEMO_TTL_MS) {
         return { ...base, installed: true, missingEnv: [], state: "ready" };
@@ -1027,10 +1032,9 @@ export async function autoSelectMcpTools(input: {
     if (tool.state === "missing-key" && !mayRequestCredentials(tool.id)) result.splice(index, 1);
   }
 
-  // 사용자가 손수 등록한 커스텀 MCP(카탈로그에 없는 catalogId=null)는 위 MCP_TOOL_CATALOG
-  // 스캔에 잡히지 않아 채팅 런타임(.mcp.json)에서 늘 누락됐다 — 명시적으로 추가한 서버이므로
-  // 항상 후보에 포함한다. remote(헤더 없는 URL)는 envKeys가 비어 바로 사용 가능하고,
-  // 헤더/키가 필요한 서버는 vault에 값이 있을 때만 installed로 잡힌다.
+  // Custom servers participate in the same task judgment as catalog entries.
+  // Probe and attach only selected or explicitly assigned servers; installing
+  // the full Hub catalog must not open every remote connection on each turn.
   let latestInstalledServers: InstalledMcpServer[] = [];
   try {
     latestInstalledServers = deps.listInstalledServers();
@@ -1047,6 +1051,7 @@ export async function autoSelectMcpTools(input: {
     || input.requiredToolCatalogIds?.includes("agentlas-browser") === true;
   for (const server of latestInstalledServers) {
     if (server.catalogId) continue;
+    if (!neededIds.has(server.id) && !requiredServerIds.has(server.id)) continue;
     if (!requiredServerIds.has(server.id)
       && (canonicalBrowserSelected || optionalBrowserDuplicates.has(server.id))
       && isKeylessPlaywrightMcpDuplicate(server)) continue;
@@ -1056,7 +1061,8 @@ export async function autoSelectMcpTools(input: {
       ? "disabled" : "ready";
     if (state === "ready") {
       try {
-        for (const key of server.envKeys) {
+        const hasOAuth = await serverHasOAuth(server, deps);
+        for (const key of requiredMcpManualEnvKeys(server, hasOAuth)) {
           const value = await deps.readEnvVar(key);
           if (!value) missingEnv.push(key);
         }
@@ -1082,13 +1088,13 @@ export async function autoSelectMcpTools(input: {
         state = "probe-failed";
       }
     }
-    // Same invariant as the catalog pins: a custom server that is ready stays available, but
-    // an unconfigured one only surfaces (and only asks for its key) when the task needs it.
-    if (state === "missing-key" && !neededIds.has(server.id)) continue;
     result.push({
       id: server.id,
       name: server.nameEn || server.name,
-      reason: "user-added custom MCP (always available)",
+      reason: requiredServerIds.has(server.id) ? "explicitly assigned to this run"
+        : retainedIds.has(server.id) && !needs.needed.includes(server.id)
+          ? "previous selection in this active Goal, revalidated for this run"
+          : "resident judgment: the task needs this custom MCP",
       installed: state === "ready",
       missingEnv,
       required: false,

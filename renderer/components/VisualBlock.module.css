@@ -150,14 +150,16 @@
   top: 32px;
   right: 0;
   min-width: 176px;
+  max-width: calc(100vw - 24px);
   display: grid;
   padding: 4px;
   border: 1px solid var(--paper-edge-strong);
   border-radius: 10px;
   background: var(--paper);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  box-shadow: var(--popup-shadow);
 }
 .menu button {
+  min-height: 40px;
   display: flex;
   align-items: center;
   gap: 9px;

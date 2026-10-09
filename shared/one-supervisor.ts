@@ -1,5 +1,6 @@
 import type { RuntimeSelection, ChatHistoryEntry, ImageAttachment } from "./types";
 import type { OneBubbleColor } from "./one-profile";
+import type { SupervisorControlProgress, SupervisorJournalInput, SupervisorJournalPage, SupervisorRuntimeOwner, SupervisorStopInput } from "./one-supervisor-runtime";
 
 /** Personal identity is One's durable oneId; none of these IDs is a provider session. */
 export const ONE_SUPERVISOR_SCHEMA = "agentlas.one-supervisor.v1" as const;
@@ -14,6 +15,7 @@ export interface SupervisorCommandReceipt {
   /** Received/delivered is never a claim that a model applied an instruction. */
   acknowledgement: "stored" | "delivered" | "settled" | "unknown";
   reason: string | null;
+  control?: SupervisorControlProgress;
 }
 export interface SupervisorTask {
   taskId: string;
@@ -26,7 +28,7 @@ export interface SupervisorTask {
   state: string;
   controlVersion: string;
   observedAt: string;
-  owner: "desktop-main" | "science-daemon";
+  owner: "desktop-main" | "work-daemon" | "science-daemon";
   controls: Array<"steer" | "cancel">;
   result: string | null;
   resultVerified: boolean;
@@ -85,6 +87,9 @@ export interface OneSupervisorSnapshot {
   profileVersion?:number;
   conversationChatId: string;
   observedAt: string;
+  /** Cursor for command receipt transitions, separate from per-run token ordinals. */
+  journalCursor?: number;
+  runtimeOwner?: SupervisorRuntimeOwner | null;
   executor: "desktop-local";
   workOwner: "desktop-main";
   scienceAvailable: boolean;
@@ -98,9 +103,10 @@ export interface OneSupervisorSnapshot {
   turns?: SupervisorReplyTurn[];
   delegations?: SupervisorDelegation[];
   legacyHistory?: SupervisorLegacyHistory;
+  checkins?: OneCheckin[];
 }
 export interface SupervisorSendInput { commandId: string; text: string; runtimeSelection?: RuntimeSelection; oneId?:string; permissions?:"read"|"write"|"full"; images?:ImageAttachment[]; fileGroupId?:string }
-export interface SupervisorWorkInput extends SupervisorSendInput { projectId?: string; permissions?: "read" | "write" | "full" }
+export interface SupervisorWorkInput extends SupervisorSendInput { projectId?: string; permissions?: "read" | "write" | "full"; budgetId?:string }
 export interface SupervisorScienceInput { commandId: string; text: string; projectId: string; oneId?:string }
 /**
  * One speaks first only when it matters (dots parity, owner 2026-10-04). A host-started One turn — a finished
@@ -129,12 +135,12 @@ export const ONE_CHECKIN_LIMITS = { active: 20, minMinutes: 5, maxMinutes: 7 * 2
 export function nextCheckinAt(cadence: OneCheckinCadence, from: number): number {
   if (cadence.kind === "interval") {
     if (!Number.isInteger(cadence.minutes) || cadence.minutes < ONE_CHECKIN_LIMITS.minMinutes || cadence.minutes > ONE_CHECKIN_LIMITS.maxMinutes) {
-      throw new TypeError("supervisor_checkin_interval_invalid");
+      throw supervisorError('supervisor_checkin_interval_invalid', true);
     }
     return from + cadence.minutes * 60_000;
   }
   const match = /^([01]\d|2[0-3]):([0-5]\d)$/.exec(cadence.time);
-  if (!match) throw new TypeError("supervisor_checkin_time_invalid");
+  if (!match) throw supervisorError('supervisor_checkin_time_invalid', true);
   const next = new Date(from);
   next.setHours(Number(match[1]), Number(match[2]), 0, 0);
   if (next.getTime() <= from) next.setDate(next.getDate() + 1);
@@ -149,8 +155,10 @@ export interface SupervisorCheckinInput {
 export interface SupervisorFollowUpInput { commandId: string; taskId: string; text: string; oneId?: string }
 /** How a host-started supervisor turn is labelled in its chat: One's own brief in a worker session, or One's review line. */
 export type SupervisorHostNoticePurpose = "one-dispatch-brief" | "one-delegation-review" | "one-checkin";
-export interface SupervisorControlInput { commandId: string; taskId: string; expectedVersion: string; action: "steer" | "cancel"; text?: string; oneId?:string }
+export interface SupervisorControlInput { commandId: string; taskId: string; expectedVersion: string; action: "steer" | "cancel"; text?: string; oneId?:string; runId?: string }
 export interface OneSupervisorAPI {
+  budgets(input:import("./one-budget").OneBudgetListInput):Promise<import("./one-budget").OneBudgetSnapshot[]>;
+  budgetConfigure(input:import("./one-budget").OneBudgetConfigureInput):Promise<import("./one-budget").OneBudgetConfigureResult>;
   snapshot(): Promise<OneSupervisorSnapshot>;
   send(input: SupervisorSendInput): Promise<SupervisorCommandReceipt>;
   startWork(input: SupervisorWorkInput): Promise<SupervisorCommandReceipt>;
@@ -158,18 +166,27 @@ export interface OneSupervisorAPI {
   control(input: SupervisorControlInput): Promise<SupervisorCommandReceipt>;
   stopReply(input: { commandId: string; runId: string; oneId?:string }): Promise<SupervisorCommandReceipt>;
   appearance(input:{commandId:string;oneId:string;expectedVersion:number;displayName:string;bubbleColor:OneBubbleColor}):Promise<SupervisorCommandReceipt>;
+  journal(input: SupervisorJournalInput): Promise<SupervisorJournalPage>;
+  receipt(input: {oneId:string;commandId:string}): Promise<SupervisorCommandReceipt | null>;
+  stopTask(input: SupervisorStopInput): Promise<SupervisorCommandReceipt>;
+  checkin(input: SupervisorCheckinInput): Promise<{receipt?:SupervisorCommandReceipt;checkin?:OneCheckin;checkins?:OneCheckin[]}>;
 }
 
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{2,199}$/;
 export function supervisorIdentifier(value: unknown): string {
-  if (typeof value !== "string" || !ID.test(value)) throw new TypeError("supervisor_identifier_invalid");
+  if (typeof value !== "string" || !ID.test(value)) throw supervisorError('supervisor_identifier_invalid', true);
   return value;
 }
 export function supervisorText(value: unknown): string {
-  if (typeof value !== "string" || !value.trim() || value.length > 8_000 || /\u0000/u.test(value)) throw new TypeError("supervisor_text_invalid");
+  if (typeof value !== "string" || !value.trim() || value.length > 8_000 || /\u0000/u.test(value)) throw supervisorError('supervisor_text_invalid', true);
   return value.trim();
 }
 export function supervisorObject(value: unknown, keys: readonly string[]): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) throw new TypeError("supervisor_input_invalid");
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).some(key => !keys.includes(key))) throw supervisorError('supervisor_input_invalid', true);
   return value as Record<string, unknown>;
+}
+
+/** Preserve existing machine-readable domain refusals over authenticated RPC. */
+export function supervisorError(code:string,typeError=false):Error & {code:string} {
+  return Object.assign(typeError ? new TypeError(code) : new Error(code),{code});
 }

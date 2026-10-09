@@ -1,4 +1,4 @@
-import type { InvocationHostStopCause } from "./types";
+import type { InvocationHostStopCause, InvocationRunReceipt } from "./types";
 
 /**
  * 실행을 끊은 쪽이 Main 자신일 때 남기는 기계 표식(`AbortController.abort(new Error(<표식>))`).
@@ -32,6 +32,13 @@ export function invocationHostStopCause(value: unknown): InvocationHostStopCause
 export function isOwnerGoalStopCause(value: unknown): boolean {
   const cause = invocationHostStopCause(value);
   return cause !== null && OWNER_GOAL_STOP_CAUSES.includes(cause);
+}
+
+/** A terminal host/owner stop is not a provider or tool failure. */
+export function isNonFailureInvocationStop(receipt: Pick<InvocationRunReceipt, "status" | "interruptionCause" | "hostStopCause">): boolean {
+  if (receipt.status === "cancelled") return true;
+  if (receipt.status !== "interrupted" && receipt.status !== "failed") return false;
+  return receipt.interruptionCause === "steering" || invocationHostStopCause(receipt.hostStopCause) !== null;
 }
 
 /** 대화에 남기는 한 줄 — 무엇 때문에 멈췄는지와, 실패가 아니라는 사실. */

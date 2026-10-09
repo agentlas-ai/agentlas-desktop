@@ -18,6 +18,13 @@ type TurnScope = Scope & { turnId: string };
 /** Native, authenticated control operations, NOT an agent-callable tool surface. */
 export type DaemonScienceCommand =
   | DaemonSciencePublicationCommand
+  | { op: "space.inspect"; input: { projectId: string; options?: Parameters<ReturnType<Science["scienceProjectSpaceService"]>["inspect"]>[1] } }
+  | { op: "space.snapshot"; input: { projectId: string } }
+  | { op: "space.link"; input: { projectId: string; link: Parameters<ReturnType<Science["scienceProjectSpaceService"]>["link"]>[1] } }
+  | { op: "workspace.get"; input: { projectId: Parameters<Store["getProjectWorkspaceState"]>[0] } }
+  | { op: "workspace.updateNavigation"; input: Parameters<Store["updateProjectNavigation"]>[0] }
+  | { op: "workspace.replaceTabs"; input: Parameters<Store["replaceProjectWorkspaceTabs"]>[0] }
+  | { op: "projects.updateDeliverable"; input: Parameters<Store["updateProjectDeliverable"]>[0] }
   | { op: "runtime.inspect"; input: Parameters<Science["inspectScienceRuntime"]>[1] }
   | { op: "runtime.select"; input: Parameters<Science["selectScienceRuntime"]>[1] }
   | { op: "loops.inspect"; input: { projectId: string } }
@@ -323,6 +330,13 @@ export function createDaemonScienceService(options: {
     }
     const { api, store, conversations, host: activeHost } = ready();
     switch (command.op) {
+      case "space.inspect": return api.scienceProjectSpaceService().inspect(command.input.projectId, command.input.options);
+      case "space.snapshot": return api.scienceProjectSpaceService().snapshot(command.input.projectId);
+      case "space.link": return api.scienceProjectSpaceService().link(command.input.projectId, command.input.link);
+      case "workspace.get": return store.getProjectWorkspaceState(command.input.projectId);
+      case "workspace.updateNavigation": return store.updateProjectNavigation(command.input);
+      case "workspace.replaceTabs": return store.replaceProjectWorkspaceTabs(command.input);
+      case "projects.updateDeliverable": return store.updateProjectDeliverable(command.input);
       case "runtime.inspect": return api.inspectScienceRuntime(store, command.input);
       case "runtime.select": {
         const result = await api.selectScienceRuntime(store, command.input);

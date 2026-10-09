@@ -10,9 +10,11 @@ import { runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-se
 import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
-import { readOneChatHistory } from "@/lib/one-chat-history";
+import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
+import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInput";
+import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
-import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, type OneFollowupIntent } from "@/lib/one-followup-outbox";
+import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, waitForOneFollowupDelivery, type OneFollowupIntent } from "@/lib/one-followup-outbox";
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS, normalizeOnePreflightSteerRequest } from "@shared/one-preflight-steers";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
@@ -43,6 +45,8 @@ import {
 import { flushSync } from "react-dom";
 import { bindAgentScreenScope } from "@/lib/agent-screen-scope";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
+import { hasIntellectUiFence } from "@/lib/intellect-ui-actions";
+import { mapIntellectUiProse } from "@shared/intellect-ui";
 import { AskCard, type AskCardOption } from "@/components/AskCard";
 import {
   ASK_ACTION_COPY,
@@ -82,7 +86,9 @@ import {
   IconShield,
   IconSparkles,
   IconUsers,
+  IconTrash,
 } from "@/components/Icon";
+import { confirmPopup, alertPopup } from "@/lib/popup";
 import { grantForDroppedFile, grantForPastedAttachment, grantForPastedImage, ipc, ipcEvents } from "@/lib/ipc";
 import { tFor, useT } from "@/lib/i18n";
 import { visibleAgents } from "@/lib/agent-visibility";
@@ -556,6 +562,8 @@ type UiMessage = {
   goalResult?: GoalResultPresentation;
   hostNotice?: ChatHostNotice;
   id: string;
+  /** Local UI identity survives live-to-durable row renames. */
+  intellectUiMessageId?: string;
   /** Exact Main-issued transcript identity for a settled assistant row. */
   durableMessageId?: string;
   role: "user" | "assistant" | "system";
@@ -749,6 +757,9 @@ function writeOneComposerDraft(key: string, patch: Partial<OneComposerDraftCache
     // Draft persistence is best-effort and must never block typing.
   }
 }
+
+function readOneComposerInputDraft(key: string): string { return readOneComposerDraft(key).composer; }
+function writeOneComposerInputDraft(key: string, value: string): void { writeOneComposerDraft(key, { composer: value }); }
 
 function uid(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -985,6 +996,12 @@ function visibleOneMessageText(message: UiMessage): string {
   return value;
 }
 function computeVisibleOneMessageText(message: UiMessage): string {
+  return message.role === "assistant"
+    ? mapIntellectUiProse(message.text, text => projectVisibleOneMessageText({ ...message, text }))
+    : projectVisibleOneMessageText(message);
+}
+
+function projectVisibleOneMessageText(message: UiMessage): string {
   if (normalizeChatHostNotice(message.role, message.hostNotice)) return message.text;
   if (isResultContinuationMessage(message)) {
     return "";
@@ -1033,7 +1050,8 @@ function computeVisibleOneMessageText(message: UiMessage): string {
 
 function upsertLiveMessage(messages: UiMessage[], text: string, streaming: boolean): UiMessage[] {
   const index = messages.findIndex((item) => item.id === "one-live-response");
-  const message: UiMessage = { id: "one-live-response", role: "assistant", text, streaming };
+  const message: UiMessage = { id: "one-live-response", role: "assistant", text, streaming,
+    intellectUiMessageId: messages[index]?.intellectUiMessageId ?? `one-ui:${uid()}` };
   if (index < 0) return [...messages, message];
   return messages.map((item, itemIndex) => itemIndex === index ? message : item);
 }
@@ -1266,7 +1284,7 @@ function readLastOneConversation(): string | null {
 
 export function OneShell() {
   const params = useSearchParams();
-  return params.get("personal") === "1" ? <PersonalOneWorkspace /> : <OneSessionsShell />;
+  return params.get("personal") === "1" ? <PersonalOneWorkspace detached={params.get("companion") === "1"} /> : <OneSessionsShell />;
 }
 
 function OneSessionsShell() {
@@ -1361,6 +1379,37 @@ function OneSessionsShell() {
   const [teamPreflightBusy, setTeamPreflightBusy] = useState(false);
   const [pendingTeamPrompt, setPendingTeamPrompt] = useState<PendingTeamPrompt | null>(null);
   const [messages, setMessages] = useState<UiMessage[]>([]);
+  const historyPageRef = useRef<{ chatId: string | null; generation: number; initialized: boolean;
+    hasOlder: boolean; cursor: import("@shared/types").ChatMessagesCursor | null; loadedOlder: boolean; pending: boolean;
+    error: boolean }>({ chatId: null, generation: 0, initialized: false, hasOlder: false, cursor: null,
+      loadedOlder: false, pending: false, error: false });
+  const [historyPageEpoch, setHistoryPageEpoch] = useState(0);
+  async function readOneShellHistory(api: NonNullable<ReturnType<typeof ipc>>, chatId: string) {
+    if (typeof api.chats.messagesPage !== "function") return readOneChatHistory(api, chatId);
+    const owner = historyPageRef.current;
+    const generation = owner.generation;
+    const page = await readOneChatHistoryPage(api, chatId);
+    if (activeThreadChatIdRef.current === chatId) {
+      const meta = historyPageRef.current;
+      if (meta === owner && meta.generation === generation && meta.chatId === chatId
+        && (!meta.initialized || !meta.cursor || page.messages.length === 0)) {
+        meta.initialized = true;
+        meta.hasOlder = page.hasOlder;
+        meta.cursor = oneChatHistoryCursor(page.messages);
+        if (!page.messages.length) meta.loadedOlder = false;
+        setHistoryPageEpoch(current => current + 1);
+      }
+    }
+    return page.messages;
+  }
+  function mergeOneShellHistory(current: readonly UiMessage[], durable: readonly UiMessage[]): UiMessage[] {
+    const base = mergeDurableChatCatchup(current, durable);
+    const meta = historyPageRef.current;
+    if (!meta.loadedOlder || !durable.length) return base;
+    const all = mergeOneChatHistory(current.filter(message => message.durableMessageId), durable, "newest");
+    const boundary = all.findIndex(message => message.id === durable[0].id);
+    return mergeOneChatHistory(boundary > 0 ? all.slice(0, boundary) : [], base, "newest");
+  }
   const [rejectedGoalDirection, setRejectedGoalDirection] = useState<{
     chatId: string; goalId: string; messageId: string; runId: string;
   } | null>(null);
@@ -1394,6 +1443,9 @@ function OneSessionsShell() {
    */
   const [threadRuns, setThreadRuns] = useState<OneThreadRunBlock[]>([]);
   const threadRunsChatIdRef = useRef<string | null>(null);
+  // The output props and their owner must commit together. Selection changes
+  // render before the thread effect clears the previous room's activity.
+  const [outputThreadChatId, setOutputThreadChatId] = useState<string | null>(null);
   // React can paint the busy shell before its dispatch state batch is visible.
   // These refs make that first paint belong to the new run, rather than briefly
   // borrowing the prior answer's Activity and elapsed clock.
@@ -1432,9 +1484,14 @@ function OneSessionsShell() {
   const preflightSubmissionRef = useRef<{ submissionId: string; chatId: string; ready?: Promise<void> } | null>(null);
   const preflightSubmissionGenerationRef = useRef(0);
   const [localFollowupIntents, setLocalFollowupIntents] = useState<OneFollowupIntent[]>([]);
+  const [delayedFollowupIds, setDelayedFollowupIds] = useState<ReadonlySet<string>>(() => new Set());
+  const [currentTurnFollowups, setCurrentTurnFollowups] = useState<Array<{ intent: OneFollowupIntent; receipt: import("@shared/types").InvocationCurrentTurnSteerReceipt }>>([]);
   const [heldFollowupRecovery, setHeldFollowupRecovery] = useState<InvocationSteerRecovery[]>([]);
   const locallyStoppedFollowupIdsRef = useRef(new Set<string>());
+  const terminalFollowupIdsRef = useRef(new Set<string>());
+  const followupDeliveryNoticeRef = useRef<{ chatId: string; text: string } | null>(null);
   const followupRefreshesRef = useRef(new Map<string, ReturnType<typeof createCoalescedRefresh<undefined>>>());
+  const currentTurnDeliveriesRef = useRef(new Map<string, Promise<void>>());
   const followupBridgesRef = useRef(new Map<string, ReturnType<typeof ipc>>());
   // Instructions typed while the run is still being prepared (no runId yet).
   // They join the queue strip at once and reach Main as steers the moment the
@@ -1479,18 +1536,24 @@ function OneSessionsShell() {
   const uncertainAdmissionRef = useRef(new Map<string, string>());
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [messageReply, setMessageReply] = useState<MessageReply | null>(null);
-  const [composer, setComposerState] = useState(initialComposerDraftRef.current.composer);
+  const composerHandleRef = useRef<OneComposerInputHandle>(null);
+  const composerValueRef = useRef(initialComposerDraftRef.current.composer);
+  const [composerHasText, setComposerHasText] = useState(Boolean(initialComposerDraftRef.current.composer.trim()));
+  const composer = composerValueRef.current;
+  const onComposerValueChange = useCallback((next: string, key: string) => {
+    composerValueRef.current = next;
+    composerDraftKeyRef.current = key;
+    setComposerHasText(Boolean(next.trim()));
+    setAgentPickerOpen(/(^|\s)@[^\s]*$/u.test(next));
+  }, []);
   function setComposer(next: string | ((current: string) => string)) {
-    if (typeof next === "string") {
-      writeOneComposerDraft(composerDraftKeyRef.current, { composer: next });
-      setComposerState(next);
+    if (composerHandleRef.current) {
+      composerHandleRef.current.setValue(next);
       return;
     }
-    setComposerState((current) => {
-      const resolved = next(current);
-      writeOneComposerDraft(composerDraftKeyRef.current, { composer: resolved });
-      return resolved;
-    });
+    const resolved = typeof next === "string" ? next : next(composerValueRef.current);
+    writeOneComposerDraft(composerDraftKeyRef.current, { composer: resolved });
+    onComposerValueChange(resolved, composerDraftKeyRef.current);
   }
   function setStagedSteer(next: string | null) {
     writeOneComposerDraft(composerDraftKeyRef.current, { stagedSteer: next });
@@ -1518,9 +1581,9 @@ function OneSessionsShell() {
       return;
     }
     try {
-      const receipt = await bridge.invoke.preflightSteerReceipt({
+      const receipt = await waitForOneFollowupDelivery(bridge.invoke.preflightSteerReceipt({
         steerId: fence.steerId, submissionId: fence.submissionId, chatId,
-      });
+      }));
       if (activeThreadChatIdRef.current !== chatId
         || readOneUncertainPreflightSteer(chatId)?.steerId !== fence.steerId) return;
       if (!receipt) {
@@ -1530,7 +1593,7 @@ function OneSessionsShell() {
       }
       if (receipt.steerId !== fence.steerId || receipt.submissionId !== fence.submissionId
         || receipt.chatId !== chatId
-        || await onePreflightTextDigest(receipt.userPrompt) !== fence.textDigest) {
+        || await waitForOneFollowupDelivery(onePreflightTextDigest(receipt.userPrompt)) !== fence.textDigest) {
         setPreflightFenceStatus({ chatId, reason: "mismatch" });
         return;
       }
@@ -1559,6 +1622,36 @@ function OneSessionsShell() {
     }
   }, [appLocale]);
 
+  const deliverCurrentTurnFollowup = useCallback((intent: OneFollowupIntent, bridge: ReturnType<typeof ipc>) => {
+    if (!bridge || !intent.currentTurnRunId || currentTurnDeliveriesRef.current.has(intent.intentId)) return;
+    if (locallyStoppedFollowupIdsRef.current.has(intent.intentId) || intent.autoDeliveryPaused || intent.requiresReprepare) return;
+    const task = (async () => {
+      try {
+        // Issue each captured gesture immediately. Main's durable identity makes
+        // a repeated IPC read the same receipt; it never repeats native dispatch.
+        const nativeReceipt = await waitForOneFollowupDelivery(bridge.invoke.steerCurrentTurn({ chatId: intent.chatId,
+          intentId: intent.intentId, expectedRunId: intent.currentTurnRunId!, text: intent.userPrompt }));
+        if (nativeReceipt.chatId !== intent.chatId || nativeReceipt.intentId !== intent.intentId
+          || nativeReceipt.runId !== intent.currentTurnRunId || nativeReceipt.promptHash !== await onePreflightTextDigest(intent.userPrompt)) {
+          throw new Error("one_followup_receipt_mismatch");
+        }
+        if (activeThreadChatIdRef.current === intent.chatId) {
+          setMessages(current => current.map(message => message.id === `followup:${intent.intentId}`
+            ? { ...message, id: nativeReceipt.messageId, durableMessageId: nativeReceipt.messageId } : message));
+          setCurrentTurnFollowups(current => [...current.filter(item => item.intent.intentId !== intent.intentId),
+            { intent, receipt: nativeReceipt }].slice(-64));
+        }
+        removeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
+        if (activeThreadChatIdRef.current === intent.chatId) setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, intent.chatId));
+      } catch {
+        if (activeThreadChatIdRef.current !== intent.chatId) return;
+        setDelayedFollowupIds(current => current.has(intent.intentId) ? current : new Set([...current, intent.intentId]));
+        setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, intent.chatId));
+      }
+    })().finally(() => { currentTurnDeliveriesRef.current.delete(intent.intentId); });
+    currentTurnDeliveriesRef.current.set(intent.intentId, task);
+  }, []);
+
   const reconcileUncertainPreflightSteer = useCallback(async (chatId: string, bridge = ipc()): Promise<void> => {
     followupBridgesRef.current.set(chatId, bridge);
     let coordinator = followupRefreshesRef.current.get(chatId);
@@ -1566,7 +1659,19 @@ function OneSessionsShell() {
       coordinator = createCoalescedRefresh(async (_input: undefined) => {
         const bridge = followupBridgesRef.current.get(chatId);
         const showLocal = () => {
-          if (activeThreadChatIdRef.current === chatId) setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, chatId));
+          if (activeThreadChatIdRef.current !== chatId) return;
+          const remaining = readOneFollowupOutbox(window.localStorage, chatId);
+          setLocalFollowupIntents(current => JSON.stringify(current) === JSON.stringify(remaining) ? current : remaining);
+          const ownedNotice = followupDeliveryNoticeRef.current;
+          if (!remaining.length && ownedNotice?.chatId === chatId) {
+            followupDeliveryNoticeRef.current = null;
+            setActionNotice(current => current === ownedNotice.text ? null : current);
+          }
+        };
+        const showDeliveryNotice = (text: string) => {
+          if (activeThreadChatIdRef.current !== chatId) return;
+          followupDeliveryNoticeRef.current = { chatId, text };
+          setActionNotice(text);
         };
         const deliveryPaused = (intent: OneFollowupIntent) => locallyStoppedFollowupIdsRef.current.has(intent.intentId)
           || readOneFollowupOutbox(window.localStorage, chatId).find(item => item.intentId === intent.intentId)?.autoDeliveryPaused === true;
@@ -1575,28 +1680,29 @@ function OneSessionsShell() {
           if (!bridge) return;
           for (const intent of readOneFollowupOutbox(window.localStorage, chatId)) {
             try {
-              if (deliveryPaused(intent)) continue;
+              if (deliveryPaused(intent) || terminalFollowupIdsRef.current.has(intent.intentId)) continue;
               if (intent.requiresReprepare) {
-                if (activeThreadChatIdRef.current === chatId) setActionNotice(appLocale === "ko"
+                showDeliveryNotice(appLocale === "ko"
                   ? "팀 선택이 바뀐 추가 지시는 로컬에 보관했습니다. 새 팀의 실행 준비를 확인한 뒤 보내 주세요."
                   : "The follow-up with a different team is saved locally. Confirm fresh team preparation before sending it.");
                 break;
               }
               if (intent.submissionId) {
                 const parent = preflightSubmissionRef.current;
-                if (parent?.submissionId === intent.submissionId) await parent.ready;
+                if (parent?.submissionId === intent.submissionId && parent.ready) await waitForOneFollowupDelivery(parent.ready);
                 const request = normalizeOnePreflightSteerRequest(Object.fromEntries(ONE_PREFLIGHT_STEER_REQUEST_KEYS
                   .flatMap(key => intent.request[key] === undefined ? [] : [[key, intent.request[key]]])));
                 const input = { steerId: intent.intentId, submissionId: intent.submissionId, chatId, userPrompt: intent.userPrompt, request };
-                let receipt = await bridge.invoke.preflightSteerReceipt({ steerId: intent.intentId, submissionId: intent.submissionId, chatId });
+                let receipt = await waitForOneFollowupDelivery(bridge.invoke.preflightSteerReceipt({ steerId: intent.intentId, submissionId: intent.submissionId, chatId }));
                 if (!receipt) {
                   if (deliveryPaused(intent)) continue;
-                  receipt = await bridge.invoke.preflightSteerEnqueue(input);
+                  receipt = await waitForOneFollowupDelivery(bridge.invoke.preflightSteerEnqueue(input));
                 }
                 if (receipt.steerId !== intent.intentId || receipt.submissionId !== intent.submissionId
                   || receipt.chatId !== chatId || receipt.userPrompt !== intent.userPrompt
                   || JSON.stringify(normalizeOnePreflightSteerRequest(receipt.request ?? {})) !== JSON.stringify(request)) throw new Error("one_followup_receipt_mismatch");
                 if (deliveryPaused(intent)) continue;
+                if (receipt.status === "held" || receipt.status === "cancelled") terminalFollowupIdsRef.current.add(intent.intentId);
                 if (activeThreadChatIdRef.current === chatId) setPreflightSteerReceipts(current => [
                   ...current.filter(item => item.steerId !== receipt.steerId), receipt,
                 ]);
@@ -1605,33 +1711,45 @@ function OneSessionsShell() {
                 // Legacy admission has no submission binding. Preserve the intent
                 // locally until the exact parent is observed; never start over an unknown parent.
                 if (intent.waitingParentRunId) {
-                  const admission = await bridge.invoke.admission(intent.waitingParentRunId);
+                  const admission = await waitForOneFollowupDelivery(bridge.invoke.admission(intent.waitingParentRunId));
                   if (admission.status !== "admitted" || admission.chatId !== chatId) break;
-                  const receipt = await bridge.invoke.receipt(intent.waitingParentRunId);
+                  const receipt = await waitForOneFollowupDelivery(bridge.invoke.receipt(intent.waitingParentRunId));
                   if (!receipt || receipt.chatId !== chatId || receipt.runId !== intent.waitingParentRunId) break;
                 }
-                let receipt = await bridge.invoke.steerReceipt({ chatId, intentId: intent.intentId });
+                if (intent.currentTurnRunId) {
+                  deliverCurrentTurnFollowup(intent, bridge);
+                  continue;
+                }
+                let receipt = await waitForOneFollowupDelivery(bridge.invoke.steerReceipt({ chatId, intentId: intent.intentId }));
                 if (!receipt) {
                   if (deliveryPaused(intent)) continue;
-                  receipt = await bridge.invoke.steer(intent.request, intent.intentId);
+                  receipt = await waitForOneFollowupDelivery(bridge.invoke.steer(intent.request, intent.intentId));
                 }
                 if (!receipt.accepted || receipt.chatId !== chatId || receipt.intentId !== intent.intentId
-                  || receipt.promptHash !== await onePreflightTextDigest(intent.userPrompt)) throw new Error("one_followup_receipt_mismatch");
+                  || receipt.promptHash !== await waitForOneFollowupDelivery(onePreflightTextDigest(intent.userPrompt))) throw new Error("one_followup_receipt_mismatch");
                 if (deliveryPaused(intent)) continue;
                 if (receipt.status === "cancelled" || receipt.status === "failed" || receipt.status === "held") {
-                  if (activeThreadChatIdRef.current === chatId) setActionNotice(appLocale === "ko"
+                  terminalFollowupIdsRef.current.add(intent.intentId);
+                  showDeliveryNotice(appLocale === "ko"
                     ? "이 추가 지시는 실행되지 않도록 보류되었습니다. 로컬 보관한 글을 검토해 주세요."
                     : "This follow-up was held. Review its locally saved text.");
                   continue;
                 }
-                if (activeThreadChatIdRef.current === chatId && receipt.queued) setQueuedSteers(current => current.some(item => item.id === intent.intentId)
-                  ? current : [...current, { id: intent.intentId, chatId, text: intent.userPrompt }]);
+                if (activeThreadChatIdRef.current === chatId && receipt.queued) {
+                  const queuedRequestId = receipt.queuedRequestId ?? intent.intentId;
+                  setQueuedSteers(current => {
+                    const withoutLegacyId = current.filter(item => item.chatId !== chatId || item.id !== intent.intentId || item.id === queuedRequestId);
+                    return withoutLegacyId.some(item => item.chatId === chatId && item.id === queuedRequestId)
+                      ? withoutLegacyId : [...withoutLegacyId, { id: queuedRequestId, chatId, text: intent.userPrompt }];
+                  });
+                }
                 removeOneFollowupIntent(window.localStorage, chatId, intent.intentId);
               }
             } catch {
+              setDelayedFollowupIds(current => new Set([...current, intent.intentId]));
               // Keep local intake available, but never overtake an unresolved
               // earlier intent when handing the room's FIFO queue to Main.
-              if (activeThreadChatIdRef.current === chatId) setActionNotice(appLocale === "ko"
+              showDeliveryNotice(appLocale === "ko"
                 ? "추가 지시를 로컬에 보관했습니다. Main의 접수 여부는 아직 확인하지 못했습니다."
                   : "The follow-up is saved locally. Main acceptance is still unconfirmed.");
               showLocal();
@@ -1650,6 +1768,58 @@ function OneSessionsShell() {
     await coordinator.request(undefined);
     await reconcileLegacyPreflightSteer(chatId, bridge);
   }, [appLocale, reconcileLegacyPreflightSteer]);
+
+  useEffect(() => {
+    const api = ipc();
+    const chatId = selected?.chatId ?? conversation?.id ?? null;
+    if (!api || !chatId || typeof api.invoke.currentTurnSteerReceipt !== "function"
+      || !currentTurnFollowups.some(item => item.intent.chatId === chatId
+        && (item.receipt.status === "queued" || item.receipt.status === "dispatching"))) return;
+    let disposed = false;
+    let running = false;
+    const refresh = async () => {
+      if (disposed || running) return;
+      running = true;
+      try {
+        const receipts = await Promise.all(currentTurnFollowups.filter(item => item.intent.chatId === chatId
+          && (item.receipt.status === "queued" || item.receipt.status === "dispatching"))
+          .map(item => waitForOneFollowupDelivery(api.invoke.currentTurnSteerReceipt({ chatId, intentId: item.intent.intentId })).catch(() => null)));
+        if (disposed || activeThreadChatIdRef.current !== chatId) return;
+        const changed = new Map(receipts.filter((item): item is NonNullable<typeof item> => Boolean(item))
+          .map(item => [item.intentId, item]));
+        setCurrentTurnFollowups(current => {
+          let dirty = false;
+          const next = current.map(item => {
+            const receipt = changed.get(item.intent.intentId);
+            if (!receipt || receipt.status === item.receipt.status && receipt.code === item.receipt.code) return item;
+            dirty = true;
+            return { ...item, receipt };
+          });
+          return dirty ? next : current;
+        });
+      } finally { running = false; }
+    };
+    void refresh();
+    const timer = window.setInterval(() => { void refresh(); }, 1_000);
+    return () => { disposed = true; window.clearInterval(timer); };
+  }, [currentTurnFollowups, selected?.chatId, conversation?.id]);
+
+  useEffect(() => {
+    const chatId = selected?.chatId ?? conversation?.id ?? null;
+    const retryHead = localFollowupIntents.find(intent => intent.chatId === chatId && !intent.autoDeliveryPaused
+      && !locallyStoppedFollowupIdsRef.current.has(intent.intentId) && !terminalFollowupIdsRef.current.has(intent.intentId));
+    if (!chatId || !retryHead || retryHead.requiresReprepare) return;
+    const timer = window.setInterval(() => {
+      if (activeThreadChatIdRef.current !== chatId) return;
+      try {
+        const next = readOneFollowupOutbox(window.localStorage, chatId).find(intent => !intent.autoDeliveryPaused
+          && !locallyStoppedFollowupIdsRef.current.has(intent.intentId) && !terminalFollowupIdsRef.current.has(intent.intentId));
+        if (!next || next.requiresReprepare) { window.clearInterval(timer); return; }
+        void reconcileUncertainPreflightSteer(chatId);
+      } catch { /* The preserved text is retained until local storage can be read again. */ }
+    }, 3_000);
+    return () => window.clearInterval(timer);
+  }, [selected?.chatId, conversation?.id, localFollowupIntents, reconcileUncertainPreflightSteer]);
 
   useEffect(() => {
     const api = ipc();
@@ -1802,19 +1972,6 @@ function OneSessionsShell() {
   }, []);
   const [taskMenuOpen, setTaskMenuOpen] = useState(false);
   const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
-  // 에이전트 세션 시트는 OneBottomSheet 를 쓰지 않는 자체 다이얼로그라 Escape
-  // 계약(설정·검색 시트와 동일)이 빠져 있었다(D-8). 닫기는 포커스 위치와
-  // 무관하게 무조건 들어야 한다.
-  useEffect(() => {
-    if (!sessionSheetOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.preventDefault();
-      setSessionSheetOpen(false);
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [sessionSheetOpen]);
   /**
    * 세션 시트의 실행 모델 표기 (표시=실행, C-D-1): 각 세션의 마지막 실행
    * receipt에 원장이 남긴 실제 실행 모델을 시트가 열릴 때 한 번 읽어 단다.
@@ -2012,6 +2169,10 @@ function OneSessionsShell() {
     : runStartedAt;
   const [workerSelection, setWorkerSelection] = useState<OneWorkerPanelSelection | null>(null);
   const workerChatId = selected?.chatId ?? conversation?.id ?? null;
+  if (historyPageRef.current.chatId !== workerChatId) {
+    historyPageRef.current = { chatId: workerChatId, generation: historyPageRef.current.generation + 1,
+      initialized: false, hasOlder: false, cursor: null, loadedOlder: false, pending: false, error: false };
+  }
   const inspectWorkerPanel = useCallback((runId: string, group: OneWorkerWorkGroup) => {
     if (!workerChatId || !runId || !group.agentId) return;
     setWorkerSelection({ chatId: workerChatId, runId, agentId: group.agentId, name: group.name });
@@ -2025,9 +2186,70 @@ function OneSessionsShell() {
     return exact ? { chatId: workerChatId, runId: exact.runId, state: exact.state } : null;
   }, [activity, activityStateRunId, contextRailOpen, threadRuns, workerChatId, workerSelection]);
   useEffect(() => { setWorkerSelection(null); }, [workerChatId]);
-  const visibleMessages = messages;
-  const liveResponseMounted = messages.some((message) => message.id === "one-live-response");
-  const livePromptMounted = Boolean(activeRunPrompt && isPromptOnScreen(messages, activeRunPrompt.text));
+  const transcriptIds = useMemo(() => messages.map(message => message.id), [messages]);
+  const [historyWindow, setHistoryWindow] = useState<{ chatId: string | null; oldestId: string | null } | null>(null);
+  const historyAnchor = historyWindow?.chatId === workerChatId ? historyWindow.oldestId : null;
+  const historyStart = oneHistoryWindowStart(transcriptIds, historyAnchor, 24);
+  const visibleMessages = useMemo(() => historyStart ? messages.slice(historyStart) : messages, [messages, historyStart]);
+  const historyWindowRef = useRef({ chatId: workerChatId, ids: transcriptIds, start: historyStart });
+  historyWindowRef.current = { chatId: workerChatId, ids: transcriptIds, start: historyStart };
+  const olderHistoryAvailable = historyPageRef.current.chatId === workerChatId && historyPageRef.current.hasOlder;
+  const olderHistoryPending = historyPageRef.current.chatId === workerChatId && historyPageRef.current.pending;
+  const olderHistoryError = historyPageRef.current.chatId === workerChatId && historyPageRef.current.error;
+  void historyPageEpoch;
+  const historyViewportRef = useRef<{ chatId: string | null; anchor: Element | null; top: number; scrollTop: number; scrollHeight: number } | null>(null);
+  const preserveHistoryViewport = useCallback(() => {
+    const scroller = scrollRef.current;
+    if (!scroller) return;
+    const top = scroller.getBoundingClientRect().top;
+    const anchor = [...scroller.querySelectorAll("[data-one-message-id]")]
+      .find(element => element.getBoundingClientRect().bottom > top) ?? null;
+    historyViewportRef.current = { chatId: workerChatId, anchor, top: anchor?.getBoundingClientRect().top ?? 0,
+      scrollTop: scroller.scrollTop, scrollHeight: scroller.scrollHeight };
+  }, [workerChatId]);
+  const revealEarlierHistory = async () => {
+    const api = ipc();
+    const meta = historyPageRef.current;
+    if (!workerChatId || meta.chatId !== workerChatId || meta.pending || meta.error) return;
+    if (historyStart > 0) {
+      preserveHistoryViewport();
+      setHistoryWindow({ chatId: workerChatId, oldestId: revealOneHistoryPage(transcriptIds, historyStart, 24) });
+      return;
+    }
+    if (!api || !meta.hasOlder || !meta.cursor) return;
+    const generation = meta.generation;
+    meta.pending = true;
+    setHistoryPageEpoch(current => current + 1);
+    try {
+      const page = await readOneChatHistoryPage(api, workerChatId, meta.cursor);
+      if (historyPageRef.current !== meta || meta.generation !== generation || activeThreadChatIdRef.current !== workerChatId) return;
+      const older = toUiMessages(page.messages);
+      preserveHistoryViewport();
+      meta.cursor = oneChatHistoryCursor(page.messages) ?? meta.cursor;
+      meta.hasOlder = page.hasOlder;
+      meta.loadedOlder = true;
+      setHistoryWindow({ chatId: workerChatId, oldestId: older[Math.max(0, older.length - 24)]?.id ?? transcriptIds[0] ?? null });
+      setMessages(current => {
+        if (historyPageRef.current !== meta || meta.generation !== generation) return current;
+        return mergeOneChatHistory(current, older, "older");
+      });
+    } catch {
+      if (historyPageRef.current === meta && meta.generation === generation) meta.error = true;
+    } finally {
+      if (historyPageRef.current === meta) { meta.pending = false; setHistoryPageEpoch(current => current + 1); }
+    }
+  };
+  // Typing and live events do not change historical timestamps. Reuse one
+  // formatter and compute labels only when the transcript or locale changes.
+  const messageTimeFormatter = useMemo(() => new Intl.DateTimeFormat(appLocale === "ko" ? "ko-KR" : "en-US", {
+    hour: "2-digit", minute: "2-digit",
+  }), [appLocale]);
+  const messageTimeLabels = useMemo(() => new Map(visibleMessages.map(message => {
+    const date = new Date(message.createdAt ?? "");
+    return [message.id, Number.isFinite(date.getTime()) ? messageTimeFormatter.format(date) : ""] as const;
+  })), [visibleMessages, messageTimeFormatter]);
+  const liveResponseMounted = visibleMessages.some((message) => message.id === "one-live-response");
+  const livePromptMounted = Boolean(activeRunPrompt && isPromptOnScreen(visibleMessages, activeRunPrompt.text));
   // The live run's work block: before the streaming reply once text arrives,
   // otherwise at the tail of the thread (after the prompt that started it).
   const liveWorkAnchorMessageId = workBusy && liveResponseMounted ? "one-live-response" : null;
@@ -2064,11 +2286,27 @@ function OneSessionsShell() {
       });
     }
     return planOneThreadWork({
-      messages: visibleMessages.map((message) => ({ id: message.id, role: message.role, createdAt: message.createdAt })),
+      // Plan against the loaded transcript, then mount only the visible page.
+      // Planning against its tail would turn every older run into a leading block.
+      messages: messages.map((message) => ({ id: message.id, role: message.role, createdAt: message.createdAt })),
       runs,
       excludeRunId: workBusy ? activeActivityRunId : null,
     });
-  }, [activeActivityRunId, activity, activityStateRunId, visibleMessages, runStartedAt, threadRuns, workBusy]);
+  }, [activeActivityRunId, activity, activityStateRunId, messages, runStartedAt, threadRuns, workBusy]);
+  const leadingRunIds = useMemo(() => threadWorkPlan.leading.map(block => block.runId), [threadWorkPlan.leading]);
+  const [leadingHistoryWindow, setLeadingHistoryWindow] = useState<{ chatId: string | null; oldestId: string | null } | null>(null);
+  const leadingHistoryAnchor = leadingHistoryWindow?.chatId === workerChatId ? leadingHistoryWindow.oldestId : null;
+  const leadingHistoryStart = oneHistoryWindowStart(leadingRunIds, leadingHistoryAnchor, 3);
+  const visibleLeadingWork = historyStart ? [] : threadWorkPlan.leading.slice(leadingHistoryStart);
+  useLayoutEffect(() => {
+    const previous = historyViewportRef.current;
+    historyViewportRef.current = null;
+    const scroller = scrollRef.current;
+    if (!previous || previous.chatId !== workerChatId || !scroller) return;
+    scroller.scrollTop += previous.anchor?.isConnected
+      ? previous.anchor.getBoundingClientRect().top - previous.top
+      : scroller.scrollHeight - previous.scrollHeight;
+  }, [workerChatId, historyStart, leadingHistoryStart]);
   // The host's quiet status lines (effect check, wait, cycle) fold into the work block of the run they
   // describe — matched by the durable marker's runId, never by wording. A line whose run is not drawn
   // here (live run, or older than the loaded window) stays one quiet line in place.
@@ -2115,7 +2353,6 @@ function OneSessionsShell() {
     document.addEventListener("keydown", closeDrawer);
     return () => document.removeEventListener("keydown", closeDrawer);
   }, [railOpen]);
-  const composerComposingRef = useRef(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   // State, not a ref: the dock mounts after the first render, and an effect keyed
   // on a ref never re-ran, so the dock height was never observed.
@@ -2271,17 +2508,6 @@ function OneSessionsShell() {
     if (selectedConversationId) rememberLastOneConversation(selectedConversationId);
   }, [selectedConversationId, selectedTaskId]);
 
-  useEffect(() => {
-    const input = composerInputRef.current;
-    if (!input) return;
-    const minimumHeight = 24;
-    const maximumHeight = 210;
-    input.style.height = "auto";
-    const nextHeight = Math.max(minimumHeight, Math.min(input.scrollHeight, maximumHeight));
-    input.style.height = `${nextHeight}px`;
-    input.style.overflowY = input.scrollHeight > maximumHeight ? "auto" : "hidden";
-  }, [composer]);
-
   useEffect(() => () => {
     for (const item of attachmentDraftsRef.current) {
       if (item.previewUrl) URL.revokeObjectURL(item.previewUrl);
@@ -2358,7 +2584,15 @@ function OneSessionsShell() {
   useEffect(() => {
     const scroller = scrollRef.current;
     if (!scroller) return;
-    const leaveLatest = () => { readerLeftLatestRef.current = true; scrollFollow.cancel(); };
+    const leaveLatest = () => {
+      readerLeftLatestRef.current = true;
+      scrollFollow.cancel();
+      // Freeze the visible boundary while someone reads. New messages must
+      // neither evict the row they are reading nor unfold earlier history.
+      const current = historyWindowRef.current;
+      if (current.start > 0) setHistoryWindow(previous => previous?.chatId === current.chatId && previous.oldestId
+        ? previous : { chatId: current.chatId, oldestId: current.ids[current.start] ?? null });
+    };
     const wheel = (event: WheelEvent) => { if (event.deltaY < 0) leaveLatest(); };
     const key = (event: KeyboardEvent) => {
       if (["ArrowUp", "PageUp", "Home"].includes(event.key)) leaveLatest();
@@ -2707,9 +2941,9 @@ function OneSessionsShell() {
           && selectedConversationIdRef.current === null
         );
         if (detail && taskRouteStillOwnsScreen()) {
-          setSelected(detail);
+          setSelected(keepPrevIfDeepEqual(detail));
           setConversation(null);
-          setReceipt(detail.latestReceipt ?? null);
+          setReceipt(keepPrevIfDeepEqual(detail.latestReceipt ?? null));
         } else if (!detail && taskRouteStillOwnsScreen()) {
           // A projection is a moving view of the Task. Never turn a transient
           // version mismatch into an empty home that clears the chat history.
@@ -2748,15 +2982,15 @@ function OneSessionsShell() {
           if (detail?.chatId === chatId && conversationRouteStillOwnsScreen()) {
             selectedTaskIdRef.current = promotedTask.id;
             selectedConversationIdRef.current = null;
-            setSelected(detail);
+            setSelected(keepPrevIfDeepEqual(detail));
             setConversation(null);
-            setReceipt(detail.latestReceipt ?? null);
+            setReceipt(keepPrevIfDeepEqual(detail.latestReceipt ?? null));
             router.replace(`/one?task=${encodeURIComponent(promotedTask.id)}`);
           } else if (conversationRouteStillOwnsScreen()) {
             // Keep the stable chat owner visible until the Task projection is
             // coherent. The next store refresh retries the promotion.
             setSelected(null);
-            setConversation(chat);
+            setConversation(keepPrevIfDeepEqual(chat));
             setReceipt(null);
           }
         } else if (chat && chat.originSurface !== "one" && conversationRouteStillOwnsScreen()) {
@@ -2769,7 +3003,7 @@ function OneSessionsShell() {
           router.replace("/one");
         } else if (conversationRouteStillOwnsScreen()) {
           setSelected(null);
-          setConversation(chat);
+          setConversation(keepPrevIfDeepEqual(chat));
           setReceipt(null);
         }
       } else {
@@ -3057,7 +3291,7 @@ function OneSessionsShell() {
      * 화면의 낙관 행을 지우지 않는다 — 없는 것을 사실로 만들지 않기 위해서다.
      */
     if (shownThreadChatIdRef.current === chatId && runChatIdRef.current === chatId && !runIdRef.current) {
-      const history = await readOneChatHistory(api, chatId).catch(() => null);
+      const history = await readOneShellHistory(api, chatId).catch(() => null);
       if (!supersededByNewerRun() && history && shownThreadChatIdRef.current === chatId) {
         const next = toUiMessages(history);
         setMessages((current) => {
@@ -3072,7 +3306,7 @@ function OneSessionsShell() {
           ) return current;
           if (next.length === 0 && current.length > 0) return current;
           return hydrateCachedChatFiles(
-            mergeDurableChatCatchup(current, next),
+            mergeOneShellHistory(current, next),
             chatFileGroupsIncludingMessages(oneChatFileGroupsRef.current, current),
           );
         });
@@ -3379,6 +3613,7 @@ function OneSessionsShell() {
     if (liveRunOwnsActiveThread) {
       runTaskIdRef.current = selected?.taskId ?? runTaskIdRef.current;
       setReceipt(selected?.latestReceipt ?? null);
+      setOutputThreadChatId(activeThreadChatId ?? runChatIdRef.current);
       return () => { cancelled = true; };
     }
 
@@ -3434,6 +3669,7 @@ function OneSessionsShell() {
     }
     setSurface(null);
     setReceipt(selected?.latestReceipt ?? null);
+    setOutputThreadChatId(activeThreadChatId);
     if (!activeThreadChatId) {
       if (freshChatSubmissionPendingRef.current) return;
       if (!selectedTaskId) {
@@ -3498,7 +3734,7 @@ function OneSessionsShell() {
     const screenAlreadyOnThisThread = shownThreadChatIdRef.current === chatId;
     // Read and paint the conversation before asking Main for auxiliary ledgers.
     // A slow work block must not hold the person's messages behind a blank pane.
-    void readOneChatHistory(api, chatId).then((history) => {
+    void readOneShellHistory(api, chatId).then((history) => {
       if (cancelled || activeThreadChatIdRef.current !== chatId) return;
       // A newly created conversation can start its first run before this
       // initial history request resolves. Do not replace the optimistic user
@@ -3532,7 +3768,7 @@ function OneSessionsShell() {
           // 같은 대화인데 서버 스냅샷이 아직 비었다면(첫 실행이 방금 시작됐다면)
           // 사람이 막 친 말과 라이브 응답을 빈 스냅샷으로 지우지 않는다.
           if (hydratedNext.length === 0 && current.length > 0) return current;
-          return mergeDurableChatCatchup(current, hydratedNext);
+          return mergeOneShellHistory(current, hydratedNext);
         });
       }
       // 이 대화의 기록이 화면에 도착했다 — 그 전에는 "대화를 시작해 보세요"·추천을 띄우지 않는다.
@@ -3738,7 +3974,7 @@ function OneSessionsShell() {
       const historyRefresh = createCoalescedRefresh(async (_input: undefined) => {
         if (disposed) return;
         const generation = historyGeneration;
-        await readOneChatHistory(api, activeThreadChatId).then((history) => {
+        await readOneShellHistory(api, activeThreadChatId).then((history) => {
           if (disposed || generation !== historyGeneration || activeThreadChatIdRef.current !== activeThreadChatId) return;
           const states = new Map(history.filter((entry) => entry.goalResult).map((entry) => [entry.durableMessageId ?? entry.id, entry.goalResult]));
           const notices = toUiMessages(history).filter(message => message.hostNotice?.purpose === "automation-report");
@@ -4051,22 +4287,34 @@ function OneSessionsShell() {
     return () => { cancelled = true; };
   }, [activeThreadChatId]);
   const runtimeArtifacts = activity.artifacts;
+  // The route can move before its projection arrives. Hide the old panel in
+  // that first commit, including its native guest, without changing run ownership.
+  const outputRailChatId = selectedTaskId
+    ? (selected?.taskId === selectedTaskId ? selected.chatId : null)
+    : selectedConversationId
+      ? (conversation?.id === selectedConversationId ? conversation.id : null)
+      : null;
+  const outputStateIsCurrent = Boolean(outputRailChatId && outputThreadChatId === outputRailChatId);
+  const outputRailVisible = outputStateIsCurrent && contextRailOpen;
   // The open bit is persisted for convenience, but it is not conversation
   // state. Reset it at each thread boundary so an empty mobile conversation
   // cannot inherit an open, full-screen output rail from the previous thread.
   const outputRailScopeRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (outputRailScopeRef.current === activeThreadChatId) return;
-    outputRailScopeRef.current = activeThreadChatId;
+  useLayoutEffect(() => {
+    // A same-chat Conversation -> Task handoff may briefly have no projection.
+    // Hide during that interval, but preserve the person's panel choice.
+    if (!outputRailChatId && (selectedTaskId || selectedConversationId)) return;
+    if (outputRailScopeRef.current === outputRailChatId) return;
+    outputRailScopeRef.current = outputRailChatId;
     setContextRailOpen(false);
-  }, [activeThreadChatId, setContextRailOpen]);
+  }, [outputRailChatId, selectedTaskId, selectedConversationId, setContextRailOpen]);
 
   const latestRuntimeArtifact = runtimeArtifacts.at(-1) ?? null;
   useEffect(() => {
     const bridge = typeof window === "undefined" ? null : window.agentlas;
     const chatId = activeThreadChatId;
     const surfaceId = surface?.manifestId;
-    if (!bridge?.appFactory || !chatId || !surfaceId) {
+    if (!bridge?.appFactory || !chatId || !surfaceId || !outputRailVisible) {
       setOneLiveAppPreview(null);
       return;
     }
@@ -4135,7 +4383,7 @@ function OneSessionsShell() {
         void bridge.appFactory.releaseLivePreview({ appId, viewLeaseId }).catch(() => undefined);
       }
     };
-  }, [activeThreadChatId, busy, surface?.manifestId]);
+  }, [activeThreadChatId, busy, outputRailVisible, surface?.manifestId]);
 
   // 산출물 목록은 실행 이벤트마다 자란다. 콜백이 그것에 매이면 모든 말풍선의 Markdown memo 가
   // 이벤트마다 깨진다(2026-09-28 X Marketing 스크롤 끊김) — 누를 때 최신 값을 읽는다.
@@ -4296,35 +4544,31 @@ function OneSessionsShell() {
     setQueuedSteers((current) => current.some((item) => item.chatId !== activeThreadChatId)
       ? current.filter((item) => item.chatId === activeThreadChatId)
       : current);
-    if (homeTransitionPendingRef.current && composerDraftKeyRef.current === "new" && composerDraftKey !== "new") return;
-    if (composerDraftKeyRef.current === composerDraftKey) return;
-    const previousKey = composerDraftKeyRef.current;
-    composerDraftKeyRef.current = composerDraftKey;
-    const restored = readOneComposerDraft(composerDraftKey);
+    setStagedSteerState(null);
+  }, [activeThreadChatId, composerDraftKey]);
+  const resolveComposerScopeValue = useCallback((nextKey: string, previousKey: string, inProgress: string) => {
+    const restored = readOneComposerDraft(nextKey);
     // A fresh submit navigates from "new" to the chat it created while the
     // user may already be typing the next instruction into the same box.
     // Restoring that chat's (empty) draft erased what they typed (measured
     // 2026-08-16: text sent during "준비하는 중" vanished without a trace).
     // Carry in-progress text over instead of replacing it with nothing.
-    const inProgress = composerInputRef.current?.value ?? "";
     const pendingCarry = pendingNewChatDraftCarryRef.current;
     const freshSubmitLanding = previousKey === "new"
       && Boolean(pendingCarry)
-      && composerDraftKey === `chat:${pendingCarry?.chatId}`
+      && nextKey === `chat:${pendingCarry?.chatId}`
       && pendingCarry?.navigationEpoch === navigationEpochRef.current;
     if (previousKey === "new") pendingNewChatDraftCarryRef.current = null;
     if (freshSubmitLanding && restored.composer.trim() === "" && inProgress.trim() !== "") {
-      writeOneComposerDraft(composerDraftKey, { composer: inProgress });
+      writeOneComposerDraft(nextKey, { composer: inProgress });
       // The in-progress text now belongs to the exact chat that was just
       // created. Leaving the same text under `new` makes the next explicit New
       // action resurrect it as an unrelated draft.
       writeOneComposerDraft("new", { composer: "", stagedSteer: null });
-      setComposerState(inProgress);
-    } else {
-      setComposerState(restored.composer);
+      return inProgress;
     }
-    setStagedSteerState(null);
-  }, [activeThreadChatId, composerDraftKey]);
+    return restored.composer;
+  }, []);
   // Main starts a queued steer only after the active model turn settles. Attach
   // to that replacement run immediately so the user never has to leave and
   // reopen One to see continued progress.
@@ -4907,14 +5151,14 @@ function OneSessionsShell() {
         let directionVisible = false;
         if (goalDirection && admission.promptMessageId) {
           try {
-            const history = await readOneChatHistory(api, chatId);
+            const history = await readOneShellHistory(api, chatId);
             const durable = toUiMessages(history);
             const exactSavedDirection = durable.some((message) => message.id === admission.promptMessageId && message.role === "user");
             if (exactSavedDirection && activeThreadChatIdRef.current === chatId && !runIdRef.current) {
               directionVisible = true;
               oneTranscriptRevisionRef.current += 1;
               setMessages((current) => activeThreadChatIdRef.current === chatId && !runIdRef.current
-                ? mergeDurableChatCatchup(current.filter((message) => message.id !== optimisticUserMessageId && message.id !== "one-live-response"), durable)
+                ? mergeOneShellHistory(current.filter((message) => message.id !== optimisticUserMessageId && message.id !== "one-live-response"), durable)
                 : current);
               setRejectedGoalDirection({ chatId, goalId: admission.goalId!, messageId: admission.promptMessageId, runId: candidateRunId });
               // A preceding unresolved run is reconciled before this new
@@ -5651,6 +5895,8 @@ function OneSessionsShell() {
         intentId: uid(), chatId, userPrompt: explicitValue,
         createdAt: new Date().toISOString(), request, ...binding,
         agentIds: turnAgentIds.slice(),
+        ...(!binding.submissionId && !binding.waitingParentRunId && runIdRef.current && runChatIdRef.current === chatId
+          && typeof ipc()?.invoke.steerCurrentTurn === "function" ? { currentTurnRunId: runIdRef.current } : {}),
         ...(turnAgentIds.length !== activeTaskforceAgentIds.length
           || turnAgentIds.some(agentId => !activeTaskforceAgentIds.includes(agentId)) ? { requiresReprepare: true } : {}),
       };
@@ -5660,11 +5906,13 @@ function OneSessionsShell() {
           setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, chatId));
           setComposer(current => current === text || current === rawReply ? "" : current);
           setMessageReply(current => current === submittedReply ? null : current);
-          setActionNotice(appLocale === "ko"
-            ? "추가 지시를 로컬에 보관했습니다. Main 접수 확인 중입니다."
-            : "The follow-up is saved locally. Checking Main acceptance.");
+          setMessages(current => current.some(message => message.id === `followup:${intent.intentId}`) ? current
+            : [...current, { id: `followup:${intent.intentId}`, role: "user", text: intent.userPrompt, createdAt: intent.createdAt }]);
+          followupDeliveryNoticeRef.current = null;
+          setActionNotice(null);
         }
-        void reconcileUncertainPreflightSteer(chatId);
+        if (intent.currentTurnRunId && !intent.requiresReprepare) deliverCurrentTurnFollowup(intent, ipc());
+        else void reconcileUncertainPreflightSteer(chatId);
         scrollToLatest();
       } catch {
         setActionNotice(appLocale === "ko"
@@ -6714,9 +6962,12 @@ function OneSessionsShell() {
     homeTransitionPendingRef.current = true;
     freshChatSubmissionPendingRef.current = false;
     pendingNewChatDraftCarryRef.current = null;
+    composerHandleRef.current?.flushDraft();
     writeOneComposerDraft("new", { composer: "", stagedSteer: null });
+    composerHandleRef.current?.switchScope("new", "");
     composerDraftKeyRef.current = "new";
-    setComposerState("");
+    composerValueRef.current = "";
+    setComposerHasText(false);
     setStagedSteerState(null);
     selectedTaskIdRef.current = null;
     selectedConversationIdRef.current = null;
@@ -7129,12 +7380,12 @@ function OneSessionsShell() {
       return;
     }
     if (activeChatIds.includes(chatId)) {
-      window.alert(appLocale === "ko" ? "실행 중인 대화는 먼저 중지한 뒤 삭제할 수 있어요." : "Stop the active run before deleting this conversation.");
+      await alertPopup(appLocale === "ko" ? "실행 중인 대화는 먼저 중지한 뒤 삭제할 수 있어요." : "Stop the active run before deleting this conversation.", { locale: appLocale, tone: "warning" });
       return;
     }
     const target = conversations.find((item) => item.id === chatId);
     const title = target ? briefingSourceName(target.title, appLocale) : (appLocale === "ko" ? "이 대화" : "this conversation");
-    if (!window.confirm(appLocale === "ko" ? `\"${title}\" 대화를 삭제할까요?` : `Delete \"${title}\"?`)) return;
+    if (!await confirmPopup(appLocale === "ko" ? `\"${title}\" 대화를 삭제할까요?` : `Delete \"${title}\"?`, { locale: appLocale, title: appLocale === "ko" ? "대화 삭제" : "Delete conversation", confirmLabel: appLocale === "ko" ? "삭제" : "Delete", tone: "danger" })) return;
     try {
       await api.chats.remove(chatId);
       if (selectedConversationIdRef.current === chatId) {
@@ -7426,12 +7677,13 @@ function OneSessionsShell() {
       resultTopRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
     });
   }, [presentRichOutputRail]);
-  // Browser execution must be visible in the current task. TaskSidePanel owns
-  // the scoped event and tab selection; the shell only reveals its container.
+  // TaskSidePanel observes scoped browser events while the person's explicit
+  // panel choice remains authoritative.
   const presentBrowserOutput = useCallback((url: string) => {
     void url;
-    presentRichOutputRail();
-  }, [presentRichOutputRail]);
+    // A runtime navigation updates the available view; only an explicit
+    // person action may reveal a closed panel.
+  }, []);
   /*
    * 산출물이나 터미널 기록이 하나라도 있으면 오른쪽 패널을 저 혼자 열던 자리
    * (제거, 오너 지시 2026-08-24 "우측사이드바 디폴트로 접히고"). 열림 상태가
@@ -7969,6 +8221,13 @@ function OneSessionsShell() {
     });
   }, [introBlockingCategory, oneIntroPending, oneIntroState]);
 
+  const prepareUiFollowup = useCallback((prompt: string) => {
+    if (!activeThreadChatId || activeThreadChatIdRef.current !== activeThreadChatId || busy || activeSeatDissolved || activeDirectSessionUnavailable) return false;
+    setComposer(current => current.trim() ? `${current}\n\n${prompt}` : prompt);
+    composerInputRef.current?.focus();
+    return true;
+  }, [activeThreadChatId, busy, activeSeatDissolved, activeDirectSessionUnavailable]);
+
   if (!loaded) {
     return <div className={styles.shell}><div className={styles.loadingShell} role="status" aria-live="polite">
       <aside className={styles.loadingRail}><span className={styles.loadingBrand} /><span /><span /><span /><span /></aside>
@@ -7983,7 +8242,7 @@ function OneSessionsShell() {
         className={styles.body}
         data-rail-collapsed={railCollapsed ? "true" : "false"}
         data-rail-open={railOpen ? "true" : "false"}
-        data-context-rail={(selected || conversation) && contextRailOpen ? "true" : "false"}
+        data-context-rail={outputRailVisible ? "true" : "false"}
         data-context-rail-kind={oneOutputKind}
         data-task-active={selected || conversation ? "true" : "false"}
         data-home={!selected && !conversation ? "true" : "false"}
@@ -8206,7 +8465,7 @@ function OneSessionsShell() {
         <main
           className={styles.workspace}
           data-runtime-artifacts={runtimeArtifacts.length > 0 ? "true" : "false"}
-          data-context-rail={(selected || conversation) && contextRailOpen ? "true" : "false"}
+          data-context-rail={outputRailVisible ? "true" : "false"}
           data-context-rail-kind={oneOutputKind}
           data-split-active={splitPanes.length > 0 ? "true" : "false"}
           data-mail-view={railMode === "mail" ? "true" : undefined}
@@ -8313,13 +8572,13 @@ function OneSessionsShell() {
                   type="button"
                   className={styles.taskToolbarOutputToggle}
                   data-one-output-toggle="true"
-                  data-active={contextRailOpen ? "true" : "false"}
-                  aria-label={contextRailOpen
+                  data-active={outputRailVisible ? "true" : "false"}
+                  aria-label={outputRailVisible
                     ? (appLocale === "ko" ? "결과 패널 닫기" : "Close result panel")
                     : (appLocale === "ko" ? "결과 패널 열기" : "Open result panel")}
-                  aria-expanded={contextRailOpen}
+                  aria-expanded={outputRailVisible}
                   onClick={() => {
-                    if (contextRailOpen) {
+                    if (outputRailVisible) {
                       setContextRailOpen(false);
                       return;
                     }
@@ -8354,10 +8613,10 @@ function OneSessionsShell() {
                         </button>
                       )}
                       <button type="button" role="menuitem" className={panelMenu.panelMenuRow} onClick={() => { setTaskMenuOpen(false); startNewConversation(); }}>
-                        {tFor(appLocale, "one.shell.rail.new_conversation")}
+                        <IconPlus size={15} />{tFor(appLocale, "one.shell.rail.new_conversation")}
                       </button>
                       <button type="button" role="menuitem" className={panelMenu.panelMenuRow} onClick={() => { setTaskMenuOpen(false); setSessionSheetOpen(true); }}>
-                        {appLocale === "ko" ? "에이전트 세션" : "Agent sessions"}
+                        <IconUsers size={15} />{appLocale === "ko" ? "에이전트 세션" : "Agent sessions"}
                       </button>
                     </div>
                   )}
@@ -8439,7 +8698,31 @@ function OneSessionsShell() {
                       </div>
                     </section>
                   )}
-                  {threadWorkPlan.leading.map((block) => (
+                  {(historyStart > 0 || historyAnchor || leadingHistoryAnchor || olderHistoryAvailable || olderHistoryError) && (
+                    <div className={styles.historyDisclosure} data-one-main-history-window="true">
+                      {(historyStart > 0 || olderHistoryAvailable) && <button type="button" data-one-main-history="earlier"
+                        disabled={olderHistoryPending || olderHistoryError} onClick={() => { void revealEarlierHistory(); }}>
+                        {olderHistoryPending ? (appLocale === "ko" ? "이전 대화 불러오는 중…" : "Loading earlier conversation…")
+                          : historyStart > 0 ? (appLocale === "ko" ? `이전 대화 ${historyStart}개 펼치기` : `Show ${historyStart} earlier messages`)
+                            : (appLocale === "ko" ? "더 이전 대화 펼치기" : "Show older conversation")}
+                      </button>}
+                      {olderHistoryError && <small>{appLocale === "ko" ? "이전 대화를 불러오지 못했습니다. 대화를 다시 열어 주세요." : "Earlier conversation could not be loaded. Reopen the conversation."}</small>}
+                      {(historyAnchor || leadingHistoryAnchor) && <button type="button" data-one-main-history="collapse" onClick={() => {
+                        historyViewportRef.current = null;
+                        historyPageRef.current.generation += 1;
+                        setHistoryWindow({ chatId: workerChatId, oldestId: null });
+                        setLeadingHistoryWindow({ chatId: workerChatId, oldestId: null });
+                        scrollToLatest("auto");
+                      }}>{appLocale === "ko" ? "최근 대화만 보기" : "Show recent conversation"}</button>}
+                    </div>
+                  )}
+                  {!historyStart && leadingHistoryStart > 0 && <div className={styles.historyDisclosure}>
+                    <button type="button" data-one-main-work-history="earlier" onClick={() => {
+                      preserveHistoryViewport();
+                      setLeadingHistoryWindow({ chatId: workerChatId, oldestId: revealOneHistoryPage(leadingRunIds, leadingHistoryStart, 3) });
+                    }}>{appLocale === "ko" ? `이전 작업 ${leadingHistoryStart}개 펼치기` : `Show ${leadingHistoryStart} earlier runs`}</button>
+                  </div>}
+                  {visibleLeadingWork.map((block) => (
                     <Fragment key={`work:${block.runId}`}>
                       {/* 단톡에도 1:1과 같은 도구 호출 로그 표면을 남긴다 (G-4).
                           워커 도구 이벤트는 agentName이 붙어 오므로 행에 발화자가 보인다. */}
@@ -8456,7 +8739,7 @@ function OneSessionsShell() {
                         locale={appLocale}
                         workspacePath={workspacePath}
                       />
-                      {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
+                      {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${block.runId}`} state={block.state} org={oneOrgState} locale={appLocale} />}
                     </Fragment>
                   ))}
                   {visibleMessages.map((message, messageIndex) => {
@@ -8495,7 +8778,7 @@ function OneSessionsShell() {
                     const assistantGroupStart = message.role === "assistant"
                       && visibleMessages[messageIndex - 1]?.role !== "assistant";
                     return (
-                      <Fragment key={message.id}>
+                      <Fragment key={message.intellectUiMessageId ?? message.id}>
                         {(departurePlan.beforeMessage.get(message.id) ?? []).map((notice) => (
                           <p key={notice.id} className={styles.departureNotice} data-one-departure="true">
                             <span aria-hidden="true">---------</span>
@@ -8504,7 +8787,7 @@ function OneSessionsShell() {
                           </p>
                         ))}
                         {liveBefore && !preflightPrompt && <>
-                          {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
+                          {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${activeActivityRunId ?? "pending"}`} state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                           {liveWorkBlock}
                         </>}
                         {(displayedText || hasAttachments) && !foldedIntoWork && (drawsAsHostNotice
@@ -8524,6 +8807,7 @@ function OneSessionsShell() {
                           <MessageActions messageId={message.id} author={message.role === "user" ? (appLocale === "ko" ? "나" : "You") : assistantSpeaker.label} text={displayedText} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
                           <article
                             className={styles.message}
+                            data-one-message-id={message.id}
                             data-role={message.role}
                             data-kind={isResultContinuationMessage(message) ? "continuity" : undefined}
                             data-taskforce={activeTaskforce ? "true" : undefined}
@@ -8549,7 +8833,7 @@ function OneSessionsShell() {
                               <div className={styles.taskforceMessageMeta}>
                                 <span>
                                   <strong>{message.role === "user" ? (appLocale === "ko" ? "나" : "You") : assistantSpeaker.label}</strong>
-                                  {message.createdAt && <time dateTime={message.createdAt}>{new Date(message.createdAt).toLocaleTimeString(appLocale === "ko" ? "ko-KR" : "en-US", { hour: "2-digit", minute: "2-digit" })}</time>}
+                                  {message.createdAt && <time dateTime={message.createdAt}>{messageTimeLabels.get(message.id)}</time>}
                                 </span>
                               </div>
                             )}
@@ -8565,8 +8849,8 @@ function OneSessionsShell() {
                               <ChatFileCards files={message.chatFiles} locale={appLocale} onOpen={openOneChatFile} />
                             )}
                             {(displayedText || (message.files?.some((file) => file.kind !== "image") ?? false)) && (
-                            <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && isDocumentLikeText(message.text) ? "true" : undefined}
-                              data-one-visual-answer={message.role === "assistant" && hasInlineVisualBlock(message.text) ? "true" : undefined}>
+                            <div className={styles.messageBody} data-doc={message.role === "assistant" && !message.streaming && !hasIntellectUiFence(displayedText) && isDocumentLikeText(message.text) ? "true" : undefined}
+                              data-one-visual-answer={message.role === "assistant" && (hasInlineVisualBlock(message.text) || hasIntellectUiFence(displayedText)) ? "true" : undefined}>
                               {message.files && message.files.filter((f) => f.kind !== "image").length > 0 && (
                                 <div className={styles.messageFiles}>
                                   {message.files.filter((f) => f.kind !== "image").map((f, i) => (
@@ -8582,13 +8866,13 @@ function OneSessionsShell() {
                                 * 아직 한 줄인 글을 문서 카드로 세우면 빈 액자가 된다.
                                 */}
                               <GoalResultReport result={message.goalResult} locale={appLocale}>
-                              {displayedText && (message.streaming
-                                ? <StreamingMarkdown text={displayedText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} />
+                              {displayedText && ((message.streaming || hasIntellectUiFence(displayedText))
+                                ? <StreamingMarkdown text={displayedText} messageId={message.intellectUiMessageId ?? message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} />
                                 : (() => {
                                   const documentMark = readOneDocumentMark(displayedText);
                                   return documentMark
                                     ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={message.id} />
-                                    : <Markdown text={displayedText} messageId={message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} />;
+                                    : <Markdown text={displayedText} messageId={message.intellectUiMessageId ?? message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} />;
                                 })())}
                               {message.role === "assistant" && !message.streaming && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
                               </GoalResultReport>
@@ -8638,7 +8922,7 @@ function OneSessionsShell() {
                                 ? { onRetry: () => retryUnansweredTurn(message.text, block.state.model), retryDisabled: busy }
                                 : {})}
                             />
-                            {activeTaskforce && <OneTaskforceConversation state={block.state} org={oneOrgState} locale={appLocale} />}
+                            {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${block.runId}`} state={block.state} org={oneOrgState} locale={appLocale} />}
                           </Fragment>
                         ))}
                       </Fragment>
@@ -8671,7 +8955,7 @@ function OneSessionsShell() {
                         </article>
                         </MessageActions>
                       )}
-                      {activeTaskforce && <OneTaskforceConversation state={renderedActivity} org={oneOrgState} locale={appLocale} />}
+                      {activeTaskforce && <OneTaskforceConversation historyIdentity={`${workerChatId}:${activeActivityRunId ?? "pending"}`} state={renderedActivity} org={oneOrgState} locale={appLocale} />}
                       {liveWorkBlock}
                     </>
                   )}
@@ -9075,13 +9359,13 @@ function OneSessionsShell() {
                     let directionVisible = false;
                     if (admission.goalId && admission.promptMessageId) {
                       try {
-                        const history = await readOneChatHistory(api, pending.chatId);
+                        const history = await readOneShellHistory(api, pending.chatId);
                         const durable = toUiMessages(history);
                         directionVisible = durable.some((message) => message.id === admission.promptMessageId && message.role === "user");
                         if (directionVisible && activeThreadChatIdRef.current === pending.chatId && !runIdRef.current) {
                           oneTranscriptRevisionRef.current += 1;
                           setMessages((current) => activeThreadChatIdRef.current === pending.chatId && !runIdRef.current
-                            ? mergeDurableChatCatchup(current, durable) : current);
+                            ? mergeOneShellHistory(current, durable) : current);
                           setRejectedGoalDirection({ chatId: pending.chatId, goalId: admission.goalId,
                             messageId: admission.promptMessageId, runId: pending.runId });
                         } else directionVisible = false;
@@ -9380,7 +9664,22 @@ function OneSessionsShell() {
                 </button>
               </div>
             ))}
-            {localFollowupIntents.filter(item => item.chatId === activeThreadChatId).map(item => (
+            {currentTurnFollowups.filter(item => item.intent.chatId === activeThreadChatId
+              && (item.receipt.status === "uncertain" || item.receipt.status === "rejected")).map(item => (
+              <div key={item.intent.intentId} className={styles.steeringQueue} role="status" data-one-current-turn-followup={item.receipt.status}>
+                <strong>{item.intent.userPrompt}</strong>
+                <small>{item.receipt.status === "uncertain"
+                  ? (appLocale === "ko" ? "이 지시가 전달됐는지 확인하지 못했습니다. 다시 보내지 않고 보관합니다." : "Delivery is unconfirmed. This instruction is preserved without resending it.")
+                  : (appLocale === "ko" ? "이 지시를 현재 실행에 전달하지 못했습니다." : "This instruction was not delivered to the current run.")}</small>
+                {item.receipt.status === "rejected" && <button type="button" disabled={composerHasText} onClick={() => {
+                  if (composerHandleRef.current?.getValue().trim()) return;
+                  setComposer(item.intent.userPrompt);
+                  setCurrentTurnFollowups(current => current.filter(value => value.intent.intentId !== item.intent.intentId));
+                }}>{appLocale === "ko" ? "초안으로 가져오기" : "Restore draft"}</button>}
+              </div>
+            ))}
+            {localFollowupIntents.filter(item => item.chatId === activeThreadChatId
+              && (delayedFollowupIds.has(item.intentId) || item.requiresReprepare || item.autoDeliveryPaused)).map(item => (
               <div key={item.intentId} className={styles.steeringQueue} role="status" data-one-local-followup={item.intentId}>
                 <span>{item.autoDeliveryPaused || locallyStoppedFollowupIdsRef.current.has(item.intentId)
                   ? (appLocale === "ko" ? "추가 지시 자동 전달 중단" : "Follow-up delivery paused")
@@ -9391,7 +9690,7 @@ function OneSessionsShell() {
                   {appLocale === "ko" ? "이 지시의 전달 명시적으로 재개" : "Explicitly resume this instruction"}
                 </button>}
                 {item.requiresReprepare ? (
-                  <button type="button" disabled={busy || teamPreflightBusy || Boolean(composer.trim())} onClick={() => restoreUnsentFollowup(item)}>
+                  <button type="button" disabled={busy || teamPreflightBusy || composerHasText} onClick={() => restoreUnsentFollowup(item)}>
                     {appLocale === "ko" ? "작업 종료 후 초안 복원" : "Restore draft when idle"}
                   </button>
                 ) : (
@@ -9399,7 +9698,7 @@ function OneSessionsShell() {
                     <button type="button" onClick={() => void reconcileUncertainPreflightSteer(item.chatId)}>
                       {appLocale === "ko" ? "접수 다시 확인" : "Check acceptance again"}
                     </button>
-                    {item.waitingParentRunId && <button type="button" disabled={busy || teamPreflightBusy || Boolean(composer.trim())} onClick={() => void restoreUnsentFollowup(item)}>
+                    {item.waitingParentRunId && <button type="button" disabled={busy || teamPreflightBusy || composerHasText} onClick={() => void restoreUnsentFollowup(item)}>
                       {appLocale === "ko" ? "첫 요청 거절 확인 후 초안 복원" : "Restore draft after confirmed rejection"}
                     </button>}
                   </>
@@ -9454,7 +9753,7 @@ function OneSessionsShell() {
             </div>}
             {/* 새 세션 추천 작업 — 작성창 바로 위(오너 2026-09-26, Codex 식). */}
             {firstRequestEntry && !activeSeatDissolved && (
-              <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composer.trim().length > 0} />
+              <OneFirstRequestCards locale={appLocale} entry={firstRequestEntry} cards={firstRequestCards} onInsert={insertFirstRequestPrompt} hasDraft={composerHasText} />
             )}
             <MessageReplyPreview reply={messageReply} locale={appLocale} onDismiss={() => setMessageReply(null)} />
             <form className={styles.composer} data-one-composer="true" data-unavailable={activeDirectSessionUnavailable ? "true" : undefined} style={activeSeatDissolved ? { display: "none" } : undefined} onSubmit={(event) => {
@@ -9474,33 +9773,21 @@ function OneSessionsShell() {
                 aria-hidden="true"
                 onChange={(event) => { if (event.target.files?.length) void addAttachmentFiles(event.target.files); }}
               />
-              <textarea
-                ref={composerInputRef}
-                /* 초점 링은 감싼 작성창(.composer:focus-within)이 그린다. */
+              <OneComposerInput
+                ref={composerHandleRef}
+                inputRef={composerInputRef}
+                scopeKey={homeTransitionPendingRef.current && composerDraftKeyRef.current === "new" && composerDraftKey !== "new" ? "new" : composerDraftKey}
+                readDraft={readOneComposerInputDraft}
+                writeDraft={writeOneComposerInputDraft}
+                resolveScopeValue={resolveComposerScopeValue}
+                onValueChange={onComposerValueChange}
+                onSubmit={(submittedValue) => {
+                  if (activeSeatDissolved || activeDirectSessionUnavailable) return;
+                  if (busy && !submittedValue.trim()) stopRun();
+                  else void submit(submittedValue);
+                }}
                 data-focus-ring="wrapper"
                 rows={1}
-                value={composer}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  setComposer(value);
-                  setAgentPickerOpen(/(^|\s)@[^\s]*$/u.test(value));
-                }}
-                onCompositionStart={() => { composerComposingRef.current = true; }}
-                onCompositionEnd={() => {
-                  window.setTimeout(() => { composerComposingRef.current = false; }, 0);
-                }}
-                onBlur={() => { composerComposingRef.current = false; }}
-                onKeyDown={(event) => {
-                  // Snapshot the native textarea value for this key event.
-                  // React state can trail rapid accessibility input by one
-                  // render and must not let the following prompt overwrite it.
-                  const submittedValue = event.currentTarget.value;
-                  handleComposerKey(
-                    event,
-                    busy && !submittedValue.trim() ? stopRun : () => void submit(submittedValue),
-                    composerComposingRef.current,
-                  );
-                }}
                 onPaste={(event) => {
                   // 클립보드에는 스크린샷뿐 아니라 Finder 파일, 오디오·비디오, 생성된
                   // 문서도 File로 온다. 모든 File을 같은 안전 첨부 파이프로 보내고,
@@ -9663,22 +9950,22 @@ function OneSessionsShell() {
                     composerRef={composerInputRef}
                     disabled={composerSettingsBlocked}
                   />
-                  {(busy || composer.trim() || attachmentDrafts.length > 0) && (
+                  {(busy || composerHasText || attachmentDrafts.length > 0) && (
                     <button
                       type="submit"
                       className={styles.sendButton}
-                      data-one-steering-send={busy && composer.trim() ? "true" : undefined}
-                      disabled={!busy && ((!composer.trim() && attachmentDrafts.length === 0) || composerInteractionBlocked)}
+                      data-one-steering-send={busy && composerHasText ? "true" : undefined}
+                      disabled={!busy && ((!composerHasText && attachmentDrafts.length === 0) || composerInteractionBlocked)}
                       aria-label={busy
-                        ? composer.trim()
+                        ? composerHasText
                           ? (appLocale === "ko" ? "진행 중 작업에 지시 추가" : "Add instruction to the ongoing task")
                           : tFor(appLocale, "one.shell.composer.stop_run_aria")
                         : tFor(appLocale, "one.shell.composer.send_aria")}
-                      title={busy && composer.trim()
+                      title={busy && composerHasText
                         ? (appLocale === "ko" ? "현재 실행을 유지하고 완료 후 다음 지시를 이어서 실행합니다" : "Keeps the current execution running, then continues with the next instruction")
                         : undefined}
                     >
-                      {busy && !composer.trim() ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
+                      {busy && !composerHasText ? <span className={styles.stopGlyph} aria-hidden="true" /> : <IconArrowUp size={20} strokeWidth={2} aria-hidden="true" />}
                     </button>
                   )}
                 </div>
@@ -9690,16 +9977,8 @@ function OneSessionsShell() {
           </div>
 
           {sessionSheetOpen && (
-            <section className={styles.sessionSheet} role="dialog" aria-modal="true" aria-label={appLocale === "ko" ? "에이전트 세션" : "Agent sessions"}>
-              <header className={styles.sessionSheetHeader}>
-                <strong>{appLocale === "ko" ? "에이전트 세션" : "Agent sessions"}</strong>
-                <span className={styles.sessionSheetHint}>
-                  {appLocale === "ko"
-                    ? `세션 분할 ${splitPanes.length + 1}/4`
-                    : `Split ${splitPanes.length + 1}/4`}
-                </span>
-                <button type="button" className={styles.iconButton} aria-label={appLocale === "ko" ? "닫기" : "Close"} onClick={() => setSessionSheetOpen(false)}><IconClose size={14} /></button>
-              </header>
+            <OneBottomSheet open={sessionSheetOpen} onClose={() => setSessionSheetOpen(false)} closeLabel={appLocale === "ko" ? "닫기" : "Close"} title={appLocale === "ko" ? "에이전트 세션" : "Agent sessions"} icon={<IconUsers size={20} />} size="compact">
+              <div className={styles.sessionSplitMeter} aria-label={appLocale === "ko" ? `세션 분할 ${splitPanes.length + 1}/4` : `Split ${splitPanes.length + 1}/4`}><IconPanelRight size={17} /><span>{appLocale === "ko" ? "세션 분할" : "Split"}</span>{[0,1,2,3].map(index => <i key={index} data-filled={index <= splitPanes.length} aria-hidden="true" />)}<small>{splitPanes.length + 1}/4</small></div>
               <div className={styles.sessionSheetList}>
                 {sessionGroups.rows.length === 0 && (
                   <p className={styles.sessionSheetEmpty}>{appLocale === "ko" ? "아직 세션이 없습니다." : "No sessions yet."}</p>
@@ -9743,12 +10022,12 @@ function OneSessionsShell() {
                   );
                 })}
               </div>
-            </section>
+            </OneBottomSheet>
           )}
 
           {searchOpen && (
             <section ref={searchSheetRef} className={styles.searchSheet} role="dialog" aria-modal="true" aria-label={tFor(appLocale, "one.shell.search.dialog_aria")} onKeyDown={trapSearchFocus}>
-              <div className={styles.searchHeader}><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tFor(appLocale, "one.shell.search.placeholder")} /><button type="button" className={styles.iconButton} aria-label={tFor(appLocale, "one.shell.search.close_aria")} onClick={() => setSearchOpen(false)}><IconClose size={14} /></button></div>
+              <div className={styles.searchHeader}><IconSearch size={18} /><input autoFocus value={query} onChange={(event) => setQuery(event.target.value)} placeholder={tFor(appLocale, "one.shell.search.placeholder")} /><button type="button" className={styles.iconButton} aria-label={tFor(appLocale, "one.shell.search.close_aria")} onClick={() => setSearchOpen(false)}><IconClose size={14} /></button></div>
               <div className={styles.searchScope}>
                 <span>{tFor(appLocale, "one.shell.search.scope")}</span>
                 <label><input type="checkbox" checked={searchIncludeArchived} onChange={(event) => setSearchIncludeArchived(event.target.checked)} />{tFor(appLocale, "one.shell.search.include_archived")}</label>
@@ -9845,12 +10124,16 @@ function OneSessionsShell() {
                 startNewConversation();
                 const api = ipc();
                 const recommendationId = entry.recommendation?.id;
+            const draftNavigationEpoch = navigationEpochRef.current;
                 if (!api || !recommendationId) {
                   requestOneOperationalRecovery("computer-history-draft", new Error("Computer History evidence unavailable"));
                   return;
                 }
                 void api.computerHistory.prepareDraft(recommendationId, appLocale)
-                  .then((draft) => setComposer(draft.prompt))
+                  .then((draft) => {
+                    if (navigationEpochRef.current !== draftNavigationEpoch || composerDraftKeyRef.current !== "new") return;
+                    setComposer(current => current === "" ? draft.prompt : current);
+                  })
                   .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
               }}
             />
@@ -9858,13 +10141,13 @@ function OneSessionsShell() {
           </aside>
         )}
         <TaskSidePanel
-          items={runtimeArtifacts}
+          items={outputStateIsCurrent ? runtimeArtifacts : []}
           onRequestOpen={presentRichOutputRail}
-          activity={activity}
+          activity={outputStateIsCurrent ? activity : undefined}
           locale={appLocale}
-          visible={Boolean((selected || conversation) && contextRailOpen)}
-          workerSelection={workerSelection}
-          workerRun={workerRun}
+          visible={outputRailVisible}
+          workerSelection={outputStateIsCurrent ? workerSelection : null}
+          workerRun={outputStateIsCurrent ? workerRun : null}
           onCloseWorker={() => setWorkerSelection(null)}
           onAdd={() => attachmentInputRef.current?.click()}
           onClose={() => setContextRailOpen(false)}
@@ -9875,7 +10158,7 @@ function OneSessionsShell() {
           minWidth={ONE_CONTEXT_RAIL_WIDTH_MIN}
           maxWidth={contextRailViewportMax()}
           defaultWidth={ONE_CONTEXT_RAIL_WIDTH_DEFAULT}
-          result={selected && (surface || (receipt && ["completed", "failed", "cancelled", "interrupted"].includes(receipt.status))) ? (
+          result={outputStateIsCurrent && selected && (surface || (receipt && ["completed", "failed", "cancelled", "interrupted"].includes(receipt.status))) ? (
             <OneAdaptiveResult
               manifest={surface}
               projection={selected}
@@ -9896,13 +10179,13 @@ function OneSessionsShell() {
               onManageImprovementAsset={manageImprovementAsset}
             />
           ) : null}
-          resultKey={surface
+          resultKey={!outputStateIsCurrent ? null : surface
             ? `surface:${surface.manifestId}`
             : receipt && selected
               ? `receipt:${selected.taskId}:${receipt.runId}:${receipt.status}`
               : null}
           resultKind={oneOutputKind}
-          appPreview={oneLiveAppPreview}
+          appPreview={outputStateIsCurrent ? oneLiveAppPreview : null}
           computerHistory={computerHistory}
           onHistoryConsent={enableComputerHistory}
           onHistoryClear={() => setHistoryClearConfirmOpen(true)}
@@ -9916,12 +10199,16 @@ function OneSessionsShell() {
             startNewConversation();
             const api = ipc();
             const recommendationId = entry.recommendation?.id;
+            const draftNavigationEpoch = navigationEpochRef.current;
             if (!api || !recommendationId) {
               requestOneOperationalRecovery("computer-history-draft", new Error("Computer History evidence unavailable"));
               return;
             }
             void api.computerHistory.prepareDraft(recommendationId, appLocale)
-              .then((draft) => setComposer(draft.prompt))
+              .then((draft) => {
+                if (navigationEpochRef.current !== draftNavigationEpoch || composerDraftKeyRef.current !== "new") return;
+                setComposer(current => current === "" ? draft.prompt : current);
+              })
               .catch((cause) => requestOneOperationalRecovery("computer-history-draft", cause));
               }}
           onBrowserAnnotation={receipt => {
@@ -9933,7 +10220,8 @@ function OneSessionsShell() {
           }}
           screenChatId={activeThreadChatId}
           browserScopeKey={activeThreadChatId ?? selected?.taskId ?? conversation?.id}
-          browserHistoryUrl={durableThreadBrowserUrl}
+          navigationKey={JSON.stringify([selectedTaskId, selectedConversationId])}
+          browserHistoryUrl={outputStateIsCurrent ? durableThreadBrowserUrl : undefined}
           onBrowserObserved={presentBrowserOutput}
         />
       </div>
@@ -9990,8 +10278,8 @@ function OneSessionsShell() {
         closeOnBackdrop={!historyClearBusy}
         closeOnEscape={!historyClearBusy}
         dialogRole="alertdialog"
-        size="wide"
-        eyebrow={appLocale === "ko" ? "컴퓨터 사용 기록" : "Computer History"}
+        size="compact"
+        icon={<IconTrash size={20} />}
         title={appLocale === "ko" ? "컴퓨터 사용 기록을 지울까요?" : "Clear Computer History?"}
         titleId="one-computer-history-clear-title"
         ariaLabelledBy="one-computer-history-clear-title"

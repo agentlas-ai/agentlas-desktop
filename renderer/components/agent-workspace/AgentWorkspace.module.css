@@ -173,3 +173,29 @@
 @media (max-width: 900px) { .listPane { width: 200px; flex-basis: 200px; } .tree { width: 150px; flex-basis: 150px; } .projectAttach select { max-width: 95px; } .syncNode { min-width: 85px; padding: 10px; } .syncEdge svg { width: 48px; } .syncGraph { padding: 14px 8px; gap: 8px; } .detail { padding: 16px; } }
 @media (max-width: 650px) { .projectAttach { display: none; } .tree { width: 120px; flex-basis: 120px; } .listPane { width: 165px; flex-basis: 165px; } .fileRole, .treeRole { display: none; } .toolbar { padding: 7px; } .rail { width: 40px; flex-basis: 40px; } .railButton { width: 34px; } .reviewSummary { padding: 8px; } .lineNumber { width: 29px; flex-basis: 29px; padding-right: 4px; } }
 @media (prefers-reduced-motion: reduce) { .loading { animation: none; } }
+
+/* Portal popup controls share the app's focus and backdrop behavior. */
+.popupSearch { display:flex; align-items:center; gap:10px; min-height:46px; padding:10px 12px; border:1px solid var(--paper-edge-strong); border-radius:12px; background:var(--popup-control-bg); color:var(--muted-deep); }
+.popupSearch input { width:100%; min-width:0; border:0; outline:0; color:var(--ink); background:transparent; font-size:14px; }
+.popupSearch kbd { font-size:12px; color:var(--muted-deep); }
+.popupFiles { display:flex; flex-direction:column; gap:4px; max-height:min(420px,48dvh); overflow:auto; margin-top:12px; }
+.popupFile { display:flex; align-items:center; gap:12px; width:100%; min-height:52px; border:0; border-radius:10px; padding:10px; text-align:left; background:transparent; color:var(--ink-soft); }
+.popupFile:hover,.popupFile:focus-visible { background:var(--popup-control-bg); }
+.popupFile > span { min-width:0; display:flex; flex-direction:column; gap:3px; }
+.popupFile strong { font-size:13px; font-weight:600; }
+.popupFile small { font-size:11px; color:var(--muted-deep); overflow-wrap:anywhere; }
+.popupPath { display:flex; flex-direction:column; gap:8px; margin-bottom:16px; font-size:12px; color:var(--ink-soft); }
+.popupPath input { min-height:44px; width:100%; min-width:0; border:1px solid var(--paper-edge-strong); border-radius:10px; padding:10px 12px; background:var(--popup-control-bg); color:var(--ink); font-size:13px; }
+.popupNote { display:flex; gap:8px; align-items:flex-start; margin:12px 0; color:var(--ink-soft); font-size:12px; line-height:1.55; }
+.popupNote svg { flex-shrink:0; margin-top:2px; color:var(--muted-deep); }
+.importRows { display:flex; flex-direction:column; gap:8px; max-height:30dvh; overflow:auto; margin:12px 0; }
+.importRow { display:flex; align-items:flex-start; gap:10px; padding:12px; border:1px solid var(--paper-edge); border-radius:12px; background:var(--popup-control-bg); color:var(--ink-soft); }
+.importRow > div { min-width:0; flex:1; }
+.importRow strong,.importRow small { display:block; overflow-wrap:anywhere; }
+.importRow strong { font-size:13px; }
+.importRow small { font-size:11px; line-height:1.6; color:var(--muted-deep); margin-top:4px; }
+.importRow details { margin-top:8px; }
+
+.importFacts > dl{grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.importFacts > dl > div{grid-template-columns:1fr;justify-items:center;gap:5px;padding:10px 6px;text-align:center}.importFacts dd{font-size:20px!important;font-weight:650;color:var(--ink)!important}.importFacts dt{font-size:11px!important}.importRows{max-height:38dvh}
+
+.fileMenu button{display:flex;align-items:center;gap:9px;min-height:42px}.fileMenu{border-radius:12px!important;background:var(--popup-card-bg)!important;box-shadow:var(--popup-shadow)!important}

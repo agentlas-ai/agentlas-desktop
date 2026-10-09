@@ -298,3 +298,6 @@
   grid-column: 3;
   justify-self: center;
 }
+
+.menu { border-radius: 14px; background: var(--popup-card-bg, var(--paper)); box-shadow: var(--popup-shadow); }
+.option { min-height: 44px; }

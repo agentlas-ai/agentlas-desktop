@@ -16,6 +16,7 @@ import { AGI_NON_ALTERNATIVE_ACTIONS } from "./blocker";
 import { AGI_ACTION_SCHEMA, type AgiActionExecutor, type AgiActionReceipt } from "./actions";
 import type { AgiUnblockHandler, AgiUnblockInput, AgiUnblockResult } from "./monitor";
 import type { AgiModelAttempt } from "./model-attempt";
+import { runtimeFailureBlocksReplay } from "../runtime/selection";
 
 function actionId(input: AgiUnblockInput, attempt: number, action: string, index: number): string {
   const incident = input.incidentId.replace(/[^A-Za-z0-9]/g, "").slice(-24);
@@ -116,7 +117,8 @@ export function createAgiDeterministicHandler(executor: AgiActionExecutor, readF
           && result.actions?.some(action => action.action === "rest" && action.result === "goal_episode_wait_registered") === true;
         const refusal = controlRefusal();
         if (refusal && result.outcome !== "acted" && result.outcome !== "needs-human" && !waitRegistered) final = { ...result, outcome: "rested", code: refusal };
-        if (!refusal && !workStarted && result.outcome !== "acted" && !waitRegistered) {
+        if (!refusal && !workStarted && result.outcome !== "acted" && !waitRegistered
+          && !runtimeFailureBlocksReplay({ providerCode: result.code })) {
           const version = executor.currentVersion(input.goalId);
           const acted = version !== null && deterministic({ ...fence, runVersion: version });
           final = { ...result, outcome: acted ? "acted" : result.outcome, code: acted ? "agi.model-fallback-acted" : result.code,

@@ -9,6 +9,7 @@ import { outsideInvocationJudgmentContext } from "../runtime/judgment-context";
 import { oneGraphDispatch } from "./graph-dispatch";
 import { AGENTLAS_ONE_TEAM_TOOL_NAMES } from "./team-mcp-server";
 import { ONE_SUPERVISOR_TOOL_NAMES } from "../../shared/one-supervisor-tools";
+import { supervisorError } from "../../shared/one-supervisor";
 import {
   oneTeamCreateMember,
   oneTeamComposeGroup,
@@ -93,18 +94,21 @@ function readJsonBody(req: http.IncomingMessage): Promise<Record<string, unknown
   });
 }
 
-export async function handleOneTeamControlRequest(request: Record<string, unknown>): Promise<unknown> {
-  if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("one-team-capability-invalid");
-  const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
-  if (!binding) throw new Error("one-team-capability-invalid");
-  if (request.operation === "supervisor") {
-    if (binding.scope === "toolchain-consumer") throw new Error("one-team-consumer-scope");
+/** Internal capability dispatch shared by the same-process host and the
+ * authenticated original native source callback. Not an IPC/HTTP endpoint. */
+export async function dispatchOneSupervisorTool(binding: Pick<OneTeamCapabilityBinding,'chatId'|'supervisorReplyRunId'>,name:string,input:Record<string,unknown>):Promise<unknown> {
     const {isPersonalSupervisorConversation,oneSupervisor} = require("./supervisor") as typeof import("./supervisor");
     if (!binding.chatId || !isPersonalSupervisorConversation(binding.chatId)) throw new Error("supervisor_personal_conversation_required");
-    const input = request.input && typeof request.input === "object" && !Array.isArray(request.input) ? request.input as Record<string, unknown> : {};
-    const service = oneSupervisor();
-    service.assertConversation(binding.chatId);
-    switch (request.name) {
+    const service = (await import("./supervisor")).supervisorRunsInDaemon() ? oneSupervisor() : (await import("./supervisor-native-runtime")).oneSupervisorEndpoint();
+    await service.assertConversation(binding.chatId);
+    const observation = name === "one_supervisor_status" || name === "one_app_operations"
+      || (name === "one_supervisor_checkin" && (input.action === "list" || input.action === "cancel"))
+      || (name === "one_supervisor_control" && input.action === "cancel");
+    if (!observation) {
+      if(!binding.supervisorReplyRunId)throw supervisorError('supervisor_handoff_origin_invalid');
+      await service.assertAutomaticWriteAllowed(binding.supervisorReplyRunId);
+    }
+    switch (name) {
       case "one_supervisor_status": {
         const snapshot = await service.snapshot();
         return { one_id: snapshot.oneId, executor: snapshot.executor, observed_at: snapshot.observedAt, science_error: snapshot.scienceError,
@@ -125,10 +129,24 @@ export async function handleOneTeamControlRequest(request: Record<string, unknow
       // The app-control catalog (every bridge operation) loads only when One first uses it.
       case "one_app_operations": return (require("../app-control/service") as typeof import("../app-control/service")).appControlOperations(input);
       case "one_app_call": return (require("../app-control/service") as typeof import("../app-control/service"))
-        .appControlCall({ownerTurn:service.ownerTurn(binding.supervisorReplyRunId)},{operation:input.operation,args:input.args});
+        .appControlCall({ownerTurn:await service.ownerTurn(binding.supervisorReplyRunId)},{operation:input.operation,args:input.args});
       case "one_supervisor_control": return service.control({commandId:String(input.command_id ?? ""),taskId:String(input.task_id ?? ""),expectedVersion:String(input.control_version ?? ""),action:input.action as "steer"|"cancel",...(input.message ? {text:String(input.message)} : {})});
       default: throw new Error("supervisor_operation_unknown");
     }
+}
+
+export async function handleOneTeamControlRequest(request: Record<string, unknown>): Promise<unknown> {
+  if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("one-team-capability-invalid");
+  const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
+  if (!binding) throw new Error("one-team-capability-invalid");
+  if (request.operation === "supervisor") {
+    if (binding.scope === "toolchain-consumer") throw new Error("one-team-consumer-scope");
+    const input = request.input && typeof request.input === "object" && !Array.isArray(request.input) ? request.input as Record<string, unknown> : {};
+    if(binding.supervisorReplyRunId && !(await import("./supervisor")).supervisorRunsInDaemon()) {
+      const relay=(await import("./supervisor-native-relay")).supervisorNativeRelay(binding.chatId ?? '',binding.supervisorReplyRunId);
+      if(relay)return relay(String(request.name ?? ''),input);
+    }
+    return dispatchOneSupervisorTool(binding,String(request.name ?? ''),input);
   }
   // The child lists only the consumer tools, but the boundary is here, not in the child.
   if (binding.scope === "toolchain-consumer"

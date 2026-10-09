@@ -23,6 +23,8 @@ export interface AliveModelOrderItem {
 }
 
 export interface AliveState {
+  /** Exact held attempt; only a reviewed native user action may authorize one new wake. */
+  resumeBarrier?: AliveResumeBarrier;
   available: boolean;
   /** Machine code when unavailable (e.g. alive-work-project-required, alive-controller-not-installed). */
   reasonCode?: string;
@@ -44,6 +46,14 @@ export interface AliveState {
 }
 
 export interface AliveGetStateInput { surface: AliveSurface; chatId: string }
+export interface AliveResumeBarrier {
+  agentId:string; agentVersion:number; controlEpoch:number; wakeId:string;
+  settledSequence:number; latestSequence:number; receiptDigest:string; errorCode:string;
+  goalBinding?: {goalId:string;runId:string;runVersion:number};
+}
+export interface AliveResumeUncertainWakeInput {
+  surface:AliveSurface; chatId:string; intentId:string; expected:AliveResumeBarrier;
+}
 export interface AliveSetEnabledInput {
   surface: AliveSurface; chatId: string; enabled: boolean; tokenLimit?: number | null; moveFrom?: boolean;
 }

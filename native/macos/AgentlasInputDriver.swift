@@ -501,16 +501,54 @@ case "listApps":
         }
     respond(["ok": true, "apps": Array(apps)])
 
+case "listCaptureTargets":
+    let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+    let targets = rows.compactMap { row -> [String: Any]? in
+        guard let number = row[kCGWindowNumber as String] as? Int,
+              let pid = row[kCGWindowOwnerPID as String] as? Int,
+              let layer = row[kCGWindowLayer as String] as? Int, layer == 0,
+              let raw = row[kCGWindowBounds as String] as? NSDictionary,
+              let bounds = CGRect(dictionaryRepresentation: raw), bounds.width > 1, bounds.height > 1,
+              let start = processStartMilliseconds(pid_t(pid)) else { return nil }
+        let app = NSRunningApplication(processIdentifier: pid_t(pid))
+        return ["windowId": number, "pid": pid, "processStartMs": start,
+                "name": row[kCGWindowName as String] as? String ?? app?.localizedName ?? "Window",
+                "bundleIdentifier": app?.bundleIdentifier ?? "", "appName": app?.localizedName ?? "", "active": app?.isActive ?? false,
+                "bounds": ["x": bounds.origin.x, "y": bounds.origin.y, "width": bounds.width, "height": bounds.height]]
+    }
+    respond(["ok": true, "targets": Array(targets.prefix(300))])
+
 case "focusApp":
     guard let target = request["app"] as? String, !target.isEmpty, target.count <= 160 else {
         failure("invalid-app", message: "app must be a non-empty string under 160 characters.", exitCode: 64)
     }
     let match = runningApplication(target)
     guard let match else { failure("app-not-found", message: "No running application matched the requested app name, bundle identifier, or pid.", exitCode: 69) }
+    var exactWindow: AXUIElement?
+    if let windowId = integer(request, "windowId") {
+        ensureAccessibility()
+        guard let expectedStart = number(request, "processStartMs"), let currentStart = processStartMilliseconds(match.processIdentifier), Double(currentStart) == expectedStart else { failure("process-identity-changed", message: "The process identity changed.") }
+        let rows = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID) as? [[String: Any]] ?? []
+        guard let row = rows.first(where: { ($0[kCGWindowNumber as String] as? Int) == windowId && ($0[kCGWindowOwnerPID as String] as? Int) == Int(match.processIdentifier) }),
+              let rawBounds = row[kCGWindowBounds as String] as? NSDictionary, let bounds = CGRect(dictionaryRepresentation: rawBounds) else { failure("window-target-stale", message: "The selected window is unavailable.") }
+        let root = AXUIElementCreateApplication(match.processIdentifier)
+        var rawWindows: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(root, kAXWindowsAttribute as CFString, &rawWindows) == .success, let windows = rawWindows as? [AXUIElement] else { failure("window-identity-unavailable", message: "The selected window identity is unavailable.") }
+        let matches = windows.filter { window in
+            guard let frame = frameOf(window) else { return false }
+            return abs(frame.origin.x-bounds.origin.x)<1 && abs(frame.origin.y-bounds.origin.y)<1 && abs(frame.width-bounds.width)<1 && abs(frame.height-bounds.height)<1
+        }
+        guard matches.count == 1 else { failure("window-identity-ambiguous", message: "The selected window identity is ambiguous.") }
+        exactWindow = matches[0]
+    }
     let activated = match.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
     if activated {
         Thread.sleep(forTimeInterval: 0.08)
-        raiseApplicationWindow(pid: match.processIdentifier)
+        if let window = exactWindow {
+            _ = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            _ = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+        } else { raiseApplicationWindow(pid: match.processIdentifier) }
     }
     respond(["ok": activated, "app": match.localizedName ?? target, "pid": Int(match.processIdentifier)])
 

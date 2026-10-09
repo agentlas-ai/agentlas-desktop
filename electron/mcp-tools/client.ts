@@ -1,6 +1,6 @@
 import { preparedMcpTransport, preparedMcpTargetTransport, type PreparedMcpBinding } from "./prepared-transport";
 import { mcpToolSchemaDigest } from "./tool-schema";
-// 실제 MCP 클라이언트 — @modelcontextprotocol/sdk로 외부 서버에 붙어 tools/list.
+// 실제 MCP 클라이언트 — v2 SDK로 2026/2025 원격 서버에 붙어 tools/list.
 // 트랜스포트 3종: stdio(npx) / SSE(레거시 원격) / Streamable HTTP(현대 원격 표준).
 // 시크릿은 keychain 글로벌 vault에서 읽어 stdio는 자식 env로, 원격은 HTTP 헤더로 주입.
 //
@@ -9,14 +9,13 @@ import { mcpToolSchemaDigest } from "./tool-schema";
 import os from "node:os";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { Client, ProtocolError, SSEClientTransport, StreamableHTTPClientTransport, UnauthorizedError, SdkHttpError, SseError } from "@modelcontextprotocol/client";
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
-import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
-import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import type { JSONRPCMessage, Transport } from "@modelcontextprotocol/client";
+import type { Transport as LegacyTransport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { OwnedStdioClientTransport, ownedStdioEnvironment } from "./owned-stdio-transport";
-import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { readEnvVar } from "../secrets/vault";
+import { resolveMcpOAuthAccessToken } from "./oauth";
 import { listInstalledServers, getServer } from "./registry";
 import { isCurrentElectronExecutable } from "../runtime/exec";
 import { withUvxPath } from "./uv-runtime";
@@ -48,6 +47,13 @@ const MAX_REMOTE_URL_CHARS = 4_096;
 const DEFAULT_TOOL_TEXT_LIMIT = 256_000;
 const MAX_TOOL_TEXT_LIMIT = 16 * 1024 * 1024;
 const HEPHAESTUS_NETWORK_CATALOG_ID = "hephaestus-network";
+/** HTTP negotiates modern server/discover; owned stdio and legacy SSE retain initialize.
+ * Selecting by the concrete transport also respects Main-prepared stdio proxy bindings. */
+function configureProtocolNegotiation(client: Client, transport: Transport): void {
+  client.setVersionNegotiation(transport instanceof StreamableHTTPClientTransport
+    ? { mode: "auto", probe: { timeoutMs: 10_000, maxRetries: 0 } }
+    : undefined);
+}
 const WORKFORCE_MCP_CAPABILITIES = workforceProtocolContract.tools.requiredNames;
 const WORKFORCE_PROTOCOL_METADATA = workforceProtocolContract.protocolMetadata;
 const WORKFORCE_PROTOCOL_METADATA_KEYS = [
@@ -387,6 +393,24 @@ async function resolveEnv(envKeys: string[]): Promise<{ resolved: Record<string,
   return { resolved, missing };
 }
 
+/** OAuth replaces manual authentication headers, never endpoint credentials. */
+export function requiredMcpManualEnvKeys(server: InstalledMcpServer, hasOAuth: boolean): string[] {
+  if (!hasOAuth || server.transport === "stdio") return server.envKeys;
+  const endpointKey = server.url ? vaultUrlKey(server.url) : null;
+  return server.envKeys.filter(key => key === endpointKey || server.url?.includes(`{${key}}`));
+}
+
+async function resolveServerEnvironment(server: InstalledMcpServer): Promise<{ resolved: Record<string, string>; missing: string[] }> {
+  if (server.transport === "stdio") return resolveEnv(server.envKeys);
+  const endpoint = await resolveEnv(requiredMcpManualEnvKeys(server, true));
+  if (endpoint.missing.length) return endpoint;
+  const token = await resolveMcpOAuthAccessToken(server.id, parseRemoteUrl(server, endpoint.resolved).url.toString());
+  const environment = token ? endpoint : await resolveEnv(server.envKeys);
+  // Keep the token only in the local connection material so error redaction also covers it.
+  if (token) environment.resolved.__mcpOAuthAccessToken = token;
+  return environment;
+}
+
 /**
  * 원격(sse/http) 서버의 envKeys→vault 값을 HTTP 요청 헤더로 매핑한다.
  * 헤더 이름은 envKey 그대로(예: `Authorization`), 값은 vault 값(예: `Bearer …`).
@@ -608,6 +632,7 @@ async function createTransport(
   }
   const { url, urlVaultKey } = parseRemoteUrl(server, resolved);
   const headers = buildRemoteHeaders(server.envKeys, resolved, urlVaultKey);
+  if (resolved.__mcpOAuthAccessToken) headers.Authorization = `Bearer ${resolved.__mcpOAuthAccessToken}`;
   const init = {
     ...(Object.keys(headers).length ? { requestInit: { headers } } : {}),
     ...(server.catalogId === OPENCRAB_CATALOG_ID ? { fetch: openCrabNoRedirectFetch } : {}),
@@ -703,11 +728,8 @@ export async function listCompleteToolInventory(client: Pick<Client, "listTools"
   let size = 0;
   do {
     signal.throwIfAborted();
-    // The local SDK compatibility declaration predates pagination; the installed
-    // SDK exposes listTools({cursor}) and nextCursor on its protocol result.
-    const page = await (client as unknown as {
-      listTools(params?: { cursor: string }): Promise<Awaited<ReturnType<Client["listTools"]>> & { nextCursor?: string }>;
-    }).listTools(cursor ? { cursor } : undefined);
+    // A prepared schema seal needs current server evidence, not v2's response cache.
+    const page = await client.listTools(cursor ? { cursor } : undefined, { signal, cacheMode: "refresh" });
     signal.throwIfAborted();
     size += Buffer.byteLength(JSON.stringify(page.tools));
     if (tools.length + page.tools.length > 10_000 || size > 16 * 1024 * 1024) throw new Error("mcp_tool_inventory_limit_exceeded");
@@ -738,13 +760,14 @@ export async function testServerConnection(
     const tools = await withAbortSignal(withTimeout((async () => {
       if (options?.signal?.aborted) stop();
       controller.signal.throwIfAborted();
-      const environment = options?.prepared ? { resolved: {}, missing: [] } : await resolveEnv(server.envKeys);
+      const environment = options?.prepared ? { resolved: {}, missing: [] } : await resolveServerEnvironment(server);
       resolved = environment.resolved;
       missing = environment.missing;
       controller.signal.throwIfAborted();
       if (missing.length > 0) return [];
       transport = (await createTransport(server, resolved, undefined, controller.signal, options?.prepared)).transport;
       controller.signal.throwIfAborted();
+      configureProtocolNegotiation(client, transport);
       await client.connect(transport);
       controller.signal.throwIfAborted();
       const result = await listCompleteToolInventory(client, controller.signal);
@@ -752,13 +775,19 @@ export async function testServerConnection(
       return result.tools;
     })(), timeoutMs, stop, controller.signal), options?.signal, stop);
     await closeMcpProbeBounded(client, transport);
-    return { id: server.id, connected: missing.length === 0, tools, error: null, missingEnv: missing, checkedAt };
+    return { id: server.id, connected: missing.length === 0, tools, error: null, missingEnv: missing, checkedAt,
+      ...(missing.length ? { failureCode: 'configuration_missing' as const } : {}) };
   } catch (err) {
     stop();
     await closeMcpProbeBounded(client, transport);
     const rawMessage = err instanceof Error ? err.message : String(err);
     const message = server.catalogId === OPENCRAB_CATALOG_ID ? "OpenCrab connection failed" : redactResolvedSecrets(rawMessage, resolved);
-    return { id: server.id, connected: false, tools: [], error: message.slice(0, 300), missingEnv: missing, checkedAt };
+    const observation = err && typeof err === 'object' ? err as { status?: unknown; statusCode?: unknown } : null;
+    const httpStatus = err instanceof SdkHttpError ? err.status : err instanceof SseError ? err.code
+      : observation?.status ?? observation?.statusCode;
+    const failureCode = err instanceof UnauthorizedError || httpStatus === 401 ? 'authentication_required' as const
+      : options?.signal?.aborted ? 'connection_cancelled' as const : 'connection_unavailable' as const;
+    return { id: server.id, connected: false, tools: [], error: message.slice(0, 300), missingEnv: missing, checkedAt, failureCode };
   }
 }
 
@@ -841,6 +870,7 @@ interface McpSessionEntry {
   boundary: McpToolCallBoundaryState;
   server: InstalledMcpServer;
   prepared?: PreparedMcpBinding;
+  credentialDigest?: string;
 }
 
 class RunMcpToolCallSession implements McpToolCallSession {
@@ -878,12 +908,12 @@ class RunMcpToolCallSession implements McpToolCallSession {
     };
   }
 
-  take(key: string, server: InstalledMcpServer, prepared?: PreparedMcpBinding): McpSessionEntry | null {
+  take(key: string, server: InstalledMcpServer, prepared?: PreparedMcpBinding, credentialDigest?: string): McpSessionEntry | null {
     const entry = this.entries.get(key);
     if (!entry) return null;
     // The SDK drops its transport when the connection closes (server exit included).
     const live = (entry.client as unknown as { transport?: unknown }).transport !== undefined;
-    if (!live || entry.server !== server || entry.prepared !== prepared) { this.evict(key); return null; }
+    if (!live || entry.server !== server || entry.prepared !== prepared || entry.credentialDigest !== credentialDigest) { this.evict(key); return null; }
     return entry;
   }
 
@@ -953,10 +983,11 @@ async function callServerToolContentInternal(
       (async () => {
         if (options?.signal?.aborted) stop();
         preparation.signal.throwIfAborted();
-        const environment = options?.prepared ? { resolved: {}, missing: [] } : await resolveEnv(server.envKeys);
+        const environment = options?.prepared ? { resolved: {}, missing: [] } : await resolveServerEnvironment(server);
         resolved = environment.resolved;
         preparation.signal.throwIfAborted();
-        if (environment.missing.length > 0) return null;
+        if (environment.missing.length > 0) { session?.evict(sessionKey); return null; }
+        const credentialDigest = options?.prepared ? undefined : createHash("sha256").update(JSON.stringify(resolved)).digest("hex");
         if (options?.runtimePin && !workforceCall) {
           throw new Error("Runtime transaction pins are supported only for Agentlas Workforce calls");
         }
@@ -978,7 +1009,7 @@ async function callServerToolContentInternal(
           if (session) {
             releaseSession ??= await session.acquire(sessionKey);
             preparation.signal.throwIfAborted();
-            sessionEntry = session.take(sessionKey, server, options?.prepared);
+            sessionEntry = session.take(sessionKey, server, options?.prepared, credentialDigest);
           }
           let activeClient: Client;
           let created: CreatedTransport = { transport: null as unknown as Transport, runtimeRoot: null };
@@ -1001,10 +1032,11 @@ async function callServerToolContentInternal(
             preparation.signal.throwIfAborted();
             transport = created.transport;
             instrumentMcpToolCallTransport(transport, boundaryState);
+            configureProtocolNegotiation(activeClient, transport);
             await activeClient.connect(transport);
             preparation.signal.throwIfAborted();
             if (session) {
-              sessionEntry = { client: activeClient, transport, boundary: boundaryState, server, prepared: options?.prepared };
+              sessionEntry = { client: activeClient, transport, boundary: boundaryState, server, prepared: options?.prepared, credentialDigest };
               session.put(sessionKey, sessionEntry);
             }
           }
@@ -1104,7 +1136,17 @@ async function callServerToolContentInternal(
 
           preparation.signal.throwIfAborted();
           if (options?.prepared) preparedMcpTransport(options.prepared, server);
-          const res = await activeClient.callTool({ name: toolName, arguments: args });
+          // The v2 modern client can automatically replay a tools/call after a
+          // HeaderMismatch response. Supplying the exact toolDefinition disables
+          // that SDK retry; every received response remains final for this call.
+          const modernInventory = activeClient.getProtocolEra() === "modern"
+            ? checkedInventory ?? await listCompleteToolInventory(activeClient, preparation.signal) : null;
+          const modernDefinition = modernInventory?.tools.find((tool) => tool.name === toolName);
+          if (modernInventory && !modernDefinition) throw new Error("mcp_tool_not_in_current_inventory");
+          preparation.signal.throwIfAborted();
+          if (options?.prepared) preparedMcpTransport(options.prepared, server);
+          const res = await activeClient.callTool({ name: toolName, arguments: args },
+            modernDefinition ? { toolDefinition: modernDefinition } : undefined);
           const normalized = normalizeMcpToolContentResult(res, maxTextChars, options?.retainFullResult === true);
           if (session && sessionEntry) session.touch();
           else await closeMcpClientAndTransport(activeClient, transport);
@@ -1127,7 +1169,7 @@ async function callServerToolContentInternal(
     client = null;
     transport = null;
     const rawMessage = err instanceof Error ? err.message : String(err);
-    const mcpCode = err instanceof McpError ? err.code : null;
+    const mcpCode = err instanceof McpError || ProtocolError.isInstance(err) ? err.code : null;
     const boundary = classifyMcpToolCallBoundary(err, boundaryState.phase);
     const reason = err instanceof McpToolResponseTooLargeError ? "response-too-large" : null;
     throw new McpToolCallError(
@@ -1234,7 +1276,8 @@ export async function statusAllServers(
 }
 
 /** One Main-owned transport per native proxy attachment, never an arbitrary launch spec. */
-export async function createPreparedMcpTargetTransport(binding: PreparedMcpBinding, signal: AbortSignal, cwd: string): Promise<Transport> {
+export async function createPreparedMcpTargetTransport(binding: PreparedMcpBinding, signal: AbortSignal, cwd: string): Promise<LegacyTransport> {
   if (preparedMcpTargetTransport(binding, binding.server).kind !== "stdio") throw new Error("mcp_proxy_transport_unsupported");
-  return (await createTransport(binding.server, {}, undefined, signal, binding, true, cwd)).transport;
+  // Internal native proxies stay on the legacy SDK's byte-compatible stdio boundary.
+  return (await createTransport(binding.server, {}, undefined, signal, binding, true, cwd)).transport as unknown as LegacyTransport;
 }

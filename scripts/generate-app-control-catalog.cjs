@@ -12,7 +12,10 @@ const path = require("node:path");
 const ts = require("typescript");
 
 const root = path.resolve(__dirname, "..");
-const OUT = path.join(root, "electron/app-control/catalog.generated.ts");
+const outputIndex = process.argv.indexOf("--output-dir");
+if (outputIndex !== -1 && (!process.argv[outputIndex + 1] || process.argv[outputIndex + 1].startsWith("--"))) throw new Error("--output-dir requires a directory");
+const outputDirectory = outputIndex === -1 ? path.join(root, "electron/app-control") : path.resolve(process.argv[outputIndex + 1]);
+const OUT = path.join(outputDirectory, "catalog.generated.ts");
 const typesSource = fs.readFileSync(path.join(root, "shared/types.ts"), "utf8");
 const types = ts.createSourceFile("types.ts", typesSource, ts.ScriptTarget.Latest, true);
 
@@ -198,7 +201,7 @@ const body = [
   "",
 ].join("\n");
 
-const schemaCount = require("./generate-app-control-schemas.cjs").generateAppControlSchemas({ root, operations, check: process.argv.includes("--check") });
+const schemaCount = require("./generate-app-control-schemas.cjs").generateAppControlSchemas({ root, operations, check: process.argv.includes("--check"), outputDirectory });
 
 if (process.argv.includes("--check")) {
   const current = fs.existsSync(OUT) ? fs.readFileSync(OUT, "utf8") : "";

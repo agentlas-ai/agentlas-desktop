@@ -9,6 +9,7 @@ import {
   useSyncExternalStore,
   type KeyboardEvent,
 } from "react";
+import { confirmPopup } from "@/lib/popup";
 import { ipc } from "../../lib/ipc";
 import { useT } from "../../lib/i18n";
 import { useDismissibleLayer } from "../../lib/use-dismissible-layer";
@@ -179,7 +180,7 @@ export default function TelegramOneDialog() {
   const runCleanup = useCallback(async () => {
     const api = ipc();
     if (!api || busy || !legacyBindings.length) return;
-    if (!window.confirm(t("tgone.legacy.confirm", { count: String(legacyBindings.length) }))) return;
+    if (!(await confirmPopup(t("tgone.legacy.confirm", { count: String(legacyBindings.length) }), { locale: locale === "ko" ? "ko" : "en", tone: "danger" }))) return;
     setError("");
     setTelegramOneBusy("legacy");
     try {
@@ -213,8 +214,8 @@ export default function TelegramOneDialog() {
     async (action: "open" | "test" | "settings" | "import_terminal" | "remove", oneBinding: TelegramConnectBinding) => {
       const api = ipc();
       if (!api || !oneBinding || busy) return;
-      if (action === "remove" && !window.confirm(t("tgone.disconnect.confirm"))) return;
-      if (action === "import_terminal" && !window.confirm(t("tgone.terminal_import.confirm"))) return;
+      if (action === "remove" && !(await confirmPopup(t("tgone.disconnect.confirm"), { locale: locale === "ko" ? "ko" : "en", tone: "danger" }))) return;
+      if (action === "import_terminal" && !(await confirmPopup(t("tgone.terminal_import.confirm"), { locale: locale === "ko" ? "ko" : "en" }))) return;
       setError("");
       setTelegramOneBusy(action);
       try {
@@ -302,7 +303,7 @@ export default function TelegramOneDialog() {
         <h2 id="tgone-title" className={styles.title}>{t("tgone.title", { name: oneName })}</h2>
         <p id="tgone-subtitle" className={styles.subtitle}>{t("tgone.subtitle", { name: oneName })}</p>
 
-        <p className={styles.notice}>{t("tgone.migration.notice", { name: oneName })}</p>
+        <details className={styles.details}><summary>{locale === "ko" ? "기존 연결 안내" : "Existing connection details"}</summary><p className={styles.notice}>{t("tgone.migration.notice", { name: oneName })}</p></details>
 
         {busy === "connect" ? (
           <div className={styles.progress}>

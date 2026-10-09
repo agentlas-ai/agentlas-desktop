@@ -25,9 +25,11 @@
  *   - Raycast: skipped setup stays reachable later ("Show Onboarding") — here via
  *     Settings → "Run first-time setup again".
  */
+import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { ipc } from "@/lib/ipc";
+import { IconUser, IconMonitor, IconCpu, IconSettings, IconAtSign } from "@/components/Icon";
 import { useT } from "@/lib/i18n";
 import type { AuthSession, HubCreditBalance, OneProfile, RuntimeStatus } from "@/lib/types";
 import type { AgentMailStatus } from "@shared/agent-mail";
@@ -254,6 +256,9 @@ export function FirstRunOnboarding({
   const [apiModels, setApiModels] = useState<Array<{ id: string; label: string; tag?: string }>>([]);
   const [apiBusy, setApiBusy] = useState(false);
   const auth = useRuntimeAuth();
+
+  const rootRef = useRef<HTMLDivElement>(null);
+  useDismissibleLayer({ open: !importOpen && connectFor === null, roots: [rootRef], onDismiss: () => onClose() });
 
   // Preferences
   const [prefText, setPrefText] = useState("");
@@ -520,7 +525,7 @@ export function FirstRunOnboarding({
   const popupOpen = Boolean(connectFor);
 
   return (
-    <div className={styles.root} role="dialog" aria-modal="true" aria-labelledby="first-run-title">
+    <div ref={rootRef} className={styles.root} role="dialog" aria-modal="true" aria-labelledby="first-run-title">
       <div className={styles.drag}>
         <span className={styles.brand}><img src="/brand/agentlas-one-mark.png" alt="" />Agentlas</span>
       </div>
@@ -528,7 +533,7 @@ export function FirstRunOnboarding({
         {/* One fixed-height frame per flow, optically centred in .stage: the title stays put
             from step to step instead of each step re-centring at its own height (owner 2026-09-27). */}
         <div className={styles.frame}>
-          <header className={styles.head}>
+          <header className={styles.head}><span className={styles.stepMark} aria-hidden="true">{step === "name" ? <IconUser size={24}/> : step === "browser" ? <IconMonitor size={24}/> : step === "ai" ? <IconCpu size={24}/> : step === "preferences" ? <IconSettings size={24}/> : <IconAtSign size={24}/>}</span>
             <h1 id="first-run-title">{heading[0]}</h1>
             <p>{heading[1]}</p>
           </header>
@@ -552,7 +557,7 @@ export function FirstRunOnboarding({
                 {/* The placeholder "루나" is an example, not a value: with no name typed the
                     preview used it as if the agent were already called that (QA 2026-09-27). */}
                 <div className={styles.preview} aria-live="polite" data-empty={name.trim() ? undefined : "true"}>{name.trim() ? copy.namePreview(name.trim()) : copy.namePreviewEmpty}</div>
-                <p className={styles.hint}>{copy.nameHint}</p>
+                <details className={styles.help}><summary>{ko ? "이름 설정 안내" : "Name details"}</summary><p className={styles.hint}>{copy.nameHint}</p></details>
               </>
             )}
 
@@ -581,7 +586,7 @@ export function FirstRunOnboarding({
                   <li><span>{copy.factKept}</span><b>{keptSites === undefined ? copy.checking : keptSites === null ? copy.keptUnknown : copy.sitesKept(keptSites)}</b></li>
                 </ul>
                 {importSummary && <p className={styles.hint} role="status">{importSummary}</p>}
-                {!importSummary && <p className={styles.hint}>{copy.browserHint}</p>}
+                {!importSummary && <details className={styles.help}><summary>{ko ? "브라우저 연결 안내" : "Browser details"}</summary><p className={styles.hint}>{copy.browserHint}</p></details>}
               </>
             )}
 
@@ -660,14 +665,14 @@ export function FirstRunOnboarding({
                   <label htmlFor="first-run-principles">{copy.principleLabel}</label>
                   <textarea id="first-run-principles" className={styles.textarea} rows={2} value={principleText} placeholder={copy.principlePlaceholder} onChange={(event) => setPrincipleText(event.target.value)} />
                 </div>
-                <p className={styles.hint}>{copy.prefHint}</p>
+                <details className={styles.help}><summary>{ko ? "맞춤 설정 안내" : "Preference details"}</summary><p className={styles.hint}>{copy.prefHint}</p></details>
               </>
             )}
 
             {step === "mailbox" && (
               <>
                 <AgentMailOfferCard locale={ko ? "ko" : "en"} oneName={displayName} status={mail} reload={async () => { await loadMail(); }} />
-                <p className={styles.hint}>{copy.mailHint}</p>
+                <details className={styles.help}><summary>{ko ? "메일함 안내" : "Mailbox details"}</summary><p className={styles.hint}>{copy.mailHint}</p></details>
               </>
             )}
 

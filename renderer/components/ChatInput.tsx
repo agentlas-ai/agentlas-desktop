@@ -13,6 +13,7 @@ import goalBarStyles from "./ComposerGoalBar.module.css";
 import type { GoalPlanView } from "../../shared/goal-shape";
 import { requestGoalPanelOpen } from "./goal/GoalPanel";
 import { ComposerDecisionSlot } from "./ComposerDecisionPortal";
+import { PopupSteps } from "./Popup";
 import { OneVoiceInputHelp } from "./one/OneVoiceInputHelp";
 import { AliveComposerButton } from "./alive/AliveComposerButton";
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -107,6 +108,7 @@ import {
   IconAtSign,
   IconBuilding,
   IconCheck,
+  IconChat,
   IconChevronDown,
   IconChevronRight,
   IconClose,
@@ -1305,11 +1307,13 @@ function ChatInputComponent({
             left: 16,
             bottom: "calc(100% + 8px)",
             zIndex: 45,
-            maxWidth: 360,
+            maxWidth: "min(360px, calc(100% - 32px))",
             display: "flex",
             flexDirection: "column",
             gap: 8,
             border: "1px solid var(--paper-edge)",
+            borderRadius: "var(--popup-radius)",
+            boxShadow: "var(--popup-shadow)",
             background: "var(--paper)",
             padding: 12,
           }}
@@ -1335,6 +1339,7 @@ function ChatInputComponent({
               style={{
                 fontSize: 12,
                 fontWeight: 600,
+                minHeight: 44,
                 padding: "4px 12px",
                 border: "1px solid var(--paper-edge)",
                 background: "var(--fill-1)",
@@ -1899,17 +1904,18 @@ function ChatInputComponent({
                     style={{
                       position: "absolute", right: 16, bottom: "calc(100% - 4px)", zIndex: 50,
                       width: "min(286px, calc(100% - 32px))", padding: 10, display: "grid", gap: 8,
-                      border: "1px solid var(--paper-edge)", borderRadius: 10,
-                      background: "var(--paper)", boxShadow: "0 12px 28px rgba(15, 23, 42, 0.14)",
+                      border: "1px solid var(--paper-edge)", borderRadius: "var(--popup-radius)",
+                      background: "var(--popup-card-bg)", boxShadow: "var(--popup-shadow)",
+                      maxHeight: "min(400px, 65dvh)", overflowY: "auto",
                     }}
                   >
                     <div>
-                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, color: "var(--ink)", fontSize: 12, fontWeight: 800 }}>
-                        <span>{t("chatinput.context.menu_title")}</span>
-                        <span style={{ color: "var(--accent)" }}>{contextTokenLabel}</span>
+                      <div style={{ display: "flex", alignItems: "center", gap: 10, color: "var(--ink)", fontSize: 12, fontWeight: 700 }}>
+                        <span aria-hidden style={{display: "grid", placeItems: "center", width: 40, height: 40, borderRadius: 12, background: "var(--popup-control-bg)"}}><IconLayers size={20} /></span>
+                        <span>{t("chatinput.context.menu_title")}<strong style={{display: "block", fontSize: 24, lineHeight: 1.25}}>{contextTokenLabel}</strong></span>
                       </div>
                       <p style={{ margin: "4px 0 0", color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.45 }}>
-                        {t("chatinput.context.menu_desc")}
+                        {locale === "ko" ? "기록의 추정 토큰 · 모델 사용률 아님" : "Estimated history tokens · not model usage"}
                       </p>
                     </div>
                     <button
@@ -1918,6 +1924,7 @@ function ChatInputComponent({
                       disabled={!onSessionAction}
                       style={contextMenuActionStyle}
                     >
+                      <IconPlus size={17} style={{gridRow: "1 / span 2", alignSelf: "center"}} />
                       <span style={{ color: "var(--ink)", fontSize: 11.5, fontWeight: 780 }}>{t("chatinput.context.new")}</span>
                       <span style={contextMenuActionDescStyle}>{t("chatinput.context.new_desc")}</span>
                     </button>
@@ -1928,6 +1935,7 @@ function ChatInputComponent({
                       title={busy ? t("chatinput.context.clear_busy") : undefined}
                       style={{ ...contextMenuActionStyle, opacity: busy ? 0.55 : 1, cursor: busy ? "not-allowed" : "pointer" }}
                     >
+                      <IconTrash size={17} style={{gridRow: "1 / span 2", alignSelf: "center"}} />
                       <span style={{ color: "var(--ink)", fontSize: 11.5, fontWeight: 780 }}>{t("chatinput.context.clear")}</span>
                       <span style={contextMenuActionDescStyle}>{t("chatinput.context.clear_desc")}</span>
                     </button>
@@ -2335,6 +2343,8 @@ ChatInput.displayName = "ChatInput";
 
 const contextMenuActionStyle = {
   display: "grid",
+  gridTemplateColumns: "22px minmax(0, 1fr)",
+  minHeight: 54,
   gap: 2,
   width: "100%",
   minWidth: 0,
@@ -2347,6 +2357,7 @@ const contextMenuActionStyle = {
 };
 
 const contextMenuActionDescStyle = {
+  gridColumn: 2,
   color: "var(--muted-deep)",
   fontSize: 10.5,
   lineHeight: 1.35,
@@ -2390,10 +2401,12 @@ function BottomQuestionSheet({
         maxWidth: 980,
         margin: "0 auto",
         zIndex: 40,
-        borderRadius: 0,
+        borderRadius: "var(--popup-radius)",
         border: "1px solid var(--paper-edge)",
-        background: "var(--paper)",
-        boxShadow: "none",
+        background: "var(--popup-card-bg)",
+        boxShadow: "var(--popup-shadow)",
+        maxHeight: "min(600px, 70dvh)",
+        overflowY: "auto",
         padding: 12,
       }}
       onKeyDown={(e) => {
@@ -2408,6 +2421,7 @@ function BottomQuestionSheet({
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+        <IconChat size={20} />
         <span
           style={{
             flexShrink: 0,
@@ -2439,8 +2453,8 @@ function BottomQuestionSheet({
           aria-label={t("workspace.close_panel")}
           title={t("workspace.close_panel")}
           style={{
-            width: 24,
-            height: 24,
+            width: 44,
+            height: 44,
             borderRadius: 6,
             display: "inline-flex",
             alignItems: "center",
@@ -2456,7 +2470,7 @@ function BottomQuestionSheet({
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-        {options.map((option) => {
+        {options.map((option, index) => {
           const picked = value === option.id;
           return (
             <button
@@ -2476,6 +2490,7 @@ function BottomQuestionSheet({
                 color: "var(--ink)",
               }}
             >
+              <span aria-hidden style={{display: "grid", placeItems: "center", flex: "0 0 30px", height: 30, borderRadius: 10, background: picked ? "var(--popup-control-bg)" : "var(--paper)"}}>{picked ? <IconCheck size={17} /> : index + 1}</span>
               <span style={{ flex: 1, minWidth: 0 }}>
                 <strong
                   style={{
@@ -2575,9 +2590,16 @@ function AutoRouteGateSheet({
   onClose: () => void;
   t: TFunction;
 }) {
+  const { locale } = useT();
+  const ko = locale === "ko";
   const title = t("chatinput.autoroute.build_title");
   const desc = gate.reason || t("chatinput.autoroute.build_desc");
   const buttonBase: React.CSSProperties = {
+    display: "inline-flex",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 6,
+    minHeight: 44,
     padding: "6px 12px",
     borderRadius: 8,
     fontSize: 12,
@@ -2600,8 +2622,12 @@ function AutoRouteGateSheet({
         margin: "0 auto",
         zIndex: 40,
         border: "1px solid var(--paper-edge)",
-        background: "var(--paper)",
-        padding: 12,
+        borderRadius: "var(--popup-radius)",
+        background: "var(--popup-card-bg)",
+        boxShadow: "var(--popup-shadow)",
+        padding: 16,
+        maxHeight: "min(440px, 70dvh)",
+        overflowY: "auto",
       }}
       onKeyDown={(e) => {
         if (e.key === "Escape") {
@@ -2610,8 +2636,17 @@ function AutoRouteGateSheet({
         }
       }}
     >
-      <div style={{ fontSize: 12.5, fontWeight: 700, color: "var(--ink)" }}>{title}</div>
-      <div style={{ marginTop: 4, fontSize: 11.5, lineHeight: 1.5, color: "var(--muted-deep)" }}>{desc}</div>
+      <div style={{display: "flex", alignItems: "center", gap: 10, marginBottom: 12}}>
+        <IconUsers size={22} />
+        <strong style={{ flex: 1, fontSize: 14, fontWeight: 700, color: "var(--ink)" }}>{title}</strong>
+        <button type="button" onClick={onClose} aria-label={ko ? "닫기" : "Close"} style={{width: 44, height: 44, display: "grid", placeItems: "center", border: 0, borderRadius: 10, color: "var(--muted-deep)", background: "transparent"}}><IconClose size={16} /></button>
+      </div>
+      <PopupSteps steps={[
+        { label: ko ? "필요한 능력" : "Capability", icon: <IconTarget size={20} /> },
+        { label: ko ? "에이전트 만들기" : "Create agent", icon: <IconPlus size={20} />, active: true },
+        { label: ko ? "작업에 사용" : "Use in task", icon: <IconRoute size={20} /> },
+      ]} />
+      <p style={{ margin: "10px 0 0", fontSize: 12, lineHeight: 1.5, color: "var(--muted-deep)", overflowWrap: "anywhere" }}>{desc}</p>
       <div style={{ marginTop: 10, display: "flex", gap: 8, justifyContent: "flex-end" }}>
         <button
           type="button"
@@ -2623,6 +2658,7 @@ function AutoRouteGateSheet({
             color: "var(--muted-deep)",
           }}
         >
+          <IconChat size={16} />
           {t("chatinput.autoroute.build_skip")}
         </button>
         <button
@@ -2630,12 +2666,13 @@ function AutoRouteGateSheet({
           onClick={onBuild}
           style={{
             ...buttonBase,
-            border: "1px solid var(--accent)",
-            background: "var(--accent)",
-            color: "var(--paper)",
+            border: "1px solid var(--line)",
+            background: "var(--popup-control-bg)",
+            color: "var(--ink)",
             fontWeight: 700,
           }}
         >
+          <IconPlus size={16} />
           {t("chatinput.autoroute.build_cta")}
         </button>
       </div>
@@ -3061,6 +3098,7 @@ function PermissionMenu({
           icon={<IconShield size={13} style={{ color: o.color }} />}
           title={t(`chatinput.perm.${o.id}` as `chatinput.perm.${PermissionLevel}`)}
           subtitle={t(`chatinput.perm.${o.id}.desc` as `chatinput.perm.${PermissionLevel}.desc`)}
+          showNote
           selected={value === o.id}
           right={value === o.id ? <IconCheck size={14} style={{ color: "var(--accent)" }} /> : undefined}
           compact
@@ -3073,6 +3111,7 @@ function PermissionMenu({
         icon={<IconCheck size={13} style={{ color: "var(--accent)" }} />}
         title={locale === "ko" ? "항상 승인" : "Always approve"}
         subtitle={locale === "ko" ? "이 대화의 승인 요청을 자동으로 허용합니다" : "Automatically allow approval requests in this conversation"}
+        showNote
         selected={alwaysApproval.enabled}
         checkbox
         compact
@@ -3151,11 +3190,15 @@ function ModelMenu({
           right={!currentEffort ? check : undefined}
           compact
         />
-          {efforts.map((e) => (
+          {efforts.map((e, index) => (
             <Row
               key={e.id}
               onClick={() => onSelectEffort(e.id)}
-              icon={effortIcon}
+              icon={<svg width="22" height="20" viewBox="0 0 22 20" aria-hidden="true" style={{color: "var(--accent)"}}>
+                {efforts.map((_, slot) => <rect key={slot} x={slot * 22 / efforts.length} y={16 - (slot + 1) * 12 / efforts.length}
+                  width={Math.max(1, 22 / efforts.length - 1.2)} height={4 + (slot + 1) * 12 / efforts.length} rx=".8"
+                  fill="currentColor" opacity={slot <= index ? 1 : .16} />)}
+              </svg>}
               title={e.label}
               selected={currentEffort === e.id}
               right={currentEffort === e.id ? check : undefined}
@@ -3194,24 +3237,25 @@ function Popover({
   align?: "left" | "right";
 }) {
   const compactMenu = compact || dataKind === "plus" || dataKind === "permission" || dataKind === "model";
+  const effectiveRole = role ?? (dataKind === "permission" || dataKind === "model" ? "menu" : undefined);
   const rootRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
-    if (role !== "menu") return;
+    if (effectiveRole !== "menu") return;
     const root = rootRef.current;
     const selected = root?.querySelector<HTMLElement>('[role^="menuitem"][aria-checked="true"]:not(:disabled)');
     const first = root?.querySelector<HTMLElement>('[role^="menuitem"]:not(:disabled)');
     (selected ?? first)?.focus();
-  }, [role]);
+  }, [effectiveRole]);
   return (
     <div
       ref={rootRef}
       data-popover-root
       data-popover-kind={dataKind}
       data-compact-menu={compactMenu ? "true" : undefined}
-      role={role ?? (dataKind === "permission" || dataKind === "model" ? "menu" : undefined)}
+      role={effectiveRole}
       aria-label={ariaLabel ?? title}
       className="glass-lift"
-      onKeyDown={role === "menu" ? (event) => {
+      onKeyDown={effectiveRole === "menu" ? (event) => {
         const items = Array.from(event.currentTarget.querySelectorAll<HTMLElement>('[role^="menuitem"]:not(:disabled)'));
         if (items.length === 0) return;
         const current = items.indexOf(document.activeElement as HTMLElement);
@@ -3231,9 +3275,13 @@ function Popover({
         minWidth: compactMenu ? 0 : 240,
         width: compactMenu ? "min(280px, calc(100vw - 32px))" : undefined,
         maxWidth: 320,
-        maxHeight: 360,
+        maxHeight: "min(440px, 70dvh)",
         overflowY: "auto",
-        borderRadius: 14,
+        borderRadius: "var(--popup-radius)",
+        border: "1px solid var(--paper-edge)",
+        background: "var(--popup-card-bg)",
+        boxShadow: "var(--popup-shadow)",
+        fontFamily: "var(--font-body)",
         padding: 6,
         zIndex: 100,
       }}
@@ -3244,7 +3292,7 @@ function Popover({
           style={{
             padding: "6px 10px 4px",
             fontSize: 10,
-            fontFamily: "var(--font-mono)",
+            fontFamily: "var(--font-body)",
             textTransform: "uppercase",
             letterSpacing: 0.6,
             color: "var(--muted-deep)",
@@ -3269,7 +3317,7 @@ function GroupLabel({ children }: { children: React.ReactNode }) {
       style={{
         padding: "6px 10px 2px",
         fontSize: 10,
-        fontFamily: "var(--font-mono)",
+        fontFamily: "var(--font-body)",
         textTransform: "uppercase",
         letterSpacing: 0.6,
         color: "var(--muted-deep)",
@@ -3313,6 +3361,7 @@ function Row({
   selected,
   disabled = false,
   checkbox = false,
+  showNote = false,
 }: {
   onClick?: () => void;
   /** 마우스가 위로 올라오면 호출 — 키보드 activeIndex와 마우스 활성을 동기화 */
@@ -3328,6 +3377,7 @@ function Row({
   selected?: boolean;
   disabled?: boolean;
   checkbox?: boolean;
+  showNote?: boolean;
 }) {
   // active일 때는 hover 색을 항상 표시 — inline 토글이라 ref로 보존하지 않음
   return (
@@ -3347,7 +3397,7 @@ function Row({
         width: "100%",
         alignItems: "center",
         gap: 10,
-        minHeight: compact ? 36 : 46,
+        minHeight: compact ? 44 : 48,
         padding: compact ? "6px 8px" : "8px 10px",
         borderRadius: 8,
         background: active ? "var(--fill-1)" : "transparent",
@@ -3381,14 +3431,16 @@ function Row({
         </span>
         {subtitle && (
           <span
-            className={compact ? "sr-only" : undefined}
+            className={compact && !showNote ? "sr-only" : undefined}
             style={{
               display: "block",
               fontSize: 10.5,
               color: "var(--muted-deep)",
-              whiteSpace: "nowrap",
-              overflow: "hidden",
-              textOverflow: "ellipsis",
+              whiteSpace: showNote ? "normal" : "nowrap",
+              overflowWrap: "anywhere",
+              lineHeight: 1.4,
+              overflow: showNote ? undefined : "hidden",
+              textOverflow: showNote ? undefined : "ellipsis",
             }}
           >
             {subtitle}
@@ -3434,7 +3486,7 @@ function ToggleRow({
         width: "100%",
         alignItems: "center",
         gap: 10,
-        minHeight: compact ? 36 : undefined,
+        minHeight: 44,
         padding: compact ? "6px 8px" : "8px 10px",
         borderRadius: 8,
         background: "transparent",
@@ -3551,7 +3603,7 @@ function AgentPickerPopup({
   return (
     <section
       role="dialog"
-      aria-modal="true"
+      aria-modal="false"
       aria-label={t("chatinput.agent_picker.title")}
       data-popover-root
       data-popover-kind="agent-picker"
@@ -3564,11 +3616,11 @@ function AgentPickerPopup({
         maxWidth: 480,
         margin: "0 auto",
         zIndex: 50,
-        borderRadius: 16,
+        borderRadius: "var(--popup-radius)",
         border: "1px solid var(--paper-edge)",
         background: "var(--paper)",
         backdropFilter: "blur(24px)",
-        boxShadow: "0 12px 40px rgba(0,0,0,0.12), 0 0 0 1px rgba(255,255,255,0.08) inset",
+        boxShadow: "var(--popup-shadow)",
         padding: 0,
         overflow: "hidden",
       }}
@@ -3623,8 +3675,8 @@ function AgentPickerPopup({
           onClick={onClose}
           aria-label={t("chatinput.agent_picker.cancel")}
           style={{
-            width: 24,
-            height: 24,
+            width: 44,
+            height: 44,
             borderRadius: 6,
             display: "inline-flex",
             alignItems: "center",
@@ -3690,7 +3742,7 @@ function AgentPickerPopup({
                   style={{
                     padding: "8px 10px 4px",
                     fontSize: 10,
-                    fontFamily: "var(--font-mono)",
+                    fontFamily: "var(--font-body)",
                     textTransform: "uppercase",
                     letterSpacing: 0.6,
                     color: "var(--muted-deep)",
@@ -3722,7 +3774,7 @@ function AgentPickerPopup({
                   style={{
                     padding: "8px 10px 4px",
                     fontSize: 10,
-                    fontFamily: "var(--font-mono)",
+                    fontFamily: "var(--font-body)",
                     textTransform: "uppercase",
                     letterSpacing: 0.6,
                     color: "var(--muted-deep)",
@@ -3753,7 +3805,7 @@ function AgentPickerPopup({
                   style={{
                     padding: "8px 10px 4px",
                     fontSize: 10,
-                    fontFamily: "var(--font-mono)",
+                    fontFamily: "var(--font-body)",
                     textTransform: "uppercase",
                     letterSpacing: 0.6,
                     color: "var(--muted-deep)",

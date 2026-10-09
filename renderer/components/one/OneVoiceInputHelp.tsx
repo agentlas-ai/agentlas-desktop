@@ -129,12 +129,15 @@ export function OneVoiceInputHelp({ locale, composerRef, disabled = false, surfa
           onKeyDown={handlePanelKeyDown}
         >
           <strong id={titleId}>{tFor(locale, "one.voice.panel_title")}</strong>
-          <p id={instructionId}>{instruction}</p>
+          <div className={styles.keyHint} aria-hidden="true">{platform === "mac" ? <><kbd>Fn / 🌐</kbd><span>× 2</span></> : platform === "windows" ? <><kbd>Windows</kbd><span>+</span><kbd>H</kbd></> : <kbd>{locale === "ko" ? "OS 받아쓰기" : "OS dictation"}</kbd>}</div>
+          <p id={instructionId} className={styles.screenReaderOnly}>{instruction}</p>
+          <div className={styles.steps}><span>1 · {locale === "ko" ? "입력창 선택" : "Focus"}</span><span>2 · {locale === "ko" ? "받아쓰기" : "Dictate"}</span><span>3 · {locale === "ko" ? "확인 후 전송" : "Review & send"}</span></div>
+          <details className={styles.details}><summary>{locale === "ko" ? "단축키·개인정보" : "Shortcut & privacy"}</summary><p>{instruction}</p>
           <small id={privacyId}>
             {surface === "work"
               ? (locale === "ko" ? "Work는 여기서 마이크를 켜거나 음성 파일을 저장하지 않습니다. 받아쓴 텍스트를 확인한 뒤 직접 보내세요." : "Work does not turn on the microphone or save audio here. Review the dictated text before sending it yourself.")
               : voiceCopy(locale, "one.voice.privacy")}
-          </small>
+          </small></details>
           <button type="button" onClick={closeToComposer}>
             {voiceCopy(locale, "one.voice.return_composer")}
           </button>

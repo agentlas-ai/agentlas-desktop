@@ -485,3 +485,18 @@
     flex: 1;
   }
 }
+
+/* Paper popup elevation shares the desktop popup palette. */
+.backdrop { background: var(--popup-backdrop, rgb(31 42 34 / 24%)); backdrop-filter: blur(5px); }
+.dialog { border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }
+
+
+
+.dialog { color:var(--ink); }
+.header { padding:24px 28px 20px; gap:18px; }
+.header h2 { font-size:22px; }
+.sectionHeading details { margin-top:4px; color:var(--ink-soft); font-size:11px; }
+.sectionHeading summary { cursor:pointer; }
+.sectionHeading>span { width:34px; height:34px; border-radius:11px; background:var(--popup-sage,var(--paper-2)); color:var(--ink); }
+.providerCard { box-shadow:inset 0 1px 0 #fff9,0 3px 9px #26312708; }
+.providerCard[data-selected="true"] { background:var(--popup-sage,var(--paper-2)); border-color:var(--paper-edge-strong); }

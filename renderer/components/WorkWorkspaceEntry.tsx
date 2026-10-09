@@ -9,6 +9,7 @@ import { pendingWorkStart, persistWorkStart, workStartBridge } from '@/lib/work-
 import type { InstalledAgent, Project, RuntimeSelection, RuntimeStatus } from '@/lib/types';
 import { runtimeMatchesSelection, selectionForRuntime } from '@shared/runtime-selection';
 import { failureCode } from '@/lib/invocation-failure';
+import { IconFolder, IconChevronDown, IconPlus, IconCheck, IconArrowUp } from './Icon';
 import menus from './PanelPopover.module.css';
 import styles from './WorkWorkspaceEntry.module.css';
 
@@ -50,13 +51,13 @@ export function WorkWorkspaceEntry(){
   return <section className={styles.entry} data-work-entry>
     <header className={`${styles.header} titlebar-drag`}>
       <div className={`${styles.projectMenu} titlebar-nodrag`} ref={root}>
-        <button ref={trigger} type="button" className={styles.projectTrigger} aria-expanded={menu} aria-haspopup="menu" onClick={()=>setMenu(v=>!v)}><span aria-hidden>▱</span><span>{project?.name??(ko?'새 작업':'New work')}</span><span aria-hidden>⌄</span></button>
+        <button ref={trigger} type="button" className={styles.projectTrigger} aria-expanded={menu} aria-haspopup="menu" onClick={()=>setMenu(v=>!v)}><IconFolder size={15} /><span>{project?.name??(ko?'새 작업':'New work')}</span><IconChevronDown size={14} /></button>
         {menu&&<div role="menu" aria-label={ko?'프로젝트와 에이전트':'Projects and agents'} className={`${menus.panelPopover} ${styles.menu}`}>
-          <button role="menuitem" className={menus.panelMenuRow} onClick={()=>{setProjectId(null);setMenu(false);trigger.current?.focus();}}>{ko?'새 프로젝트에서 시작':'Start a new project'}<span aria-hidden>＋</span></button>
+          <button role="menuitem" className={menus.panelMenuRow} onClick={()=>{setProjectId(null);setMenu(false);trigger.current?.focus();}}>{ko?'새 프로젝트':'New project'}<IconPlus size={15} /></button>
           <div className={menus.panelMenuSeparator}/>
-          <div className={styles.projectList}>{projects.map(item=><button role="menuitemradio" aria-checked={item.id===projectId} key={item.id} className={menus.panelMenuRow} onClick={()=>{setProjectId(item.id);setMenu(false);trigger.current?.focus();}}><span className={styles.ellipsis}>{item.name}</span><span>{item.id===projectId?'✓':''}</span></button>)}</div>
-          {project&&<><div className={menus.panelMenuSeparator}/><span className={menus.panelMenuLabel}>{ko?'프로젝트 에이전트':'Project agents'}</span>{members.map(member=><span key={`${member.source}:${member.targetId}`} className={menus.panelMenuRow}>{member.nameSnapshot}</span>)}<button role="menuitem" className={menus.panelMenuRow} onClick={()=>navigate(`/project/detail?id=${encodeURIComponent(project.id)}`)}>{ko?'에이전트와 프로젝트 설정':'Agents and project settings'}<span aria-hidden>↗</span></button></>}
-          <div className={menus.panelMenuSeparator}/><button role="menuitem" className={menus.panelMenuRow} onClick={()=>navigate('/project/new')}>{ko?'폴더·저장소 연결':'Connect folder or repository'}<span aria-hidden>↗</span></button>
+          <div className={styles.projectList}>{projects.map(item=><button role="menuitemradio" aria-checked={item.id===projectId} key={item.id} className={menus.panelMenuRow} onClick={()=>{setProjectId(item.id);setMenu(false);trigger.current?.focus();}}><span className={styles.ellipsis}>{item.name}</span><span>{item.id===projectId?<IconCheck size={15} />:null}</span></button>)}</div>
+          {project&&<><div className={menus.panelMenuSeparator}/><span className={menus.panelMenuLabel}>{ko?'프로젝트 에이전트':'Project agents'}</span>{members.map(member=><span key={`${member.source}:${member.targetId}`} className={menus.panelMenuRow}>{member.nameSnapshot}</span>)}<button role="menuitem" className={menus.panelMenuRow} onClick={()=>navigate(`/project/detail?id=${encodeURIComponent(project.id)}`)}>{ko?'에이전트와 프로젝트 설정':'Agents and project settings'}<IconArrowUp size={15} /></button></>}
+          <div className={menus.panelMenuSeparator}/><button role="menuitem" className={menus.panelMenuRow} onClick={()=>navigate('/project/new')}>{ko?'폴더·저장소 연결':'Connect folder or repository'}<IconArrowUp size={15} /></button>
         </div>}
       </div>
       <span className={styles.brand}>Agentlas Work</span>

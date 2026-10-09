@@ -80,6 +80,9 @@ function statusLabel(status: AliveStatus, ko: boolean): string {
 }
 
 function errorMessage(code: string | null, ko: boolean): string {
+  if (code === "alive-resume-budget-blocked") return ko ? "먼저 미측정 사용량을 확인하고 한도를 조정하세요. 그다음 새 상태를 다시 검토해야 합니다." : "Acknowledge unknown usage and adjust the budget first, then review the new state.";
+  if (code === "alive-resume-stale" || code === "alive-resume-binding-invalid" || code === "alive-resume-intent-conflict")
+    return ko ? "실행 또는 권한 상태가 바뀌었습니다. 메뉴를 다시 열고 새 상태를 검토하세요." : "Execution or control state changed. Reopen this menu and review the new state.";
   if (code === "alive-goal-required") return ko ? "먼저 목표를 시작하세요." : "Start a goal first.";
   if (code === "alive-project-conflict") return ko ? "이 프로젝트의 다른 대화에서 이미 실행 중입니다." : "Already running in another chat of this project.";
   if (code === "alive-sign-in-required") return ko ? "Alive Agent를 쓰려면 Agentlas 계정으로 로그인하세요." : "Sign in to your Agentlas account to use Alive Agent.";
@@ -104,6 +107,9 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
   const [state, setState] = useState<AliveState | null>(null);
   const [open, setOpen] = useState(false);
   const [pending, setPending] = useState(false);
+  const actionRevision = useRef(0);
+  const [resumeReview, setResumeReview] = useState<{ expected: NonNullable<AliveState["resumeBarrier"]>; intentId:string }|null>(null);
+  useEffect(() => { if (!open) setResumeReview(null); }, [open]);
   const [error, setError] = useState<string | null>(null);
   const [draftLimit, setDraftLimit] = useState("");
   /** 팝오버 안의 화면 — 본 메뉴, 또는 토큰 한도 하위 목록(다른 선택기의 하위 메뉴처럼 제자리에서 바뀐다). */
@@ -125,10 +131,11 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
     if (!api) { setSupported(false); return; }
     setSupported(true);
     const requested = chatRef.current;
+    const revision = actionRevision.current;
     if (!requested) { setState(null); return; }
     try {
       const next = await api.getState({ surface, chatId: requested });
-      if (chatRef.current !== requested) return;
+      if (chatRef.current !== requested || actionRevision.current !== revision) return;
       setState(next);
     } catch {
       if (chatRef.current === requested) setState(null);
@@ -136,9 +143,12 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
   }, [surface]);
 
   useEffect(() => {
+    actionRevision.current++;
+    setPending(false);
     setState(null);
     setError(null);
     setOpen(false);
+    setResumeReview(null);
     void refresh();
   }, [refresh, chatId]);
 
@@ -287,25 +297,28 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
   const limit = state.budget.tokenLimit;
   const used = Math.max(0, state.budget.tokensUsed || 0);
 
-  async function run(action: (api: AliveApi) => Promise<AliveState>) {
+  async function run(action: (api: AliveApi) => Promise<AliveState>, terminal = false) {
     const api = aliveApi();
-    if (!api || pending) return;
+    if (!api || (pending && !terminal)) return;
+    const revision = ++actionRevision.current;
     setPending(true);
     setError(null);
     try {
       const next = await action(api);
-      setState(next);
+      if (actionRevision.current === revision) setState(next);
     } catch (cause) {
-      setError(errorMessage(errorCode(cause), ko));
-      void refresh();
+      if (actionRevision.current === revision) {
+        setError(errorMessage(errorCode(cause), ko));
+        void refresh();
+      }
     } finally {
-      setPending(false);
+      if (actionRevision.current === revision) setPending(false);
     }
   }
 
   const toggle = () => {
     if (blockedByGoal || (conflict && !state.enabled)) return;
-    void run((api) => api.setEnabled({ surface, chatId: activeChatId, enabled: !state.enabled }));
+    void run((api) => api.setEnabled({ surface, chatId: activeChatId, enabled: !state.enabled }), state.enabled);
   };
   const moveHere = () => void run((api) => api.setEnabled({ surface, chatId: activeChatId, enabled: true, moveFrom: true }));
   /*
@@ -317,6 +330,16 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
     void run((api) => api.setTokenLimit({ surface, chatId: activeChatId, tokenLimit }));
   };
   const regrant = () => void run((api) => api.setTokenLimit({ surface, chatId: activeChatId, tokenLimit: limit ?? ALIVE_DEFAULT_TOKEN_LIMIT }));
+  const reviewUncertainWake = () => {
+    if (state.resumeBarrier && typeof aliveApi()?.resumeUncertainWake === "function")
+      setResumeReview({expected:{...state.resumeBarrier},intentId:crypto.randomUUID()});
+  };
+  const resumeReviewedWake = () => {
+    const confirmation = resumeReview;
+    if (!confirmation || typeof aliveApi()?.resumeUncertainWake !== "function") return;
+    // Polling may replace state, but cannot replace the attempt the owner reviewed.
+    void run(api=>api.resumeUncertainWake({surface,chatId:activeChatId,...confirmation}));
+  };
   const commitDraft = () => {
     const raw = draftLimit.trim();
     if (!raw) return;
@@ -338,7 +361,7 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
    */
   const limitDisabled = pending || !state.scope;
   const triggerLabel = `AGI · ${statusLabel(status, ko)}`;
-  const switchDisabled = pending || blockedByGoal || Boolean(conflict && !state.enabled)
+  const switchDisabled = (pending && !state.enabled) || blockedByGoal || Boolean(conflict && !state.enabled)
     || Boolean(state.accessReasonCode && !state.enabled);
   const limitText = limit ? compactTokens(limit) : (ko ? "무제한" : "No limit");
   // 쓴 양이 있거나 켜져 있을 때만 "쓴 양 / 한도" — 아니면 한도 하나만(조용한 글자).
@@ -382,8 +405,22 @@ export function AliveComposerButton({ surface, chatId, locale, triggerClassName,
       key: "usage-unknown",
       tone: "warn",
       text: ko ? "끊긴 실행의 사용량을 잴 수 없습니다." : "An interrupted run's usage can't be measured.",
-      action: { label: ko ? "다시 허용" : "Re-grant", onClick: regrant, attr: { "data-alive-regrant": "true" }, disabled: pending },
+      action: { label: ko ? "미측정 사용량 인정" : "Acknowledge unknown usage", onClick: regrant, attr: { "data-alive-regrant": "true" }, disabled: pending },
     });
+  }
+
+  if (state.enabled && state.resumeBarrier) {
+    notices.push({key:"uncertain-wake",tone:"warn",
+      text:<><span title={resumeReview?.expected.wakeId ?? state.resumeBarrier.wakeId}>
+        {ko ? "이전 판단 " : "Prior decision "}#{(resumeReview?.expected.wakeId ?? state.resumeBarrier.wakeId).slice(0,8)}. </span>{resumeReview
+        ? (ko ? "이전 실행 결과는 미확정입니다. 결과를 직접 확인한 후 새 판단을 허용하세요. 이전 작업을 재시도하는 동의가 아닙니다." : "The prior result remains unconfirmed. Check its effects before allowing a new decision. This does not authorize retrying that action.")
+        : (ko ? "이전 실행 결과가 미확정이라 자동 판단을 중단했습니다." : "Automatic decisions stopped because the prior result is unconfirmed.")}
+        {(status==="usage-unknown" || status==="tokens-spent") && (ko ? " 먼저 사용량을 확인하거나 한도를 조정한 뒤, 새 상태를 검토하세요." : " Acknowledge usage or adjust the budget first, then review the new state.")}</>,
+      action:{label:resumeReview ? (ko ? "확인 후 새 판단 허용" : "Allow a new decision after review") : (ko ? "미확정 결과 검토" : "Review the unconfirmed result"),
+        onClick:resumeReview ? resumeReviewedWake : reviewUncertainWake,attr:{"data-alive-resume":resumeReview ? "confirm" : "review"},
+        disabled:pending || Boolean(state.accessReasonCode) || state.needsGoal || status==="usage-unknown" || status==="tokens-spent"
+          || state.statusReasonCode==="grant.deadline-spent"
+          || typeof aliveApi()?.resumeUncertainWake!=="function"}});
   }
   if (state.enabled && status === "tokens-spent") {
     notices.push({

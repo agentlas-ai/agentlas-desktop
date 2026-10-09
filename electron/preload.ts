@@ -687,6 +687,9 @@ const api: AgentlasIpc = {
       ipcRenderer.invoke("mcpTools:installHubPlugin", input),
     pendingHubApprovals: () => ipcRenderer.invoke("mcpTools:pendingHubApprovals"),
     oauthStatus: (serverId: string) => ipcRenderer.invoke("mcpTools:oauthStatus", serverId),
+    oauthStart: (serverId: string) => ipcRenderer.invoke("mcpTools:oauthStart", serverId),
+    oauthPoll: (serverId: string, attemptId: string) => ipcRenderer.invoke("mcpTools:oauthPoll", serverId, attemptId),
+    oauthCancel: (serverId: string, attemptId: string) => ipcRenderer.invoke("mcpTools:oauthCancel", serverId, attemptId),
     oauthConnect: (serverId: string) => ipcRenderer.invoke("mcpTools:oauthConnect", serverId),
     oauthDisconnect: (serverId: string) => ipcRenderer.invoke("mcpTools:oauthDisconnect", serverId),
     test: (id: string) => ipcRenderer.invoke("mcpTools:test", id),
@@ -853,6 +856,7 @@ const api: AgentlasIpc = {
     openInbox: (projectId: string) => ipcRenderer.invoke("ontology:openInbox", projectId),
   },
   chats: {
+    messagesPage: (input) => ipcRenderer.invoke("chats:messagesPage", input),
     listRecent: (limit?: number) => ipcRenderer.invoke("chats:listRecent", limit),
     /** One 홈 전용 목록 — Work 대화가 One 대화를 밀어내지 않게 DB 에서 거른다. */
     listRecentOne: (limit?: number) => ipcRenderer.invoke("chats:listRecentOne", limit),
@@ -1010,12 +1014,38 @@ const api: AgentlasIpc = {
   },
   oneSupervisor: {
     snapshot: () => ipcRenderer.invoke("oneSupervisor:snapshot"),
+    budgets: (input) => ipcRenderer.invoke("oneSupervisor:budgets", input),
+    budgetConfigure: (input) => ipcRenderer.invoke("oneSupervisor:budgetConfigure", input),
     send: (input) => ipcRenderer.invoke("oneSupervisor:send", input),
     startWork: (input) => ipcRenderer.invoke("oneSupervisor:startWork", input),
     startScience: (input) => ipcRenderer.invoke("oneSupervisor:startScience", input),
     control: (input) => ipcRenderer.invoke("oneSupervisor:control", input),
     stopReply: (input) => ipcRenderer.invoke("oneSupervisor:stopReply", input),
     appearance: (input) => ipcRenderer.invoke("oneSupervisor:appearance", input),
+    journal: (input) => ipcRenderer.invoke("oneSupervisor:journal", input),
+    receipt: (input) => ipcRenderer.invoke("oneSupervisor:receipt", input),
+    stopTask: (input) => ipcRenderer.invoke("oneSupervisor:stopTask", input),
+    checkin: (input) => ipcRenderer.invoke("oneSupervisor:checkin", input),
+  },
+  oneContext: {
+    snapshot: (input) => ipcRenderer.invoke("oneContext:snapshot", input),
+    targets: (input) => ipcRenderer.invoke("oneContext:targets", input),
+    grant: (input) => ipcRenderer.invoke("oneContext:grant", input),
+    revoke: (input) => ipcRenderer.invoke("oneContext:revoke", input),
+    capture: (input) => ipcRenderer.invoke("oneContext:capture", input),
+    openPermissions: (input) => ipcRenderer.invoke("oneContext:openPermissions", input),
+  },
+  oneWindow: {
+    getState: () => ipcRenderer.invoke("oneWindow:getState"),
+    setAlwaysOnTop: (input: { value: boolean }) => ipcRenderer.invoke("oneWindow:setAlwaysOnTop", input),
+    showMain: (input?: { route?: string }) => ipcRenderer.invoke("oneWindow:showMain", input),
+    open: (input?: { taskId?: string }) => ipcRenderer.invoke("oneWindow:open", input),
+    hide: () => ipcRenderer.invoke("oneWindow:hide"),
+  },
+  oneHarness: {
+    getResult: (input) => ipcRenderer.invoke("oneHarness:getResult", input),
+    action: (input) => ipcRenderer.invoke("oneHarness:action", input),
+    readiness: (input) => ipcRenderer.invoke("oneHarness:readiness", input),
   },
   oneTeamPreflight: {
     prepare: (input) => ipcRenderer.invoke("oneTeamPreflight:prepare", input),
@@ -1030,6 +1060,7 @@ const api: AgentlasIpc = {
     setConcurrency: (value: number) => ipcRenderer.invoke("system:setConcurrency", value),
   },
   alive: {
+    resumeUncertainWake: (input) => ipcRenderer.invoke("alive:resumeUncertainWake", input),
     getState: (input) => ipcRenderer.invoke("alive:getState", input),
     setEnabled: (input) => ipcRenderer.invoke("alive:setEnabled", input),
     setTokenLimit: (input) => ipcRenderer.invoke("alive:setTokenLimit", input),
@@ -1298,6 +1329,9 @@ const api: AgentlasIpc = {
     clear: (input) => ipcRenderer.invoke("officeTaskContext:clear", input),
   },
   invoke: {
+    steerCurrentTurn: (input) => ipcRenderer.invoke("invoke:steerCurrentTurn", input),
+    currentTurnSteerReceipt: (input) => ipcRenderer.invoke("invoke:currentTurnSteerReceipt", input),
+    currentTurn: (chatId) => ipcRenderer.invoke("invoke:currentTurn", chatId),
     run: (req: McpInvocationRequest) => ipcRenderer.invoke("invoke:run", req),
     steer: (req: McpInvocationRequest, intentId?: string) => ipcRenderer.invoke("invoke:steer", req, intentId),
     steerReceipt: (input) => ipcRenderer.invoke("invoke:steerReceipt", input),
@@ -1367,7 +1401,14 @@ const api: AgentlasIpc = {
   },
 };
 
-contextBridge.exposeInMainWorld("agentlas", api);
+// The sandbox cannot import a relative preload module. Keep this role projection
+// inline and retain the original full API for the existing Desktop renderer.
+const oneWindowRole = process.argv.includes("--agentlas-window-role=one");
+const oneGroups = new Set(["oneWindow", "oneHarness", "auth", "app", "config", "runtime", "usage", "media", "menu", "fs", "chats", "tasks", "projects", "invoke",
+  "confirm", "attention", "browserUi", "browser", "browserAutofill", "browserAnnotation", "computerUse", "mcpTools", "secrets", "automations", "schedule",
+  "agents", "agentRuntime", "skills", "workStart", "goalPanel", "workLiveView", "localModelHub", "env"]);
+const exposedApi = oneWindowRole ? Object.fromEntries(Object.entries(api).filter(([group]) => group.startsWith("one") || oneGroups.has(group))) : api;
+contextBridge.exposeInMainWorld("agentlas", exposedApi);
 
 // 드래그&드롭으로 들어온 File/폴더의 실제 경로는 preload 안에서만 얻는다.
 // renderer에는 raw-path grant API 대신 main이 발급한 제한된 capability만 돌려준다.

@@ -54,7 +54,7 @@ export function searchToolchainAssets(task: string, assets: ToolchainAsset[], li
     const version = asset.versions.find(item => item.version === asset.stableVersion);
     if (asset.status !== "callable" || version?.validation.state !== "passed") return [];
     const c = version.contract;
-    const text = [c.name, c.description, ...c.whenToUse, ...c.whenNotToUse,
+    const text = [c.name, c.description, ...c.whenToUse,
       Object.keys((c.inputSchema.properties ?? {}) as Record<string, unknown>).join(" ")].join("\n");
     return [{ id: asset.id, text, embedding: embeddingOf(text) }];
   }));

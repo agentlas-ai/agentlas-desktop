@@ -35,9 +35,13 @@ async function* frames(response: Response): AsyncGenerator<{ event: string; data
         else if (line.startsWith("data:")) data.push(line.slice(5).trim());
       }
       if (!data.length) continue;
-      try { yield { event, data: JSON.parse(data.join("\n")) as Record<string, unknown> }; } catch { /* a broken frame is skipped */ }
+      const parsed: unknown = JSON.parse(data.join("\n"));
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("serving_frame_invalid");
+      yield { event, data: parsed as Record<string, unknown> };
     }
   }
+  buffer += decoder.decode();
+  if (buffer.trim()) throw new Error("serving_frame_incomplete");
 }
 
 const measured = (value: unknown): value is number => Number.isSafeInteger(value) && Number(value) >= 0;
@@ -66,15 +70,27 @@ export const runAliveServingDecision: Runner = async (req, _events): Promise<Run
   }
   let text = "";
   let usage: { inputTokens: number; outputTokens: number } | undefined;
-  for await (const frame of frames(response)) {
+  let done: Record<string, unknown> | undefined;
+  let doneCount = 0;
+  let invalidTerminal = false;
+  try { for await (const frame of frames(response)) {
+    if (doneCount > 0 && frame.event === "delta") invalidTerminal = true;
     if (frame.event === "delta" && typeof frame.data.text === "string") text += frame.data.text;
     else if (frame.event === "done") {
+      done = frame.data;
+      doneCount += 1;
       if (typeof frame.data.text === "string" && frame.data.text.length > text.length) text = frame.data.text;
       const u = frame.data.usage as { inputTokens?: unknown; outputTokens?: unknown } | undefined;
       if (u && measured(u.inputTokens) && measured(u.outputTokens)) usage = { inputTokens: u.inputTokens, outputTokens: u.outputTokens };
     } else if (frame.event === "error") {
       throw new Error(typeof frame.data.message === "string" ? frame.data.message : "serving_failed");
     }
+  } } catch {
+    return { text, ownerControlTerminal: "uncertain", ...(usage ? { observedUsage: usage } : {}) };
   }
-  return { text, ...(usage ? { observedUsage: usage } : {}) };
+  return { text, ...(usage ? { observedUsage: usage } : {}),
+    ownerControlTerminal: !req.signal?.aborted && !invalidTerminal && doneCount === 1 && text.trim()
+      && (done?.stopReason === "end_turn" || done?.stopReason === "stop_sequence")
+      && (done?.toolUses === undefined || Array.isArray(done.toolUses) && done.toolUses.length === 0)
+      ? "completed" : "uncertain" };
 };

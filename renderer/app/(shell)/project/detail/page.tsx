@@ -1,5 +1,9 @@
 // 프로젝트 상세 — 프로젝트 문맥, 채팅, PM 메모리 기반 작업 타임라인.
 "use client";
+
+import { PopupFrame, PopupFacts } from "@/components/Popup";
+
+import { confirmPopup } from "@/lib/popup";
 import { useAppUiPreference } from "@/lib/app-ui-preferences";
 import { OneBottomSheet as SharedDialog } from "@/components/one/OneBottomSheet";
 
@@ -833,7 +837,7 @@ function ProjectPage() {
       return;
     }
     if (!project) return;
-    if (!confirm(t("project.confirm_delete", { name: project.name }))) return;
+    if (!await confirmPopup(t("project.confirm_delete", { name: project.name }), { locale, tone: "danger", confirmLabel: locale === "ko" ? "삭제" : "Delete" })) return;
     try {
       await api.projects.remove(project.id);
       navigate("/dashboard", "replace");
@@ -929,9 +933,9 @@ function ProjectPage() {
 
       <SharedDialog open={taskStartOpen} onClose={() => setTaskStartOpen(false)}
         closeLabel={locale === "ko" ? "닫기" : "Close"} size="compact" eyebrow={project.name}
-        title={locale === "ko" ? "어떻게 시작할까요?" : "How would you like to start?"}
+        icon={<IconChat size={20} />} title={locale === "ko" ? "작업 시작" : "Start a task"}
         titleId="task-start-title"
-        description={locale === "ko" ? "새 대화를 시작하거나, 이 프로젝트 폴더에서 진행하던 CLI 기록을 가져올 수 있습니다." : "Start a new conversation or bring in CLI history created inside this project folder."}>
+        >
             <div style={{ display: "grid", gap: 10, padding: 0 }}>
               <button
                 autoFocus
@@ -944,7 +948,7 @@ function ProjectPage() {
                 <span style={{ width: 44, height: 44, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--accent)", color: "white" }}><IconChat size={19} /></span>
                 <span style={{ minWidth: 0 }}>
                   <strong style={{ display: "block", fontSize: 14 }}>{locale === "ko" ? "새 채팅" : "New conversation"}</strong>
-                  <small style={{ display: "block", marginTop: 5, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.45 }}>{locale === "ko" ? "빈 작업에서 목표를 입력하고 바로 시작합니다." : "Start with an empty task and describe the result you want."}</small>
+                  <small style={{ display: "block", marginTop: 5, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.45 }}>{locale === "ko" ? "목표를 입력하고 시작" : "Describe your goal"}</small>
                 </span>
                 <IconChevronRight size={17} style={{ color: "var(--muted-deep)" }} />
               </button>
@@ -957,7 +961,7 @@ function ProjectPage() {
                 <span style={{ width: 44, height: 44, display: "grid", placeItems: "center", borderRadius: 11, background: "var(--fill-1)", color: "var(--accent)" }}><IconFileUp size={19} /></span>
                 <span style={{ minWidth: 0 }}>
                   <strong style={{ display: "block", fontSize: 14 }}>{locale === "ko" ? "CLI 세션 가져오기" : "Import CLI session"}</strong>
-                  <small style={{ display: "block", marginTop: 5, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.45 }}>{locale === "ko" ? "Claude Code 또는 Codex 기록을 프로젝트 작업으로 가져옵니다." : "Import Claude Code or Codex history as project-owned work."}</small>
+                  <small style={{ display: "block", marginTop: 5, color: "var(--muted-deep)", fontSize: 11.5, lineHeight: 1.45 }}>{locale === "ko" ? "Claude Code · Codex" : "Claude Code · Codex"}</small>
                 </span>
                 <IconChevronRight size={17} style={{ color: "var(--muted-deep)" }} />
               </button>
@@ -976,9 +980,7 @@ function ProjectPage() {
         eyebrow={project.name}
         title={locale === "ko" ? "이 프로젝트에 맞는 Hub 에이전트" : "Hub agents for this project"}
         titleId="project-hub-recommendations-title"
-        description={locale === "ko"
-          ? "프로젝트 이름·설명·지시로 공개 Hub 전체에서 후보를 찾습니다. 북마크하지 않은 항목도 함께 확인하며, 이미 붙인 항목만 결과에서 뺍니다."
-          : "Searches the full public Hub catalog from the project name, description, and instructions, including items you have not bookmarked. Already attached items are omitted."}
+        icon={<IconUsers size={20} />}
       >
         <div data-testid="project-hub-recommendations" style={{ display: "grid", gap: 12 }}>
           {hubRecommendationsLoading ? (
@@ -1043,40 +1045,15 @@ function ProjectPage() {
           ) : null}
           <p style={{ margin: 0, color: "var(--muted-deep)", fontSize: 10.5, lineHeight: 1.5 }}>
             {locale === "ko"
-              ? "추가한 에이전트는 북마크에도 저장됩니다. 공개 Hub 에이전트는 무료로 붙이고 호출할 수 있습니다. 실행에는 선택한 AI 제공자의 사용 한도가 적용될 수 있습니다."
-              : "Added agents are also saved to bookmarks. Public Hub agents are free to attach and invoke. Your selected AI provider may apply its own usage limits."}
+              ? "북마크에 저장 · Hub 무료 · AI 제공자 사용 한도 적용"
+              : "Saved to bookmarks · Free Hub agents · AI provider limits apply"}
           </p>
         </div>
       </SharedDialog>
 
       {externalSessionsOpen && (
-        <div
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget && !externalSessionImporting) setExternalSessionsOpen(false);
-          }}
-          style={{ position: "fixed", inset: 0, zIndex: 1200, display: "grid", placeItems: "center", padding: 24, background: "rgba(21, 22, 18, .34)", backdropFilter: "blur(3px)" }}
-        >
-          <section
-            role="dialog"
-            aria-modal="true"
-            aria-labelledby="external-cli-session-title"
-            style={{ width: "var(--popup-2-width)", maxHeight: "min(720px, calc(100vh - 48px))", display: "flex", flexDirection: "column", overflow: "hidden", border: "1px solid var(--paper-edge)", borderRadius: 16, background: "var(--paper)", boxShadow: "0 24px 80px rgba(20, 22, 18, .22)" }}
-          >
-            <header style={{ display: "flex", alignItems: "center", gap: 12, padding: "18px 20px", borderBottom: "1px solid var(--paper-edge)" }}>
-              <div style={{ flex: 1, minWidth: 0 }}>
-                <h2 id="external-cli-session-title" style={{ margin: 0, fontSize: 17, fontFamily: "var(--font-head)" }}>{locale === "ko" ? "CLI 세션 가져오기" : "Import a CLI session"}</h2>
-                <p style={{ margin: "5px 0 0", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.5 }}>
-                  {locale === "ko"
-                    ? `${project.name} 폴더에서 시작한 CLI 세션만 이 프로젝트 작업 기록으로 가져옵니다. 원본 파일과 세션은 바꾸거나 재개하지 않습니다. 다음 실행은 이 프로젝트가 소유하는 새 Agentlas 세션입니다.`
-                    : `Only CLI sessions started inside ${project.name}'s folder are shown. Import creates project-owned work without changing or resuming the original file or session.`}
-                </p>
-              </div>
-              <button type="button" disabled={Boolean(externalSessionImporting)} onClick={() => setExternalSessionsOpen(false)} aria-label={locale === "ko" ? "닫기" : "Close"} style={{ width: 44, height: 44, display: "grid", placeItems: "center", borderRadius: 10, color: "var(--muted-deep)" }}>
-                <IconClose size={17} />
-              </button>
-            </header>
-
+        <PopupFrame title={locale === "ko" ? "CLI 세션 가져오기" : "Import CLI session"} icon={<IconFileUp size={20} />} closeLabel={locale === "ko" ? "닫기" : "Close"} onClose={() => setExternalSessionsOpen(false)} busy={Boolean(externalSessionImporting)} size="wide">
+          <PopupFacts items={[{ label: project.name, value: locale === "ko" ? "이 폴더에서 시작한 세션만" : "Sessions from this folder" }, { label: locale === "ko" ? "원본 유지" : "Original preserved", value: locale === "ko" ? "새 Agentlas 세션으로 실행" : "Run as a new Agentlas session" }]} />
             <div style={{ display: "flex", gap: 8, padding: "12px 20px", borderBottom: "1px solid var(--paper-edge)" }}>
               <label style={{ position: "relative", flex: 1 }}>
                 <span className="sr-only">{locale === "ko" ? "CLI 세션 검색" : "Search CLI sessions"}</span>
@@ -1130,8 +1107,7 @@ function ProjectPage() {
                 );
               })}
             </div>
-          </section>
-        </div>
+        </PopupFrame>
       )}
 
       {startChatError && (

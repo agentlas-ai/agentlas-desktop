@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ProductExtensionStatus } from "@shared/product-extension";
 import { IconBrain, IconCheck, IconPower, IconTrash } from "@/components/Icon";
+import { confirmPopup } from "@/lib/popup";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import { requestScienceInstall, SCIENCE_INSTALL_DISCOVERY_ENABLED } from "@/lib/science-install-entry";
@@ -118,9 +119,9 @@ export function ScienceExtensionPanel() {
   const uninstall = async () => {
     const api = ipc();
     if (!api?.productExtensions || !status?.installed || busy) return;
-    const confirmed = window.confirm(ko
+    const confirmed = await confirmPopup(ko
       ? "Agentlas Science 프로그램을 제거할까요? 연구 프로젝트와 데이터는 보존됩니다."
-      : "Remove Agentlas Science? Research projects and data will be preserved.");
+      : "Remove Agentlas Science? Research projects and data will be preserved.", { locale: ko ? "ko" : "en", tone: "danger", confirmLabel: ko ? "제거" : "Remove" });
     if (!confirmed) return;
     setBusy("uninstall");
     setNotice(null);

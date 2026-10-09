@@ -1,10 +1,12 @@
+import { supervisorError } from "../../shared/one-supervisor";
 import type { InvocationRunReceipt, McpInvocationRequest } from "../../shared/types";
 import type { SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorStore, supervisorHash, type SupervisorRequestRow } from "./supervisor-store";
 import { OneSupervisorWorkQueue, type SupervisorWorkLease } from "./supervisor-work-queue";
+import {OneBudgetAdmissionDenied} from "./budget-store";
 
 export interface SupervisorWorkRuntime {
-  start(request: McpInvocationRequest, hostNoticePurpose?: SupervisorHostNoticePurpose): {runId: string};
+  start(request: McpInvocationRequest, hostNoticePurpose?: SupervisorHostNoticePurpose): {runId: string} | Promise<{runId: string}>;
   attach(chatId: string): {runId: string} | null;
   receipt(runId: string): InvocationRunReceipt | null;
   onSettled(listener: (event: {runId: string; chatId: string; receipt: InvocationRunReceipt}) => void): () => void;
@@ -34,9 +36,10 @@ export class OneSupervisorWorkExecutor {
   private ticking = false;
   private timer: NodeJS.Timeout | null = null;
   private lastFailure: string | null = null;
+  private readonly dispatching = new Set<string>();
   private readonly unsubscribe: () => void;
   constructor(private readonly deps: SupervisorWorkExecutorOptions) {
-    if (deps.queue.db !== deps.store.db) throw new Error("supervisor_work_store_mismatch");
+    if (deps.queue.db !== deps.store.db) throw supervisorError('supervisor_work_store_mismatch');
     this.unsubscribe = deps.runtime.onSettled(event => {
       if (this.closed || !this.started) return;
       try {
@@ -77,7 +80,7 @@ export class OneSupervisorWorkExecutor {
         this.deps.assertOwner();
         const claimed = this.deps.queue.claim({ownerEpoch: this.deps.ownerEpoch, ownerKind: this.deps.ownerKind, leaseMs: this.deps.leaseMs});
         if (!claimed) break;
-        this.dispatch(claimed);
+        void this.dispatch(claimed);
       }
       this.lastFailure = null;
     } catch (error) {
@@ -87,17 +90,18 @@ export class OneSupervisorWorkExecutor {
     }
     finally { this.ticking = false; }
   }
-  private dispatch(claimed: SupervisorWorkLease): void {
+  private async dispatch(claimed: SupervisorWorkLease): Promise<void> {
+    this.dispatching.add(claimed.command_id);
     let starting: SupervisorWorkLease | null = null;
     try {
       this.deps.assertOwner();
       const row = this.deps.store.get(claimed.command_id);
       if (!row || row.state !== "stored" || row.one_id !== claimed.one_id || row.task_id !== claimed.task_id || row.run_id !== claimed.run_id) {
-        throw new Error("supervisor_work_ingress_changed");
+        throw supervisorError('supervisor_work_ingress_changed');
       }
       const {workerChatId, ...input} = JSON.parse(row.payload_json);
       if (workerChatId !== claimed.chat_id || supervisorHash([row.one_id, "work", input]) !== row.payload_hash) {
-        throw new Error("supervisor_work_payload_changed");
+        throw supervisorError('supervisor_work_payload_changed');
       }
       this.deps.assertBinding(claimed, row);
       // Commit the uncertain-effect boundary before any native start. An expired
@@ -109,28 +113,38 @@ export class OneSupervisorWorkExecutor {
       // A brief One wrote (bound to its reply) is shown in the Work session as handed over by One, never as the
       // owner's words, and carries no owner authority (no automatic Goal, no user model pin). The owner's own brief stays theirs.
       const byOne = row.source_reply_run_id !== null;
-      const started = this.deps.runtime.start({runId: starting.run_id, chatId: starting.chat_id,
+      const issued = this.deps.runtime.start({runId: starting.run_id, chatId: starting.chat_id,
         userPrompt: input.text, taskIntent: "task", permissions: input.permissions,
         locale: this.deps.locale(), runtimeSelection: input.runtimeSelection,
         ...(byOne ? {promptOrigin: "system" as const} : {})}, byOne ? "one-dispatch-brief" : undefined);
-      if (started.runId !== starting.run_id) throw new Error("supervisor_work_native_run_mismatch");
+      const started = "then" in issued ? await issued : issued;
+      if (started.runId !== starting.run_id) throw supervisorError('supervisor_work_native_run_mismatch');
+      this.deps.assertOwner();
       const current = this.deps.queue.get(starting.command_id)!;
+      if(current.generation!==starting.generation || current.owner_epoch!==starting.owner_epoch)throw supervisorError('supervisor_work_owner_fenced');
       if (current.phase === "starting") {
         this.deps.queue.transition(current, "running");
         const request = this.deps.store.get(current.command_id)!;
         if (request.state === "dispatching") this.deps.store.update(request, {state: "accepted", acknowledgement: "delivered"});
       }
     } catch (error) {
+      try { this.deps.assertOwner(); } catch { return; }
       const current = this.deps.queue.get(claimed.command_id);
       if (!current || current.generation !== claimed.generation || terminal(current.phase)) return;
       const reason = error instanceof Error ? error.message : "supervisor_work_dispatch_unknown";
+      if(error instanceof OneBudgetAdmissionDenied){
+        this.deps.queue.transition(current,"failed",reason);
+        const row=this.deps.store.get(claimed.command_id);
+        if(row && ["stored","dispatching"].includes(row.state))this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason});
+        return;
+      }
       this.deps.queue.transition(current, "held", reason);
       const row = this.deps.store.get(claimed.command_id);
       if (row && ["stored", "dispatching"].includes(row.state)) this.deps.store.update(row, {
         state: "held", acknowledgement: starting ? "unknown" : "stored",
         reason: starting ? reason : "work_binding_requires_review",
       });
-    }
+    } finally { this.dispatching.delete(claimed.command_id); }
   }
   private settle(job: SupervisorWorkLease, receipt: InvocationRunReceipt): void {
     if (receipt.runId !== job.run_id || receipt.chatId !== job.chat_id || !terminal(receipt.status)) return;
@@ -148,6 +162,7 @@ export class OneSupervisorWorkExecutor {
     }).immediate();
   }
   private reconcile(job: SupervisorWorkLease): void {
+    if (this.dispatching.has(job.command_id)) return;
     if (job.phase === "queued" || job.phase === "claimed" || terminal(job.phase)) return;
     const receipt = this.deps.runtime.receipt(job.run_id);
     if (receipt && receipt.runId === job.run_id && receipt.chatId === job.chat_id && terminal(receipt.status)) {

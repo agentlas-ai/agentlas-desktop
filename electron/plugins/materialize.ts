@@ -1,4 +1,4 @@
-// Materialize bundled plugins as exact releases under ~/.agentlas/plugins.
+// Materialize exact plugin releases under the install-owned plugin root.
 // Only `.state/` is host/user data. The release itself is staged and verified
 // before an atomic directory swap, so plugin.json can never claim a new
 // version over a partial mixture of old and new files.
@@ -9,6 +9,7 @@ import * as path from "node:path";
 import { pluginTreeSignature } from "./tree-signature";
 import Database from "better-sqlite3";
 import { isPackagedRuntime, optionalElectronAppPath, userDataPath } from "../runtime-paths";
+import { configuredIdentity } from "../install-identity";
 
 function bundledPluginsRoot(): string {
   const appPath = optionalElectronAppPath();
@@ -40,13 +41,15 @@ function bundledPluginsRoot(): string {
 const RESEARCH_DIRECTOR_PLUGIN_SLUG = "agentlas-science-research-director";
 
 /**
- * Packaged apps share the machine root. Dev/QA apps keep their own root under userData: two
+ * Official packaged apps share the machine root. Local candidates and dev/QA apps
+ * keep their own root under userData: two
  * desktop builds on one machine pin different Research Director versions, and whichever
  * materialized last would break the other's Science binding (production 1.2.6 vs a dev app
  * bundling 1.24.5, 2026-09-14). Science reads the same root through its env override.
  */
 export function installedPluginsRoot(): string {
-  if (!isPackagedRuntime() || process.env.AGENTLAS_QA_USER_DATA_DIR) {
+  if (!isPackagedRuntime() || process.env.AGENTLAS_QA_USER_DATA_DIR
+    || configuredIdentity()?.channel === "local-candidate") {
     const root = userDataPath("plugins");
     if (!process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT) {
       process.env.AGENTLAS_SCIENCE_RESEARCH_DIRECTOR_PLUGIN_ROOT = path.join(root, RESEARCH_DIRECTOR_PLUGIN_SLUG);

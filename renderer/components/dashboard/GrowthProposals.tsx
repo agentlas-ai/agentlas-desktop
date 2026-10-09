@@ -3,6 +3,7 @@
 //   저위험 자동적용분 = 수동태 "적용됨 · 되돌리기" 표기(언제든 undo).
 // 승인이 firm 상세에 묻혀 아무도 못 누르던 문제를, 사람이 늘 보는 대시보드 인박스에 띄워 해결한다.
 "use client";
+import { confirmPopup } from "@/lib/popup";
 import { useCallback, useEffect, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
@@ -83,10 +84,10 @@ export function GrowthProposals() {
     [load],
   );
 
-  const deleteSession = useCallback((id: string) => {
-    if (!window.confirm(t("one.growth.confirm_delete_session"))) return;
-    void act(id, "delete");
-  }, [act, t]);
+  const deleteSession = useCallback(async (id: string) => {
+    if (!(await confirmPopup(t("one.growth.confirm_delete_session"), { locale: ko ? "ko" : "en", title: ko ? "성장 세션 삭제" : "Delete growth session", detail: id, tone: "danger" }))) return;
+    await act(id, "delete");
+  }, [act, ko, t]);
 
   const proposalKey = (proposal: AgentEvolutionProposalUi) => {
     const card = cardCopy(proposal);

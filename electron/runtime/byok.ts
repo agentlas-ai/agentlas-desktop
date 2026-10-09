@@ -11,7 +11,9 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 //  - 압축: 모델 컨텍스트 윈도우 초과 시 compactHistory로 과거 대화를 다이제스트로 접음
 import { readApiKey } from "../secrets/vault";
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
-import { cumulativeSurfaceGateText, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
+import { cumulativeSurfaceGateText, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
+import { createOwnerControlBoundary, ownerControlHistoryImages } from "./owner-control-pump";
+import { abortReasonError } from "./abort-reason";
 import {
   prepareMainToolLoop,
   runLocalOpenAiChat,
@@ -243,7 +245,12 @@ async function runAnthropicMessages(
   const messages: AnthropicMessage[] = [];
   for (const m of recent) {
     if (m.role === "user" || m.role === "assistant") {
-      messages.push({ role: m.role, content: m.text });
+      const images = ownerControlHistoryImages(m);
+      messages.push({ role: m.role, content: images.length ? [
+        ...images.map((image): AnthropicContent => ({ type: "image",
+          source: { type: "base64", media_type: image.mediaType, data: image.data } })),
+        { type: "text", text: m.text },
+      ] : m.text });
     }
   }
 
@@ -323,7 +330,15 @@ async function runAnthropicMessages(
   // ★도구 왕복. 모델이 tool_use 로 멈추면 실행하고 tool_result 로 답한 뒤 다시 부른다.
   // 상한을 두는 이유는 로컬/저가 모델이 같은 도구를 무한 반복하는 실측 때문이다.
   let toolTurnsTaken = 0;
+  const ownerControl = createOwnerControlBoundary(req);
+  try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
+    if (req.signal?.aborted) throw abortReasonError(req);
+    if (turn > 0) {
+      const batch = ownerControl.take();
+      // Keep tool_result blocks together before appending ordinary user text.
+      for (const entry of batch) messages.push({ role: "user", content: entry.text });
+    }
     const outgoingBody = () => ({ model, max_tokens: outputLimit, stream: true, system: systemField,
       messages: backend === "anthropic" ? withHistoryCacheBreakpoint(messages) : messages,
       ...(anthropicTools.length > 0 ? { tools: anthropicTools } : {}) });
@@ -346,6 +361,8 @@ async function runAnthropicMessages(
     const usageAttempt = measuredUsage.start();
     const beforeInput = inputTokens + cacheRead + cacheWrite;
     const beforeCacheRead = cacheRead;
+    if (req.signal?.aborted) throw abortReasonError(req);
+    ownerControl.dispatched();
     const resp = await fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
       headers,
@@ -367,6 +384,7 @@ async function runAnthropicMessages(
     // 이번 턴에 모인 tool_use 블록. index 로 들어와 조각조각 쌓인다.
     const pendingToolUse = new Map<number, { id: string; name: string; json: string }>();
     let stopReason: string | null = null;
+    let conflictingStopReason = false;
     let turnInputObserved = false;
     let turnCacheReadObserved = false;
     let turnOutputObserved = false;
@@ -419,7 +437,10 @@ async function runAnthropicMessages(
             turnOutputTokens = event.usage!.output_tokens!;
             turnOutputObserved = true;
           }
-          if (event.delta?.stop_reason) stopReason = event.delta.stop_reason;
+          if (typeof event.delta?.stop_reason === "string") {
+            if (stopReason !== null && stopReason !== event.delta.stop_reason) conflictingStopReason = true;
+            stopReason = event.delta.stop_reason;
+          }
         } else if (event.type === "message_stop") {
           messageStopped = true;
         }
@@ -433,6 +454,31 @@ async function runAnthropicMessages(
       ? { inputTokens: turnInput, outputTokens: turnOutputTokens,
           ...(turnCacheReadObserved ? { cachedInputTokens: cacheRead - beforeCacheRead } : {}) }
       : undefined);
+
+    // Only complete client-tool groups or final answers admit further work.
+    // pause_turn and token/context limits are partial responses, not ACKs.
+    const toolIds = new Set<string>();
+    const completeTools = [...pendingToolUse.values()].every((entry) => {
+      if (!entry.id || !entry.name || toolIds.has(entry.id)) return false;
+      toolIds.add(entry.id);
+      try {
+        const args: unknown = entry.json ? JSON.parse(entry.json) : {};
+        return !!args && typeof args === "object" && !Array.isArray(args);
+      } catch { return false; }
+    });
+    const completeBoundary = messageStopped && completeTools && !conflictingStopReason
+      && ((["end_turn", "stop_sequence"].includes(stopReason ?? "") && pendingToolUse.size === 0)
+        || (stopReason === "tool_use" && pendingToolUse.size > 0));
+    if (!completeBoundary) {
+      const error = new RuntimeTurnUnsettledError("byok", req.locale);
+      return { text: acc.trim() || error.message, ownerControlTerminal: "uncertain",
+        failure: stopReason === "refusal"
+          ? { ...byokFailure("refused", acc.trim() || "Anthropic refused the request."), providerCode: "refusal" }
+          : { ...byokFailure("exit", error.message), providerCode: error.code },
+        workforcePermissionEnforcement: broker?.finish(false) };
+    }
+    if (req.signal?.aborted) throw abortReasonError(req);
+    ownerControl.applied();
 
     if (req.scienceCollectionCapability && stopReason === "tool_use" && pendingToolUse.size === 0) {
       throw new Error("science_collection_tool_frame_invalid");
@@ -519,6 +565,7 @@ async function runAnthropicMessages(
   const observedUsage = measuredUsage.total();
   return {
     text: answer || (failure ? failure.message : ""),
+    ownerControlTerminal: failure ? "uncertain" : "completed",
     ...(failure ? { failure } : {}),
     ...(observedUsage ? { observedUsage } : {}),
     ...(outputTokens > 0 ? { tokens: outputTokens } : {}),
@@ -549,6 +596,7 @@ async function runAnthropicMessages(
               : ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
           ),
   };
+  } finally { ownerControl.finish(); }
 }
 
 /** 테스트 전용 진입점 — 와이어 형상(캐시 브레이크포인트·usage 계측) 검증에만 쓴다. */
@@ -603,9 +651,14 @@ function openAiMessages(
 ): ChatMessage[] {
   const messages: ChatMessage[] = [{ role: "system", content: system }];
   for (const message of recent) {
-    if (message.role === "user" || message.role === "assistant") {
-      messages.push({ role: message.role, content: message.text });
-    }
+    if (message.role === "user") {
+      const images = ownerControlHistoryImages(message);
+      messages.push({ role: "user", content: images.length ? [
+        ...images.map((image): LocalChatContent => ({ type: "image_url",
+          image_url: { url: `data:${image.mediaType};base64,${image.data}` } })),
+        { type: "text", text: message.text },
+      ] : message.text });
+    } else if (message.role === "assistant") messages.push({ role: "assistant", content: message.text });
   }
   if (req.images && req.images.length > 0) {
     const content: LocalChatContent[] = req.images.map((image) => ({
@@ -788,7 +841,10 @@ export const runGoogleByok: Runner = async (
   };
   const contents: Array<{ role: "user" | "model"; parts: GooglePart[] }> = [];
   for (const m of recent) {
-    if (m.role === "user") contents.push({ role: "user", parts: [{ text: m.text }] });
+    if (m.role === "user") contents.push({ role: "user", parts: [
+      ...ownerControlHistoryImages(m).map((image) => ({ inlineData: { mimeType: image.mediaType, data: image.data } })),
+      { text: m.text },
+    ] });
     else if (m.role === "assistant")
       contents.push({ role: "model", parts: [{ text: m.text }] });
   }
@@ -831,7 +887,13 @@ export const runGoogleByok: Runner = async (
       workforcePermissionEnforcement: broker?.finish(false) };
   };
 
+  const ownerControl = createOwnerControlBoundary(req);
+  try {
   for (let turn = 0; turn < MAX_BYOK_TOOL_TURNS; turn += 1) {
+    if (req.signal?.aborted) throw abortReasonError(req);
+    if (turn > 0) {
+      for (const entry of ownerControl.take()) contents.push({ role: "user", parts: [{ text: entry.text }] });
+    }
     const outgoingBody = () => ({
       systemInstruction: { parts: [{ text: system }] },
       contents,
@@ -854,6 +916,8 @@ export const runGoogleByok: Runner = async (
     const requestBody = outgoingBody();
     assertScienceRecoveryRequest(req, "byok", "google");
     let usageAttempt = measuredUsage.start();
+    if (req.signal?.aborted) throw abortReasonError(req);
+    ownerControl.dispatched();
     let resp = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -864,7 +928,7 @@ export const runGoogleByok: Runner = async (
       const terminal = httpFailureResult(resp.status);
       if (terminal) return terminal;
     }
-    if (!resp.ok && includeTools && resp.status >= 400 && resp.status < 500) {
+    if (!ownerControl.hasPending() && !resp.ok && includeTools && resp.status >= 400 && resp.status < 500) {
       // A Workforce grant is for this advertised inventory. A tools-free retry
       // would make any later success evidence describe a different invocation.
       if (req.scienceCollectionCapability) throw new Error("science_collection_tool_protocol_unsupported");
@@ -895,7 +959,8 @@ export const runGoogleByok: Runner = async (
       args: Record<string, unknown>;
     }> = [];
     let terminalUsage: { inputTokens: number; outputTokens: number } | undefined;
-    let sawFinishReason = false;
+    let finishReason: string | undefined;
+    let conflictingFinishReason = false;
     for await (const line of iterSseLines(resp)) {
       if (!line.startsWith("data:")) continue;
       const payload = line.slice(5).trim();
@@ -909,7 +974,11 @@ export const runGoogleByok: Runner = async (
           candidates?: Array<{ content?: { parts?: GooglePart[] }; finishReason?: string }>;
           usageMetadata?: { promptTokenCount?: unknown; totalTokenCount?: unknown };
         };
-        sawFinishReason ||= event.candidates?.some((candidate) => typeof candidate.finishReason === "string") ?? false;
+        const candidateFinishReason = event.candidates?.[0]?.finishReason;
+        if (typeof candidateFinishReason === "string") {
+          if (finishReason !== undefined && finishReason !== candidateFinishReason) conflictingFinishReason = true;
+          finishReason = candidateFinishReason;
+        }
         const input = event.usageMetadata?.promptTokenCount;
         const total = event.usageMetadata?.totalTokenCount;
         if (Number.isSafeInteger(input) && Number(input) >= 0
@@ -959,7 +1028,20 @@ export const runGoogleByok: Runner = async (
         // authority, so ignore them just as the previous text-only adapter did.
       }
     }
-    measuredUsage.complete(usageAttempt, sawFinishReason ? terminalUsage : undefined);
+    measuredUsage.complete(usageAttempt, finishReason === "STOP" ? terminalUsage : undefined);
+    if (finishReason !== "STOP" || conflictingFinishReason) {
+      const error = new RuntimeTurnUnsettledError("byok", req.locale);
+      const refused = ["SAFETY", "RECITATION", "LANGUAGE", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
+        "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "ESCALATION", "PUP_LIMITED_DISABLED"]
+        .includes(finishReason ?? "");
+      return { text: acc.trim() || error.message, ownerControlTerminal: "uncertain",
+        failure: refused
+          ? { ...byokFailure("refused", acc.trim() || `Google stopped the response: ${finishReason}.`), providerCode: finishReason }
+          : { ...byokFailure("exit", error.message), providerCode: error.code },
+        workforcePermissionEnforcement: broker?.finish(false) };
+    }
+    if (req.signal?.aborted) throw abortReasonError(req);
+    ownerControl.applied();
     if (functionCalls.length === 0 || req.untrustedNoTools) {
       reachedAnswer = true;
       break;
@@ -1007,6 +1089,7 @@ export const runGoogleByok: Runner = async (
   const observedUsage = measuredUsage.total();
   return {
     text: answer || (failure ? failure.message : ""),
+    ownerControlTerminal: failure ? "uncertain" : "completed",
     ...(failure ? { failure } : {}),
     ...(observedUsage ? { observedUsage } : {}),
     workforcePermissionEnforcement: failure
@@ -1021,4 +1104,5 @@ export const runGoogleByok: Runner = async (
               : ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
           ),
   };
+  } finally { ownerControl.finish(); }
 };

@@ -2,6 +2,7 @@
 // 과거 렌트 수익 및 잔액 전송 UI는 마켓플레이스 정산 영구 폐쇄로 제거했다.
 // 세션은 main이 보관하며 렌더러는 IPC로 잔액만 조회한다.
 "use client";
+import popupMenu from "./PanelPopover.module.css";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useVisibleInterval } from "@/lib/useVisibleInterval";
@@ -166,7 +167,7 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
 
       {open && (
         <div
-          role="dialog"
+          className={popupMenu.panelPopover} role="dialog" aria-label={ko ? "AI 사용 잔액" : "AI usage balance"}
           style={{
             position: "absolute",
             bottom: "calc(100% + 8px)",
@@ -174,10 +175,10 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
             zIndex: 60,
             width: 260,
             padding: 14,
-            borderRadius: 12,
-            background: "var(--paper)",
+            borderRadius: "var(--popup-radius)",
+            background: "var(--popup-card-bg)",
             border: "1px solid var(--paper-edge)",
-            boxShadow: "0 14px 36px rgba(0,0,0,0.18)",
+            boxShadow: "var(--popup-shadow)",
             fontSize: 12,
             color: "var(--ink)",
           }}
@@ -186,8 +187,9 @@ export function CreditBalanceWidget({ collapsed = false }: { collapsed?: boolean
             <span style={{ color: "var(--muted-deep)" }}>{ko ? "AI 사용 잔액" : "AI usage balance"}</span>
             <strong style={{ fontVariantNumeric: "tabular-nums" }}>{remaining.toLocaleString()}{limit ? <span style={{ color: "var(--muted-deep)", fontWeight: 500 }}> / {limit.toLocaleString()}</span> : null}</strong>
           </div>
+          {limit > 0 && <progress aria-label={ko ? "남은 AI 사용량" : "Remaining AI usage"} max={limit} value={Math.max(0, Math.min(remaining, limit))} style={{ width: "100%", height: 6, accentColor: "var(--accent)" }} />}
           <p style={{ margin: "8px 0 0", color: "var(--muted-deep)", lineHeight: 1.45 }}>
-            {ko ? "공개 Hub 에이전트는 무료로 공유·호출됩니다." : "Public Hub agents are free to share and invoke."}
+            {ko ? "공개 Hub · 공유/호출 무료" : "Public Hub · Free sharing and invocation"}
           </p>
         </div>
       )}

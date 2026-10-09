@@ -1,5 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { IconTarget } from "@/components/Icon";
 import { useT } from "@/lib/i18n";
 
 interface TourStep {
@@ -194,7 +195,7 @@ export function PageTour({
         role="dialog"
         aria-modal="false"
         aria-label={ko ? `${config.labelKo} 안내` : `${config.labelEn} tour`}
-        style={{ left: callout.left, top: callout.top }}
+        style={{ left: callout.left, top: callout.top, maxWidth:"calc(100vw - 24px)", background:"var(--paper)", borderRadius:18, boxShadow:"var(--popup-shadow)" }}
       >
         <div className="agentlas-tour-topline">
           <span>{progress}</span>
@@ -202,8 +203,8 @@ export function PageTour({
             ×
           </button>
         </div>
-        <h2>{ko ? step.titleKo : step.titleEn}</h2>
-        <p>{ko ? step.bodyKo : step.bodyEn}</p>
+        <div style={{display:"flex",alignItems:"center",gap:10,margin:"10px 0 12px"}}><span style={{display:"grid",placeItems:"center",width:38,height:38,borderRadius:12,background:"var(--popup-control-bg)",flexShrink:0}} aria-hidden="true"><IconTarget size={19}/></span><h2 style={{margin:0}}>{ko ? step.titleKo : step.titleEn}</h2></div>
+        <details style={{fontSize:11,color:"var(--ink-soft)",lineHeight:1.6}}><summary style={{cursor:"pointer",padding:"5px 0"}}>{ko ? "사용 방법" : "How it works"}</summary><p>{ko ? step.bodyKo : step.bodyEn}</p></details>
         <div className="agentlas-tour-actions">
           <button type="button" className="agentlas-tour-secondary" onClick={close}>
             {ko ? "건너뛰기" : "Skip"}

@@ -15,6 +15,8 @@ import type { AliveActionPacket, AliveAgent, AliveAttachment, AlivePlaygroundObs
   AliveRuntimeStart, AliveUnblockAttempt, AliveUnblockOutcome, AliveUnblockResult } from "./contracts";
 import { aliveActionKindsForDomain, aliveActionRegistration } from "./action-registry";
 import { AliveLifetimeStore } from "./lifetime-store";
+import { runtimeFailureBlocksReplay } from "../runtime/selection";
+import { aliveResumeAuthorized } from "./owner-resume";
 
 const digest = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 export interface AliveLifetimeBeat { agentId: string; outcome: "wait" | "dispatched" | "failed"; reasonCode: string }
@@ -243,6 +245,27 @@ export class AliveLifetimeService {
       if (agent.budget.deadlineMs !== null && nowMs >= agent.budget.deadlineMs) { beats.push(this.wait(agent, "grant.deadline-spent", nowMs)); continue; }
       if (agent.budget.tokenLimit !== null && agent.budget.tokensUsed >= agent.budget.tokenLimit) { beats.push(this.wait(agent, "grant.tokens-spent", nowMs)); continue; }
       if (agent.budget.tokenLimit !== null && agent.state.usageUnknown === true) { beats.push(this.wait(agent, "grant.usage-unavailable", nowMs)); continue; }
+      // The ledger sequence owns the last attempt, including equal/backward
+      // clocks. Settings, a new model, and changed observations cannot release
+      // an uncertain wake. Only exact, unconsumed native owner consent can do so.
+      let ownerResumeDue = false;
+      const lastWake = this.store.db.prepare(`SELECT w.wake_id,w.receipt_json FROM alive_wakes w
+        JOIN alive_events e ON e.agent_id=w.agent_id AND e.kind='wake.settled'
+          AND json_extract(e.payload_json,'$.wakeId')=w.wake_id
+        WHERE w.agent_id=? ORDER BY e.sequence DESC LIMIT 1`).get(agent.agentId) as {wake_id:string;receipt_json:string|null}|undefined;
+      if (lastWake) {
+        let receipt: {runId?:unknown;errorCode?:unknown}|null = null;
+        try { receipt = lastWake.receipt_json ? JSON.parse(lastWake.receipt_json) : null; } catch { /* retain the failed boundary */ }
+        if (!receipt || receipt.runId !== lastWake.wake_id) {
+          beats.push(this.wait(agent, "runtime_turn_unsettled", nowMs)); continue;
+        }
+        if (typeof receipt.errorCode === "string" && (receipt.errorCode === "alive-host-lost"
+          || runtimeFailureBlocksReplay({providerCode:receipt.errorCode}))) {
+          const barrier = this.store.resumeBarrier(agent.agentId);
+          ownerResumeDue = Boolean(barrier && aliveResumeAuthorized(this.store.db,agent,barrier));
+          if (!ownerResumeDue) { beats.push(this.wait(agent, receipt.errorCode, nowMs)); continue; }
+        }
+      }
       const lastAction = agent.state.lastAction as { ok?: unknown; atMs?: unknown } | undefined;
       if (this.options.actionSpacingMs && lastAction?.ok === true && typeof lastAction.atMs === "number"
         && nowMs - lastAction.atMs < this.options.actionSpacingMs) { beats.push(this.wait(agent, "action.spacing", nowMs)); continue; }
@@ -305,17 +328,17 @@ export class AliveLifetimeService {
         && nowMs >= agent.state.actionBackoffUntilMs
         && (typeof agent.state.lastReviewAtMs !== "number"
           || agent.state.lastReviewAtMs < agent.state.actionBackoffUntilMs);
-      const due = typeof agent.state.nextWakeAtMs === "number" && nowMs >= agent.state.nextWakeAtMs
+      const due = ownerResumeDue || typeof agent.state.nextWakeAtMs === "number" && nowMs >= agent.state.nextWakeAtMs
         || periodicPausedReview || actionRetryDue || runtimeBindingChanged || grantChanged;
       if (!changed && !due) { beats.push(this.wait(agent, "agent.resting", nowMs)); continue; }
       const floorMs = this.options.reviewFloorMs?.(agent) ?? 0;
       const lastReviewStatus = (agent.state.lastReview as { status?: unknown } | undefined)?.status;
-      if (!changed && floorMs > 0 && lastReviewStatus === "completed" && typeof agent.state.lastReviewAtMs === "number"
+      if (!ownerResumeDue && !changed && floorMs > 0 && lastReviewStatus === "completed" && typeof agent.state.lastReviewAtMs === "number"
         && nowMs - agent.state.lastReviewAtMs < floorMs) { beats.push(this.wait(agent, "agent.resting", nowMs)); continue; }
       if (agent.runtimeBinding === null || agent.runtimeBinding === undefined) { beats.push(this.wait(agent, "runtime.selection-unavailable", nowMs)); continue; }
       const admissionCode = this.options.admission?.(agent, nowMs) ?? null;
       if (admissionCode) { beats.push(this.wait(agent, admissionCode, nowMs)); continue; }
-      const reasonCode = changed ? "agent.observation-changed"
+      const reasonCode = ownerResumeDue ? "owner.resume-uncertain" : changed ? "agent.observation-changed"
         : runtimeBindingChanged || grantChanged ? "agent.runtime-or-grant-changed"
           : actionRetryDue ? "agent.action-retry-due"
             : periodicPausedReview ? "agent.unfinished-review-due" : "agent.review-due";

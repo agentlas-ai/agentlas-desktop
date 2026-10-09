@@ -833,3 +833,10 @@
     animation: none !important;
   }
 }
+.stepMark { display:grid; place-items:center; width:52px; height:52px; margin:0 auto 16px; border-radius:17px; background:var(--popup-sage,var(--paper-2)); color:var(--ink); border:1px solid var(--paper-edge); box-shadow:inset 0 1px 0 #fff9,0 5px 14px #26312709; }
+.head h1 { white-space:normal; }
+.head p { font-size:12px; margin-top:8px; }
+.help { margin:10px 0; color:var(--ink-soft); font-size:11px; }
+.help summary { padding:6px 0; cursor:pointer; }
+.help p { margin-top:6px; }
+.setupCard { box-shadow:inset 0 1px 0 #fff9,0 4px 14px #26312708; }

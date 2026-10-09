@@ -2,7 +2,7 @@
 // 메인 프로세스의 buildAppMenu가 webContents.send("menu:navigate", route)로 보냄.
 // 라우트면 router.push, 특수 sentinel(__toggle_sidebar__ 등)은 별도 처리.
 "use client";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useT, type LocalePref } from "@/lib/i18n";
 import { DARK_THEME_ENABLED, useTheme, type ThemePref } from "@/lib/theme";
@@ -12,6 +12,8 @@ import { readWorkSidebarWidth, clampWorkSidebarWidth, setWorkSidebarWidth } from
 import type { AppControlRendererState } from "@shared/app-control";
 import { isAppUiPreferenceName } from "@shared/app-ui-preferences";
 import { readAppUiPreferences, writeAppUiPreference } from "@/lib/app-ui-preferences";
+import { PopupFrame } from "./Popup";
+import { IconApps, IconChat, IconClose, IconFolder, IconSettings, IconSidebar, IconStore } from "./Icon";
 
 interface MenuBridge {
   onNavigate: (handler: (route: string) => void) => () => void;
@@ -27,6 +29,7 @@ const SIDEBAR_COLLAPSE_KEY = SIDENAV_COLLAPSE_KEY;
 
 export function MenuBridge() {
   const router = useRouter();
+  const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const { pref: localePreference, locale, setPref: setLocalePref } = useT();
   const { pref: themePreference, resolved: theme, setPref: setThemePref } = useTheme();
   const state = useRef({ localePreference, locale, themePreference, theme });
@@ -88,18 +91,7 @@ export function MenuBridge() {
         return;
       }
       if (route === "__show_shortcuts__") {
-        // V1: 단축키 다이얼로그. 지금은 alert로 대체.
-        alert(
-          [
-            "⌘N  New project",
-            "⌘[  Toggle sidebar",
-            "⌘,  Settings",
-            "⌘↵  Send message",
-            "⇧⌘M  Agent Hub",
-            "⇧⌘L  Apps",
-            "Esc  Close popover",
-          ].join("\n"),
-        );
+        setShortcutsOpen(true);
         return;
       }
       // One changed the app language for the owner (electron/app-control): the same setter as Settings.
@@ -115,5 +107,23 @@ export function MenuBridge() {
     return off;
   }, [router, setLocalePref]);
 
-  return null;
+  const ko = locale === "ko";
+  const modifier = typeof navigator !== "undefined" && /mac/i.test(navigator.platform) ? "⌘" : "Ctrl";
+  const shortcuts = [
+    { label: ko ? "새 프로젝트" : "New project", keys: [modifier, "N"], icon: <IconFolder size={18} /> },
+    { label: ko ? "사이드바" : "Sidebar", keys: [modifier, "["], icon: <IconSidebar size={18} /> },
+    { label: ko ? "설정" : "Settings", keys: [modifier, ","], icon: <IconSettings size={18} /> },
+    { label: ko ? "메시지 보내기" : "Send message", keys: [modifier, "↵"], icon: <IconChat size={18} /> },
+    { label: "Agent Hub", keys: ["⇧", modifier, "M"], icon: <IconStore size={18} /> },
+    { label: ko ? "앱" : "Apps", keys: ["⇧", modifier, "L"], icon: <IconApps size={18} /> },
+    { label: ko ? "팝업 닫기" : "Close popup", keys: ["Esc"], icon: <IconClose size={18} /> },
+  ];
+  return shortcutsOpen ? <PopupFrame title={ko ? "단축키" : "Shortcuts"} icon={<IconApps size={20} />}
+    closeLabel={ko ? "닫기" : "Close"} onClose={() => setShortcutsOpen(false)}>
+    {shortcuts.map(({ label, keys, icon }) => <div key={label} style={{display: "flex", alignItems: "center", gap: 10, minHeight: 44}}>
+      <span aria-hidden="true" style={{color: "var(--muted-deep)"}}>{icon}</span>
+      <span style={{flex: 1, fontSize: 13}}>{label}</span>
+      <span style={{display: "flex", gap: 4}}>{keys.map((key, index) => <kbd key={index} style={{display: "grid", placeItems: "center", minWidth: 26, height: 28, padding: "0 6px", border: "1px solid var(--line)", borderRadius: 6, background: "var(--paper)", boxShadow: "0 2px 0 var(--line)", font: "inherit", fontSize: 12}}>{key}</kbd>)}</span>
+    </div>)}
+  </PopupFrame> : null;
 }

@@ -1,5 +1,7 @@
 // 자동화 — 리스트. 영구 SQLite + 백그라운드 스케줄러(60초)로 실제 실행.
 "use client";
+
+import { confirmPopup } from "@/lib/popup";
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
@@ -171,7 +173,7 @@ export default function AutomationListPage() {
       locale === "en"
         ? `Delete '${name}'?\n\nThis also deletes its session transcript.`
         : `'${name}' 자동화를 삭제할까요?\n\n이 자동화의 세션 대화도 같이 삭제됩니다.`;
-    if (!confirm(message)) return;
+    if (!await confirmPopup(message, { locale, tone: "danger", confirmLabel: locale === "ko" ? "삭제" : "Delete" })) return;
     try {
       await api.automations.remove(id);
       window.dispatchEvent(new CustomEvent("agentlas:automation-changed", { detail: { id } }));
@@ -247,8 +249,8 @@ export default function AutomationListPage() {
         <div className={styles.listTools}>
           <GraphControl label={locale === "en" ? "Graphs" : "그래프"} icon={<IconLayers size={17}/>} aria-pressed={tab === "graph"} onClick={()=>setTab("graph")}/>
           <GraphControl label={locale === "en" ? "One automations" : "One 자동화"} icon={<IconChat size={17}/>} aria-pressed={tab === "one"} onClick={()=>setTab("one")}/>
-          <details className={styles.menu}><summary title={locale === "en" ? "Describe a graph" : "말로 만들기"} aria-label={locale === "en" ? "Describe a graph" : "말로 만들기"}><IconPlus size={17}/></summary><div className={styles.menuContent} style={{left:0,right:"auto",width:420,maxWidth:"80vw"}}><DescribeAutomation locale={locale} onCreated={()=>void refresh()}/></div></details>
-          <details className={styles.menu}><summary title={locale === "en" ? "Install from Hub" : "Hub에서 받기"} aria-label={locale === "en" ? "Install from Hub" : "Hub에서 받기"}><IconDownload size={17}/></summary><div className={styles.menuContent} style={{left:0,right:"auto"}}>
+          <details className={styles.menu}><summary title={locale === "en" ? "Describe a graph" : "말로 만들기"} aria-label={locale === "en" ? "Describe a graph" : "말로 만들기"}><IconPlus size={17}/></summary><div className={styles.menuContent} style={{left:0,right:"auto",width:420,maxWidth:"80vw", background:"var(--popup-card-bg)", boxShadow:"var(--popup-shadow)", borderRadius:"var(--popup-radius)"}}><DescribeAutomation locale={locale} onCreated={()=>void refresh()}/></div></details>
+          <details className={styles.menu}><summary title={locale === "en" ? "Install from Hub" : "Hub에서 받기"} aria-label={locale === "en" ? "Install from Hub" : "Hub에서 받기"}><IconDownload size={17}/></summary><div className={styles.menuContent} style={{left:0,right:"auto", background:"var(--popup-card-bg)", boxShadow:"var(--popup-shadow)", borderRadius:"var(--popup-radius)"}}>
             <input value={hubSlug} onChange={e=>setHubSlug(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")void installFromHub();}} placeholder={locale === "en" ? "Graph name" : "그래프 이름"} aria-label={locale === "en" ? "Graph name" : "그래프 이름"}/>
             <button disabled={installing || !hubSlug.trim()} onClick={()=>void installFromHub()}>{locale === "en" ? "Install" : "받기"}</button>
           </div></details>

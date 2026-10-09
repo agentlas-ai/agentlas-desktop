@@ -18,6 +18,9 @@ import {
   IconPlus,
   IconSearch,
   IconSparkles,
+  IconLayers,
+  IconRoute,
+  IconShield,
 } from "@/components/Icon";
 
 export interface OneOrgSearchItem {
@@ -701,7 +704,8 @@ export function OneOrgChart({
         title={editorMember ? `${editorMember.displayName} · ${editorCopy.edit}` : editorCopy.defaultTitle}
         titleId="one-org-member-editor-title"
         ariaLabelledBy="one-org-member-editor-title"
-        description={locale === "ko" ? "이름과 협업 방식은 이 조직에만 적용됩니다. 원본 에이전트 패키지는 바뀌지 않습니다." : "Name and collaboration style apply only to this organisation. The source agent package stays unchanged."}
+        icon={<IconEdit size={20} />}
+        description={ko ? "이 조직에만 적용" : "Applies to this organisation"}
       >
         {editorMember && <div className={styles.memberEditor}>
           <section className={styles.editorSection}>
@@ -729,7 +733,7 @@ export function OneOrgChart({
               <IconSparkles size={15} />
               <div><strong>{editorCopy.modelAuto}</strong><span>{editorInstalled?.preferredBackend ? editorCopy.modelPreferred(editorInstalled.preferredBackend) : editorCopy.modelDefault}</span></div>
             </div>
-            <p className={styles.editorHint}>{editorCopy.modelHint}</p>
+            <details className={styles.popupDetails}><summary>{ko ? "모델 배정 방식" : "Model assignment"}</summary><p className={styles.editorHint}>{editorCopy.modelHint}</p></details>
             {(onBrowseTools || onConnectTool) && <button type="button" className={styles.secondaryAction} onClick={() => { setToolsMember(editorMember); setEditorMember(null); }}>{editorCopy.openTools}</button>}
           </section>
 
@@ -774,9 +778,10 @@ export function OneOrgChart({
         title={locale === "ko" ? "에이전트 추가" : "Add agent"}
         titleId="one-org-add-title"
         ariaLabelledBy="one-org-add-title"
-        description={addTab === "my" ? addCopy.localNote : addTab === "cloud" ? addCopy.cloudNote : addCopy.hubNote}
+        icon={<IconPlus size={20} />}
       >
         <div className={styles.addSheet}>
+          <details className={styles.popupDetails}><summary>{ko ? "가져오기 안내" : "Import details"}</summary><p>{addTab === "my" ? addCopy.localNote : addTab === "cloud" ? addCopy.cloudNote : addCopy.hubNote}</p></details>
           <div className={styles.tabs} role="tablist" aria-label={addCopy.sourceAria}>{([['my', addCopy.myAgents], ['cloud', 'Cloud'], ['hub', 'Hub']] as const).map(([key, label]) => <button key={key} type="button" role="tab" aria-selected={addTab === key} data-active={addTab === key} onClick={() => { setAddTab(key); setSelectedAgent(""); setAddError(null); }}>{label}</button>)}</div>
           <label className={styles.addSearch}><IconSearch size={15} /><input value={addSearch} onChange={(event) => setAddSearch(event.target.value)} placeholder={addCopy.search} aria-label={addCopy.search} />{addSearch && <button type="button" onClick={() => setAddSearch("")} aria-label={locale === "ko" ? "검색 지우기" : "Clear search"}><IconClose size={14} /></button>}</label>
           {/*
@@ -828,27 +833,27 @@ export function OneOrgChart({
         bodyClassName={styles.toolsDialogBody}
         eyebrow={toolsMember?.displayName}
         title={locale === "ko" ? "도구" : "Tools"}
+        icon={<IconApps size={20} />}
         titleId="one-org-tools-title"
         ariaLabelledBy="one-org-tools-title"
-        description={locale === "ko" ? "플러그인과 MCP를 나눠 보고, 이 동료가 실행 시 사용할 도구를 관리합니다." : "Review Plugins and MCP separately, then manage the tools this teammate may use at run time."}
       >
         {toolsMember && <div className={styles.toolsSheet}>
           <div className={styles.autoSelectRow}>
-            <div><strong>{toolsCopy.auto}</strong><small>{toolsCopy.autoDetail}</small></div>
+            <span className={styles.autoIcon} aria-hidden="true"><IconSparkles size={18} /></span><div><strong>{toolsCopy.auto}</strong><small>{ko ? "작업에 맞춰 선택" : "Match tools to the task"}</small></div>
             <button type="button" className={styles.toggle} data-on={toolsMember.autoSelectTools ? "true" : "false"} disabled={!onSetAutoSelect || toolsBusy} onClick={() => {
               if (!onSetAutoSelect) return;
               const next = !toolsMember.autoSelectTools;
               setToolsBusy(true);
               void onSetAutoSelect(toolsMember, next).then(() => setToolsMember((current) => current ? { ...current, autoSelectTools: next } : current)).finally(() => setToolsBusy(false));
-            }} aria-pressed={toolsMember.autoSelectTools}>{toolsMember.autoSelectTools ? toolsCopy.on : toolsCopy.off}</button>
+            }} role="switch" aria-checked={toolsMember.autoSelectTools} aria-label={toolsCopy.auto}><span /></button>
           </div>
           <div className={styles.builtInTool}><span className={styles.toolMark}><IconCode size={15} /></span><div><strong>{locale === "ko" ? "파일 · 터미널" : "Files · Terminal"}</strong><small>{locale === "ko" ? "내장 도구 · 항상 사용 가능" : "Built-in tools · Always available"}</small></div><span className={styles.toolState}>{locale === "ko" ? "준비됨" : "Ready"}</span></div>
-          <div className={styles.toolTabs} role="tablist" aria-label={locale === "ko" ? "도구 종류" : "Tool type"}><button type="button" role="tab" aria-selected={toolsTab === "plugins"} data-active={toolsTab === "plugins" ? "true" : "false"} onClick={() => setToolsTab("plugins")}>{toolsCopy.plugins}</button><button type="button" role="tab" aria-selected={toolsTab === "mcp"} data-active={toolsTab === "mcp" ? "true" : "false"} onClick={() => setToolsTab("mcp")}>{toolsCopy.mcp}</button></div>
+          <div className={styles.toolTabs} role="tablist" aria-label={locale === "ko" ? "도구 종류" : "Tool type"}><button type="button" role="tab" aria-selected={toolsTab === "plugins"} data-active={toolsTab === "plugins" ? "true" : "false"} onClick={() => setToolsTab("plugins")}><IconLayers size={15} />{toolsCopy.plugins}<small>{assignedTools.filter(tool => tool.source === "plugin").length}</small></button><button type="button" role="tab" aria-selected={toolsTab === "mcp"} data-active={toolsTab === "mcp" ? "true" : "false"} onClick={() => setToolsTab("mcp")}><IconRoute size={15} />{toolsCopy.mcp}<small>{assignedTools.filter(tool => tool.source === "custom").length}</small></button></div>
           <div className={styles.toolList}>
-            {visibleAssignedTools.length === 0 && <p className={styles.sheetEmpty}>{toolsTab === "plugins" ? toolsCopy.noPlugins : toolsCopy.noMcp}</p>}
+            {visibleAssignedTools.length === 0 && <div className={styles.sheetEmpty}><span className={styles.emptyToolIcon} aria-hidden="true">{toolsTab === "plugins" ? <IconLayers size={26} /> : <IconRoute size={26} />}</span><span>{ko ? "배정된 도구 없음" : "No assigned tools"}</span></div>}
             {visibleAssignedTools.map((tool) => <div className={styles.toolRow} key={tool.id}><span className={styles.toolMark}><IconApps size={14} /></span><div><strong>{locale === "ko" ? tool.name : tool.nameEn}</strong><small>{toolsTab === "plugins" ? toolsCopy.plugins : toolsCopy.mcp} · {tool.state === "ready" ? (locale === "ko" ? "연결됨" : "Connected") : tool.state === "disabled" ? (locale === "ko" ? "꺼짐" : "Off") : (locale === "ko" ? "연결 필요" : "Connection needed")}</small></div>{tool.state === "needs-connection" && <button type="button" className={styles.toolAction} onClick={() => { const member = toolsMember; setToolsMember(null); onConnectTool?.(member, tool.id); }}>{locale === "ko" ? "연결" : "Connect"}</button>}<span className={styles.toolState}>{tool.state === "ready" ? (locale === "ko" ? "준비됨" : "Ready") : tool.state === "disabled" ? (locale === "ko" ? "꺼짐" : "Off") : (locale === "ko" ? "확인 필요" : "Review")}</span></div>)}
           </div>
-          <p className={styles.note}>{toolsCopy.permissionNote}</p>
+          <p className={styles.toolPermission}><IconShield size={14} />{ko ? "실행 권한 적용" : "Execution permissions apply"}</p>
           <div className={styles.sheetActions}><button type="button" onClick={() => { const member = toolsMember; setToolsMember(null); if (toolsTab === "plugins") onBrowseTools?.(member); else onConnectTool?.(member); }}><IconPlus size={13} />{toolsTab === "plugins" ? (locale === "ko" ? "플러그인 관리" : "Manage plugins") : (locale === "ko" ? "MCP 관리" : "Manage MCP")}</button><button type="button" className={styles.primaryAction} onClick={() => setToolsMember(null)}>{locale === "ko" ? "닫기" : "Close"}</button></div>
         </div>}
       </OneBottomSheet>

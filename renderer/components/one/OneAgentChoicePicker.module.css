@@ -90,3 +90,6 @@
 .copy small { overflow: hidden; color: var(--muted-deep); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .meta { display: inline-flex; justify-self: end; color: var(--ok); }
 .empty { margin: 0; padding: 12px 8px; color: var(--muted-deep); font-size: 12px; }
+
+.panel { border-radius: 12px; background: var(--popup-card-bg, var(--paper)); box-shadow: var(--popup-shadow); }
+.row { min-height: 48px; }

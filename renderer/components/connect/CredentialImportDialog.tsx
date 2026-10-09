@@ -27,6 +27,7 @@ import {
   IconChevronDown,
   IconClose,
   IconKey,
+  IconFileUp,
   IconLock,
   IconPuzzle,
   IconRefresh,
@@ -314,6 +315,7 @@ export function CredentialImportDialog({
       <div className={`cid-panel${result ? " cid-complete" : ""}`} role="dialog" aria-modal="true" aria-labelledby="credential-import-title" onClick={(event) => event.stopPropagation()}>
         <header className="cid-head">
           <div>
+            <span className="cid-heading-icon" aria-hidden="true"><IconFileUp size={21} /></span>
             <h2 id="credential-import-title">{result ? (ko ? "가져오기 결과" : "Import results") : (ko ? "브라우저에서 가져오기" : "Import from your browser")}</h2>
             <p>{result
               ? (ko ? "선택한 데이터의 실제 처리 결과입니다." : "Here is what was actually imported.")
@@ -334,8 +336,7 @@ export function CredentialImportDialog({
             {result.cookieDetail && <p className="cid-result-note">{result.cookieDetail}</p>}
             {result.attempted.cookies > 0 && <p className="cid-result-note">{ko ? "쿠키를 가져온 결과이며, 실제 로그인 상태는 사이트의 연결 버튼에서 확인합니다." : "Cookies were imported. Use the site’s Connect button to verify live sign-in."}</p>}
             <div className="cid-result-warnings">
-              <strong>{ko ? "확장 프로그램" : "Extensions"}</strong>
-              <p>{ko ? "확장 프로그램 가져오기는 현재 지원하지 않습니다." : "Extension import is not currently supported."}</p>
+              <details><summary>{ko ? "지원 범위" : "Supported data"}</summary><p>{ko ? "확장 프로그램 가져오기는 현재 지원하지 않습니다." : "Extension import is not currently supported."}</p></details>
               {result.warnings.map((warning, index) => <p className="cid-warning" key={`${index}-${warning}`}>{warning}</p>)}
               {result.loginRequired.length > 0 && <>
                 <strong>{ko ? "다시 로그인해야 하는 사이트" : "Sites requiring sign-in"}</strong>
@@ -398,7 +399,7 @@ export function CredentialImportDialog({
               </div>
             </div>}
 
-            <div className="cid-consent"><strong>{ko ? "가져오기 전 확인" : "Before you import"}</strong><p>{ko ? "선택한 항목만 이 컴퓨터의 브라우저 프로필에서 읽어 Agentlas로 복사합니다. 비밀번호는 암호화된 저장소에, 쿠키는 전용 브라우저 세션에 저장되며 방문 기록은 현재 작업에만 추가됩니다. 브라우저 보호로 일부 항목은 가져올 수 없을 수 있습니다." : "Only selected items are copied from this computer's browser profile. Passwords go into the encrypted vault, cookies into the dedicated browser session, and history into this task only. Browser protection may prevent some transfers."}</p><label><input type="checkbox" checked={consented} disabled={importingNow} onChange={(event) => setConsented(event.target.checked)}/><span>{ko ? "선택한 브라우저 데이터를 Agentlas로 가져오는 데 동의합니다." : "I agree to import the selected browser data into Agentlas."}</span></label></div>
+            <div className="cid-consent"><div className="cid-storage-facts"><span><IconKey size={16} />{ko ? "비밀번호 · 암호화 저장" : "Passwords · encrypted vault"}</span><span><IconLock size={16} />{ko ? "쿠키 · 전용 세션" : "Cookies · dedicated session"}</span><span><IconRefresh size={16} />{ko ? "기록 · 현재 작업" : "History · this task"}</span></div><details><summary>{ko ? "가져오기 안내" : "Import details"}</summary><p>{ko ? "선택한 항목만 이 컴퓨터의 브라우저 프로필에서 읽어 Agentlas로 복사합니다. 비밀번호는 암호화된 저장소에, 쿠키는 전용 브라우저 세션에 저장되며 방문 기록은 현재 작업에만 추가됩니다. 브라우저 보호로 일부 항목은 가져올 수 없을 수 있습니다." : "Only selected items are copied from this computer's browser profile. Passwords go into the encrypted vault, cookies into the dedicated browser session, and history into this task only. Browser protection may prevent some transfers."}</p></details><label><input type="checkbox" checked={consented} disabled={importingNow} onChange={(event) => setConsented(event.target.checked)}/><span>{ko ? "선택한 브라우저 데이터를 Agentlas로 가져오는 데 동의합니다." : "I agree to import the selected browser data into Agentlas."}</span></label></div>
             {error && <div className="cid-error-row"><p className="cid-error" role="alert">{error}</p>{!scanning && selectedCount === 0 && <button type="button" onClick={() => { if (profileId) { void loadProfile(profileId); } else { setScanning(true); setError(null); setScanNonce((value) => value + 1); } }}>{ko ? "다시 찾기" : "Scan again"}</button>}</div>}
           </div>
         )}
@@ -408,6 +409,14 @@ export function CredentialImportDialog({
       </div>
 
       <style jsx>{`
+        .cid-heading-icon { display: inline-grid; place-items: center; width: 38px; height: 38px; margin-bottom: 10px; border-radius: 12px; background: var(--popup-sage, color-mix(in srgb, var(--ok) 8%, var(--paper))); color: var(--ink); box-shadow: inset 0 1px 0 #fff8, 0 3px 9px #26312708; }
+        .cid-storage-facts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-bottom: 10px; }
+        .cid-storage-facts span { display: grid; gap: 7px; padding: 11px; font-size: 10.5px; line-height: 1.4; border-radius: 10px; background: var(--paper); border: 1px solid var(--paper-edge); }
+        .cid-consent details, .cid-result-warnings details { font-size: 11px; line-height: 1.6; }
+        .cid-consent summary, .cid-result-warnings summary { cursor: pointer; color: var(--ink-soft); }
+        .cid-backdrop { backdrop-filter: blur(5px); }
+        .cid-panel { box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }
+        @media (max-width: 460px) { .cid-storage-facts { grid-template-columns: 1fr; } .cid-storage-facts span { display: flex; align-items: center; } }
         .cid-stepper { padding: 0 24px; flex-shrink: 0; }
         .cid-backdrop {
           position: fixed;

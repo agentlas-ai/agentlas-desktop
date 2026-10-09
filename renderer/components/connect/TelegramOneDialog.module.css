@@ -358,3 +358,16 @@
     color: var(--ink);
   }
 }
+
+/* Paper popup elevation shares the desktop popup palette. */
+.scrim { background: var(--popup-backdrop, rgb(31 42 34 / 24%)); backdrop-filter: blur(5px); }
+.card { border: 1px solid var(--paper-edge); border-radius: 20px; background: var(--paper); color: var(--ink); box-shadow: var(--popup-shadow, 0 28px 72px #20312424, 0 3px 12px #2031240d); }
+
+
+
+.details { font-size:11px; color:var(--ink-soft); margin:8px 0 16px; }
+.details summary { padding:8px 0; cursor:pointer; }
+.options button { box-shadow:inset 0 1px 0 #fff9,0 3px 9px #26312708; }
+
+/* Keep the responsive card within its padded overlay. */
+.card { max-width: 100%; }

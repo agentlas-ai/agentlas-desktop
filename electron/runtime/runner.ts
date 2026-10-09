@@ -1,5 +1,6 @@
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { WORK_RECOVERY_PROTOCOL } from "../../shared/work-recovery";
+import { intellectUiPrompt } from "../../shared/intellect-ui-prompt";
 // 모든 런타임(CLI 3종 + BYOK 3종)이 구현해야 하는 통합 인터페이스.
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
 import { runtimeNativeAbilitiesLine } from "./native-capabilities";
@@ -23,7 +24,16 @@ export type BeforeMcpToolResult = (input: {
   catalogId: string | null; toolName: string; isError: boolean;
 }) => Promise<void>;
 
+/** A Main-owned durable mailbox; text has user authority, never system authority. */
+export type RunnerOwnerControlDeliveryPhase = "current-boundary" | "episode-terminal";
+export interface RunnerOwnerControlInbox {
+  /** Queue input is eligible only at a positively completed episode terminal. */
+  take(phase?: RunnerOwnerControlDeliveryPhase): Array<{ intentId: string; text: string }>;
+  settle(intentIds: string[], status: "applied" | "rejected" | "uncertain", code?: string): void;
+}
+
 export interface RunnerRequest {
+  ownerControlInbox?: RunnerOwnerControlInbox;
   /** Private Host port; canonical task/checkpoint/action identities survive model changes. */
   canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryContext;
   /** Awaited before an MCP result can reach the next provider dispatch. */
@@ -612,7 +622,31 @@ export function workforceNativeToolEnforcement(
   };
 }
 
+/** Main-only handle for one confirmed provider turn; never accepted from IPC JSON. */
+export interface RunnerNativeTurnBinding {
+  readonly runtime: string;
+  readonly chatId: string;
+  readonly runtimeSessionOwnerId: string | null;
+  readonly threadId: string;
+  readonly turnId: string;
+  readonly model: string | null;
+  readonly permission: "read" | "write" | "full";
+  readonly cwd: string;
+}
+
+export type RunnerNativeSteerResult =
+  | { status: "accepted"; turnId: string }
+  | { status: "rejected"; code: string; reason: string; rpcCode?: number }
+  | { status: "uncertain"; code: string; reason: string; rpcCode?: number };
+
+export interface RunnerNativeTurnController {
+  readonly binding: Readonly<RunnerNativeTurnBinding>;
+  steer(input: { requestId: string; text: string; expectedThreadId: string; expectedTurnId: string }): Promise<RunnerNativeSteerResult>;
+}
+
 export interface RunnerEvents {
+  /** Published after exact native turn ACK; null synchronously withdraws this run's handle. */
+  onNativeTurnController?: (controller: RunnerNativeTurnController | null) => void;
   /** 토큰 또는 줄 단위 partial 출력 */
   onPartial: (chunk: string) => void;
   /** 사용자에게 보일 상태 줄 — locale 적용된 완성 문자열 */
@@ -688,6 +722,8 @@ export interface RunnerFailure {
 }
 
 export interface RunnerResult {
+  /** Explicit missing terminal proof prevents the common harness from dispatching another episode. */
+  ownerControlTerminal?: "completed" | "uncertain";
   text: string;
   /**
    * 실려 있으면 text는 답이 아니다(표시용 고지문일 수 있다). 소비자는 이 칸으로만
@@ -731,10 +767,27 @@ export class RuntimeTurnUnsettledError extends Error {
 }
 
 /** Terminal HTTP status is machine evidence; prose/network errors do not grant replay. */
+const runtimeHttpRefusals = new WeakMap<RunnerFailure, number>();
 export function runtimeHttpFailure(status: number, runtime: string, provider: string): RunnerFailure | null {
   const kind = status === 401 ? "auth" : status === 429 ? "quota" : status === 403 ? "refused" : null;
-  return kind ? { kind, runtime, source: "marker", providerCode: `http_${status}`,
-    message: `${provider} API returned HTTP ${status}.` } : null;
+  if (!kind) return null;
+  const failure: RunnerFailure = { kind, runtime, source: "marker", providerCode: `http_${status}`,
+    message: `${provider} API returned HTTP ${status}.` };
+  runtimeHttpRefusals.set(failure, status);
+  return failure;
+}
+
+/** Only this process's actual HTTP rejection factory can prove no model work. */
+export function runtimeFailureIsClosedHttpRefusal(failure: RunnerFailure | null | undefined, evidence: {
+  text: string; nativeActivity: boolean; aborted: boolean; observedUsage?: RunnerResult["observedUsage"];
+}): boolean {
+  if (!failure || evidence.nativeActivity !== false || evidence.aborted !== false || evidence.text !== "") return false;
+  const status = runtimeHttpRefusals.get(failure);
+  const kind = status === 401 ? "auth" : status === 403 ? "refused" : status === 429 ? "quota" : null;
+  if (!kind || failure.kind !== kind || failure.source !== "marker" || failure.providerCode !== `http_${status}`) return false;
+  const usage = evidence.observedUsage;
+  return usage === undefined || (usage !== null && usage.inputTokens === 0 && usage.outputTokens === 0
+    && (usage.cachedInputTokens === undefined || usage.cachedInputTokens === 0));
 }
 
 /** A Main-observed completed-tool loop stop cannot authorize provider replay. */
@@ -1204,6 +1257,7 @@ export function wrapSystemPrompt(
       "Do not emit memory, automation, app, workbench, or surface control blocks.",
       "",
       ASK_PROTOCOL,
+      intellectUiPrompt(locale),
       "",
       tStatus(locale, "sysAgentDef"),
       restrictedAgentPrompt,
@@ -1294,6 +1348,7 @@ export function wrapSystemPrompt(
     ...(capabilityPriority ? [capabilityPriority] : []),
     "",
     ASK_PROTOCOL,
+    intellectUiPrompt(locale),
     "",
     // 항상-켜진 백그라운드 스킬 — 사용자가 "API/MCP"를 몰라도 에이전트가 브라우저로 가입·로그인·키
     // 발급을 손잡고 안내한 뒤 저장하게 한다. 사용자에게는 보이지 않는다(시스템 프롬프트 내부).

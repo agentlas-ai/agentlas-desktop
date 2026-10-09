@@ -1,4 +1,4 @@
-// 자동 업데이트 카드 — 실제 업데이트가 있을 때만 좌측 사이드바 하단에 노출.
+// 아이콘 중심 업데이트 행 — 실제 업데이트가 있을 때만 사이드바 하단에 노출.
 //   - available:   새 버전 발견 (자동 다운로드 시작) 알림
 //   - downloading: 진행률 표시
 //   - downloaded:  "재시작 업데이트" 강조 버튼 (dismissed 전까지)
@@ -8,17 +8,16 @@
 // 사용자가 "나중에"로 일단 닫으면 같은 다운로드 버전에 대해 다시 안 뜸 (세션 한정).
 // 새 버전이 다시 다운로드되면 자동으로 다시 노출.
 "use client";
-import { useEffect, useRef, useState } from "react";
-import { IconChevronDown, IconClose, IconRefresh, IconSparkles } from "@/components/Icon";
+import { useEffect, useId, useRef, useState } from "react";
+import { IconAlertTriangle, IconCheck, IconChevronDown, IconClose, IconDownload, IconRefresh } from "@/components/Icon";
 import { ipc, updaterEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { UpdaterState } from "@/lib/types";
 import { updaterCanUseOfficialInstaller } from "@shared/types";
-import { LoadingEstimate } from "./LoadingEstimate";
 import { UpdateResumeConfirm } from "./UpdateResumeConfirm";
 
 export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
-  const { t, locale } = useT();
+  const { t } = useT();
   const [state, setState] = useState<UpdaterState>({ status: "idle" });
   /** 사용자가 "나중에" 누른 버전. 그 버전에 대해서는 더 이상 안 띄움 */
   const [dismissedVersion, setDismissedVersion] = useState<string | null>(null);
@@ -29,6 +28,7 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   const [resumeBusy, setResumeBusy] = useState(false);
   const [laterChosen, setLaterChosen] = useState(false);
   const lastFocusCheck = useRef(0);
+  const releaseNotesId = useId();
 
   useEffect(() => {
     let cancelled = false;
@@ -161,6 +161,15 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
           ? t("update.installing", { version: state.version ?? "?" })
           : "";
 
+  const progress = state.status === "downloading" && typeof state.progress === "number" && Number.isFinite(state.progress)
+    ? Math.round(Math.min(100, Math.max(0, state.progress)))
+    : undefined;
+  const progressLabel = progress === undefined
+    ? t("update.found", { version: state.version ?? "?" })
+    : t("update.downloading", { pct: progress });
+  const recoveryLabel = canUseOfficialInstaller && !retrySourceSeal ? t("update.open_download") : t("update.retry");
+  const deferredCopy = installDeferred ? t("update.active_runs") : laterChosen ? t("update.resume_deferred") : null;
+
   return (
     <>
     {confirm}
@@ -169,33 +178,55 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
       data-downloaded={isDownloaded ? "true" : "false"}
       data-action-required={isManual ? "true" : "false"}
       data-collapsed={collapsed ? "true" : "false"}
+      data-state={state.status}
       role={isManual ? "alert" : "status"}
       aria-live="polite"
+      aria-busy={isDownloading || isInstalling}
     >
       {isDownloaded ? (
         collapsed ? (
           <button
+            type="button"
             onClick={() => void install()}
             className="sidenav-update-action"
             aria-label={t("update.restart_action")}
-            title={t("update.restart_now")}
+            title={`${t("update.ready_version", { version: state.version ?? "?" })} · ${t("update.restart_now")}`}
           >
-            <IconRefresh size={17} aria-hidden="true" />
+            <IconRefresh size={18} />
+            <span className="sidenav-update-ready-dot" aria-hidden="true" />
           </button>
         ) : (
           <>
             <div className="sidenav-update-head">
-              <span className="sidenav-update-icon" aria-hidden="true">
-                <IconSparkles size={16} />
-              </span>
-              <span className="sidenav-update-copy">
-                <strong>{t("update.ready_compact")}</strong>
-                <span className="sidenav-update-version">v{state.version ?? "?"}</span>
-                <span>{t("update.ready_description")}</span>
-                {installDeferred && <span role="status">{t("update.active_runs")}</span>}
-                {laterChosen && !installDeferred && <span role="status" data-update-resume-deferred>{t("update.resume_deferred")}</span>}
-              </span>
               <button
+                type="button"
+                className="sidenav-update-secondary"
+                aria-label={showReleaseNotes ? t("update.hide_whats_new") : t("update.whats_new")}
+                title={showReleaseNotes ? t("update.hide_whats_new") : t("update.whats_new")}
+                aria-expanded={showReleaseNotes}
+                aria-controls={releaseNotesId}
+                onClick={() => setShowReleaseNotes((visible) => !visible)}
+              >
+                <span className="sidenav-update-icon" aria-hidden="true"><IconCheck size={16} /></span>
+                <span className="sidenav-update-copy">
+                  <strong className="sidenav-update-version">v{state.version ?? "?"}</strong>
+                  <span>{t("update.status.ready")}</span>
+                </span>
+                <span className="sidenav-update-chevron" data-open={showReleaseNotes ? "true" : "false"} aria-hidden="true">
+                  <IconChevronDown size={12} />
+                </span>
+              </button>
+              <button
+                type="button"
+                onClick={() => void install()}
+                className="sidenav-update-action"
+                aria-label={t("update.restart_action")}
+                title={`${t("update.restart_action")} · ${t("update.ready_description")}`}
+              >
+                <IconRefresh size={18} />
+              </button>
+              <button
+                type="button"
                 onClick={() => state.version && setDismissedVersion(state.version)}
                 aria-label={t("update.dismiss")}
                 title={t("update.dismiss")}
@@ -204,8 +235,14 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                 <IconClose size={15} aria-hidden="true" />
               </button>
             </div>
+            {deferredCopy && (
+              <p className="sidenav-update-feedback" role="status" data-update-resume-deferred={laterChosen && !installDeferred ? "true" : undefined}>
+                {deferredCopy}
+              </p>
+            )}
             {showReleaseNotes && (
-              <div className="sidenav-update-changelog">
+              <div className="sidenav-update-changelog" id={releaseNotesId}>
+                <p className="sidenav-update-description">{t("update.ready_description")}</p>
                 <strong>{t("update.changelog_title")}</strong>
                 {releaseNoteLines.length > 0 ? (
                   <ul>
@@ -223,65 +260,42 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                 </button>
               </div>
             )}
-            <div className="sidenav-update-actions">
-              <button
-                type="button"
-                className="sidenav-update-secondary"
-                aria-expanded={showReleaseNotes}
-                onClick={() => setShowReleaseNotes((visible) => !visible)}
-              >
-                <span>{showReleaseNotes ? t("update.hide_whats_new") : t("update.whats_new")}</span>
-                <span
-                  className="sidenav-update-chevron"
-                  data-open={showReleaseNotes ? "true" : "false"}
-                  aria-hidden="true"
-                >
-                  <IconChevronDown size={14} />
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => void install()}
-                className="sidenav-update-action"
-              >
-                {t("update.restart_action")}
-              </button>
-            </div>
           </>
         )
-      ) : isManual || isInstalling ? (
+      ) : isManual ? (
         <>
-          <span className="sidenav-update-dot" aria-hidden />
-          <span className="sidenav-update-copy">
-            <strong>{collapsed ? "↑" : attentionCopy}</strong>
+          {(!collapsed || (!canUseOfficialInstaller && !state.canRetry)) && (
+            <span className="sidenav-update-icon" title={attentionCopy} aria-hidden="true"><IconAlertTriangle size={17} /></span>
+          )}
+          <span className={collapsed ? "sr-only" : "sidenav-update-copy"}>
+            <strong>{attentionCopy}</strong>
           </span>
-          {!isInstalling && (
-            (canUseOfficialInstaller || state.canRetry) && (
-              <button
-                onClick={() => void (
-                  canUseOfficialInstaller && !retrySourceSeal ? openOfficialInstaller() : retrySafetyAction()
-                )}
-                className="sidenav-update-action"
-                title={canUseOfficialInstaller && !retrySourceSeal ? t("update.open_download") : t("update.retry")}
-              >
-                {collapsed
-                  ? (state.canRetry ? "↻" : "↗")
-                  : canUseOfficialInstaller && !retrySourceSeal
-                    ? t("update.open_download")
-                    : t("update.retry")}
-              </button>
-            )
+          {(canUseOfficialInstaller || state.canRetry) && (
+            <button
+              type="button"
+              onClick={() => void (
+                canUseOfficialInstaller && !retrySourceSeal ? openOfficialInstaller() : retrySafetyAction()
+              )}
+              className="sidenav-update-action"
+              aria-label={recoveryLabel}
+              title={`${attentionCopy} · ${recoveryLabel}`}
+            >
+              {canUseOfficialInstaller && !retrySourceSeal ? <IconDownload size={18} /> : <IconRefresh size={18} />}
+            </button>
           )}
         </>
       ) : (
         <>
-          <Spinner />
-          <span className="sidenav-update-copy">
-            <span>{state.status === "available"
-              ? t("update.found", { version: state.version ?? "?" })
-              : t("update.downloading", { pct: state.progress ?? 0 })}</span>
-            {!collapsed && <LoadingEstimate locale={locale} operationKey="desktop-update-download" expectedSeconds={[60, 600]} progress={state.progress} compact />}
-          </span>
+          <UpdateProgress progress={isInstalling ? undefined : progress} installing={isInstalling} label={isInstalling ? attentionCopy : progressLabel} />
+          {!collapsed && (
+            <>
+              <span className="sidenav-update-copy">
+                <strong className="sidenav-update-version">v{state.version ?? "?"}</strong>
+                {isInstalling && <span>{t("update.status.installing")}</span>}
+              </span>
+              {progress !== undefined && !isInstalling && <span className="sidenav-update-percent" aria-hidden="true">{progress}%</span>}
+            </>
+          )}
         </>
       )}
     </div>
@@ -289,19 +303,24 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
   );
 }
 
-function Spinner() {
+function UpdateProgress({ progress, installing, label }: { progress?: number; installing: boolean; label: string }) {
   return (
     <span
-      aria-hidden
-      style={{
-        width: 12,
-        height: 12,
-        borderRadius: "50%",
-        border: "2px solid var(--paper-edge)",
-        borderTopColor: "var(--accent)",
-        animation: "agentlas-spin 0.8s linear infinite",
-        display: "inline-block",
-      }}
-    />
+      className="sidenav-update-progress"
+      data-indeterminate={progress === undefined ? "true" : "false"}
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={progress}
+      aria-valuetext={label}
+      title={label}
+    >
+      <svg className="sidenav-update-progress-ring" viewBox="0 0 36 36" aria-hidden="true">
+        <circle className="sidenav-update-progress-track" cx="18" cy="18" r="15" />
+        <circle className="sidenav-update-progress-fill" cx="18" cy="18" r="15" pathLength="100" strokeDasharray={progress === undefined ? "24 76" : "100"} strokeDashoffset={progress === undefined ? 0 : 100 - progress} />
+      </svg>
+      {installing ? <IconRefresh size={14} /> : <IconDownload size={14} />}
+    </span>
   );
 }

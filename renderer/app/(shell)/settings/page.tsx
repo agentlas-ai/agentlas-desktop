@@ -1,5 +1,9 @@
 // 설정 — BYOC 연결 관리. PRD 3.1 FRE 6단계 + 10번 리스크 "키 저장 위치 명시".
 "use client";
+
+import { PopupFrame, PopupSteps } from "@/components/Popup";
+
+import { confirmPopup } from "@/lib/popup";
 import { FIRST_RUN_OPEN_EVENT } from "@/lib/first-run-state";
 import { requestWhatsNewReplay } from "@/lib/whats-new";
 import { updaterCanUseOfficialInstaller } from "@shared/types";
@@ -1284,10 +1288,11 @@ function MobileBridgePanel() {
   async function revoke(device: MobileBridgeDeviceSummary) {
     const api = ipc();
     if (!api) return;
-    const confirmed = window.confirm(
+    const confirmed = await confirmPopup(
       locale === "ko"
         ? `${device.name}의 모바일 연결을 해제할까요? 즉시 다시 인증해야 합니다.`
         : `Disconnect ${device.name}? It will need to pair again.`,
+      { locale, tone: "warning", confirmLabel: locale === "ko" ? "연결 해제" : "Disconnect" },
     );
     if (!confirmed) return;
     try {
@@ -1389,40 +1394,8 @@ function MobileBridgePanel() {
             This gate also answers the prerequisite question — is the app even
             installed — instead of leaving a person with an unusable QR. */}
         {installGate !== "closed" && (
-          <div
-            role="dialog"
-            aria-modal="true"
-            aria-label={locale === "ko" ? "모바일 앱 설치 확인" : "Mobile app install check"}
-            data-testid="mobile-bridge-install-gate"
-            onClick={() => setInstallGate("closed")}
-            style={{
-              position: "fixed", inset: 0, zIndex: 60, display: "grid", placeItems: "center",
-              background: "rgba(16,16,16,.44)", padding: 20,
-            }}
-          >
-            <div
-              onClick={(event) => event.stopPropagation()}
-              style={{
-                width: "var(--popup-3-width)", background: "var(--paper)", borderRadius: 18,
-                border: "1px solid var(--paper-edge)", boxShadow: "0 24px 60px -24px rgba(0,0,0,.5)",
-                padding: 22,
-              }}
-            >
-              <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: -8 }}>
-                <button
-                  type="button"
-                  onClick={() => setInstallGate("closed")}
-                  aria-label={locale === "ko" ? "닫기" : "Close"}
-                  title={locale === "ko" ? "닫기" : "Close"}
-                  style={{
-                    width: 28, height: 28, display: "grid", placeItems: "center",
-                    border: 0, borderRadius: 8, background: "transparent",
-                    color: "var(--muted-deep)", fontSize: 16, lineHeight: 1,
-                  }}
-                >
-                  ×
-                </button>
-              </div>
+          <PopupFrame title={locale === "ko" ? "모바일 연결" : "Connect Mobile"} icon={<IconCheck size={20} />} closeLabel={locale === "ko" ? "닫기" : "Close"} onClose={() => setInstallGate("closed")}>
+            <div data-testid="mobile-bridge-install-gate">
               {installGate === "ask" ? (
                 <>
                   <div style={{ fontSize: 15, fontWeight: 750 }}>
@@ -1430,9 +1403,10 @@ function MobileBridgePanel() {
                   </div>
                   <p style={{ margin: "8px 0 18px", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.65 }}>
                     {locale === "ko"
-                      ? "연결 QR은 Agentlas 앱의 스캐너로만 읽을 수 있습니다. 폰 기본 카메라로 찍으면 연결되지 않습니다."
-                      : "The pairing QR only works with the scanner inside the Agentlas app. Your phone's default camera cannot complete the pairing."}
+                      ? "연결 QR은 Agentlas 앱에서 스캔하세요."
+                      : "Scan the pairing QR inside Agentlas."}
                   </p>
+                  <PopupSteps steps={[{ label: locale === "ko" ? "앱 설치" : "Install app", icon: <IconCheck size={16} /> }, { label: locale === "ko" ? "기기 추가" : "Add device", icon: <IconKey size={16} /> }, { label: locale === "ko" ? "QR 스캔" : "Scan QR", icon: <IconImage size={16} /> }]} />
                   <div style={{ display: "grid", gap: 8 }}>
                     <button
                       type="button"
@@ -1465,8 +1439,8 @@ function MobileBridgePanel() {
                   </div>
                   <p style={{ margin: "8px 0 18px", color: "var(--muted-deep)", fontSize: 12, lineHeight: 1.65 }}>
                     {locale === "ko"
-                      ? "로고를 누르면 설치용 QR이 나옵니다. 그 QR은 폰 기본 카메라로 찍어도 됩니다."
-                      : "Pick a platform to get an install QR. That one does work with your phone's default camera."}
+                      ? "설치 QR은 폰 카메라로 스캔하세요."
+                      : "Scan the install QR with your phone camera."}
                   </p>
                   <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
                     <button
@@ -1531,8 +1505,8 @@ function MobileBridgePanel() {
                       </div>
                       <div style={{ color: "var(--muted-deep)", fontSize: 11, textAlign: "center", lineHeight: 1.6 }}>
                         {locale === "ko"
-                          ? "폰 카메라로 찍으면 Google Play가 열립니다. 설치 후 이 창에서 “이미 설치했습니다”를 누르세요."
-                          : "Scan it with your phone camera to open Google Play. After installing, choose “I already have it”."}
+                          ? "카메라로 스캔 → 설치 → “설치했습니다”"
+                          : "Scan with camera → Install → “Installed — continue”"}
                       </div>
                     </div>
                   )}
@@ -1562,7 +1536,7 @@ function MobileBridgePanel() {
                 </>
               )}
             </div>
-          </div>
+          </PopupFrame>
         )}
 
         {pairing && qrDataUrl && (

@@ -19,8 +19,10 @@ export function personalOneReplyPresentation(
 export function personalOneTranscript(messages:ChatHistoryEntry[],turns:SupervisorReplyTurn[]) {
   const answers=new Set(turns.flatMap(turn=>turn.assistantMessageId ? [turn.assistantMessageId] : []));
   const byId=new Map(messages.map(message=>[message.id,message]));
+  const byUserId=new Map<string,SupervisorReplyTurn>();
+  for(const turn of turns)if(!byUserId.has(turn.userMessageId))byUserId.set(turn.userMessageId,turn);
   return messages.filter(message=>!answers.has(message.id)).map(message=>{
-    const turn=turns.find(turn=>turn.userMessageId===message.id);
+    const turn=byUserId.get(message.id);
     return {message,turn,answer:turn?.assistantMessageId ? byId.get(turn.assistantMessageId) : undefined};
   });
 }

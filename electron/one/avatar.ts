@@ -107,24 +107,31 @@ export function resolveOneTeamAvatarProtocolPath(rawUrl: string): string | null 
   if (agentId === "self") return resolveOneSelfAvatarPath();
   if (!AGENT_ID_RE.test(agentId)) return null;
   const row = getDb().prepare(`
-    SELECT agent.slug, member.icon
+    SELECT member.agent_slug AS slug, agent.slug AS installed_slug, member.icon
     FROM installed_agents agent
     JOIN one_org_members member ON member.installed_agent_id = agent.id
     WHERE agent.id = ? AND member.icon = ?
+    ORDER BY member.archived_at IS NULL DESC, member.updated_at DESC
     LIMIT 1
-  `).get(agentId, `one-avatar:${agentId}`) as { slug?: string; icon?: string } | undefined;
+  `).get(agentId, `one-avatar:${agentId}`) as { slug?: string; installed_slug?: string; icon?: string } | undefined;
   if (!row?.slug) return null;
-  const dir = agentFolderPath(row.slug);
-  for (const extension of ["png", "jpg", "webp"] as const) {
-    const candidate = path.join(dir, `one-avatar.${extension}`);
-    try {
-      if (!fs.statSync(candidate).isFile() || fs.lstatSync(candidate).isSymbolicLink()) continue;
-      const realDir = fs.realpathSync.native(dir);
-      const realFile = fs.realpathSync.native(candidate);
-      const relative = path.relative(realDir, realFile);
-      if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return realFile;
-    } catch {
-      // Try the next supported extension.
+  // Member edits write to the seat's original slug. A later package import can
+  // change installed_agents.slug without moving that saved portrait.
+  // The installed slug remains a fallback for portraits saved by older builds.
+  for (const slug of new Set([row.slug, row.installed_slug])) {
+    if (!slug || slug === "." || slug === ".." || /[\\/\u0000-\u001f\u007f]/.test(slug)) continue;
+    const dir = agentFolderPath(slug);
+    for (const extension of ["png", "jpg", "webp"] as const) {
+      const candidate = path.join(dir, `one-avatar.${extension}`);
+      try {
+        if (fs.lstatSync(dir).isSymbolicLink() || !fs.statSync(candidate).isFile() || fs.lstatSync(candidate).isSymbolicLink()) continue;
+        const realDir = fs.realpathSync.native(dir);
+        const realFile = fs.realpathSync.native(candidate);
+        const relative = path.relative(realDir, realFile);
+        if (relative && !relative.startsWith("..") && !path.isAbsolute(relative)) return realFile;
+      } catch {
+        // Try the next supported extension or the legacy installed slug.
+      }
     }
   }
   return null;

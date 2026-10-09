@@ -8,9 +8,9 @@ import type { PreparedMcpAdmission } from "../mcp-tools/prepared-transport";
  * daemon's invocation service, which mints/binds its own process-local grants.
  * Prepared MCP transports likewise require admission in the receiving host. */
 export type RemoteLocalModelRunRequest = Omit<RunnerRequest,
-  "signal" | "scienceRecoveryCapability" | "scienceCollectionCapability" | "onAgentAppMcpRuntimeUnavailable" | "beforeMcpToolResult">
+  "signal" | "scienceRecoveryCapability" | "scienceCollectionCapability" | "onAgentAppMcpRuntimeUnavailable" | "beforeMcpToolResult" | "ownerControlInbox">
   & { signal?: never; scienceRecoveryCapability?: never; scienceCollectionCapability?: never;
-    onAgentAppMcpRuntimeUnavailable?: never; beforeMcpToolResult?: never };
+    onAgentAppMcpRuntimeUnavailable?: never; beforeMcpToolResult?: never; ownerControlInbox?: never };
 
 export type RemoteLocalModelRunEvent = {
   [K in keyof RunnerEvents]-?: { kind: K; args: Parameters<NonNullable<RunnerEvents[K]>> }
@@ -91,7 +91,9 @@ export function localModelRemoteError(code: string, message = code): Error & { c
  * preparation must move to the receiving invocation host, not be JSON-minted. */
 export function remoteLocalModelRequest(request: RunnerRequest | RemoteLocalModelRunRequest,
   options?: { mcpResultRelay: true }): RemoteLocalModelRunRequest {
-  const { signal: _signal, beforeMcpToolResult, ...wire } = request;
+  // The caller's common pump retains this inbox and claims only after a definite
+  // remote brain result. It is not an inbox in the receiving daemon process.
+  const { signal: _signal, ownerControlInbox: _ownerControlInbox, beforeMcpToolResult, ...wire } = request;
   if (beforeMcpToolResult !== undefined && (typeof beforeMcpToolResult !== "function" || !options?.mcpResultRelay)) {
     throw localModelRemoteError("local_model_remote_result_relay_required");
   }

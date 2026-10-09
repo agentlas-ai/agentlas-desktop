@@ -1,5 +1,23 @@
+import { configuredNativeGuiControls } from "./invocation/native-gui-controls";
+import { publishLegacyInvocationActiveChats, combinedInvocationActiveChatIds } from "./invocation/native-gui-public";
+import { createNativeMainNoBrainChecker } from "./invocation/native-main-no-brain";
+import { configuredNativeGuiOwner, assertNativeGuiStartAvailable, installNativeGuiOwner, nativeGuiEnrollmentChannel, type NativeGuiEnrollment } from "./invocation/native-gui-startup";
+import { createNativeGuiOwnerClient } from "./invocation/native-gui-owner";
+import { createNativeMainAuthCallbackAdapter } from "./invocation/native-main-auth-callback";
+import { createNativeMainPreparationRouter, type NativeMainPreparationRouterPorts } from "./invocation/native-main-preparation-router";
+import { createInvocationRunOwnerStore } from "./store/invocation-owner-core";
+import { isAppControlEvent } from "./app-control/ipc-registry";
+import { createRendererInvocationPreparation } from "./invocation/renderer-preparation";
 import { answerOneDispatchQuestion } from "./one/team-dispatch";
 import { registerOneSupervisorIpc } from "./one/supervisor-ipc";
+import { registerOneHarnessIpc } from "./one/harness-ipc";
+import { registerOneContextIpc } from "./one/context-ipc";
+import { openOneContextPermissions } from "./one/context-platform";
+import { configureOneHarnessRuntimeClient } from "./one/harness";
+import { authorizeSupervisorNativeOrigin, supervisorNativeNoticePurpose, dispatchSupervisorNativeCommand,
+  configureOneSupervisorNativeRuntime, callOneSupervisorRuntime, supervisorRuntimeMode } from "./one/supervisor-native-runtime";
+import { assertOneWindowChannel } from "./one-window-manager";
+import { recordAppControlRendererEvent, registerAppControlDomainIpc } from "./app-control/ipc-registry";
 import { registerAgentWorkspaceIpc } from "./agents/workspace-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
 import { goalActiveChatIds } from "./store/goal-active-chats";
@@ -156,9 +174,14 @@ import {
 } from "./mcp-tools/hub-plugin-bridge";
 import {
   authorizeMcpServer,
+  cancelMcpOAuthAuthorization,
   discoverMcpOAuth,
   forgetMcpOAuth,
+  getMcpOAuthAuthorizationStatus,
+  hasUsableMcpOAuthCredential,
   readMcpOAuthSession,
+  resolveMcpOAuthAccessToken,
+  startMcpOAuthAuthorization,
 } from "./mcp-tools/oauth";
 import { getPluginBrandMap } from "./mcp-tools/plugin-brand";
 import { measuringZoomFactor } from "./native-view-bounds";
@@ -199,11 +222,11 @@ import {
 import { getRoute } from "./agents/routes";
 import { importLocalFolder } from "./agents/import-local";
 import { getDb } from "./store/db";
-import { installDurableToolApprovalLedger } from "./one/supervisor-approval-ledger";
 import { AutomationWorkspaceError, automationWorkspaceView, withOwnerAutomationWorkspaceIntent } from "./automation-workspace";
 import {
   canonicalInvocationRequestJson,
   createInvocationAdmission,
+  INVOCATION_ADMISSION_DIGEST_VERSION,
   decideInvocationAdmission,
   getVerifiedStartRejectedReceipt,
   getInvocationPreflightGoalId,
@@ -221,7 +244,7 @@ import {
   listOnePreflightSteers,
   reserveOnePreflightParent,
 } from "./store/one-preflight-steers";
-import { dispatchOnePreflightSteers, recoverOnePreflightSteers } from "./invocation/preflight-steer-admission";
+import { dispatchOnePreflightSteers, recoverOnePreflightSteers, installNativePreflightSteerPort, captureNativePreflightSteerGesture } from "./invocation/preflight-steer-admission";
 import type { OnePreflightSteerInput, OnePreflightSteerLookupInput, OnePreflightSubmissionInput } from "../shared/one-preflight-steers";
 import { getResolvedOrg } from "./store/org-spec";
 import { listInstalledAgentHubBindings } from "./ontology/hub-bindings";
@@ -236,6 +259,7 @@ import {
 } from "./mcp/workforce-goal-continuity";
 import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
 import { invocationService } from "./invocation/service";
+import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "./runtime/invocation-owner-control";
 import { queueAutomaticGoalResume } from "./invocation/automatic-goal";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
 import { hepAuthLogin, hepAuthStatus } from "./hephaestus/commands";
@@ -468,6 +492,7 @@ import {
   getChatWorkingFolder,
   listArchivedChats,
   listChatMessages,
+  listChatMessagesPage,
   repairRootChatSurfaceController,
   listChatsByFirm,
   listChatsByProject,
@@ -513,15 +538,13 @@ import { ONE_SELF_AVATAR_ICON, decodeOneTeamAvatarDataUrl, writeOneSelfAvatar } 
 import { mutateOneTaskArchive, searchOneHistory } from "./one/search";
 import { importExternalCliSession, listExternalCliSessions } from "./external-cli-sessions";
 import {
-  prejudgeOneRequestIntent,
   resolveOneRequestIntent,
 } from "./one/judged-request-intent";
 import { judge, judgeSubset } from "./system-agents/judgment";
 import { PROJECT_HUB_RECOMMENDATION_JUDGMENT } from "../shared/project-hub-recommendation";
 import { PROJECT_TEAM_ROLES_JUDGMENT, PROJECT_TEAM_ROLE_FILL_JUDGMENT } from "../shared/project-team-recommendation";
-import { prejudgeOneMemoryIntent } from "./one/memory-detector";
 import { normalizeRuntimeSelectionInput, RuntimeSelectionContractError } from "../shared/runtime-selection";
-import { withInvocationAccounting, withInvocationPreflightAccounting } from "./long-run/accounting-context";
+import { withInvocationAccounting } from "./long-run/accounting-context";
 import { forgetOneRecoveryJudgment, judgeOneAutoRecovery, oneRecoveryRuntimeSelection } from "./one/auto-recovery";
 import { desktopOneRecoveryContext, desktopOneRecoveryOriginalRunId, desktopOneRecoveryScope, pendingDesktopOneRecovery, reserveDesktopOneRecovery } from "./one/desktop-recovery-admission";
 import { oneRunFailureFingerprint } from "../shared/one-auto-recovery";
@@ -920,31 +943,21 @@ import {
   reconcileAutomationGraph,
 } from "./store/graph-reconciliation";
 import {
-  announceToolDenied,
-  capabilityClassFor,
   getToolApprovalResolution,
   listPendingToolApprovals,
   onToolApprovalRequested,
   onToolApprovalResolved,
-  requestToolApproval,
   resolveToolApproval,
-  setCapabilityGrantPersister,
-  setRuntimeToolPermissionArbiter,
 } from "./runtime/tool-approval";
-import { mainToolConsentResource } from "./runtime/tool-consent";
 import {
-  getCapabilityDecision,
-  capabilityConsentScope,
-  capabilityResourceIdentity,
   grantChatAlwaysApproval,
   listAlwaysApprovedChatIds,
   listCapabilityGrants,
-  recordCapabilityGrant,
   revokeCapabilityGrant,
   revokeChatAlwaysApproval,
 } from "./store/capability-grants";
 import type { ToolApprovalDecision } from "../shared/types";
-import type { ToolApprovalConsentBinding } from "../shared/types";
+import { installHostToolPermissionPolicy } from "./runtime/host-tool-permission-policy";
 
 // DESKTOP_MOBILE_BRIDGE: live invocation authority moved to invocation/service.ts.
 // Hephaestus 빌더(hep-build) 진행 중 실행 — 취소용 AbortController 레지스트리.
@@ -1550,6 +1563,78 @@ function rendererInvocationRequestForStart(req: McpInvocationRequest): McpInvoca
 }
 
 // A PID can be reused. This boot-local identity is never accepted from the renderer.
+/** Main startup only. Required custody observers come from Root's actual
+ * authenticated service evidence. No default/permissive cwd or noBrain port. */
+export function authorizeNativeGuiRenderer(event: object): object {
+  if (isAppControlEvent(event)) throw new Error("native_gui_original_renderer_required");
+  assertTrustedSitePublishIpcSender(event as IpcMainInvokeEvent);
+  return (event as IpcMainInvokeEvent).sender;
+}
+export function initializeNativeGuiInvocationOwner(enrollment: NativeGuiEnrollment, authority: Pick<NativeMainPreparationRouterPorts,
+  "maxRequestBytes" | "maxCheckpointBytes" | "maxRetainedBytes">): void {
+  const getChannel = () => nativeGuiEnrollmentChannel(enrollment);
+  const callback = createNativeMainAuthCallbackAdapter({ getChannel });
+  const authorizeRenderer = authorizeNativeGuiRenderer;
+  const owners = createInvocationRunOwnerStore({ getDb });
+  const assertNoBrainDispatch = createNativeMainNoBrainChecker({ getChannel,
+    assertSourceNoBrainDispatch: (_channel, _identity, binding, owner) => callback.assertNoBrainDispatch(binding, owner),
+  });
+  const router = createNativeMainPreparationRouter({ ...authority, authorizeRenderer,
+    authorizeHost: authorizeSupervisorNativeOrigin, hostNoticePurpose: supervisorNativeNoticePurpose,
+    supervisorCommand: dispatchSupervisorNativeCommand,
+    assertExecutionCwd: callback.assertExecutionCwd, assertNoBrainDispatch,
+    getRunOwner: (chatId, runId) => owners.getRunOwner(chatId, runId),
+    assertReservation(admission) {
+      const row = getInvocationAdmission(admission.runId);
+      if (!row || row.status !== "pending" || row.chatId !== admission.chatId || row.ownerProcessEpoch !== admission.ownerProcessEpoch
+        || row.inputDigest !== createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(admission.canonicalRequestJson).digest("hex")) {
+        throw new Error("native_gui_reserved_admission_required");
+      }
+    },
+    assertClosedIngressNoStart: callback.assertClosedIngressNoStart,
+  });
+  callback.bindRouter(router);
+  const owner = createNativeGuiOwnerClient({ getChannel, authorizeRenderer, authorizeHost: authorizeSupervisorNativeOrigin,
+    sanitizeRendererRequest: raw => rendererInvocationRequestForStart(raw as McpInvocationRequest),
+    // Actual invoke:run body preserves every guard before startReserved; the
+    // issuer separately rechecks canonical native sender, row and capabilities.
+    validateBeforeReserve() {}, assertStartAvailable: () => assertNativeGuiStartAvailable(enrollment), router, callbackAdapter: callback, maxRetainedStarts: 32 });
+  installNativeGuiOwner(enrollment, owner, callback);
+  configureOneSupervisorNativeRuntime({ owner, getChannel, onHandoff: () => {
+    configureOneHarnessRuntimeClient({
+      getResult: input => callOneSupervisorRuntime('harness.result', input),
+      action: input => callOneSupervisorRuntime('harness.action', input),
+    });
+  } });
+  const controls = configuredNativeGuiControls();
+  if (controls) {
+    const gestures = new Map<string, { event: object; text: string; chatId: string; submissionId: string }>();
+    installNativePreflightSteerPort({
+      captureGesture(event, receipt) {
+        authorizeNativeGuiRenderer(event);
+        if (!["queued", "claimed"].includes(receipt.status)) return;
+        const old = gestures.get(receipt.steerId);
+        if (old && (old.text !== receipt.userPrompt || old.chatId !== receipt.chatId || old.submissionId !== receipt.submissionId)) throw new Error("native_preflight_gesture_conflict");
+        if (!old) gestures.set(receipt.steerId, {event,text:receipt.userPrompt,chatId:receipt.chatId,submissionId:receipt.submissionId});
+      },
+      ownsParent: (chatId,runId) => owner.capturedParent(chatId,runId),
+      async intake(runId,steerId,request) {
+        const gesture=gestures.get(steerId);if(!gesture||gesture.chatId!==request.chatId||gesture.text!==request.userPrompt)throw new Error("native_preflight_original_gesture_required");
+        const binding=owner.preflightTextInputBinding(gesture.event,request,runId);
+        const receipt=await controls.ownerText(gesture.event,binding,steerId,request.userPrompt,"queue");
+        const acknowledged=["queued","dispatching","applied"].includes(receipt.sourceStatus);gestures.delete(steerId);return acknowledged;
+      },
+      async receipt(runId,steerId,request) {
+        const gesture=gestures.get(steerId);if(!gesture)throw new Error("native_preflight_original_gesture_required");
+        try { const binding=owner.preflightTextInputBinding(gesture.event,request,runId);
+          const receipt=await controls.ownerTextReceipt(gesture.event,binding,steerId,{text:request.userPrompt,kind:"queue"});
+          return !!receipt&&["queued","dispatching","applied"].includes(receipt.sourceStatus);
+        } finally { gestures.delete(steerId); }
+      },
+    });
+  }
+
+}
 const rendererInvocationProcessEpoch = randomUUID();
 
 /** Run after runtime bootstrap, before ordinary queued-steer recovery. */
@@ -1648,9 +1733,20 @@ function goalAutomationOwnershipReview(automationId: string, goalId: string, roo
 }
 
 export function registerIpcHandlers(): void {
-  const ipcMain = developmentIpcBoundary(electronIpcMain);
+  const boundary = developmentIpcBoundary(electronIpcMain);
+  const ipcMain: typeof boundary = {
+    handle(channel, listener) {
+      boundary.handle(channel, (event, ...args) => {
+        assertOneWindowChannel(event, channel);
+        recordAppControlRendererEvent(event);
+        return listener(event, ...args);
+      });
+    },
+  };
   registerAgentWorkspaceIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneSupervisorIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerOneHarnessIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerOneContextIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender, openPermissions: openOneContextPermissions });
   registerBrowserUiIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserAutofillIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerBrowserProfileImportIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
@@ -1830,7 +1926,7 @@ export function registerIpcHandlers(): void {
     const timeoutMs = Number.isFinite(timeoutRaw) ? Math.max(1_000, Math.min(maxTimeoutMs, Math.floor(timeoutRaw))) : 6_000;
     return { kind, meta, labels, input, hints, timeoutMs, maxInputChars, fallback: String(spec.fallback ?? "") };
   };
-  ipcMain.handle("judgment:judge", async (_e, raw: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "judgment:judge", async (raw: unknown) => {
     const spec = sanitizeRendererJudgmentSpec(raw, RENDERER_JUDGE_KINDS);
     if (!spec.labels.includes(spec.fallback)) throw new TypeError("Judgment fallback must be one of the labels");
     const verdict = await judge<string>({
@@ -1846,7 +1942,7 @@ export function registerIpcHandlers(): void {
     });
     return { verdict: verdict.verdict, source: verdict.source, confidence: verdict.confidence, reason: verdict.reason };
   });
-  ipcMain.handle("judgment:judgeSubset", async (_e, raw: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "judgment:judgeSubset", async (raw: unknown) => {
     const spec = sanitizeRendererJudgmentSpec(raw, RENDERER_SUBSET_KINDS);
     const verdict = await judgeSubset<string>({
       kind: spec.kind,
@@ -1864,29 +1960,29 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("app:getVersion", () => app.getVersion());
 
   // ── T-rex 슬라이드 스튜디오 이미지 생성(키리스 CLI: codex image_gen / agy) ──
-  ipcMain.handle("multimodal:generateImage", async (_e, payload: { model?: "codex" | "gemini" | "auto"; prompt?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "multimodal:generateImage", async (payload: { model?: "codex" | "gemini" | "auto"; prompt?: string }) => {
     const { generateImage } = await import("./multimodal/image");
     const model = payload?.model === "gemini" ? "gemini" : payload?.model === "codex" ? "codex" : "auto";
     return generateImage(model, String(payload?.prompt ?? ""));
   });
-  ipcMain.handle("multimodal:imageProviders", async () => {
+  registerAppControlDomainIpc(ipcMain, "multimodal:imageProviders", async () => {
     const { imageProviders } = await import("./multimodal/image");
     return imageProviders();
   });
   // T-rex 슬라이드 "내용" 생성 — 연결된 LLM(agy/codex)이 슬라이드별 실제 카피·수치를 JSON으로 작성.
-  ipcMain.handle("site:listProjects", async () => {
+  registerAppControlDomainIpc(ipcMain, "site:listProjects", async () => {
     const { listSiteProjectsForRenderer } = await import("./site/store");
     return listSiteProjectsForRenderer();
   });
-  ipcMain.handle("site:operationStatus", async (_e, payload: { projectId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:operationStatus", async (payload: { projectId?: string }) => {
     const { activeSiteProjectOperation } = await import("./site/operation-lock");
     return activeSiteProjectOperation(String(payload?.projectId ?? ""));
   });
-  ipcMain.handle("site:listConversation", async (_e, payload: { projectId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:listConversation", async (payload: { projectId?: string }) => {
     const { listSiteConversation } = await import("./site/store");
     return listSiteConversation(String(payload?.projectId ?? ""));
   });
-  ipcMain.handle("site:createProject", async (_e, payload: {
+  registerAppControlDomainIpc(ipcMain, "site:createProject", async (payload: {
     name?: string;
     surface?: SiteSurface;
     agentAppTarget?: SiteAgentAppTargetRef;
@@ -1941,15 +2037,15 @@ export function registerIpcHandlers(): void {
     const { launchSiteAgentApp } = await import("./site/agent-app-runtime");
     return launchSiteAgentApp(projectId);
   });
-  ipcMain.handle("site:stopAgentApp", async (_e, payload: { projectId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:stopAgentApp", async (payload: { projectId?: string }) => {
     const { stopSiteAgentApp } = await import("./site/agent-app-runtime");
     return stopSiteAgentApp(String(payload?.projectId ?? ""));
   });
-  ipcMain.handle("site:agentAppRuntimeStatus", async (_e, payload: { projectId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:agentAppRuntimeStatus", async (payload: { projectId?: string }) => {
     const { siteAgentAppRuntimeStatus } = await import("./site/agent-app-runtime");
     return siteAgentAppRuntimeStatus(String(payload?.projectId ?? ""));
   });
-  ipcMain.handle("site:agentAppMcpRecommendation", async (_e, payload: { projectId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:agentAppMcpRecommendation", async (payload: { projectId?: string }) => {
     const { getSiteAgentAppMcpRecommendation } = await import("./site/agent-app-mcp-plan");
     return getSiteAgentAppMcpRecommendation(String(payload?.projectId ?? ""));
   });
@@ -1962,19 +2058,19 @@ export function registerIpcHandlers(): void {
     const win = assertTrustedSitePublishIpcSender(event);
     return reviewNativeSiteAgentAppMcp(win, String(payload?.projectId ?? ""), "prebuild");
   });
-  ipcMain.handle("site:agentAppThumbnail", async (_e, payload: { projectId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:agentAppThumbnail", async (payload: { projectId?: string }) => {
     const { readSiteAgentAppThumbnail } = await import("./site/agent-app-thumbnail");
     return readSiteAgentAppThumbnail(String(payload?.projectId ?? ""));
   });
-  ipcMain.handle("site:listPublishProviderStatuses", async () => {
+  registerAppControlDomainIpc(ipcMain, "site:listPublishProviderStatuses", async () => {
     const { listSitePublishProviderStatuses } = await import("./site/agent-app-publish");
     return listSitePublishProviderStatuses();
   });
-  ipcMain.handle("site:savePublishProviderToken", async (_e, payload: { provider?: SitePublishProvider; token?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:savePublishProviderToken", async (payload: { provider?: SitePublishProvider; token?: string }) => {
     const { saveSitePublishProviderToken } = await import("./site/agent-app-publish");
     return saveSitePublishProviderToken(payload?.provider as SitePublishProvider, String(payload?.token ?? ""));
   });
-  ipcMain.handle("site:removePublishProviderToken", async (_e, payload: { provider?: SitePublishProvider }) => {
+  registerAppControlDomainIpc(ipcMain, "site:removePublishProviderToken", async (payload: { provider?: SitePublishProvider }) => {
     const { removeSitePublishProviderToken } = await import("./site/agent-app-publish");
     return removeSitePublishProviderToken(payload?.provider as SitePublishProvider);
   });
@@ -2287,7 +2383,7 @@ export function registerIpcHandlers(): void {
       }
     },
   );
-  ipcMain.handle("site:readScreen", async (_e, payload: { projectId?: string; screenId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:readScreen", async (payload: { projectId?: string; screenId?: string }) => {
     try {
       const { readSiteScreenHtml } = await import("./site/store");
       const html = readSiteScreenHtml(String(payload?.projectId ?? ""), String(payload?.screenId ?? ""));
@@ -2296,7 +2392,7 @@ export function registerIpcHandlers(): void {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   });
-  ipcMain.handle("site:prepareRender", async (_e, payload: { projectId?: string; screenId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:prepareRender", async (payload: { projectId?: string; screenId?: string }) => {
     try {
       const { readSiteScreenHtml } = await import("./site/store");
       const { prepareSiteRenderHtml } = await import("./site/html-tagger");
@@ -2308,7 +2404,7 @@ export function registerIpcHandlers(): void {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   });
-  ipcMain.handle("site:renameScreen", async (_e, payload: { projectId?: string; screenId?: string; name?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:renameScreen", async (payload: { projectId?: string; screenId?: string; name?: string }) => {
     const projectId = String(payload?.projectId ?? "");
     const { assertSiteProjectIdle } = await import("./site/operation-lock");
     assertSiteProjectIdle(projectId);
@@ -2316,7 +2412,7 @@ export function registerIpcHandlers(): void {
     const screen = renameSiteScreen(projectId, String(payload?.screenId ?? ""), String(payload?.name ?? ""));
     return { ok: true, screen };
   });
-  ipcMain.handle("site:deleteScreen", async (_e, payload: { projectId?: string; screenId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:deleteScreen", async (payload: { projectId?: string; screenId?: string }) => {
     const projectId = String(payload?.projectId ?? "");
     const { assertSiteProjectIdle } = await import("./site/operation-lock");
     assertSiteProjectIdle(projectId);
@@ -2419,7 +2515,7 @@ export function registerIpcHandlers(): void {
       return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }
   });
-  ipcMain.handle("site:exportTargets", async (_e, payload: { projectId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "site:exportTargets", async (payload: { projectId?: string }) => {
     try {
       const { getSiteProject } = await import("./site/store");
       const { exportTargetsFor } = await import("./site/design-export");
@@ -2450,9 +2546,9 @@ export function registerIpcHandlers(): void {
   });
   // Site 디자인을 실제 작업공간의 불변 레퍼런스 리비전으로 넘긴다. 렌더러가
   // 전달한 경로는 신뢰하지 않고 네이티브 picker가 발급한 capability만 해석한다.
-  ipcMain.handle(
-    "site:handoffToWorkspace",
-    async (_e, payload: { projectId?: string; workspaceGrant?: import("../shared/types").FsPathGrant; locale?: string }) => {
+  registerAppControlDomainIpc(
+    ipcMain, "site:handoffToWorkspace",
+    async (payload: { projectId?: string; workspaceGrant?: import("../shared/types").FsPathGrant; locale?: string }) => {
       let releaseSiteOperation: (() => void) | null = null;
       try {
         if (!payload?.workspaceGrant) throw new Error(L("작업공간 폴더를 먼저 선택해 주세요.", "Please select a workspace folder first."));
@@ -2480,16 +2576,15 @@ export function registerIpcHandlers(): void {
       }
     },
   );
-  ipcMain.handle("site:contentAvailable", async () => {
+  registerAppControlDomainIpc(ipcMain, "site:contentAvailable", async () => {
     const { siteEngineStatus } = await import("./site/generate");
     return siteEngineStatus();
   });
 
   // ── 문서 스튜디오 "내용" 생성 — 연결된 LLM(agy/codex)이 실제 문서 초안을 JSON으로 작성 ──
-  ipcMain.handle(
-    "document:generate",
+  registerAppControlDomainIpc(
+    ipcMain, "document:generate",
     async (
-      _e,
       payload: {
         goal?: string;
         mode?: string;
@@ -2505,14 +2600,14 @@ export function registerIpcHandlers(): void {
     },
   );
   // 선택 텍스트 개정(AI 편집 툴바).
-  ipcMain.handle("document:revise", async (_e, payload: { text?: string; action?: string; locale?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "document:revise", async (payload: { text?: string; action?: string; locale?: string }) => {
     const { reviseDocumentText } = await import("./document/generate");
     const actions = ["expand", "rewrite", "shorten", "improve", "formal", "casual"] as const;
     const action = (actions as readonly string[]).includes(String(payload?.action)) ? (payload!.action as (typeof actions)[number]) : "improve";
     const locale = payload?.locale === "ko" ? "ko" : "en";
     return reviseDocumentText(String(payload?.text ?? ""), action, locale);
   });
-  ipcMain.handle("document:available", async () => {
+  registerAppControlDomainIpc(ipcMain, "document:available", async () => {
     const { documentContentAvailable } = await import("./document/generate");
     return documentContentAvailable();
   });
@@ -2544,17 +2639,16 @@ export function registerIpcHandlers(): void {
       return result.ok ? { ...result, path: chosen.filePath } : result;
     },
   );
-  ipcMain.handle("document:pdfCapability", async () => {
+  registerAppControlDomainIpc(ipcMain, "document:pdfCapability", async () => {
     const { documentPdfCapability } = await import("./document/export-pdf");
     return documentPdfCapability();
   });
 
   // ── 버그 신고 ────────────────────────────────────────────
   // 우측 하단 도움말(?) 메뉴 → 신고 폼 → 웹 API(agentlas.cloud) → MongoDB 적재.
-  ipcMain.handle(
-    "support:submitBugReport",
+  registerAppControlDomainIpc(
+    ipcMain, "support:submitBugReport",
     async (
-      _e,
       payload: { message?: string; title?: string; severity?: "low" | "medium" | "high"; email?: string; page?: string; locale?: string },
     ) => {
       const { submitBugReport } = await import("./support");
@@ -2600,10 +2694,10 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(e.sender);
     return pickDirectory(win);
   });
-  ipcMain.handle("fs:listDirectory", (_e, absPath: string, scope: FsReadScope, showHidden?: boolean) =>
+  registerAppControlDomainIpc(ipcMain, "fs:listDirectory", (absPath: string, scope: FsReadScope, showHidden?: boolean) =>
     listDirectory(absPath, scope, showHidden ?? false),
   );
-  ipcMain.handle("fs:readTextFile", (_e, absPath: string, scope: FsReadScope) => readTextFilePreview(absPath, scope));
+  registerAppControlDomainIpc(ipcMain, "fs:readTextFile", (absPath: string, scope: FsReadScope) => readTextFilePreview(absPath, scope));
   ipcMain.handle("fs:watchFile", (event, absPath: string, scope: FsReadScope) => {
     assertTrustedSitePublishIpcSender(event);
     const ownerId = event.sender.id;
@@ -2624,11 +2718,11 @@ export function registerIpcHandlers(): void {
   });
   // This channel is intentionally absent from window.agentlas. Only the isolated
   // preload bridge can pair webUtils.getPathForFile(File) with this grant call.
-  ipcMain.handle("fs:grantDroppedPath", (_e, droppedPath: string) => grantDroppedPath(droppedPath));
+  registerAppControlDomainIpc(ipcMain, "fs:grantDroppedPath", (droppedPath: string) => grantDroppedPath(droppedPath));
   // Only preload can submit grants. Renderer text can never promote an
   // arbitrary path into a durable chat file.
-  ipcMain.handle("chatFiles:snapshot", (_e, input: unknown) => persistChatFileSnapshot(input as Parameters<typeof persistChatFileSnapshot>[0]));
-  ipcMain.handle("chatFiles:listGroup", (_e, input: unknown) => listChatFileSnapshot(input as Parameters<typeof listChatFileSnapshot>[0]));
+  registerAppControlDomainIpc(ipcMain, "chatFiles:snapshot", (input: unknown) => persistChatFileSnapshot(input as Parameters<typeof persistChatFileSnapshot>[0]));
+  registerAppControlDomainIpc(ipcMain, "chatFiles:listGroup", (input: unknown) => listChatFileSnapshot(input as Parameters<typeof listChatFileSnapshot>[0]));
   ipcMain.handle("officeTaskContext:get", (event, chatId: string) => {
     assertTrustedSitePublishIpcSender(event);
     return getOfficeTaskContextState(chatId);
@@ -2705,11 +2799,11 @@ export function registerIpcHandlers(): void {
   });
   // 클립보드 이미지는 경로가 없다 — main이 내용을 비공개 파일로 고정하고 같은 등급의
   // capability를 돌려준다. 그래야 붙여넣기가 드롭·파일선택과 같은 첨부 경로를 탄다.
-  ipcMain.handle("fs:grantPastedImage", (_e, input: unknown) =>
+  registerAppControlDomainIpc(ipcMain, "fs:grantPastedImage", (input: unknown) =>
     grantPastedImage((input ?? {}) as { mediaType?: unknown; bytes?: unknown }));
   // Pasted audio, video and safe document data has no native Finder path. Main
   // owns the accepted MIME/extension and emits the same exact-file capability.
-  ipcMain.handle("fs:grantPastedAttachment", (_e, input: unknown) =>
+  registerAppControlDomainIpc(ipcMain, "fs:grantPastedAttachment", (input: unknown) =>
     grantPastedAttachment((input ?? {}) as { mediaType?: unknown; bytes?: unknown }));
   ipcMain.handle("fs:openPath", async (_e, target: string): Promise<{ ok: boolean; message?: string }> => {
     const raw = String(target || "").trim();
@@ -2784,18 +2878,18 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(e.sender);
     return pickDirectory(win);
   });
-  ipcMain.handle("workspace:get", (_e, chatId: string) => getChatWorkingFolder(chatId));
-  ipcMain.handle("workspace:set", (_e, chatId: string, grant: FsPathGrant | null) => {
+  registerAppControlDomainIpc(ipcMain, "workspace:get", (chatId: string) => getChatWorkingFolder(chatId));
+  registerAppControlDomainIpc(ipcMain, "workspace:set", (chatId: string, grant: FsPathGrant | null) => {
     setChatWorkingFolder(chatId, grant ? pathFromGrant(grant, "directory") : null);
   });
-  ipcMain.handle("workspace:setFromProject", (_e, chatId: string, projectId: string) => {
+  registerAppControlDomainIpc(ipcMain, "workspace:setFromProject", (chatId: string, projectId: string) => {
     const project = getProject(projectId);
     if (!project?.folderPath) throw new Error("The project does not have a working folder.");
     // Project paths can only be written by the grant-validating project handlers
     // below. Existing rows are trusted main-owned migration state.
     setChatWorkingFolder(chatId, project.folderPath);
   });
-  ipcMain.handle("workspace:defaultRunFolder", () => {
+  registerAppControlDomainIpc(ipcMain, "workspace:defaultRunFolder", () => {
     try {
       return agentRunCwd();
     } catch {
@@ -2804,7 +2898,7 @@ export function registerIpcHandlers(): void {
   });
 
   // ── auth (agentlas.cloud 구글 로그인) ───────────────────
-  ipcMain.handle("auth:getSession", () => getAuthSession());
+  registerAppControlDomainIpc(ipcMain, "auth:getSession", () => getAuthSession());
   ipcMain.handle("auth:signInWithGoogle", async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     const session = await signInWithGoogle(win);
@@ -2845,13 +2939,13 @@ export function registerIpcHandlers(): void {
   });
 
   // ── usage (LLM 엔진 사용량 — 프로바이더 OAuth usage) ─────
-  ipcMain.handle("usage:setSubscriptionCreditUse", (_e, enabled: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "usage:setSubscriptionCreditUse", (enabled: unknown) => {
     if (typeof enabled !== "boolean") throw new Error("invalid subscription credit preference");
     const saved = setSubscriptionCreditUse(enabled);
     clearDetectCache();
     return saved;
   });
-  ipcMain.handle("usage:snapshot", async (_e, opts?: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "usage:snapshot", async (opts?: unknown) => {
     if (developmentEffectsSuppressed()) return getUsageSnapshot();
     const force = !!opts && typeof opts === "object" && !Array.isArray(opts)
       && (opts as { force?: unknown }).force === true;
@@ -2867,7 +2961,7 @@ export function registerIpcHandlers(): void {
     };
   });
   // Renderer는 임의 invalidate를 할 수 없다. allowlist+main cooldown 아래 대상 Provider만 원자적으로 재시도한다.
-  ipcMain.handle("usage:retry", async (_e, providerId?: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "usage:retry", async (providerId?: unknown) => {
     if (!isUsageRetryProviderId(providerId)) throw new Error("invalid usage retry provider");
     if (developmentEffectsSuppressed()) return retryUsageProvider(providerId);
     const result = await retryUsageProvider(providerId);
@@ -2883,49 +2977,49 @@ export function registerIpcHandlers(): void {
   });
 
   // ── AI 사용 잔액 조회. 과거 Hub 수익 전송 IPC는 refusal-only. ─────────
-  ipcMain.handle("billing:getCredits", () => getBillingCredits());
-  ipcMain.handle("billing:getPlans", () => getBillingPlans());
-  ipcMain.handle("billing:checkoutReadiness", (_e, input: { plan?: unknown; cycle?: unknown }) => getBillingCheckoutReadiness(input ?? {}));
-  ipcMain.handle("billing:transferEarnings", (_e, credits: number) => transferEarnings(credits));
+  registerAppControlDomainIpc(ipcMain, "billing:getCredits", () => getBillingCredits());
+  registerAppControlDomainIpc(ipcMain, "billing:getPlans", () => getBillingPlans());
+  registerAppControlDomainIpc(ipcMain, "billing:checkoutReadiness", (input: { plan?: unknown; cycle?: unknown }) => getBillingCheckoutReadiness(input ?? {}));
+  registerAppControlDomainIpc(ipcMain, "billing:transferEarnings", (credits: number) => transferEarnings(credits));
 
   // ── 프롬프트 저장소 — 웹 /api/prompts 프록시(쿠키+Origin, billing 패턴) ──────
-  ipcMain.handle("promptHub:list", (_e, params?: { q?: string; category?: string }) => listHubPrompts(params));
-  ipcMain.handle("promptHub:get", (_e, slug: string) => getHubPrompt(slug));
-  ipcMain.handle(
-    "promptHub:unlock",
-    (_e, input: { slug: string; unlockIntentId: string }) => unlockHubPrompt(input),
+  registerAppControlDomainIpc(ipcMain, "promptHub:list", (params?: { q?: string; category?: string }) => listHubPrompts(params));
+  registerAppControlDomainIpc(ipcMain, "promptHub:get", (slug: string) => getHubPrompt(slug));
+  registerAppControlDomainIpc(
+    ipcMain, "promptHub:unlock",
+    (input: { slug: string; unlockIntentId: string }) => unlockHubPrompt(input),
   );
-  ipcMain.handle(
-    "promptHub:unlockStatus",
-    (_e, input: { slug: string; unlockIntentId: string }) => getHubPromptUnlockStatus(input),
+  registerAppControlDomainIpc(
+    ipcMain, "promptHub:unlockStatus",
+    (input: { slug: string; unlockIntentId: string }) => getHubPromptUnlockStatus(input),
   );
-  ipcMain.handle(
-    "promptHub:taste",
-    (_e, input: { slug: string; tasteIntentId: string }) => tasteHubPrompt(input),
+  registerAppControlDomainIpc(
+    ipcMain, "promptHub:taste",
+    (input: { slug: string; tasteIntentId: string }) => tasteHubPrompt(input),
   );
-  ipcMain.handle(
-    "promptHub:tasteStatus",
-    (_e, input: { slug: string; tasteIntentId: string }) => getHubPromptTasteStatus(input),
+  registerAppControlDomainIpc(
+    ipcMain, "promptHub:tasteStatus",
+    (input: { slug: string; tasteIntentId: string }) => getHubPromptTasteStatus(input),
   );
-  ipcMain.handle(
-    "promptHub:startChat",
-    (_e, input: { intentId: string; body: string; seedOnly?: boolean }) => createOrReplayPromptChat(input),
+  registerAppControlDomainIpc(
+    ipcMain, "promptHub:startChat",
+    (input: { intentId: string; body: string; seedOnly?: boolean }) => createOrReplayPromptChat(input),
   );
-  ipcMain.handle("promptHub:tastes", () => listHubPromptTastes());
-  ipcMain.handle("promptHub:bookmarks", () => listHubPromptBookmarks());
-  ipcMain.handle("promptHub:bookmarkAdd", (_e, slug: string) => addHubPromptBookmark(slug));
-  ipcMain.handle("promptHub:bookmarkRemove", (_e, slug: string) => removeHubPromptBookmark(slug));
+  registerAppControlDomainIpc(ipcMain, "promptHub:tastes", () => listHubPromptTastes());
+  registerAppControlDomainIpc(ipcMain, "promptHub:bookmarks", () => listHubPromptBookmarks());
+  registerAppControlDomainIpc(ipcMain, "promptHub:bookmarkAdd", (slug: string) => addHubPromptBookmark(slug));
+  registerAppControlDomainIpc(ipcMain, "promptHub:bookmarkRemove", (slug: string) => removeHubPromptBookmark(slug));
 
   // ── 퀘스트 — 대시보드 신규 유저 튜토리얼(온보딩 대체) ──────────────────────
-  ipcMain.handle("quests:list", () => listQuests());
-  ipcMain.handle("quests:claim", (_e, input) => claimQuest(input));
-  ipcMain.handle("quests:claimStatus", (_e, input) => getQuestClaimStatus(input));
+  registerAppControlDomainIpc(ipcMain, "quests:list", () => listQuests());
+  registerAppControlDomainIpc(ipcMain, "quests:claim", (input) => claimQuest(input));
+  registerAppControlDomainIpc(ipcMain, "quests:claimStatus", (input) => getQuestClaimStatus(input));
 
   // ── 에이전트 전역 durable 메모리 — 프로젝트 귀속 콘텐츠는 이 표면에서 제외 ──
-  ipcMain.handle("agentMemory:entries", (_e, agentId: string, limit?: number) =>
+  registerAppControlDomainIpc(ipcMain, "agentMemory:entries", (agentId: string, limit?: number) =>
     listMemoryEntriesForAgentUi(agentId, Math.min(Math.max(Number(limit) || 100, 1), 300)),
   );
-  ipcMain.handle("agentLearning:summary", (_e, agentId: string) => getAgentLearningSummary(agentId));
+  registerAppControlDomainIpc(ipcMain, "agentLearning:summary", (agentId: string) => getAgentLearningSummary(agentId));
 
   // ── 기존 메모리 가져오기 (Phase 1b) — 레거시 마크다운 폴더 → 멤버/팀/공유 메모리 ──
   //   dry-run 미리보기(어느 멤버·kind로 들어갈지) + 적용. 미리보기는 경로 미지정 시
@@ -2944,63 +3038,63 @@ export function registerIpcHandlers(): void {
     }
     return importMemoryPreview({ agentId, sourcePath: resolvedPath });
   });
-  ipcMain.handle("memory:import-apply", (_e, agentId: string, sourcePath: string) =>
+  registerAppControlDomainIpc(ipcMain, "memory:import-apply", (agentId: string, sourcePath: string) =>
     importMemoryApply({ agentId, sourcePath: String(sourcePath ?? "").trim() }));
 
   // Legacy history remains readable. Retired writes stop before probes or Hub calls.
-  ipcMain.handle("experience:hubCatalog", () => getExperienceHubCatalog());
-  ipcMain.handle("experience:createPack", () => experienceChipsRetired());
-  ipcMain.handle("experience:listPacks", (_e, input) => listExperiencePacks(input));
-  ipcMain.handle("experience:ontologySummary", (_e, agentId: string) => getExperienceOntologySummary(agentId));
-  ipcMain.handle("experience:ontologyGraph", (_e, agentId: string) =>
+  registerAppControlDomainIpc(ipcMain, "experience:hubCatalog", () => getExperienceHubCatalog());
+  registerAppControlDomainIpc(ipcMain, "experience:createPack", () => experienceChipsRetired());
+  registerAppControlDomainIpc(ipcMain, "experience:listPacks", (input) => listExperiencePacks(input));
+  registerAppControlDomainIpc(ipcMain, "experience:ontologySummary", (agentId: string) => getExperienceOntologySummary(agentId));
+  registerAppControlDomainIpc(ipcMain, "experience:ontologyGraph", (agentId: string) =>
     getExperienceOntologyGraphSnapshot(agentId));
-  ipcMain.handle("agents:borrowed-profiles", () => listBorrowedAgentProfiles());
-  ipcMain.handle("agents:exact-bindings", () => listInstalledAgentHubBindings());
-  ipcMain.handle("agents:borrowed-ontology-graph", (_e, profileId: string) =>
+  registerAppControlDomainIpc(ipcMain, "agents:borrowed-profiles", () => listBorrowedAgentProfiles());
+  registerAppControlDomainIpc(ipcMain, "agents:exact-bindings", () => listInstalledAgentHubBindings());
+  registerAppControlDomainIpc(ipcMain, "agents:borrowed-ontology-graph", (profileId: string) =>
     getBorrowedAgentOntologyGraph(profileId));
-  ipcMain.handle("experience:hubProjection", () => experienceChipsRetired());
-  ipcMain.handle("experience:hubResolveAttach", () => experienceChipsRetired());
+  registerAppControlDomainIpc(ipcMain, "experience:hubProjection", () => experienceChipsRetired());
+  registerAppControlDomainIpc(ipcMain, "experience:hubResolveAttach", () => experienceChipsRetired());
   ipcMain.handle("experience:captureFromMemory", (_e, input) => captureExperienceCandidate(input));
-  ipcMain.handle("experience:listCandidates", (_e, packId: string) => listExperienceCandidates(packId));
-  ipcMain.handle("experience:listOperationalPublicProjections", (_e, packId: string) =>
+  registerAppControlDomainIpc(ipcMain, "experience:listCandidates", (packId: string) => listExperienceCandidates(packId));
+  registerAppControlDomainIpc(ipcMain, "experience:listOperationalPublicProjections", (packId: string) =>
     listOperationalPublicProjections(packId));
-  ipcMain.handle("experience:saveOperationalPublicProjection", (_e, input) =>
+  registerAppControlDomainIpc(ipcMain, "experience:saveOperationalPublicProjection", (input) =>
     saveOperationalPublicProjection(input));
-  ipcMain.handle("experience:confirmOperationalPublicProjection", (_e, input) =>
+  registerAppControlDomainIpc(ipcMain, "experience:confirmOperationalPublicProjection", (input) =>
     confirmOperationalPublicProjection(input));
-  ipcMain.handle("experience:listTasteDrafts", (_e, agentId: string) => listLocalTasteDrafts(agentId));
-  ipcMain.handle("experience:listTasteWorkflows", (_e, agentId: string) => listTasteChipWorkflows(agentId));
-  ipcMain.handle("experience:saveTasteGeneralization", (_e, input) => saveTasteGeneralization(input));
-  ipcMain.handle("experience:confirmTasteGeneralization", (_e, input) => confirmTasteGeneralization(input));
+  registerAppControlDomainIpc(ipcMain, "experience:listTasteDrafts", (agentId: string) => listLocalTasteDrafts(agentId));
+  registerAppControlDomainIpc(ipcMain, "experience:listTasteWorkflows", (agentId: string) => listTasteChipWorkflows(agentId));
+  registerAppControlDomainIpc(ipcMain, "experience:saveTasteGeneralization", (input) => saveTasteGeneralization(input));
+  registerAppControlDomainIpc(ipcMain, "experience:confirmTasteGeneralization", (input) => confirmTasteGeneralization(input));
   ipcMain.handle("experience:pickTastePreviews", () => experienceChipsRetired());
   ipcMain.handle("experience:prepareTastePreviews", (_e, input) => prepareTastePreviews(input));
-  ipcMain.handle("experience:uploadTasteDraft", (_e, input) => uploadTasteDraft(input));
-  ipcMain.handle("experience:promote", (_e, input) => promoteExperienceCandidate(input));
-  ipcMain.handle("experience:unsealPublic", (_e, input) => unsealExperienceCandidatePublic(input));
-  ipcMain.handle("experience:intake-diagnostics", (_e, agentId: string) =>
+  registerAppControlDomainIpc(ipcMain, "experience:uploadTasteDraft", (input) => uploadTasteDraft(input));
+  registerAppControlDomainIpc(ipcMain, "experience:promote", (input) => promoteExperienceCandidate(input));
+  registerAppControlDomainIpc(ipcMain, "experience:unsealPublic", (input) => unsealExperienceCandidatePublic(input));
+  registerAppControlDomainIpc(ipcMain, "experience:intake-diagnostics", (agentId: string) =>
     getExperienceIntakeDiagnostics(agentId));
-  ipcMain.handle("experience:listPromotionReceipts", (_e, packId: string) =>
+  registerAppControlDomainIpc(ipcMain, "experience:listPromotionReceipts", (packId: string) =>
     listExperiencePromotionReceipts(packId),
   );
 
   // ── v74 에이전트 사용 원장 + 북마크 ─────────────────────────────────────────
-  ipcMain.handle("agents:usage-summary", () => listAgentUsageSummary());
-  ipcMain.handle("agents:set-bookmark", (_e, agentId: string, bookmarked: boolean) =>
+  registerAppControlDomainIpc(ipcMain, "agents:usage-summary", () => listAgentUsageSummary());
+  registerAppControlDomainIpc(ipcMain, "agents:set-bookmark", (agentId: string, bookmarked: boolean) =>
     setAgentBookmark(agentId, bookmarked === true));
-  ipcMain.handle("experience:createExportIntent", (_e, input) => createExperienceExportIntent(input));
-  ipcMain.handle("experience:listExportIntents", (_e, packId: string) => listExperienceExportIntents(packId));
-  ipcMain.handle("experience:cloudSave", (_e, input: ExperienceCloudSaveInput) => saveExperienceToCloud(input));
-  ipcMain.handle("experience:cloudList", (_e, packId: string) => listExperienceCloudUploads(packId));
-  ipcMain.handle("experience:cloudReconcile", (_e, input: ExperienceCloudReconcileInput) =>
+  registerAppControlDomainIpc(ipcMain, "experience:createExportIntent", (input) => createExperienceExportIntent(input));
+  registerAppControlDomainIpc(ipcMain, "experience:listExportIntents", (packId: string) => listExperienceExportIntents(packId));
+  registerAppControlDomainIpc(ipcMain, "experience:cloudSave", (input: ExperienceCloudSaveInput) => saveExperienceToCloud(input));
+  registerAppControlDomainIpc(ipcMain, "experience:cloudList", (packId: string) => listExperienceCloudUploads(packId));
+  registerAppControlDomainIpc(ipcMain, "experience:cloudReconcile", (input: ExperienceCloudReconcileInput) =>
     reconcileExperienceCloudUpload(input.localUploadId));
-  ipcMain.handle("experience:cloudExport", (_e, input: ExperienceCloudReconcileInput) =>
+  registerAppControlDomainIpc(ipcMain, "experience:cloudExport", (input: ExperienceCloudReconcileInput) =>
     exportExperienceFromCloud(input.localUploadId));
-  ipcMain.handle("experience:cloudWithdraw", (_e, input: ExperienceCloudWithdrawInput) =>
+  registerAppControlDomainIpc(ipcMain, "experience:cloudWithdraw", (input: ExperienceCloudWithdrawInput) =>
     withdrawExperienceFromCloud(input));
 
   // ── 유휴 드리밍 큐레이션 — 옵트인 설정(기본 OFF) + 상태 ─────────────────────
-  ipcMain.handle("memoryDreaming:status", () => getDreamingStatus());
-  ipcMain.handle("memoryDreaming:setEnabled", (_e, enabled: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "memoryDreaming:status", () => getDreamingStatus());
+  registerAppControlDomainIpc(ipcMain, "memoryDreaming:setEnabled", (enabled: unknown) => {
     setDreamingEnabled(enabled === true);
     return getDreamingStatus();
   });
@@ -3010,8 +3104,8 @@ export function registerIpcHandlers(): void {
     assertTrustedSitePublishIpcSender(_e);
     return answerOneDispatchQuestion(input);
   });
-  ipcMain.handle("confirm:listPending", () => listPendingConfirmations());
-  ipcMain.handle("confirm:commitAnswer", (_e, input: {
+  registerAppControlDomainIpc(ipcMain, "confirm:listPending", () => listPendingConfirmations());
+  registerAppControlDomainIpc(ipcMain, "confirm:commitAnswer", (input: {
     chatId?: unknown;
     reply?: unknown;
     sourceMessageId?: unknown;
@@ -3059,9 +3153,9 @@ export function registerIpcHandlers(): void {
       admitMainInvocation(typeof input?.chatId === "string" ? input.chatId : ""),
     );
   });
-  ipcMain.handle("confirm:committedAnswers", (_e, chatId: unknown) =>
+  registerAppControlDomainIpc(ipcMain, "confirm:committedAnswers", (chatId: unknown) =>
     listCommittedQuestionAnswers(typeof chatId === "string" ? chatId : ""));
-  ipcMain.handle("confirm:snooze", (_e, input: { chatId?: unknown; sourceMessageId?: unknown; resumeAt?: unknown }) =>
+  registerAppControlDomainIpc(ipcMain, "confirm:snooze", (input: { chatId?: unknown; sourceMessageId?: unknown; resumeAt?: unknown }) =>
     snoozePendingConfirmation(
       typeof input?.chatId === "string" ? input.chatId : "",
       typeof input?.sourceMessageId === "string" ? input.sourceMessageId : "",
@@ -3074,15 +3168,15 @@ export function registerIpcHandlers(): void {
   });
 
   // ── runtime ─────────────────────────────────────────────
-  ipcMain.handle("runtime:detect", (_e, force?: boolean) => observeRuntimes(force === true));
-  ipcMain.handle("runtime:setActive", (_e, selection: RuntimeSelection) =>
+  registerAppControlDomainIpc(ipcMain, "runtime:detect", (force?: boolean) => observeRuntimes(force === true));
+  registerAppControlDomainIpc(ipcMain, "runtime:setActive", (selection: RuntimeSelection) =>
     setActiveRuntime(selection),
   );
   // 역할 풀: 순서 있는 후보 목록 + 현재 선택/스킵 사유. set은 전체 교체(순서=우선순위).
-  ipcMain.handle("runtime:listRoleMembers", () => desktopRuntimeRolePoolState());
-  ipcMain.handle(
-    "runtime:setRoleMembers",
-    async (_e, role: RuntimeRole, selections: RuntimeSelection[]) => {
+  registerAppControlDomainIpc(ipcMain, "runtime:listRoleMembers", () => desktopRuntimeRolePoolState());
+  registerAppControlDomainIpc(
+    ipcMain, "runtime:setRoleMembers",
+    async (role: RuntimeRole, selections: RuntimeSelection[]) => {
       setModelRoleMembersStore(role, selections);
       clearDetectCache();
       await detectRuntimes();
@@ -3090,12 +3184,12 @@ export function registerIpcHandlers(): void {
     },
   );
   // 온보딩 AI 단계가 끝날 때 — 연결한 것으로 오케스트레이터·워커 풀을 처음 채운다(오너 2026-10-06).
-  ipcMain.handle("runtime:seedFirstRunRoles", async (_e, apiChoice?: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "runtime:seedFirstRunRoles", async (apiChoice?: unknown) => {
     const seed = await seedFirstRunRoles(apiChoice);
     if (seed.seeded) emitDesktopStoreChange({ entity: "runtime" });
     return seed;
   });
-  ipcMain.handle("runtime:installCli", (_e, kind: InstallableCli) => installCli(kind));
+  registerAppControlDomainIpc(ipcMain, "runtime:installCli", (kind: InstallableCli) => installCli(kind));
   ipcMain.handle("runtime:openCliLogin", async (_e, kind: ManageableCli) => {
     // 로그인 터미널을 여는 시점에 감지/사용량 캐시를 즉시 무효화 — 로그인 완료가
     // watchRecovery 폴링(및 그 이후 일반 폴링)에 재시작 없이 바로 반영되게 한다.
@@ -3123,7 +3217,7 @@ export function registerIpcHandlers(): void {
   app.once("before-quit", () => runtimeConnector.disposeAll());
   const connectable = (kind: unknown): kind is ConnectableRuntime =>
     typeof kind === "string" && (CONNECTABLE_RUNTIMES as readonly string[]).includes(kind);
-  ipcMain.handle("runtime:probeAuth", (_e, kind?: ConnectableRuntime | null, force?: boolean) =>
+  registerAppControlDomainIpc(ipcMain, "runtime:probeAuth", (kind?: ConnectableRuntime | null, force?: boolean) =>
     connectable(kind) ? probeRuntimeAuthCached(kind, force === true) : probeAllRuntimeAuth(force === true));
   ipcMain.handle("runtime:connectStart", (_e, kind: ConnectableRuntime) => {
     if (!connectable(kind)) throw new Error(`Unknown runtime: ${String(kind)}`);
@@ -3133,7 +3227,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("runtime:connectGet", (_e, kind: ConnectableRuntime) => (connectable(kind) ? runtimeConnector.get(kind) : null));
   // 앱 시작 때 한 번 — 설치된 런타임의 로그인을 실제로 물어 둔다(결과는 60초 캐시).
   setTimeout(() => { void probeAllRuntimeAuth(true).catch(() => undefined); }, 4_000).unref?.();
-  ipcMain.handle("runtime:updateCli", async (_e, kind: ManageableCli) => {
+  registerAppControlDomainIpc(ipcMain, "runtime:updateCli", async (kind: ManageableCli) => {
     const releaseMaintenance = tryAcquireRuntimeMaintenance();
     if (!releaseMaintenance) {
       return {
@@ -3163,18 +3257,18 @@ export function registerIpcHandlers(): void {
       releaseMaintenance();
     }
   });
-  ipcMain.handle("runtime:listCommands", () => listRuntimeCommands());
-  ipcMain.handle(
-    "runtime:listModels",
-    (_e, sel: { kind: RuntimeKind; backend?: RuntimeBackend | null; availableModels?: string[] | null }) =>
+  registerAppControlDomainIpc(ipcMain, "runtime:listCommands", () => listRuntimeCommands());
+  registerAppControlDomainIpc(
+    ipcMain, "runtime:listModels",
+    (sel: { kind: RuntimeKind; backend?: RuntimeBackend | null; availableModels?: string[] | null }) =>
       listRuntimeModels(sel.kind, sel.backend ?? null, sel.availableModels ?? null, Date.now()),
   );
   /*
    * 실행 완료 알람(오너 2026-09-07). 값은 main 이 소유하고 렌더러는 패치만 보낸다 —
    * 저장된 값이 곧 알림 판단의 입력이라, 렌더러가 임의 모양을 쓰게 두면 안 된다.
    */
-  ipcMain.handle("runAlerts:get", () => getRunAlerts());
-  ipcMain.handle("runAlerts:set", (_e, patch: unknown) => setRunAlerts(patch));
+  registerAppControlDomainIpc(ipcMain, "runAlerts:get", () => getRunAlerts());
+  registerAppControlDomainIpc(ipcMain, "runAlerts:set", (patch: unknown) => setRunAlerts(patch));
   ipcMain.handle("runAlerts:preview", () => {
     // 설정 화면에서 "지금 들어보기". 저장값 그대로 한 번 울려, 켜 놓고도 안 들리는
     // (OS 알림 권한이 꺼져 있는) 상태를 사용자가 그 자리에서 알 수 있게 한다.
@@ -3187,31 +3281,31 @@ export function registerIpcHandlers(): void {
     });
     return settings;
   });
-  ipcMain.handle("agentRuntime:list", () => listAgentRuntimeOverrides());
-  ipcMain.handle(
-    "agentRuntime:get",
-    (_e, scope: AgentRuntimeOverrideScope, targetId: string) =>
+  registerAppControlDomainIpc(ipcMain, "agentRuntime:list", () => listAgentRuntimeOverrides());
+  registerAppControlDomainIpc(
+    ipcMain, "agentRuntime:get",
+    (scope: AgentRuntimeOverrideScope, targetId: string) =>
       getAgentRuntimeOverride(scope, targetId),
   );
-  ipcMain.handle(
-    "agentRuntime:set",
-    (_e, input: AgentRuntimeOverrideSetInput) => setAgentRuntimeOverride(input),
+  registerAppControlDomainIpc(
+    ipcMain, "agentRuntime:set",
+    (input: AgentRuntimeOverrideSetInput) => setAgentRuntimeOverride(input),
   );
-  ipcMain.handle(
-    "agentRuntime:remove",
-    (_e, scope: AgentRuntimeOverrideScope, targetId: string) =>
+  registerAppControlDomainIpc(
+    ipcMain, "agentRuntime:remove",
+    (scope: AgentRuntimeOverrideScope, targetId: string) =>
       removeAgentRuntimeOverride(scope, targetId),
   );
 
   // ── secrets (macOS Keychain) ────────────────────────────
-  ipcMain.handle("secrets:saveApiKey", async (_e, backend: RuntimeBackend, key: string) => {
+  registerAppControlDomainIpc(ipcMain, "secrets:saveApiKey", async (backend: RuntimeBackend, key: string) => {
     await saveApiKey(backend, key);
     clearModelCache();
     clearDetectCache();
     emitDesktopStoreChange({ entity: "runtime" });
   });
-  ipcMain.handle("secrets:hasApiKey", (_e, backend: RuntimeBackend) => hasApiKey(backend));
-  ipcMain.handle("secrets:deleteApiKey", async (_e, backend: RuntimeBackend) => {
+  registerAppControlDomainIpc(ipcMain, "secrets:hasApiKey", (backend: RuntimeBackend) => hasApiKey(backend));
+  registerAppControlDomainIpc(ipcMain, "secrets:deleteApiKey", async (backend: RuntimeBackend) => {
     await deleteApiKey(backend);
     clearModelCache();
     clearDetectCache();
@@ -3219,7 +3313,7 @@ export function registerIpcHandlers(): void {
   });
   
   // ── custom backend config ───────────────────────────────
-  ipcMain.handle("config:getCustomBaseUrl", () => {
+  registerAppControlDomainIpc(ipcMain, "config:getCustomBaseUrl", () => {
     try {
       const row = getDb().prepare("SELECT value FROM meta WHERE key = 'custom_base_url'").get() as { value: string } | undefined;
       return row?.value ?? "";
@@ -3228,7 +3322,7 @@ export function registerIpcHandlers(): void {
   // 보안: 이 값은 byok.ts가 BYOK API 키를 Bearer로 보내는 baseUrl이 된다. 손상된 렌더러가
   // 임의 origin으로 재지정해 키를 탈취하지 못하게, 저장 전에 스킴/호스트를 검증한다.
   // 정상 사용(공개 https API, 로컬/LAN http LLM)은 그대로 허용 — 부작용 없음.
-  ipcMain.handle("config:setCustomBaseUrl", (_e, url: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "config:setCustomBaseUrl", (url: unknown) => {
     const safe = validateCustomBaseUrl(typeof url === "string" ? url : "");
     getDb().prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('custom_base_url', ?)").run(safe);
     clearModelCache();
@@ -3248,7 +3342,7 @@ export function registerIpcHandlers(): void {
       return Array.isArray(parsed) ? parsed : [];
     } catch { return []; }
   });
-  ipcMain.handle("config:getTerminalProfiles", () => {
+  registerAppControlDomainIpc(ipcMain, "config:getTerminalProfiles", () => {
     try {
       const row = getDb().prepare("SELECT value FROM meta WHERE key = 'terminal_profiles'").get() as { value: string } | undefined;
       if (!row?.value) return [];
@@ -3256,7 +3350,7 @@ export function registerIpcHandlers(): void {
       return Array.isArray(parsed) ? parsed : [];
     } catch { return []; }
   });
-  ipcMain.handle("config:setTerminalProfiles", (_e, profiles: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "config:setTerminalProfiles", (profiles: unknown) => {
     // Shape rules live in shared/terminal-profiles.ts (template needs {{{prompt}}};
     // acp needs a command). Saved acp profiles are detected as kind "acp".
     const safe = sanitizeTerminalProfiles(profiles);
@@ -3271,15 +3365,15 @@ export function registerIpcHandlers(): void {
    * **이 프로세스** 기준의 진실(isTrustedAccessibilityClient)이다 — 설치본에 켠 권한과
    * 개발 실행은 macOS가 서로 다른 앱으로 취급한다(오너가 "이미 켰는데?"라고 한 실측 혼선의 뿌리).
    */
-  ipcMain.handle("system:computerUsePermissions", () => checkComputerUsePermissions());
+  registerAppControlDomainIpc(ipcMain, "system:computerUsePermissions", () => checkComputerUsePermissions());
   ipcMain.handle("system:openAccessibilitySettings", async () => {
     await shell.openExternal("x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility");
   });
-  ipcMain.handle("system:concurrencyInfo", () => getAgentConcurrencyInfo());
+  registerAppControlDomainIpc(ipcMain, "system:concurrencyInfo", () => getAgentConcurrencyInfo());
   // 브리핑 인터뷰 모드 (smart / build-only / off)
-  ipcMain.handle("interview:getMode", () => getInterviewMode());
-  ipcMain.handle("interview:setMode", (_e, mode: InterviewMode) => setInterviewMode(mode));
-  ipcMain.handle("system:setConcurrency", (_e, value: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "interview:getMode", () => getInterviewMode());
+  registerAppControlDomainIpc(ipcMain, "interview:setMode", (mode: InterviewMode) => setInterviewMode(mode));
+  registerAppControlDomainIpc(ipcMain, "system:setConcurrency", (value: unknown) => {
     setAgentConcurrency(Number(value));
     enforceAgentResidencyBudget();
     return getAgentConcurrencyInfo();
@@ -3295,7 +3389,7 @@ export function registerIpcHandlers(): void {
     if (typeof retryToken !== "string" || retryToken.length > 128) return { status: "invalid-token" };
     return retryCredentialRecoveryFromUser(retryToken);
   });
-  ipcMain.handle("env:list", async () => {
+  registerAppControlDomainIpc(ipcMain, "env:list", async () => {
     // Gather known requirements before touching credential storage.
     const agents = listInstalledAgents();
     type Aggregated = {
@@ -3363,30 +3457,30 @@ export function registerIpcHandlers(): void {
       { listKeys: listEnvKeys, hasValue: hasEnvVar, preview: previewEnvVar },
     );
   });
-  ipcMain.handle("env:set", (_e, key: string, value: string) => setEnvVar(key, value));
-  ipcMain.handle("env:has", (_e, key: string) => hasEnvVar(key));
+  registerAppControlDomainIpc(ipcMain, "env:set", (key: string, value: string) => setEnvVar(key, value));
+  registerAppControlDomainIpc(ipcMain, "env:has", (key: string) => hasEnvVar(key));
   ipcMain.handle("env:preview", (_e, key: string) => previewEnvVar(key));
-  ipcMain.handle("env:remove", (_e, key: string) => deleteEnvVar(key));
+  registerAppControlDomainIpc(ipcMain, "env:remove", (key: string) => deleteEnvVar(key));
 
   // ── multimodal global fallback ─────────────────────────
-  ipcMain.handle("multimodal:listProviders", () => listMultimodalProviders());
-  ipcMain.handle("multimodal:getSettings", () => getMultimodalSettings());
-  ipcMain.handle("multimodal:saveSettings", (_e, settings: Partial<MultimodalSettings>) =>
+  registerAppControlDomainIpc(ipcMain, "multimodal:listProviders", () => listMultimodalProviders());
+  registerAppControlDomainIpc(ipcMain, "multimodal:getSettings", () => getMultimodalSettings());
+  registerAppControlDomainIpc(ipcMain, "multimodal:saveSettings", (settings: Partial<MultimodalSettings>) =>
     saveMultimodalSettings(settings),
   );
-  ipcMain.handle("multimodal:status", () => getMultimodalStatus());
+  registerAppControlDomainIpc(ipcMain, "multimodal:status", () => getMultimodalStatus());
 
   // ── Oberon real generation bridges ─────────────────────────
-  ipcMain.handle("multimodal:startVideo", (_e, request) => startVideoJob(request));
-  ipcMain.handle("multimodal:getVideoJob", (_e, id: string) => getVideoJob(id));
-  ipcMain.handle("multimodal:cancelVideo", (_e, id: string) => cancelVideoJob(id));
+  registerAppControlDomainIpc(ipcMain, "multimodal:startVideo", (request) => startVideoJob(request));
+  registerAppControlDomainIpc(ipcMain, "multimodal:getVideoJob", (id: string) => getVideoJob(id));
+  registerAppControlDomainIpc(ipcMain, "multimodal:cancelVideo", (id: string) => cancelVideoJob(id));
   ipcMain.handle("multimodal:openVideoOutput", (_e, id: string) => openVideoOutput(id));
-  ipcMain.handle("multimodal:videoKeyStatus", () => videoKeyStatus());
+  registerAppControlDomainIpc(ipcMain, "multimodal:videoKeyStatus", () => videoKeyStatus());
 
   // ── team (설치된 에이전트) ─────────────────────────────
-  ipcMain.handle("team:list", () => listInstalledAgents());
-  ipcMain.handle("team:install", (_e, slug: string) => installAgent(slug));
-  ipcMain.handle("team:installMine", (_e, id: string) => installMyAgent(id));
+  registerAppControlDomainIpc(ipcMain, "team:list", () => listInstalledAgents());
+  registerAppControlDomainIpc(ipcMain, "team:install", (slug: string) => installAgent(slug));
+  registerAppControlDomainIpc(ipcMain, "team:installMine", (id: string) => installMyAgent(id));
   // 봇 삭제 확인 문구용 정확한 수 — "좌석 N곳이 빈 자리가 됩니다. 대화 M개는 그대로 남습니다".
   ipcMain.handle("team:uninstallPreview", (_e, id: string) => agentRemovalPreview(id));
   ipcMain.handle("team:uninstall", async (_e, id: string, options?: { removeSource?: boolean }) => {
@@ -3406,37 +3500,37 @@ export function registerIpcHandlers(): void {
     }
     return { removed: true, sourceMovedToTrash };
   });
-  ipcMain.handle("team:setLocalDisplayName", (_e, id: string, value: string) =>
+  registerAppControlDomainIpc(ipcMain, "team:setLocalDisplayName", (id: string, value: string) =>
     setAgentLocalDisplayName(id, value),
   );
   // 로컬 폴더 임포트 — 런타임 감지 + 라우팅 저장 후 설치된 에이전트로 반환
-  ipcMain.handle(
-    "team:importLocalFolder",
-    async (_e, input: { path: string; scope: FsReadScope }) =>
+  registerAppControlDomainIpc(
+    ipcMain, "team:importLocalFolder",
+    async (input: { path: string; scope: FsReadScope }) =>
       (await importLocalFolder(resolveFsReadPath(input.path, input.scope))).agent,
   );
-  ipcMain.handle("team:resolveSubAgents", (_e, agentId: string) => resolveAgentTeam(agentId));
+  registerAppControlDomainIpc(ipcMain, "team:resolveSubAgents", (agentId: string) => resolveAgentTeam(agentId));
 
   // ── One Team (durable identity bindings; Work still owns execution) ──
-  ipcMain.handle("oneOrg:get", () => getOneOrgState());
-  ipcMain.handle("oneOrg:createAgent", (_e, input) => createOneTeamAgent(input));
-  ipcMain.handle("oneOrg:add", (_e, input) => addOneOrgMember(input));
-  ipcMain.handle("oneOrg:rename", (_e, input) => renameOneOrgMember(input));
-  ipcMain.handle("oneOrg:update", (_e, input) => updateOneOrgMember(input));
-  ipcMain.handle("oneOrg:replace", (_e, input) => replaceOneOrgMember(input));
-  ipcMain.handle("oneOrg:archive", (_e, input) => archiveOneOrgMember(input));
-  ipcMain.handle("oneOrg:restore", (_e, input) => restoreOneOrgMember(input));
-  ipcMain.handle("oneOrg:markRead", (_e, input) => markOneOrgMemberRead(input));
-  ipcMain.handle("oneOrg:reorder", (_e, input) => reorderOneOrgMembers(input));
-  ipcMain.handle("oneOrg:setTools", (_e, input) => setOneOrgMemberTools(input));
-  ipcMain.handle("oneOrg:suggestions", (_e, input: { installedAgentId?: unknown } | undefined) =>
+  registerAppControlDomainIpc(ipcMain, "oneOrg:get", () => getOneOrgState());
+  registerAppControlDomainIpc(ipcMain, "oneOrg:createAgent", (input) => createOneTeamAgent(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:add", (input) => addOneOrgMember(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:rename", (input) => renameOneOrgMember(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:update", (input) => updateOneOrgMember(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:replace", (input) => replaceOneOrgMember(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:archive", (input) => archiveOneOrgMember(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:restore", (input) => restoreOneOrgMember(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:markRead", (input) => markOneOrgMemberRead(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:reorder", (input) => reorderOneOrgMembers(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:setTools", (input) => setOneOrgMemberTools(input));
+  registerAppControlDomainIpc(ipcMain, "oneOrg:suggestions", (input: { installedAgentId?: unknown } | undefined) =>
     readOneSeatSuggestions(typeof input?.installedAgentId === "string" ? input.installedAgentId : ""));
 
   // ── One Taskforces (durable group chats; One is always implicit) ──
-  ipcMain.handle("oneTaskforces:list", () => listOneTaskforces());
-  ipcMain.handle("oneTaskforces:create", (_e, input) => createOneTaskforce(input));
-  ipcMain.handle("oneTaskforces:update", (_e, input) => updateOneTaskforce(input));
-  ipcMain.handle("oneTaskforces:remove", (_e, input) => {
+  registerAppControlDomainIpc(ipcMain, "oneTaskforces:list", () => listOneTaskforces());
+  registerAppControlDomainIpc(ipcMain, "oneTaskforces:create", (input) => createOneTaskforce(input));
+  registerAppControlDomainIpc(ipcMain, "oneTaskforces:update", (input) => updateOneTaskforce(input));
+  registerAppControlDomainIpc(ipcMain, "oneTaskforces:remove", (input) => {
     const taskforce = listOneTaskforces().find((item) => item.id === input?.id);
     if (taskforce && invocationService.activeChatIds().includes(taskforce.chatId)) {
       throw new Error("Stop the active Taskforce run before deleting it.");
@@ -3447,14 +3541,14 @@ export function registerIpcHandlers(): void {
   // 해체 확인 문구용 정확한 수(사전 COUNT) — "대화 N개는 기록으로 남습니다".
   ipcMain.handle("oneTaskforces:removePreview", (_e, input) => oneTaskforceRemovalPreview(input));
   // 세션의 좌석 1급 조회 — 해체 배너·빈 자리 표시가 이 창구로 읽는다.
-  ipcMain.handle("seats:forChat", (_e, chatId: string) => getSeatForChat(chatId));
+  registerAppControlDomainIpc(ipcMain, "seats:forChat", (chatId: string) => getSeatForChat(chatId));
   // "그때 누가 있었나" 재구성(I6) — 닫힌 점유 포함 append-only 이력.
-  ipcMain.handle("seats:historyForChat", (_e, chatId: string) => {
+  registerAppControlDomainIpc(ipcMain, "seats:historyForChat", (chatId: string) => {
     const seat = getSeatForChat(chatId);
     return seat ? listSeatOccupantHistory(seat.id) : [];
   });
   // T10 빈 좌석 배정 — 착석 + 세션에 시스템 줄 1개(누가 앉았는지 대화가 스스로 말한다).
-  ipcMain.handle("seats:assign", (_e, input: { chatId: string; agentId: string; slot?: number }) => {
+  registerAppControlDomainIpc(ipcMain, "seats:assign", (input: { chatId: string; agentId: string; slot?: number }) => {
     const seat = getSeatForChat(input.chatId);
     if (!seat) throw new Error(currentUiLocale() === "ko" ? "이 대화에는 아직 팀원 정보가 없습니다." : "This conversation has no teammate yet.");
     const assigned = assignSeatOccupant(seat.id, input.agentId, input.slot ?? 0);
@@ -3470,63 +3564,63 @@ export function registerIpcHandlers(): void {
   });
 
   // ── Computer History (explicit local opt-in; no raw history leaves disk) ──
-  ipcMain.handle("computerHistory:get", () => getComputerHistoryState());
-  ipcMain.handle("computerHistory:setConsent", (_e, enabled: boolean) => setComputerHistoryConsent(enabled === true));
-  ipcMain.handle("computerHistory:clear", () => clearComputerHistory());
-  ipcMain.handle("computerHistory:prepareDraft", (_e, recommendationId: string, locale: "ko" | "en") =>
+  registerAppControlDomainIpc(ipcMain, "computerHistory:get", () => getComputerHistoryState());
+  registerAppControlDomainIpc(ipcMain, "computerHistory:setConsent", (enabled: boolean) => setComputerHistoryConsent(enabled === true));
+  registerAppControlDomainIpc(ipcMain, "computerHistory:clear", () => clearComputerHistory());
+  registerAppControlDomainIpc(ipcMain, "computerHistory:prepareDraft", (recommendationId: string, locale: "ko" | "en") =>
     prepareComputerHistoryDraftPrompt(recommendationId, locale === "ko" ? "ko" : "en"));
   // Adaptive Toolchains — what past runs taught the product to do (electron/toolchains).
   registerToolchainIpc(ipcMain);
 
   // ── agentFiles (에이전트 폴더 파일 — 우측 패널 에디터) ──
-  ipcMain.handle("agentFiles:list", (_e, agentId: string) => listAgentFiles(agentId));
-  ipcMain.handle("agentFiles:read", (_e, agentId: string, absPath: string) =>
+  registerAppControlDomainIpc(ipcMain, "agentFiles:list", (agentId: string) => listAgentFiles(agentId));
+  registerAppControlDomainIpc(ipcMain, "agentFiles:read", (agentId: string, absPath: string) =>
     readAgentFile(agentId, absPath),
   );
-  ipcMain.handle("agentFiles:write", (_e, agentId: string, absPath: string, content: string) =>
+  registerAppControlDomainIpc(ipcMain, "agentFiles:write", (agentId: string, absPath: string, content: string) =>
     writeAgentFile(agentId, absPath, content),
   );
-  ipcMain.handle("agentFiles:promptSource", (_e, agentId: string) => readAgentPromptSource(agentId));
+  registerAppControlDomainIpc(ipcMain, "agentFiles:promptSource", (agentId: string) => readAgentPromptSource(agentId));
 
   // ── runLedger (실행/실패 원장 — 실패 메모리·자가진화 평가 입력) ──
-  ipcMain.handle("runLedger:events", (_e, runId: string, limit?: number) =>
+  registerAppControlDomainIpc(ipcMain, "runLedger:events", (runId: string, limit?: number) =>
     listRunEvents(runId, limit),
   );
-  ipcMain.handle(
-    "runLedger:chatTimeline",
-    (_e, chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) =>
+  registerAppControlDomainIpc(
+    ipcMain, "runLedger:chatTimeline",
+    (chatId: string, input?: { maxRuns?: number; eventsPerRun?: number }) =>
       listChatRunTimeline(chatId, input),
   );
-  ipcMain.handle(
-    "runLedger:failures",
-    (_e, input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) =>
+  registerAppControlDomainIpc(
+    ipcMain, "runLedger:failures",
+    (input?: { runId?: string; automationId?: string; chatId?: string; agentId?: string; limit?: number }) =>
       listFailureEvents(input),
   );
 
   // ── agentEvolution (자가진화 proposal 원장 — 승인 흐름을 durable DB에 기록) ──
-  ipcMain.handle("agentEvolution:list", (_e, agentId: string, limit?: number) =>
+  registerAppControlDomainIpc(ipcMain, "agentEvolution:list", (agentId: string, limit?: number) =>
     listAgentEvolutionProposals(agentId, limit),
   );
-  ipcMain.handle("agentEvolution:createProposal", (_e, input: CreateAgentEvolutionProposalInput) =>
+  registerAppControlDomainIpc(ipcMain, "agentEvolution:createProposal", (input: CreateAgentEvolutionProposalInput) =>
     createAgentEvolutionProposal(input),
   );
-  ipcMain.handle("agentEvolution:approveAndApply", (_e, proposalId: string, note?: string) =>
+  registerAppControlDomainIpc(ipcMain, "agentEvolution:approveAndApply", (proposalId: string, note?: string) =>
     approveAndApplyAgentEvolutionProposal(proposalId, note),
   );
-  ipcMain.handle("agentEvolution:reject", (_e, proposalId: string, note?: string) =>
+  registerAppControlDomainIpc(ipcMain, "agentEvolution:reject", (proposalId: string, note?: string) =>
     rejectAgentEvolutionProposal(proposalId, note),
   );
-  ipcMain.handle("agentEvolution:markMeasured", (_e, proposalId: string, note?: string) =>
+  registerAppControlDomainIpc(ipcMain, "agentEvolution:markMeasured", (proposalId: string, note?: string) =>
     markAgentEvolutionProposalMeasured(proposalId, note),
   );
-  ipcMain.handle("agentEvolution:rollback", (_e, proposalId: string) =>
+  registerAppControlDomainIpc(ipcMain, "agentEvolution:rollback", (proposalId: string) =>
     rollbackAgentEvolutionProposal(proposalId),
   );
   // 4표면 발화 UX — 에이전트 무관 전역 "성장 제안"(고위험 pending + 저위험 자동적용분).
-  ipcMain.handle("agentEvolution:listGrowth", (_e, limit?: number) =>
+  registerAppControlDomainIpc(ipcMain, "agentEvolution:listGrowth", (limit?: number) =>
     listPendingGrowthProposals(limit),
   );
-  ipcMain.handle("agentEvolution:deleteGrowthSession", (_e, proposalId: string) =>
+  registerAppControlDomainIpc(ipcMain, "agentEvolution:deleteGrowthSession", (proposalId: string) =>
     deleteAgentGrowthProposalSession(proposalId),
   );
 
@@ -3537,23 +3631,22 @@ export function registerIpcHandlers(): void {
    * 엔진 텍스트 자산 편집 — 스킬·호스트 훅·어댑터 매니페스트를 앱 안에서 고친다.
    * 경계와 "업데이트가 덮어쓴다"는 사실은 runtime-files.ts 가 들고 있다.
    */
-  ipcMain.handle("runtimeFiles:list", () => listRuntimeFiles());
-  ipcMain.handle("runtimeFiles:read", (_e, relPath: string) => readRuntimeFile(relPath));
-  ipcMain.handle("runtimeFiles:write", (_e, relPath: string, content: string) =>
+  registerAppControlDomainIpc(ipcMain, "runtimeFiles:list", () => listRuntimeFiles());
+  registerAppControlDomainIpc(ipcMain, "runtimeFiles:read", (relPath: string) => readRuntimeFile(relPath));
+  registerAppControlDomainIpc(ipcMain, "runtimeFiles:write", (relPath: string, content: string) =>
     writeRuntimeFile(relPath, content));
-  ipcMain.handle("skills:listCatalog", () => listSkillCatalog());
-  ipcMain.handle("skills:readCatalog", (_event, slug: string) => readSkillCatalogAsset(slug));
+  registerAppControlDomainIpc(ipcMain, "skills:listCatalog", () => listSkillCatalog());
+  registerAppControlDomainIpc(ipcMain, "skills:readCatalog", (slug: string) => readSkillCatalogAsset(slug));
 
   // ── mcpTools (외부 MCP 툴 플러그인 — Slack/Discord/GitHub 등) ─
-  ipcMain.handle("mcpTools:listCatalog", () => MCP_TOOL_CATALOG);
+  registerAppControlDomainIpc(ipcMain, "mcpTools:listCatalog", () => MCP_TOOL_CATALOG);
   // 로고는 웹 카탈로그가 정본이다 — 데스크탑은 slug->자산 주소만 거울로 들고 있는다.
-  ipcMain.handle("mcpTools:brandMap", () => getPluginBrandMap());
-  ipcMain.handle("mcpTools:listInstalled", () => listInstalledServers());
-  ipcMain.handle("mcpTools:install", (_e, catalogId: string) => installFromCatalog(catalogId));
-  ipcMain.handle(
-    "mcpTools:installCustom",
+  registerAppControlDomainIpc(ipcMain, "mcpTools:brandMap", () => getPluginBrandMap());
+  registerAppControlDomainIpc(ipcMain, "mcpTools:listInstalled", () => listInstalledServers());
+  registerAppControlDomainIpc(ipcMain, "mcpTools:install", (catalogId: string) => installFromCatalog(catalogId));
+  registerAppControlDomainIpc(
+    ipcMain, "mcpTools:installCustom",
     (
-      _e,
       def: {
         name: string;
         transport: McpTransport;
@@ -3564,8 +3657,8 @@ export function registerIpcHandlers(): void {
       },
     ) => installCustomServer(def),
   );
-  ipcMain.handle("mcpTools:remove", (_e, id: string) => removeServer(id));
-  ipcMain.handle("mcpTools:setEnabled", (_e, id: string, enabled: boolean) =>
+  registerAppControlDomainIpc(ipcMain, "mcpTools:remove", (id: string) => removeServer(id));
+  registerAppControlDomainIpc(ipcMain, "mcpTools:setEnabled", (id: string, enabled: boolean) =>
     setServerEnabled(id, enabled),
   );
   // Hub 플러그인 설치 — 미리보기와 설치를 반드시 나눈다. stdio 행은 그 명령을 이 기계에서
@@ -3575,9 +3668,9 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("mcpTools:previewHubPlugin", (_e, manifestUrl: string) =>
     previewHubPlugin(String(manifestUrl)),
   );
-  ipcMain.handle(
-    "mcpTools:installHubPlugin",
-    (_e, input: { slug: string; manifestUrl: string; approveLocalExecution?: boolean }) =>
+  registerAppControlDomainIpc(
+    ipcMain, "mcpTools:installHubPlugin",
+    (input: { slug: string; manifestUrl: string; approveLocalExecution?: boolean }) =>
       installHubPlugin({
         slug: String(input?.slug ?? ""),
         manifestUrl: String(input?.manifestUrl ?? ""),
@@ -3586,24 +3679,25 @@ export function registerIpcHandlers(): void {
   );
   // 자동 브리지가 등록해 두고 승인을 기다리는 stdio 서버. 실행 중 채팅에 한 줄 지나가는
   // needs-approval 영수증을 놓치면 사용자는 어디서 무엇을 켜는지 알 수 없었다.
-  ipcMain.handle("mcpTools:pendingHubApprovals", () => listPendingHubPluginApprovals());
+  registerAppControlDomainIpc(ipcMain, "mcpTools:pendingHubApprovals", () => listPendingHubPluginApprovals());
   /*
    * 원격 MCP OAuth.
    *
-   * `authStatus` 는 이 서버가 무엇을 요구하는지 읽기만 한다(연결 시도 없음) — 화면이
-   * "로그인 필요"인지 "이미 연결됨"인지 "인증 불필요"인지 말할 수 있어야 하기 때문이다.
+   * `oauthStatus` 는 저장된 자격증명의 유효 여부만 읽는다. 토큰 갱신과 실제
+   * tools/list 성공 확인은 mcpTools:test가 맡고, 새 동의는 oauthStart가 맡는다.
    * `connect` 는 실제 인가 흐름을 돌린다. 값(토큰)은 이 채널로 오가지 않는다: 저장은
    * Keychain vault, 화면에는 성공 여부와 사람이 직접 열어야 할 URL만 돌려준다.
    */
-  ipcMain.handle("mcpTools:oauthStatus", async (_e, serverId: string) => {
+  registerAppControlDomainIpc(ipcMain, "mcpTools:oauthStatus", async (serverId: string) => {
     const id = String(serverId ?? "");
     const server = getServer(id);
     if (!server || !server.url) return { supported: false as const, connected: false, reason: "not_remote" };
     const session = await readMcpOAuthSession(id);
     if (session) {
+      const connected = await hasUsableMcpOAuthCredential(id, server.url);
       return {
         supported: true as const,
-        connected: true,
+        connected,
         resource: session.resource,
         expiresAt: session.expiresAt ?? null,
       };
@@ -3622,14 +3716,84 @@ export function registerIpcHandlers(): void {
       };
     }
   });
+  const mcpOAuthOwnerCleanups = new Map<string, () => void>();
+  ipcMain.handle("mcpTools:oauthStart", async (event, serverId: string) => {
+    const id = String(serverId ?? "");
+    const server = getServer(id);
+    if (!server?.url) return { ok: false as const, error: "this server has no remote URL to authorize" };
+    const sender = event.sender;
+    let ownerGone = sender.isDestroyed();
+    let attemptId: string | null = null;
+    let expiry: ReturnType<typeof setTimeout> | null = null;
+    const cleanup = () => {
+      sender.removeListener("destroyed", onOwnerGone);
+      sender.removeListener("render-process-gone", onOwnerGone);
+      if (expiry) clearTimeout(expiry);
+      if (attemptId) mcpOAuthOwnerCleanups.delete(attemptId);
+    };
+    const onOwnerGone = () => {
+      ownerGone = true;
+      if (attemptId) void cancelMcpOAuthAuthorization(id, attemptId).finally(cleanup);
+    };
+    if (ownerGone) return { ok: false as const, error: "The connection window is closed." };
+    sender.once("destroyed", onOwnerGone);
+    sender.once("render-process-gone", onOwnerGone);
+    try {
+      const result = await startMcpOAuthAuthorization({ serverId: id, serverUrl: server.url });
+      attemptId = result.attemptId;
+      if (ownerGone || sender.isDestroyed()) {
+        await cancelMcpOAuthAuthorization(id, attemptId);
+        cleanup();
+        return { ok: false as const, error: "The connection window is closed." };
+      }
+      mcpOAuthOwnerCleanups.set(attemptId, cleanup);
+      // Core expires the pending callback after five minutes. Bound UI owners
+      // must not accumulate listeners when a renderer stops polling.
+      expiry = setTimeout(cleanup, 310_000);
+      expiry.unref();
+      return { ok: true as const, ...result };
+    } catch (error) {
+      cleanup();
+      return { ok: false as const, error: error instanceof Error ? error.message.slice(0, 300) : "authorization failed" };
+    }
+  });
+  registerAppControlDomainIpc(ipcMain, "mcpTools:oauthPoll", async (serverId: string, attemptId: string) => {
+    const id = String(serverId ?? "");
+    const attempt = String(attemptId ?? "");
+    const status = getMcpOAuthAuthorizationStatus(id, attempt);
+    if (status.status !== "waiting" && status.status !== "exchanging" && status.status !== "unknown") {
+      mcpOAuthOwnerCleanups.get(attempt)?.();
+    }
+    if (status.status === "connected") {
+      const server = getServer(id);
+      // A row can be removed or its endpoint changed during consent. Never
+      // enable that replacement with credentials for the previous resource.
+      if (!server?.url || !await resolveMcpOAuthAccessToken(id, server.url)) {
+        return { status: "failed" as const, error: "The server authorization is no longer valid. Reconnect the server." };
+      }
+      if (!server.enabled) setServerEnabled(id, true);
+    }
+    return status;
+  });
+  // Cleanup must remain available even if the installed row has been removed.
+  registerAppControlDomainIpc(ipcMain, "mcpTools:oauthCancel", async (serverId: string, attemptId: string) => {
+    const attempt = String(attemptId ?? "");
+    const result = await cancelMcpOAuthAuthorization(String(serverId ?? ""), attempt);
+    if (result.ok) mcpOAuthOwnerCleanups.get(attempt)?.();
+    return result;
+  });
   ipcMain.handle("mcpTools:oauthConnect", async (_e, serverId: string) => {
     const id = String(serverId ?? "");
     const server = getServer(id);
     if (!server?.url) return { ok: false as const, error: "this server has no remote URL to authorize" };
     try {
       const result = await authorizeMcpServer({ serverId: id, serverUrl: server.url });
+      const current = getServer(id);
+      if (!current?.url || !await resolveMcpOAuthAccessToken(id, current.url)) {
+        return { ok: false as const, error: "The server authorization is no longer valid. Reconnect the server." };
+      }
       // 연결이 끝났으면 다음 실행부터 이 서버가 실려야 한다. 꺼져 있던 행을 켜 준다.
-      if (!server.enabled) setServerEnabled(id, true);
+      if (!current.enabled) setServerEnabled(id, true);
       return { ok: true as const, manualUrl: result.manualUrl };
     } catch (error) {
       return {
@@ -3642,15 +3806,15 @@ export function registerIpcHandlers(): void {
     await forgetMcpOAuth(String(serverId ?? ""));
     return { ok: true as const };
   });
-  ipcMain.handle("mcpTools:test", (_e, id: string) => testServerById(id));
-  ipcMain.handle("mcpTools:status", () => statusAllServers());
-  ipcMain.handle("mcpTools:recommendForBuild", (_e, input) => recommendMcpBuildPlan(input));
+  registerAppControlDomainIpc(ipcMain, "mcpTools:test", (id: string) => testServerById(id));
+  registerAppControlDomainIpc(ipcMain, "mcpTools:status", () => statusAllServers());
+  registerAppControlDomainIpc(ipcMain, "mcpTools:recommendForBuild", (input) => recommendMcpBuildPlan(input));
   // 실행 전 키 요청 시트의 완료 신호 — 비밀 값은 절대 이 채널로 오지 않는다(값은 env:set).
   // 만료/미지의 runId는 { ok:false } 멱등 무시라 렌더러 재시도가 안전하다.
-  ipcMain.handle("mcp:supplyRunKeys", (_e, runId: string, outcome: unknown) =>
+  registerAppControlDomainIpc(ipcMain, "mcp:supplyRunKeys", (runId: string, outcome: unknown) =>
     resolveRunKeyElicitation(String(runId), outcome),
   );
-  ipcMain.handle("openCrab:readiness", async () => {
+  registerAppControlDomainIpc(ipcMain, "openCrab:readiness", async () => {
     const readiness = await getOpenCrabReadiness();
     switch (readiness.reason) {
       case "not_installed":
@@ -3671,11 +3835,11 @@ export function registerIpcHandlers(): void {
   });
 
   // ── marketplace (agentlas.cloud Hub-only; no in-memory fallback catalog) ─
-  ipcMain.handle("marketplace:listBundles", () => getMarketSource().listBundles());
-  ipcMain.handle("marketplace:search", (_e, q: string) => getMarketSource().searchAgents(q));
-  ipcMain.handle("marketplace:listFirms", () => getMarketSource().listFirms());
-  ipcMain.handle("marketplace:status", (_e, force?: boolean) => refreshMarketSourceStatus(force === true));
-  ipcMain.handle("marketplace:bookmarks", () => listHubAgentBookmarks());
+  registerAppControlDomainIpc(ipcMain, "marketplace:listBundles", () => getMarketSource().listBundles());
+  registerAppControlDomainIpc(ipcMain, "marketplace:search", (q: string) => getMarketSource().searchAgents(q));
+  registerAppControlDomainIpc(ipcMain, "marketplace:listFirms", () => getMarketSource().listFirms());
+  registerAppControlDomainIpc(ipcMain, "marketplace:status", (force?: boolean) => refreshMarketSourceStatus(force === true));
+  registerAppControlDomainIpc(ipcMain, "marketplace:bookmarks", () => listHubAgentBookmarks());
   // 허브 소개 페이지 임베드 — 원격 페이지라 preload/IPC를 붙이지 않는다(hub-profile-view 참고).
   ipcMain.handle(
     "marketplace:openProfileView",
@@ -3687,27 +3851,27 @@ export function registerIpcHandlers(): void {
     (e, bounds: HubProfileBounds) => setHubProfileViewBounds(bounds, measuringZoomFactor(e.sender)),
   );
   ipcMain.handle("marketplace:closeProfileView", () => closeHubProfileView());
-  ipcMain.handle("marketplace:bookmarksSync", () => syncHubBookmarks({ rerunIfBusy: true }));
-  ipcMain.handle("marketplace:bookmarkAdd", (_e, listing) => {
+  registerAppControlDomainIpc(ipcMain, "marketplace:bookmarksSync", () => syncHubBookmarks({ rerunIfBusy: true }));
+  registerAppControlDomainIpc(ipcMain, "marketplace:bookmarkAdd", (listing) => {
     const bookmark = addHubAgentBookmark(listing);
     broadcastHubBookmarkSnapshot();
     void syncHubBookmarks({ rerunIfBusy: true });
     return bookmark;
   });
-  ipcMain.handle("marketplace:bookmarkRemove", (_e, slug: string, entityKind?: string) => {
+  registerAppControlDomainIpc(ipcMain, "marketplace:bookmarkRemove", (slug: string, entityKind?: string) => {
     removeHubAgentBookmark(slug, entityKind);
     broadcastHubBookmarkSnapshot();
     void syncHubBookmarks({ rerunIfBusy: true });
   });
   // 내 에이전트(cargo) — 미로그인/오프라인/실패면 빈 배열(팝업이 안내 처리).
-  ipcMain.handle("marketplace:listMine", async () => {
+  registerAppControlDomainIpc(ipcMain, "marketplace:listMine", async () => {
     try {
       return await listMyAgentsCached();
     } catch {
       return [];
     }
   });
-  ipcMain.handle("marketplace:deleteMine", async (_e, slug: string) => {
+  registerAppControlDomainIpc(ipcMain, "marketplace:deleteMine", async (slug: string) => {
     const source = getCargoSource();
     if (!source) throw new Error("Agent Cloud is not connected.");
     const result = await source.deleteMyAgent(String(slug ?? ""));
@@ -3794,7 +3958,7 @@ export function registerIpcHandlers(): void {
     };
   };
 
-  ipcMain.handle("cloudAgents:listRegisteredUploadOptions", () => registeredUploadOptions());
+  registerAppControlDomainIpc(ipcMain, "cloudAgents:listRegisteredUploadOptions", () => registeredUploadOptions());
   ipcMain.handle("cloudAgents:saveRegisteredPrivate", async (event, input: CloudAgentRegisteredSaveRequest) => {
     const source = registeredUploadRoot(input.target);
     return packageAndReviewCloudAgent({
@@ -3847,23 +4011,23 @@ export function registerIpcHandlers(): void {
   );
   // Compatibility surface for existing callers/flags. The packager defaults
   // omitted visibility to private-link; explicit marketplace remains public.
-  ipcMain.handle("cloudAgents:publish", async (_e, input: CloudAgentPublishRequest) =>
+  registerAppControlDomainIpc(ipcMain, "cloudAgents:publish", async (input: CloudAgentPublishRequest) =>
     packageAndReviewCloudAgent(resolveCloudAgentPackageRequest(input)),
   );
 
   // Compatibility only: Hub pricing and settlement are permanently closed.
   // Older clients receive a retirement refusal and cannot read or set a rate.
-  ipcMain.handle("cloudAgents:readPrices", async (_e, slug: string) => readAgentPrices(String(slug || "")));
-  ipcMain.handle(
-    "cloudAgents:setPrices",
-    async (_e, input: { slug: string; patch: CloudAgentPricePatch }) =>
+  registerAppControlDomainIpc(ipcMain, "cloudAgents:readPrices", async (slug: string) => readAgentPrices(String(slug || "")));
+  registerAppControlDomainIpc(
+    ipcMain, "cloudAgents:setPrices",
+    async (input: { slug: string; patch: CloudAgentPricePatch }) =>
       setAgentPrices({ slug: String(input?.slug || ""), patch: input?.patch ?? {} }),
   );
 
   // ── firms (설치된 회사) ────────────────────────────────
-  ipcMain.handle("firms:list", () => listFirms());
-  ipcMain.handle("firms:get", (_e, id: string) => getFirm(id));
-  ipcMain.handle("firms:install", (_e, slug: string) => installFirm(slug));
+  registerAppControlDomainIpc(ipcMain, "firms:list", () => listFirms());
+  registerAppControlDomainIpc(ipcMain, "firms:get", (id: string) => getFirm(id));
+  registerAppControlDomainIpc(ipcMain, "firms:install", (slug: string) => installFirm(slug));
   ipcMain.handle("firms:uninstall", async (_e, id: string, options?: { removeMembers?: boolean; removeSource?: boolean }) => {
     const firm = getFirm(id);
     if (!firm) return { removed: false, sourceMovedToTrash: false };
@@ -3897,53 +4061,65 @@ export function registerIpcHandlers(): void {
     };
   });
   // 정규화된 3-tier 조직 스펙 조회 (저장된 리졸버 결과 또는 orgChart 파생)
-  ipcMain.handle("firms:getResolvedOrg", (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "firms:getResolvedOrg", (id: string) => {
     const firm = getFirm(id);
     return firm ? getResolvedOrg(firm) : null;
   });
   // LLM으로 팀 폴더를 분석해 3-tier 조직 스펙 생성 (임포트 팀용)
-  ipcMain.handle("firms:resolveOrg", (_e, id: string) => resolveTeamOrg(id));
+  registerAppControlDomainIpc(ipcMain, "firms:resolveOrg", (id: string) => resolveTeamOrg(id));
 
   // ── Telegram Connect (Bot API polling + Agentlas invocation bridge) ─────
-  ipcMain.handle("telegram:listBindings", () => listTelegramBindings());
+  registerAppControlDomainIpc(ipcMain, "telegram:listBindings", () => listTelegramBindings());
   ipcMain.handle("telegram:connectOne", (_e, input?: { botName?: string; newConnection?: boolean }) => connectTelegramToOne(input ?? {}));
-  ipcMain.handle("telegram:removeLegacy", (_e, input: { deleteBots?: boolean }) =>
+  registerAppControlDomainIpc(ipcMain, "telegram:removeLegacy", (input: { deleteBots?: boolean }) =>
     removeLegacyTelegramConnections({ deleteBots: input?.deleteBots === true }));
   ipcMain.handle("telegram:autoConnect", (_e, input) => autoConnectTelegram(input));
-  ipcMain.handle("telegram:start", (_e, input) => startTelegramConnection(input));
-  ipcMain.handle("telegram:clone", (_e, input) => cloneTelegramConnection(input));
-  ipcMain.handle("telegram:importTerminal", (_e, id: string) => importTerminalTelegramConnection(id));
-  ipcMain.handle("telegram:resume", (_e, id: string) => resumeTelegramConnection(id));
-  ipcMain.handle("telegram:stop", (_e, id: string) => stopTelegramConnection(id));
-  ipcMain.handle("telegram:remove", (_e, id: string, deleteBot?: boolean) => removeTelegramConnection(id, deleteBot === true));
-  ipcMain.handle("telegram:resetConversation", (_e, id: string) => resetTelegramConversation(id));
-  ipcMain.handle("telegram:sendTest", (_e, id: string) => sendTelegramTest(id));
+  registerAppControlDomainIpc(ipcMain, "telegram:start", (input) => startTelegramConnection(input));
+  registerAppControlDomainIpc(ipcMain, "telegram:clone", (input) => cloneTelegramConnection(input));
+  registerAppControlDomainIpc(ipcMain, "telegram:importTerminal", (id: string) => importTerminalTelegramConnection(id));
+  registerAppControlDomainIpc(ipcMain, "telegram:resume", (id: string) => resumeTelegramConnection(id));
+  registerAppControlDomainIpc(ipcMain, "telegram:stop", (id: string) => stopTelegramConnection(id));
+  registerAppControlDomainIpc(ipcMain, "telegram:remove", (id: string, deleteBot?: boolean) => removeTelegramConnection(id, deleteBot === true));
+  registerAppControlDomainIpc(ipcMain, "telegram:resetConversation", (id: string) => resetTelegramConversation(id));
+  registerAppControlDomainIpc(ipcMain, "telegram:sendTest", (id: string) => sendTelegramTest(id));
   ipcMain.handle("telegram:openBot", (_e, id: string) => openTelegramBot(id));
-  ipcMain.handle("telegram:configureBotSettings", (_e, id: string) => configureTelegramBotSettings(id));
-  ipcMain.handle("telegram:pruneOrphans", () => pruneOrphanedTelegramBindings());
+  registerAppControlDomainIpc(ipcMain, "telegram:configureBotSettings", (id: string) => configureTelegramBotSettings(id));
+  registerAppControlDomainIpc(ipcMain, "telegram:pruneOrphans", () => pruneOrphanedTelegramBindings());
 
   // ── browser (자격증명 볼트 · 전용 프로필 · 승인 게이트 · 로그) ─
   // 동기 질문의 답 — confirm/ask-user.ts 의 대기 중인 약속을 깨운다.
-  ipcMain.handle("confirm:listPendingAskUser", (event) => {
+  ipcMain.handle("confirm:listPendingAskUser", async (event) => {
     // Pending question text is private: only the trusted Desktop top frame
     // may recover it after its event subscription (or renderer) restarts.
     assertTrustedSitePublishIpcSender(event);
-    return listPendingAskUserRequests();
+    const local = listPendingAskUserRequests();
+    const mode = supervisorRuntimeMode();
+    if (mode === 'handoff') throw new Error('supervisor_runtime_handoff');
+    if (mode !== 'daemon') return local;
+    const owned = await callOneSupervisorRuntime('questions.list');
+    if (!Array.isArray(owned)) throw new Error('supervisor_runtime_question_projection_invalid');
+    return [...local, ...owned.filter(question => !local.some(item => item.requestId === question.requestId))];
   });
-  ipcMain.handle("confirm:submitAskUserAnswer", (_e, requestId: string, answer: string | null) =>
-    submitAskUserAnswer(String(requestId), typeof answer === "string" ? answer : null),
-  );
-  ipcMain.handle("browser:status", () => getBrowserStatus());
-  ipcMain.handle("browser:listSites", () => browserListSites());
-  ipcMain.handle("browser:saveSite", (_e, input) => browserSaveSite(input));
-  ipcMain.handle("browser:deleteSite", (_e, site: string) => browserDeleteSite(site));
+  ipcMain.handle("confirm:submitAskUserAnswer", async (event, requestId: string, answer: string | null) => {
+    assertTrustedSitePublishIpcSender(event);
+    const id = String(requestId), value = typeof answer === 'string' ? answer : null;
+    if (listPendingAskUserRequests().some(question => question.requestId === id)) return submitAskUserAnswer(id, value);
+    const mode = supervisorRuntimeMode();
+    if (mode === 'handoff') throw new Error('supervisor_runtime_handoff');
+    if (mode === 'daemon') return callOneSupervisorRuntime('questions.answer', { requestId: id, answer: value });
+    return false;
+  });
+  registerAppControlDomainIpc(ipcMain, "browser:status", () => getBrowserStatus());
+  registerAppControlDomainIpc(ipcMain, "browser:listSites", () => browserListSites());
+  registerAppControlDomainIpc(ipcMain, "browser:saveSite", (input) => browserSaveSite(input));
+  registerAppControlDomainIpc(ipcMain, "browser:deleteSite", (site: string) => browserDeleteSite(site));
   ipcMain.handle("browser:openLogin", (_e, site: string) => browserOpenLogin(site));
-  ipcMain.handle("browser:markSession", (_e, site: string, status: "valid" | "expired" | "none") =>
+  registerAppControlDomainIpc(ipcMain, "browser:markSession", (site: string, status: "valid" | "expired" | "none") =>
     browserMarkSession(site, status),
   );
   // 평소 브라우저에서 이미 로그인된 도메인을 목록으로 주고(scan), 고른 것만 전용 프로필로
   // 가져온다(import). 가져오면 Connect 목록에 사이트로 올라가므로 주소를 손으로 칠 일이 없다.
-  ipcMain.handle("browser:scanCredentials", (_e, profileId?: string | null) =>
+  registerAppControlDomainIpc(ipcMain, "browser:scanCredentials", (profileId?: string | null) =>
     scanBrowserCredentials(typeof profileId === "string" ? profileId : null),
   );
   ipcMain.handle("browser:importCredentials", async (event, profileId: string, domains: string[]) => {
@@ -3981,25 +4157,25 @@ export function registerIpcHandlers(): void {
     return result.ok && !result.nativeSession
       ? { ...result, nativeSession: await syncConnectBrowserSession({ domains: importedDomains, reason: "connect-import" }) } : result;
   });
-  ipcMain.handle("browser:credentialConsent", () => ({
+  registerAppControlDomainIpc(ipcMain, "browser:credentialConsent", () => ({
     consent: getBrowserCredentialConsent(),
     ...browserCredentialConsentIsPending(),
   }));
-  ipcMain.handle("browser:revokeCredentialConsent", () => revokeBrowserCredentialConsent());
+  registerAppControlDomainIpc(ipcMain, "browser:revokeCredentialConsent", () => revokeBrowserCredentialConsent());
   // 주기를 기다리지 않고 지금 갱신. 사용자가 방금 어딘가에 새로 로그인했을 때 필요하고,
   // 자동 갱신과 **같은 코드 경로**를 쓰므로 이 버튼이 도는지가 곧 자동 갱신이 도는지다.
-  ipcMain.handle("browser:refreshCredentials", async () => {
+  registerAppControlDomainIpc(ipcMain, "browser:refreshCredentials", async () => {
     await refreshBrowserCredentialsIfDue({ force: true });
     return getBrowserCredentialConsent();
   });
-  ipcMain.handle("browser:listPermissions", () => browserListPermissions());
-  ipcMain.handle("browser:revokePermission", (_e, site: string, actionType: string) =>
+  registerAppControlDomainIpc(ipcMain, "browser:listPermissions", () => browserListPermissions());
+  registerAppControlDomainIpc(ipcMain, "browser:revokePermission", (site: string, actionType: string) =>
     browserRevokePermission(site, actionType),
   );
-  ipcMain.handle("browser:resolveApproval", (_e, requestId: string, decision: BrowserPermissionDecision) =>
+  registerAppControlDomainIpc(ipcMain, "browser:resolveApproval", (requestId: string, decision: BrowserPermissionDecision) =>
     browserResolveApproval(requestId, decision),
   );
-  ipcMain.handle("browser:listPendingApprovals", () => listPendingBrowserApprovals());
+  registerAppControlDomainIpc(ipcMain, "browser:listPendingApprovals", () => listPendingBrowserApprovals());
 
   /*
    * 도구 승인 — 런타임이 승인을 필요로 하거나(live) 이미 자동 거부한(post-denial) 사실을
@@ -4027,7 +4203,7 @@ export function registerIpcHandlers(): void {
       execPath: process.execPath, daemonEntry: path.join(__dirname, "daemon", "main.js"), storeBootstrapToken,
     });
   };
-  ipcMain.handle("daemon:getAutostart", async () => {
+  registerAppControlDomainIpc(ipcMain, "daemon:getAutostart", async () => {
     const { getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
     try {
       const { inspectDaemonAutostart } = await import("./daemon/app-launcher");
@@ -4040,7 +4216,7 @@ export function registerIpcHandlers(): void {
         reason: error instanceof Error ? error.message : String(error) };
     }
   });
-  ipcMain.handle("daemon:setAutostart", async (_e, enabled: boolean) => {
+  registerAppControlDomainIpc(ipcMain, "daemon:setAutostart", async (enabled: boolean) => {
     const { setDaemonAutostartEnabled, getDaemonAutostartEnabled } = await import("./store/daemon-autostart");
     if (typeof enabled !== "boolean") throw new TypeError("daemon_autostart_preference_invalid");
     try {
@@ -4060,10 +4236,10 @@ export function registerIpcHandlers(): void {
       };
     }
   });
-  ipcMain.handle("capability:listGrants", (_e, scope?: string) => listCapabilityGrants(scope));
-  ipcMain.handle("capability:revokeGrant", (_e, id: number) => revokeCapabilityGrant(Number(id)));
-  ipcMain.handle("capability:listAlwaysApprovedChats", () => listAlwaysApprovedChatIds());
-  ipcMain.handle("capability:grantChatAlwaysApproval", (_e, chatId: string) => {
+  registerAppControlDomainIpc(ipcMain, "capability:listGrants", (scope?: string) => listCapabilityGrants(scope));
+  registerAppControlDomainIpc(ipcMain, "capability:revokeGrant", (id: number) => revokeCapabilityGrant(Number(id)));
+  registerAppControlDomainIpc(ipcMain, "capability:listAlwaysApprovedChats", () => listAlwaysApprovedChatIds());
+  registerAppControlDomainIpc(ipcMain, "capability:grantChatAlwaysApproval", (chatId: string) => {
     if (typeof chatId === "string" && chatId) {
       const scopedChatId = chatId.slice(0, 128);
       grantChatAlwaysApproval(scopedChatId, "chip");
@@ -4072,205 +4248,33 @@ export function registerIpcHandlers(): void {
     }
     return listAlwaysApprovedChatIds();
   });
-  ipcMain.handle("capability:revokeChatAlwaysApproval", (_e, chatId: string) => {
+  registerAppControlDomainIpc(ipcMain, "capability:revokeChatAlwaysApproval", (chatId: string) => {
     if (typeof chatId === "string" && chatId) revokeChatAlwaysApproval(chatId.slice(0, 128));
     return listAlwaysApprovedChatIds();
   });
-  ipcMain.handle("runtime:listToolApprovals", () => listPendingToolApprovals());
-  ipcMain.handle("runtime:getToolApprovalResolution", (_e, id: string) =>
-    getToolApprovalResolution(typeof id === "string" ? id.slice(0, 256) : ""),
-  );
+  registerAppControlDomainIpc(ipcMain, "runtime:listToolApprovals", () => [...new Map([...listPendingToolApprovals(), ...(configuredNativeGuiControls()?.listApprovals() ?? [])].map(request => [request.id, request])).values()]);
+  ipcMain.handle("runtime:getToolApprovalResolution", (_e, id: string) => {
+    const native = configuredNativeGuiControls();
+    if (native?.hasApproval(id)) return native.approvalReceipt(_e, id);
+    return getToolApprovalResolution(typeof id === "string" ? id.slice(0, 256) : "");
+  });
   ipcMain.handle("runtime:resolveToolApproval", (
     _e,
     id: string,
     decision: ToolApprovalDecision,
     actionId: string,
-  ) =>
-    resolveToolApproval(
+  ) => {
+    const native = configuredNativeGuiControls();
+    if (native?.hasApproval(id)) return native.resolveApproval(_e, id, decision, actionId);
+    return resolveToolApproval(
       typeof id === "string" ? id.slice(0, 256) : "",
       decision,
       typeof actionId === "string" ? actionId.slice(0, 512) : "",
-    ),
-  );
-  /*
-   * ACP는 전수 조사에서 **유일하게 런타임이 실행 전에 묻는** 경로다
-   * (`session/request_permission`). 그래서 여기만 진짜 live 승인이 성립한다.
-   *
-   * 결합은 import 가 아니라 주입이다 — acp 런타임은 이 계약 파일을 알지 못하고,
-   * 등록되지 않으면 종전의 보수 기본값(read+mutating → 거절)으로 돈다.
-   */
-  /*
-   * ★오너 결정(2026-08-15) — 승인 카드는 **경계를 넘을 때만, 묻는 순간, 그 대화 안에서**.
-   * 실행에 준 권한 범위 안의 호출은 처음부터 풀어 둔다(묻지 않는다):
-   *   full            → 전부 허용
-   *   write + 변이     → 허용(세션) — 사용자가 write 를 골랐다는 뜻이 그것이다
-   *   비변이(read/search/fetch/think) → 허용
-   *   read + 변이      → 경계를 넘는 요청. 여기만 사용자에게 live 로 묻는다.
-   * 헤드리스 CLI 들은 묻는 순간이 없어 같은 규칙을 spawn 플래그로 미리 준다
-   * (claude/grok acceptEdits+allow, codex workspace-write, agy skip-permissions+sandbox).
-   */
-  /*
-   * 사람이 방금 거부한 것을 같은 실행의 복구 패스가 곧바로 다시 묻지 않게 한다 — One 은
-   * 도구 실패 흔적이 있으면 최대 2번 스스로 재시도하는데(완주 규범), 사용자의 "거부"는
-   * 막힌 단계가 아니라 결정이다. 같은 도구·대상 거부는 짧게(5분) 기억해 조용히 거부한다.
-   * 영구 기억은 아니다 — 다음 요청 때는 다시 묻는다.
-   */
-  const recentUserDenials = new Map<string, number>();
-  const USER_DENIAL_TTL_MS = 5 * 60_000;
-  const denialKey = (ask: { sessionKey: string; tool: string; detail?: string }) => `${ask.sessionKey}\u0000${ask.tool}\u0000${mainToolConsentResource(ask) ?? ask.detail ?? ""}`;
-
-  const opaqueConsentIdentity = (label: string, value: string): string => {
-    // Account ids, workspace paths, and agent names are Main-only material.
-    // Approval events may cross into a renderer, so keep the binding exact but
-    // value-free at that boundary and in the capability ledger.
-    if (!value || value.length > 16 * 1024 || /[\u0000-\u001f\u007f]/.test(value)) {
-      throw new Error(`invalid capability consent ${label}`);
-    }
-    return `consent-id:v1:${label}:${createHash("sha256")
-      .update(`agentlas-tool-consent-${label}-v1\u0000${value}`, "utf8")
-      .digest("hex")}`;
-  };
-
-  /**
-   * Main is the only authority that can mint a durable consent identity.  The
-   * account id comes from the authenticated session when available; unsigned
-   * local work is isolated to this install's user-data namespace.  Workspace
-   * includes the exact working folder (or chat fallback), while requester is
-   * stable across runtime restarts and excludes the ephemeral session key.
-   */
-  const consentBindingForAsk = (ask: {
-    runtime: string;
-    tool: string;
-    detail?: string;
-    cwd?: string;
-    chatId?: string;
-    agentId?: string;
-    permission: "read" | "write" | "full" | undefined;
-  }): ToolApprovalConsentBinding => {
-    const actor = getAuthenticatedActorIds();
-    const install = configuredIdentity();
-    // Keep the supplied path bytes intact before canonicalizing `.`/`..`.
-    // Unix permits leading/trailing spaces in a directory name; trimming here
-    // would let two distinct workspaces inherit the same durable consent.
-    const rawWorkspace = ask.cwd && ask.cwd.length > 0
-      ? path.resolve(ask.cwd)
-      : ask.chatId
-        ? `chat:${ask.chatId}`
-        : `desktop:${install?.userDataNamespace ?? "Agentlas"}`;
-    const rawUser = actor
-      ? `account:${actor.userId}`
-      : `install:${install?.channel ?? "official"}:${install?.userDataNamespace ?? "Agentlas"}`;
-    const rawWorkspaceIdentity = actor
-      ? `account-workspace:${actor.workspaceId}|${rawWorkspace}`
-      : rawWorkspace;
-    const rawRequester = `runtime:${ask.runtime}|agent:${ask.agentId?.trim() || "default"}`;
-    return {
-      userIdentity: opaqueConsentIdentity("user", rawUser),
-      workspaceIdentity: opaqueConsentIdentity("workspace", rawWorkspaceIdentity),
-      requesterIdentity: opaqueConsentIdentity("requester", rawRequester),
-      credentialResourceIdentity: mainToolConsentResource(ask) ?? capabilityResourceIdentity(ask.tool, ask.detail),
-      permissionScope: ask.permission ?? "read",
-    };
-  };
-  // ★한 벌뿐이다 — ACP 의 session/request_permission 과 우리 in-process 도구 루프
-  // (ollama/lmstudio/mlx)가 **같은** 이 함수를 지난다. 정책을 두 벌 쓰면 갈라지고,
-  // 갈라진 쪽은 반드시 "묻지 않고 실행"으로 기운다(local-tool-loop 이 실제로 그랬다).
-  // "항상 허용" 칩의 영구 기록(capability_grants) — tool-approval.ts 는 store 를 모르므로
-  // 여기서 주입한다(오너 결정 2026-08-20: 항상 허용은 다시는 묻지 않는다).
-  setCapabilityGrantPersister((grant) => {
-    if (!grant.consentBinding) return { ok: false, code: "missing-binding" };
-    const result = recordCapabilityGrant({
-      capability: grant.capability,
-      pattern: grant.pattern,
-      decision: "allow",
-      // The store derives the full scope digest from all binding fields.  The
-      // marker supplied by the runtime is intentionally not trusted here.
-      scope: capabilityConsentScope(grant.consentBinding),
-      source: "chip",
-      tool: grant.tool,
-      consentBinding: grant.consentBinding,
-    });
-    if (!result.ok) return { ok: false, code: result.code };
-    return { ok: true, id: result.id };
+    );
   });
-  // live 승인 결정의 영속 장부 — 결정은 여기 먼저 기록되고 그다음 실행이 듣는다. 장부를 못 열면 예전처럼 메모리로만 기다린다.
-  try {
-    installDurableToolApprovalLedger(getDb());
-  } catch (error) {
-    console.error("[tool-approval] durable ledger unavailable", error);
-  }
-  setRuntimeToolPermissionArbiter(async (ask) => {
-    /*
-     * 저장된 능력 규칙이 최우선이다(deny > allow, chat > agent > global).
-     * "항상 허용"으로 영구 부여된 행동은 권한 등급과 무관하게 통과한다.
-     * 사용자가 이 실행에서 Full access를 선택하면 이전에 저장된 거부보다
-     * 현재의 명시적 선택을 우선해 모든 일반 도구 관문을 해제한다.
-     */
-    const capability = capabilityClassFor(ask.kind, ask.tool);
-    let consentBinding: ToolApprovalConsentBinding;
-    try {
-      consentBinding = consentBindingForAsk(ask);
-    } catch {
-      // An invalid Main-owned identity must not turn into a broad legacy rule.
-      return "deny";
-    }
-    const ruled = getCapabilityDecision({
-      capability,
-      tool: ask.tool,
-      detail: ask.detail,
-      agentId: ask.agentId,
-      chatId: ask.chatId,
-      consentBinding,
-    });
-    // Durable rules are re-read for each request so revocation is not cached by the runtime.
-    if (ruled === "allow") return "allow_once";
-    if (ask.permission === "full") return "allow_session";
-    if (ruled === "deny") return "deny";
-    // One's own coordination tools (one-team: hand off, follow up, observe, team sessions, groups) are gated by Main's
-    // One control server — capability binding, personal-conversation scope, follow-up bounds — the same gate codex exec
-    // runs reach through default_tools_approval_mode. Owner 2026-10-04: what One hands off runs without asking. An
-    // explicit owner deny rule (above) still wins.
-    if (ask.tool.startsWith("mcp__one-team__")) return "allow_session";
-    if (!ask.mutating) return "allow_once";
-    if (ask.permission === "write") return "allow_session";
-    const deniedAt = recentUserDenials.get(denialKey(ask));
-    if (deniedAt && Date.now() - deniedAt < USER_DENIAL_TTL_MS) return "deny";
-    /*
-     * 대화가 붙어 있지 않은 실행(자동화/그래프/헤드리스)은 답할 사람이 없다 — 5분을
-     * 매달아 두었다가 거부하는 대신 즉시 거부하고 사실만 남긴다(08-09 결정: 실행 중
-     * 승인 게이트 없음. 승인은 만들 때 한 번).
-     */
-    if (!ask.chatId || ask.unattended) {
-      announceToolDenied({
-        sessionKey: ask.sessionKey,
-        // 실제로 돈 런타임을 적는다. 예전엔 "acp"로 못 박혀 있어, 같은 중재자를
-        // 쓰는 로컬 런타임의 거부까지 ACP 가 한 일로 기록될 뻔했다.
-        runtime: ask.runtime,
-        tool: ask.tool,
-        detail: ask.detail,
-        cwd: ask.cwd,
-        deniedBy: "runtime-headless",
-        consentBinding,
-      });
-      return "deny";
-    }
-    const outcome = await requestToolApproval({
-      ...(ask.signal ? { signal: ask.signal } : {}),
-      sessionKey: ask.sessionKey,
-      runtime: ask.runtime,
-      tool: ask.tool,
-      detail: ask.detail,
-      cwd: ask.cwd,
-      chatId: ask.chatId,
-      capability,
-      agentId: ask.agentId,
-      consentBinding,
-    });
-    if (outcome.decision === "deny") recentUserDenials.set(denialKey(ask), Date.now());
-    // Durable consent is checked again for each call, including its first approval.
-    // A native session permit would outlive revocation of the saved rule.
-    return outcome.decision === "allow_always" ? "allow_once" : outcome.decision;
-  });
+  // Main and agentlasd install the same native store-backed consent policy.
+  // Authenticated identity comes from this host, never the invocation payload.
+  installHostToolPermissionPolicy({ hostKind: "main", getAuthenticatedActorIds });
 
   onToolApprovalRequested((request) => {
     for (const window of BrowserWindow.getAllWindows()) {
@@ -4296,7 +4300,7 @@ export function registerIpcHandlers(): void {
       }
     }
   });
-  ipcMain.handle("browser:listLogs", (_e, limit?: number) => browserListLogs(limit));
+  registerAppControlDomainIpc(ipcMain, "browser:listLogs", (limit?: number) => browserListLogs(limit));
   ipcMain.handle("browser:captureTaskFrame", (event, chatId?: unknown) => {
     assertTrustedSitePublishIpcSender(event);
     return captureTaskBrowserFrame(chatId);
@@ -4356,10 +4360,10 @@ export function registerIpcHandlers(): void {
   });
 
   // ── projects ───────────────────────────────────────────
-  ipcMain.handle("projects:list", () => listProjects());
-  ipcMain.handle(
-    "projects:createFromWorkspace",
-    async (_e, input: { chatId: string; name: string; agentPool?: ProjectAgentPoolMember[] }) => {
+  registerAppControlDomainIpc(ipcMain, "projects:list", () => listProjects());
+  registerAppControlDomainIpc(
+    ipcMain, "projects:createFromWorkspace",
+    async (input: { chatId: string; name: string; agentPool?: ProjectAgentPoolMember[] }) => {
       const chatId = typeof input?.chatId === "string" ? input.chatId.trim() : "";
       const name = typeof input?.name === "string" ? input.name.trim() : "";
       if (!chatId || !name) throw new TypeError("A chat and project name are required.");
@@ -4387,13 +4391,13 @@ export function registerIpcHandlers(): void {
       return created;
     },
   );
-  ipcMain.handle("projects:get", (_e, id: string) => getProject(id));
-  ipcMain.handle("projects:timeline", (_e, id: string, limit?: number) =>
+  registerAppControlDomainIpc(ipcMain, "projects:get", (id: string) => getProject(id));
+  registerAppControlDomainIpc(ipcMain, "projects:timeline", (id: string, limit?: number) =>
     getProjectTimelineSnapshot(id, limit),
   );
-  ipcMain.handle(
-    "projects:create",
-    async (_e, input: ExplicitProjectCreateInput) => {
+  registerAppControlDomainIpc(
+    ipcMain, "projects:create",
+    async (input: ExplicitProjectCreateInput) => {
       const projectAgentGrant = projectPoolAddsMembers([], input?.agentPool)
         ? await getFreshProjectAgentLimitGrant() : undefined;
       const project = createProjectFromExplicitSave(input, { projectAgentGrant });
@@ -4403,10 +4407,9 @@ export function registerIpcHandlers(): void {
       return project;
     },
   );
-  ipcMain.handle(
-    "projects:update",
+  registerAppControlDomainIpc(
+    ipcMain, "projects:update",
     async (
-      _e,
       id: string,
       patch: ExplicitProjectUpdatePatch,
     ) => {
@@ -4416,43 +4419,42 @@ export function registerIpcHandlers(): void {
       return updateProjectFromExplicitSave(id, patch, { projectAgentGrant });
     },
   );
-  ipcMain.handle("projects:remove", (_e, id: string) => removeProject(id));
+  registerAppControlDomainIpc(ipcMain, "projects:remove", (id: string) => removeProject(id));
   ipcMain.handle("projects:connectGithub", async (event, repositoryUrl: string) =>
     connectGithubProject(BrowserWindow.fromWebContents(event.sender), repositoryUrl));
   // Per-project rent consent (per-work-order RENT; owner decision 2026-08-18).
   // Desktop-local only — the server never learns which projects allow whom.
-  ipcMain.handle("projects:listRentAllowed", (_e, projectId: string) =>
+  registerAppControlDomainIpc(ipcMain, "projects:listRentAllowed", (projectId: string) =>
     listRentAllowedSlugs(String(projectId || "")));
-  ipcMain.handle(
-    "projects:setRentAllowed",
-    (_e, input: { projectId: string; slug: string; allowed: boolean }) =>
+  registerAppControlDomainIpc(
+    ipcMain, "projects:setRentAllowed",
+    (input: { projectId: string; slug: string; allowed: boolean }) =>
       setRentAllowed(String(input?.projectId || ""), String(input?.slug || ""), input?.allowed === true),
   );
 
   // Legacy lease IPC remains for installed clients. Paid Hub leases and
   // marketplace settlement are permanently closed; handlers only refuse or
   // return an empty list, and never charge credits.
-  ipcMain.handle("agentLeases:quote", (_e, slug: string) => getAgentLeaseQuote(String(slug || "")));
-  ipcMain.handle(
-    "agentLeases:purchase",
-    (_e, input: Parameters<typeof purchaseAgentLease>[0]) => purchaseAgentLease(input),
+  registerAppControlDomainIpc(ipcMain, "agentLeases:quote", (slug: string) => getAgentLeaseQuote(String(slug || "")));
+  registerAppControlDomainIpc(
+    ipcMain, "agentLeases:purchase",
+    (input: Parameters<typeof purchaseAgentLease>[0]) => purchaseAgentLease(input),
   );
-  ipcMain.handle("agentLeases:list", () => listAgentLeasesCached());
+  registerAppControlDomainIpc(ipcMain, "agentLeases:list", () => listAgentLeasesCached());
 
   // ── ontology activation (project-local, inbox + explicit sources only) ──
-  ipcMain.handle("ontology:getProject", (_e, projectId: string) =>
+  registerAppControlDomainIpc(ipcMain, "ontology:getProject", (projectId: string) =>
     getProjectOntologyStatus(projectId),
   );
-  ipcMain.handle("ontology:provision", (_e, projectId: string) =>
+  registerAppControlDomainIpc(ipcMain, "ontology:provision", (projectId: string) =>
     provisionProjectOntology(projectId),
   );
-  ipcMain.handle("ontology:sync", (_e, projectId: string) =>
+  registerAppControlDomainIpc(ipcMain, "ontology:sync", (projectId: string) =>
     syncProjectOntology(projectId),
   );
-  ipcMain.handle(
-    "ontology:addSource",
+  registerAppControlDomainIpc(
+    ipcMain, "ontology:addSource",
     (
-      _e,
       projectId: string,
       absPath: string,
       scope: "public" | "internal" | "private",
@@ -4469,24 +4471,32 @@ export function registerIpcHandlers(): void {
   });
 
   // ── chats ──────────────────────────────────────────────
-  ipcMain.handle("chats:listRecent", (_e, limit?: number) => listRecentChats(limit));
+  ipcMain.handle("chats:messagesPage", (_event, input: { chatId: string; limit?: number; before?: { id: string; createdAt: string } }) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (!input || typeof input !== "object" || typeof input.chatId !== "string" || !input.chatId
+      || !getChat(input.chatId) || input.before && (typeof input.before.id !== "string"
+        || !input.before.id || typeof input.before.createdAt !== "string" || !input.before.createdAt)) {
+      throw new TypeError("Invalid chat history page");
+    }
+    return listChatMessagesPage(input.chatId, input.limit ?? 200, input.before);
+  });
+  registerAppControlDomainIpc(ipcMain, "chats:listRecent", (limit?: number) => listRecentChats(limit));
   // One 화면 전용 — 전체 최근 목록을 잘라 쓰면 Work 대화가 One 대화를 밀어낸다.
-  ipcMain.handle("chats:listRecentOne", (_e, limit?: number) => listRecentOneChats(limit));
-  ipcMain.handle("chats:listArchived", () => listArchivedChats());
-  ipcMain.handle("chats:archive", (_e, id: string) => archiveChat(id));
-  ipcMain.handle("chats:unarchive", (_e, id: string) => unarchiveChat(id));
-  ipcMain.handle("chats:listByProject", (_e, projectId: string) =>
+  registerAppControlDomainIpc(ipcMain, "chats:listRecentOne", (limit?: number) => listRecentOneChats(limit));
+  registerAppControlDomainIpc(ipcMain, "chats:listArchived", () => listArchivedChats());
+  registerAppControlDomainIpc(ipcMain, "chats:archive", (id: string) => archiveChat(id));
+  registerAppControlDomainIpc(ipcMain, "chats:unarchive", (id: string) => unarchiveChat(id));
+  registerAppControlDomainIpc(ipcMain, "chats:listByProject", (projectId: string) =>
     listChatsByProject(projectId),
   );
-  ipcMain.handle("chats:listByFirm", (_e, firmId: string) => listChatsByFirm(firmId));
-  ipcMain.handle("chats:get", (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "chats:listByFirm", (firmId: string) => listChatsByFirm(firmId));
+  registerAppControlDomainIpc(ipcMain, "chats:get", (id: string) => {
     const chat = getChat(id);
     return chat ? repairRootChatSurfaceController(chat) : null;
   });
-  ipcMain.handle(
-    "chats:create",
+  registerAppControlDomainIpc(
+    ipcMain, "chats:create",
     (
-      _e,
       input: {
         agentId?: string;
         firmId?: string | null;
@@ -4508,7 +4518,7 @@ export function registerIpcHandlers(): void {
         ? getOrCreateEmptyOneMemberChat(input.agentId, input.title)
         : getOrCreateOneMemberChat(input.agentId, input.title),
   );
-  ipcMain.handle("chats:appendOneUserMessage", (_e, id: string, rawText: string) => {
+  registerAppControlDomainIpc(ipcMain, "chats:appendOneUserMessage", (id: string, rawText: string) => {
     const chat = getChat(id);
     if (!chat || chat.originSurface !== "one") throw new Error("One conversation not found.");
     const text = typeof rawText === "string" ? rawText.trim() : "";
@@ -4517,8 +4527,8 @@ export function registerIpcHandlers(): void {
     }
     return appendChatMessage(id, "user", text);
   });
-  ipcMain.handle("chats:rename", (_e, id: string, title: string) => renameChat(id, title));
-  ipcMain.handle("chats:remove", (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "chats:rename", (id: string, title: string) => renameChat(id, title));
+  registerAppControlDomainIpc(ipcMain, "chats:remove", (id: string) => {
     // Renderer의 busy 표시는 투영일 뿐이다. 삭제 권위인 Main이 terminal event가 끝날
     // 때까지 채팅 행을 보존해, 실행 결과가 사라진 대화에 기록되는 race를 막는다.
     assertChatRemovalAllowed(id, invocationService.activeChatIds());
@@ -4527,11 +4537,11 @@ export function registerIpcHandlers(): void {
     closeWorkLiveViewsForTaskScope(id);
   });
   // 세션 recap — 자리를 비운 사이 도착한 에이전트 응답 한 줄 요약(없으면 null).
-  ipcMain.handle("chats:recap", (_e, id: string) => buildChatRecap(id, currentUiLocale() === "ko" ? "ko" : "en"));
+  registerAppControlDomainIpc(ipcMain, "chats:recap", (id: string) => buildChatRecap(id, currentUiLocale() === "ko" ? "ko" : "en"));
   ipcMain.handle("chats:markViewed", (_e, id: string) => {
     markChatRecapViewed(id);
   });
-  ipcMain.handle("chats:setContinuousMode", (_e, id: string, enabled: boolean) => {
+  registerAppControlDomainIpc(ipcMain, "chats:setContinuousMode", (id: string, enabled: boolean) => {
     setChatContinuousMode(id, enabled);
     return getChat(id);
   });
@@ -4544,7 +4554,7 @@ export function registerIpcHandlers(): void {
    * goal의 연속실행 자동화 정확히 한 행 비활성화, 바인딩 해제.
    * 종료는 Main이 원장·계약·바인딩을 함께 닫고 실제 실행도 중단한다.
    */
-  ipcMain.handle("chats:setGoalMode", (_e, id: string, enabled: boolean) => {
+  registerAppControlDomainIpc(ipcMain, "chats:setGoalMode", (id: string, enabled: boolean) => {
     const chat = getChat(id);
     if (!chat) throw new Error(`Chat not found: ${id}`);
     if (enabled) {
@@ -4570,15 +4580,15 @@ export function registerIpcHandlers(): void {
     }
     return getChat(id);
   });
-  ipcMain.handle("chats:pauseGoal", (_e, id: string, goalId: string) => {
+  registerAppControlDomainIpc(ipcMain, "chats:pauseGoal", (id: string, goalId: string) => {
     invocationService.pauseGoal(id, goalId);
     return getGoalLedgerGoal(goalId, getChatWorkingFolder(id));
   });
-  ipcMain.handle("chats:deleteGoal", (_e, id: string, goalId: string) => {
+  registerAppControlDomainIpc(ipcMain, "chats:deleteGoal", (id: string, goalId: string) => {
     invocationService.deleteGoal(id, goalId);
     return getChat(id);
   });
-  ipcMain.handle("chats:getGoalContext", async (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "chats:getGoalContext", async (id: string) => {
     const chat = getChat(id);
     if (!chat?.goalId) return null;
     // Look before asking (owner 2026-09-23): a Goal blocked only because an
@@ -4597,7 +4607,7 @@ export function registerIpcHandlers(): void {
     return { ...context, wait: { waitId: wait.waitId, state: wait.state, subjectKind: wait.intent.subject.kind,
       nextCheckAt: wait.nextCheckAt, deadline: wait.deadline, executionAvailability: wait.executionAvailability } };
   });
-  ipcMain.handle("chats:defineGoal", async (_e, id: string, objective: string, requestedLocale?: "ko" | "en") => {
+  registerAppControlDomainIpc(ipcMain, "chats:defineGoal", async (id: string, objective: string, requestedLocale?: "ko" | "en") => {
     const chat = getChat(id);
     if (!chat?.goalId) return null;
     const projectDir = getChatWorkingFolder(id);
@@ -4636,7 +4646,7 @@ export function registerIpcHandlers(): void {
     }
     return context;
   });
-  ipcMain.handle("chats:reviseGoal", async (_e, id: string, input: {
+  registerAppControlDomainIpc(ipcMain, "chats:reviseGoal", async (id: string, input: {
     expectedGoalId?: unknown; expectedVersion?: unknown; expectedGoalRevision?: unknown;
     objective?: unknown; locale?: unknown;
   }) => {
@@ -4740,30 +4750,30 @@ export function registerIpcHandlers(): void {
     }
     return getGoalLedgerGoal(expectedGoalId, getChatWorkingFolder(id));
   });
-  ipcMain.handle("chats:setSwarmMode", (_e, id: string, enabled: boolean) => {
+  registerAppControlDomainIpc(ipcMain, "chats:setSwarmMode", (id: string, enabled: boolean) => {
     setChatSwarmMode(id, enabled);
     return getChat(id);
   });
-  ipcMain.handle(
-    "chats:setRuntimeSelection",
-    (_e, id: string, selection: RuntimeSelection | null) =>
+  registerAppControlDomainIpc(
+    ipcMain, "chats:setRuntimeSelection",
+    (id: string, selection: RuntimeSelection | null) =>
       setChatRuntimeSelection(id, selection),
   );
-  ipcMain.handle("chats:requestGoalRuntimeSelection", async (_e, id: string, input: {
+  registerAppControlDomainIpc(ipcMain, "chats:requestGoalRuntimeSelection", async (id: string, input: {
     expectedGoalId: string; expectedGoalRevision: number; selection: RuntimeSelection;
   }) => requestGoalRuntimeSelection({ chatId: id, ...input }, await detectRuntimes()));
-  ipcMain.handle("chats:getGoalRuntimeSelection", (_e, id: string) => getGoalRuntimeSelection(id));
-  ipcMain.handle("chats:getContinuitySnapshot", (_e, id: string) =>
+  registerAppControlDomainIpc(ipcMain, "chats:getGoalRuntimeSelection", (id: string) => getGoalRuntimeSelection(id));
+  registerAppControlDomainIpc(ipcMain, "chats:getContinuitySnapshot", (id: string) =>
     getChatContinuitySnapshot(id, invocationService.attach(id, { includeEvents: false })?.runId ?? null));
-  ipcMain.handle("externalCliSessions:list", (_e, input?: { projectId?: unknown; query?: unknown; limit?: unknown }) =>
+  registerAppControlDomainIpc(ipcMain, "externalCliSessions:list", (input?: { projectId?: unknown; query?: unknown; limit?: unknown }) =>
     listExternalCliSessions({
       projectId: typeof input?.projectId === "string" ? input.projectId : "",
       query: typeof input?.query === "string" ? input.query : "",
       limit: Math.min(Math.max(Number(input?.limit) || 60, 1), 100),
     }));
-  ipcMain.handle("externalCliSessions:importToProject", (_e, input: unknown) =>
+  registerAppControlDomainIpc(ipcMain, "externalCliSessions:importToProject", (input: unknown) =>
     importExternalCliSession(input as Parameters<typeof importExternalCliSession>[0]));
-  ipcMain.handle("tasks:createProject", (_e, input: { projectId: string; title?: string }): CanonicalTaskWorkTarget => {
+  registerAppControlDomainIpc(ipcMain, "tasks:createProject", (input: { projectId: string; title?: string }): CanonicalTaskWorkTarget => {
     if (!input || typeof input.projectId !== "string" || !input.projectId.trim()) {
       throw new TypeError("Project is required");
     }
@@ -4791,13 +4801,13 @@ export function registerIpcHandlers(): void {
     if (!task) throw new Error("Project task could not be prepared");
     return { taskId: task.id, chatId: chat.id, title: task.title };
   });
-  ipcMain.handle("tasks:list", (_e, input?: { projectId?: string; limit?: number; includeArchived?: boolean; reconcile?: boolean }) =>
+  registerAppControlDomainIpc(ipcMain, "tasks:list", (input?: { projectId?: string; limit?: number; includeArchived?: boolean; reconcile?: boolean }) =>
     listCanonicalTasks(input),
   );
-  ipcMain.handle("tasks:get", (_e, id: string) => getCanonicalTask(id));
-  ipcMain.handle("tasks:listProjections", (_e, input) =>
+  registerAppControlDomainIpc(ipcMain, "tasks:get", (id: string) => getCanonicalTask(id));
+  registerAppControlDomainIpc(ipcMain, "tasks:listProjections", (input) =>
     oneTaskProjectionRuntime.listProjections(input));
-  ipcMain.handle("tasks:getProjection", (_e, id: string, input) =>
+  registerAppControlDomainIpc(ipcMain, "tasks:getProjection", (id: string, input) =>
     oneTaskProjectionRuntime.getProjection(id, input));
   // One 의 "Work 에서 열기" 는 지금까지 렌더러가 projection 에서 조립한 URL 로만
   // 이동했다. openInWork 브리지는 인터페이스에 선언만 되어 있고 IPC·preload·main
@@ -4816,9 +4826,9 @@ export function registerIpcHandlers(): void {
     if (!chat || chat.projectId !== task.projectId || !getProject(task.projectId)) return null;
     return { taskId: task.id, chatId: chat.id, title: chat.title ?? task.title ?? "" };
   });
-  ipcMain.handle("tasks:findForChat", (_e, chatId: string) => findCanonicalTaskForChat(chatId));
-  ipcMain.handle("tasks:forChat", (_e, chatId: string) => getCanonicalTaskForChat(chatId));
-  ipcMain.handle("tasks:acceptResult", async (_e, input: CanonicalTaskResultAcceptance) => {
+  registerAppControlDomainIpc(ipcMain, "tasks:findForChat", (chatId: string) => findCanonicalTaskForChat(chatId));
+  registerAppControlDomainIpc(ipcMain, "tasks:forChat", (chatId: string) => getCanonicalTaskForChat(chatId));
+  registerAppControlDomainIpc(ipcMain, "tasks:acceptResult", async (input: CanonicalTaskResultAcceptance) => {
     if (
       !input ||
       typeof input !== "object" ||
@@ -4936,7 +4946,7 @@ export function registerIpcHandlers(): void {
     }
     return accepted;
   });
-  ipcMain.handle("tasks:continueFromResult", (_e, input: {
+  registerAppControlDomainIpc(ipcMain, "tasks:continueFromResult", (input: {
     taskId: string;
     expectedVersion: number;
     userPrompt: string;
@@ -4966,8 +4976,8 @@ export function registerIpcHandlers(): void {
         : currentUiLocale().toLowerCase().startsWith("ko") ? "ko" : "en",
     });
   });
-  ipcMain.handle("oneSearch:search", (_e, input: unknown) => searchOneHistory(input));
-  ipcMain.handle("oneSearch:mutateArchive", (_e, input: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "oneSearch:search", (input: unknown) => searchOneHistory(input));
+  registerAppControlDomainIpc(ipcMain, "oneSearch:mutateArchive", (input: unknown) => {
     const taskId = input && typeof input === "object" && "taskId" in input
       ? String((input as { taskId?: unknown }).taskId ?? "")
       : "";
@@ -4977,25 +4987,25 @@ export function registerIpcHandlers(): void {
     }
     return mutateOneTaskArchive(input);
   });
-  ipcMain.handle("oneAttachments:prepare", (_e, input) => prepareOneAttachments(input));
-  ipcMain.handle("oneAttachments:bindToTeam", (_e, input) => bindOneAttachmentsToTeam(input));
-  ipcMain.handle("oneAttachments:forTeam", (_e, proposalId) => getOneAttachmentsForTeam(String(proposalId ?? "")));
-  ipcMain.handle("oneAttachments:discard", (_e, input) => discardOneAttachments(input));
+  registerAppControlDomainIpc(ipcMain, "oneAttachments:prepare", (input) => prepareOneAttachments(input));
+  registerAppControlDomainIpc(ipcMain, "oneAttachments:bindToTeam", (input) => bindOneAttachmentsToTeam(input));
+  registerAppControlDomainIpc(ipcMain, "oneAttachments:forTeam", (proposalId) => getOneAttachmentsForTeam(String(proposalId ?? "")));
+  registerAppControlDomainIpc(ipcMain, "oneAttachments:discard", (input) => discardOneAttachments(input));
   ipcMain.handle("oneArtifacts:issuePreview", (_e, input: OneArtifactBindingRequestV1) =>
     issueOneArtifactPreviewCapability(input));
   ipcMain.handle("oneArtifacts:revokePreview", (_e, input: OneArtifactPreviewRevokeV1) => ({
     revoked: revokeOneArtifactPreview(input),
   }));
-  ipcMain.handle("oneProfile:get", () => getOneProfile());
-  ipcMain.handle("oneProfile:origin", () => getOneProfileOrigin());
-  ipcMain.handle("oneProfile:update", (_e, input: OneProfileUpdateInput) => updateOneProfile(input));
+  registerAppControlDomainIpc(ipcMain, "oneProfile:get", () => getOneProfile());
+  registerAppControlDomainIpc(ipcMain, "oneProfile:origin", () => getOneProfileOrigin());
+  registerAppControlDomainIpc(ipcMain, "oneProfile:update", (input: OneProfileUpdateInput) => updateOneProfile(input));
   /*
    * One 자신의 초상(생성·업로드 이미지). 팀원과 같은 창에서 같은 방식으로 고르므로,
    * 저장하는 길도 있어야 한다 — 없으면 그 창에서 One 만 두 탭이 사라진다.
    * 이미지는 먼저 디스크에 쓰고, 그다음 프로필이 그 자리를 가리키게 한다. 순서를 뒤집으면
    * 저장이 실패했을 때 프로필만 없는 그림을 가리킨다.
    */
-  ipcMain.handle("oneProfile:setAvatarImage", (_e, input: { dataUrl: string; expectedVersion: number }) => {
+  registerAppControlDomainIpc(ipcMain, "oneProfile:setAvatarImage", (input: { dataUrl: string; expectedVersion: number }) => {
     const decoded = decodeOneTeamAvatarDataUrl(String(input?.dataUrl ?? ""));
     writeOneSelfAvatar(decoded);
     return updateOneProfile({
@@ -5003,69 +5013,69 @@ export function registerIpcHandlers(): void {
       patch: { avatarIcon: ONE_SELF_AVATAR_ICON },
     });
   });
-  ipcMain.handle("oneProfile:addPrinciple", (_e, input: OneOperatingPrincipleCreateInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneProfile:addPrinciple", (input: OneOperatingPrincipleCreateInput) =>
     addOneOperatingPrinciple(input));
-  ipcMain.handle("oneProfile:updatePrinciple", (_e, input: OneOperatingPrincipleUpdateInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneProfile:updatePrinciple", (input: OneOperatingPrincipleUpdateInput) =>
     updateOneOperatingPrinciple(input));
-  ipcMain.handle("oneProfile:setPrincipleEnabled", (_e, input: OneOperatingPrincipleEnabledInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneProfile:setPrincipleEnabled", (input: OneOperatingPrincipleEnabledInput) =>
     setOneOperatingPrincipleEnabled(input));
-  ipcMain.handle("oneProfile:deletePrinciple", (_e, input: OneOperatingPrincipleDeleteInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneProfile:deletePrinciple", (input: OneOperatingPrincipleDeleteInput) =>
     deleteOneOperatingPrinciple(input));
-  ipcMain.handle("oneFeatureIntro:getState", () => getOneFeatureIntroState());
-  ipcMain.handle("oneFeatureIntro:acknowledge", (_e, input: AcknowledgeOneFeatureIntroInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneFeatureIntro:getState", () => getOneFeatureIntroState());
+  registerAppControlDomainIpc(ipcMain, "oneFeatureIntro:acknowledge", (input: AcknowledgeOneFeatureIntroInput) =>
     acknowledgeOneFeatureIntro(input));
-  ipcMain.handle("oneFeatureIntro:defer", (_e, input: DeferOneFeatureIntroInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneFeatureIntro:defer", (input: DeferOneFeatureIntroInput) =>
     deferOneFeatureIntro(input));
-  ipcMain.handle("oneActivation:getState", (_e, input) => getOneActivationState(input));
-  ipcMain.handle("oneActivation:resolveConcern", (_e, input) => resolveOneActivationConcern(input));
-  ipcMain.handle("oneActivation:resolveWork", (_e, input) => resolveOneActivationWork(input));
-  ipcMain.handle("oneActivation:skip", (_e, input) => skipOneActivation(input));
-  ipcMain.handle("oneActivation:resolveMobile", (_e, input) => resolveOneActivationMobile(input));
-  ipcMain.handle("oneMemory:getState", () => getOneMemoryState());
-  ipcMain.handle("oneMemory:getMap", () => getOneMemoryMap());
-  ipcMain.handle("oneMemory:listEntries", (_e, input?: { limit?: number }) => listOneDurableMemoryEntries(input?.limit));
-  ipcMain.handle("oneMemory:forgetEntry", (_e, input: { memoryId: string }) => forgetOneDurableMemoryEntry(input?.memoryId));
-  ipcMain.handle("oneMemory:propose", (_e, input: ProposeOneMemoryCandidateInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneActivation:getState", (input) => getOneActivationState(input));
+  registerAppControlDomainIpc(ipcMain, "oneActivation:resolveConcern", (input) => resolveOneActivationConcern(input));
+  registerAppControlDomainIpc(ipcMain, "oneActivation:resolveWork", (input) => resolveOneActivationWork(input));
+  registerAppControlDomainIpc(ipcMain, "oneActivation:skip", (input) => skipOneActivation(input));
+  registerAppControlDomainIpc(ipcMain, "oneActivation:resolveMobile", (input) => resolveOneActivationMobile(input));
+  registerAppControlDomainIpc(ipcMain, "oneMemory:getState", () => getOneMemoryState());
+  registerAppControlDomainIpc(ipcMain, "oneMemory:getMap", () => getOneMemoryMap());
+  registerAppControlDomainIpc(ipcMain, "oneMemory:listEntries", (input?: { limit?: number }) => listOneDurableMemoryEntries(input?.limit));
+  registerAppControlDomainIpc(ipcMain, "oneMemory:forgetEntry", (input: { memoryId: string }) => forgetOneDurableMemoryEntry(input?.memoryId));
+  registerAppControlDomainIpc(ipcMain, "oneMemory:propose", (input: ProposeOneMemoryCandidateInput) =>
     proposeOneMemoryCandidate(input));
-  ipcMain.handle("oneMemory:save", (_e, input: SaveOneMemoryCandidateInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneMemory:save", (input: SaveOneMemoryCandidateInput) =>
     saveOneMemoryCandidate(input));
-  ipcMain.handle("oneMemory:editAndSave", (_e, input: EditAndSaveOneMemoryCandidateInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneMemory:editAndSave", (input: EditAndSaveOneMemoryCandidateInput) =>
     editAndSaveOneMemoryCandidate(input));
-  ipcMain.handle("oneMemory:useOnce", (_e, input: UseOneMemoryCandidateOnceInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneMemory:useOnce", (input: UseOneMemoryCandidateOnceInput) =>
     useOneMemoryCandidateOnce(input));
-  ipcMain.handle("oneMemory:reject", (_e, input: RejectOneMemoryCandidateInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneMemory:reject", (input: RejectOneMemoryCandidateInput) =>
     rejectOneMemoryCandidate(input));
-  ipcMain.handle("oneMemory:deleteCandidate", (_e, input: DeleteOneMemoryCandidateInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneMemory:deleteCandidate", (input: DeleteOneMemoryCandidateInput) =>
     deleteOneMemoryCandidate(input));
-  ipcMain.handle("oneMemory:updateAsset", (_e, input: UpdateOneMemoryAssetInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneMemory:updateAsset", (input: UpdateOneMemoryAssetInput) =>
     updateOneMemoryAsset(input));
-  ipcMain.handle("oneMemory:setAssetEnabled", (_e, input: SetOneMemoryAssetEnabledInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneMemory:setAssetEnabled", (input: SetOneMemoryAssetEnabledInput) =>
     setOneMemoryAssetEnabled(input));
-  ipcMain.handle("oneMemory:deleteAsset", (_e, input: DeleteOneMemoryAssetInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneMemory:deleteAsset", (input: DeleteOneMemoryAssetInput) =>
     deleteOneMemoryAsset(input));
-  ipcMain.handle("oneSuggestions:getState", () => getOneSuggestionState());
+  registerAppControlDomainIpc(ipcMain, "oneSuggestions:getState", () => getOneSuggestionState());
   ipcMain.handle("oneSuggestions:acceptForReview", (_e, input: AcceptOneSuggestionForReviewInput) =>
     acceptOneSuggestionForReviewFromUser(input));
   ipcMain.handle("oneSuggestions:getReviewHandoff", (_e, input: OneSuggestionReviewHandoffInput) =>
     getOneSuggestionReviewHandoff(input));
   ipcMain.handle("oneSuggestions:getReviewSeed", (_e, input: OneSuggestionReviewHandoffInput) =>
     getOneSuggestionReviewSeed(input));
-  ipcMain.handle("oneSuggestions:snooze", (_e, input: SnoozeOneSuggestionInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneSuggestions:snooze", (input: SnoozeOneSuggestionInput) =>
     snoozeOneSuggestion(input));
-  ipcMain.handle("oneSuggestions:dismiss", (_e, input: DismissOneSuggestionInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneSuggestions:dismiss", (input: DismissOneSuggestionInput) =>
     dismissOneSuggestion(input));
-  ipcMain.handle("oneSuggestions:neverAsk", (_e, input: NeverAskOneSuggestionInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneSuggestions:neverAsk", (input: NeverAskOneSuggestionInput) =>
     neverAskOneSuggestion(input));
-  ipcMain.handle("oneHubDerivative:getDraft", (_e, input: GetOneHubDerivativeDraftInput) => {
+  registerAppControlDomainIpc(ipcMain, "oneHubDerivative:getDraft", (input: GetOneHubDerivativeDraftInput) => {
     const handoff = getOneSuggestionReviewHandoff(input);
     if (handoff.type !== "hub_derivative" || handoff.reviewKind !== "hub_derivative_draft") {
       throw new Error("This review handoff is not a Hub public derivative");
     }
     return getOneHubDerivativeDraft(input);
   });
-  ipcMain.handle(
-    "oneAutoRecovery:judge",
-    async (_e, input: { runId?: string; chatId?: string; goal?: string; attemptsSpent?: number; previousFingerprint?: string | null }) => {
+  registerAppControlDomainIpc(
+    ipcMain, "oneAutoRecovery:judge",
+    async (input: { runId?: string; chatId?: string; goal?: string; attemptsSpent?: number; previousFingerprint?: string | null }) => {
       const runId = String(input?.runId ?? "");
       const chatId = String(input?.chatId ?? "");
       if (!runId || !chatId) return null;
@@ -5159,9 +5169,9 @@ export function registerIpcHandlers(): void {
       };
     },
   );
-  ipcMain.handle(
-    "oneAutoRecovery:verify",
-    async (_e, input: {
+  registerAppControlDomainIpc(
+    ipcMain, "oneAutoRecovery:verify",
+    async (input: {
       originalRunId?: string;
       recoveryRunId?: string;
       chatId?: string;
@@ -5193,12 +5203,12 @@ export function registerIpcHandlers(): void {
         : { ...result, retry: false, reason: "undecided", attempt: undefined };
     },
   );
-  ipcMain.handle("oneValueClosure:getState", () => getOneValueClosureState());
-  ipcMain.handle("oneValueClosure:latestForTask", (_e, taskId: string) =>
+  registerAppControlDomainIpc(ipcMain, "oneValueClosure:getState", () => getOneValueClosureState());
+  registerAppControlDomainIpc(ipcMain, "oneValueClosure:latestForTask", (taskId: string) =>
     getLatestOneValueClosure(taskId));
-  ipcMain.handle("oneValueClosure:setReflection", (_e, input: SetOneValueClosureReflectionInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneValueClosure:setReflection", (input: SetOneValueClosureReflectionInput) =>
     setOneValueClosureReflection(input));
-  ipcMain.handle("oneWeeklyReflection:get", () => {
+  registerAppControlDomainIpc(ipcMain, "oneWeeklyReflection:get", () => {
     // Async pre-pass: warm completion-claim judgments for the stored closure
     // statements the synchronous reflection builder peeks (miss = regex fallback).
     // 폴 경로(5초 틱)에서 LLM 판정을 기다리면 핸들러가 최대 4초 막힌다 — 웜업은
@@ -5212,21 +5222,21 @@ export function registerIpcHandlers(): void {
     void prejudgeCompletionClaims(statements, { timeoutMs: 4_000 }).catch(() => undefined);
     return getOneWeeklyReflectionSnapshot();
   });
-  ipcMain.handle("oneWeeklyReflection:resolve", (_e, input: ResolveOneWeeklyReflectionInputV1) =>
+  registerAppControlDomainIpc(ipcMain, "oneWeeklyReflection:resolve", (input: ResolveOneWeeklyReflectionInputV1) =>
     resolveOneWeeklyReflection(input));
-  ipcMain.handle("oneExperienceReuse:getState", () => getOneExperienceReuseState());
-  ipcMain.handle("oneExperienceReuse:latestForTask", (_e, taskId: string) =>
+  registerAppControlDomainIpc(ipcMain, "oneExperienceReuse:getState", () => getOneExperienceReuseState());
+  registerAppControlDomainIpc(ipcMain, "oneExperienceReuse:latestForTask", (taskId: string) =>
     getLatestOneExperienceReuseReceipt(taskId));
-  ipcMain.handle("oneImprovementProof:getState", () => {
+  registerAppControlDomainIpc(ipcMain, "oneImprovementProof:getState", () => {
     reconcileOneImprovementProofs();
     const { evidence: _mainOnlyEvidence, ...readState } = getOneImprovementProofState();
     return readState;
   });
-  ipcMain.handle("oneImprovementProof:list", (_e, input: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "oneImprovementProof:list", (input: unknown) => {
     reconcileOneImprovementProofs();
     return listOneImprovementProofs(oneImprovementProofListTaskId(input));
   });
-  ipcMain.handle("oneImprovementProof:latestForTask", (_e, taskId: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "oneImprovementProof:latestForTask", (taskId: unknown) => {
     const exactTaskId = strictOneImprovementProofTaskId(taskId, "Improvement Proof taskId");
     tryProduceOneImprovementProofForTask(exactTaskId);
     const task = getCanonicalTask(exactTaskId);
@@ -5237,7 +5247,7 @@ export function registerIpcHandlers(): void {
   // 5초 폴링이 그대로 때리지 않게 10초 캐시를 두고, 사용자 행동(openTask)은
   // 즉시 무효화한다. 탐지 지연 10초는 프로액티브 브리핑 표면에서 체감 불가.
   let oneBriefingSnapshotCache: { at: number; snapshot: ReturnType<typeof getOneBriefingSnapshot> } | null = null;
-  ipcMain.handle("oneBriefing:get", () => {
+  registerAppControlDomainIpc(ipcMain, "oneBriefing:get", () => {
     if (oneBriefingSnapshotCache && Date.now() - oneBriefingSnapshotCache.at < 10_000) {
       return oneBriefingSnapshotCache.snapshot;
     }
@@ -5249,7 +5259,7 @@ export function registerIpcHandlers(): void {
     oneBriefingSnapshotCache = null;
     return resolveOneBriefingTaskNavigation(input);
   });
-  ipcMain.handle("oneRequestIntent:resolve", async (_e, prompt: unknown, selection: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "oneRequestIntent:resolve", async (prompt: unknown, selection: unknown) => {
     if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 4_000) {
       throw new TypeError("Invalid One request-intent prompt");
     }
@@ -5258,7 +5268,7 @@ export function registerIpcHandlers(): void {
     const resolved = await resolveOneRequestIntent(prompt, { timeoutMs: 4_000, runtimeSelection });
     return { intent: resolved.intent, source: resolved.source };
   });
-  ipcMain.handle("oneTeamPreflight:prepare", async (_e, input: PrepareOneTeamPreflightInput) => {
+  registerAppControlDomainIpc(ipcMain, "oneTeamPreflight:prepare", async (input: PrepareOneTeamPreflightInput) => {
     try {
       return await prepareOneTeamPreflight(input);
     } catch (error) {
@@ -5276,19 +5286,19 @@ export function registerIpcHandlers(): void {
       throw error;
     }
   });
-  ipcMain.handle("oneTeamPreflight:getForChat", (_e, chatId: string) =>
+  registerAppControlDomainIpc(ipcMain, "oneTeamPreflight:getForChat", (chatId: string) =>
     getOneTeamPreflightForChat(chatId));
-  ipcMain.handle("oneTeamPreflight:autoResolve", (_e, input: AutoResolveOneTeamPreflightInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneTeamPreflight:autoResolve", (input: AutoResolveOneTeamPreflightInput) =>
     autoResolveOneTeamPreflight(input));
-  ipcMain.handle("oneTeamPreflight:resolve", (_e, input: ResolveOneTeamPreflightInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneTeamPreflight:resolve", (input: ResolveOneTeamPreflightInput) =>
     resolveOneTeamPreflight(input));
-  ipcMain.handle("oneTeamPreflight:acknowledge", (_e, input) =>
+  registerAppControlDomainIpc(ipcMain, "oneTeamPreflight:acknowledge", (input) =>
     acknowledgeOneTeamPreflight(input));
-  ipcMain.handle("oneTeamPreflight:failStart", (_e, ref: OneTeamPreflightRef) =>
+  registerAppControlDomainIpc(ipcMain, "oneTeamPreflight:failStart", (ref: OneTeamPreflightRef) =>
     failOneTeamPreflightStart(ref));
-  ipcMain.handle("oneBriefing:prepareAction", (_e, input: PrepareOneBriefingActionInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneBriefing:prepareAction", (input: PrepareOneBriefingActionInput) =>
     prepareOneBriefingActionPacket(input));
-  ipcMain.handle("oneBriefing:getAction", (_e, input: PrepareOneBriefingActionInput) =>
+  registerAppControlDomainIpc(ipcMain, "oneBriefing:getAction", (input: PrepareOneBriefingActionInput) =>
     getOneBriefingActionPacketForCandidate(input));
   ipcMain.handle("oneBriefing:startAction", (_e, input: StartOneBriefingActionInput) => {
     assertTrustedSitePublishIpcSender(_e);
@@ -5339,12 +5349,12 @@ export function registerIpcHandlers(): void {
       return { ok: false, packet, runId: null, errorCategory: error.category };
     }
   });
-  ipcMain.handle("oneBriefing:setPreferences", (_e, input: {
+  registerAppControlDomainIpc(ipcMain, "oneBriefing:setPreferences", (input: {
     cadence?: OneBriefingPreferences["cadence"];
     channels?: OneBriefingChannel[];
     quietHours?: OneBriefingPreferences["quietHours"];
   }) => setOneBriefingPreferences(input ?? {}));
-  ipcMain.handle("oneBriefing:feedback", (_e, input: {
+  registerAppControlDomainIpc(ipcMain, "oneBriefing:feedback", (input: {
     candidateId: string;
     expectedDetectedAt: string;
     feedback: OneBriefingFeedback;
@@ -5364,10 +5374,10 @@ export function registerIpcHandlers(): void {
       /* 매니저 미기동(헤드리스 등)이면 무시 */
     }
   };
-  ipcMain.handle("automations:list", () => listAutomations().map(automationWorkspaceView));
-  ipcMain.handle(
-    "automations:create",
-    async (_e, input: AutomationCreateInput) => {
+  registerAppControlDomainIpc(ipcMain, "automations:list", () => listAutomations().map(automationWorkspaceView));
+  registerAppControlDomainIpc(
+    ipcMain, "automations:create",
+    async (input: AutomationCreateInput) => {
       if (Object.hasOwn(input, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted");
       // The connected model decides the tool mode at creation; warm it before the
       // synchronous store write peeks the verdict (see prejudgeAutomationComputerUse).
@@ -5382,7 +5392,7 @@ export function registerIpcHandlers(): void {
       return automationWorkspaceView(created);
     },
   );
-  ipcMain.handle("automations:toggle", async (_e, id: string, enabled: boolean) => {
+  registerAppControlDomainIpc(ipcMain, "automations:toggle", async (id: string, enabled: boolean) => {
     // ★켜기 게이트. 저장은 언제나 허용하되, **연결이 빠진 채로는 켜지 않는다.**
     // 업계 합의(create-then-gate): Zapier "you will not be able to turn it on",
     // n8n "Please resolve outstanding issues before you activate it",
@@ -5410,7 +5420,7 @@ export function registerIpcHandlers(): void {
     await resyncTriggers();
     return next;
   });
-  ipcMain.handle("automations:update", async (_e, id: string, patch: AutomationUpdatePatch) => {
+  registerAppControlDomainIpc(ipcMain, "automations:update", async (id: string, patch: AutomationUpdatePatch) => {
     if (Object.hasOwn(patch, "goalId")) throw new AutomationWorkspaceError("automation_workspace_goal_association_untrusted");
     await prejudgeAutomationComputerUse(
       { toolMode: patch.toolMode, name: patch.name, promptTemplate: patch.promptTemplate, targetLabel: patch.targetType },
@@ -5425,16 +5435,16 @@ export function registerIpcHandlers(): void {
     await resyncTriggers();
     return automationWorkspaceView(next);
   });
-  ipcMain.handle("automations:remove", async (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:remove", async (id: string) => {
     const { removeAutomationSafely } = await import("./automation-removal");
     removeAutomationSafely(id);
     await resyncTriggers();
   });
-  ipcMain.handle("automations:get", (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:get", (id: string) => {
     const a = getAutomation(id);
     return a ? automationWorkspaceView(a) : null;
   });
-  ipcMain.handle("automations:listRuns", (_e, id: string, limit?: number) => listRunHistory(id, limit ?? 50));
+  registerAppControlDomainIpc(ipcMain, "automations:listRuns", (id: string, limit?: number) => listRunHistory(id, limit ?? 50));
   // ★실패의 물증 — 실행 창(ranAt±10분)에 cua-driver가 저장한 화면 캡처를 그 실행의
   // 증거로 돌려준다. 실측 2026-08-19: 모델이 "글자수 초과"를 지어내는 동안 진짜
   // 원인(중복 차단으로 비활성화된 Reply 버튼)은 이미 캡처에 찍혀 있었다 — 디스크에만
@@ -5468,20 +5478,20 @@ export function registerIpcHandlers(): void {
     }
   });
   // 확인필요 카드 닫기 — 기록은 남기고 "지금 조치하라"는 요구만 끈다.
-  ipcMain.handle("automations:acknowledgeRun", (_e, id: string, runId: string) =>
+  registerAppControlDomainIpc(ipcMain, "automations:acknowledgeRun", (id: string, runId: string) =>
     acknowledgeAutomationRun(id, runId));
   // 실행 id 없이 "지금까지의 확인 요구"를 전부 닫는다 — 어떤 카드든 끝낼 수 있는 행동.
-  ipcMain.handle("automations:acknowledgeAttention", (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:acknowledgeAttention", (id: string) => {
     const { acknowledgeAutomationAttention } = require("./store/automations") as
       typeof import("./store/automations");
     return acknowledgeAutomationAttention(id);
   });
-  ipcMain.handle("automations:listTriggerAttention", (_e, automationId: string) =>
+  registerAppControlDomainIpc(ipcMain, "automations:listTriggerAttention", (automationId: string) =>
     listTriggerEventAttention(automationId),
   );
-  ipcMain.handle(
-    "automations:reconcileTriggerEvent",
-    (_e, input: AutomationTriggerEventReconcileInput) => {
+  registerAppControlDomainIpc(
+    ipcMain, "automations:reconcileTriggerEvent",
+    (input: AutomationTriggerEventReconcileInput) => {
       reconcileParkedTriggerEvent(input);
       return {
         eventId: input.eventId,
@@ -5491,13 +5501,13 @@ export function registerIpcHandlers(): void {
       };
     },
   );
-  ipcMain.handle("automations:terminalCloseCandidate", (_e, automationId: string) =>
+  registerAppControlDomainIpc(ipcMain, "automations:terminalCloseCandidate", (automationId: string) =>
     getAutomationGraphTerminalCloseCandidate(automationId),
   );
-  ipcMain.handle("automations:terminalClose", (_e, input: AutomationGraphTerminalCloseInput) =>
+  registerAppControlDomainIpc(ipcMain, "automations:terminalClose", (input: AutomationGraphTerminalCloseInput) =>
     terminalCloseAutomationGraph(input),
   );
-  ipcMain.handle("automations:getGraphReconciliation", (_e, automationId: string) =>
+  registerAppControlDomainIpc(ipcMain, "automations:getGraphReconciliation", (automationId: string) =>
     getAutomationGraphReconciliation(automationId),
   );
   ipcMain.handle(
@@ -5521,7 +5531,7 @@ export function registerIpcHandlers(): void {
       return result;
     },
   );
-  ipcMain.handle("automations:updateGraph", (_e, id: string, graph: WorkflowGraph | null) => {
+  registerAppControlDomainIpc(ipcMain, "automations:updateGraph", (id: string, graph: WorkflowGraph | null) => {
     const saved = updateAutomationGraph(id, graph);
     /* ★고친 그래프가 바깥으로 나가게 됐으면 권한도 따라 올라간다.
        내리지는 않는다 — 넓혀 둔 것은 사람이 그렇게 정했을 수 있고, 좁히는 쪽이
@@ -5536,8 +5546,8 @@ export function registerIpcHandlers(): void {
   });
 
   // ★저장된 판으로 되돌리기 — 저장이 덮어쓰기뿐이라 잘못 저장하면 돌아갈 자리가 없었다.
-  ipcMain.handle("automations:listGraphVersions", (_e, id: string) => listGraphVersions(id));
-  ipcMain.handle("automations:restoreGraphVersion", (_e, id: string, versionId: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:listGraphVersions", (id: string) => listGraphVersions(id));
+  registerAppControlDomainIpc(ipcMain, "automations:restoreGraphVersion", (id: string, versionId: string) => {
     try {
       const automation = restoreGraphVersion(id, versionId);
       return {
@@ -5556,13 +5566,13 @@ export function registerIpcHandlers(): void {
   // ★두 방향 모두 **미바인딩**을 정직하게 말한다. 발행은 무엇을 지웠는지,
   //   설치는 무엇이 비어 있는지 돌려준다. "됐습니다"만 말하면 사람은 돈다고 믿는다.
   // 도는 실행을 사람이 멈춘다. 멈출 것이 없으면 그대로 false — 멈춘 척하지 않는다.
-  ipcMain.handle("automations:stopRun", (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:stopRun", (id: string) => {
     try { (require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision")).invalidateGraphSupervision(String(id || "").trim()); } catch { /* Stop remains unconditional. */ }
     const { stopAutomationRun } = require("./automation-scheduler") as typeof import("./automation-scheduler");
     return { ok: true as const, stopped: stopAutomationRun(String(id || "").trim()) };
   });
 
-  ipcMain.handle("automations:publishGraph", async (_e, id: string, opts?: { version?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "automations:publishGraph", async (id: string, opts?: { version?: string }) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);
     if (!automation.graph) {
@@ -5576,12 +5586,12 @@ export function registerIpcHandlers(): void {
     });
   });
 
-  ipcMain.handle("automations:fetchGraphFromHub", async (_e, slug: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:fetchGraphFromHub", async (slug: string) => {
     const { fetchGraphFromHub } = await import("./cloud-agents/graph-publish");
     return fetchGraphFromHub(String(slug || "").trim());
   });
 
-  ipcMain.handle("automations:installGraphFromHub", async (_e, slug: string, opts?: { name?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "automations:installGraphFromHub", async (slug: string, opts?: { name?: string }) => {
     const { fetchGraphFromHub } = await import("./cloud-agents/graph-publish");
     const fetched = await fetchGraphFromHub(String(slug || "").trim());
     if (!fetched.ok || !fetched.package) return fetched;
@@ -5617,7 +5627,7 @@ export function registerIpcHandlers(): void {
   // 그래프 변경 제안 — 평가만 한다. 적용은 사용자가 diff를 보고 누른 뒤 별도 호출로만.
   // 모델 출력이 저장된 그래프에 직접 닿는 경로는 만들지 않는다(설계 D8).
   // 사용자의 한 문장 → 변경 제안. 여기서도 **적용은 하지 않는다**.
-  ipcMain.handle("automations:requestGraphPatch", async (_e, id: string, request: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:requestGraphPatch", async (id: string, request: string) => {
     const supervision = await import("./workflow/graph-supervision");
     const architect = await import("./workflow/graph-architect");
     const { MAX_SELF_CORRECTIONS } = await import("./workflow/graph-interview");
@@ -6067,7 +6077,7 @@ export function registerIpcHandlers(): void {
    *   그래프가 **실제로 바뀐 경우에만** 응한다 — 안 바뀌었으면 이전 실패는 여전히
    *   그 그래프의 실패이고, 잊는 것은 이중 실행의 문을 여는 짓이다.
    */
-  ipcMain.handle("automations:forgetFailedRun", (_e, id: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "automations:forgetFailedRun", (id: unknown) => {
     const automationId = String(id ?? "").trim();
     if (!automationId) return { automationId, ok: false as const, forgot: false, reason: "no_automation" };
     const automation = getAutomation(automationId);
@@ -6083,7 +6093,7 @@ export function registerIpcHandlers(): void {
     return { automationId, ok: true as const, ...result };
   });
 
-  ipcMain.handle("automations:createFromBlueprint", (_e, payload: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "automations:createFromBlueprint", (payload: unknown) => {
     const input = payload as {
       name?: string; graph?: unknown; scheduleHuman?: string; targetId?: string; goal?: string;
     } | null;
@@ -6129,12 +6139,12 @@ export function registerIpcHandlers(): void {
     }).immediate();
   });
 
-  ipcMain.handle("automations:proposeGraphPatch", (_e, id: string, patch: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "automations:proposeGraphPatch", (id: string, patch: unknown) => {
     const { captureGraphProposalBase,prepareGraphProposal,GraphSupervisionError }=require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision");
     try { return prepareGraphProposal(captureGraphProposalBase(id),patch as import("./workflow/graph-patch").GraphPatch); }
     catch(error) { return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_PROPOSAL_INVALID",reason:L("구조 검증을 통과하지 못했습니다.","Structural verification did not pass."),nextAction:""}; }
   });
-  ipcMain.handle("automations:applyGraphPatch", (_e, id: string, input: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "automations:applyGraphPatch", (id: string, input: unknown) => {
     const { applyGraphProposal,GraphSupervisionError }=require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision");
     const request=input as {proposalId?:unknown;approved?:unknown}|null;
     try {
@@ -6142,7 +6152,7 @@ export function registerIpcHandlers(): void {
       return applyGraphProposal(id,request.proposalId,request.approved===true);
     } catch(error) { return {ok:false as const,code:error instanceof GraphSupervisionError?error.code:"GRAPH_APPLY_FAILED",reason:L("현재 저장본에 이 제안을 적용하지 않았습니다.","This proposal was not applied to the current saved graph."),nextAction:""}; }
   });
-  ipcMain.handle("automations:readGraphPatchReceipt", (_e,id:string,proposalId:string) =>
+  registerAppControlDomainIpc(ipcMain, "automations:readGraphPatchReceipt", (id:string,proposalId:string) =>
     (require("./workflow/graph-supervision") as typeof import("./workflow/graph-supervision")).readGraphProposalReceipt(id,proposalId));
   ipcMain.handle("automations:runNow", async (
     _e,
@@ -6206,9 +6216,9 @@ export function registerIpcHandlers(): void {
 
   // 원터치 교체 — 같은 일을 하는 다른 서비스로 **한 번에** 갈아끼운다.
   // 검사는 여기(main)에서 한다. 화면이 후보를 잘못 그려도, 할 수 없는 것으로는 안 바뀐다.
-  ipcMain.handle(
-    "automations:swapProvider",
-    async (_e, id: string, input: { capability: string; fromProvider: string | null; toProvider: string }) => {
+  registerAppControlDomainIpc(
+    ipcMain, "automations:swapProvider",
+    async (id: string, input: { capability: string; fromProvider: string | null; toProvider: string }) => {
       const automation = getAutomation(id);
       if (!automation) throw new Error(`Automation not found: ${id}`);
       const locale = currentUiLocale() === "en" ? "en" : "ko";
@@ -6224,10 +6234,9 @@ export function registerIpcHandlers(): void {
       return { ok: true, changed: plan.changed, report: await reportGraphConnections(plan.graph, locale) };
     },
   );
-  ipcMain.handle(
-    "automations:swapAgent",
+  registerAppControlDomainIpc(
+    ipcMain, "automations:swapAgent",
     async (
-      _e,
       id: string,
       input: { nodeId: string; ref: string; targetType: "agent" | "firm" | "hub"; targetVersion?: string | null; label?: string },
     ) => {
@@ -6249,21 +6258,21 @@ export function registerIpcHandlers(): void {
     },
   );
 
-  ipcMain.handle("automations:inputRequirement", (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:inputRequirement", (id: string) => {
     const automation = getAutomation(id);
     if (!automation) return null;
     return graphInputRequirement(automation.graph);
   });
-  ipcMain.handle("automations:latestRun", (_e, id: string) => getLatestGraphRun(id));
+  registerAppControlDomainIpc(ipcMain, "automations:latestRun", (id: string) => getLatestGraphRun(id));
   // 대화에 딸린 자동화 — 실행 중 줄·보고 요약·오른쪽 "자동화" 탭. 원장(run_events)만 읽는다.
   registerAutomationChatActivityIpc(ipcMain);
   // 목표 전용 패널(오른쪽 "목표" 탭) — 원장 읽기와 오너의 형식 있는 편집(오너 2026-09-28).
   registerGoalPanelIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   // 승인은 사람의 결정이라 판정 모델 가용성과 무관하게 동작해야 한다. 결정은 가장 최근
   // 실행의 occurrence에 묶는다 — 승인 하나가 다음 실행까지 조용히 재사용되면 안 된다.
-  ipcMain.handle(
-    "automations:decideNodeApproval",
-    (_e, id: string, nodeId: string, decision: "approved" | "rejected" | "always") => {
+  registerAppControlDomainIpc(
+    ipcMain, "automations:decideNodeApproval",
+    (id: string, nodeId: string, decision: "approved" | "rejected" | "always") => {
       const automation = getAutomation(id);
       if (!automation) throw new Error(`Automation not found: ${id}`);
       if (typeof nodeId !== "string" || !nodeId.trim()) throw new Error("automation_approval_node_invalid");
@@ -6293,9 +6302,9 @@ export function registerIpcHandlers(): void {
       return { ok: true, occurrenceId, always: decision === "always" };
     },
   );
-  ipcMain.handle(
-    "automations:proposeChecklistFromExample",
-    async (_e, id: string, example: string) => {
+  registerAppControlDomainIpc(
+    ipcMain, "automations:proposeChecklistFromExample",
+    async (id: string, example: string) => {
       const automation = getAutomation(id);
       if (!automation) throw new Error(`Automation not found: ${id}`);
       if (typeof example !== "string" || !example.trim()) {
@@ -6313,9 +6322,9 @@ export function registerIpcHandlers(): void {
         : { ok: false as const, items: [] };
     },
   );
-  ipcMain.handle(
-    "automations:recordEvalCorrection",
-    (_e, id: string, nodeId: string, correctedVerdict: "pass" | "fail", note?: string) => {
+  registerAppControlDomainIpc(
+    ipcMain, "automations:recordEvalCorrection",
+    (id: string, nodeId: string, correctedVerdict: "pass" | "fail", note?: string) => {
       const automation = getAutomation(id);
       if (!automation) throw new Error(`Automation not found: ${id}`);
       if (correctedVerdict !== "pass" && correctedVerdict !== "fail") {
@@ -6348,15 +6357,15 @@ export function registerIpcHandlers(): void {
     },
   );
   // 멈춘 자동화의 "지금 무엇을 하면 되는지" — 실행 가능한 조치까지 포함해 계산한다.
-  ipcMain.handle("automations:planFix", async (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:planFix", async (id: string) => {
     const { planAutomationFix } = await import("./automation-fix");
     return planAutomationFix(id);
   });
-  ipcMain.handle("automations:applyFix", async (_e, id: string, actionId: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:applyFix", async (id: string, actionId: string) => {
     const { applyAutomationFix } = await import("./automation-fix");
     return { ...(await applyAutomationFix(id, actionId)), automationId: id, actionId };
   });
-  ipcMain.handle("automations:getSession", (_e, id: string) => {
+  registerAppControlDomainIpc(ipcMain, "automations:getSession", (id: string) => {
     const automation = getAutomation(id);
     if (!automation) throw new Error(`Automation not found: ${id}`);
     const session = getOrCreateAutomationSession({
@@ -6387,11 +6396,11 @@ export function registerIpcHandlers(): void {
   });
 
   // ── schedule 문법 헬퍼(렌더러 스케줄 빌더용 — croner는 메인에서만) ──
-  ipcMain.handle("schedule:validateCron", async (_e, expr: string) => {
+  registerAppControlDomainIpc(ipcMain, "schedule:validateCron", async (expr: string) => {
     const { validateCron } = await import("./store/schedule");
     return validateCron(expr);
   });
-  ipcMain.handle("schedule:describe", async (_e, spec: ScheduleSpec, loc?: "ko" | "en") => {
+  registerAppControlDomainIpc(ipcMain, "schedule:describe", async (spec: ScheduleSpec, loc?: "ko" | "en") => {
     const { describeSchedule } = await import("./store/schedule");
     try {
       return describeSchedule(spec, loc ?? "en");
@@ -6399,7 +6408,7 @@ export function registerIpcHandlers(): void {
       return "";
     }
   });
-  ipcMain.handle("schedule:nextRun", async (_e, spec: ScheduleSpec) => {
+  registerAppControlDomainIpc(ipcMain, "schedule:nextRun", async (spec: ScheduleSpec) => {
     const { nextRun } = await import("./store/schedule");
     try {
       return nextRun(spec);
@@ -6407,56 +6416,56 @@ export function registerIpcHandlers(): void {
       return null;
     }
   });
-  ipcMain.handle("schedule:defaultTz", async () => {
+  registerAppControlDomainIpc(ipcMain, "schedule:defaultTz", async () => {
     const { defaultTz } = await import("./store/schedule");
     return defaultTz();
   });
 
   // ── legacy launchd cleanup (Desktop local execution is app-scoped) ───
-  ipcMain.handle("launchd:status", async () => {
+  registerAppControlDomainIpc(ipcMain, "launchd:status", async () => {
     const { launchdStatus } = await import("./launchd/agent");
     return launchdStatus();
   });
-  ipcMain.handle("launchd:enable", async () => {
+  registerAppControlDomainIpc(ipcMain, "launchd:enable", async () => {
     const { enableLaunchd } = await import("./launchd/agent");
     return enableLaunchd();
   });
-  ipcMain.handle("launchd:disable", async () => {
+  registerAppControlDomainIpc(ipcMain, "launchd:disable", async () => {
     const { disableLaunchd } = await import("./launchd/agent");
     return disableLaunchd();
   });
 
   // ── Surfaces (agent-made Workbench outputs) ─────────────
-  ipcMain.handle("surfaces:list", (_e, chatId?: string) => listAgentSurfaces(chatId));
-  ipcMain.handle("surfaces:get", (_e, id: string) => getAgentSurface(id));
-  ipcMain.handle("surfaces:listJobs", (_e, surfaceId: string) => listSurfaceJobs(surfaceId));
-  ipcMain.handle("surfaces:getJobSummary", (_e, surfaceId: string) => {
+  registerAppControlDomainIpc(ipcMain, "surfaces:list", (chatId?: string) => listAgentSurfaces(chatId));
+  registerAppControlDomainIpc(ipcMain, "surfaces:get", (id: string) => getAgentSurface(id));
+  registerAppControlDomainIpc(ipcMain, "surfaces:listJobs", (surfaceId: string) => listSurfaceJobs(surfaceId));
+  registerAppControlDomainIpc(ipcMain, "surfaces:getJobSummary", (surfaceId: string) => {
     const surface = getAgentSurface(surfaceId);
     if (!surface) return null;
     return getSurfaceJobSummary(surfaceId, surface.manifest.budget);
   });
-  ipcMain.handle("surfaces:updateJob", (_e, input: SurfaceJobUpdateRequest) =>
+  registerAppControlDomainIpc(ipcMain, "surfaces:updateJob", (input: SurfaceJobUpdateRequest) =>
     updateSurfaceJob(input),
   );
-  ipcMain.handle("surfaces:updateState", (_e, input: SurfaceStatePatchRequest) =>
+  registerAppControlDomainIpc(ipcMain, "surfaces:updateState", (input: SurfaceStatePatchRequest) =>
     patchAgentSurfaceState(input),
   );
-  ipcMain.handle("surfaces:listEvents", (_e, surfaceId: string) =>
+  registerAppControlDomainIpc(ipcMain, "surfaces:listEvents", (surfaceId: string) =>
     listAgentSurfaceEvents(surfaceId),
   );
-  ipcMain.handle("surfaces:approve", (_e, input: SurfaceApprovalGrantRequest) =>
+  registerAppControlDomainIpc(ipcMain, "surfaces:approve", (input: SurfaceApprovalGrantRequest) =>
     approveAgentSurface(input),
   );
-  ipcMain.handle("surfaces:hasApproval", (_e, input: SurfaceApprovalCheckRequest) =>
+  registerAppControlDomainIpc(ipcMain, "surfaces:hasApproval", (input: SurfaceApprovalCheckRequest) =>
     hasAgentSurfaceApproval(input),
   );
-  ipcMain.handle("surfaces:listApprovals", (_e, surfaceId: string) =>
+  registerAppControlDomainIpc(ipcMain, "surfaces:listApprovals", (surfaceId: string) =>
     listAgentSurfaceApprovals(surfaceId),
   );
-  ipcMain.handle("surfaces:revokeApproval", (_e, id: string) => revokeAgentSurfaceApproval(id));
+  registerAppControlDomainIpc(ipcMain, "surfaces:revokeApproval", (id: string) => revokeAgentSurfaceApproval(id));
 
   // ── Surface Assets (reusable packs from declarative manifests) ─
-  ipcMain.handle("surfaceAssets:materialize", async (_e, input: SurfaceAssetPackRequest) => {
+  registerAppControlDomainIpc(ipcMain, "surfaceAssets:materialize", async (input: SurfaceAssetPackRequest) => {
     const chat = getChat(input.chatId);
     if (!chat) throw new Error(`Chat not found: ${input.chatId}`);
     const project = chat.projectId ? getProject(chat.projectId) : null;
@@ -6476,24 +6485,24 @@ export function registerIpcHandlers(): void {
     });
     return { ...result, record };
   });
-  ipcMain.handle("surfaceAssets:archive", async (_e, input: SurfaceAssetPackRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "surfaceAssets:archive", async (input: SurfaceAssetPackRootRequest) => {
     const pack = getSurfaceAssetPackByRoot(path.resolve(input.rootPath));
     if (!pack) throw new Error(`Surface asset pack not found: ${input.rootPath}`);
     const result = await archiveSurfaceAssetPack(input);
     return recordSurfaceAssetPackOperation(pack.id, "archive", true, result, "archived");
   });
-  ipcMain.handle("surfaceAssets:restore", async (_e, input: SurfaceAssetPackRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "surfaceAssets:restore", async (input: SurfaceAssetPackRootRequest) => {
     const pack = getSurfaceAssetPackByRoot(path.resolve(input.rootPath));
     if (!pack) throw new Error(`Surface asset pack not found: ${input.rootPath}`);
     const result = await restoreSurfaceAssetPack(input);
     return recordSurfaceAssetPackOperation(pack.id, "restore", true, result, "restored");
   });
-  ipcMain.handle("surfaceAssets:listPacks", (_e, chatId?: string) => listSurfaceAssetPacks(chatId));
-  ipcMain.handle("surfaceAssets:getPack", (_e, id: string) => getSurfaceAssetPack(id));
-  ipcMain.handle("surfaceAssets:getPackBySurface", (_e, chatId: string, surfaceId: string) =>
+  registerAppControlDomainIpc(ipcMain, "surfaceAssets:listPacks", (chatId?: string) => listSurfaceAssetPacks(chatId));
+  registerAppControlDomainIpc(ipcMain, "surfaceAssets:getPack", (id: string) => getSurfaceAssetPack(id));
+  registerAppControlDomainIpc(ipcMain, "surfaceAssets:getPackBySurface", (chatId: string, surfaceId: string) =>
     getSurfaceAssetPackBySurface(chatId, surfaceId),
   );
-  ipcMain.handle("surfaceAssets:listOperations", (_e, packId: string) =>
+  registerAppControlDomainIpc(ipcMain, "surfaceAssets:listOperations", (packId: string) =>
     listSurfaceAssetPackOperations(packId),
   );
 
@@ -6524,7 +6533,7 @@ export function registerIpcHandlers(): void {
     });
     return { ...result, record };
   });
-  ipcMain.handle("appFactory:syncCloudManifest", async (_e, input: AppFactoryCloudAppManifestRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:syncCloudManifest", async (input: AppFactoryCloudAppManifestRequest) => {
     const existingCloudApp = input.chatId
       ? null
       : getAgentAppByRoot(cloudAppRootPath(input.slug || input.cloudId));
@@ -6546,7 +6555,7 @@ export function registerIpcHandlers(): void {
       agentId: input.agentId ?? chat.agentId,
     });
   });
-  ipcMain.handle("appFactory:runAutopilot", async (_e, input: AppFactoryAutopilotRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:runAutopilot", async (input: AppFactoryAutopilotRequest) => {
     const result = await runAppFactoryAutopilot(input);
     recordAppFactoryOperation(
       result.rootPath,
@@ -6557,22 +6566,22 @@ export function registerIpcHandlers(): void {
     );
     return result;
   });
-  ipcMain.handle("appFactory:installMcpPlan", async (_e, input: AppFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:installMcpPlan", async (input: AppFactoryRootRequest) => {
     const result = await installMcpPlan(input);
     recordAppFactoryOperation(result.rootPath, "install-mcp", true, result, "mcp-ready");
     return result;
   });
-  ipcMain.handle("appFactory:runProviderTasks", async (_e, input: AppFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:runProviderTasks", async (input: AppFactoryRootRequest) => {
     const result = await runProviderTasks(input);
     recordAppFactoryOperation(result.rootPath, "run-provider-tasks", true, result, "operations-ready");
     return result;
   });
-  ipcMain.handle("appFactory:materializeAssets", async (_e, input: AppFactoryAssetMaterializeRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:materializeAssets", async (input: AppFactoryAssetMaterializeRequest) => {
     const result = await materializeCatalogAssets(input);
     recordAppFactoryOperation(result.rootPath, "materialize-assets", true, result, "operations-ready");
     return result;
   });
-  ipcMain.handle("appFactory:activateLocalCommerceStack", async (_e, input: AppFactoryLocalCommerceActivationRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:activateLocalCommerceStack", async (input: AppFactoryLocalCommerceActivationRequest) => {
     const result = await activateLocalCommerceStack(input);
     recordAppFactoryOperation(result.rootPath, "activate-local-commerce-stack", true, result, "operations-ready");
     return result;
@@ -6598,22 +6607,22 @@ export function registerIpcHandlers(): void {
     recordAppFactoryOperation(result.rootPath, "launch-provider-session", result.ok, result, "operations-ready");
     return result;
   });
-  ipcMain.handle("appFactory:syncProviderBrowserResults", async (_e, input: AppFactoryProviderBrowserResultSyncRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:syncProviderBrowserResults", async (input: AppFactoryProviderBrowserResultSyncRequest) => {
     const result = await syncProviderBrowserResults(input);
     recordAppFactoryOperation(result.rootPath, "sync-provider-browser-results", true, result, "operations-ready");
     return result;
   });
-  ipcMain.handle("appFactory:resolveProviderCredentials", async (_e, input: AppFactoryProviderCredentialResolveRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:resolveProviderCredentials", async (input: AppFactoryProviderCredentialResolveRequest) => {
     const result = await resolveProviderCredentials(input);
     recordAppFactoryOperation(result.rootPath, "resolve-provider-credentials", true, result, "operations-ready");
     return result;
   });
-  ipcMain.handle("appFactory:approveProviderPayment", async (_e, input: AppFactoryProviderPaymentApproveRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:approveProviderPayment", async (input: AppFactoryProviderPaymentApproveRequest) => {
     const result = await approveProviderPayment(input);
     recordAppFactoryOperation(result.rootPath, "approve-provider-payment", true, result, "operations-ready");
     return result;
   });
-  ipcMain.handle("appFactory:runSmoke", async (_e, input: AppFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:runSmoke", async (input: AppFactoryRootRequest) => {
     const result = await runAppFactorySmoke(input);
     recordAppFactoryOperation(
       result.rootPath,
@@ -6759,12 +6768,12 @@ export function registerIpcHandlers(): void {
     recordAgentAppOperation(appRecord.id, "open-launch-target", result.opened, result);
     return result;
   });
-  ipcMain.handle("appFactory:publishAsTool", async (_e, input: AppFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:publishAsTool", async (input: AppFactoryRootRequest) => {
     const result = await publishAppAsTool(input);
     recordAppFactoryOperation(result.rootPath, "publish-as-tool", true, result, "tool-published");
     return result;
   });
-  ipcMain.handle("appFactory:archive", async (_e, input: AppFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:archive", async (input: AppFactoryRootRequest) => {
     const rootPath = isCloudAppRoot(input.rootPath) ? input.rootPath : path.resolve(input.rootPath);
     const appRecord = getAgentAppByRoot(rootPath);
     if (!appRecord) throw new Error(`Generated app not found: ${input.rootPath}`);
@@ -6786,7 +6795,7 @@ export function registerIpcHandlers(): void {
     const result = await archiveAppPackage(input);
     return recordAgentAppOperation(appRecord.id, "archive", true, result, "archived");
   });
-  ipcMain.handle("appFactory:restore", async (_e, input: AppFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "appFactory:restore", async (input: AppFactoryRootRequest) => {
     const rootPath = isCloudAppRoot(input.rootPath) ? input.rootPath : path.resolve(input.rootPath);
     const appRecord = getAgentAppByRoot(rootPath);
     if (!appRecord) throw new Error(`Generated app not found: ${input.rootPath}`);
@@ -6807,22 +6816,22 @@ export function registerIpcHandlers(): void {
     const result = await restoreAppPackage(input);
     return recordAgentAppOperation(appRecord.id, "restore", true, result, "restored");
   });
-  ipcMain.handle("appFactory:listApps", (_e, chatId?: string) => listAgentApps(chatId));
-  ipcMain.handle("appFactory:getApp", (_e, id: string) => getAgentApp(id));
-  ipcMain.handle("appFactory:getAppBySurface", (_e, chatId: string, surfaceId: string) =>
+  registerAppControlDomainIpc(ipcMain, "appFactory:listApps", (chatId?: string) => listAgentApps(chatId));
+  registerAppControlDomainIpc(ipcMain, "appFactory:getApp", (id: string) => getAgentApp(id));
+  registerAppControlDomainIpc(ipcMain, "appFactory:getAppBySurface", (chatId: string, surfaceId: string) =>
     getAgentAppBySurface(chatId, surfaceId),
   );
-  ipcMain.handle("appFactory:listOperations", (_e, appId: string) =>
+  registerAppControlDomainIpc(ipcMain, "appFactory:listOperations", (appId: string) =>
     listAgentAppOperations(appId),
   );
 
   // ── Meta Agent Factory (local team materialization) ─────
-  ipcMain.handle("metaAgent:createCommerceTeam", (_e, input: MetaAgentTeamFactoryRequest) =>
+  registerAppControlDomainIpc(ipcMain, "metaAgent:createCommerceTeam", (input: MetaAgentTeamFactoryRequest) =>
     createCommerceAgentTeam(input),
   );
 
   // ── Tool Factory (agent-made local tools) ───────────────
-  ipcMain.handle("toolFactory:scaffold", async (_e, input: ToolFactoryScaffoldRequest) => {
+  registerAppControlDomainIpc(ipcMain, "toolFactory:scaffold", async (input: ToolFactoryScaffoldRequest) => {
     const chat = getChat(input.chatId);
     if (!chat) throw new Error(`Chat not found: ${input.chatId}`);
     const project = chat.projectId ? getProject(chat.projectId) : null;
@@ -6841,7 +6850,7 @@ export function registerIpcHandlers(): void {
     });
     return { ...result, record };
   });
-  ipcMain.handle("toolFactory:runSmoke", async (_e, input: ToolFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "toolFactory:runSmoke", async (input: ToolFactoryRootRequest) => {
     const result = await runToolFactorySmoke(input);
     recordToolFactoryOperation(
       result.rootPath,
@@ -6870,7 +6879,7 @@ export function registerIpcHandlers(): void {
     }
     return result;
   });
-  ipcMain.handle("toolFactory:installMcp", async (_e, input: ToolFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "toolFactory:installMcp", async (input: ToolFactoryRootRequest) => {
     const result = await installToolMcp(input);
     recordToolFactoryOperation(
       result.rootPath,
@@ -6882,13 +6891,13 @@ export function registerIpcHandlers(): void {
     );
     return result;
   });
-  ipcMain.handle("toolFactory:archive", async (_e, input: ToolFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "toolFactory:archive", async (input: ToolFactoryRootRequest) => {
     const toolRecord = getAgentToolByRoot(path.resolve(input.rootPath));
     if (!toolRecord) throw new Error(`Generated tool not found: ${input.rootPath}`);
     const result = await archiveToolPackage(input);
     return recordAgentToolOperation(toolRecord.id, "archive", true, result, "archived", null);
   });
-  ipcMain.handle("toolFactory:restore", async (_e, input: ToolFactoryRootRequest) => {
+  registerAppControlDomainIpc(ipcMain, "toolFactory:restore", async (input: ToolFactoryRootRequest) => {
     const toolRecord = getAgentToolByRoot(path.resolve(input.rootPath));
     if (!toolRecord) throw new Error(`Generated tool not found: ${input.rootPath}`);
     const result = await restoreToolPackage(input);
@@ -6901,31 +6910,31 @@ export function registerIpcHandlers(): void {
       result.restoredServerId,
     );
   });
-  ipcMain.handle("toolFactory:listTools", (_e, chatId?: string) => listAgentTools(chatId));
-  ipcMain.handle("toolFactory:getTool", (_e, id: string) => getAgentTool(id));
-  ipcMain.handle(
-    "toolFactory:getToolBySurface",
-    (_e, chatId: string, surfaceId: string, requestedToolId?: string) =>
+  registerAppControlDomainIpc(ipcMain, "toolFactory:listTools", (chatId?: string) => listAgentTools(chatId));
+  registerAppControlDomainIpc(ipcMain, "toolFactory:getTool", (id: string) => getAgentTool(id));
+  registerAppControlDomainIpc(
+    ipcMain, "toolFactory:getToolBySurface",
+    (chatId: string, surfaceId: string, requestedToolId?: string) =>
       getAgentToolBySurface(chatId, surfaceId, requestedToolId),
   );
-  ipcMain.handle("toolFactory:listOperations", (_e, toolRecordId: string) =>
+  registerAppControlDomainIpc(ipcMain, "toolFactory:listOperations", (toolRecordId: string) =>
     listAgentToolOperations(toolRecordId),
   );
 
   // ── Plugin Builder (@plugin-make) ──────────────────────
-  ipcMain.handle("pluginBuilder:start", (_e, input: { chatId: string; seed: PluginBuilderSeed }) =>
+  registerAppControlDomainIpc(ipcMain, "pluginBuilder:start", (input: { chatId: string; seed: PluginBuilderSeed }) =>
     startPluginBuilder(input));
-  ipcMain.handle("pluginBuilder:draft", (_e, input: { sessionId: string; answers: PluginBuilderAnswers }) =>
+  registerAppControlDomainIpc(ipcMain, "pluginBuilder:draft", (input: { sessionId: string; answers: PluginBuilderAnswers }) =>
     draftPluginBuilder(input));
-  ipcMain.handle("pluginBuilder:verify", (_e, input: { sessionId: string }) => verifyPluginBuilder(input));
-  ipcMain.handle("pluginBuilder:install", (_e, input: { sessionId: string }) => installPluginBuilder(input));
-  ipcMain.handle("pluginBuilder:prove", (_e, input: { sessionId: string }) => provePluginBuilder(input));
-  ipcMain.handle("pluginBuilder:discard", (_e, input: { sessionId: string }) => discardPluginBuilder(input));
-  ipcMain.handle("pluginBuilder:listDrafts", (_e, chatId: string) => listPluginBuilderDrafts(chatId));
+  registerAppControlDomainIpc(ipcMain, "pluginBuilder:verify", (input: { sessionId: string }) => verifyPluginBuilder(input));
+  registerAppControlDomainIpc(ipcMain, "pluginBuilder:install", (input: { sessionId: string }) => installPluginBuilder(input));
+  registerAppControlDomainIpc(ipcMain, "pluginBuilder:prove", (input: { sessionId: string }) => provePluginBuilder(input));
+  registerAppControlDomainIpc(ipcMain, "pluginBuilder:discard", (input: { sessionId: string }) => discardPluginBuilder(input));
+  registerAppControlDomainIpc(ipcMain, "pluginBuilder:listDrafts", (chatId: string) => listPluginBuilderDrafts(chatId));
 
   // ── migration (OpenClaw / Hermes → Agentlas) ────────────
-  ipcMain.handle("migration:scan", () => scanMigrationSources());
-  ipcMain.handle("migration:import", (_e, opts: MigrationOptions) => runMigration(opts));
+  registerAppControlDomainIpc(ipcMain, "migration:scan", () => scanMigrationSources());
+  registerAppControlDomainIpc(ipcMain, "migration:import", (opts: MigrationOptions) => runMigration(opts));
 
   // ── invoke (renderer + Mobile Bridge가 공유하는 main-process 권위) ──────
   // DESKTOP_MOBILE_BRIDGE: 실행 상태·스트림·steering 큐는 invocationService만 소유한다.
@@ -6937,13 +6946,7 @@ export function registerIpcHandlers(): void {
       }
     }
   });
-  invocationService.onActiveChats((chatIds) => {
-    for (const window of BrowserWindow.getAllWindows()) {
-      if (!window.isDestroyed()) {
-        try { window.webContents.send("invoke:activeChats", chatIds); } catch {}
-      }
-    }
-  });
+  invocationService.onActiveChats(publishLegacyInvocationActiveChats);
   invocationService.onSteerQueueCapacity((chatId) => dispatchOnePreflightSteers(undefined, chatId));
   invocationService.onSettled(({ chatId }) => {
     setImmediate(() => {
@@ -6953,11 +6956,15 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("invoke:preflightSubmissionBegin", (_event, input: OnePreflightSubmissionInput) => {
     assertTrustedSitePublishIpcSender(_event);
-    return beginOnePreflightSubmission(input, rendererInvocationProcessEpoch);
+    const native = configuredNativeGuiOwner();
+    if (native && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    return beginOnePreflightSubmission(input, native ? native.assertCanStart(randomUUID()).bootId : rendererInvocationProcessEpoch);
   });
   ipcMain.handle("invoke:preflightSteerEnqueue", (_event, input: OnePreflightSteerInput) => {
     assertTrustedSitePublishIpcSender(_event);
+    if(configuredNativeGuiOwner())authorizeNativeGuiRenderer(_event);
     const receipt = enqueueOnePreflightSteer(input);
+    captureNativePreflightSteerGesture(_event,receipt);
     // Commit acceptance before dispatch work. A busy Main must not turn its
     // provider handoff latency into an uncertain intake acknowledgement.
     setImmediate(() => {
@@ -6980,6 +6987,8 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
+    const nativeOwner = configuredNativeGuiOwner();
+    if (nativeOwner && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
     const preflightSubmissionId = req?.preflightSubmissionId;
     if (preflightSubmissionId !== undefined && (typeof preflightSubmissionId !== "string"
       || !preflightSubmissionId || !req.oneMode)) {
@@ -6987,8 +6996,9 @@ export function registerIpcHandlers(): void {
     }
     const request = rendererInvocationRequestForStart(req);
     request.runId ??= randomUUID();
+    const invocationOwnerEpoch = nativeOwner ? nativeOwner.assertCanStart(request.runId).bootId : rendererInvocationProcessEpoch;
     if (preflightSubmissionId) {
-      assertOnePreflightSubmissionReady(preflightSubmissionId, request, rendererInvocationProcessEpoch);
+      assertOnePreflightSubmissionReady(preflightSubmissionId, request, invocationOwnerEpoch);
     }
     // Check the durable reservation before One's asynchronous preflight. Exact
     // retries and a different run in the same pending chat must never cross
@@ -7009,7 +7019,7 @@ export function registerIpcHandlers(): void {
         runId: request.runId!,
         chatId: request.chatId,
         canonicalRequestJson: canonicalInvocationRequestJson(request),
-        ownerProcessEpoch: rendererInvocationProcessEpoch,
+        ownerProcessEpoch: invocationOwnerEpoch,
       };
       const reserved = createInvocationAdmission(candidate);
       if (reserved.kind !== "created") {
@@ -7090,45 +7100,21 @@ export function registerIpcHandlers(): void {
           }
         }
       }
-      // Best-effort with a tight budget: a miss remains unresolved and must
-      // never be replaced by a lexical or static verdict.
-      // Reserve before this first await so a concurrent IPC request or a
-      // restarted Main cannot both observe an absent admission.
-      const preflightAdmission = reserveAdmission();
-      try {
-        await withInvocationPreflightAccounting({ runId: request.runId, chatId: request.chatId }, () => Promise.all([
-          prejudgeOneRequestIntent(request, { timeoutMs: 4_000 }),
-          prejudgeOneMemoryIntent(request, { timeoutMs: 4_000 }),
-        ]));
-      } catch (cause) {
-        // start() was never called. This control-flow proof is stronger than
-        // a missing receipt in the still-live Main process.
-        const rejected = decideInvocationAdmission({
-          ...preflightAdmission,
-          decision: "rejected",
-          reasonCode: "main_preflight_refused",
-          noStartProof: {
-            kind: "owner-start-boundary-not-crossed",
-            verifiedOwnerProcessEpoch: rendererInvocationProcessEpoch,
-          },
-        });
-        if (rejected.kind !== "rejected") {
-          throw new Error("invocation_admission_preflight_rejection_failed", { cause });
-        }
-        throw cause;
-      }
+
     }
+    const mainAdmission = admitMainInvocation(request.chatId, request.runId);
+    if (!mainAdmission) throw new Error("native_invocation_admission_required");
     const acceptedAdmission = reserveAdmission();
     if (preflightSubmissionId) {
       try {
-        reserveOnePreflightParent(preflightSubmissionId, request.runId, request, rendererInvocationProcessEpoch);
+        reserveOnePreflightParent(preflightSubmissionId, request.runId, request, invocationOwnerEpoch);
       } catch (cause) {
         // No call to start() has happened. Close only this proven pre-start
         // admission; a failed reservation must not strand the chat pending.
         const rejected = decideInvocationAdmission({
           ...acceptedAdmission, decision: "rejected", reasonCode: "one_preflight_parent_reservation_refused",
           noStartProof: { kind: "owner-start-boundary-not-crossed",
-            verifiedOwnerProcessEpoch: rendererInvocationProcessEpoch },
+            verifiedOwnerProcessEpoch: invocationOwnerEpoch },
         });
         if (rejected.kind !== "rejected") {
           throw new Error("one_preflight_parent_reservation_rejection_failed", { cause });
@@ -7138,11 +7124,16 @@ export function registerIpcHandlers(): void {
       }
     }
     try {
-      const started = invocationService.start(request, undefined, undefined, undefined, undefined,
-        admitMainInvocation(request.chatId, request.runId), acceptedAdmission);
+      const startResult = nativeOwner
+        ? nativeOwner.startReserved(_event, request, mainAdmission, acceptedAdmission)
+        : invocationService.startNativePrepared(request, createRendererInvocationPreparation(acceptedAdmission), mainAdmission, acceptedAdmission);
+      // Parent capture and ordered signed start packet precede this wakeup.
+      // Intake is independent of the preparation/start result ACK.
+      if (nativeOwner && preflightSubmissionId) dispatchOnePreflightSteers(preflightSubmissionId);
+      const started = await startResult;
       if (preflightSubmissionId) {
         try {
-          bindOnePreflightSubmission(preflightSubmissionId, started.runId, request, rendererInvocationProcessEpoch);
+          bindOnePreflightSubmission(preflightSubmissionId, started.runId, request, invocationOwnerEpoch);
           dispatchOnePreflightSteers(preflightSubmissionId);
         } catch (cause) {
           // The parent has already crossed admitted+invoke_started. Never turn
@@ -7207,9 +7198,40 @@ export function registerIpcHandlers(): void {
       throw cause;
     }
   });
+  ipcMain.handle("invoke:currentTurn", (_event, chatId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (typeof chatId !== "string" || !chatId) throw new Error("invocation_steer_invalid_chat_id");
+    const native = configuredNativeGuiControls();
+    if (native && (native.hasChat(chatId) || configuredNativeGuiOwner()?.retainedChatIds().includes(chatId))) return native.currentTurn(_event, chatId);
+    return invocationCurrentTurnControl.currentTurn(chatId);
+  });
+  ipcMain.handle("invoke:steerCurrentTurn", (_event, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
+    assertTrustedSitePublishIpcSender(_event);
+    const owner = configuredNativeGuiOwner(), controls = configuredNativeGuiControls();
+    if (controls && (controls.hasChat(input.chatId) || owner?.retainedChatIds().includes(input.chatId))) {
+      const binding = owner?.retainedChatIds().includes(input.chatId) ? owner.capturedTextBinding(input.chatId, input.expectedRunId) : controls.observedTextBinding(_event,input.chatId);
+      if(binding.runId!==input.expectedRunId)throw new Error("invocation_steer_stale_run");
+      return controls.ownerText(_event,binding,input.intentId,input.text,"current").then(r=>({chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}));
+    }
+    return invocationCurrentTurnControl.steerCurrentTurn(input);
+  });
+  ipcMain.handle("invoke:currentTurnSteerReceipt", (_event, input: { chatId: string; intentId: string }) => {
+    assertTrustedSitePublishIpcSender(_event);
+    if (!input || typeof input.chatId !== "string" || !input.chatId || typeof input.intentId !== "string"
+      || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.intentId)) throw new Error("invocation_steer_invalid_lookup");
+    const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
+    if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?{chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}:null);}
+    return invocationCurrentTurnControl.currentTurnSteerReceipt(input.chatId, input.intentId);
+  });
   ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest, intentId?: string) => {
     assertTrustedSitePublishIpcSender(_event);
     const request = rendererInvocationRequest(req);
+    const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
+    if(controls&&(controls.hasChat(request.chatId)||owner?.retainedChatIds().includes(request.chatId))){
+      const intent=intentId??randomUUID(), kind=request.steeringMode==="interrupt"?"interrupt":"queue";
+      if(owner?.retainedChatIds().includes(request.chatId)){const binding=owner.textInputBinding(_event,request);return controls.ownerText(_event,binding,intent,request.userPrompt,kind).then(r=>r.result);}
+      return controls.recoveredTextBinding(_event,request).then(binding=>controls.ownerText(_event,binding,intent,request.userPrompt,kind)).then(r=>r.result);
+    }
     return invocationService.steerFromOwner(
       request, intentId, admitMainInvocation(request.chatId),
     );
@@ -7217,23 +7239,42 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("invoke:steerReceipt", (_event, input: { chatId: string; intentId: string }) => {
     assertTrustedSitePublishIpcSender(_event);
     if (!input || typeof input !== "object") throw new Error("invocation_steer_invalid_lookup");
+    const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
+    if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?.result??null);}
     return invocationService.ownerSteerReceipt(input.chatId, input.intentId);
   });
-  ipcMain.handle("invoke:cancel", (_event, runId: string) => ({
-    runId,
-    status: invocationService.cancel(runId),
-  }));
+  ipcMain.handle("invoke:cancel", async (_event, runId: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    const native = configuredNativeGuiOwner();
+    if (native && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    // Captured native starts include preauthorization/prelease preparation.
+    // The signed Stop lane never waits for start ACK or a run-owner SQL lookup.
+    if (native?.inspect(runId).retained) return { runId, status: await native.cancel(runId) };
+    const recovered = configuredNativeGuiControls();
+    if (recovered?.hasRun(runId)) return { runId, status: await recovered.cancel(_event, runId) };
+    return { runId, status: await cancelInvocationOwnerRun(runId) };
+  });
   ipcMain.handle(
     "invoke:unsteer",
-    (_event, req: { chatId: string; position: number; text: string }) =>
-      invocationService.unsteer(req.chatId, req.position, req.text),
+    (_event, req: { chatId: string; position: number; text: string }) => {
+      const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
+      if(controls&&(controls.hasChat(req.chatId)||owner?.retainedChatIds().includes(req.chatId))){const binding=owner?.retainedChatIds().includes(req.chatId)?owner.capturedTextBinding(req.chatId):controls.observedTextBinding(_event,req.chatId);return controls.ownerTextUnsteer(_event,binding,req.position,req.text);}
+      return invocationService.unsteer(req.chatId,req.position,req.text);
+    },
   );
-  ipcMain.handle("invoke:activeChats", () => invocationService.activeChatIds());
+  registerAppControlDomainIpc(ipcMain, "invoke:activeChats", () => [...new Set([...invocationService.activeChatIds(), ...combinedInvocationActiveChatIds()])]);
   // 목표가 살아 있어 턴 사이에서 다음 실행을 기다리는 대화(사이드바 혜성). 실행 권한 판단에는 안 쓴다.
-  ipcMain.handle("invoke:goalActiveChats", () => goalActiveChatIds());
-  ipcMain.handle("invoke:attach", (_event, chatId: string, options?: { includeEvents?: boolean }) =>
-    invocationService.attach(chatId, { includeEvents: options?.includeEvents !== false }));
-  ipcMain.handle("invoke:receipt", (_event, runId: string) => invocationService.receipt(runId));
+  registerAppControlDomainIpc(ipcMain, "invoke:goalActiveChats", () => goalActiveChatIds());
+  ipcMain.handle("invoke:attach", (_event, chatId: string, options?: { includeEvents?: boolean }) => {
+    const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
+    if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextAttach(_event,binding,options?.includeEvents!==false);}
+    return invocationService.attach(chatId, {includeEvents:options?.includeEvents!==false});
+  });
+  ipcMain.handle("invoke:receipt", (_event, runId: string) => {
+    const native = configuredNativeGuiControls();
+    if (native?.hasRun(runId)) return native.receipt(_event, runId);
+    return invocationService.receipt(runId);
+  });
   ipcMain.handle("invoke:admission", (_event, runId: string) => {
     assertTrustedSitePublishIpcSender(_event);
     let admission: ReturnType<typeof getInvocationAdmission> = null;
@@ -7278,11 +7319,12 @@ export function registerIpcHandlers(): void {
       ...(rejected?.promptMessageId ? { promptMessageId: rejected.promptMessageId } : {}),
     };
   });
-  ipcMain.handle("invoke:replay", (_event, input: unknown) => invocationService.replay(input));
-  ipcMain.handle("invoke:workerReport", (_event, scope) => getWorkerReport(scope));
-  ipcMain.handle("invoke:latestReceipt", (_event, chatId: string) => invocationService.latestReceipt(chatId));
-  ipcMain.handle("invoke:steeringRecovery", (_event, chatId: string) => invocationService.steeringRecovery(chatId));
-  ipcMain.handle("invoke:latestOneSurface", (_event, input: unknown) => {
+  registerAppControlDomainIpc(ipcMain, "invoke:replay", (input: unknown) => invocationService.replay(input));
+  registerAppControlDomainIpc(ipcMain, "invoke:workerReport", (scope) => getWorkerReport(scope));
+  registerAppControlDomainIpc(ipcMain, "invoke:latestReceipt", (chatId: string) => invocationService.latestReceipt(chatId));
+  ipcMain.handle("invoke:steeringRecovery", (_event, chatId: string) => {const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
+    if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextRecovery(_event,binding);}return invocationService.steeringRecovery(chatId);});
+  registerAppControlDomainIpc(ipcMain, "invoke:latestOneSurface", (input: unknown) => {
     if (
       !input ||
       typeof input !== "object" ||
@@ -7295,8 +7337,8 @@ export function registerIpcHandlers(): void {
     }
     return invocationService.latestOneSurface(input as { runId: string; chatId: string; taskId: string });
   });
-  ipcMain.handle("invoke:history", (_event, chatId: string) => invocationService.history(chatId));
-  ipcMain.handle("invoke:clearHistory", (_e, chatId: string) => {
+  registerAppControlDomainIpc(ipcMain, "invoke:history", (chatId: string) => invocationService.history(chatId));
+  registerAppControlDomainIpc(ipcMain, "invoke:clearHistory", (chatId: string) => {
     // Renderer busy는 projection일 뿐 권위가 아니다. attach가 끝나기 전의 창에서도
     // main registry가 run/cancelling을 보유하면 clear를 거부해 terminal event가
     // 빈 대화에 다시 쓰이는 race를 막는다.
@@ -7311,24 +7353,24 @@ export function registerIpcHandlers(): void {
   // ── Hephaestus 엔진 브리지 ──────────────────────────────────────────────
   // 임베딩된 오픈소스 엔진(Hephaestus)을 범용 CLI/JSON 으로 호출한다. 엔진 측에는 데스크탑
   // 흔적이 없고, 모든 연결 코드는 electron/hephaestus/* + 아래 핸들러에만 존재한다.
-  ipcMain.handle("hephaestus:status", (_e, locale?: "ko" | "en") => hephaestusAvailable(locale));
-  ipcMain.handle("hephaestus:recover", async (_e, input?: { locale?: "ko" | "en"; actionId?: string }) => {
+  registerAppControlDomainIpc(ipcMain, "hephaestus:status", (locale?: "ko" | "en") => hephaestusAvailable(locale));
+  registerAppControlDomainIpc(ipcMain, "hephaestus:recover", async (input?: { locale?: "ko" | "en"; actionId?: string }) => {
     const { recoverHephaestusRuntime } = await import("./one/hephaestus-recovery");
     return { ...(await recoverHephaestusRuntime(input)), actionId: input?.actionId ?? null };
   });
-  ipcMain.handle("hephaestus:coreAuthStatus", () => hepAuthStatus());
+  registerAppControlDomainIpc(ipcMain, "hephaestus:coreAuthStatus", () => hepAuthStatus());
   // 로그인은 브라우저를 띄우고 최대 3분 기다린다. 두 번 겹치면 Core 의 콜백 서버가
   // 포트를 두고 다투므로 하나로 직렬화한다.
-  ipcMain.handle("hephaestus:coreAuthLogin", () => {
+  registerAppControlDomainIpc(ipcMain, "hephaestus:coreAuthLogin", () => {
     if (!coreAuthLoginInFlight) {
       coreAuthLoginInFlight = hepAuthLogin().finally(() => { coreAuthLoginInFlight = null; });
     }
     return coreAuthLoginInFlight;
   });
-  ipcMain.handle("hephaestus:updateJournal", () => readHephaestusUpdateJournal());
+  registerAppControlDomainIpc(ipcMain, "hephaestus:updateJournal", () => readHephaestusUpdateJournal());
   // Serialised: two concurrent updaters would race Core's lock and the second
   // would report a misleading outcome for work the first is still doing.
-  ipcMain.handle("hephaestus:runUpdate", () => {
+  registerAppControlDomainIpc(ipcMain, "hephaestus:runUpdate", () => {
     if (!hephaestusUpdateInFlight) {
       hephaestusUpdateInFlight = runHephaestusRuntimeUpdate().finally(() => {
         hephaestusUpdateInFlight = null;
@@ -7336,32 +7378,32 @@ export function registerIpcHandlers(): void {
     }
     return hephaestusUpdateInFlight;
   });
-  ipcMain.handle("hephaestus:doctor", () => hephaestusDoctor());
-  ipcMain.handle(
-    "hephaestus:stormbreaker",
-    (_e, input: { query: string; project?: string; background?: boolean; researchEvidence?: boolean }) =>
+  registerAppControlDomainIpc(ipcMain, "hephaestus:doctor", () => hephaestusDoctor());
+  registerAppControlDomainIpc(
+    ipcMain, "hephaestus:stormbreaker",
+    (input: { query: string; project?: string; background?: boolean; researchEvidence?: boolean }) =>
       stormbreakerRun(input.query, {
         project: input.project,
         background: input.background,
         researchEvidence: input.researchEvidence,
       }),
   );
-  ipcMain.handle("hephaestus:getSupervisor", () => ({ enabled: isSupervisorEnabled() }));
-  ipcMain.handle("hephaestus:setSupervisor", (_e, enabled: boolean) => setSupervisorEnabled(enabled));
+  registerAppControlDomainIpc(ipcMain, "hephaestus:getSupervisor", () => ({ enabled: isSupervisorEnabled() }));
+  registerAppControlDomainIpc(ipcMain, "hephaestus:setSupervisor", (enabled: boolean) => setSupervisorEnabled(enabled));
   // 엔진 자동 개입 토글 — 신규 설치 기본값은 Stormbreaker OFF / hep-network Workforce ON.
-  ipcMain.handle("hephaestus:getEngineToggles", () => getEngineToggles());
-  ipcMain.handle("hephaestus:setEngineToggle", (_e, input: { id: "stormbreaker" | "network"; enabled: boolean }) =>
+  registerAppControlDomainIpc(ipcMain, "hephaestus:getEngineToggles", () => getEngineToggles());
+  registerAppControlDomainIpc(ipcMain, "hephaestus:setEngineToggle", (input: { id: "stormbreaker" | "network"; enabled: boolean }) =>
     setEngineToggle(input.id, input.enabled),
   );
-  ipcMain.handle(
-    "hephaestus:journal",
-    (_e, input: { action: "status" | "verify" | "repair" | "gate"; runId?: string; project?: string }) =>
+  registerAppControlDomainIpc(
+    ipcMain, "hephaestus:journal",
+    (input: { action: "status" | "verify" | "repair" | "gate"; runId?: string; project?: string }) =>
       stormbreakerJournal(input.action, { runId: input.runId, project: input.project }),
   );
-  ipcMain.handle("hephaestus:search", (_e, input: { query: string; limit?: number }) =>
+  registerAppControlDomainIpc(ipcMain, "hephaestus:search", (input: { query: string; limit?: number }) =>
     hepSearch(input.query, { limit: input.limit }),
   );
-  ipcMain.handle("hephaestus:network", (_e, input: { query: string; autoRun?: boolean; noOpen?: boolean }) =>
+  registerAppControlDomainIpc(ipcMain, "hephaestus:network", (input: { query: string; autoRun?: boolean; noOpen?: boolean }) =>
     hepNetwork(input.query, { autoRun: input.autoRun, noOpen: input.noOpen }),
   );
   // 추천 미리보기 — routeOnly(실행 없음)을 정규화해 추천 바텀시트에 넘긴다. 인터랙티브해야 하므로
@@ -7390,7 +7432,7 @@ export function registerIpcHandlers(): void {
       }
     },
   );
-  ipcMain.handle("hephaestus:localGui", (_e, input: { shortcut: string; detach?: boolean; noOpen?: boolean }) =>
+  registerAppControlDomainIpc(ipcMain, "hephaestus:localGui", (input: { shortcut: string; detach?: boolean; noOpen?: boolean }) =>
     localGui(input.shortcut, { detach: input.detach, noOpen: input.noOpen }),
   );
   ipcMain.handle(
@@ -7514,7 +7556,7 @@ export function registerIpcHandlers(): void {
     }
     return securityScan(folder, { strict: input.strict, ...coreProgressOptions(event, input.progressId) });
   });
-  ipcMain.handle("hephaestus:aoGraph", (_e, input?: { agent?: string; dir?: string; locale?: "ko" | "en" }) => {
+  registerAppControlDomainIpc(ipcMain, "hephaestus:aoGraph", (input?: { agent?: string; dir?: string; locale?: "ko" | "en" }) => {
     const inp = input ?? {};
     let dir: string | undefined;
     if (inp.dir != null && String(inp.dir).trim()) {
@@ -7558,9 +7600,9 @@ export function registerIpcHandlers(): void {
   // 완료 신호가 없어도 "계약이 통과했는가"는 물어볼 수 있어야 한다. 모델이 마지막
   // 한 줄을 빠뜨렸다고 완성된 패키지를 실패로 통보하는 건 사실과 다르다
   // (2026-08-17 실측: blockers 0인 패키지가 "최종 검증 완료 신호 미확인"으로 실패 처리).
-  ipcMain.handle(
-    "hephaestus:contractVerify",
-    async (_e, input: { folder: string; scope: FsReadScope; mode?: "single" | "team" | "package" }) => {
+  registerAppControlDomainIpc(
+    ipcMain, "hephaestus:contractVerify",
+    async (input: { folder: string; scope: FsReadScope; mode?: "single" | "team" | "package" }) => {
       let folder: string;
       try {
         folder = resolveFsReadPath(input.folder, input.scope);
@@ -7577,7 +7619,7 @@ export function registerIpcHandlers(): void {
     },
   );
 
-  ipcMain.handle("hephaestus:activeBuild", () => {
+  registerAppControlDomainIpc(ipcMain, "hephaestus:activeBuild", () => {
     const latest = [...buildTranscripts.values()].at(-1);
     if (!latest) return null;
     return {
@@ -7659,17 +7701,17 @@ export function registerIpcHandlers(): void {
     });
     return { runId, mcpReceipt: resolvedRequest.mcpAttachment!.receipt };
   });
-  ipcMain.handle("hephaestus:buildReady", (_e, runId: string) => {
+  registerAppControlDomainIpc(ipcMain, "hephaestus:buildReady", (runId: string) => {
     buildReadySignals.get(runId)?.();
   });
-  ipcMain.handle("hephaestus:cancelBuild", (_e, runId: string) => {
+  registerAppControlDomainIpc(ipcMain, "hephaestus:cancelBuild", (runId: string) => {
     activeBuilds.get(runId)?.abort();
     activeBuilds.delete(runId);
   });
 
   // Startup Founder Studio — 패키지 자체 런처를 spawn 해 실제 SPA 를 로컬 서빙, iframe URL 반환.
-  ipcMain.handle("hephaestus:startStudio", (_event, input?: { idea?: string }) => startStudio(input));
-  ipcMain.handle("hephaestus:stopStudio", () => {
+  registerAppControlDomainIpc(ipcMain, "hephaestus:startStudio", (input?: { idea?: string }) => startStudio(input));
+  registerAppControlDomainIpc(ipcMain, "hephaestus:stopStudio", () => {
     stopStudio();
   });
 }

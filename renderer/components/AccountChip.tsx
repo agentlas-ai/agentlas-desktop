@@ -4,13 +4,14 @@
 //
 // 세션은 main 메모리에서 가져옴 (cookie는 keytar에). 마운트 시 한 번 조회, 로그인 직후 갱신.
 "use client";
+import popupMenu from "./PanelPopover.module.css";
 import { useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import type { AuthSession } from "@/lib/types";
 import { useT } from "@/lib/i18n";
 import { useDismissibleLayer } from "@/lib/use-dismissible-layer";
 import { loadViewData, readViewData, writeViewData } from "@/lib/view-data-cache";
-import { IconChevronDown } from "./Icon";
+import { IconChevronDown, IconArrowLeft } from "./Icon";
 
 export function AccountChip() {
   const { t } = useT();
@@ -227,7 +228,7 @@ export function AccountChip() {
 
       {popoverOpen && session.signedIn && (
         <div
-          className="glass-lift"
+          role="menu" aria-label={t("account.sign_out")} className={`glass-lift ${popupMenu.panelPopover}`}
           style={{
             position: "absolute",
             bottom: "calc(100% + 6px)",
@@ -235,8 +236,9 @@ export function AccountChip() {
             right: 0,
             zIndex: 60,
             padding: 6,
-            borderRadius: 12,
-            boxShadow: "0 8px 24px rgba(11,11,15,0.12)",
+            borderRadius: "var(--popup-radius)",
+            boxShadow: "var(--popup-shadow)",
+            background: "var(--popup-card-bg)",
           }}
         >
           {session.email && (
@@ -252,9 +254,9 @@ export function AccountChip() {
             </div>
           )}
           <button
-            onClick={() => void signOut()}
+            role="menuitem" onClick={() => void signOut()}
             style={{
-              display: "block",
+              display: "flex", alignItems: "center", gap: 8,
               width: "100%",
               padding: "8px 10px",
               background: "transparent",
@@ -267,7 +269,7 @@ export function AccountChip() {
               cursor: "pointer",
             }}
           >
-            {t("account.sign_out")}
+            <IconArrowLeft size={15} />{t("account.sign_out")}
           </button>
         </div>
       )}

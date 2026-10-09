@@ -11,6 +11,7 @@ import type {
   SitePublishProvider,
   SitePublishProviderPage,
 } from "@shared/site-studio";
+import { IconFileUp, IconCpu } from "@/components/Icon";
 import styles from "./SitePublishDialog.module.css";
 
 type Props = {
@@ -380,8 +381,8 @@ export function SitePublishDialog({ project, locale, onClose, onPublished }: Pro
         <div className={styles.body}>
           <section className={styles.section}>
             <div className={styles.sectionHeading}>
-              <span>01</span>
-              <div><h3>{ko ? "호스팅 선택" : "Choose hosting"}</h3><p>{ko ? "계정 생성과 약관 동의는 Provider 화면에서 직접 진행합니다." : "Account creation and terms stay on the provider surface."}</p></div>
+              <span><IconFileUp size={16} /></span>
+              <div><h3>{ko ? "호스팅 선택" : "Choose hosting"}</h3><details><summary>{ko ? "계정 안내" : "Account details"}</summary><p>{ko ? "계정 생성과 약관 동의는 Provider 화면에서 직접 진행합니다." : "Account creation and terms stay on the provider surface."}</p></details></div>
             </div>
             <div className={styles.providerGrid} role="tablist" aria-label={ko ? "호스팅 Provider" : "Hosting provider"}>
               {PROVIDERS.map((entry) => {
@@ -467,7 +468,7 @@ export function SitePublishDialog({ project, locale, onClose, onPublished }: Pro
 
           <section className={styles.section}>
             <div className={styles.sectionHeading}>
-              <span>02</span>
+              <span><IconCpu size={16} /></span>
               <div><h3>{ko ? "LLM 연결" : "Connect the LLM"}</h3><p>{provider === "render"
                 ? (ko ? "모델 provider만 선택합니다. Agentlas는 Render 배포에서 저장된 LLM 키나 app access key를 읽거나 전송하지 않습니다." : "Choose the model provider only. Agentlas never reads or transfers an LLM key or app access key to Render.")
                 : (ko ? "키는 브라우저 번들에 들어가지 않고 서버 secret으로만 배포됩니다." : "The key stays out of the browser bundle and is deployed only as a server secret.")}</p></div>

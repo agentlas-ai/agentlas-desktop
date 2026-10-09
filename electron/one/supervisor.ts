@@ -1,3 +1,4 @@
+import { supervisorError } from "../../shared/one-supervisor";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
 import { getDb, openedStoreMigrationRole } from "../store/db";
 import { getOneProfile, getOneProfileOrigin, updateOneProfile } from "../store/one-profile";
@@ -11,7 +12,7 @@ import { invocationService } from "../invocation/service";
 import { admitMainInvocation } from "../runtime/scheduled-root-context";
 import { currentUiLocale } from "../ui-locale";
 import { OneSupervisorStore, supervisorHash, personalSupervisorConversationInDb, supervisorStoppedGoalForTask } from "./supervisor-store";
-import { OneSupervisorService } from "./supervisor-service";
+import { OneSupervisorService, type SupervisorRuntime } from "./supervisor-service";
 import { SupervisorScienceAdapter } from "./supervisor-science";
 import { supervisorExactResult, supervisorQuietRun, supervisorReplyTurns } from "./supervisor-presentation";
 import { onAskUserLifecycle } from "../confirm/ask-user";
@@ -21,12 +22,38 @@ import type { ScienceDaemonClient } from "../science-host/daemon-client";
 import type { SupervisorTask, SupervisorHostNoticePurpose } from "../../shared/one-supervisor";
 import { OneSupervisorWorkQueue } from "./supervisor-work-queue";
 import { OneSupervisorWorkExecutor } from "./supervisor-work-executor";
+import { OneSupervisorOwner } from "./supervisor-owner";
+import {OneBudgetStore} from "./budget-store";
+import {OneBudgetRuntime} from "./budget-runtime";
+import { createSupervisorNativeRuntime, oneSupervisorNativeRuntime, startSupervisorPreparedInvocation } from "./supervisor-native-runtime";
+import { invocationRunOwners, invocationProcessOwner } from "../store/invocation-run-owners";
 import { assertDesktopLongRunAdmissionOpen, desktopAppInstanceId, registerAppRuntimeParticipant } from "../long-run/app-runtime-coordinator";
 
+interface SupervisorHostOptions { ownerKind:'desktop-main'|'work-daemon';ownerEpoch:string;assertAuthority():void }
+let hostOptions:SupervisorHostOptions|undefined;
+let hostOwner:OneSupervisorOwner|null=null;
+let stopProactiveHost:(()=>void)|undefined;
+let stopBudgetHost:(()=>void)|undefined;
 let supervisor:OneSupervisorService|null=null;
+export function configureOneSupervisorDaemonHost(options:SupervisorHostOptions):void {
+  if(supervisor || options.ownerKind!=='work-daemon')throw supervisorError('supervisor_host_already_initialized');
+  options.assertAuthority();hostOptions=options;
+}
+export function closeOneSupervisorHostAdmission():void {
+  hostOwner?.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();supervisor?.close();nativeRuntime?.close();
+}
+export function supervisorRunsInDaemon():boolean { return hostOptions?.ownerKind==='work-daemon'; }
+export function prepareOneSupervisorDaemonHandoff():{oneId:string;ownerEpoch:string;generation:number}|null {
+  if(!supervisor || !hostOwner)return null;
+  if(hostOptions || invocationService.activeChatIds().length || nativeRuntime?.pendingCount || oneSupervisorNativeRuntime()?.owner.retainedCount)return null;
+  const token=hostOwner.current();if(!token || token.phase!=='active')return null;
+  hostOwner.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();supervisor.close();nativeRuntime?.close();hostOwner.release();
+  return {oneId:token.oneId,ownerEpoch:token.ownerEpoch,generation:token.generation};
+}
 let science:SupervisorScienceAdapter|undefined;
 let workExecutor: OneSupervisorWorkExecutor | null = null;
-export function configureOneSupervisorScience(client:ScienceDaemonClient):void {
+let nativeRuntime: ReturnType<typeof createSupervisorNativeRuntime> | null = null;
+export function configureOneSupervisorScience(client:Pick<ScienceDaemonClient,"commandObserved">):void {
   science=new SupervisorScienceAdapter(client);
 }
 export function isPersonalSupervisorConversation(chatId:string):boolean {
@@ -42,36 +69,54 @@ function desktopTasks():SupervisorTask[] {
     const goalId=chat.goalId ?? supervisorStoppedGoalForTask(getDb(),task.id,receipt?.runId ?? null);
     const goal=goalId ? getLongRunByGoalId(goalId) : null;
     const state=goal?.status ?? receipt?.status ?? task.status;
-    const active=!!invocationService.attach(chat.id,{includeEvents:false});
+    const nativeOwner=invocationRunOwners.getActiveOwner(chat.id);
+    const active=!!invocationService.attach(chat.id,{includeEvents:false}) || !!nativeRuntime?.attach(chat.id);
     const result=supervisorExactResult(getDb(),chat.id,receipt?.runId ?? null)?.text ?? null;
     return [{taskId:task.id,surface:chat.originSurface === "one" ? "one" as const : "work" as const,title:task.title,
       chatId:chat.id,projectId:chat.projectId,goalId:goal?.goalId ?? null,runId:receipt?.runId ?? null,state,
       controlVersion:supervisorHash([task.id,state,receipt?.runId,goal?.goalId,goal?.status,goal?.version]),observedAt:goal?.updatedAt ?? receipt?.updatedAt ?? task.updatedAt,
-      owner:"desktop-main" as const,controls:!["cancelling","cancelled","completed","paused","pausing","failed"].includes(state)
+      owner:nativeOwner?.ownerKind==="daemon" ? "work-daemon" as const : "desktop-main" as const,controls:!["cancelling","cancelled","completed","paused","pausing","failed"].includes(state)
         ? active ? ["steer" as const,"cancel" as const] : goal ? ["cancel" as const] : [] : [],
       result,resultVerified:!!result && task.status==="completed" && receipt?.status==="completed" && hasPassedTaskForceExecutionVerification(receipt.runId)}];
   });
 }
 export function oneSupervisor():OneSupervisorService {
   if (supervisor) return supervisor;
+  if(!hostOptions && invocationProcessOwner().ownerKind==="daemon")throw Object.assign(supervisorError('supervisor_daemon_domain_not_adopted'),{code:"supervisor_daemon_domain_not_adopted"});
   const legacy=new OneSupervisorLegacyMigration(getDb());
   const store = new OneSupervisorStore(getDb());
-  // Main is the only process that runs Work, so it hosts the Work queue and executor whatever its store role.
-  // With a compatible daemon alive (the ordinary installed state) Main opens the store as a follower
-  // (initializeDesktopStore). Gating the executor on "owner" left every hand-off queued forever: QA,
-  // 2026-10-04, a QA daemon started first and One's Work sat "stored" for 10 minutes. The queue tables are
-  // additive (CREATE IF NOT EXISTS), so Main creates them in either role; the daemon never does.
+  const owner = new OneSupervisorOwner(getDb(),{ownerEpoch:hostOptions?.ownerEpoch ?? desktopAppInstanceId(),ownerKind:hostOptions?.ownerKind ?? 'desktop-main'});
+  hostOptions?.assertAuthority();hostOwner=owner;
+  owner.assert(getOneProfile().oneId);
+  if(!hostOptions)nativeRuntime=createSupervisorNativeRuntime({store,owner,identity:()=>getOneProfile().oneId,receipt:runId=>invocationService.receipt(runId)});
+  const attach=(chatId:string)=>nativeRuntime?.attach(chatId) ?? invocationService.attach(chatId,{includeEvents:false});
+  const receipt=(runId:string)=>nativeRuntime?.receipt(runId) ?? invocationService.receipt(runId);
+  const onSettled:SupervisorRuntime["onSettled"]=listener=>{const local=invocationService.onSettled(listener),native=nativeRuntime?.onSettled(listener);return ()=>{local();native?.();};};
+  // Schema migration role does not confer execution authority. The fenced
+  // Supervisor domain owner alone may run the durable queue in either host.
   const hostsWork = openedStoreMigrationRole() !== null;
   const workQueue = new OneSupervisorWorkQueue(getDb(), hostsWork);
+  const assertBudgetOwner=(oneId:string)=>{
+    hostOptions?.assertAuthority();
+    if(oneId!==getOneProfile().oneId)throw supervisorError("supervisor_budget_identity_changed");
+    owner.assert(oneId,true);
+  };
+  const budget=new OneBudgetStore(getDb(),assertBudgetOwner);
+  const budgetRuntime=new OneBudgetRuntime({budget,store,oneId:()=>getOneProfile().oneId,assertOwner:()=>assertBudgetOwner(getOneProfile().oneId),receipt});
   const startNative = (req: Parameters<typeof invocationService.start>[0], hostNoticePurpose?: SupervisorHostNoticePurpose) => {
+    hostOptions?.assertAuthority();owner.assert(getOneProfile().oneId);
     if (req.runtimeSelection) req={...req,runtimeSelection:normalizeChatRuntimeSelection(req.runtimeSelection) ?? undefined};
     // The target's persisted surface owns its execution contract. A handoff into
     // an existing One room must not accidentally enter the Work-only route.
     if (getChat(req.chatId)?.originSurface === "one") req={...req,oneMode:true,onePermissionMode:req.onePermissionMode ?? req.permissions};
-    return invocationService.start(req,undefined,undefined,undefined,hostNoticePurpose,admitMainInvocation(req.chatId,req.runId));
+    return budgetRuntime.dispatch(req,()=>{
+      if(hostOptions){hostOptions.assertAuthority();return startSupervisorPreparedInvocation({store,owner,oneId:getOneProfile().oneId,request:req,purpose:hostNoticePurpose,epoch:hostOptions.ownerEpoch});}
+      if(oneSupervisorNativeRuntime())return nativeRuntime!.start(req,hostNoticePurpose);
+      return invocationService.start(req,undefined,undefined,undefined,hostNoticePurpose,admitMainInvocation(req.chatId,req.runId));
+    });
   };
   supervisor=new OneSupervisorService({
-    store,identity:getOneProfile,workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>workExecutor?.kick(),
+    store,owner,budget,identity:getOneProfile,assertAuthority:()=>hostOptions?.assertAuthority(),workQueue,workIdentityMutable:hostsWork,wakeWorkQueue:()=>workExecutor?.kick(),
     createConversation:()=>createChat({originSurface:"one",taskMode:"conversation",title:getOneProfile().displayName}).id,
     history:chatId=>listChatMessages(chatId,100),appendUser:(chatId,text,images)=>{
       const groupId=/<!-- agentlas-chat-files:v1:([0-9a-f-]{36}) -->/i.exec(text)?.[1];
@@ -80,10 +125,10 @@ export function oneSupervisor():OneSupervisorService {
       return appendChatMessage(chatId,"user",text,allImages.length ? {images:allImages} : undefined).id;
     },attachmentPrompt:chatFilePrompt,
     createWork:input=>{
-      if (input.projectId && !getProject(input.projectId)) throw new Error("supervisor_work_project_missing");
+      if (input.projectId && !getProject(input.projectId)) throw supervisorError('supervisor_work_project_missing');
       const chat=createChat({originSurface:"work",taskMode:"task",projectId:input.projectId,title:input.text.split(/\r?\n/,1)[0].slice(0,120)});
       const task=ensureCanonicalTaskForChat(chat.id);
-      if (!task) throw new Error("supervisor_work_task_missing");
+      if (!task) throw supervisorError('supervisor_work_task_missing');
       // The native Work invocation persists its own human input once. The
       // atomic supervisor request already durably owns this brief before dispatch.
       return {chatId:chat.id,taskId:task.id};
@@ -92,12 +137,12 @@ export function oneSupervisor():OneSupervisorService {
     appearance:input=>{updateOneProfile({expectedVersion:input.expectedVersion,patch:{displayName:input.displayName,bubbleColor:input.bubbleColor}});},
     legacyHistory:(oneId,chatId)=>legacy.inventory(oneId,chatId,new Set(invocationService.activeChatIds()),['inherited','machine'].includes(getOneProfileOrigin())),
     runtime:{
-      start:startNative,attach:chatId=>invocationService.attach(chatId,{includeEvents:false}),receipt:runId=>invocationService.receipt(runId),
-      cancel:runId=>invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>invocationService.pauseGoal(chatId,goalId),
+      start:startNative,attach,receipt,
+      cancel:runId=>!hostOptions && (invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' || nativeRuntime?.ownsPending(runId)) ? nativeRuntime!.cancel(runId) : invocationService.cancel(runId),pauseGoal:(chatId,goalId)=>invocationService.pauseGoal(chatId,goalId),
       cancelGoal:(chatId,goalId)=>invocationService.deleteGoal(chatId,goalId),
-      steer:(req,runId)=>invocationService.steerFromSupervisor(req,runId,admitMainInvocation(req.chatId)),
+      steer:(req,runId)=>!hostOptions && invocationRunOwners.getOwnerByRunId(runId)?.ownerKind==='daemon' ? nativeRuntime!.steer(req,runId) : invocationService.steerFromSupervisor(req,runId,admitMainInvocation(req.chatId)),
       steerState:id=>queuedSteerState(id),
-      onSettled:listener=>invocationService.onSettled(listener),
+      onSettled,
     },science:{
       tasks:()=>{if(!science) return Promise.reject(new Error("science_daemon_unavailable"));return science.tasks();},
       projects:()=>science?.projects() ?? [],
@@ -105,16 +150,23 @@ export function oneSupervisor():OneSupervisorService {
       control:(input,task)=>{if(!science) return Promise.reject(new Error("science_daemon_unavailable"));return science.control(input,task);},
     },
   });
+  const observeBudget=(runId?:string,nativeReceipt?:ReturnType<typeof receipt>)=>{
+    try{if(runId)budgetRuntime.reconcileRun(runId,nativeReceipt);else budgetRuntime.reconcile();}
+    catch(error){console.warn("[one-supervisor] usage reconciliation pending",error instanceof Error?error.message:"unknown");}
+  };
+  const stopBudgetEvents=onSettled(event=>observeBudget(event.runId,event.receipt));
+  const budgetTimer=setInterval(()=>observeBudget(),30_000);budgetTimer.unref?.();
+  stopBudgetHost=()=>{clearInterval(budgetTimer);stopBudgetEvents();};
+  observeBudget();
   supervisor.recover();
   if (hostsWork) {
     workExecutor = new OneSupervisorWorkExecutor({store,queue:workQueue,
-    ownerEpoch:desktopAppInstanceId(),ownerKind:"desktop-main",locale:currentUiLocale,
-    assertOwner:()=>{assertDesktopLongRunAdmissionOpen();workQueue.setActiveIdentity(getOneProfile().oneId);},
+    ownerEpoch:hostOptions?.ownerEpoch ?? desktopAppInstanceId(),ownerKind:hostOptions?.ownerKind ?? "desktop-main",locale:currentUiLocale,
+    assertOwner:()=>{if(hostOptions)hostOptions.assertAuthority();else assertDesktopLongRunAdmissionOpen();owner.assert(getOneProfile().oneId);workQueue.setActiveIdentity(getOneProfile().oneId);},
     assertBinding:job=>{
       const chat=getChat(job.chat_id),task=getCanonicalTaskForChat(job.chat_id);
-      if (!chat || chat.originSurface!=="work" || chat.kind!=="user" || task?.id!==job.task_id) throw new Error("supervisor_work_native_binding_changed");
-    },runtime:{start:startNative,attach:chatId=>invocationService.attach(chatId,{includeEvents:false}),
-      receipt:runId=>invocationService.receipt(runId),onSettled:listener=>invocationService.onSettled(listener)},
+      if (!chat || chat.originSurface!=="work" || chat.kind!=="user" || task?.id!==job.task_id) throw supervisorError('supervisor_work_native_binding_changed');
+    },runtime:{start:startNative,attach,receipt,onSettled},
     onFailure:error=>console.warn("[one-supervisor] worker admission deferred",error instanceof Error ? error.message : "unknown"),
   });
   // Dots parity (owner 2026-10-04): One speaks first on a check-in it was asked to run, or when a worker it
@@ -132,9 +184,11 @@ export function oneSupervisor():OneSupervisorService {
   });
   // Host problems from other rooms reach the owner through One, not only as cards there (owner 2026-10-05).
   const stopHostAlerts=registerOneHostAlertSink(alert=>supervisor?.hostNeedsOwner(alert) ?? false);
-  const stopProactive=()=>{clearInterval(checkinTimer);stopQuestions();stopHostAlerts();};
+  const stopProactive=()=>{clearInterval(checkinTimer);stopQuestions();stopHostAlerts();};stopProactiveHost=stopProactive;
   registerAppRuntimeParticipant("one-supervisor-work-queue", {
-    closeAdmission:()=>{workExecutor?.close();stopProactive();},interrupt:()=>{workExecutor?.close();stopProactive();},isSettled:()=>true,
+    closeAdmission:()=>{owner.closeAdmission();workExecutor?.close();stopProactive();},
+    interrupt:()=>{owner.closeAdmission();workExecutor?.close();stopProactive();},
+    isSettled:()=>{if(invocationService.activeChatIds().length)return false;stopBudgetHost?.();owner.release();supervisor?.close();nativeRuntime?.close();return true;},
   });
   workExecutor.start();
   fireCheckins(); // a check-in due while the app was closed runs once now

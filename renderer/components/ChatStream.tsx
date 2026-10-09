@@ -3,6 +3,9 @@ import { MessageActions } from "./MessageActions";
 import { displayMessageReply, type MessageReply } from "@/lib/message-reply";
 import type { GoalResultPresentation } from "../../shared/goal-result";
 import { VisualChatScope } from "@/lib/visual-artifacts";
+import { IntellectUiActions, hasIntellectUiFence, type IntellectUiFollowup } from "@/lib/intellect-ui-actions";
+import { mapIntellectUiProse } from "@shared/intellect-ui";
+import { snapMarkdownAnchor } from "@shared/streaming-segments";
 import { GoalResultReport } from "./GoalResultReport";
 import type { ChatHostNotice } from "../../shared/types";
 import { normalizeChatHostNotice } from "../../shared/chat-host-notice";
@@ -10,7 +13,7 @@ import { HostContinuationNotice } from "./HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "./automation/AutomationChatActivity";
 // 메시지 스트림 렌더 — agent 메시지는 Markdown으로, 사용자 메시지는 plain.
 // 작업 중 메시지는 Codex/Claude 데스크톱처럼 step log + 경과 시간을 실시간으로 보여준다.
-import { Fragment, createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { Fragment, createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import type { HubAgentBookmark, InstalledAgent, InstalledFirm, InstalledMcpServer, Project } from "@/lib/types";
 import { hubBookmarksWithoutLocalDuplicates } from "@/lib/hub-bookmark-events";
 import { AgentAvatar } from "./AgentAvatar";
@@ -206,6 +209,8 @@ export interface StreamActivityRun {
 }
 
 export interface StreamMessage {
+  /** Renderer identity retained across an exact durable transcript match. */
+  intellectUiMessageId?: string;
   goalResult?: GoalResultPresentation;
   hostNotice?: ChatHostNotice;
   id: string;
@@ -299,6 +304,9 @@ function messageDomId(messageId: string): string {
   return `chat-message-${encodeURIComponent(messageId)}`;
 }
 
+const CHAT_HISTORY_PAGE_SIZE = 24;
+const CHAT_OUTLINE_PAGE_SIZE = 24;
+
 export function ChatStream({
   messages,
   agentName,
@@ -317,8 +325,12 @@ export function ChatStream({
   workspaceRoot,
   focusMessageId,
   onReply,
+  onUiFollowup,
+  interactionBusy,
+  stopRequested,
 }: {
   onReply?: (reply: MessageReply) => void;
+  onUiFollowup?: IntellectUiFollowup;
   messages: StreamMessage[];
   agentName: string;
   agentTone: InstalledAgent["tone"];
@@ -345,6 +357,11 @@ export function ChatStream({
   focusMessageId?: string | null;
 }) {
   const { t, locale } = useT();
+  const uiActionsDisabled = Boolean(interactionBusy || stopRequested || messages.some(message => message.busy || message.streaming));
+  const uiActions = useMemo(() => ({
+    prepareFollowup: onUiFollowup,
+    disabled: uiActionsDisabled,
+  }), [onUiFollowup, uiActionsDisabled]);
   const scrollRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   const scrollingToBottomRef = useRef(false);
@@ -354,6 +371,12 @@ export function ChatStream({
    * 공통). 고정은 그 답이 끝나거나 사람이 직접 스크롤하면 풀린다.
    */
   const pinnedUserMessageRef = useRef<string | null>(null);
+  const pinnedUserViewportRef = useRef<{ id: string; offset: number } | null>(null);
+  const clearUserPin = useCallback(() => {
+    pinnedUserMessageRef.current = null;
+    pinnedUserViewportRef.current = null;
+    if (scrollRef.current) scrollRef.current.style.overflowAnchor = "";
+  }, []);
   const [awayFromBottom, setAwayFromBottom] = useState(false);
   const [hasOverflow, setHasOverflow] = useState(false);
   const [hasNewContent, setHasNewContent] = useState(false);
@@ -362,15 +385,103 @@ export function ChatStream({
     ? `${messages.length}:${last.id}:${last.text.length}:${last.busy ? 1 : 0}:${last.streaming ? 1 : 0}:${last.steps?.length ?? 0}`
     : "empty";
   const previousScrollSignalRef = useRef(scrollSignal);
-  const hasFocusMessage = Boolean(
-    focusMessageId && messages.some((message) => message.id === focusMessageId),
-  );
+  const previousTailRef = useRef({ id: last?.id, count: messages.length });
+  const [historyWindow, setHistoryWindow] = useState<{ scope?: string; firstId: string; lastId: string } | null>(null);
+  const scopedWindow = historyWindow?.scope === artifactChatId ? historyWindow : null;
+  const firstIndex = scopedWindow ? messages.findIndex(message => message.id === scopedWindow.firstId) : -1;
+  const lastIndex = scopedWindow ? messages.findIndex(message => message.id === scopedWindow.lastId) : -1;
+  const historyStart = firstIndex >= 0 && lastIndex >= firstIndex ? firstIndex : Math.max(0, messages.length - CHAT_HISTORY_PAGE_SIZE);
+  const historyEnd = firstIndex >= 0 && lastIndex >= firstIndex ? lastIndex + 1 : messages.length;
+  const visibleMessages = useMemo(() => messages.slice(historyStart, historyEnd), [messages, historyStart, historyEnd]);
+  const hasLaterHistory = historyEnd < messages.length;
+  const historyAnchorRef = useRef<{ id: string; top: number } | null>(null);
+  const pendingJumpRef = useRef<string | null>(null);
+  const messagesRef = useRef(messages);
+  const scopeRef = useRef(artifactChatId);
+  useLayoutEffect(() => { messagesRef.current = messages; scopeRef.current = artifactChatId; });
+  const handledFocusRef = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    setHistoryWindow(null);
+    historyAnchorRef.current = null;
+    pendingJumpRef.current = null;
+    handledFocusRef.current = null;
+    clearUserPin();
+    previousTailRef.current = { id: last?.id, count: messages.length };
+    stickToBottomRef.current = true;
+    scrollingToBottomRef.current = false;
+    setAwayFromBottom(false);
+    setHasNewContent(false);
+  }, [artifactChatId]);
+  useLayoutEffect(() => {
+    const anchor = historyAnchorRef.current;
+    historyAnchorRef.current = null;
+    const el = scrollRef.current;
+    const target = anchor && document.getElementById(messageDomId(anchor.id));
+    if (el && target) el.scrollTop += target.getBoundingClientRect().top - anchor!.top;
+    const jumpId = pendingJumpRef.current;
+    if (!jumpId) return;
+    pendingJumpRef.current = null;
+    const jump = document.getElementById(messageDomId(jumpId));
+    jump?.scrollIntoView({ block: "center", behavior: "auto" });
+    jump?.focus({ preventScroll: true });
+  }, [historyStart, historyEnd, artifactChatId, historyWindow]);
+  const jumpToPrompt = useCallback((id: string) => {
+    const rows = messagesRef.current;
+    const targetIndex = rows.findIndex(message => message.id === id);
+    if (targetIndex < 0) return;
+    const start = Math.max(0, Math.min(targetIndex - Math.floor(CHAT_HISTORY_PAGE_SIZE / 2), rows.length - CHAT_HISTORY_PAGE_SIZE));
+    const end = Math.min(rows.length, start + CHAT_HISTORY_PAGE_SIZE);
+    clearUserPin();
+    stickToBottomRef.current = false;
+    scrollingToBottomRef.current = false;
+    pendingJumpRef.current = id;
+    setAwayFromBottom(true);
+    setHasNewContent(false);
+    setHistoryWindow({ scope: scopeRef.current, firstId: rows[start].id, lastId: rows[end - 1].id });
+  }, [clearUserPin]);
+  useLayoutEffect(() => {
+    const anchor = pinnedUserViewportRef.current;
+    const el = scrollRef.current;
+    if (!anchor || !el || pinnedUserMessageRef.current !== anchor.id) return;
+    const row = document.getElementById(messageDomId(anchor.id));
+    if (row) el.scrollTop += row.getBoundingClientRect().top - el.getBoundingClientRect().top - anchor.offset;
+  }, [messages, historyStart, historyEnd, artifactChatId]);
+  const hasFocusMessage = Boolean(focusMessageId && messages.some(message => message.id === focusMessageId));
+  function revealHistory(direction: "earlier" | "later") {
+    const el = scrollRef.current;
+    const anchor = el?.querySelector<HTMLElement>("[data-chat-message-id]");
+    if (anchor) historyAnchorRef.current = { id: anchor.dataset.chatMessageId!, top: anchor.getBoundingClientRect().top };
+    const start = direction === "earlier" ? Math.max(0, historyStart - CHAT_HISTORY_PAGE_SIZE) : historyStart;
+    const end = direction === "later" ? Math.min(messages.length, historyEnd + CHAT_HISTORY_PAGE_SIZE) : historyEnd;
+    if (start === end) return;
+    stickToBottomRef.current = false;
+    clearUserPin();
+    setHistoryWindow({ scope: artifactChatId, firstId: messages[start].id, lastId: messages[end - 1].id });
+  }
 
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const contentChanged = previousScrollSignalRef.current !== scrollSignal;
     previousScrollSignalRef.current = scrollSignal;
+    const previousTail = previousTailRef.current;
+    const priorTailStillInPlace = previousTail.count > 0
+      && messages[previousTail.count - 1]?.id === previousTail.id;
+    const startsLiveConversation = previousTail.count === 0 && Boolean(last?.busy || last?.streaming);
+    const appendedUser = messages.length > previousTail.count && (priorTailStillInPlace || startsLiveConversation)
+      ? [...messages.slice(previousTail.count)].reverse().find(message => message.role === "user")
+      : undefined;
+    previousTailRef.current = { id: last?.id, count: messages.length };
+    if (appendedUser) {
+      // A newly sent prompt must be visible even while an older page is inspected.
+      setHistoryWindow(null);
+      historyAnchorRef.current = null;
+      pendingJumpRef.current = null;
+      stickToBottomRef.current = true;
+      scrollingToBottomRef.current = false;
+      clearUserPin();
+      pinnedUserMessageRef.current = appendedUser.id;
+    }
 
     if (messages.length === 0) {
       stickToBottomRef.current = true;
@@ -383,7 +494,7 @@ export function ChatStream({
 
     const responding = Boolean(last && last.role !== "user" && (last.busy || last.streaming));
     if (contentChanged && last?.role === "user" && stickToBottomRef.current) pinnedUserMessageRef.current = last.id;
-    else if (!responding && last?.role !== "user") pinnedUserMessageRef.current = null;
+    else if (!responding && last?.role !== "user") clearUserPin();
     const pinnedId = pinnedUserMessageRef.current;
     const pinnedActive = Boolean(pinnedId && (last?.role === "user" || responding));
 
@@ -402,7 +513,11 @@ export function ChatStream({
     const handle = window.requestAnimationFrame(() => {
       const pinned = pinnedActive && pinnedId ? document.getElementById(messageDomId(pinnedId)) : null;
       if (pinned) {
+        el.style.overflowAnchor = "none";
         el.scrollTop += pinned.getBoundingClientRect().top - el.getBoundingClientRect().top - 12;
+        // The initial scroll can clamp at the bottom while the answer is empty.
+        // Retain the position actually reached, rather than chasing the requested 12px.
+        pinnedUserViewportRef.current = { id: pinnedId!, offset: pinned.getBoundingClientRect().top - el.getBoundingClientRect().top };
         // 이 뒤로는 바닥을 따라가지 않는다: 답이 자라도 내 메시지가 그 자리에 남는다.
         stickToBottomRef.current = false;
         return;
@@ -410,34 +525,17 @@ export function ChatStream({
       el.scrollTop = el.scrollHeight;
     });
     return () => window.cancelAnimationFrame(handle);
-  }, [messages.length, scrollSignal]);
+  }, [messages.length, scrollSignal, historyStart, historyEnd]);
 
   /*
    * 딥링크 초점은 한 번만 — focus 는 URL 에 남아 있고 hasFocusMessage 는 기록이 재수화될 때마다 다시 참이 되어,
    * "맨 아래로"를 눌러도 옛 메시지로 되돌아갔다(페르소나 루프 라운드 2, 긴 대화 실측).
    */
-  const handledFocusRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!focusMessageId || !hasFocusMessage) return;
-    if (handledFocusRef.current === focusMessageId) return;
+    if (!focusMessageId || !hasFocusMessage || handledFocusRef.current === focusMessageId) return;
     handledFocusRef.current = focusMessageId;
-    stickToBottomRef.current = false;
-    scrollingToBottomRef.current = false;
-    setHasNewContent(false);
-    const handle = window.requestAnimationFrame(() => {
-      const target = document.getElementById(messageDomId(focusMessageId));
-      if (!target) return;
-      target.scrollIntoView({
-        block: "center",
-        behavior: window.matchMedia?.("(prefers-reduced-motion: reduce)").matches
-          ? "auto"
-          : "smooth",
-      });
-      target.focus({ preventScroll: true });
-      setAwayFromBottom(true);
-    });
-    return () => window.cancelAnimationFrame(handle);
-  }, [focusMessageId, hasFocusMessage]);
+    jumpToPrompt(focusMessageId);
+  }, [artifactChatId, focusMessageId, hasFocusMessage, jumpToPrompt]);
 
   function handleScroll() {
     const el = scrollRef.current;
@@ -445,20 +543,34 @@ export function ChatStream({
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     const overflow = el.scrollHeight - el.clientHeight > 96;
     setHasOverflow(overflow);
-    const atBottom = distanceFromBottom < 96;
+    const atBottom = !hasLaterHistory && distanceFromBottom < 96;
+    if (pinnedUserViewportRef.current) {
+      // A programmatic pin that clamped at the bottom is still a pin. Only
+      // an actual user gesture, explicit navigation, or terminal reply releases it.
+      stickToBottomRef.current = false;
+      setAwayFromBottom(false);
+      return;
+    }
     if (scrollingToBottomRef.current && !atBottom) return;
     scrollingToBottomRef.current = false;
     stickToBottomRef.current = atBottom;
-    if (atBottom) pinnedUserMessageRef.current = null;
+    if (atBottom) clearUserPin();
     setAwayFromBottom(!atBottom && !pinnedUserMessageRef.current);
     if (atBottom) setHasNewContent(false);
   }
 
-  function cancelProgrammaticScroll() {
+  function cancelProgrammaticScroll(event: { type: string; target: EventTarget | null }) {
     // A wheel/touch/pointer gesture during smooth scrolling is an explicit
     // user takeover. Let the following scroll event recompute stickiness;
     // otherwise scrollingToBottomRef can stay true forever after interruption.
     scrollingToBottomRef.current = false;
+    if (event.type === "pointerdown" && event.target instanceof Element
+      && event.target.closest("button,a,input,textarea,select")) return;
+    stickToBottomRef.current = false;
+    clearUserPin();
+    if (visibleMessages.length) setHistoryWindow(current => current?.scope === artifactChatId ? current : {
+      scope: artifactChatId, firstId: visibleMessages[0].id, lastId: visibleMessages.at(-1)!.id,
+    });
   }
 
   // 아웃라인 레일 입력 — 사용자 프롬프트는 스트리밍으로 변하지 않으므로, 내용이
@@ -473,25 +585,25 @@ export function ChatStream({
     outlinePromptsRef.current = next;
     return next;
   }, [messages]);
-  const jumpToPrompt = useCallback((id: string) => {
-    const node = document.getElementById(messageDomId(id));
-    node?.scrollIntoView({ behavior: "smooth", block: "start" });
-  }, []);
 
   function scrollToLatest() {
     const el = scrollRef.current;
     if (!el) return;
+    const scope = artifactChatId;
     const reduceMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    setHistoryWindow(null);
+    pendingJumpRef.current = null;
+    historyAnchorRef.current = null;
     stickToBottomRef.current = true;
     scrollingToBottomRef.current = !reduceMotion;
-    pinnedUserMessageRef.current = null;
+    clearUserPin();
     setHasNewContent(false);
-    if (reduceMotion) {
-      el.scrollTop = el.scrollHeight;
-      setAwayFromBottom(false);
-      return;
-    }
-    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    setAwayFromBottom(false);
+    window.requestAnimationFrame(() => {
+      if (scrollRef.current !== el || scopeRef.current !== scope) return;
+      if (reduceMotion) el.scrollTop = el.scrollHeight;
+      else el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    });
   }
 
   useEffect(() => {
@@ -518,7 +630,7 @@ export function ChatStream({
   // streamed token retained a burst of callbacks and caused avoidable renderer
   // churn during long answers; only a row-count change can replace the first
   // observed child.
-  }, [messages.length]);
+  }, [historyStart, historyEnd]);
 
   return (
     <WorkspaceRootContext.Provider value={workspaceRoot}>
@@ -532,7 +644,7 @@ export function ChatStream({
         display: "flex",
       }}
     >
-      <ChatOutlineRail prompts={outlinePrompts} onJump={jumpToPrompt} />
+      <ChatOutlineRail key={artifactChatId ?? "new-chat"} prompts={outlinePrompts} onJump={jumpToPrompt} />
       <div
         ref={scrollRef}
         onScroll={handleScroll}
@@ -562,15 +674,22 @@ export function ChatStream({
           <EmptyChatState agentName={agentName} directory={emptyDirectory} />
         )}
         <VisualChatScope.Provider value={artifactChatId ?? null}>
-        {messages.map((m, index) => (
-          <MessageActions key={m.id} messageId={m.id} author={m.role === "user" ? (locale === "ko" ? "나" : "You") : agentName} text={displayMessageReply(m.role === "user" ? m.text : userFacingAssistantText(m.text, Boolean(m.streaming)), locale)} locale={locale} onReply={onReply}>
+        <IntellectUiActions.Provider value={uiActions}>
+        {historyStart > 0 && <button type="button" data-chat-history="earlier" onClick={() => revealHistory("earlier")}>
+          {locale === "ko" ? `이전 ${historyStart}개 · ${Math.min(CHAT_HISTORY_PAGE_SIZE, historyStart)}개 더 보기` : `${historyStart} earlier · Show ${Math.min(CHAT_HISTORY_PAGE_SIZE, historyStart)} more`}
+        </button>}
+        {scopedWindow && <button type="button" data-chat-history="collapse" onClick={scrollToLatest}>
+          {locale === "ko" ? "이전 대화 접기 · 최신 보기" : "Hide earlier messages · Latest"}
+        </button>}
+        {visibleMessages.map((m, index) => (
+          <MessageActions key={m.intellectUiMessageId ?? m.id} messageId={m.id} author={m.role === "user" ? (locale === "ko" ? "나" : "You") : agentName} text={displayMessageReply(m.role === "user" ? m.text : userFacingAssistantText(m.text, Boolean(m.streaming)), locale)} locale={locale} onReply={onReply}>
           <div
             id={messageDomId(m.id)}
             tabIndex={-1}
             data-chat-message-id={m.id}
             data-timeline-focus={focusMessageId === m.id ? "true" : "false"}
             className="agentlas-chat-message-anchor"
-            style={{ marginTop: messageGap(messages[index - 1], m) }}
+            style={{ marginTop: messageGap(messages[historyStart + index - 1], m) }}
           >
             <Bubble
               message={m}
@@ -590,12 +709,16 @@ export function ChatStream({
           </div>
           </MessageActions>
         ))}
+        {hasLaterHistory && <button type="button" data-chat-history="later" onClick={() => revealHistory("later")}>
+          {locale === "ko" ? `다음 ${messages.length - historyEnd}개 · ${Math.min(CHAT_HISTORY_PAGE_SIZE, messages.length - historyEnd)}개 더 보기` : `${messages.length - historyEnd} later · Show ${Math.min(CHAT_HISTORY_PAGE_SIZE, messages.length - historyEnd)} more`}
+        </button>}
+        </IntellectUiActions.Provider>
         </VisualChatScope.Provider>
         {/* 이 대화·프로젝트의 자동화가 숨은 세션에서 도는 동안의 실시간 줄. */}
         <AutomationLiveRows chatId={artifactChatId} locale={locale === "ko" ? "ko" : "en"} />
       </div>
 
-      {messages.length > 0 && hasOverflow && awayFromBottom && (
+      {messages.length > 0 && (hasLaterHistory || (hasOverflow && awayFromBottom)) && (
         <button
           type="button"
           className="agentlas-chat-latest-button"
@@ -611,6 +734,32 @@ export function ChatStream({
       </span>
 
       <style jsx global>{`
+        [data-chat-history] {
+          align-self: center;
+          border: 1px solid var(--paper-edge);
+          border-radius: 8px;
+          background: var(--paper-raised, var(--paper));
+          color: var(--muted-deep);
+          padding: 6px 10px;
+          margin: 4px 0 10px;
+          font: inherit;
+          font-size: 12px;
+          cursor: pointer;
+        }
+        [data-chat-history]:hover { color: var(--ink); background: var(--fill-1); }
+        [data-chat-history]:focus-visible, [data-chat-outline]:focus-visible {
+          outline: 2px solid var(--accent);
+          outline-offset: 2px;
+        }
+        [data-chat-outline] {
+          border: 0;
+          border-radius: 4px;
+          background: transparent;
+          color: var(--muted-deep);
+          padding: 3px;
+          font-size: 12px;
+          cursor: pointer;
+        }
         /* both-edges: a gutter on the right only centred the messages 4px left of the composer below them. */
         .agentlas-chat-stream-scroll {
           scrollbar-gutter: stable both-edges;
@@ -1099,6 +1248,7 @@ const Bubble = memo(function Bubble({
   // 단일 실행은 기본적으로 영상형 인터리브 본문을 쓰되, 런타임이 공개한 reasoning
   // summary가 있으면 One과 같은 투명 활동 타임라인으로 남긴다.
   const displayText = userFacingAssistantText(message.text, Boolean(message.streaming));
+  const hasInlineUi = hasIntellectUiFence(displayText);
   const displayMessage = displayText === message.text ? message : { ...message, text: displayText };
   const hasCanonicalActivity = workActivities.some(({ state }) => (
     state.items.length > 0
@@ -1144,7 +1294,10 @@ const Bubble = memo(function Bubble({
           </div>
         )}
         <GoalResultReport result={message.goalResult} locale={locale}>
-        {showWorkActivity && displayText && message.busy && (
+        {hasInlineUi && <StreamingMarkdown text={displayText} messageId={message.intellectUiMessageId ?? message.id}
+          onOpenArtifact={onOpenArtifact} onOpenMedia={onOpenMedia}
+          onOpenLinkedFile={onOpenLinkedFile} mediaBasePaths={mediaBasePaths} />}
+        {showWorkActivity && displayText && message.busy && !hasInlineUi && (
           <LiveOutputPanel
             text={displayText}
             streaming={message.streaming}
@@ -1155,7 +1308,7 @@ const Bubble = memo(function Bubble({
             mediaBasePaths={mediaBasePaths}
           />
         )}
-        {showWorkActivity && displayText && !message.busy && (
+        {showWorkActivity && displayText && !message.busy && !hasInlineUi && (
           <div
             style={{
               color: "var(--ink)",
@@ -1175,7 +1328,7 @@ const Bubble = memo(function Bubble({
             {message.streaming && <BlinkingCursor />}
           </div>
         )}
-        {!showWorkActivity && (
+        {!showWorkActivity && !hasInlineUi && (
           <SingleRunBody
             message={displayMessage}
             onOpenArtifact={onOpenArtifact}
@@ -1559,11 +1712,7 @@ function SingleRunBody({
       ))}
       {tail.trim() && (
         <div style={{ minWidth: 0 }}>
-          {busy && message.streaming ? (
-            <StreamingMarkdown text={tail} messageId={`${message.id}:t${cursor}`} {...markdownProps} />
-          ) : (
-            <Markdown text={tail} messageId={`${message.id}:t${cursor}`} {...markdownProps} />
-          )}
+          <StreamingMarkdown text={tail} messageId={`${message.id}:t${cursor}`} {...markdownProps} />
           {message.streaming && <BlinkingCursor />}
         </div>
       )}
@@ -1591,28 +1740,7 @@ function buildToolGroups(
  *  (partial 스로틀로 문장 꼬리가 도구 카드 아래로 떨어지는 것 방지), 코드펜스 안이면
  *  펜스가 닫힌 뒤로 전진한다. */
 function snapAnchor(text: string, raw: number): number {
-  let anchor = Math.min(Math.max(raw, 0), text.length);
-  const atBoundary =
-    anchor === 0 || anchor === text.length || text[anchor - 1] === "\n" || text[anchor] === "\n";
-  if (!atBoundary) {
-    const next = text.indexOf("\n", anchor);
-    anchor = next < 0 ? text.length : next + 1;
-  }
-  const fences = (text.slice(0, anchor).match(/```/g) || []).length;
-  if (fences % 2 === 1) {
-    const close = text.indexOf("```", anchor);
-    if (close < 0) {
-      // 아직 닫히지 않은 펜스 — text.length를 반환하면 스트리밍 중 매 partial마다 앵커가
-      // 따라 움직여(chase) 리마운트 폭주가 된다. 펜스 시작 직전 줄 경계로 '뒤로' 고정.
-      const fenceStart = text.lastIndexOf("```", Math.max(0, anchor - 1));
-      if (fenceStart <= 0) return 0;
-      const back = text.lastIndexOf("\n", fenceStart - 1);
-      return back < 0 ? 0 : back + 1;
-    }
-    const after = text.indexOf("\n", close + 3);
-    anchor = after < 0 ? text.length : after + 1;
-  }
-  return anchor;
+  return snapMarkdownAnchor(text, raw);
 }
 
 // ── 도구 그룹 카드 — 실행 중 "읽는 중 ›" 라이브 라벨, 완료 후
@@ -2057,6 +2185,10 @@ function isInternalRuntimeStatus(text: string): boolean {
 }
 
 function userFacingAssistantText(text: string, streaming = false): string {
+  return mapIntellectUiProse(text, prose => projectAssistantProse(prose, streaming));
+}
+
+function projectAssistantProse(text: string, streaming: boolean): string {
   // Main normally removes these blocks before persisting a final event. This
   // renderer-side backstop also protects older Work history and partial
   // streams, so protocol JSON can never become ordinary Markdown content.
@@ -2651,6 +2783,9 @@ const ChatOutlineRail = memo(function ChatOutlineRail({
 }) {
   const { locale } = useT();
   const [hovered, setHovered] = useState<number | null>(null);
+  const [pageStart, setPageStart] = useState<number | null>(null);
+  const start = pageStart == null ? Math.max(0, prompts.length - CHAT_OUTLINE_PAGE_SIZE) : Math.min(pageStart, Math.max(0, prompts.length - 1));
+  const visiblePrompts = prompts.slice(start, start + CHAT_OUTLINE_PAGE_SIZE);
   if (prompts.length < 3) return null;
   return (
     <div
@@ -2659,7 +2794,11 @@ const ChatOutlineRail = memo(function ChatOutlineRail({
       aria-label={locale === "ko" ? "대화 아웃라인" : "Conversation outline"}
       onPointerLeave={() => setHovered(null)}
     >
-      {prompts.map((prompt, index) => {
+      {start > 0 && <button type="button" data-chat-outline="first" aria-label={locale === "ko" ? "첫 요청 보기" : "First prompts"}
+        onClick={() => { setHovered(null); setPageStart(0); }}>⇤</button>}
+      {start > 0 && <button type="button" data-chat-outline="earlier" aria-label={locale === "ko" ? "이전 요청 보기" : "Earlier prompts"}
+        onClick={() => { setHovered(null); setPageStart(Math.max(0, start - CHAT_OUTLINE_PAGE_SIZE)); }}>↑</button>}
+      {visiblePrompts.map((prompt, index) => {
         // 포인터 근처가 부드럽게 굵어진다(raised cosine, 반경 2) — 밴드가 켜졌다
         // 꺼지는 게 아니라 하나의 융기가 포인터를 따라 움직이는 것으로 읽힌다.
         const distance = hovered === null ? Infinity : Math.abs(index - hovered);
@@ -2669,6 +2808,7 @@ const ChatOutlineRail = memo(function ChatOutlineRail({
             key={prompt.id}
             type="button"
             className="agentlas-chat-outline-tick"
+            data-chat-outline-id={prompt.id}
             title={prompt.text.slice(0, 80)}
             aria-label={prompt.text.slice(0, 80)}
             onPointerEnter={() => setHovered(index)}
@@ -2677,6 +2817,10 @@ const ChatOutlineRail = memo(function ChatOutlineRail({
           />
         );
       })}
+      {start + visiblePrompts.length < prompts.length && <button type="button" data-chat-outline="later" aria-label={locale === "ko" ? "다음 요청 보기" : "Later prompts"}
+        onClick={() => { setHovered(null); setPageStart(start + CHAT_OUTLINE_PAGE_SIZE); }}>↓</button>}
+      {pageStart !== null && <button type="button" data-chat-outline="latest" aria-label={locale === "ko" ? "최신 요청 보기" : "Latest prompts"}
+        onClick={() => { setHovered(null); setPageStart(null); }}>⇥</button>}
     </div>
   );
 });
