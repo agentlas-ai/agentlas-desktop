@@ -1,3 +1,4 @@
+import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shared/observed-usage";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
@@ -54,6 +55,7 @@ export async function runObservedRunner(
   runner: Runner,
   request: RunnerRequest,
   events: RunnerEvents,
+  nativeRuntimeKind?:string,
 ): Promise<RunnerResult> {
   const usage = createRuntimeUsageCollector();
   const receipts = new Map<string, ReturnType<typeof createRuntimeUsageCollector>>();
@@ -61,18 +63,22 @@ export async function runObservedRunner(
   let returnedResult: RunnerResult | undefined;
   let providerActivityObserved = false;
   try {
-    const result = await observeRunnerSettlement(runner(request, {
+    currentHistoryRuntimeFence()?.assertRuntimeCoverage(nativeRuntimeKind??"unknown");
+    const result = await observeRunnerSettlement(withCurrentHistoryProvider(async()=>{const nativeResult=await runner(request, {
       ...events,
       onPartial: (text) => {
         if (text.length > 0) providerActivityObserved = true;
+        currentHistoryRuntimeFence()?.assertCurrent();
         events.onPartial(text);
       },
       onTool: (...args) => {
         providerActivityObserved = true;
+        currentHistoryRuntimeFence()?.assertCurrent();
         events.onTool?.(...args);
       },
       onThinking: (...args) => {
         providerActivityObserved = true;
+        if(args[0]!=="end"||args[2])currentHistoryRuntimeFence()?.assertCurrent();
         events.onThinking?.(...args);
       },
       onUsage: (tokens) => {
@@ -84,7 +90,8 @@ export async function runObservedRunner(
         events.onNativeTurnController?.(controller);
       },
       onRuntimeAttemptStarted: (id) => {
-        providerActivityObserved = true;
+        // Attempt admission starts accounting. Only measured model/tool output
+        // above can invalidate a process-proven closed HTTP rejection.
         usage.start(id);
         if (!receipts.has(id)) {
           const receipt = createRuntimeUsageCollector();
@@ -99,8 +106,9 @@ export async function runObservedRunner(
         if (id !== undefined) receipts.get(id)?.recordTerminal(receipt, id);
         events.onTerminalObservedUsage?.(receipt, id);
       },
-    }));
+    });returnedResult=nativeResult;return nativeResult;}));
     returnedResult = result;
+    currentHistoryRuntimeFence()?.assertCurrent();
     const { observedUsage: returnedUsage, ...rest } = result;
     const observedUsage = usage.total(returnedUsage);
     const measuredResult = { ...rest, ...(observedUsage ? { observedUsage } : {}) };
@@ -119,6 +127,7 @@ export async function runObservedRunner(
     nativeReceipts.set(measuredResult, receipts);
     return measuredResult;
   } catch (error) {
+    returnedResult??=observedRunnerReturnedResult(error);
     invocationAttempt.complete(usage.total(returnedResult?.observedUsage));
     if (error !== null && (typeof error === "object" || typeof error === "function")) {
       usageOnError.set(error, usage);
@@ -144,3 +153,6 @@ export class ObservedRunnerFailureError extends Error {
     this.code = failure.providerCode ?? "runtime_failure";
   }
 }
+
+/** Native host result boundary: preserve genuine returned usage/diagnostics on denial, never deliver the result. No additional attempt/admission. */
+export function assertCurrentHistoryRunnerResult<T extends RunnerResult>(result:T):T{try{currentHistoryRuntimeFence()?.assertCurrent();return result;}catch(error){if(error!==null&&(typeof error==="object"||typeof error==="function")){returnedResultsOnError.set(error,result);const usage=createRuntimeUsageCollector();usageOnError.set(error,usage);}throw error;}}

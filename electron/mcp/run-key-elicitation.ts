@@ -35,6 +35,7 @@ export function runKeyElicitationTimeoutMs(): number {
 }
 
 interface PendingElicitation {
+  request: McpRunKeyRequest;
   promise: Promise<"provided" | "declined" | "timeout">;
   settle: (outcome: "provided" | "declined" | "timeout") => void;
   settled: boolean;
@@ -129,6 +130,7 @@ export function awaitRunKeyElicitation(opts: {
     resolvePromise = resolve;
   });
   const entry: PendingElicitation = {
+    request: structuredClone(opts.request),
     promise,
     settled: false,
     settle: () => {},
@@ -168,8 +170,27 @@ export function awaitRunKeyElicitation(opts: {
 export function resolveRunKeyElicitation(runId: string, outcome: unknown): { ok: boolean } {
   const entry = pendingByRunId.get(String(runId));
   if (!entry || entry.settled) return { ok: false };
-  entry.settle(outcome === "provided" ? "provided" : "declined");
+  // A renderer signal cannot certify OS custody. Main's exact receipt gate owns "provided".
+  if(outcome==='provided')return {ok:false};
+  entry.settle("declined");
   return { ok: true };
+}
+/** Main-only read of the original pending intent; no secret values or caller-built scope. */
+export function pendingRunKeyElicitation(runId:string):McpRunKeyRequest|null {
+  const entry=pendingByRunId.get(runId);
+  return entry&&!entry.settled&&entry.request.expiresAt>Date.now()?structuredClone(entry.request):null;
+}
+let nativeSavedGate:((request:Readonly<McpRunKeyRequest>)=>boolean|Promise<boolean>)|null=null;
+export function configureRunKeySavedReceiptGate(gate:(request:Readonly<McpRunKeyRequest>)=>boolean|Promise<boolean>):void {
+  if(nativeSavedGate&&nativeSavedGate!==gate)throw new Error('mcp_key_receipt_gate_already_configured');nativeSavedGate=gate;
+}
+export async function resolveRunKeysFromNativeReceipt(runId:string):Promise<{ok:boolean}> {
+  const entry=pendingByRunId.get(runId);
+  if(!entry||entry.settled||entry.request.expiresAt<=Date.now()||!nativeSavedGate)return{ok:false};
+  const gate=nativeSavedGate;
+  try{if(await gate(Object.freeze(structuredClone(entry.request)))!==true)return{ok:false};}catch{return{ok:false};}
+  if(pendingByRunId.get(runId)!==entry||entry.settled||entry.request.expiresAt<=Date.now()||nativeSavedGate!==gate)return{ok:false};
+  entry.settle('provided');return{ok:true};
 }
 
 /** Test/diagnostic surface: is a key window pending for this run? */

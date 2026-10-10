@@ -53,6 +53,7 @@ export function PluginPickerDialog({
   onClose,
   onCompleted,
   onCustomSetup,
+  contextNote,
 }: {
   ko: boolean;
   /** onboarding이면 대표 항목만 먼저 보이고 "더 찾아보기"로 전체를 편다. */
@@ -62,6 +63,8 @@ export function PluginPickerDialog({
   onClose: () => void;
   onCompleted?: (result: PluginPickerResult) => void;
   onCustomSetup?: () => void;
+  /** Value-free explanation of the pending original request; never a grant. */
+  contextNote?: string;
 }) {
   const brandMap = usePluginBrandMap();
   const catalog = usePluginCatalog();
@@ -311,6 +314,7 @@ export function PluginPickerDialog({
         )}
 
         <div className={styles.body}>
+        {contextNote && <p role="status" style={{ fontSize: 12, lineHeight: 1.5 }}>{contextNote}</p>}
           {!loaded && <div className={styles.hint} style={{ display: "grid", gap: 5 }}><span>{ko ? "목록을 불러오는 중…" : "Loading…"}</span><LoadingEstimate locale={ko ? "ko" : "en"} operationKey="desktop-plugin-catalog" expectedSeconds={[2, 20]} /></div>}
           {loaded && !installedKnown && <p className={styles.error}>{ko ? "설치 상태를 읽지 못했습니다. 추가 전 기존 연결을 확인하세요." : "Installed state could not be read. Review existing connections before adding."}</p>}
           {loaded && loadError && (

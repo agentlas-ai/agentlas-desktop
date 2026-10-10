@@ -1,3 +1,5 @@
+import type {OneVaultErrorCode} from "./one-vault";
+import type {OneProviderRemoteErrorCode} from "./one-provider-remote";
 import { MOBILE_GOAL_CONTROL_METHODS, MOBILE_GOAL_CONTROL_WRITE_METHODS, isMobileGoalControlMethod, validateMobileGoalControlParams } from "./mobile-goal-control";
 import type { OneSurfaceManifestV1 } from "./one-surface";
 import { supervisorIdentifier, supervisorObject, supervisorText } from "./one-supervisor";
@@ -103,6 +105,7 @@ export const MOBILE_BRIDGE_MAIL_WRITE_METHODS = [
 ] as const;
 
 export const MOBILE_BRIDGE_METHODS = [
+  "one.vault.request", "one.vault.submit", "one.vault.status", "one.vault.cancel", "one.provider.remote.read",
   "notifications.register", "notifications.unregister",
   ...MOBILE_GOAL_CONTROL_METHODS,
   "snapshot.get",
@@ -909,7 +912,9 @@ export interface MobileBridgeRpcErrorBody {
     | "idempotency_unavailable"
     | "authority_error"
     | "response_too_large"
-    | "request_timeout";
+    | "request_timeout"
+    | OneVaultErrorCode
+    | OneProviderRemoteErrorCode;
   message: string;
   retryable: boolean;
 }
@@ -3421,6 +3426,15 @@ function validateParams(method: MobileBridgeMethod, params: Record<string, unkno
   if (method === "notifications.register" || method === "notifications.unregister") return validateMobilePushParams(method, params);
   if (!isMobileBridgeJsonValue(params)) return "params must contain only bounded JSON values";
   if (isMobileGoalControlMethod(method)) return validateMobileGoalControlParams(method, params);
+  // One owns signature, exact nested DTO, current native origin and nonce checks.
+  // These methods never enter the generic write replay ledger or request.status.
+  if (method.startsWith("one.vault.") || method === "one.provider.remote.read") {
+    const keys = method === "one.vault.request" ? ["commandId", "requestId", "requestRevision"]
+      : method === "one.vault.submit" ? ["requestId", "envelope"]
+      : method === "one.provider.remote.read" ? ["query"] : ["requestId", "query"];
+    if (Object.keys(params).sort().join("|") !== keys.sort().join("|")) return "secure method fields invalid";
+    return null; // Generic bounded JSON check above; exact crypto DTO validated before use.
+  }
   if (EMPTY_METHODS.has(method)) {
     return Object.keys(params).length === 0 ? null : `${method} does not accept parameters`;
   }

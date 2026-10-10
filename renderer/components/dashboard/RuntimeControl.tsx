@@ -134,6 +134,33 @@ function runtimeLabel(runtime: RuntimeStatus): string {
   return runtime.label ?? RUNTIME_LABEL[runtime.kind] ?? runtime.kind;
 }
 
+function modelDiscoveryNotes(runtimes: RuntimeStatus[], ko: boolean): Array<{ key: string; text: string }> {
+  const notes: Array<{ key: string; text: string }> = [];
+  const seen = new Set<string>();
+  for (const runtime of runtimes) {
+    if (runtime.kind === "ollama" || runtime.credentialAccess?.status === "unavailable") continue;
+    if (runtime.modelDiscovery?.status !== "failed") continue;
+    const key = runtimeKey(runtime);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const label = runtimeLabel(runtime);
+    // Discovery reasons can contain RPC bodies and headers. Keep diagnostics
+    // in the host; a cached or selected model does not make this probe succeed.
+    const noCodexCache = runtime.kind === "codex" && runtime.modelDiscovery.reason === "no-cache";
+    notes.push({
+      key,
+      text: noCodexCache
+        ? ko
+          ? `${label}: 최신 모델 목록을 확인하지 못했습니다. 터미널에서 codex login을 마친 뒤 다시 확인하세요.`
+          : `${label}: could not check the current model list. Finish codex login in a terminal, then check again.`
+        : ko
+          ? `${label}: 모델 목록을 읽지 못했습니다. 연결 상태와 모델 사용 권한을 확인하세요.`
+          : `${label}: could not read the model list. Check the connection and model access permissions.`,
+    });
+  }
+  return notes;
+}
+
 function modelOptionKey(runtime: RuntimeStatus, model: string | undefined): string {
   return `${runtimeKey(runtime)}\u0000${model ?? ""}`;
 }
@@ -215,6 +242,7 @@ export function RuntimeControl() {
     over: number;
   } | null>(null);
   const pointerDragRef = useRef<{ role: RuntimeRole; from: number; startX: number; startY: number } | null>(null);
+  const discoveryNotes = useMemo(() => modelDiscoveryNotes(runtimes, ko), [runtimes, ko]);
   const multimodalRuntimes = useMemo(
     // The local generate_image tool has executable adapters only for these
     // two CLIs. Input-vision support on a chat model is not image generation.
@@ -425,39 +453,6 @@ export function RuntimeControl() {
 
   function runtimesForRole(role: RuntimeRole): RuntimeStatus[] {
     return role === "multimodal" ? multimodalRuntimes : runtimes;
-  }
-
-  /*
-   * ★모델 목록이 비어 있으면 "왜" 가 화면에 있어야 한다.
-   *   RuntimeStatus.modelDiscovery 는 2026-08-15 부터 실패 사유를 실어 왔는데 화면은 한 번도
-   *   읽지 않았다 — 새 맥에서 코덱스 CLI 가 로그인 전이라 모델 캐시가 없으면 목록이 그냥 비었고,
-   *   오너는 "gpt 6.0 이 안 보인다" 로 읽었다(2026-09-13, f-6d 진단). 비어 있는 이유와 채우는 길을 적는다.
-   */
-  function discoveryNotesForRole(role: RuntimeRole): Array<{ key: string; text: string }> {
-    const notes: Array<{ key: string; text: string }> = [];
-    for (const runtime of runtimesForRole(role)) {
-      if (runtime.kind === "ollama" || runtime.credentialAccess?.status === "unavailable") continue;
-      const models = modelsByRuntime[runtimeKey(runtime)] ?? (runtime.availableModels ?? []).map((id) => ({ id, label: id }));
-      if (models.length > 0 || runtime.model?.trim()) continue;
-      const discovery = runtime.modelDiscovery;
-      if (!discovery || discovery.status !== "failed") continue;
-      const label = runtimeLabel(runtime);
-      const reason = discovery.reason ?? "unknown";
-      if (runtime.kind === "codex" && reason === "no-cache") {
-        notes.push({
-          key: runtimeKey(runtime),
-          text: ko
-            ? `${label}: 모델 목록이 비어 있음 — 터미널에서 codex login 을 마치면 채워집니다.`
-            : `${label}: no models yet — finish codex login in a terminal and the list fills in.`,
-        });
-        continue;
-      }
-      notes.push({
-        key: runtimeKey(runtime),
-        text: ko ? `${label}: 모델 목록을 읽지 못함 (${reason})` : `${label}: model list could not be read (${reason})`,
-      });
-    }
-    return notes;
   }
 
   function runtimeOptionsForRole(role: RuntimeRole) {
@@ -1113,13 +1108,6 @@ export function RuntimeControl() {
             </ol>
           </>
         )}
-        {discoveryNotesForRole(role).length > 0 && (
-          <ul className="dashboard-runtime-discovery-notes" role="status">
-            {discoveryNotesForRole(role).map((note) => (
-              <li key={note.key}>{note.text}</li>
-            ))}
-          </ul>
-        )}
         <button
           type="button"
           className="dashboard-runtime-pool-add"
@@ -1239,6 +1227,13 @@ export function RuntimeControl() {
             <div className="dashboard-runtime-message" role="status" aria-live="polite">
               {ko ? "로컬 모델의 준비 상태를 확인하고 있습니다." : "Checking local model readiness."}
             </div>
+          )}
+          {discoveryNotes.length > 0 && (
+            <ul className="dashboard-runtime-discovery-notes" role="status">
+              {discoveryNotes.map((note) => (
+                <li key={note.key}>{note.text}</li>
+              ))}
+            </ul>
           )}
           <div className="dashboard-runtime-library">
             {renderRole("orchestrator")}

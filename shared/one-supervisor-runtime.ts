@@ -38,6 +38,8 @@ export interface SupervisorControlProgress {
 
 /** Main/daemon admission is denied before handoff on any compatibility mismatch. */
 export const ONE_SUPERVISOR_RUNTIME_PROTOCOL = "agentlas.one-supervisor-runtime.v1" as const;
+/** Closed native domain set. An older host cannot own new personal/Vault operations. */
+export const ONE_SUPERVISOR_EXTENSIONS_SCHEMA = 'agentlas.one-personal-vault84.v1' as const;
 
 /** Signed native transport canonicalizes object keys; compare the closed value
  * set rather than insertion order. Unknown fields are a version mismatch. */

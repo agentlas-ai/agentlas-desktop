@@ -1,4 +1,5 @@
-import type { Automation } from "./types";
+import type { Automation, RuntimeSelection } from "./types";
+import type { ToolchainInterface } from "./toolchain";
 
 export const TOOLCHAIN_GENERATION_TIMEOUT_MS = 120_000;
 
@@ -16,6 +17,19 @@ export interface ToolchainAssetContract {
   variationStatement: string;
 }
 export interface ToolchainOutputBinding { nodeId: string; format: "json" | "text" }
+/** Actual fresh-session generation + search + selection; separate from example execution. */
+export interface ToolchainAssetColdStart extends NonNullable<ToolchainInterface["coldStart"]> {
+  schemaVersion: "agentlas.toolchain-asset-cold-start.v1";
+  toolchainId: string; version: number; contentHash: string; nativeIntentId: string; catalogDigest: string;
+  cases: Array<{ kind: "positive" | "negative"; task: string; found: boolean; selected: boolean; bound: boolean;
+    candidates: Array<{ id: string; version: number; contentHash: string }>;
+    chosen: { id: string; version: number; contentHash: string } | null; input: Record<string, unknown> }>;
+  runtimeReceipts: Array<{ selection: Pick<RuntimeSelection, "kind" | "backend" | "source" | "model" | "role" | "inherit" | "acpAgentId">;
+    route: "explicit_pin" | "orchestrator_pool" | "worker_pool" | "legacy"; fingerprint: string;
+    execution: "invoked" | "cached" | "not_invoked"; longContext?: boolean; effort?: string;
+    capability?: { schemaVersion: "agentlas.judgment-capability.v1"; requirement: "no_tools";
+      status: "verified" | "unsupported" | "unknown"; enforcement: "claude_safe_mode" | "main_tool_payload_omitted" | "unsupported" | "unknown"; reason: string } }>;
+}
 export interface ToolchainAssetVersion {
   version: number;
   contentHash: string;
@@ -27,9 +41,13 @@ export interface ToolchainAssetVersion {
   contract: ToolchainAssetContract;
   implementation: { kind: "graph"; automationId: string; snapshot: Automation; outputBinding: ToolchainOutputBinding };
   provenance: { sourceAutomationId: string; sourceDefinitionDigest: string; creatorChatId: string | null };
+  coldStart?: ToolchainAssetColdStart;
+  exposedBy?: { kind: "owner" | "one"; chatId: string | null; at: string; authorityRevision: string };
   validation: { state: "untested" | "passed" | "failed"; at: string | null; receipts: string[]; problems: string[] };
 }
 export interface ToolchainAsset {
+  /** Host observation only; never persisted or interpreted as admission. */
+  testInProgress?: boolean;
   schemaVersion: "agentlas.toolchain-asset.v1";
   id: string;
   name: string;

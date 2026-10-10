@@ -102,6 +102,12 @@ export function invokeNativeInputDriver(
   request: NativeInputAction,
   timeoutMs = request.action === "drag" ? 8_000 : 4_000,
 ): Promise<NativeInputResult> {
+  return withOneSensitiveOperation(() => invokeNativeInputDriverUnlocked(request, timeoutMs));
+}
+function invokeNativeInputDriverUnlocked(
+  request: NativeInputAction,
+  timeoutMs = request.action === "drag" ? 8_000 : 4_000,
+): Promise<NativeInputResult> {
   const driver = nativeInputDriverPath();
   if (!driver) {
     return Promise.resolve({
@@ -160,3 +166,4 @@ export function invokeNativeInputDriver(
     child.stdin.end(JSON.stringify(request));
   });
 }
+import { withOneSensitiveOperation } from '../secrets/sensitive-surface';

@@ -17,15 +17,24 @@
 //      사용자에게는 아무 차이가 없어야 한다(문구도 새로 만들지 않는다).
 import {
   agentResidencyBudget,
-  enforceAgentResidencyBudget,
+  beginAgentResidencyAdmission,
+  finishAgentResidencyAdmission,
+  retainAgentResidencyAdmissionUntilClosed,
+  currentAwakeAgentResidency,
+  isAgentContextResidencyAdmissionCurrent,
+  isAgentResidencyAwake,
+  holdingAgentResidency,
   dropAgentResidency,
   isResidencyExemptAgent,
   registerAgentResidency,
   touchAgentResidency,
   type AgentResidencySource,
+  type AgentResidencyAdmission,
+  type AwakeAgentResidencyAdmission,
 } from "./agent-residency";
 import {
   beginProjectResidencyAdmission,
+  ProjectResidencyBusyError,
   enforceProjectResidencyIdle,
   finishProjectResidencyAdmission,
 } from "./project-residency";
@@ -55,6 +64,11 @@ interface PoolEntry<S> {
   reaperExempt: boolean;
   retireOnRelease?: boolean;
   retain?: () => boolean;
+  awakeAdmission?: AwakeAgentResidencyAdmission;
+  registered?: boolean;
+  closing?: boolean;
+  closeFailed?: boolean;
+  closeCompletion?: Promise<void>;
 }
 
 export interface AcpSessionLease<S> {
@@ -68,7 +82,7 @@ export interface AcpSessionPoolOptions<S> {
   /** 이 세션이 아직 살아 있는가(프로세스 생존 + 프로토콜 미종료). */
   alive: (session: S) => boolean;
   /** 세션을 놓는 방법(프로토콜 close + 프로세스 트리 종료). */
-  close: (session: S) => void;
+  close: (session: S) => void | Promise<void>;
   /**
    * 유휴로 붙들 때 호출 — 이 세션이 **호스트를 살려 두지 않게** 한다(자식 파이프 unref).
    *
@@ -93,6 +107,7 @@ export class AcpSessionPool<S> {
   private readonly leases = new WeakMap<AcpSessionLease<S>, PoolEntry<S>>();
   private readonly opts: AcpSessionPoolOptions<S>;
   private readonly now: () => number;
+  private opening = 0;
 
   constructor(opts: AcpSessionPoolOptions<S>) {
     this.opts = opts;
@@ -112,10 +127,12 @@ export class AcpSessionPool<S> {
   /** 죽은 세션을 목록에서 걷어낸다 — 죽은 것을 재사용 후보로 세면 안 된다. */
   private reapDead(): void {
     for (const entry of [...this.entries]) {
-      if (entry.inUse) continue;
+      if (entry.inUse || entry.closing) continue;
       let alive = false;
       try { alive = this.opts.alive(entry.session); } catch { alive = false; }
-      if (!alive) this.remove(entry, { close: true, reason: "process-exit" });
+      if (!alive || (entry.awakeAdmission && !isAgentContextResidencyAdmissionCurrent(entry.awakeAdmission))) {
+        this.remove(entry, { close: true, reason: "process-exit" });
+      }
     }
   }
 
@@ -125,16 +142,18 @@ export class AcpSessionPool<S> {
     // per-pool override only for isolated callers that requested one.
     if (!this.opts.budget) return;
     const limit = this.budget();
-    while (this.entries.length + headroom > limit) {
+    while (this.entries.length + this.opening + headroom > limit) {
       let victim: PoolEntry<S> | null = null;
       for (const entry of this.entries) {
-        if (entry.inUse) continue;
+        if (entry.inUse || entry.closing || isAgentResidencyAwake(entry.residencyKey)) continue;
         if (!victim || entry.lastActivityAt < victim.lastActivityAt) victim = entry;
       }
-      // 전부 사용 중이면 더 닫을 것이 없다 — 실행 슬롯(run-slots)이 이미 동시 실행을
-      // 같은 예산으로 막고 있으므로, 여기서 실행을 거절하지는 않는다.
+      // Busy and admitted awake resources stay intact. acquire performs the
+      // final capacity check before opening another provider process.
       if (!victim) return;
+      const previous = this.entries.length;
       this.remove(victim, { close: true, reason: "evicted" });
+      if (this.entries.length >= previous) break;
     }
   }
 
@@ -144,14 +163,32 @@ export class AcpSessionPool<S> {
    */
   async acquire(key: string, meta: AcpPoolMeta, open: () => Promise<S>, retain?: () => boolean): Promise<AcpSessionLease<S>> {
     this.reapDead();
+    const awake = currentAwakeAgentResidency(meta.agentId);
     const projectId = typeof meta.projectId === "string" ? meta.projectId.trim() || null : null;
-    const reusable = this.entries.find((e) => e.key === key && e.projectId === projectId && !e.inUse && !e.retireOnRelease);
+    let reusable = this.entries.find((e) => e.key === key && e.projectId === projectId && !e.inUse && !e.closing && !e.retireOnRelease);
+    if (reusable && reusable.awakeAdmission !== awake) {
+      if (reusable.awakeAdmission) throw Object.assign(new Error("agent_awake_context_owned"), { code: "agent_awake_context_owned" });
+      // First actor attachment cannot inherit an unbound process lease. The
+      // provider's persisted resume handle remains available to its runner.
+      this.remove(reusable, { close: true, reason: "shutdown" });
+      reusable = undefined;
+    }
     let projectAdmission: string | null = null;
+    let residentAdmission: AgentResidencyAdmission | undefined;
+    let opening = false;
+    let opened: PoolEntry<S> | undefined;
     try {
       projectAdmission = beginProjectResidencyAdmission({
         projectId,
         keepResidencyKey: reusable?.residencyKey ?? null,
       });
+      // Project admission starts idle retirement synchronously. A physical
+      // sibling may still be exiting even when global budget has spare seats.
+      if (projectId) {
+        const closing = holdingAgentResidency().filter(entry => entry.projectId === projectId
+          && entry.closing && entry.key !== reusable?.residencyKey);
+        if (closing.length) throw new ProjectResidencyBusyError(projectId, closing);
+      }
       if (reusable) {
         reusable.inUse = true;
         reusable.lastActivityAt = this.now();
@@ -163,7 +200,7 @@ export class AcpSessionPool<S> {
           this.remove(reusable, { close: true, reason: "error" });
           throw error;
         }
-        touchAgentResidency(reusable.residencyKey, { inUse: true, now: reusable.lastActivityAt });
+        touchAgentResidency(reusable.residencyKey, { inUse: true, now: reusable.lastActivityAt, chatId: meta.chatId ?? null });
         finishProjectResidencyAdmission(projectId, projectAdmission);
         projectAdmission = null;
         const lease: AcpSessionLease<S> = { key, session: reusable.session, fresh: false };
@@ -173,7 +210,12 @@ export class AcpSessionPool<S> {
 
       // 자리를 먼저 만든다 — 열고 나서 넘치면 방금 연 것을 닫게 된다.
       this.enforceBudget();
-      enforceAgentResidencyBudget(1);
+      if (this.opts.budget && this.entries.length + this.opening >= this.budget()) {
+        throw Object.assign(new Error("agent_residency_capacity"), { code: "agent_residency_capacity" });
+      }
+      residentAdmission = beginAgentResidencyAdmission(meta.agentId);
+      this.opening += 1;
+      opening = true;
       const session = await open();
       const entry: PoolEntry<S> = {
         key,
@@ -184,9 +226,12 @@ export class AcpSessionPool<S> {
         lastActivityAt: this.now(),
         reaperExempt: meta.reaperExempt ?? isResidencyExemptAgent(meta.agentId),
         retain,
-        retireOnRelease: retain ? !retain() : false,
+        retireOnRelease: false,
+        awakeAdmission: awake,
       };
+      opened = entry;
       this.entries.push(entry);
+      entry.retireOnRelease = retain ? !retain() : false;
       registerAgentResidency({
         key: entry.residencyKey,
         agentId: meta.agentId ?? null,
@@ -200,17 +245,41 @@ export class AcpSessionPool<S> {
         inUse: true,
         // 리퍼(12h)와 호스트 종료가 이 세션을 놓는 방법 — 등록소는 이것만 안다.
         // 풀 목록에서도 함께 빠진다(등록소만 지우면 죽은 항목이 재사용 후보로 남는다).
-        close: () => this.remove(entry, { close: true, reason: "shutdown" }),
+        close: () => this.closeEntry(entry),
         now: entry.lastActivityAt,
+        admission: residentAdmission,
       });
+      entry.registered = true;
+      residentAdmission = undefined;
       finishProjectResidencyAdmission(projectId, projectAdmission);
       projectAdmission = null;
       const lease: AcpSessionLease<S> = { key, session, fresh: true };
       this.leases.set(lease, entry);
       return lease;
     } catch (error) {
+      if (opened) {
+        this.remove(opened, { close: true, reason: "error" });
+        // If registration failed after spawn, retain the pre-open seat until
+        // physical termination; rejected close remains charged/quarantined.
+        if (!opened.registered && (opened.closeCompletion || opened.closeFailed)) {
+          const admission = residentAdmission;
+          residentAdmission = undefined;
+          const projectToken = projectAdmission;
+          projectAdmission = null;
+          const completion = opened.closeCompletion
+            ?? Promise.reject(new Error("agent_residency_close_failed"));
+          retainAgentResidencyAdmissionUntilClosed(admission, completion);
+          // This unregistered writer is invisible to project entry lookup.
+          // Retain its exact project token as well as global capacity until
+          // termination; rejection quarantines both ownership reservations.
+          void completion.then(() => finishProjectResidencyAdmission(projectId, projectToken), () => {});
+        }
+      }
       finishProjectResidencyAdmission(projectId, projectAdmission);
       throw error;
+    } finally {
+      if (opening) this.opening -= 1;
+      finishAgentResidencyAdmission(residentAdmission);
     }
   }
 
@@ -219,7 +288,10 @@ export class AcpSessionPool<S> {
     const entry = this.leases.get(lease);
     if (!entry) return;
     this.leases.delete(lease);
-    if (entry.retireOnRelease || (entry.retain && !entry.retain())) {
+    if (entry.closing) return;
+    let retained = true;
+    try { retained = !entry.retain || entry.retain(); } catch { retained = false; }
+    if (entry.retireOnRelease || !retained || (entry.awakeAdmission && !isAgentContextResidencyAdmissionCurrent(entry.awakeAdmission))) {
       this.remove(entry, { close: true, reason: "shutdown" });
       return;
     }
@@ -262,6 +334,7 @@ export class AcpSessionPool<S> {
     let pending = 0;
     for (const entry of [...this.entries]) {
       if (!matches(entry.session)) continue;
+      if (entry.closing) { pending += 1; continue; }
       if (entry.inUse) {
         entry.retireOnRelease = true;
         pending += 1;
@@ -278,7 +351,7 @@ export class AcpSessionPool<S> {
     const cutoff = this.now() - Math.max(1_000, maxIdleMs);
     let closed = 0;
     for (const entry of [...this.entries]) {
-      if (entry.inUse || entry.reaperExempt) continue;
+      if (entry.closing || entry.inUse || entry.reaperExempt || isAgentResidencyAwake(entry.residencyKey)) continue;
       if (entry.lastActivityAt > cutoff) continue;
       this.remove(entry, { close: true, reason: "reaped" });
       closed += 1;
@@ -293,22 +366,49 @@ export class AcpSessionPool<S> {
 
   /** 진단용 — 붙든 수 / 유휴 수. */
   stats(): { size: number; idle: number } {
-    return { size: this.entries.length, idle: this.entries.filter((e) => !e.inUse).length };
+    return { size: this.entries.length, idle: this.entries.filter((e) => !e.inUse && !e.closing).length };
   }
 
-  private closeEntry(entry: PoolEntry<S>): void {
-    try { this.opts.close(entry.session); } catch { /* 이미 죽었을 수 있다 */ }
+  /** The registry invokes this callback once, after marking its seat closing.
+   * It never calls back into the registry, avoiding recursive drop/close. */
+  private closeEntry(entry: PoolEntry<S>): void | Promise<void> {
+    if (entry.closing) return entry.closeCompletion;
+    entry.closing = true;
+    entry.inUse = false;
+    const finish = (): void => {
+      const index = this.entries.indexOf(entry);
+      if (index >= 0) this.entries.splice(index, 1);
+    };
+    try {
+      const completion = this.opts.close(entry.session);
+      if (completion && typeof completion.then === "function") {
+        entry.closeCompletion = completion.then(finish, (error: unknown) => {
+          entry.closeFailed = true;
+          throw error;
+        });
+        // Callers may retire synchronously; keep rejection observed even when
+        // no registry row exists yet (a failed registration after spawn).
+        void entry.closeCompletion.catch(() => {});
+        return entry.closeCompletion;
+      }
+      finish();
+    } catch (error) {
+      entry.closeFailed = true;
+      throw error;
+    }
   }
 
   private remove(
     entry: PoolEntry<S>,
     opts: { close: boolean; reason?: AgentProcessLifecycleReason },
   ): void {
-    const index = this.entries.indexOf(entry);
-    if (index >= 0) this.entries.splice(index, 1);
-    // 등록소 항목을 먼저 지운다 — close 를 두 번 부르지 않기 위해서(등록소의 close 가
-    // 곧 이 세션을 닫는 함수다).
-    dropAgentResidency(entry.residencyKey, { reason: opts.reason });
-    if (opts.close) this.closeEntry(entry);
+    if (entry.closing) return;
+    if (entry.registered) {
+      dropAgentResidency(entry.residencyKey, { close: opts.close, reason: opts.reason });
+    } else {
+      // Opening succeeded but retain/registration failed. No registry callback
+      // exists yet; the acquire catch keeps its opening reservation charged.
+      try { this.closeEntry(entry); } catch { /* quarantined until termination */ }
+    }
   }
 }

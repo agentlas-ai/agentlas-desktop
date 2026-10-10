@@ -1,7 +1,8 @@
+import { withOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
 import { getAuthenticatedActorIds } from "../auth";
 import { STORE_SCHEMA_VERSION } from "../store/db";
 import { ONE_SUPERVISOR_SCHEMA } from "../../shared/one-supervisor";
-import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, sameSupervisorRuntimeCompatibility } from "../../shared/one-supervisor-runtime";
+import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, ONE_SUPERVISOR_EXTENSIONS_SCHEMA, sameSupervisorRuntimeCompatibility } from "../../shared/one-supervisor-runtime";
 import { importNativeJsonValue } from "../daemon/native-json-transfer";
 import { NATIVE_MAIN_PREPARATION_POLICY } from "../daemon/native-invocation-policy";
 import type { OneSupervisorService } from "./supervisor-service";
@@ -38,7 +39,8 @@ export function supervisorNativeNoticePurpose(origin: object, request: Readonly<
 /** Original durable command + exact identity/generation is the host producer.
  * This capability never crosses IPC and does not pretend to be a renderer. */
 export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: OneSupervisorOwner,
-  oneId: string, request: McpInvocationRequest, purpose?: SupervisorHostNoticePurpose): object {
+  oneId: string, request: McpInvocationRequest, purpose?: SupervisorHostNoticePurpose, assertOriginal?: () => void): object {
+  assertOriginal?.();
   const token = owner.assert(oneId),actor=JSON.stringify(getAuthenticatedActorIds());
   const rows = store.db.prepare("SELECT * FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND state='dispatching'")
     .all(oneId, request.runId) as SupervisorRequestRow[];
@@ -59,6 +61,7 @@ export function createSupervisorNativeOrigin(store: OneSupervisorStore, owner: O
   }
   const source = Object.freeze({});
   origins.set(source, { request: canonicalInvocationRequestJson(request), purpose, assert() {
+    assertOriginal?.();
     if(JSON.stringify(getAuthenticatedActorIds())!==actor)fail("supervisor_native_actor_changed");
     owner.assertToken(token);
     const current = store.get(row.command_id);
@@ -76,7 +79,7 @@ let handoffTimer:NodeJS.Timeout|undefined;
 let handoffBusy=false;
 let handoffProposal:{oneId:string;ownerEpoch:string;generation:number}|undefined;
 export function supervisorRuntimeMode(){return mode;}
-export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer',input?:unknown):Promise<any> {
+export async function callOneSupervisorRuntime(op:'status'|'adopt'|'command'|'harness.result'|'harness.action'|'questions.list'|'questions.answer'|'personal.command',input?:unknown):Promise<any> {
   const channel=bootstrap?.getChannel(),identity=channel && nativeGuiChannelIdentity(channel);
   if(!channel || !identity)fail('supervisor_native_channel_unavailable');
   const assertCurrent=()=>{if(nativeGuiChannelIdentity(channel)!==identity)fail('supervisor_native_channel_changed');};
@@ -93,7 +96,7 @@ async function tryHandoff():Promise<void>{
   if(handoffBusy || mode==='daemon')return;handoffBusy=true;
   try{
     const status=await callOneSupervisorRuntime('status');
-    const compatibility={protocol:ONE_SUPERVISOR_RUNTIME_PROTOCOL,supervisorSchema:ONE_SUPERVISOR_SCHEMA,journalSchema:ONE_SUPERVISOR_JOURNAL_SCHEMA,storeSchema:STORE_SCHEMA_VERSION,nativeAbi:process.versions.modules};
+    const compatibility={protocol:ONE_SUPERVISOR_RUNTIME_PROTOCOL,supervisorSchema:ONE_SUPERVISOR_SCHEMA,journalSchema:ONE_SUPERVISOR_JOURNAL_SCHEMA,extensionsSchema:ONE_SUPERVISOR_EXTENSIONS_SCHEMA,storeSchema:STORE_SCHEMA_VERSION,nativeAbi:process.versions.modules};
     if(!sameSupervisorRuntimeCompatibility(status?.compatibility,compatibility))fail('supervisor_daemon_version_mismatch');
     if(status.active && status.authorityCurrent && status.owner?.ownerEpoch===status.bootId && status.owner?.ownerKind==='work-daemon' && status.owner?.phase==='active'){
       if(status.owner.oneId!==(await import('../store/one-profile')).getOneProfile().oneId)fail('supervisor_daemon_identity_changed');
@@ -178,7 +181,7 @@ export function createSupervisorNativeRuntime(options: {
       starts.add(request.runId); pending.set(request.runId, request.chatId);
       // Original owner has one admission and one actual start. A lost response
       // stays uncertain and is reconciled using exact durable custody/receipts.
-      const actual = value.owner.startHost(origin, request);
+      const actual = withOnePersonalNativeOriginal(origin,request,()=>value.owner.startHost(origin, request));
       void actual.then(() => { pending.delete(request.runId!); poll(); }, () => {
         const admission = getInvocationAdmission(request.runId!);
         if (admission?.status === "rejected") pending.delete(request.runId!);
@@ -228,5 +231,5 @@ export async function startSupervisorPreparedInvocation(input:{store:OneSupervis
     cancel:binding=>original.cancel(binding),quiesce:(binding,status)=>original.quiesce(binding,status),finish:(binding,status)=>original.finish(binding,status),
   });
   const root=admitMainInvocation(request.chatId,request.runId);if(!root)fail('supervisor_native_root_required');
-  return invocationService.startNativePrepared(request,port,root,admission,undefined,undefined,input.purpose);
+  return withOnePersonalNativeOriginal(origin,request,()=>invocationService.startNativePrepared(request,port,root,admission,undefined,undefined,input.purpose));
 }

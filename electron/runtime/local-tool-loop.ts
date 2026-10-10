@@ -1,3 +1,5 @@
+import { assertCurrentHistoryRunnerResult } from "./observed-runner";
+import { withCurrentHistoryTool, currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
@@ -141,7 +143,7 @@ export function createToolLoopProgress(runtimeKind: string, req: RunnerRequest, 
             imageDigest: imageDataUrl ? createHash("sha256").update(imageDataUrl).digest("hex") : undefined })
         : result;
       noteNoProgressEvent(guard, { kind: "tool-use", tool: { name, args, result: observedResult, id, isError } });
-      target.onTool?.(name, args, result, id, isError, artifactPaths, imageDataUrl, origin);
+      (currentHistoryRuntimeFence()?.assertCurrent(), target.onTool?.(name, args, result, id, isError, artifactPaths, imageDataUrl, origin));
     } },
     assertProgress(): void {
       if (guard.tripped) throw new RuntimeNoProgressError(runtimeKind, req.locale);
@@ -562,7 +564,9 @@ async function dispatchMainToolRaw(
 ): Promise<MainToolDispatchResult> {
   if (approval.beforeMcpToolResult) approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
   assertMcpResultDelivery(approval);
-  const result = await dispatchMainToolRawUnchecked(byName, call, events, approval, broker);
+  let result:MainToolDispatchResult;
+  if(currentHistoryRuntimeFence()){const resolved=byName.get(call.toolName);const input={kind:resolved?.kind??"builtin" as const,serverId:resolved?.kind==="mcp"?resolved.server.id:null,catalogId:resolved?.kind==="mcp"?resolved.server.catalogId??null:null,toolName:resolved?.kind==="mcp"?resolved.serverToolName:resolved?.kind==="builtin"?resolved.builtinName:call.toolName,args:JSON.parse(call.arguments),schemaDigest:resolved?.kind==="mcp"?resolved.schemaDigest:null};result=await withCurrentHistoryTool(input,()=>dispatchMainToolRawUnchecked(byName, call, events, approval, broker));}
+  else result=await dispatchMainToolRawUnchecked(byName, call, events, approval, broker);
   // A timed-out code guest can return while its detached host calls are still
   // awaiting Main. Its bounded cleanup must not release a provider response.
   while (approval.mcpResultDeliveryState?.pending.size) {
@@ -580,6 +584,28 @@ function assertMcpResultDelivery(approval: LocalToolApprovalContext): void {
   if (approval.mcpResultDeliveryState?.blocked) throw approval.mcpResultDeliveryState.reason;
 }
 
+async function awaitMcpResultDelivery(
+  approval: LocalToolApprovalContext,
+  input: Parameters<NonNullable<RunnerRequest["beforeMcpToolResult"]>>[0],
+): Promise<void> {
+  const state = approval.mcpResultDeliveryState;
+  let delivery: Promise<void> | undefined;
+  try {
+    delivery = approval.beforeMcpToolResult?.(input);
+    if (delivery) state?.pending.add(delivery);
+    await delivery;
+  } catch (reason) {
+    const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
+    blocked.blocked = true; blocked.reason = reason;
+    throw reason;
+  } finally {
+    if (delivery) state?.pending.delete(delivery);
+  }
+  assertMcpResultDelivery(approval);
+  approval.signal?.throwIfAborted();
+  approval.assertCurrent?.();
+}
+
 async function dispatchMainToolRawUnchecked(
   byName: Map<string, ResolvedTool>, call: MainToolDispatchCall, events: RunnerEvents,
   approval: LocalToolApprovalContext, broker?: MainWorkforceBroker,
@@ -594,25 +620,25 @@ async function dispatchMainToolRawUnchecked(
       if (decision === "deny") throw new Error("tool_result_read_permission_denied");
       approval.signal?.throwIfAborted(); approval.assertCurrent?.();
       const content = readToolResult(byName, approval, request);
-      events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
-      events.onTool?.(call.toolName, call.arguments, content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
       return { content, visionMessage: null, isError: false };
     }
     if (approval.scienceCollectionCapability) assertScienceCollectionTool(approval.scienceCollectionCapability, byName.get(call.toolName));
     if (call.toolName === CODE_MODE_TOOL) {
       if (broker) throw new Error("code_mode_broker_not_supported");
       // Start receipt for the host-owned wrapper operation (see the dispatch start below).
-      events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
       const result = await runMainCodeMode(byName, call.arguments, events, approval, dispatchMainToolRaw);
-      events.onTool?.(call.toolName, call.arguments, result.content, call.providerCallId ?? undefined, result.isError, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, result.content, call.providerCallId ?? undefined, result.isError, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
       return result;
     }
     const menu = resolveToolMenu(byName, call.toolName, call.arguments);
     if (menu?.kind === "result") {
       // Menu listing/preparation is a host operation too; the effect reader needs start + result
       // (live 2026-09-25, run 3834da2a: three agentlas_tools_* results alone kept the boundary pending).
-      events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
-      events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, menu.content, call.providerCallId ?? undefined, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
       return { content: menu.content, visionMessage: null, isError: false };
     }
     if (menu?.kind === "call") {
@@ -625,13 +651,13 @@ async function dispatchMainToolRawUnchecked(
       events = {
         ...events,
         onTool: (name, args, result, _providerId, ...rest) =>
-          providerEvents.onTool?.(name, args, result, providerCall.providerCallId ?? undefined, ...rest),
+          (currentHistoryRuntimeFence()?.assertCurrent(), providerEvents.onTool?.(name, args, result, providerCall.providerCallId ?? undefined, ...rest)),
       };
       call = { ...call, toolName: menu.toolName, arguments: menu.arguments };
     }
   } catch (error) {
     const content = `Error: ${error instanceof Error ? error.message : String(error)}`;
-    events.onTool?.(call.toolName, call.arguments, content, call.providerCallId ?? undefined, true);
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, content, call.providerCallId ?? undefined, true));
     return { content, visionMessage: null, isError: true };
   }
   const eventCallId = call.providerCallId ?? undefined;
@@ -649,7 +675,7 @@ async function dispatchMainToolRawUnchecked(
     : undefined;
   if (!resolved) {
     if (actionId) broker?.finishAction(actionId, "not_dispatched");
-    events.onTool?.(call.toolName, call.arguments, "unknown tool", eventCallId, true);
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, "unknown tool", eventCallId, true));
     return {
       content: `Error: unknown tool "${call.toolName}"`,
       visionMessage: null,
@@ -661,7 +687,7 @@ async function dispatchMainToolRawUnchecked(
     args = call.arguments ? JSON.parse(call.arguments) : {};
   } catch {
     if (actionId) broker?.finishAction(actionId, "not_dispatched");
-    events.onTool?.(call.toolName, call.arguments, "invalid JSON arguments", eventCallId, true);
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, "invalid JSON arguments", eventCallId, true));
     return {
       content: "Error: invalid JSON arguments",
       visionMessage: null,
@@ -698,7 +724,7 @@ async function dispatchMainToolRawUnchecked(
   if (approval.planMode && planMutation) {
     const content = "Error: plan_mode_mutation_denied";
     if (actionId) broker?.finishAction(actionId, "denied");
-    events.onTool?.(call.toolName, call.arguments, content, eventCallId, true);
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, content, eventCallId, true));
     return { content, visionMessage: null, isError: true };
   }
   // 승인은 **호출 직전**이다. 인자를 파싱한 뒤, 서버에 닿기 전.
@@ -732,7 +758,7 @@ async function dispatchMainToolRawUnchecked(
   if ((collectionDecision ?? await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin, admittedMcpRead)) === "deny") {
     if (actionId) broker?.finishAction(actionId, "denied");
     const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.`;
-    events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true);
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true));
     return {
       content: denied,
       visionMessage: null,
@@ -758,10 +784,15 @@ async function dispatchMainToolRawUnchecked(
     return {content:JSON.stringify({code,recovery:approval.canonicalWorkRecovery!.packet()}),visionMessage:null,isError:true};
   }
   if(work && "reused" in work) {
+    // Original custody avoids another effect; delivery still belongs to this run.
+    if (resolved.kind === "mcp") await awaitMcpResultDelivery(approval, {
+      catalogId: resolved.server.catalogId ?? null,
+      toolName: resolved.serverToolName, isError: work.reused.isError,
+    });
     if(actionId)broker?.finishAction(actionId,work.reused.isError ? "failed" : "succeeded");
     return {...work.reused,canonicalWorkAction:{action_id:work.action.actionId,step_id:work.action.stepId}} as MainToolDispatchResult;
   }
-  withDurableMainToolStart(() => events.onTool?.(call.toolName, call.arguments, undefined, eventCallId, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
+  withDurableMainToolStart(() => (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, undefined, eventCallId, false, undefined, undefined, agentlasDispatchedOrigin(call.toolName))));
   if (resolved.kind === "builtin") {
     const [{ runBuiltinTool }, { askUser }, { multimodalImageSlot }, { generateImage }] = await Promise.all([
       import("../../shared/builtin-tools"),
@@ -784,8 +815,8 @@ async function dispatchMainToolRawUnchecked(
         const content = JSON.stringify({ error: { code } });
         attestMainToolPreDispatchRejection({ adapterKind: approval.runtimeKind, chatId: approval.chatId,
           agentId: approval.agentId, toolId: eventCallId });
-        events.onTool?.(call.toolName, call.arguments, content, eventCallId, true,
-          undefined, undefined, agentlasDispatchedOrigin(call.toolName));
+        (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, content, eventCallId, true,
+          undefined, undefined, agentlasDispatchedOrigin(call.toolName)));
         if (actionId) {
           if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
           broker?.finishAction(actionId, "failed");
@@ -816,7 +847,7 @@ async function dispatchMainToolRawUnchecked(
           }
         : {}),
     });
-    events.onTool?.(
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(
       call.toolName,
       call.arguments,
       outcome.content,
@@ -825,7 +856,7 @@ async function dispatchMainToolRawUnchecked(
       outcome.artifactPaths,
       outcome.imageDataUrl,
       agentlasDispatchedOrigin(call.toolName),
-    );
+    ));
     if (outcome.ok && outcome.downloadId) {
       try { await downloadProof?.complete(outcome.downloadId); } catch { /* Missing durable proof is never completion evidence. */ }
     }
@@ -885,14 +916,14 @@ async function dispatchMainToolRawUnchecked(
     const capturePaths = images
       .map((image) => saveBrowserCaptureArtifact(image.mediaType, image.data))
       .filter((filePath): filePath is string => filePath !== null);
-    events.onTool?.(
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(
       call.toolName,
       call.arguments,
-      text,
+      result.presentationResult ?? text,
       eventCallId,
       result.isError,
       capturePaths.length > 0 ? capturePaths : undefined,
-    );
+    ));
     if (!result.isError) mcpFileProof?.complete();
     if (actionId) {
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
@@ -918,7 +949,7 @@ async function dispatchMainToolRawUnchecked(
     };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    events.onTool?.(call.toolName, call.arguments, message, eventCallId, true);
+    (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, message, eventCallId, true));
     if (actionId) {
       if (approvalDecision === null) throw new Error("workforce_broker_approval_missing");
       broker?.finishAction(actionId, "failed");
@@ -931,23 +962,8 @@ async function dispatchMainToolRawUnchecked(
   }
   // Outside the ordinary tool-error catch: rejection belongs to the host run
   // lifecycle, while the completed tool receipt above remains intact.
-  const state = approval.mcpResultDeliveryState;
-  let delivery: Promise<void> | undefined;
-  try {
-    delivery = approval.beforeMcpToolResult?.({ catalogId: resolved.server.catalogId ?? null,
-      toolName: resolved.serverToolName, isError: mcpOutcome.isError });
-    if (delivery) state?.pending.add(delivery);
-    await delivery;
-  } catch (reason) {
-    const blocked = approval.mcpResultDeliveryState ??= { blocked: false, pending: new Set() };
-    blocked.blocked = true; blocked.reason = reason;
-    throw reason;
-  } finally {
-    if (delivery) state?.pending.delete(delivery);
-  }
-  assertMcpResultDelivery(approval);
-  approval.signal?.throwIfAborted();
-  approval.assertCurrent?.();
+  await awaitMcpResultDelivery(approval, { catalogId: resolved.server.catalogId ?? null,
+    toolName: resolved.serverToolName, isError: mcpOutcome.isError });
   if(work && "unit" in work) {
     approval.canonicalWorkRecovery!.finish(work,mcpOutcome);
     mcpOutcome.canonicalWorkAction={action_id:work.action.actionId,step_id:work.action.stepId};
@@ -1080,19 +1096,19 @@ async function streamChatTurn(
         if (!thinkingOpen) {
           thinkingOpen = true;
           thinkingStartedAt = Date.now();
-          onThinking?.("start");
+          (currentHistoryRuntimeFence()?.assertCurrent(), onThinking?.("start"));
         }
-        onThinking?.("delta", undefined, thought);
+        (currentHistoryRuntimeFence()?.assertCurrent(), onThinking?.("delta", undefined, thought));
       }
       if (delta?.content) {
         if (thinkingOpen) {
           thinkingOpen = false;
-          onThinking?.("end", Date.now() - thinkingStartedAt);
+          (onThinking?.("end", Date.now() - thinkingStartedAt));
         }
         acc += delta.content;
         const now = Date.now();
         if (now - lastEmit > 80) {
-          onPartial(acc);
+          (currentHistoryRuntimeFence()?.assertCurrent(), onPartial(acc));
           lastEmit = now;
         }
       }
@@ -1107,7 +1123,7 @@ async function streamChatTurn(
       // 빈 줄 / keep-alive — 무시
     }
   }
-  if (thinkingOpen) onThinking?.("end", Date.now() - thinkingStartedAt);
+  if (thinkingOpen) (onThinking?.("end", Date.now() - thinkingStartedAt));
   const pendingCalls = [...pending.values()];
   const toolCalls: OpenAiToolCall[] = pendingCalls
     .filter((entry) => entry.name)
@@ -1335,14 +1351,14 @@ export async function runLocalOpenAiChat(
   };
   const terminalFailure = (result: StreamTurnResult): RunnerResult | null => {
     if (result.finishReason === "length" && opts.contextWindow !== undefined) {
-      return { text: "", ownerControlTerminal: "uncertain",
-        failure: localContextFailure("local_output_limit_exceeded", runtimeKind, req.locale) };
+      return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain",
+        failure: localContextFailure("local_output_limit_exceeded", runtimeKind, req.locale) });
     }
     if (result.terminalObserved && result.finishReason === "content_filter") {
-      return { text: result.text, ownerControlTerminal: "uncertain",
+      return assertCurrentHistoryRunnerResult({ text: result.text, ownerControlTerminal: "uncertain",
         failure: { kind: "refused", runtime: runtimeKind, source: "marker", providerCode: "content_filter",
           message: req.locale === "ko" ? "모델이 콘텐츠 필터로 응답을 중단했습니다." : "The model stopped the response due to its content filter." },
-        workforcePermissionEnforcement: broker?.finish(false) };
+        workforcePermissionEnforcement: broker?.finish(false) });
     }
     return null;
   };
@@ -1350,8 +1366,8 @@ export async function runLocalOpenAiChat(
     const failure = runtimeHttpFailure(status, runtimeKind, providerLabel);
     if (!failure) return null;
     const observedUsage = usage.total();
-    return { text: finalText.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
-      workforcePermissionEnforcement: broker?.finish(false) };
+    return assertCurrentHistoryRunnerResult({ text: finalText.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
+      workforcePermissionEnforcement: broker?.finish(false) });
   };
 
   try {
@@ -1418,11 +1434,11 @@ export async function runLocalOpenAiChat(
         if (inputEstimate + reserve <= window) reportHistoryCompaction(droppedCount);
       }
       if (inputEstimate + reserve > window && !opts.unknownCapacityProviderEnforced) {
-        return { text: "", failure: { kind: "refused", runtime: runtimeKind, source: "marker",
+        return assertCurrentHistoryRunnerResult({ text: "", failure: { kind: "refused", runtime: runtimeKind, source: "marker",
           providerCode: "model_context_capacity_exceeded",
           message: req.locale === "ko"
             ? "현재 모델의 추정 문맥 용량을 넘었습니다. 요청·지시·도구 내용은 잘라내지 않았습니다."
-            : "The request exceeds this model's estimated context capacity. Current request, instructions, and tools were not clipped." } };
+            : "The request exceeds this model's estimated context capacity. Current request, instructions, and tools were not clipped." } });
       }
     }
     if (opts.contextWindow !== undefined) {
@@ -1468,15 +1484,15 @@ export async function runLocalOpenAiChat(
             reportHistoryCompaction(droppedCount);
           }
         }
-        if (!measured.fits) return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+        if (!measured.fits) return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
         const admittedOutputTokens = boundedLocalOutputTokens(measured.maxOutputTokens, req.maxOutputTokens);
         if (req.maxOutputTokens && admittedOutputTokens < req.maxOutputTokens) {
-          return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+          return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
         }
         requestBody.max_tokens = admittedOutputTokens;
       } catch {
         if (req.signal?.aborted) throw abortReasonError(req);
-        return {text:"",failure:localContextFailure("local_context_measurement_unavailable",runtimeKind,req.locale)};
+        return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_measurement_unavailable",runtimeKind,req.locale)});
       }
     }
     assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
@@ -1485,12 +1501,12 @@ export async function runLocalOpenAiChat(
     try {
       if (req.signal?.aborted) throw abortReasonError(req);
       ownerControlDispatched = ownerControlPending !== null;
-      resp = await fetch(chatEndpoint, {
+      resp = await withCurrentHistoryProvider(()=>fetch(chatEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json", ...opts.headers },
         signal: req.signal,
           body: JSON.stringify(requestBody),
-      });
+      }));
     } catch (err) {
       // 사용자가 멈춘 것을 "서버에 연결 못 함"이라고 말하면 거짓말이 된다 —
       // 취소는 취소로 올려보낸다. 다만 **원 에러를 그대로 던지면 안 된다**:
@@ -1517,12 +1533,12 @@ export async function runLocalOpenAiChat(
         assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
         usageAttempt = usage.start();
         try {
-          resp = await fetch(chatEndpoint, {
+          resp = await withCurrentHistoryProvider(()=>fetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
             signal: req.signal,
             body: JSON.stringify(retryBody),
-          });
+          }));
         } catch {
           if (req.signal?.aborted) throw abortReasonError(req);
           throw new Error(opts.unreachableMessage);
@@ -1535,7 +1551,7 @@ export async function runLocalOpenAiChat(
         }
       } else {
         const failureClass = localHttpFailureClass(errText);
-        if (failureClass === "context") return {text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)};
+        if (failureClass === "context") return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
         // Only explicit structured unsupported-tools markers permit the legacy downgrade.
         if (!ownerControlPending && failureClass === "tools" && tools.length > 0 && !sawAnyToolCall && resp.status >= 400 && resp.status < 500) {
           // A host-broker receipt must describe the inventory admitted to the
@@ -1547,12 +1563,12 @@ export async function runLocalOpenAiChat(
           events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
           assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
           usageAttempt = usage.start();
-          const fallback = await fetch(chatEndpoint, {
+          const fallback = await withCurrentHistoryProvider(()=>fetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
             signal: req.signal,
               body: JSON.stringify(Object.fromEntries(Object.entries(requestBody).filter(([key])=>key!=="tools"))),
-          });
+          }));
           if (!fallback.ok) {
             const terminal = httpFailureResult(fallback.status);
             if (terminal) return terminal;
@@ -1560,11 +1576,11 @@ export async function runLocalOpenAiChat(
             throw new Error(`${providerLabel} API ${fallback.status}: ${fallbackErrText.slice(0, 300)}`);
           }
           const result = await streamChatTurn(fallback, events.onPartial, events.onThinking);
-          usage.complete(usageAttempt, result.terminalUsage);
+          (usage.complete(usageAttempt, result.terminalUsage), currentHistoryRuntimeFence()?.assertCurrent());
           const failure = terminalFailure(result);
           if (failure) return failure;
           observeOwnerControlResponse(result);
-          if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
+          if (opts.contextWindow !== undefined && result.finishReason === "length") return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)});
           finalText = result.text;
           reachedAnswer = true;
           break;
@@ -1574,11 +1590,11 @@ export async function runLocalOpenAiChat(
     }
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
-    usage.complete(usageAttempt, result.terminalUsage);
+    (usage.complete(usageAttempt, result.terminalUsage), currentHistoryRuntimeFence()?.assertCurrent());
     const failure = terminalFailure(result);
     if (failure) return failure;
     observeOwnerControlResponse(result);
-    if (opts.contextWindow !== undefined && result.finishReason === "length") return {text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)};
+    if (opts.contextWindow !== undefined && result.finishReason === "length") return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_output_limit_exceeded",runtimeKind,req.locale)});
     if (approvalContext.scienceCollectionCapability && (result.missingToolCallIds || result.incompleteToolCalls
       || result.finishReason === "tool_calls" && result.toolCalls.length === 0)) {
       throw new Error("science_collection_tool_frame_invalid");
@@ -1672,7 +1688,7 @@ export async function runLocalOpenAiChat(
         : workforceZeroToolsEnforcement(req, runtimeKind, zeroToolsCapabilities);
 
   const observedUsage = usage.total();
-  return {
+  return assertCurrentHistoryRunnerResult({
     // 실패일 때도 원문은 지우지 않는다 — 표식을 안 읽는 소비자에게 빈 말풍선을
     // 주지 않기 위해서다. 판정은 어디까지나 failure 칸이 한다.
     text: answer || (failure ? failure.message : ""),
@@ -1680,7 +1696,7 @@ export async function runLocalOpenAiChat(
     ...(failure ? { failure } : {}),
     ...(observedUsage ? { observedUsage } : {}),
     workforcePermissionEnforcement: enforcement,
-  };
+  });
   } finally {
     if (ownerControlPending) req.ownerControlInbox!.settle(ownerControlPending,
       ownerControlDispatched ? "uncertain" : "rejected",

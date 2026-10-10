@@ -17,6 +17,17 @@ export function goalPlanOf(context: unknown): GoalPlanView | null {
 
 const STATUS_MARK: Record<string, string> = { done: "✓", retired: "–", active: "•", proposed: "○" };
 
+/** Agent Strategy KPI 상태 한 단어. 쿨다운·확인 횟수 같은 내부 상태는 화면에 내지 않는다. */
+const KPI_STATE_WORD: Record<string, { ko: string; en: string }> = {
+  no_data: { ko: "측정 전", en: "no data" },
+  ahead: { ko: "앞서는 중", en: "ahead" },
+  on_pace: { ko: "순조", en: "on pace" },
+  behind: { ko: "뒤처짐", en: "behind" },
+  stalled: { ko: "정체", en: "stalled" },
+  breakout: { ko: "급상승", en: "breakout" },
+  declining: { ko: "하락", en: "declining" },
+};
+
 /**
  * 골 구조 판단 결과 — 모양과 지금 하위목표를 한 줄로, 트리면 접힌 작은 트리.
  * 화면 용어는 최종목표·전략목표·하위목표(오너 2026-09-25) — 대계·전략·전술은 쓰지 않는다.
@@ -56,14 +67,21 @@ export function GoalPlanSummary({ plan, locale, variant = "inline" }: {
         ? (ko ? "확인할 하위목표" : "Sub-goal to inspect") : (ko ? "지금" : "Now")}: {current}
         {plan.currentTactic && readinessLabel(plan.currentTactic.id) && ` · ${readinessLabel(plan.currentTactic.id)}`}</span>
     </p>
+    {plan.shape === "mission_tree" && plan.mission?.keyResults.some((kr) => kr.current != null) && <p className={styles.line} data-goal-kpi-line="true">
+      {plan.mission.keyResults.filter((kr) => kr.current != null).map((kr) => {
+        const word = kr.state && KPI_STATE_WORD[kr.state] ? KPI_STATE_WORD[kr.state]![ko ? "ko" : "en"] : "";
+        return `${kr.metric} ${kr.current!.toLocaleString(ko ? "ko-KR" : "en-US")} / ${kr.target.toLocaleString(ko ? "ko-KR" : "en-US")}${word ? ` · ${word}` : ""}`;
+      }).join("  ·  ")}
+    </p>}
     {plan.shape === "mission_tree" && <details className={styles.tree}>
       <summary>{ko ? "트리 보기" : "Show tree"}</summary>
       {plan.mission && <p className={styles.mission}>{ko ? "최종목표" : "Final goal"}: {plan.mission.objective}</p>}
       {plan.mission?.keyResults.length ? <ul className={styles.krs}>
         {plan.mission.keyResults.map((kr) => <li key={kr.metric}>
-          {kr.metric} → {kr.target.toLocaleString(ko ? "ko-KR" : "en-US")}{kr.unit ? ` ${kr.unit}` : ""}
+          {kr.metric} → {kr.current != null ? `${kr.current.toLocaleString(ko ? "ko-KR" : "en-US")} / ` : ""}{kr.target.toLocaleString(ko ? "ko-KR" : "en-US")}{kr.unit ? ` ${kr.unit}` : ""}
+          {kr.state && KPI_STATE_WORD[kr.state] ? ` · ${KPI_STATE_WORD[kr.state]![ko ? "ko" : "en"]}` : ""}
           {kr.requiredPerDay !== null ? ` · ${ko ? "필요" : "need"} ${kr.requiredPerDay}/${ko ? "일" : "day"}` : ""}
-          {kr.sensor === "no_sensor" ? ` · ${ko ? "측정 없음" : "no sensor"}` : ""}
+          {kr.sensor === "no_sensor" && kr.current == null && !kr.state ? ` · ${ko ? "측정 없음" : "no sensor"}` : ""}
         </li>)}
       </ul> : null}
       <ul className={styles.strategies}>

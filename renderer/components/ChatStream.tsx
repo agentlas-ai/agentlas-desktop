@@ -1802,7 +1802,7 @@ function ToolGroupBlock({
           <span aria-hidden style={{ color: "var(--muted)", fontSize: 14, lineHeight: 1 }}>›</span>
         </div>
         {completedResultSteps.map((step) => (
-          <McpResultPreview key={`mcp-preview:${step.id}`} result={step.result} toolName={step.tool} locale={locale} compact />
+          <McpResultPreview key={`mcp-preview:${step.id}`} result={step.result} toolName={step.tool} isError={step.resultIsError} locale={locale} compact />
         ))}
       </div>
     );
@@ -1853,7 +1853,7 @@ function ToolGroupBlock({
         </span>
       </button>
       {steps.filter((step) => step.result?.trim()).slice(-3).map((step) => (
-        <McpResultPreview key={`mcp-preview:${step.id}`} result={step.result} toolName={step.tool} locale={locale} compact />
+        <McpResultPreview key={`mcp-preview:${step.id}`} result={step.result} toolName={step.tool} isError={step.resultIsError} locale={locale} compact />
       ))}
       {open && (
         <div

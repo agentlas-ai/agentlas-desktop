@@ -1,4 +1,6 @@
 import { supervisorError } from "../../shared/one-supervisor";
+import { readOrdinaryOneTurn, type OrdinaryOneTurnSource } from "../invocation/ordinary-one-turn";
+import { createSupervisorNativeOrigin } from "./supervisor-native-runtime";
 import { randomUUID } from "node:crypto";
 import type { ChatHistoryEntry, InvocationRunReceipt, McpInvocationRequest, RuntimeSelection, ImageAttachment } from "../../shared/types";
 import {
@@ -72,8 +74,19 @@ export const SUPERVISOR_FOLLOW_UP_LIMIT = 2;
 /** A host-started One turn that reviews finished delegations (Dots-style: the coordinator checks what comes back). */
 const isReview = (row: SupervisorRequestRow) => row.kind === "reply" && row.user_message_id === null && row.command_id.startsWith("review:");
 
+export interface OrdinaryNativeTurnObservation {
+  readonly origin: object;
+  readonly request: Readonly<McpInvocationRequest>;
+  onAdmitted(): void;
+  onPromptBound(): void;
+  onSettled(): void;
+  onPreparationClosed(): void;
+}
+const ordinaryNativeMarker = (row: SupervisorRequestRow): boolean => Object.prototype.hasOwnProperty.call(JSON.parse(row.payload_json), "ordinaryNative");
+
 /** One durable domain owner serves every viewer. Provider state never owns the personal identity. */
 export class OneSupervisorService {
+  private readonly ordinaryNativeTurns = new Map<string, { source: OrdinaryOneTurnSource; observation: OrdinaryNativeTurnObservation }>();
   private draining = false;
   private closed = false;
   private readonly unsubscribe: () => void;
@@ -82,11 +95,94 @@ export class OneSupervisorService {
       if (this.closed) return;
       const oneId=deps.identity().oneId;
       try { deps.assertAuthority?.(); deps.owner?.assert(oneId,true); } catch { return; } // stale owners never write another owner's outcome
+      const ordinary = deps.store.db.prepare("SELECT payload_json FROM one_supervisor_requests WHERE run_id=?").all(event.runId) as Array<{payload_json:string}>;
+      if (ordinary.some(row => Object.prototype.hasOwnProperty.call(JSON.parse(row.payload_json), "ordinaryNative"))) return;
       for (const row of deps.store.forRun(event.runId)) if(row.one_id===oneId)this.settle(row, event.receipt);
       if(!deps.owner || deps.owner.current()?.phase==='active')this.drain();
     });
   }
   close(): void { this.closed = true; this.unsubscribe(); }
+  /** Host-only observation of an existing ordinary native One turn; never a start or tool grant. */
+  observeOrdinaryNativeTurn(source: OrdinaryOneTurnSource): OrdinaryNativeTurnObservation | undefined {
+    const captured = readOrdinaryOneTurn(source, "scope"), request = captured.request;
+    const oneId = this.currentIdentity(this.deps.identity().oneId), owner = this.deps.owner;
+    if (!owner || this.closed) throw supervisorError("supervisor_native_owner_required");
+    const token = owner.assert(oneId);
+    const current = (control = false) => { if (this.closed) throw supervisorError("ordinary_one_turn_source_changed"); this.currentIdentity(oneId); owner.assertToken(token,control); };
+    const commandId = `ordinary:${request.runId}`;
+    const payload = { text: request.userPrompt, ordinaryNative: { inputDigest: captured.inputDigest, ownerProcessEpoch: captured.admission.ownerProcessEpoch } };
+    let ordinary = false;
+    const row = this.deps.store.db.transaction(() => {
+      current(); readOrdinaryOneTurn(source, "scope");
+      const rows = this.deps.store.db.prepare("SELECT * FROM one_supervisor_requests WHERE run_id=?").all(request.runId) as SupervisorRequestRow[];
+      if (rows.length > 1) throw supervisorError("supervisor_native_exact_command_required");
+      const prior = rows[0];
+      if (prior && !ordinaryNativeMarker(prior)) {
+        // Existing supervised replies retain their original origin/observation path.
+        // These are the existing origin validator's four-family binding checks, without minting another origin.
+        const originalPayload = JSON.parse(prior.payload_json);
+        let target: string | undefined;
+        if (prior.kind === "reply") target = prior.origin_chat_id;
+        else if (prior.kind === "work") target = originalPayload.workerChatId;
+        else if (prior.kind === "chat-send") target = originalPayload.chatId;
+        else if (prior.kind === "follow-up") {
+          const delegated = this.deps.store.db.prepare("SELECT payload_json FROM one_supervisor_requests WHERE one_id=? AND task_id=? AND kind='work' ORDER BY rowid LIMIT 1")
+            .get(oneId, prior.task_id) as {payload_json:string} | undefined;
+          if (delegated) target = JSON.parse(delegated.payload_json).workerChatId;
+        }
+        if (prior.one_id !== oneId || target !== request.chatId
+          || prior.state !== "dispatching" || originalPayload.text !== request.userPrompt
+          || (prior.source_reply_run_id && !this.deps.store.db.prepare("SELECT 1 FROM one_supervisor_requests WHERE one_id=? AND run_id=? AND kind='reply'").get(oneId, prior.source_reply_run_id)))
+          throw supervisorError("supervisor_native_command_binding_changed");
+        return prior;
+      }
+      ordinary = true;
+      if (prior) {
+        const held = this.ordinaryNativeTurns.get(prior.command_id);
+        if (!held || held.source !== source || prior.command_id !== commandId || prior.one_id !== oneId
+          || prior.origin_chat_id !== request.chatId || prior.payload_hash !== supervisorHash([oneId,"reply",payload])
+          || prior.payload_json !== JSON.stringify(payload)) throw supervisorError("ordinary_one_turn_source_changed");
+        return prior;
+      }
+      const received = this.deps.store.receive({commandId,oneId,kind:"reply",payload,originChatId:request.chatId,runId:request.runId});
+      this.deps.store.update(received,{state:"dispatching"});
+      return this.deps.store.get(commandId)!;
+    }).immediate();
+    if (!ordinary) return undefined;
+    const previous = this.ordinaryNativeTurns.get(row.command_id);
+    if (previous) return previous.observation;
+    const assertOriginal = () => { current(); readOrdinaryOneTurn(source,"scope"); };
+    const origin = createSupervisorNativeOrigin(this.deps.store,owner as OneSupervisorOwner,oneId,request as McpInvocationRequest,undefined,assertOriginal);
+    const actualRow = (control = false) => {
+      current(control); const value = this.deps.store.get(row.command_id);
+      if (!value || value.one_id !== oneId || value.run_id !== request.runId || value.origin_chat_id !== request.chatId
+        || value.payload_json !== row.payload_json || value.payload_hash !== row.payload_hash) throw supervisorError("ordinary_one_turn_source_changed");
+      return value;
+    };
+    const observation: OrdinaryNativeTurnObservation = Object.freeze({ origin, request,
+      onAdmitted: () => { readOrdinaryOneTurn(source,"execution"); const value=actualRow();
+        if (value.state === "dispatching") this.deps.store.update(value,{state:"accepted",acknowledgement:"delivered"});
+        else if (value.state !== "accepted") throw supervisorError("ordinary_one_turn_source_changed"); },
+      onPromptBound: () => {
+        const message=readOrdinaryOneTurn(source,"message").state.messageId!, value=actualRow();
+        if (value.user_message_id === message) return;
+        if (value.user_message_id !== null || this.deps.store.db.prepare("UPDATE one_supervisor_requests SET user_message_id=? WHERE command_id=? AND one_id=? AND run_id=? AND origin_chat_id=? AND payload_hash=? AND user_message_id IS NULL")
+          .run(message,value.command_id,oneId,request.runId,request.chatId,row.payload_hash).changes !== 1) throw supervisorError("ordinary_one_turn_source_changed");
+      },
+      onSettled: () => {
+        readOrdinaryOneTurn(source,"settlement"); const value=actualRow(true), receipt=this.deps.runtime.receipt(request.runId!);
+        if (!receipt || receipt.runId !== request.runId || receipt.chatId !== request.chatId || !settled(receipt))
+          throw supervisorError("ordinary_one_turn_outcome_unconfirmed");
+        if (["dispatching","accepted","held"].includes(value.state)) this.settle(value,receipt,true);
+        this.ordinaryNativeTurns.delete(row.command_id);
+      },
+      onPreparationClosed: () => { readOrdinaryOneTurn(source,"closed"); const value=actualRow(true);
+        if (["dispatching","accepted"].includes(value.state)) this.deps.store.update(value,{state:"held",acknowledgement:"unknown",reason:"ordinary_preparation_closed"});
+        this.ordinaryNativeTurns.delete(row.command_id); },
+    });
+    this.ordinaryNativeTurns.set(row.command_id,{source,observation});
+    return observation;
+  }
   /** Internal host action admission; never exposed to renderer or model input. */
   assertHostWriteAuthority(oneId: string): void { this.binding(oneId); }
   budgetConfigure(input:OneBudgetConfigureInput):OneBudgetConfigureResult{
@@ -172,7 +268,7 @@ export class OneSupervisorService {
     if(!job||job.one_id!==oneId||task.chatId!==job.chat_id||!['queued','claimed','cancelled','held'].includes(job.phase)
       || task.runId!==null&&task.runId!==job.run_id)return task;
     return {...task,state:job.phase==='claimed'?'queued':job.phase,runId:job.run_id,controlVersion:this.deps.workQueue!.version(job),
-      controls:['queued','claimed'].includes(job.phase)?['cancel']:[],observedAt:new Date(job.updated_at).toISOString()};
+      controls:this.deps.workQueue!.canCancelUnstarted(job)?['cancel']:[],observedAt:new Date(job.updated_at).toISOString()};
   }
   /** The reply run answers a message the owner wrote, not a review or check-in the host started (those read workers' output). */
   ownerTurn(replyRunId?: string): boolean {
@@ -233,7 +329,8 @@ export class OneSupervisorService {
       throw supervisorError('supervisor_review_report_only');
     }
   }
-  private settle(row: SupervisorRequestRow, receipt: InvocationRunReceipt): void {
+  private settle(row: SupervisorRequestRow, receipt: InvocationRunReceipt, ordinary = false): void {
+    if (ordinaryNativeMarker(row) && !ordinary) return;
     if (!settled(receipt)) return;
     if (row.kind==='cancel' && JSON.parse(row.payload_json).boundGoalId) return;
     if (row.kind === "chat-send" && JSON.parse(row.receipt_json).reason === "legacy_chat_delivery_unverified") return;
@@ -259,8 +356,20 @@ export class OneSupervisorService {
   }
   /** Saved-but-unclaimed replies are safe. A claimed start without proof is held, never replayed. */
   recover(): void {
+    const observedOneId = this.currentIdentity(this.deps.identity().oneId), observed = this.deps.store.pending(observedOneId);
+    for (const row of observed.filter(ordinaryNativeMarker)) {
+      const token = this.deps.owner?.current();
+      if (!token || token.oneId !== observedOneId) throw supervisorError("supervisor_native_owner_required");
+      this.deps.owner!.assertToken(token,true);
+      const captured = this.ordinaryNativeTurns.get(row.command_id);
+      let live = false;
+      if (captured) try { readOrdinaryOneTurn(captured.source,"scope"); live = true; } catch { /* No grant or settlement is inferred. */ }
+      if (!live && ["dispatching","accepted"].includes(row.state)) this.deps.store.update(row,{state:"held",acknowledgement:"unknown",reason:"ordinary_native_capture_unavailable"});
+    }
+    if (observed.length && observed.every(ordinaryNativeMarker)) return;
     const {oneId} = this.binding();
     for (const row of this.deps.store.pending(oneId)) {
+      if (ordinaryNativeMarker(row)) continue; // Missing capture after restart is not cleanup proof.
       if (!["dispatching","accepted","held"].includes(row.state) || !row.run_id || row.kind === "science" || row.task_id?.startsWith("science-") || JSON.parse(row.payload_json).boundGoalId) continue;
       // An old direction may still name its predecessor. Its durable queue
       // cursor, not that run's liveness, owns the application verdict.
@@ -314,8 +423,8 @@ export class OneSupervisorService {
       if (this.deps.runtime.attach(chatId)) return;
       // A held start is never replayed, and it no longer blocks every later message: once recover() found no live run
       // for it, the chat lock above is the guard. (Before, one unconfirmed start silenced One until a reset.)
-      if (this.deps.store.pending(oneId).some(row => row.kind === "reply" && ["dispatching","accepted"].includes(row.state))) return;
-      const stored = this.deps.store.list(oneId,"stored").filter(item => item.kind === "reply");
+      if (this.deps.store.pending(oneId).some(row => row.kind === "reply" && !ordinaryNativeMarker(row) && ["dispatching","accepted"].includes(row.state))) return;
+      const stored = this.deps.store.list(oneId,"stored").filter(item => item.kind === "reply" && !ordinaryNativeMarker(item));
       // The owner's own messages go first; a review of finished delegations waits for them.
       const row = stored.find(item => !isReview(item)) ?? stored[0] ?? this.queueReview(oneId, chatId);
       if (!row) return;
@@ -512,29 +621,12 @@ export class OneSupervisorService {
     const delegated=work ? JSON.parse(work.payload_json) as SupervisorWorkInput & {workerChatId?:string} : null;
     const automatic=Boolean(originReplyRunId && !this.ownerTurn(originReplyRunId));
     const sent=this.automaticFollowUps(oneId,input.taskId);
-    // A settled rejection before a follow-up acquired a run is not an execution.
-    // Keep ambiguous/malformed receipts and every assigned run in the replay fence.
+    // Only a definitive pre-dispatch refusal may be omitted from execution history.
     const latest = this.deps.store.db.prepare(`SELECT * FROM one_supervisor_requests
       WHERE one_id=? AND task_id=? AND kind IN ('work','follow-up')
-        AND NOT (kind='follow-up' AND state='failed' AND run_id IS NULL AND
-          CASE WHEN json_valid(receipt_json) THEN COALESCE(
-            json_type(receipt_json)='object'
-            AND json_type(receipt_json,'$.commandId')='text'
-            AND json_extract(receipt_json,'$.commandId')=command_id
-            AND json_type(receipt_json,'$.taskId')='text'
-            AND json_extract(receipt_json,'$.taskId')=task_id
-            AND json_type(receipt_json,'$.kind')='text'
-            AND json_extract(receipt_json,'$.kind')='follow-up'
-            AND json_type(receipt_json,'$.state')='text'
-            AND json_extract(receipt_json,'$.state')='failed'
-            AND json_type(receipt_json,'$.runId')='null'
-            AND json_type(receipt_json,'$.acknowledgement')='text'
-            AND json_extract(receipt_json,'$.acknowledgement')='settled'
-            AND json_type(receipt_json,'$.reason')='text'
-            AND json_extract(receipt_json,'$.reason') IN (
-              'supervisor_follow_up_not_delegated','supervisor_task_still_running',
-              'supervisor_task_cancelled','supervisor_follow_up_limit'),0)
-          ELSE 0 END)
+        AND NOT (kind='follow-up' AND run_id IS NULL AND state='failed'
+          AND COALESCE(json_extract(receipt_json,'$.acknowledgement'),'')='settled'
+          AND COALESCE(json_extract(receipt_json,'$.reason'),'')='supervisor_task_still_running')
       ORDER BY rowid DESC LIMIT 1`)
       .get(oneId,input.taskId) as SupervisorRequestRow|undefined;
     const automaticUnknown = Boolean(automatic && delegated?.workerChatId
@@ -726,7 +818,7 @@ export class OneSupervisorService {
     }
     if (!task) throw supervisorError('supervisor_task_missing');
     const unstarted = this.deps.workQueue?.forTask(task.taskId);
-    if (input.action === "cancel" && unstarted && ["queued", "claimed"].includes(unstarted.phase)) {
+    if (input.action === "cancel" && unstarted && this.deps.workQueue!.canCancelUnstarted(unstarted)) {
       return this.deps.store.db.transaction(() => {
         const row = this.deps.store.receive({commandId:input.commandId,oneId,kind:"cancel",payload:input,originChatId:chatId,taskId:task.taskId,runId:unstarted.run_id});
         if (!this.deps.workQueue!.cancelUnstarted(unstarted)) return this.deps.store.update(row, {
@@ -845,7 +937,7 @@ export class OneSupervisorService {
         task.state = job.phase === "claimed" ? "queued" : job.phase;
         task.runId = job.run_id;
         task.controlVersion = this.deps.workQueue!.version(job);
-        task.controls = ["queued", "claimed"].includes(job.phase) ? ["cancel"] : [];
+        task.controls = this.deps.workQueue!.canCancelUnstarted(job) ? ["cancel"] : [];
         task.observedAt = new Date(job.updated_at).toISOString();
       }
     }

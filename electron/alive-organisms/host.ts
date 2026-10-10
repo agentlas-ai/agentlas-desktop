@@ -23,6 +23,7 @@ import { AliveLifetimeService, type AliveLifetimeServiceOptions } from "../alive
 import { GoalAlivePlayground, attachedGoalId, type GoalPlaygroundDeps } from "./goal-playground";
 import { GoalAliveRuntime } from "./goal-runtime";
 import { LightWakeRunner, type LightWakeDeps } from "./light-wake";
+import { createAliveDecisionBinding } from "../daemon/alive-decision-port";
 import { ALIVE_POOL_RUNTIME_POLICY, aliveSelectionFromPool, type AliveModelOrderEntry } from "./model-order";
 import { ALIVE_DEFAULT_TOKEN_LIMIT, ALIVE_MAX_TOKEN_LIMIT, type AliveChangedEvent, type AliveModelOrderItem,
   type AliveSetEnabledInput, type AliveSetTokenLimitInput, type AliveResumeUncertainWakeInput, type AliveState, type AliveStatus, type AliveSurface } from "../../shared/alive";
@@ -41,7 +42,7 @@ export interface AliveHostDeps {
   intervalMs: number;
   playground: GoalPlaygroundDeps;
   /** The light decision-only runner's edges (runtime runner pick, cooldown note, timeout). */
-  light: Pick<LightWakeDeps, "pickRunner" | "noteFailure" | "timeoutMs">;
+  light: Pick<LightWakeDeps, "pickRunner" | "noteFailure" | "timeoutMs" | "decisionTransport">;
   /** Minimum spacing between unchanged-world wakes, escalating by consecutive unchanged reviews. */
   reviewFloorsMs?: readonly number[];
   /** Quiet period after an accepted action (the playground's own next step changes the world meanwhile). */
@@ -116,7 +117,11 @@ export class AliveOrganismHost {
       const store = new AliveLifetimeStore(deps.db, { initializeSchema: false, agentScope: (agentId) => this.lives.get(agentId) === kind });
       const playground = new GoalAlivePlayground(kind, deps.db, deps.playground);
       const runtime = new GoalAliveRuntime(store, { organism: kind, processStartedAtMs: deps.processStartedAtMs, now: deps.now,
-        light: this.light, resolveSelection: () => aliveSelectionFromPool(deps.cachedModelOrder()) });
+        light: this.light, resolveSelection: () => aliveSelectionFromPool(deps.cachedModelOrder()),
+        ...(deps.light.decisionTransport ? { bindDecision: (input: import("../alive-core/contracts").AliveRuntimeStart) => createAliveDecisionBinding({
+          store, organism: kind, start: input, ownerBinding: deps.light.decisionTransport!.ownerBinding, now: deps.now,
+          assertCurrent: () => { if (!this.running || this.planAccess !== "allowed" || !deps.controllerInstalled()) throw new AliveHostError("alive-decision-host-unavailable"); },
+        }) } : {}) });
       const service = new AliveLifetimeService(store, runtime, new Map([[kind, playground]]), {
         clock: deps.now,
         // No member can run now: a visible wait, re-checked every beat (cooldowns expire on their own).
@@ -177,6 +182,7 @@ export class AliveOrganismHost {
     if (!this.running) return;
     this.running = false;
     this.light.cancelAll();
+    this.deps.light.decisionTransport?.close();
     for (const organism of Object.values(this.organisms)) {
       organism.service.close();
       try { organism.releaseClock?.(); } catch { /* clock already released */ }
@@ -244,6 +250,7 @@ export class AliveOrganismHost {
   private suspendLife(organism: Organism, agentId: string, reasonCode: string): void {
     const nowMs = this.deps.now();
     organism.store.setEnabled(agentId, false, reasonCode, nowMs);
+    this.deps.light.decisionTransport?.release(agentId);
     const current = organism.store.get(agentId);
     if (current && current.state.lastWaitCode !== reasonCode) {
       organism.store.update(agentId, { state: { ...current.state, lastWaitCode: reasonCode, reviewPending: false } }, nowMs);

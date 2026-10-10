@@ -12,6 +12,9 @@ export type AppControlPolicy =
   | { allowed: false; reason: string };
 
 const DENIED: Array<[RegExp, string]> = [
+  [/^oneVault\./, "credential input belongs to the dedicated native owner surface"],
+  [/^oneProvider\./, "provider effects require the original native owner request"],
+  [/^onePersonalData\./, "personal sources and Page changes require their current native grant"],
   // The owner's consent boundary. One granting itself (or a worker) permission would be self-escalation.
   [/^(resolveToolApproval|grantChatAlwaysApproval|revokeChatAlwaysApproval|revokeCapabilityGrant)$/, "approvals and grants are the owner's decision"],
   [/^confirm\./, "the owner answers questions agents ask"],

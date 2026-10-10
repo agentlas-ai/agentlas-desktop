@@ -17,7 +17,8 @@ import { refreshAllToolchains, refreshToolchainForAutomation } from "./learner";
 import { toolchainLogos } from "./logo";
 import { listToolchainStates, mutateToolchainState } from "./store";
 import type { ToolchainAssetCreateInput } from "../../shared/toolchain-asset";
-import { getToolchainAsset, listToolchainAssets, publishToolchainVersion, withdrawToolchainAsset } from "./assets";
+import { resolveNativeAssetPublicationAuthority } from "./asset-cold-start";
+import { getToolchainAsset, listToolchainAssets, publishToolchainVersion, toolchainAssetTestInProgress, withdrawToolchainAsset } from "./assets";
 import { callToolchain, listToolchainCalls } from "./calls";
 import { generateToolchain } from "./generalizer";
 import type { ToolchainGenerationInput } from "../../shared/toolchain-asset";
@@ -63,7 +64,7 @@ function automationIdOf(value: unknown): string {
 }
 
 export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
-  ipc.handle("toolchains:assets-list", () => listToolchainAssets());
+  ipc.handle("toolchains:assets-list", () => listToolchainAssets().map(asset => ({ ...asset, testInProgress: toolchainAssetTestInProgress(asset.id) })));
   ipc.handle("toolchains:assets-get", (_event, id: string) => getToolchainAsset(id));
   ipc.handle("toolchains:assets-generate", (_event, input: ToolchainGenerationInput) => generateToolchain(input));
   // Compatibility callers delegate to the same AI authoring path. Their old
@@ -74,7 +75,10 @@ export function registerToolchainIpc(ipc: Pick<IpcMain, "handle">): void {
   });
   ipc.handle("toolchains:assets-create", async (_event, input: ToolchainAssetCreateInput) => (await generateToolchain(legacyRequest(input))).asset);
   ipc.handle("toolchains:assets-add-version", async (_event, input: ToolchainAssetCreateInput & { id: string }) => (await generateToolchain(legacyRequest(input))).asset);
-  ipc.handle("toolchains:assets-publish", (_event, input: { id: string; version: number; allowEffectfulValidation?: boolean }) => publishToolchainVersion(input.id, input.version, { permission: "write", allowEffectfulValidation: input.allowEffectfulValidation === true }));
+  ipc.handle("toolchains:assets-publish", async (event, input: { id: string; version: number }) => {
+    const nativePublication = await resolveNativeAssetPublicationAuthority({ kind: "ipc", caller: event, id: input.id, version: input.version });
+    return publishToolchainVersion(input.id, input.version, { permission: "write", nativePublication });
+  });
   ipc.handle("toolchains:assets-withdraw", (_event, id: string) => withdrawToolchainAsset(id));
   ipc.handle("toolchains:assets-run", (_event, input: { id: string; version?: number; input: Record<string, unknown>; requestId: string }) => {
     const asset = getToolchainAsset(input.id);

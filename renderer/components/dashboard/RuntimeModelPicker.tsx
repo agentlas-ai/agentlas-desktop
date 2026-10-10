@@ -398,7 +398,7 @@ export function RuntimeModelPicker({
          *   (실측 2026-09-08, 1180px: "GPT-5.1 Codex" 가 62px 자리에 83px).
          *   그리고 고를 모델이 하나도 없어 회색일 때도 이유가 없었다.
          */
-        title={options.length === 0
+        title={open ? undefined : options.length === 0
           ? (locale === "ko" ? "고를 수 있는 모델이 없습니다. 설정에서 런타임을 먼저 연결하세요." : "No models to choose from. Connect a runtime in Settings first.")
           : selected
             ? `${optionModelLabel(selected, locale)} · ${selectedIdentity}`

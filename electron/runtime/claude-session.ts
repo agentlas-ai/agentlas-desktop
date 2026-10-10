@@ -21,7 +21,7 @@ import type { ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
-import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
+import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit } from "./runner";
 
 export type { AcpSessionLease };
@@ -95,7 +95,7 @@ export function openClaudeResidentSession(opts: {
   env: NodeJS.ProcessEnv;
   model?: string | null;
   poolKey?: string | null;
-}): ClaudeResidentSession {
+}): ClaudeResidentSession | Promise<never> {
   const child = spawnCli(opts.bin, opts.args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: opts.env,
@@ -116,54 +116,60 @@ export function openClaudeResidentSession(opts: {
     completedTurns: 0,
     stderrTail: "",
   };
-  trackRunChild(child);
-  // 자식이 stdio 를 상속한 손자를 남기고 죽으면 close 가 영영 안 온다 — runner.ts 주석 참고.
-  ensureChildCloseAfterExit(child);
-  const readStdout = createNdjsonLineReader((ev) => {
-    const response = ev.type === "control_response" && ev.response && typeof ev.response === "object"
-      ? ev.response as Record<string, unknown> : null;
-    const pending = session.pendingModelSwitch;
-    if (response && pending && response.request_id === pending.requestId) {
-      session.pendingModelSwitch = null;
-      clearTimeout(pending.timer);
-      pending.resolve(response.subtype === "success");
-      return;
-    }
-    try {
-      session.active?.onEvent(ev);
-    } catch {
-      /* 수신자의 예외가 세션을 죽이지는 않는다 — 턴 쪽에서 정산한다 */
-    }
-  });
-  child.stdout?.on("data", readStdout);
-  const stderrDecoder = new StringDecoder("utf8");
-  child.stderr?.on("data", (chunk: Buffer) => {
-    const text = stderrDecoder.write(chunk);
-    session.stderrTail = (session.stderrTail + text).slice(-STDERR_TAIL_MAX);
-    try {
-      session.active?.onStderr(text);
-    } catch {
-      /* 위와 같다 */
-    }
-  });
-  const die = (code: number | null) => {
-    if (session.dead) return;
-    session.dead = true;
-    const pending = session.pendingModelSwitch;
-    if (pending) { session.pendingModelSwitch = null; clearTimeout(pending.timer); pending.resolve(false); }
-    const sink = session.active;
-    session.active = null;
-    try {
-      sink?.onDeath(code);
-    } catch {
-      /* 정산은 턴 쪽 책임 */
-    }
-  };
-  child.once("close", (code) => die(typeof code === "number" ? code : null));
-  child.once("error", () => die(null));
-  // stdin 이 EPIPE 로 프로세스를 죽이지 않게 한다(자식이 먼저 닫는 경우).
-  child.stdin?.on("error", () => {});
-  return session;
+  try {
+    trackRunChild(child);
+    // 자식이 stdio 를 상속한 손자를 남기고 죽으면 close 가 영영 안 온다 — runner.ts 주석 참고.
+    ensureChildCloseAfterExit(child);
+    const readStdout = createNdjsonLineReader((ev) => {
+      const response = ev.type === "control_response" && ev.response && typeof ev.response === "object"
+        ? ev.response as Record<string, unknown> : null;
+      const pending = session.pendingModelSwitch;
+      if (response && pending && response.request_id === pending.requestId) {
+        session.pendingModelSwitch = null;
+        clearTimeout(pending.timer);
+        pending.resolve(response.subtype === "success");
+        return;
+      }
+      try {
+        session.active?.onEvent(ev);
+      } catch {
+        /* 수신자의 예외가 세션을 죽이지는 않는다 — 턴 쪽에서 정산한다 */
+      }
+    });
+    child.stdout?.on("data", readStdout);
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const text = stderrDecoder.write(chunk);
+      session.stderrTail = (session.stderrTail + text).slice(-STDERR_TAIL_MAX);
+      try {
+        session.active?.onStderr(text);
+      } catch {
+        /* 위와 같다 */
+      }
+    });
+    const die = (code: number | null) => {
+      if (session.dead) return;
+      session.dead = true;
+      const pending = session.pendingModelSwitch;
+      if (pending) { session.pendingModelSwitch = null; clearTimeout(pending.timer); pending.resolve(false); }
+      const sink = session.active;
+      session.active = null;
+      try {
+        sink?.onDeath(code);
+      } catch {
+        /* 정산은 턴 쪽 책임 */
+      }
+    };
+    child.once("close", (code) => die(typeof code === "number" ? code : null));
+    child.once("error", () => die(null));
+    // stdin 이 EPIPE 로 프로세스를 죽이지 않게 한다(자식이 먼저 닫는 경우).
+    child.stdin?.on("error", () => {});
+    return session;
+  } catch (error) {
+    // The successful open remains synchronous. A failed setup keeps its pool
+    // opening reservation until the owned process tree has actually stopped.
+    return closeClaudeResidentSession(session).then(() => { throw error; });
+  }
 }
 
 /** 이 세션이 아직 다음 턴을 받을 수 있는가. */
@@ -175,7 +181,12 @@ export function claudeResidentSessionAlive(session: ClaudeResidentSession): bool
 }
 
 /** 세션을 놓는다(프로세스 트리 종료). */
-export function closeClaudeResidentSession(session: ClaudeResidentSession): void {
+const claudeSessionTerminations = new WeakMap<ClaudeResidentSession, Promise<void>>();
+export function closeClaudeResidentSession(session: ClaudeResidentSession): Promise<void> {
+  const existing = claudeSessionTerminations.get(session);
+  if (existing) return existing;
+  const termination = waitForCliTreeTermination(session.child);
+  claudeSessionTerminations.set(session, termination);
   session.closed = true;
   const pending = session.pendingModelSwitch;
   if (pending) { session.pendingModelSwitch = null; clearTimeout(pending.timer); pending.resolve(false); }
@@ -190,6 +201,7 @@ export function closeClaudeResidentSession(session: ClaudeResidentSession): void
   } catch {
     /* 이미 죽었을 수 있다 */
   }
+  return termination;
 }
 
 /** Installed Claude Code 2.1.278: control_request(set_model) is acknowledged on stdout before the next user turn. */

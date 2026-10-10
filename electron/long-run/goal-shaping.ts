@@ -7,7 +7,8 @@
  *    판단이 실패하면 목표를 막지 않는다 — 단일 전술 폴백으로 저장하고 다음 턴 시작에 다시 판단한다.
  * 2) 턴 문맥에는 활성 전술만(R9) 넣고, 표식으로 전술 완료·막힘·계획 연산을 받는다(산문 파싱 없음).
  * 3) 막힘은 지속 정책(shared/persistence-policy.ts)이 다음 수를 고른다. 단일 전술이 두 번 막히면 모양을 다시 판단한다(ADaPT 승격).
- * 4) 트리는 review_every_hours 마다 전략 리뷰 절을 넣는다. 속도는 shared/mission-pace.ts, 센서는 P-a 스텁("no_sensor" = 인프라 상태).
+ * 4) 트리는 review_every_hours 마다 전략 리뷰 절을 넣는다. 속도는 shared/mission-pace.ts, 센서는 Agent Strategy(KPI 표본 저장소,
+ *    long-run/agent-strategy.ts) — 표본이 없으면 "no_sensor" = 인프라 상태. KPI 상태가 바뀌면 시간과 무관하게 재계획 블록이 들어간다.
  */
 import {
   callConnectedModelDetailed,
@@ -33,6 +34,18 @@ import {
   type GoalPlanView,
 } from "../../shared/goal-shape";
 import { missionPace, type MissionPace } from "../../shared/mission-pace";
+import { extractAgentStrategyMarkers } from "../../shared/agent-strategy";
+import {
+  agentStrategyMode,
+  applyKpiMarkers,
+  applyStrategyShift,
+  buildKpiShiftContext,
+  evaluateGoalKpis,
+  goalKpiSampleCount,
+  kpiMeasurementLines,
+  krMetricSamples,
+  krStrategyView,
+} from "./agent-strategy";
 import type { RuntimeSelection } from "../../shared/types";
 import { decidePersistenceMove, isPersistenceBoundaryKind, type FailureCause, type PersistenceAttempt } from "../../shared/persistence-policy";
 import {
@@ -288,8 +301,9 @@ export function ownerPausedOpen(plan: LiveGoalPlan): LiveTactic[] {
 
 export function missionPaces(plan: LiveGoalPlan, nowMs: number): Array<{ krId: string; metric: string; target: number; unit: string; targetText: string; pace: MissionPace }> {
   return (plan.mission?.key_results ?? []).map((kr) => ({ krId: kr.id, metric: kr.metric, target: kr.target, unit: kr.unit, targetText: kr.target_text,
-    // 센서는 P-a 스텁 — 호스트가 잰 표본이 아직 없다. 추측하지 않는다.
-    pace: missionPace({ target: kr.target, baseline: kr.baseline, startAt: plan.createdAt, deadlineAt: kr.deadline_at, nowMs, samples: [] }) }));
+    // 센서 = Agent Strategy 가 검증·저장한 KPI 표본(없으면 빈 배열 → no_sensor, 추측하지 않는다).
+    pace: missionPace({ target: kr.target, baseline: kr.baseline, startAt: plan.createdAt, deadlineAt: kr.deadline_at, nowMs,
+      samples: krMetricSamples(plan.goalId, kr.id) }) }));
 }
 
 function reviewDue(plan: LiveGoalPlan, nowMs: number, reservedDecisionIds?: ReadonlySet<string>): boolean {
@@ -332,16 +346,24 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const lines: string[] = ["## Goal plan (host-owned shape decision · agentlas.goal-shape.v1)"];
   lines.push(`Current plan identity: goal ${plan.goalId} · revision ${plan.revision} · planSeq ${plan.planSeq}. This is the current projection for this Goal revision; earlier plan projections are historical.`);
   lines.push(`Shape: ${plan.shape} (problem: ${plan.problem_nature}${plan.fallback ? "; provisional — the planner was unavailable" : ""}). ${plan.rationale}`);
+  // Agent Strategy: 이 패스의 KPI 상태를 먼저 갱신한다(멱등). 읽기 전용 재렌더(record:false)는 쓰지 않는다.
+  if (plan.shape === "mission_tree" && input.record !== false) {
+    try { evaluateGoalKpis(plan, nowMs); } catch (error) { console.warn("[agent-strategy] evaluation failed:", error instanceof Error ? error.message : error); }
+  }
   const paces = missionPaces(plan, nowMs);
+  const krView = plan.shape === "mission_tree" ? krStrategyView(plan.goalId) : new Map();
   if (plan.shape === "mission_tree" && plan.mission) {
     lines.push(`Mission (owner intent, immutable): ${plan.mission.objective}`);
     lines.push(`Diagnosis: ${plan.mission.diagnosis}`);
-    for (const { metric, target, unit, targetText, pace } of paces) {
+    for (const { krId, metric, target, unit, targetText, pace } of paces) {
+      const view = krView.get(krId);
       lines.push(`- KR ${metric}: ${target}${unit ? ` ${unit}` : ""} (owner: "${targetText}")`
+        + (view?.current != null ? ` · current ${view.current}` : "")
         + (pace.daysLeft !== null ? ` · ${pace.daysLeft} days left` : "")
         + (pace.requiredPerDay !== null ? ` · required ≈ ${pace.requiredPerDay}/day`
           : pace.requiredPerDayUpperBound !== null ? ` · required ≤ ${pace.requiredPerDayUpperBound}/day (baseline unknown — measure it first)` : "")
-        + ` · host sensor: ${pace.status === "no_sensor" ? "none yet (not a strategy failure)" : pace.status}`);
+        + ` · host sensor: ${pace.status === "no_sensor" ? (view?.current != null ? "one sample so far (need more)" : "none yet (not a strategy failure)") : pace.status}`
+        + (view?.state && view.state !== "no_data" ? ` · KPI state: ${view.state}` : ""));
     }
     if (plan.mission.boundaries.length) lines.push(`Boundaries (the only limits): ${plan.mission.boundaries.map((b) => b.text).join("; ")}`);
     const active = plan.strategies.filter((s) => s.status === "active").map((s) => `${s.id}: ${s.hypothesis}`);
@@ -381,7 +403,11 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
     lines.push("Every planned tactic is done or retired. Verify the goal's acceptance criteria; if work remains, add a tactic with an add_tactic plan-op.");
   }
   const review = reviewDue(plan, nowMs, reservedDecisionIds);
-  if (review) {
+  const strategyLocale = input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en");
+  const kpiBlock = buildKpiShiftContext(plan, nowMs, strategyLocale);
+  lines.push(...kpiMeasurementLines(plan, nowMs));
+  if (kpiBlock) lines.push(kpiBlock);
+  if (review && !kpiBlock) {
     lines.push("Strategy review is due: compare each active strategy against the key-result pace above. You may retire a strategy whose timebox has elapsed (cite evidence) or add a strategy that cites a key result. Missing sensor data is an infrastructure state, not a reason to retire a strategy.");
   }
   lines.push("Protocol (machine markers, each on its own line; the host strips them from the reply):");
@@ -401,7 +427,9 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
     }
     if (review) {
       const receipt = recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "strategy_review", createdAt: new Date(nowMs).toISOString(),
-        payload: { runId: input.runId ?? null, sensor: "none", sensorState: "infra_no_sensor",
+        payload: { runId: input.runId ?? null, ...(goalKpiSampleCount(plan.goalId) > 0 && agentStrategyMode() !== "off"
+          ? { sensor: "agent_observed", sensorState: "observed", kpiStates: [...krView.entries()].map(([kr, v]) => ({ kr, current: v.current, state: v.state })) }
+          : { sensor: "none", sensorState: "infra_no_sensor" }),
           paces: paces.map(({ krId, pace }) => ({ krId, ...pace })),
           activeStrategies: plan.strategies.filter((s) => s.status === "active").map((s) => s.id) } });
       input.onDecisionRecorded?.(receipt.id);
@@ -562,8 +590,14 @@ export function bindGoalPlanDispatch(plan: LiveGoalPlan, runId: string | null): 
  * 실패는 삼키고 본문만 돌려준다 — 계획 원장 오류가 사람의 답을 막지 않는다.
  */
 export function applyGoalPlanMarkers(input: { goalId: string | null; text: string; runId?: string | null; nowMs?: number; signal?: AbortSignal }): GoalPlanMarkerOutcome {
-  const extracted = extractGoalPlanMarkers(input.text);
-  if (!input.goalId || (!extracted.tactics.length && !extracted.ops.length)) return { text: extracted.text, applied: [] };
+  // Agent Strategy 표식(KPI 표본·전략 변경)은 먼저 떼어 낸다. 표본은 계획 변경과 독립이라 바로 저장하고, 전략 변경은 아래 같은 트랜잭션에서 적용한다.
+  const strategyMarkers = extractAgentStrategyMarkers(input.text);
+  if (input.goalId && strategyMarkers.kpis.length) {
+    applyKpiMarkers({ goalId: input.goalId, markers: strategyMarkers.kpis, runId: input.runId ?? null, nowMs: input.nowMs });
+  }
+  const shifts = agentStrategyMode() === "on" ? strategyMarkers.shifts : [];
+  const extracted = extractGoalPlanMarkers(strategyMarkers.text);
+  if (!input.goalId || (!extracted.tactics.length && !extracted.ops.length && !shifts.length)) return { text: extracted.text, applied: [] };
   const applied: GoalPlanMarkerOutcome["applied"] = [];
   const nowMs = input.nowMs ?? Date.now();
   try {
@@ -597,6 +631,12 @@ export function applyGoalPlanMarkers(input: { goalId: string | null; text: strin
         if (branch?.ownerHeld || pausedStrategy) throw new Error("goal_plan_owner_held");
         const value = item.kind === "tactic" ? applyTacticMarker(plan, item.value, input.runId!, nowMs) : applyPlanOp(plan, item.value, input.runId!, nowMs);
         outcome.push({ kind: item.kind, id, result: value }); keys.push(key); seen.add(key);
+      }
+      for (const shift of shifts) {
+        const key = JSON.stringify({ kind: "strategy_shift", shift });
+        if (seen.has(key)) { outcome.push({ kind: "plan_op", id: "strategy_shift", result: "duplicate" }); continue; }
+        const value = applyStrategyShift(readGoalPlan(input.goalId!)!, shift, input.runId!, nowMs);
+        outcome.push({ kind: "plan_op", id: "strategy_shift", result: value }); keys.push(key); seen.add(key);
       }
       const after = readGoalPlan(input.goalId!)!;
       recordGoalPlanDecision({ goalId: after.goalId, revision: after.revision, planSeq: after.planSeq, kind: "marker_apply",
@@ -639,13 +679,17 @@ export function goalPlanView(goalId: string, nowMs = Date.now()): GoalPlanView |
     const plan = readGoalPlan(goalId);
     if (!plan) return null;
     const current = selectActiveTactics(plan, { nowMs })[0] ?? null;
+    const krView = krStrategyView(goalId);
     const short = (t: LiveTactic) => ({ id: t.id, description: t.description.slice(0, GOAL_SHAPE_LIMITS.shortText), status: t.status });
     return {
       readiness: projectGoalPlanReadiness(plan, { nowMs }),
       shape: plan.shape, problemNature: plan.problem_nature, fallback: plan.fallback, revision: plan.revision, planSeq: plan.planSeq,
       currentTactic: current ? { id: current.id, description: current.description.slice(0, GOAL_SHAPE_LIMITS.shortText), strategyId: current.strategy_id } : null,
-      mission: plan.mission ? { objective: plan.mission.objective, keyResults: missionPaces(plan, nowMs).map(({ metric, target, unit, pace }) => ({
-        metric, target, unit, requiredPerDay: pace.requiredPerDay ?? pace.requiredPerDayUpperBound, daysLeft: pace.daysLeft, sensor: pace.status })) } : null,
+      mission: plan.mission ? { objective: plan.mission.objective, keyResults: missionPaces(plan, nowMs).map(({ krId, metric, target, unit, pace }) => {
+        const view = krView.get(krId);
+        return { metric, target, unit, requiredPerDay: pace.requiredPerDay ?? pace.requiredPerDayUpperBound, daysLeft: pace.daysLeft, sensor: pace.status,
+          current: view?.current ?? null, state: view?.state ?? null };
+      }) } : null,
       strategies: plan.strategies.map((s) => ({ id: s.id, hypothesis: s.hypothesis.slice(0, GOAL_SHAPE_LIMITS.shortText), status: s.status,
         tactics: plan.tactics.filter((t) => t.strategy_id === s.id && t.status !== "retired").map(short) })),
       tactics: plan.tactics.filter((t) => t.status !== "retired").sort((a, b) => a.ord - b.ord).map(short),

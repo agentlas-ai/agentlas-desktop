@@ -1,4 +1,5 @@
 import { BrowserWindow, desktopCapturer, nativeImage, powerMonitor, screen, shell, systemPreferences } from "electron";
+import { withOneSensitiveOperation } from '../secrets/sensitive-surface';
 import { execFile } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -69,6 +70,9 @@ export async function oneContextTargetCurrent(target: ContextTarget): Promise<bo
   return (await oneContextTargets(target.kind)).some(current => current.sourceId === target.sourceId && current.fingerprint === target.fingerprint);
 }
 async function captureExact(target: ContextTarget, signal: AbortSignal): Promise<{ dataUrl:string; capturedAt:string }> {
+  return withOneSensitiveOperation(() => captureExactUnlocked(target, signal));
+}
+async function captureExactUnlocked(target: ContextTarget, signal: AbortSignal): Promise<{ dataUrl:string; capturedAt:string }> {
   if (signal.aborted) throw new OneContextError("one-context-revoked");
   if (target.owned) {
     const match = /^electron:(\d+):(\d+)$/.exec(target.sourceId), window = match ? BrowserWindow.fromId(Number(match[1])) : null;

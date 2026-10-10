@@ -11,6 +11,7 @@ import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import os from "node:os";
 import fs from "node:fs/promises";
+import { unlinkSync } from "node:fs";
 import crypto from "node:crypto";
 import { ToolRequestReplayGuard } from "../../shared/tool-request-replay";
 import type { Runner, RunnerRequest, RunnerEvents, RunnerResult , RunnerFailure } from "./runner";
@@ -56,6 +57,8 @@ import {
   renderConversationContext,
   renderGapContext,
   unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext, invalidateStableTurnContext } from "./continuity";
+import { agentContextSessionKey, agentContextNoToolsPacketForRequest } from "./agent-context";
+import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, withCliPath, writeStdin } from "./exec";
@@ -816,6 +819,9 @@ function looksLikeUnknownInputFormat(stderr: string): boolean {
   return /input-format/i.test(stderr);
 }
 
+// Captured session identity remains valid after its exclusive lease is returned.
+const aliveClaudeResources = new Map<string, { session: ClaudeResidentSession; close(): void }>();
+
 const runClaudeTurn = async (
   req: RunnerRequest,
   events: RunnerEvents,
@@ -823,6 +829,13 @@ const runClaudeTurn = async (
   observeNativeFile: NativeFileProofObserver,
 ): Promise<RunnerResult> => {
   assertScienceRecoveryRequest(req, "claude-code");
+  const aliveProfile = aliveDecisionProfileForRequest(req);
+  const alivePacket = aliveProfile ? agentContextNoToolsPacketForRequest(req) : null;
+  if (aliveProfile && !alivePacket) throw new Error("alive_claude_packet_required");
+  if (aliveProfile) {
+    const prior = aliveClaudeResources.get(aliveProfile.resourceOwnerKey);
+    if (prior && !claudeResidentSessionAlive(prior.session)) prior.close();
+  }
   if (req.restrictedReadBoundary) {
     throw new Error(
       "Claude Code is not enabled for restricted read-only execution because its host filesystem boundary is not release-verified.",
@@ -835,16 +848,23 @@ const runClaudeTurn = async (
   const bin = executableIdentity.executable;
   const executableState = capabilitiesFor(executableIdentity);
 
-  const executableOwner = req.chatId ? {
-    chatId: req.chatId,
+  // Canonical host identity only keys resident/cache resources. Observable
+  // chat ids, approval closures, effects and runtime-session FK rows stay actual.
+  const canonicalContextKey = aliveProfile?.resourceOwnerKey ?? (req.agentContext && !req.minimalObservation && !req.untrustedNoTools
+    && !req.scienceRecoveryCapability && !req.restrictedReadBoundary && !req.judgmentOnly
+    ? agentContextSessionKey(req.agentContext) : undefined);
+  const contextChatId = canonicalContextKey ?? req.chatId;
+  const executableOwner = aliveProfile || req.chatId ? {
+    chatId: contextChatId!,
     sessionOwnerId: req.runtimeSessionOwnerId ?? req.agentId ?? null,
     isolateOwner: req.runtimeSessionOwnerId != null,
     generation: executableIdentity.generation,
   } : null;
   const retainExecutableOwner = executableOwner && allowResidency
-    && !req.untrustedNoTools && !req.workforceRuntimeToolGrant
+    && (!req.untrustedNoTools || !!aliveProfile) && !req.workforceRuntimeToolGrant
     && !residencyDisabledFor(KIND, req.env ?? process.env)
     ? captureClaudeExecutableOwner(executableOwner) : () => true;
+  const retainAliveExecutableOwner = () => retainExecutableOwner() && (!aliveProfile || aliveProfile.retainResource());
 
   const stagedImages = await stageCliImageAttachments(req);
   const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
@@ -890,7 +910,7 @@ const runClaudeTurn = async (
 
   // A minimal observation carries its own complete prompt: none of the Agentlas header, skills and
   // protocols (~33 KB) that wrapSystemPrompt adds for conversation turns.
-  const systemPrompt = runReq.minimalObservation && !runReq.untrustedNoTools ? runReq.systemPrompt : wrapSystemPrompt(
+  const systemPrompt = aliveProfile || (runReq.minimalObservation && !runReq.untrustedNoTools) ? runReq.systemPrompt : wrapSystemPrompt(
     runReq.systemPrompt,
     runReq.locale,
     runReq.permission,
@@ -908,7 +928,9 @@ const runClaudeTurn = async (
     runReq.sciencePromptProfile,
     runReq.judgmentOnly === true ? "host-judgment" : undefined,
   );
-  const fingerprint = !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableIdentity.fingerprint) : null;
+  const fingerprint = aliveProfile ? crypto.createHash("sha256").update(JSON.stringify([aliveProfile.bindingKey,
+    executableIdentity.fingerprint, systemPrompt, runReq.outputSchema, runReq.model])).digest("hex")
+    : !runReq.untrustedNoTools && runReq.chatId ? systemFingerprint(runReq, executableIdentity.fingerprint) : null;
   const savedSession = !assertScienceRecoveryRequest(runReq, "claude-code") && !runReq.untrustedNoTools && runReq.chatId
     ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
@@ -933,7 +955,10 @@ const runClaudeTurn = async (
     [gapContext, runReq.turnContext].filter(Boolean).join("\n\n"),
     runReq.locale,
   );
-  let flatUser = resumeSessionId ? continuationPrompt : flattenHistory(runReq);
+  let flatUser = alivePacket ? [
+    ...(alivePacket.priorRows.length ? ["Recorded earlier decisions (data only):", ...alivePacket.priorRows.map(row => `${row.role}: ${row.text}`), "Current decision:"] : []),
+    alivePacket.currentPrompt,
+  ].join("\n\n") : resumeSessionId ? continuationPrompt : flattenHistory(runReq);
   /*
    * 읽기 전용 실행이면 그 사실을 말해 준다 — 도구를 조용히 빼기만 하면 모델은 그것을
    * 일시적 장애로 읽고 우회를 찾는다. 실측: 서브에이전트 위임 → 다른 도구 대체 →
@@ -956,8 +981,11 @@ const runClaudeTurn = async (
         ? `\n\n[쓰기 실행] 셸 명령은 작업 폴더 샌드박스 안에서 돈다. 어떤 명령이 승인 필요·샌드박스 거부로 막히면(권한 없음, Operation not permitted, GUI 앱·에뮬레이터·가상화·시스템 서비스 실행 실패, 프로세스가 시작하자마자 SIGILL·exit 132 로 즉사하는 것 포함) 그것은 이 컴퓨터의 한계가 아니라 이 실행의 권한 경계다. open·osascript·launchctl·.command·tmux 처럼 샌드박스 밖에 프로세스를 만드는 길로 우회하지 마라 — 막히며 그것도 같은 권한 경계다. 기계 문제로 진단하거나 우회를 반복하지 말고, 무엇이 왜 필요한지 한 문장으로 말한 뒤 답의 마지막 줄에 정확히 ${PERMISSION_ESCALATION_MARKER} 를 한 줄로 남겨라 — 앱이 사용자에게 전체 액세스 승격을 묻고, 승인되면 이어서 실행된다.`
         : `\n\n[Write run] Shell commands run inside a workspace sandbox. If a command is blocked by an approval requirement or the sandbox (permission denied, Operation not permitted, GUI apps, emulators, virtualization or system services failing to start, a process dying immediately with SIGILL / exit 132), that is this run's permission boundary, not a limit of this computer. Do not route around it through launchers that start processes outside the sandbox (open, osascript, launchctl, .command files, tmux) — they are blocked and are the same boundary. Do not diagnose the machine or keep trying workarounds: say in one sentence what is needed and why, then put exactly ${PERMISSION_ESCALATION_MARKER} on its own final line — the app will ask the user to escalate to full access and resume.`)
       : "";
-  const seededSystemPrompt = (!resumeSessionId && runReq.turnContext?.trim()
-    ? `${systemPrompt}\n\n${runReq.turnContext.trim()}`
+  // Snapshot what this prompt actually dispatches before asynchronous native init.
+  const stableContextSnapshot = { turnContext: aliveProfile ? undefined : runReq.turnContext,
+    stableBlocks: !aliveProfile && runReq.turnContextStable ? [...runReq.turnContextStable] : undefined };
+  const seededSystemPrompt = (!resumeSessionId && stableContextSnapshot.turnContext?.trim()
+    ? `${systemPrompt}\n\n${stableContextSnapshot.turnContext.trim()}`
     : systemPrompt) + (runReq.minimalObservation ? ""
       : readOnlyToolNotice + writeSandboxNotice + (runReq.untrustedNoTools ? "" : toolOutageGuidance(runReq.locale)));
 
@@ -1146,8 +1174,8 @@ const runClaudeTurn = async (
   //    fingerprint가 바뀌면 storedSessionId도 함께 버려지므로(위 clearRuntimeSession)
   //    낡은 내용이 재사용될 수 없다. 앱 재시작 등으로 파일이 사라졌으면 append 없이
   //    재개한다(그 턴만 재작성, 다음 세션 생성 때 파일 재생성).
-  const stableSysKey = runReq.chatId && fingerprint
-    ? crypto.createHash("sha256").update(`${runReq.chatId}\0${KIND}\0${fingerprint}`).digest("hex").slice(0, 20)
+  const stableSysKey = contextChatId && fingerprint
+    ? crypto.createHash("sha256").update(`${contextChatId}\0${KIND}\0${fingerprint}`).digest("hex").slice(0, 20)
     : null;
   const sysPromptFile = stableSysKey
     ? path.join(os.tmpdir(), `agentlas-claude-sys-${stableSysKey}.txt`)
@@ -1244,12 +1272,13 @@ const runClaudeTurn = async (
    * 떨어지고, 사용자 화면에는 아무 차이도 남지 않는다.
    */
   const runCwd = req.cwd ?? agentRunCwd();
-  const runEnv = req.env ?? process.env;
+  const runEnv = aliveProfile ? { ...process.env, CLAUDE_CODE_MAX_OUTPUT_TOKENS: String(req.maxOutputTokens),
+    MAX_STRUCTURED_OUTPUT_RETRIES: "1", CLAUDE_CODE_MAX_TURNS: "1", CLAUDE_CODE_MAX_RETRIES: "0" } : req.env ?? process.env;
   const residencyEligible =
     allowResidency &&
     executableState.residencySupported &&
     !residencyDisabledFor(KIND, runEnv) &&
-    !runReq.untrustedNoTools &&
+    (!runReq.untrustedNoTools || !!aliveProfile) &&
     // Browser and isolated MCP grants are per-turn authority. A resident
     // process must never retain one after this turn has completed.
     !runReq.browserOnly &&
@@ -1262,12 +1291,12 @@ const runClaudeTurn = async (
     // A pooled process does not repeat system/init for each turn. This
     // Workforce call needs fresh native observations; existing pools stay intact.
     !hostAuthorityWorkforce &&
-    Boolean(runReq.chatId) &&
+    Boolean(aliveProfile || runReq.chatId) &&
     Boolean(fingerprint);
   const poolKey =
-    residencyEligible && runReq.chatId && fingerprint
+    residencyEligible && contextChatId && fingerprint
       ? claudePoolKey({
-          chatId: runReq.chatId,
+          chatId: contextChatId!,
           sessionOwnerId: runtimeSessionOwnerId ?? null,
           isolateOwner: isolateRuntimeSessionOwner,
           fingerprint,
@@ -1281,6 +1310,10 @@ const runClaudeTurn = async (
         })
       : null;
   const pool = claudeSessionPool();
+  if (aliveProfile) {
+    aliveProfile.assertCurrent();
+    if (!poolKey) throw new Error("alive_claude_residency_unavailable");
+  }
   let lease: AcpSessionLease<ClaudeResidentSession> | null = null;
   let modelHandoff: { retired: number; pending: number } | null = null;
   /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
@@ -1299,7 +1332,7 @@ const runClaudeTurn = async (
   if (poolKey && executableOwner) {
     try {
       const current = getExecutable(req.runtimeSource, runCwd, runEnv);
-      if (!retainExecutableOwner() || current?.generation !== executableIdentity.generation) {
+      if (!retainAliveExecutableOwner() || current?.generation !== executableIdentity.generation) {
         throw new Error("cli_executable_identity_changed_during_preparation");
       }
     } catch (error) {
@@ -1308,6 +1341,10 @@ const runClaudeTurn = async (
       throw error;
     }
     retireSupersededClaudeSessions(pool, executableOwner);
+    if (aliveProfile) {
+      const prior = aliveClaudeResources.get(aliveProfile.resourceOwnerKey);
+      if (prior && !claudeResidentSessionAlive(prior.session)) prior.close();
+    }
     try {
       lease = await pool.acquire(
         poolKey,
@@ -1334,9 +1371,23 @@ const runClaudeTurn = async (
             model: runReq.model,
             poolKey,
           }),
-        retainExecutableOwner,
+        retainAliveExecutableOwner,
       );
+      if (aliveProfile && lease.fresh) {
+        const captured = lease.session;
+        let detach = () => {};
+        const close = () => {
+          pool.retireMatching(session => session === captured);
+          detach();
+          if (aliveClaudeResources.get(aliveProfile.resourceOwnerKey)?.session === captured) aliveClaudeResources.delete(aliveProfile.resourceOwnerKey);
+          try { unlinkSync(sysPromptFile); } catch { /* already retired */ }
+        };
+        try { detach = aliveProfile.registerResource(`claude:${poolKey}`, close); }
+        catch (error) { pool.discard(lease); lease = null; throw error; }
+        aliveClaudeResources.set(aliveProfile.resourceOwnerKey, { session: captured, close });
+      }
     } catch (error) {
+      if (aliveProfile) { cleanupSysFile(); cleanupAgentAppMcpConfig(); throw error; }
       if (error && typeof error === "object" && "code" in error && error.code === WORK_PROJECT_RESIDENCY_BUSY_CODE) {
         throw error;
       }
@@ -1362,6 +1413,7 @@ const runClaudeTurn = async (
     }
   }
   if (lease && !lease.fresh && lease.session.model !== (runReq.model?.trim() ?? "")) {
+    if (aliveProfile) { pool.discard(lease); throw new Error("alive_claude_model_changed"); }
     // The installed CLI accepts an idle stream-json control_request(set_model).
     // Only an acknowledged switch may receive the user turn; an old CLI or a
     // failed hook falls back to a fresh one-shot --resume with the requested model.
@@ -1382,9 +1434,13 @@ const runClaudeTurn = async (
     throw abortReasonError(req);
   }
   const session = lease?.session ?? null;
-  // Bind preparation to the actual held native identity when available. Native
-  // init/thread creation alone cannot prove fresh seed retention, so it is untracked.
-  const contextSessionId = session?.nativeSessionId ?? resumeSessionId;
+  // A fresh native id binds the dispatched seed snapshot at root system/init;
+  // only its valid terminal result acknowledges delivery, never init/stdin alone.
+  let contextSessionId = session?.nativeSessionId ?? resumeSessionId;
+  let initialSeedCompacted = false;
+  if (contextSessionId && lease?.fresh) {
+    invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId });
+  }
   // Use semantic request authority, not transport argv/pool identity: resume vs
   // fresh argument order, one-shot vs pooled carriers and materialized temporary
   // MCP filenames must not make an unchanged native contract look new.
@@ -1395,11 +1451,11 @@ const runClaudeTurn = async (
     runReq.isolatedMcpConfig, runReq.mcpAllowedTools,
     runReq.mcpConfigPath, runReq.toolBrokerSettingsPath, executableIdentity.fingerprint,
     runCwd, runEnv.CLAUDE_CONFIG_DIR])).digest("hex");
-  const resumeContext = contextSessionId ? dedupeStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND,
-    sessionId: contextSessionId, contextFingerprint, turnContext: runReq.turnContext,
-    stableBlocks: runReq.turnContextStable }) : undefined;
+  let resumeContext = contextSessionId ? dedupeStableTurnContext({ chatId: contextChatId, runtimeKind: KIND,
+    sessionId: contextSessionId, contextFingerprint, ...stableContextSnapshot,
+    ...(session ? { retention: "native-compaction" as const } : {}) }) : undefined;
   let stableContextAcknowledged = false;
-  if (resumeContext) {
+  if (resumeContext && !aliveProfile) {
     continuationPrompt = composeResumeTurnPrompt(runReq.userPrompt,
       [gapContext, resumeContext.text].filter(Boolean).join("\n\n"), runReq.locale);
     if (resumeSessionId) flatUser = continuationPrompt;
@@ -1503,6 +1559,7 @@ const runClaudeTurn = async (
     let lastEmit = 0;
     let sessionId: string | undefined;
     let terminalSessionId = contextSessionId ?? null;
+    let aliveInventoryVerified = Boolean(aliveProfile && session?.nativeSessionId && !lease?.fresh);
     let accCapped = false;
     // 런어웨이 출력(예: 장기 실행 GUI/서버 로그가 끝없이 스트리밍되는 명령)으로부터
     // 메모리를 보호한다. acc를 무제한 누적 + 매 partial마다 전체를 렌더러로 보내면
@@ -1862,9 +1919,36 @@ const runClaudeTurn = async (
           return;
         }
       }
+      if (aliveProfile) {
+        try { aliveProfile.assertCurrent(); }
+        catch (error) {
+          broken = true; structuredRuntimeError = error instanceof Error ? error : new Error(String(error));
+          // A late terminal still settles measured cost; it never ACKs context
+          // or publishes an answer after the original wake authority expires.
+          if (ev.type !== "result") { killCliTree(child, 250); return; }
+        }
+        try {
+          const raw = ev as unknown as Record<string, unknown>;
+          if (raw.type === "control_request" || raw.parent_tool_use_id || raw.isSidechain === true) throw new Error("alive_claude_tool_denied");
+          if (ev.type === "system" && ev.subtype === "init") {
+            if (!Array.isArray(ev.tools) || ev.tools.some(tool => tool !== "StructuredOutput")
+              || (Array.isArray(ev.mcp_servers) && ev.mcp_servers.length)
+              || typeof ev.session_id !== "string" || !ev.session_id.trim()) throw new Error("alive_claude_inventory_changed");
+            aliveInventoryVerified = true;
+          }
+          if (["assistant", "stream_event", "result"].includes(ev.type ?? "") && !aliveInventoryVerified) throw new Error("alive_claude_inventory_missing");
+          if (contextSessionId && ev.session_id != null && ev.session_id !== contextSessionId) throw new Error("alive_claude_session_changed");
+          const deniedTool = ev.message?.content?.find(block => block.type === "tool_use" && block.name !== "StructuredOutput");
+          if (deniedTool) {
+            events.onTool?.(deniedTool.name ?? "unknown", JSON.stringify(deniedTool.input ?? {}), undefined, deniedTool.id);
+            throw new Error("alive_claude_tool_denied");
+          }
+        } catch (error) { broken = true; structuredRuntimeError = error instanceof Error ? error : new Error(String(error)); killCliTree(child, 250); return; }
+      }
       if (agentAppMcpInitFailed) return;
       const isAgentAppMcpInit = ev.type === "system" && ev.subtype === "init";
-      if (isAgentAppMcpInit && !terminalSessionId && typeof ev.session_id === "string" && ev.session_id.trim()) {
+      if (isAgentAppMcpInit && !terminalSessionId && !ev.parent_tool_use_id && ev.isSidechain !== true
+        && typeof ev.session_id === "string" && ev.session_id.trim()) {
         terminalSessionId = ev.session_id;
       }
       if (isAgentAppMcpInit) recordClaudeCapabilityInit(ev.tools);
@@ -1882,18 +1966,28 @@ const runClaudeTurn = async (
         killCliTree(child, 250);
         return;
       }
-      if (typeof ev.session_id === "string" && ev.session_id) {
-        if (resumeContext?.delivery && ev.session_id !== resumeContext.delivery.identity.sessionId
-          && !ev.parent_tool_use_id && ev.isSidechain !== true) {
+      if (typeof ev.session_id === "string" && ev.session_id
+        && !ev.parent_tool_use_id && ev.isSidechain !== true) {
+        if (isAgentAppMcpInit && !contextSessionId && ev.session_id.trim()) {
+          contextSessionId = ev.session_id;
+          terminalSessionId = ev.session_id;
+          invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId });
+          if (!initialSeedCompacted) resumeContext = dedupeStableTurnContext({ chatId: contextChatId,
+            runtimeKind: KIND, sessionId: contextSessionId, contextFingerprint, ...stableContextSnapshot,
+            ...(session ? { retention: "native-compaction" as const } : {}) });
+        }
+        if (resumeContext?.delivery && ev.session_id !== resumeContext.delivery.identity.sessionId) {
           invalidateStableTurnContext(resumeContext.delivery.identity);
         }
         sessionId = ev.session_id;
         if (session) session.nativeSessionId = ev.session_id;
       }
       if (ev.type === "system" && ev.subtype === "compact_boundary"
-        && !ev.parent_tool_use_id && ev.isSidechain !== true && contextSessionId) {
-        invalidateStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND,
-          sessionId: ev.session_id ?? sessionId ?? contextSessionId });
+        && !ev.parent_tool_use_id && ev.isSidechain !== true) {
+        if (!contextSessionId) initialSeedCompacted = true;
+        else if (ev.session_id == null || ev.session_id === contextSessionId) {
+          invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId });
+        }
       }
       if (ev.error === "authentication_failed") {
         runnerFailure = claudeFailureFromEvent(ev, finalText, runnerFailure);
@@ -2101,15 +2195,20 @@ const runClaudeTurn = async (
           && typeof ev.session_id === "string" && Boolean(ev.session_id.trim())
           && (!terminalSessionId || ev.session_id === terminalSessionId)
           && typeof ev.uuid === "string" && Boolean(ev.uuid.trim())
-          && Number.isSafeInteger(ev.num_turns) && ev.num_turns! > 0 && !req.signal?.aborted;
-        const receiptKey = JSON.stringify([runReq.chatId ?? null, runtimeSessionOwnerId ?? null, ev.session_id]);
+          && Number.isSafeInteger(ev.num_turns) && ev.num_turns! > 0 && (!aliveProfile || ev.num_turns === 1) && !req.signal?.aborted;
+        const receiptKey = JSON.stringify([contextChatId ?? null, runtimeSessionOwnerId ?? null, ev.session_id]);
         const seenResults = terminalResultReceipts.get(receiptKey);
         const freshResult = rootResult && !seenResults?.has(ev.uuid!);
+        const completedResult = freshResult && ev.subtype === "success"
+          && (ev.terminal_reason === undefined || ev.terminal_reason === "completed")
+          && ev.deferred_tool_use == null;
         let acknowledgedResult = false;
         if (freshResult) {
-          acknowledgedResult = acknowledgeStableTurnContext(resumeContext?.delivery,
-            { sessionId: ev.session_id!, acknowledgementId: ev.uuid! });
-          stableContextAcknowledged = acknowledgedResult || stableContextAcknowledged;
+          if (completedResult) {
+            acknowledgedResult = acknowledgeStableTurnContext(resumeContext?.delivery,
+              { sessionId: ev.session_id!, acknowledgementId: ev.uuid! });
+            stableContextAcknowledged = acknowledgedResult || stableContextAcknowledged;
+          }
           if (!seenResults && terminalResultReceipts.size >= 500) {
             const oldest = terminalResultReceipts.keys().next();
             if (!oldest.done) terminalResultReceipts.delete(oldest.value);
@@ -2119,10 +2218,9 @@ const runClaudeTurn = async (
           receipts.add(ev.uuid!);
           terminalResultReceipts.set(receiptKey, receipts);
         }
-        terminalSucceeded = freshResult && ev.subtype === "success"
-          && (ev.terminal_reason === undefined || ev.terminal_reason === "completed")
-          && ev.deferred_tool_use == null
-          && (!resumeContext?.delivery || acknowledgedResult);
+        // Cache compaction can reject an old context ACK without invalidating
+        // this exact native terminal. Neither receipt asserts external quiescence.
+        terminalSucceeded = completedResult;
         const resultShape = ev as { subtype?: unknown; num_turns?: unknown };
         if (resumeSessionId && ev.is_error === true && resultShape.subtype === "error_during_execution"
           && resultShape.num_turns === 0) resumedConversationMissing = true;
@@ -2231,6 +2329,9 @@ const runClaudeTurn = async (
       if (turnDispatchAttempted && !sawResult) {
         rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale));
         return;
+      }
+      if (aliveProfile && (!sawResult || !terminalSucceeded)) {
+        broken = true; rejectRuntime(new RuntimeTurnUnsettledError(KIND, req.locale)); return;
       }
       if (session && !sawResult && !combined() && !finalText) {
         broken = true;
@@ -2432,6 +2533,7 @@ const runClaudeTurn = async (
       if (!claudeResidentSessionAlive(session)) {
         settle(null);
       } else {
+        try { aliveProfile?.assertCurrent(); } catch (error) { broken = true; pool.discard(lease!); rejectRuntime(error); return; }
         turnDispatchAttempted = true;
         events.onRuntimeAttemptStarted?.(runtimeAttemptId);
         if (!writeClaudeResidentTurn(session, turnText)) settle(null);
@@ -2443,11 +2545,14 @@ const runClaudeTurn = async (
     });
   } finally {
     if (contextSessionId && (broken || req.signal?.aborted || (resumeContext?.delivery && !stableContextAcknowledged))) {
-      invalidateStableTurnContext({ chatId: runReq.chatId, runtimeKind: KIND, sessionId: contextSessionId });
+      invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: contextSessionId });
     }
     if (lease) {
       // 취소·오류면 버리고, 아니면 반납한다(다음 턴이 이어 쓴다).
-      if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse) pool.discard(lease);
+      if (broken || req.signal?.aborted || runReq.ephemeralToolGrant || runReq.singleUse) {
+        pool.discard(lease);
+        if (aliveProfile) aliveClaudeResources.get(aliveProfile.resourceOwnerKey)?.close();
+      }
       else pool.release(lease);
     }
   }

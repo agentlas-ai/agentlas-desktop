@@ -94,17 +94,19 @@ function Block({ block, locale }: { block: McpResultBlock; locale: "ko" | "en" }
 export function McpResultPreview({
   result,
   toolName,
+  isError,
   locale = "ko",
   compact = false,
   placement = "chat",
 }: {
   result?: string | null;
   toolName?: string;
+  isError?: boolean;
   locale?: "ko" | "en";
   compact?: boolean;
   placement?: "chat" | "sidebar";
 }) {
-  const presentation = useMemo(() => parseMcpResult(result, toolName), [result, toolName]);
+  const presentation = useMemo(() => parseMcpResult(result, toolName, isError), [result, toolName, isError]);
   const { preferences } = useMediaDisplayPreferences();
   if (!result || presentation.blocks.length === 0) return null;
   const allMedia = presentation.blocks.filter((block) => block.kind === "image" || block.kind === "video" || block.kind === "audio");

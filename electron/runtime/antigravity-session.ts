@@ -8,7 +8,7 @@ import type { ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
-import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
+import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit } from "./runner";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 
@@ -69,7 +69,7 @@ export function openAntigravityResidentSession(opts: {
   cwd: string;
   env: NodeJS.ProcessEnv;
   onPersistentMcpScopeClose?: (key: string, owner: string) => void;
-}): AntigravityResidentSession {
+}): AntigravityResidentSession | Promise<never> {
   const child = spawnCli(opts.bin, opts.args, {
     stdio: ["pipe", "pipe", "pipe"],
     env: opts.env,
@@ -87,30 +87,36 @@ export function openAntigravityResidentSession(opts: {
     persistentMcpScopes: new Map(),
     onPersistentMcpScopeClose: opts.onPersistentMcpScopeClose,
   };
-  trackRunChild(child);
-  ensureChildCloseAfterExit(child);
+  try {
+    trackRunChild(child);
+    ensureChildCloseAfterExit(child);
 
-  const readStdout = createAgyNdjsonLineReader((line) => {
-    try { session.active?.onLine(line); } catch { /* turn settlement owns failures */ }
-  });
-  child.stdout?.on("data", readStdout);
-  const stderrDecoder = new StringDecoder("utf8");
-  child.stderr?.on("data", (chunk: Buffer) => {
-    const text = stderrDecoder.write(chunk);
-    session.stderrTail = (session.stderrTail + text).slice(-STDERR_TAIL_MAX);
-    try { session.active?.onStderr(text); } catch { /* see stdout handler */ }
-  });
-  const die = (code: number | null) => {
-    if (session.dead) return;
-    session.dead = true;
-    const sink = session.active;
-    session.active = null;
-    try { sink?.onDeath(code); } catch { /* the active turn settles itself */ }
-  };
-  child.once("close", (code) => die(typeof code === "number" ? code : null));
-  child.once("error", () => die(null));
-  child.stdin?.on("error", () => {});
-  return session;
+    const readStdout = createAgyNdjsonLineReader((line) => {
+      try { session.active?.onLine(line); } catch { /* turn settlement owns failures */ }
+    });
+    child.stdout?.on("data", readStdout);
+    const stderrDecoder = new StringDecoder("utf8");
+    child.stderr?.on("data", (chunk: Buffer) => {
+      const text = stderrDecoder.write(chunk);
+      session.stderrTail = (session.stderrTail + text).slice(-STDERR_TAIL_MAX);
+      try { session.active?.onStderr(text); } catch { /* see stdout handler */ }
+    });
+    const die = (code: number | null) => {
+      if (session.dead) return;
+      session.dead = true;
+      const sink = session.active;
+      session.active = null;
+      try { sink?.onDeath(code); } catch { /* the active turn settles itself */ }
+    };
+    child.once("close", (code) => die(typeof code === "number" ? code : null));
+    child.once("error", () => die(null));
+    child.stdin?.on("error", () => {});
+    return session;
+  } catch (error) {
+    // Preserve synchronous success while holding a failed opening reservation
+    // until this owned CLI tree has physically terminated.
+    return closeAntigravityResidentSession(session).then(() => { throw error; });
+  }
 }
 
 export function antigravityResidentSessionAlive(session: AntigravityResidentSession): boolean {
@@ -120,7 +126,12 @@ export function antigravityResidentSessionAlive(session: AntigravityResidentSess
   return Boolean(child.stdin && child.stdin.writable);
 }
 
-export function closeAntigravityResidentSession(session: AntigravityResidentSession): void {
+const antigravitySessionTerminations = new WeakMap<AntigravityResidentSession, Promise<void>>();
+export function closeAntigravityResidentSession(session: AntigravityResidentSession): Promise<void> {
+  const existing = antigravitySessionTerminations.get(session);
+  if (existing) return existing;
+  const termination = waitForCliTreeTermination(session.child);
+  antigravitySessionTerminations.set(session, termination);
   session.closed = true;
   session.active = null;
   for (const [key, owner] of session.persistentMcpScopes) {
@@ -129,6 +140,7 @@ export function closeAntigravityResidentSession(session: AntigravityResidentSess
   session.persistentMcpScopes.clear();
   try { session.child.stdin?.end(); } catch { /* already closed */ }
   try { killCliTree(session.child); } catch { /* already dead */ }
+  return termination;
 }
 
 export function bindAntigravityPersistentMcpScope(

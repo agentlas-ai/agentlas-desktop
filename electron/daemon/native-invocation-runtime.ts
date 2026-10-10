@@ -1,4 +1,11 @@
 import { createDaemonOneSupervisorHost } from "./one-supervisor-host";
+import { ALIVE_DECISION_PROTOCOL, createDaemonAliveDecisionPort } from "./alive-decision-port";
+import { getDb } from "../store/db";
+import { agentContextOwnerBinding } from "../runtime/agent-context-admission";
+import { withAgentContext } from "../runtime/agent-context";
+import { detectRuntimes } from "../runtime/detect";
+import { pickRunner } from "../runtime/selection";
+import { runAliveServingDecision } from "../alive-organisms/serving-wake";
 import { ONE_SUPERVISOR_RUNTIME_PROTOCOL } from "../../shared/one-supervisor-runtime";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import { randomUUID } from "node:crypto";
@@ -48,6 +55,25 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   assertNativeAuthBinding(options.binding); options.assertOwner();
   let accepting = true;
   const supervisor=createDaemonOneSupervisorHost({bootId:options.bootId,assertOwner:options.assertOwner,science:options.science});
+  // Created after the original GUI session is adopted; an unauthenticated
+  // startup snapshot cannot bind a later account's context lifetime.
+  let alive:ReturnType<typeof createDaemonAliveDecisionPort>|undefined;
+  let aliveOwnerBinding:string|undefined;
+  const alivePort=()=>{
+    const binding=JSON.stringify(agentContextOwnerBinding());
+    if(aliveOwnerBinding!==binding){alive?.close();alive=undefined;aliveOwnerBinding=binding;}
+    return alive??(alive=createDaemonAliveDecisionPort({db:getDb(),bootId:options.bootId,
+    assertOwner:options.assertOwner,ownerBinding:agentContextOwnerBinding,now:Date.now,
+    async resolveRuntime(choice){
+      const status=(await detectRuntimes()).find(value=>value.kind===choice.kind
+        && (value.backend??null)===choice.backend && (value.source??null)===choice.source);
+      if(!status)return null;
+      const selected={...status,model:choice.model};
+      const picked=selected.kind==="agentlas"?{runner:withAgentContext(runAliveServingDecision,{kind:"agentlas"}),label:"Agentlas"}:pickRunner(selected);
+      return picked?{...picked,status:selected}:null;
+    },
+  }));
+  };
   let host: ReturnType<typeof createDaemonNativeInvocationHost> | undefined;
   type Captured = { peer: ControlSocketPeer; identity: NativeAuthenticatedIdentity; start: NativeStartDescriptor; released: boolean };
   type Attached = { identity: NativeAuthenticatedIdentity; publisher: ReturnType<typeof createNativeInvocationPublicPublisher>;
@@ -83,6 +109,12 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   async function dispatch(method: string, params: unknown, peer: ControlSocketPeer): Promise<unknown> {
     options.assertOwner();
     if (method === "native.attach") {
+      if(params && typeof params==="object" && (params as {version?:unknown}).version===ALIVE_DECISION_PROTOCOL){
+        const attachment=current(peer),identity=attachment.identity;
+        return alivePort().dispatch(params,{identity,
+          assertCurrent(){if(current(peer).identity!==identity)fail("alive_decision_native_peer_changed");},
+          onClose:listener=>peer.onClose(listener)});
+      }
       if(params && typeof params==='object' && (params as {version?:unknown}).version===ONE_SUPERVISOR_RUNTIME_PROTOCOL) {
         const attachment=current(peer);
         const observed=await supervisor.dispatch(params);options.assertOwner();current(peer);
@@ -273,6 +305,6 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
   try{await supervisor.recover();}catch(error){console.warn("[one-supervisor] domain recovery held",(error as Error).message);}
   return { address: server.address, status, get supervisorActive(){return supervisor.active;}, closeAdmission() { accepting = false; supervisor.closeAdmission(); },
     get pendingCount() { return host?.retainedRecordCount ?? 0; },
-    async close() { accepting = false; for (const peer of [...attached.keys()]) disposeAttachment(peer); await server.close(); },
+    async close() { accepting = false; alive?.close(); for (const peer of [...attached.keys()]) disposeAttachment(peer); await server.close(); },
     settleDispatched: () => server.settleDispatched() };
 }

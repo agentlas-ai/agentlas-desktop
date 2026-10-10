@@ -4,6 +4,50 @@
   border: 1px solid color-mix(in srgb, var(--ink) 12%, var(--paper-edge)); border-radius: 12px;
   background: color-mix(in srgb, var(--paper-2) 72%, var(--paper)); }
 .top > :global(.chat-composer-goal) { margin: 0; border: 0; border-radius: 0; box-shadow: none; }
+
+/* Keep the action hit areas separate from the objective, even with both Work panels open. */
+.card:global(.chat-composer-goal) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  padding: 8px 10px;
+}
+.heading { display: flex; align-items: center; gap: 7px; flex: 1 0 auto; }
+.actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; margin-left: auto; max-width: 100%; }
+.card .objective {
+  flex: 1 0 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.card .actions button {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+.card .actions button[data-chat-goal-resume] {
+  width: auto;
+  min-width: 28px;
+  max-width: 100%;
+  height: auto;
+  min-height: 28px;
+  padding: 4px 10px;
+  background: var(--fill-1);
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+}
+.card .actions button:hover:not(:disabled) { background: var(--fill-2); color: var(--ink); }
+.card .actions button:active:not(:disabled) { background: color-mix(in srgb, var(--ink) 22%, transparent); color: var(--ink); }
+.card .actions button:focus-visible { outline-offset: -2px; }
+@media (prefers-reduced-motion: reduce) {
+  .card .actions button { transition: none; }
+}
+
 /* The plan line starts under the objective text (10px padding + 18px icon + 7px gap), like the next-check line. */
 .top > [data-goal-plan] { margin: 0; border: 0; padding-left: 35px; }
 .nextWake { margin: 0; padding: 0 10px 6px 35px; color: var(--muted-deep); font-size: 10.5px; line-height: 1.4; }

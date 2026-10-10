@@ -42,6 +42,14 @@ function toAgent(row: AgentRow): InstalledAgent {
   // 로컬 임포트 라우팅이 있으면 런타임 라벨/원본 경로/종류를 병합.
   const route = getRoute(row.id);
   const asset = routeAssetState(route);
+  // A definition fingerprint is not proof that its folder still exists.
+  // Measure only this directory; inventory reads never rewrite routes or walk the package.
+  let sourceMissingSince: string | undefined;
+  if (route) {
+    let sourcePresent = false;
+    try { sourcePresent = fs.statSync(route.path).isDirectory(); } catch { /* Disconnected or unreadable source. */ }
+    if (!sourcePresent) sourceMissingSince = route.missingSince || new Date().toISOString();
+  }
   // single/team 종류는 로컬 route가 1차, 없으면 DB에 저장된 entity_kind가 권위 신호다.
   // (Hub/클라우드 설치 팀은 route가 없어 이 컬럼이 유일한 신호 — 없으면 single 오분류됨.)
   const persistedKind =
@@ -50,7 +58,7 @@ function toAgent(row: AgentRow): InstalledAgent {
   // Legacy automatic imports from deleted pytest workspaces are diagnostic
   // registrations, not selectable workers. Keep their identities and history;
   // suppress only the inventory projection proven by source + missing path.
-  const missingTestImport = asset.source === "local-import" && Boolean(route?.missingSince)
+  const missingTestImport = asset.source === "local-import" && Boolean(sourceMissingSince)
     && /[/\\](?:pytest-of-[^/\\]+|pytest-\d+)[/\\]/i.test(route?.path ?? "");
   return {
     id: row.id,
@@ -75,7 +83,7 @@ function toAgent(row: AgentRow): InstalledAgent {
           runtimeLabel: route.runtime,
           localPath: route.path,
           assetSource: asset.source,
-          ...(route.missingSince ? { sourceMissingSince: route.missingSince } : {}),
+          ...(sourceMissingSince ? { sourceMissingSince } : {}),
           ...(asset.packageHash ? { packageHash: asset.packageHash } : {}),
         }
       : {}),
@@ -88,6 +96,12 @@ function routeAssetState(route: AgentRoute | null): {
   packageHash?: string;
 } {
   if (!route) return { source: "local-import" };
+  // A local folder can also have Cloud/Hub registration baselines. Those
+  // versions do not change the explicitly registered local source authority.
+  if (route.source === "local-import") {
+    const localHash = route.definitionHash || route.packageHash;
+    return { source: "local-import", ...(localHash ? { packageHash: localHash } : {}) };
+  }
   const marker = readCloudAgentRestoreMarker(route.path);
   if (route.source === "agent-cloud" || route.source === "hub" || marker) {
     return {
@@ -98,10 +112,6 @@ function routeAssetState(route: AgentRoute | null): {
         ? { packageHash: marker?.packageHash || route.packageHash }
         : {}),
     };
-  }
-  if (route.source === "local-import") {
-    const localHash = route.definitionHash || route.packageHash;
-    return { source: "local-import", ...(localHash ? { packageHash: localHash } : {}) };
   }
   // Old route records predate source. A valid cloud marker is checked above;
   // everything else was created by the local-folder import flow.

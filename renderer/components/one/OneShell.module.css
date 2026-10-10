@@ -374,7 +374,7 @@
 }
 
 .conversationRow .sessionButton {
-  padding-right: 9px;
+  padding-right: 38px;
 }
 
 .sessionButton > :first-child {
@@ -1952,6 +1952,39 @@
 }
 .admissionAction:hover,
 .admissionAction:focus-visible { background: var(--paper-3); outline: none; }
+
+/* Follow-up receipts separate state and copy from actions in narrow composer panels. */
+.steeringQueue.followupReceiptCard {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 6px;
+}
+.steeringQueue.followupReceiptCard span,
+.steeringQueue.followupReceiptCard small {
+  min-width: 0;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.steeringQueue.followupReceiptCard strong {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-height: 1.4;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.followupReceiptActions {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.followupReceiptActions .admissionAction {
+  flex: 0 0 auto;
+  max-width: 100%;
+}
 
 .steeringDraft {
   width: min(var(--one-composer-width, 720px), 100%);

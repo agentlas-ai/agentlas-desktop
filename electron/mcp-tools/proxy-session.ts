@@ -1,3 +1,6 @@
+import {StreamableHTTPClientTransport as ScopedHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {preparedMcpScopedCredential} from './prepared-transport';
+import { assertHistoryRuntimeFence, type HistoryRuntimeFence, type HistoryRuntimeToolInput } from "../one/history-runtime-fences";
 import type http from "node:http";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
@@ -17,6 +20,8 @@ import type { BeforeMcpToolResult } from "../runtime/runner";
 export type McpProxyGate = {
   /** Main-owned closure; not part of the serialized approval scope. */
   beforeMcpToolResult?: BeforeMcpToolResult;
+  /** Native opaque invocation callback; excluded from delegated JSON. */
+  historyRuntimeFence?: HistoryRuntimeFence;
   serverKey: string; runtime: string; sessionKey: string; permission?: "read" | "write" | "full";
   cwd?: string; chatId?: string; unattended?: boolean; simulation?: boolean; planMode?: boolean;
   catalogId: string | null; planReadAuthority?: "agentlas-browser" | "cua-driver"; planPath?: string;
@@ -267,6 +272,7 @@ function expireUnused(handle: string, entry: Registration): void {
 }
 /** Main builder only. Serialized policy fields cannot register or upgrade a launch. */
 export function prepareMcpProxyLaunch(gate: McpProxyGate): string {
+  if(gate.historyRuntimeFence)assertHistoryRuntimeFence(gate.historyRuntimeFence);
   if (typeof gate.cwd !== "string" || !path.isAbsolute(gate.cwd)) throw new Error("mcp_proxy_cwd_invalid");
   let cwd: Registration["cwd"];
   try {
@@ -313,7 +319,8 @@ export function prepareMcpProxyLaunch(gate: McpProxyGate): string {
 export function activateMcpProxyLaunch(handle: string, binding: PreparedMcpBinding): void {
   const entry = launches.get(handle);
   if (!entry || entry.gate.serverKey !== binding.configKey) throw new Error("mcp_proxy_launch_unapproved");
-  if (preparedMcpTargetTransport(binding, binding.server).kind !== "stdio") throw new Error("mcp_proxy_transport_unsupported");
+  const kind = preparedMcpTargetTransport(binding, binding.server).kind;
+  if (kind !== "stdio" && kind !== "http" && kind !== "sse") throw new Error("mcp_proxy_transport_unsupported");
   if (entry.resident) {
     if (entry.binding) throw new Error("mcp_proxy_resident_scope_active");
     const nextGate = entry.pendingGate ?? entry.gate;
@@ -475,7 +482,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   }
   // A revoked seal cannot recover on the same handle. Reject before opening
   // a wire so proxy-child receives terminal 403, not a retryable socket reset.
-  try { preparedMcpTargetTransport(candidate, candidate.server); validateLaunchCwd(registration.cwd); }
+  let scopedAttachment:ReturnType<typeof preparedMcpScopedCredential>=null;
+  try { preparedMcpTargetTransport(candidate, candidate.server); validateLaunchCwd(registration.cwd); scopedAttachment=preparedMcpScopedCredential(candidate); }
   catch {
     revokeMcpProxyLaunch(handle);
     res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
@@ -497,6 +505,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   const hostPrefix = `host:${randomUUID()}:`; let hostSequence = 0;
   const native = new Map<string, { id: string | number; method: string; controller?: AbortController; detach?: () => void; sent: boolean; effect?: ReturnType<typeof beginMainMcpEffect>; initParamsKey?: string | null;
     toolName?: string; resultFinishing?: boolean;
+    historyUpstream?: {resolve(frame:Frame):void;reject(error:unknown):void};
     /** agentlas-browser tools/call only: the call as sent, for one bounded ladder replay. */
     browserCall?: { frame: Frame; mutating: boolean; laddered: boolean } }>();
   const external = new Map<string, string>();
@@ -504,7 +513,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   const serverRequestIds = new Map<string, string>();
   const internal = new Map<string, { resolve: (frame: Frame) => void; reject: (error: Error) => void; cleanup: () => void }>();
   const idKey = (id: unknown) => JSON.stringify(id);
-  const validate = () => {
+  const validate = (terminal=false) => {
+    if(!terminal&&gate.historyRuntimeFence)assertHistoryRuntimeFence(gate.historyRuntimeFence);
     if (closed || lifetime.signal.aborted) throw new Error("mcp_proxy_closed");
     // Rebinding is a turn boundary.  An async approval/inventory continuation
     // from the old wire must never validate against the new binding or grant.
@@ -533,11 +543,11 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     if (initialized && reason === "wire_ended") console.debug(line); else console.warn(line);
     // Park only a quiescent upstream after a clean client end: nothing in
     // flight either way, one successful initialize, reuse-safe methods only.
-    const parkable = !invalidScope && reason === "wire_ended" && initialized && reusable && upstreamInit !== null
+    const parkable = !scopedAttachment && !invalidScope && reason === "wire_ended" && initialized && reusable && upstreamInit !== null
       && swapping === null && transport !== null && native.size === 0 && internal.size === 0 && serverRequests.size === 0;
     lifetime.abort(new Error("mcp_proxy_closed"));
     for (const pending of internal.values()) { pending.cleanup(); pending.reject(new Error("mcp_proxy_closed")); } internal.clear();
-    for (const pending of native.values()) { pending.effect?.finish(); pending.controller?.abort(new Error("mcp_proxy_closed")); pending.detach?.(); }
+    for (const pending of native.values()) { pending.historyUpstream?.reject(new Error("mcp_proxy_closed")); pending.effect?.finish(); pending.controller?.abort(new Error("mcp_proxy_closed")); pending.detach?.(); }
     native.clear(); external.clear(); serverRequests.clear(); serverRequestIds.clear();
     const upstream = transport; transport = null;
     if (upstream) detachTransport(upstream);
@@ -562,16 +572,19 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     if (Buffer.byteLength(line) > MAX_FRAME_BYTES || res.writableLength + Buffer.byteLength(line) > MAX_FRAME_BYTES) { close(); return; }
     res.write(line);
   };
+  const historyToolInput = (frame:Frame,schemaDigest:string|null=null):HistoryRuntimeToolInput=>({kind:"mcp",serverId:binding.server.id,catalogId:gate.catalogId,toolName:String(frame.params?.name??""),args:frame.params?.arguments??{},schemaDigest});
   const up = async (frame: Frame) => {
-    validate();
+    const terminal=frame.method==="notifications/cancelled";validate(terminal);
     // Only a provisional-adoption swap ever sets this; frames queued behind it
     // resume in arrival order once the fresh upstream has started.
-    if (swapping) { await swapping; validate(); }
+    if (swapping) { await swapping; validate(terminal); }
     if (!transport) throw new Error("mcp_proxy_not_ready");
+    if(!terminal&&gate.historyRuntimeFence){assertHistoryRuntimeFence(gate.historyRuntimeFence);if(typeof frame.method==="string")gate.historyRuntimeFence.assertMcpMethod(frame.method);if(frame.method==="tools/call")gate.historyRuntimeFence.assertTool(historyToolInput(frame));}
     await transport.send(frame as JSONRPCMessage);
   };
   const finish = (wireId: string, frame: Frame) => {
     const pending = native.get(wireId); if (!pending || pending.resultFinishing) return;
+    if(gate.historyRuntimeFence){try{assertHistoryRuntimeFence(gate.historyRuntimeFence);}catch(error){pending.effect?.finish(frame);pending.effect=undefined;pending.historyUpstream?.reject(error);close(error);return;}}
     // Browser fallback ladder (electron/browser/fallback-ladder.ts): a failed agentlas-browser call waits for the
     // bounded ladder, which may bring the surface back (then a read-only call is replayed once) or annotate the
     // error with a machine block and one line for the agent. Never more than one ladder per call.
@@ -604,6 +617,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   };
   const finishNow = (wireId: string, frame: Frame) => {
     const pending = native.get(wireId); if (!pending || pending.resultFinishing) return;
+    if(pending.historyUpstream){pending.effect?.finish(frame);pending.effect=undefined;pending.historyUpstream.resolve(frame);return;}
     pending.resultFinishing = true;
     // The operation already happened. Preserve its receipt even when Main parks
     // this exact run instead of releasing the result to the native provider.
@@ -677,6 +691,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     try {
       const tool = frame.params?.name, args = frame.params?.arguments ?? {};
       if (!initialized || typeof tool !== "string" || !tool || !args || typeof args !== "object" || Array.isArray(args)) throw new Error("mcp_proxy_call_invalid");
+      if(gate.historyRuntimeFence){assertHistoryRuntimeFence(gate.historyRuntimeFence);gate.historyRuntimeFence.assertTool(historyToolInput(frame));}
       if (!graphAllows(gate, tool)) { deny(wireId, "plan_denied"); return; }
       const mutating = policy.mutating({ catalogId: gate.catalogId, toolName: tool, args });
       if ((gate.simulation && mutating) || (gate.planMode && policy.planMutating({ authority: gate.planReadAuthority, toolName: tool, args }))) { deny(wireId, "plan_denied"); return; }
@@ -695,13 +710,19 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       if (decision === "deny") { deny(wireId, "policy_denied"); return; }
       if (await schema(tool, signal) !== digest) { deny(wireId, "schema_changed"); return; }
       signal.throwIfAborted(); validate();
-      const pending = native.get(wireId); if (!pending) return; pending.sent = true; pending.effect?.dispatched();
-      if (gate.catalogId === "agentlas-browser") pending.browserCall = { frame, mutating, laddered: false };
-      await up({ ...frame, id: wireId });
+      const pending = native.get(wireId); if (!pending) return;
+      const send=async()=>{pending.sent=true;pending.effect?.dispatched();if(gate.catalogId==="agentlas-browser")pending.browserCall={frame,mutating,laddered:false};await up({...frame,id:wireId});};
+      if(gate.historyRuntimeFence){
+        const response=await gate.historyRuntimeFence.withMcpToolCall(historyToolInput(frame,digest),async()=>{
+          let resolve!:(value:Frame)=>void,reject!:(error:unknown)=>void;const result=new Promise<Frame>((yes,no)=>{resolve=yes;reject=no;});pending.historyUpstream={resolve,reject};
+          try{return (await Promise.all([send(),result]))[1];}finally{pending.historyUpstream=undefined;}
+        });
+        finishNow(wireId,response);
+      }else await send();
     } catch { deny(wireId, signal.aborted ? "cancelled" : "scope_or_schema_unavailable"); }
   }
   async function receive(frame: Frame): Promise<void> {
-    validate();
+    validate(frame?.method==="notifications/cancelled");
     if (!frame || typeof frame !== "object" || Array.isArray(frame) || frame.jsonrpc !== "2.0") throw new Error("mcp_proxy_frame_invalid");
     if (adopted) {
       const parked = adopted; adopted = null;
@@ -763,6 +784,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const frame = message as Frame;
       if (closed || transport !== upstream) return;
       if (typeof frame.method === "string") {
+        if(gate.historyRuntimeFence){try{assertHistoryRuntimeFence(gate.historyRuntimeFence);gate.historyRuntimeFence.assertMcpMethod(frame.method);if(frame.id!==undefined)throw new Error("history_native_upstream_request_unavailable");}catch{close("history_native_upstream_method_denied");return;}}
         if (frame.id !== undefined) {
           // The upstream may cache this client's answer (roots, sampling):
           // never hand that session to a later client.
@@ -791,6 +813,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const pending = native.get(String(frame.id));
       if (!pending) { close(); return; }
       if (pending.method === "initialize" && !frame.error) {
+        if (typeof frame.result?.protocolVersion === "string") transport?.setProtocolVersion?.(frame.result.protocolVersion);
         initialized = true;
         // Exactly one successful handshake per upstream may be replayed.
         if (upstreamInit || !pending.initParamsKey) reusable = false;
@@ -800,7 +823,12 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     };
   }
   async function spawnUpstream(): Promise<void> {
-    const upstream = await createPreparedMcpTargetTransport(binding, lifetime.signal, entry.cwd.path);
+    const scoped = preparedMcpScopedCredential(binding);
+    const target = scoped ? preparedMcpTargetTransport(binding,binding.server) : null;
+    if(scoped && target?.kind!=="http")throw new Error("one_mcp_scoped_proxy_unavailable");
+    const upstream = scoped && target?.kind==="http"
+      ? new ScopedHTTPClientTransport(new URL(target.url),{fetch:scoped.fetch,reconnectionOptions:{maxRetries:0,initialReconnectionDelay:1000,maxReconnectionDelay:1000,reconnectionDelayGrowFactor:1}})
+      : await createPreparedMcpTargetTransport(binding, lifetime.signal, entry.cwd.path);
     upstreamStats.spawned++;
     if (closed) { void upstream.close().catch(() => {}); throw new Error("mcp_proxy_closed"); }
     transport = upstream; validate();

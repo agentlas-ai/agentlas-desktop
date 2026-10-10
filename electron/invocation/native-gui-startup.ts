@@ -114,3 +114,6 @@ export function revokeNativeGuiStartAvailability(enrollment: NativeGuiEnrollment
 export function nativeGuiEnrollmentChannel(enrollment: NativeGuiEnrollment): Channel | undefined { return state(enrollment).channel; }
 /** Sticky after enrollment: channel loss cannot silently choose legacy start. */
 export function configuredNativeGuiOwner(): Owner | undefined { return installed?.owner; }
+
+/** Read the already enrolled authenticated channel; never provisions credentials. */
+export function configuredNativeGuiChannel(): Channel | undefined { return installed?.channel; }

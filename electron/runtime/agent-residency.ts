@@ -19,6 +19,7 @@
 //     상주 형태를 아직 못 가지는 런타임(일회성 `-p` CLI)을 "상주 중"이라고 말하지 않기
 //     위해서다 — 예산은 붙든 것(holdsSession)만 센다.
 import { onHostShutdown } from "../host-lifecycle";
+import { AsyncLocalStorage } from "node:async_hooks";
 import type {
   AgentProcessLifecycleReason,
   AgentProcessState,
@@ -68,7 +69,146 @@ export interface AgentResidencyEntry {
   /** 살아 있는 자원을 실제로 붙들고 있는가(false 면 활동 기록일 뿐). */
   holdsSession: boolean;
   /** 붙든 자원을 놓는 방법. holdsSession 인 항목만 가진다. */
-  close?: () => void;
+  close?: () => void | Promise<void>;
+  /** Closing resources still occupy capacity until measured termination. */
+  closing?: boolean;
+  closeFailed?: boolean;
+  closeCompletion?: Promise<void>;
+  /** Host-minted, generation-bound reservation; never inferred from agentId. */
+  awakeAdmission?: AwakeAgentResidencyAdmission;
+}
+
+declare const awakeAdmissionBrand: unique symbol;
+export interface AwakeAgentResidencyAdmission { readonly [awakeAdmissionBrand]: true }
+declare const residencyAdmissionBrand: unique symbol;
+export interface AgentResidencyAdmission { readonly [residencyAdmissionBrand]: true }
+interface AwakeRecord {
+  contextKey: string; agentId: string; ownerEpoch: string; generation: number; awake: boolean;
+  assertCurrent(): void;
+}
+const awakeAdmissions = new Map<AwakeAgentResidencyAdmission, AwakeRecord>();
+const awakeScope = new AsyncLocalStorage<{ token: AwakeAgentResidencyAdmission; assertCurrent(): void }>();
+const openingAdmissions = new Map<AgentResidencyAdmission, { awake?: AwakeAgentResidencyAdmission; closing?: boolean; closeFailed?: boolean; revoked?: boolean }>();
+const activeContextTurns = new Map<AwakeAgentResidencyAdmission, number>();
+
+function residencyFailure(code: string): never { throw Object.assign(new Error(code), { code }); }
+export function isAgentContextResidencyAdmissionCurrent(value: AwakeAgentResidencyAdmission | undefined): boolean {
+  const record = value && awakeAdmissions.get(value);
+  if (!record) return false;
+  try { record.assertCurrent(); return true; } catch { return false; }
+}
+export function isAwakeAgentResidencyAdmission(value: AwakeAgentResidencyAdmission | undefined): boolean {
+  return !!value && awakeAdmissions.get(value)?.awake === true && isAgentContextResidencyAdmissionCurrent(value);
+}
+export function isAgentResidencyAwake(key: string): boolean {
+  return isAwakeAgentResidencyAdmission(entries.get(key)?.awakeAdmission);
+}
+function reservedResidencyCount(): number {
+  return [...awakeAdmissions.keys()].filter(isAwakeAgentResidencyAdmission).length
+    + [...entries.values()].filter(entry => entry.holdsSession && !isAwakeAgentResidencyAdmission(entry.awakeAdmission)).length
+    + [...openingAdmissions.values()].filter(entry => !isAwakeAgentResidencyAdmission(entry.awake)).length;
+}
+/** Only the daemon actor host calls this after validating its owner and scope.
+ * One actor reserves one seat before any async process open. */
+type ResidencyOwner = Omit<AwakeRecord, "awake">;
+export function admitAwakeAgentResidency(input: ResidencyOwner): AwakeAgentResidencyAdmission {
+  return admitContextResidency(input, true);
+}
+/** Ordinary conversations retain ownership and warm transports under normal
+ * LRU. They reserve no seat until a physical adapter actually opens. */
+export function admitWarmAgentResidency(input: ResidencyOwner): AwakeAgentResidencyAdmission {
+  return admitContextResidency(input, false);
+}
+function admitContextResidency(input: ResidencyOwner, awake: boolean): AwakeAgentResidencyAdmission {
+  if (![input.contextKey, input.agentId, input.ownerEpoch].every(value => typeof value === "string" && value.trim())
+    || !Number.isSafeInteger(input.generation) || input.generation < 1 || typeof input.assertCurrent !== "function") {
+    residencyFailure("agent_awake_identity_invalid");
+  }
+  input.assertCurrent();
+  for (const [token, record] of awakeAdmissions) {
+    if (!isAgentContextResidencyAdmissionCurrent(token)) { awakeAdmissions.delete(token); continue; }
+    if (record.contextKey === input.contextKey) residencyFailure("agent_awake_context_owned");
+  }
+  if (awake) {
+    enforceAgentResidencyBudget(1);
+    if (reservedResidencyCount() >= agentResidencyBudget()) residencyFailure("agent_residency_capacity");
+  }
+  const token = Object.freeze({}) as AwakeAgentResidencyAdmission;
+  awakeAdmissions.set(token, { ...input, awake });
+  ensureShutdownHook();
+  return token;
+}
+export function withAwakeAgentResidency<T>(token: AwakeAgentResidencyAdmission, action: () => T, assertCurrent: () => void): T {
+  if (!isAgentContextResidencyAdmissionCurrent(token)) residencyFailure("agent_awake_generation_changed");
+  assertCurrent();
+  activeContextTurns.set(token, (activeContextTurns.get(token) ?? 0) + 1);
+  const release = () => {
+    const remaining = (activeContextTurns.get(token) ?? 1) - 1;
+    if (remaining > 0) activeContextTurns.set(token, remaining); else activeContextTurns.delete(token);
+  };
+  try {
+    const result = awakeScope.run({ token, assertCurrent }, action);
+    if (result && typeof (result as unknown as PromiseLike<unknown>).then === "function") {
+      return Promise.resolve(result).finally(release) as unknown as T;
+    }
+    release(); return result;
+  } catch (error) { release(); throw error; }
+}
+export function currentAwakeAgentResidency(agentId: string | null | undefined): AwakeAgentResidencyAdmission | undefined {
+  const scope = awakeScope.getStore();
+  if (!scope) return undefined;
+  scope.assertCurrent();
+  const token = scope.token;
+  if (!isAgentContextResidencyAdmissionCurrent(token)) residencyFailure("agent_awake_generation_changed");
+  return awakeAdmissions.get(token)?.agentId === agentId ? token : undefined;
+}
+export function releaseAwakeAgentResidency(token: AwakeAgentResidencyAdmission): void {
+  awakeAdmissions.delete(token);
+  // Active turns own their resources until release. They observe revocation
+  // through the actor's abort signal, and the pool retires them on release.
+  for (const entry of [...entries.values()]) {
+    if (entry.awakeAdmission === token && !entry.inUse) dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
+  }
+}
+/** A daemon adapter switch releases the old idle transport while retaining the
+ * actor's seat and context. An unresolved checkout cannot be replaced. */
+export function retireAwakeAgentResidencyAdapter(token: AwakeAgentResidencyAdmission): void | Promise<void> {
+  if (!isAgentContextResidencyAdmissionCurrent(token)) residencyFailure("agent_awake_generation_changed");
+  const held = [...entries.values()].filter(entry => entry.holdsSession && entry.awakeAdmission === token);
+  if (held.some(entry => entry.inUse) || [...openingAdmissions.values()].some(entry => entry.awake === token)) {
+    residencyFailure("agent_awake_adapter_busy");
+  }
+  for (const entry of held) dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
+  if (held.some(entry => entry.closeFailed)) residencyFailure("agent_residency_close_failed");
+  const pending = held.flatMap(entry => entry.closeCompletion ? [entry.closeCompletion] : []);
+  if (pending.length) return Promise.all(pending).then(() => {});
+}
+/** Atomic pre-open reservation across all pools, including concurrent opens. */
+export function beginAgentResidencyAdmission(agentId: string | null | undefined): AgentResidencyAdmission {
+  const awake = currentAwakeAgentResidency(agentId);
+  if (awake && ([...entries.values()].some(entry => entry.holdsSession && entry.awakeAdmission === awake)
+    || [...openingAdmissions.values()].some(entry => entry.awake === awake))) residencyFailure("agent_awake_adapter_busy");
+  const reserved = isAwakeAgentResidencyAdmission(awake);
+  enforceAgentResidencyBudget(reserved ? 0 : 1);
+  if (reservedResidencyCount() + (reserved ? 0 : 1) > agentResidencyBudget()) residencyFailure("agent_residency_capacity");
+  const token = Object.freeze({}) as AgentResidencyAdmission;
+  openingAdmissions.set(token, { awake });
+  return token;
+}
+export function finishAgentResidencyAdmission(token: AgentResidencyAdmission | undefined): void {
+  if (token) openingAdmissions.delete(token);
+}
+/** Spawn succeeded but registry publication failed. Keep the opening seat and
+ * diagnostics until measured termination; failure is quarantined. */
+export function retainAgentResidencyAdmissionUntilClosed(
+  token: AgentResidencyAdmission | undefined,
+  completion: Promise<void>,
+): void {
+  const record = token && openingAdmissions.get(token);
+  if (record) record.closing = true;
+  void completion.then(() => {
+    if (token && openingAdmissions.get(token) === record) openingAdmissions.delete(token);
+  }, () => { if (record) record.closeFailed = true; });
 }
 
 const entries = new Map<string, AgentResidencyEntry>();
@@ -147,16 +287,20 @@ export function agentResidencyBudget(): number {
 export function enforceAgentResidencyBudget(headroom = 0): number {
   const needed = Math.max(0, Math.floor(headroom));
   const limit = agentResidencyBudget();
-  let holding = [...entries.values()].filter(entry => entry.holdsSession).length;
+  let holding = reservedResidencyCount();
   let evicted = 0;
   while (holding + needed > limit) {
     const oldest = [...entries.values()]
-      .filter(entry => entry.holdsSession && !entry.inUse)
+      .filter(entry => entry.holdsSession && !entry.inUse && !entry.closing && !isAwakeAgentResidencyAdmission(entry.awakeAdmission))
       .sort((a, b) => a.lastActivityAt - b.lastActivityAt || a.key.localeCompare(b.key))[0];
     if (!oldest) break;
     dropAgentResidency(oldest.key, { close: true, reason: "evicted" });
-    holding -= 1;
+    const previous = holding;
+    holding = reservedResidencyCount();
     evicted += 1;
+    // An asynchronous retirement cannot make space yet. Do not close every
+    // other warm session while waiting for the first physical exit.
+    if (holding >= previous) break;
   }
   return evicted;
 }
@@ -251,16 +395,22 @@ export interface RegisterAgentResidencyInput {
   /** Explicit exemption only; omitted means the normal 12h idle policy. */
   reaperExempt?: boolean;
   inUse?: boolean;
-  close?: () => void;
+  close?: () => void | Promise<void>;
   now?: number;
+  admission?: AgentResidencyAdmission;
 }
 
 /** 새 상주/활동을 등록하거나 기존 항목을 갱신한다(키가 같으면 upsert). */
 export function registerAgentResidency(input: RegisterAgentResidencyInput): AgentResidencyEntry {
+  const reservation = input.admission ? openingAdmissions.get(input.admission) : undefined;
+  if (input.admission && (!reservation || reservation.revoked)) residencyFailure("agent_residency_admission_changed");
+  if (reservation?.awake && (!isAgentContextResidencyAdmissionCurrent(reservation.awake)
+    || awakeAdmissions.get(reservation.awake)?.agentId !== input.agentId)) residencyFailure("agent_awake_generation_changed");
   ensureShutdownHook();
   const now = input.now ?? Date.now();
   const agentId = input.agentId ?? null;
   const existing = entries.get(input.key);
+  if (existing?.closing) residencyFailure("agent_residency_closing");
   const entry: AgentResidencyEntry = {
     key: input.key,
     agentId,
@@ -273,9 +423,11 @@ export function registerAgentResidency(input: RegisterAgentResidencyInput): Agen
     reaperExempt: input.reaperExempt ?? isResidencyExemptAgent(agentId),
     inUse: input.inUse ?? true,
     holdsSession: input.holdsSession ?? false,
+    ...(reservation?.awake ? { awakeAdmission: reservation.awake } : {}),
     ...(input.close ? { close: input.close } : existing?.close ? { close: existing.close } : {}),
   };
   entries.set(input.key, entry);
+  finishAgentResidencyAdmission(input.admission);
   if (entry.holdsSession && !existing?.holdsSession) {
     emitAgentResidencyChange(entry, "running", "spawned");
   }
@@ -298,11 +450,12 @@ export function agentActivityKey(input: {
 }
 
 /** 활동 시각 갱신(+사용 중 표식). 없는 키면 아무것도 하지 않는다. */
-export function touchAgentResidency(key: string, patch?: { inUse?: boolean; now?: number }): void {
+export function touchAgentResidency(key: string, patch?: { inUse?: boolean; now?: number; chatId?: string | null }): void {
   const entry = entries.get(key);
-  if (!entry) return;
+  if (!entry || entry.closing) return;
   entry.lastActivityAt = patch?.now ?? Date.now();
   if (patch?.inUse !== undefined) entry.inUse = patch.inUse;
+  if (patch?.chatId !== undefined) entry.chatId = patch.chatId;
   if (entry.holdsSession && patch?.inUse !== undefined) {
     emitAgentResidencyChange(
       entry,
@@ -320,13 +473,38 @@ export function dropAgentResidency(
 ): void {
   const entry = entries.get(key);
   if (!entry) return;
-  if (entry.holdsSession) {
-    emitAgentResidencyChange(entry, "closed", opts?.reason ?? "process-exit");
-  }
-  entries.delete(key);
+  // Project idle cleanup also uses this primitive. It cannot evict a seat
+  // explicitly held by the daemon actor, nor an active turn.
+  if ((opts?.reason === "evicted" || opts?.reason === "reaped")
+    && (entry.inUse || isAwakeAgentResidencyAdmission(entry.awakeAdmission))) return;
+  // Reentrant/repeated removal must not free a still-closing physical seat.
+  if (entry.closing) return;
+  const finish = (): void => {
+    // A late completion cannot delete a replacement row or emit its lifecycle.
+    if (entries.get(key) !== entry) return;
+    entries.delete(key);
+    if (entry.holdsSession) emitAgentResidencyChange(entry, "closed", opts?.reason ?? "process-exit");
+  };
   if (opts?.close && entry.close) {
-    try { entry.close(); } catch { /* 이미 죽었을 수 있다 */ }
+    entry.closing = true;
+    entry.inUse = false;
+    try {
+      const completion = entry.close();
+      if (completion && typeof completion.then === "function") {
+        entry.closeCompletion = completion.then(finish, () => {
+          entry.closeFailed = true;
+          residencyFailure("agent_residency_close_failed");
+        });
+        void entry.closeCompletion.catch(() => {});
+        return;
+      }
+    } catch {
+      // A failed close is not evidence of termination. Keep its seat quarantined.
+      entry.closeFailed = true;
+      return;
+    }
   }
+  finish();
 }
 
 /* ──────────────────────────── 리퍼/관측 ──────────────────────────── */
@@ -340,7 +518,7 @@ export function sweepIdleAgentResidency(maxIdleMs = AGENT_RESIDENCY_IDLE_REAP_MS
   const cutoff = now - Math.max(1_000, maxIdleMs);
   let reaped = 0;
   for (const entry of [...entries.values()]) {
-    if (entry.inUse || entry.reaperExempt) continue;
+    if (entry.closing || entry.inUse || entry.reaperExempt || isAwakeAgentResidencyAdmission(entry.awakeAdmission)) continue;
     if (entry.lastActivityAt > cutoff) continue;
     dropAgentResidency(entry.key, { close: true, reason: "reaped" });
     reaped += 1;
@@ -358,6 +536,13 @@ export interface AgentResidencySnapshot {
   /** 리퍼 면제(One) 수. */
   exempt: number;
   budget: number;
+  /** Explicit actor reservations, including those not yet holding a CLI. */
+  awakeAdmissions: number;
+  closing: number;
+  closeFailed: number;
+  opening: number;
+  openingClosing: number;
+  openingCloseFailed: number;
   agents: Array<{
     agentId: string | null;
     nodeId: string | null;
@@ -369,6 +554,8 @@ export interface AgentResidencySnapshot {
     inUse: boolean;
     reaperExempt: boolean;
     idleMs: number;
+    closing: boolean;
+    closeFailed: boolean;
   }>;
 }
 
@@ -379,8 +566,14 @@ export function agentResidencySnapshot(now = Date.now()): AgentResidencySnapshot
     total: all.length,
     holding: all.filter((e) => e.holdsSession).length,
     inUse: all.filter((e) => e.inUse).length,
-    exempt: all.filter((e) => e.reaperExempt).length,
+    exempt: all.filter((e) => e.reaperExempt || isAwakeAgentResidencyAdmission(e.awakeAdmission)).length,
     budget: agentResidencyBudget(),
+    awakeAdmissions: [...awakeAdmissions.keys()].filter(isAwakeAgentResidencyAdmission).length,
+    opening: openingAdmissions.size,
+    openingClosing: [...openingAdmissions.values()].filter(e => e.closing).length,
+    openingCloseFailed: [...openingAdmissions.values()].filter(e => e.closeFailed).length,
+    closing: all.filter(e => e.closing).length,
+    closeFailed: all.filter(e => e.closeFailed).length,
     agents: all
       .sort((a, b) => b.lastActivityAt - a.lastActivityAt)
       .map((e) => ({
@@ -392,7 +585,9 @@ export function agentResidencySnapshot(now = Date.now()): AgentResidencySnapshot
         source: e.source,
         holdsSession: e.holdsSession,
         inUse: e.inUse,
-        reaperExempt: e.reaperExempt,
+        reaperExempt: e.reaperExempt || isAwakeAgentResidencyAdmission(e.awakeAdmission),
+        closing: !!e.closing,
+        closeFailed: !!e.closeFailed,
         idleMs: e.inUse ? 0 : Math.max(0, now - e.lastActivityAt),
       })),
   };
@@ -404,7 +599,23 @@ export function holdingAgentResidency(): AgentResidencyEntry[] {
 }
 
 /** 호스트 종료 — 붙든 상주를 전부 놓는다(면제도 예외 없음). */
+/** Maintenance releases idle physical resources, never active work or an
+ * opening transport. The actor host separately releases its idle lifetimes. */
+export function releaseIdleAgentResidency(): { released: number; active: number; opening: number } {
+  let released = 0;
+  for (const entry of [...entries.values()]) {
+    if (!entry.holdsSession || entry.closing || entry.inUse || (entry.awakeAdmission && activeContextTurns.has(entry.awakeAdmission))) continue;
+    dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
+    released += 1;
+  }
+  return { released, active: holdingAgentResidency().filter(entry => entry.inUse
+    || !!entry.awakeAdmission && activeContextTurns.has(entry.awakeAdmission)).length, opening: openingAdmissions.size };
+}
 export function disposeAgentResidency(): void {
+  awakeAdmissions.clear();
+  activeContextTurns.clear();
+  // Revoke publication immediately, but keep physical/opening capacity charged.
+  for (const record of openingAdmissions.values()) record.revoked = true;
   for (const entry of [...entries.values()]) {
     dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
   }
@@ -418,6 +629,9 @@ export function disposeAgentResidency(): void {
 /** 테스트 전용 — 같은 프로세스에서 여러 시나리오를 재려면 상태를 되돌려야 한다. */
 export function __resetAgentResidencyForTests(): void {
   entries.clear();
+  awakeAdmissions.clear();
+  activeContextTurns.clear();
+  openingAdmissions.clear();
   sourceCache.clear();
   stopSweeper();
   if (shutdownDetach) {

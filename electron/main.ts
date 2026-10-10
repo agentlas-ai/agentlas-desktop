@@ -52,6 +52,13 @@ import { registerLocalModelHubIpc } from "./local-model-hub-ipc";
 import { isAppControlEvent, recordAppControlRendererEvent } from "./app-control/ipc-registry";
 import { configureAppControlHost } from "./app-control/service";
 import { assertOneWindowChannel, configureOneWindowHost, getOneWindow, oneOnlyLaunch, oneWindowShellActive, openOneWindow, registerOneWindowIpc } from "./one-window-manager";
+import { registerOneVaultMainIpc, closeOneVaultMain, invalidateOneVaultMainAuthority, oneVaultMainMobileSources } from './secrets/one-vault-main';
+import {createOnePersonalNativeMainEntry} from './secrets/one-personal-native-main-owner';
+import {getServer as getInstalledMcpServer} from './mcp-tools/registry';
+import {mcpServerConfigurationDigest} from './mcp-tools/prepared-transport';
+import { registerOneNativeMainComposition, currentOneNativeMainComposition } from './one/native-main-composition';
+import { registerOnePersonalIntegrationMainIpc } from './one/personal-integrations-main';
+import { closeOnePersonalIntegrations, invalidateOnePersonalIntegrations } from './one/personal-integrations-runtime';
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
 import { installDesktopScienceHost } from "./science-host";
@@ -712,6 +719,8 @@ const STARTUP_PLACEHOLDER_HTML = `<!doctype html>
 const STARTUP_PLACEHOLDER_URL = `data:text/html;charset=utf-8,${encodeURIComponent(STARTUP_PLACEHOLDER_HTML)}`;
 
 let mainWindow: BrowserWindow | null = null;
+let nativePersonalEntry:ReturnType<typeof createOnePersonalNativeMainEntry>|null=null;
+let nativePersonalEpoch=0,nativePersonalCleanupUnknown=false;const nativePersonalShutdown=new AbortController();
 let pendingOneNotification: { taskId?: string; chatId?: string } | null = null;
 // One operates the app through the same handlers the window calls (electron/app-control).
 configureAppControlHost({ mainWindow: () => mainWindow, interactionWindow: () => getOneWindow() ?? mainWindow,
@@ -1482,6 +1491,10 @@ function stopQuitServices(): Promise<void> {
   disposeAuthSessionInvalidation = null;
   try { disposeAuthSessionRestoration?.(); } catch {}
   disposeAuthSessionRestoration = null;
+  try { currentOneNativeMainComposition()?.invalidate('shutdown'); } catch {}
+  nativePersonalShutdown.abort();try{nativePersonalEntry?.close()}catch{nativePersonalCleanupUnknown=true}
+  try { closeOneVaultMain(); } catch {}
+  try { closeOnePersonalIntegrations(); } catch {}
   try { disposeMobileBridgeStateChange?.(); } catch {}
   disposeMobileBridgeStateChange = null;
 
@@ -2443,6 +2456,32 @@ app.whenReady().then(async () => {
     if(!personal&&!requested)throw new Error("one-context-task-source-unavailable");
   }});
   registerIpcHandlers();
+  registerOnePersonalIntegrationMainIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
+  registerOneVaultMainIpc({ipc:ipcMain,host:{preloadPath:path.join(__dirname,'preload.js'),
+    preparePersonalPending:(window,runId)=>{if(!nativePersonalEntry||nativePersonalCleanupUnknown)throw Error('one_personal_native_entry_unavailable');return nativePersonalEntry.preparePending(window,runId)},
+    installPersonalSavedConsumer:async(window,runId)=>{if(!nativePersonalEntry||nativePersonalCleanupUnknown)throw Error('one_personal_native_entry_unavailable');await nativePersonalEntry.finishSaved(runId)},
+    reauthorizeNativeOwner:async event=>{const native=currentOneNativeMainComposition();if(native?.reauthorizationRequired())await native.reauthorize(event);},
+    rendererBaseUrl:()=>isDev&&process.env.ELECTRON_START_URL?process.env.ELECTRON_START_URL:'agentlas://app',
+    isOwnerWindow:window=>window===mainWindow||window===getOneWindow(),assertTrustedSender:assertTrustedSitePublishIpcSender,
+    prepareSession:isolated=>{isolated.protocol.handle('agentlas',request=>{
+      const url=new URL(request.url);
+      if(url.hostname!=='app'||!(url.pathname==='/one-vault'||url.pathname.startsWith('/_next/static/')||url.pathname.startsWith('/fonts/')))return new Response('not found',{status:404});
+      return net.fetch(pathToFileURL(resolveRendererFile(request.url)).toString());
+    });},
+  }});
+  // Metadata-only prior account candidates; construction/host initialization grants zero.
+  const nativeSources=oneVaultMainMobileSources();if(nativeSources){
+    nativePersonalEntry=createOnePersonalNativeMainEntry({sources:nativeSources,
+      lifetime:{signal:nativePersonalShutdown.signal,ready:()=>!nativePersonalCleanupUnknown&&!nativePersonalShutdown.signal.aborted&&!!nativeSources.runtime()?.currentNativeOwner(),currentEpoch:()=>nativePersonalEpoch},
+      focusedWindow:()=>getOneWindow()?.isFocused()?getOneWindow():mainWindow?.isFocused()?mainWindow:null,
+      currentServer:getInstalledMcpServer,configurationDigest:mcpServerConfigurationDigest,
+      // No existing signed storage record proves the installed MCP domain mapping.
+      mappingOwner:null,
+    });
+  }
+  // Construction is inert; absent independently installed native owners remains unavailable.
+  registerOneNativeMainComposition();
+  currentOneNativeMainComposition()?.start();
   // DESKTOP_MOBILE_BRIDGE: Desktop main is the sole authority. Renderer IPC
   // can issue/revoke pairing, but never receives a persisted bearer token.
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
@@ -4331,6 +4370,10 @@ app.whenReady().then(async () => {
   // renderer remains mounted. Switch the bookmark authority boundary and
   // account UI immediately instead of waiting for a future focus event.
   disposeAuthSessionInvalidation = onAuthSessionInvalidated(() => {
+    nativePersonalEpoch++;
+    currentOneNativeMainComposition()?.invalidate('session');
+    invalidateOneVaultMainAuthority();
+    invalidateOnePersonalIntegrations();
     // Losing a session is not evidence the account changed. Reconciling here
     // revokes nothing while signed out; the bridge simply stops serving until
     // the user signs back in. Wiping on plain TTL expiry is what left this
@@ -4685,6 +4728,7 @@ app.whenReady().then(async () => {
   };
   const startMobileBridgeAfterAuth = (requireSignedIn = false): Promise<void> => {
     if (bridgeStartupJob) return bridgeStartupJob;
+    currentOneNativeMainComposition()?.start();
     const started = performMobileBridgeStartup(requireSignedIn);
     bridgeStartupJob = started;
     void started.then(() => { if (bridgeStartupJob === started) bridgeStartupJob = null; },

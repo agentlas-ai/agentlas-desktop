@@ -1,3 +1,4 @@
+import { currentHistoryRuntimeFence } from "../one/history-runtime-fences";
 import { retainNativePreparation, runNativePreparation } from "../runtime/native-preparation-lifetime";
 import { runObservedRunner, observedRunnerUsage } from "../runtime/observed-runner";
 import { runnerFailureFromError } from "../runtime/runner";
@@ -230,6 +231,12 @@ export function noToolsJudgmentFallback(timeoutMs: number,
     if (p50 !== null && p50 < timeoutMs) return selection;
   }
   return null;
+}
+
+/** Availability only; discovery/absence is never candidate authorization. */
+export function judgmentPoolAvailability(): Readonly<Pick<JudgmentPool, "state" | "fingerprint">> {
+  const pool = readJudgmentPool();
+  return Object.freeze({ state: pool.state, fingerprint: pool.fingerprint });
 }
 
 /** Read the user-configured judgment pool without falling back to execution. */
@@ -1021,6 +1028,7 @@ async function callJudgmentModelDetailed(opts: {
       // quota/auth/refusal failures still return early and leave their unused time to the next candidate.
       const attemptTimeoutMs = remainingMs;
       let toolObserved = false;
+      currentHistoryRuntimeFence()?.assertRuntimeCoverage(runtime.kind);
       const accounting = beginAccountedInference(runtime);
       const bounded = await runBoundedAttempt(attemptTimeoutMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runNativePreparation(() => runVerificationEffectDispatch(runtime.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(picked.runner,
           {
@@ -1049,10 +1057,11 @@ async function callJudgmentModelDetailed(opts: {
             onStatus: () => {},
             onTool: (...args) => { toolObserved = true; onTool?.(...args); },
           },
-        )))), attemptSignal));
+        runtime.kind)))), attemptSignal));
       accounting?.complete(bounded.value?.observedUsage ?? observedRunnerUsage(bounded.error), bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
       if (bounded.error !== undefined) {
         const error = bounded.error;
+        if(currentHistoryRuntimeFence())throw error;
         const normalized = runnerFailureFromError(error, runtime.kind);
         lastFailure = bounded.timedOut && !runtimeFailureBlocksReplay(normalized)
           ? { ...normalized, kind: "timeout" } : normalized;
@@ -1112,6 +1121,7 @@ async function callJudgmentModelDetailed(opts: {
         } };
         console.info("[judgment-runtime-attempt]", JSON.stringify(runtimeReceipt));
         const startedAt = Date.now();
+        currentHistoryRuntimeFence()?.assertRuntimeCoverage(selection.kind);
         const accounting = beginAccountedInference(selection);
         attemptBudgetMs = Math.max(1, deadlineAt - Date.now());
         const bounded = await runBoundedAttempt(attemptBudgetMs, (attemptSignal) => awaitConnectedModelRunnerWithAbortGrace(runNativePreparation(() => runVerificationEffectDispatch(selection.kind, attemptSignal, (runnerSignal, onTool) => runWithJudgmentPurpose(() => runObservedRunner(recovery.runner,
@@ -1134,10 +1144,11 @@ async function callJudgmentModelDetailed(opts: {
               locale: opts.locale ?? "en",
             },
             { onPartial: () => {}, onStatus: () => {}, onTool },
-          )))), attemptSignal));
+          selection.kind)))), attemptSignal));
         accounting?.complete(bounded.value?.observedUsage ?? observedRunnerUsage(bounded.error), bounded.cancelled ? "cancelled" : bounded.timedOut ? "timeout" : bounded.error !== undefined ? "failed" : "returned");
         if (bounded.error !== undefined) {
           const error = bounded.error;
+          if(currentHistoryRuntimeFence())throw error;
           const normalized = runnerFailureFromError(error, selection.kind);
           lastFailure = bounded.timedOut && !runtimeFailureBlocksReplay(normalized)
             ? { ...normalized, kind: "timeout" } : normalized;

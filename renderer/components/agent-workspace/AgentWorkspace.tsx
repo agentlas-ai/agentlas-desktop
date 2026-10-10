@@ -97,13 +97,14 @@ function treeEntries(files: AgentWorkspaceFile[], expanded: Set<string>): TreeEn
 }
 
 export function AgentWorkspace({ agent, name, locale, initialView = "files", onToggleRoster, projectControl,
-  firm, org, binding, runtimes, overrides, onRename, onRemove, onOverridesChange, onDirtyChange,
+  firm, org, binding, runtimes, overrides, onRename, onRemove, onOverridesChange, onDirtyChange, onMemoryCountChange,
 }: {
   agent: InstalledAgent; name: string; locale: string; initialView?: AgentWorkspaceView;
   onToggleRoster: () => void; projectControl?: ReactNode; firm?: InstalledFirm | null; org?: ResolvedOrg | null;
   binding?: InstalledAgentExactBinding | null; runtimes: RuntimeStatus[]; overrides: AgentRuntimeOverride[];
   onRename: (value: string) => Promise<void>; onRemove: () => Promise<void>; onOverridesChange: (overrides: AgentRuntimeOverride[]) => void;
   onDirtyChange?: (dirty: boolean) => void;
+  onMemoryCountChange?: (agentId: string, count: number) => void;
 }) {
   const ko = locale === "ko";
   const [view, setView] = useState<AgentWorkspaceView>(initialView);
@@ -165,10 +166,11 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     const next = await bridge.getWorkspace(agent.id);
     if (workspaceGeneration.current !== generation) return next;
     setSnapshot(next); setFiles(next.files);
+    onMemoryCountChange?.(agent.id, next.memoryCandidates.filter(candidate => candidate.state === "eligible").length);
     setMemorySelection((previous) => new Set([...previous].filter((id) => next.memoryCandidates.some((candidate) => candidate.id === id && candidate.state === "eligible"))));
     setTargetPath((current) => current || next.canonicalEntry || "");
     return next;
-  }, [agent.id, ko]);
+  }, [agent.id, ko, onMemoryCountChange]);
   useEffect(() => { setView(initialView); }, [initialView]);
   useEffect(() => {
     let cancelled = false;
@@ -404,7 +406,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     <header className={styles.toolbar}>
       <button className={styles.iconButton} aria-label={ko ? "에이전트 목록 접기/펴기" : "Toggle agent roster"} title={ko ? "에이전트 목록" : "Agent roster"} onClick={onToggleRoster}><IconSidebar size={17} /></button>
       <div className={styles.agentTitle}><AgentAvatar name={name} size={25} /><strong>{name}</strong>{agent.sourceMissingSince && <IconAlertTriangle size={13} />}</div>
-      <div className={styles.locations}><button className={`${styles.location} ${snapshot ? styles.locationConnected : ""}`} onClick={() => setView("files")}><IconMonitor size={12} />Local</button><button className={`${styles.location} ${snapshot?.cloudId ? styles.locationConnected : ""}`} onClick={() => { setSyncTarget("cloud"); setView("sync"); }}><IconLayers size={12} />Cloud</button><button className={`${styles.location} ${snapshot?.hubRef ? styles.locationConnected : ""}`} onClick={() => { setSyncTarget("hub"); setSyncDirection("receive"); setView("sync"); }}><IconGithub size={12} />Hub</button></div>
+      <div className={styles.locations}><button className={`${styles.location} ${snapshot ? styles.locationConnected : ""}`} title={ko ? "이 설치의 로컬 파일" : "Local files for this installation"} onClick={() => setView("files")}><IconMonitor size={12} />Local</button>{snapshot?.cloudId && <button className={`${styles.location} ${styles.locationConnected}`} title={ko ? "연결된 Cloud 버전 비교" : "Compare the linked Cloud version"} onClick={() => { setSyncTarget("cloud"); setView("sync"); }}><IconLayers size={12} />Cloud</button>}{snapshot?.hubRef && <button className={`${styles.location} ${styles.locationConnected}`} title={ko ? "연결된 Hub 릴리스 비교" : "Compare the linked Hub release"} onClick={() => { setSyncTarget("hub"); setSyncDirection("receive"); setView("sync"); }}><IconGithub size={12} />Hub</button>}</div>
       {projectControl}<button className={styles.iconButton} disabled={loading || Boolean(busy)} aria-label={ko ? "파일 새로고침" : "Refresh workspace"} title={ko ? "파일 새로고침" : "Refresh workspace"} onClick={() => void run("refresh", async () => { await refresh(); if (path && !dirty) await openFile(path, true); })}><IconRefresh size={15} /></button><button className={`${styles.iconButton} ${inspector ? styles.selected : ""}`} onClick={() => setInspector((current) => !current)} title={ko ? "속성" : "Inspector"} aria-label={ko ? "속성" : "Inspector"} aria-pressed={inspector}><IconSettings size={17} /></button>
     </header>
     {error && <div className={`${styles.banner} ${styles.error}`} role="alert"><IconAlertTriangle size={14} /><span>{error}</span><button className={styles.iconButton} aria-label={ko ? "오류 닫기" : "Dismiss error"} onClick={() => setError("")}><IconClose size={13} /></button></div>}

@@ -21,6 +21,7 @@ import type {
   BrowserSite,
   InstalledMcpServer,
   MarketplaceListing,
+  McpServerStatus,
   PluginAuthKind,
   PluginBrandAsset,
 } from "@/lib/types";
@@ -162,62 +163,67 @@ export interface PluginInstallOutcome {
  * 실패는 그 항목에서 멈추고 나머지를 계속한다 — 하나가 안 붙었다고 나머지 선택을
  * 버리면 사용자는 무엇이 됐고 무엇이 안 됐는지 모른 채 처음부터 다시 골라야 한다.
  */
-/**
- * 이 서버가 지금 이미 붙는가. 붙으면 키를 물을 이유가 없다.
- *
- * 못 재면 **false** 를 돌려 원래대로 묻는다 — 확인 실패를 "괜찮다"로 읽으면 키가 정말
- * 필요한 도구가 조용히 죽은 채 남는다.
- */
-async function alreadyConnects(
-  api: NonNullable<ReturnType<typeof ipc>>,
-  serverId: string | null,
-): Promise<boolean> {
-  if (!serverId) return false;
-  try {
-    const status = await api.mcpTools.test(serverId);
-    // 도구를 실제로 받아 왔을 때만 "된다"로 본다. connected 만 보면 붙자마자 아무것도
-    // 못 내주는 서버까지 통과시킨다. missingEnv 가 남아 있으면 당연히 물어야 한다.
-    return Boolean(status?.connected)
-      && (status.tools?.length ?? 0) > 0
-      && (status.missingEnv?.length ?? 0) === 0;
-  } catch {
-    return false;
-  }
+/** A failed transport probe is not evidence that a key is absent or OAuth is needed. */
+export function mcpConnectionSetupStep(input: {
+  authKind?: PluginAuthKind;
+  rows: Array<{ transport: string; envKeys?: string[] }>;
+  status: McpServerStatus | null;
+}): "login" | "keys" | "none" | "unverified" {
+  const { authKind, rows, status } = input;
+  if (status?.connected && status.tools.length > 0 && status.missingEnv.length === 0) return "none";
+  if (status?.failureCode === "configuration_missing" && status.missingEnv.length > 0) return "keys";
+  const remote = rows.some((row) => row.transport === "http" || row.transport === "sse");
+  const manualKeys = rows.some((row) => (row.envKeys?.length ?? 0) > 0);
+  if (remote && status?.failureCode === "authentication_required"
+    && (authKind === "oauth" || (authKind === undefined && !manualKeys))) return "login";
+  return "unverified";
 }
 
-/**
- * 다음 단계를 정한다 — **서버에게 직접 묻고**, 못 물을 때만 선언값으로 떨어진다.
- *
- * 왜 이렇게까지 하나 (2026-08-20 라이브 허브 115항목 실측):
- *   원격 행 49 / stdio+키 49 / 안내형 6 / stdio인데 키 선언 없음 11.
- * 원격 서버는 자기가 인가를 요구하는지 **프로토콜로 말해 준다**(oauthStatus 는 연결을
- * 시도하지 않고 discovery 만 읽는다). 그러니 원격은 카탈로그의 auth 값을 고칠 문제가
- * 아니라 물어볼 문제다 — 실제로 그 선언은 자주 어긋난다(railway·datadog 은 auth="token"
- * 인데 원격이고, notion 은 auth="oauth" 인데 stdio 다).
- *
- * stdio 는 물어볼 상대가 없다. 그때만 매니페스트가 선언한 envKeys 가 유일한 근거다.
- */
+/** Only an exact stored catalog identity supplies declared auth metadata. Names never do. */
+export function mcpConnectionAuthKind(server: Pick<InstalledMcpServer, "catalogId">, listings: MarketplaceListing[]): PluginAuthKind | undefined {
+  const id = server.catalogId?.replace(/^hub:/, "");
+  if (!id) return undefined;
+  const matches = listings.filter((listing) => listing.slug === id);
+  return matches.length === 1 ? matches[0].authKind : undefined;
+}
+
+export function mcpConnectionFailureMessage(status: McpServerStatus | null, ko: boolean): string {
+  if (status?.failureCode === "configuration_missing") {
+    const names = status.missingEnv.join(", ");
+    return ko
+      ? `이 연결의 설정을 찾지 못했어요: ${names}. 이미 저장한 키가 있다면 이 연결이 같은 항목을 사용하는지 확인하세요. (configuration_missing)`
+      : `This connection could not find its configuration: ${names}. If a key is already saved, check that this connection uses that entry. (configuration_missing)`;
+  }
+  if (status?.failureCode === "authentication_required") return ko
+    ? "이 연결의 인증이 확인되지 않았어요. 선택한 계정과 저장된 연결을 확인하세요. (authentication_required)"
+    : "Authentication for this connection was not verified. Check the selected account and saved connection. (authentication_required)";
+  if (status?.failureCode === "connection_cancelled") return ko ? "연결 확인을 취소했어요. (connection_cancelled)" : "Connection verification was cancelled. (connection_cancelled)";
+  return ko
+    ? "연결을 확인하지 못했어요. 저장된 키가 없다는 뜻은 아닙니다. (connection_unverified)"
+    : "The connection could not be verified. This does not mean a saved key is missing. (connection_unverified)";
+}
+
 async function resolveSetupStep(input: {
   api: NonNullable<ReturnType<typeof ipc>>;
   listing: MarketplaceListing;
   rows: Array<{ transport: string; envKeys?: string[] }>;
   serverId: string | null;
-}): Promise<"login" | "keys" | "none"> {
-  const { api, listing, rows, serverId } = input;
-  const remote = rows.some((row) => row.transport === "http" || row.transport === "sse");
-  if (remote && serverId) {
-    try {
-      const status = await api.mcpTools.oauthStatus(serverId);
-      // 저장된 인가 상태와 무관하게 실제 연결을 먼저 확인한다. 이 probe가
-      // 기존 refresh credential이나 수동 API 키로 연결되면 새 동의가 필요 없다.
-      if (status?.supported) return await alreadyConnects(api, serverId) ? "none" : "login";
-      // supported=false 는 "인증이 필요 없다" 또는 "discovery 실패"다. 전자면 끝이고,
-      // 후자면 아래 선언값 판단이 받는다 — 둘 다 여기서 단정하지 않는다.
-    } catch {
-      /* 물어보지 못했을 뿐이다. 아래 선언값 판단으로 내려간다. */
-    }
+  ko: boolean;
+}): Promise<{ step: "login" | "keys" | "none"; missingEnv: string[] }> {
+  const { api, listing, rows, serverId, ko } = input;
+  let observed: McpServerStatus | null = null;
+  if (serverId) {
+    try { observed = await api.mcpTools.test(serverId); } catch { /* Failed reads stay unverified. */ }
   }
-  return nextSetupStepFor({ listing, rows });
+  const step = mcpConnectionSetupStep({ authKind: listing.authKind, rows, status: observed });
+  if (step === "none" || step === "keys") return { step, missingEnv: [...new Set(observed?.missingEnv ?? [])] };
+  if (step === "login" && serverId) {
+    // Protocol discovery confirms OAuth only after a typed authentication refusal;
+    // it cannot override an API-key/token/none declaration or an unavailable probe.
+    const oauth = await api.mcpTools.oauthStatus(serverId);
+    if (oauth.supported) return { step, missingEnv: [] };
+  }
+  throw new Error(mcpConnectionFailureMessage(observed, ko));
 }
 
 export async function installPlugins(input: {
@@ -283,8 +289,8 @@ export async function installPlugins(input: {
           const serverId = connected.find((row) => row.serverId)
             ?? pending.find((row) => row.serverId)
             ?? null;
-          const step = await resolveSetupStep({
-            api, listing, rows: preview.rows, serverId: serverId?.serverId ?? null,
+          const { step, missingEnv } = await resolveSetupStep({
+            api, listing, rows: preview.rows, serverId: serverId?.serverId ?? null, ko,
           });
 
           if (step === "login" && serverId?.serverId) {
@@ -292,10 +298,9 @@ export async function installPlugins(input: {
             continue;
           }
           if (step !== "keys") continue;
-          // 키를 묻기 전에 **이미 되는지 본다.** 제공사가 토큰을 선언해도 익명으로 붙는
-          // 서버가 있다. 되는 것에 키를 물으면 사용자는 없는 숙제를 받는다.
-          if (await alreadyConnects(api, serverId?.serverId ?? null)) continue;
-          const envKeys = [...new Set(preview.rows.flatMap((row) => row.envKeys ?? []))];
+          // Only the typed probe's missing names enter the existing secure form.
+          // Declared keys that are already available must never be requested again.
+          const envKeys = missingEnv;
           needKeys.push({ slug: listing.slug, name: listing.name, envKeys });
         } else if (failed.length > 0) {
           result.skipped.push({
@@ -563,8 +568,8 @@ export function KeyStep({
           </h2>
           <p className={styles.keySub}>
             {ko
-              ? "이 도구를 쓰려면 아래 값이 필요합니다. 지금 없으면 나중에 넣어도 됩니다."
-              : "This tool needs the values below. If you don't have them now, you can add them later."}
+              ? "이 연결이 아래 이름의 설정을 찾지 못했습니다. 이미 저장한 키가 있다면 연결된 항목을 먼저 확인하세요. 지금 입력하지 않아도 됩니다."
+              : "This connection could not find the settings named below. If a key is already saved, check its connection first. You can skip entering a value."}
           </p>
         </div>
       </header>

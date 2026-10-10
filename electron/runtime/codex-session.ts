@@ -35,7 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { AcpConnection, AcpRpcError } from "./acp-protocol";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
-import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
+import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
 import {
   capabilityClassFor,
@@ -64,6 +64,7 @@ export const CODEX_CLIENT_REQUESTS = [
   "model/list",
   "thread/resume",
   "thread/start",
+  "thread/name/set",
   "turn/interrupt",
   "turn/start",
   "turn/steer",
@@ -158,62 +159,67 @@ export async function openCodexResidentSession(opts: {
     completedTurns: 0,
     stopHeartbeat: () => {},
   };
-  trackRunChild(child);
-  // 자식이 stdio 를 상속한 손자를 남기고 죽으면 close 가 영영 안 온다 — runner.ts 주석 참고.
-  ensureChildCloseAfterExit(child, () => {
-    session.active?.onStatus(`${opts.label ?? "codex"}: app-server exited without closing its output — settling the turn`);
-  });
-  // ★호스트 소유 생존 신호 — 러너 공통 규칙. 지금 활성인 턴으로 간다.
-  session.stopHeartbeat = startCliHeartbeat(
-    child,
-    (status) => session.active?.onStatus(status),
-    opts.label ?? "codex",
-  );
-  const markClosed = (reason: string): void => {
-    session.closed = true;
-    try { session.stopHeartbeat(); } catch { /* 이미 멈췄다 */ }
-    const sink = session.active;
-    session.active = null;
-    try { sink?.onTransportClosed(reason); } catch { /* 정산은 턴 쪽 책임 */ }
-  };
-  child.on("close", (code) => markClosed(`app-server exited (${code ?? "?"})`));
-  child.on("error", (err) => markClosed(err instanceof Error ? err.message : String(err)));
-  session.conn = new AcpConnection(child, {
-    onNotification: (method, params) => {
-      try { session.active?.onNotification(method, params); } catch { /* 수신자 예외가 세션을 죽이지 않는다 */ }
-    },
-    onRequest: (method, params) => {
-      const handler = session.active?.onServerRequest;
-      // 유휴 세션에 승인 요청이 오면 답할 사람이 없다 — 조용히 삼키지 않고 규격 오류로 답한다.
-      if (!handler) throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
-      return handler(method, params);
-    },
-    onClose: (code) => markClosed(`app-server transport closed (${code ?? "?"})`),
-  });
   try {
-    session.init = await session.conn.request(
-      "initialize",
-      {
-        clientInfo: { name: "agentlas-desktop", version: "1.0" },
-        // Dynamic tools are currently behind app-server's negotiated
-        // experimental API. The method list above pins the exact surface we
-        // consume; unknown server requests still fail closed.
-        capabilities: { experimentalApi: true, requestAttestation: false },
-      },
-      { timeoutMs },
+    trackRunChild(child);
+    // 자식이 stdio 를 상속한 손자를 남기고 죽으면 close 가 영영 안 온다 — runner.ts 주석 참고.
+    ensureChildCloseAfterExit(child, () => {
+      session.active?.onStatus(`${opts.label ?? "codex"}: app-server exited without closing its output — settling the turn`);
+    });
+    // ★호스트 소유 생존 신호 — 러너 공통 규칙. 지금 활성인 턴으로 간다.
+    session.stopHeartbeat = startCliHeartbeat(
+      child,
+      (status) => session.active?.onStatus(status),
+      opts.label ?? "codex",
     );
-  } catch (err) {
-    /*
-     * ★사유를 들고 나간다. 구형 CLI 는 `app-server` 하위 명령 자체를 모르고, 그 사실은
-     * stderr 에만 있다("error: unrecognized subcommand 'app-server'"). 여기서 붙이지
-     * 않으면 호출자는 "연결이 닫혔다"만 보고 영구 강등을 판정할 근거를 잃는다.
-     */
-    const stderr = (session.conn?.lastStderr ?? "").trim();
-    closeCodexResidentSession(session);
-    const message = err instanceof Error ? err.message : String(err);
-    throw new Error(stderr && !message.includes(stderr.slice(-80)) ? `${message}\n${stderr.slice(-500)}` : message);
+    const markClosed = (reason: string): void => {
+      session.closed = true;
+      try { session.stopHeartbeat(); } catch { /* 이미 멈췄다 */ }
+      const sink = session.active;
+      session.active = null;
+      try { sink?.onTransportClosed(reason); } catch { /* 정산은 턴 쪽 책임 */ }
+    };
+    child.on("close", (code) => markClosed(`app-server exited (${code ?? "?"})`));
+    child.on("error", (err) => markClosed(err instanceof Error ? err.message : String(err)));
+    session.conn = new AcpConnection(child, {
+      onNotification: (method, params) => {
+        try { session.active?.onNotification(method, params); } catch { /* 수신자 예외가 세션을 죽이지 않는다 */ }
+      },
+      onRequest: (method, params) => {
+        const handler = session.active?.onServerRequest;
+        // 유휴 세션에 승인 요청이 오면 답할 사람이 없다 — 조용히 삼키지 않고 규격 오류로 답한다.
+        if (!handler) throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
+        return handler(method, params);
+      },
+      onClose: (code) => markClosed(`app-server transport closed (${code ?? "?"})`),
+    });
+    try {
+      session.init = await session.conn.request(
+        "initialize",
+        {
+          clientInfo: { name: "agentlas-desktop", version: "1.0" },
+          // Dynamic tools are currently behind app-server's negotiated
+          // experimental API. The method list above pins the exact surface we
+          // consume; unknown server requests still fail closed.
+          capabilities: { experimentalApi: true, requestAttestation: false },
+        },
+        { timeoutMs },
+      );
+    } catch (err) {
+      /*
+       * ★사유를 들고 나간다. 구형 CLI 는 `app-server` 하위 명령 자체를 모르고, 그 사실은
+       * stderr 에만 있다("error: unrecognized subcommand 'app-server'"). 여기서 붙이지
+       * 않으면 호출자는 "연결이 닫혔다"만 보고 영구 강등을 판정할 근거를 잃는다.
+       */
+      const stderr = (session.conn?.lastStderr ?? "").trim();
+      await closeCodexResidentSession(session);
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(stderr && !message.includes(stderr.slice(-80)) ? `${message}\n${stderr.slice(-500)}` : message);
+    }
+    return session;
+  } catch (error) {
+    await closeCodexResidentSession(session);
+    throw error;
   }
-  return session;
 }
 
 /** 이 세션이 아직 다음 턴을 받을 수 있는가. */
@@ -225,7 +231,13 @@ export function codexResidentSessionAlive(session: CodexResidentSession): boolea
 }
 
 /** 세션을 놓는 유일한 경로 — 생존 신호 정지 + 전송 close + 프로세스 트리 종료. */
-export function closeCodexResidentSession(session: CodexResidentSession): void {
+const codexSessionTerminations = new WeakMap<CodexResidentSession, Promise<void>>();
+export function closeCodexResidentSession(session: CodexResidentSession): Promise<void> {
+  const existing = codexSessionTerminations.get(session);
+  if (existing) return existing;
+  // Capture physical ownership before protocol close can obscure leader exit.
+  const termination = waitForCliTreeTermination(session.child);
+  codexSessionTerminations.set(session, termination);
   if (session.threadId && !childExited(session.child)) {
     const key = codexThreadOwnerKey(session, session.threadId);
     const pending = pendingCodexWriterExits.get(key) ?? [];
@@ -241,6 +253,7 @@ export function closeCodexResidentSession(session: CodexResidentSession): void {
   try { session.stopHeartbeat(); } catch { /* 이미 멈췄다 */ }
   try { session.conn?.close(); } catch { /* 이미 죽었을 수 있다 */ }
   try { killCliTree(session.child); } catch { /* 이미 죽었을 수 있다 */ }
+  return termination;
 }
 
 /** `initialize` 응답을 한 줄 영수증으로 — 버전 스큐를 나중에 읽을 수 있게 남긴다. */

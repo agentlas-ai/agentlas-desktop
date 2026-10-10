@@ -587,22 +587,31 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
   }
   const { chats, invocationService } = runtime();
   const title = brief.split(/\r?\n/, 1)[0]!.slice(0, 120);
-  const fresh = input.newSession !== false;
-  // new_session:false continues the session One opened for this teammate before —
-  // never the owner's own private conversation with that teammate.
+  const fresh = input.newSession === true;
+  // Continue this room's teammate context by default. An explicit new session
+  // still requests isolation; a private owner/member chat is never a candidate.
   const previous = fresh ? undefined : getDb().prepare(
-    "SELECT child_chat_id FROM one_team_dispatches WHERE parent_chat_id = ? AND member_id = ? ORDER BY created_at DESC LIMIT 1",
-  ).get(parentChatId, member.id) as { child_chat_id: string } | undefined;
-  const reused = previous ? chats.getChat(previous.child_chat_id) : null;
-  const chat = reused ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation",
-    kind: "division", parentChatId });
-  const createdHere = !reused;
-  if (!fresh && invocationService.activeChatIds().includes(chat.id)) {
+    `SELECT d.child_chat_id FROM one_team_dispatches d JOIN chats c ON c.id = d.child_chat_id
+      WHERE d.parent_chat_id = ? AND d.member_id = ? AND c.parent_chat_id = ?
+        AND c.kind = 'division' AND c.origin_surface = 'one' AND c.agent_id = ? AND c.archived_at IS NULL
+      ORDER BY d.created_at DESC LIMIT 1`,
+  ).get(parentChatId, member.id, parentChatId, member.installedAgentId) as { child_chat_id: string } | undefined;
+  const candidate = previous ? chats.getChat(previous.child_chat_id) : null;
+  const reused = candidate?.kind === "division" && candidate.originSurface === "one"
+    && candidate.agentId === member.installedAgentId
+    ? candidate : null;
+  const settling = reused && getDb().prepare(
+    "SELECT 1 FROM one_team_dispatches WHERE child_chat_id = ? AND status = 'running' LIMIT 1",
+  ).get(reused.id);
+  if (reused && (settling || invocationService.activeChatIds().includes(reused.id))) {
     throw new Error(`one-team-member-busy: ${ownerMessage(
       `팀원 ${member.displayName}의 그 세션은 지금 작업 중이라 시작하지 않았어요. one_team_steer 로 방향을 더하거나 새 세션으로 맡기세요.`,
       `Teammate ${member.displayName}'s session is working right now, so nothing was started. Use one_team_steer on it, or start a new session.`,
     )}`);
   }
+  const chat = reused ?? chats.createChat({ agentId: member.installedAgentId, title, originSurface: "one", taskMode: "conversation",
+    kind: "division", parentChatId });
+  const createdHere = !reused;
   installSettleListener();
   const id = `dispatch-${randomUUID()}`;
   const runId = randomUUID();

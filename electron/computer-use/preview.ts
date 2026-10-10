@@ -1,4 +1,5 @@
 import { desktopCapturer, screen, systemPreferences } from "electron";
+import { withOneSensitiveOperation } from '../secrets/sensitive-surface';
 import { checkComputerUsePermissions } from "../mac-permissions";
 import type { ComputerUseCaptureOptions, ComputerUsePreview } from "../../shared/types";
 import { nativeInputDriverAvailable } from "./native-driver";
@@ -13,6 +14,12 @@ function screenPermission(): ComputerUsePreview["screenPermission"] {
 }
 
 export async function captureComputerUsePreview(
+  sourceId?: string,
+  options?: ComputerUseCaptureOptions,
+): Promise<ComputerUsePreview> {
+  return withOneSensitiveOperation(() => captureComputerUsePreviewUnlocked(sourceId, options));
+}
+async function captureComputerUsePreviewUnlocked(
   sourceId?: string,
   options?: ComputerUseCaptureOptions,
 ): Promise<ComputerUsePreview> {

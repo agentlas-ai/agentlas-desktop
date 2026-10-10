@@ -62,24 +62,54 @@ export interface LongRunCostAccounting {
   unknownCount: number;
 }
 
+// rowToLongRun calls this for every long run the screen reads, and the room screen polls
+// several of those reads every few seconds. Recomputing from the event log each time parsed
+// every usage receipt of a months-long Goal (1.6k receipts, 6.5k events in the Youtube room,
+// 2026-10-10) and pinned Main at ~45% CPU. The event log is append-only per run, so its newest
+// seq is an exact version for the derived totals.
+const COST_ACCOUNTING_CACHE_LIMIT = 256;
+const costAccountingCache = new WeakMap<object, Map<string, { version: number; cycleCount: number; value: LongRunCostAccounting }>>();
+
 export function readLongRunCostAccounting(runId: string, cycleCount: number): LongRunCostAccounting {
-  const rows = getDb().prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.usage_recorded'")
+  const db = getDb();
+  const version = (db.prepare("SELECT MAX(seq) AS v FROM long_run_events WHERE run_id = ?").get(runId) as { v: number | null }).v ?? 0;
+  let cache = costAccountingCache.get(db);
+  if (!cache) { cache = new Map(); costAccountingCache.set(db, cache); }
+  const hit = cache.get(runId);
+  if (hit && hit.version === version && hit.cycleCount === cycleCount) {
+    cache.delete(runId); cache.set(runId, hit);
+    return { ...hit.value };
+  }
+  const value = computeLongRunCostAccounting(runId, cycleCount);
+  cache.delete(runId);
+  cache.set(runId, { version, cycleCount, value });
+  while (cache.size > COST_ACCOUNTING_CACHE_LIMIT) cache.delete(cache.keys().next().value as string);
+  return { ...value };
+}
+
+function computeLongRunCostAccounting(runId: string, cycleCount: number): LongRunCostAccounting {
+  const db = getDb();
+  const rows = db.prepare("SELECT payload_json FROM long_run_events WHERE run_id = ? AND kind = 'run.usage_recorded'")
     .all(runId) as { payload_json: string }[];
   let knownSubtotalUsd = 0;
   let receiptCount = 0;
-  const cycles = getDb().prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN json_extract(payload_json, '$.usage.schemaVersion') = 'agentlas.long-run-usage.v1' THEN 0 ELSE 1 END) AS legacy FROM long_run_events WHERE run_id = ? AND kind = 'run.cycle_recorded'")
+  const cycles = db.prepare("SELECT COUNT(*) AS total, SUM(CASE WHEN json_extract(payload_json, '$.usage.schemaVersion') = 'agentlas.long-run-usage.v1' THEN 0 ELSE 1 END) AS legacy FROM long_run_events WHERE run_id = ? AND kind = 'run.cycle_recorded'")
     .get(runId) as { total: number; legacy: number | null };
   let unknownCount = Math.max(0, cycleCount - cycles.total) + (cycles.legacy ?? 0);
+  const recordedSources = new Set<unknown>();
   for (const row of rows) {
     const receipt = JSON.parse(row.payload_json).usage as LongRunUsageReceipt | undefined;
+    if (receipt && receipt.sourceId !== undefined && receipt.sourceId !== null) recordedSources.add(receipt.sourceId);
     if (receipt?.schemaVersion === "agentlas.long-run-usage.v1") receiptCount += 1;
     if (receipt?.cost?.status === "measured" && Number.isFinite(receipt.cost.usd) && receipt.cost.usd! >= 0 && receipt.cost.sourceRef) {
       knownSubtotalUsd += receipt.cost.usd!;
     } else unknownCount += 1;
   }
-  const pending = getDb().prepare("SELECT COUNT(*) AS n FROM long_run_events starts WHERE starts.run_id=? AND starts.kind='run.usage_started' AND NOT EXISTS (SELECT 1 FROM long_run_events ends WHERE ends.run_id=starts.run_id AND ends.kind='run.usage_recorded' AND json_extract(ends.payload_json,'$.usage.sourceId')=json_extract(starts.payload_json,'$.sourceId'))")
-    .get(runId) as { n: number };
-  unknownCount += pending.n;
+  // A started usage without a recorded result for the same source stays unknown. Matched in
+  // memory: the previous correlated NOT EXISTS re-parsed every recorded receipt per start.
+  const starts = db.prepare("SELECT json_extract(payload_json,'$.sourceId') AS sourceId FROM long_run_events WHERE run_id=? AND kind='run.usage_started'")
+    .all(runId) as { sourceId: unknown }[];
+  for (const start of starts) if (start.sourceId === null || !recordedSources.has(start.sourceId)) unknownCount += 1;
   return { status: unknownCount ? "unknown" : "measured", knownSubtotalUsd, receiptCount, unknownCount };
 }
 

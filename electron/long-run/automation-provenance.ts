@@ -237,8 +237,10 @@ export function readCurrentGoalAutomationBinding(
 ): CurrentGoalAutomationBinding | null {
   const normalized = automationId.trim();
   if (!normalized) return null;
-  const runRows = getDb().prepare(`SELECT run_id, payload_json FROM long_run_events
-    WHERE kind = ? ORDER BY occurred_at DESC, rowid DESC LIMIT ?`)
+  // Drive from long_runs so each run uses idx_long_run_events_kind (run_id, kind). A bare
+  // `kind = ?` scanned the whole event log on every automation row the screen listed.
+  const runRows = getDb().prepare(`SELECT e.run_id, e.payload_json FROM long_runs r CROSS JOIN long_run_events e
+    WHERE e.run_id = r.id AND e.kind = ? ORDER BY e.occurred_at DESC, e.rowid DESC LIMIT ?`)
     .all(BINDING_KIND, MAX_BINDINGS_READ * 4) as Array<{ run_id: string; payload_json: string }>;
   for (const row of runRows) {
     const binding = parseBinding(row.payload_json);

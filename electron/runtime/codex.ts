@@ -7,7 +7,10 @@ import { registerNativeApprovalChildSignal } from "./native-approval-provenance"
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
-import { runCodexNoTools } from "./codex-no-tools";
+import { runCodexNoTools, runCodexAliveNoTools } from "./codex-no-tools";
+import { runCodexAliveResidentTurn, closeCodexAliveResidentOwner,
+  codexAliveResidentGeneration, consumeCodexAliveResidentResult } from "./codex-alive-session";
+import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { resolveEffectiveContextWindow } from "../../shared/models";
 import { accountCodexHome, withCodexProductHome } from "./codex-product-home";
 import os from "node:os";
@@ -31,6 +34,7 @@ import {
   renderGapContext,
   unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext, invalidateStableTurnContext,
   type StableTurnContextDelivery } from "./continuity";
+import { agentContextSessionKey } from "./agent-context";
 import { tStatus } from "./status-i18n";
 import { agentRunCwd, detachedSpawnOpts, firstExistingCli, killCliTree, probeCliVersion, spawnCli, trackRunChild, writeStdin } from "./exec";
 import { nativeCliCandidates } from "./native-cli";
@@ -48,6 +52,10 @@ import {
   getRuntimeSession,
   saveRuntimeSession,
 } from "../store/runtime-sessions";
+import {
+  ROOM_AUTO_COMPACT_TOKEN_LIMIT, boundHandoffHistory, decideSessionRotation, readThreadHealth,
+  recordRotationReceipt, recordThreadTurn, renderRotationNotice,
+} from "./session-rotation";
 import { AcpRpcError } from "./acp-protocol";
 import {
   CODEX_APP_SERVER_ARGS,
@@ -302,6 +310,30 @@ function buildResidentInitialTurnPrompt(req: RunnerRequest): string {
   if (turnContext) parts.push(turnContext, "");
   parts.push(tStatus(req.locale, "histThisSection"), req.userPrompt);
   return parts.join("\n");
+}
+
+/** Name only a thread we just created; host context is not an owner task title. */
+async function nameNewCodexThread(
+  session: CodexResidentSession,
+  threadId: string,
+  req: RunnerRequest,
+  events: RunnerEvents,
+): Promise<void> {
+  if (req.signal?.aborted) return;
+  const text = req.surfaceUserPrompt
+    ?.replace(/[\u0000-\u001f\u007f-\u009f]+/g, " ")
+    .replace(/\s+/g, " ").trim();
+  // Other callers may supply an enriched provider prompt without original text.
+  // Leave their naming alone instead of promoting host instructions to a title.
+  if (!text) return;
+  const name = [...`Agentlas · ${text}`].slice(0, 80).join("").trim();
+  try {
+    await session.conn.request("thread/name/set", { threadId, name },
+      { timeoutMs: 1_000, signal: req.signal });
+  } catch {
+    // Metadata is optional on older CLIs. Never restart or replay the task over it.
+    if (!req.signal?.aborted) events.onStatus(`[runtime-session] name_unavailable kind=${KIND}`);
+  }
 }
 
 const CODEX_WORKSPACE_WRITE_CONFIG_ARGS = [
@@ -1424,6 +1456,12 @@ async function runCodexResidentTurn(input: {
   observeNativeFile: NativeFileProofObserver;
 }): Promise<ResidentTurnOutcome> {
   const { bin, req, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
+  publishCodexNativeControlState(input.events, "app-server", "pending", "native_control_pending");
+  // Host capability is internal continuity identity, never effect/approval chat authority.
+  const canonicalContextKey = req.agentContext && !req.minimalObservation && !req.untrustedNoTools
+    && !req.scienceRecoveryCapability && !req.restrictedReadBoundary && !req.judgmentOnly
+    ? agentContextSessionKey(req.agentContext) : undefined;
+  const contextChatId = canonicalContextKey ?? req.chatId;
   let events = input.events;
   const surfaceArgs = input.surfaceArgs ?? [];
   const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
@@ -1442,10 +1480,10 @@ async function runCodexResidentTurn(input: {
    * 스폰 형상 — `-c` 는 app-server 하위 명령의 옵션이다(실측 `codex app-server --help`).
    * reasoning summary 를 켜는 것은 exec 경로와 같은 이유다(끄면 요약 아이템이 비어 온다).
    */
-  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", ...(req.scienceController ? ["-c", "model_auto_compact_token_limit=150000"] : []), ...surfaceArgs, ...mcpArgs];
+  const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", "-c", `model_auto_compact_token_limit=${req.scienceController ? 150000 : ROOM_AUTO_COMPACT_TOKEN_LIMIT}`, ...surfaceArgs, ...mcpArgs];
   const pool = codexSessionPool();
   const poolKey = codexPoolKey({
-    chatId: req.approvalChatId ?? chatId,
+    chatId: canonicalContextKey ?? req.approvalChatId ?? chatId,
     fingerprint,
     sessionOwnerId: runtimeSessionOwnerId ?? null,
     isolateOwner: isolateRuntimeSessionOwner,
@@ -1538,8 +1576,16 @@ async function runCodexResidentTurn(input: {
     observed: ObservedTokenUsage | undefined;
     total: { outputTokens: number; inputTokens?: number; cachedInputTokens?: number } | null;
   } = { observed: undefined, total: null };
+  // Thread-health observations for rotation (session-rotation.ts): last model-call input of this turn and
+  // native compactions seen. Recorded only for a turn that reached a terminal; a failed turn adds nothing.
+  const health: { lastInputTokens: number | null; compactionItems: Set<string>; compactedNotices: number } =
+    { lastInputTokens: null, compactionItems: new Set(), compactedNotices: 0 };
   const persistTurnCounters = (): void => {
     if (!session.threadId) return;
+    if (terminalObserved) {
+      recordThreadTurn(session.threadId, { lastInputTokens: health.lastInputTokens,
+        compactions: Math.max(health.compactionItems.size, health.compactedNotices) });
+    }
     const total = terminalObserved ? usage.total : null;
     if (!saveRuntimeSession(chatId, KIND, session.threadId, fingerprint, {
       agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
@@ -1555,10 +1601,9 @@ async function runCodexResidentTurn(input: {
   let modelSelectionError: CodexModelSelectionError | null = null;
   let nativeTurnController: ReturnType<typeof createCodexNativeTurnController> | null = null;
   const withdrawNativeTurnController = (): void => {
-    if (!nativeTurnController) return;
-    nativeTurnController.revoke();
+    nativeTurnController?.revoke();
     nativeTurnController = null;
-    try { events.onNativeTurnController?.(null); } catch { /* Stop and native settlement remain unconditional. */ }
+    publishCodexNativeControlState(events, "app-server", "withdrawn", "native_control_withdrawn");
   };
   // Every blocking MCP elicitation belongs to this one turn, even when the
   // underlying app-server process survives for later turns. Stop, transport
@@ -1615,7 +1660,9 @@ async function runCodexResidentTurn(input: {
       || ["thread/closed", "thread/deleted", "thread/archived"].includes(method)
       || ((method === "item/started" || method === "item/completed")
         && ["contextCompaction", "context_compaction", "compaction"].includes(String(params?.item?.type ?? ""))))) {
-      invalidateStableTurnContext({ chatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
+      invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
+      if (method === "thread/compacted") health.compactedNotices += 1;
+      else if (method === "item/completed") health.compactionItems.add(String(params?.item?.id ?? health.compactionItems.size));
     }
     if (method === "item/started" || method === "item/completed") {
       if (fromOtherThread(params) || (confirmedTurnId && params?.turnId && params.turnId !== confirmedTurnId)) {
@@ -1774,6 +1821,7 @@ async function runCodexResidentTurn(input: {
           usage.observed = codexObservedTurnUsage(usage.total, turnUsageBaseline);
           if (usage.observed) events.onUsage?.(usage.observed.outputTokens);
         }
+        if (last && Number.isSafeInteger(last.inputTokens) && last.inputTokens > 0) health.lastInputTokens = last.inputTokens;
         if (last && typeof last.inputTokens === "number" && typeof last.cachedInputTokens === "number" && last.inputTokens > 0) {
           events.onStatus(`[cache] read=${last.cachedInputTokens} fresh=${last.inputTokens - last.cachedInputTokens} hit=${Math.round((last.cachedInputTokens / last.inputTokens) * 100)}%`);
         }
@@ -2105,6 +2153,7 @@ async function runCodexResidentTurn(input: {
         session.threadId = id;
         nativeThreadCreated = true;
         session.modelAcknowledgement = modelAcknowledgement;
+        await nameNewCodexThread(session, id, req, events);
       }
       // 버전 스큐 관측 — 이 세션이 어떤 app-server 였는지 영수증에 남긴다.
       events.onStatus(codexProtocolReceipt(session.init));
@@ -2131,11 +2180,12 @@ async function runCodexResidentTurn(input: {
     /* ── 턴 ── */
     // 새 스레드면 시스템+히스토리 시드, 이어가는 스레드면 사용자 턴만(+gap/turn 컨텍스트).
     const continuing = reusing || Boolean(resumeThreadId && session.threadId === resumeThreadId);
-    // Fresh seeding remains untracked: a completed turn/session id alone cannot
-    // prove retention of the initial context through native compaction.
-    const resumeContext = continuing ? dedupeStableTurnContext({ chatId: req.chatId, runtimeKind: KIND,
+    // Prepare the exact dispatched seed too. Only the bound turn/start receipt
+    // commits it; typed compaction/replacement and unsettled turns invalidate it.
+    if (!reusing) invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: session.threadId });
+    const resumeContext = dedupeStableTurnContext({ chatId: contextChatId, runtimeKind: KIND,
       sessionId: session.threadId, contextFingerprint: stableContextFingerprint(req, fingerprint, [bin, cwd, mcpArgs, surfaceArgs, appliedEffort]),
-      turnContext: req.turnContext, stableBlocks: req.turnContextStable }) : undefined;
+      turnContext: req.turnContext, stableBlocks: req.turnContextStable, retention: "native-compaction" });
     stableContextDelivery = resumeContext?.delivery;
     const promptText = continuing
       ? composeResumeTurnPrompt(
@@ -2143,7 +2193,7 @@ async function runCodexResidentTurn(input: {
         [gapContext, resumeContext?.text].filter(Boolean).join("\n\n"),
         req.locale,
       )
-      : buildResidentInitialTurnPrompt(req);
+      : buildResidentInitialTurnPrompt({ ...req, turnContext: resumeContext.text });
     const turnParams: Record<string, unknown> = {
       threadId: session.threadId,
       input: [{ type: "text", text: promptText }],
@@ -2176,7 +2226,8 @@ async function runCodexResidentTurn(input: {
       turnId = started.turn.id;
       confirmedTurnId = started.turn.id;
       acknowledgedTurnId = started.turn.id;
-      acknowledgeStableTurnContext(stableContextDelivery, { sessionId: session.threadId, acknowledgementId: started.turn.id });
+      if (!req.signal?.aborted) acknowledgeStableTurnContext(stableContextDelivery,
+        { sessionId: session.threadId, acknowledgementId: started.turn.id });
     } else {
       throw new RuntimeTurnUnsettledError(KIND, req.locale);
     }
@@ -2205,9 +2256,10 @@ async function runCodexResidentTurn(input: {
           && !modelSelectionError && !req.signal?.aborted && codexResidentSessionAlive(session),
         request: session.conn.request.bind(session.conn),
       });
-      try { events.onNativeTurnController?.(nativeTurnController.controller); }
+      try { events.onNativeTurnController?.(nativeTurnController.controller, { runtime: KIND, driver: "app-server", phase: "active", code: "native_control_active" }); }
       catch { withdrawNativeTurnController(); }
     }
+    if (!nativeTurnController) publishCodexNativeControlState(events, "app-server", "unavailable", "native_control_unavailable");
     events.onStatus(`[runtime-session] ${continuing ? "resumed" : "created"} kind=${KIND}`);
     if (modelSelectionError) throw modelSelectionError;
     const reason = await settled;
@@ -2314,7 +2366,7 @@ async function runCodexResidentTurn(input: {
     // 수신자를 먼저 뗀다 — 유휴 세션이 지난 턴의 events 로 상태를 흘리면 안 된다.
     session.active = null;
     if (broken || req.signal?.aborted || failure || interrupted || (turnDispatchAttempted && !terminalObserved)) {
-      invalidateStableTurnContext({ chatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
+      invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
     }
     effects.complete(turnDispatchAttempted ? "resident_turn_closed" : "not_dispatched", (!turnDispatchAttempted || terminalObserved) && !req.signal?.aborted && (!turnDispatchAttempted || !broken));
     if (broken || req.signal?.aborted) pool.discard(lease);
@@ -2384,11 +2436,22 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
   }
 }
 
+function publishCodexNativeControlState(events: RunnerEvents,
+  driver: import("./runner").RunnerNativeControlState["driver"],
+  phase: import("./runner").RunnerNativeControlState["phase"],
+  code: import("./runner").RunnerNativeControlState["code"]): void {
+  try { events.onNativeTurnController?.(null, Object.freeze({ runtime: KIND, driver, phase, code })); }
+  catch { /* Observation cannot change admission, Stop or settlement. */ }
+}
 export const runCodex: Runner = async (
   req: RunnerRequest,
   events: RunnerEvents,
 ): Promise<RunnerResult> => {
+  publishCodexNativeControlState(events, "unselected", "pending", "native_control_pending");
   assertScienceRecoveryRequest(req, "codex");
+  // Validate before adding internal account/cwd transport fields. These fields
+  // cannot turn a copied JSON request into the host's opaque Alive admission.
+  const aliveAdmission = aliveDecisionProfileForRequest(req) ? req : null;
   // Judgment's gateway replaces all model input, so it can keep the actual
   // account home for keyring identity and CLI-owned refresh without a mirror.
   const requestEnv = req.env ?? process.env;
@@ -2454,7 +2517,7 @@ export const runCodex: Runner = async (
     const capacities = [inventory.find(model => model.id === req.model)?.contextWindow,
       resolveEffectiveContextWindow("codex", req.model, req.longContext === true).contextWindow]
       .filter((value): value is number => typeof value === "number" && value > 0);
-    return runCodexNoTools({ ...req, effort: effort ?? undefined }, events, async (args, request) => {
+    const executeNoTools = async (args: string[], request: RunnerRequest): Promise<RunnerResult> => {
       const run = await runCodexProcess(bin, args, request.userPrompt, request, events,
         { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
       if (request.signal?.aborted) throw abortReasonError(request);
@@ -2465,13 +2528,38 @@ export const runCodex: Runner = async (
       return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
         ownerControlTerminal: run.code === 0 && run.turnCompleted && !run.failure && run.text.trim()
           ? "completed" : "uncertain",
+        ...(aliveAdmission && run.code === 0 && run.turnCompleted && !run.failure && run.text.trim() && run.threadId
+          ? { sessionId: run.threadId } : {}),
         ...(run.observedUsage ? { observedUsage: run.observedUsage } : {}), ...(request.effort ? { appliedEffort: request.effort } : {}) };
-    }, { ...(capacities.length ? { contextWindowTokens: Math.min(...capacities) } : {}) });
+    };
+    const dependencies = { ...(capacities.length ? { contextWindowTokens: Math.min(...capacities) } : {}) };
+    if (!aliveAdmission) return runCodexNoTools({ ...req, effort: effort ?? undefined }, events, executeNoTools, dependencies);
+    const aliveRequest = { ...aliveAdmission, effort: effort ?? undefined };
+    const profile = aliveDecisionProfileForRequest(aliveRequest)!;
+    // The daemon profile alone selects this lane. A native boundary failure
+    // cannot retry through ordinary exec after input may have been delivered.
+    let residentFingerprint: string;
+    try { residentFingerprint = await codexAliveResidentGeneration(bin); }
+    catch (error) {
+      const code = error instanceof Error && /^codex_alive_[a-z_]+$/u.test(error.message)
+        ? error.message : "codex_alive_native_failed";
+      return { text: "", ownerControlTerminal: "uncertain", failure: {
+        kind: code.endsWith("unsupported") ? "unsupported" : "unavailable", runtime: KIND,
+        source: "marker", providerCode: code, message: code } };
+    }
+    return runCodexAliveNoTools(aliveRequest, events, executeNoTools, {
+      ...dependencies, residentFingerprint,
+      resident: input => runCodexAliveResidentTurn({ ...input, bin, originalRequest: aliveRequest,
+        executionEnv: req.env ?? process.env }, events),
+      closeResident: () => closeCodexAliveResidentOwner(profile.resourceOwnerKey),
+      verifyResidentResult: (result, nonce, expectedNativeHandle) =>
+        consumeCodexAliveResidentResult(result, aliveRequest, nonce, expectedNativeHandle),
+    }, req.env);
   }
   if (req.minimalObservation && !req.untrustedNoTools) return runCodexMinimalObservation(bin, req, events, observeNativeFile);
 
   const stagedImages = await stageCliImageAttachments(req);
-  const runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
+  let runReq = stagedImages.images.length > 0 ? { ...req, userPrompt: stagedImages.userPrompt } : req;
   const runtimeSessionOwnerId = runReq.runtimeSessionOwnerId ?? runReq.agentId;
   const isolateRuntimeSessionOwner = runReq.runtimeSessionOwnerId != null;
 
@@ -2533,7 +2621,7 @@ export const runCodex: Runner = async (
   // reasoning summary 아이템을 켠다 — 실측(codex 0.147): 이 설정 없이는 `--json`에
   // reasoning 아이템이 0건이라 화면이 "생각 중" 외에 아무것도 말할 수 없었다. 켜면
   // 모델이 낸 헤드라인("**Preparing file count command execution**")이 아이템으로 온다.
-  modelArgs.push("-c", "model_reasoning_summary=auto", ...(runReq.scienceController ? ["-c", "model_auto_compact_token_limit=150000"] : []));
+  modelArgs.push("-c", "model_reasoning_summary=auto", "-c", `model_auto_compact_token_limit=${runReq.scienceController ? 150000 : ROOM_AUTO_COMPACT_TOKEN_LIMIT}`);
   let appliedEffort: string | null = null;
   if (runReq.model) modelArgs.push("--model", runReq.model);
   // 모델 캐시의 exact profile을 실행 시점에도 다시 검증한다. 최신 Codex 모델은 max를
@@ -2559,10 +2647,31 @@ export const runCodex: Runner = async (
   const existing = !assertScienceRecoveryRequest(runReq, "codex") && runReq.chatId
     ? getRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
     : null;
-  const storedSessionId =
+  const matchedSessionId =
     existing && fingerprint && existing.fingerprint === fingerprint
       ? existing.sessionId
       : null;
+  /*
+   * Long-lived room threads rotate at a TURN BOUNDARY (here, before dispatch; a prior turn's recorded health
+   * decides, never the current turn). The next turn starts a fresh thread seeded with the goal contract
+   * (turnContext) plus a bounded text-only tail of the room, so the old thread's screenshots and tool dumps
+   * are not re-read on every call. Caller-managed sessions (Build etc.) are never rotated here.
+   */
+  const rotation = matchedSessionId && existing && !runReq.runtimeSessionId && !runReq.singleUse
+    ? decideSessionRotation({ health: readThreadHealth(matchedSessionId),
+      reportedInputTokens: existing.reportedInputTokens })
+    : null;
+  const storedSessionId = rotation?.rotate ? null : matchedSessionId;
+  if (rotation?.rotate && matchedSessionId && runReq.chatId) {
+    const rotatedAt = new Date().toISOString();
+    const receiptStored = recordRotationReceipt({ schemaVersion: "agentlas.runtime-thread-rotation.v1",
+      chatId: runReq.chatId, previousThreadId: matchedSessionId, reasons: rotation.reasons,
+      health: readThreadHealth(matchedSessionId), reportedInputTokens: existing?.reportedInputTokens ?? null, rotatedAt });
+    events.onStatus(`[runtime-session] rotated kind=${KIND} previous=${matchedSessionId} reasons=${rotation.reasons.join(",")} receipt=${receiptStored ? "stored" : "missing"}`);
+    runReq = { ...runReq, history: boundHandoffHistory(runReq.history),
+      turnContext: [renderRotationNotice({ previousThreadId: matchedSessionId, reasons: rotation.reasons, locale: runReq.locale }),
+        runReq.turnContext].filter(Boolean).join("\n\n") };
+  }
   /*
    * Unattended parallel branches share one ledger chat and therefore one stored
    * thread; codex admits one writer per thread. A sibling that finds the stored
@@ -2652,6 +2761,7 @@ export const runCodex: Runner = async (
     if (attempt.result) return attempt.result;
   }
   if (runReq.workforceRuntimeToolGrant) throw new Error("workforce_codex_observation_no_exec_fallback");
+  publishCodexNativeControlState(events, "exec", "unavailable", "native_control_exec_boundary");
 
   /*
    * 출력 형태 계약 — codex 는 스키마를 **파일 경로**로만 받는다

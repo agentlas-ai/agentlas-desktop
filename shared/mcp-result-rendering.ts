@@ -194,12 +194,65 @@ function providerLooksLikeMcpTool(toolName: string | undefined): boolean {
   return /(?:^|[_:. -])mcp(?:$|[_:. -])/iu.test(name) || /^mcp__?/iu.test(name);
 }
 
+/** Bounded presentation copy for persisted ordinary MCP events. Model text and
+ * native result/authority receipts remain separate; this copy cannot grant access. */
+export function serializeMcpResultForPreview(value: unknown): string | undefined {
+  const source = record(value);
+  if (!source) return undefined;
+  const content = Array.isArray(source.content) ? source.content : [];
+  if (source.structuredContent === undefined
+    && !content.some((item) => record(item)?.type !== "text")) return undefined;
+  let remaining = 256_000;
+  let nodes = 0;
+  let omitted = content.length > MAX_BLOCKS;
+  const copy = (input: unknown, depth: number, key = ""): unknown => {
+    if (++nodes > 256 || depth > MAX_WALK_DEPTH) { omitted = true; return undefined; }
+    if (input === null || typeof input === "boolean") return input;
+    if (typeof input === "number") return Number.isFinite(input) ? input : undefined;
+    if (typeof input === "string") {
+      // Inline bytes are either complete or omitted. Truncated base64 is not a result.
+      if (/^(?:data|blob|base64|bytes)$/u.test(key) && input.length > Math.min(remaining, MAX_INLINE_DATA_URL_CHARS)) {
+        omitted = true; return undefined;
+      }
+      const limit = /^(?:data|blob|base64|bytes)$/u.test(key) ? remaining
+        : key === "text" ? MAX_TEXT_CHARS : MAX_DATA_CHARS;
+      const length = Math.min(input.length, limit, remaining);
+      if (length < input.length) omitted = true;
+      remaining -= length;
+      return input.slice(0, length);
+    }
+    if (Array.isArray(input)) {
+      if (input.length > MAX_BLOCKS) omitted = true;
+      return input.slice(0, MAX_BLOCKS).map((item) => copy(item, depth + 1)).filter((item) => item !== undefined);
+    }
+    const object = record(input);
+    if (!object) return undefined;
+    const output: JsonRecord = Object.create(null);
+    const keys = Object.keys(object);
+    if (keys.length > 32) omitted = true;
+    for (const field of keys.slice(0, 32)) {
+      if (field.length > 160 || field === "__proto__" || field === "constructor" || field === "prototype") {
+        omitted = true; continue;
+      }
+      const next = copy(object[field], depth + 1, field);
+      if (next !== undefined) output[field] = next;
+    }
+    return output;
+  };
+  const envelope: JsonRecord = { content: copy(content, 0), isError: source.isError === true };
+  if (source.structuredContent !== undefined) envelope.structuredContent = copy(source.structuredContent, 0);
+  if (omitted) envelope.previewTruncated = true;
+  const result = JSON.stringify(envelope);
+  return result.length <= MAX_INLINE_DATA_URL_CHARS ? result
+    : JSON.stringify({ content: [], isError: source.isError === true, previewTruncated: true });
+}
+
 /**
  * Parse the bounded string carried by `McpInvocationEvent.tool.result`.
  * Standard MCP content is preferred; structured provider payloads are only
  * interpreted when they carry a media/link/status/data signal.
  */
-export function parseMcpResult(raw: string | undefined | null, toolName?: string): McpResultPresentation {
+export function parseMcpResult(raw: string | undefined | null, toolName?: string, isError?: boolean): McpResultPresentation {
   const blocks: McpResultBlock[] = [];
   const seen = new Set<string>();
   const warnings: string[] = [];
@@ -394,6 +447,15 @@ export function parseMcpResult(raw: string | undefined | null, toolName?: string
     const data = stringifyData(parsed);
     if (data) push({ id: "data:root", kind: "data", label: "Structured result", value: data });
   }
+  if ((isMcpEnvelope || blocks.length > 0) && (isError === true || root?.isError === true)) {
+    status = "failed";
+    for (let index = blocks.length - 1; index >= 0; index -= 1) {
+      if (blocks[index].kind === "status") blocks.splice(index, 1);
+    }
+    if (blocks.length === MAX_BLOCKS) blocks.pop();
+    blocks.unshift({ id: `status:failed:${jobId ?? ""}`, kind: "status", status, ...(jobId ? { jobId } : {}) });
+  }
+  if (root?.previewTruncated === true) warnings.push("preview_truncated");
   if (status && !blocks.some((block) => block.kind === "status")) {
     push({ id: `status:${status}:${jobId ?? ""}`, kind: "status", status, ...(jobId ? { jobId } : {}) });
   }

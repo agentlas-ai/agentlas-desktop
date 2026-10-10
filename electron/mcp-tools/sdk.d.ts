@@ -41,19 +41,34 @@ declare module "@modelcontextprotocol/sdk/shared/stdio.js" {
 }
 
 declare module "@modelcontextprotocol/sdk/client/sse.js" {
+  import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
   export class SSEClientTransport {
     constructor(url: URL, opts?: {
       eventSourceInit?: Record<string, unknown>;
       requestInit?: RequestInit;
       fetch?: typeof fetch;
     });
+    start(): Promise<void>;
+    send(message: JSONRPCMessage): Promise<void>;
     close(): Promise<void>;
   }
 }
 
 declare module "@modelcontextprotocol/sdk/client/streamableHttp.js" {
+  import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
   export class StreamableHTTPClientTransport {
-    constructor(url: URL, opts?: { requestInit?: RequestInit });
+    constructor(url: URL, opts?: {
+      requestInit?: RequestInit;
+      fetch?: typeof fetch;
+      reconnectionOptions?: {
+        maxRetries: number;
+        initialReconnectionDelay: number;
+        maxReconnectionDelay: number;
+        reconnectionDelayGrowFactor: number;
+      };
+    });
+    start(): Promise<void>;
+    send(message: JSONRPCMessage): Promise<void>;
     close(): Promise<void>;
   }
 }

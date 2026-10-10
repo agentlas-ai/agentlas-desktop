@@ -484,6 +484,69 @@ export function detachedSpawnOpts(): { detached?: boolean } {
 // Keep shutdown aware of escalations scheduled before a leader's close event.
 // A closed leader can still have an MCP grandchild in its owned process group.
 const pendingCliTreeEscalations = new Set<symbol>();
+const ownedCliProcessGroups = new WeakMap<ChildProcess, number>();
+const cliTreeTerminationWaiters = new WeakMap<ChildProcess, Promise<void>>();
+
+function rememberOwnedCliProcessGroup(child: ChildProcess): void {
+  // Capture the group while the original ChildProcess still owns its leader.
+  // Never discover a new group using a numeric PID after that leader exited.
+  if (process.platform === "win32" || !child.pid || child.exitCode !== null || child.signalCode !== null) return;
+  try { process.kill(-child.pid, 0); ownedCliProcessGroups.set(child, child.pid); }
+  catch (error) {
+    // ESRCH proves there is no group. A denied/unknown probe does not prove
+    // that descendants are gone, so keep observing the original owned ID.
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") ownedCliProcessGroups.set(child, child.pid);
+  }
+}
+
+/** Retirement revokes reuse immediately, but its hardware seat survives until
+ * the owned process actually exits. POSIX descendants in the captured process
+ * group also have to exit. Unknown/permission-denied probes never release it.
+ * Windows observes the original ChildProcess handle; tree cleanup remains the
+ * taskkill driver's responsibility rather than a probe of a recycled PID. */
+export function waitForCliTreeTermination(child: ChildProcess): Promise<void> {
+  const existing = cliTreeTerminationWaiters.get(child);
+  if (existing) return existing;
+  rememberOwnedCliProcessGroup(child);
+  const groupId = ownedCliProcessGroups.get(child);
+  const waiter = new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let settled = false;
+    let spawnFailed = false;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      child.removeListener("exit", inspect);
+      child.removeListener("close", inspect);
+      child.removeListener("error", failed);
+      resolve();
+    };
+    const inspect = () => {
+      if (settled) return;
+      if (groupId !== undefined) {
+        try { process.kill(-groupId, 0); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ESRCH") { finish(); return; }
+        }
+      } else if (spawnFailed || child.exitCode !== null || child.signalCode !== null) {
+        finish(); return;
+      }
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(inspect, 25);
+      // A quarantined resource must not make host shutdown depend on a timer.
+      // Live children and the host's explicit shutdown drain own that lifetime.
+      timer.unref?.();
+    };
+    const failed = () => { if (!child.pid) spawnFailed = true; inspect(); };
+    child.on("exit", inspect);
+    child.on("close", inspect);
+    child.on("error", failed);
+    inspect();
+  });
+  cliTreeTerminationWaiters.set(child, waiter);
+  return waiter;
+}
 
 function scheduleCliTreeEscalation(action: () => void, graceMs: number): () => void {
   const token = Symbol("cli-tree-escalation");
@@ -662,6 +725,7 @@ export async function drainAttemptChildren(scope: AttemptChildren, timeoutMs = 6
  * 수거한다.
  */
 export function trackRunChild(child: ChildProcess): void {
+  rememberOwnedCliProcessGroup(child);
   claimAttemptChild(child);
   liveRunChildren.add(child);
   child.once("close", () => liveRunChildren.delete(child));

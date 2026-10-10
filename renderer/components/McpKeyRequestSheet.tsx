@@ -1,14 +1,16 @@
 "use client";
 
 import { ComposerDecisionPortal } from "./ComposerDecisionPortal";
+import { PluginLogo } from "./PluginLogo";
+import { ServiceConnectionsButton } from "./connect/ServiceConnectionsButton";
 
 // 실행 전 API 키 요청 바텀시트 — 에이전트가 작업 중 PayPal/Klaviyo 같은 툴에
 // 키가 필요하다고 판단하면 메인이 mcp-key-request 이벤트를 보내 이 시트가 뜬다.
-//  - 입력값은 기존 env.set(키체인 vault)으로만 저장한다. mcp:supplyRunKeys IPC는
-//    "provided"/"declined" 완료 신호만 나른다 — 비밀 값은 절대 싣지 않는다.
+//  - 원래 실행에 묶인 전용 Vault 창만 연다. 이 시트에는 비밀 입력이 없다.
+//  - Main의 정확한 저장 receipt가 확인돼야 provided가 된다.
 //  - [없이 진행]/시간초과면 메인이 해당 툴 없이 대안 지시 블록과 함께 계속 실행한다.
 // 스타일은 BrowserActionApprovalSheet를 따른다(경량 고정 바텀시트).
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { useT } from "@/lib/i18n";
 import { ipc } from "@/lib/ipc";
 import type { McpRunKeyRequest } from "@/lib/types";
@@ -29,24 +31,21 @@ export function McpKeyRequestSheet({
   const { locale: appLocale } = useT();
   const locale = localeOverride ?? appLocale;
   const ko = locale === "ko";
-  const [values, setValues] = useState<Record<string, string>>({});
+  const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [now, setNow] = useState(() => Date.now());
-
-  const allKeys = useMemo(
-    () => request.tools.flatMap((tool) => tool.envKeys.map((envKey) => envKey.key)),
-    [request],
-  );
-  const filledCount = allKeys.filter((key) => (values[key] ?? "").trim().length > 0).length;
+  const generation=useRef(0);
 
   useEffect(() => {
+    const captured=++generation.current;setBusy(false);setError(null);
     setNow(Date.now());
     const tick = window.setInterval(() => setNow(Date.now()), 1_000);
     const expire = window.setTimeout(
-      () => onResolved("expired"),
+      () => {if(captured===generation.current){++generation.current;onResolved("expired");}},
       Math.max(0, request.expiresAt - Date.now()),
     );
     return () => {
+      ++generation.current;
       window.clearInterval(tick);
       window.clearTimeout(expire);
     };
@@ -54,34 +53,31 @@ export function McpKeyRequestSheet({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [request.requestId, request.expiresAt]);
 
-  const save = async () => {
-    if (busy) return;
-    setBusy(true);
+  const openSecure = async (toolId:string,keyName:string) => {
+    if(busy)return;const captured=generation.current;setBusy(true);setError(null);
     try {
-      const api = ipc();
-      // 값은 vault로만 — 채운 키만 저장하고, 화면/로그 어디에도 값을 남기지 않는다.
-      for (const key of allKeys) {
-        const value = (values[key] ?? "").trim();
-        if (value) await api?.env.set(key, value);
-      }
-      await api?.mcpTools.supplyRunKeys(request.runId, "provided");
-    } finally {
-      setValues({});
-      setBusy(false);
-      onResolved("provided");
-    }
+      const result=await ipc()?.oneVault.openRunKeyRequest({runId:request.runId,toolId,keyName});
+      if(captured!==generation.current)return;
+      if(result?.state!=='opened')setError(ko?'안전한 입력 경로 또는 이 요청의 현재 권한을 확인할 수 없습니다.':'The secure route or current request authority is unavailable.');
+    } catch {if(captured!==generation.current)return;setError(ko?'전용 입력 창을 열지 못했습니다. 키 없이 진행할 수 있습니다.':'The secure entry window could not open. You can continue without this key.');}
+    finally {if(captured===generation.current)setBusy(false);}
+  };
+  const checkSaved = async () => {
+    if(busy)return;const captured=generation.current;setBusy(true);setError(null);
+    try {
+      const result=await ipc()?.oneVault.runKeyStatus({runId:request.runId});
+      if(captured!==generation.current)return;
+      if(result?.state==='saved')onResolved('provided');
+      else setError(result?.state==='store_unknown'?(ko?'저장 결과가 미확인입니다. 같은 작업 상태를 확인해 주세요.':'The save result is unknown. Reconcile the same operation.'):(ko?'현재 요청의 저장 receipt를 확인하지 못했습니다.':'A saved receipt for this request was not verified.'));
+    } catch {if(captured!==generation.current)return;setError(ko?'현재 저장 상태를 확인할 수 없습니다.':'Current save status is unavailable.');}
+    finally {if(captured===generation.current)setBusy(false);}
   };
 
-  const decline = async () => {
-    if (busy) return;
-    setBusy(true);
-    try {
-      await ipc()?.mcpTools.supplyRunKeys(request.runId, "declined");
-    } finally {
-      setValues({});
-      setBusy(false);
-      onResolved("declined");
-    }
+  const decline = () => {
+    // Local close is unconditional; it does not claim that an already-issued save was undone.
+    ++generation.current;setBusy(false);
+    void ipc()?.mcpTools.supplyRunKeys(request.runId,"declined").catch(()=>{});
+    onResolved("declined");
   };
 
   const secondsLeft = Math.max(0, Math.ceil((request.expiresAt - now) / 1_000));
@@ -95,7 +91,7 @@ export function McpKeyRequestSheet({
             {ko ? `${secondsLeft}초 안에 선택` : `Choose within ${secondsLeft}s`}
           </span>
         </div>
-        <div className="mkr-summary"><IconCheck size={15} />{ko ? "저장하면 이번 실행부터 사용" : "Saved keys apply to this run"}</div>
+        <div className="mkr-summary"><IconCheck size={15} />{ko ? "저장 확인과 제공자 연결은 별도 단계" : "Saving and provider verification are separate"}</div>
         <div className="mkr-note">
           <span><IconLock size={15} />{ko ? "키체인에만 저장" : "Stored only in keychain"}</span>
           <span><IconSend size={15} />{ko ? "키 없이도 대안으로 진행" : "Continue with alternatives without keys"}</span>
@@ -104,7 +100,8 @@ export function McpKeyRequestSheet({
           {request.tools.map((tool) => (
             <div className="mkr-tool" key={tool.id}>
               <div className="mkr-tool-head">
-                <span className="mkr-tool-name">{tool.name}</span>
+                <span className="mkr-tool-name" style={{ display: "inline-flex", alignItems: "center", gap: 8 }}><PluginLogo name={tool.name} size={22} />{tool.name}</span>
+                <ServiceConnectionsButton key={`${request.requestId}:${tool.id}`} locale={locale} requestServerId={tool.id} requestName={tool.name} disabled={busy || secondsLeft === 0} />
                 {tool.setupUrl && (
                   <a
                     className="mkr-setup"
@@ -123,16 +120,9 @@ export function McpKeyRequestSheet({
                       ? envKey.label || envKey.labelEn || envKey.key
                       : envKey.labelEn || envKey.key}
                   </span>
-                  <input
-                    type="password"
-                    autoComplete="off"
-                    spellCheck={false}
-                    placeholder={envKey.key}
-                    value={values[envKey.key] ?? ""}
-                    onChange={(e) =>
-                      setValues((prev) => ({ ...prev, [envKey.key]: e.target.value }))
-                    }
-                  />
+                  <button type="button" disabled={busy||secondsLeft===0} onClick={()=>void openSecure(tool.id,envKey.key)}>
+                    {ko?'전용 Vault 입력 열기':'Open dedicated Vault entry'}
+                  </button>
                   {(ko ? envKey.hint : envKey.hintEn) || envKey.hintEn ? (
                     <span className="mkr-hint">{(ko ? envKey.hint : envKey.hintEn) || envKey.hintEn}</span>
                   ) : null}
@@ -141,18 +131,19 @@ export function McpKeyRequestSheet({
             </div>
           ))}
         </div>
+        {error?<p role="status">{error}</p>:null}
         <div className="mkr-actions">
-          <button className="skip" onClick={() => void decline()} disabled={busy} data-testid="mcp-key-skip">
+          <button className="skip" onClick={() => decline()} data-testid="mcp-key-skip">
             {ko ? "없이 진행" : "Continue without"}
           </button>
           <button
             className="save"
-            onClick={() => void save()}
-            disabled={busy || filledCount === 0}
+            onClick={() => void checkSaved()}
+            disabled={busy || secondsLeft === 0}
             data-testid="mcp-key-save"
           >
             <IconLock size={15} />
-            {ko ? "저장하고 계속" : "Save and continue"}
+            {ko ? "저장 결과 확인" : "Check save receipt"}
           </button>
         </div>
       </div>

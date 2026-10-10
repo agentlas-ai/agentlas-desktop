@@ -1167,9 +1167,8 @@ function TaskSidePanelContent({
     for (let index = activityItems.length - 1; index >= 0 && results.length < 8; index -= 1) {
       const item = activityItems[index];
       if (item.kind === "tool"
-        && item.tool?.isError !== true
         && typeof item.tool?.result === "string"
-        && parseMcpResult(item.tool.result, item.tool.name).blocks.length > 0) results.push(item);
+        && parseMcpResult(item.tool.result, item.tool.name, item.tool.isError).blocks.length > 0) results.push(item);
     }
     return results.reverse();
   }, [activity?.items, visible]);
@@ -1755,6 +1754,7 @@ function TaskSidePanelContent({
                 key={`mcp-rail-preview:${item.id}`}
                 result={item.tool?.result}
                 toolName={item.tool?.name}
+                isError={item.tool?.isError}
                 locale={locale}
                 compact
                 placement="sidebar"

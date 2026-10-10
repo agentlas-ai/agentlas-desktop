@@ -1,3 +1,5 @@
+import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
+import { withOneHistoryNativeInvocation } from "../one/personal-integrations-runtime";
 import { withAdapterEffectObserver } from "../invocation/adapter-effect-context";
 import { runWithOwnerControl } from "../runtime/owner-control-pump";
 import { assertGraphWorkerAttempt, noteGraphWorkerDispatch, noteGraphWorkerReturnedFailure, noteGraphWorkerAdapterStart, noteGraphWorkerAdapterFinish, noteGraphWorkerCoverageUnknown, noteGraphWorkerActivity, noteGraphWorkerTool, noteGraphWorkerPrepare, noteGraphWorkerSelection, noteGraphWorkerFailure, settleGraphWorkerAttempt, type GraphWorkerAttempt, type GraphWorkerFailureReceipt } from "../workflow/graph-worker-fallback";
@@ -13,7 +15,7 @@ import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "..
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { beginAccountedInference } from "../long-run/accounting-context";
 import { createRuntimeUsageCollector } from "../../shared/observed-usage";
-import { runObservedRunner, observedRunnerUsage, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { assertCurrentHistoryRunnerResult, runObservedRunner, observedRunnerUsage, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { withInvocationUsage, beginInvocationUsageAttempt, currentInvocationObservedUsage } from "../runtime/invocation-usage";
 import { createNoProgressGuard, noteNoProgressEvent, toolObservationDigest } from "../automation-progress-guard";
 import { formatAutomationNextRun } from "../../shared/automation-next-run";
@@ -50,6 +52,7 @@ import { parseHubReleasePin, assertHubReleasePin } from "../../shared/hub-releas
 import { isCallOnlyHubAgent } from "../../shared/call-only-agent";
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
+import { bindInvocationAgentContext } from "../runtime/agent-context-admission";
 import { createMainHostControlSink, createMainHostOperationBridge, withAdapterEffectChildDispatch } from "../invocation/adapter-effect-context";
 import { detectRuntimes } from "../runtime/detect";
 import { ONE_AGENT_ID } from "../runtime/agent-residency";
@@ -251,7 +254,7 @@ import {
 } from "../site/agent-app-mcp-config-policy";
 import { listInstalledServers as listInstalledMcpServers } from "../mcp-tools/registry";
 import { getAgentApp } from "../store/agent-apps";
-import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
+import { autoSelectMcpTools, buildMcpAutoSelectionPrompt, describeScopedMcpOutcome, type GoalToolSelectionReceipt } from "../mcp-tools/auto-select";
 import { runMcpKeyElicitationGate } from "./run-key-elicitation";
 import { getEnvConfigurationRevision } from "../secrets/vault";
 import { bridgeHubPluginCandidates } from "../mcp-tools/hub-plugin-bridge";
@@ -264,6 +267,8 @@ import type { WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { resolveMcpNeeds } from "../mcp-tools/need-resolver";
 import { mcpServerConfigurationDigest, preparedMcpBindings } from "../mcp-tools/prepared-transport";
+import { createOneScopedMcpPreflight } from "../mcp-tools/one-scoped-preflight";
+import { resolveOnePersonalNativeMcpSelection, captureOnePersonalNativeOriginal, captureOnePersonalNativePending } from "../secrets/one-personal-native-main-owner";
 import { createWorkerCapabilityPreparer, WorkerCapabilityMaterializationError } from "./worker-capability-preparer";
 import { WorkerCapabilityError, type PrepareWorkerCapabilities } from "./worker-capabilities";
 import { browserCdpHostFailureDiagnostic } from "../mcp-tools/browser-cdp-launcher";
@@ -302,6 +307,7 @@ import {
   ATTENDED_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
+import { validatedRunnerNativeControlState } from "../runtime/runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   effortForSelectedModel,
@@ -940,8 +946,9 @@ async function runInvocationPlanningRunner(
   const accounting = beginAccountedInference({ kind: runtime.kind, model: runtime.model, source: runtime.source });
   try {
     assertCurrent?.();
+    currentHistoryRuntimeFence()?.assertRuntimeCoverage(runtime.kind);
     noteGraphWorkerDispatch(graphAttempt, selectionForRuntime(runtime));
-    let result = await runObservedRunner(runner, request, events);
+    let result = await runObservedRunner(runner, request, events, runtime.kind);
     if (result.ownerControlTerminal !== "completed") {
       result = { ...result, ownerControlTerminal: "uncertain",
         failure: result.failure ?? runnerFailureFromError(new RuntimeTurnUnsettledError(runtime.kind, request.locale), runtime.kind) };
@@ -1986,6 +1993,7 @@ export function runMcpInvocation(
     } catch { /* Missing admission evidence cannot authorize a Goal transition. */ }
   };
   const guardedSink: EventSink = (event) => {
+    if(event.kind==="partial"||event.kind==="thinking"||event.kind==="reasoning"||(event.kind==="tool-use"&&event.tool))currentHistoryRuntimeFence()?.assertCurrent();
     // Status/progress also uses tool-use in this legacy channel. Only an
     // actual tool frame (including start, failed or read tools) is an effect observation.
     if (event.kind === "tool-use" && event.tool) noteGraphWorkerTool(graphAttempt);
@@ -2013,7 +2021,7 @@ export function runMcpInvocation(
       message: pickLocale(req) === "ko" ? "같은 결과가 반복돼 다음 단계에서 접근을 바꾸고 독립 작업을 이어갑니다."
         : "Repeated results detected. The next step will change strategy and continue independent work." } });
   };
-  const runOwnedInvocation = () => withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
+  const runOwnedInvocation = () => withOneHistoryNativeInvocation({runId:req.runId!,chatId:req.chatId},()=>withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
     req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory, onBeforeGoalWorkDispatch, workRecovery,
     () => directWorkOwnerCurrent && !ownerSignal.aborted, onNativeTurnController, ownerControlInbox,
   )).then(async result => {
@@ -2037,7 +2045,7 @@ export function runMcpInvocation(
     }
     login.cancel();
     throw error;
-  }), () => bindDispatchedGoal(getChatGoalId(req.chatId) ?? null)));
+  }), () => bindDispatchedGoal(getChatGoalId(req.chatId) ?? null))));
   const owned = graphAttempt ? withAdapterEffectObserver({ runId: req.runId!, chatId: req.chatId, rootAgentId: null, source: "automation" }, {
     begin: admission => noteGraphWorkerAdapterStart(graphAttempt, admission),
     finish: (scopeId, report) => noteGraphWorkerAdapterFinish(graphAttempt, scopeId, report),
@@ -2069,6 +2077,8 @@ async function runMcpInvocationInContext(
   ownerControlInbox?: RunnerRequest["ownerControlInbox"],
 ): Promise<McpInvocationResult> {
   assertInvocationWorkspaceSourceContext(workspaceBinding, executionContext?.source);
+  const historyNative = await import('../one/personal-integrations-runtime');
+  const historyRun = await historyNative.bindOneHistoryNativeRun({ runId: req.runId!, chatId: req.chatId });
   let nativeBrowserGrant: NativeBrowserRelayGrant | undefined;
   const workspaceLeases = new Map<string, string>();
   const workspacePins = new Map<string, { revisionId: string; treeDigest: string }>();
@@ -3469,6 +3479,8 @@ ${effectiveUserPrompt}`;
   let mcpGoalSelectionIsCurrent: (() => boolean) | undefined;
   let mcpGoalSelectionInvalidated = false;
   const assertMcpGoalSelectionCurrent = (): void => {
+    (require('../one/personal-data-runtime') as typeof import('../one/personal-data-runtime')).assertOnePersonalDataRunCurrent(req.runId);
+    historyNative.assertOneHistoryRunCurrent({ runId: req.runId!, chatId: req.chatId });
     assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
     if (mcpGoalSelectionIsCurrent && !mcpGoalSelectionIsCurrent()) mcpGoalSelectionInvalidated = true;
     if (mcpGoalSelectionInvalidated) {
@@ -3689,7 +3701,22 @@ ${effectiveUserPrompt}`;
         requestedPluginSlugs: readMidTurnPluginRequests(chat.id, req.runId),
       };
       mcpPrepStage = "tool-selection";
-      let selectedContext = await autoSelectMcpTools(autoSelectInput);
+      captureOnePersonalNativeOriginal();
+      const scopedMcpPreflight = createOneScopedMcpPreflight({
+        resolveSelection: resolveOnePersonalNativeMcpSelection, isCurrent: isMcpConfigCurrent, runId: req.runId,
+        gate: {
+          beforeMcpToolResult, runtime: active.kind,
+          sessionKey: `${active.kind}:${req.chatId ?? workingFolder ?? "default"}`,
+          permission: normalizedPermission,
+          ...(planReadOnly ? { planMode: true as const } : {}),
+          ...(req.simulation === true ? { simulation: true as const } : {}),
+          ...(workingFolder ? { cwd: workingFolder } : {}),
+          ...(req.chatId ? { chatId: req.chatId } : {}),
+          ...(executionContext ? { unattended: true } : {}),
+        },
+      });
+      const scopedSelectionDeps = { probeScopedServer: scopedMcpPreflight.probe };
+      let selectedContext = await autoSelectMcpTools(autoSelectInput, scopedSelectionDeps);
       const keyConfigurationRevision = getEnvConfigurationRevision();
       const keyUserMessageId = persistedUserMessageId
         ?? [...priorHistory].reverse().find((message) => message.role === "user")?.id;
@@ -3714,7 +3741,7 @@ ${effectiveUserPrompt}`;
           isCurrent: () => getEnvConfigurationRevision() === keyConfigurationRevision
             && selectedContext.goalSelectionIsCurrent?.() === true,
         } } : {}),
-        sink,
+        sink: event => { if (event.kind === "mcp-key-request") captureOnePersonalNativePending(); sink(event); },
         signal,
         // 키가 저장된 뒤의 재선택은 세상이 바뀐 시점이다 — 메모를 버리고 처음부터 다시 고른다.
         reselect: () => autoSelectMcpTools({
@@ -3727,7 +3754,7 @@ ${effectiveUserPrompt}`;
             selectedIds: selectedContext.tools.filter((tool) => tool.state === "missing-key" && tool.missingEnv.length > 0)
               .map((tool) => tool.id),
           } } : {}),
-        }),
+        }, scopedSelectionDeps),
       });
       selectedContext = keyGate.context;
       mcpGoalSelectionIsCurrent = selectedContext.goalSelectionIsCurrent;
@@ -3880,7 +3907,7 @@ ${effectiveUserPrompt}`;
             // Value-free state receipt: never include an MCP error body because
             // remote servers may reflect a credential or private URL in it.
             result: degradedTools
-              .map((tool) => `${tool.id}: ${tool.state}${tool.required ? " (required function only)" : ""}`)
+              .map((tool) => `${tool.id}: ${tool.connectionOutcome ? describeScopedMcpOutcome(tool.connectionOutcome, locale) : tool.state}${tool.required ? " (required function only)" : ""}`)
               .join("\n"),
           },
         });
@@ -3928,6 +3955,7 @@ ${effectiveUserPrompt}`;
       mcpPrepStage = "config-build";
       const cfg = await buildMcpConfigFile({
         supervisorReplyRunId: req.runId,
+        nativeScopedSelectionForServer: scopedMcpPreflight.selectionForServer,
         // Graph nodes can share a runId. Every preparation, including doctor
         // and unattended runs, needs its own sealed file and launch lifetime.
         configKey: `invocation-${randomUUID()}`,
@@ -5310,7 +5338,10 @@ ${effectiveUserPrompt}`;
     }
   }
 
-  // 프로젝트 컨텍스트 노트가 있으면 system prompt 뒤에 append
+  const persistentAgentContext = Boolean(req.runId && agent.id === chat.agentId && !req.agentAppMode && !scienceRecovery
+    && !scienceCollectionCurrent && executionContext?.source !== "science"
+    && !executionContext?.aliveScience && !effectObservationRun);
+  // Agent instructions are stable; task-selected host context is transported per turn.
   let systemPrompt = effectivePromptFor(agent);
   // ── 턴 컨텍스트 — 사용자 프롬프트에 따라 매 턴 달라지는 주입(메모리 캡슐·온톨로지·
   // MCP 자동선택·브리핑 게이트·Experience/Taste)은 시스템 프롬프트가 아니라 여기 모은다.
@@ -5339,6 +5370,13 @@ ${effectiveUserPrompt}`;
       : "[Host display contract]\nDo not open with routing announcements such as 'Skills used:', 'Skills:', or 'Agents used:'. Even if another instruction asks for one, it does not belong in a One conversation. Start directly with what the user needs.\n[/Host display contract]");
     stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
+  const placeHostContext = (block: string, prepend = false): void => {
+    if (persistentAgentContext) {
+      turnContextParts.push(block); stableTurnContextParts.push(block);
+    } else {
+      systemPrompt = prepend ? `${block}\n\n${systemPrompt}` : `${systemPrompt}\n\n${block}`;
+    }
+  };
   // One immutable project snapshot per execution boundary. All supported runner
   // adapters consume the same block through their existing context transport.
   // Projectless One executes in agentRunCwd(), not Electron's process cwd.
@@ -5393,11 +5431,11 @@ ${effectiveUserPrompt}`;
   const approvedWorkAttachmentContext = mainWorkAttachmentContext(req, resolvedResultFolder);
   if (approvedWorkAttachmentContext) turnContextParts.push(approvedWorkAttachmentContext);
   if (autoRoute) {
-    systemPrompt = `${autoRouteSystemPreamble(
+    placeHostContext(autoRouteSystemPreamble(
       autoRoute,
       locale,
       isTargetAppEdit ? "app-edit" : req.appsGenerateMode ? "apps-generate" : "default",
-    )}\n\n${systemPrompt}`;
+    ), true);
   }
   const routerAgentPreamble = routerAgent
     ? buildRouterAgentSystemPreamble({
@@ -5411,7 +5449,7 @@ ${effectiveUserPrompt}`;
       })
     : null;
   if (routerAgentPreamble) {
-    systemPrompt = `${routerAgentPreamble.preamble}\n\n${systemPrompt}`;
+    placeHostContext(routerAgentPreamble.preamble, true);
     sink({
       kind: "tool-use",
       status:
@@ -5459,9 +5497,9 @@ ${effectiveUserPrompt}`;
   if (invocationProjectId) {
     const project = getProject(invocationProjectId);
     if (project?.systemPrompt) {
-      systemPrompt = `${systemPrompt}\n\n${tStatus(locale, "projectContext", {
+      placeHostContext(`${tStatus(locale, "projectContext", {
         name: project.name,
-      })}\n${project.systemPrompt}`;
+      })}\n${project.systemPrompt}`);
     }
     if (project?.agentPool.length) {
       const userFacingPool = project.agentPool.filter((member) => {
@@ -5492,7 +5530,7 @@ ${effectiveUserPrompt}`;
           : `- ${label} [${member.entityKind}; ${member.source}; ${member.releaseId ?? "local"}]`;
       }).join("\n");
       if (pool) {
-        systemPrompt = `${systemPrompt}\n\n## Project tool pool\n${pool}\n` +
+        const poolContext = `## Project tool pool\n${pool}\n` +
           `You are the task orchestrator for this project and own decomposition, staffing, execution, and verification. ` +
           `The saved rows are unordered reusable tools, not session owners or a mandatory chain. Use suitable project tools first. ` +
           `A row with a call handle is a remote Agentlas agent: call it directly with the Hephaestus call tool (hephaestus_call, agents set to that exact handle); do not search, recruit, or rename it to find it again. ` +
@@ -5504,6 +5542,7 @@ ${effectiveUserPrompt}`;
           `to recruit the minimum suitable role from Network (Local + owner Cloud + public Hub). ` +
           `Any recruited worker is scoped to that WorkOrder and must not mutate the saved project team. ` +
           `Do not ask the user to type @ or choose internal roles; @ is only an optional one-turn manual override.`;
+        placeHostContext(poolContext);
       }
     }
   }
@@ -5519,12 +5558,11 @@ ${effectiveUserPrompt}`;
             }`,
         )
         .join("\n");
-      systemPrompt =
-        `${systemPrompt}\n\n` +
+      placeHostContext(
         `${tStatus(locale, "firmContext", { name: firm.name })}\n` +
         `${tStatus(locale, "firmCeoGuide")}\n` +
         `${tStatus(locale, "firmOrgChart")}\n${roster}\n` +
-        tStatus(locale, "firmDelegateNote");
+        tStatus(locale, "firmDelegateNote"));
     }
   }
 
@@ -5722,7 +5760,7 @@ ${effectiveUserPrompt}`;
       [effectiveUserPrompt, req.toolMode ?? "", req.hubMode ?? ""].join("\n"),
       { threshold: 0.6, maxModules: 3 },
     );
-    systemPrompt = `${systemPrompt}\n\n${supervisor.systemPrompt}`;
+    placeHostContext(supervisor.systemPrompt);
     sink({
       kind: "tool-use",
       status:
@@ -5751,7 +5789,7 @@ ${effectiveUserPrompt}`;
     // division(무인 시드)은 기존처럼 시스템 프롬프트에. 인터랙티브 채팅은 engaged가 턴 단위
     // 상태이므로 턴 컨텍스트로 — resume 세션에서도 이번 턴에 확실히 전달된다.
     if (chat.kind === "division") {
-      systemPrompt = `${systemPrompt}\n\n${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`;
+      placeHostContext(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`);
     } else {
       turnContextParts.push(`${coreHarness.system_prompt}\n\n${STORMBREAKER_LOOP_PROTOCOL}`); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
     }
@@ -5923,10 +5961,10 @@ ${effectiveUserPrompt}`;
       beforeMcpToolResult,
       ...(canonicalWorkRecovery ? { canonicalWorkRecovery } : {}),
       ...(executionContext?.source === "science" ? { sciencePromptProfile: true as const } : {}),
-      systemPrompt: sessionCapableRuntime || !turnContext
+      systemPrompt: sessionCapableRuntime || persistentAgentContext || !turnContext
         ? `${systemPrompt}${canonicalWorkPacket ? `\n\n${canonicalWorkPacket}` : ""}`
         : `${systemPrompt}\n\n${turnContext}${canonicalWorkPacket ? `\n\n${canonicalWorkPacket}` : ""}`,
-      ...(sessionCapableRuntime && turnContext ? { turnContext } : {}),
+      ...((sessionCapableRuntime || persistentAgentContext) && turnContext ? { turnContext } : {}),
       // Long-run state comes from the versioned goal and checkpoint. Replaying
       // the whole chat into a fresh native session is neither recovery nor state.
       // The no-checkpoint fallback above is intentionally bounded and only
@@ -5937,10 +5975,9 @@ ${effectiveUserPrompt}`;
       // 2026-09-24: 79k-500k input tokens per observation, growing with each retry). Its own isolated
       // session owner starts fresh and never replaces the conversation's stored session.
       ...(effectObservationRun && req.runId ? { runtimeSessionOwnerId: `effect-observation:${req.runId}` } : {}),
-      // An Alive wake is one decision over host-supplied state (its plan and last review ride in that state). Resuming the
-      // controller chat's native session replayed every earlier wake (measured 2026-09-26: a Claude Alive controller at
-      // 26 wakes/day read up to 500k cached tokens per call, 5.8M tokens a day; the Codex ones ~86k per wake).
-      ...(isAliveControllerRun && req.runId ? { runtimeSessionOwnerId: `alive-wake:${req.runId}` } : {}),
+      // Alive decisions continue this controller's context. Work/run identity
+      // stays in the existing effect/Goal ledgers, separate from native session identity.
+      ...(isAliveControllerRun ? { runtimeSessionOwnerId: `alive-controller:${chat.id}:${agent.id}` } : {}),
       // A checkpoint successor is seeded from host-owned neutral state. Its
       // native owner is assigned only after the exact checkpoint is validated
       // for the selected runtime below.
@@ -6063,6 +6100,20 @@ ${effectiveUserPrompt}`;
       // lightweight and plain-text capable.
       forceSurface: oneTeamExecutionPolicy ? true : undefined,
     };
+    let agentContextAttempt = 0;
+    const persistentRunnerRequest = (request: RunnerRequest): RunnerRequest => {
+      if (!persistentAgentContext || !req.runId || request.minimalObservation || request.judgmentOnly || request.untrustedNoTools) return request;
+      return bindInvocationAgentContext(request, { chatId: chat.id, agentId: agent.id, runId: req.runId,
+        attempt: ++agentContextAttempt, aliveController: isAliveControllerRun, assertCurrent() {
+          assertMcpGoalSelectionCurrent();
+          if (activeGoalId && activeGoalRevision !== null) {
+            const revision = getChatGoalRevision(activeGoalId);
+            if (!revision || revision.chatId !== chat.id || revision.revision !== activeGoalRevision) {
+              throw Object.assign(new Error("agent_context_goal_revision_changed"), { code: "agent_context_goal_revision_changed" });
+            }
+          }
+        } });
+    };
     let goalWorkAdmissionNotified = false;
     if (workspacePins.size) runnerReq.sessionFingerprintSeed = JSON.stringify({ base: runnerReq.sessionFingerprintSeed ?? null,
       revisions: [...workspacePins].sort(([a], [b]) => a.localeCompare(b)) });
@@ -6083,7 +6134,7 @@ ${effectiveUserPrompt}`;
         assertScienceCollectionRuntimeSelection(runtime, req.runtimeSelection);
         if (!scienceCollectionCapability) throw new Error("science_collection_transport_unsupported");
       }
-      const sessionCapable = runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi" || runtime.kind === "antigravity";
+      const sessionCapable = persistentAgentContext || runtime.kind === "claude-code" || runtime.kind === "codex" || runtime.kind === "kimi" || runtime.kind === "antigravity";
       const checkpoint = activeGoalId ? latestTaskCheckpoint(activeGoalId) : null;
       let checkpointAdvisory: string | null = null;
       let checkpointAdmitted = false;
@@ -6160,7 +6211,8 @@ ${effectiveUserPrompt}`;
         bindGoalPlanDispatch(currentPlan, req.runId ?? null);
       }
       const dispatchTurnContext = dispatchTurnContextParts.filter((part) => part && part.trim()).join("\n\n");
-      const runtimeTurnContext = [dispatchTurnContext, checkpointContext, checkpointAdvisory, ownerExecutionDirectives, progressAdvisory?.()].filter(Boolean).join("\n\n");
+      const runtimeTurnContext = [dispatchTurnContext, checkpointContext, checkpointAdvisory, ownerExecutionDirectives,
+        canonicalWorkRecovery?.packet(), progressAdvisory?.()].filter(Boolean).join("\n\n");
       // Every runtime gets the minimal observation request; runners that support the mode (claude-code, codex, serving,
       // BYOK/local host loop) also shed their own headers, user setup and extra tool servers.
       if (effectObservationRun) {
@@ -6503,12 +6555,14 @@ ${effectiveUserPrompt}`;
           onPartial: forward((...args: Parameters<RunnerEvents["onPartial"]>) => {
             if (args[0]) nativeActivity = true;
             if (args[0]) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
+            currentHistoryRuntimeFence()?.assertCurrent();
             runnerEvents.onPartial(...args);
           }),
           onStatus: forward(runnerEvents.onStatus),
           onTool: forward((...args: Parameters<NonNullable<RunnerEvents["onTool"]>>) => {
             nativeActivity = true;
             creditRetryBlocked = true;
+            currentHistoryRuntimeFence()?.assertCurrent();
             runnerEvents.onTool(...args);
           }),
           onUsage: forward((...args: Parameters<NonNullable<RunnerEvents["onUsage"]>>) => {
@@ -6521,17 +6575,21 @@ ${effectiveUserPrompt}`;
           onRuntimeAttemptStarted: (attemptId) => {
             if (!settled && generation === runnerEventGeneration) { nativeActivity = true; usageCollector.start(attemptId); }
           },
-          onNativeTurnController: (controller) => {
+          onNativeTurnController: (controller, state) => {
             if (settled || generation !== runnerEventGeneration) return;
+            const observed = state === undefined ? undefined : validatedRunnerNativeControlState(state);
+            if (state !== undefined && !observed) { if (!controller) onNativeTurnController?.(null); return; }
             // Withdrawal must still pass after Stop; it has no provider effect.
             if (controller && signal?.aborted) return;
             if (controller) nativeActivity = true;
-            onNativeTurnController?.(controller);
+            onNativeTurnController?.(controller, observed ?? undefined);
+
           },
           onTerminalObservedUsage: recordTerminalUsage,
           onThinking: forward((...args: Parameters<NonNullable<RunnerEvents["onThinking"]>>) => {
             nativeActivity = true;
             if (args[0]) { creditRetryBlocked = true; noteGraphWorkerActivity(executionContext?.graphWorkerAttempt); }
+            if(args[0]!=="end"||args[2])currentHistoryRuntimeFence()?.assertCurrent();
             runnerEvents.onThinking(...args);
           }),
           onNotice: forward(runnerEvents.onNotice),
@@ -6685,6 +6743,7 @@ ${effectiveUserPrompt}`;
         }
         const attemptEvents = createAttemptRunnerEvents();
         let runnerInvoked = false;
+        let historyReturnedUsage:LongRunUsageInput["observedUsage"];
         runtimeTerminalEvidence.closedHttpRefusal = false;
         runtimeTerminalEvidence.locallyRejected = false;
         let result: Awaited<ReturnType<Runner>>;
@@ -6745,8 +6804,9 @@ ${effectiveUserPrompt}`;
           invocationUsageAttempt = beginInvocationUsageAttempt();
           assertGraphWorkerAttempt(executionContext?.graphWorkerAttempt);
           noteGraphWorkerDispatch(executionContext?.graphWorkerAttempt, selectionForRuntime(selectedRuntime));
+          currentHistoryRuntimeFence()?.assertRuntimeCoverage(selectedRuntime.kind);
           runnerInvoked = true;
-          result = await selected.runner(requestForRuntime, attemptEvents.events);
+          result = await withCurrentHistoryProvider(async()=>{const returned=await selected.runner(persistentRunnerRequest(requestForRuntime), attemptEvents.events);historyReturnedUsage=returned.observedUsage;return assertCurrentHistoryRunnerResult(returned);});
           runtimeTerminalEvidence.closedHttpRefusal = runtimeFailureIsClosedHttpRefusal(result.failure, {
             text: result.text, nativeActivity: attemptEvents.nativeActivity(), aborted: signal?.aborted === true,
             observedUsage: result.observedUsage,
@@ -6766,9 +6826,9 @@ ${effectiveUserPrompt}`;
           // usage, but never persist completion or enter recovery/verification.
           if (signal?.aborted) throw signal.reason ?? new Error(tStatus(locale, "aborted"));
         } catch (error) {
-          persistAttemptUsage(attemptEvents.observedUsage(), signal?.aborted ? "cancelled" : "failed");
+          persistAttemptUsage(attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error)), signal?.aborted ? "cancelled" : "failed");
           if (runnerInvoked && !signal?.aborted) {
-            const observedUsage = attemptEvents.observedUsage();
+            const observedUsage = attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error));
             persistGoalUsage(observedUsage);
             if (runtimeFailureBlocksReplay(runnerFailureFromError(error, selectedRuntime.kind))) throw error;
             const unsettled = new RuntimeTurnUnsettledError(selectedRuntime.kind, locale);
@@ -6776,7 +6836,7 @@ ${effectiveUserPrompt}`;
             throw unsettled;
           }
           if (!directRuntimeFallbackAllowed || signal?.aborted) {
-            persistGoalUsage(attemptEvents.observedUsage());
+            persistGoalUsage(attemptEvents.observedUsage(historyReturnedUsage??observedRunnerUsage(error)));
             throw error;
           }
           runtimeTerminalEvidence.locallyRejected = true;

@@ -74,10 +74,11 @@ function readOwner(automationId: string): Omit<GoalOwner, "generation"> | undefi
   const source = getDb().prepare(`SELECT id, run_id, payload_json FROM run_events
     WHERE automation_id = ? AND kind = 'automation_workspace_source' ORDER BY rowid DESC LIMIT 1`)
     .get(a.id) as { id: string; run_id: string; payload_json: string } | undefined;
-  const bridge = getDb().prepare(`SELECT run_id, seq, payload_json FROM long_run_events
-    WHERE kind = 'goal.automation_provenance_bound' AND actor_kind = 'host'
-      AND json_extract(payload_json, '$.automationId') = ?
-      AND json_extract(payload_json, '$.automationCreatedAt') = ? ORDER BY occurred_at DESC, rowid DESC LIMIT 1`)
+  // Driven from long_runs so idx_long_run_events_kind applies per run (no whole-log scan).
+  const bridge = getDb().prepare(`SELECT e.run_id, e.seq, e.payload_json FROM long_runs r CROSS JOIN long_run_events e
+    WHERE e.run_id = r.id AND e.kind = 'goal.automation_provenance_bound' AND e.actor_kind = 'host'
+      AND json_extract(e.payload_json, '$.automationId') = ?
+      AND json_extract(e.payload_json, '$.automationCreatedAt') = ? ORDER BY e.occurred_at DESC, e.rowid DESC LIMIT 1`)
     .get(a.id, a.createdAt) as { run_id: string; seq: number; payload_json: string } | undefined;
   if (!source && !bridge) {
     if (a.goalId) refused("automation_goal_execution_owner_unverified"); // Mutable legacy associations never mint a controller owner.
@@ -118,8 +119,9 @@ function readOwner(automationId: string): Omit<GoalOwner, "generation"> | undefi
 }
 
 function finiteBinding(automationId: string): { goalId: string; deadlineAt: string } | undefined {
-  const row = getDb().prepare(`SELECT payload_json FROM long_run_events WHERE kind='goal.automation_provenance_bound'
-    AND actor_kind='host' AND json_extract(payload_json,'$.automationId')=? ORDER BY occurred_at DESC,rowid DESC LIMIT 1`)
+  const row = getDb().prepare(`SELECT e.payload_json FROM long_runs r CROSS JOIN long_run_events e WHERE e.run_id=r.id
+    AND e.kind='goal.automation_provenance_bound' AND e.actor_kind='host' AND json_extract(e.payload_json,'$.automationId')=?
+    ORDER BY e.occurred_at DESC,e.rowid DESC LIMIT 1`)
     .get(automationId) as { payload_json: string } | undefined;
   if (!row) return undefined;
   const raw = JSON.parse(row.payload_json);

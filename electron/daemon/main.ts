@@ -635,7 +635,8 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
      * 보이지 않는다. 두 프로세스의 목록을 합쳐 하나인 척하면 그 숫자는 아무도 못 고친다.
      */
     const { agentResidencySnapshot: snapshot } = await import("../runtime/agent-residency");
-    return { ...snapshot(), pid: process.pid, warmProcesses: processPool.size() };
+    const {daemonAgentContextSnapshot}=await import("../runtime/agent-context-admission");
+    return { ...snapshot(), pid: process.pid, warmProcesses: processPool.size(), contexts:daemonAgentContextSnapshot() };
   }
   if (method === "agents.releaseResidency") {
     /*
@@ -643,11 +644,12 @@ async function handleControlMethod(method: string, params: unknown, peer: Contro
      * 상주 CLI를 해제하지 않는다. 업데이트 교체는 전체 shutdown을 사용한다.
      * 연속성은 손실되지 않는다: 다음 턴은 지금처럼 세션 id + 히스토리로 이어진다.
      */
-    const { agentResidencySnapshot: snapshot, disposeAgentResidency } =
+    const { agentResidencySnapshot: snapshot, releaseIdleAgentResidency } =
       await import("../runtime/agent-residency");
-    const before = snapshot().holding;
-    disposeAgentResidency();
-    return { ok: true, pid: process.pid, released: before, holding: snapshot().holding };
+    const { releaseIdleDaemonAgentContexts } = await import("../runtime/agent-context-admission");
+    const actors=releaseIdleDaemonAgentContexts();
+    const resources=releaseIdleAgentResidency();
+    return { ok: true, pid: process.pid, ...actors,...resources, holding: snapshot().holding };
   }
   if (method === "daemon.shutdown") {
     /*

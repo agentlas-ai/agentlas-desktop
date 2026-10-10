@@ -49,6 +49,7 @@ export const AGENT_GOAL_COMPLETE_PREFIX = "<<agentlas-goal-complete";
 /**
  * 한 줄 표식 — 표식 뒤에 JSON 하나가 오고 그 줄 끝까지가 표식이다. 표식 앞의 글은 남긴다.
  * 정본 파서: `<<agentlas-tactic>>`·`<<agentlas-plan-op>>` → shared/goal-shape.ts extractGoalPlanMarkers,
+ * `<<agentlas-kpi>>`·`<<agentlas-strategy-shift>>` → shared/agent-strategy.ts extractAgentStrategyMarkers,
  * `<<agentlas-effect-observation>>` → shared/effect-observation.ts.
  * ★2026-09-26 QA 0b03862a: 목표 이어가기 답이 전술 표식을 원문 그대로 채팅에 남겼다(Main 은 목표 원장용으로만
  * 떼고, 대화 기록에는 원문이 저장된 경로가 있었다). 표시 층이 마지막 방어선이다.
@@ -56,6 +57,9 @@ export const AGENT_GOAL_COMPLETE_PREFIX = "<<agentlas-goal-complete";
 export const AGENT_LINE_MARKERS = [
   "<<agentlas-tactic>>",
   "<<agentlas-plan-op>>",
+  // Agent Strategy (shared/agent-strategy.ts): KPI samples and strategy shifts.
+  "<<agentlas-kpi>>",
+  "<<agentlas-strategy-shift>>",
   "<<agentlas-effect-observation>>",
 ] as const;
 

@@ -22,6 +22,7 @@ import { RuntimeTurnUnsettledError, runnerFailureFromError, runtimeFailureIsClos
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { isJudgmentRefusal } from "../runtime/judgment-refusal";
 import { createRuntimeUsageCollector } from "../../shared/observed-usage";
+import type { AliveDecisionBinding, AliveDecisionTransport } from "../daemon/alive-decision-port";
 
 /**
  * What a light wake taught about a runtime (durable, keyed by kind + source + CLI version so an upgrade re-tests):
@@ -49,6 +50,9 @@ export interface LightWakeDeps {
   noteFailure(status: RuntimeStatus, failure: RunnerFailure): void;
   now(): number;
   timeoutMs?: number;
+  /** Authenticated daemon decision lane. Absence preserves the legacy
+   * stateless path; an uncertain dispatch never falls back to that path. */
+  decisionTransport?: AliveDecisionTransport;
 }
 
 export function ensureLightWakeSchema(db: Database.Database): void {
@@ -117,7 +121,8 @@ export class LightWakeRunner {
 
   /** Durable row, then the provider call; resolves nothing to the caller — settlement arrives via onSettled. */
   start(input: { wakeId: string; agentId: string; status: RuntimeStatus; selection: RuntimeSelection;
-    systemPrompt: string; userPrompt: string; schema: Record<string, unknown> }): { accepted: boolean; reasonCode?: string } {
+    systemPrompt: string; userPrompt: string; schema: Record<string, unknown>; decisionBinding?: AliveDecisionBinding }): { accepted: boolean; reasonCode?: string } {
+    if (Boolean(input.decisionBinding) !== Boolean(this.deps.decisionTransport)) return { accepted: false, reasonCode: "alive-decision-binding-required" };
     const picked = this.deps.pickRunner(input.status);
     if (!picked) return { accepted: false, reasonCode: "alive-runner-unavailable" }; // before the row: a known 0
     this.deps.db.prepare(`INSERT INTO alive_light_wakes(wake_id,agent_id,status,attempt_started,process_started_at_ms,created_at_ms)
@@ -131,7 +136,10 @@ export class LightWakeRunner {
     let nativeEvidence = false;
     let partialText = "";
     let settled = false;
-    void Promise.resolve().then(() => picked.runner({
+    const runner: Runner = this.deps.decisionTransport
+      ? (request, events) => this.deps.decisionTransport!.run(input.decisionBinding!, input.status, input.selection, request, events)
+      : picked.runner;
+    void Promise.resolve().then(() => runner({
       systemPrompt: input.systemPrompt, history: [], userPrompt: input.userPrompt, backendLabel: picked.label,
       runtimeSource: input.status.source, model: input.selection.model, effort: "low",
       longContext: false, permission: "read", untrustedNoTools: true, judgmentOnly: true, surfaceGate: "exclude",

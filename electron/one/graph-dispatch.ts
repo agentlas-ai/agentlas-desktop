@@ -1,3 +1,4 @@
+import { withCurrentHistoryProducer } from "./history-runtime-fences";
 import { createHash } from "node:crypto";
 import type { Automation, WorkflowGraph } from "../../shared/types";
 import { buildGraphFromBlueprint, type GraphBlueprint } from "../../shared/graph-blueprint";
@@ -29,7 +30,12 @@ import { callToolchain, getToolchainCall, listToolchainCalls } from "../toolchai
 import type { ToolchainAsset, ToolchainCallReceipt } from "../../shared/toolchain-asset";
 import { generateToolchain } from "../toolchains/generalizer";
 import { TOOLCHAIN_CONSUMER_TOOLS } from "../toolchains/consumer";
-import { recordToolchainRepair, toolchainRepairVerdict } from "../toolchains/reports";
+import { recordToolchainRepair, toolchainRepairVerdict, reportToolchainAssetProblem, openToolchainAssetReports,
+  preflightToolchainAssetRepair, withToolchainAssetRepairCommit, settleToolchainAssetRepair } from "../toolchains/reports";
+import { readToolchainState } from "../toolchains/store";
+import { recordToolchainAssetDiscovery, toolchainAssetUsage } from "../toolchains/usage";
+import { currentOneToolchainNativeInvocation } from "./toolchain-native-runtime";
+import { resolveNativeAssetPublicationAuthority } from "../toolchains/asset-cold-start";
 
 /** A Work task's capability (team-control-server scope "toolchain-consumer"). */
 function isToolchainConsumer(caller: OneTeamCaller): boolean {
@@ -200,8 +206,24 @@ function assetManifest(asset: ToolchainAsset, version = asset.stableVersion ?? a
     description: release.contract.description, when_to_use: release.contract.whenToUse, when_not_to_use: release.contract.whenNotToUse,
     input_schema: release.contract.inputSchema, output_schema: release.contract.outputSchema, examples: release.contract.examples,
     variation_statement: release.contract.variationStatement, validation: release.validation,
+    fresh_session_test: release.coldStart ? { ...release.coldStart, matching_requests: release.coldStart.positives,
+      found: release.coldStart.positiveFound, selected: release.coldStart.positiveSelected,
+      bound: release.coldStart.positiveBound, wrongly_selected: release.coldStart.negativeSelected } : null,
+    exposed_by: release.exposedBy ?? null,
     effects: { readOnlyHint: requiredExecutionPermission(release.implementation.snapshot.graph) === "read" },
-    versions: asset.versions.map(item => ({ version: item.version, content_hash: item.contentHash, validation: item.validation.state })) };
+    versions: asset.versions.map(item => ({ version: item.version, content_hash: item.contentHash, validation: item.validation.state })),
+    usage: toolchainAssetUsage(asset.id) };
+}
+
+function toolchainPublicationSummary(asset: ToolchainAsset, version: number, before: ToolchainAsset) {
+  const tested = asset.versions.find(v => v.version === version)?.coldStart;
+  const prior = before.versions.find(v => v.version === version)?.coldStart;
+  const sameTest = tested && prior && tested.at === prior.at && tested.nativeIntentId === prior.nativeIntentId && tested.catalogDigest === prior.catalogDigest;
+  const callable = asset.stableVersion === version && asset.status === "callable";
+  return { state: callable ? "callable" : "draft",
+    ...(sameTest ? (before.status === "callable" && before.stableVersion === version ? { already_callable: true } : { already_tested: true }) : {}),
+    ...(callable ? {} : { next: currentUiLocale() === "ko" ? "테스트 결과를 확인하고 툴체인을 수정한 뒤 다시 시도하세요."
+      : "Review the test results and improve the Toolchain before retrying." }) };
 }
 
 function assetOwnedBy(caller: OneTeamCaller, _asset: ToolchainAsset): void {
@@ -213,7 +235,9 @@ function assetOwnedBy(caller: OneTeamCaller, _asset: ToolchainAsset): void {
 }
 function callerCall(caller: OneTeamCaller, id: unknown): ToolchainCallReceipt {
   const call = typeof id === "string" ? getToolchainCall(id) : null;
-  if (!call || call.callerChatId !== owner(caller).id) throw new Error("toolchain_call_not_in_context");
+  const original = currentOneToolchainNativeInvocation().assertCurrent();
+  if (caller.chatId !== original.chatId || !call || call.callerChatId !== original.chatId)
+    throw new Error("toolchain_call_not_in_context");
   return call;
 }
 async function waitForCall(caller: OneTeamCaller, id: unknown, seconds: number): Promise<ToolchainCallReceipt> {
@@ -227,46 +251,95 @@ async function waitForCall(caller: OneTeamCaller, id: unknown, seconds: number):
 }
 function callManifest(call: ToolchainCallReceipt) {
   const name = getToolchainAsset(call.toolchainId)?.versions.find(version => version.version === call.version)?.contract.name;
-  return { ...call, ...(name ? { name } : {}), call_id: call.id, toolchain_id: call.toolchainId };
+  const { result, ...metadata } = call;
+  // Native runtime projections cap long output. Keep the exact immutable identity
+  // ahead of its potentially large result so the received event remains attributable.
+  return { ...metadata, ...(name ? { name } : {}), call_id: call.id, toolchain_id: call.toolchainId,
+    ...("result" in call ? { result } : {}) };
 }
 
 async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Record<string, unknown>): Promise<unknown> {
   const chat = owner(caller);
-  if (name === "toolchain_search") return { schemaVersion: "agentlas.toolchain-search.v2",
-    toolchains: searchToolchainAssets(String(input.task), listToolchainAssets(), input.limit as number | undefined).map(asset => assetManifest(asset)) };
+  if (name === "toolchain_search") {
+    const selected = searchToolchainAssets(String(input.task), listToolchainAssets(), input.limit as number | undefined);
+    recordToolchainAssetDiscovery(selected);
+    return { schemaVersion: "agentlas.toolchain-search.v2", toolchains: selected.map(asset => assetManifest(asset)) };
+  }
   if (name === "toolchain_inspect") {
     const asset = getToolchainAsset(String(input.toolchain_id));
     if (!asset) throw new Error("toolchain_not_found");
-    return { schemaVersion: "agentlas.toolchain-inspect.v1", ...assetManifest(asset, input.version as number | undefined) };
+    const manifest = assetManifest(asset, input.version as number | undefined);
+    if (input.include_reports !== true) return { schemaVersion: "agentlas.toolchain-inspect.v1", ...manifest };
+    if (isToolchainConsumer(caller)) throw new Error("toolchain_owner_scope_required");
+    if (chat.archivedAt) throw new Error("toolchain_caller_archived");
+    const original = currentOneToolchainNativeInvocation().assertCurrent();
+    if (caller.chatId !== original.chatId) throw new Error("toolchain_call_not_in_context");
+    const reports = await openToolchainAssetReports({ callerChatId: original.chatId, toolchainId: asset.id,
+      version: manifest.version, contentHash: manifest.content_hash });
+    return { schemaVersion: "agentlas.toolchain-inspect.v1", ...manifest, reports };
   }
   if (name === "toolchain_result") return callManifest(await waitForCall(caller, input.call_id, Number(input.wait_seconds ?? 0)));
   if (name === "toolchain_report") {
     const call = callerCall(caller, input.call_id);
-    const reportId = `tcrp_${createHash("sha256").update(`${chat.id}\0${call.id}\0${input.problem}`).digest("hex")}`;
-    getDb().prepare("INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING").run(`toolchain.report.v1:${reportId}`,
-      JSON.stringify({ id: reportId, toolchainId: call.toolchainId, version: call.version, callId: call.id,
-        reporterChatId: chat.id, problem: input.problem, expected: input.expected ?? null, at: new Date().toISOString() }));
+    const outcome = await reportToolchainAssetProblem({ callerChatId: call.callerChatId!, callId: call.id,
+      problem: String(input.problem), expected: typeof input.expected === "string" ? input.expected : null });
     return { schemaVersion: "agentlas.toolchain-report.v2", toolchainId: call.toolchainId, version: call.version, call_id: call.id,
-      report_id: reportId, state: "recorded" };
+      next: currentUiLocale() === "ko" ? "해당 Toolchain 없이 다른 방법으로 작업을 이어가세요." : "Continue the task without the Toolchain.",
+      ...(outcome.state === "queue_full" ? { state: outcome.state, open: outcome.open }
+        : { report_id: outcome.reportId, state: outcome.state, delivered_to: outcome.deliveredTo }) };
   }
   if (name === "toolchain_run") {
+    writable(caller);
     if (chat.archivedAt) throw new Error("toolchain_caller_archived");
+    const native = currentOneToolchainNativeInvocation(), original = native.assertCurrent(), execution = native.execution();
+    if (caller.chatId !== original.chatId) throw new Error("toolchain_call_not_in_context");
     const pending = callToolchain({ toolchainId: String(input.toolchain_id), version: Number(input.version), args: input.args as Record<string, unknown> },
-      { callerChatId: chat.id, requestId: String(input.request_id), permission: caller.permission === "read" ? "read" : "write", dryRun: input.dry_run === true });
+      { callerChatId: original.chatId, parentRunId: original.runId, signal: execution.signal,
+        requestId: String(input.request_id), permission: caller.permission === "read" ? "read" : "write", dryRun: input.dry_run === true,
+        beforeExecution: call => native.registerCall(call).then(() => undefined),
+        afterSettlement: call => native.registerCall(call).then(() => undefined),
+        withExecution: (call, body) => execution.run(call, body) });
     pending.catch(() => undefined);
     const settled = await Promise.race([pending, new Promise<null>(resolve => {
       const timer = setTimeout(() => resolve(null), Number(input.wait_seconds ?? 20) * 1000); timer.unref?.();
     })]);
     if (settled) return callManifest(settled);
-    const receipt = listToolchainCalls(String(input.toolchain_id)).find(call => call.callerChatId === chat.id && call.requestId === input.request_id);
+    native.assertCurrent();
+    const receipt = listToolchainCalls(String(input.toolchain_id)).find(call => call.callerChatId === original.chatId && call.requestId === input.request_id);
     if (!receipt) throw new Error("toolchain_call_receipt_missing");
     return callManifest(receipt);
   }
   writable(caller);
   if (name === "toolchain_create") {
-    const result = await generateToolchain({ request: String(input.request), requestId: String(input.request_id),
-      ...(input.toolchain_id ? { toolchainId: String(input.toolchain_id) } : {}), ...(chat.projectId ? { projectId: chat.projectId } : {}) },
-    { callerChatId: chat.id, assertCurrent: () => writable(caller) });
+    const native = currentOneToolchainNativeInvocation(), original = native.assertCurrent(), preparation = native.preparation("generalization");
+    if (caller.chatId !== original.chatId) throw new Error("toolchain_call_not_in_context");
+    const targetId = typeof input.toolchain_id === "string" ? input.toolchain_id : null;
+    const reportId = typeof input.report_id === "string" ? input.report_id : null;
+    if (reportId && !targetId) throw new Error("toolchain_repair_original_report_required");
+    // This check only denies bypass; report reads and repair writes still require
+    // their exact current native source, audience and owner effect admissions.
+    if (targetId && !reportId && (readToolchainState(`asset:${targetId}`).reports ?? []).some(report => report.state === "open"))
+      throw new Error("toolchain_repair_report_id_required");
+    const repair = targetId && reportId ? { callerChatId: original.chatId, toolchainId: targetId, reportId } : null;
+    if (repair) await preflightToolchainAssetRepair({ ...repair, requestId: String(input.request_id) });
+    else native.assertPreparedCommitBound();
+    native.assertCurrent(); preparation.producer.assertCurrent("generalization");
+    const generationInput={ request:String(input.request),requestId:String(input.request_id),...(input.toolchain_id?{toolchainId:String(input.toolchain_id)}:{}),...(chat.projectId?{projectId:chat.projectId}:{}) };
+    const generationActor: NonNullable<Parameters<typeof generateToolchain>[1]> = {callerChatId:original.chatId,signal:preparation.signal,preparationProducer:preparation.producer,
+      assertCurrent:()=>{ native.assertCurrent(); writable(caller); },
+      withPreparedCommit: repair ? (proposal, commit) => withToolchainAssetRepairCommit(repair, proposal, commit) : (proposal, commit) => {
+        // The actual model may select an existing identity even when the request
+        // omitted toolchain_id. That cannot bypass its report/repair admission.
+        const checkReports = () => {
+          if (proposal.decision === "new_version" && proposal.targetToolchainId
+            && (readToolchainState(`asset:${proposal.targetToolchainId}`).reports ?? []).some(report => report.state === "open"))
+            throw new Error("toolchain_repair_report_id_required");
+        };
+        checkReports();
+        return native.withPreparedCommit(proposal, () => { checkReports(); return commit(); });
+      }};
+    const result = await preparation.run(() => withCurrentHistoryProducer("toolchain",ports=>ports.toolchain.generateToolchain(generationInput,generationActor),()=>generateToolchain(generationInput,generationActor)));
+    await native.registerProduced(result);
     return { schemaVersion: "agentlas.toolchain-create.v2", ...assetManifest(result.asset, result.version),
       decision: result.decision, rationale: result.rationale, generalization_id: result.generalizationId };
   }
@@ -275,11 +348,23 @@ async function dispatchToolchain(caller: OneTeamCaller, name: string, input: Rec
     if (!asset) throw new Error("toolchain_not_found");
     assetOwnedBy(caller, asset);
     const version = Number(input.version);
-    const pending = publishToolchainVersion(asset.id, version, { callerChatId: chat.id, permission: "write" });
+    const reportId = typeof input.report_id === "string" ? input.report_id : null;
+    const repairRequestId = typeof input.repair_request_id === "string" ? input.repair_request_id : null;
+    if (Boolean(reportId) !== Boolean(repairRequestId)) throw new Error("toolchain_repair_exact_acceptance_required");
+    const native = currentOneToolchainNativeInvocation(), original = native.assertCurrent(), preparation = native.preparation("fresh-session-evaluation");
+    if (caller.chatId !== original.chatId) throw new Error("toolchain_call_not_in_context");
+    const nativePublication = await resolveNativeAssetPublicationAuthority({ kind: "one", caller, id: asset.id, version });
+    native.assertCurrent();
+    const pending = preparation.run(() => publishToolchainVersion(asset.id, version,
+      { callerChatId: original.chatId, permission: "write", nativePublication, signal: preparation.signal }));
     pending.catch(() => undefined);
     const settled = await Promise.race([pending, new Promise<null>(resolve => { const timer = setTimeout(() => resolve(null), 45_000); timer.unref?.(); })]);
+    const repaired = settled && reportId && repairRequestId ? await settleToolchainAssetRepair({ callerChatId: original.chatId,
+      toolchainId: asset.id, reportId, repairRequestId }) : null;
     return { schemaVersion: "agentlas.toolchain-publish.v2", ...assetManifest(settled ?? getToolchainAsset(asset.id)!, version),
-      ...(settled ? {} : { testing: true }) };
+      ...(repaired ? { repaired_report: repaired } : {}),
+      ...(settled ? toolchainPublicationSummary(settled, version, asset) : { testing: true, state: "testing",
+        next: currentUiLocale() === "ko" ? "테스트가 진행 중입니다. 같은 툴체인의 결과를 다시 확인하세요." : "Testing is in progress. Check the same Toolchain result again." }) };
   }
   throw new Error("toolchain_unknown_operation");
 }

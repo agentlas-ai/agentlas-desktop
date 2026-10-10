@@ -108,8 +108,13 @@ export interface AgentWorkspaceRecovery {
   reviewToken?: string;
   changes: AgentWorkspaceChange[];
 }
+export interface AgentWorkspaceMemoryCounts {
+  counts: Record<string, number>;
+  unavailableAgentIds: string[];
+}
 export interface AgentWorkspaceIpc {
   getWorkspace(agentId: string): Promise<AgentWorkspaceSnapshot>;
+  memoryCounts(agentIds: string[]): Promise<AgentWorkspaceMemoryCounts>;
   listFiles(agentId: string, relativeDir?: string): Promise<AgentWorkspaceFile[]>;
   readFile(agentId: string, relativePath: string): Promise<AgentWorkspaceReadFile>;
   prepareFromMemory(input: { agentId: string; memoryEntryIds: string[]; targetPath?: string }): Promise<AgentWorkspaceProposal>;

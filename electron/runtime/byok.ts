@@ -1,3 +1,5 @@
+import { assertCurrentHistoryRunnerResult } from "./observed-runner";
+import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // BYOK 직접 API 러너 — Anthropic Messages / OpenAI Chat Completions / Google Generative API.
 // Node 20+ 글로벌 fetch + ReadableStream으로 SSE 파싱. 외부 SDK 의존성 없음.
@@ -356,26 +358,26 @@ async function runAnthropicMessages(
         messages.splice(0, transmittedHistoryCount, ...next);
         transmittedHistoryCount = next.length;
       },
-    })) return { text: "", failure: byokContextFailure(req) };
+    })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
     assertScienceRecoveryRequest(req, "byok", backend);
     const usageAttempt = measuredUsage.start();
     const beforeInput = inputTokens + cacheRead + cacheWrite;
     const beforeCacheRead = cacheRead;
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.dispatched();
-    const resp = await fetch(`${baseUrl}/v1/messages`, {
+    const resp = await withCurrentHistoryProvider(()=>fetch(`${baseUrl}/v1/messages`, {
       method: "POST",
       headers,
       signal: req.signal,
       body: JSON.stringify(outgoingBody()),
-    });
+    }));
 
     if (!resp.ok) {
       const failure = runtimeHttpFailure(resp.status, "byok", "Anthropic");
       if (failure) {
         const observedUsage = measuredUsage.total();
-        return { text: acc.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
-          ...(outputTokens > 0 ? { tokens: outputTokens } : {}), workforcePermissionEnforcement: broker?.finish(false) };
+        return assertCurrentHistoryRunnerResult({ text: acc.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
+          ...(outputTokens > 0 ? { tokens: outputTokens } : {}), workforcePermissionEnforcement: broker?.finish(false) });
       }
       const errText = await resp.text().catch(() => "");
       throw new Error(`Anthropic API ${resp.status}: ${errText.slice(0, 300)}`);
@@ -417,7 +419,7 @@ async function runAnthropicMessages(
           acc += event.delta.text;
           const now = Date.now();
           if (now - lastEmit > 80) {
-            events.onPartial(acc);
+            (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(acc));
             lastEmit = now;
           }
         } else if (event.type === "message_start" && event.message?.usage) {
@@ -450,10 +452,10 @@ async function runAnthropicMessages(
     }
     outputTokens += turnOutputTokens;
     const turnInput = inputTokens + cacheRead + cacheWrite - beforeInput;
-    measuredUsage.complete(usageAttempt, turnInputObserved && turnOutputObserved && messageStopped
+    (measuredUsage.complete(usageAttempt, turnInputObserved && turnOutputObserved && messageStopped
       ? { inputTokens: turnInput, outputTokens: turnOutputTokens,
           ...(turnCacheReadObserved ? { cachedInputTokens: cacheRead - beforeCacheRead } : {}) }
-      : undefined);
+      : undefined), currentHistoryRuntimeFence()?.assertCurrent());
 
     // Only complete client-tool groups or final answers admit further work.
     // pause_turn and token/context limits are partial responses, not ACKs.
@@ -471,11 +473,11 @@ async function runAnthropicMessages(
         || (stopReason === "tool_use" && pendingToolUse.size > 0));
     if (!completeBoundary) {
       const error = new RuntimeTurnUnsettledError("byok", req.locale);
-      return { text: acc.trim() || error.message, ownerControlTerminal: "uncertain",
+      return assertCurrentHistoryRunnerResult({ text: acc.trim() || error.message, ownerControlTerminal: "uncertain",
         failure: stopReason === "refusal"
           ? { ...byokFailure("refused", acc.trim() || "Anthropic refused the request."), providerCode: "refusal" }
           : { ...byokFailure("exit", error.message), providerCode: error.code },
-        workforcePermissionEnforcement: broker?.finish(false) };
+        workforcePermissionEnforcement: broker?.finish(false) });
     }
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.applied();
@@ -563,7 +565,7 @@ async function runAnthropicMessages(
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
   const observedUsage = measuredUsage.total();
-  return {
+  return assertCurrentHistoryRunnerResult({
     text: answer || (failure ? failure.message : ""),
     ownerControlTerminal: failure ? "uncertain" : "completed",
     ...(failure ? { failure } : {}),
@@ -595,7 +597,7 @@ async function runAnthropicMessages(
                 ]
               : ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
           ),
-  };
+  });
   } finally { ownerControl.finish(); }
 }
 
@@ -883,8 +885,8 @@ export const runGoogleByok: Runner = async (
     const failure = runtimeHttpFailure(status, "byok", "Google");
     if (!failure) return null;
     const observedUsage = measuredUsage.total();
-    return { text: acc.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
-      workforcePermissionEnforcement: broker?.finish(false) };
+    return assertCurrentHistoryRunnerResult({ text: acc.trim(), failure, ...(observedUsage ? { observedUsage } : {}),
+      workforcePermissionEnforcement: broker?.finish(false) });
   };
 
   const ownerControl = createOwnerControlBoundary(req);
@@ -912,18 +914,18 @@ export const runGoogleByok: Runner = async (
         contents.splice(0, transmittedHistoryCount, ...next);
         transmittedHistoryCount = next.length;
       },
-    })) return { text: "", failure: byokContextFailure(req) };
+    })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
     const requestBody = outgoingBody();
     assertScienceRecoveryRequest(req, "byok", "google");
     let usageAttempt = measuredUsage.start();
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.dispatched();
-    let resp = await fetch(url, {
+    let resp = await withCurrentHistoryProvider(()=>fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: req.signal,
       body: JSON.stringify(requestBody),
-    });
+    }));
     if (!resp.ok) {
       const terminal = httpFailureResult(resp.status);
       if (terminal) return terminal;
@@ -937,12 +939,12 @@ export const runGoogleByok: Runner = async (
       events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
       assertScienceRecoveryRequest(req, "byok", "google");
       usageAttempt = measuredUsage.start();
-      resp = await fetch(url, {
+      resp = await withCurrentHistoryProvider(()=>fetch(url, {
         method: "POST",
         headers: { "content-type": "application/json" },
         signal: req.signal,
         body: JSON.stringify(outgoingBody()),
-      });
+      }));
     }
     if (!resp.ok) {
       const terminal = httpFailureResult(resp.status);
@@ -997,7 +999,7 @@ export const runGoogleByok: Runner = async (
             acc += part.text;
             const now = Date.now();
             if (now - lastEmit > 80) {
-              events.onPartial(acc);
+              (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(acc));
               lastEmit = now;
             }
             continue;
@@ -1028,17 +1030,17 @@ export const runGoogleByok: Runner = async (
         // authority, so ignore them just as the previous text-only adapter did.
       }
     }
-    measuredUsage.complete(usageAttempt, finishReason === "STOP" ? terminalUsage : undefined);
+    (measuredUsage.complete(usageAttempt, finishReason === "STOP" ? terminalUsage : undefined), currentHistoryRuntimeFence()?.assertCurrent());
     if (finishReason !== "STOP" || conflictingFinishReason) {
       const error = new RuntimeTurnUnsettledError("byok", req.locale);
       const refused = ["SAFETY", "RECITATION", "LANGUAGE", "BLOCKLIST", "PROHIBITED_CONTENT", "SPII",
         "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION", "ESCALATION", "PUP_LIMITED_DISABLED"]
         .includes(finishReason ?? "");
-      return { text: acc.trim() || error.message, ownerControlTerminal: "uncertain",
+      return assertCurrentHistoryRunnerResult({ text: acc.trim() || error.message, ownerControlTerminal: "uncertain",
         failure: refused
           ? { ...byokFailure("refused", acc.trim() || `Google stopped the response: ${finishReason}.`), providerCode: finishReason }
           : { ...byokFailure("exit", error.message), providerCode: error.code },
-        workforcePermissionEnforcement: broker?.finish(false) };
+        workforcePermissionEnforcement: broker?.finish(false) });
     }
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.applied();
@@ -1087,7 +1089,7 @@ export const runGoogleByok: Runner = async (
     if (refusal) failure = { ...refusal, runtime: "byok", source: "heuristic" };
   }
   const observedUsage = measuredUsage.total();
-  return {
+  return assertCurrentHistoryRunnerResult({
     text: answer || (failure ? failure.message : ""),
     ownerControlTerminal: failure ? "uncertain" : "completed",
     ...(failure ? { failure } : {}),
@@ -1103,6 +1105,6 @@ export const runGoogleByok: Runner = async (
               ? ["browser", "mcp", "apps", "session_persistence"]
               : ["filesystem", "shell", "browser", "mcp", "apps", "session_persistence"],
           ),
-  };
+  });
   } finally { ownerControl.finish(); }
 };

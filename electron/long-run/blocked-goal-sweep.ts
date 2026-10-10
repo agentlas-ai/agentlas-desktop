@@ -3,6 +3,7 @@
  * Retry spacing still prevents unavailable runtimes from spinning. */
 import { applyPendingOwnerGoalAmendments, OWNER_GOAL_AMENDMENT_PENDING_KIND } from "./goal-owner-amendment";
 import { randomUUID } from "node:crypto";
+import { redactSecrets } from "../../shared/secret-patterns";
 import { getDb } from "../store/db";
 import { adoptExplicitGoalGrant } from "./explicit-goal-authority";
 import { appendChatMessage, getChat } from "../store/chats";
@@ -69,6 +70,18 @@ function notify(run: LongRunRecord, status: "goal-resuming" | "goal-closed" | "e
 
 function errorCode(error: unknown, fallback: string): string {
   return error instanceof Error && /^[a-z_]+(?::[a-z_0-9-]+)?$/.test(error.message) ? error.message : fallback;
+}
+
+/**
+ * errorCode() collapses every exception without a machine code into one fallback, which is how an
+ * 08:56 resume failure in the Youtube room (2026-10-10) left only `blocked_goal_resume_unavailable`
+ * and no way to tell why. Keep the code, but log the real cause (redacted, bounded) to main.log.
+ */
+function logSweepFailureCause(stage: string, runId: string, code: string, error: unknown): void {
+  try {
+    const raw = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
+    console.warn(`[blocked-goal-sweep] ${stage} failed run=${runId} code=${code} cause=${redactSecrets(raw).replace(/\s+/g, " ").slice(0, 400)}`);
+  } catch { /* diagnostics must never change the retry decision */ }
 }
 
 function scheduleRetry(run: LongRunRecord, kind: "observe" | "resume", detail: string, trigger: string,
@@ -152,6 +165,7 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
       })();
     } catch (error) {
       const code = errorCode(error, "blocked_goal_resume_unavailable");
+      if (code !== "blocked_goal_sweep_state_changed") logSweepFailureCause("resume-prepare", run.id, code, error);
       const latest = getLongRun(run.id);
       if (!latest || code === "blocked_goal_sweep_state_changed" || !["blocked", "paused", "queued", "running", "waiting_tool"].includes(latest.status)) {
         return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: code };
@@ -178,6 +192,7 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
     return { runId: run.id, fromReason: run.blockedReason, action: "resumed", detail: prepared.request.runId ?? "dispatched" };
   } catch (error) {
     const code = errorCode(error, "blocked_goal_dispatch_failed");
+    logSweepFailureCause("resume-dispatch", run.id, code, error);
     try { failDesktopLongRunResumeDispatch(prepared.queuedId, code); } catch { /* keep the original dispatch failure */ }
     const latest = getLongRun(run.id);
     if (!latest) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: code };

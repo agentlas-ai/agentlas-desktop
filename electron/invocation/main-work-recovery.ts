@@ -14,6 +14,27 @@ interface Action { actionId: string; stepId: string; taskId: string; revision: s
   originInvocationRunId: string; expected: ExpectedWorkOutcome; observational: boolean }
 export interface MainWorkReference { action_id?: string; step_id?: string; regenerate_read?: true }
 const contexts = new WeakSet<object>();
+const MAX_RESULT_BYTES = 32 * 1024 * 1024;
+const RESULT_STORAGE = "agentlas.main-work-result-bytes.v1";
+
+// The existing action/journal remains the execution authority. This table
+// holds only its original result bytes, never a second queue or an admission.
+function resultStore() {
+  const db = getDb();
+  db.exec(`CREATE TABLE IF NOT EXISTS main_work_result_bytes (
+    event_id TEXT PRIMARY KEY REFERENCES run_events(id) ON DELETE CASCADE,
+    chat_id TEXT NOT NULL REFERENCES chats(id) ON DELETE CASCADE,
+    run_id TEXT NOT NULL, task_id TEXT NOT NULL, action_id TEXT NOT NULL,
+    revision TEXT NOT NULL, method_id TEXT NOT NULL, input_digest TEXT NOT NULL,
+    origin_run_id TEXT NOT NULL, generation INTEGER NOT NULL,
+    owner_epoch TEXT NOT NULL, attempt_id TEXT NOT NULL,
+    digest TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+    result_bytes BLOB NOT NULL,
+    CHECK(size_bytes > 0 AND size_bytes <= 33554432 AND size_bytes = length(result_bytes)),
+    UNIQUE(run_id, action_id, generation)
+  )`);
+  return db;
+}
 const digest = (value: unknown) => `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 function decodeAction(payload:string):Action {
   const saved=JSON.parse(payload);
@@ -137,11 +158,52 @@ export class MainWorkRecoveryContext {
   }
 
   private readResult(scope:Scope,unit:WorkUnit):Result|null {
-    const row=getDb().prepare("SELECT id,payload_json FROM run_events WHERE run_id=? AND kind='main_work_result' AND json_extract(payload_json,'$.actionId')=? ORDER BY seq DESC LIMIT 1")
-      .get(scope.runId,unit.unitId) as {id:string;payload_json:string}|undefined;
-    if (!row)return null;const p=JSON.parse(row.payload_json);
-    if (unit.resultRef!==`main-work-result:${row.id}:${p.digest}` || typeof p.result!=="string")return null;
-    const value=JSON.parse(p.result);return digest(value)===p.digest ? value : null;
+    this.assertCurrent();
+    if (unit.state!=="succeeded" || unit.runId!==scope.runId || unit.taskId!==scope.taskId
+      || unit.revision!==scope.revision) return null;
+    const row=getDb().prepare(`SELECT id,payload_json FROM run_events WHERE run_id=? AND chat_id=?
+      AND kind='main_work_result' AND json_extract(payload_json,'$.actionId')=? ORDER BY seq DESC LIMIT 1`)
+      .get(scope.runId,this.chatId,unit.unitId) as {id:string;payload_json:string}|undefined;
+    if (!row) return null;
+    try {
+      const p=JSON.parse(row.payload_json);
+      if (unit.resultRef!==`main-work-result:${row.id}:${p.digest}`) return null;
+      let serialized:string;
+      if (p.storage===RESULT_STORAGE) {
+        if (!getDb().prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='main_work_result_bytes'").get()) return null;
+        const action=this.readAction(scope,unit.unitId);
+        if (!action || action.taskId!==scope.taskId || action.revision!==scope.revision
+          || action.inputDigest!==unit.inputDigest || action.methodId!==unit.methodId) return null;
+        const bytes=getDb().prepare(`SELECT digest,size_bytes,result_bytes FROM main_work_result_bytes
+          WHERE event_id=? AND chat_id=? AND run_id=? AND task_id=? AND action_id=? AND revision=?
+          AND method_id=? AND input_digest=? AND origin_run_id=? AND generation=? AND owner_epoch=? AND attempt_id=?`)
+          .get(row.id,this.chatId,scope.runId,scope.taskId,unit.unitId,scope.revision,unit.methodId,
+            unit.inputDigest,action.originInvocationRunId,unit.generation,unit.ownerEpoch,unit.attemptId) as
+          {digest:string;size_bytes:number;result_bytes:Buffer}|undefined;
+        if (!bytes || bytes.digest!==p.digest || bytes.size_bytes!==p.sizeBytes || !Buffer.isBuffer(bytes.result_bytes)
+          || bytes.size_bytes<1 || bytes.size_bytes>MAX_RESULT_BYTES || bytes.result_bytes.length!==bytes.size_bytes
+          || `sha256:${createHash("sha256").update(bytes.result_bytes).digest("hex")}`!==p.digest) return null;
+        serialized=bytes.result_bytes.toString("utf8");
+        if (!Buffer.from(serialized,"utf8").equals(bytes.result_bytes)) return null;
+      } else {
+        // Old inline receipts remain readable only when their original hash
+        // matches. A historical digest-only receipt cannot invent an original.
+        if (p.storage!==undefined || typeof p.result!=="string") return null;
+        serialized=p.result;
+      }
+      const value=JSON.parse(serialized);
+      if (!value || typeof value!=="object" || Array.isArray(value) || typeof value.content!=="string"
+        || value.isError!==false || (value.artifactPaths!==undefined && (!Array.isArray(value.artifactPaths)
+          || value.artifactPaths.some((item:unknown)=>typeof item!=="string")))
+        || (value.rawMcpResult!==undefined && (!value.rawMcpResult || typeof value.rawMcpResult!=="object"
+          || Array.isArray(value.rawMcpResult))) || digest(value)!==p.digest) return null;
+      this.assertCurrent();
+      return value;
+    } catch {
+      // Missing/corrupt bytes are an unavailable original, never permission to
+      // repeat an external action or to return a bounded diagnostic instead.
+      return null;
+    }
   }
 
   finish(admission:{unit:WorkUnit;action:Action},result:Result):void {
@@ -149,16 +211,34 @@ export class MainWorkRecoveryContext {
     if(scope.runId!==admission.unit.runId || scope.revision!==admission.unit.revision)throw new Error("main_work_completion_scope_changed");
     const stored={content:result.content,isError:result.isError,visionMessage:result.visionMessage,
       ...(result.artifactPaths ? {artifactPaths:result.artifactPaths} : {}),...(result.rawMcpResult ? {rawMcpResult:result.rawMcpResult} : {})};
-    // Large/image/opaque results keep their normal result/artifact paths. Do
-    // not copy them into another journal or pretend an unavailable read matched.
     const serialized=JSON.stringify(stored);
     if(result.isError) {this.journal.transition(admission.unit,"held",{reason:"original_tool_outcome_unconfirmed"});return;}
+    const bytes=Buffer.from(serialized,"utf8");
+    if(bytes.length>MAX_RESULT_BYTES)throw new Error("main_work_result_too_large");
     getDb().transaction(()=>{
+      this.assertCurrent();
+      const action=this.readAction(scope,admission.unit.unitId);
+      if(admission.unit.state!=="started" || admission.unit.taskId!==scope.taskId
+        || admission.action.actionId!==admission.unit.unitId || !action || digest(action)!==digest(admission.action)
+        || action.taskId!==scope.taskId || action.revision!==scope.revision
+        || action.inputDigest!==admission.unit.inputDigest || action.methodId!==admission.unit.methodId)
+        throw new Error("main_work_completion_action_changed");
+      const db=resultStore(), resultDigest=digest(stored);
       const event=recordRunEvent({runId:scope.runId,chatId:this.chatId,kind:"main_work_result",
-        payload:{actionId:admission.action.actionId,digest:digest(stored),...(serialized.length<=1000 ? {result:serialized} : {})}});
-      const resultRef=`main-work-result:${event.id}:${digest(stored)}`;
-      if(!this.journal.transition(admission.unit,"succeeded",{reason:"main_tool_result_confirmed",resultRef}))throw new Error("main_work_completion_owner_changed");
-      if(serialized.length<=1000 && !this.readResult(scope,this.journal.read(scope.runId,admission.unit.unitId)!))throw new Error("main_work_result_not_durable");
+        payload:{actionId:action.actionId,digest:resultDigest,storage:RESULT_STORAGE,sizeBytes:bytes.length,
+          ...(serialized.length<=1000 ? {result:serialized} : {})}});
+      // Store the exact original in the same transaction as its existing
+      // receipt and success CAS. Generic run-event redaction/previews stay as-is.
+      db.prepare(`INSERT INTO main_work_result_bytes(event_id,chat_id,run_id,task_id,action_id,revision,
+        method_id,input_digest,origin_run_id,generation,owner_epoch,attempt_id,digest,size_bytes,result_bytes)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(event.id,this.chatId,scope.runId,scope.taskId,action.actionId,
+          scope.revision,action.methodId,action.inputDigest,action.originInvocationRunId,admission.unit.generation+1,
+          admission.unit.ownerEpoch,admission.unit.attemptId,resultDigest,bytes.length,bytes);
+      const resultRef=`main-work-result:${event.id}:${resultDigest}`;
+      const completed=this.journal.transition(admission.unit,"succeeded",{reason:"main_tool_result_confirmed",resultRef});
+      if(!completed)throw new Error("main_work_completion_owner_changed");
+      if(!this.readResult(scope,completed))throw new Error("main_work_result_not_durable");
+      this.assertCurrent();
     }).immediate();
   }
 }

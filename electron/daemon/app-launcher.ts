@@ -29,6 +29,7 @@ import {
   type AutostartRuntime,
   type AutostartReconciliation,
 } from "./autostart";
+import { isNonProductionInstance } from "./autostart-eligibility";
 import { entryDigest, validateDaemonAutostartManifest, type DaemonAutostartManifest } from "./autostart-manifest";
 import {
   OFFICIAL_INSTALL_IDENTITY,
@@ -698,6 +699,9 @@ export async function shutdownDaemon(
  * barrier. Only a fully bound manifest can install a persistent service.
  */
 export function reconcileDaemonAutostart(enabled: boolean, command: AutostartCommand, runtime?: AutostartRuntime): AutostartReconciliation {
+  // 개발·QA 인스턴스는 로그인 항목을 만들지 않고, 이 설치 몫으로 남은 것은 걷어 낸다.
+  // 주입된 runtime(비공개 시험)은 실제 launchd 를 건드리지 않으므로 규칙 그대로 시험한다.
+  if (enabled && !runtime?.run && isNonProductionInstance()) return reconcileAutostart(false, command, runtime);
   return reconcileAutostart(enabled, command, runtime);
 }
 

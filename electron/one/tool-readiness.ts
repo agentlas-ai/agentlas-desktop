@@ -3,11 +3,15 @@ import { MCP_TOOL_CATALOG } from '../mcp-tools/catalog';
 import { listInstalledServers, getServer } from '../mcp-tools/registry';
 import { testServerById } from '../mcp-tools/client';
 import { getOneProfile } from '../store/one-profile';
+import { getCredentialStateRevision, getEnvConfigurationRevision } from '../secrets/vault';
 import { supervisorIdentifier, supervisorObject } from '../../shared/one-supervisor';
 import type { OneToolReadiness, OneToolReadinessState } from '../../shared/one-harness';
 import type { InstalledMcpServer, McpServerStatus } from '../../shared/types';
 
-const observations = new Map<string, { fingerprint: string; oneId: string; status: McpServerStatus }>();
+const observations = new Map<string, { fingerprint: string; oneId: string; credentialRevision: string; status: McpServerStatus }>();
+let scopedCredentialRevision = 0;
+const credentialRevision = () => `${scopedCredentialRevision}:${getCredentialStateRevision()}:${getEnvConfigurationRevision()}`;
+export function invalidateOneToolReadiness(): void { scopedCredentialRevision += 1; observations.clear(); }
 const pending = new Map<string, Promise<McpServerStatus>>();
 const FRESHNESS_MS = 60_000;
 function fingerprint(server: InstalledMcpServer): string {
@@ -37,14 +41,15 @@ export async function oneToolReadiness(raw: { oneId: string; query?: string; pro
     const server = getServer(id);
     if (!server || !server.enabled) throw new Error('one_tool_probe_unavailable');
     const key = oneId + ':' + id;
+    const admittedCredentialRevision = credentialRevision();
     let probe = pending.get(key);
     if (!probe) { probe = testServerById(id); pending.set(key, probe); }
     try {
       const status = await probe;
       if (getOneProfile().oneId !== oneId) throw new Error('one_harness_identity_changed');
       const current = getServer(id);
-      if (!current || fingerprint(current) !== fingerprint(server)) throw new Error('one_tool_configuration_changed');
-      observations.set(key, { fingerprint: fingerprint(server), oneId, status });
+      if (!current || fingerprint(current) !== fingerprint(server) || credentialRevision() !== admittedCredentialRevision) throw new Error('one_tool_configuration_changed');
+      observations.set(key, { fingerprint: fingerprint(server), oneId, credentialRevision: admittedCredentialRevision, status });
       if (observations.size > 256) observations.delete(observations.keys().next().value!);
     } finally { if (pending.get(key) === probe) pending.delete(key); }
   }
@@ -59,6 +64,7 @@ export async function oneToolReadiness(raw: { oneId: string; query?: string; pro
   return candidates.filter(item => !query || (item.label + ' ' + item.description + ' ' + item.id).toLocaleLowerCase().includes(query)).slice(0, 200).map(item => {
     const cached = item.installed ? observations.get(oneId + ':' + item.installed.id) : undefined;
     const valid = cached && item.installed && cached.fingerprint === fingerprint(item.installed)
+      && cached.credentialRevision === credentialRevision()
       && Number.isFinite(Date.parse(cached.status.checkedAt)) && Date.now() - Date.parse(cached.status.checkedAt) >= 0
       && Date.now() - Date.parse(cached.status.checkedAt) <= FRESHNESS_MS;
     const status = valid ? cached.status : null;

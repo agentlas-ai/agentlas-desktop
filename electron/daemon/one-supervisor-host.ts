@@ -6,7 +6,7 @@ import { getDb, STORE_SCHEMA_VERSION } from "../store/db";
 import { getOneProfile } from "../store/one-profile";
 import { getAuthenticatedActorIds } from "../auth";
 import { ONE_SUPERVISOR_SCHEMA } from "../../shared/one-supervisor";
-import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, sameSupervisorRuntimeCompatibility } from "../../shared/one-supervisor-runtime";
+import { ONE_SUPERVISOR_JOURNAL_SCHEMA, ONE_SUPERVISOR_RUNTIME_PROTOCOL, ONE_SUPERVISOR_EXTENSIONS_SCHEMA, sameSupervisorRuntimeCompatibility } from "../../shared/one-supervisor-runtime";
 import { getInvocationAdmission } from "../store/invocation-admissions";
 import { invocationRunOwners } from "../store/invocation-run-owners";
 import type { ScienceDaemonClient } from "../science-host/daemon-client";
@@ -29,7 +29,7 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
   const digest=(value:unknown)=>createHash("sha256").update(JSON.stringify(value)).digest("hex");
   let closeHost:(()=>void)|undefined;
   const compatibility = Object.freeze({ protocol: ONE_SUPERVISOR_RUNTIME_PROTOCOL, supervisorSchema: ONE_SUPERVISOR_SCHEMA,
-    journalSchema: ONE_SUPERVISOR_JOURNAL_SCHEMA, storeSchema:STORE_SCHEMA_VERSION, nativeAbi: process.versions.modules });
+    journalSchema: ONE_SUPERVISOR_JOURNAL_SCHEMA, extensionsSchema:ONE_SUPERVISOR_EXTENSIONS_SCHEMA, storeSchema:STORE_SCHEMA_VERSION, nativeAbi: process.versions.modules });
   function authority() {
     options.assertOwner(); const actor = getAuthenticatedActorIds();
     if (!identity || JSON.stringify(actor)!==identity.actor || getOneProfile().oneId !== identity.oneId) fail("supervisor_daemon_identity_authority_changed");
@@ -113,6 +113,11 @@ export function createDaemonOneSupervisorHost(options: { bootId: string; assertO
 
     }
     authority(); if (!service) fail("supervisor_daemon_not_adopted");
+    if(raw.op==='personal.command') {
+      if(!exact(raw.input,['method','args']) || typeof raw.input.method!=='string' || !Array.isArray(raw.input.args) || raw.input.args.length>1)fail('personal_data_native_command_invalid');
+      authority(); service.assertHostWriteAuthority(identity!.oneId);
+      return (await import('../one/personal-data-runtime')).dispatchOnePersonalDataNative(raw.input.method,raw.input.args);
+    }
     if(raw.op==="questions.list")return [...questions.values()].map(row=>row.event).filter(row=>row.expiresAt>Date.now());
     if(raw.op==="questions.answer"){
       if(!exact(raw.input,["requestId","answer"]) || typeof raw.input.requestId!=="string" || !(raw.input.answer===null || typeof raw.input.answer==="string"&&raw.input.answer.length<=100000))fail("supervisor_question_answer_invalid");

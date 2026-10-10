@@ -17,6 +17,7 @@ import { aliveActionRegistration } from "../alive-core/action-registry";
 import { ALIVE_GOAL_DECISION_OUTPUT_SCHEMA, parseAliveGoalDecision } from "./goal-decision";
 import { ALIVE_GOAL_CONTROLLER_PROMPT, compactWakeInput } from "./controller-prompt";
 import type { LightWakeRow, LightWakeRunner } from "./light-wake";
+import type { AliveDecisionBinding } from "../daemon/alive-decision-port";
 
 const UUID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-8][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 export const ALIVE_WAKE_RUNTIME_EVENT = "wake.runtime-selected";
@@ -27,6 +28,7 @@ export interface GoalRuntimeDeps {
   resolveSelection(): { selection: RuntimeSelection; status: RuntimeStatus; record: AliveWakeRuntimeRecord } | null;
   light: LightWakeRunner;
   now(): number;
+  bindDecision?(input: AliveRuntimeStart): AliveDecisionBinding;
 }
 
 export class GoalAliveRuntime implements AliveRuntimePort {
@@ -47,10 +49,14 @@ export class GoalAliveRuntime implements AliveRuntimePort {
     let userPrompt: string;
     try { userPrompt = compactWakeInput(input); } catch { return { accepted: false, reasonCode: "alive-runtime-context-invalid" }; }
     if (Buffer.byteLength(userPrompt, "utf8") > 16 * 1024) return { accepted: false, reasonCode: "alive-runtime-context-too-large" };
+    let decisionBinding: AliveDecisionBinding | undefined;
+    try { decisionBinding = this.deps.bindDecision?.(input); }
+    catch { return { accepted: false, reasonCode: "alive-decision-binding-unavailable" }; }
     this.store.event(input.agentId, ALIVE_WAKE_RUNTIME_EVENT, { wakeId: input.wakeId, ...resolved.record,
       processStartedAtMs: this.deps.processStartedAtMs }, this.deps.now());
     const started = this.deps.light.start({ wakeId: input.wakeId, agentId: input.agentId, status: resolved.status,
-      selection: resolved.selection, systemPrompt: ALIVE_GOAL_CONTROLLER_PROMPT, userPrompt, schema: ALIVE_GOAL_DECISION_OUTPUT_SCHEMA });
+      selection: resolved.selection, systemPrompt: ALIVE_GOAL_CONTROLLER_PROMPT, userPrompt, schema: ALIVE_GOAL_DECISION_OUTPUT_SCHEMA,
+      ...(decisionBinding ? { decisionBinding } : {}) });
     return started.accepted ? { accepted: true, runId: input.wakeId } : { accepted: false, reasonCode: started.reasonCode ?? "alive-runtime-start-failed" };
   }
 

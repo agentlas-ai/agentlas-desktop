@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
-import { gzipSync, gunzipSync } from "node:zlib";
+import { brotliCompressSync, brotliDecompressSync, constants } from "node:zlib";
 import { ONE_GRAPH_TOOLS, ONE_GRAPH_TOOL_NAMES } from "../../shared/graph-authoring";
 import { ONE_SUPERVISOR_TOOLS, ONE_SUPERVISOR_TOOL_NAMES } from "../../shared/one-supervisor-tools";
+import { ONE_PERSONAL_TOOLS, ONE_PERSONAL_TOOL_NAMES } from '../../shared/one-personal-tools';
+import { ONE_HISTORY_TOOLS, ONE_HISTORY_TOOL_NAMES } from '../../shared/one-history-tools';
 
 // Built-in inline MCP server: One starts and steers a teammate's own session.
 // The child holds no authority — each call is forwarded to Main's loopback
@@ -19,10 +21,12 @@ export const AGENTLAS_ONE_TEAM_TOOL_NAMES = [
   "one_team_compose_group",
   ...ONE_GRAPH_TOOL_NAMES,
   ...ONE_SUPERVISOR_TOOL_NAMES,
+  ...ONE_PERSONAL_TOOL_NAMES,
+  ...ONE_HISTORY_TOOL_NAMES,
 ] as const;
 
 // Inline discovery uses concise guidance; canonical input schemas and annotations
-// remain exact. This keeps the authenticated gzip launch below its 12k limit.
+// remain exact. This keeps the authenticated compressed launch below its 12k limit.
 const INLINE_GRAPH_DESCRIPTIONS: Record<string, string> = {
   one_graph_schema: "Get canonical blueprint schema or installed MCP argument schema/digest by catalog_id. Include registration protocol only for typed monitor sources.",
   one_graph_inspect: "Inspect this conversation's saved graphs/revisions. Omit graph_id to list; node_ids, node_offset or offset/limit page large results. if_cache_key avoids unchanged instructions.",
@@ -89,7 +93,7 @@ const session = { type: "string", minLength: 1, maxLength: 128, description: "se
 const tools = [
   ...${JSON.stringify(INLINE_GRAPH_TOOLS)},
   { name: "one_team_list", annotations: ro, description: "List teammates with exact member ids/current work and sessions this conversation started with status.", inputSchema: { type: "object", properties: {}, additionalProperties: false } },
-  { name: "one_team_start_session", annotations: act, description: "Assign work to an existing teammate's own session. Write intent, purpose and done criteria. Starts immediately; identical member/brief reuses receipt. Default new_session:true; false continues latest session. Read one_team_session_status with wait_seconds or let completion wake this conversation. Tell owner confirmed owner_message; refusal means nothing started. Session ids are internal; UI shows Open session. Recover uncertain handoff via same request or one_team_list.", inputSchema: { type: "object", properties: { member: { type: "string", minLength: 1, maxLength: 200, description: "Teammate name or member id (see one_team_list)." }, brief: { type: "string", minLength: 1, maxLength: 8000 }, new_session: { type: "boolean", description: "Default true: a new session. false continues the teammate's latest session." } }, required: ["member", "brief"], additionalProperties: false } },
+  { name: "one_team_start_session", annotations: act, description: "Assign work to an existing teammate's own session. Write intent, purpose and done criteria. Starts immediately; identical member/brief reuses receipt. By default continue this room's latest teammate session; new_session:true explicitly isolates a new conversation. Read one_team_session_status with wait_seconds or let completion wake this conversation. Tell owner confirmed owner_message; refusal means nothing started. Session ids are internal; UI shows Open session. Recover uncertain handoff via same request or one_team_list.", inputSchema: { type: "object", properties: { member: { type: "string", minLength: 1, maxLength: 200, description: "Teammate name or member id (see one_team_list)." }, brief: { type: "string", minLength: 1, maxLength: 8000 }, new_session: { type: "boolean", description: "Default false: continue this room's latest teammate session. true explicitly starts an isolated new conversation." } }, required: ["member", "brief"], additionalProperties: false } },
   { name: "one_team_steer", annotations: act, description: "Send a follow-up direction to a teammate session you started (queued after its current step if it is still working; reopens it if it had finished).", inputSchema: { type: "object", properties: { session_id: session, message: { type: "string", minLength: 1, maxLength: 8000 } }, required: ["session_id", "message"], additionalProperties: false } },
   { name: "one_team_session_status", annotations: ro, description: "Status of a teammate session you started; when finished, includes the teammate's final answer. wait_seconds (0-180) waits for it to finish first.", inputSchema: { type: "object", properties: { session_id: session, wait_seconds: { type: "integer", minimum: 0, maximum: 180 } }, required: ["session_id"], additionalProperties: false } },
   { name: "one_team_create_member", annotations: act, description: "Create teammate with own chat/memory/default character; default invite:true adds to this group. Use for owner-requested hiring or a missing specialist after one_team_list. Requires write/full. Existing name reuses teammate. Tell owner confirmed owner_message; refusal means nobody created. Delegate separately with one_team_start_session.", inputSchema: { type: "object", properties: { name: { type: "string", minLength: 1, maxLength: 80 }, role: { type: "string", maxLength: 100, description: "One line: what this teammate is responsible for." }, personality: { type: "string", maxLength: 1200 }, invite: { type: "boolean", description: "Default true: also add them to this group chat (ignored when this chat is not a group chat)." } }, required: ["name"], additionalProperties: false } },
@@ -97,6 +101,8 @@ const tools = [
   { name: "one_team_compose_group", annotations: act, description: "Make this exact One conversation a group with specified EXISTING active local teammates, or add them to its existing group. Use only when the owner requests a group conversation. First check one_team_list.conversation and use exact member_id values from teammates; create a missing teammate separately. Needs write or full permission. Preserves this conversation, task, goal, messages and runtime. Never removes current members or starts work. Repeating the same composition returns the same group without duplicates. Check confirmed, created, added_member_ids and owner_message; hand work separately with one_team_start_session.", inputSchema: { type: "object", properties: { members: { type: "array", minItems: 1, maxItems: 16, uniqueItems: true, items: { type: "string", minLength: 3, maxLength: 128, pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{2,127}$" }, description: "Exact member_id values returned by one_team_list for existing active local teammates." } }, required: ["members"], additionalProperties: false } },
 ];
 tools.push(...${JSON.stringify(ONE_SUPERVISOR_TOOLS)});
+tools.push(...${JSON.stringify(ONE_PERSONAL_TOOLS)});
+tools.push(...${JSON.stringify(ONE_HISTORY_TOOLS)});
 function handle(requestValue) {
   if (requestValue.method === "initialize") {
     const consumer = allowedTools();
@@ -118,6 +124,8 @@ function handle(requestValue) {
   if (name === "one_team_invite") return request("invite", { member: args.member });
   if (name === "one_team_compose_group") return request("compose_group", { members: args.members });
   if (${JSON.stringify(ONE_SUPERVISOR_TOOL_NAMES)}.includes(name)) return request("supervisor", { name, input: args });
+  if (${JSON.stringify(ONE_PERSONAL_TOOL_NAMES)}.includes(name)) return request('personal', { name, input: args });
+  if (${JSON.stringify(ONE_HISTORY_TOOL_NAMES)}.includes(name)) return request('history', { name, input: args });
   if (${JSON.stringify(ONE_GRAPH_TOOL_NAMES)}.includes(name)) return request("graph", { name, input: args });
   return Promise.resolve(error("Unknown One team tool."));
 }
@@ -137,10 +145,10 @@ process.stdin.on("data", (chunk) => { input += chunk; if (Buffer.byteLength(inpu
 
 const SOURCE_SHA256 = createHash("sha256").update(SOURCE).digest("hex");
 const BOOTSTRAP =
-  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.gunzipSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:65536});` +
+  `const z=require("node:zlib"),c=require("node:crypto"),v=require("node:vm"),b=z.brotliDecompressSync(Buffer.from(process.argv[1],"base64"),{maxOutputLength:65536});` +
   `if(b.length>65536||c.createHash("sha256").update(b).digest("hex")!==${JSON.stringify(SOURCE_SHA256)})process.exit(78);` +
   `v.runInThisContext(b.toString("utf8"),{filename:"agentlas-one-team.cjs"});`;
-const PAYLOAD = gzipSync(Buffer.from(SOURCE, "utf8"), { level: 9 }).toString("base64");
+const PAYLOAD = brotliCompressSync(Buffer.from(SOURCE, "utf8"), { params: { [constants.BROTLI_PARAM_QUALITY]: 11 } }).toString("base64");
 
 export function oneTeamMcpLaunchArgs(): string[] {
   return ["-e", BOOTSTRAP, PAYLOAD];
@@ -154,7 +162,7 @@ export function isAuthenticOneTeamMcpLaunch(command: string | null, args: readon
   if (!command || command !== process.execPath || !oneTeamMcpLaunchWithinBudget()) return false;
   if (args.length !== 3 || args[0] !== "-e" || args[1] !== BOOTSTRAP) return false;
   try {
-    return createHash("sha256").update(gunzipSync(Buffer.from(args[2], "base64"))).digest("hex") === SOURCE_SHA256;
+    return createHash("sha256").update(brotliDecompressSync(Buffer.from(args[2], "base64"), { maxOutputLength: 65536 })).digest("hex") === SOURCE_SHA256;
   } catch {
     return false;
   }

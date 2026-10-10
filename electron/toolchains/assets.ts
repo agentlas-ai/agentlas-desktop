@@ -6,6 +6,7 @@ import type { ToolchainAsset, ToolchainAssetContract, ToolchainAssetCreateInput,
 import type { Automation } from "../../shared/types";
 import { getDb } from "../store/db";
 import { createAutomation, getAutomation, markToolchainImplementationAutomation } from "../store/automations";
+import { prepareAssetFreshSession, type AssetFreshSession, type NativeAssetPublicationAuthority } from "./asset-cold-start";
 import { emitDesktopStoreChange } from "../store/change-bus";
 
 const PREFIX = "toolchain.asset.v1:";
@@ -235,42 +236,68 @@ export function withdrawToolchainAsset(id: string): ToolchainAsset {
     return save({ ...asset, status: "withdrawn" });
   }).immediate();
 }
-const publishing = new Map<string, Promise<ToolchainAsset>>();
-interface PublicationContext { permission: "read" | "write"; callerChatId?: string | null; signal?: AbortSignal; allowEffectfulValidation?: boolean }
-export function publishToolchainVersion(id: string, version: number, context: PublicationContext): Promise<ToolchainAsset> {
-  const key = `${id}@${version}`;
-  const prior = publishing.get(key); if (prior) return prior;
-  const task = validateAndPublish(id, version, context).finally(() => publishing.delete(key));
-  publishing.set(key, task); return task;
+const publishing = new Map<string, Map<object, Promise<ToolchainAsset>>>();
+export function toolchainAssetTestInProgress(id: string): boolean {
+  return [...publishing.entries()].some(([key, jobs]) => key.startsWith(id + "@") && jobs.size > 0);
 }
-async function validateAndPublish(id: string, version: number, context: PublicationContext): Promise<ToolchainAsset> {
-  const before = getToolchainAsset(id);
-  const release = before?.versions.find(item => item.version === version);
+interface PublicationContext { permission: "read" | "write"; callerChatId?: string | null; signal?: AbortSignal;
+  /** Main resolves this from the actual original owner/One command; never an IPC flag. */
+  nativePublication?: NativeAssetPublicationAuthority }
+export async function publishToolchainVersion(id: string, version: number, context: PublicationContext): Promise<ToolchainAsset> {
+  const before = getToolchainAsset(id), release = before?.versions.find(item => item.version === version);
   if (!before || !release) throw new Error("toolchain_version_not_found");
-  if (before.status === "withdrawn") throw new Error("toolchain_withdrawn");
-  const examples = release.contract.examples;
+  const session = await prepareAssetFreshSession(before, release, context.nativePublication, context.signal);
+  const key = id + "@" + version, identity = context.nativePublication!.identity;
+  const jobs = publishing.get(key) ?? new Map<object, Promise<ToolchainAsset>>();
+  const running = jobs.get(identity);
+  if (running) { session.release(); return running; }
+  const task = validateAndPublish(before, release, context, session).finally(() => {
+    try { session.release(); } finally { if (jobs.get(identity) === task) jobs.delete(identity); if (!jobs.size) publishing.delete(key); }
+  });
+  jobs.set(identity, task); publishing.set(key, jobs); return task;
+}
+async function validateAndPublish(before: ToolchainAsset, release: ToolchainAssetVersion, context: PublicationContext, session: AssetFreshSession): Promise<ToolchainAsset> {
+  const id = before.id, version = release.version, examples = release.contract.examples;
   if (!release.contract.variationStatement.trim() || examples.length < 2 || new Set(examples.map(item => sha256Value(item.input))).size < 2)
     throw new Error("toolchain_distinct_validation_examples_required");
-  // Only the owner surface can authorize the exact visible example effects. The model
-  // publication API does not forward this opt-in. Repeated validation still deduplicates.
+  const coldStart = await session.test(); session.check();
   const effectful = requiredExecutionPermission(release.implementation.snapshot.graph) === "write";
-  if (effectful && (context.permission !== "write" || context.allowEffectfulValidation !== true)) throw new Error("toolchain_owner_validation_required");
-  const { runToolchainValidation } = await import("./calls");
-  const receipts: string[] = []; const problems: string[] = [];
-  for (let index = 0; index < examples.length; index += 1) {
-    const receipt = await runToolchainValidation({ toolchainId: id, version, args: examples[index].input }, {
-      ...context, permission: effectful ? "write" : "read", requestId: `validation:${release.contentHash}:${index}`,
-    });
-    receipts.push(receipt.id);
-    if (!receipt.ok || sha256Value(receipt.result) !== sha256Value(examples[index].expectedOutput)) problems.push(`example:${index}:${receipt.error ?? "output_mismatch"}`);
-    if (receipt.status === "uncertain" || receipt.status === "running" || effectful && problems.length) break;
-  }
-  return getDb().transaction(() => {
-    const current = getToolchainAsset(id);
-    if (!current || current.status === "withdrawn" || current.revision !== before.revision) throw new Error("toolchain_changed_during_validation");
-    const passed = problems.length === 0;
+  const receipts: string[] = [], problems: string[] = [];
+  // Retained actual passed example receipts are immutable-version evidence, never a grant.
+  if (coldStart.passed && release.validation.state === "passed") {
+    const { getToolchainCall } = await import("./calls");
+    if (release.validation.receipts.length !== examples.length || new Set(release.validation.receipts).size !== examples.length
+      || release.validation.problems.length || !release.validation.at || release.validation.receipts.some((receiptId, index) => {
+        const r = getToolchainCall(receiptId);
+        return !r || r.status !== "succeeded" || r.ok !== true || !r.completedAt || r.dryRun
+          || r.toolchainId !== id || r.version !== version || r.contentHash !== release.contentHash
+          || r.requestId !== "validation:" + release.contentHash + ":" + index
+          || r.inputHash !== sha256Value({ toolchainId: id, version, args: examples[index].input,
+            permission: effectful ? "write" : "read", dryRun: false, validation: true })
+          || sha256Value(r.result) !== sha256Value(examples[index].expectedOutput);
+      })) throw new Error("toolchain_validation_receipt_unconfirmed");
+    receipts.push(...release.validation.receipts); problems.push(...release.validation.problems);
+  } else if (coldStart.passed) {
+    const { runToolchainValidation } = await import("./calls");
+    for (let index = 0; index < examples.length; index += 1) {
+      session.check();
+      const receipt = await session.validateExample(index, () => runToolchainValidation({ toolchainId: id, version, args: examples[index].input }, {
+        ...context, callerChatId: session.lease.actor.chatId, permission: effectful ? "write" : "read",
+        requestId: "validation:" + release.contentHash + ":" + index,
+      }));
+      session.check(); receipts.push(receipt.id);
+      if (!receipt.ok || receipt.status !== "succeeded" || receipt.toolchainId !== id || receipt.version !== version || receipt.contentHash !== release.contentHash
+        || sha256Value(receipt.result) !== sha256Value(examples[index].expectedOutput)) problems.push("example:" + index + ":" + (receipt.error ?? "output_mismatch"));
+      if (receipt.status === "uncertain" || receipt.status === "running" || effectful && problems.length) break;
+    }
+  } else problems.push("fresh_session_discovery_selection_failed");
+  const passed = coldStart.passed && problems.length === 0 && receipts.length >= examples.length;
+  const exposedBy = { ...session.lease.actor, at: new Date().toISOString(), authorityRevision: session.lease.authorityRevision };
+  return session.commit({ coldStart, validation: { passed, receipts, problems }, exposedBy }, () => getDb().transaction(() => {
+    session.check(); const current = getToolchainAsset(id);
+    if (!current || current.revision !== before.revision) throw new Error("toolchain_changed_during_validation");
     return save({ ...current, ...(passed ? { stableVersion: version, status: "callable" as const, name: release.contract.name } : {}),
-      versions: current.versions.map(item => item.version === version ? { ...item,
+      versions: current.versions.map(item => item.version === version ? { ...item, coldStart, exposedBy,
         validation: { state: passed ? "passed" as const : "failed" as const, at: new Date().toISOString(), receipts, problems } } : item) });
-  }).immediate();
+  }).immediate());
 }

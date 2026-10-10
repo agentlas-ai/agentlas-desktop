@@ -28,6 +28,10 @@ import { checkAliveAgentAccess } from "../billing";
 import { ALIVE_CONTROLLER_SLUG, builtinAgentId } from "../architecture/manifest";
 import { cachedAliveModelOrder, refreshAliveModelOrder } from "./model-order";
 import { runAliveServingDecision } from "./serving-wake";
+import { createAliveDecisionTransport } from "../daemon/alive-decision-port";
+import { agentContextOwnerBinding } from "../runtime/agent-context-admission";
+import { configuredNativeGuiChannel, configuredNativeGuiOwner } from "../invocation/native-gui-startup";
+import { nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
 import { AliveHostError, AliveOrganismHost, parseAliveSurfaceChat, parseAliveTokenLimit, type AliveHostDeps } from "./host";
 import type { GoalPlaygroundDeps, GoalRunView } from "./goal-playground";
 import type { AliveChangedEvent, AliveState, AliveSurface, AliveResumeBarrier } from "../../shared/alive";
@@ -206,6 +210,17 @@ export function startAliveOrganisms(): AliveOrganismHost {
     intervalMs: aliveOrganismTickMs(),
     playground: playgroundDeps,
     light: {
+      ...(configuredNativeGuiOwner()?{decisionTransport:createAliveDecisionTransport({
+        ownerBinding:agentContextOwnerBinding,
+        async dispatch(wire){
+          const channel=configuredNativeGuiChannel(),identity=channel && nativeGuiChannelIdentity(channel);
+          if(!channel || !identity)throw Object.assign(new Error("alive_decision_native_channel_unavailable"),{code:"alive_decision_native_channel_unavailable"});
+          const result=await channel.dispatch("native.attach",wire);
+          if(configuredNativeGuiChannel()!==channel || nativeGuiChannelIdentity(channel)!==identity)
+            throw Object.assign(new Error("alive_decision_native_channel_changed"),{code:"alive_decision_native_channel_changed"});
+          return result;
+        },
+      })}:{}),
       // The Agentlas-served runtime gets the decision-only serving call (own prompt, strict schema, measured usage),
       // not the chat harness runner; every CLI runtime uses its runner's judgment no-tools path.
       pickRunner: (status) => status.kind === "agentlas" ? { runner: runAliveServingDecision, label: "Agentlas" } : pickRunner(status),

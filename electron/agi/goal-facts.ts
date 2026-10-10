@@ -195,11 +195,19 @@ function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<
   const checkpoint = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND kind IN
     ('run.task_checkpoint','run.checkpoint_continuation','run.ongoing_cycle_verified','run.cycle_recorded',
      'run.wait_notification','run.wait_claim_reconciled') ORDER BY seq DESC LIMIT 1`).get(run.id) as { seq: number } | undefined;
-  const complete = tableExists(db, "run_events") && tableExists(db, "long_run_worker_attempts") ? db.prepare(`SELECT e.id FROM run_events e
-    WHERE e.chat_id=? AND e.kind IN ('mcp_tool-use','runtime_effect_boundary') AND e.ts>=?
-    AND (e.kind='runtime_effect_boundary' OR json_extract(e.payload_json,'$.toolCompleted')=1)
+  // Newest completed worker effect since the revision. Read per kind so each walks
+  // idx_run_events_chat_kind_ts backwards and stops at the first match; the IN-list form
+  // sorted every tool event of the room (28k in Youtube launch) on each monitor tick.
+  const completedEffect = (kind: string, extra: string) => db.prepare(`SELECT e.id, e.ts, e.seq FROM run_events e
+    WHERE e.chat_id=? AND e.kind=? AND e.ts>=? ${extra}
     AND EXISTS(SELECT 1 FROM long_run_worker_attempts a WHERE a.run_id=? AND a.invocation_run_id=e.run_id)
-    ORDER BY e.ts DESC,e.seq DESC LIMIT 1`).get(run.rootChatId, revision?.created_at ?? "", run.id) as { id: string } | undefined : undefined;
+    ORDER BY e.ts DESC,e.seq DESC LIMIT 1`).get(run.rootChatId, kind, revision?.created_at ?? "", run.id) as { id: string; ts: string; seq: number } | undefined;
+  const complete = tableExists(db, "run_events") && tableExists(db, "long_run_worker_attempts") ? (() => {
+    const boundary = completedEffect("runtime_effect_boundary", "");
+    const tool = completedEffect("mcp_tool-use", "AND json_extract(e.payload_json,'$.toolCompleted')=1");
+    if (!boundary || !tool) return boundary ?? tool;
+    return tool.ts > boundary.ts || tool.ts === boundary.ts && tool.seq > boundary.seq ? tool : boundary;
+  })() : undefined;
   // Column selection permits older schema fixtures without treating a timestamp as a policy change.
   const row = (table: string, names: string[], where: string, args: unknown[]) => {
     if (!tableExists(db, table)) return [];

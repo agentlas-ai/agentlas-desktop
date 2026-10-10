@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.2.84 — 2026-10-10
+
+- Keep One supervision and Toolchain use tied to the current task, run, command and authority, including follow-up, Stop and recovery.
+- Apply organization document updates against current document and access revisions while retaining original work ownership.
+- Retain isolated Codex sessions and queued-turn context so each turn keeps its own tools and state.
+- Fix scroll and pointer lag in long rooms: goal cost totals are no longer recomputed from the whole event log on every screen read, and automation and monitor reads use indexed lookups (room open: Main 44% → 5% busy, longest stall 2.5 s → under 0.1 s).
+- Start a fresh runtime thread with a short handoff when a room's thread grows too large, and compact ordinary Codex runs earlier.
+- Agent Strategy: goals record KPI samples, detect stalls and breakouts with two-window trends, and re-plan strategy within budget and cooldown limits.
+- Follow-up cards can be closed or discarded, automatic resend stops when the run is gone, and instructions that fail to start are kept in the conversation.
+- Show the default portrait when an agent picture cannot load, and stop development builds from installing login items.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.83 — 2026-10-09
 
 - Open One in its own window and tray, with durable Supervisor work, results, questions, approvals, follow-up and Stop controls.

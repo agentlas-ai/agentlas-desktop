@@ -35,6 +35,7 @@ import type {
   ScheduleSpec,
 } from "../shared/types";
 import type { PluginBuilderProgressEvent } from "../shared/plugin-builder";
+import type { OneVaultWindowBridge } from "../shared/one-vault";
 import type { ConnectableRuntime, RuntimeConnectSnapshot } from "../shared/runtime-connect";
 import type {
   SiteActivityEvent,
@@ -613,6 +614,7 @@ const api: AgentlasIpc = {
   },
   agentWorkspace: {
     getWorkspace: (agentId) => ipcRenderer.invoke("agentWorkspace:get", agentId),
+    memoryCounts: (agentIds) => ipcRenderer.invoke("agentWorkspace:memoryCounts", agentIds),
     listFiles: (agentId, relativeDir) => ipcRenderer.invoke("agentWorkspace:listFiles", agentId, relativeDir),
     readFile: (agentId, relativePath) => ipcRenderer.invoke("agentWorkspace:readFile", agentId, relativePath),
     prepareFromMemory: (input) => ipcRenderer.invoke("agentWorkspace:prepareFromMemory", input),
@@ -1035,6 +1037,59 @@ const api: AgentlasIpc = {
     capture: (input) => ipcRenderer.invoke("oneContext:capture", input),
     openPermissions: (input) => ipcRenderer.invoke("oneContext:openPermissions", input),
   },
+  onePersonalData: {
+    gmailCatalog: () => ipcRenderer.invoke('onePersonalData:gmailCatalog'),
+    gmailPropose: (input) => ipcRenderer.invoke('onePersonalData:gmailPropose', input),
+    gmailApprove: (input) => ipcRenderer.invoke('onePersonalData:gmailApprove', input),
+    gmailRegister: (input) => ipcRenderer.invoke('onePersonalData:gmailRegister', input),
+    gmailPause: (input) => ipcRenderer.invoke('onePersonalData:gmailPause', input),
+    gmailRevoke: (input) => ipcRenderer.invoke('onePersonalData:gmailRevoke', input),
+    gmailResume: (input) => ipcRenderer.invoke('onePersonalData:gmailResume', input),
+    gmailIntake: (input) => ipcRenderer.invoke('onePersonalData:gmailIntake', input),
+    historySnapshot: (input) => ipcRenderer.invoke('onePersonalData:historySnapshot', input),
+    historyObserve: (input) => ipcRenderer.invoke('onePersonalData:historyObserve', input),
+    historyDraft: (input) => ipcRenderer.invoke('onePersonalData:historyDraft', input),
+    historyCollectDraft: (input) => ipcRenderer.invoke('onePersonalData:historyCollectDraft', input),
+    historyEvaluate: (input) => ipcRenderer.invoke('onePersonalData:historyEvaluate', input),
+    historyAccept: (input) => ipcRenderer.invoke('onePersonalData:historyAccept', input),
+    historyRun: (input) => ipcRenderer.invoke('onePersonalData:historyRun', input),
+    historyProposeFeedback: (input) => ipcRenderer.invoke('onePersonalData:historyProposeFeedback', input),
+    historyAcceptFeedback: (input) => ipcRenderer.invoke('onePersonalData:historyAcceptFeedback', input),
+    historyReconcileFeedback: (input) => ipcRenderer.invoke('onePersonalData:historyReconcileFeedback', input),
+    historyControl: (input) => ipcRenderer.invoke('onePersonalData:historyControl', input),
+    historyRestore: (input) => ipcRenderer.invoke('onePersonalData:historyRestore', input),
+    bootstrap: (input) => ipcRenderer.invoke('onePersonalData:bootstrap', input),
+    listTargets: () => ipcRenderer.invoke('onePersonalData:listTargets'),
+    createTarget: (input) => ipcRenderer.invoke('onePersonalData:createTarget', input),
+    selectTarget: (input) => ipcRenderer.invoke('onePersonalData:selectTarget', input),
+    connectorCatalog: (input) => ipcRenderer.invoke('onePersonalData:connectorCatalog', input),
+    registerSource: (input) => ipcRenderer.invoke('onePersonalData:registerSource', input),
+    openSpaceLink: (input) => ipcRenderer.invoke('onePersonalData:openSpaceLink', input),
+    snapshot: (input) => ipcRenderer.invoke('onePersonalData:snapshot', input),
+    create: (input) => ipcRenderer.invoke('onePersonalData:create', input),
+    edit: (input) => ipcRenderer.invoke('onePersonalData:edit', input),
+    collect: (input) => ipcRenderer.invoke('onePersonalData:collect', input),
+    sourceControl: (input) => ipcRenderer.invoke('onePersonalData:sourceControl', input),
+    accept: (input) => ipcRenderer.invoke('onePersonalData:accept', input),
+    cancelProposal: (input) => ipcRenderer.invoke('onePersonalData:cancelProposal', input),
+    rebaseProposal: (input) => ipcRenderer.invoke('onePersonalData:rebaseProposal', input),
+    cancelInference: (input) => ipcRenderer.invoke('onePersonalData:cancelInference', input),
+    followUp: (input) => ipcRenderer.invoke('onePersonalData:followUp', input),
+  },
+  oneVault: {
+    openRunKeyRequest:input=>ipcRenderer.invoke('oneVault:openRunKeyRequest',input),
+    runKeyStatus:input=>ipcRenderer.invoke('oneVault:runKeyStatus',input),
+    recoverableOperations:()=>ipcRenderer.invoke('oneVault:recoverableOperations'),
+    openStoredOperation:input=>ipcRenderer.invoke('oneVault:openStoredOperation',input),
+    reviewHostTrust:input=>ipcRenderer.invoke('oneVault:reviewHostTrust',input),
+  },
+  oneProvider: {
+    bootstrap:input=>ipcRenderer.invoke('oneProvider:bootstrap',input),
+    prepare:input=>ipcRenderer.invoke('oneProvider:prepare',input),
+    execute:input=>ipcRenderer.invoke('oneProvider:execute',input),
+    status:input=>ipcRenderer.invoke('oneProvider:status',input),
+    openAudio:input=>ipcRenderer.invoke('oneProvider:openAudio',input),
+  },
   oneWindow: {
     getState: () => ipcRenderer.invoke("oneWindow:getState"),
     setAlwaysOnTop: (input: { value: boolean }) => ipcRenderer.invoke("oneWindow:setAlwaysOnTop", input),
@@ -1408,6 +1463,19 @@ const oneGroups = new Set(["oneWindow", "oneHarness", "auth", "app", "config", "
   "confirm", "attention", "browserUi", "browser", "browserAutofill", "browserAnnotation", "computerUse", "mcpTools", "secrets", "automations", "schedule",
   "agents", "agentRuntime", "skills", "workStart", "goalPanel", "workLiveView", "localModelHub", "env"]);
 const exposedApi = oneWindowRole ? Object.fromEntries(Object.entries(api).filter(([group]) => group.startsWith("one") || oneGroups.has(group))) : api;
+if(process.argv.includes('--one-vault-window')) {
+  // This origin receives only ciphertext and signed, value-free request/status data.
+  // It has no general env, files, invoke, diagnostics, browser or capture bridge.
+  const vault:OneVaultWindowBridge={
+    bootstrap:()=>ipcRenderer.invoke('oneVault:bootstrap'),
+    registerSender:input=>ipcRenderer.invoke('oneVault:registerSender',input),
+    submit:(id,envelope)=>ipcRenderer.invoke('oneVault:submit',id,envelope),
+    reconcile:(id,query)=>ipcRenderer.invoke('oneVault:reconcile',id,query),
+    cancel:(id,reason)=>ipcRenderer.invoke('oneVault:cancel',id,reason),
+    onChanged:listener=>{const wrapped=()=>listener();ipcRenderer.on('oneVault:changed',wrapped);return()=>ipcRenderer.removeListener('oneVault:changed',wrapped);},
+  };
+  contextBridge.exposeInMainWorld('oneVault',vault);
+} else {
 contextBridge.exposeInMainWorld("agentlas", exposedApi);
 
 // 드래그&드롭으로 들어온 File/폴더의 실제 경로는 preload 안에서만 얻는다.
@@ -1600,3 +1668,4 @@ contextBridge.exposeInMainWorld("agentlasMenu", {
     return () => ipcRenderer.removeListener("menu:navigate", wrapped);
   },
 });
+}

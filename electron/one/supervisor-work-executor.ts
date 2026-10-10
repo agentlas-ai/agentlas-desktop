@@ -138,7 +138,11 @@ export class OneSupervisorWorkExecutor {
         if(row && ["stored","dispatching"].includes(row.state))this.deps.store.update(row,{state:"failed",acknowledgement:"settled",reason});
         return;
       }
-      this.deps.queue.transition(current, "held", reason);
+      // Only this pre-begin branch may mint the local-cancellation marker.
+      // A native error can carry arbitrary text after the uncertain boundary.
+      const heldReason = !starting ? 'held_before_native_dispatch'
+        : reason === 'held_before_native_dispatch' ? 'native_dispatch_outcome_unknown' : reason;
+      this.deps.queue.transition(current, "held", heldReason);
       const row = this.deps.store.get(claimed.command_id);
       if (row && ["stored", "dispatching"].includes(row.state)) this.deps.store.update(row, {
         state: "held", acknowledgement: starting ? "unknown" : "stored",

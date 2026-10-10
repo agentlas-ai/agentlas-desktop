@@ -65,7 +65,22 @@ function sameFile(left: BigIntStats, right: BigIntStats): boolean {
     left.ctimeNs === right.ctimeNs;
 }
 
+/**
+ * Codex replaces models_cache.json atomically (new inode), so a read that straddles the swap sees a
+ * different inode/size between its lstat/fstat/lstat checks and was reported as "no-cache" 103 times in
+ * the Youtube room's log (2026-10-07..10). A swap settles within milliseconds: retry the whole stable read
+ * a few times before giving up. Genuinely absent/oversized/symlinked files still return null on the first pass.
+ */
 async function readStableCache(cachePath: string): Promise<string | null> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const text = await readStableCacheOnce(cachePath);
+    if (text !== null) return text;
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, 40 * (attempt + 1)));
+  }
+  return null;
+}
+
+async function readStableCacheOnce(cachePath: string): Promise<string | null> {
   let handle: Awaited<ReturnType<typeof fs.open>> | null = null;
   try {
     const pathBefore = await fs.lstat(cachePath, { bigint: true });

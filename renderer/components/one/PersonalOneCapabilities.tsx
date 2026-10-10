@@ -26,7 +26,6 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
   const [error, setError] = useState<string | null>(null);
   const [install, setInstall] = useState<string | null>(null);
   const [configure, setConfigure] = useState<string | null>(null);
-  const [keys, setKeys] = useState<Record<string, string>>({});
   const [query, setQuery] = useState("");
   const [createRepeat, setCreateRepeat] = useState(false);
   const [manualUrl,setManualUrl]=useState<string|null>(null);
@@ -56,7 +55,7 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
     const off = ipcEvents()?.onStoreChanged?.(() => { void load(); });
     return () => { ++revision.current; off?.(); abort.current?.abort(); };
   }, [open, load]);
-  useEffect(() => { setKeys({}); setConfigure(null); setInstall(null); setError(null); setOauthMessage(null);setManualUrl(null); }, [open]);
+  useEffect(() => { setConfigure(null); setInstall(null); setError(null); setOauthMessage(null);setManualUrl(null); }, [open]);
   const perform = async (id: string, action: () => Promise<unknown>) => {
     if (busy) return;
     setBusy(id); setError(null);
@@ -78,15 +77,10 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
 
     if (!status.connected) throw new Error("capability_not_ready");
   });
-  const saveKeys = (server: InstalledMcpServer) => perform(server.id, async () => {
-    const api = ipc(); if (!api) throw new Error("desktop_unavailable");
-    const supplied = server.envKeys.filter(key => keys[key]?.trim());
-    if (!supplied.length) return;
-    for (const key of supplied) await api.env.set(key, keys[key].trim());
-    setKeys({}); setConfigure(null);
-    const status = await api.mcpTools.test(server.id);
-
-  });
+  const requestSecureSetup = (server:InstalledMcpServer) => {
+    onPrompt(copy(`도구 '${server.name}' (ID: ${server.id})의 필요한 연결 키를 원래 One 요청에 묶어 전용 Vault 입력으로 준비해줘. 현재 계정·범위·Desktop host·권한·저장 위치·유료 동작을 먼저 확인해줘.`, `Prepare dedicated Vault entry for tool '${server.name}' (ID: ${server.id}) bound to this original One request. Check current account, scope, exact Desktop host, permissions, storage and paid actions first.`));
+    setConfigure(null);onClose();
+  };
   const repeatItems = automations.filter(item => !!chatId && (item.monitor?.originChatId === chatId));
   const visibleCatalog = catalog.filter(item => !installed.some(server => server.catalogId === item.id)
     && `${item.name} ${item.nameEn} ${item.description}`.toLowerCase().includes(query.toLowerCase())).slice(0, 30);
@@ -109,13 +103,12 @@ export function PersonalOneCapabilities({ open, locale, chatId, oneId, onClose, 
             <div className={styles.actions}>
               <button type="button" disabled={!!busy} onClick={() => void perform(server.id, () => ipc()!.mcpTools.setEnabled(server.id, !server.enabled))}>{server.enabled ? copy("끄기", "Turn off") : copy("켜기", "Turn on")}</button>
               <button type="button" disabled={!!busy || !server.enabled} onClick={() => void connect(server)}>{copy("로그인·연결 확인", "Sign in / verify")}</button>
-              {server.envKeys.length > 0 && <button type="button" onClick={() => {setKeys({}); setConfigure(configure === server.id ? null : server.id);}}>{copy("키 설정", "Set keys")}</button>}
+              {server.envKeys.length > 0 && <button type="button" onClick={() => {setConfigure(configure === server.id ? null : server.id);}}>{copy("키 설정", "Set keys")}</button>}
             </div>
-            {configure === server.id && <form onSubmit={event => {event.preventDefault(); void saveKeys(server);}}>
-              {server.envKeys.map(key => <label key={key}>{key}<input type="password" autoComplete="off" spellCheck={false} value={keys[key] ?? ""} onChange={event => setKeys(prior => ({...prior, [key]:event.target.value}))}/></label>)}
-              <small>{copy("입력한 값은 키체인에만 저장되며 대화에 첨부되지 않습니다.", "Values are stored in the keychain and are never attached to the conversation.")}</small>
-              <button type="submit" disabled={!!busy || !Object.values(keys).some(value => value.trim())}>{copy("저장하고 확인", "Save and verify")}</button>
-            </form>}
+            {configure === server.id && <div>
+              <p>{copy("키는 현재 One 실행에 묶인 전용 Vault 창에서 직접 입력합니다. 현재 권한과 안전한 경로가 확인돼야 입력할 수 있습니다.","Enter keys directly in a dedicated Vault window bound to the current One run after current authority and the secure route are verified.")}</p>
+              <button type="button" disabled={!!busy} onClick={()=>requestSecureSetup(server)}>{copy("보안 입력 요청 준비","Prepare secure entry request")}</button>
+            </div>}
           </article>;
         })}
         {oauthMessage && <div role="status" className={styles.notice}>{oauthMessage}{manualUrl&&<p><a href={manualUrl} target="_blank" rel="noopener noreferrer">{copy("공식 로그인 페이지 열기","Open official sign-in page")}</a></p>}<button type="button" onClick={() => {abort.current?.abort(); setOauthMessage(null);setManualUrl(null);}}>{copy("로그인 취소", "Cancel sign-in")}</button></div>}

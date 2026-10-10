@@ -898,6 +898,13 @@ export function getAuthenticatedActorIds(): { workspaceId: string; userId: strin
   return { workspaceId: _cache.workspaceId, userId: _cache.userId };
 }
 
+/** Native value-free epoch. Secret cookies and their hashes are never protocol identities. */
+export function getAuthenticatedSessionBinding(): { workspaceId: string; userId: string; sessionId: string; expiresAt: number | null } | null {
+  const actor = getAuthenticatedActorIds();
+  if (!actor) return null;
+  return { ...actor, sessionId: `native-session:${_sessionGeneration}`, expiresAt: _cache?.expiresAt ?? null };
+}
+
 export async function signInWithGoogle(parent: BrowserWindow | null): Promise<AuthSession> {
   assertDevelopmentEffectAllowed("auth.sign-in-google");
   const { BrowserWindow, session: electronSession } = electronApi();

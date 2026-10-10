@@ -190,9 +190,11 @@ export function bindCreatedGoalContinuationWorkspace(input: {
 function hasPriorGoalBinding(a: Automation): boolean {
   if (a.createdBy !== "agent") return false;
   if (a.goalId) return true;
-  return !!getDb().prepare(`SELECT 1 FROM long_run_events WHERE kind = 'goal.automation_provenance_bound'
-    AND json_extract(payload_json, '$.automationId') = ?
-    AND json_extract(payload_json, '$.automationCreatedAt') = ? LIMIT 1`).get(a.id, a.createdAt);
+  // Indexed per run (see readCurrentGoalAutomationBinding); a bare kind filter scanned the log.
+  return !!getDb().prepare(`SELECT 1 FROM long_runs r CROSS JOIN long_run_events e
+    WHERE e.run_id = r.id AND e.kind = 'goal.automation_provenance_bound'
+    AND json_extract(e.payload_json, '$.automationId') = ?
+    AND json_extract(e.payload_json, '$.automationCreatedAt') = ? LIMIT 1`).get(a.id, a.createdAt);
 }
 
 export function automationWorkspaceView(a: Automation): Automation {

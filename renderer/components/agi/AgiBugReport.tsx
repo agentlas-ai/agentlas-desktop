@@ -269,9 +269,10 @@ export function AgiDefectChip({ chatId, locale }: { chatId: string | null; local
     const fixed = visibleDefects.find((defect) => defect.resolved);
     if (!fixed?.resolved) return null;
     const commit = fixed.resolved.commit.split(",")[0] ?? "";
+    // The commit id means nothing to the owner on the goal line; it stays in the tooltip only.
     return <span className={styles.chip} data-agi-defect-resolved={fixed.code}
-      title={fixed.resolved.note || (ko ? "이 결함은 수정됐어요" : "This defect was fixed")}>
-      {ko ? `해결됨${commit ? ` · ${commit}` : ""}` : `Fixed${commit ? ` · ${commit}` : ""}`}</span>;
+      title={[fixed.resolved.note || (ko ? "이 결함은 수정됐어요" : "This defect was fixed"), commit].filter(Boolean).join(" · ")}>
+      {ko ? "해결됨" : "Fixed"}</span>;
   }
   return <AgiIncidentReportButton key={pending.defectId} locale={locale} onAcknowledged={load}
     draft={{ defectId: pending.defectId, failureCode: pending.code, chatId }} />;

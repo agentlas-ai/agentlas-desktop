@@ -82,7 +82,9 @@ export function ensureGoalPlanTables(db: Db = getDb()): void {
 export type GoalPlanDecisionKind =
   | "shape" | "shape_fallback" | "reshape_requested" | "tactic_dispatch" | "tactic_status" | "strategy_review" | "plan_op"
   /** An edit the owner made in the goal panel (electron/long-run/goal-panel.ts). Receipt only; the node rows carry the state. */
-  | "owner_edit" | "marker_apply" | "marker_context";
+  | "owner_edit" | "marker_apply" | "marker_context"
+  /** Agent Strategy (electron/long-run/agent-strategy.ts): a KPI state transition receipt, and the outcome of a strategy shift. */
+  | "kpi_state" | "strategy_shift";
 
 export interface GoalPlanDecisionRow {
   id: string;

@@ -14,7 +14,7 @@ import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneCha
 import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInput";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
 import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
-import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, resumeOneFollowupIntent, waitForOneFollowupDelivery, type OneFollowupIntent } from "@/lib/one-followup-outbox";
+import { readOneFollowupOutbox, saveOneFollowupIntent, removeOneFollowupIntent, pauseOneFollowupOutbox, pauseOneFollowupIntent, resumeOneFollowupIntent, waitForOneFollowupDelivery, type OneFollowupIntent } from "@/lib/one-followup-outbox";
 import { ONE_PREFLIGHT_STEER_REQUEST_KEYS, normalizeOnePreflightSteerRequest } from "@shared/one-preflight-steers";
 
 import { AutomationMonitorStrip } from "../AutomationMonitorStrip";
@@ -1492,6 +1492,7 @@ function OneSessionsShell() {
   const followupDeliveryNoticeRef = useRef<{ chatId: string; text: string } | null>(null);
   const followupRefreshesRef = useRef(new Map<string, ReturnType<typeof createCoalescedRefresh<undefined>>>());
   const currentTurnDeliveriesRef = useRef(new Map<string, Promise<void>>());
+  const currentTurnBackoffRef = useRef(new Map<string, { failures: number; nextAt: number }>());
   const followupBridgesRef = useRef(new Map<string, ReturnType<typeof ipc>>());
   // Instructions typed while the run is still being prepared (no runId yet).
   // They join the queue strip at once and reach Main as steers the moment the
@@ -1625,6 +1626,12 @@ function OneSessionsShell() {
   const deliverCurrentTurnFollowup = useCallback((intent: OneFollowupIntent, bridge: ReturnType<typeof ipc>) => {
     if (!bridge || !intent.currentTurnRunId || currentTurnDeliveriesRef.current.has(intent.intentId)) return;
     if (locallyStoppedFollowupIdsRef.current.has(intent.intentId) || intent.autoDeliveryPaused || intent.requiresReprepare) return;
+    // The room's 3 s outbox tick re-entered here for every failure. After an app restart the
+    // run stays owned by the previous process, so Main refused each attempt
+    // (`invocation_owner_unavailable`) — 1,260 refusals in one day in Youtube launch, 2026-10-10.
+    // Back off per intent and stop automatic delivery once the refusal is definitive.
+    const backoff = currentTurnBackoffRef.current.get(intent.intentId);
+    if (backoff && Date.now() < backoff.nextAt) return;
     const task = (async () => {
       try {
         // Issue each captured gesture immediately. Main's durable identity makes
@@ -1641,9 +1648,17 @@ function OneSessionsShell() {
           setCurrentTurnFollowups(current => [...current.filter(item => item.intent.intentId !== intent.intentId),
             { intent, receipt: nativeReceipt }].slice(-64));
         }
+        currentTurnBackoffRef.current.delete(intent.intentId);
         removeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
         if (activeThreadChatIdRef.current === intent.chatId) setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, intent.chatId));
-      } catch {
+      } catch (cause) {
+        const failures = (currentTurnBackoffRef.current.get(intent.intentId)?.failures ?? 0) + 1;
+        const definitive = String((cause as Error | undefined)?.message ?? cause).includes("invocation_owner_unavailable");
+        currentTurnBackoffRef.current.set(intent.intentId, { failures, nextAt: Date.now() + Math.min(120_000, 3_000 * 2 ** failures) });
+        if (definitive || failures >= 6) {
+          // The text is kept; only the automatic retry stops. The owner resends or discards it.
+          try { pauseOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId); } catch { /* retried on the next read */ }
+        }
         if (activeThreadChatIdRef.current !== intent.chatId) return;
         setDelayedFollowupIds(current => current.has(intent.intentId) ? current : new Set([...current, intent.intentId]));
         setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, intent.chatId));
@@ -8538,7 +8553,7 @@ function OneSessionsShell() {
                     {/* 이름만 쓴다. "상주 동료 · 전용 터미널" 같은 설명 부제는 아무것도
                         알려주지 않으면서 이름 아래 자리를 차지했다(오너 결정 2026-08-24).
                         단톡방만 사람 수를 쓴다 — 그건 실제로 바뀌는 정보다. */}
-                    <strong>{activeTaskforce?.title
+                    <strong title={activeTaskforce?.title}>{activeTaskforce?.title
                       ?? ((activeSeatDissolved || activeSeatEmpty) && activeSeat?.title?.trim() ? activeSeat.title.trim() : null)
                       ?? activeOneMember?.displayName
                       ?? (activeSeatEmpty ? previousOccupantName : null)
@@ -9664,53 +9679,79 @@ function OneSessionsShell() {
                 </button>
               </div>
             ))}
+            {/* Receipt cards: short plain copy, and every card can be closed. Internal states
+                (Main acceptance, run ownership) stay out of the owner's view; the durable rows and
+                the automatic-retry stop are unchanged by closing a card. */}
             {currentTurnFollowups.filter(item => item.intent.chatId === activeThreadChatId
               && (item.receipt.status === "uncertain" || item.receipt.status === "rejected")).map(item => (
-              <div key={item.intent.intentId} className={styles.steeringQueue} role="status" data-one-current-turn-followup={item.receipt.status}>
+              <div key={item.intent.intentId} className={`${styles.steeringQueue} ${styles.followupReceiptCard}`} role="status" data-one-current-turn-followup={item.receipt.status}>
                 <strong>{item.intent.userPrompt}</strong>
                 <small>{item.receipt.status === "uncertain"
-                  ? (appLocale === "ko" ? "이 지시가 전달됐는지 확인하지 못했습니다. 다시 보내지 않고 보관합니다." : "Delivery is unconfirmed. This instruction is preserved without resending it.")
-                  : (appLocale === "ko" ? "이 지시를 현재 실행에 전달하지 못했습니다." : "This instruction was not delivered to the current run.")}</small>
-                {item.receipt.status === "rejected" && <button type="button" disabled={composerHasText} onClick={() => {
-                  if (composerHandleRef.current?.getValue().trim()) return;
-                  setComposer(item.intent.userPrompt);
-                  setCurrentTurnFollowups(current => current.filter(value => value.intent.intentId !== item.intent.intentId));
-                }}>{appLocale === "ko" ? "초안으로 가져오기" : "Restore draft"}</button>}
+                  ? (appLocale === "ko" ? "전달됐는지 확인하지 못했어요. 자동으로 다시 보내지 않아요." : "Delivery wasn't confirmed. It won't be resent automatically.")
+                  : (appLocale === "ko" ? "실행 중인 작업에 전달하지 못했어요." : "This couldn't reach the running work.")}</small>
+                <div className={styles.followupReceiptActions}>
+                  <button type="button" className={styles.admissionAction} disabled={composerHasText} onClick={() => {
+                    if (composerHandleRef.current?.getValue().trim()) return;
+                    setComposer(item.intent.userPrompt);
+                    setCurrentTurnFollowups(current => current.filter(value => value.intent.intentId !== item.intent.intentId));
+                  }}>{appLocale === "ko" ? "초안으로 가져오기" : "Restore draft"}</button>
+                  <button type="button" className={styles.admissionAction} data-one-followup-dismiss="current-turn" onClick={() => {
+                    setCurrentTurnFollowups(current => current.filter(value => value.intent.intentId !== item.intent.intentId));
+                  }}>{appLocale === "ko" ? "닫기" : "Close"}</button>
+                </div>
               </div>
             ))}
             {localFollowupIntents.filter(item => item.chatId === activeThreadChatId
-              && (delayedFollowupIds.has(item.intentId) || item.requiresReprepare || item.autoDeliveryPaused)).map(item => (
-              <div key={item.intentId} className={styles.steeringQueue} role="status" data-one-local-followup={item.intentId}>
-                <span>{item.autoDeliveryPaused || locallyStoppedFollowupIdsRef.current.has(item.intentId)
-                  ? (appLocale === "ko" ? "추가 지시 자동 전달 중단" : "Follow-up delivery paused")
-                  : item.requiresReprepare ? (appLocale === "ko" ? "팀 선택 확인 필요" : "Team preparation required") : (appLocale === "ko" ? "추가 지시 로컬 보관" : "Follow-up saved locally")}</span>
+              && (delayedFollowupIds.has(item.intentId) || item.requiresReprepare || item.autoDeliveryPaused)).map(item => {
+              const paused = Boolean(item.autoDeliveryPaused || locallyStoppedFollowupIdsRef.current.has(item.intentId));
+              return (
+              <div key={item.intentId} className={`${styles.steeringQueue} ${styles.followupReceiptCard}`} role="status" data-one-local-followup={item.intentId}>
+                <span>{item.requiresReprepare ? (appLocale === "ko" ? "팀 확인 필요" : "Team check needed")
+                  : paused ? (appLocale === "ko" ? "보내지 않은 지시" : "Not sent")
+                    : (appLocale === "ko" ? "전송 대기" : "Waiting to send")}</span>
                 <strong>{item.userPrompt}</strong>
-                <small>{item.requiresReprepare ? (appLocale === "ko" ? "바뀐 팀의 실행 권한을 새로 확인해야 합니다. 이 글은 전송되지 않았습니다." : "The changed team needs fresh execution authority. This text has not been sent.") : (appLocale === "ko" ? "Main 접수 여부가 아직 확인되지 않았습니다. 새 글을 작성할 수 있습니다." : "Main acceptance is unconfirmed. You can write another message.")}</small>
-                {(item.autoDeliveryPaused || locallyStoppedFollowupIdsRef.current.has(item.intentId)) && <button type="button" onClick={() => resumePausedFollowup(item)}>
-                  {appLocale === "ko" ? "이 지시의 전달 명시적으로 재개" : "Explicitly resume this instruction"}
-                </button>}
-                {item.requiresReprepare ? (
-                  <button type="button" disabled={busy || teamPreflightBusy || composerHasText} onClick={() => restoreUnsentFollowup(item)}>
-                    {appLocale === "ko" ? "작업 종료 후 초안 복원" : "Restore draft when idle"}
-                  </button>
-                ) : (
-                  <>
-                    <button type="button" onClick={() => void reconcileUncertainPreflightSteer(item.chatId)}>
-                      {appLocale === "ko" ? "접수 다시 확인" : "Check acceptance again"}
+                <small>{item.requiresReprepare ? (appLocale === "ko" ? "팀이 바뀌어 아직 보내지 않았어요." : "The team changed, so this hasn't been sent.")
+                  : paused ? (appLocale === "ko" ? "자동 전송을 멈췄어요. 다시 보내거나 지울 수 있어요." : "Automatic sending stopped. Send it again or discard it.")
+                    : (appLocale === "ko" ? "아직 전달되지 않았어요. 새 글은 계속 쓸 수 있어요." : "Not delivered yet. You can keep writing.")}</small>
+                <div className={styles.followupReceiptActions}>
+                  {paused && !item.requiresReprepare && <button type="button" className={styles.admissionAction} onClick={() => {
+                    currentTurnBackoffRef.current.delete(item.intentId);
+                    resumePausedFollowup(item);
+                  }}>
+                    {appLocale === "ko" ? "다시 보내기" : "Send again"}
+                  </button>}
+                  {item.requiresReprepare ? (
+                    <button type="button" className={styles.admissionAction} disabled={busy || teamPreflightBusy || composerHasText} onClick={() => restoreUnsentFollowup(item)}>
+                      {appLocale === "ko" ? "작업 끝나면 초안으로" : "Restore draft when idle"}
                     </button>
-                    {item.waitingParentRunId && <button type="button" disabled={busy || teamPreflightBusy || composerHasText} onClick={() => void restoreUnsentFollowup(item)}>
-                      {appLocale === "ko" ? "첫 요청 거절 확인 후 초안 복원" : "Restore draft after confirmed rejection"}
-                    </button>}
-                  </>
-                )}
+                  ) : !paused && (
+                    <>
+                      <button type="button" className={styles.admissionAction} onClick={() => void reconcileUncertainPreflightSteer(item.chatId)}>
+                        {appLocale === "ko" ? "다시 확인" : "Check again"}
+                      </button>
+                      {item.waitingParentRunId && <button type="button" className={styles.admissionAction} disabled={busy || teamPreflightBusy || composerHasText} onClick={() => void restoreUnsentFollowup(item)}>
+                        {appLocale === "ko" ? "초안으로 가져오기" : "Restore draft"}
+                      </button>}
+                    </>
+                  )}
+                  <button type="button" className={styles.admissionAction} data-one-followup-dismiss="local" onClick={() => {
+                    // Discard is the owner's explicit choice; it never sends the text anywhere.
+                    try { removeOneFollowupIntent(window.localStorage, item.chatId, item.intentId); } catch { return; }
+                    locallyStoppedFollowupIdsRef.current.delete(item.intentId);
+                    currentTurnBackoffRef.current.delete(item.intentId);
+                    setDelayedFollowupIds(current => { if (!current.has(item.intentId)) return current; const next = new Set(current); next.delete(item.intentId); return next; });
+                    setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, item.chatId));
+                  }}>{appLocale === "ko" ? "지우기" : "Discard"}</button>
+                </div>
               </div>
-            ))}
+              );
+            })}
             {preflightSteerReceipts
               .filter((item) => item.chatId === activeThreadChatId
                 && (item.status === "queued" || item.status === "held" || item.status === "cancelled"))
               .slice(-10)
               .map((item) => (
-                <div key={item.steerId} className={styles.steeringQueue} role="status" data-one-preflight-steer={item.status}>
+                <div key={item.steerId} className={`${styles.steeringQueue} ${styles.followupReceiptCard}`} role="status" data-one-preflight-steer={item.status}>
                   <span>{item.status === "held"
                     ? (appLocale === "ko" ? "추가 지시 보류" : "Follow-up held")
                     : item.status === "cancelled"
@@ -9718,18 +9759,25 @@ function OneSessionsShell() {
                       : (appLocale === "ko" ? "추가 지시 접수" : "Follow-up received")}</span>
                   <strong>{item.userPrompt}</strong>
                   <small>{item.status === "held" || item.status === "cancelled"
-                    ? (appLocale === "ko" ? "자동 재전송하지 않습니다. 작성한 글을 검토한 뒤 새 지시로 결정하세요." : "Not replayed automatically. Review your draft before deciding on a new instruction.")
-                    : (appLocale === "ko" ? "첫 요청에 묶여 대기 중입니다." : "Waiting for the exact parent run.")}</small>
+                    ? (appLocale === "ko" ? "자동으로 다시 보내지 않아요." : "It won't be resent automatically.")
+                    : (appLocale === "ko" ? "앞 요청이 끝나면 이어서 보내요." : "Sends after the current request.")}</small>
+                  {(item.status === "held" || item.status === "cancelled") && <div className={styles.followupReceiptActions}>
+                    <button type="button" className={styles.admissionAction} data-one-followup-dismiss="preflight" onClick={() => {
+                      setPreflightSteerReceipts(current => current.filter(value => value.steerId !== item.steerId));
+                    }}>{appLocale === "ko" ? "닫기" : "Close"}</button>
+                  </div>}
                 </div>
               ))}
             {preflightFenceStatus?.chatId === activeThreadChatId && (
-              <div className={styles.steeringQueue} role="status" data-one-preflight-fence={preflightFenceStatus.reason}>
+              <div className={`${styles.steeringQueue} ${styles.followupReceiptCard}`} role="status" data-one-preflight-fence={preflightFenceStatus.reason}>
                 <span>{appLocale === "ko" ? "추가 지시 접수 확인" : "Follow-up receipt check"}</span>
                 <small>{ONE_PREFLIGHT_FENCE_COPY[preflightFenceStatus.reason][appLocale === "ko" ? "ko" : "en"]}</small>
-                <button type="button" disabled={preflightFenceStatus.reason === "checking"}
-                  onClick={() => { if (activeThreadChatId) void reconcileUncertainPreflightSteer(activeThreadChatId); }}>
-                  {appLocale === "ko" ? "다시 확인" : "Check again"}
-                </button>
+                <div className={styles.followupReceiptActions}>
+                  <button type="button" className={styles.admissionAction} disabled={preflightFenceStatus.reason === "checking"}
+                    onClick={() => { if (activeThreadChatId) void reconcileUncertainPreflightSteer(activeThreadChatId); }}>
+                    {appLocale === "ko" ? "다시 확인" : "Check again"}
+                  </button>
+                </div>
               </div>
             )}
             {activeDirectSessionUnavailable && <div className={styles.sessionUnavailableBanner} role="status" data-one-session-unavailable-banner="true">
@@ -10464,7 +10512,7 @@ function ConversationListButton({ item, active, locale, onOpen, onRemove, seatLa
   const preview = unavailable ? unavailableCopy : (item.lastMessagePreview?.trim() || briefingSourceName(item.title, locale));
   return (
     <div className={styles.conversationRow} data-unavailable={unavailable ? "true" : "false"}>
-      <button type="button" className={`${styles.taskButton} ${styles.sessionButton} ${oneRunCometHostClass}`} data-active={active ? "true" : "false"} data-one-running={spinning ? "true" : "false"} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
+      <button type="button" className={`${styles.taskButton} ${styles.sessionButton} ${oneRunCometHostClass}`} data-active={active ? "true" : "false"} data-one-running={spinning ? "true" : "false"} title={roomTitle} onClick={() => onOpen(item.id)} aria-current={active ? "page" : undefined}>
         {isGroup ? <span className={styles.sessionGroupAvatar} aria-label={roomTitle}>
           <OneAgentPortrait status="quiet" label={oneName} tone={oneAvatarTone} size="small" />
           {groupMembers.slice(0, 2).map((groupMember) => (

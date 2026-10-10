@@ -16,7 +16,7 @@ import { AgentWorkspaceError, snapshotAgentWorkspace, workspaceTarget, workspace
   decodeWorkspaceText, normalizeWorkspacePath, isWorkspaceAsset, workspaceFileRole, MAX_WORKSPACE_FILE_BYTES, MAX_WORKSPACE_FILES,
   MAX_WORKSPACE_TOTAL_BYTES, type WorkspaceTree, type WorkspaceAsset } from "./workspace-snapshot";
 import type { AgentWorkspaceSnapshot, AgentWorkspaceProposal, AgentWorkspaceRevision, AgentWorkspaceDiff,
-  AgentWorkspaceMemoryCandidate, AgentWorkspaceReadFile, AgentWorkspaceFile } from "../../shared/agent-workspace";
+  AgentWorkspaceMemoryCandidate, AgentWorkspaceMemoryCounts, AgentWorkspaceReadFile, AgentWorkspaceFile } from "../../shared/agent-workspace";
 
 export const AGENT_WORKSPACE_CAPABILITY_VERSION = 2;
 interface StoredRevision extends AgentWorkspaceRevision { agentId: string; tree: WorkspaceTree; }
@@ -162,15 +162,37 @@ function verifySources(p: StoredProposal): void {
   if (JSON.stringify(hashes) !== JSON.stringify(p.sourceHashes)) throw new AgentWorkspaceError("memory_changed", "The source memory changed. Generate and review a new diff.");
 }
 function memoryCandidates(agentId: string, proposals: StoredProposal[]): AgentWorkspaceMemoryCandidate[] {
-  const memories = listMemoryEntriesForAgentUi(agentId, 300); const natives = nativeTextsFor("memory_entry", memories.map(entry => entry.id));
-  return memories.filter(memory => !memory.supersededAt && memory.agentId === agentId && memory.sensitivity !== "secret"
-    && !looksSecret(memory.content) && !looksSecret(natives.get(memory.id) ?? "")).map(memory => {
-    let state: AgentWorkspaceMemoryCandidate["state"] = memory.scope !== "agent_repo" || memory.projectPath || memory.projectId ? "scope_review" : !memory.evidence.length ? "needs_evidence" : "eligible";
+  // UI projections do not need embeddings. The general memory reader lazily
+  // computes and writes legacy embeddings, so use a bounded read-only query.
+  const memories = getDb().prepare(`SELECT id, kind, scope, content, sensitivity, evidence_json FROM memory_entries
+    WHERE superseded_at IS NULL AND agent_id = ? AND scope = 'agent_repo' AND project_id IS NULL AND project_path IS NULL
+    ORDER BY created_at DESC LIMIT 300`).all(agentId) as Array<{ id: string; kind: string; scope: string; content: string; sensitivity: string; evidence_json: string }>;
+  const natives = nativeTextsFor("memory_entry", memories.map(entry => entry.id));
+  return memories.filter(memory => memory.sensitivity !== "secret" && !looksSecret(memory.content) && !looksSecret(natives.get(memory.id) ?? "")).map(memory => {
+    let evidence: string[] = [];
+    try { const parsed: unknown = JSON.parse(memory.evidence_json); if (Array.isArray(parsed) && parsed.every(item => typeof item === "string" && item.trim())) evidence = parsed; } catch { /* Corrupt evidence is ineligible. */ }
+    let state: AgentWorkspaceMemoryCandidate["state"] = evidence.length ? "eligible" : "needs_evidence";
     const linked = proposals.find(p => p.memoryEntryIds.includes(memory.id) && ["review_ready", "applied"].includes(p.status));
     if (linked) state = linked.status === "applied" ? "applied" : "proposed";
-    return { id: memory.id, title: (natives.get(memory.id) ?? memory.content).slice(0, 90), content: memory.content,
-      ...(natives.get(memory.id) ? { contentNative: natives.get(memory.id)! } : {}), kind: memory.kind, scope: memory.scope, evidence: memory.evidence, state };
+    const content = natives.get(memory.id) ?? memory.content;
+    return { id: memory.id, title: content.slice(0, 90), content,
+      ...(natives.get(memory.id) ? { contentNative: natives.get(memory.id)! } : {}), kind: memory.kind, scope: memory.scope, evidence, state };
   });
+}
+/** Roster counts share the review eligibility rules without opening or writing agent files. */
+export function getAgentWorkspaceMemoryCounts(agentIds: string[]): AgentWorkspaceMemoryCounts {
+  if (!Array.isArray(agentIds) || agentIds.length > 250 || agentIds.some(id => typeof id !== "string" || !id || id.length > 256)) {
+    throw new AgentWorkspaceError("invalid_agents", "Choose at most 250 installed agents.");
+  }
+  const counts: Array<[string, number]> = []; const unavailableAgentIds: string[] = [];
+  const installed = getDb().prepare("SELECT id FROM installed_agents WHERE id = ?");
+  for (const id of new Set(agentIds)) {
+    try {
+      if (!installed.get(id)) { unavailableAgentIds.push(id); continue; }
+      counts.push([id, memoryCandidates(id, listProposals(id)).filter(memory => memory.state === "eligible").length]);
+    } catch { unavailableAgentIds.push(id); }
+  }
+  return { counts: Object.fromEntries(counts), unavailableAgentIds };
 }
 function privateDirectory(root: string, relative: string, create = false): string {
   let current = root;

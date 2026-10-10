@@ -1,3 +1,5 @@
+import type { HistoryRuntimeFence } from "../one/history-runtime-fences";
+import type { AgentContextCapability } from "./agent-context";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { WORK_RECOVERY_PROTOCOL } from "../../shared/work-recovery";
 import { intellectUiPrompt } from "../../shared/intellect-ui-prompt";
@@ -38,6 +40,8 @@ export interface RunnerRequest {
   canonicalWorkRecovery?: import("../invocation/main-work-recovery").MainWorkRecoveryContext;
   /** Awaited before an MCP result can reach the next provider dispatch. */
   beforeMcpToolResult?: BeforeMcpToolResult;
+  /** Native exact-run closure, never serialized into a provider/CLI request. */
+  historyRuntimeFence?: HistoryRuntimeFence;
   /** Main-minted exact-run recovery authority; never accepted from renderer JSON. */
   scienceRecoveryCapability?: object;
   /** Main-minted object identity; JSON/renderer input cannot authorize collection. */
@@ -254,6 +258,8 @@ export interface RunnerRequest {
    * `agentId`.
    */
   runtimeSessionOwnerId?: string;
+  /** Opaque host-authorized persistent context; never accepted from IPC/JSON. */
+  agentContext?: AgentContextCapability;
   /**
    * Main-issued read-only effect observation (claude-code): one look, not a conversation turn. The
    * runner replaces the system prompt instead of appending to the user's CLI setup, loads no user or
@@ -644,9 +650,33 @@ export interface RunnerNativeTurnController {
   steer(input: { requestId: string; text: string; expectedThreadId: string; expectedTurnId: string }): Promise<RunnerNativeSteerResult>;
 }
 
+/** Value-free driver observation; only the live controller object grants a send capability. */
+export interface RunnerNativeControlState {
+  readonly runtime: string;
+  readonly driver: "unselected" | "app-server" | "exec";
+  readonly phase: "pending" | "active" | "unavailable" | "withdrawn";
+  readonly code: "native_control_pending" | "native_control_exec_boundary" | "native_control_unavailable" | "native_control_active" | "native_control_withdrawn";
+}
+/** Validate an observation before journaling. Getters, symbols/prototypes and
+ * extra fields never enter value-free records; this still grants nothing. */
+export function validatedRunnerNativeControlState(input: unknown): Readonly<RunnerNativeControlState> | null {
+  try {
+    if (!input || typeof input !== "object" || ![Object.prototype, null].includes(Object.getPrototypeOf(input))) return null;
+    const keys = Reflect.ownKeys(input); if (keys.length !== 4 || keys.some(k => typeof k !== "string" || !["runtime", "driver", "phase", "code"].includes(k))) return null;
+    const d = Object.getOwnPropertyDescriptors(input);
+    if (keys.some(k => !d[k as string]?.enumerable || !("value" in d[k as string]))) return null;
+    const runtime = d.runtime.value, driver = d.driver.value, phase = d.phase.value, code = d.code.value;
+    if (runtime !== "codex") return null;
+    const allowed = phase === "pending" && ["unselected", "app-server"].includes(driver) && code === "native_control_pending"
+      || phase === "active" && driver === "app-server" && code === "native_control_active"
+      || phase === "unavailable" && (driver === "exec" && code === "native_control_exec_boundary" || driver === "app-server" && code === "native_control_unavailable")
+      || phase === "withdrawn" && ["unselected", "app-server", "exec"].includes(driver) && code === "native_control_withdrawn";
+    return allowed ? Object.freeze({ runtime, driver, phase, code }) : null;
+  } catch { return null; }
+}
 export interface RunnerEvents {
   /** Published after exact native turn ACK; null synchronously withdraws this run's handle. */
-  onNativeTurnController?: (controller: RunnerNativeTurnController | null) => void;
+  onNativeTurnController?: (controller: RunnerNativeTurnController | null, state?: Readonly<RunnerNativeControlState>) => void;
   /** 토큰 또는 줄 단위 partial 출력 */
   onPartial: (chunk: string) => void;
   /** 사용자에게 보일 상태 줄 — locale 적용된 완성 문자열 */

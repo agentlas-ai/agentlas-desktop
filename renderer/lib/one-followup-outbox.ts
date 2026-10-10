@@ -75,6 +75,14 @@ export function pauseOneFollowupOutbox(storage: StoragePort, chatId: string): vo
   if (items.length) writeOutbox(storage, chatId, items.map(item => ({ ...item, autoDeliveryPaused: true })));
 }
 
+/** Stop automatic delivery of one intent (e.g. its run's owner is gone); the text stays for the owner. */
+export function pauseOneFollowupIntent(storage: StoragePort, chatId: string, intentId: string): void {
+  const items = readOneFollowupOutbox(storage, chatId);
+  if (items.some(item => item.intentId === intentId && !item.autoDeliveryPaused)) {
+    writeOutbox(storage, chatId, items.map(item => item.intentId === intentId ? { ...item, autoDeliveryPaused: true } : item));
+  }
+}
+
 /** An explicit owner action resumes this same identity; it does not author a new message. */
 export function resumeOneFollowupIntent(storage: StoragePort, chatId: string, intentId: string): void {
   const items = readOneFollowupOutbox(storage, chatId);

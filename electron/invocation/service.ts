@@ -1,3 +1,4 @@
+import { captureOrdinaryOneTurn, type OrdinaryOneTurnSource, type OrdinaryOneTurnMode, type OrdinaryOneTurnState } from "./ordinary-one-turn";
 import { nativeOwnerTextChoices, NATIVE_OWNER_TEXT_CONTEXT_OMITTED } from "./native-owner-text";
 import type { NativeOwnerTextBinding, NativeOwnerTextInput, NativeOwnerTextReceipt } from "./native-owner-text";
 import { withNativeApprovalExecution } from "../runtime/native-approval-provenance";
@@ -101,10 +102,11 @@ import {
   type InvocationWorkspaceBinding,
 } from "./workspace-binding";
 import { pickLocale } from "../runtime/status-i18n";
+import { emitDesktopStoreChange } from "../store/change-bus";
 import { permissionEscalationContinuationRequest } from "./permission-escalation-continuation";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
 import { cancelQueuedOnePreflightSteersForChat } from "../store/one-preflight-steers";
-import type { RunnerNativeTurnController, RunnerOwnerControlInbox } from "../runtime/runner";
+import type { RunnerNativeTurnController, RunnerOwnerControlInbox, RunnerNativeControlState } from "../runtime/runner";
 import type { InvocationCurrentTurnSteerRequest, InvocationCurrentTurnSteerReceipt } from "../../shared/types";
 import { claimCurrentTurnSteer, countPendingCurrentTurnSteers, existingCurrentTurnSteer, getCurrentTurnSteer,
   settleCurrentTurnSteer, takeCurrentTurnSteers } from "../store/current-turn-steers";
@@ -117,7 +119,7 @@ import {
 import { stripStrayProtocolTokens } from "../../shared/protocol-token-strip";
 import { advanceMainLivePartial, markInterruptedPartial } from "./interrupted-partial";
 import { untrustedRuntimeFailurePayload } from "../runtime/untrusted-error";
-import { RUNTIME_TURN_UNSETTLED_CODE, RuntimeTurnUnsettledError } from "../runtime/runner";
+import { validatedRunnerNativeControlState, RUNTIME_TURN_UNSETTLED_CODE, RuntimeTurnUnsettledError } from "../runtime/runner";
 import {
   getInvocationRunReceipt,
   getLatestInvocationRunReceipt,
@@ -232,6 +234,7 @@ import {
   teamProposalRequiresOneAttachments,
 } from "../one/attachments";
 import { redactMcpInvocationEventSecrets } from "./event-secret-redaction";
+import { redactSecrets } from "../../shared/secret-patterns";
 import { invocationErrorDiagnostic } from "./error-diagnostic";
 import { normalizeOneRecurrenceSelectionV1 } from "../../shared/one-recurrence";
 import { classifyOneRequestIntent } from "../../shared/one-request-intent";
@@ -328,11 +331,43 @@ interface StartBoundary {
   ownerLease?: InvocationRunOwner;
 }
 
+/** Local bootstrap callback; never a renderer/daemon wire capability. */
+export interface OrdinaryOneTurnObservation {
+  wrap<T>(body: () => T): T;
+  onAdmitted(): void;
+  onPromptBound(): void;
+  onSettled(): void;
+  onPreparationClosed(): void;
+}
+interface OrdinaryOneTurnLifetime {
+  phase: OrdinaryOneTurnState["phase"];
+  actor: string;
+  inputDigest: string;
+  source?: OrdinaryOneTurnSource;
+  observation?: OrdinaryOneTurnObservation;
+  record?: RunRecord;
+  messageId?: string;
+  preparationClosed: boolean;
+  executionClosed: boolean;
+}
+interface NativePreparingPending {
+  request: Readonly<McpInvocationRequest>;
+  actorSnapshot: Readonly<{ userId: string; workspaceId: string }> | null;
+  binding: NativeOneStartBinding;
+  controller: AbortController;
+  port: NativeOneStartPort;
+  retained: Set<Promise<unknown>>;
+  preparationLifetime: NativePreparationLifetime;
+  ordinaryTurn?: OrdinaryOneTurnLifetime;
+}
+
 interface RunRecord {
   /** Original immutable native choices, never effective mutable UI settings. */
   nativeOwnerTextChoices?: string;
   ownerLease?: InvocationRunOwner;
   nativeTurnController?: RunnerNativeTurnController;
+  nativeControlState?: Readonly<RunnerNativeControlState>;
+  nativeBoundaryNoticeIntents?: Set<string>;
   /** Main verification owns this yielded native episode's next scheduling step. */
   nativeGoalEpisodePending?: boolean;
   mainLifetime?: MainInvocationLifetime;
@@ -1000,7 +1035,8 @@ export class InvocationService {
   private readonly settlingRuns = new Map<string, RunRecord>();
   private readonly browserLoginWaitingRuns = new Map<string, RunRecord>();
   private readonly steerQueues = new Map<string, QueuedSteer[]>();
-  private readonly nativePreparing = new Map<string, { request: Readonly<McpInvocationRequest>; actorSnapshot: Readonly<{ userId: string; workspaceId: string }> | null; binding: NativeOneStartBinding; controller: AbortController; port: NativeOneStartPort; retained: Set<Promise<unknown>>; preparationLifetime: NativePreparationLifetime }>();
+  private readonly nativePreparing = new Map<string, NativePreparingPending>();
+  private ordinaryOneTurnObserver?: (source: OrdinaryOneTurnSource) => OrdinaryOneTurnObservation | undefined;
   private readonly nativeIngress = new Map<string, NativeIngressPending>();
   private readonly nativeIngressOriginals = new WeakMap<NativeInvocationIngressSource, { pending: NativeIngressPending; controller: AbortController; lifetime: NativePreparationLifetime }>();
   private readonly nativeServiceObservationProofs = new WeakMap<object, { original: NativeInvocationIngressSource; pending: NativeIngressPending; kind: "native-execution-cwd-selected-v1" | "native-undispatched-start-v1" }>();
@@ -1016,6 +1052,72 @@ export class InvocationService {
     this.foreignNativeStartFence = fence;
   }
 
+
+  /** Install one stable local bootstrap adapter. It resolves the current One
+   * owner for each invocation instead of retaining a stale account/service. */
+  configureOrdinaryOneTurnObserver(observer: (source: OrdinaryOneTurnSource) => OrdinaryOneTurnObservation | undefined): void {
+    if (typeof observer !== "function" || (this.ordinaryOneTurnObserver && this.ordinaryOneTurnObserver !== observer)) {
+      throw new Error("ordinary_one_turn_observer_already_configured");
+    }
+    this.ordinaryOneTurnObserver = observer;
+  }
+
+  private assertOrdinaryOneTurnCurrent(pending: NativePreparingPending, turn: OrdinaryOneTurnLifetime, mode: OrdinaryOneTurnMode): void {
+    function fail(): never { throw Object.assign(new Error("ordinary_one_turn_source_changed"), { code: "ordinary_one_turn_source_changed" }); }
+    const { chatId, runId, admission } = pending.binding;
+    const current = getInvocationAdmission(runId);
+    if (pending.ordinaryTurn !== turn || pending.request.chatId !== chatId || pending.request.runId !== runId
+      || canonicalInvocationRequestJson(pending.request) !== admission.canonicalRequestJson
+      || JSON.stringify(getAuthenticatedActorIds()) !== turn.actor
+      || !current || current.chatId !== chatId || current.runId !== runId
+      || current.ownerProcessEpoch !== admission.ownerProcessEpoch || current.inputDigest !== turn.inputDigest
+      || current.digestVersion !== INVOCATION_ADMISSION_DIGEST_VERSION) fail();
+    const record = turn.record;
+    const hasRecord = Boolean(record && [this.activeRuns.get(runId), this.settlingRuns.get(runId),
+      this.pendingGoalVerifications.get(runId), this.browserLoginWaitingRuns.get(runId)].includes(record));
+    if (turn.phase === "preparing") {
+      if (this.nativePreparing.get(runId) !== pending || current.status !== "pending" || record) fail();
+    } else if (turn.phase === "admitted") {
+      if (current.status !== "admitted" || !record || !hasRecord || record.controller !== pending.controller
+        || record.chatId !== chatId || record.request.runId !== runId || !record.ownerLease) fail();
+      if (mode === "scope" || mode === "execution" || mode === "message") {
+        const lease = record.ownerLease;
+        if (lease.chatId !== chatId || lease.runId !== runId
+          || (!isLocalInvocationPreparationPort(pending.port) && lease.ownerId !== admission.ownerProcessEpoch)) fail();
+        assertInvocationRunOwner(lease);
+      }
+    } else if (turn.phase === "settled") {
+      if (mode !== "settlement" || !turn.preparationClosed || !turn.executionClosed
+        || current.status !== "admitted" || !record || record.controller !== pending.controller
+        || this.nativePreparing.has(runId) || hasRecord) fail();
+    } else if (mode !== "closed" || !turn.preparationClosed || this.nativePreparing.has(runId) || hasRecord) fail();
+    if ((mode === "settlement" || mode === "closed") && record?.ownerLease) {
+      const expected = record.ownerLease, custody = invocationRunOwners.getRunOwner(chatId, runId);
+      if (!custody || custody.chatId !== chatId || custody.runId !== runId || custody.ownerId !== expected.ownerId
+        || custody.ownerKind !== expected.ownerKind || custody.leaseId !== expected.leaseId || custody.state !== "released") fail();
+    }
+    if (mode === "message") {
+      const row = turn.messageId ? getDb().prepare("SELECT id, chat_id, role FROM chat_messages WHERE id=?")
+        .get(turn.messageId) as { id: string; chat_id: string; role: string } | undefined : undefined;
+      if (!row || row.id !== turn.messageId || row.chat_id !== chatId || row.role !== "user") fail();
+    }
+  }
+
+  private finishOrdinaryOneTurn(pending: NativePreparingPending, outcome: "preparation" | "execution" | "closed"): void {
+    const turn = pending.ordinaryTurn;
+    if (!turn || turn.phase === "settled" || turn.phase === "closed") return;
+    if (outcome === "execution") turn.executionClosed = true;
+    else turn.preparationClosed = true;
+    if (outcome === "closed") turn.phase = "closed";
+    else if (turn.preparationClosed && turn.executionClosed) turn.phase = "settled";
+    else return;
+    // A failed ledger observation cannot veto unconditional Stop/physical
+    // cleanup or authorize any replay of the already-owned invocation.
+    try {
+      if (turn.phase === "closed") turn.observation?.onPreparationClosed();
+      else turn.observation?.onSettled();
+    } catch (error) { console.warn("[invocation] ordinary One observation remains unconfirmed:", error); }
+  }
 
   /** Additive quiescence fact; never a fabricated invocation terminal receipt. */
   onNativePreparationQuiesced(listener: (event: { runId: string; chatId: string; status: "handed-off" | "rejected" | "cancelled" | "uncertain" }) => void): () => void {
@@ -1195,15 +1297,26 @@ export class InvocationService {
     const controller = ingress?.controller ?? new AbortController(), retained = ingress?.retained ?? new Set<Promise<unknown>>();
     const preparationLifetime = ingress?.lifetime ?? createNativePreparationLifetime(binding);
     const nativeActor = ingress ? ingress.actorSnapshot : !isLocalInvocationPreparationPort(port) ? getAuthenticatedActorIds() : null;
-    const pending = { request:req, actorSnapshot: nativeActor ? Object.freeze({ ...nativeActor }) : null, binding, controller, port, retained, preparationLifetime };
+    const pending: NativePreparingPending = { request:req, actorSnapshot: nativeActor ? Object.freeze({ ...nativeActor }) : null, binding, controller, port, retained, preparationLifetime };
     this.nativePreparing.set(nativeRunId, pending);
     this.publishActiveChats();
     const boundary: StartBoundary = { crossed: false };
     let status: "handed-off" | "rejected" | "cancelled" | "uncertain" = "rejected";
     let nativeFailure: unknown;
     try {
+      if (req.oneMode && !effectObservationTicket(nativeRunId) && this.ordinaryOneTurnObserver) {
+        const turn: OrdinaryOneTurnLifetime = { phase: "preparing", actor: JSON.stringify(ingress || !isLocalInvocationPreparationPort(port) ? pending.actorSnapshot : getAuthenticatedActorIds()),
+          inputDigest: reservation.inputDigest, preparationClosed: false, executionClosed: false };
+        pending.ordinaryTurn = turn;
+        const source = captureOrdinaryOneTurn({ request: req, admission: binding.admission, port, controller,
+          readState: () => ({ phase: turn.phase, lease: turn.record?.ownerLease, messageId: turn.messageId }),
+          assertCurrent: (mode) => this.assertOrdinaryOneTurnCurrent(pending, turn, mode) });
+        turn.source = source;
+        turn.observation = this.ordinaryOneTurnObserver(source);
+      }
       const steps = this.startPreparedSteps(req, workspaceBinding, executionContext, undefined, hostNoticePurpose, admission, durableAdmission, boundary, undefined, controller);
-      const started = await withNativePreparationLifetime(preparationLifetime, () => driveNativeOneStart(steps, port, binding, controller.signal, preparationLifetime));
+      const drive = () => withNativePreparationLifetime(preparationLifetime, () => driveNativeOneStart(steps, port, binding, controller.signal, preparationLifetime));
+      const started = await (pending.ordinaryTurn?.observation ? pending.ordinaryTurn.observation.wrap(drive) : drive());
       status = "handed-off";
       try {
         for (const [waitingRunId, waiting] of this.browserLoginWaitingRuns) {
@@ -1239,6 +1352,7 @@ export class InvocationService {
       catch (cause) { const error = new RuntimeTurnUnsettledError("native-one-cleanup"); Object.defineProperty(error, "cause", { value: cause }); throw error; }
       this.nativePreparing.delete(nativeRunId);
       this.publishActiveChats();
+      this.finishOrdinaryOneTurn(pending, boundary.handedOff ? "preparation" : "closed");
       for (const listener of this.nativePreparationListeners) {
         try { listener({ runId: nativeRunId, chatId: req.chatId, status }); } catch { /* machine fact remains owned */ }
       }
@@ -2392,6 +2506,11 @@ export class InvocationService {
       startBoundary.crossed = true;
       startBoundary.runId = runId;
       startBoundary.cleanups = nativeController && !isLocalInvocationPreparationPort(nativePreparation!.port) ? [] : [() => releaseOneAttachmentRun(requestedOneAttachmentRef)];
+      if (nativePreparation?.ordinaryTurn) {
+        nativePreparation.ordinaryTurn.record = record;
+        nativePreparation.ordinaryTurn.phase = "admitted";
+        nativePreparation.ordinaryTurn.observation?.onAdmitted();
+      }
     } catch (error) {
       (yield oneStartCheckpoint("attachments.release", { ref: requestedOneAttachmentRef }, () => releaseOneAttachmentRun(requestedOneAttachmentRef)));
       throw error;
@@ -3611,6 +3730,12 @@ export class InvocationService {
           kind: "invoke_prompt_bound",
           payload: { promptMessageId: sourceMessageId },
         });
+        if (nativePreparation?.ordinaryTurn) {
+          const turn = nativePreparation.ordinaryTurn;
+          if (turn.messageId && turn.messageId !== sourceMessageId) throw new Error("ordinary_one_prompt_identity_changed");
+          turn.messageId = sourceMessageId;
+          turn.observation?.onPromptBound();
+        }
         const publishAutomaticGoalDegradedNotice = (reason: string, failureKind?: string) => {
           const ko = "목표 자동 추적을 이번 실행에 적용하지 못했습니다. 작업은 일반 실행으로 계속합니다. 반복되면 설정의 모델 역할에서 오케스트레이터 연결과 사용 한도를 확인해 주세요.";
           const en = "Automatic Goal tracking was unavailable for this run. The task is continuing as a normal run. If this repeats, check the orchestrator connections and usage limits under Model roles in Settings.";
@@ -3695,14 +3820,10 @@ export class InvocationService {
             void reviewOwnerGoalMessage({ goalId: amendmentGoalId, chatId: chat.id, sourceMessageId }).then((review) => {
               if (review.reasonCode.startsWith("judge_unavailable:")) {
                 console.warn(`[goal-amendment] review unanswered goal=${amendmentGoalId} reason=${review.reasonCode}`);
-                // The message still steers this turn, but an unanswered review
-                // must not imply that its success criteria were revised.
-                try {
-                  appendChatMessage(chat.id, "assistant", pickLocale(runReq) === "ko"
-                    ? "이번 메시지의 목표 변경 여부를 확인하지 못해 목표 조건은 갱신되지 않았어요. 목표 패널에서 현재 조건을 확인해 주세요."
-                    : "The goal amendment review was unavailable, so its conditions were not updated. Check the current conditions in the goal panel.",
-                  { hostNotice: { purpose: "host-status", runId, status: "needs-owner" } });
-                } catch { /* The coded review event below remains durable evidence. */ }
+                // The message still steers this turn and the Goal stays unchanged. No room notice:
+                // the judge being down is an internal state the owner cannot act on (13 identical
+                // notices in the Youtube room, 2026-10-10). The coded review event below is the
+                // durable receipt; the Goal panel still shows the current conditions.
               }
               tryRecordRunEvent({ runId, chatId: chat.id, kind: "goal_owner_amendment_reviewed", payload: {
                 goalId: amendmentGoalId, sourceMessageId, label: review.label, reasonCode: review.reasonCode,
@@ -3977,8 +4098,27 @@ export class InvocationService {
         } finally { producerWorkDispatchSealed = true; }
       },
       canonicalWorkRecovery,
-      (nativeController) => {
-        if (!nativeController) { record.nativeTurnController = undefined; return; }
+      (nativeController, nativeState) => {
+        // Withdrawal clears this captured run even after Stop/custody revocation.
+        if (!nativeController) record.nativeTurnController = undefined;
+        if (this.activeRuns.get(runId) !== record || record.background) return;
+        const state = nativeState === undefined ? undefined : validatedRunnerNativeControlState(nativeState);
+        if (nativeState !== undefined && !state) { record.nativeTurnController = undefined; return; }
+        if (state) {
+          const observed = state.phase === "active" && (!nativeController || controller.signal.aborted || nativeController.binding.chatId !== record.chatId || state.runtime !== nativeController.binding.runtime || state.driver !== "app-server")
+            ? { ...state, phase: "unavailable" as const, code: "native_control_unavailable" as const }
+            : state;
+          record.nativeControlState = Object.freeze({ ...observed });
+          if (observed.phase === "unavailable" || observed.phase === "withdrawn") this.rejectUnsentNativeCurrentInputs(runId, record);
+          if (observed.phase === "unavailable") this.publishQueuedNativeBoundaryNotice(runId, record);
+          tryRecordRunEvent({ runId, chatId: record.chatId, kind: "invoke_native_control_state",
+            payload: { ...observed, inputDigest: getInvocationAdmission(runId)?.inputDigest ?? null } });
+        }
+        if (!nativeController) {
+          if (!nativeState && record.nativeControlState) record.nativeControlState = Object.freeze({ ...record.nativeControlState, phase: "withdrawn", code: "native_control_withdrawn" });
+          return;
+        }
+        if (state && (state.phase !== "active" || state.runtime !== nativeController.binding.runtime || state.driver !== "app-server")) { record.nativeTurnController = undefined; return; }
         if (!record.background && !controller.signal.aborted && this.activeRuns.get(runId) === record
           && nativeController.binding.chatId === record.chatId) {
           record.nativeTurnController = nativeController;
@@ -4663,6 +4803,7 @@ export class InvocationService {
         }
         this.settlingRuns.delete(runId);
         this.publishActiveChats();
+        if (nativePreparation) this.finishOrdinaryOneTurn(nativePreparation, "execution");
         // Recovery listeners can start the next read-only turn only after the
         // predecessor's full cleanup/lifetime barrier released its chat slot.
         this.publishSettled(runId, record);
@@ -5300,6 +5441,8 @@ export class InvocationService {
     if (row?.status === "dispatching" && !this.currentTurnSteerDispatches.has(intentId)) {
       return settleCurrentTurnSteer(chatId, intentId, "uncertain", "native_steer_dispatch_interrupted");
     }
+    if (row?.status === "queued" && !row.code && !record?.nativeTurnController) return { ...row,
+      code: record?.nativeControlState?.code ?? "native_control_pending" };
     return row;
   }
 
@@ -5358,6 +5501,11 @@ export class InvocationService {
     if (receipt.status === "queued" && (!target || target.signal.aborted)) receipt = settleCurrentTurnSteer(binding.chatId, intentId, "uncertain", "native_owner_text_held");
     if (receipt.status === "dispatching" && !this.currentTurnSteerDispatches.has(intentId)) receipt = settleCurrentTurnSteer(binding.chatId, intentId, "uncertain", "native_steer_dispatch_interrupted");
     const position = this.nativeOwnerTextRows(binding).filter(item => item.status === "queued" || item.status === "uncertain").findIndex(item => item.intent_id === intentId);
+    if (receipt.status === "queued" && !receipt.code) {
+      if (saved.deliveryKind === "queue") receipt = { ...receipt, code: "native_control_next_boundary" };
+      else if (!this.activeRuns.get(binding.runId)?.nativeTurnController) receipt = { ...receipt,
+        code: this.activeRuns.get(binding.runId)?.nativeControlState?.code ?? "native_control_pending" };
+    }
     const withdrawn = receipt.code === "native_owner_text_withdrawn";
     return { version:"agentlas.native-owner-text.v1", chatId:binding.chatId,runId:binding.runId,inputDigest:binding.inputDigest, intentId, deliveryKind:saved.requestedMode,
       promptHash:receipt.promptHash,messageId:receipt.messageId,sourceStatus:receipt.status,...(receipt.code ? {code:receipt.code}:{}),
@@ -5391,13 +5539,19 @@ export class InvocationService {
     if (countPendingCurrentTurnSteers(input.chatId,input.runId) >= 64) throw Object.assign(new Error("invocation_current_turn_steer_limit"),{code:"invocation_current_turn_steer_limit"});
     claimCurrentTurnSteer(request,{source:"native-owner-text",chatId:input.chatId,runId:input.runId,inputDigest:input.inputDigest,
       requestedMode:input.deliveryKind,deliveryKind:input.deliveryKind === "current" ? "current" : "queue"});
-    if (input.deliveryKind === "interrupt") {
+    if (input.deliveryKind === "current" && !this.activeRuns.get(input.runId)?.nativeTurnController) {
+      const record = this.activeRuns.get(input.runId);
+      if (record) this.rejectUnsentNativeCurrentInputs(input.runId, record);
+    } else if (input.deliveryKind === "interrupt") {
       this.cancel(input.runId); // unconditional Stop; no source-safe successor is manufactured.
       settleCurrentTurnSteer(input.chatId,input.intentId,"uncertain","native_owner_text_interrupt_held");
     } else if (input.deliveryKind === "current") {
       const record = this.activeRuns.get(input.runId); if (record) this.deliverNativeOwnerControls(input.runId,record);
     }
-    return this.nativeOwnerTextReceipt(input,input.intentId)!;
+    const receipt = this.nativeOwnerTextReceipt(input,input.intentId)!;
+    const record = this.activeRuns.get(input.runId);
+    if (record && receipt.sourceStatus === "queued") this.publishQueuedNativeBoundaryNotice(input.runId, record, input.intentId);
+    return receipt;
   }
 
   nativeOwnerTextUnsteer(binding: NativeOwnerTextBinding, position: number, text: string): boolean {
@@ -5439,7 +5593,69 @@ export class InvocationService {
       agentId: record.actualAgentId, workspaceBinding: record.workspaceBinding,
       permission: record.request.permissions, runtime: record.request.runtimeSelection });
     this.deliverNativeOwnerControls(input.expectedRunId, record);
-    return intake;
+    this.publishQueuedNativeBoundaryNotice(input.expectedRunId, record, input.intentId);
+    return intake.code || record.nativeTurnController ? intake : { ...intake,
+      code: record.nativeControlState?.code ?? "native_control_pending" };
+  }
+
+  /** A pending current-only intent waits for this exact run's handle, never a later episode. */
+  private rejectUnsentNativeCurrentInputs(runId: string, record: RunRecord): void {
+    if (this.activeRuns.get(runId) !== record || record.background || record.controller.signal.aborted
+      || record.nativeTurnController || this.pendingGoalVerifications.has(runId)) return;
+    const observation = record.nativeControlState;
+    const state = validatedRunnerNativeControlState(observation);
+    if (!state || state.phase !== "unavailable" && state.phase !== "withdrawn") return;
+    const admission = getInvocationAdmission(runId); if (!admission || admission.chatId !== record.chatId) return;
+    if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
+    const changed = getDb().transaction(() => {
+      let rejected = 0;
+      for (const row of this.nativeOwnerTextRows({chatId:record.chatId,runId,inputDigest:admission.inputDigest})) {
+        if (row.status !== "queued") continue;
+        const binding = JSON.parse(row.binding_json);
+        if (binding.deliveryKind !== "current" || binding.chatId !== record.chatId || binding.runId !== runId
+          || this.nativeOwnerTextTarget(binding) !== record.controller) continue;
+        if (this.activeRuns.get(runId) !== record || record.controller.signal.aborted || record.nativeTurnController
+          || record.nativeControlState !== observation || this.pendingGoalVerifications.has(runId)) break;
+        rejected += getDb().prepare(`UPDATE invocation_current_turn_steers SET status = 'rejected', code = ?, updated_at = ?
+          WHERE intent_id = ? AND chat_id = ? AND run_id = ? AND binding_json = ? AND status = 'queued'`)
+          .run(state.code,new Date().toISOString(),row.intent_id,record.chatId,runId,row.binding_json).changes;
+      }
+      return rejected;
+    }).immediate();
+    if (changed) try { emitDesktopStoreChange({entity:"chat",id:record.chatId}); } catch { /* Receipt is already durable. */ }
+  }
+
+  /** A delivery notice describes an admitted queued intent, never driver readiness or an effect. */
+  private publishQueuedNativeBoundaryNotice(runId: string, record: RunRecord, intentId?: string): void {
+    try {
+      if (this.activeRuns.get(runId) !== record || record.background || record.controller.signal.aborted
+        || this.pendingGoalVerifications.has(runId) || record.nativeTurnController) return;
+      const observation = record.nativeControlState;
+      const state = validatedRunnerNativeControlState(observation);
+      if (!state || state.phase !== "unavailable") return;
+      if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
+      const rows = getDb().prepare(`SELECT intent_id,binding_json FROM invocation_current_turn_steers
+        WHERE chat_id = ? AND run_id = ? AND status = 'queued' ORDER BY rowid`).all(record.chatId, runId) as Array<{intent_id:string;binding_json:string}>;
+      for (const row of rows) {
+        if (intentId !== undefined && row.intent_id !== intentId || record.nativeBoundaryNoticeIntents?.has(row.intent_id)) continue;
+        const binding = JSON.parse(row.binding_json);
+        if (binding.chatId !== record.chatId || binding.runId !== runId || binding.deliveryKind === "current"
+          || binding.deliveryKind !== undefined && binding.deliveryKind !== "queue") continue;
+        if (binding.source === "native-owner-text") {
+          const admission = getInvocationAdmission(runId);
+          if (!admission || binding.inputDigest !== admission.inputDigest || this.nativeOwnerTextTarget(binding) !== record.controller) continue;
+        }
+        // Re-read after source checks. Never describe a changed/uncertain dispatch as next-boundary delivery.
+        if (this.activeRuns.get(runId) !== record || record.controller.signal.aborted || record.nativeTurnController
+          || this.pendingGoalVerifications.has(runId) || record.nativeControlState !== observation
+          || getCurrentTurnSteer(record.chatId,row.intent_id)?.status !== "queued") continue;
+        (record.nativeBoundaryNoticeIntents ??= new Set()).add(row.intent_id);
+        const ko = "추가 요청은 이번 답변이 끝난 뒤 처리 대기 중입니다.";
+        const en = "Your follow-up is queued until this response ends.";
+        this.publishRunEvent(record, {runId,chatId:record.chatId,event:{kind:"notice",notice:{level:"info",code:state.code,
+          message:pickLocale(record.request) === "ko" ? ko : en, i18n:{ko,en}}}});
+      }
+    } catch { /* Notice cannot change model admission, retry credits, authority or an intent receipt. */ }
   }
 
   private ownerControlInbox(runId: string, record: RunRecord): RunnerOwnerControlInbox {
@@ -6030,6 +6246,29 @@ export class InvocationService {
       } catch (error) {
         settleQueuedSteer(next.id, "failed");
         const message = error instanceof Error ? error.message : String(error);
+        // The queued direction was never a chat message (start() persists it), so a failed start used
+        // to erase the owner's sentence and leave no trace of why (Youtube room, 2026-10-10 08:55).
+        // Log the real cause, keep the sentence as the owner's own turn, and say so briefly. Never re-run it.
+        console.warn(`[invocation] queued steer failed to start steer=${next.id} chat=${chatId} cause=${redactSecrets(message).replace(/\s+/g, " ").slice(0, 400)}`);
+        try {
+          const request = next.request;
+          const text = typeof request.userPrompt === "string" ? request.userPrompt : "";
+          if (text.trim() && request.promptOrigin !== "system" && !request.agentAppMode) {
+            // A preflight copy of the same direction may already have been delivered as a user turn.
+            const delivered = getDb().prepare(
+              "SELECT 1 FROM chat_messages WHERE chat_id = ? AND role = 'user' AND text = ? AND created_at >= ? LIMIT 1",
+            ).get(chatId, text, next.queuedAt);
+            if (!delivered) {
+              appendChatMessage(chatId, "user", text, request.images?.length ? { images: request.images } : undefined);
+              appendChatMessage(chatId, "assistant", pickLocale(request) === "ko"
+                ? "방금 보낸 지시를 실행으로 넘기지 못했어요. 문장은 대화에 남겨 두었습니다. 다시 보내면 이어서 처리합니다."
+                : "I couldn't hand your last direction to a run. Your message is saved in the chat; send it again to continue.",
+              { hostNotice: { purpose: "host-status", runId: drainedRunId, status: "needs-owner" } });
+            }
+          }
+        } catch (persistError) {
+          console.warn("[invocation] failed queued steer could not be preserved in the chat:", persistError);
+        }
         this.publishEvent({
           runId: "steer",
           chatId,

@@ -1,3 +1,6 @@
+import {isOneMobileSecureMethod} from "../secrets/one-mobile-secure";
+import {OneVaultError} from "../../shared/one-vault";
+import {OneProviderRemoteError} from "../../shared/one-provider-remote";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import http from "node:http";
 import https from "node:https";
@@ -106,6 +109,7 @@ const MAX_PAIR_ATTEMPTS_PER_MINUTE = 10;
 const MAX_INITIAL_EVENT_QUEUE = 512;
 const MAX_INITIAL_EVENT_QUEUE_BYTES = 4 * MOBILE_BRIDGE_MAX_MESSAGE_BYTES;
 
+import {currentOneMobileSocketOwner,type OneMobileSocketOwner} from '../secrets/one-mobile-socket';
 export interface MobileBridgeConnectionContext {
   connectionId: string;
   remoteAddress: string | null;
@@ -128,6 +132,8 @@ export interface MobileBridgeAuthorityEvent {
  * or calls a model directly.
  */
 export interface MobileBridgeAuthority {
+  /** Only server.accept mints this lifecycle event; never RPC-selectable. */
+  connectionOpened?(context: MobileBridgeConnectionContext): void;
   snapshot(context: MobileBridgeConnectionContext): Promise<MobileBridgeSnapshot>;
   pairingVerification?(context: MobileBridgeConnectionContext): Promise<{
     hostId: string;
@@ -338,6 +344,7 @@ export class AgentlasMobileBridgeServer {
   private readonly requestTimeoutMs: number;
   private readonly relayPairingInfo?: () => { endpoint: string; secret: string } | null;
   private readonly onError: (error: Error) => void;
+  private readonly onePhoneOwners = new WeakMap<ConnectionState,OneMobileSocketOwner>();
   private readonly clients = new Set<ConnectionState>();
   private readonly upgradeIdentities = new WeakMap<http.IncomingMessage, UpgradeIdentity>();
   private readonly webSocketServer: BridgeWebSocketServer;
@@ -592,6 +599,23 @@ export class AgentlasMobileBridgeServer {
       transportFailed: false,
     };
     this.clients.add(state);
+    try { this.authority.connectionOpened?.(state.context); }
+    catch { this.clients.delete(state); socket.close(1008, "secure channel unavailable"); return; }
+    const phoneOwner = currentOneMobileSocketOwner();
+    if (phoneOwner) {
+      this.onePhoneOwners.set(state, phoneOwner);
+      const current = () => this.clients.has(state) && !state.revoked && !state.revocationPending && !state.transportFailed && state.socket.readyState === WS_OPEN;
+      try { phoneOwner.accepted(state.context, {current,
+        send: (frame, stillCurrent) => new Promise<void>((resolve, reject) => {
+          let done = false;
+          const finish = (error?: Error) => { if (done) return; done = true; clearTimeout(timer); if (error || !current() || !stillCurrent()) reject(new Error('secure_route_unavailable')); else resolve(); };
+          const timer = setTimeout(() => finish(new Error('secure_route_unavailable')), 5000);
+          if (!current() || !stillCurrent()) { finish(new Error('secure_route_unavailable')); return; }
+          this.send(state, frame as MobileBridgeServerMessage, finish);
+        }),
+        close: () => { try { state.socket.close(1008, 'secure channel closed'); } finally { this.dropClient(state); } },
+      }); } catch { state.socket.close(1008, 'secure route unavailable'); this.dropClient(state); return; }
+    }
     this.syncAuthoritySubscription();
     socket.on("pong", () => {
       state.alive = true;
@@ -921,6 +945,7 @@ export class AgentlasMobileBridgeServer {
       state.socket.close(1007, "invalid json");
       return;
     }
+    if (this.onePhoneOwners.get(state)?.respond(state.context, decoded)) return;
     const parsed = parseMobileBridgeRequest(decoded);
     if (!parsed.ok) {
       this.send(state, parsed.error);
@@ -965,6 +990,7 @@ export class AgentlasMobileBridgeServer {
       return;
     }
     const selfRevocation = request.method === "device.revokeSelf";
+    const secureRequest = isOneMobileSecureMethod(request.method);
     const writeRequest = MOBILE_BRIDGE_WRITE_METHODS.has(request.method);
     const replayKey = request.idempotencyKey ?? request.id;
     const replayFingerprint = writeRequest ? fingerprintMobileBridgeRequest(request) : null;
@@ -1048,7 +1074,7 @@ export class AgentlasMobileBridgeServer {
       this.send(state, response);
     } catch (error) {
       const normalized = errorOf(error);
-      this.onError(normalized);
+      this.onError(secureRequest ? new Error("secure_route_unavailable") : normalized);
       if (selfRevocation) this.clearDeviceRevocationPending(state.context.deviceId);
       const timeout = normalized.message === "Mobile Bridge authority request timed out";
       if (timeout && writeRequest && this.replayStore && replayFingerprint) {
@@ -1085,13 +1111,15 @@ export class AgentlasMobileBridgeServer {
       const uncertainWrite = timeout && writeRequest;
       let response: MobileBridgeReplayResponse = mobileBridgeFailure(
         request.id,
-        uncertainWrite ? "outcome_unknown" : timeout ? "request_timeout" : "authority_error",
+        secureRequest ? (timeout && request.method === "one.vault.submit" ? "store_unknown"
+          : error instanceof OneVaultError || error instanceof OneProviderRemoteError ? error.code : "secure_route_unavailable")
+          : uncertainWrite ? "outcome_unknown" : timeout ? "request_timeout" : "authority_error",
         uncertainWrite
           ? "Desktop may have accepted this command, but its acknowledgement was not available; check Desktop state before trying again"
           : timeout
             ? "Desktop did not answer in time"
             : "Desktop rejected the request",
-        timeout && !writeRequest,
+        timeout && !writeRequest && !secureRequest,
       );
       if (!timeout && writeRequest && this.replayStore && replayFingerprint) {
         response = this.completeReplay(
@@ -1382,6 +1410,7 @@ export class AgentlasMobileBridgeServer {
 
   private dropClient(state: ConnectionState): void {
     if (!this.clients.delete(state)) return;
+    try { this.onePhoneOwners.get(state)?.closed(state.context); } catch { /* owner keeps sticky cleanup uncertainty */ }
     try {
       this.authority.connectionClosed?.(state.context);
     } catch (error) {
@@ -1461,10 +1490,11 @@ export class AgentlasMobileBridgeServer {
     }
   }
 
-  private send(state: ConnectionState, message: MobileBridgeServerMessage): void {
-    if (state.revoked || state.transportFailed || state.socket.readyState !== WS_OPEN) return;
+  private send(state: ConnectionState, message: MobileBridgeServerMessage, acknowledged?: (error?: Error) => void): void {
+    if (state.revoked || state.transportFailed || state.socket.readyState !== WS_OPEN) { acknowledged?.(new Error('secure_route_unavailable')); return; }
     if (state.socket.bufferedAmount > MAX_BUFFERED_BYTES) {
       state.socket.terminate();
+      acknowledged?.(new Error('secure_route_unavailable'));
       return;
     }
     let encoded: string;
@@ -1473,16 +1503,19 @@ export class AgentlasMobileBridgeServer {
     } catch (error) {
       this.onError(errorOf(error));
       state.socket.close(1011, "serialization failed");
+      acknowledged?.(new Error("secure_route_unavailable"));
       return;
     }
     if (Buffer.byteLength(encoded, "utf8") > MOBILE_BRIDGE_MAX_MESSAGE_BYTES) {
       this.onError(new Error("Mobile Bridge outbound message exceeded the wire limit"));
       state.socket.close(1009, "message too large");
+      acknowledged?.(new Error("secure_route_unavailable"));
       return;
     }
-    state.socket.send(encoded, (error) => {
+    try { state.socket.send(encoded, (error) => {
       if (error) this.transportError(state, error, "write");
-    });
+      acknowledged?.(error);
+    }); } catch (error) { this.transportError(state, error, "write"); acknowledged?.(errorOf(error)); }
   }
 
   private markDeviceRevocationPending(deviceId: string): void {

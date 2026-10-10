@@ -1,13 +1,13 @@
 "use client";
 
 import { confirmPopup } from "@/lib/popup";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { ChipGrid, ConnectChip } from "@/components/connect/RuntimeConnect";
 import { ServiceConnectPopup, type ServiceConnectRun } from "@/components/connect/ServiceConnect";
 import { PluginLogo, pluginSlugCandidates, usePluginBrandMap } from "@/components/PluginLogo";
 import { PluginPickerDialog } from "@/components/plugins/PluginPickerDialog";
-import { groupByCategory, usePluginCatalog } from "@/components/plugins/PluginPickerCore";
+import { groupByCategory, usePluginCatalog, mcpConnectionSetupStep, mcpConnectionAuthKind, mcpConnectionFailureMessage } from "@/components/plugins/PluginPickerCore";
 import Link from "next/link";
 import { mcpOAuthAPI, runMcpOAuthAttempt } from "@/components/plugins/McpOAuthAttempt";
 import { LocalExecutionReview } from "@/components/plugins/PluginSetupReview";
@@ -65,12 +65,19 @@ export default function LibraryMcpsPage() {
   const [cUrl, setCUrl] = useState("");
   const [cEnv, setCEnv] = useState("");
   const [cBusy, setCBusy] = useState(false);
-  const customValid = !!cName.trim() && (cTransport === "stdio" ? !!cCommand.trim() : /^https?:\/\//i.test(cUrl.trim()));
+  const customInFlight = useRef(false);
+  const endpointValid = validCustomMcpEndpoint(cUrl);
+  const keysValid = !cEnv.trim() || cEnv.split(/[,\s]+/).every((key) => /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(key));
+  const customValid = !!cName.trim() && keysValid && (cTransport === "stdio" ? !!cCommand.trim() : endpointValid);
   const customOpenCrabUrl = cTransport !== "stdio" && isOpenCrabCredentialUrl(cUrl);
+  useEffect(() => {
+    if (window.location.hash === "#custom") setTab("private");
+  }, []);
 
   async function addCustom() {
     const api = ipc();
-    if (!api || !customValid || customOpenCrabUrl) return;
+    if (!api || customInFlight.current || !customValid || customOpenCrabUrl) return;
+    customInFlight.current = true;
     setCBusy(true);
     setActionError(null);
     try {
@@ -91,6 +98,7 @@ export default function LibraryMcpsPage() {
     } catch (error) {
       setActionError(error instanceof Error ? error.message : "custom_install_failed");
     } finally {
+      customInFlight.current = false;
       setCBusy(false);
     }
   }
@@ -186,9 +194,13 @@ export default function LibraryMcpsPage() {
       return result;
     };
     let status = await probe();
-    // A failed live probe can mean an expired/401 token even if a stored session
-    // still exists. Supported OAuth gets a fresh authorization before key setup.
-    if (!status.connected || status.missingEnv.length) {
+    // A typed refusal and this exact connection's auth metadata determine the action.
+    // OAuth support alone cannot turn a transport/credential-read failure into sign-in.
+    const authStep = mcpConnectionSetupStep({
+      authKind: mcpConnectionAuthKind(connecting, hub.listings),
+      rows: [connecting], status,
+    });
+    if (authStep === "login") {
       const auth = await api.mcpTools.oauthStatus(connecting.id);
       assertActive();
       if (auth.supported) {
@@ -201,11 +213,10 @@ export default function LibraryMcpsPage() {
         status = await probe();
       }
     }
-    if (status.missingEnv.length) throw new Error(`${ko ? "필수 키를 설정해 주세요" : "Set the required keys"}: ${status.missingEnv.join(", ")} (missing_env)`);
-    if (!status.connected) throw new Error(`${status.error || (ko ? "서버에 연결하지 못했어요." : "Could not connect to the server.")} (probe_failed)`);
+    if (status.missingEnv.length || !status.connected) throw new Error(mcpConnectionFailureMessage(status, ko));
     if (!status.tools.length) throw new Error(ko ? "서버 응답은 있지만 사용 가능한 도구가 없어요. (empty_tools)" : "The server responded but supplied no tools. (empty_tools)");
     return { evidence: [`tools/list · ${status.tools.length} ${ko ? "개 도구" : "tools"}`, status.tools.slice(0, 3).map((tool) => tool.name).join(", "), new Date(status.checkedAt).toLocaleTimeString()] };
-  }, [connecting, ko]);
+  }, [connecting, ko, hub.listings]);
 
   const matches = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -234,7 +245,7 @@ export default function LibraryMcpsPage() {
     if (loadFailed) return ko ? "상태 확인 불가" : "State unverified";
     const status = statuses[server.id];
     if (!server.enabled) return ko ? "꺼짐" : "Off";
-    if (status?.missingEnv.length) return ko ? "키 필요" : "Keys needed";
+    if (status?.failureCode === "configuration_missing" && status.missingEnv.length) return ko ? "연결 설정 확인" : "Review connection settings";
     if (status?.connected && status.tools.length > 0) return ko ? "연결됨" : "Connected";
     return ko ? "연결 확인 필요" : "Unverified";
   };
@@ -246,7 +257,7 @@ export default function LibraryMcpsPage() {
         <button type="button" className={styles.navItem} data-active={!selectedServerId && tab === "public"} onClick={() => { setSelectedServerId(null); setTab("public"); }}><IconWand size={15} />{ko ? "플러그인" : "Plugins"}</button>
         <Link href="/library/env" className={styles.navItem}><IconLock size={15} />{ko ? "API 키" : "API keys"}</Link>
         <p className={styles.sidebarLabel}>{ko ? "설치됨" : "Installed"}</p>
-        {!loaded ? <p className={styles.sidebarHint}>{ko ? "불러오는 중…" : "Loading…"}</p> : loadFailed ? <p className={styles.sidebarHint}>{ko ? "설치 상태를 읽지 못했어요" : "Could not read installed state"}</p> : installed.length === 0 ? <p className={styles.sidebarHint}>{ko ? "아직 설치된 MCP가 없어요" : "No MCP servers installed yet"}</p> : installed.map((server) => <button key={server.id} type="button" className={styles.installedItem} data-active={selectedServerId === server.id} onClick={() => setSelectedServerId(server.id)} title={`${displayName(server)} · ${connectionBadge(server)}`} aria-label={`${displayName(server)} · ${connectionBadge(server)}`}><PluginLogo catalogId={server.catalogId} name={server.name} size={20} brandMap={brandMap} /><span>{displayName(server)}</span><span className={styles.statusDot} data-ready={serverReady(server)} aria-label={connectionBadge(server)} /></button>)}
+        {!loaded ? <p className={styles.sidebarHint}>{ko ? "불러오는 중…" : "Loading…"}</p> : loadFailed ? <p className={styles.sidebarHint}>{ko ? "설치 상태를 읽지 못했어요" : "Could not read installed state"}</p> : installed.length === 0 ? <p className={styles.sidebarHint}>{ko ? "아직 설치된 MCP가 없어요" : "No MCP servers installed yet"}</p> : installed.map((server) => <button key={server.id} type="button" data-connection-id={server.id} className={styles.installedItem} data-active={selectedServerId === server.id} onClick={() => setSelectedServerId(server.id)} title={`${displayName(server)} · ${connectionBadge(server)}`} aria-label={`${displayName(server)} · ${connectionBadge(server)}`}><PluginLogo catalogId={server.catalogId} name={server.name} size={20} brandMap={brandMap} /><span>{displayName(server)}</span><span className={styles.statusDot} data-ready={serverReady(server)} aria-label={connectionBadge(server)} /></button>)}
         <p className={styles.sidebarFoot}>{ko ? "설치한 도구는 모든 에이전트가 함께 사용해요." : "Every agent shares your installed tools."}</p>
       </aside>
       <div className={styles.main}>
@@ -262,7 +273,7 @@ export default function LibraryMcpsPage() {
         <div className={styles.tabs} role="tablist" aria-label={ko ? "플러그인 출처" : "Plugin source"}>{(["public", "private"] as Tab[]).map((value) => <button key={value} type="button" role="tab" aria-selected={tab === value && !selectedServerId} className={styles.tab} data-active={tab === value && !selectedServerId} onClick={() => { setTab(value); setSelectedServerId(null); }}>{value === "public" ? ko ? "공개" : "Public" : ko ? "개인용" : "Private"}</button>)}</div>
         {actionError && <p className={styles.notice} role="alert">{actionError}</p>}
         {addSkipped.length > 0 && <div className={styles.notice} role="status"><strong>{ko ? "일부 플러그인을 추가하지 못했어요" : "Some plugins could not be added"}</strong>{addSkipped.map((row) => <p key={row.slug}>{row.slug} — {row.reason}</p>)}<button type="button" onClick={() => setAddSkipped([])}>{ko ? "닫기" : "Dismiss"}</button></div>}
-        {selectedServer ? <div className={styles.serverDetail}><h2>{displayName(selectedServer)}</h2><p className={styles.detailNote}>{ko ? "등록 상태와 실제 연결 상태를 확인하세요." : "Review configuration and verify the live connection."}</p>{selectedServer.transport === "stdio" && <LocalExecutionReview server={selectedServer} ko={ko} />}<ChipGrid label={ko ? "MCP 연결" : "MCP connection"}><ConnectChip icon={<PluginLogo catalogId={selectedServer.catalogId} name={selectedServer.name} size={28} brandMap={brandMap} />} name={displayName(selectedServer)} sub={selectedServer.transport === "http" ? "Streamable HTTP" : selectedServer.transport === "sse" ? "SSE" : ko ? "로컬 명령" : "Local command"} ready={serverReady(selectedServer)} badge={connectionBadge(selectedServer)} facts={loadFailed ? [] : serverReady(selectedServer) ? [`tools/list · ${statuses[selectedServer.id].tools.length}`, statuses[selectedServer.id].tools.slice(0, 3).map((tool) => tool.name).join(", ")] : statuses[selectedServer.id]?.missingEnv || []} action={{ label: selectedServer.transport === "stdio" && !selectedServer.enabled ? ko ? "실행 패키지 설치 후 연결" : "Install execution package and connect" : ko ? "연결 확인" : "Verify connection", onClick: () => setConnecting(selectedServer) }} secondaryActions={[{ label: selectedServer.enabled ? t("mcps.off") : selectedServer.transport === "stdio" ? ko ? "로컬 실행 허용" : "Allow local execution" : t("mcps.on"), onClick: () => void toggle(selectedServer).catch((error) => setActionError(String(error))) }, { label: t("mcps.remove"), onClick: () => void remove(selectedServer).then(() => setSelectedServerId(null)).catch((error) => setActionError(String(error))) }]} /></ChipGrid>{selectedServer.envKeys.length > 0 && <Link href="/library/env" className={styles.textLink}>{ko ? "필수 키 설정" : "Set required keys"}</Link>}</div> : tab === "public" ? <>
+        {selectedServer ? <div className={styles.serverDetail}><h2>{displayName(selectedServer)}</h2><p className={styles.detailNote}>{ko ? "등록 상태와 실제 연결 상태를 확인하세요." : "Review configuration and verify the live connection."}</p>{selectedServer.transport === "stdio" && <LocalExecutionReview server={selectedServer} ko={ko} />}<ChipGrid label={ko ? "MCP 연결" : "MCP connection"}><ConnectChip icon={<PluginLogo catalogId={selectedServer.catalogId} name={selectedServer.name} size={28} brandMap={brandMap} />} name={displayName(selectedServer)} sub={selectedServer.transport === "http" ? "Streamable HTTP" : selectedServer.transport === "sse" ? "SSE" : ko ? "로컬 명령" : "Local command"} ready={serverReady(selectedServer)} badge={connectionBadge(selectedServer)} facts={loadFailed ? [] : serverReady(selectedServer) ? [`tools/list · ${statuses[selectedServer.id].tools.length}`, statuses[selectedServer.id].tools.slice(0, 3).map((tool) => tool.name).join(", ")] : statuses[selectedServer.id]?.missingEnv || []} action={{ label: selectedServer.transport === "stdio" && !selectedServer.enabled ? ko ? "실행 패키지 설치 후 연결" : "Install execution package and connect" : ko ? "연결 확인" : "Verify connection", onClick: () => setConnecting(selectedServer) }} secondaryActions={[{ label: selectedServer.enabled ? t("mcps.off") : selectedServer.transport === "stdio" ? ko ? "로컬 실행 허용" : "Allow local execution" : t("mcps.on"), onClick: () => void toggle(selectedServer).catch((error) => setActionError(String(error))) }, { label: t("mcps.remove"), onClick: () => void remove(selectedServer).then(() => setSelectedServerId(null)).catch((error) => setActionError(String(error))) }]} /></ChipGrid>{selectedServer.envKeys.length > 0 && <Link href="/library/env" className={styles.textLink}>{ko ? "저장된 키·연결 확인" : "Review saved keys and connections"}</Link>}</div> : tab === "public" ? <>
           {hub.loadError && <p className={styles.notice} role="status">{ko ? "실시간 목록을 갱신하지 못했어요. 앱에 포함된 카탈로그를 표시합니다." : "The live catalog could not be refreshed. Showing the bundled catalog."}</p>}
           {loadFailed && <p className={styles.notice} role="status">{ko ? "설치 상태를 읽지 못했어요. 새로고침으로 다시 확인해 주세요." : "Installed state could not be read. Refresh to check again."}</p>}
           <p className={styles.catalogNote}>{ko ? "전체 Hub 카탈로그 · 필요한 도구를 고르면 연결 설정을 안내해요." : "The full Hub catalog · choose a tool to review its setup."}</p>
@@ -273,7 +284,7 @@ export default function LibraryMcpsPage() {
             return <button key={listing.slug} type="button" className={styles.pluginRow} onClick={() => server ? setSelectedServerId(server.id) : openPicker([listing.slug])} aria-label={`${name} · ${already ? ko ? "설치 관리" : "Manage installation" : ko ? "추가 설정" : "Review setup"}`}><PluginLogo slug={listing.slug} name={name} size={36} brandColor={listing.brandColor} brandMap={brandMap} /><span className={styles.rowText}><strong>{name}</strong><span>{!ko ? listing.taglineEn || listing.tagline : listing.tagline}</span></span><span className={styles.rowAction} title={already ? ko ? "설치됨" : "Installed" : ko ? "추가 설정" : "Review setup"}>{already ? "···" : <IconPlus size={19} />}</span></button>;
           })}</div></section>)}
           {matches.length === 0 && <Empty text={query.trim() ? ko ? `“${query.trim()}”과 맞는 플러그인이 없어요.` : `No plugins match “${query.trim()}”.` : ko ? "카탈로그를 불러오는 중…" : "Loading the catalog…"} />}
-        </> : <div className={styles.customSection}><h2>{ko ? "나만의 MCP 연결" : "Your custom MCP connection"}</h2><p className={styles.detailNote}>{ko ? "Streamable HTTP 주소 또는 로컬 실행 명령을 등록하세요. 키는 별도로 안전하게 저장됩니다." : "Add a Streamable HTTP endpoint or a local command. Keys are stored separately and securely."}</p>
+        </> : <div className={styles.customSection}><h2>{ko ? "나만의 MCP 연결" : "Your custom MCP connection"}</h2><p className={styles.detailNote}>{ko ? "MCP를 지원하는 API 주소 또는 로컬 실행 명령을 등록하세요. 일반 REST API는 해당 서비스 커넥터가 필요합니다. 표시 이름으로 저장된 키를 자동 선택하지 않습니다." : "Add an MCP API endpoint or a local command. Ordinary REST APIs need their service connector. Display names do not automatically select stored keys."}</p>
 
         <div style={{ marginBottom: 12 }}>
           {(
@@ -288,6 +299,7 @@ export default function LibraryMcpsPage() {
                 value={cName}
                 onChange={(e) => setCName(e.target.value)}
                 placeholder={t("mcps.custom.name")}
+                aria-label={ko ? "연결 표시 이름" : "Connection display name"}
                 style={{ ...customInput, width: "100%" }}
               />
               {/* 로컬(명령) / 원격(URL) 세그먼트 — 원격 URL 진입로를 명확히 노출 */}
@@ -314,8 +326,11 @@ export default function LibraryMcpsPage() {
                     value={cUrl}
                     onChange={(e) => onUrlChange(e.target.value)}
                     placeholder={t("mcps.custom.url")}
+                    aria-label={ko ? "MCP API 주소" : "MCP API endpoint"}
+                    aria-invalid={!!cUrl.trim() && !endpointValid}
                     style={{ ...customInput, width: "100%", fontFamily: "var(--font-mono)" }}
                   />
+                  {!!cUrl.trim() && !endpointValid && <p role="alert">{ko ? "인증정보가 포함되지 않은 HTTP(S) 주소를 입력하세요. 키는 Vault에 저장해 주세요." : "Enter an HTTP(S) endpoint without credentials. Store keys in Vault."}</p>}
                   {cUrl.trim() ? (
                     <div style={{ fontSize: 11, color: "var(--muted-deep)", display: "flex", alignItems: "center", gap: 6 }}>
                       <span>{t("mcps.custom.detected")}:</span>
@@ -337,8 +352,12 @@ export default function LibraryMcpsPage() {
                 value={cEnv}
                 onChange={(e) => setCEnv(e.target.value)}
                 placeholder={cTransport === "stdio" ? t("mcps.custom.env") : t("mcps.custom.header")}
+                aria-label={ko ? "필수 키 또는 헤더 이름 (값 제외)" : "Required key or header names (no values)"}
+                aria-invalid={!keysValid}
                 style={{ ...customInput, width: "100%", fontFamily: "var(--font-mono)" }}
               />
+              <p className={styles.detailNote}>{ko ? "여기에는 키·헤더 이름만 입력하세요. 값은 저장된 키 설정 또는 이 요청의 전용 Vault에서 관리합니다. 저장과 실제 연결 확인은 별도 단계입니다." : "Enter key or header names only. Manage values in saved key settings or this request's dedicated Vault. Saving and connection verification are separate."}</p>
+              {!keysValid && <p role="alert">{ko ? "키 값을 붙여넣지 말고 키 또는 헤더 이름만 입력하세요." : "Enter only key or header names; do not paste values."}</p>}
               <button
                 onClick={() => void addCustom()}
                 disabled={!customValid || cBusy || customOpenCrabUrl}
@@ -364,9 +383,17 @@ export default function LibraryMcpsPage() {
         <p className={styles.securityNote}><IconLock size={13} />{t("env.security_note")}</p></div>}
       </div>
       {pickerOpen && <PluginPickerDialog ko={ko} initialSlugs={pickerSlugs} onCustomSetup={() => { setPickerOpen(false); setSelectedServerId(null); setTab("private"); }} onClose={() => { setPickerOpen(false); void refreshAll(); }} onCompleted={(result) => { setAddSkipped(result?.skipped ?? []); void refreshAll(); }} />}
-      {connecting && <ServiceConnectPopup name={displayName(connecting)} icon={<PluginLogo catalogId={connecting.catalogId} name={connecting.name} size={28} brandMap={brandMap} />} ko={ko} run={connectServer} setupLink={connecting.envKeys.length ? { label: ko ? "필수 키 설정" : "Set required keys", href: "/library/env" } : undefined} onClose={() => { setConnecting(null); void refresh(); }} onDone={() => { setConnecting(null); void refresh(); }} />}
+      {connecting && <ServiceConnectPopup name={displayName(connecting)} icon={<PluginLogo catalogId={connecting.catalogId} name={connecting.name} size={28} brandMap={brandMap} />} ko={ko} run={connectServer} setupLink={connecting.envKeys.length ? { label: ko ? "저장된 키·연결 확인" : "Review saved keys and connections", href: "/library/env" } : undefined} onClose={() => { setConnecting(null); void refresh(); }} onDone={() => { setConnecting(null); void refresh(); }} />}
     </section>
   );
+}
+
+function validCustomMcpEndpoint(value: string): boolean {
+  try {
+    const url = new URL(value.trim());
+    return (url.protocol === "https:" || url.protocol === "http:") && !url.username && !url.password && !url.hash
+      && ![...url.searchParams.keys()].some((key) => /(?:token|key|secret|password|authorization|credential|signature)/iu.test(key));
+  } catch { return false; }
 }
 
 function isOpenCrabCredentialUrl(value: string): boolean {

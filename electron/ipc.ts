@@ -17,6 +17,7 @@ import { configureOneHarnessRuntimeClient } from "./one/harness";
 import { authorizeSupervisorNativeOrigin, supervisorNativeNoticePurpose, dispatchSupervisorNativeCommand,
   configureOneSupervisorNativeRuntime, callOneSupervisorRuntime, supervisorRuntimeMode } from "./one/supervisor-native-runtime";
 import { assertOneWindowChannel } from "./one-window-manager";
+import { registerOnePersonalDataIpc } from './one/personal-data-ipc';
 import { recordAppControlRendererEvent, registerAppControlDomainIpc } from "./app-control/ipc-registry";
 import { registerAgentWorkspaceIpc } from "./agents/workspace-ipc";
 import { importDedicatedBrowserCookies, syncConnectBrowserSession } from "./browser/native-session-cookie-import";
@@ -1745,6 +1746,7 @@ export function registerIpcHandlers(): void {
   };
   registerAgentWorkspaceIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneSupervisorIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
+  registerOnePersonalDataIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneHarnessIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });
   registerOneContextIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender, openPermissions: openOneContextPermissions });
   registerBrowserUiIpc({ ipc: ipcMain, assertTrustedSender: assertTrustedSitePublishIpcSender });

@@ -5,6 +5,9 @@ import type { OneSupervisorAPI } from "./one-supervisor";
 import type { OneWindowAPI } from "./one-window";
 import type { OneHarnessAPI } from "./one-harness";
 import type { OneContextAPI } from "./one-context";
+import type { OnePersonalDataNativeAPI } from './one-personal-native';
+import type { OneVaultNativeAPI } from './one-vault';
+import type { OneProviderNativeAPI } from './one-provider-native';
 import type { AgentWorkspaceIpc } from "./agent-workspace";
 import type { LocalModelHubAPI } from "./local-model-hub";
 import type { LocalModelMigrationAPI } from "./local-model-migration";
@@ -8178,6 +8181,9 @@ export interface AgentlasIpc {
   oneHarness: OneHarnessAPI;
   /** Explicit, expiring OS context and task-bound interaction state. */
   oneContext: OneContextAPI;
+  onePersonalData: OnePersonalDataNativeAPI;
+  oneVault: OneVaultNativeAPI;
+  oneProvider: OneProviderNativeAPI;
   oneProfile: {
     get: () => Promise<OneProfile>;
     /** 계정 하나 = One 하나 — 이 계정의 One 이 기계 전역 프로필을 이어받았는지("inherited"), 새로 시작했는지("fresh"). */

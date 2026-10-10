@@ -98,6 +98,8 @@ export function OneTaskforceRail({
           className={`${styles.taskforceRow} ${oneRunCometHostClass}`}
           data-active={activeChatId === taskforce.chatId ? "true" : "false"}
           data-one-running={spinning ? "true" : "false"}
+          title={taskforce.title}
+          aria-label={taskforce.title}
           onClick={() => onOpen(taskforce)}
         >
           <TaskforcePortraits taskforce={taskforce} org={org} oneAvatarIcon={oneAvatarIcon} />

@@ -1,3 +1,4 @@
+import { currentHistoryRuntimeFence } from "../one/history-runtime-fences";
 import { withInvocationUsageIfAbsent, currentInvocationObservedUsage, currentInvocationRunnerScopeCount } from "../runtime/invocation-usage";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { runnerFailureFromError } from "../runtime/runner";
@@ -171,11 +172,12 @@ export async function allocateBuildRuntime(input: {
           locale: input.locale,
         },
         { onPartial: () => {}, onStatus: () => {}, onTool: () => {} },
-      );
+      input.picked.active.kind);
       if (input.signal.aborted) throw input.signal.reason ?? new Error("Build cancelled");
       if (selector.failure) throw new ObservedRunnerFailureError(selector.failure);
       allocation = normalizeWorkloadAllocation(buildAllocationJson(selector.text), phase);
     } catch (error) {
+      if(currentHistoryRuntimeFence())throw error;
       if (input.signal.aborted || runtimeFailureBlocksReplay(ObservedRunnerFailureError.providerFailure(error) ?? runnerFailureFromError(error, input.picked.active.kind))) throw error;
       allocation = normalizeWorkloadAllocation(null, phase);
     }
@@ -1304,7 +1306,7 @@ async function runHephaestusBuildInScope(
     let runnerOutcome;
     try {
       runnerOutcome = await runBuildRunnerWithMcpRecovery({
-      runner: (request, events) => runObservedRunner(buildPicked.runner, request, events),
+      runner: (request, events) => runObservedRunner(buildPicked.runner, request, events,buildActive.kind),
       attachment: req.mcpAttachment,
       makeRequest: makeRunnerRequest,
       events: runnerEvents,
@@ -1409,7 +1411,7 @@ async function runHephaestusBuildInScope(
             ].join("\n"),
           },
           runnerEvents,
-        );
+        buildActive.kind);
         // 되돌린 답이 실제로 질문을 담았을 때만 채택한다. 또 완료를 선언하면
         // 원래 결과를 그대로 두고 진행한다 — 사용자를 무한 루프에 가두지 않는다.
         if (signal.aborted) throw signal.reason ?? new Error("Build cancelled");
@@ -1587,7 +1589,7 @@ async function runHephaestusBuildInScope(
               ],
             },
             runnerEvents,
-          );
+          buildActive.kind);
           if (signal.aborted) throw signal.reason ?? new Error("Build cancelled");
           if (repairResult.failure) throw new ObservedRunnerFailureError(repairResult.failure);
           finalSessionId = repairResult.sessionId ?? finalSessionId;

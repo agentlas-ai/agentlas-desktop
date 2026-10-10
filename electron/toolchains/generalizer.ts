@@ -12,7 +12,7 @@ import { createAutomation, removeAutomation } from "../store/automations";
 import { getProject } from "../store/projects";
 import { listInstalledServers } from "../mcp-tools/registry";
 import { GLOBAL_ORCHESTRATOR_SLUG } from "../architecture/manifest";
-import { callConnectedModelDetailed, configuredOrchestratorJudgmentPolicy } from "../system-agents/judgment";
+import { callToolchainPreparation, type ToolchainPreparationProducer } from "./preparation";
 import { TOOLCHAIN_GENERALIZER_AGENT, TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA, type ToolchainGeneralizationDecision } from "../system-agents/toolchain-generalizer";
 import { graphMcpEffectProblems } from "../workflow/mcp-call";
 import { currentUiLocale } from "../ui-locale";
@@ -21,15 +21,41 @@ import { addToolchainVersion, createToolchainAsset, getToolchainAsset, listToolc
 const PREFIX = "toolchain.generalization.v1:";
 const validateDecision = new Ajv({ strict: true, allErrors: true }).compile<ToolchainGeneralizationDecision>(TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA);
 const pending = new Map<string, { inputHash: string; promise: Promise<ToolchainGenerationResult> }>();
-interface GenerationActor { callerChatId?: string | null; signal?: AbortSignal; assertCurrent?: () => void }
+export interface ToolchainPreparedProposal {
+  schema: "agentlas.toolchain-prepared-proposal.v1";
+  requestId: string; inputHash: string; catalogRevision: string;
+  decision: "reuse" | "new_version" | "new_asset";
+  targetToolchainId: string | null; version: number | null; baseRevision: number | null;
+  projectId: string | null; capabilityKey: string;
+  compiledGraph: WorkflowGraph | null;
+  contract: ToolchainAsset["versions"][number]["contract"] | null;
+  runtimeReceipt: NonNullable<Awaited<ReturnType<typeof callToolchainPreparation>>["runtimeReceipt"]>;
+}
+interface GenerationActor {
+  callerChatId?: string | null; signal?: AbortSignal; assertCurrent?: () => void;
+  preparationProducer?: ToolchainPreparationProducer;
+  /** Main-only admission AFTER genuine proposal preparation, BEFORE SQL.
+   * The original commit callback is synchronous and exactly once. A native
+   * owner may open an outer IMMEDIATE and invoke it as a nested transaction. */
+  withPreparedCommit?: (proposal: Readonly<ToolchainPreparedProposal>, commit: () => ToolchainGenerationResult)
+    => ToolchainGenerationResult | Promise<ToolchainGenerationResult>;
+}
+function immutablePreparedProposal(input: ToolchainPreparedProposal): Readonly<ToolchainPreparedProposal> {
+  const value = structuredClone(input), seen = new WeakSet<object>();
+  const freeze = (item: unknown): void => {
+    if (!item || typeof item !== "object" || seen.has(item)) return;
+    seen.add(item); Object.values(item).forEach(freeze); Object.freeze(item);
+  };
+  freeze(value); return value;
+}
 interface GenerationRecord {
   inputHash: string;
   result: Omit<ToolchainGenerationResult, "asset"> & { assetId: string };
   agentId: string;
   taskId: string;
   catalogRevision: string;
-  runtimeReceipt: Awaited<ReturnType<typeof callConnectedModelDetailed>>["runtimeReceipt"];
-  attempts: Awaited<ReturnType<typeof callConnectedModelDetailed>>["attempts"];
+  runtimeReceipt: Awaited<ReturnType<typeof callToolchainPreparation>>["runtimeReceipt"];
+  attempts: Awaited<ReturnType<typeof callToolchainPreparation>>["attempts"];
   createdAt: string;
 }
 
@@ -150,10 +176,9 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
         installedProviders: listInstalledServers().filter(server => server.enabled).map(server => ({ catalogId: server.catalogId, name: server.name })),
         feedback, outputSchema: TOOLCHAIN_GENERALIZATION_OUTPUT_SCHEMA });
       if (Buffer.byteLength(context) > 1024 * 1024) throw new Error("toolchain_catalog_context_too_large");
-      const policy = configuredOrchestratorJudgmentPolicy();
-      if (!policy) throw new Error("toolchain_orchestrator_unconfigured");
-      const detailed = await callConnectedModelDetailed({ systemPrompt: TOOLCHAIN_GENERALIZER_AGENT.core, input: context,
-        selectionPolicy: policy, requireNoTools: true, signal, timeoutMs: Math.max(1, deadline - Date.now()) });
+      const detailed = await callToolchainPreparation({ purpose: "generalization",
+        systemPrompt: TOOLCHAIN_GENERALIZER_AGENT.core, input: context,
+        producer: actor.preparationProducer, signal, deadlineAt: deadline });
       signal.throwIfAborted(); actor.assertCurrent?.();
       if (!detailed.text && detailed.failure?.kind === "refused" && detailed.failure.source === "marker"
         && detailed.failure.message === "judgment_orchestrator_pool_changed") {
@@ -162,6 +187,7 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
       }
       if (!detailed.text) throw new Error("toolchain_generalization_unavailable");
       if (catalogRevision() !== revision) { feedback = "Catalog changed while you reviewed it. Compare the fresh complete catalog again before choosing an identity."; continue; }
+      let nativeCommitAttempted = false;
       try {
         const decision = parseDecision(detailed.text);
         const target = decision.toolchainId ? assets.find(asset => asset.id === decision.toolchainId) : null;
@@ -172,50 +198,76 @@ async function prepare(input: ToolchainGenerationInput, actor: GenerationActor, 
         if (decision.decision === "new_asset" && assets.some(asset => asset.capabilityKey === decision.capabilityKey))
           throw new Error("toolchain_existing_capability_requires_reuse_or_version");
         const graph = decision.decision === "reuse" ? null : compileDecision(decision);
-        const result = getDb().transaction(() => {
+        if (!detailed.runtimeReceipt) throw new Error("toolchain_preparation_receipt_invalid");
+        const proposal = immutablePreparedProposal({ schema: "agentlas.toolchain-prepared-proposal.v1",
+          requestId: input.requestId, inputHash, catalogRevision: revision, decision: decision.decision,
+          targetToolchainId: target?.id ?? null, version: decision.decision === "reuse" ? decision.version : null,
+          baseRevision: target?.revision ?? null, projectId: input.projectId ?? null, capabilityKey: decision.capabilityKey,
+          compiledGraph: graph, contract: decision.contract, runtimeReceipt: detailed.runtimeReceipt });
+        let open = true, entered = false;
+        let committed: ToolchainGenerationResult | undefined;
+        const commit = (): ToolchainGenerationResult => {
+          if (!open || entered) throw new Error("toolchain_prepared_commit_once_required");
+          entered = true;
+          // Native admission may have awaited. Re-read original work and catalog
+          // BEFORE opening SQL; the transaction repeats these checks atomically.
           signal.throwIfAborted(); actor.assertCurrent?.();
           if (catalogRevision() !== revision) throw new Error("toolchain_catalog_changed");
-          const replay = readResult(key, inputHash);
-          if (replay) return replay;
-          let asset: ToolchainAsset;
-          let version: number;
-          let outcome: ToolchainGenerationResult["decision"] = decision.decision;
-          if (decision.decision === "reuse") {
-            const release = target!.versions.find(release => release.version === decision.version);
-            if (target!.status !== "callable" || release?.validation.state !== "passed") throw new Error("toolchain_version_not_callable");
-            asset = target!; version = release.version;
-          } else {
-            const runtime = detailed.runtimeReceipt?.selection;
-            if (!runtime?.model) throw new Error("toolchain_runtime_pin_required");
-            const runtimeSelection: RuntimeSelection = { ...runtime, role: "worker", inherit: false,
-              ...(detailed.runtimeReceipt?.effort ? { effort: detailed.runtimeReceipt.effort } : {}),
-              ...(detailed.runtimeReceipt?.longContext !== undefined ? { longContext: detailed.runtimeReceipt.longContext } : {}) };
-            // Only a new, disabled staging graph is constructed here. Its frozen
-            // carrier is retained; the staging row is removed in this same transaction.
-            const source = createAutomation({ name: decision.contract.name, goal: decision.contract.description,
-              targetType: "agent", targetId: `builtin-${GLOBAL_ORCHESTRATOR_SLUG}`, promptTemplate: "",
-              projectId: input.projectId ?? null, graphJson: graph!, runtimeSelection,
-              executionPermission: requiredExecutionPermission(graph!), toolMode: "auto", hubMode: "local-only",
-              scheduleHuman: "", triggerType: "command", trigger: { kind: "command" }, enabled: false, createdBy: "agent" });
-            const creation: ToolchainAssetCreateInput = { sourceAutomationId: source.id, capabilityKey: decision.capabilityKey,
-              contract: decision.contract, outputBinding: { nodeId: `step${decision.outputStep + 1}`, format: decision.outputFormat } };
-            asset = decision.decision === "new_version" ? addToolchainVersion(target!.id, creation, actor) : createToolchainAsset(creation, actor);
-            const exact = matchingToolchainVersion(asset, creation);
-            if (!exact) throw new Error("toolchain_generation_version_missing");
-            version = exact.version;
-            if (assets.some(prior => prior.id === asset.id && prior.versions.some(release => release.version === version))) outcome = "reuse";
-            removeAutomation(source.id);
-          }
-          const result: ToolchainGenerationResult = { asset, version, decision: outcome, rationale: decision.rationale, generalizationId: `tcg_${randomUUID()}` };
-          const { asset: _asset, ...withoutAsset } = result;
-          const record: GenerationRecord = { inputHash, result: { ...withoutAsset, assetId: asset.id },
-            agentId: `builtin-${GLOBAL_ORCHESTRATOR_SLUG}`, taskId: TOOLCHAIN_GENERALIZER_AGENT.id, catalogRevision: revision,
-            runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, createdAt: new Date().toISOString() };
-          getDb().prepare("INSERT INTO meta(key,value) VALUES(?,?)").run(key, JSON.stringify(record));
+          committed = getDb().transaction(() => {
+            signal.throwIfAborted(); actor.assertCurrent?.();
+            if (catalogRevision() !== revision) throw new Error("toolchain_catalog_changed");
+            const replay = readResult(key, inputHash);
+            if (replay) return replay;
+            let asset: ToolchainAsset;
+            let version: number;
+            let outcome: ToolchainGenerationResult["decision"] = decision.decision;
+            if (decision.decision === "reuse") {
+              const release = target!.versions.find(release => release.version === decision.version);
+              if (target!.status !== "callable" || release?.validation.state !== "passed") throw new Error("toolchain_version_not_callable");
+              asset = target!; version = release.version;
+            } else {
+              const runtime = detailed.runtimeReceipt?.selection;
+              if (!runtime?.model) throw new Error("toolchain_runtime_pin_required");
+              const runtimeSelection: RuntimeSelection = { ...runtime, role: "worker", inherit: false,
+                ...(detailed.runtimeReceipt?.effort ? { effort: detailed.runtimeReceipt.effort } : {}),
+                ...(detailed.runtimeReceipt?.longContext !== undefined ? { longContext: detailed.runtimeReceipt.longContext } : {}) };
+              // Only a new, disabled staging graph is constructed here. Its frozen
+              // carrier is retained; the staging row is removed in this same transaction.
+              const source = createAutomation({ name: decision.contract.name, goal: decision.contract.description,
+                targetType: "agent", targetId: `builtin-${GLOBAL_ORCHESTRATOR_SLUG}`, promptTemplate: "",
+                projectId: input.projectId ?? null, graphJson: graph!, runtimeSelection,
+                executionPermission: requiredExecutionPermission(graph!), toolMode: "auto", hubMode: "local-only",
+                scheduleHuman: "", triggerType: "command", trigger: { kind: "command" }, enabled: false, createdBy: "agent" });
+              const creation: ToolchainAssetCreateInput = { sourceAutomationId: source.id, capabilityKey: decision.capabilityKey,
+                contract: decision.contract, outputBinding: { nodeId: `step${decision.outputStep + 1}`, format: decision.outputFormat } };
+              asset = decision.decision === "new_version" ? addToolchainVersion(target!.id, creation, actor) : createToolchainAsset(creation, actor);
+              const exact = matchingToolchainVersion(asset, creation);
+              if (!exact) throw new Error("toolchain_generation_version_missing");
+              version = exact.version;
+              if (assets.some(prior => prior.id === asset.id && prior.versions.some(release => release.version === version))) outcome = "reuse";
+              removeAutomation(source.id);
+            }
+            const result: ToolchainGenerationResult = { asset, version, decision: outcome, rationale: decision.rationale, generalizationId: `tcg_${randomUUID()}` };
+            const { asset: _asset, ...withoutAsset } = result;
+            const record: GenerationRecord = { inputHash, result: { ...withoutAsset, assetId: asset.id },
+              agentId: `builtin-${GLOBAL_ORCHESTRATOR_SLUG}`, taskId: TOOLCHAIN_GENERALIZER_AGENT.id, catalogRevision: revision,
+              runtimeReceipt: detailed.runtimeReceipt, attempts: detailed.attempts, createdAt: new Date().toISOString() };
+            getDb().prepare("INSERT INTO meta(key,value) VALUES(?,?)").run(key, JSON.stringify(record));
+            return result;
+          }).immediate();
+          return committed;
+        };
+        try {
+          nativeCommitAttempted = Boolean(actor.withPreparedCommit);
+          const result = actor.withPreparedCommit ? await actor.withPreparedCommit(proposal, commit) : commit();
+          if (!entered || result !== committed) throw new Error("toolchain_prepared_commit_result_required");
+          signal.throwIfAborted(); actor.assertCurrent?.();
           return result;
-        }).immediate();
-        return result;
+        } finally { open = false; }
       } catch (error) {
+        // A prepared lease denial/unknown commit is terminal, not permission
+        // for another model turn or a new repair occurrence.
+        if (nativeCommitAttempted) throw error;
         feedback = `Host rejected the proposal: ${error instanceof Error ? error.message : "toolchain_generalization_invalid"}. Correct it using the current catalog and the same requested capability. Do not create a duplicate or ask the user to author schemas.`;
         if (round === 2) throw error;
       }

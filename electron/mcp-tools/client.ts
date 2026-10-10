@@ -1,3 +1,4 @@
+import { withCurrentHistoryTool } from "../one/history-runtime-fences";
 import { preparedMcpTransport, preparedMcpTargetTransport, type PreparedMcpBinding } from "./prepared-transport";
 import { mcpToolSchemaDigest } from "./tool-schema";
 // 실제 MCP 클라이언트 — v2 SDK로 2026/2025 원격 서버에 붙어 tools/list.
@@ -13,6 +14,8 @@ import { Client, ProtocolError, SSEClientTransport, StreamableHTTPClientTranspor
 import { McpError } from "@modelcontextprotocol/sdk/types.js";
 import type { JSONRPCMessage, Transport } from "@modelcontextprotocol/client";
 import type { Transport as LegacyTransport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { SSEClientTransport as LegacySSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
+import { StreamableHTTPClientTransport as LegacyHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { OwnedStdioClientTransport, ownedStdioEnvironment } from "./owned-stdio-transport";
 import { readEnvVar } from "../secrets/vault";
 import { resolveMcpOAuthAccessToken } from "./oauth";
@@ -27,6 +30,7 @@ import {
   vaultUrlKey,
 } from "../opencrab/constants";
 import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
+import { serializeMcpResultForPreview } from "../../shared/mcp-result-rendering";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 import { isCanonicalComputerUseMcpServer } from "../computer-use/mcp-server";
 import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
@@ -795,12 +799,15 @@ export interface McpToolContentResult {
   text: string;
   isError: boolean;
   images: Array<{ mediaType: "image/png" | "image/jpeg"; data: string }>;
-  /** Exact decoded MCP response, retained only by the Main-owned Science bridge. */
+  /** Bounded ordinary event payload for the existing result UI; never model input. */
+  presentationResult?: string;
+  /** Exact received response for Main: Science opt-in or an omitted presentation original. */
   rawResult?: Record<string, unknown>;
 }
 
-/** The ordinary adapter keeps its established admission limits. Science retains exact blocks
- * first, and bounds model delivery separately; an already received result is never re-executed. */
+/** The ordinary adapter keeps its established model admission limits. If presentation omits
+ * received bytes, Main retains that original separately. This is not durable artifact storage
+ * or an access grant. Science still opts into full text before model projection. */
 export function normalizeMcpToolContentResult(value: unknown, maxTextChars: number, retainFullResult = false): McpToolContentResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("mcp_tool_result_invalid");
   const res = value as Record<string, unknown>;
@@ -819,7 +826,10 @@ export function normalizeMcpToolContentResult(value: unknown, maxTextChars: numb
     }
     images.push({ mediaType: item.mimeType as "image/png" | "image/jpeg", data: item.data });
   }
-  return { text, images, isError: res.isError === true, ...(retainFullResult ? { rawResult: res } : {}) };
+  const presentationResult = serializeMcpResultForPreview(res);
+  const retainReceivedOriginal = retainFullResult
+    || Boolean(presentationResult && JSON.parse(presentationResult).previewTruncated === true);
+  return { text, images, isError: res.isError === true, ...(presentationResult ? { presentationResult } : {}), ...(retainReceivedOriginal ? { rawResult: res } : {}) };
 }
 
 export interface McpToolCallOptions {
@@ -1145,8 +1155,8 @@ async function callServerToolContentInternal(
           if (modernInventory && !modernDefinition) throw new Error("mcp_tool_not_in_current_inventory");
           preparation.signal.throwIfAborted();
           if (options?.prepared) preparedMcpTransport(options.prepared, server);
-          const res = await activeClient.callTool({ name: toolName, arguments: args },
-            modernDefinition ? { toolDefinition: modernDefinition } : undefined);
+          const res = await withCurrentHistoryTool({kind:"mcp",serverId:server.id,catalogId:server.catalogId??null,toolName,args,schemaDigest:options?.expectedToolSchemaDigest??(modernDefinition?mcpToolSchemaDigest(modernDefinition):null)},()=>activeClient.callTool({ name: toolName, arguments: args },
+            modernDefinition ? { toolDefinition: modernDefinition } : undefined));
           const normalized = normalizeMcpToolContentResult(res, maxTextChars, options?.retainFullResult === true);
           if (session && sessionEntry) session.touch();
           else await closeMcpClientAndTransport(activeClient, transport);
@@ -1277,7 +1287,17 @@ export async function statusAllServers(
 
 /** One Main-owned transport per native proxy attachment, never an arbitrary launch spec. */
 export async function createPreparedMcpTargetTransport(binding: PreparedMcpBinding, signal: AbortSignal, cwd: string): Promise<LegacyTransport> {
-  if (preparedMcpTargetTransport(binding, binding.server).kind !== "stdio") throw new Error("mcp_proxy_transport_unsupported");
+  signal.throwIfAborted();
+  const target = preparedMcpTargetTransport(binding, binding.server);
+  if (target.kind !== "stdio") {
+    // Same SDK as proxy-session's actual wire. Headers stay inside Main's
+    // current opaque prepared target, not the CLI's config or arguments.
+    preparedMcpTransport(binding, binding.server);
+    const init = { requestInit: { headers: target.headers },
+      ...(binding.server.catalogId === OPENCRAB_CATALOG_ID ? { fetch: openCrabNoRedirectFetch } : {}) };
+    return target.kind === "sse" ? new LegacySSEClientTransport(new URL(target.url), init)
+      : new LegacyHTTPClientTransport(new URL(target.url), init);
+  }
   // Internal native proxies stay on the legacy SDK's byte-compatible stdio boundary.
   return (await createTransport(binding.server, {}, undefined, signal, binding, true, cwd)).transport as unknown as LegacyTransport;
 }

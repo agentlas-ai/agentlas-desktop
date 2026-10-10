@@ -10,6 +10,18 @@ import { tStatus } from "./status-i18n";
 import { resolveEffectiveContextWindow } from "../../shared/models";
 import { runLocalOpenAiChat, type ChatMessage, type LocalChatContent } from "./local-tool-loop";
 import { ownerControlHistoryImages } from "./owner-control-pump";
+import { agentContextHostBinding } from "./agent-context";
+
+export interface LoadedInstanceContextLengthRequest {
+  readonly host: string;
+  readonly model: string;
+  readonly signal?: AbortSignal;
+  /** Original host invocation assertion; metadata grants no new authority. */
+  readonly assertCurrent: () => void;
+}
+function loadedCapacityFailure(code: string): never {
+  throw Object.assign(new Error(code), { code });
+}
 
 /** "localhost:1234"처럼 스킴이 없으면 http:// 보정하고 끝 슬래시를 제거한다. */
 export function normalizeLocalHost(raw: string | undefined, fallback: string): string {
@@ -57,6 +69,9 @@ export function makeLocalOpenAiRunner(
     headersFn?: () => Record<string, string>;
     /** Exact resident Main receipt; generic OpenAI-compatible providers do not opt in. */
     contextWindowFn?: () => number | Promise<number>;
+    /** Read-only loaded configuration. Token counts still use the estimated
+     * Chat path; this is not a managed tokenizer or retained-chain receipt. */
+    loadedInstanceContextLengthFn?: (input: Readonly<LoadedInstanceContextLengthRequest>) => Promise<number | undefined>;
     /** See RunLocalOpenAiChatOptions.acceptsImageResults. Default true (Ollama/LM Studio vision models). */
     acceptsImageResults?: boolean;
     temperature?: number;
@@ -69,6 +84,11 @@ export function makeLocalOpenAiRunner(
     if (!model) {
       throw new Error(req.locale === "ko" ? "모델이 선택되지 않았습니다." : "No model selected.");
     }
+    // Capture before any callback/await so the optional metadata read cannot
+    // silently observe a different selection or invocation halfway through.
+    const loadedBinding = { model: req.model, signal: req.signal, capability: req.agentContext,
+      science: req.scienceRecoveryCapability, chatId: req.chatId, agentId: req.agentId,
+      approvalChatId: req.approvalChatId, permission: req.permission };
 
     events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
@@ -76,7 +96,27 @@ export function makeLocalOpenAiRunner(
     // may only have catalog metadata; unknown is explicitly an estimate.
     const contextWindow = await options.contextWindowFn?.();
     assertScienceRecoveryRequest(req, runtimeKind);
-    const capacity = contextWindow === undefined ? resolveEffectiveContextWindow(runtimeKind, model, false) : null;
+    let loadedContextLength: number | undefined;
+    if (contextWindow === undefined && options.loadedInstanceContextLengthFn) {
+      const original = loadedBinding;
+      const assertCurrent = () => {
+        if (req.model !== original.model || req.signal !== original.signal || req.agentContext !== original.capability
+          || req.scienceRecoveryCapability !== original.science || req.chatId !== original.chatId
+          || req.agentId !== original.agentId || req.approvalChatId !== original.approvalChatId || req.permission !== original.permission)
+          loadedCapacityFailure("local_loaded_capacity_request_binding_changed");
+        original.signal?.throwIfAborted();
+        if (original.capability) agentContextHostBinding(original.capability).assertCurrent();
+        assertScienceRecoveryRequest(req, runtimeKind);
+      };
+      assertCurrent();
+      loadedContextLength = await options.loadedInstanceContextLengthFn(Object.freeze({ host, model, signal: original.signal, assertCurrent }));
+      assertCurrent();
+      if (loadedContextLength !== undefined && (!Number.isSafeInteger(loadedContextLength) || loadedContextLength <= 0))
+        loadedCapacityFailure("local_loaded_capacity_invalid");
+    }
+    const capacity = contextWindow === undefined && loadedContextLength === undefined
+      ? resolveEffectiveContextWindow(runtimeKind, model, false) : null;
+    const estimatedWindow = loadedContextLength ?? (capacity ? capacity.contextWindow ?? 16_000 : undefined);
     const recent = req.history;
     const systemText = req.systemPrompt;
 
@@ -146,10 +186,10 @@ export function makeLocalOpenAiRunner(
         headers: options.headersFn?.(),
         contextWindow,
         ...(contextWindow !== undefined ? { dynamicHistoryCompaction: true as const } : {}),
-        ...(capacity ? {
-          estimatedContextWindow: capacity.contextWindow ?? 16_000,
-          estimatedOutputReserve: req.maxOutputTokens ?? Math.min(8_192, Math.floor((capacity.contextWindow ?? 16_000) / 4)),
-          capacitySource: capacity.source,
+        ...(estimatedWindow !== undefined ? {
+          estimatedContextWindow: estimatedWindow,
+          estimatedOutputReserve: req.maxOutputTokens ?? Math.min(8_192, Math.floor(estimatedWindow / 4)),
+          ...(capacity ? { capacitySource: capacity.source } : {}),
         } : {}),
         ...(options.acceptsImageResults === false ? { acceptsImageResults: false } : {}),
         ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),

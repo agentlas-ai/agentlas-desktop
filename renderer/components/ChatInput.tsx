@@ -2205,17 +2205,19 @@ export function ComposerGoalBar({
   return (
     <div className={placement === "top" ? `chat-composer-goal-stack ${goalBarStyles.top}` : "chat-composer-goal-stack"}
       data-chat-goal-bar="true" data-goal-bar-placement={placement}>
-    <div className="chat-composer-progress chat-composer-goal" role="status" aria-live="polite">
+    <div className={`chat-composer-progress chat-composer-goal ${goalBarStyles.card}`} role="status" aria-live="polite">
+      <div className={goalBarStyles.heading}>
       <span className="chat-composer-progress-icon" aria-hidden><IconTarget size={13} /></span>
       <strong>{locale === "ko" ? "목표" : "Goal"}</strong>
-      <span className="chat-composer-progress-label" title={(paused || blocked) ? [title, blockedReason ?? pauseReason].filter(Boolean).join("\n") : title}>{title}</span>
+      </div>
+      <div className={goalBarStyles.actions}>
       {(criteria?.length ?? 0) > 0 && (
         <span className="chat-composer-goal-criteria" title={criteriaTitle}>
           {locale === "ko" ? `성공 기준 ${criteria?.length}개` : `${criteria?.length} criteria`}
         </span>
       )}
       {observed && onPause && runStatus && !["paused", "pausing", "blocked", "failed", "completed", "cancelled", "cancelling"].includes(runStatus) && (
-        <button type="button" onClick={onPause} data-chat-goal-pause="true"
+        <button type="button" onClick={onPause} data-chat-goal-pause="true" data-hover="own"
           aria-label={locale === "ko" ? "목표 일시정지" : "Pause goal"}
           title={locale === "ko" ? "실행과 자동 이어가기를 멈추고 목표를 보존합니다" : "Stop execution and automatic continuation; keep the goal"}>
           <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true"><path d="M4 3h3v10H4zM9 3h3v10H9z" /></svg>
@@ -2228,6 +2230,7 @@ export function ComposerGoalBar({
           type="button"
           onClick={onResume}
           data-chat-goal-resume="true"
+          data-hover="own"
           aria-label={blockedReason === "goal_wait_ongoing_authority_required"
             ? (locale === "ko" ? "지속 목표 확인" : "Confirm ongoing goal")
             : (locale === "ko" ? "목표 수동 재개" : "Resume goal manually")}
@@ -2241,7 +2244,7 @@ export function ComposerGoalBar({
         </button>
       )}
       {onEdit && label && (
-        <button type="button" data-goal-chip-edit="true"
+        <button type="button" data-goal-chip-edit="true" data-hover="own"
           onClick={() => { if (!requestGoalPanelOpen(chatId)) { setDraft(label); setEditing(true); } }}
           aria-label={locale === "ko" ? "목표 편집" : "Edit goal"}
           title={locale === "ko" ? "목표 패널에서 편집" : "Edit in the goal panel"}>
@@ -2251,11 +2254,15 @@ export function ComposerGoalBar({
       <button
         type="button"
         onClick={onEndGoal}
+        data-hover="own"
         aria-label={locale === "ko" ? "목표 삭제" : "Delete goal"}
         title={locale === "ko" ? "목표를 삭제합니다. 대화와 작업 파일은 유지됩니다" : "Delete the goal; keep the conversation and files"}
       >
         <IconTrash size={12} />
       </button>
+      </div>
+      <span className={`chat-composer-progress-label ${goalBarStyles.objective}`}
+        title={(paused || blocked) ? [title, blockedReason ?? pauseReason].filter(Boolean).join("\n") : title}>{title}</span>
     </div>
     {plan && <GoalPlanSummary plan={plan} locale={locale === "ko" ? "ko" : "en"} variant="composer-tab" />}
     {nextWake && <p className={goalBarStyles.nextWake} data-goal-next-wake={nextWake.requestedBy}>

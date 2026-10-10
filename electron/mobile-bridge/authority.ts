@@ -1,3 +1,4 @@
+import {isOneMobileSecureMethod, type OneMobileSecureAdapter} from "../secrets/one-mobile-secure";
 import { answerOneDispatchQuestion } from "../one/team-dispatch";
 import type { MobilePushService, MobilePushNotice } from "./push";
 import { MobileGoalControl, type MobileGoalControlServices } from "./goal-control";
@@ -327,6 +328,8 @@ function activeMobileBuildStatus(status: InternalMobileBuildStatus): boolean {
 }
 
 export interface AgentlasDesktopMobileBridgeAuthorityOptions {
+  /** Main-installed independent sender/original-command service; absent stays unavailable. */
+  oneSecure?: () => OneMobileSecureAdapter | null;
   mobilePush?: MobilePushService;
   /** Host composition routes the exact run to its leased process owner. */
   currentTurnControl?: InvocationCurrentTurnPort;
@@ -2187,7 +2190,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
     }, context);
   }
 
+  connectionOpened(context: MobileBridgeConnectionContext): void {
+    this.options.oneSecure?.()?.connectionOpened(context);
+  }
+
   connectionClosed(context: MobileBridgeConnectionContext): void {
+    this.options.oneSecure?.()?.connectionClosed(context);
     this.visualSessions.closeDeviceSessions(context.deviceId);
   }
 
@@ -2514,6 +2522,12 @@ export class AgentlasDesktopMobileBridgeAuthority implements MobileBridgeAuthori
       !REQUEST_ID_RE.test(request.id)
     ) {
       throw new TypeError("Invalid Mobile Bridge authority request envelope");
+    }
+
+    if (isOneMobileSecureMethod(request.method)) {
+      const secure = this.options.oneSecure?.();
+      if (!secure) throw new Error("secure_route_unavailable");
+      return asJsonValue(await secure.request(context, request.method, request.params), request.method);
     }
 
     if (isMobileGoalControlMethod(request.method)) {

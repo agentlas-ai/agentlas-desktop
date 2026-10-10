@@ -16,6 +16,8 @@ import { reconcileTaskParticipantsFromRunEventsInDb } from "./task-participant-p
 import { currentUiLocale } from "../ui-locale";
 import { pruneLegacyDatabaseBackups } from "./backup-retention";
 import { createOneDomainEventIndexes } from "./one-domain-event-indexes";
+import { createAgentContextSchema } from "./agent-context";
+import { createAgentStrategySchema } from "./agent-strategy-schema";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -24,7 +26,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 129;
+const SCHEMA_VERSION = 131;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6962,6 +6964,18 @@ export function initStore(options: StoreInitOptions = {}): void {
         _db!.exec("ALTER TABLE one_preflight_steers ADD COLUMN request_json TEXT");
       }
     })();
+  }
+
+  // v130: portable actor context belongs to the shared store and follows its
+  // existing owner/follower migration authority. Daemons never run lazy DDL.
+  if (userVersion < 130) {
+    _db.transaction(() => { createAgentContextSchema(_db!); })();
+  }
+
+  // v131: Agent Strategy KPI ledger (goal_kpis / goal_kpi_samples / goal_kpi_state). Shared-store DDL follows the same
+  // owner/follower migration authority; CREATE IF NOT EXISTS keeps the step idempotent.
+  if (userVersion < 131) {
+    _db.transaction(() => { createAgentStrategySchema(_db!); })();
   }
 
   } catch (error) {

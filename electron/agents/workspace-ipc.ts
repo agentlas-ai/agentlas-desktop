@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { IpcMain, IpcMainInvokeEvent } from "electron";
 import type { AgentWorkspaceIpc } from "../../shared/agent-workspace";
 import { AgentWorkspaceError } from "./workspace-snapshot";
-import { getAgentWorkspace, listAgentWorkspaceFiles, readAgentWorkspaceFile, prepareAgentWorkspaceFromMemory,
+import { getAgentWorkspace, getAgentWorkspaceMemoryCounts, listAgentWorkspaceFiles, readAgentWorkspaceFile, prepareAgentWorkspaceFromMemory,
   prepareAgentWorkspaceFileChange, prepareAgentWorkspaceRollback, prepareAgentWorkspaceFileOperation, getAgentWorkspaceDiff, issueAgentWorkspaceApprovalReceipt,
   applyAgentWorkspaceProposal, rejectAgentWorkspaceProposal, getAgentWorkspaceRecoveryDiff, acknowledgeAgentWorkspaceRecovery } from "./workspace-service";
 import { prepareAgentWorkspaceComparison, receiveAgentWorkspace, sendAgentWorkspace, type AgentWorkspaceRemoteReview } from "./workspace-remote";
@@ -28,6 +28,7 @@ export function registerAgentWorkspaceIpc(input: { ipc: Pick<IpcMain, "handle">;
     catch (error) { if (error instanceof AgentWorkspaceError) throw new Error(`[${error.code}] ${error.message}`); throw error; }
   });
   handle("agentWorkspace:get", (_event, id: string) => getAgentWorkspace(id));
+  handle("agentWorkspace:memoryCounts", (_event, ids: string[]) => getAgentWorkspaceMemoryCounts(ids));
   handle("agentWorkspace:listFiles", (_event, id: string, dir?: string) => listAgentWorkspaceFiles(id, dir));
   handle("agentWorkspace:readFile", (_event, id: string, file: string) => readAgentWorkspaceFile(id, file));
   handle("agentWorkspace:prepareFromMemory", (_event, value: Input<"prepareFromMemory">) => prepareAgentWorkspaceFromMemory(value));

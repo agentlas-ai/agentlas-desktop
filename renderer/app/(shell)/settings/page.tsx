@@ -40,6 +40,7 @@ import { classifyHephaestusUpdateJournal, hephaestusPendingHostLabels } from "@s
 import { ScienceExtensionPanel } from "@/components/settings/ScienceExtensionPanel";
 import { OllamaMigrationPanel } from "@/components/settings/OllamaMigrationPanel";
 import { AgentMailPanel } from "@/components/settings/AgentMailPanel";
+import { ServiceConnectionsButton } from "@/components/connect/ServiceConnectionsButton";
 import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 
 // BYOK 백엔드 목록은 shared/models.ts의 ByokBackend(단일 출처)를 그대로 쓴다.
@@ -950,6 +951,14 @@ export default function SettingsPage() {
           <span style={{ display: "block", marginTop: 6, fontSize: 12, color: "var(--muted-deep)" }}>{locale === "ko" ? "Hugging Face 모델 탐색 · 다운로드 · 실행 관리 →" : "Browse Hugging Face models · Download · Manage runtime →"}</span>
         </a>
         <OllamaMigrationPanel locale={locale} />
+
+        <section id="service-connections" style={{ marginTop: 32 }}>
+          <h2 style={{ fontFamily: "var(--font-head)", fontSize: 15 }}>{locale === "ko" ? "서비스 API·도구 연결" : "Service API and tool connections"}</h2>
+            <p style={{ fontSize: 12, color: "var(--muted-deep)", lineHeight: 1.6 }}>{locale === "ko"
+              ? "서비스 검색·로고·연결 상태·사용자 지정 MCP API를 한곳에서 관리하세요. 저장된 키의 이름과 서비스·계정 연결은 별개입니다. 작업 중 키 요청에도 같은 연결 화면을 사용합니다."
+              : "Search services, review logos and connection status, and add custom MCP APIs here. A stored key's name is separate from its service and account binding. In-task key requests use this same connection screen."}</p>
+          <ServiceConnectionsButton locale={locale} />
+        </section>
 
         <ConnectSection
           title={locale === "ko" ? "API 모델" : "API models"}

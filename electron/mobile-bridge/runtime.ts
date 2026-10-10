@@ -1,3 +1,4 @@
+import {currentOneMobileSecureAdapter} from "../secrets/one-mobile-secure";
 import { MobilePushService } from "./push";
 import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "../runtime/invocation-owner-control";
 import { desktopGoalControlServices } from "./goal-control";
@@ -236,6 +237,7 @@ async function startBridgeInternal(
     });
   } catch { console.warn("[mobile-push] registration store unavailable; push capability disabled"); }
   const authority = createMobileBridgeAuthority({
+    oneSecure: currentOneMobileSecureAdapter,
     currentTurnControl: invocationCurrentTurnControl,
     cancelInvocationRun: cancelInvocationOwnerRun,
     ...(push ? { mobilePush: push } : {}),

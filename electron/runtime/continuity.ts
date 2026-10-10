@@ -107,7 +107,8 @@ export function composeResumeTurnPrompt(
  *
  * 왜: 기억 이벤트 규약·목표 계약·대기 규약처럼 세션 내내 같은 블록이 매 턴 사용자 메시지에 실려,
  * 20턴 세션이면 같은 규약 사본 20벌이 기록에 쌓였다(턴당 3~4KB). 모델은 앞 턴의 사본을 이미 갖고 있다.
- * 다만 CLI 가 긴 세션을 압축(compact)하면 옛 사본이 요약으로 뭉개질 수 있어 STABLE_RESEND_EVERY 턴마다 다시 보낸다.
+ * Typed native compaction invalidates retained contracts explicitly. Other transports
+ * conservatively resend every STABLE_RESEND_EVERY acknowledged turns.
  * 기억은 프로세스 메모리뿐이라 앱을 다시 켜면 한 번 더 보낼 뿐이다(손해 없음).
  * Prompt preparation is read-only. Only a native protocol acknowledgement may
  * commit delivery or advance the resend cadence; process/thread init is not delivery.
@@ -146,6 +147,8 @@ function stableContextGeneration(input: Omit<StableTurnContextIdentity, "context
 export function dedupeStableTurnContext(input: {
   chatId?: string | null; runtimeKind: string; sessionId: string; contextFingerprint?: string;
   turnContext?: string; stableBlocks?: readonly string[];
+  /** Opt in only when the adapter observes typed native compaction/replacement. */
+  retention?: "native-compaction";
 }): { text: string; skipped: number; savedBytes: number; delivery?: StableTurnContextDelivery } {
   const text = input.turnContext ?? "";
   if (!text.trim() || !input.stableBlocks?.length || !input.sessionId || !input.contextFingerprint) return { text, skipped: 0, savedBytes: 0 };
@@ -163,7 +166,7 @@ export function dedupeStableTurnContext(input: {
     if (!b || !out.includes(b)) continue;
     const hash = createHash("sha256").update(b).digest("hex").slice(0, 24);
     const last = record?.sent.get(hash);
-    if (last !== undefined && turn - last < STABLE_RESEND_EVERY) {
+    if (last !== undefined && (input.retention === "native-compaction" || turn - last < STABLE_RESEND_EVERY)) {
       out = out.replace(b, ""); skipped += 1; savedBytes += Buffer.byteLength(b);
     } else {
       includedHashes.push(hash);

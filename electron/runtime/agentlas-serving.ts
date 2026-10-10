@@ -14,6 +14,8 @@
  * 실행 1회가 크레딧을 쓴다. 잔액 판정·예약·정산은 전부 서버가 한다. 여기서 값을 지어내
  * 미리 보여 주지 않는다 — 앱이 계산한 값과 실제 청구가 어긋나면 그것이 곧 거짓말이 된다.
  */
+import { assertCurrentHistoryRunnerResult } from "./observed-runner";
+import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
 import { createHash } from "node:crypto";
 import {
@@ -299,7 +301,7 @@ function reportDeliveredCapabilities(req: RunnerRequest, events: RunnerEvents, d
 }
 
 async function postServing(body: string, cookie: string, req: RunnerRequest): Promise<Response> {
-  return fetch(`${webBaseUrl()}/api/one/serving/chat`, {
+  return withCurrentHistoryProvider(()=>fetch(`${webBaseUrl()}/api/one/serving/chat`, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -311,7 +313,7 @@ async function postServing(body: string, cookie: string, req: RunnerRequest): Pr
     },
     body,
     ...(req.signal ? { signal: req.signal } : {}),
-  });
+  }));
 }
 
 async function runAgentlasServingWithTools(
@@ -360,13 +362,13 @@ async function runAgentlasServingWithTools(
     // growing tool transcript and schemas before another charged model call.
     if (servingAdmissionTokens(JSON.stringify(admissionPayload)) + imageTokenEstimate(req, toolImageCount) + outputReserve + 256
       > AGENTLAS_SERVING_CONTEXT_WINDOW) {
-      return { text: accumulatedText, ownerControlTerminal: "uncertain", failure: { kind: "refused", runtime: "agentlas", source: "marker",
+      return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: { kind: "refused", runtime: "agentlas", source: "marker",
         providerCode: "model_context_capacity_exceeded",
-        message: "The Agentlas serving tool transcript exceeds the conservative context budget." } };
+        message: "The Agentlas serving tool transcript exceeds the conservative context budget." } });
     }
     const usageAttempt = usage.start();
     const response = await postServing(requestBody, cookie, req);
-    if (!response.ok) return { text: accumulatedText, ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale), ...usage.settle() };
+    if (!response.ok) return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale), ...usage.settle() });
     let text = "";
     let done: ServingDone | null = null;
     try {
@@ -375,27 +377,27 @@ async function runAgentlasServingWithTools(
           const delta = (frame.data as { text?: unknown })?.text;
           if (typeof delta === "string") {
             text += delta;
-            events.onPartial(accumulatedText + text);
+            (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(accumulatedText + text));
           }
         } else if (frame.event === "done") {
           done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
         } else if (frame.event === "error") {
-          return { text: accumulatedText, ownerControlTerminal: "uncertain", failure: streamFailure(frame.data, req.locale), ...usage.settle() };
+          return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: streamFailure(frame.data, req.locale), ...usage.settle() });
         }
       }
     } catch {
-      return { text: accumulatedText, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...usage.settle() };
+      return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...usage.settle() });
     }
-    if (!done) return { text: accumulatedText, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...usage.settle() };
-    usage.add(usageAttempt, done);
+    if (!done) return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale), ...usage.settle() });
+    (usage.add(usageAttempt, done), currentHistoryRuntimeFence()?.assertCurrent());
     // A stateless round gets new tool images once. Preserve the textual exchanges,
     // but do not carry base64 screenshots through every later charged call.
     for (const exchange of toolExchanges) delete exchange.images;
     if (toolImageCount > 0 && done.imagesAccepted !== sentImageCount) {
-      return { text: accumulatedText, ownerControlTerminal: "uncertain", failure: { kind: "unsupported", runtime: "agentlas", source: "marker",
+      return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: { kind: "unsupported", runtime: "agentlas", source: "marker",
         providerCode: "serving_tool_images_not_delivered",
         message: req.locale === "ko" ? "Agentlas 서버가 도구 이미지를 모델에 전달하지 않았습니다."
-          : "The Agentlas server did not forward tool images to the model." }, ...usage.settle() };
+          : "The Agentlas server did not forward tool images to the model." }, ...usage.settle() });
     }
     if (firstRound) { reportDeliveredCapabilities(req, events, done); firstRound = false; }
     if (typeof done.text === "string" && done.text.length >= text.length) text = done.text;
@@ -405,10 +407,10 @@ async function runAgentlasServingWithTools(
       if (Array.isArray(done.toolUses) && done.toolUses.length > 0) throw new Error("invalid_serving_tool_frame");
       accumulatedText += text;
       if (!accumulatedText.trim()) throw new Error("agentlas_serving_empty_answer");
-      events.onPartial(accumulatedText);
-      return { text: accumulatedText, ...usage.settle(),
+      (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(accumulatedText));
+      return assertCurrentHistoryRunnerResult({ text: accumulatedText, ...usage.settle(),
         ownerControlTerminal: !req.signal?.aborted && (done.toolUses === undefined || (Array.isArray(done.toolUses) && done.toolUses.length === 0))
-          ? "completed" : "uncertain" };
+          ? "completed" : "uncertain" });
     }
     const calls = servingToolCalls(done.toolUses, admitted);
     for (const call of calls) {
@@ -436,8 +438,8 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
   // boundary, before authentication, prompt construction or a charged call.
   assertScienceRecoveryRequest(req, "agentlas");
   const cookie = getSessionCookieHeader();
-  if (!cookie) return { text: "", ownerControlTerminal: "uncertain", failure: { kind: "auth", runtime: "agentlas", source: "marker",
-    providerCode: "sign_in_required", message: signInRequired(req.locale).message } };
+  if (!cookie) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "auth", runtime: "agentlas", source: "marker",
+    providerCode: "sign_in_required", message: signInRequired(req.locale).message } });
 
   const model = servingModelId(req);
   events.onStatus(tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
@@ -448,11 +450,11 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
 
   const outputReserve = Math.min(MAX_TOKENS[model] ?? 2_600, req.maxOutputTokens ?? Number.POSITIVE_INFINITY);
   const context = turnsFor(req, events, outputReserve);
-  if (!context) return { text: "", ownerControlTerminal: "uncertain", failure: { kind: "refused", runtime: "agentlas", source: "marker",
+  if (!context) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "refused", runtime: "agentlas", source: "marker",
     providerCode: "model_context_capacity_exceeded",
     message: req.locale === "ko"
       ? "Agentlas 모델의 보수적 문맥 예산을 넘었습니다. 현재 요청과 지시는 잘라내지 않았습니다."
-      : "The request exceeds the conservative Agentlas context budget. Current request and instructions were not clipped." } };
+      : "The request exceeds the conservative Agentlas context budget. Current request and instructions were not clipped." } });
   const { turns, system } = context;
   // Same admission as every host-loop runtime: tools whenever the run is not a
   // Main-authored no-tools boundary and has either an MCP config or a workspace.
@@ -469,7 +471,7 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
     maxTokens: outputReserve,
     ...servingRequestFields(req),
   }), cookie, req);
-  if (!response.ok) return { text: "", ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale) };
+  if (!response.ok) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale) });
 
   let text = "";
   let done: ServingDone | null = null;
@@ -479,34 +481,34 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
         const delta = (frame.data as { text?: unknown })?.text;
         if (typeof delta === "string" && delta) {
           text += delta;
-          events.onPartial(text);
+          (currentHistoryRuntimeFence()?.assertCurrent(), events.onPartial(text));
         }
       } else if (frame.event === "done") {
         done = frame.data && typeof frame.data === "object" ? frame.data as ServingDone : null;
         const final = done?.text;
         if (typeof final === "string" && final.length > text.length) text = final;
       } else if (frame.event === "error") {
-        return { text: "", ownerControlTerminal: "uncertain", failure: streamFailure(frame.data, req.locale) };
+        return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: streamFailure(frame.data, req.locale) });
       }
     }
   } catch {
-    return { text: "", ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale) };
+    return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale) });
   }
-  if (!done) return { text: "", ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale) };
+  if (!done) return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: servingReconciliationFailure(req.locale) });
   if (done) {
-    usage.add(usageAttempt, done);
+    (usage.add(usageAttempt, done), currentHistoryRuntimeFence()?.assertCurrent());
     reportDeliveredCapabilities(req, events, done);
   }
   if (!text.trim()) {
-    return { text: "", ownerControlTerminal: "uncertain", failure: { kind: "exit", runtime: "agentlas", source: "marker", providerCode: "empty_answer",
+    return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain", failure: { kind: "exit", runtime: "agentlas", source: "marker", providerCode: "empty_answer",
       message: req.locale === "ko"
         ? "Agentlas 모델이 빈 답을 돌려주었습니다. 다시 시도해 주세요."
-        : "The Agentlas model returned an empty answer. Try again." } };
+        : "The Agentlas model returned an empty answer. Try again." } });
   }
-  return { text, ...usage.settle(),
+  return assertCurrentHistoryRunnerResult({ text, ...usage.settle(),
     ownerControlTerminal: !req.signal?.aborted && (done.stopReason === "end_turn" || done.stopReason === "stop_sequence")
       && (done.toolUses === undefined || Array.isArray(done.toolUses) && done.toolUses.length === 0)
-      ? "completed" : "uncertain" };
+      ? "completed" : "uncertain" });
 };
 
 /** 화면에 그릴 러너 이름. 세기까지 붙여 무엇으로 돌았는지 알 수 있게 한다. */

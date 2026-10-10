@@ -822,7 +822,9 @@ export interface GoalPlanView {
   planSeq: number;
   readiness?: PlanReadiness;
   currentTactic: { id: string; description: string; strategyId: string | null } | null;
-  mission: { objective: string; keyResults: Array<{ metric: string; target: number; unit: string; requiredPerDay: number | null; daysLeft: number | null; sensor: string }> } | null;
+  mission: { objective: string; keyResults: Array<{ metric: string; target: number; unit: string; requiredPerDay: number | null; daysLeft: number | null; sensor: string;
+    /** Agent Strategy: latest host-stored KPI value and its one-word state (null until the first measurement). */
+    current?: number | null; state?: string | null }> } | null;
   strategies: Array<{ id: string; hypothesis: string; status: string; tactics: Array<{ id: string; description: string; status: string }> }>;
   tactics: Array<{ id: string; description: string; status: string }>;
 }

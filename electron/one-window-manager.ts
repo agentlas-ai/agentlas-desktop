@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { OneWindowState } from "../shared/one-window";
 import { configureAppControlInteractionValidator, isAppControlEvent, recordAppControlRendererEvent } from "./app-control/ipc-registry";
+import { assertOneSensitiveIpcChannel } from './secrets/sensitive-surface';
 
 export const ONE_WINDOW_MIN_WIDTH = 380;
 export const ONE_WINDOW_MIN_HEIGHT = 560;
@@ -107,7 +108,7 @@ export function assertOneWindowSender(event: IpcMainInvokeEvent): BrowserWindow 
 }
 // The companion can reach only its controllers. Each controller still validates
 // its own arguments, grants, task ownership and user interaction requirements.
-const ONE_CHANNEL_PREFIXES = ["oneWindow:", "oneContext:", "oneHarness:", "oneSupervisor:", "oneOrg:", "oneTaskforces:", "oneSearch:", "oneAttachments:", "oneArtifacts:",
+const ONE_CHANNEL_PREFIXES = ["oneWindow:", "oneContext:", "oneHarness:", "oneSupervisor:", "onePersonalData:", "oneVault:", "oneProvider:", "oneOrg:", "oneTaskforces:", "oneSearch:", "oneAttachments:", "oneArtifacts:",
   "oneProfile:", "oneFeatureIntro:", "oneActivation:", "oneMemory:", "oneSuggestions:", "oneHubDerivative:", "oneAutoRecovery:", "oneValueClosure:",
   "oneWeeklyReflection:", "oneExperienceReuse:", "oneImprovementProof:", "oneBriefing:", "oneRequestIntent:", "oneTeamPreflight:", "auth:", "config:", "runtime:", "usage:",
   "fs:", "chatFiles:", "chats:", "tasks:", "projects:", "invoke:", "confirm:", "attention:", "menu:", "media:",
@@ -115,6 +116,7 @@ const ONE_CHANNEL_PREFIXES = ["oneWindow:", "oneContext:", "oneHarness:", "oneSu
   "mcpTools:", "mcp:supplyRunKeys", "vault:", "env:", "secrets:", "automations:", "schedule:", "agents:", "agentRuntime:", "skills:", "workStart:",
   "goalPanel:", "workLiveView:", "workspace:", "app:", "localModelHub:", "store:"];
 export function assertOneWindowChannel(event: IpcMainInvokeEvent, channel: string): void {
+  assertOneSensitiveIpcChannel(event.sender.id,channel);
   if (event.sender !== getOneWindow()?.webContents) return;
   assertOneWindowSender(event);
   // Host app-control has already decoded the selected operation and enforced its

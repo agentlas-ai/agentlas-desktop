@@ -2,9 +2,8 @@
 .railHeader { min-height: 27px; display: flex; align-items: center; justify-content: space-between; padding: 0 5px 0 8px; color: var(--muted-deep); font-size: 9px; font-weight: 720; letter-spacing: .08em; text-transform: uppercase; }
 .railHeader button { width: 26px; height: 26px; display: grid; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted-deep); cursor: pointer; }
 .railHeader button:hover, .railHeader button:focus-visible { background: var(--paper-3); outline: none; }
-.railList { min-width: 0; display: grid; grid-auto-flow: column; grid-auto-columns: 74px; justify-content: start; gap: 4px; padding: 0 4px; overflow-x: auto; overscroll-behavior-x: contain; scrollbar-width: none; }
-.railList::-webkit-scrollbar { display: none; }
-.taskforceRow, .emptyRow { width: 74px; min-width: 74px; min-height: 68px; display: grid; grid-template-rows: 40px minmax(0, auto); justify-items: center; align-content: center; gap: 3px; padding: 5px 2px; border: 0; border-radius: 10px; background: transparent; color: var(--ink); font: inherit; text-align: center; cursor: pointer; }
+.railList { min-width: 0; display: grid; grid-template-columns: repeat(auto-fill, minmax(74px, 1fr)); gap: 4px; padding: 0 4px; }
+.taskforceRow, .emptyRow { width: 100%; min-width: 0; min-height: 68px; display: grid; grid-template-rows: 40px minmax(0, auto); justify-items: center; align-content: center; gap: 3px; padding: 5px 2px; border: 0; border-radius: 10px; background: transparent; color: var(--ink); font: inherit; text-align: center; cursor: pointer; }
 .taskforceRow:hover, .taskforceRow:focus-visible, .emptyRow:hover, .emptyRow:focus-visible { background: var(--paper-3); outline: none; }
 .taskforceRow[data-active="true"] { background: var(--paper-3); }
 .portraitStack { position: relative; display: block; width: 62px; height: 40px; isolation: isolate; }
@@ -15,8 +14,7 @@
 .portraitStack > span > span { display: none; }
 .portraitStack > .portraitOverflow { right: 0; bottom: 0; z-index: 5; width: auto; height: 15px; min-width: 15px; display: grid; place-items: center; padding: 0 3px; border: 1px solid var(--paper); border-radius: 999px; background: var(--muted-deep); color: var(--white); font-size: 8px; font-weight: 760; line-height: 1; }
 .taskforceCopy, .emptyRow > span:last-child { width: 100%; min-width: 0; display: grid; gap: 0; }
-.taskforceCopy strong, .taskforceCopy small, .emptyRow strong, .emptyRow small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.taskforceCopy strong, .emptyRow strong { font-size: 9px; font-weight: 680; }
+.taskforceCopy strong, .emptyRow strong { min-width: 0; min-height: 26px; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; font-size: 10px; font-weight: 680; line-height: 1.3; white-space: normal; overflow-wrap: anywhere; }
 .taskforceCopy small, .emptyRow small { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .emptyRow { grid-template-rows: 40px minmax(0, auto); }
 .emptyIcon { width: 32px; height: 32px; display: grid; place-items: center; border: 1px dashed var(--muted); border-radius: 10px; color: var(--muted-deep); }

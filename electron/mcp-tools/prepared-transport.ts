@@ -1,3 +1,5 @@
+import type {prepareOneOriginalMcpTransport} from '../one/one-original-mcp-credential';
+type ScopedCredential = Awaited<ReturnType<typeof prepareOneOriginalMcpTransport>>;
 import fs from "node:fs";
 import { createHash } from "node:crypto";
 import type { InstalledMcpServer } from "../../shared/types";
@@ -29,7 +31,7 @@ export interface PreparedMcpAdmission {
   sourcePath: string;
   sourceDigest: string;
   proxyScope?: PreparedMcpProxyScope;
-  buildOptions: Omit<McpConfigBuildOptions, "admissionCurrent">;
+  buildOptions: Omit<McpConfigBuildOptions, "admissionCurrent" | "nativeScopedSelection" | "nativeScopedSelectionForServer">;
   servers: Array<{ configKey: string; serverId: string; configurationDigest: string }>;
 }
 export type PreparedMcpTransport =
@@ -37,9 +39,9 @@ export type PreparedMcpTransport =
   | { kind: "http" | "sse"; url: string; headers: Record<string, string>; runtimeRoot: null };
 type Seal = { path: string; digest: string; current: () => boolean; invalid?: boolean; bindings: PreparedMcpBinding[];
   environmentChecks: Map<string, string>;
-  buildOptions?: Omit<McpConfigBuildOptions, "admissionCurrent"> };
+  buildOptions?: Omit<McpConfigBuildOptions, "admissionCurrent" | "nativeScopedSelection" | "nativeScopedSelectionForServer"> };
 const seals = new Map<string, Seal>();
-const bindings = new WeakMap<PreparedMcpBinding, { seal: Seal; transport: PreparedMcpTransport; targetTransport: PreparedMcpTransport; consentResource: string; proxyScope?: PreparedMcpProxyScope }>();
+const bindings = new WeakMap<PreparedMcpBinding, { seal: Seal; transport: PreparedMcpTransport; targetTransport: PreparedMcpTransport; consentResource: string; proxyScope?: PreparedMcpProxyScope; scopedCredential?: ScopedCredential }>();
 const proxyAsks = new WeakMap<object, { binding: PreparedMcpBinding; scope: PreparedMcpProxyScope }>();
 export class PreparedMcpScopeChangedError extends Error {
   readonly code = "mcp_prepared_scope_changed";
@@ -66,10 +68,10 @@ function stringRecord(value: unknown): Record<string, string> {
 export function registerPreparedMcpConfig(input: {
   path: string; servers: Array<{ configKey: string; server: InstalledMcpServer; transport: unknown; runtimeRoot?: string | null;
     /** Main's actual target before its per-run approval proxy is added. */
-    consentTransport?: unknown; proxyScope?: PreparedMcpProxyScope }>;
+    consentTransport?: unknown; proxyScope?: PreparedMcpProxyScope; scopedCredential?: ScopedCredential }>;
   runtimeEnv: Record<string, string>; isCurrent: () => boolean;
   /** Only the stock native config builder supplies reconstruction intent. */
-  buildOptions?: Omit<McpConfigBuildOptions, "admissionCurrent">;
+  buildOptions?: Omit<McpConfigBuildOptions, "admissionCurrent" | "nativeScopedSelection" | "nativeScopedSelectionForServer">;
 }): () => boolean {
   const resolve = (value: string) => value.replace(/\$\{(AGENTLAS_MCP_SECRET_[A-Za-z0-9_]+)\}/g, (_match, key: string) => {
     if (!Object.prototype.hasOwnProperty.call(input.runtimeEnv, key)) throw new Error("mcp_prepared_secret_unavailable");
@@ -115,11 +117,13 @@ export function registerPreparedMcpConfig(input: {
     const transport = resolveTransport(row.transport, row.runtimeRoot ?? null);
     const targetTransport = row.consentTransport === undefined ? transport : resolveTransport(row.consentTransport, row.runtimeRoot ?? null);
     const consentResource = mainToolConsentDigest({ configKey: row.configKey,
-      configuration: mcpServerConfigurationDigest(row.server), transport: targetTransport });
+      configuration: mcpServerConfigurationDigest(row.server), transport: targetTransport,
+      ...(row.scopedCredential ? {scopedReference:row.scopedCredential.reference} : {}) });
     const server = Object.freeze({ ...row.server, args: Object.freeze([...row.server.args]) as unknown as string[], envKeys: Object.freeze([...row.server.envKeys]) as unknown as string[] });
     const binding = Object.freeze({ configKey: row.configKey, server });
     const proxyScope = row.proxyScope ? Object.freeze({ ...row.proxyScope }) : undefined;
-    bindings.set(binding, { seal, transport, targetTransport, consentResource, proxyScope }); seal.bindings.push(binding);
+    if(row.scopedCredential && (!row.scopedCredential.current() || targetTransport.kind!=="http" || Object.keys(targetTransport.headers).length || transport.kind!=="stdio")) throw new PreparedMcpScopeChangedError();
+    bindings.set(binding, { seal, transport, targetTransport, consentResource, proxyScope, scopedCredential:row.scopedCredential }); seal.bindings.push(binding);
   }
   if (!seal.current()) throw new PreparedMcpScopeChangedError();
   seals.set(input.path, seal);
@@ -140,7 +144,9 @@ function validate(seal: Seal): void {
       || ![...seal.environmentChecks].every(([command, digest]) => mainToolConsentDigest(ownedStdioEnvironment(command)) === digest)
       || fileDigest(seal.path) !== seal.digest) throw new PreparedMcpScopeChangedError();
     for (const binding of seal.bindings) {
-      const scope = bindings.get(binding)?.proxyScope;
+      const bound = bindings.get(binding);
+      if(bound?.scopedCredential && !bound.scopedCredential.current()) throw new PreparedMcpScopeChangedError();
+      const scope = bound?.proxyScope;
       if (!scope) continue;
       const stat = fs.statSync(scope.cwd);
       if (fs.realpathSync(scope.cwd) !== scope.cwd || !stat.isDirectory()
@@ -158,6 +164,7 @@ export function preparedMcpBindings(path: string): PreparedMcpBinding[] {
  * can delegate its exact selection to another installation/epoch-fenced host. */
 export function exportPreparedMcpAdmission(path: string): PreparedMcpAdmission {
   const admitted = preparedMcpBindings(path);
+  if(admitted.some(binding=>bindings.get(binding)?.scopedCredential)) throw new Error("mcp_scoped_native_delegation_unavailable");
   const seal = seals.get(path)!;
   if (!seal.buildOptions) throw new Error("local_model_remote_mcp_admission_required");
   const proxyScope = preparedMcpProxyScope(path);
@@ -223,4 +230,17 @@ export function preparedMcpTargetTransport(binding: PreparedMcpBinding, server: 
   return row.targetTransport.kind === "stdio"
     ? { ...row.targetTransport, args: [...row.targetTransport.args], env: { ...row.targetTransport.env } }
     : { ...row.targetTransport, headers: { ...row.targetTransport.headers } };
+}
+
+/** Same prepared seal only; no JSON ref can select a reader. */
+export function preparedMcpScopedCredential(binding:PreparedMcpBinding):ScopedCredential|null {
+ const row=bindings.get(binding);if(!row)throw new PreparedMcpScopeChangedError();validate(row.seal);return row.scopedCredential??null;
+}
+
+/** Main-local observation from the exact previously admitted binding. Execution
+ * validation remains denied after terminal closure. This read returns no source,
+ * credential, URL, body, receipt, or fresh permission; JSON clones cannot use it. */
+export function preparedMcpScopedOutcome(binding:PreparedMcpBinding):import('../one/one-original-mcp-credential').OneMcpScopedOutcome|null {
+ const row=bindings.get(binding);if(!row)throw new PreparedMcpScopeChangedError();
+ return row.scopedCredential?.outcome()??null;
 }

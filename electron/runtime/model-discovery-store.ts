@@ -166,10 +166,19 @@ export function settleDiscovery(
 
 /** Log a failed/stale discovery once per (runtime, reason) until it changes. */
 const lastLogged = new Map<string, string>();
+const staleNoCacheWarned = new Set<string>();
 export function reportDiscoveryLoudly(runtime: string, outcome: DiscoveryOutcome, log: (message: string) => void = (m) => console.error(m)): boolean {
   if (outcome.status !== "failed" && !outcome.yieldWarning) {
     lastLogged.delete(runtime);
     return false;
+  }
+  // Serving the last-good list because the vendor cache was momentarily unreadable is intentional, not an
+  // error: warn once per process instead of an error line every time the picker refreshes (103 lines, 2026-10-10).
+  if (outcome.stale && outcome.reason === "no-cache") {
+    if (staleNoCacheWarned.has(runtime)) return false;
+    staleNoCacheWarned.add(runtime);
+    console.warn(`[model-discovery] ${runtime}: vendor model cache unreadable; serving ${outcome.models.length} last-good models (further occurrences suppressed)`);
+    return true;
   }
   const signature = `${outcome.status}:${outcome.reason ?? ""}:${outcome.stale ? "stale" : ""}`;
   if (lastLogged.get(runtime) === signature) return false;

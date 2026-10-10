@@ -23,9 +23,12 @@ function displayName(agent: InstalledAgent, locale: Locale): string {
   return agent.localDisplayName?.trim() || pickLocalized(agent, locale).name || agent.slug;
 }
 function sourceOf(agent: InstalledAgent, bindings: InstalledAgentExactBinding[]): "local" | "cloud" | "hub" {
+  if (agent.assetSource === "local-import") return "local";
+  if (agent.assetSource === "hub") return "hub";
+  if (agent.assetSource === "agent-cloud") return "cloud";
   const binding = bindings.find((item) => item.installedAgentId === agent.id);
-  if (binding?.source === "hub-install" || agent.assetSource === "hub") return "hub";
-  if (binding?.source === "agent-cloud-restore" || agent.assetSource === "agent-cloud") return "cloud";
+  if (binding?.source === "hub-install") return "hub";
+  if (binding?.source === "agent-cloud-restore") return "cloud";
   return "local";
 }
 function initialView(value: string | null): AgentWorkspaceView {
@@ -71,6 +74,9 @@ function LibraryAgentsView() {
   const [published, setPublished] = useState<MarketplaceListing[]>([]);
   const [publishedSignedIn, setPublishedSignedIn] = useState<boolean | null>(null);
   const [publishedLoading, setPublishedLoading] = useState(false);
+  const [memoryCounts, setMemoryCounts] = useState<Record<string, number>>({});
+  const memoryCountGeneration = useRef(0);
+  const memoryCountVersions = useRef(new Map<string, number>());
   const refreshGeneration = useRef(0);
   const dirty = useRef(false);
   const roster = useMemo(() => buildAgentRoster(visibleRosterAgents(agents), firms), [agents, firms]);
@@ -80,6 +86,10 @@ function LibraryAgentsView() {
   const activeFirm = selectedFirm ?? firms.find((firm) => firm.id === contextFirmId) ?? firms.find((firm) => firm.orgChart.some((node) => node.agentId === selectedAgent?.id) || firm.ceoAgentId === selectedAgent?.id) ?? null;
   const selectedProfile = borrowed.find((profile) => profile.profileId === selectedBorrowedId) ?? null;
   const setDirty = useCallback((next: boolean) => { dirty.current = next; }, []);
+  const onMemoryCountChange = useCallback((agentId: string, count: number) => {
+    memoryCountVersions.current.set(agentId, (memoryCountVersions.current.get(agentId) ?? 0) + 1);
+    setMemoryCounts(current => ({ ...current, [agentId]: count }));
+  }, []);
   const mayChangeAgent = async () => !dirty.current || await confirmPopup(ko ? "저장하지 않은 초안을 버릴까요?" : "Discard the unsaved draft?", { locale, tone: "warning", confirmLabel: ko ? "초안 버리기" : "Discard draft" });
   useEffect(() => {
     if (!targetAgentId && !targetFirmId) return;
@@ -207,7 +217,38 @@ function LibraryAgentsView() {
   });
   const installedExactPairs = new Set(bindings.map((binding) => `${binding.agentDefinitionId}:${binding.agentReleaseId}`));
   const borrowedRows = borrowed.filter((profile) => (profile.componentId || !installedExactPairs.has(`${profile.agentDefinitionId}:${profile.agentReleaseId}`)) && (source === "all" || source === "hub") && (!query.trim() || [profile.name, profile.nameEn, profile.slug].some((value) => value.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))));
-  const row = (agent: InstalledAgent, firmId = "", child = false, contextId = firmId) => <button key={`${firmId}:${agent.id}`} className={`${styles.rosterRow} ${child ? styles.subRow : ""} ${selectedId === agent.id && !selectedBorrowedId ? styles.selected : ""}`} onClick={() => void chooseAgent(agent, firmId, contextId)} title={displayName(agent, locale)} aria-pressed={selectedId === agent.id && !selectedBorrowedId}><AgentAvatar name={displayName(agent, locale)} size={rosterCollapsed ? 26 : 23} />{!rosterCollapsed && <><span className={styles.rosterText}>{displayName(agent, locale)}</span>{agent.bookmarkedAt && <IconCheck size={10} />}<span className={`${styles.dot} ${agent.sourceMissingSince ? styles.warningDot : ""}`} title={agent.sourceMissingSince ? (ko ? "원본 연결 끊김" : "Source disconnected") : sourceOf(agent, bindings)} /></>}</button>;
+  const badgeAgentKey = JSON.stringify([...new Set([
+    ...(kind !== "multi" ? singleAgents.map(agent => agent.id) : []),
+    ...(kind !== "single" ? teams.flatMap(team => [team.id, ...(!rosterCollapsed && expandedTeams.has(team.id) ? agents.filter(agent => agent.parentTeamId === team.id).map(agent => agent.id) : [])]) : []),
+    ...(kind !== "single" ? multiFirms.flatMap(firm => [firm.ceoAgentId, ...(!rosterCollapsed && expandedTeams.has(firm.id) ? firm.orgChart.filter(node => isUserFacingAgentText(allAgents.get(node.agentId)?.name ?? node.role, node.role)).map(node => node.agentId) : [])]) : []),
+  ])].sort());
+  useEffect(() => {
+    const bridge = ipc()?.agentWorkspace;
+    if (!bridge?.memoryCounts) return;
+    const generation = ++memoryCountGeneration.current;
+    const ids = JSON.parse(badgeAgentKey) as string[];
+    const versions = new Map(ids.map(id => [id, memoryCountVersions.current.get(id) ?? 0]));
+    void (async () => {
+      for (let offset = 0; offset < ids.length; offset += 250) {
+        const batch = ids.slice(offset, offset + 250);
+        let counts: Record<string, number> = {};
+        try { counts = (await bridge.memoryCounts(batch)).counts; } catch { /* Unknown counts stay absent, never zero. */ }
+        if (generation !== memoryCountGeneration.current) return;
+        setMemoryCounts(current => {
+          const next = { ...current };
+          for (const id of batch) {
+            // A live Workspace refresh may be newer than this roster request.
+            if (versions.get(id) !== (memoryCountVersions.current.get(id) ?? 0)) continue;
+            if (Number.isInteger(counts[id]) && counts[id] >= 0) next[id] = counts[id]; else delete next[id];
+          }
+          return next;
+        });
+      }
+    })();
+    return () => { memoryCountGeneration.current++; };
+  }, [badgeAgentKey, agents, firms]);
+  const memoryBadge = (agentId: string) => typeof memoryCounts[agentId] === "number" ? <span className={styles.memoryCount} title={ko ? `승격 검토 가능 메모리 ${memoryCounts[agentId]}개` : `${memoryCounts[agentId]} memories eligible for promotion review`} aria-label={ko ? `승격 검토 가능 메모리 ${memoryCounts[agentId]}개` : `${memoryCounts[agentId]} memories eligible for promotion review`}>{memoryCounts[agentId]}</span> : null;
+  const row = (agent: InstalledAgent, firmId = "", child = false, contextId = firmId) => <button key={`${firmId}:${agent.id}`} className={`${styles.rosterRow} ${child ? styles.subRow : ""} ${selectedId === agent.id && !selectedBorrowedId ? styles.selected : ""}`} onClick={() => void chooseAgent(agent, firmId, contextId)} title={displayName(agent, locale)} aria-pressed={selectedId === agent.id && !selectedBorrowedId}><AgentAvatar name={displayName(agent, locale)} size={rosterCollapsed ? 26 : 23} />{!rosterCollapsed && <><span className={styles.rosterText}>{displayName(agent, locale)}</span>{agent.bookmarkedAt && <IconCheck size={10} />}{agent.sourceMissingSince && <span className={styles.sourceWarning} title={ko ? "원본 연결 끊김" : "Source disconnected"}><IconAlertTriangle size={12} /></span>}{memoryBadge(agent.id)}</>}</button>;
   const projectControl = <div className={styles.projectAttach}><select aria-label={ko ? "장착할 프로젝트" : "Project to attach"} value={projectId} onChange={(event) => setProjectId(event.target.value)} disabled={!projects.length || Boolean(busy)}><option value="">{ko ? "프로젝트" : "Project"}</option>{projects.map((project) => <option value={project.id} key={project.id}>{project.name}</option>)}</select><button className={styles.iconButton} title={ko ? "프로젝트에 장착" : "Attach to project"} aria-label={ko ? "프로젝트에 장착" : "Attach to project"} disabled={!projectId || !selectedAgent || Boolean(busy) || Boolean(selectedAgent.sourceMissingSince)} onClick={() => void action("attach", attach)}><IconPaperclip size={15} /></button>{selectedAgent && <button className={`${styles.iconButton} ${selectedAgent.bookmarkedAt ? styles.selected : ""}`} aria-pressed={Boolean(selectedAgent.bookmarkedAt)} title={ko ? "즐겨찾기" : "Bookmark"} aria-label={ko ? "즐겨찾기" : "Bookmark"} onClick={() => void action("bookmark", async () => { const api = ipc(); if (!api || !selectedAgent) return; await api.agents.setBookmark(selectedAgent.id, !selectedAgent.bookmarkedAt); await refresh(); })}><IconCheck size={13} /></button>}</div>;
 
   return <div className={styles.shell} data-testid="manage-agent-workspace">
@@ -221,7 +262,7 @@ function LibraryAgentsView() {
           const controller = allAgents.get(firm.ceoAgentId);
           const members = firm.orgChart.filter((node) => isUserFacingAgentText(allAgents.get(node.agentId)?.name ?? node.role, node.role));
           const name = pickLocalized(firm, locale).name;
-          return <div key={firm.id}><div className={styles.rosterGroup}>{!rosterCollapsed && <button className={styles.iconButton} aria-label={`${name} ${ko ? "멤버 보기" : "members"}`} aria-expanded={expandedTeams.has(firm.id)} onClick={() => setExpandedTeams((previous) => { const next = new Set(previous); if (next.has(firm.id)) next.delete(firm.id); else next.add(firm.id); return next; })}>{expandedTeams.has(firm.id) ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}</button>}<button className={`${styles.rosterRow} ${selectedFirmId === firm.id && !selectedBorrowedId ? styles.selected : ""}`} title={name} onClick={() => { if (controller) void chooseAgent(controller, firm.id); else { setError(ko ? "팀 실행 에이전트를 찾을 수 없습니다." : "The team controller is missing."); } }}><IconUsers size={rosterCollapsed ? 21 : 17} />{!rosterCollapsed && <span className={styles.rosterText}>{name}</span>}</button></div>{!rosterCollapsed && expandedTeams.has(firm.id) && members.map((node) => { const agent = allAgents.get(node.agentId); return agent ? row(agent, "", true, firm.id) : <div className={`${styles.rosterRow} ${styles.subRow}`} key={`${node.agentId}:${node.role}`}><IconAlertTriangle size={12} /><span className={styles.rosterText}>{node.role}</span></div>; })}</div>;
+          return <div key={firm.id}><div className={styles.rosterGroup}>{!rosterCollapsed && <button className={styles.iconButton} aria-label={`${name} ${ko ? "멤버 보기" : "members"}`} aria-expanded={expandedTeams.has(firm.id)} onClick={() => setExpandedTeams((previous) => { const next = new Set(previous); if (next.has(firm.id)) next.delete(firm.id); else next.add(firm.id); return next; })}>{expandedTeams.has(firm.id) ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}</button>}<button className={`${styles.rosterRow} ${selectedFirmId === firm.id && !selectedBorrowedId ? styles.selected : ""}`} title={name} onClick={() => { if (controller) void chooseAgent(controller, firm.id); else { setError(ko ? "팀 실행 에이전트를 찾을 수 없습니다." : "The team controller is missing."); } }}><IconUsers size={rosterCollapsed ? 21 : 17} />{!rosterCollapsed && <><span className={styles.rosterText}>{name}</span>{controller && memoryBadge(controller.id)}</>}</button></div>{!rosterCollapsed && expandedTeams.has(firm.id) && members.map((node) => { const agent = allAgents.get(node.agentId); return agent ? row(agent, "", true, firm.id) : <div className={`${styles.rosterRow} ${styles.subRow}`} key={`${node.agentId}:${node.role}`}><IconAlertTriangle size={12} /><span className={styles.rosterText}>{node.role}</span></div>; })}</div>;
         })}{teams.map((team) => { const members = agents.filter((agent) => agent.parentTeamId === team.id); return <div key={team.id}><div className={styles.rosterGroup}>{!rosterCollapsed && members.length > 0 && <button className={styles.iconButton} aria-label={`${displayName(team, locale)} ${ko ? "멤버 보기" : "members"}`} aria-expanded={expandedTeams.has(team.id)} onClick={() => setExpandedTeams((previous) => { const next = new Set(previous); if (next.has(team.id)) next.delete(team.id); else next.add(team.id); return next; })}>{expandedTeams.has(team.id) ? <IconChevronDown size={12} /> : <IconChevronRight size={12} />}</button>}{row(team)}</div>{!rosterCollapsed && expandedTeams.has(team.id) && members.map((member) => row(member, "", true))}</div>; })}</>}
         {borrowedRows.length > 0 && <>{!rosterCollapsed && <div className={styles.groupLabel}><span>{ko ? "Hub 사용 기록" : "HUB REFERENCES"}</span><span>{borrowedRows.length}</span></div>}{borrowedRows.map((profile) => <button key={profile.profileId} className={`${styles.rosterRow} ${selectedBorrowedId === profile.profileId ? styles.selected : ""}`} title={locale === "en" ? profile.nameEn : profile.name} onClick={async () => { if (!await mayChangeAgent()) return; setSelectedBorrowedId(profile.profileId); }}><IconGithub size={18} />{!rosterCollapsed && <><span className={styles.rosterText}>{locale === "en" ? profile.nameEn : profile.name}</span><IconShield size={11} /></>}</button>)}</>}
         {!loading && !agents.length && !firms.length && !borrowed.length && <div className={styles.empty}><IconFolder size={28} />{!rosterCollapsed && (ko ? "에이전트 없음" : "No agents")}</div>}
@@ -230,7 +271,7 @@ function LibraryAgentsView() {
     <div className={styles.workspace}>{error && <div className={`${styles.banner} ${styles.error}`} role="alert"><IconAlertTriangle size={14} /><span>{error}</span><button className={styles.iconButton} aria-label={ko ? "오류 닫기" : "Dismiss error"} onClick={() => setError("")}><IconClose size={13} /></button></div>}
       {publishedView ? <div className={styles.workspace}><header className={styles.toolbar}><strong>{ko ? "내 게시 자산" : "My published assets"}</strong><button className={styles.iconButton} onClick={() => void loadPublished()} aria-label={ko ? "게시 자산 새로고침" : "Refresh published assets"}><IconRefresh size={15} /></button><Link className={styles.button} href="/library/agents">{ko ? "에이전트 파일" : "Agent files"}</Link></header>{publishedLoading ? <div className={styles.empty}><span className={styles.loading} /></div> : publishedSignedIn === false ? <div className={styles.empty}><IconShield size={30} /><button className={styles.button} onClick={() => void action("sign-in", async () => { const api = ipc(); if (!api) return; await api.auth.signInWithGoogle(); await loadPublished(); })}>{ko ? "로그인" : "Sign in"}</button></div> : <div className={styles.history}>{published.filter((listing) => !query.trim() || [listing.name, listing.nameEn, listing.slug].some((value) => value?.toLowerCase().includes(query.toLowerCase()))).map((listing) => <div className={styles.revisionBody} key={listing.slug}><div className={styles.revisionTitle}><IconBuilding size={17} /><strong>{pickLocalized(listing, locale).name}</strong><code className={styles.meta}>{listing.slug}</code><button className={styles.button} disabled={Boolean(busy)} onClick={() => void action("install", async () => { const api = ipc(); if (!api || !await mayChangeAgent()) return; const installed = await api.team.installMine(listing.slug); await refresh(); await chooseAgent(installed); setNotice(ko ? "설치했습니다. 에이전트 파일에서 확인하세요." : "Installed. Open Agent files to inspect it."); })}><IconFileUp size={12} />{ko ? "로컬 설치" : "Install locally"}</button></div></div>)}{!published.length && <div className={styles.empty}>{ko ? "게시 자산 없음" : "No published assets"}</div>}</div>}</div>
       : selectedProfile ? <div className={styles.workspace} data-testid="borrowed-agent-detail"><header className={styles.toolbar}><button className={styles.iconButton} onClick={() => setRosterCollapsed((current) => !current)} aria-label={ko ? "에이전트 목록" : "Agent roster"}><IconSidebar size={17} /></button><div className={styles.agentTitle}><IconGithub size={20} /><strong>{locale === "en" ? selectedProfile.nameEn : selectedProfile.name}</strong></div><span className={styles.state}>{ko ? "읽기 전용 Hub 참조" : "Read-only Hub reference"}</span></header><article className={styles.detail}><dl className={styles.definition}><dt>{ko ? "정의 ID" : "Definition"}</dt><dd>{selectedProfile.agentDefinitionId}</dd><dt>{ko ? "릴리스 ID" : "Release"}</dt><dd>{selectedProfile.agentReleaseId}</dd>{selectedProfile.componentId && <><dt>{ko ? "구성원 ID" : "Component"}</dt><dd>{selectedProfile.componentId}</dd></>}<dt>{ko ? "최근 사용" : "Last use"}</dt><dd>{selectedProfile.lastUsedAt ? new Date(selectedProfile.lastUsedAt).toLocaleString(locale) : "—"}</dd><dt>{ko ? "사용 횟수" : "Uses"}</dt><dd>{selectedProfile.useCount}</dd></dl><div className={styles.banner} style={{ marginTop: 20 }}>{ko ? "이 참조에는 로컬 원본 파일 편집 권한이 없습니다." : "This reference has no permission to edit local source files."}</div><Link className={styles.button} href="/marketplace" style={{ marginTop: 14 }}><IconGithub size={14} />{ko ? "Hub 열기" : "Open Hub"}</Link></article></div>
-      : selectedAgent ? <AgentWorkspace key={selectedAgent.id} agent={selectedAgent} name={displayName(selectedAgent, locale)} locale={locale} initialView={initialView(params.get("tab"))} onToggleRoster={() => setRosterCollapsed((current) => !current)} projectControl={projectControl} firm={activeFirm} org={selectedOrg} binding={bindings.find((item) => item.installedAgentId === selectedAgent.id)} runtimes={runtimes} overrides={overrides} onRename={rename} onRemove={remove} onOverridesChange={setOverrides} onDirtyChange={setDirty} />
+      : selectedAgent ? <AgentWorkspace key={selectedAgent.id} agent={selectedAgent} name={displayName(selectedAgent, locale)} locale={locale} initialView={initialView(params.get("tab"))} onToggleRoster={() => setRosterCollapsed((current) => !current)} projectControl={projectControl} firm={activeFirm} org={selectedOrg} binding={bindings.find((item) => item.installedAgentId === selectedAgent.id)} runtimes={runtimes} overrides={overrides} onRename={rename} onRemove={remove} onOverridesChange={setOverrides} onDirtyChange={setDirty} onMemoryCountChange={onMemoryCountChange} />
       : <div className={styles.empty}><IconFolder size={40} /><strong>{loading ? (ko ? "에이전트 읽는 중" : "Reading agents") : (ko ? "에이전트를 선택하세요" : "Select an agent")}</strong>{!loading && <button className={styles.button} disabled={Boolean(busy)} onClick={() => void action("import", importFolder)}><IconFileUp size={14} />{ko ? "로컬 폴더 가져오기" : "Import local folder"}</button>}</div>}
       {notice && <div className={styles.toast} role="status">{notice}</div>}
     </div>

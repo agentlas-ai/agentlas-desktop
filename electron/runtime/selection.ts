@@ -28,12 +28,12 @@ import { runAntigravity } from "./antigravity";
 import { runKimi } from "./kimi";
 import { runGrok } from "./grok";
 import { runCursor } from "./cursor";
-import { runLMStudio } from "./lmstudio";
+import { runLMStudio, lmStudioHost } from "./lmstudio";
 import { runMLX } from "./mlx";
 import { runManagedLocalModel } from "../local-model-hub/runtime-adapter";
 import { acquireRunSlot } from "./run-slots";
 import { agentActivityKey, registerAgentResidency, touchAgentResidency } from "./agent-residency";
-import { acpOrLegacyRunner, acpSessionKind, createAcpRunner } from "./acp";
+import { acpOrLegacyRunner, acpSessionKind, createAcpRunner, type AcpAgentSpec } from "./acp";
 import { resolveAcpAgentSpec } from "./acp-agents";
 import { acquireLocalInferenceSlot } from "./local-inference-run-slots";
 import { withNativeBrowserGuidance, type Runner, type RunnerFailure } from "./runner";
@@ -43,6 +43,9 @@ import { listModelRoleMembers } from "../store/model-roles";
 import { CONNECTABLE_RUNTIMES, type ConnectableRuntime } from "../../shared/runtime-connect";
 import { probeRuntimeAuthForRun } from "./runtime-connect";
 import { abortReasonError } from "./abort-reason";
+import { withAgentContext } from "./agent-context";
+import { responsesContextPolicy } from "./responses-context-policy";
+import { withDaemonAgentContext } from "./agent-context-admission";
 
 /** Per-turn, before the provider or its reusable session is used. Unknown probes are not authentication. */
 function withRuntimeAuthProbe(runner: Runner, runtimeKind: string): Runner {
@@ -258,14 +261,22 @@ export function effortForSelectedModel(
 }
 
 export function pickRunner(active: RuntimeStatus): { runner: Runner; label: string } | null {
-  const selected = pickRunnerWithoutHostGuidance(active);
+  const resolvedSpec = active.kind === "acp" ? resolveAcpAgentSpec(active.acpAgentId) : null;
+  // One immutable selected spec supplies both the spawned runner and its
+  // portable/native binding; a shared executable must not merge ACP profiles.
+  const spec = resolvedSpec ? { ...resolvedSpec, args: [...resolvedSpec.args] } : null;
+  const configurationIdentity = spec ? JSON.stringify([spec.id,spec.command,spec.args,spec.registryId??null]) : undefined;
+  const selected = pickRunnerWithoutHostGuidance(active, spec);
   // 모든 제품 경로가 여기를 지난다 — 어느 루프에 버그가 있어도 실패하는 런타임을 분당 수만 번 띄우지 못한다(invocation-breaker).
   return selected
-    ? { ...selected, runner: invocationBreaker.wrap(withNativeBrowserGuidance(selected.runner), invocationBreakerKey(active), selected.label) }
+    ? { ...selected, runner: invocationBreaker.wrap(withNativeBrowserGuidance(withDaemonAgentContext(withAgentContext(selected.runner,
+      { kind: active.kind, ...(active.backend ? { backend: active.backend } : {}) },
+      { configurationSource:active.source,configurationIdentity }),
+      { kind: active.kind,configurationIdentity,...(active.backend ? { backend: active.backend } : {}) })), invocationBreakerKey(active), selected.label) }
     : null;
 }
 
-function pickRunnerWithoutHostGuidance(active: RuntimeStatus): { runner: Runner; label: string } | null {
+function pickRunnerWithoutHostGuidance(active: RuntimeStatus, acpSpec: AcpAgentSpec | null): { runner: Runner; label: string } | null {
   if (isRuntimeCredentialUnavailable(active)) {
     return {
       label: `BYOK · ${active.backend}`,
@@ -317,7 +328,7 @@ function pickRunnerWithoutHostGuidance(active: RuntimeStatus): { runner: Runner;
   if (active.kind === "acp") {
     // Open seat: the spec (built-in or user profile) is looked up by acpAgentId;
     // the detected executable travels as runtimeSource so we spawn exactly it.
-    const spec = resolveAcpAgentSpec(active.acpAgentId);
+    const spec = acpSpec;
     if (!spec) return null;
     return {
       runner: bindRuntimeSource(withRunSlot(createAcpRunner(spec), acpSessionKind(spec.id)), active.source),

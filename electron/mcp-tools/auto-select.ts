@@ -64,6 +64,8 @@ export interface AutoSelectedMcpTool {
   installed: boolean;
   missingEnv: string[];
   required: boolean;
+  /** Exact value-free observation from the invocation's owned prepared binding. */
+  connectionOutcome?: import("../one/one-original-mcp-credential").OneMcpScopedOutcome;
   state:
     | "ready"
     | "missing-key"
@@ -146,6 +148,12 @@ export interface AutoSelectMcpDependencies {
     connected: boolean;
     missingEnv: string[];
   }>;
+  /** Main's current original-run selection and prepared proxy probe. A saved
+   * reference alone is not a connection; scoped failures never read global env. */
+  probeScopedServer?: (server: InstalledMcpServer, signal?: AbortSignal) => Promise<
+    { route: "legacy" } | { route: "scoped"; available: boolean; connected: boolean;
+      outcome?: import("../one/one-original-mcp-credential").OneMcpScopedOutcome }
+  >;
   /** The only thing allowed to pick an optional tool. Injectable so tests can pin a verdict. */
   resolveNeeds: (input: {
     task: string;
@@ -158,6 +166,49 @@ export interface AutoSelectMcpDependencies {
   }) => Promise<ResolvedMcpNeeds>;
   /** Installed plugin manifests as routing candidates (injectable for isolated tests). */
   listPluginCandidates: () => InstalledPluginCandidate[];
+}
+
+async function scopedServerProbe(
+  server: InstalledMcpServer, deps: AutoSelectMcpDependencies, signal?: AbortSignal,
+): Promise<{ route: "scoped"; available: boolean; connected: boolean;
+  outcome?: import("../one/one-original-mcp-credential").OneMcpScopedOutcome } | null> {
+  if (!deps.probeScopedServer) return null;
+  try {
+    const result = await deps.probeScopedServer(server, signal);
+    if (result?.route === "legacy") return null;
+    if (result?.route === "scoped" && typeof result.available === "boolean"
+      && typeof result.connected === "boolean") {
+      if (result.outcome === undefined) return { route: "scoped", available: result.available, connected: result.connected };
+      const outcome = result.outcome;
+      if (outcome.retryAllowed !== false) throw new Error("invalid_scoped_outcome");
+      if (outcome.kind === "outcome-unknown" && Object.keys(outcome).sort().join("|") === "kind|retryAllowed") {
+        return { route: "scoped", available: false, connected: false, outcome: Object.freeze({ kind: outcome.kind, retryAllowed: false }) };
+      }
+      if (outcome.kind === "http-rejected" && Object.keys(outcome).sort().join("|") === "category|kind|retryAllowed|status"
+        && Number.isInteger(outcome.status) && outcome.status >= 100 && outcome.status <= 599) {
+        const category = outcome.status === 401 ? "authentication" : outcome.status === 403 ? "permission"
+          : outcome.status === 402 ? "billing" : outcome.status === 429 ? "quota" : "http";
+        if (outcome.category !== category) throw new Error("invalid_scoped_outcome");
+        return { route: "scoped", available: false, connected: false,
+          outcome: Object.freeze({ kind: outcome.kind, status: outcome.status, category, retryAllowed: false }) };
+      }
+    }
+  } catch { /* A failed native resolver is unavailable, never a legacy grant. */ }
+  return { route: "scoped", available: false, connected: false };
+}
+
+/** Translate only machine-checked observations. Remote bodies and error prose
+ * never enter this user/model receipt, and an unknown result is not resubmitted. */
+export function describeScopedMcpOutcome(outcome: NonNullable<AutoSelectedMcpTool["connectionOutcome"]>, locale: string): string {
+  if (outcome.kind === "outcome-unknown") return locale.startsWith("ko")
+    ? "전송 결과를 확인하지 못했습니다. 자동으로 다시 보내지 않습니다."
+    : "The request outcome is unknown. No automatic retry.";
+  const labels = locale.startsWith("ko")
+    ? { authentication: "제공자가 인증을 거부했습니다", permission: "제공자가 요청 권한을 거부했습니다",
+      billing: "제공자가 결제 오류를 반환했습니다", quota: "제공자가 요청 한도 오류를 반환했습니다", http: "제공자가 연결 오류를 반환했습니다" }
+    : { authentication: "The provider rejected authentication", permission: "The provider rejected request permission",
+      billing: "The provider returned a billing error", quota: "The provider returned a request-limit error", http: "The provider returned a connection error" };
+  return `${labels[outcome.category]} (HTTP ${outcome.status}). ${locale.startsWith("ko") ? "자동으로 다시 보내지 않습니다." : "No automatic retry."}`;
 }
 
 /** Build a deterministic fixed-assignment result for an agent whose One Team
@@ -945,6 +996,13 @@ export async function autoSelectMcpTools(input: {
       required,
     };
     const existingServer = deps.listInstalledServers().find(candidate => candidate.catalogId === entry.id || candidate.id === entry.id);
+    const scoped = existingServer ? await scopedServerProbe(existingServer, deps, input.signal) : null;
+    if (scoped) {
+      const state: AutoSelectedMcpTool["state"] = !existingServer!.enabled || existingServer!.configurationValid === false
+        ? "disabled" : scoped.outcome ? "probe-failed" : !scoped.available ? "host-failure" : scoped.connected ? "ready" : "probe-failed";
+      return { ...base, installed: state === "ready", missingEnv: [], state,
+        ...(scoped.outcome ? { connectionOutcome: scoped.outcome } : {}) };
+    }
     const hasOAuth = existingServer && existingServer.transport !== "stdio"
       ? await serverHasOAuth(existingServer, deps) : false;
     const manualKeys = existingServer && hasOAuth ? requiredMcpManualEnvKeys(existingServer, true) : null;
@@ -1059,7 +1117,9 @@ export async function autoSelectMcpTools(input: {
     const missingEnv: string[] = [];
     let state: AutoSelectedMcpTool["state"] = !server.enabled || server.configurationValid === false
       ? "disabled" : "ready";
-    if (state === "ready") {
+    const scoped = state === "ready" ? await scopedServerProbe(server, deps, input.signal) : null;
+    if (scoped) state = scoped.outcome ? "probe-failed" : !scoped.available ? "host-failure" : scoped.connected ? "ready" : "probe-failed";
+    if (state === "ready" && !scoped) {
       try {
         const hasOAuth = await serverHasOAuth(server, deps);
         for (const key of requiredMcpManualEnvKeys(server, hasOAuth)) {
@@ -1075,7 +1135,7 @@ export async function autoSelectMcpTools(input: {
         state = "host-failure";
       }
     }
-    if (state === "ready") {
+    if (state === "ready" && !scoped) {
       try {
         const status = await deps.testServerConnection(server, input.signal);
         if (status.missingEnv.length > 0) {
@@ -1099,6 +1159,7 @@ export async function autoSelectMcpTools(input: {
       missingEnv,
       required: false,
       state,
+      ...(scoped?.outcome ? { connectionOutcome: scoped.outcome } : {}),
     });
   }
 
@@ -1271,7 +1332,7 @@ export function buildMcpAutoSelectionPrompt(
     "Only ask the user when the selected Hub plugin requires login, OAuth, credentials, paid/credit approval, or a macOS/browser permission. Include the exact plugin slug or install command in that question.",
     unavailable.length > 0
       ? `Unavailable MCP state (value-free): ${unavailable
-          .map((tool) => `${tool.id}=${tool.state}${tool.required ? "(required)" : ""}`)
+          .map((tool) => `${tool.id}=${tool.state}${tool.required ? "(required)" : ""}${tool.connectionOutcome ? `: ${describeScopedMcpOutcome(tool.connectionOutcome, "en")}` : ""}`)
           .join("; ")}. Healthy MCPs remain available; degrade only the function that depends on an unavailable capability.`
       : "",
     "Mid-task capability gaps: call agentlas_resolve_plugins or agentlas_tool_search (hephaestus-network) before declaring something impossible. An already-installed plugin you name there is attached automatically on the next turn of this conversation/Goal; a Hub plugin that is not installed needs the owner's approval — name its slug and what it would do.",

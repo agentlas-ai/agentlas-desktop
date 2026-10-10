@@ -1,3 +1,4 @@
+import {prepareOneOriginalMcpTransport,type OneOriginalMcpSelection} from '../one/one-original-mcp-credential';
 import {
   prepareMcpProxyLaunch,
   preparedMcpProxyLaunchScope,
@@ -7,6 +8,7 @@ import {
   cancelMcpProxyLaunchPreparation,
   isPersistentMcpProxyLaunch,
 } from "./proxy-session";
+import { currentHistoryRuntimeFence, serializableHistoryGate, type HistoryRuntimeFence } from "../one/history-runtime-fences";
 import type { BeforeMcpToolResult } from "../runtime/runner";
 // MCP -> 런타임 브리지. 설치·활성화된 MCP 서버를 런타임별 설정으로 직렬화한다.
 // - Claude Code: `--mcp-config` JSON 파일 (vault 값은 `${ENV_ALIAS}` 참조만 기록)
@@ -173,6 +175,11 @@ export interface McpConfigResult {
 }
 
 export interface McpConfigBuildOptions {
+  /** Exact Main original/source/installed receiver, never a serialized caller option. */
+  nativeScopedSelection?: OneOriginalMcpSelection;
+  /** Resolve the same Main claim for every final installed row, including fixed
+   * assignments and required-tool unions that did not run a selection probe. */
+  nativeScopedSelectionForServer?: (server: Readonly<InstalledMcpServer>) => OneOriginalMcpSelection;
   /** Main-only personal One reply origin for exact Work/Science handoff attribution. */
   supervisorReplyRunId?: string;
   /** Receiving native host's origin/epoch revocation fence. Never a wire value. */
@@ -211,6 +218,7 @@ export interface McpConfigBuildOptions {
   toolGate?: {
     /** Main-only result delivery boundary, retained by the registered proxy gate. */
     beforeMcpToolResult?: BeforeMcpToolResult;
+    historyRuntimeFence?: HistoryRuntimeFence;
     /** Main-authored Plan ceiling, independent of per-tool approval grants. */
     planMode?: true;
     /** Main-only: One's turn that reports a teammate result — no one-team tools (EDGE-CASES X4). */
@@ -342,6 +350,11 @@ function validateEnvKey(value: string): string {
 export function mcpRuntimeSecretAlias(serverKey: string, envKey: string): string {
   const digest = createHash("sha256").update(serverKey).update("\0").update(envKey).digest("hex");
   return `${SECRET_ALIAS_PREFIX}${digest.slice(0, 32).toUpperCase()}`;
+}
+
+function cliMcpRuntimeEnvironment(runtimeEnv: Record<string, string>, mainOnlyRemoteAliases: Set<string>, mcpServers: Record<string, unknown>, codexConfigArgs: string[]): Record<string, string> {
+  const cliReferences = new Set(JSON.stringify({ mcpServers, codexConfigArgs }).match(/AGENTLAS_MCP_SECRET_[A-Za-z0-9_]+/g) ?? []);
+  return Object.fromEntries(Object.entries(runtimeEnv).filter(([alias]) => !mainOnlyRemoteAliases.has(alias) || cliReferences.has(alias)));
 }
 
 function envReference(alias: string): string {
@@ -652,6 +665,7 @@ function argsWithToolGateWorkingFolder(
  * Playwright가 설치돼 있어도 config/allowedTools에 싣지 않아 브라우저 우회를 막는다.
  */
 export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<McpConfigResult | null> {
+  const historyFence=currentHistoryRuntimeFence();if(historyFence){if(!opts?.toolGate)throw new Error("history_native_mcp_gate_required");opts={...opts,toolGate:{...opts.toolGate,historyRuntimeFence:historyFence}};}
   // Automation must start the canonical Agentlas Browser wrapper itself. A
   // generic Playwright process attached directly to 9222 has no lease,
   // guardian, page cap or idle cleanup and can therefore orphan the browser.
@@ -741,6 +755,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const allowedTools: string[] = [];
   const codexConfigArgs: string[] = [];
   const runtimeEnv: Record<string, string> = {};
+  const mainOnlyRemoteAliases = new Set<string>();
   let nativeBrowserBound = false;
   let nativeComputerUseBound = false;
   const preparedRows: Parameters<typeof registerPreparedMcpConfig>[0]["servers"] = [];
@@ -809,7 +824,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         chatId: callerChatId,
         runId: ownerGrantValid ? ownerGrant!.runId : null,
         cwd: canonicalCallerCwd,
-        permission: opts.toolGate?.permission ?? "read",
+        permission: opts?.toolGate?.permission ?? "read",
         ownerGrantId: ownerGrantValid ? ownerGrant!.grantId : null,
         ownerExecutionPermission: ownerGrantValid ? ("full" as const) : null,
       }
@@ -870,6 +885,30 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // The Main control capability must never be handed to a mutable command
       // merely because an installed row claims the catalog id.
       continue;
+    }
+    // An explicitly selected scoped ref stays on Main's existing prepared proxy.
+    // Missing receiver/read authority never falls through to a global env key.
+    const nativeSelection = opts?.nativeScopedSelectionForServer
+      ? opts.nativeScopedSelectionForServer(s) : opts?.nativeScopedSelection;
+    if (opts?.nativeScopedSelectionForServer && (nativeSelection?.route !== 'legacy'
+      && (nativeSelection?.route !== 'scoped' || nativeSelection.serverId !== s.id))) {
+      throw new Error("one_mcp_scoped_selection_changed");
+    }
+    if (nativeSelection?.route === 'scoped' && nativeSelection.serverId === s.id) {
+      const owners=nativeSelection.owners;
+      if(!owners || owners.serverId!==s.id) throw new Error("one_mcp_scoped_proxy_unavailable");
+      if (!opts?.toolGate || opts.toolGate.planMode || opts.toolGate.historyRuntimeFence) throw new Error("one_mcp_scoped_proxy_unavailable");
+      const scopedCredential = await prepareOneOriginalMcpTransport(owners, s);
+      browserAuthorityCleanup.push(() => scopedCredential.close());
+      const key = mcpConfigKey(s), proxy = mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles);
+      if (!proxy || !scopedCredential.current()) throw new Error("one_mcp_scoped_proxy_unavailable");
+      mcpServers[key] = proxy;
+      pushCodexConfig(codexConfigArgs, key, "command", tomlString(proxy.command));
+      pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(proxy.args));
+      pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(proxy.env));
+      preparedRows.push({configKey:key,server:s,transport:proxy,consentTransport:{type:"http",url:s.url,headers:{}},scopedCredential});
+      includedServerIds.push(s.id);includedServers.push({serverId:s.id,catalogId:s.catalogId,configKey:key});
+      allowedTools.push(`mcp__${key}`,`mcp__${key}__*`);continue;
     }
     // Re-check every required value immediately before serialization. A key can
     // be revoked after consent; that server is omitted instead of poisoning the
@@ -973,7 +1012,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
               ...(canonicalComputerUseSelected && opts?.toolGate && mcpProxyApprovalPort() > 0 ? {
                 AGENTLAS_UNIFIED_CUA_GATE_CONTROL: mcpProxyControlInfoPath(),
                 AGENTLAS_UNIFIED_CUA_GATE_SERVER_KEY: mcpConfigKey(canonicalComputerUseServer!),
-                AGENTLAS_UNIFIED_CUA_GATE_SESSION: JSON.stringify({ ...opts.toolGate, catalogId: "cua-driver" }),
+                AGENTLAS_UNIFIED_CUA_GATE_SESSION: JSON.stringify({ ...serializableHistoryGate(opts.toolGate), catalogId: "cua-driver" }),
                 ...(opts.toolGate.planPath ? { AGENTLAS_UNIFIED_CUA_GATE_PLAN: opts.toolGate.planPath } : {}),
               } : {}),
               // Agent runs render their shared CDP page inside One's Browser
@@ -1098,9 +1137,9 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // model-facing stream summary. Keep the authenticated inline target;
         // the proxy observes it without introducing a mutable target wrapper.
         const needsTimeReceipt = opts?.toolGate?.runtime === "antigravity" && isAuthenticSystemTimeMcpLaunch(command, args);
-        const proxied = isComputerUse || opts?.toolGate?.planMode || needsTimeReceipt
+        const proxied = isComputerUse || opts?.toolGate?.planMode || opts?.toolGate?.historyRuntimeFence || needsTimeReceipt
           ? mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles, isComputerUse ? "cua-driver" : undefined) : null;
-        if (isComputerUse && opts?.toolGate && !proxied) {
+        if ((isComputerUse || opts?.toolGate?.historyRuntimeFence) && opts?.toolGate && !proxied) {
           throw new Error("computer-use-tool-gate-unavailable");
         }
         const launch = proxied ?? direct;
@@ -1156,7 +1195,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
         // External stdio MCPs launch through the least-privilege wrapper. The
         // child gets OS necessities and only its own mapped credentials, never
         // LLM auth or another MCP's opaque alias.
-        const codexLaunch = opts?.toolGate?.planMode || browserReadOnly || browserCodexMainGated || s.catalogId === "cua-driver" ? proxied : null;
+        const codexLaunch = opts?.toolGate?.historyRuntimeFence || opts?.toolGate?.planMode || browserReadOnly || browserCodexMainGated || s.catalogId === "cua-driver" ? proxied : null;
         pushCodexConfig(codexConfigArgs, key, "command", tomlString(codexLaunch?.command ?? process.execPath));
         pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(codexLaunch?.args ?? wrapperArgs));
         pushCodexConfig(
@@ -1195,6 +1234,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     } else if (s.url) {
       // Native remote transports have no Main per-call approval proxy. Do not
       // silently pass an unenforced Plan context to a provider-owned client.
+      if (opts?.toolGate?.historyRuntimeFence) throw new Error("history_native_remote_mcp_gate_unavailable");
       if (opts?.toolGate?.planMode) throw new Error("plan_mode_remote_mcp_gate_unavailable");
       // Claude Code는 HTTP/SSE, 현재 Codex CLI는 Streamable HTTP URL을
       // 네이티브로 지원한다. Codex 0.144.1의 `codex mcp add --help` 계약에
@@ -1275,11 +1315,27 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       // URL이 시크릿인 서버는 Claude-only로 남긴다: Codex는 `${VAR}` URL 보간이
       // 없고, -c argv에 실제 URL을 실으면 프로세스 목록으로 노출되기 때문이다.
       if (vaultKey) codexRemoteSupported = false;
-      mcpServers[key] = {
+      const remoteTarget = {
         type: s.transport === "sse" ? "sse" : "http",
         url: serializedUrl,
         ...(Object.keys(headers).length ? { headers } : {}),
       };
+      // Codex cannot represent SSE or arbitrary native headers. Reuse Main's
+      // existing opaque proxy and exact sealed target, never pass secrets in argv.
+      const codexRemoteProxy = opts?.toolGate?.runtime === "codex" && !codexRemoteSupported
+        ? mcpProxySpec(key, opts, s.catalogId, proxyHandles, residentProxyHandles) : null;
+      if (codexRemoteProxy) {
+        // Keep the full alias environment until Main seals the resolved target.
+        // Remove only this proxy's aliases absent from every CLI transport reference.
+        for (const value of [serializedUrl, ...Object.values(headers)]) {
+          for (const alias of value.match(/AGENTLAS_MCP_SECRET_[A-Za-z0-9_]+/g) ?? []) mainOnlyRemoteAliases.add(alias);
+        }
+        consentTransport = remoteTarget;
+        mcpServers[key] = codexRemoteProxy;
+        pushCodexConfig(codexConfigArgs, key, "command", tomlString(codexRemoteProxy.command));
+        pushCodexConfig(codexConfigArgs, key, "args", tomlStringArray(codexRemoteProxy.args));
+        pushCodexConfig(codexConfigArgs, key, "env", tomlInlineStringTable(codexRemoteProxy.env));
+      } else mcpServers[key] = remoteTarget;
       if (codexRemoteSupported) {
         pushCodexConfig(codexConfigArgs, key, "url", tomlString(s.url));
         if (codexBearerAlias) {
@@ -1327,7 +1383,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
 
   writePrivateFile(configPath, JSON.stringify({ mcpServers }, null, 2));
   const configurations = preparedRows.map(({ server }) => [server.id, mcpServerConfigurationDigest(server)] as const);
-  const { admissionCurrent: _admissionCurrent, ...delegationBuildOptions } = opts ?? {};
+  const { admissionCurrent: _admissionCurrent, nativeScopedSelection: _nativeScopedSelection,
+    nativeScopedSelectionForServer: _nativeScopedSelectionForServer, ...delegationBuildOptions } = opts ?? {};
   for (const row of preparedRows) {
     const entry = mcpServers[row.configKey] as { env?: Record<string, string> };
     const handle = entry.env?.[MCP_PROXY_LAUNCH_ENV];
@@ -1337,7 +1394,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   // Process-local callbacks stay on Main's proxy registration. The delegated
   // reconstruction intent is structured-cloned and cannot carry authority closures.
   if (delegationBuildOptions.toolGate) {
-    const { beforeMcpToolResult: _beforeMcpToolResult, ...serializableGate } = delegationBuildOptions.toolGate;
+    const { beforeMcpToolResult: _beforeMcpToolResult, historyRuntimeFence:_historyRuntimeFence, ...serializableGate } = delegationBuildOptions.toolGate;
     delegationBuildOptions.toolGate = serializableGate;
   }
   if (proxyScope && delegationBuildOptions.toolGate) {
@@ -1363,7 +1420,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       if (isPersistentMcpProxyLaunch(handle)) activatedResidentProxyHandles.add(handle);
     }
   }
-  return { configPath, allowedTools, codexConfigArgs, runtimeEnv, includedServerIds, includedServers, cleanup,
+  return { configPath, allowedTools, codexConfigArgs, runtimeEnv: cliMcpRuntimeEnvironment(runtimeEnv, mainOnlyRemoteAliases, mcpServers, codexConfigArgs), includedServerIds, includedServers, cleanup,
     ...(toolchainConsumer && includedServers.some((server) => server.catalogId === "one-team") ? { toolchainConsumer: true as const } : {}),
     ...(workspacePreviewCapabilityCleanup ? { workspacePreviewCapabilityCleanup } : {}),
     ...(nativeBrowserBound ? { nativeBrowserBound: true as const } : {}), ...(nativeComputerUseBound ? { nativeComputerUseBound: true as const } : {}) };

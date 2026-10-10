@@ -22,7 +22,7 @@ import { assertScienceRecoveryAcpRequest } from "../science-host/recovery-author
 import type { ChildProcess } from "node:child_process";
 import fs from "node:fs/promises";
 import { preparedMcpBindings, preparedMcpTransport } from "../mcp-tools/prepared-transport";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   AcpConnection,
   ACP_PROTOCOL_VERSION,
@@ -37,11 +37,14 @@ import {
 } from "./acp-protocol";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 import { ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, RuntimeTurnUnsettledError, runnerFailureFromError } from "./runner";
-import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild } from "./exec";
+import { agentRunCwd, detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { pickLocale, tStatus } from "./status-i18n";
 import { abortReasonError } from "./abort-reason";
-import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext } from "./continuity";
+import { CLI_HISTORY_CONTEXT_TOKENS, composeResumeTurnPrompt, renderConversationContext,
+  renderGapContext, unseenHistoryGap, dedupeStableTurnContext, acknowledgeStableTurnContext,
+  invalidateStableTurnContext, type StableTurnContextDelivery } from "./continuity";
 import { stageCliImageAttachments } from "./image-attachments";
+import { agentContextBootstrapForRequest, agentContextDeliveryForRequest, agentContextSessionKey } from "./agent-context";
 import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions";
 import {
   getRuntimeToolPermissionArbiter,
@@ -453,58 +456,73 @@ async function openAcp(
     env: opts.env,
     ...detachedSpawnOpts(),
   });
-  trackRunChild(child);
-  /*
-   * ★ACP 러너도 자식을 띄운다 — 그러므로 같은 정산 계약이 필요하다.
-   *
-   * `pickRunner` 는 cursor·grok·kimi 를 이 러너로 보낸다(ACP_PREFERRED_KINDS).
-   * 즉 그 세 런타임의 **실제 실행 경로가 여기**다. 손 드라이버 쪽에만 정산을 달고
-   * 이 자리를 비워 두면, 고친 코드가 안 쓰이는 경로에만 있는 셈이 된다.
-   *
-   * Node 계약상 `close` 는 자식의 stdio 가 전부 닫혀야 오는데, 에이전트가 파이프를
-   * 상속한 손자를 남기고 죽으면 영영 오지 않는다 — runner.ts 주석 참고.
-   */
-  // 생존 신호는 **지금 활성인 턴**으로 간다 — 세션이 여러 턴을 살기 때문이다.
-  const heartbeatStatus = (status: string): void => { state.active?.onStatus?.(status); };
-  const stopAcpHeartbeat = startCliHeartbeat(child, heartbeatStatus, opts.label ?? spec.id);
-  ensureChildCloseAfterExit(child, () => {
-    state.active?.onStatus?.(`${opts.label ?? spec.id}: agent exited without closing its output — settling the session`);
-  });
-  child.on("close", () => { state.closed = true; stopAcpHeartbeat(); });
-  child.on("error", () => { state.closed = true; stopAcpHeartbeat(); });
-  const conn = new AcpConnection(child, {
-    onNotification: (method, params) => state.active?.onNotification?.(method, params),
-    onRequest: (method, params) => {
-      const handler = state.active?.onRequest;
-      // 유휴 세션에 요청이 오면 답할 사람이 없다 — 조용히 삼키지 않고 규격 오류로 답한다.
-      if (!handler) throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
-      return handler(method, params);
-    },
-    onClose: () => { state.closed = true; },
-  });
-  const init = await conn.request("initialize", {
-    protocolVersion: ACP_PROTOCOL_VERSION,
-    clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
-    clientInfo: { name: "agentlas-desktop", version: "1.0" },
-  }, { timeoutMs: opts.timeoutMs });
-  if (init?.protocolVersion !== ACP_PROTOCOL_VERSION) {
-    stopAcpHeartbeat();
-    killCliTree(child);
-    throw new Error(`ACP protocolVersion ${String(init?.protocolVersion)} unsupported (client speaks v${ACP_PROTOCOL_VERSION} only)`);
-  }
-  const authMethods: any[] = Array.isArray(init?.authMethods) ? init.authMethods : [];
-  if (authMethods.length > 0) {
-    const chosen = chooseAuthMethod(authMethods, opts.env);
-    if (chosen?.id) {
-      try {
-        await conn.request("authenticate", { methodId: chosen.id }, { timeoutMs: opts.timeoutMs });
-      } catch {
-        // Already-logged-in runtimes may reject authenticate yet accept
-        // session/new; if not, session/new fails loudly right after.
+  let session: Session | undefined;
+  let stopAcpHeartbeat = (): void => {};
+  try {
+    trackRunChild(child);
+    /*
+     * ★ACP 러너도 자식을 띄운다 — 그러므로 같은 정산 계약이 필요하다.
+     *
+     * `pickRunner` 는 cursor·grok·kimi 를 이 러너로 보낸다(ACP_PREFERRED_KINDS).
+     * 즉 그 세 런타임의 **실제 실행 경로가 여기**다. 손 드라이버 쪽에만 정산을 달고
+     * 이 자리를 비워 두면, 고친 코드가 안 쓰이는 경로에만 있는 셈이 된다.
+     *
+     * Node 계약상 `close` 는 자식의 stdio 가 전부 닫혀야 오는데, 에이전트가 파이프를
+     * 상속한 손자를 남기고 죽으면 영영 오지 않는다 — runner.ts 주석 참고.
+     */
+    // 생존 신호는 **지금 활성인 턴**으로 간다 — 세션이 여러 턴을 살기 때문이다.
+    const heartbeatStatus = (status: string): void => { state.active?.onStatus?.(status); };
+    stopAcpHeartbeat = startCliHeartbeat(child, heartbeatStatus, opts.label ?? spec.id);
+    ensureChildCloseAfterExit(child, () => {
+      state.active?.onStatus?.(`${opts.label ?? spec.id}: agent exited without closing its output — settling the session`);
+    });
+    child.on("close", () => { state.closed = true; stopAcpHeartbeat(); });
+    child.on("error", () => { state.closed = true; stopAcpHeartbeat(); });
+    const conn = new AcpConnection(child, {
+      onNotification: (method, params) => state.active?.onNotification?.(method, params),
+      onRequest: (method, params) => {
+        const handler = state.active?.onRequest;
+        // 유휴 세션에 요청이 오면 답할 사람이 없다 — 조용히 삼키지 않고 규격 오류로 답한다.
+        if (!handler) throw new AcpRpcError({ code: -32601, message: `Method not found: ${method}` });
+        return handler(method, params);
+      },
+      onClose: () => { state.closed = true; },
+    });
+    session = { child, conn, init: null, state, ...(opts.executableOwner ? { executableOwner: opts.executableOwner } : {}), stopHeartbeat: stopAcpHeartbeat };
+    const init = await conn.request("initialize", {
+      protocolVersion: ACP_PROTOCOL_VERSION,
+      clientCapabilities: { fs: { readTextFile: false, writeTextFile: false }, terminal: false },
+      clientInfo: { name: "agentlas-desktop", version: "1.0" },
+    }, { timeoutMs: opts.timeoutMs });
+    if (init?.protocolVersion !== ACP_PROTOCOL_VERSION) {
+      throw new Error(`ACP protocolVersion ${String(init?.protocolVersion)} unsupported (client speaks v${ACP_PROTOCOL_VERSION} only)`);
+    }
+    const authMethods: any[] = Array.isArray(init?.authMethods) ? init.authMethods : [];
+    if (authMethods.length > 0) {
+      const chosen = chooseAuthMethod(authMethods, opts.env);
+      if (chosen?.id) {
+        try {
+          await conn.request("authenticate", { methodId: chosen.id }, { timeoutMs: opts.timeoutMs });
+        } catch {
+          // Already-logged-in runtimes may reject authenticate yet accept
+          // session/new; if not, session/new fails loudly right after.
+        }
       }
     }
+    session.init = init;
+    return session;
+  } catch (error) {
+    if (session) await closeAcpSession(session);
+    else {
+      const termination = waitForCliTreeTermination(child);
+      state.active = null;
+      state.closed = true;
+      try { stopAcpHeartbeat(); } catch { /* already stopped */ }
+      try { killCliTree(child); } catch { /* already closing */ }
+      await termination;
+    }
+    throw error;
   }
-  return { child, conn, init, state, ...(opts.executableOwner ? { executableOwner: opts.executableOwner } : {}), stopHeartbeat: stopAcpHeartbeat };
 }
 
 /**
@@ -519,12 +537,18 @@ function acpSessionAlive(session: Session): boolean {
 }
 
 /** 세션을 놓는 유일한 경로 — 프로토콜 close + 프로세스 트리 종료 + 생존 신호 정지. */
-function closeAcpSession(session: Session): void {
+const acpSessionTerminations = new WeakMap<Session, Promise<void>>();
+function closeAcpSession(session: Session): Promise<void> {
+  const existing = acpSessionTerminations.get(session);
+  if (existing) return existing;
+  const termination = waitForCliTreeTermination(session.child);
+  acpSessionTerminations.set(session, termination);
   session.state.active = null;
   session.state.closed = true;
   try { session.stopHeartbeat(); } catch { /* ignore */ }
   try { session.conn.close(); } catch { /* ignore */ }
   try { killCliTree(session.child); } catch { /* ignore */ }
+  return termination;
 }
 
 /*
@@ -714,7 +738,7 @@ export async function probeAcpModels(
     return { status: "failed", models: [], rawLineCount: 0, reason: `acp:${detail && !raw.includes(detail) ? `${raw}: ${detail}` : raw}`, source: "acp" };
   } finally {
     // 탐지용 세션은 풀에 넣지 않는다 — 대화가 아니라 한 번의 질문이다.
-    if (session) closeAcpSession(session);
+    if (session) await closeAcpSession(session);
   }
 }
 
@@ -928,11 +952,17 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       unattended: req.unattended === true,
     });
     const sessionKind = acpSessionKind(spec.id);
+    // Only the host's active delivery keys retained resources. Observable chat,
+    // approval and effect ownership continue to use the actual task chat.
+    const canonicalContextKey = req.agentContext && !recovery && !req.minimalObservation
+      && !req.untrustedNoTools && !req.restrictedReadBoundary && !req.judgmentOnly
+      && agentContextDeliveryForRequest(req) ? agentContextSessionKey(req.agentContext) : undefined;
+    const contextChatId = canonicalContextKey ?? req.chatId;
     const runtimeSessionOwnerId = req.runtimeSessionOwnerId ?? req.agentId;
     const isolateRuntimeSessionOwner = req.runtimeSessionOwnerId != null;
     const executableOwner: AcpExecutableOwner | null = req.chatId ? {
       specId: spec.id,
-      chatId: req.chatId,
+      chatId: contextChatId!,
       sessionOwnerId: runtimeSessionOwnerId ?? null,
       isolateOwner: isolateRuntimeSessionOwner,
       generation: executableIdentity.generation,
@@ -973,7 +1003,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     const poolKey = !req.singleUse && req.chatId && fingerprint
       ? acpPoolKey({
         specId: spec.id,
-        chatId: req.chatId,
+        chatId: contextChatId!,
         fingerprint,
         sessionOwnerId: runtimeSessionOwnerId ?? null,
         isolateOwner: isolateRuntimeSessionOwner,
@@ -1021,6 +1051,9 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     let lease: AcpSessionLease<Session> | null = null;
     /** 이 세션을 풀에 되돌리면 안 되는가(취소·오류·프로토콜 파손). */
     let broken = false;
+    let contextSessionId: string | null = null;
+    let stableContextDelivery: StableTurnContextDelivery | undefined;
+    let stableContextAcknowledged = false;
     let promptDispatchAttempted = false;
     let agentRequestObserved = false;
     let effectRun: ReturnType<typeof beginAdapterEffectRun> = null, effectTerminal: string | null = null;
@@ -1141,6 +1174,11 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         } catch (err) {
           if (req.signal?.aborted) throw abortReasonError(req);
           events.onStatus(`[runtime-session] resume_failed kind=${sessionKind}`);
+          // -32601 is the source protocol's closed method-not-found error.
+          // Other load errors cannot establish that no work happened. Never
+          // turn an ambiguous canonical load into another provider operation.
+          if (canonicalContextKey && (!(err instanceof AcpRpcError) || err.code !== -32601
+            || client.turnActivityObserved || agentRequestObserved || effectRun)) throw err;
           if (req.unattended) {
             throw new Error(`Automation runtime session resume failed for ${sessionKind}; refusing to create a fresh ACP session.`);
           }
@@ -1179,6 +1217,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       // 모델 선택을 확인한 세션만 다음 턴에 재사용할 수 있게 붙인다.
       session.acpSessionId = sessionId;
+      contextSessionId = sessionId;
       /*
        * ★모드 — plan 모드는 ACP 로는 고를 방법이 아예 없었다(session/set_mode 미호출).
        * 모드는 세션을 만들 때 광고되므로 새 세션에서만 고른다. resume 턴에서는 세션이
@@ -1197,9 +1236,13 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
        * 를 광고하는 에이전트에는 ACP 이미지 블록을 그대로 싣고, 아니면 기존 산문 폴백
        * (파일로 저장하고 경로를 알려주는 길)을 쓴다.
        */
-      const images = req.images ?? [];
+      // session/new is measured before resolving this immutable host packet.
+      // A cold no-load carrier needs its own prior turns as well as foreign
+      // deltas; the wrapper's retained-turn req.history is intentionally empty.
+      const bootstrap = !resumed ? agentContextBootstrapForRequest(req) : null;
+      const images = bootstrap?.images ?? req.images ?? [];
       const imageBlocks: Array<Record<string, unknown>> = [];
-      let userPrompt = req.userPrompt;
+      let userPrompt = bootstrap?.currentPrompt ?? req.userPrompt;
       if (images.length > 0) {
         if (agentCaps.promptCapabilities?.image === true) {
           for (const image of images) imageBlocks.push({ type: "image", mimeType: image.mediaType, data: image.data });
@@ -1208,8 +1251,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
             : `Sending ${images.length} attached image(s) inline`);
         } else {
           const staged = await stageCliImageAttachments({
-            userPrompt: req.userPrompt,
-            images,
+            userPrompt,
+            images: [...images],
             cwd,
             locale,
             chatId: req.chatId,
@@ -1239,8 +1282,23 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
             : "This runtime cannot enforce the output schema — asking for it in the prompt instead.",
         );
       }
+      // A restored ACP session has not seen turns from another backend. A caller
+      // supplying its own native session also owns its history cursor.
+      const gapContext = resumed && !req.runtimeSessionId && savedSession && sessionId === storedSessionId
+        ? renderGapContext(unseenHistoryGap(req.history, savedSession.updatedAt), locale) : "";
+      const contextFingerprint = createHash("sha256").update(JSON.stringify([fingerprint,
+        runtimeSessionOwnerId ?? null, isolateRuntimeSessionOwner, req.systemPrompt, locale,
+        req.permission, req.planMode, req.approvalsReviewer, req.model, req.effort,
+        req.forceSurface, req.surfaceGate, req.untrustedNoTools, req.untrustedAllowedMcpTools,
+        poolKey, cwd])).digest("hex");
+      // session/new is a replacement even if a provider recycles an identifier.
+      // Prepare delivery without committing it; init/load is never a prompt ACK.
+      if (!resumed) invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind, sessionId });
+      const context = dedupeStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind,
+        sessionId, contextFingerprint, turnContext: bootstrap?.turnContext ?? req.turnContext, stableBlocks: req.turnContextStable });
+      stableContextDelivery = context.delivery;
       const promptText = resumed
-        ? `${composeResumeTurnPrompt(userPrompt, req.turnContext, locale)}${schemaFallback}`
+        ? `${composeResumeTurnPrompt(userPrompt, [gapContext, context.text].filter(Boolean).join("\n\n"), locale)}${schemaFallback}`
         : [
           wrapSystemPrompt(
             req.systemPrompt, locale, req.permission, userPrompt,
@@ -1251,8 +1309,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
             undefined,
             req.judgmentOnly === true ? "host-judgment" : undefined,
           ),
-          req.history.length > 0 ? renderConversationContext(req.history, locale, CLI_HISTORY_CONTEXT_TOKENS).block : "",
-          req.turnContext,
+          (bootstrap?.history ?? req.history).length > 0 ? renderConversationContext([...(bootstrap?.history ?? req.history)], locale, CLI_HISTORY_CONTEXT_TOKENS).block : "",
+          context.text,
           userPrompt,
           schemaFallback,
         ].filter(Boolean).join("\n\n");
@@ -1264,6 +1322,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       effectRun = ensureEffectRun();
       req.signal?.throwIfAborted();
       promptCancellation = new AbortController();
+      const promptAcknowledgementId = `acp-prompt-completed:${randomUUID()}`;
       // Mark before calling transport: an exception cannot prove nothing was sent.
       promptDispatchAttempted = true;
       const result = await session.conn.request(
@@ -1278,6 +1337,14 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       }
       effectTerminal = stopReason;
       client.finish();
+      // The RPC response is bound to this exact session/prompt request. Only a
+      // confirmed ordinary terminal advances delivery; truncated/cancelled or
+      // Kimi's unconfirmed native terminal never proves retained context.
+      if (stopReason === "end_turn" && !req.signal?.aborted && spec.id !== "kimi" && spec.registryId !== "kimi"
+        && session.acpSessionId === contextSessionId) {
+        stableContextAcknowledged = acknowledgeStableTurnContext(stableContextDelivery,
+          { sessionId, acknowledgementId: promptAcknowledgementId });
+      }
       // Ordinary turns retain the session; fresh recovery must never seed a later resume.
       if (!recovery && req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
         events.onStatus(`[runtime-session] store_failed kind=${sessionKind}`);
@@ -1370,6 +1437,10 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       throw err;
     } finally {
       if (cancelFallback !== undefined) clearTimeout(cancelFallback);
+      if (contextSessionId && (broken || req.signal?.aborted || effectTerminal !== "end_turn"
+        || (stableContextDelivery && !stableContextAcknowledged))) {
+        invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: sessionKind, sessionId: contextSessionId });
+      }
       effectRun?.complete(client.effectReport(req.signal?.aborted ? "cancelled" : effectTerminal));
       req.signal?.removeEventListener("abort", onAbort);
       req.signal?.removeEventListener("abort", endApprovalTurn);
@@ -1385,7 +1456,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
         else pool.release(lease);
       } else if (session) {
         // 풀에 들어가지 않는 일회성 실행 — 예전 그대로 닫는다.
-        closeAcpSession(session);
+        await closeAcpSession(session);
       }
     }
   };

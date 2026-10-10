@@ -142,8 +142,11 @@ export class OneSupervisorWorkQueue {
   }
   cancelUnstarted(lease: SupervisorWorkLease): boolean {
     return this.db.prepare(`UPDATE one_supervisor_work_jobs SET phase='cancelled',lease_until=0,
-      reason='cancelled_before_dispatch',updated_at=? WHERE command_id=? AND generation=? AND phase IN ('queued','claimed')`)
+      reason='cancelled_before_dispatch',updated_at=? WHERE command_id=? AND generation=? AND (phase IN ('queued','claimed') OR (phase='held' AND reason='held_before_native_dispatch'))`)
       .run(this.now(), lease.command_id, lease.generation).changes === 1;
+  }
+  canCancelUnstarted(lease: SupervisorWorkLease): boolean {
+    return ['queued','claimed'].includes(lease.phase) || lease.phase==='held' && lease.reason==='held_before_native_dispatch';
   }
   version(lease: SupervisorWorkLease): string {
     // Heartbeats are not new user-control versions. A claim or dispatch phase is.
