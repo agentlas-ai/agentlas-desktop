@@ -1,5 +1,5 @@
 import { configuredNativeGuiControls } from "./invocation/native-gui-controls";
-import { ownerTurnCanBindGoal } from "./invocation/goal-owner-route";
+import { ownerTurnStartsOnDesktop } from "./invocation/goal-owner-route";
 import { publishLegacyInvocationActiveChats, combinedInvocationActiveChatIds } from "./invocation/native-gui-public";
 import { createNativeMainNoBrainChecker } from "./invocation/native-main-no-brain";
 import { configuredNativeGuiOwner, assertNativeGuiStartAvailable, installNativeGuiOwner, nativeGuiEnrollmentChannel, type NativeGuiEnrollment } from "./invocation/native-gui-startup";
@@ -1638,14 +1638,27 @@ export function initializeNativeGuiInvocationOwner(enrollment: NativeGuiEnrollme
 
 }
 const rendererInvocationProcessEpoch = randomUUID();
+/*
+ * invoke:run runs synchronously from receipt to its durable admission reservation, so a run ID this process received
+ * that still has no admission row was refused before reservation and can never start. A request recorded before this
+ * process started cannot be in flight either. invoke:admission reports both, so a renderer is not left holding an
+ * "admission unknown" card that no receipt can ever resolve (1.2.89 refusals, Hope chat 2026-10-10).
+ */
+const invocationProcessStartedAt = Date.now();
+const invocationRunIdsReceived = new Set<string>();
+function noteInvocationRunReceived(runId: unknown): void {
+  if (typeof runId !== "string" || !runId) return;
+  invocationRunIdsReceived.add(runId);
+  if (invocationRunIdsReceived.size > 4096) invocationRunIdsReceived.delete(invocationRunIdsReceived.values().next().value!);
+}
 /**
  * The native owner that starts an owner turn in this chat, or null for Desktop. Goal custody is Desktop-only and any
- * One/Work turn can bind a Goal (a resumed stopped Goal, a goal chip, automatic intake), so such owner turns start on
- * Desktop, like the Goal's own wake-ups (goal-owner-route.ts). Every epoch stamped for the turn (One preflight
- * submission, admission) must come from this same decision.
+ * Work turn can bind a Goal, so Work owner turns start on Desktop; One turns need the One personal domain the daemon
+ * holds, so they start there (goal-owner-route.ts). Every epoch stamped for the turn (One preflight submission,
+ * admission) must come from this same decision.
  */
 function ownerTurnStarter<T>(configuredOwner: T | null | undefined, chatId: unknown): T | null {
-  return configuredOwner && !ownerTurnCanBindGoal(chatId) ? configuredOwner : null;
+  return configuredOwner && !ownerTurnStartsOnDesktop(chatId) ? configuredOwner : null;
 }
 
 /** Run after runtime bootstrap, before ordinary queued-steer recovery. */
@@ -7003,6 +7016,7 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
+    noteInvocationRunReceived(req?.runId);
     const configuredOwner = configuredNativeGuiOwner();
     if (configuredOwner && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
     const preflightSubmissionId = req?.preflightSubmissionId;
@@ -7324,7 +7338,10 @@ export function registerIpcHandlers(): void {
     // internally inconsistent, because it implies an atomic invoke_started
     // receipt that must be reviewed rather than reclassified.
     if (rejectedReceipt && admission?.status !== "admitted") return rejectedReceipt;
-    if (!admission) return { runId, status: "absent" as const };
+    if (!admission) {
+      return { runId, status: "absent" as const, ownerProcessStartedAt: invocationProcessStartedAt,
+        ...(invocationRunIdsReceived.has(runId) ? { refusedBeforeReservation: true as const } : {}) };
+    }
     return {
       runId: admission.runId,
       chatId: admission.chatId,

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.91 — 2026-10-11
+
+- Messages in One conversations start again. In 1.2.90 they were still refused before starting, for a second reason than in 1.2.89.
+- A request that was refused before it started no longer leaves a "checking whether the request was accepted" card that cannot be cleared. Check admission now confirms that nothing ran, and the conversation accepts new messages again.
+- A request refused because the conversation's run settings changed while sending now says so and keeps your text so you can send it again.
+- The 1.2.89 first-turn fix for goals now applies to Work conversations. In One rooms, a message to a room whose goal is paused or waiting may still fail its first turn; this is a known issue.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.90 — 2026-10-11
 
 - Messages in One conversations send again. In 1.2.89 every One message was refused before it started while the background service was running.

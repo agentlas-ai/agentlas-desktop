@@ -12,18 +12,26 @@ import { getLongRunByGoalId } from "../store/long-runs";
  * launch": an owner message to a user-paused Goal resumed the Goal in the ledger,
  * then failed in the daemon with no controller attempt).
  *
- * Any One/Work turn can bind a Goal, not only a chat that already has one: a
- * message to a stopped Goal resumes it (stoppedGoalMessageReopens), a goal chip
- * gets its ledger row during the first turn, and automatic intake may admit a Goal
- * mid-turn. So an owner turn in a chat that can hold Desktop Goal custody starts on
- * Desktop, where the Goal's own host wake-ups already run. Only a chat whose Goal is
- * held elsewhere (Science, a non-Desktop host) may start in the daemon.
+ * Any Work turn can bind a Goal, not only a chat that already has one: a message
+ * to a stopped Goal resumes it (stoppedGoalMessageReopens), a goal chip gets its
+ * ledger row during the first turn, and automatic intake may admit a Goal mid-turn.
+ * So a Work owner turn starts on Desktop, where the Goal's own host wake-ups run.
+ *
+ * One turns cannot. They run inside the One personal domain (personal native
+ * capabilities, vault credentials), which the daemon adopts when it runs; Desktop's
+ * supervisor is then closed, and the ordinary One turn observer refuses a One turn
+ * started on Desktop with supervisor_native_owner_required before anything runs
+ * (production 1.2.90, 2026-10-10T23:17Z: every One message was refused). A One chat
+ * therefore starts in the daemon, as before 1.2.89. An owner turn in a One Goal room
+ * keeps its known first-turn gap there (goal_episode_admission_missing) until One
+ * turns can carry Desktop Goal custody; the Goal's Desktop wake-ups still run.
+ * A chat whose Goal is held elsewhere (Science, a non-Desktop host) also stays in the daemon.
  */
-export function ownerTurnCanBindGoal(chatId: unknown): boolean {
+export function ownerTurnStartsOnDesktop(chatId: unknown): boolean {
   if (typeof chatId !== "string" || !chatId) return false;
   const chat = getChat(chatId);
   if (!chat) return false;
   const run = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
   if (run && (run.surface === "science" || run.hostOwnerKind !== "desktop")) return false;
-  return chat.originSurface === "one" || chat.originSurface === "work";
+  return chat.originSurface === "work";
 }

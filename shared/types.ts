@@ -6776,9 +6776,17 @@ export interface InvocationRunReceipt {
 /** Closed vocabulary of Main-owned abort markers (shared/invocation-host-stop.ts). */
 export type InvocationHostStopCause = "app_closed" | "update_restart" | "goal_paused_by_user" | "goal_deleted_by_user";
 
-/** Content-free Main admission status; absent is not proof that an in-flight IPC request never started. */
+/** Content-free Main admission status; absent alone is not proof that an in-flight IPC request never started. */
 export type InvocationAdmissionReceipt =
-  | { runId: string; status: "absent" }
+  | {
+      runId: string;
+      status: "absent";
+      /** This Main process received invoke:run for this ID. invoke:run reserves its admission row synchronously,
+       * so a received request with no row was refused before reservation and can never start. */
+      refusedBeforeReservation?: true;
+      /** Epoch ms at which the answering Main process started. No request recorded before it is in flight. */
+      ownerProcessStartedAt?: number;
+    }
   | {
       runId: string;
       chatId: string;

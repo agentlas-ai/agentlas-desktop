@@ -22,7 +22,7 @@ import { ContinuityStatus } from "../ContinuityStatus";
 import { ComposerDecisionSlot } from "../ComposerDecisionPortal";
 import { mergeGoalResults, type GoalResultPresentation } from "../../../shared/goal-result";
 import { GoalResultReport } from "../GoalResultReport";
-import type { ChatHostNotice, InvocationSteerRecovery, McpInvocationRequest } from "../../../shared/types";
+import type { ChatHostNotice, InvocationAdmissionReceipt, InvocationSteerRecovery, McpInvocationRequest } from "../../../shared/types";
 import { agiActionNoticeLine, hostStatusLabel, isQuietHostStatus, normalizeChatHostNotice } from "../../../shared/chat-host-notice";
 import { HostContinuationNotice } from "../HostContinuationNotice";
 import { AutomationLiveRows, AutomationReportSummary } from "../automation/AutomationChatActivity";
@@ -687,7 +687,7 @@ function clearOneUncertainPreflightSteer(value: OneUncertainPreflightSteer): voi
   } catch { /* Main receipt remains authoritative. */ }
 }
 
-type OneUncertainAdmission = { chatId: string; runId: string; submissionId?: string };
+type OneUncertainAdmission = { chatId: string; runId: string; submissionId?: string; recordedAt?: number; legacy?: true };
 
 function readOneUncertainAdmission(chatId: string): OneUncertainAdmission | null {
   try {
@@ -695,11 +695,28 @@ function readOneUncertainAdmission(chatId: string): OneUncertainAdmission | null
       ?? window.sessionStorage.getItem(`${ONE_UNCERTAIN_ADMISSION_PREFIX}${chatId}`);
     if (!raw) return null;
     const value = JSON.parse(raw) as Partial<OneUncertainAdmission>;
+    const recordedAt = typeof value.recordedAt === "number" && Number.isFinite(value.recordedAt) ? value.recordedAt : undefined;
     return value.chatId === chatId && typeof value.runId === "string"
       && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.runId)
-      ? { chatId, runId: value.runId, ...(typeof value.submissionId === "string" ? { submissionId: value.submissionId } : {}) }
+      ? { chatId, runId: value.runId, ...(typeof value.submissionId === "string" ? { submissionId: value.submissionId } : {}),
+        // Every record this build writes carries recordedAt; one without it was written by an earlier build, so the
+        // update restart that installed this build has happened since.
+        ...(recordedAt !== undefined ? { recordedAt } : { legacy: true as const }) }
       : null;
   } catch { return null; }
+}
+
+/**
+ * Main answers "absent" for a run with no admission row. That proves no start only when Main received the request
+ * (it reserves synchronously, so a received request without a row was refused before reservation) or when the record
+ * predates the Main process that answers. Callers also require that no run receipt exists. Anything else stays unknown.
+ */
+function absentAdmissionProvesNoStart(admission: InvocationAdmissionReceipt, pending: OneUncertainAdmission): boolean {
+  if (admission.status !== "absent" || admission.runId !== pending.runId) return false;
+  if (admission.refusedBeforeReservation === true) return true;
+  const startedAt = admission.ownerProcessStartedAt;
+  if (typeof startedAt !== "number" || !Number.isFinite(startedAt)) return false;
+  return pending.legacy === true || (pending.recordedAt !== undefined && pending.recordedAt < startedAt);
 }
 
 function writeOneUncertainAdmission(value: OneUncertainAdmission): boolean {
@@ -5140,7 +5157,13 @@ function OneSessionsShell() {
     let observedAdmissionStatus: "absent" | "pending" | "admitted" | "rejected" | null = null;
     let optimisticUserMessageId: string | null = null;
     const reconcileAcceptedAdmission = async (candidateRunId: string, rejectionCause?: unknown): Promise<boolean> => {
-      const admission = await api.invoke.admission(candidateRunId);
+      let admission = await api.invoke.admission(candidateRunId);
+      const record = readOneUncertainAdmission(chatId);
+      if (absentAdmissionProvesNoStart(admission, record?.runId === candidateRunId ? record : { chatId, runId: candidateRunId })
+        && !(await api.invoke.receipt(candidateRunId))) {
+        // A proven no-start without an admission row takes the same path as a recorded rejection.
+        admission = { runId: candidateRunId, chatId, status: "rejected", pendingAt: "", updatedAt: "", rejectionReasonCode: null };
+      }
       observedAdmissionStatus = admission.status;
       if (admission.status !== "absent" && admission.chatId !== chatId) return false;
       if (admission.status === "pending") return false;
@@ -5379,7 +5402,7 @@ function OneSessionsShell() {
     // Persist only the opaque ID and its chat binding, never text or
     // capabilities. A renderer reload while Main preflight is still awaiting
     // its judges must not silently allocate a second run ID for this chat.
-    if (!writeOneUncertainAdmission({ chatId, runId, ...(options?.preflightSubmissionId ? { submissionId: options.preflightSubmissionId } : {}) })) {
+    if (!writeOneUncertainAdmission({ chatId, runId, recordedAt: Date.now(), ...(options?.preflightSubmissionId ? { submissionId: options.preflightSubmissionId } : {}) })) {
       if (runIdRef.current === runId) runIdRef.current = null;
       unsubscribeRunRef.current?.();
       unsubscribeRunRef.current = null;
@@ -9354,7 +9377,11 @@ function OneSessionsShell() {
                   setActionNotice(appLocale === "ko" ? "Desktop 연결이 없어 아직 확인할 수 없습니다." : "Desktop is unavailable; admission cannot be checked yet.");
                   return;
                 }
-                void api.invoke.admission(pending.runId).then(async (admission) => {
+                void api.invoke.admission(pending.runId).then(async (answered) => {
+                  const admission: InvocationAdmissionReceipt = absentAdmissionProvesNoStart(answered, pending)
+                    && !(await api.invoke.receipt(pending.runId))
+                    ? { runId: pending.runId, chatId: pending.chatId, status: "rejected", pendingAt: "", updatedAt: "", rejectionReasonCode: null }
+                    : answered;
                   if (admission.status !== "absent" && admission.chatId !== pending.chatId) {
                     setActionNotice(appLocale === "ko" ? "요청 ID가 다른 대화에 묶여 있습니다. 재전송하지 않았습니다." : "This request ID belongs to another conversation. Nothing was resent.");
                     return;

@@ -147,6 +147,14 @@ export function goalAdmissionControlFailureForCode(code: string | null | undefin
     return { code, message };
   }
   switch (code) {
+    // invoke:run throws these only before start: the submission check precedes the admission row, and a refused
+    // parent reservation records a rejected admission first. Shown as uncertain, the 1.2.89 refusal (Hope chat,
+    // 2026-10-10T21:05Z) left "admission unknown" in the chat with no way to clear it.
+    case "one_preflight_submission_changed":
+    case "one_preflight_parent_not_pending":
+      message = ko ? "보내는 사이 이 대화의 실행 설정이 바뀌어 요청을 시작하지 않았습니다. 아무것도 실행되지 않았고 입력은 보존되어 있습니다. 다시 보내 주세요."
+        : "This conversation's run settings changed while sending, so the request did not start. Nothing ran and your input is preserved; send it again.";
+      break;
     case "budget_cost_exhausted":
       message = ko ? "목표에 정한 비용 한도를 모두 써서 시작하지 않았습니다. 목표의 비용 한도를 늘리면 이어서 진행합니다. 입력은 보존되어 있습니다."
         : "The goal's cost budget is used up, so this did not start. Raise the goal's cost budget to continue; your input is preserved.";
