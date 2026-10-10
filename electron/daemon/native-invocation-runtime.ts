@@ -34,6 +34,11 @@ export interface NativeInvocationRuntimeOptions {
   clearDetectCache(): void;
   science?:Pick<import("../science-host/daemon-client").ScienceDaemonClient,"commandObserved">;
 }
+// Main's recoveryValue() accepts exactly {version,method,chatId,runId,transfer}. The owner-text binding
+// also carries inputDigest (a daemon-side auth input); it must never ride on this wire reply.
+export function nativeRecoveryValueWire(method: string, value: { chatId: string; runId: string }, transfer: NativeJsonTransferDescriptor) {
+  return { version: "agentlas.native-recovery-value.v1" as const, method, chatId: value.chatId, runId: value.runId, transfer };
+}
 function fail(code: string): never { throw Object.assign(new Error(code), { code }); }
 function exact(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)
@@ -155,7 +160,7 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         try { snapshot.descriptor = attachment.recovery.issue(snapshot,"checkpoint-value",observed,NATIVE_PUBLIC_EVENT_POLICY.maxRetainedBytes); }
         catch (error) {attachment.recoveryRecords.delete(slot);throw error;}
         attachment.recoveryRecords.delete(slot);attachment.recoveryRecords.set(snapshot.descriptor.transferId,snapshot);
-        return {version:"agentlas.native-recovery-value.v1",method:wire.version,...value,transfer:snapshot.descriptor};
+        return nativeRecoveryValueWire(wire.version,value,snapshot.descriptor);
       }
 
       if (exact(params, ["version", "read"]) && params.version === "agentlas.native-recovery-read.v1") {

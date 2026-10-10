@@ -1,7 +1,9 @@
 # Changelog
 
-## 1.2.87 — 2026-10-11
+## 1.2.88 — 2026-10-11
 
+- A running conversation no longer shows "stopped" while it is still working, so Stop and new directions stay available during the run.
+- A message to a room whose goal is paused resumes that goal reliably instead of failing on its first turn.
 - A Hub plugin published after this build is offered to the tool picker again; the bundled catalog no longer crowds it out.
 - A coding agent whose model list cannot be read (for example a Copilot account without access) is retried less and less often instead of every minute, and logs the failure once.
 - GitHub Copilot CLI starts at the version verified by the bound engine.

@@ -1,4 +1,5 @@
 import { configuredNativeGuiControls } from "./invocation/native-gui-controls";
+import { chatGoalRequiresDesktopOwner } from "./invocation/goal-owner-route";
 import { publishLegacyInvocationActiveChats, combinedInvocationActiveChatIds } from "./invocation/native-gui-public";
 import { createNativeMainNoBrainChecker } from "./invocation/native-main-no-brain";
 import { configuredNativeGuiOwner, assertNativeGuiStartAvailable, installNativeGuiOwner, nativeGuiEnrollmentChannel, type NativeGuiEnrollment } from "./invocation/native-gui-startup";
@@ -6989,8 +6990,8 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
-    const nativeOwner = configuredNativeGuiOwner();
-    if (nativeOwner && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    const configuredOwner = configuredNativeGuiOwner();
+    if (configuredOwner && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
     const preflightSubmissionId = req?.preflightSubmissionId;
     if (preflightSubmissionId !== undefined && (typeof preflightSubmissionId !== "string"
       || !preflightSubmissionId || !req.oneMode)) {
@@ -6998,6 +6999,9 @@ export function registerIpcHandlers(): void {
     }
     const request = rendererInvocationRequestForStart(req);
     request.runId ??= randomUUID();
+    // Goal custody is Desktop-only: the daemon cannot admit a Goal controller, so an owner message
+    // in a chat bound to a live Goal (which resumes it) stays on Desktop, like the Goal's own wake-ups.
+    const nativeOwner = configuredOwner && !chatGoalRequiresDesktopOwner(request.chatId) ? configuredOwner : null;
     const invocationOwnerEpoch = nativeOwner ? nativeOwner.assertCanStart(request.runId).bootId : rendererInvocationProcessEpoch;
     if (preflightSubmissionId) {
       assertOnePreflightSubmissionReady(preflightSubmissionId, request, invocationOwnerEpoch);
