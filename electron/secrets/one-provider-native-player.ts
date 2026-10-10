@@ -1,4 +1,7 @@
-import { BrowserWindow } from 'electron';
+import type { BrowserWindow } from 'electron';
+// Electron is loaded on use: the background service (ELECTRON_RUN_AS_NODE) reaches this module through
+// invocation and MCP code and has no 'electron' module, so a top-level import crashed it on every start (1.2.84).
+const electron=():typeof import('electron')=>require('electron') as typeof import('electron');
 import { createHash } from 'node:crypto';
 import type { OneProviderReceipt } from '../../shared/one-provider';
 import { OneProviderError } from '../../shared/one-provider';
@@ -9,14 +12,14 @@ export class OneProviderNativePlayer {
   private windows = new Set<BrowserWindow>();
   constructor(private readonly isOwnerWindow: (window: BrowserWindow) => boolean) {}
   async play(bytes: Uint8Array, receipt: Readonly<OneProviderReceipt>, stillCurrent: () => boolean): Promise<void> {
-    const owner = BrowserWindow.getFocusedWindow();
+    const owner = electron().BrowserWindow.getFocusedWindow();
     if (!owner || owner.isDestroyed() || !this.isOwnerWindow(owner) || !stillCurrent()
       || receipt.state !== 'audio_ready' || !receipt.audio || bytes.byteLength !== receipt.audio.sizeBytes
       || bytes.byteLength > 32 * 1024 * 1024 || createHash('sha256').update(bytes).digest('hex') !== receipt.audio.sha256) {
       throw new OneProviderError('authority_denied');
     }
     verifyOneWav(bytes);
-    const window = new BrowserWindow({ parent: owner, width: 420, height: 190, minWidth: 320, minHeight: 160,
+    const window = new (electron().BrowserWindow)({ parent: owner, width: 420, height: 190, minWidth: 320, minHeight: 160,
       title: 'One 음성 결과', show: false, resizable: true,
       webPreferences: { nodeIntegration: false, contextIsolation: true, sandbox: true, devTools: false,
         autoplayPolicy: 'no-user-gesture-required', partition: `one-audio-${receipt.operationId}` } });

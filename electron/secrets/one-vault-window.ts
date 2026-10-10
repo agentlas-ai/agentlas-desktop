@@ -1,4 +1,7 @@
-import {BrowserWindow,dialog,ipcMain,session,type IpcMainInvokeEvent,type Session} from 'electron';
+import type {BrowserWindow,IpcMainInvokeEvent,Session} from 'electron';
+// Electron is loaded on use: the background service (ELECTRON_RUN_AS_NODE) reaches this module through
+// invocation and MCP code and has no 'electron' module, so a top-level import crashed it on every start (1.2.84).
+const electron=():typeof import('electron')=>require('electron') as typeof import('electron');
 import {randomUUID} from 'node:crypto';
 import path from 'node:path';
 import {OneVaultError,type OneVaultEnvelope,type OneVaultStatusQuery} from '../../shared/one-vault';
@@ -37,11 +40,11 @@ export class OneVaultWindowManager {
  private safe<T>(run:()=>Promise<T>|T):Promise<T>{return Promise.resolve().then(run).catch(error=>{throw new OneVaultError(error instanceof OneVaultError?error.code:'secure_route_unavailable');});}
  registerIpc():void {
   if(this.registered)return;this.registered=true;
-  ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.bootstrap,event=>this.safe(()=>this.p.service.bootstrap(this.sender(event).surface)));
-  ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.registerSender,(event,input)=>this.safe(()=>this.p.service.registerSender(this.sender(event,true).surface,input)));
-  ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.submit,(event,requestId:unknown,envelope:OneVaultEnvelope)=>this.safe(()=>{const h=this.sender(event,true);if(typeof requestId!=='string'||requestId!==h.requestId)throw new OneVaultError('not_found');return this.p.service.submit(h.surface,requestId,envelope);}));
-  ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.reconcile,(event,requestId:unknown,query:OneVaultStatusQuery)=>this.safe(()=>{const h=this.sender(event);if(typeof requestId!=='string'||requestId!==h.requestId)throw new OneVaultError('not_found');return this.p.service.reconcile(h.surface,requestId,query);}));
-  ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.cancel,(event,requestId:unknown,reason:unknown)=>this.safe(()=>{
+  electron().ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.bootstrap,event=>this.safe(()=>this.p.service.bootstrap(this.sender(event).surface)));
+  electron().ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.registerSender,(event,input)=>this.safe(()=>this.p.service.registerSender(this.sender(event,true).surface,input)));
+  electron().ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.submit,(event,requestId:unknown,envelope:OneVaultEnvelope)=>this.safe(()=>{const h=this.sender(event,true);if(typeof requestId!=='string'||requestId!==h.requestId)throw new OneVaultError('not_found');return this.p.service.submit(h.surface,requestId,envelope);}));
+  electron().ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.reconcile,(event,requestId:unknown,query:OneVaultStatusQuery)=>this.safe(()=>{const h=this.sender(event);if(typeof requestId!=='string'||requestId!==h.requestId)throw new OneVaultError('not_found');return this.p.service.reconcile(h.surface,requestId,query);}));
+  electron().ipcMain.handle(ONE_VAULT_WINDOW_CHANNELS.cancel,(event,requestId:unknown,reason:unknown)=>this.safe(()=>{
    // Origin still required; close never depends on current auth/provider or request admission.
    const h=this.held;if(!h||event.sender!==h.window.webContents||event.senderFrame!==event.sender.mainFrame)return;
    if(requestId!==null&&requestId!==h.requestId)throw new OneVaultError('not_found');
@@ -55,7 +58,7 @@ export class OneVaultWindowManager {
    if(!path.isAbsolute(this.p.preloadPath))throw new OneVaultError('secure_route_unavailable');
    const base=new URL(this.p.rendererBaseUrl);
    if(!(base.protocol==='agentlas:'&&base.host==='app')&&!(base.protocol==='http:'&&['localhost','127.0.0.1','[::1]'].includes(base.hostname)))throw new OneVaultError('secure_route_unavailable');
-   const url=new URL('/one-vault',base).href,ses=session.fromPartition(`one-vault:${randomUUID()}`,{cache:false});
+   const url=new URL('/one-vault',base).href,ses=electron().session.fromPartition(`one-vault:${randomUUID()}`,{cache:false});
    await this.p.prepareSession(ses);
    ses.setPermissionRequestHandler((_wc,_permission,callback)=>callback(false));ses.setPermissionCheckHandler(()=>false);
    ses.on('will-download',(event,item)=>{event.preventDefault();item.cancel();});
@@ -67,7 +70,7 @@ export class OneVaultWindowManager {
      callback({cancel:!(sameOrigin&&(resource.href===url||staticAsset))});
     }catch{callback({cancel:true});}
    });
-   const win=new BrowserWindow({width:540,height:780,minWidth:420,minHeight:600,title:'Agentlas — 연결 키 입력',show:false,autoHideMenuBar:true,webPreferences:{preload:this.p.preloadPath,additionalArguments:['--one-vault-window'],session:ses,sandbox:true,contextIsolation:true,nodeIntegration:false,webSecurity:true,devTools:false,spellcheck:false,webviewTag:false}});
+   const win=new (electron().BrowserWindow)({width:540,height:780,minWidth:420,minHeight:600,title:'Agentlas — 연결 키 입력',show:false,autoHideMenuBar:true,webPreferences:{preload:this.p.preloadPath,additionalArguments:['--one-vault-window'],session:ses,sandbox:true,contextIsolation:true,nodeIntegration:false,webSecurity:true,devTools:false,spellcheck:false,webviewTag:false}});
    allocated=win;win.setContentProtection(true);win.setMenu(null);
    const surfaceId=randomUUID();let released=false;const releaseNative=this.p.acquireSensitiveSurface(win.webContents.id,options.reconcileOnly?this.p.service.recoveryRequestId(commandId):surfaceId);
    const release=()=>{if(!released){released=true;releaseNative();}};
@@ -75,7 +78,7 @@ export class OneVaultWindowManager {
     if(!held||!win.isFocused()||released)throw new OneVaultError('authority_denied');held.confirming=true;
     try{
      const b=request.binding;
-     const confirmation=await dialog.showMessageBox(win,{type:'question',title:'연결 키 입력 승인',message:statusOnly?'이전 저장 작업의 상태 확인을 새 전용 창에 허용하시겠습니까?':'이 전용 창에서 연결 키 입력을 허용하시겠습니까?',detail:`${b.provider} · ${b.providerWorkspace} · ${b.region}\n저장 위치: 이 Desktop의 OS Vault\n범위: ${b.scope}\n요청: ${b.requestId}`,buttons:['허용','취소'],defaultId:1,cancelId:1,noLink:true});
+     const confirmation=await electron().dialog.showMessageBox(win,{type:'question',title:'연결 키 입력 승인',message:statusOnly?'이전 저장 작업의 상태 확인을 새 전용 창에 허용하시겠습니까?':'이 전용 창에서 연결 키 입력을 허용하시겠습니까?',detail:`${b.provider} · ${b.providerWorkspace} · ${b.region}\n저장 위치: 이 Desktop의 OS Vault\n범위: ${b.scope}\n요청: ${b.requestId}`,buttons:['허용','취소'],defaultId:1,cancelId:1,noLink:true});
      return confirmation.response===0&&!released&&!win.isDestroyed();
     }finally{if(held)held.confirming=false;}
    }};

@@ -1,4 +1,7 @@
-import { BrowserWindow, type IpcMain, type IpcMainInvokeEvent, type Session } from 'electron';
+import type { BrowserWindow, IpcMain, IpcMainInvokeEvent, Session } from 'electron';
+// Electron is loaded on use: the background service (ELECTRON_RUN_AS_NODE) reaches this module through
+// invocation and MCP code and has no 'electron' module, so a top-level import crashed it on every start (1.2.84).
+const electron=():typeof import('electron')=>require('electron') as typeof import('electron');
 import type { OneVaultNativeAPI } from '../../shared/one-vault';
 import { OneVaultError } from '../../shared/one-vault';
 import { isAppControlEvent } from '../app-control/ipc-registry';
@@ -91,7 +94,7 @@ export function oneVaultMainMobileSources(){
   /** Explicit Main startup only: reuses existing runtime constructor; creates no host keys/approval. */
   prepareRuntime:()=>host===original?runtime():null,
   isNativeOwnerWindow(window:{id:number;isDestroyed():boolean;isFocused():boolean}){
-   return host===original&&!window.isDestroyed()&&BrowserWindow.fromId(window.id)===window&&original.isOwnerWindow(window as BrowserWindow);
+   return host===original&&!window.isDestroyed()&&electron().BrowserWindow.fromId(window.id)===window&&original.isOwnerWindow(window as BrowserWindow);
   }});
 }
 function owned(event:IpcMainInvokeEvent):BrowserWindow {
@@ -160,7 +163,7 @@ export function registerOneVaultMainIpc(input:{ipc:Pick<IpcMain,'handle'>;host:O
     currentGrant:(action,phase)=>providerDomain?.currentGrant(action,phase)??Promise.resolve({decision:'unknown',lease:null})};
   registerOneProviderMainIpc({ipc:input.ipc,ports:{runtime:()=>runtime(),domain,assertOwner:owned,media:{getMediaOperation,patchMediaOperation},
     approve:async(window,prepared,retention)=>{
-      const native=BrowserWindow.fromId(window.id);if(native!==window||!host?.isOwnerWindow(native)||!native.isFocused())return false;
+      const native=electron().BrowserWindow.fromId(window.id);if(native!==window||!host?.isOwnerWindow(native)||!native.isFocused())return false;
       const binding=prepared.action.binding;
       const money=new Intl.NumberFormat('ko-KR',{style:'currency',currency:prepared.quote.currency});
       const maximumCost=money.format(prepared.quote.upperBoundMinor/10**(money.resolvedOptions().maximumFractionDigits??0));

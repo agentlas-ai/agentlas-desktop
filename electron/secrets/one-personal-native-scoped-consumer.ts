@@ -1,4 +1,7 @@
-import {BrowserWindow,dialog} from 'electron';
+import type {BrowserWindow} from 'electron';
+// Electron is loaded on use: the background service (ELECTRON_RUN_AS_NODE) reaches this module through
+// invocation and MCP code and has no 'electron' module, so a top-level import crashed it on every start (1.2.84).
+const electron=():typeof import('electron')=>require('electron') as typeof import('electron');
 import {randomUUID,sign,verify} from 'node:crypto';
 import {oneVaultCanonical} from '../../shared/one-vault';
 import type {InstalledMcpServer} from '../../shared/types';
@@ -36,7 +39,7 @@ export function createOnePersonalScopedConsumerOwner(p:OnePersonalNativeScopedCo
  const entries=new Map<string,{binding:Readonly<OneVaultScopedConsumerReceipt>;mapping:OnePersonalNativeMcpMapping;value:object;rowId:string;read:(body:(secret:string)=>Promise<void>)=>Promise<void>;closed:boolean;receiver:object|null;use:object|null}>();
  const pending=new Set<string>();let closed=false;const refs=[p.runtime,p.focusedWindow,p.isNativeOwnerWindow,p.currentMapping,p.currentServer,p.configurationDigest];
  const live=()=>!closed&&refs.every((v,i)=>v===[p.runtime,p.focusedWindow,p.isNativeOwnerWindow,p.currentMapping,p.currentServer,p.configurationDigest][i]);
- const focused=(w:BrowserWindow)=>live()&&BrowserWindow.fromId(w.id)===w&&!w.isDestroyed()&&w.isFocused()&&p.isNativeOwnerWindow(w);
+ const focused=(w:BrowserWindow)=>live()&&electron().BrowserWindow.fromId(w.id)===w&&!w.isDestroyed()&&w.isFocused()&&p.isNativeOwnerWindow(w);
  const key=(b:Readonly<OneVaultScopedConsumerReceipt>)=>b.installationRevision;
  function mapping(binding:Readonly<OneVaultScopedConsumerReceipt>){
   if(!live())throw Error('one_personal_mcp_consumer_unavailable');const m=p.currentMapping(binding),owner=p.runtime.currentNativeOwner(),slot=p.runtime.journal.current(binding.slotId),server=m&&p.currentServer(m.server.id);
@@ -55,7 +58,7 @@ export function createOnePersonalScopedConsumerOwner(p:OnePersonalNativeScopedCo
  const consumer:OnePersonalNativeConsumerOwner={clearInstallation,
   authorizeCredentialRead:async binding=>{try{const m=mapping(binding),captured=proof(m);return{decision:'allow',bindingDigest:oneVaultDigest(binding),revision:m.revision,stillCurrent:()=>{try{return proof(mapping(binding))===captured}catch{return false}}}}catch{return{decision:'unknown',bindingDigest:'',revision:'',stillCurrent:()=>false}}},
   async install(binding,read){if(entries.has(key(binding))||pending.has(key(binding)))throw Error('one_personal_mcp_install_conflict');const w=p.focusedWindow();if(!w||!focused(w))throw Error('one_personal_mcp_focused_owner_required');const m=mapping(binding),digest=proof(m),owner=p.runtime.currentNativeOwner();pending.add(key(binding));let entry:ReturnType<typeof entries.get>;
-   try{const response=await dialog.showMessageBox(w,{type:'question',title:'One 원래 요청의 MCP 연결 승인',message:'이 저장된 참조를 정확한 설치 서버에 연결할까요?',detail:`원래 요청: ${binding.commandId}\n계정: ${m.providerWorkspace} / ${m.region}\n리소스: ${m.resourceId}\n서버: ${m.server.id}\n엔드포인트: ${m.server.url}\n전달 헤더: ${m.header} (${m.prefix||'접두사 없음'})\n범위: 개인 / 소유자\n저장 버전: ${binding.generation}\n제공자 확인·유료 실행은 이 승인에 포함되지 않습니다.`,buttons:['취소','이 연결 승인'],defaultId:0,cancelId:0,noLink:true});
+   try{const response=await electron().dialog.showMessageBox(w,{type:'question',title:'One 원래 요청의 MCP 연결 승인',message:'이 저장된 참조를 정확한 설치 서버에 연결할까요?',detail:`원래 요청: ${binding.commandId}\n계정: ${m.providerWorkspace} / ${m.region}\n리소스: ${m.resourceId}\n서버: ${m.server.id}\n엔드포인트: ${m.server.url}\n전달 헤더: ${m.header} (${m.prefix||'접두사 없음'})\n범위: 개인 / 소유자\n저장 버전: ${binding.generation}\n제공자 확인·유료 실행은 이 승인에 포함되지 않습니다.`,buttons:['취소','이 연결 승인'],defaultId:0,cancelId:0,noLink:true});
     if(response.response!==1||!focused(w)||proof(mapping(binding))!==digest||oneVaultDigest(p.runtime.currentNativeOwner())!==oneVaultDigest(owner))throw Error('one_personal_mcp_approval_changed');
     const host=await loadOneVaultApprovedHost(owner!.hostId,p.runtime.trust,p.runtime.sources.vault);if(!focused(w)||proof(mapping(binding))!==digest||oneVaultDigest(p.runtime.currentNativeOwner())!==oneVaultDigest(owner))throw Error('one_personal_mcp_approval_changed');
     const operation='personal-mcp-consumer:'+binding.commandId,prior=p.runtime.sources.db.prepare('SELECT id FROM one_vault_native_approvals WHERE operation_id=? ORDER BY rowid DESC LIMIT 1').get(operation) as {id:string}|undefined;

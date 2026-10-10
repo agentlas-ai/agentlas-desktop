@@ -1,7 +1,8 @@
 # Changelog
 
-## 1.2.85 — 2026-10-11
+## 1.2.86 — 2026-10-11
 
+- The background service starts again. In 1.2.84 it stopped on every start and restarted every few seconds, which took down the Science runtime, local models and the mobile connection.
 - Group rooms always include the One Team tools, so a room never runs its goal without its team.
 - A continuous goal run wraps up at the next pass boundary after 20 minutes and continues from its checkpoint, so owner directions are not held behind hour-long runs.
 - Persistent agent context dispatches read the correct room origin column instead of failing as an unsettled turn.

@@ -1,4 +1,7 @@
-import {BrowserWindow,dialog} from 'electron';
+import type {BrowserWindow} from 'electron';
+// Electron is loaded on use: the background service (ELECTRON_RUN_AS_NODE) reaches this module through
+// invocation and MCP code and has no 'electron' module, so a top-level import crashed it on every start (1.2.84).
+const electron=():typeof import('electron')=>require('electron') as typeof import('electron');
 import {currentOnePersonalNativeOriginal,type OnePersonalNativeOriginal} from './one-personal-native-entry';
 import {authorizeSupervisorNativeOrigin} from '../one/supervisor-native-runtime';
 import {pendingRunKeyElicitation} from '../mcp/run-key-elicitation';
@@ -34,7 +37,7 @@ export function createOnePersonalNativeMainOwner(p:OnePersonalNativeMainOwnerPor
   authorizeSupervisorNativeOrigin(original.origin,original.request);const prior=originals.get(original.request.runId);if(prior&&prior.original.origin!==original.origin)throw Error('one_personal_native_original_changed');if(!prior)originals.set(original.request.runId,{original,selectedAccount:null});
  }
  function capturePending(){const original=currentOnePersonalNativeOriginal();if(original?.request.runId&&pendingRunKeyElicitation(original.request.runId))captureOriginal();}
- function focused(w:BrowserWindow){if(BrowserWindow.fromId(w.id)!==w||w.isDestroyed()||!w.isFocused()||!p.isNativeOwnerWindow(w))throw Error('one_personal_native_focused_owner_required');}
+ function focused(w:BrowserWindow){if(electron().BrowserWindow.fromId(w.id)!==w||w.isDestroyed()||!w.isFocused()||!p.isNativeOwnerWindow(w))throw Error('one_personal_native_focused_owner_required');}
  async function preparePending(window:BrowserWindow,runId:string){
   focused(window);const original=originals.get(runId)?.original,pending=pendingRunKeyElicitation(runId);
   if(!original||!pending)throw Error('one_personal_native_account_or_consumer_unbound');authorizeSupervisorNativeOrigin(original.origin,original.request);
@@ -46,7 +49,7 @@ export function createOnePersonalNativeMainOwner(p:OnePersonalNativeMainOwnerPor
   const choices=p.accounts.current(original);if(!choices.length||choices.length>16||choices.some(c=>!c.handle||!c.label||c.label.length>512||!c.stillCurrent()))throw Error('one_personal_native_account_selection_unavailable');
   const identity=oneVaultDigest([anchor,pending,r.currentNativeOwner()]);
   const check=()=>{focused(window);if(current()!==r||oneVaultDigest([r.anchor(command),pendingRunKeyElicitation(runId),r.currentNativeOwner()])!==identity)throw Error('one_personal_native_current_source_changed');authorizeSupervisorNativeOrigin(original.origin,original.request);};
-  const picked=await dialog.showMessageBox(window,{type:'question',title:'One 원래 요청의 개인 연결 선택',message:'이 원래 대화 요청에 사용할 현재 계정을 선택하세요.',detail:`호스트: ${r.currentNativeOwner()!.hostId}\n원래 대화: ${anchor.chatId}\n원래 실행: ${anchor.runId}\n범위: 개인 / 소유자\n키 저장·기존 키 읽기·제공자 유료 사용은 각각 별도 승인합니다.`,buttons:['취소',...choices.map(c=>c.label)],defaultId:0,cancelId:0,noLink:true});
+  const picked=await electron().dialog.showMessageBox(window,{type:'question',title:'One 원래 요청의 개인 연결 선택',message:'이 원래 대화 요청에 사용할 현재 계정을 선택하세요.',detail:`호스트: ${r.currentNativeOwner()!.hostId}\n원래 대화: ${anchor.chatId}\n원래 실행: ${anchor.runId}\n범위: 개인 / 소유자\n키 저장·기존 키 읽기·제공자 유료 사용은 각각 별도 승인합니다.`,buttons:['취소',...choices.map(c=>c.label)],defaultId:0,cancelId:0,noLink:true});
   if(picked.response<1||picked.response>choices.length)throw Error('one_personal_native_declined');const choice=choices[picked.response-1];originals.get(runId)!.selectedAccount=choice.handle;check();if(!choice.stillCurrent()||!p.accounts.current(original).some(c=>c.handle===choice.handle&&c.label===choice.label&&c.stillCurrent()))throw Error('one_personal_native_account_changed');
   if(bundle&&bundleOwnerDigest!==oneVaultDigest(r.currentNativeOwner()))throw Error('one_personal_native_existing_owner_use_reauthorization');
   const target:OnePersonalNativeResourceTarget={kind:'ordinary-one-room',deploymentId:r.currentNativeOwner()!.hostId,oneId:r.sources.oneId(),scope:'personal',organizationId:null,projectId:null,audience:'owner',chatId:anchor.chatId};

@@ -1,6 +1,9 @@
 /** Main-only personal Vault owner: original native capability, existing Page ACL and focused consent. */
 import {randomUUID,sign,verify} from 'node:crypto';
-import {BrowserWindow,dialog} from 'electron';
+import type {BrowserWindow} from 'electron';
+// Electron is loaded on use: the background service (ELECTRON_RUN_AS_NODE) reaches this module through
+// invocation and MCP code and has no 'electron' module, so a top-level import crashed it on every start (1.2.84).
+const electron=():typeof import('electron')=>require('electron') as typeof import('electron');
 import type {OneOriginalMcpTransportOwners} from '../one/one-original-mcp-credential';
 import type {McpInvocationRequest,InstalledMcpServer} from '../../shared/types';
 import type {PersonalDataTarget} from '../../shared/one-personal-data';
@@ -93,10 +96,10 @@ export function createOnePersonalNativeOwners(runtime:OneVaultRuntime,p:OnePerso
   isNativeOwnerWindow:w=>{try{live();return p.isNativeOwnerWindow(w)}catch{return false}},
   currentSource:(anchor,pending)=>{try{const r=currentRegistration(anchor.commandId);return pending&&oneVaultDigest(anchor)===oneVaultDigest(r.anchor)?structuredClone(r.source):null}catch{return null}},
   confirmStorage:async(window,input)=>{
-   const r=assertInput(input),epoch=live(),native=BrowserWindow.fromId(window.id);if(native!==window||window.isDestroyed()||!window.isFocused()||!p.isNativeOwnerWindow(window))deny();
+   const r=assertInput(input),epoch=live(),native=electron().BrowserWindow.fromId(window.id);if(native!==window||window.isDestroyed()||!window.isFocused()||!p.isNativeOwnerWindow(window))deny();
    const id=randomUUID(),inputDigest=oneVaultDigest(input),expectedRevision=latest(input.commandId)?.value.record.revision??null;confirmations.delete(input.commandId);
-   const response=await dialog.showMessageBox(native,{type:'question',title:'One 개인 키 저장 확인',message:'이 원래 요청에만 사용할 키를 저장할까요?',detail:`계정: ${r.source.accountLabel}\n범위: 개인 / 소유자\n호스트: ${runtime.currentNativeOwner()!.hostId}\n원래 리소스: ${'kind' in r.target?r.target.chatId:r.target.pageId}\n원래 작업: ${r.anchor.taskId} / ${r.anchor.runId}\n제공자: elevenlabs-audio / ${r.source.region} / ${r.source.providerWorkspace}\n권한: 이 요청의 키 저장\n저장소: OS Vault\n지금 비용: 없음. 제공자 확인·사용 비용은 별도로 승인합니다.`,buttons:['취소','저장 입력으로 이동'],defaultId:0,cancelId:0,noLink:true});
-   if(response.response!==1)return false;if(native!==BrowserWindow.fromId(window.id)||window.isDestroyed()||!window.isFocused()||!p.isNativeOwnerWindow(window)||live()!==epoch||assertInput(input)!==r)deny('revision_changed');
+   const response=await electron().dialog.showMessageBox(native,{type:'question',title:'One 개인 키 저장 확인',message:'이 원래 요청에만 사용할 키를 저장할까요?',detail:`계정: ${r.source.accountLabel}\n범위: 개인 / 소유자\n호스트: ${runtime.currentNativeOwner()!.hostId}\n원래 리소스: ${'kind' in r.target?r.target.chatId:r.target.pageId}\n원래 작업: ${r.anchor.taskId} / ${r.anchor.runId}\n제공자: elevenlabs-audio / ${r.source.region} / ${r.source.providerWorkspace}\n권한: 이 요청의 키 저장\n저장소: OS Vault\n지금 비용: 없음. 제공자 확인·사용 비용은 별도로 승인합니다.`,buttons:['취소','저장 입력으로 이동'],defaultId:0,cancelId:0,noLink:true});
+   if(response.response!==1)return false;if(native!==electron().BrowserWindow.fromId(window.id)||window.isDestroyed()||!window.isFocused()||!p.isNativeOwnerWindow(window)||live()!==epoch||assertInput(input)!==r)deny('revision_changed');
    const host=await loadOneVaultApprovedHost(runtime.currentNativeOwner()!.hostId,runtime.trust,runtime.sources.vault);
    if(!window.isFocused()||!p.isNativeOwnerWindow(window)||live()!==epoch||assertInput(input)!==r||(latest(input.commandId)?.value.record.revision??null)!==expectedRevision)deny('revision_changed');
    const c:OneVaultPersonalConsent={input:structuredClone(input),nativeReceiptId:id,revision:'native-personal-consent:'+id,permissionRevision:'native-personal-permission:'+id,revoked:false};
@@ -175,13 +178,13 @@ const {r,c}=currentConsent(q.sourceRefs[0],q.action==='vault-reconcile'?'consume
   return{r,metadata,op,reference:{slotId,operationId:op.operationId,requestDigest:op.requestDigest,priorCommandId:b.commandId,credentialRef:op.credentialRef,generation:op.generation}};
  }
  async function admitStoredReference(window:OneVaultOwnerWindow,commandId:string){
-  const current=lookupStoredReference(commandId);if(!current)deny('authority_unavailable');const {r,reference}=current,epoch=live(),native=BrowserWindow.fromId(window.id);
+  const current=lookupStoredReference(commandId);if(!current)deny('authority_unavailable');const {r,reference}=current,epoch=live(),native=electron().BrowserWindow.fromId(window.id);
   if(native!==window||window.isDestroyed()||!window.isFocused()||!p.isNativeOwnerWindow(window))deny();
   const id=randomUUID(),operation='personal-vault-reference:'+commandId,old=runtime.sources.db.prepare('SELECT id FROM one_vault_native_approvals WHERE operation_id=? ORDER BY rowid DESC LIMIT 1').get(operation) as {id:string}|undefined;
-  const response=await dialog.showMessageBox(native,{type:'question',title:'One 저장된 개인 키 사용 확인',message:'이 원래 요청에 저장된 키 참조를 연결할까요?',detail:`계정: ${r.source.accountLabel}\n범위: 개인 / 소유자\n원래 리소스: ${'kind' in r.target?r.target.chatId:r.target.pageId}\n원래 작업: ${r.anchor.taskId} / ${r.anchor.runId}\n제공자: elevenlabs-audio / ${r.source.region} / ${r.source.providerWorkspace}\n저장 버전: ${reference.generation}\n권한: 원래 요청 전용 키 읽기 연결\n키 재입력·새 저장 없음. 제공자 확인·유료 사용은 별도로 승인합니다.`,buttons:['취소','저장된 참조 연결'],defaultId:0,cancelId:0,noLink:true});
+  const response=await electron().dialog.showMessageBox(native,{type:'question',title:'One 저장된 개인 키 사용 확인',message:'이 원래 요청에 저장된 키 참조를 연결할까요?',detail:`계정: ${r.source.accountLabel}\n범위: 개인 / 소유자\n원래 리소스: ${'kind' in r.target?r.target.chatId:r.target.pageId}\n원래 작업: ${r.anchor.taskId} / ${r.anchor.runId}\n제공자: elevenlabs-audio / ${r.source.region} / ${r.source.providerWorkspace}\n저장 버전: ${reference.generation}\n권한: 원래 요청 전용 키 읽기 연결\n키 재입력·새 저장 없음. 제공자 확인·유료 사용은 별도로 승인합니다.`,buttons:['취소','저장된 참조 연결'],defaultId:0,cancelId:0,noLink:true});
   if(response.response!==1)deny();
   const host=await loadOneVaultApprovedHost(runtime.currentNativeOwner()!.hostId,runtime.trust,runtime.sources.vault);
-  if(native!==BrowserWindow.fromId(window.id)||window.isDestroyed()||!window.isFocused()||!p.isNativeOwnerWindow(window)||live()!==epoch||oneVaultDigest(lookupStoredReference(commandId)?.reference)!==oneVaultDigest(reference))deny('revision_changed');
+  if(native!==electron().BrowserWindow.fromId(window.id)||window.isDestroyed()||!window.isFocused()||!p.isNativeOwnerWindow(window)||live()!==epoch||oneVaultDigest(lookupStoredReference(commandId)?.reference)!==oneVaultDigest(reference))deny('revision_changed');
   const body={schema:'agentlas.one-personal-reference-consent.v1' as const,id,commandId,anchorDigest:oneVaultDigest(r.anchor),source:structuredClone(r.source),target:structuredClone(r.target),pageRevision:r.pageRevision,pageDigest:r.pageDigest,owner:runtime.currentNativeOwner()!,reference,hostKeyId:host.metadata.hostKeyId,trustGeneration:host.metadata.generation,expectedReceiptId:old?.id??null};
   const value={...body,signature:sign('sha256',Buffer.from(oneVaultCanonical(['personal-reference-consent',body])),{key:host.signingKey,dsaEncoding:'ieee-p1363'}).toString('base64url')};
   runtime.sources.db.transaction(()=>{
@@ -222,7 +225,7 @@ const {r,c}=currentConsent(q.sourceRefs[0],q.action==='vault-reconcile'?'consume
   finally{installing.delete(commandId)}
  }
  function revokeOriginal(window:OneVaultOwnerWindow,commandId:string){
-  live();const owner=runtime.currentNativeOwner(),r=registrations.get(commandId),native=BrowserWindow.fromId(window.id);
+  live();const owner=runtime.currentNativeOwner(),r=registrations.get(commandId),native=electron().BrowserWindow.fromId(window.id);
   if(!owner||!r||owner.principalId!==r.source.principalId||owner.workspaceId!==r.source.workspaceId||native!==window||window.isDestroyed()||!window.isFocused()||!p.isNativeOwnerWindow(window))deny();
   confirmations.delete(commandId);r.closed=true;
   const n=runtime.sources.db.prepare('UPDATE one_vault_native_approvals SET revoked_at=? WHERE operation_id IN (?,?) AND revoked_at IS NULL').run(runtime.sources.now?.()??Date.now(),'personal-vault-consent:'+commandId,'personal-vault-reference:'+commandId),installed=installations.get(commandId);
@@ -256,7 +259,7 @@ const {r,c}=currentConsent(q.sourceRefs[0],q.action==='vault-reconcile'?'consume
   if(!check())return null;let cache=mcpCapabilities.get(r);if(!cache){cache=new Map();mcpCapabilities.set(r,cache)}cache.set(selectedServer.id,{capability,current:check});return capability;
  }catch{return null}}
  const bundle=Object.freeze({policy,personal,activePorts,stillCurrent,registerOriginal,currentMcpOwners,lookupStoredReference:(commandId:string)=>{const found=lookupStoredReference(commandId);return found?immutable(found.reference):null},admitStoredReference,approveOriginalPending:adapter.approveOriginalPending.bind(adapter),consumerReady,installScopedConsumer,revokeOriginal,close});
- nativeOwnerEvidence.set(bundle,{runtime,window:w=>BrowserWindow.fromId(w.id)===w&&!w.isDestroyed()&&w.isFocused()&&p.isNativeOwnerWindow(w),cleanupConfirmed:()=>closed&&!cleanupUnknown&&installations.size===0&&installing.size===0,
+ nativeOwnerEvidence.set(bundle,{runtime,window:w=>electron().BrowserWindow.fromId(w.id)===w&&!w.isDestroyed()&&w.isFocused()&&p.isNativeOwnerWindow(w),cleanupConfirmed:()=>closed&&!cleanupUnknown&&installations.size===0&&installing.size===0,
   current:()=>{live();const rows=[...registrations.keys()].flatMap(id=>{try{return[currentRegistration(id,'consumer')]}catch{return[]}});if(rows.length!==1)deny('authority_unavailable');const r=rows[0],host=runtime.trust.currentHostMetadata();if(!host)deny('authority_unavailable');return immutable({anchor:r.anchor,source:r.source,target:r.target,pageRevision:r.pageRevision,pageDigest:r.pageDigest,owner:runtime.currentNativeOwner(),host});}});
  return bundle;
 }
@@ -303,7 +306,7 @@ export function createOnePersonalNativeOwnerFactory(runtime:OneVaultRuntime,init
   if(r!==runtime)deny('authority_denied');const scopeDigest=currentScope(scope),fresh=ready();focused(window,fresh);
   const disclosure=snapshot(fresh),evidenceDigest=oneVaultDigest(disclosure),prior=active,expectedId=latest()?.id??null;
   const signing=signer;if(!signing||signerEvidence!==evidenceDigest||oneVaultDigest(signing.metadata)!==oneVaultDigest(runtime.trust.currentHostMetadata()))deny('authority_unavailable');
-  const response=await dialog.showMessageBox(window,{type:'question',title:'One 개인 권한 다시 승인',message:'현재 개인 원래 요청의 보안 입력 권한을 다시 승인할까요?',detail:`계정: ${disclosure.source.accountLabel}\n범위: 개인 / 소유자\n호스트: ${disclosure.owner!.hostId}\n원래 리소스: ${'kind' in disclosure.target?disclosure.target.chatId:disclosure.target.pageId}\n원래 작업: ${disclosure.anchor.taskId} / ${disclosure.anchor.runId}\n제공자: elevenlabs-audio / ${disclosure.source.region} / ${disclosure.source.providerWorkspace}\n현재 세션과 페이지·제공자 선택을 다시 확인합니다.\n키 저장·제공자 사용·유료 실행·기기 등록은 이 승인에 포함되지 않습니다.`,buttons:['취소','현재 권한 다시 승인'],defaultId:0,cancelId:0,noLink:true});
+  const response=await electron().dialog.showMessageBox(window,{type:'question',title:'One 개인 권한 다시 승인',message:'현재 개인 원래 요청의 보안 입력 권한을 다시 승인할까요?',detail:`계정: ${disclosure.source.accountLabel}\n범위: 개인 / 소유자\n호스트: ${disclosure.owner!.hostId}\n원래 리소스: ${'kind' in disclosure.target?disclosure.target.chatId:disclosure.target.pageId}\n원래 작업: ${disclosure.anchor.taskId} / ${disclosure.anchor.runId}\n제공자: elevenlabs-audio / ${disclosure.source.region} / ${disclosure.source.providerWorkspace}\n현재 세션과 페이지·제공자 선택을 다시 확인합니다.\n키 저장·제공자 사용·유료 실행·기기 등록은 이 승인에 포함되지 않습니다.`,buttons:['취소','현재 권한 다시 승인'],defaultId:0,cancelId:0,noLink:true});
   if(response.response!==1)return null;
   focused(window,fresh);if(currentScope(scope)!==scopeDigest||ready()!==fresh||active!==prior||oneVaultDigest(snapshot(fresh))!==evidenceDigest||signer!==signing||oneVaultDigest(signing.metadata)!==oneVaultDigest(runtime.trust.currentHostMetadata()))deny('revision_changed');
   const id=randomUUID(),body={schema:'agentlas.one-personal-reauthorization.v1',id,operation:operation(),scopeDigest,evidenceDigest,owner:runtime.currentNativeOwner(),hostKeyId:signing.metadata.hostKeyId,trustGeneration:signing.metadata.generation,expectedId};
