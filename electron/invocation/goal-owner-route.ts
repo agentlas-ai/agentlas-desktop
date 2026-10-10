@@ -1,6 +1,5 @@
 import { getChat } from "../store/chats";
 import { getLongRunByGoalId } from "../store/long-runs";
-import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
 
 /**
  * Goal custody is Desktop-only. A controller attempt is admitted by
@@ -13,16 +12,18 @@ import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
  * launch": an owner message to a user-paused Goal resumed the Goal in the ledger,
  * then failed in the daemon with no controller attempt).
  *
- * An owner message to a stopped Goal resumes it (stoppedGoalMessageReopens), so
- * the turn must run in the process that owns the Goal -- exactly where the Goal's
- * own host wake-ups already run. True when this chat is bound to a live Desktop
- * Goal.
+ * Any One/Work turn can bind a Goal, not only a chat that already has one: a
+ * message to a stopped Goal resumes it (stoppedGoalMessageReopens), a goal chip
+ * gets its ledger row during the first turn, and automatic intake may admit a Goal
+ * mid-turn. So an owner turn in a chat that can hold Desktop Goal custody starts on
+ * Desktop, where the Goal's own host wake-ups already run. Only a chat whose Goal is
+ * held elsewhere (Science, a non-Desktop host) may start in the daemon.
  */
-export function chatGoalRequiresDesktopOwner(chatId: unknown): boolean {
+export function ownerTurnCanBindGoal(chatId: unknown): boolean {
   if (typeof chatId !== "string" || !chatId) return false;
-  const goalId = getChat(chatId)?.goalId;
-  if (!goalId) return false;
-  const run = getLongRunByGoalId(goalId);
-  return Boolean(run && run.surface !== "science" && run.hostOwnerKind === "desktop"
-    && !LONG_RUN_TERMINAL_STATUSES.has(run.status));
+  const chat = getChat(chatId);
+  if (!chat) return false;
+  const run = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
+  if (run && (run.surface === "science" || run.hostOwnerKind !== "desktop")) return false;
+  return chat.originSurface === "one" || chat.originSurface === "work";
 }

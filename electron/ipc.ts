@@ -1,5 +1,5 @@
 import { configuredNativeGuiControls } from "./invocation/native-gui-controls";
-import { chatGoalRequiresDesktopOwner } from "./invocation/goal-owner-route";
+import { ownerTurnCanBindGoal } from "./invocation/goal-owner-route";
 import { publishLegacyInvocationActiveChats, combinedInvocationActiveChatIds } from "./invocation/native-gui-public";
 import { createNativeMainNoBrainChecker } from "./invocation/native-main-no-brain";
 import { configuredNativeGuiOwner, assertNativeGuiStartAvailable, installNativeGuiOwner, nativeGuiEnrollmentChannel, type NativeGuiEnrollment } from "./invocation/native-gui-startup";
@@ -6999,9 +6999,9 @@ export function registerIpcHandlers(): void {
     }
     const request = rendererInvocationRequestForStart(req);
     request.runId ??= randomUUID();
-    // Goal custody is Desktop-only: the daemon cannot admit a Goal controller, so an owner message
-    // in a chat bound to a live Goal (which resumes it) stays on Desktop, like the Goal's own wake-ups.
-    const nativeOwner = configuredOwner && !chatGoalRequiresDesktopOwner(request.chatId) ? configuredOwner : null;
+    // Goal custody is Desktop-only and any One/Work turn can bind a Goal (a resumed stopped Goal, a goal chip,
+    // automatic intake), so such owner turns start on Desktop, like the Goal's own wake-ups (goal-owner-route.ts).
+    const nativeOwner = configuredOwner && !ownerTurnCanBindGoal(request.chatId) ? configuredOwner : null;
     const invocationOwnerEpoch = nativeOwner ? nativeOwner.assertCanStart(request.runId).bootId : rendererInvocationProcessEpoch;
     if (preflightSubmissionId) {
       assertOnePreflightSubmissionReady(preflightSubmissionId, request, invocationOwnerEpoch);

@@ -3961,6 +3961,14 @@ export class InvocationService {
         // Goal. Science and remote/automation authority keep their own adapters.
         if (projectionGoalId || runReq.agentAppMode || runWorkspaceBinding || executionContext ||
             runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted) return;
+        // Goal custody is Desktop-only: this process cannot admit a Goal controller (producerAdmission stays
+        // null), so a Goal admitted mid-turn would have its first dispatch refused with goal_episode_admission_missing.
+        // Intake is optional; keep a daemon-owned turn ordinary. A later Desktop-owned turn may admit the Goal.
+        if (record.ownerLease?.ownerKind === "daemon") {
+          tryRecordRunEvent({ runId, chatId: chat.id, kind: "automatic_goal_intake_skipped",
+            payload: { sourceMessageId, reason: "goal_custody_desktop_only" } });
+          return;
+        }
         try {
           const prepared = await prepareInvocationAutomaticGoal({ runId, chatId: chat.id, sourceMessageId,
             userPrompt: runReq.userPrompt, permission: runReq.permissions ?? "read", signal: controller.signal,
