@@ -473,7 +473,12 @@ export async function fetchHubPluginInventory(hubAllowed: boolean): Promise<{
   if (!hubAllowed) return { listings: [], hubPluginCount: 0 };
   try {
     const listings = await withTimeout(getMarketSource().searchAgents(""), HUB_PLUGIN_LOOKUP_TIMEOUT_MS);
+    // The search merges the bundled catalog (113 rows) ahead of live Hub rows, and the judge is offered only the
+    // first HUB_PLUGIN_INVENTORY_LIMIT, so a plugin published to the Hub after this build was never offered.
+    // Hub-only plugins go first; the order is otherwise kept.
+    const bundled = new Set(listBundledHubPlugins().map((row) => row.slug.toLowerCase()));
     const plugins = listings.filter(isHubPluginListing);
+    plugins.sort((a, b) => Number(bundled.has(a.slug.toLowerCase())) - Number(bundled.has(b.slug.toLowerCase())));
     return { listings: plugins, hubPluginCount: plugins.length };
   } catch (err) {
     const bundled = listBundledHubPlugins();

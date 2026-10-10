@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.87 — 2026-10-11
+
+- A Hub plugin published after this build is offered to the tool picker again; the bundled catalog no longer crowds it out.
+- A coding agent whose model list cannot be read (for example a Copilot account without access) is retried less and less often instead of every minute, and logs the failure once.
+- GitHub Copilot CLI starts at the version verified by the bound engine.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.86 — 2026-10-11
 
 - The background service starts again. In 1.2.84 it stopped on every start and restarted every few seconds, which took down the Science runtime, local models and the mobile connection.

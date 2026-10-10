@@ -80,7 +80,7 @@ export const ACP_AGENTS: Record<string, AcpAgentSpec> = {
   // 우리가 BYOK로 직접 부르는 것과 결과가 같으면서 러너 계약(캐시·세션·usage)만 하나
   // 더 늘린다 — 내장 목록에서 제거했다. 사용자가 원하면 설정의 ACP 프로필로 직접
   // 등록할 수 있다(그 자리는 "사용자가 추가한 것"이지 우리가 제공하는 것이 아니다).
-  "github-copilot-cli": { id: "github-copilot-cli", label: "GitHub Copilot CLI (ACP)", command: "npx", args: ["-y", "@github/copilot@1.0.86", "--acp"], registryId: "github-copilot-cli" },
+  "github-copilot-cli": { id: "github-copilot-cli", label: "GitHub Copilot CLI (ACP)", command: "npx", args: ["-y", "@github/copilot@1.0.95", "--acp"], registryId: "github-copilot-cli" },
   // gemini는 레지스트리에 `gemini --acp`로 선언돼 있지만 **아직 내장하지 않는다 —
   // 보류이지 기각이 아니고, 판단은 오너 몫이다.** 위 기준("구독 인증 자산이 있는가")에
   // 해당하는지가 열린 질문이기 때문이다:
@@ -734,7 +734,7 @@ export async function probeAcpModels(
     // 아무도 진단할 수 없다(실측: goose 의 provider 미설정이 정확히 그 모습이었다).
     const raw = err instanceof Error ? err.message : String(err);
     const data = err instanceof AcpRpcError ? err.data : undefined;
-    const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(data));
+    const detail = data == null ? "" : (typeof data === "string" ? data : JSON.stringify(stableAcpErrorData(data)));
     return { status: "failed", models: [], rawLineCount: 0, reason: `acp:${detail && !raw.includes(detail) ? `${raw}: ${detail}` : raw}`, source: "acp" };
   } finally {
     // 탐지용 세션은 풀에 넣지 않는다 — 대화가 아니라 한 번의 질문이다.
@@ -742,13 +742,29 @@ export async function probeAcpModels(
   }
 }
 
-const acpProbeCache = new Map<string, { at: number; outcome: DiscoveryOutcome & { init?: any } }>();
+/**
+ * The error data minus per-request noise. Copilot CLI's 403 carries every response header (request ids, date),
+ * so the failure reason changed on every probe and "report once per change" logged an error each minute
+ * (1.2.84 production, 2026-10-10: 18 lines in 13 minutes).
+ */
+function stableAcpErrorData(data: unknown): unknown {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return data;
+  return Object.fromEntries(Object.entries(data as Record<string, unknown>)
+    .filter(([key]) => !/^(headers|request|date)$|request_?id$/i.test(key)));
+}
+
+const acpProbeCache = new Map<string, { at: number; outcome: DiscoveryOutcome & { init?: any }; failures: number }>();
+const acpProbeInFlight = new Map<string, Promise<DiscoveryOutcome & { init?: any }>>();
 export const ACP_PROBE_TTL_MS = 10 * 60 * 1000;
+export const ACP_FAILED_PROBE_MAX_RETRY_MS = 30 * 60 * 1000;
 
 /**
  * Cached ACP discovery for detect(): spawning a full agent per 10s detect tick
  * would be far too heavy, so one probe per (spec, command) is reused for 10
- * minutes; a failed probe is retried after 1 minute.
+ * minutes. A failed probe is retried after 1 minute, doubling per consecutive
+ * failure up to 30 minutes — a denied account stays denied, and every retry
+ * spawns the agent (`npx -y @github/copilot` for Copilot). Concurrent detect()
+ * calls share one probe instead of spawning one each.
  */
 export async function probeAcpModelsCached(
   spec: AcpAgentSpec,
@@ -758,17 +774,24 @@ export async function probeAcpModelsCached(
   const now = opts?.now ?? Date.now();
   const hit = acpProbeCache.get(key);
   if (hit) {
-    const ttl = hit.outcome.status === "ok" ? ACP_PROBE_TTL_MS : 60_000;
+    const ttl = hit.outcome.status === "ok" ? ACP_PROBE_TTL_MS : Math.min(60_000 * 2 ** Math.max(0, hit.failures - 1), ACP_FAILED_PROBE_MAX_RETRY_MS);
     if (now - hit.at < ttl) return hit.outcome;
   }
-  const outcome = await probeAcpModels(spec, opts);
-  acpProbeCache.set(key, { at: now, outcome });
-  return outcome;
+  const pending = acpProbeInFlight.get(key);
+  if (pending) return pending;
+  const probe = probeAcpModels(spec, opts).then((outcome) => {
+    const failures = outcome.status === "ok" ? 0 : (acpProbeCache.get(key)?.failures ?? 0) + 1;
+    acpProbeCache.set(key, { at: now, outcome, failures });
+    return outcome;
+  }).finally(() => acpProbeInFlight.delete(key));
+  acpProbeInFlight.set(key, probe);
+  return probe;
 }
 
 /** Test hook. */
 export function resetAcpProbeCacheForTests(): void {
   acpProbeCache.clear();
+  acpProbeInFlight.clear();
 }
 
 /**
