@@ -26,7 +26,7 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
   if (!Number.isSafeInteger(input.attempt) || input.attempt < 1) fail("agent_context_attempt_identity_required");
   const owner = invocationRunOwners.getRunOwner(input.chatId, input.runId), processOwner = invocationProcessOwner();
   if (!owner || owner.ownerId !== processOwner.ownerId || owner.ownerKind !== processOwner.ownerKind) fail("agent_context_original_invocation_owner_required");
-  const row = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin FROM chats WHERE id=?").get(input.chatId) as
+  const row = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin_surface AS origin FROM chats WHERE id=?").get(input.chatId) as
     { agent_id: string; kind: string | null; parent_chat_id: string | null; archived_at:string|null; origin:string|null } | undefined;
   if (!row || row.agent_id !== input.agentId || row.archived_at) fail("agent_context_original_agent_required");
   const identity = agentContextOwnerBinding();
@@ -36,7 +36,7 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
     request.signal?.throwIfAborted(); input.assertCurrent(); assertInvocationRunOwner(owner);
     const latest = agentContextOwnerBinding();
     if (latest.ownerScope !== identity.ownerScope || latest.serviceIdentity !== identity.serviceIdentity) fail("agent_context_owner_binding_changed");
-    const current = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin FROM chats WHERE id=?").get(input.chatId) as typeof row;
+    const current = getDb().prepare("SELECT agent_id,kind,parent_chat_id,archived_at,origin_surface AS origin FROM chats WHERE id=?").get(input.chatId) as typeof row;
     if (!current || current.agent_id !== row.agent_id || current.kind !== row.kind || current.parent_chat_id !== row.parent_chat_id || current.origin !== row.origin || current.archived_at) fail("agent_context_visibility_changed");
   };
   const capability = createAgentContextCapability({ ...identity, agentId: input.agentId, visibilityDomain },
@@ -64,7 +64,7 @@ function awakeLifetime(identity:ReturnType<typeof agentContextHostBinding>["iden
   if(!match)return null;
   const [parent,chat]=match.slice(1);
   const active=()=>!!getDb().prepare(`SELECT 1 FROM chats c WHERE c.id=? AND c.parent_chat_id=?
-    AND c.agent_id=? AND c.kind='division' AND c.origin='one' AND c.archived_at IS NULL
+    AND c.agent_id=? AND c.kind='division' AND c.origin_surface='one' AND c.archived_at IS NULL
     AND EXISTS(SELECT 1 FROM one_team_dispatches d JOIN one_org_members m ON m.id=d.member_id
       WHERE d.child_chat_id=c.id AND d.parent_chat_id=c.parent_chat_id
       AND m.installed_agent_id=c.agent_id AND m.archived_at IS NULL)`).get(chat,parent,identity.agentId);

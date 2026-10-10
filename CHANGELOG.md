@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.85 — 2026-10-11
+
+- Group rooms always include the One Team tools, so a room never runs its goal without its team.
+- A continuous goal run wraps up at the next pass boundary after 20 minutes and continues from its checkpoint, so owner directions are not held behind hour-long runs.
+- Persistent agent context dispatches read the correct room origin column instead of failing as an unsettled turn.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.84 — 2026-10-10
 
 - Keep One supervision and Toolchain use tied to the current task, run, command and authority, including follow-up, Stop and recovery.

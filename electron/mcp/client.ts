@@ -94,6 +94,7 @@ import { getAgentById, listInstalledAgents } from "./registry";
 import { applyGoalPlanMarkers, bindGoalPlanDispatch, buildGoalPlanTurnContext, ensureGoalShapeBeforeTurn, goalPlanContinuationNote, recordGoalPlanPassStop } from "../long-run/goal-shaping";
 import { readGoalPlan } from "../store/goal-plans";
 import { goalPassStopCause } from "../long-run/goal-pass-stop";
+import { goalPassBudgetStep, GOAL_PASS_WALL_CLOCK_BUDGET_MS } from "../long-run/goal-pass-budget";
 import { captureNativeGoalEpisode, type NativeGoalEpisodeBinding } from "../long-run/native-goal-pass";
 import { buildEffectiveAgentSystemPrompt } from "../agents/files";
 import { acquireAgentWorkspaceRunLease, releaseAgentWorkspaceRunLease, getAgentWorkspace, readAgentWorkspaceFile } from "../agents/workspace-service";
@@ -3696,6 +3697,8 @@ ${effectiveUserPrompt}`;
           recordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_goal_tool_selection", payload: { ...receipt } });
         },
         ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
+        // A One group room is a team by definition: One Team rides every turn (goal passes too).
+        ...(chat.originSurface === "one" && chat.seatKind === "group" && !oneMemberToolPolicy ? { groupRoom: true as const } : {}),
         // An installed plugin the agent looked up or opened mid-turn in this
         // conversation's previous run is attached now (never a Hub install).
         requestedPluginSlugs: readMidTurnPluginRequests(chat.id, req.runId),
@@ -7041,6 +7044,7 @@ ${effectiveUserPrompt}`;
     const nativeGoalEpisode = activeGoalId && req.runId && !executionContext && continuousMode
       ? captureNativeGoalEpisode(activeGoalId, chat.id, req.runId) : null;
     let goalEpisodeYield: NativeGoalEpisodeBinding | null = null;
+    const passLoopStartedAtMs = Date.now();
     let result = await invokeCurrentRuntime(activeRunnerReq);
     if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
       const error = new RuntimeTurnUnsettledError(active.kind, locale);
@@ -7188,6 +7192,16 @@ ${effectiveUserPrompt}`;
         passShouldContinue = false;
         tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
           kind: "goal_idle_pass_yield", payload: { pass, idlePasses: idleGoalPasses } });
+      }
+      // Wall-clock bound (long-run/goal-pass-budget.ts): at this pass boundary no runtime turn or tool is in
+      // flight. End the invocation instead of starting another pass; Main continues the open Goal from its ledger
+      // and drains the owner steers queued meanwhile. The event is not goal_idle_pass_yield: that one backs the
+      // follow-up off, and this turn made progress.
+      const budgetStep = goalPassBudgetStep({ continuousMode, passShouldContinue, startedAtMs: passLoopStartedAtMs, nowMs: Date.now() });
+      if (budgetStep.yieldNow && !signal?.aborted) {
+        passShouldContinue = false;
+        tryRecordRunEvent({ runId: req.runId ?? `chat:${chat.id}`, chatId: chat.id, agentId: agent.id,
+          kind: "goal_pass_budget_yield", payload: { pass, elapsedMs: budgetStep.elapsedMs, budgetMs: GOAL_PASS_WALL_CLOCK_BUDGET_MS } });
       }
       // An unfinished ongoing invocation has no terminal/effect checkpoint of
       // its own. Goal unmet and prose/tool counts cannot authorize another pass.

@@ -87,13 +87,17 @@ export interface HubPluginCandidate {
 }
 
 /** An installed plugin the relevance routing attached to this turn (skills inlined, tools attached). */
+/** Catalog id of the One Team tool set (plugin agentlas-one-team). */
+export const ONE_TEAM_BASELINE_TOOL_ID = "one-team";
+
 export interface RoutedPluginSelection {
   slug: string;
   name: string;
   reason: string;
   /** judge = resident judgment; local-relevance = deterministic fallback; retained = same active Goal;
-   *  requested = the model asked for it in the previous turn of this conversation. */
-  source: "judge" | "local-relevance" | "retained" | "requested";
+   *  requested = the model asked for it in the previous turn of this conversation;
+   *  baseline = the host always carries it for this kind of conversation (group room: One Team). */
+  source: "judge" | "local-relevance" | "retained" | "requested" | "baseline";
   hasSkills: boolean;
   toolIds: string[];
 }
@@ -511,6 +515,14 @@ export async function autoSelectMcpTools(input: {
   bypassSelectionMemo?: boolean;
   /** One Team per-member tool policy. Omitted means the normal automatic mode. */
   autoSelectTools?: boolean;
+  /**
+   * The conversation is a One group room (a taskforce seat). A group room is a team by
+   * definition, so every turn, goal passes included, carries the One Team tool set without
+   * the model having to request it first (production 2026-10-10 04:57-07:00: goal passes only
+   * retained earlier requests and ran without it). Main-derived from the stored seat, never
+   * from renderer input; the control capability still enforces who may dispatch.
+   */
+  groupRoom?: boolean;
   /** Installed MCP ids declared by the bound One Team member when auto mode is off. */
   fixedServerIds?: string[];
   /** Graph-declared tool ids; canonical browser declarations suppress duplicate probing. */
@@ -573,7 +585,7 @@ export async function autoSelectMcpTools(input: {
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      input.runtimeOutsideBrowser === true ? "outside-browser" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
+      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -944,11 +956,27 @@ export async function autoSelectMcpTools(input: {
       : "baseline capability: One Team member runs always carry the Agentlas browser");
   }
 
+  // Baseline capability: a group room is a team by definition (see AutoSelect input.groupRoom).
+  // Carried by every turn, not only by turns whose judge or earlier request named it. It is
+  // exempt from the probe cap (like an explicit assignment) so other picks cannot crowd it out.
+  const baselineIds = new Set<string>();
+  if (input.groupRoom === true && !blockedByHostBinding(ONE_TEAM_BASELINE_TOOL_ID)
+    && MCP_TOOL_CATALOG.some((entry) => entry.id === ONE_TEAM_BASELINE_TOOL_ID)) {
+    baselineIds.add(ONE_TEAM_BASELINE_TOOL_ID);
+    neededIds.add(ONE_TEAM_BASELINE_TOOL_ID);
+    pinnedReasons.set(ONE_TEAM_BASELINE_TOOL_ID, "baseline capability: a group room is a team, so every turn carries One Team");
+    const owner = pluginCandidates.find((plugin) => plugin.toolIds.includes(ONE_TEAM_BASELINE_TOOL_ID));
+    if (owner && !routedPlugins.some((routed) => routed.slug === owner.slug)) {
+      routedPlugins.push({ slug: owner.slug, name: owner.name, reason: "baseline capability: group room", source: "baseline",
+        hasSkills: owner.hasSkills, toolIds: [...owner.toolIds] });
+    }
+  }
+
   // Rank before the probe cap so a convenience pin can never crowd out a host binding or a
   // capability the judge said the task actually needs.
   const pickRank = (id: string): number => {
     if (hostBindingPins.has(id)) return 0;
-    if (explicitlyAssignedIds.has(id)) return 1;
+    if (explicitlyAssignedIds.has(id) || baselineIds.has(id)) return 1;
     if (neededIds.has(id)) return 2;
     return 3;
   };
@@ -972,7 +1000,7 @@ export async function autoSelectMcpTools(input: {
     return true;
   })
     .sort((a, b) => pickRank(a.id) - pickRank(b.id))
-    .filter((entry, index) => index < 10 || hostBindingPins.has(entry.id) || explicitlyAssignedIds.has(entry.id));
+    .filter((entry, index) => index < 10 || hostBindingPins.has(entry.id) || explicitlyAssignedIds.has(entry.id) || baselineIds.has(entry.id));
 
   const resolved = await Promise.allSettled(picked.map(async (entry): Promise<AutoSelectedMcpTool> => {
     // `required` is a host binding, never a selection outcome — so it follows the mode the

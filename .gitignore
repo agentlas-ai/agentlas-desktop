@@ -221,7 +221,6 @@ renderer/public/trex-samples/
 .agentlas/*.jsonl
 .env
 .env.*
-!.env.example
 .env.local
 signing/*
 !signing/README.md
@@ -300,14 +299,11 @@ scripts/.*
 scripts/lib/mock-*.cjs
 scripts/fixtures/
 /studio-pack/apps/founder-mobile/ios/Tests/
-# Exceptions: these two are packaging machinery, not suites. package-mac.sh and
-# the cross-platform build run them against the built artifact, so CI must have
-# them or packaging fails with file-not-found.
-!scripts/verify-packaged-workforce-runtime.cjs
-# The Windows/Linux updater E2E is the one check that cannot run on this Mac, so
-# it stays in CI and the runner sparse-checks this exact file out of the release
-# commit. It drives the built installer, not product internals.
-!scripts/verify-packaged-updater-install-e2e.cjs
+# scripts/verify-packaged-workforce-runtime.cjs and
+# scripts/verify-packaged-updater-install-e2e.cjs are NOT tracked. Release tooling fetches
+# them hash-pinned from the private release verification set
+# (scripts/fetch-release-verification.mjs); local copies stay ignored by the scripts/verify-*.cjs
+# rule and must never be committed.
 
 # session scratch/demo (never publish)
 scripts/capture-x-graph.cjs
