@@ -412,6 +412,9 @@ jobs:
           console.log(`Updater source copy guard checked ${paths.length} UTF-8 files.`);
           NODE
 
+      - name: Prepare pinned browser runtime for private contracts
+        run: npm run fetch:browser
+
       - name: Verify committed private Workspace and owner contracts
         timeout-minutes: 60
         shell: bash
