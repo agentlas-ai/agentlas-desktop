@@ -2819,6 +2819,16 @@ export class InvocationService {
       if (superseded) startBoundary.cleanups?.push(() => { restoreGoalWaitAfterUndispatchedStart(superseded); });
       goalLongRun = getLongRunByGoalId(goalLongRun.goalId);
     }
+    // A Desktop Goal turn is admitted only while its Goal is running (admitGoalProducer). Host continuations make it
+    // running (or queued, confirmed right after start) before they start, and a pending wait was superseded above;
+    // only an owner message may resume a Goal that waits for the owner or a scheduled retry. A system turn arriving
+    // then (a One relay drained after the Goal's turn asked the owner a question: Youtube launch 2026-10-10 07:00Z,
+    // run 7f8c7a55) spent 37 s of model calls and failed goal_episode_admission_missing. Refuse it before any call.
+    if (!localUserTurn && !record.background && !executionContext && !runReq.agentAppMode && !effectObservation
+      && goalLongRun?.rootChatId === chat.id && goalLongRun.surface !== "science"
+      && ["waiting_tool", "blocked", "waiting_user"].includes(goalLongRun.status)) {
+      throw new Error("goal_waiting_system_start_refused");
+    }
     let goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
     // An ongoing Goal's episode needs an open task, or no controller attempt is bound and its cycle wait is refused
 

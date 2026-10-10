@@ -1638,6 +1638,15 @@ export function initializeNativeGuiInvocationOwner(enrollment: NativeGuiEnrollme
 
 }
 const rendererInvocationProcessEpoch = randomUUID();
+/**
+ * The native owner that starts an owner turn in this chat, or null for Desktop. Goal custody is Desktop-only and any
+ * One/Work turn can bind a Goal (a resumed stopped Goal, a goal chip, automatic intake), so such owner turns start on
+ * Desktop, like the Goal's own wake-ups (goal-owner-route.ts). Every epoch stamped for the turn (One preflight
+ * submission, admission) must come from this same decision.
+ */
+function ownerTurnStarter<T>(configuredOwner: T | null | undefined, chatId: unknown): T | null {
+  return configuredOwner && !ownerTurnCanBindGoal(chatId) ? configuredOwner : null;
+}
 
 /** Run after runtime bootstrap, before ordinary queued-steer recovery. */
 export function recoverRendererPreflightSteers(): ReturnType<typeof recoverOnePreflightSteers> {
@@ -6959,8 +6968,12 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle("invoke:preflightSubmissionBegin", (_event, input: OnePreflightSubmissionInput) => {
     assertTrustedSitePublishIpcSender(_event);
-    const native = configuredNativeGuiOwner();
-    if (native && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    const configuredOwner = configuredNativeGuiOwner();
+    if (configuredOwner && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
+    // The submission carries the epoch of the owner invoke:run will start this turn in; stamping the configured
+    // native owner while invoke:run started on Desktop refused every One message with one_preflight_submission_changed
+    // (1.2.89, 2026-10-10T21:05Z).
+    const native = ownerTurnStarter(configuredOwner, input?.chatId);
     return beginOnePreflightSubmission(input, native ? native.assertCanStart(randomUUID()).bootId : rendererInvocationProcessEpoch);
   });
   ipcMain.handle("invoke:preflightSteerEnqueue", (_event, input: OnePreflightSteerInput) => {
@@ -6999,9 +7012,7 @@ export function registerIpcHandlers(): void {
     }
     const request = rendererInvocationRequestForStart(req);
     request.runId ??= randomUUID();
-    // Goal custody is Desktop-only and any One/Work turn can bind a Goal (a resumed stopped Goal, a goal chip,
-    // automatic intake), so such owner turns start on Desktop, like the Goal's own wake-ups (goal-owner-route.ts).
-    const nativeOwner = configuredOwner && !ownerTurnCanBindGoal(request.chatId) ? configuredOwner : null;
+    const nativeOwner = ownerTurnStarter(configuredOwner, request.chatId);
     const invocationOwnerEpoch = nativeOwner ? nativeOwner.assertCanStart(request.runId).bootId : rendererInvocationProcessEpoch;
     if (preflightSubmissionId) {
       assertOnePreflightSubmissionReady(preflightSubmissionId, request, invocationOwnerEpoch);

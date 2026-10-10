@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.90 — 2026-10-11
+
+- Messages in One conversations send again. In 1.2.89 every One message was refused before it started while the background service was running.
+- An automatic request that reaches a room while its goal waits for your answer or its scheduled next turn is declined at once with a clear reason, instead of running for a while and then failing.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.89 — 2026-10-11
 
 - A new goal, from a goal chip or from a message the app recognizes as ongoing work, starts working on its first turn instead of failing.
