@@ -17,6 +17,7 @@ import type { ControlSocketPeer } from "./control-socket";
 import { assertNativeAuthBinding, type NativeAuthBinding, type NativeCredential } from "./native-auth-credentials";
 import { startNativeAuthChannel } from "./native-auth-channel";
 import { daemonDeviceBridge, DeviceBridgeError, DEVICE_STATE_VERSION } from "./device-bridge";
+import { handGoalIntakeToMain } from "../invocation/goal-intake-forward";
 import { answerChatHandoverRequest, CHAT_HANDOVER_VERSION, registerChatHandoverPeer } from "../runtime/chat-host-handover";
 import { createDaemonNativeInvocationHost } from "./native-invocation-host";
 import { nativeStartDescriptor, type NativeStartDescriptor } from "./native-start-protocol";
@@ -141,6 +142,12 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         if(wire.op==="probe" && exact(wire,["version","op"])){
           try{const state=await bridge.idleSnapshot();return {version:DEVICE_STATE_VERSION,ok:true,session:state.session,idleSeconds:state.idleSeconds};}
           catch(error){return {version:DEVICE_STATE_VERSION,ok:false,error:error instanceof DeviceBridgeError?error.code:"device_bridge_unavailable"};}
+        }
+        // Goal intake handover check (2026-10-11): the service hands one owner message to Main exactly as a daemon-run turn would.
+        if(wire.op==="goalIntake" && exact(wire,["version","op","runId","chatId","sourceMessageId","permission"])
+          && typeof wire.runId==="string" && typeof wire.chatId==="string" && typeof wire.sourceMessageId==="string" && ["read","write","full"].includes(String(wire.permission))){
+          const outcome=await handGoalIntakeToMain({runId:wire.runId,chatId:wire.chatId,sourceMessageId:wire.sourceMessageId,permission:wire.permission as "read"|"write"|"full"});
+          return {version:DEVICE_STATE_VERSION,ok:true,outcome};
         }
         fail("device_state_invalid");
       }

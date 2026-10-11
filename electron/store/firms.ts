@@ -155,7 +155,7 @@ export function uninstallFirm(id: string): void {
     ) {
       throw new Error("Firm removal tried to delete an installed agent or conversation; rolled back.");
     }
-  })();
+  }).immediate();
   // The team row is gone, so a project staging that team is staging nothing.
   // The pool is JSON in a TEXT column and has no FK to cascade through.
   detachProjectPoolReferences({ firmIds: [id] });

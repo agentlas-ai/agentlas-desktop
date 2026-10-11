@@ -14,6 +14,7 @@ import { assertScienceRecoveryRequest } from "../science-host/recovery-authority
 import { readApiKey } from "../secrets/vault";
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { cumulativeSurfaceGateText, RuntimeTurnUnsettledError, runtimeHttpFailure, workforceZeroToolsEnforcement, wrapSystemPrompt } from "./runner";
+import { withRollingCacheBreakpoints, cachedTokensFromGeminiUsage } from "./prompt-cache";
 import { createOwnerControlBoundary, ownerControlHistoryImages } from "./owner-control-pump";
 import { abortReasonError } from "./abort-reason";
 import {
@@ -84,7 +85,7 @@ function prepareContext(
   }
   const recent = req.history;
   // 서피스 게이트는 러너 공통 규칙(runner.ts cumulativeSurfaceGateText)을 따른다.
-  const surfaceGateText = cumulativeSurfaceGateText(recent, req.userPrompt);
+  const surfaceGateText = cumulativeSurfaceGateText(recent, req.surfaceUserPrompt ?? req.userPrompt);
   return {
     model,
     recent,
@@ -210,23 +211,11 @@ type AnthropicMessage = { role: "user" | "assistant"; content: string | Anthropi
  * 이 필드를 거부할 수 있다(위 systemField와 같은 이유).
  */
 function withHistoryCacheBreakpoint(messages: AnthropicMessage[]): AnthropicMessage[] {
-  // 마지막(이번 턴 입력) 바로 앞 메시지가 다음 턴에도 불변인 마지막 블록이다.
-  const index = messages.length - 2;
-  if (index < 0) return messages;
-  const target = messages[index];
-  const blocks: AnthropicContent[] = typeof target.content === "string"
-    ? [{ type: "text", text: target.content }]
-    : target.content.map((block) => ({ ...block }));
-  const last = blocks[blocks.length - 1];
-  if (!last) return messages;
-  // cache_control 은 text/image 블록에만 유효하다. 도구 블록(tool_use·tool_result)에
-  // 붙이면 API 가 요청 자체를 거부하므로, 그 경우엔 브레이크포인트를 포기한다 —
-  // 캐시 한 번 못 먹는 것이 실행 전체가 400 으로 죽는 것보다 낫다.
-  if (last.type !== "text" && last.type !== "image") return messages;
-  blocks[blocks.length - 1] = { ...last, cache_control: { type: "ephemeral" } };
-  const next = messages.slice();
-  next[index] = { ...target, content: blocks };
-  return next;
+  // tool_use / tool_result blocks accept cache_control too (Anthropic docs, prompt caching). The old
+  // text/image-only rule left every tool-loop step without a history breakpoint, so a 5+ step turn
+  // re-billed the whole growing transcript at full price each step. Mark the final block (newest
+  // tool_result) and the turn boundary before it; see prompt-cache.ts.
+  return withRollingCacheBreakpoints(messages as never) as AnthropicMessage[];
 }
 
 /**
@@ -960,7 +949,7 @@ export const runGoogleByok: Runner = async (
       name: string;
       args: Record<string, unknown>;
     }> = [];
-    let terminalUsage: { inputTokens: number; outputTokens: number } | undefined;
+    let terminalUsage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | undefined;
     let finishReason: string | undefined;
     let conflictingFinishReason = false;
     for await (const line of iterSseLines(resp)) {
@@ -974,7 +963,7 @@ export const runGoogleByok: Runner = async (
       try {
         const event = JSON.parse(payload) as {
           candidates?: Array<{ content?: { parts?: GooglePart[] }; finishReason?: string }>;
-          usageMetadata?: { promptTokenCount?: unknown; totalTokenCount?: unknown };
+          usageMetadata?: { promptTokenCount?: unknown; totalTokenCount?: unknown; cachedContentTokenCount?: unknown };
         };
         const candidateFinishReason = event.candidates?.[0]?.finishReason;
         if (typeof candidateFinishReason === "string") {
@@ -985,7 +974,9 @@ export const runGoogleByok: Runner = async (
         const total = event.usageMetadata?.totalTokenCount;
         if (Number.isSafeInteger(input) && Number(input) >= 0
           && Number.isSafeInteger(total) && Number(total) >= Number(input)) {
-          terminalUsage = { inputTokens: Number(input), outputTokens: Number(total) - Number(input) };
+          const cachedInputTokens = cachedTokensFromGeminiUsage(event.usageMetadata);
+          terminalUsage = { inputTokens: Number(input), outputTokens: Number(total) - Number(input),
+            ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}) };
         }
         const currentResponseIndex = responseIndex;
         responseIndex += 1;

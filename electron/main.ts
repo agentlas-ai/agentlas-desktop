@@ -35,6 +35,7 @@ import os from "node:os";
 import { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { installModelCatalogResolver, refreshRemoteCatalog } from "./runtime/model-catalog";
+import { registerOneCapabilitiesIpc } from "./capabilities/one-capabilities-ipc";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
@@ -2508,6 +2509,8 @@ app.whenReady().then(async () => {
   currentOneNativeMainComposition()?.start();
   // DESKTOP_MOBILE_BRIDGE: Desktop main is the sole authority. Renderer IPC
   // can issue/revoke pairing, but never receives a persisted bearer token.
+  // One's capability inventory (skills, plugins, hooks, memories, connectors) with per-item switches.
+  registerOneCapabilitiesIpc(ipcMain);
   ipcMain.handle("mobileBridge:status", () => mobileBridgeRuntimeStatus());
   ipcMain.handle("mobileBridge:issuePairing", () => issueMobileBridgePairing());
   ipcMain.handle("mobileBridge:listDevices", () => listMobileBridgeDevices());

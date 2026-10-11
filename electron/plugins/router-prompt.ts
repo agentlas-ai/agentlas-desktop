@@ -41,6 +41,21 @@ function frontmatterDescription(text: string): string {
   return line ? line[1].trim().replace(/^["']|["']$/g, "") : "";
 }
 
+function standardRouterPath(slug: string): string {
+  return path.join(pluginsRoot(), slug, "skills", "index", "SKILL.md");
+}
+
+/** First sentence of a router description, capped, so a long routing essay is not repeated on every request. */
+export function shortPluginSummary(description: string, maxChars = 120): string {
+  const flat = description.replace(/\s+/g, " ").trim();
+  if (!flat) return "";
+  const sentence = /^.*?[.!?。](?=\s|$)/.exec(flat)?.[0] ?? flat;
+  if (sentence.length <= maxChars) return sentence;
+  const cut = sentence.slice(0, maxChars);
+  const at = cut.lastIndexOf(" ");
+  return `${(at > maxChars * 0.6 ? cut.slice(0, at) : cut).replace(/[,;:\s]+$/, "")}…`;
+}
+
 function readPlugin(dir: string): InstalledPlugin | null {
   try {
     const manifestRaw = fs.readFileSync(path.join(dir, "plugin.json"), "utf8").replace(/^﻿/, "");
@@ -118,11 +133,8 @@ export function pluginRouterPrompt(userPrompt?: string): string {
   const lines: string[] = [
     "## Plugins available in this run",
     "",
-    "A plugin is a capability package: a router skill that decides which of its workflow skills applies, plus the reference documents those skills cite. It is not an agent and has no memory of its own.",
-    "",
-    "How to use one:",
-    `- Open the router file listed below, follow its routing rules, then open the workflow skill it names.`,
-    `- Inside a skill, \`$name\` means another skill (\`<plugin>/skills/<name>/SKILL.md\`) or a shared reference (\`<plugin>/references/<name>.md\`); \`@name\` means a host tool.`,
+    `A plugin is a capability package (a router skill, its workflow skills and the references they cite), not an agent. Open a plugin's router file, follow its routing rules, then open the workflow skill it names. Router file: \`${standardRouterPath("<slug>")}\` unless an entry lists another path.`,
+    `Inside a skill, \`$name\` means another skill (\`<plugin>/skills/<name>/SKILL.md\`) or a shared reference (\`<plugin>/references/<name>.md\`); \`@name\` means a host tool.`,
     "- If a skill needs a tool you do not have, do not stop there: first use the capabilities this runtime already has (its own web search, image generation, shell, file tools), then call `agentlas_resolve_plugins` / `agentlas_tool_search` to find an installed or Hub plugin that covers the gap. An installed plugin you name that way is attached on the next turn automatically; a Hub plugin that is not installed needs the owner's approval, so name its slug and what it would do. Never describe work you could not carry out.",
     "",
   ];
@@ -134,13 +146,15 @@ export function pluginRouterPrompt(userPrompt?: string): string {
     );
   }
 
+  // One entry per plugin (progressive disclosure): the model opens the router file for routing
+  // detail and the workflow list, so the always-on text carries only what picks the plugin.
   for (const p of listed) {
-    lines.push(`### ${p.mention} — ${p.name}`);
-    if (p.routerDescription) lines.push(p.routerDescription);
-    lines.push(`Router: ${p.routerPath}`);
-    if (p.workflows.length) lines.push(`Skills: ${p.workflows.join(", ")}`);
-    lines.push("");
+    const summary = shortPluginSummary(p.routerDescription);
+    // The conventional router path is stated once in the header; only a non-standard path is spelled out.
+    const standard = p.routerPath === standardRouterPath(p.slug);
+    lines.push(`- ${p.mention} — ${p.name}${summary ? `: ${summary}` : ""}${standard ? "" : ` Router: ${p.routerPath}`}`);
   }
+  lines.push("");
 
   // 명시 호출된 플러그인은 라우터를 읽는 왕복 없이 바로 따를 수 있도록 전문을 싣는다.
   for (const p of listed) {

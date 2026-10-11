@@ -62,6 +62,18 @@ export function McpKeyRequestSheet({
     } catch {if(captured!==generation.current)return;setError(ko?'전용 입력 창을 열지 못했습니다. 키 없이 진행할 수 있습니다.':'The secure entry window could not open. You can continue without this key.');}
     finally {if(captured===generation.current)setBusy(false);}
   };
+  // One plain confirmation: the owner's click is the consent. Main renames inside the vault and re-checks the offer.
+  const useStored = async (toolId:string,keyName:string,storedName:string) => {
+    if(busy)return;const captured=generation.current;setBusy(true);setError(null);
+    try {
+      const result=await ipc()?.mcpTools.useStoredRunKey(request.runId,toolId,keyName,storedName);
+      if(captured!==generation.current)return;
+      if(result?.ok&&result.resolved)onResolved('provided');
+      else if(result?.ok)setError(ko?'이름을 바꿨습니다. 아직 비어 있는 다른 키가 있습니다.':'Renamed. Other keys on this request are still missing.');
+      else setError(ko?'이름을 바꾸지 못했습니다. 새 이름이 이미 있거나 키가 없습니다.':'Could not rename. The new name already exists or the key is missing.');
+    } catch {if(captured!==generation.current)return;setError(ko?'이름을 바꾸지 못했습니다.':'Could not rename.');}
+    finally {if(captured===generation.current)setBusy(false);}
+  };
   const checkSaved = async () => {
     if(busy)return;const captured=generation.current;setBusy(true);setError(null);
     try {
@@ -123,6 +135,14 @@ export function McpKeyRequestSheet({
                   <button type="button" disabled={busy||secondsLeft===0} onClick={()=>void openSecure(tool.id,envKey.key)}>
                     {ko?'전용 Vault 입력 열기':'Open dedicated Vault entry'}
                   </button>
+                  {envKey.storedMatch?(
+                    <span className="mkr-hint" data-testid="mcp-key-stored-match">
+                      {ko?`저장된 키 ${envKey.storedMatch} 를 이 키로 쓸까요?`:`Use the saved key ${envKey.storedMatch} for this?`}{" "}
+                      <button type="button" disabled={busy||secondsLeft===0} onClick={()=>void useStored(tool.id,envKey.key,envKey.storedMatch!)}>
+                        {ko?'네, 이름 바꿔서 쓰기':'Yes, rename and use it'}
+                      </button>
+                    </span>
+                  ):null}
                   {(ko ? envKey.hint : envKey.hintEn) || envKey.hintEn ? (
                     <span className="mkr-hint">{(ko ? envKey.hint : envKey.hintEn) || envKey.hintEn}</span>
                   ) : null}

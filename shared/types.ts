@@ -4822,6 +4822,8 @@ export interface MobileBridgeRuntimeStatus {
  *  값 저장은 렌더러가 기존 env:set으로 직접 하고, 완료 신호만 mcp:supplyRunKeys로 돌아온다. */
 export interface McpRunKeyRequestEnvKey {
   key: string;
+  /** A saved key name that looks like this one (ELEVENLABS_1 for ELEVENLABS_API_KEY). Name only; offered, never applied. */
+  storedMatch?: string;
   label?: string;
   labelEn?: string;
   hint?: string;
@@ -7872,6 +7874,9 @@ export interface AgentlasIpc {
     /** 실행 전 키 요청 시트의 완료 신호. 비밀 값은 절대 싣지 않는다 — 값은 env.set으로
      *  이미 vault에 저장된 뒤다. 만료/중복 runId면 { ok:false } 안전 무시. */
     supplyRunKeys: (runId: string, outcome: "provided" | "declined") => Promise<{ ok: boolean }>;
+    /** The owner's yes to "use the saved key <storedName> as <keyName>": Main renames it and, when every key of the request
+     *  is then saved, releases the waiting run. Names only; `resolved` is false when other keys are still missing. */
+    useStoredRunKey: (runId: string, toolId: string, keyName: string, storedName: string) => Promise<{ ok: boolean; resolved: boolean }>;
   };
   /** Optional ontology context. Endpoint and returned context remain in Electron main. */
   openCrab: {
@@ -8770,7 +8775,8 @@ export interface AgentlasIpc {
     currentTurnSteerReceipt: (input: { chatId: string; intentId: string }) => Promise<InvocationCurrentTurnSteerReceipt | null>;
     currentTurn: (chatId: string) => Promise<{ runId: string } | null>;
     replay: (input: import("./run-event-delivery").RunEventReplayInput) => Promise<import("./run-event-delivery").RunEventReplay>;
-    run: (req: McpInvocationRequest) => Promise<{ runId: string }>;
+    /** `queued`: the message was accepted and saved, and starts by itself when the chat is free (no run yet). */
+    run: (req: McpInvocationRequest) => Promise<{ runId: string; queued?: boolean }>;
     /** Persist an additive follow-up for this chat. Only steeringMode="interrupt" requests early settlement of the current turn. */
     steer: (req: McpInvocationRequest, intentId?: string) => Promise<InvocationSteerResult>;
     steerReceipt: (input: { chatId: string; intentId: string }) => Promise<InvocationSteerResult | null>;

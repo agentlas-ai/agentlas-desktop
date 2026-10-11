@@ -1037,7 +1037,7 @@ export function upsertLongRunDomainBinding(input: {
         input.lastError?.slice(0, 240) ?? null,
         now,
       );
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: run.id });
   const binding = getLongRunDomainBinding(run.id);
   if (!binding) throw new Error("science_projection_binding_readback_failed");
@@ -1970,7 +1970,7 @@ export function enqueueLongRunMessage(input: {
       payload: { messageId: id, toWorkerId: input.toWorkerId, kind: input.kind },
       at: now,
     });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "long-run", id: input.runId });
   return id;
 }
@@ -2119,7 +2119,7 @@ export function bindCurrentGoalRevisionToLongRun(runId: string, expectedVersion:
     appendEventInDb({ runId, kind: "run.goal_revision_bound", actorKind: "host", at: now,
       payload: { revision: goal.revision, previousRevision: binding?.revision ?? null, receiptCursor: cursor.n,
         sourceMessageId: goal.sourceMessage.messageId } });
-  })();
+  }).immediate();
   const run = getLongRun(runId);
   if (!run) throw new Error("long_run_goal_binding_readback_failed");
   emitDesktopStoreChange({ entity: "long-run", id: runId });
@@ -2523,7 +2523,7 @@ export function settleVerifiedLongRun(runId: string, options?: { background?: bo
     if (run.status !== "verifying") transitionLongRun({ runId, to: "verifying", actorKind: "host", reason: "background-verification-settled" });
     transitionLongRun({ runId, to: "completed", actorKind: "host", reason: "all-criteria-verified" });
     return "completed";
-  })();
+  }).immediate();
 }
 
 export function longRunContinueDecision(goalId: string, now: Date = new Date()): LongRunContinueDecision | null {

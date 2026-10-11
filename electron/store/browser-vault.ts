@@ -274,7 +274,7 @@ export async function scrubLegacyBrowserCredentialRows(): Promise<LegacyBrowserC
     }
 
     return { siteRowsRemoved, sessionRowsRemoved, permissionRowsRemoved, auditRowsScrubbed };
-  })();
+  }).immediate();
 
   return { ...counts, keychainCleanupFailures };
 }

@@ -120,7 +120,7 @@ export function makeLocalOpenAiRunner(
     const recent = req.history;
     const systemText = req.systemPrompt;
 
-    const surfaceGateText = cumulativeSurfaceGateText(recent, contextWindow !== undefined ? req.surfaceUserPrompt ?? req.userPrompt : req.userPrompt);
+    const surfaceGateText = cumulativeSurfaceGateText(recent, req.surfaceUserPrompt ?? req.userPrompt);
     const wrapped = (surfaceGate?: "exclude") => wrapSystemPrompt(
       systemText,
       req.locale,

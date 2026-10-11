@@ -29,6 +29,13 @@
   border-color: var(--green);
 }
 
+.grid[data-size="tall"] { gap: 12px; }
+.grid[data-size="tall"] > .chip { min-height: 196px; padding: 18px 16px 14px; }
+
+@media (max-height: 760px) {
+  .grid[data-size="tall"] > .chip { min-height: 150px; }
+}
+
 .top {
   display: flex;
   align-items: center;

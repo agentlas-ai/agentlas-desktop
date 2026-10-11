@@ -23,6 +23,7 @@ import { StringDecoder } from "node:string_decoder";
 import { codexSystemPromptWithSchemaFallback, openAiStrictSchemaOrNull } from "./strict-output-schema";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
+import { imageOutputContract, planPromptSections } from "./prompt-sections";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
@@ -83,6 +84,8 @@ import { CodexWorkforceObservation, inspectCodexWorkforceGrant, readCodexWorkfor
 import { answerCodexMcpElicitation } from "./codex-elicitation";
 import { residencyDisabledFor } from "./claude-session";
 import { codexDesktopSurfaceArgs } from "./codex-desktop-surface";
+import { codexPersonalContextArgs, codexPersonalHomeOptions } from "./codex-personal-context";
+import { selectionFor } from "../capabilities/one-capabilities";
 import {
   claimRuntimeSessionTurn,
   classifyCodexResumeFailure,
@@ -181,21 +184,7 @@ export function codexImageToolInstructions(enabled: boolean): string {
   // host slot was empty, and forbade its own image workflow when the slot was
   // ready — contradicting the runtime. Both routes are now allowed; the host
   // copies every result into the working folder so later steps have a path.
-  const copyRule = "The host copies every generated image into the working folder's `assets/` directory and reports that path. Use that path for later steps (browser uploads, documents, slides); do not look for images in the runtime's private image store.";
-  const honesty = "Say an image was generated only after a tool or your image generation actually returned one; if it failed, say so and preserve the reason. Never claim an image is above, attached, or displayed without that result.";
-  return enabled
-    ? [
-        "## Agentlas image output contract",
-        `To create or edit an image, call the host tool \`${CODEX_IMAGE_TOOL_NAME}\` (the owner's configured image engine) or use your own built-in image generation.`,
-        copyRule,
-        honesty,
-      ].join("\n")
-    : [
-        "## Agentlas image output contract",
-        "No host image-generation tool is attached to this thread. Use your own built-in image generation when an image is needed.",
-        copyRule,
-        honesty,
-      ].join("\n");
+  return imageOutputContract(enabled ? CODEX_IMAGE_TOOL_NAME : undefined);
 }
 
 const CANDIDATES = [
@@ -2090,7 +2079,12 @@ async function runCodexResidentTurn(input: {
           "sandbox_workspace_write.exclude_tmpdir_env_var": true,
           "sandbox_workspace_write.exclude_slash_tmp": true,
         } } : {}),
-        developerInstructions: `${buildDeveloperInstructions(req)}\n\n${codexImageToolInstructions(Boolean(imageToolSlot))}`,
+        // The image contract rides only a turn that can produce an image: a host image tool is attached, or the
+        // cumulative request is about images/video/audio (prompt-sections.ts). Resident threads receive it later
+        // through the stable turn context ("On-demand instructions"), where the media routing rules also travel.
+        developerInstructions: imageToolSlot || planPromptSections(cumulativeSurfaceGateText(req.history, req.userPrompt)).media
+          ? `${buildDeveloperInstructions(req)}\n\n${codexImageToolInstructions(Boolean(imageToolSlot))}`
+          : buildDeveloperInstructions(req),
         ...(imageToolSlot ? { dynamicTools: [CODEX_IMAGE_DYNAMIC_TOOL] } : {}),
       };
       let resumed = false;
@@ -2462,7 +2456,7 @@ export const runCodex: Runner = async (
   const requestEnv = req.env ?? process.env;
   req = { ...req, env: req.untrustedNoTools && req.judgmentOnly
     ? { ...requestEnv, CODEX_HOME: accountCodexHome(requestEnv.CODEX_HOME) }
-    : withCodexProductHome(requestEnv) };
+    : withCodexProductHome(requestEnv, { personal: codexPersonalHomeOptions(selectionFor(req.agentId)) }) };
   const observeNativeFile = bindNativeFileProofObserver();
   if (
     req.untrustedNoTools &&
@@ -2612,7 +2606,18 @@ export const runCodex: Runner = async (
     cwd: runReq.cwd ?? agentRunCwd(),
   });
   if (desktopSurface.receipt) events.onStatus(desktopSurface.receipt);
-  const browserOnlyConfigArgs: string[] = desktopSurface.args;
+  // Personal Codex memories, skills, plugins, hooks and MCP servers stay out of every product run; One alone gets
+  // the items the person switched on (capabilities/one-capabilities.ts).
+  const personalContext = codexPersonalContextArgs({
+    selection: selectionFor(runReq.agentId),
+    desktopControlGrant: runReq.desktopControlGrant === true,
+    userConfigIgnored: runReq.isolatedMcpConfig === true,
+    hostServerNames,
+    env: runReq.env ?? process.env,
+    cwd: runReq.cwd ?? agentRunCwd(),
+  });
+  events.onStatus(personalContext.receipt);
+  const browserOnlyConfigArgs: string[] = [...desktopSurface.args, ...personalContext.args];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).

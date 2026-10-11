@@ -140,5 +140,5 @@ export function deliverAutomationResult(input: AutomationNotificationInput): boo
         sourceMessageId, messageId: message.id, status: input.status,
         outputDigest: createHash("sha256").update(body).digest("hex"), deliveryState: "persisted" } });
     return true;
-  })();
+  }).immediate();
 }

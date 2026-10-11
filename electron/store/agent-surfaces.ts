@@ -99,7 +99,7 @@ export function recordAgentSurface(input: {
     const surface = getAgentSurface(input.id);
     if (!surface) throw new Error(`Agent surface registry write failed: ${input.id}`);
     return surface;
-  })();
+  }).immediate();
   queueMicrotask(() => emitDesktopStoreChange({ entity: "surface", id: input.id }));
   return result;
 }
@@ -182,7 +182,7 @@ export function patchAgentSurfaceState(input: SurfaceStatePatchRequest): Agentla
   const surface = getAgentSurface(input.surfaceId);
   if (!surface) throw new Error(`Agent surface state patch failed: ${input.surfaceId}`);
   return surface;
-  })();
+  }).immediate();
   queueMicrotask(() => emitDesktopStoreChange({ entity: "surface", id: input.surfaceId }));
   return result;
 }

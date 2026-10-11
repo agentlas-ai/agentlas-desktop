@@ -59,6 +59,11 @@ export type AutomaticGoalPreparation =
       causeCode?: string;
     };
 
+/** The decision prepareInvocationAutomaticGoal turns into a Goal: an execute-now request that is not a one-reply turn. */
+export function isGoalAdmittingDecision(decision: GoalIntakeDecision): boolean {
+  return decision.intent === "execute" && decision.commitment === "now" && decision.turnScope !== "single";
+}
+
 function safeIntakeFailureReason(error: unknown): string {
   return error instanceof Error && /^(?:auto_goal|goal|long_run)_[a-z_]+$/.test(error.message)
     ? error.message
@@ -81,6 +86,9 @@ export async function prepareInvocationAutomaticGoal(input: {
   userPrompt: string;
   permission: string;
   attachmentOnly?: boolean;
+  /** Daemon-run turns (2026-10-11): classify with the same resolver and stop before admission. A `bypass` whose decision
+   * satisfies isGoalAdmittingDecision is exactly the message this function would otherwise admit as a Goal. */
+  classifyOnly?: boolean;
   signal: AbortSignal;
   resolveIntent?: (
     source: GoalSourceMessage,
@@ -165,6 +173,7 @@ export async function prepareInvocationAutomaticGoal(input: {
     // A one-reply request stays an ordinary turn (owner 2026-09-25). Measured before: a one-line file
     // write became a Goal with 17 invocations and 7 verifier attempts for work done in invocation 1.
     if (decision.turnScope === "single") return { kind: "bypass", decision };
+    if (input.classifyOnly) return { kind: "bypass", decision };
     stage = "admission";
     const run = admitJudgedAutomaticGoal({
       goalId: `goal:auto-message:${source.messageId}`, chatId: source.chatId, sourceMessageId: source.messageId, decision,
@@ -249,7 +258,10 @@ function automaticGoalReplayBarrier(runId: string) {
 
 export function automaticGoalReplayBlockerCode(runId: string): string | null {
   const barrier = automaticGoalReplayBarrier(runId);
-  if (!barrier) return null;
+  // Owner rule 2026-10-05 (restated 2026-10-11): an earlier turn whose outcome is unknown never holds the Goal. The
+  // previous-turn memory (memory/previous-turn.ts) tells the next turn to check first. run_c37044fd retried 10/20/40
+  // minutes forever on this. A no-progress loop and serving reconciliation still hold.
+  if (!barrier || barrier.code === "runtime_turn_unsettled") return null;
   // Only the actual Main user-resume producer can capture this exact receipt
   // set. Wall clocks and generic user messages cannot acknowledge a later ACK.
   const resumed = getDb().prepare(`SELECT 1 FROM long_run_events WHERE run_id = ? AND seq > ?
@@ -343,5 +355,5 @@ export async function queueAutomaticGoalResume(
       .run(new Date().toISOString(), before.goalId);
     return { request,
       queued: resumeDesktopLongRunManually(before.id, getLongRun(before.id)!.version) };
-  })();
+  }).immediate();
 }

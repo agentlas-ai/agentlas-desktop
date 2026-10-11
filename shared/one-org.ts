@@ -83,6 +83,15 @@ export interface OneOrgMember {
   /** 이 팀원에게 고정된 모델(에이전트 단위 선택). 고정이 없으면 null — 자동 배정이다. */
   runtimeSelection: import("./types").RuntimeSelection | null;
   revision: number;
+  /**
+   * Present only when this seat's agent can no longer work (not installed, or its source folder is gone).
+   * `code` is machine-only; show `reason` in the owner's language and offer to replace the seat.
+   */
+  unavailable?: {
+    code: "agent_not_installed" | "source_missing" | "hidden_agent" | "seat_archived" | "seat_task_failed" | "seat_locked" | "seat_lease_invalid";
+    reason: { ko: string; en: string };
+    replaceable: boolean;
+  };
 }
 
 export interface OneOrgSlots {

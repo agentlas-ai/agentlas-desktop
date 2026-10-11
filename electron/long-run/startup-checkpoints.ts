@@ -446,7 +446,7 @@ export async function resumeLegacyOngoingBlockedGoals(dispatcher: CheckpointStar
           claimGoalRuntimeSelection(checkpoint, successorRunId);
           return { checkpoint, request: { ...request, runId: successorRunId,
             runtimeSelection: continuation.runtimeSelection, userPrompt: continuation.userPrompt } };
-        })();
+        }).immediate();
         const started = dispatcher.start(claimed.request, undefined, undefined, undefined, "goal-continuation");
         if (started.runId !== successorRunId) throw new Error("legacy_lifecycle_dispatch_identity_mismatch");
         recordGoalWake({ runId: id, chatId: claimed.request.chatId ?? "", source: "startup", invocationRunId: successorRunId, cause: "legacy-lifecycle" });

@@ -526,3 +526,7 @@ button.failureDot:focus-visible { outline: 2px solid var(--danger); outline-offs
 .popupDetails { color: var(--muted-deep); font-size: 11px; line-height: 1.5; }
 .popupDetails summary { width: fit-content; cursor: pointer; }
 .popupDetails p { margin: 8px 0 0; }
+
+.unavailableReason { display: block; margin-top: 2px; color: var(--warn); font-size: 11px; line-height: 1.35; }
+.replaceNeededButton { padding: 2px 8px; border: 1px solid var(--warn); border-radius: 6px; background: transparent; color: var(--warn); font-size: 11px; cursor: pointer; }
+.replaceNeededButton:focus-visible { outline: 2px solid var(--warn); outline-offset: 2px; }

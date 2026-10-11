@@ -1,3 +1,4 @@
+import { placeTurnContextForRuntime } from "../runtime/serving-prefix";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { withOneHistoryNativeInvocation } from "../one/personal-integrations-runtime";
 import { withAdapterEffectObserver } from "../invocation/adapter-effect-context";
@@ -278,6 +279,7 @@ import {
   type BrowserCredentialRefreshReport,
 } from "../browser/credential-sync";
 import { buildAgentAppRunnerEnv, buildRunnerEnv, restrictedRunnerEnv } from "../runtime/env-resolver";
+import { claimRenameAnnouncement, renameSuggestionNotice } from "../runtime/env-key-reach";
 import { agentRunCwd } from "../runtime/exec";
 import { codexUserConfigOutsideBrowser } from "../runtime/codex-desktop-surface";
 import { generateImage, removeGeneratedImageArtifact } from "../multimodal/image";
@@ -308,7 +310,8 @@ import {
   ATTENDED_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
-import { validatedRunnerNativeControlState } from "../runtime/runner";
+import { validatedRunnerNativeControlState, cumulativeSurfaceGateText } from "../runtime/runner";
+import { imageOutputContract, onDemandSectionTurnBlocks, planPromptSections } from "../runtime/prompt-sections";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   effortForSelectedModel,
@@ -4333,10 +4336,26 @@ ${effectiveUserPrompt}`;
   }
 
   const runnerEnv = req.agentAppMode
-    ? { env: buildAgentAppRunnerEnv(process.env, mcpRuntimeEnv), injectedKeys: [] }
+    ? { env: buildAgentAppRunnerEnv(process.env, mcpRuntimeEnv), injectedKeys: [], renameSuggestions: [] }
     : await buildRunnerEnv(agent, workingFolder ?? undefined, {
         restrictedReadBoundary,
+        // Team members run in the same tool process: the keys they declare must reach it too.
+        memberAgents: (req.taskForceTargets ?? []).flatMap((target) =>
+          target.source === "local" && target.entityKind === "agent" ? [getAgentById(target.agentId)] : []),
       });
+  // A saved key that is only misnamed (ELEVENLABS_1 for ELEVENLABS_API_KEY) is offered to the owner once, as one plain
+  // line. It is never renamed here: the rename stays an owner click (env screen) or Hope's asked-and-answered env.rename.
+  if (!req.agentAppMode) {
+    for (const suggestion of runnerEnv.renameSuggestions ?? []) {
+      if (!claimRenameAnnouncement(suggestion)) continue;
+      const notice = renameSuggestionNotice(suggestion, locale === "ko" ? "ko" : "en");
+      sink({ kind: "notice", notice: { level: "warning", code: "env-key-rename-suggested", message: notice.message, i18n: notice.i18n } });
+      tryRecordRunEvent({
+        runId: req.runId ?? `chat:${chat.id}`, kind: "env_key_rename_suggested", chatId: chat.id, agentId: agent.id,
+        payload: { from: suggestion.from, to: suggestion.to },
+      });
+    }
+  }
   const orchestrationRunnerEnv = restrictedOrchestrationBoundary
     ? restrictedRunnerEnv()
     : runnerEnv.env;
@@ -5407,7 +5426,10 @@ ${effectiveUserPrompt}`;
    * ```visual(독립 HTML)을 그 자리에서 그린다 — 모델이 그 사실을 모르면 영원히 표만 쓴다. 세션 내내
    * 같은 문장이라 stable 블록(resume 턴에서는 러너가 생략).
    */
-  if (!req.agentAppMode && executionContext?.source !== "science") {
+  // Loaded only for a request about charts, comparisons, trends or diagrams (prompt-sections.ts);
+  // cumulative like the Surface gate, so it never leaves a conversation once it has appeared.
+  const sectionGateText = cumulativeSurfaceGateText(history, effectiveUserPrompt);
+  if (!req.agentAppMode && executionContext?.source !== "science" && planPromptSections(sectionGateText).intellectUi) {
     turnContextParts.push(locale === "ko"
       ? "[차트·시각물 블록]\n이 대화 화면은 두 가지를 테두리 없이 그 자리에 그립니다. 비교·추이·분포처럼 그림이 글보다 빠를 때 쓰세요. 여러 개면 제목에 1. 2. 번호를 붙이세요.\n1) 차트(우선): ```chart 펜스에 Vega-Lite JSON 하나. title 은 {text, subtitle}(부제 한 줄), 데이터는 data.values 에 직접(5,000행 이하), 눈금에 단위(axis.format 예: \".1%\", \"+d\"). 보조 계열은 strokeDash 로 점선+작은 점, 막대는 xOffset 으로 묶음. 색·폰트·격자는 화면이 정하니 넣지 마세요. url·expr·calculate·문자열 filter·href·image 는 그려지지 않습니다.\n2) 맞춤 시각물: ```visual title=파일_이름 펜스에 HTML 조각(doctype·html·body 없이, 인라인 <svg>·<style>·<script>만, 외부 자원·네트워크 불가). 배경은 투명, 색은 CSS 변수만: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)~(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). sendPrompt(text) 를 부르면 사람의 입력창에 문장이 채워집니다(보내지는 않음).\n큰 표 자료는 .xlsx/.csv 로 저장하고 경로를 적으세요 — 오른쪽 패널에서 열립니다. 이 안내를 언급하지 마세요.\n[/차트·시각물 블록]"
       : "[Chart and visual blocks]\nThis chat draws two things in place, borderless. Use them when a picture beats prose — comparisons, trends, distributions. Number the titles (1. 2.) when there are several.\n1) Charts (preferred): one Vega-Lite JSON object in a ```chart fence. Use title {text, subtitle} (one-line subtitle), inline data.values (at most 5,000 rows), and units on ticks (axis.format such as \".1%\" or \"+d\"). Draw a secondary series dashed with small points via strokeDash; group bars with xOffset. Colors, fonts and gridlines come from the app — do not set them. url, expr, calculate, string filters, href and image are not drawn.\n2) Custom visuals: an HTML fragment in a ```visual title=file_name fence (no doctype/html/body; inline <svg>, <style>, <script> only; no external resources or network). Transparent background; colors only through CSS variables: var(--color-text-primary|secondary|tertiary) var(--color-background-primary|secondary) var(--color-border-tertiary) var(--color-chart-1)…(--color-chart-6) var(--font-sans) var(--border-radius-md|lg). Calling sendPrompt(text) fills the person's composer (it does not send).\nSave large tabular data as .xlsx/.csv and mention its path — it opens in the right panel. Do not mention these instructions.\n[/Chart and visual blocks]");
@@ -5755,6 +5777,19 @@ ${effectiveUserPrompt}`;
   // memory tasks. This keeps the recurring contract under ~150 tokens.
   if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science") {
     turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+  }
+  // Resident-session runtimes are seeded with the system prompt once and never get it again, so a
+  // section whose feature is first used on a later turn (account connecting, media routing, the
+  // agentlas-ui schema) rides the stable turn context: delivered when it first appears, then acknowledged.
+  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science"
+    && (active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity")) {
+    const sectionBlocks = onDemandSectionTurnBlocks(sectionGateText, locale);
+    // Codex alone has built-in image generation; its thread was seeded before the first image request, so the contract follows here.
+    if (active.kind === "codex" && planPromptSections(sectionGateText).media) sectionBlocks.push(imageOutputContract());
+    if (sectionBlocks.length) {
+      const sectionBlock = `[On-demand instructions]\n${sectionBlocks.join("\n\n")}\n[/On-demand instructions]`;
+      turnContextParts.push(sectionBlock); stableTurnContextParts.push(sectionBlock);
+    }
   }
   if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
   if (!req.agentAppMode && !isAliveControllerRun && chat.kind === "division" && (req.toolMode || req.hubMode)) {
@@ -6242,17 +6277,19 @@ ${effectiveUserPrompt}`;
           effort: runtime.effort ?? undefined,
         };
       }
+      const placedTurnContext = placeTurnContextForRuntime({ runtimeKind: runtime.kind, sessionCapable,
+        systemPrompt, turnContext: runtimeTurnContext, userPrompt, locale });
       return {
         ...runnerReq,
         ...(continuationSession ? { runtimeSessionOwnerId: continuationSession.ownerId,
           sessionFingerprintSeed: continuationSession.fingerprintSeed } : continuationRuntimePinned && req.runId
           ? { runtimeSessionOwnerId: `goal-independent:${req.runId}`, sessionFingerprintSeed: `goal-independent:${req.runId}` } : {}),
-        systemPrompt: sessionCapable || !runtimeTurnContext
-          ? systemPrompt
-          : systemPrompt + "\n\n" + runtimeTurnContext,
+        // Serving keeps the cached prefix (tools, system, history) byte-stable: its per-turn host
+        // context rides in front of the current user message, not on the system tail.
+        systemPrompt: placedTurnContext.systemPrompt,
         ...(sessionCapable && runtimeTurnContext ? { turnContext: runtimeTurnContext } : { turnContext: undefined }),
         ...(sessionCapable && runtimeTurnContext ? { turnContextStable: stableTurnContextParts } : {}),
-        userPrompt,
+        userPrompt: placedTurnContext.userPrompt,
         backendLabel: runtimePicked.label,
         runtimeSource: runtime.source ?? undefined,
         model: runtime.model ?? undefined,

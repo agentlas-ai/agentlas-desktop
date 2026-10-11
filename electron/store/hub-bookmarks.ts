@@ -395,7 +395,7 @@ export function claimDeviceHubBookmarks(workspaceId: string): number {
       claimed += 1;
     }
     return claimed;
-  })();
+  }).immediate();
 }
 
 export function reconcileHubBookmarkServerSnapshot(
@@ -460,7 +460,7 @@ export function reconcileHubBookmarkServerSnapshot(
       if (existing && existing.sync_state !== "clean") continue;
       upsertClean.run(params);
     }
-  })();
+  }).immediate();
 }
 
 export function markHubBookmarkUpsertSynced(

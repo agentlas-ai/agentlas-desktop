@@ -143,7 +143,7 @@ export function supersedeExplicitMemory(entry: Pick<MemoryEntry, "id">, blockKey
     );
     getDb().prepare("UPDATE memory_entries SET superseded_at = ? WHERE id = ? AND superseded_at IS NULL").run(now, old.id);
     return old.id;
-  })();
+  }).immediate();
 }
 
 /** Read-only projection filter. Unmarked legacy/manual lines are never guessed. */

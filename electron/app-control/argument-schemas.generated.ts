@@ -617,6 +617,7 @@ export const APP_CONTROL_ARGUMENT_SCHEMAS: Readonly<Record<string, Record<string
 "mcpTools.status":{"type":"object","properties":{},"additionalProperties":false},
 "mcpTools.supplyRunKeys":{"type":"object","properties":{"runId":{"type":"string"},"outcome":{"enum":["provided","declined"]}},"required":["runId","outcome"],"additionalProperties":false},
 "mcpTools.test":{"type":"object","properties":{"id":{"type":"string"}},"required":["id"],"additionalProperties":false},
+"mcpTools.useStoredRunKey":{"type":"object","properties":{"runId":{"type":"string"},"toolId":{"type":"string"},"keyName":{"type":"string"},"storedName":{"type":"string"}},"required":["runId","toolId","keyName","storedName"],"additionalProperties":false},
 "media.copyImage":{"type":"object","properties":{"payload":{"type":"object","properties":{"src":{"type":"string"},"suggestedName":{"type":"string"}},"required":["src"],"additionalProperties":false}},"required":["payload"],"additionalProperties":false},
 "media.saveImage":{"type":"object","properties":{"payload":{"type":"object","properties":{"src":{"type":"string"},"suggestedName":{"type":"string"}},"required":["src"],"additionalProperties":false}},"required":["payload"],"additionalProperties":false},
 "memoryDreaming.setEnabled":{"type":"object","properties":{"enabled":{"enum":[false,true]}},"required":["enabled"],"additionalProperties":false},

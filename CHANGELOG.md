@@ -3,9 +3,13 @@
 ## 1.3.2 — 2026-10-11
 
 - Includes everything planned for 1.3.0 and 1.3.1, which were not published: group rooms discuss, with two or three teammates answering at once, and an update is no longer refused while an AI model is kept warm between messages.
-- Pressing update always installs and restarts. Running work is paused for the update and continues after the restart instead of holding the update back, and the update says it is installing right away. Opening Agentlas again while an update is being installed no longer cancels the update.
-- "Restart and install" no longer hangs on a large, busy store. The safety copy taken before an update started over every time the app wrote to its database, so on a store of a gigabyte or more it never finished and the button seemed to do nothing. The copy is now taken in one step and can never hold up the update.
-- When Hope ends an answer in the personal window with a question, its choices appear as a card you can pick from.
+- Whatever you type is taken. A message shows once and runs; if the agent is busy it waits its turn and starts on its own. No red notices, no "reception" cards, and your text never bounces back to the composer. Typing is never overwritten while you write.
+- Pressing update always installs and restarts, even while work is running; opening Agentlas during the install no longer cancels it.
+- Group rooms: the room plans from your newest message, a "do this every day" request becomes a running Goal, a seat whose agent is gone says so and offers a replacement, and saved keys such as ElevenLabs reach every teammate.
+- Agents no longer carry your personal Codex, Claude Code or Cursor memories and skills; each request is much smaller. Instructions for connecting accounts, images and charts load only when a turn needs them, and Agentlas models keep a stable prefix so it can be cached.
+- Local models on Ollama get a context window sized to the prompt, so ordinary turns and multi-step tool turns fit.
+- A Goal whose earlier step ended with an unknown result continues with a note to check first, instead of retrying forever.
+- Setup no longer shows the API-key block on the AI step; keys stay in Settings. Hope's closing questions in the personal window appear as a card.
 - This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 
 ## 1.3.1 — 2026-10-11

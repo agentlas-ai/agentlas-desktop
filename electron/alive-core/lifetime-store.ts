@@ -106,7 +106,7 @@ export class AliveLifetimeStore {
         .run(input.agentId, input.purpose, input.enabled === false ? "suspended" : "enabled", JSON.stringify(input.state ?? {}), JSON.stringify(input.budget), JSON.stringify(input.runtimeBinding ?? null), nowMs, nowMs);
       this.event(input.agentId, "agent.created", { purpose: input.purpose }, nowMs);
       return this.get(input.agentId)!;
-    })();
+    }).immediate();
   }
   update(agentId: string, patch: { state?: Record<string, unknown>; budget?: AliveBudget; runtimeBinding?: unknown }, nowMs: number): void {
     if (patch.budget) validateBudget(patch.budget);
@@ -121,7 +121,7 @@ export class AliveLifetimeStore {
       this.db.prepare("UPDATE alive_agents SET status=?,control_epoch=control_epoch+1,version=version+1,updated_at_ms=? WHERE agent_id=?")
         .run(enabled ? "enabled" : "suspended", nowMs, agentId);
       this.event(agentId, enabled ? "agent.enabled" : "agent.suspended", { reasonCode }, nowMs);
-    })();
+    }).immediate();
   }
   attach(input: AliveAttachment, nowMs: number): void {
     this.db.transaction(() => {
@@ -132,7 +132,7 @@ export class AliveLifetimeStore {
       this.db.prepare("INSERT INTO alive_attachments(attachment_id,agent_id,domain,scope_json,status) VALUES (?,?,?,?,?) ON CONFLICT(attachment_id) DO UPDATE SET scope_json=excluded.scope_json,status=excluded.status")
         .run(input.attachmentId, input.agentId, input.domain, scope, input.status);
       this.event(input.agentId, `attachment.${input.status}`, { attachmentId: input.attachmentId, domain: input.domain }, nowMs);
-    })();
+    }).immediate();
   }
   attachments(agentId: string): AliveAttachment[] {
     return (this.db.prepare("SELECT * FROM alive_attachments WHERE agent_id=? ORDER BY attachment_id").all(agentId) as Row[])
@@ -227,7 +227,7 @@ export class AliveLifetimeStore {
       if (result.changes !== 1) return false;
       this.event(action.agentId, "action.dispatching", { actionId }, nowMs);
       return true;
-    })();
+    }).immediate();
   }
   finishAction(result: AliveActionResult, nowMs: number): boolean {
     if (typeof result.actionId !== "string" || typeof result.ok !== "boolean"
@@ -264,7 +264,7 @@ export class AliveLifetimeStore {
       this.event(row.agent_id, "action.settled", { actionId: result.actionId, ok: result.ok,
         code: result.code, invocationRunId: result.invocationRunId ?? null }, nowMs);
       return true;
-    })();
+    }).immediate();
   }
   reserve(agentId: string, expectedEpoch: number, reasonCode: string, nowMs: number): string | null {
     return this.db.transaction(() => {
@@ -286,7 +286,7 @@ export class AliveLifetimeStore {
         .run(wakeId, agentId, expectedEpoch, JSON.stringify(agent.runtimeBinding), nowMs);
       this.event(agentId, "wake.reserved", { wakeId, reasonCode, controlEpoch: expectedEpoch }, nowMs);
       return wakeId;
-    })();
+    }).immediate();
   }
   markRunning(wakeId: string): void { this.db.prepare("UPDATE alive_wakes SET status='running' WHERE wake_id=? AND status='reserved'").run(wakeId); }
   /**
@@ -349,7 +349,7 @@ export class AliveLifetimeStore {
       this.update(agentId, { state: { ...agent.state, usageUnknown: false } }, nowMs);
       this.event(agentId, "usage.unknown-acknowledged", { wakeIds: waived }, nowMs);
       return waived;
-    })();
+    }).immediate();
   }
   settle(receipt: AliveRuntimeReceipt, nowMs: number): boolean {
     if (!["completed", "failed", "cancelled", "interrupted"].includes(receipt.status)) return false;
@@ -398,6 +398,6 @@ export class AliveLifetimeStore {
           reasonCode: !validDecision ? "alive.action-invalid" : !sameEpoch ? "alive.action-epoch-changed" : "alive.action-grant-spent" }, nowMs);
       }
       return true;
-    })();
+    }).immediate();
   }
 }

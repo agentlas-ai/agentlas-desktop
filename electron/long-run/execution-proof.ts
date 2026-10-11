@@ -113,7 +113,7 @@ export function recordMainExecutionProofs(input: {
             scopeStartSeq:scope.start.seq,scopeEndSeq:scope.end.seq,toolStartSeq:tools.start.seq,toolResultSeq:tools.result.seq,
             toolResultDigest:digest(tools.last.toolResultPreview),toolResultPreview:preview,previewDigest:digest(preview)}});
       }
-    })();
+    }).immediate();
   } catch { /* Missing/unrecordable proof cannot become successful evidence. */ }
 }
 

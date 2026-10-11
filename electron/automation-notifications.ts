@@ -40,5 +40,5 @@ export function claimAutomationNotification(input: AutomationNotificationInput):
       payload: { status: input.status, observationDigest: digest, policy: automation.monitor?.notificationPolicy ?? "every_run",
         deliveryState: "attempted", executionAvailability: "app-running" } });
     return true;
-  })();
+  }).immediate();
 }

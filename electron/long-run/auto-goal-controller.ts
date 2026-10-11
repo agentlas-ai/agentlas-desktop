@@ -83,7 +83,7 @@ export function admitJudgedAutomaticGoal(input: {
     const bound = bindCurrentGoalRevisionToLongRun(run.id, run.version);
     getDb().prepare("UPDATE chats SET goal_id = ? WHERE id = ?").run(input.goalId, input.chatId);
     return bound;
-  })();
+  }).immediate();
 }
 
 /** Persist control before adapter interruption. A non-settled worker leaves
@@ -134,5 +134,5 @@ export function controlAutomaticGoal(input: {
     appendLongRunEvent({ runId: run.id, kind: "run.user_control", actorKind: "user", actorId: source.messageId,
       payload: { command: input.command, status: run.status } });
     return getLongRun(run.id)!;
-  })();
+  }).immediate();
 }

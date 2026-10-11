@@ -18,6 +18,8 @@
 // never block on a human: callers pass interactive:false and the gate is a
 // pure no-op that emits nothing.
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
+import { hasEnvVar, listEnvKeys, renameEnvVar } from "../secrets/vault";
+import { mediaToolEnvKeys, planEnvKeyRenames } from "../runtime/env-key-reach";
 import type { AutoSelectedMcpTool } from "../mcp-tools/auto-select";
 import type { McpInvocationEvent, McpRunKeyRequest } from "../../shared/types";
 
@@ -85,9 +87,17 @@ export function buildRunKeyRequest(
   runId: string,
   tools: AutoSelectedMcpTool[],
   timeoutMs = runKeyElicitationTimeoutMs(),
+  /** Saved env key names (value-free). A saved name that looks like a missing key is offered on the sheet. */
+  storedNames: readonly string[] = [],
 ): McpRunKeyRequest | null {
   const missing = tools.filter((tool) => tool.state === "missing-key" && tool.missingEnv.length > 0);
   if (missing.length === 0) return null;
+  const knownRead = [
+    ...MCP_TOOL_CATALOG.flatMap((entry) => entry.envRequirements.map((req) => req.key)),
+    ...mediaToolEnvKeys(),
+  ];
+  const wanted = missing.flatMap((tool) => tool.missingEnv);
+  const matches = new Map(planEnvKeyRenames(storedNames, wanted, knownRead).map((s) => [s.to, s.from]));
   return {
     requestId: runId,
     runId,
@@ -102,6 +112,7 @@ export function buildRunKeyRequest(
           const requirement = entry?.envRequirements.find((req) => req.key === key);
           return {
             key,
+            ...(matches.has(key) ? { storedMatch: matches.get(key)! } : {}),
             ...(requirement?.label ? { label: requirement.label } : {}),
             ...(requirement?.labelEn ? { labelEn: requirement.labelEn } : {}),
             ...(requirement?.hint ? { hint: requirement.hint } : {}),
@@ -193,6 +204,31 @@ export async function resolveRunKeysFromNativeReceipt(runId:string):Promise<{ok:
   entry.settle('provided');return{ok:true};
 }
 
+/**
+ * The owner's yes on the sheet: "use the saved key <storedName> as <keyName>". Main accepts it only for a name it
+ * offered itself on this pending request, renames inside the vault (the value never leaves Main), and releases the run
+ * only when every key the request asked for is now saved. It never runs without the sheet's click.
+ */
+export async function resolveRunKeyWithStoredName(
+  runId: string,
+  toolId: string,
+  keyName: string,
+  storedName: string,
+): Promise<{ ok: boolean; resolved: boolean }> {
+  const entry = pendingByRunId.get(runId);
+  if (!entry || entry.settled || entry.request.expiresAt <= Date.now()) return { ok: false, resolved: false };
+  const offered = entry.request.tools.find((tool) => tool.id === toolId)?.envKeys.find((key) => key.key === keyName);
+  if (!offered || offered.storedMatch !== storedName) return { ok: false, resolved: false };
+  const renamed = await renameEnvVar(storedName, keyName);
+  if (!renamed.ok) return { ok: false, resolved: false };
+  if (pendingByRunId.get(runId) !== entry || entry.settled) return { ok: true, resolved: false };
+  const wanted = entry.request.tools.flatMap((tool) => tool.envKeys.map((key) => key.key));
+  const saved = await Promise.all(wanted.map((key) => hasEnvVar(key).catch(() => false)));
+  if (!saved.every(Boolean) || entry.settled) return { ok: true, resolved: false };
+  entry.settle("provided");
+  return { ok: true, resolved: true };
+}
+
 /** Test/diagnostic surface: is a key window pending for this run? */
 export function hasPendingRunKeyElicitation(runId: string): boolean {
   return pendingByRunId.has(runId);
@@ -248,7 +284,11 @@ export async function runMcpKeyElicitationGate<TContext extends { tools: AutoSel
     fallbackPrompt: "",
   };
   if (!opts.interactive || !opts.runId) return skipped;
-  const request = buildRunKeyRequest(opts.runId, opts.context.tools);
+  let storedNames: string[] = [];
+  if (opts.context.tools.some((tool) => tool.state === "missing-key" && tool.missingEnv.length > 0)) {
+    try { storedNames = await listEnvKeys(); } catch { /* a locked vault only drops the rename offer */ }
+  }
+  const request = buildRunKeyRequest(opts.runId, opts.context.tools, runKeyElicitationTimeoutMs(), storedNames);
   if (!request) return skipped;
   pruneDeferredKeys();
   const scope = opts.goalScope;

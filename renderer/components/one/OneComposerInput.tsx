@@ -2,6 +2,7 @@
 
 import { forwardRef, memo, useCallback, useEffect, useImperativeHandle, useLayoutEffect, useRef } from "react";
 import type { Ref, TextareaHTMLAttributes } from "react";
+import { decideComposerEnter, decideComposerWrite } from "../../lib/one-composer-ime";
 
 export type OneComposerValue = string | ((current: string) => string);
 
@@ -51,8 +52,9 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
   const dirty = useRef(false);
   const draftTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const sizeFrame = useRef<number | null>(null);
+  // True from compositionstart to compositionend. Only the browser's own events change it.
   const composing = useRef(false);
-  const compositionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastCompositionEndAt = useRef<number | null>(null);
 
   const getValue = useCallback(() => input.current?.value ?? value.current, []);
   const flushDraft = useCallback(() => {
@@ -87,7 +89,11 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
     scheduleResize();
   }, [flushDraft, scheduleResize]);
   const setValue = useCallback((update: OneComposerValue) => {
-    const next = typeof update === "function" ? update(getValue()) : update;
+    const current = getValue();
+    const next = typeof update === "function" ? update(current) : update;
+    // A background update never overwrites what the owner is typing: same text is not rewritten, and nothing is
+    // written in the middle of an IME composition (that ends the composition and drops the syllable being built).
+    if (decideComposerWrite({ current, next, composing: composing.current }) === "skip") return;
     if (input.current) input.current.value = next;
     publish(next, true);
   }, [getValue, publish]);
@@ -102,8 +108,7 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
     scope.current = nextKey;
     if (input.current) input.current.value = next;
     composing.current = false;
-    if (compositionTimer.current !== null) clearTimeout(compositionTimer.current);
-    compositionTimer.current = null;
+    lastCompositionEndAt.current = null;
     publish(next, true);
   }, [getValue, flushDraft, publish]);
   useImperativeHandle(ref, () => ({
@@ -138,7 +143,6 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
     return () => {
       flushDraft();
       if (sizeFrame.current !== null) cancelAnimationFrame(sizeFrame.current);
-      if (compositionTimer.current !== null) clearTimeout(compositionTimer.current);
       window.removeEventListener("pagehide", flushDraft);
       document.removeEventListener("visibilitychange", onVisibility);
     };
@@ -149,22 +153,35 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
     ref={mountInput}
     rows={rows}
     defaultValue={initial.current.value}
-    onChange={event => publish(event.currentTarget.value, false)}
-    onCompositionStart={() => {
-      if (compositionTimer.current !== null) clearTimeout(compositionTimer.current);
-      composing.current = true;
+    onChange={event => {
+      // An input event that is not part of a composition proves no composition is open, even if compositionend was
+      // missed (the textarea was re-mounted or lost focus mid-composition). A stuck flag would swallow every Enter.
+      if (!(event.nativeEvent as InputEvent).isComposing) composing.current = false;
+      publish(event.currentTarget.value, false);
     }}
+    onCompositionStart={() => { composing.current = true; }}
     onCompositionEnd={() => {
-      // Chromium sends compositionend before its committing Enter keydown.
-      compositionTimer.current = setTimeout(() => { composing.current = false; compositionTimer.current = null; }, 0);
+      // Chromium sends compositionend before the Enter keydown that committed it; the keydown handler reads this time.
+      composing.current = false;
+      lastCompositionEndAt.current = performance.now();
     }}
     onBlur={event => { composing.current = false; flushDraft(); callbacks.current.onBlur?.(event); }}
     onKeyDown={event => {
       callbacks.current.onKeyDown?.(event);
-      if (event.defaultPrevented || event.nativeEvent.isComposing || event.keyCode === 229) return;
-      if (event.key !== "Enter" || event.shiftKey) return;
+      if (event.defaultPrevented) return;
+      const decision = decideComposerEnter({
+        key: event.key,
+        shiftKey: event.shiftKey,
+        isComposing: event.nativeEvent.isComposing,
+        keyCode: event.keyCode,
+        msSinceCompositionEnd: lastCompositionEndAt.current === null ? null : performance.now() - lastCompositionEndAt.current,
+      });
+      if (decision === "ignore") return;
       event.preventDefault();
-      if (composing.current) return;
+      if (decision === "swallow") return;
+      // This key was not composing, so no composition is open: a flag left over from a missed compositionend must not
+      // make the clear that follows a send a no-op.
+      composing.current = false;
       flushDraft();
       callbacks.current.onSubmit(event.currentTarget.value);
     }}

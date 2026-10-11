@@ -199,7 +199,7 @@ export function recordExperienceApplication(input: {
         payload: { ...snapshot, executionAgentId: input.executionAgentId, runtimeKey, applicationKey,
           phase: "dispatch_with_context", rankingPolicy: "relevance-confidence-relation-v1", itemAttribution: "unknown" },
       }).id;
-    })();
+    }).immediate();
   } catch {
     // Missing legacy ledger, concurrent forget or optional projection damage
     // can remove evidence, never interrupt a base-agent dispatch.

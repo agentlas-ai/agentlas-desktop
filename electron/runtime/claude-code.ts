@@ -1,3 +1,5 @@
+import { selectionFor } from "../capabilities/one-capabilities";
+import { withClaudePersonalContext } from "./claude-personal-context";
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
 import { claudeBrowserSurfaceArgs, claudeEngineBrowserEnabled } from "./claude-browser-surface";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -1121,7 +1123,13 @@ const runClaudeTurn = async (
   // (`--allowedTools`)은 켜기만 하므로, 선언되지 않은 호출을 거절하는 곳은 여기뿐이다.
   const executionSettings = await withProductReplyLanguage(await claudeExecutionSettings(runReq), runReq.locale);
   const productSettings = withoutPersonalClaudeInstructions(executionSettings, runReq.env ?? process.env);
-  const toolBrokerArgs = productSettings ? ["--settings", productSettings] : [];
+  // Personal skills, plugins and project memory stay out of every product run; One alone gets the ones the person
+  // switched on (capabilities/one-capabilities.ts, claude-personal-context.ts). A settings overlay, not a config-dir mirror:
+  // Claude's sign-in is keyed by its config dir.
+  const personalSettings = withClaudePersonalContext(productSettings, selectionFor(runReq.agentId),
+    path.resolve((runReq.env ?? process.env).CLAUDE_CONFIG_DIR || path.join((runReq.env ?? process.env).HOME || os.homedir(), ".claude")),
+    req.cwd ?? agentRunCwd());
+  const toolBrokerArgs = personalSettings ? ["--settings", personalSettings] : [];
   const noToolsArgs = runReq.untrustedNoTools
     ? [
         // Claude's safe-mode disables even an explicit --mcp-config. Keep it

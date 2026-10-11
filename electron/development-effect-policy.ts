@@ -176,7 +176,9 @@ function codedIpcError(channel: string, error: unknown): unknown {
   if (!isIpcErrorCode(code)) return error;
   const message = error instanceof Error ? error.message : String((error as { message?: unknown }).message ?? "");
   const encoded = encodeIpcErrorMessage(code, message);
-  console.warn(`[ipc] refused channel=${channel.slice(0, 96)} code=${code}`);
+  const detail = (error as { detail?: unknown }).detail;
+  const detailText = typeof detail === "string" && /^[A-Za-z0-9_=,.:-]{1,300}$/.test(detail) ? ` ${detail}` : "";
+  console.warn(`[ipc] refused channel=${channel.slice(0, 96)} code=${code}${detailText}`);
   if (encoded === message) return error;
   const wrapped = new Error(encoded);
   wrapped.name = error instanceof Error ? error.name : "Error";

@@ -1,7 +1,7 @@
 // 아이콘 중심 업데이트 행 — 실제 업데이트가 있을 때만 사이드바 하단에 노출.
 //   - available:   새 버전 발견 (자동 다운로드 시작) 알림
 //   - downloading: 진행률 표시
-//   - downloaded:  "재시작 업데이트" 강조 버튼 (dismissed 전까지)
+//   - downloaded:  같은 한 줄에서 다운로드 아이콘으로 재시작 (dismissed 전까지)
 //   - manual-required: 앱 내 복구 재시도와 사용자 선택형 대체 경로 노출
 //   - checking / not-available / routine error: 노출하지 않음 — 백그라운드로 조용히.
 //
@@ -9,7 +9,7 @@
 // 새 버전이 다시 다운로드되면 자동으로 다시 노출.
 "use client";
 import { useEffect, useId, useRef, useState } from "react";
-import { IconAlertTriangle, IconCheck, IconChevronDown, IconClose, IconDownload, IconRefresh } from "@/components/Icon";
+import { IconAlertTriangle, IconClose, IconDownload, IconRefresh } from "@/components/Icon";
 import { ipc, updaterEvents } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { UpdaterState } from "@/lib/types";
@@ -184,73 +184,54 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
       aria-busy={isDownloading || isInstalling}
     >
       {isDownloaded ? (
-        collapsed ? (
-          <button
-            type="button"
-            onClick={() => void install()}
-            className="sidenav-update-action"
-            aria-label={t("update.restart_action")}
-            title={`${t("update.ready_version", { version: state.version ?? "?" })} · ${t("update.restart_now")}`}
-          >
-            <IconRefresh size={18} />
-            <span className="sidenav-update-ready-dot" aria-hidden="true" />
-          </button>
-        ) : (
-          <>
-            <div className="sidenav-update-head">
-              <button
-                type="button"
-                className="sidenav-update-secondary"
-                aria-label={showReleaseNotes ? t("update.hide_whats_new") : t("update.whats_new")}
-                title={showReleaseNotes ? t("update.hide_whats_new") : t("update.whats_new")}
-                aria-expanded={showReleaseNotes}
-                aria-controls={releaseNotesId}
-                onClick={() => setShowReleaseNotes((visible) => !visible)}
-              >
-                <span className="sidenav-update-icon" aria-hidden="true"><IconCheck size={16} /></span>
-                <span className="sidenav-update-copy">
-                  <strong className="sidenav-update-version">v{state.version ?? "?"}</strong>
-                  <span>{t("update.status.ready")}</span>
-                </span>
-                <span className="sidenav-update-chevron" data-open={showReleaseNotes ? "true" : "false"} aria-hidden="true">
-                  <IconChevronDown size={12} />
-                </span>
-              </button>
-              <button
-                type="button"
-                onClick={() => void install()}
-                className="sidenav-update-action"
-                aria-label={t("update.restart_action")}
-                title={`${t("update.restart_action")} · ${t("update.ready_description")}`}
-              >
-                <IconRefresh size={18} />
-              </button>
-              <button
-                type="button"
-                onClick={() => state.version && setDismissedVersion(state.version)}
-                aria-label={t("update.dismiss")}
-                title={t("update.dismiss")}
-                className="sidenav-update-dismiss"
-              >
-                <IconClose size={15} aria-hidden="true" />
-              </button>
-            </div>
-            {deferredCopy && (
-              <p className="sidenav-update-feedback" role="status" data-update-resume-deferred={laterChosen && !installDeferred ? "true" : undefined}>
-                {deferredCopy}
-              </p>
+        <>
+          <div className="sidenav-update-head">
+            <button
+              type="button"
+              onClick={() => void install()}
+              className="sidenav-update-action"
+              aria-label={t("update.restart_action")}
+              title={`${t("update.ready_version", { version: state.version ?? "?" })} · ${t("update.restart_now")}`}
+            >
+              <IconDownload size={18} />
+            </button>
+            {!collapsed && (
+              <>
+                <button
+                  type="button"
+                  className="sidenav-update-secondary"
+                  aria-label={showReleaseNotes ? t("update.hide_whats_new") : t("update.whats_new")}
+                  title={showReleaseNotes ? t("update.hide_whats_new") : t("update.whats_new")}
+                  aria-expanded={showReleaseNotes}
+                  aria-controls={releaseNotesId}
+                  onClick={() => setShowReleaseNotes((visible) => !visible)}
+                >
+                  <span className="sidenav-update-copy">
+                    <strong className="sidenav-update-version">v{state.version ?? "?"}</strong>
+                  </span>
+                </button>
+                <span className="sidenav-update-percent" aria-hidden="true">100%</span>
+                <span className="sr-only">{t("update.status.ready")}</span>
+              </>
             )}
-            {showReleaseNotes && (
-              <div className="sidenav-update-changelog" id={releaseNotesId}>
-                <p className="sidenav-update-description">{t("update.ready_description")}</p>
-                <strong>{t("update.changelog_title")}</strong>
-                {releaseNoteLines.length > 0 ? (
-                  <ul>
-                    {releaseNoteLines.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}
-                  </ul>
-                ) : (
-                  <p>{t("update.changelog_unavailable")}</p>
-                )}
+          </div>
+          {!collapsed && deferredCopy && (
+            <p className="sidenav-update-feedback" role="status" data-update-resume-deferred={laterChosen && !installDeferred ? "true" : undefined}>
+              {deferredCopy}
+            </p>
+          )}
+          {!collapsed && showReleaseNotes && (
+            <div className="sidenav-update-changelog" id={releaseNotesId}>
+              <p className="sidenav-update-description">{t("update.ready_description")}</p>
+              <strong>{t("update.changelog_title")}</strong>
+              {releaseNoteLines.length > 0 ? (
+                <ul>
+                  {releaseNoteLines.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}
+                </ul>
+              ) : (
+                <p>{t("update.changelog_unavailable")}</p>
+              )}
+              <div className="sidenav-update-changelog-actions">
                 <button
                   type="button"
                   className="sidenav-update-release-link"
@@ -258,10 +239,19 @@ export function UpdateBanner({ collapsed = false }: { collapsed?: boolean }) {
                 >
                   {t("update.open_release_notes")}
                 </button>
+                <button
+                  type="button"
+                  onClick={() => state.version && setDismissedVersion(state.version)}
+                  aria-label={t("update.dismiss")}
+                  title={t("update.dismiss")}
+                  className="sidenav-update-dismiss"
+                >
+                  <IconClose size={15} aria-hidden="true" />
+                </button>
               </div>
-            )}
-          </>
-        )
+            </div>
+          )}
+        </>
       ) : isManual ? (
         <>
           {(!collapsed || (!canUseOfficialInstaller && !state.canRetry)) && (
@@ -320,7 +310,7 @@ function UpdateProgress({ progress, installing, label }: { progress?: number; in
         <circle className="sidenav-update-progress-track" cx="18" cy="18" r="15" />
         <circle className="sidenav-update-progress-fill" cx="18" cy="18" r="15" pathLength="100" strokeDasharray={progress === undefined ? "24 76" : "100"} strokeDashoffset={progress === undefined ? 0 : 100 - progress} />
       </svg>
-      {installing ? <IconRefresh size={14} /> : <IconDownload size={14} />}
+      {installing ? <IconRefresh size={18} /> : <IconDownload size={18} />}
     </span>
   );
 }

@@ -50,12 +50,44 @@ const MENU_TOOLS = [
 
 /** Stable provider schemas work with adapters that snapshot their wire menu once.
  * Workforce uses its exact eager broker inventory until it supports menu handles. */
-export function installLazyToolMenu(tools: OpenAiToolDef[], byName: Map<string, ResolvedTool>, enabled: boolean, oversizedOnly = false): OpenAiToolDef[] {
+/** Smaller sets used to ship every schema eagerly. Measured 2026-10-11: 12 browser tools cost ~2.4k tokens on every request
+ * of every step; the menu plus its server index costs well under half of that and a single prepare round trip. */
+const LAZY_MIN_TOOLS = 8;
+const LAZY_MIN_SCHEMA_BYTES = 6_144;
+const INDEX_NAMES_PER_SERVER = 12;
+
+/** One short line per MCP server (key, tool count, first tool names) so the model can prepare an exact name without browsing first. */
+export function toolMenuServerIndex(tools: OpenAiToolDef[], byName: Map<string, ResolvedTool>): string {
+  const perServer = new Map<string, string[]>();
+  for (const tool of tools) {
+    const resolved = byName.get(tool.function.name);
+    if (resolved?.kind !== "mcp") continue;
+    const names = perServer.get(resolved.serverConfigKey) ?? [];
+    names.push(tool.function.name);
+    perServer.set(resolved.serverConfigKey, names);
+  }
+  return [...perServer].map(([key, names]) => {
+    const prefix = `mcp__${key.replace(/[^a-zA-Z0-9_-]/g, "_")}__`;
+    const shown = names.slice(0, INDEX_NAMES_PER_SERVER).map(name => name.startsWith(prefix) ? name.slice(prefix.length) : name);
+    return `${key} (${names.length}): ${shown.join(", ")}${names.length > shown.length ? ", …" : ""}`;
+  }).join("; ");
+}
+
+/** `earlyDeferral`: API-class models (Agentlas serving, BYOK) defer a mid-size MCP set too. Small local models keep the old
+ * thresholds on purpose: measured 2026-09 they went wrong behind an indirect surface (5 agentlas_code calls, never reaching
+ * the browser) and were exact when handed the tools directly. */
+export function installLazyToolMenu(tools: OpenAiToolDef[], byName: Map<string, ResolvedTool>, enabled: boolean, oversizedOnly = false, earlyDeferral = false): OpenAiToolDef[] {
   const descriptors = new Map(tools.filter(tool => byName.get(tool.function.name)?.kind === "mcp"
     && (!oversizedOnly || bytes(tool) > MAX_PREPARED_SCHEMA_BYTES)).map(tool => [tool.function.name, tool]));
-  if (!enabled || !descriptors.size || (!oversizedOnly && descriptors.size < 32 && bytes([...descriptors.values()]) < MAX_PREPARED_SCHEMA_BYTES)
+  const descriptorBytes = bytes([...descriptors.values()]);
+  const small = descriptors.size < 32 && descriptorBytes < MAX_PREPARED_SCHEMA_BYTES
+    && (!earlyDeferral || descriptors.size < LAZY_MIN_TOOLS || descriptorBytes < LAZY_MIN_SCHEMA_BYTES);
+  if (!enabled || !descriptors.size || (!oversizedOnly && small)
     || [...NAMES].some(name => byName.has(name))) return tools;
-  const exposed = [...tools.filter(tool => !descriptors.has(tool.function.name)), ...structuredClone(MENU_TOOLS)];
+  const index = toolMenuServerIndex([...descriptors.values()], byName);
+  const menuTools = structuredClone(MENU_TOOLS);
+  if (index) menuTools[0].function.description = `${menuTools[0].function.description} MCP servers (tool names without the mcp__<server>__ prefix): ${index}. The exact tool name is the prefix plus that short name.`;
+  const exposed = [...tools.filter(tool => !descriptors.has(tool.function.name)), ...menuTools];
   menus.set(byName, { descriptors, tokens: new Map(), prepared: new Map(), metrics: {
     mode: "lazy", inventoryDigest: mcpToolSchemaDigest([...descriptors.keys()].map(name => [name, (byName.get(name) as Extract<ResolvedTool, {kind:"mcp"}>).schemaDigest])),
     eagerSchemaBytes: bytes(tools), initialSchemaBytes: bytes(exposed), loadedSchemaBytes: 0, preparedCount: 0,

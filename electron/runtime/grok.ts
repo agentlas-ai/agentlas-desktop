@@ -1,3 +1,5 @@
+import { selectionFor } from "../capabilities/one-capabilities";
+import { withForeignCliContext } from "./foreign-cli-context";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // Grok CLI text runtime — official xAI CLI (`x.ai/cli`, verified with grok 0.2.x).
 // Headless contract: --prompt-file + --cwd + --output-format streaming-json.
@@ -468,7 +470,7 @@ export const runGrok: Runner = async (req: RunnerRequest, events: RunnerEvents):
     : tStatus(req.locale, "callingBackend", { backend: req.backendLabel }));
 
   const cwd = req.cwd ?? agentRunCwd();
-  const env = grokEnv(req.env ?? process.env);
+  const env = grokEnv(withForeignCliContext("grok", req.env ?? process.env, selectionFor(req.agentId)));
   if (!env.GROK_API_KEY && !env.XAI_API_KEY) {
     const key = (await readEnvVar("GROK_API_KEY")) || (await readEnvVar("XAI_API_KEY"));
     if (key) {

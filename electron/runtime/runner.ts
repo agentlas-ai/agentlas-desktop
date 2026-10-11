@@ -2,7 +2,6 @@ import type { HistoryRuntimeFence } from "../one/history-runtime-fences";
 import type { AgentContextCapability } from "./agent-context";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { WORK_RECOVERY_PROTOCOL } from "../../shared/work-recovery";
-import { intellectUiPrompt } from "../../shared/intellect-ui-prompt";
 // 모든 런타임(CLI 3종 + BYOK 3종)이 구현해야 하는 통합 인터페이스.
 // mcp/client.ts가 활성 런타임 → 적절한 러너로 라우팅한다.
 import { runtimeNativeAbilitiesLine } from "./native-capabilities";
@@ -10,7 +9,7 @@ import { createHash } from "node:crypto";
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
-import { GLOBAL_CONNECTION_SKILL } from "./global-skill";
+import { connectionSectionText, intellectUiSectionText, planPromptSections } from "./prompt-sections";
 import { pluginRouterPrompt } from "../plugins/router-prompt";
 import { installedAgentlasCapabilityProviders } from "../plugins/plugin-candidates";
 import { capabilityPriorityGuidance } from "../../shared/capability-priority";
@@ -1287,7 +1286,7 @@ export function wrapSystemPrompt(
       "Do not emit memory, automation, app, workbench, or surface control blocks.",
       "",
       ASK_PROTOCOL,
-      intellectUiPrompt(locale),
+      intellectUiSectionText(planPromptSections(userPrompt), locale),
       "",
       tStatus(locale, "sysAgentDef"),
       restrictedAgentPrompt,
@@ -1370,6 +1369,8 @@ export function wrapSystemPrompt(
   // the model the same order where both remain (for example an unbound turn).
   let capabilityPriority = "";
   try { capabilityPriority = capabilityPriorityGuidance(installedAgentlasCapabilityProviders()); } catch { capabilityPriority = ""; }
+  // Large always-on sections load only when the turn uses the feature (prompt-sections.ts).
+  const sectionPlan = planPromptSections(userPrompt);
   const parts: string[] = [
     tStatus(locale, "sysHeader"),
     responseLanguageGuide(locale, userPrompt),
@@ -1378,13 +1379,13 @@ export function wrapSystemPrompt(
     ...(capabilityPriority ? [capabilityPriority] : []),
     "",
     ASK_PROTOCOL,
-    intellectUiPrompt(locale),
+    intellectUiSectionText(sectionPlan, locale),
     "",
     // 항상-켜진 백그라운드 스킬 — 사용자가 "API/MCP"를 몰라도 에이전트가 브라우저로 가입·로그인·키
     // 발급을 손잡고 안내한 뒤 저장하게 한다. 사용자에게는 보이지 않는다(시스템 프롬프트 내부).
     contextProfile === "managed-local"
       ? "Connections: use only tools actually granted for this run. When a needed connection is unavailable, identify it and offer the existing connection setup action; never fabricate access, credentials, or successful work. Do not reveal secrets or send them to unapproved destinations."
-      : GLOBAL_CONNECTION_SKILL,
+      : connectionSectionText(sectionPlan),
     "",
   ];
   // 설치된 플러그인의 라우터 — 파일이 있어도 모델이 모르면 없는 것과 같다.

@@ -23,7 +23,7 @@ export class DeviceBridgeError extends Error {
 }
 export type DeviceSession = "awake" | "locked" | "sleeping" | "unknown";
 export interface DeviceStateSnapshot { session: DeviceSession; idleSeconds: number | null; observedAt: string }
-export type DeviceOp = "prepareOsExecution" | "disposeOsExecution" | "idle" | "releaseChatSessions";
+export type DeviceOp = "prepareOsExecution" | "disposeOsExecution" | "idle" | "releaseChatSessions" | "forwardGoalIntake";
 export interface DeviceFrame { version: typeof DEVICE_BRIDGE_VERSION; requestId: string; op: DeviceOp; deadlineMs: number; payload: Record<string, unknown> }
 export interface PreparedOsExecutionWire { capability: { version: "agentlas.one-os-execution.v1"; executionId: string; token: string } }
 
@@ -123,6 +123,14 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
       const reply = await ask("releaseChatSessions", { chatId, deadlineMs }, deadlineMs + 2000);
       if (typeof reply.busy !== "boolean" || !Number.isSafeInteger(reply.released) || !Number.isSafeInteger(reply.pending)) throw new DeviceBridgeError("device_bridge_refused", "chat_handover_reply_invalid");
       return { busy: reply.busy, released: reply.released as number, pending: reply.pending as number };
+    },
+    /** Goal custody is Main's: hand an owner message that would become a Goal to Main (2026-10-11, run 97164057). Main answers
+     * at once (accepted|duplicate) and does the classification and admission in the background, because the native channel
+     * closes for good on a request that outlives its 10 s limit. */
+    async forwardGoalIntake(input: { runId: string; chatId: string; sourceMessageId: string; permission: "read" | "write" | "full" }): Promise<{ status: "accepted" | "duplicate" }> {
+      const reply = await ask("forwardGoalIntake", { runId: input.runId, chatId: input.chatId, sourceMessageId: input.sourceMessageId, permission: input.permission }, 8000);
+      if (reply.status !== "accepted" && reply.status !== "duplicate") throw new DeviceBridgeError("device_bridge_refused", "goal_intake_reply_invalid");
+      return { status: reply.status };
     },
     failPending: failAll,
   };

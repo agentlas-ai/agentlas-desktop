@@ -114,7 +114,7 @@ export function submitOfficeTaskContext(input: unknown): OfficeTaskContextReceip
     getDb().prepare("INSERT INTO office_task_context VALUES (?,?,?) ON CONFLICT(chat_id) DO UPDATE SET revision=excluded.revision,receipt_json=excluded.receipt_json").run(chat.id, value.revision, encoded);
     getDb().prepare("INSERT INTO office_task_context_operations(operation_id,request_sha256,receipt_json,chat_id) VALUES (?,?,?,?)").run(request.operationId, digest, encoded, chat.id);
     return value;
-  })();
+  }).immediate();
   queueMicrotask(() => emitDesktopStoreChange({ entity: "chat", id: receipt.chatId }));
   return receipt;
 }

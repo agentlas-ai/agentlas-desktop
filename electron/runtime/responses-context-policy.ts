@@ -2,6 +2,7 @@ import type { RunnerRequest } from "./runner";
 import { wrapSystemPrompt, cumulativeSurfaceGateText, surfaceFastPathHit } from "./runner";
 import { pluginRouterPrompt } from "../plugins/router-prompt";
 import { SURFACE_PROTOCOL } from "../surface-emitter";
+import { onDemandSectionTurnBlocks } from "./prompt-sections";
 
 export interface ResponsesContextPolicy {
   protocol: "responses.v1";
@@ -50,7 +51,9 @@ export function retainedResponsesPromptPacket(req: RunnerRequest): Readonly<Reta
   const surface = req.forceSurface === true || (req.surfaceGate !== "exclude"
     && surfaceFastPathHit(cumulativeSurfaceGateText(req.history, req.surfaceUserPrompt ?? req.userPrompt)))
     ? SURFACE_PROTOCOL : "";
-  const blocks = [plugin, surface].filter(Boolean);
+  // The retained prefix keeps only the always-on cores; connection, media and Intellect UI bodies ride the turn.
+  const sections = onDemandSectionTurnBlocks(cumulativeSurfaceGateText(req.history, req.surfaceUserPrompt ?? req.userPrompt), req.locale);
+  const blocks = [plugin, surface, ...sections].filter(Boolean);
   return Object.freeze({ systemPrompt, stableBlocks: Object.freeze(blocks), turnContext: blocks.length
     ? `[Current turn runtime guidance]\n${blocks.join("\n\n")}\n[End current turn runtime guidance]` : "" });
 }

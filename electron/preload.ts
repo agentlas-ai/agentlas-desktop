@@ -708,6 +708,8 @@ const api: AgentlasIpc = {
     // 실행 전 키 요청 시트 완료 신호 — outcome만 전달, 비밀 값은 env.set 경유(vault).
     supplyRunKeys: (runId: string, outcome: "provided" | "declined") =>
       ipcRenderer.invoke("mcp:supplyRunKeys", runId, outcome),
+    useStoredRunKey: (runId: string, toolId: string, keyName: string, storedName: string) =>
+      ipcRenderer.invoke("mcp:useStoredRunKey", runId, toolId, keyName, storedName),
   },
   openCrab: {
     readiness: () => ipcRenderer.invoke("openCrab:readiness"),

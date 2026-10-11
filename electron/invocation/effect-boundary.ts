@@ -257,6 +257,6 @@ export class InvocationEffectBoundaryTracker {
       recordRunEvent({runId:this.runId,chatId:this.chatId,kind:"runtime_effect_boundary",sourceEventId:`runtime-effect-boundary:${this.runId}:${terminal.id}`,
         evidencePhase:receipt.effects==="settled"?"executed":"uncertain",payload:{...receipt}});
       return receipt;
-    })();
+    }).immediate();
   }
 }

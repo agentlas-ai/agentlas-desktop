@@ -755,7 +755,7 @@ export class OneSupervisorService {
       // Target chat stays in the payload's host-sealed receipt, not a renderer-supplied identity.
       this.deps.store.db.prepare("UPDATE one_supervisor_requests SET payload_json=? WHERE command_id=?").run(JSON.stringify({...input,workerChatId:work.chatId}),row.command_id);
       this.deps.workQueue?.enqueue(this.deps.store.get(row.command_id)!, work.chatId);
-    })();
+    }).immediate();
     if (this.deps.workQueue) {
       // The periodic native executor also dispatches when no renderer is open.
       // A wake is an optimization, never the durable source of pending work.

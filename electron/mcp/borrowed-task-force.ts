@@ -1,4 +1,5 @@
 import { toolObservationDigest } from "../automation-progress-guard";
+import { selectTaskForceConversationContext } from "./task-force-history";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError, copyObservedRunnerEvidence } from "../runtime/observed-runner";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { effectiveInvocationPermission } from "../../shared/invocation-permission";
@@ -1747,6 +1748,11 @@ function boundedTaskForceHistory(history: ChatHistoryEntry[]): ChatHistoryEntry[
   });
 }
 
+/** The earlier turns a planner or synthesizer may see: settled asks and recovery chatter removed, then bounded. */
+export function taskForceConversationWindow(history: ChatHistoryEntry[], currentPrompt: string): ChatHistoryEntry[] {
+  return boundedTaskForceHistory(selectTaskForceConversationContext(history, currentPrompt));
+}
+
 function cleanAgentAppControlBlocks(text: string): string {
   const withoutContinuation = stripStormbreakerContinueMarker(text).text;
   const withoutIntent = withoutContinuation.split(SURFACE_INTENT_MARKER).join("");
@@ -3266,7 +3272,7 @@ function buildPlannerPrompt(
   activeGoalContext?: string,
 ): string {
   return [
-    "User request:",
+    "CURRENT OWNER REQUEST (this is the task to plan; earlier conversation is background only and never replaces it. Do not resume, repeat or continue an earlier recovery, approval or question thread unless this request asks for it):",
     userPrompt,
     "",
     workingFolder ? `Working folder: ${workingFolder}` : "",
@@ -5356,7 +5362,7 @@ async function runPlanner(
     return runObservedRunner(plannerPicked.runner,
       taskForceRunnerRequest(p, {
       systemPrompt,
-      history: boundedTaskForceHistory(history),
+      history: taskForceConversationWindow(history, p.req.userPrompt),
       userPrompt: [validationError
         ? `${baseUserPrompt}\n\nSchema repair validation error (sanitized): ${validationError}`
         : baseUserPrompt,
@@ -6445,7 +6451,7 @@ async function runBorrowedTaskForceInvocationInternal(p: BorrowedTaskForceParams
         synthesisOntology?.prompt,
         synthesisMemoryEmitter,
       ].filter(Boolean).join("\n\n"),
-      history: p.chat.goalId ? [] : boundedTaskForceHistory(history),
+      history: p.chat.goalId ? [] : taskForceConversationWindow(history, p.req.userPrompt),
       userPrompt: [overrideUserPrompt ?? buildSynthesisPrompt({
           originalRequest: oneAttachmentExecutionPrompt(p.req),
           planText: plan.text,

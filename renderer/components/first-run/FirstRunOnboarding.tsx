@@ -37,7 +37,6 @@ import { openPricing } from "@/components/UpgradeCta";
 import { PLAN_CHANGED_EVENT } from "@/components/billing/PlanPickerModal";
 import { agentMailOffer } from "@shared/agent-mail-offer";
 import { FIRST_RUN_LOCAL_MODEL_KINDS, agentlasServingReady } from "@shared/runtime-connect";
-import { BYOK_BACKENDS_ALL, type ByokBackend } from "@shared/models";
 import { CredentialImportDialog } from "@/components/connect/CredentialImportDialog";
 import { ChipGrid, ConnectChip, RUNTIME_CHIPS, RuntimeChip, RuntimeConnectPopup, connectCopy, useRuntimeAuth, type RuntimeChipSpec } from "@/components/connect/RuntimeConnect";
 import {
@@ -249,12 +248,6 @@ export function FirstRunOnboarding({
   const [connectFor, setConnectFor] = useState<RuntimeChipSpec | null>(null);
   const [localNote, setLocalNote] = useState<string | null>(null);
   const [localBusy, setLocalBusy] = useState(false);
-  const [apiBackend, setApiBackend] = useState<ByokBackend>("anthropic");
-  const [apiKey, setApiKey] = useState("");
-  const [apiModel, setApiModel] = useState("");
-  const [apiEndpoint, setApiEndpoint] = useState("");
-  const [apiModels, setApiModels] = useState<Array<{ id: string; label: string; tag?: string }>>([]);
-  const [apiBusy, setApiBusy] = useState(false);
   const auth = useRuntimeAuth();
 
   const rootRef = useRef<HTMLDivElement>(null);
@@ -355,35 +348,6 @@ export function FirstRunOnboarding({
   const localRuntimes = (runtimes ?? []).filter((r) => FIRST_RUN_LOCAL_MODEL_KINDS.has(r.kind) && (r.model || (r.availableModels?.length ?? 0) > 0));
   const apiRuntimes = (runtimes ?? []).filter((r) => r.kind === "byok"
     && r.credentialAccess?.status === "available" && Boolean(r.model?.trim()));
-  const selectedApiRuntime = (runtimes ?? []).find((r) => r.kind === "byok" && r.backend === apiBackend);
-  const apiKeyAvailable = selectedApiRuntime?.credentialAccess?.status === "available";
-  const apiChoice = apiKeyAvailable && apiModel.trim() ? { backend: apiBackend, model: apiModel.trim() } : undefined;
-  useEffect(() => {
-    if (step !== "ai" || !api || !apiKeyAvailable) { setApiModels([]); return; }
-    let disposed = false;
-    void api.runtime.listModels({ kind: "byok", backend: apiBackend, availableModels: selectedApiRuntime?.availableModels })
-      .then((models) => { if (!disposed) setApiModels(models); })
-      .catch(() => { if (!disposed) setApiModels([]); });
-    return () => { disposed = true; };
-  }, [api, step, apiBackend, apiKeyAvailable, selectedApiRuntime?.availableModels]);
-  useEffect(() => {
-    if (apiBackend !== "custom" || !api) return;
-    let disposed = false;
-    void api.config.getCustomBaseUrl().then((url) => { if (!disposed) setApiEndpoint(url ?? ""); }).catch(() => {});
-    return () => { disposed = true; };
-  }, [api, apiBackend]);
-  const saveFirstRunApi = async () => {
-    if (!api || apiBusy || !apiKey.trim()) return;
-    setApiBusy(true); setError(null);
-    try {
-      if (apiBackend === "custom") await api.config.setCustomBaseUrl(apiEndpoint.trim());
-      await api.secrets.saveApiKey(apiBackend, apiKey.trim());
-      setApiKey("");
-      await refreshAi(true);
-    } catch {
-      setError(ko ? "API 연결을 저장하지 못했습니다. 키와 주소를 확인해 주세요." : "Could not save the API connection. Check the key and endpoint.");
-    } finally { setApiBusy(false); }
-  };
   const plan = credits?.authenticated && credits.plan && credits.plan.toLowerCase() !== "free" ? credits.plan : null;
   const agentlasReady = agentlasServingReady(credits);
 
@@ -479,7 +443,10 @@ export function FirstRunOnboarding({
     if (index > 0) { setError(null); setStep(FIRST_RUN_STEPS[index - 1]); }
   };
 
-  const anyAiConnected = RUNTIME_CHIPS.some((spec) => auth.probes[spec.kind]?.state === "signed-in") || localRuntimes.length > 0 || apiRuntimes.length > 0 || Boolean(apiChoice) || agentlasReady;
+  // A CLI login popup or a local-model check still running: finishing the AI step now would seed roles from a
+  // half-known connection, so Next and Skip wait for it (the step no longer saves API keys itself).
+  const apiBusy = Boolean(connectFor) || localBusy;
+  const anyAiConnected = RUNTIME_CHIPS.some((spec) => auth.probes[spec.kind]?.state === "signed-in") || localRuntimes.length > 0 || apiRuntimes.length > 0 || agentlasReady;
   // What was connected here becomes the first orchestrator and worker (owner 2026-10-06). The main
   // process reads the same facts itself and leaves roles a person already chose alone; a failed
   // seed must be read back before setup reports that the two roles are ready.
@@ -488,7 +455,7 @@ export function FirstRunOnboarding({
     if (!anyAiConnected) { complete("ai", "skipped"); return; }
     setBusy(true); setError(null);
     try {
-      const result = await api?.runtime.seedFirstRunRoles?.(apiChoice);
+      const result = await api?.runtime.seedFirstRunRoles?.();
       if (!result || (!result.seeded && result.reason !== "owner-chosen")) throw new Error("first_run_roles_not_ready");
       complete("ai", "done");
     } catch { setError(ko ? "실행 모델을 배정하지 못했습니다. 연결과 모델을 확인하거나 건너뛰세요." : "Could not assign the execution models. Check the connection and model, or skip this step."); }
@@ -592,7 +559,7 @@ export function FirstRunOnboarding({
 
             {step === "ai" && (
               <>
-                <ChipGrid label={copy.aiTitle}>
+                <ChipGrid label={copy.aiTitle} size="tall">
                   {RUNTIME_CHIPS.map((spec) => (
                     <RuntimeChip key={spec.kind} spec={spec} probe={auth.probes[spec.kind]} loaded={auth.loaded} copy={cc} onConnect={setConnectFor} />
                   ))}
@@ -618,38 +585,6 @@ export function FirstRunOnboarding({
                     action={agentlasReady ? undefined : { label: cc.upgrade, onClick: openPlans, variant: "upgrade" }}
                   />
                 </ChipGrid>
-                <div className={styles.field}>
-                  <label htmlFor="first-run-api-backend">{ko ? "API 키로 연결" : "Connect with an API key"}</label>
-                  <select id="first-run-api-backend" className={styles.input} value={apiBackend} disabled={apiBusy || busy}
-                    onChange={(event) => {
-                      const backend = event.target.value as ByokBackend;
-                      setApiBackend(backend); setApiKey(""); setApiModels([]);
-                      setApiModel((runtimes ?? []).find((r) => r.kind === "byok" && r.backend === backend)?.model ?? "");
-                    }}>
-                    {BYOK_BACKENDS_ALL.map((backend) => <option key={backend} value={backend}>(API) {backend}</option>)}
-                  </select>
-                  {apiBackend === "custom" && <input aria-label={ko ? "API 주소" : "API endpoint"} className={styles.input}
-                    value={apiEndpoint} onChange={(event) => setApiEndpoint(event.target.value)} disabled={apiBusy || busy} placeholder="https://…/v1" />}
-                  <input type="password" autoComplete="off" aria-label={ko ? "API 키" : "API key"} className={styles.input}
-                    value={apiKey} onChange={(event) => setApiKey(event.target.value)} disabled={apiBusy || busy}
-                    placeholder={apiKeyAvailable ? (ko ? "키 저장됨 · 바꾸려면 입력" : "Key saved · enter to replace") : "API key"} />
-                  <button type="button" className={`${styles.secondary} ${styles.inlineAction}`} disabled={apiBusy || busy || !apiKey.trim()}
-                    onClick={() => void saveFirstRunApi()}>{apiBusy ? cc.checking : (ko ? "키 연결" : "Connect key")}</button>
-                  {apiKeyAvailable && <>
-                    {apiModels.length > 0 && <select aria-label={ko ? "API 모델 선택" : "Select an API model"} className={styles.input}
-                      value={apiModels.some((model) => model.id === apiModel) ? apiModel : ""} disabled={apiBusy || busy}
-                      onChange={(event) => setApiModel(event.target.value)}>
-                      <option value="">{ko ? "모델 선택" : "Choose a model"}</option>
-                      {apiModels.map((model) => <option key={model.id} value={model.id}>(API) {model.label}</option>)}
-                    </select>}
-                    <input aria-label={ko ? "API 모델 ID" : "API model ID"} className={styles.input} maxLength={256}
-                      value={apiModel} onChange={(event) => setApiModel(event.target.value)} disabled={apiBusy || busy} placeholder="Model ID" />
-                    <p className={styles.hint}>{ko ? "목록에서 고르거나 모델 ID를 입력하세요. 다음 단계에서 지휘·작업 모델을 함께 배정합니다." : "Choose from the list or enter a model ID. The next step assigns both Orchestrator and Worker."}</p>
-                  </>}
-                </div>
-                {apiRuntimes.length > 0 && <p className={styles.hint}>
-                  {apiRuntimes.map((r) => `(API) ${r.label ?? r.backend} · ${r.model}`).join(" · ")}
-                </p>}
                 {localNote && <p className={styles.hint} role="status">{localNote}</p>}
                 <p className={styles.caption}>{anyAiConnected ? copy.aiCaption : copy.aiNeedOne}</p>
               </>

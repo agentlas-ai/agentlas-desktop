@@ -101,7 +101,7 @@ function nextLocalAuthorityState(): { authorityInstanceId: string; authoritySequ
        ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
     ).run(AUTHORITY_SEQUENCE_META_KEY, String(authoritySequence));
     return { authorityInstanceId, authoritySequence };
-  })();
+  }).immediate();
 }
 
 function safeRef(value: unknown): value is string {

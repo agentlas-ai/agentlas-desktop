@@ -4902,7 +4902,7 @@ export function initStore(options: StoreInitOptions = {}): void {
              AND COALESCE(kind, 'user') = 'user'
              AND EXISTS (SELECT 1 FROM installed_agents WHERE slug = 'agentlas-one');
         `);
-      })();
+      }).immediate();
     }
   }
 
@@ -6394,7 +6394,7 @@ export function initStore(options: StoreInitOptions = {}): void {
         ON long_run_worker_attempts(invocation_run_id, worker_id, attempt)
         WHERE invocation_run_id IS NOT NULL;
       `);
-    })();
+    }).immediate();
   }
 
   // v109: external domain stores (initially Science) remain canonical while
@@ -6513,7 +6513,7 @@ export function initStore(options: StoreInitOptions = {}): void {
           status: "legacy-unverified", createdAt: row.created_at,
         }), row.created_at);
       }
-    })();
+    }).immediate();
   }
 
   // v115: media provider work survives renderer/Main restarts without blindly
@@ -6650,7 +6650,7 @@ export function initStore(options: StoreInitOptions = {}): void {
         WHERE chat_id IS NULL AND json_valid(receipt_json)
           AND EXISTS(SELECT 1 FROM chats WHERE id=json_extract(office_task_context_operations.receipt_json, '$.chatId'));
         CREATE INDEX IF NOT EXISTS idx_office_task_context_operations_chat ON office_task_context_operations(chat_id);`);
-    })();
+    }).immediate();
   }
 
   // v118: durable Memory forget authority. A run snapshots the global forget
@@ -6712,7 +6712,7 @@ export function initStore(options: StoreInitOptions = {}): void {
           SELECT NEW.run_id, epoch, NEW.ts FROM memory_forget_clock WHERE id = 1;
         END;
       `);
-    })();
+    }).immediate();
   }
 
   // A schema-only bootstrap can already advertise v118 while omitting the
@@ -6734,7 +6734,7 @@ export function initStore(options: StoreInitOptions = {}): void {
     } else {
       _db!.exec("INSERT OR IGNORE INTO memory_forget_clock (id, epoch) VALUES (1, 0)");
     }
-  })();
+  }).immediate();
 
   // v119: external Memory projections are rebuildable, but an explicit forget
   // must also survive a crash between the canonical DB tombstone and their

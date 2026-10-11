@@ -43,7 +43,7 @@ const RETRY_ONCE_CODES = new Set(["runtime_changed", "candidate_changed", "expir
 /** Specific, actionable wording for a refusal that survived every automatic path.
  * The machine code is always carried so the cause is visible, never guessed. */
 export function oneSubmitPreflightNotice(code: string, ko: boolean): string {
-  const tail = ko ? ` 글과 첨부는 작성창에 그대로 있습니다. (사유 코드: ${code})` : ` Your text and attachments are still in the composer. (reason code: ${code})`;
+  const tail = "";
   switch (code) {
     case "runtime_changed":
       return (ko

@@ -6,6 +6,7 @@ import { normalizeChatHostNotice, parseChatHostNotice } from "../../shared/chat-
 import { RUNTIME_KINDS } from "../../shared/runtime-kinds";
 import { RUNTIME_BACKENDS } from "../../shared/runtime-backends";
 import { getDb } from "./db";
+import { takePreparedUserRow } from "./prepared-user-rows";
 import { oneDispatchSidebarPredicate, createOneDispatchNoticeProjector } from "../one/dispatch-presentation";
 import { getChatGoalRevision } from "./chat-goals";
 import { parseGoalResult, type GoalResultPresentation } from "../../shared/goal-result";
@@ -986,6 +987,11 @@ export function appendChatMessage(
   text: string,
   options?: ChatMessageAppendOptions,
 ): ChatHistoryEntry {
+  // The send queue saved this message when it was accepted; the run that finally starts it must not add a second bubble.
+  if (role === "user") {
+    const prepared = takePreparedUserRow<ChatHistoryEntry>(chatId, text);
+    if (prepared) return prepared;
+  }
   const id = randomUUID();
   const now = new Date().toISOString();
   const db = getDb();

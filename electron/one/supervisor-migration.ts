@@ -53,7 +53,7 @@ export class OneSupervisorLegacyMigration {
             OR excluded.state='linked' AND one_supervisor_legacy_sources.linked_at IS NULL`)
           .run(source.id,state,reason,source.message_count,source.updated_at,new Date().toISOString(),state==='linked'?new Date().toISOString():null);
       }
-    })();
+    }).immediate();
     const visible=new Set(sources.slice(0,500).map(source=>source.id));
     const mapped=this.db.prepare(`SELECT c.id AS chatId,c.title,l.message_count AS messageCount
       FROM one_supervisor_legacy_sources l JOIN chats c ON c.id=l.source_chat_id

@@ -880,6 +880,10 @@ export function oneTeamComposeGroup(caller: OneTeamCaller, input: unknown) {
   const members = input.members.map(id => {
     const matches = roster.filter(member => member.id === id);
     const member = matches.length === 1 ? matches[0] : null;
+    if (member?.unavailable) {
+      // Name the teammate and say why in plain words (both languages); the machine code is only in the prefix.
+      throw new Error(`one-team-group-member-unavailable: "${member.displayName}" cannot join this group. ${member.unavailable.reason.en} / ${member.unavailable.reason.ko} The group is unchanged.`);
+    }
     if (!member || member.source !== "local" || member.statusKind === "locked") {
       throw new Error("one-team-group-member-unavailable: only existing active local One members can compose this group; the group is unchanged.");
     }

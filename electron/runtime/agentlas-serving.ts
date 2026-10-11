@@ -25,16 +25,15 @@ import {
   isAgentlasServingModel,
 } from "../../shared/agentlas-serving";
 import { compactHistoryToBudget } from "./compact";
+import { estimateAdmissionTokens } from "./token-estimate";
 
 /**
- * Admission estimate for the serving tier: UTF-8 bytes / 2.5. One token per byte (estimateTransportTokens) is a true upper
- * bound but ~3.5x English text, so the Science Research Director's 134 KB contract (~38k real tokens) alone read as 134k
- * against the 128k window and every Science turn on Agentlas serving was refused before sending (owner 2026-09-25: "can't
- * Science use Agentlas credits?"). Bytes / 2.5 still over-counts English by ~1.4-1.6x and bounds Korean (3 bytes, ~1-1.3
- * tokens per syllable); the server remains the final judge of its own window. History compaction keeps its byte budget.
+ * Admission estimate for the serving tier: the calibrated token estimate (token-estimate.ts, within +-15% of
+ * o200k_base on EN/KO/code/JSON, plus a 12% cross-tokenizer margin). It replaced UTF-8 bytes / 2.5, which
+ * over-counted English ~1.5x and Korean ~1x; the server remains the final judge of its own window.
  */
 function servingAdmissionTokens(text: string): number {
-  return Math.ceil(Buffer.byteLength(text, "utf8") / 2.5);
+  return estimateAdmissionTokens(text);
 }
 import type { Runner, RunnerEvents, RunnerFailure, RunnerRequest, RunnerResult } from "./runner";
 import { schemaFallbackInstruction } from "../../shared/runtime-capabilities";
@@ -85,7 +84,9 @@ function turnsFor(req: RunnerRequest, events: RunnerEvents, outputReserve: numbe
       req.systemPrompt,
       req.locale,
       req.permission,
-      cumulativeSurfaceGateText(req.history, req.userPrompt),
+      // The gate reads what the person typed, never the host context now framed into userPrompt
+      // (a recalled memory must not switch the 16 KB Surface protocol on and move the cached prefix).
+      cumulativeSurfaceGateText(req.history, req.surfaceUserPrompt ?? req.userPrompt),
       req.forceSurface,
       req.restrictedReadBoundary,
       req.untrustedNoTools,

@@ -27,8 +27,9 @@ interface Capture {
   readonly originalRequest: McpInvocationRequest; readonly start: NativeStartDescriptor; readonly privateHandle: NativeMainPreparationRouterHandle;
   transportStart?: Promise<unknown>; actualStart: Promise<InvocationStartResult>; cancellation?: Promise<StopResult>; unavailable: boolean;
 }
-export class NativeGuiOwnerError extends Error { constructor(readonly code: string) { super(code); } }
-function fail(code: string): never { throw new NativeGuiOwnerError(code); }
+/** `detail` is machine-readable and content-free (top-level key NAMES only); it goes to logs, never to the screen. */
+export class NativeGuiOwnerError extends Error { constructor(readonly code: string, readonly detail?: string) { super(code); } }
+function fail(code: string, detail?: string): never { throw new NativeGuiOwnerError(code, detail); }
 function rowDigest(admission: InvocationAdmissionIdentity): string { return createHash("sha256").update(INVOCATION_ADMISSION_DIGEST_VERSION + "\0").update(admission.canonicalRequestJson).digest("hex"); }
 function thenable(value: unknown): boolean { return value !== null && (typeof value === "object" || typeof value === "function") && typeof (value as { then?: unknown }).then === "function"; }
 /** Main bootstrap only. The guard and sanitizer are adapters to the ORIGINAL
@@ -196,7 +197,15 @@ export function createNativeGuiOwnerClient(ports: {
     const base: Partial<McpInvocationRequest> = { ...r.originalRequest }, next: Partial<McpInvocationRequest> = { ...request };
     for (const value of [base, next]) { delete value.runId; delete value.userPrompt; delete value.steeringMode; }
     for (const key of ["images", "fileGroupId", "oneMemoryUseOnceRef", "oneBriefingActionRef", "oneTeamPreflightRef", "oneAttachmentRef", "oneRecurrenceSelection", "preflightSubmissionId"] as const) delete base[key];
-    if (canonicalInvocationRequestJson(base as McpInvocationRequest) !== canonicalInvocationRequestJson(next as McpInvocationRequest)) fail("native_gui_text_input_context_changed");
+    if (canonicalInvocationRequestJson(base as McpInvocationRequest) !== canonicalInvocationRequestJson(next as McpInvocationRequest)) {
+      // Which top-level choices differ (names only, never values): the refusal used to say nothing about its cause.
+      const differing = [...new Set([...Object.keys(base), ...Object.keys(next)])].sort().filter((key) => {
+        const a = (base as Record<string, unknown>)[key], b = (next as Record<string, unknown>)[key];
+        if (a === undefined && b === undefined) return false;
+        try { return JSON.stringify(a) !== JSON.stringify(b); } catch { return true; }
+      });
+      fail("native_gui_text_input_context_changed", `differing_keys=${differing.join(",")}`);
+    }
     return Object.freeze({ chatId: r.start.binding.chatId, runId: r.start.binding.runId, inputDigest: r.start.binding.inputDigest });
   }
   function preflightTextInputBinding(originalEvent: object, request: McpInvocationRequest, runId: string) {

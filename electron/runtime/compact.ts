@@ -8,17 +8,20 @@
 // 전략: 과거 대화만 비신뢰 발췌로 접는다. LLM이 의미를 요약했다고 주장하지 않는다.
 import type { ChatHistoryEntry } from "../../shared/types";
 import type { RuntimeLocale } from "./status-i18n";
+import { estimateAdmissionTokens } from "./token-estimate";
 
 /** Legacy display estimate; transport admission uses UTF-8 bytes or an exact tokenizer. */
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 3.5);
 }
 
-/** UTF-8 bytes are a conservative upper bound for ordinary BPE text tokens.
- * This is still not a provider tokenizer (images and wire framing differ), so
- * managed local always rechecks with its exact resident template/tokenizer. */
+/** Admission estimate: a per-script model calibrated against o200k_base (token-estimate.ts) plus a
+ * cross-tokenizer margin. UTF-8 bytes used to stand in here, which counted ordinary text ~4x too
+ * high (a 24 KB, ~6k-token system prompt read as 24k) and refused turns that fit. This is still not a
+ * provider tokenizer (images and wire framing differ), so managed local always rechecks with its
+ * exact resident template/tokenizer. */
 export function estimateTransportTokens(text: string): number {
-  return Buffer.byteLength(text, "utf8");
+  return estimateAdmissionTokens(text);
 }
 
 export interface BudgetedHistoryResult extends CompactResult {

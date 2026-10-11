@@ -371,7 +371,7 @@ export function createStoredAutomaticGoal(input: Parameters<typeof createAutomat
       JSON.stringify(revision.acceptanceCriteria.map((criterion) => criterion.text)), revision.createdAt, revision.createdAt);
     insertRevision(revision);
     return revision;
-  })();
+  }).immediate();
 }
 
 export function reviseStoredAutomaticGoal(input: Omit<Parameters<typeof reviseAutomaticGoal>[0], "current"> & {

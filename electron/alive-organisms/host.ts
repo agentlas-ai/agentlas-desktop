@@ -504,7 +504,7 @@ export class AliveOrganismHost {
         }
       }
       organism.store.attach(attachment, nowMs);
-    })();
+    }).immediate();
     this.emitChanges(surface, agentId);
     if (this.running) setImmediate(() => { void this.beat(surface); });
     return this.getState(surface, chatId);

@@ -187,6 +187,11 @@ function tomlTables(tomlText: string, prefix: "mcp_servers" | "plugins"): Map<st
   return bodies;
 }
 
+/** Every addressable user-declared server that has a transport (the only kind `-c mcp_servers.<name>.enabled=false` can close). */
+export function declaredUserMcpServers(tomlText: string): string[] {
+  return declaredServers(tomlText, new Set(), /(?:)/);
+}
+
 function declaredServers(tomlText: string, names: ReadonlySet<string>, evidence: RegExp): string[] {
   const out: string[] = [];
   for (const [name, body] of tomlTables(tomlText, "mcp_servers")) {
@@ -196,6 +201,11 @@ function declaredServers(tomlText: string, names: ReadonlySet<string>, evidence:
     if (names.has(name) || evidence.test(body)) out.push(name);
   }
   return out.sort();
+}
+
+/** The user config texts (config.toml, managed_config.toml) of the Codex home this run reads. */
+export function codexUserConfigTexts(input: { env?: NodeJS.ProcessEnv; cwd?: string }): string[] {
+  return readUserConfigTexts(codexHomeFor(input));
 }
 
 /** Plugin ids the TOML enables (`[plugins."<id>"] enabled = true`). */

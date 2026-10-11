@@ -710,7 +710,7 @@ function scrubRecoveryDatabase(databasePath: string): {
           db!.prepare("DELETE FROM mcp_servers WHERE id = ?").run(row.id);
           consolidatedRows += 1;
         }
-      })();
+      }).immediate();
     }
 
     // Even when the logical row was already scrubbed, an older value may remain

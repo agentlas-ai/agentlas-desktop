@@ -240,7 +240,7 @@ export function removeOneTaskforce(input: RemoveOneTaskforceInput): void {
       new Date().toISOString(),
       id,
     );
-  })();
+  }).immediate();
   emitTaskforceChanged(id);
 }
 
@@ -322,8 +322,9 @@ export function composeOneTaskforceForChat(input: { chatId: string; memberAgentI
       WHERE archived_at IS NULL AND source = 'local' AND status_kind != 'locked'
       AND installed_agent_id IN (${placeholders})`).all(...requested) as Array<{ installed_agent_id: string }>;
     const localIds = new Set(local.map(row => row.installed_agent_id));
-    if (requested.some(id => !localIds.has(id))) throw new Error("one-team-group-member-unavailable");
+    // Named, plain-language refusal first (source gone, hidden, archived, locked...); the generic one is the fallback.
     ensureOneGroupLocalStaff(requested, false, { allowPriorTaskFailure: true });
+    if (requested.some(id => !localIds.has(id))) throw new Error("one-team-group-member-unavailable");
     let prior: string[] = [];
     if (existing) {
       try { prior = normalizeMemberIds(JSON.parse(existing.member_agent_ids_json), { allowUnavailable: true }); }
@@ -343,7 +344,7 @@ export function composeOneTaskforceForChat(input: { chatId: string; memberAgentI
     db.prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chatId);
     applySeatSnapshotToChats(seatId);
     return { group: { id: existing.id, chatId, revision: existing.revision + 1, memberAgentIds: members }, created: false, addedMemberAgentIds: additions };
-  })();
+  }).immediate();
   if (result.created || result.addedMemberAgentIds.length) {
     try { notifyOneTaskforceFromPreflight(result.group); }
     catch (error) { console.warn("[one-team] group_notification_failed", error instanceof Error ? error.message : String(error)); }

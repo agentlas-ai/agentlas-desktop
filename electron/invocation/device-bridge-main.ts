@@ -21,6 +21,10 @@ export interface DeviceBridgeMainPorts {
   prepare(input: { runId: string; chatId: string; permission: "read" | "write" | "full"; inputDigest: string; daemonBootId: string; channelCurrent(): boolean }): { capability: { version: "agentlas.one-os-execution.v1"; executionId: string; token: string }; dispose(): void };
   /** A2: release this process's idle resident runtime sessions of a chat; the service is taking the chat over. */
   releaseChat?(chatId: string, deadlineMs: number): Promise<{ busy: boolean; released: number; pending: number }>;
+  /** Goal intake handed over by the service (2026-10-11): validate against durable rows and answer at once; the work runs in the background. */
+  forwardGoalIntake?(input: { runId: string; chatId: string; sourceMessageId: string; permission: "read" | "write" | "full" }): { ok: true; status: "accepted" | "duplicate" } | { ok: false; error: string };
+  /** Run every intake the service could not hand over while this process was away. Called on each successful attach. */
+  drainGoalIntake?(): void;
   session(): DeviceSession;
   idleSeconds(): number | null;
   subscribePower(handler: (event: "lock-screen" | "unlock-screen" | "suspend" | "resume") => void): () => void;
@@ -64,6 +68,7 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
     if (!watched.has(channel)) { watched.add(channel); channel.onClose(() => disposeFor(channel)); }
     unsubscribePower ??= ports.subscribePower(onPower);
     void pushState(channel);
+    try { ports.drainGoalIntake?.(); } catch (error) { ports.log?.(`[device-bridge] goal intake drain failed: ${codeOf(error)}`); }
   }
   async function handle(raw: unknown, channel: object, identity: object): Promise<Record<string, unknown>> {
     const live = ports.channelIdentity(channel);
@@ -79,6 +84,11 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
       if (op === "releaseChatSessions") {
         if (!exactKeys(payload, ["chatId", "deadlineMs"]) || !id(payload.chatId) || typeof payload.deadlineMs !== "number" || !ports.releaseChat) return { ok: false, error: "device_bridge_refused" };
         return { ok: true, ...(await ports.releaseChat(payload.chatId, payload.deadlineMs)) };
+      }
+      if (op === "forwardGoalIntake") {
+        if (!exactKeys(payload, ["runId", "chatId", "sourceMessageId", "permission"]) || !id(payload.runId) || !id(payload.chatId) || !id(payload.sourceMessageId)
+          || !["read", "write", "full"].includes(String(payload.permission)) || !ports.forwardGoalIntake) return { ok: false, error: "device_bridge_refused" };
+        return ports.forwardGoalIntake({ runId: payload.runId, chatId: payload.chatId, sourceMessageId: payload.sourceMessageId, permission: payload.permission as "read" | "write" | "full" });
       }
       if (op === "disposeOsExecution") {
         if (!exactKeys(payload, ["executionId"]) || !id(payload.executionId)) return { ok: false, error: "device_bridge_refused" };
@@ -109,8 +119,8 @@ let instance: ReturnType<typeof createDeviceBridgeMain> | undefined;
 /** The window process's bridge, wired to the real powerMonitor, broker preparation and the enrolled channel. */
 export async function deviceBridgeMain(): Promise<ReturnType<typeof createDeviceBridgeMain>> {
   if (instance) return instance;
-  const [{ nativeGuiChannelIdentity }, { prepareSupervisorOsExecution }, { releaseLocalChatSessions }, electron] = await Promise.all([
-    import("../daemon/native-auth-channel"), import("../one/supervisor-os-execution"), import("../runtime/chat-host-handover"), import("electron"),
+  const [{ nativeGuiChannelIdentity }, { prepareSupervisorOsExecution }, { releaseLocalChatSessions }, goalIntake, electron] = await Promise.all([
+    import("../daemon/native-auth-channel"), import("../one/supervisor-os-execution"), import("../runtime/chat-host-handover"), import("./goal-intake-forward"), import("electron"),
   ]);
   const power = electron.powerMonitor;
   instance ??= createDeviceBridgeMain({
@@ -122,6 +132,8 @@ export async function deviceBridgeMain(): Promise<ReturnType<typeof createDevice
       return out;
     },
     releaseChat: (chatId, deadlineMs) => releaseLocalChatSessions(chatId, deadlineMs),
+    forwardGoalIntake: input => goalIntake.acceptForwardedGoalIntake(input),
+    drainGoalIntake: () => goalIntake.drainPendingGoalIntakes(),
     session: () => { try { const state = power.getSystemIdleState(1); return state === "locked" ? "locked" : state === "unknown" ? "unknown" : "awake"; } catch { return "unknown"; } },
     idleSeconds: () => { try { return power.getSystemIdleTime(); } catch { return null; } },
     subscribePower: handler => {

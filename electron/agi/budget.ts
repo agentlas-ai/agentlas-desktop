@@ -121,5 +121,5 @@ export function chargeAgiTokens(db: Database.Database, goalId: string, tokens: n
       db.prepare("UPDATE alive_agents SET budget_json = ?, version = version + 1, updated_at_ms = ? WHERE agent_id = ?")
         .run(JSON.stringify(budget), nowMs, grant.agentId);
     }
-  })();
+  }).immediate();
 }

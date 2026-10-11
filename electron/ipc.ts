@@ -261,8 +261,11 @@ import {
   freshGoalIdForChat,
   loadDesktopWorkforceGoal,
 } from "./mcp/workforce-goal-continuity";
-import { resolveRunKeyElicitation } from "./mcp/run-key-elicitation";
+import { resolveRunKeyElicitation, resolveRunKeyWithStoredName } from "./mcp/run-key-elicitation";
 import { invocationService } from "./invocation/service";
+import { createRendererSendQueue } from "./invocation/renderer-send-queue";
+import { canQueuePendingSend } from "./invocation/pending-chat-sends";
+import { isTransientSendRefusal } from "../shared/transient-send-refusal";
 import { cancelInvocationOwnerRun, invocationCurrentTurnControl } from "./runtime/invocation-owner-control";
 import { queueAutomaticGoalResume } from "./invocation/automatic-goal";
 // ── Hephaestus 엔진 브리지 — 데스크탑↔엔진 연결은 전부 electron/hephaestus/* 에서만 일어난다. ──
@@ -3853,6 +3856,10 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "mcp:supplyRunKeys", (runId: string, outcome: unknown) =>
     resolveRunKeyElicitation(String(runId), outcome),
   );
+  // The owner's click on "use the saved key X for this tool". Deliberately not an app-control operation: One may
+  // propose it but only this sheet, on an owner click, can confirm it. Main re-checks the offer; names only.
+  ipcMain.handle("mcp:useStoredRunKey", (_e, runId: unknown, toolId: unknown, keyName: unknown, storedName: unknown) =>
+    resolveRunKeyWithStoredName(String(runId), String(toolId), String(keyName), String(storedName)));
   registerAppControlDomainIpc(ipcMain, "openCrab:readiness", async () => {
     const readiness = await getOpenCrabReadiness();
     switch (readiness.reason) {
@@ -7034,7 +7041,12 @@ export function registerIpcHandlers(): void {
     assertTrustedSitePublishIpcSender(_event);
     return holdOnePreflightSubmission(submissionId);
   });
-  ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
+  // The owner's message is accepted by the per-chat send queue: it starts here when the chat is free, otherwise it waits
+  // there (saved, shown once, retried silently) and starts by itself. See invocation/renderer-send-queue.ts.
+  let rendererSendQueueInstance: ReturnType<typeof createRendererSendQueue> | undefined;
+  const rendererSendQueue = () => rendererSendQueueInstance ??= createRendererSendQueue(
+    (event, req) => startRendererInvocation(event, req) as Promise<{ runId: string }>);
+  const startRendererInvocation = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest) => {
     assertTrustedSitePublishIpcSender(_event);
     noteInvocationRunReceived(req?.runId);
     const configuredOwner = configuredNativeGuiOwner();
@@ -7195,6 +7207,8 @@ export function registerIpcHandlers(): void {
       }
       return started;
     } catch (cause) {
+      // A refusal that only means "not ready yet" is retried by the send queue, which saves the message once itself.
+      if (isTransientSendRefusal(cause) && canQueuePendingSend(request)) throw cause;
       // The renderer has already accepted and displayed this turn. Several
       // Main-owned start gates (participant snapshot, capability claim, durable
       // run receipt) execute before runMcpInvocation reaches its normal
@@ -7237,17 +7251,13 @@ export function registerIpcHandlers(): void {
             },
           });
         }
-        // Surface the proven start refusal beside the saved request. A
-        // secondary display write must not replace the original start error.
-        try {
-          appendChatMessage(request.chatId, "assistant", pickLocale(request) === "ko"
-            ? "실행을 시작하지 못했습니다. 요청은 저장되어 있습니다. 실행 기록에서 시작이 거절된 원인을 확인할 수 있습니다."
-            : "The run could not start. Your request is saved; run history shows why the start was refused.",
-          { hostNotice: { purpose: "host-status", runId: request.runId, status: "needs-owner" } });
-        } catch { /* The durable request and rejected-start receipt remain authoritative. */ }
       }
       throw cause;
     }
+  };
+  ipcMain.handle("invoke:run", async (_event, req: McpInvocationRequest) => {
+    assertTrustedSitePublishIpcSender(_event);
+    return rendererSendQueue().run(_event, req);
   });
   ipcMain.handle("invoke:currentTurn", async (_event, chatId: string) => {
     assertTrustedSitePublishIpcSender(_event);
@@ -7258,8 +7268,7 @@ export function registerIpcHandlers(): void {
     if (native && (native.hasChat(chatId) || configuredNativeGuiOwner()?.retainedChatIds().includes(chatId))) return native.currentTurn(_event, chatId);
     return invocationCurrentTurnControl.currentTurn(chatId);
   });
-  ipcMain.handle("invoke:steerCurrentTurn", async (_event, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
-    assertTrustedSitePublishIpcSender(_event);
+  const steerCurrentTurnFromRenderer = async (_event: IpcMainInvokeEvent, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
     const durable = await durableOwnerTextRoutes().steerCurrentTurn(_event, input);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner = configuredNativeGuiOwner(), controls = configuredNativeGuiControls();
@@ -7269,19 +7278,46 @@ export function registerIpcHandlers(): void {
       return controls.ownerText(_event,binding,input.intentId,input.text,"current").then(r=>({chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}));
     }
     return invocationCurrentTurnControl.steerCurrentTurn(input);
+  };
+  ipcMain.handle("invoke:steerCurrentTurn", async (_event, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
+    assertTrustedSitePublishIpcSender(_event);
+    const queued = rendererSendQueue();
+    const waiting = input && typeof input.chatId === "string" ? queued.currentTurnReceiptFor(input.chatId, input.intentId, input.expectedRunId) : null;
+    if (waiting) return waiting;
+    try { return await steerCurrentTurnFromRenderer(_event, input); }
+    catch (cause) {
+      if (!isTransientSendRefusal(cause) || typeof input?.text !== "string") throw cause;
+      // The turn the text was addressed to is gone or not reachable: it goes as the next message, with the same
+      // execution choices the chat last ran with.
+      let permissions: McpInvocationRequest["permissions"] = "read";
+      try { permissions = invocationService.latestReceipt(input.chatId)?.executionPermission ?? "read"; } catch { /* read-only is the safe default */ }
+      const accepted = queued.acceptRefusedSteer(_event, {
+        chatId: input.chatId, userPrompt: input.text, oneMode: true, taskIntent: "conversation",
+        locale: currentUiLocale(), onePermissionMode: "auto", permissions, sessionRouting: false,
+      } as McpInvocationRequest, input.intentId, cause);
+      const receipt = accepted ? queued.currentTurnReceiptFor(input.chatId, input.intentId, input.expectedRunId) : null;
+      if (receipt) return receipt;
+      throw cause;
+    }
   });
   ipcMain.handle("invoke:currentTurnSteerReceipt", async (_event, input: { chatId: string; intentId: string }) => {
     assertTrustedSitePublishIpcSender(_event);
     if (!input || typeof input.chatId !== "string" || !input.chatId || typeof input.intentId !== "string"
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.intentId)) throw new Error("invocation_steer_invalid_lookup");
+    const pendingReceipt = rendererSendQueue().currentTurnReceiptFor(input.chatId, input.intentId, "");
+    if (pendingReceipt) return pendingReceipt;
+    try {
     const durable = await durableOwnerTextRoutes().currentTurnSteerReceipt(_event, input);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-    if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?{chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}:null);}
+    if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return await controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?{chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}:null);}
     return invocationCurrentTurnControl.currentTurnSteerReceipt(input.chatId, input.intentId);
+    } catch (cause) {
+      if (isTransientSendRefusal(cause)) return null;
+      throw cause;
+    }
   });
-  ipcMain.handle("invoke:steer", async (_event, req: McpInvocationRequest, intentId?: string) => {
-    assertTrustedSitePublishIpcSender(_event);
+  const steerFromRenderer = async (_event: IpcMainInvokeEvent, req: McpInvocationRequest, intentId?: string) => {
     const request = rendererInvocationRequest(req);
     const durable = await durableOwnerTextRoutes().steer(_event, request, intentId);
     if (durable !== NOT_DAEMON_OWNED) return durable;
@@ -7299,15 +7335,37 @@ export function registerIpcHandlers(): void {
     return invocationService.steerFromOwner(
       request, intentId, admitMainInvocation(request.chatId),
     );
+  };
+  ipcMain.handle("invoke:steer", async (_event, req: McpInvocationRequest, intentId?: string) => {
+    assertTrustedSitePublishIpcSender(_event);
+    // Text that cannot join the current turn right now (the run just ended, or its process changed) is not an error the
+    // owner has to see: it is accepted and runs as the next message.
+    const queued = rendererSendQueue();
+    const waiting = intentId ? queued.steerReceiptFor(req?.chatId, intentId) : null;
+    if (waiting) return waiting;
+    try { return await steerFromRenderer(_event, req, intentId); }
+    catch (cause) {
+      const accepted = queued.acceptRefusedSteer(_event, rendererInvocationRequest(req), intentId, cause);
+      if (accepted) return accepted;
+      throw cause;
+    }
   });
   ipcMain.handle("invoke:steerReceipt", async (_event, input: { chatId: string; intentId: string }) => {
     assertTrustedSitePublishIpcSender(_event);
     if (!input || typeof input !== "object") throw new Error("invocation_steer_invalid_lookup");
+    const pendingReceipt = rendererSendQueue().steerReceiptFor(input.chatId, input.intentId);
+    if (pendingReceipt) return pendingReceipt;
+    try {
     const durable = await durableOwnerTextRoutes().steerReceipt(_event, input);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-    if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?.result??null);}
+    if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return await controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?.result??null);}
     return invocationService.ownerSteerReceipt(input.chatId, input.intentId);
+    } catch (cause) {
+      // A receipt lookup that cannot be answered right now is "no receipt yet", not a failure to report.
+      if (isTransientSendRefusal(cause)) return null;
+      throw cause;
+    }
   });
   ipcMain.handle("invoke:cancel", async (_event, runId: string) => {
     assertTrustedSitePublishIpcSender(_event);
@@ -7336,12 +7394,17 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "invoke:activeChats", () => [...new Set([...invocationService.activeChatIds(), ...combinedInvocationActiveChatIds()])]);
   // 목표가 살아 있어 턴 사이에서 다음 실행을 기다리는 대화(사이드바 혜성). 실행 권한 판단에는 안 쓴다.
   registerAppControlDomainIpc(ipcMain, "invoke:goalActiveChats", () => goalActiveChatIds());
-  ipcMain.handle("invoke:attach", async (_event, chatId: string, options?: { includeEvents?: boolean }) => {
+  const attachFromRenderer = async (_event: IpcMainInvokeEvent, chatId: string, options?: { includeEvents?: boolean }) => {
     const durable = await durableOwnerTextRoutes().attach(_event, chatId, options?.includeEvents !== false);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
     if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextAttach(_event,binding,options?.includeEvents!==false);}
     return invocationService.attach(chatId, {includeEvents:options?.includeEvents!==false});
+  };
+  // "Not attachable right now" (the run just ended, the channel is reattaching) is the same answer as "no run": nothing to show.
+  ipcMain.handle("invoke:attach", async (_event, chatId: string, options?: { includeEvents?: boolean }) => {
+    try { return await attachFromRenderer(_event, chatId, options); }
+    catch (cause) { if (isTransientSendRefusal(cause)) return null; throw cause; }
   });
   ipcMain.handle("invoke:receipt", async (_event, runId: string) => {
     const durable = await durableOwnerTextRoutes().receipt(_event, runId);
@@ -7400,11 +7463,15 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "invoke:replay", (input: unknown) => invocationService.replay(input));
   registerAppControlDomainIpc(ipcMain, "invoke:workerReport", (scope) => getWorkerReport(scope));
   registerAppControlDomainIpc(ipcMain, "invoke:latestReceipt", (chatId: string) => invocationService.latestReceipt(chatId));
-  ipcMain.handle("invoke:steeringRecovery", async (_event, chatId: string) => {
+  const steeringRecoveryFromRenderer = async (_event: IpcMainInvokeEvent, chatId: string) => {
     const durable = await durableOwnerTextRoutes().steeringRecovery(_event, chatId);
     if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
-    if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextRecovery(_event,binding);}return invocationService.steeringRecovery(chatId);});
+    if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextRecovery(_event,binding);}return invocationService.steeringRecovery(chatId);};
+  ipcMain.handle("invoke:steeringRecovery", async (_event, chatId: string) => {
+    try { return await steeringRecoveryFromRenderer(_event, chatId); }
+    catch (cause) { if (isTransientSendRefusal(cause)) return []; throw cause; }
+  });
   registerAppControlDomainIpc(ipcMain, "invoke:latestOneSurface", (input: unknown) => {
     if (
       !input ||

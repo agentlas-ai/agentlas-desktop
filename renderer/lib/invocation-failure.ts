@@ -136,8 +136,8 @@ export function goalAdmissionControlFailureForCode(code: string | null | undefin
   // identity conflicts, and failed proof writes never establish that fact.
   if (code === "invocation_admission_rejected") {
     message = ko
-      ? `실행 접수 기록을 안전하게 남기지 못해 시작하지 않았습니다(사유 코드: ${code}). 아무것도 실행되지 않았고 입력은 보존되어 있습니다. 잠시 뒤 다시 보내도 중복 실행되지 않습니다.`
-      : `The run could not be recorded safely, so it did not start (reason code: ${code}). Nothing ran and your input is preserved; sending again later cannot run it twice.`;
+      ? "실행을 안전하게 시작하지 못했어요. 아무것도 실행되지 않았어요. 잠시 뒤 다시 보내도 중복 실행되지 않아요."
+      : "The run could not be started safely. Nothing ran; sending again later cannot run it twice.";
     return { code, message };
   }
   if (code.startsWith("work_attachment_goal_")) {

@@ -161,7 +161,7 @@ export class OneSupervisorStore {
       this.db.prepare(`INSERT INTO one_supervisor_requests(command_id,one_id,kind,payload_json,payload_hash,state,task_id,run_id,origin_chat_id,user_message_id,receipt_json,created_at,updated_at)
         VALUES(?,?,?,?,?,'stored',?,?,?,?,?,?,?)`).run(input.commandId,input.oneId,input.kind,JSON.stringify(input.payload),hash,input.taskId ?? null,input.runId ?? null,input.originChatId,messageId ?? null,JSON.stringify(receipt),now,now);
       return this.get(input.commandId)!;
-    })();
+    }).immediate();
   }
   update(row: SupervisorRequestRow, patch: Partial<SupervisorCommandReceipt>, expectedState = row.state): SupervisorCommandReceipt {
     const receipt = {...JSON.parse(row.receipt_json) as SupervisorCommandReceipt,...patch};
@@ -208,7 +208,7 @@ export class OneSupervisorStore {
       this.db.prepare(`INSERT INTO one_supervisor_checkins(id,one_id,instruction,cadence_json,notify,next_at,created_at,command_id) VALUES(?,?,?,?,?,?,?,?)`)
         .run(id,oneId,input.instruction,JSON.stringify(input.cadence),input.notify,nextCheckinAt(input.cadence,now),new Date(now).toISOString(),input.commandId);
       return this.checkinRow(this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE id=?").get(id) as Parameters<OneSupervisorStore["checkinRow"]>[0]);
-    })();
+    }).immediate();
   }
   checkins(oneId: string): OneCheckin[] {
     return (this.db.prepare("SELECT * FROM one_supervisor_checkins WHERE one_id=? AND active=1 ORDER BY next_at").all(oneId) as Array<Parameters<OneSupervisorStore["checkinRow"]>[0]>).map(row=>this.checkinRow(row));
@@ -237,7 +237,7 @@ export class OneSupervisorStore {
         fired += 1;
       }
       return fired;
-    })();
+    }).immediate();
   }
   /** A delegated worker is waiting for the owner (a question). One tells the owner; it does not answer for them. */
   noticeNeedsOwner(oneId: string, taskId: string, chatId: string, waitId: string, detail: string): boolean {

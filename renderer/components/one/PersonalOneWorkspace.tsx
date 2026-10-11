@@ -45,6 +45,7 @@ import { PersonalOneContext, usePersonalOneContext, personalOneContextLabel } fr
 import { PersonalOneCheckins } from "./PersonalOneCheckins";
 import dynamic from "next/dynamic";
 import styles from "./PersonalOneWorkspace.module.css";
+import { Select } from "@/components/Select";
 
 const PersonalOneTaskResult=dynamic(()=>import("./PersonalOneTaskResult").then(module=>module.PersonalOneTaskResult),{ssr:false});
 
@@ -190,13 +191,27 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     } catch {if(mounted.current)setError(true);}
   },[]);
   const sync=useCallback(()=>refreshCoordinator.current?.request(undefined) ?? Promise.resolve(),[]);
+  // A saved request Main has not confirmed yet is delivered again quietly (same command id, so Main answers with the
+  // receipt it already has instead of running it twice). No banner, no retry button: the message is already shown.
+  const redelivery=useRef(new Map<string,{n:number;at:number}>());
+  const redeliverSaved=useCallback(()=>{
+    const box=outbox.current;const bridge=ipc()?.oneSupervisor;if(!box||!bridge)return;
+    for(const intent of box.list()){
+      if(inFlight.current.has(intent.commandId))continue;
+      const state=redelivery.current.get(intent.commandId)??{n:0,at:0};
+      if(state.n>=6||Date.now()<state.at)continue;
+      redelivery.current.set(intent.commandId,{n:state.n+1,at:Date.now()+Math.min(60000,2000*2**state.n)});
+      inFlight.current.add(intent.commandId);
+      void box.deliver(bridge,intent).then(()=>{if(mounted.current){setSavedRequests(box.list());void sync();}}).catch(()=>undefined).finally(()=>{inFlight.current.delete(intent.commandId);});
+    }
+  },[sync]);
   useEffect(()=>{
     const coordinator=createCoalescedRefresh<void>(readSnapshot,()=>undefined);refreshCoordinator.current=coordinator;
     mounted.current=true;void sync();const off=ipcEvents()?.onStoreChanged?.(()=>{void sync();});
-    const timer=window.setInterval(()=>{if(document.visibilityState!=="hidden")void sync();},5000);const focus=()=>{void sync();};window.addEventListener("focus",focus);
+    const timer=window.setInterval(()=>{if(document.visibilityState!=="hidden"){void sync();redeliverSaved();}},5000);const focus=()=>{void sync();};window.addEventListener("focus",focus);
     const storage=(event:StorageEvent)=>{if(event.key?.startsWith("agentlas.one.supervisor.outbox.")){setSavedRequests(outbox.current?.list() ?? []);void sync();}};window.addEventListener("storage",storage);
     return()=>{coordinator.dispose();if(refreshCoordinator.current===coordinator)refreshCoordinator.current=null;mounted.current=false;++generation.current;window.clearInterval(timer);off?.();window.removeEventListener("focus",focus);window.removeEventListener("storage",storage);};
-  },[sync,readSnapshot]);
+  },[sync,readSnapshot,redeliverSaved]);
   const observedCommands=useMemo(()=>{
     const messageIds=new Set(snapshot?.messages.map(message=>message.id));
     return new Set(snapshot?.turns?.filter(turn=>messageIds.has(turn.userMessageId)).map(turn=>turn.commandId));
@@ -446,14 +461,12 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               local permission selection must not resolve a previous run's card. */}
           <ToolApprovalInline chatId={snapshot?.conversationChatId} compact chip composerWidth={Math.max(300,Math.min(736,viewportWidth-(detached?32:250)))} />
         </div>
-        {error&&<p role="status" className={styles.feedback}>{copy("접수를 확인할 수 없습니다. 저장된 요청과 연결 상태를 확인해 주세요.","Reception could not be confirmed. Review the saved request and connection.")}</p>}
         <AgiDefectChip chatId={snapshot?.conversationChatId ?? null} locale={ko?"ko":"en"} />
         {receipt?.state==="failed"&&receipt.kind!=="reply"&&<AgiIncidentReportButton key={receipt.commandId} locale={ko?"ko":"en"} draft={{
           chatId:snapshot?.conversationChatId,runId:receipt.runId ?? receipt.commandId,failureCode:"one_supervisor_command_failed",category:"other",
           title:"[Supervisor] Request failed",summary:receipt.reason || "The Supervisor request state became failed.",
           steps:["Submit a Supervisor request",`Request kind: ${receipt.kind}`],
         }} />}
-        {savedRequests.filter(intent=>!inFlight.current.has(intent.commandId)).map(intent=><button className={styles.retry} key={intent.commandId} onClick={()=>void outbox.current!.deliver(ipc()!.oneSupervisor,intent).then(value=>{showReceipt(value);setSavedRequests(outbox.current!.list());void sync();}).catch(()=>setError(true))}>{copy("같은 저장 요청 다시 확인","Retry the same saved request")} · {intent.method}</button>)}
         <input ref={attachmentPicker} type="file" multiple hidden onChange={event=>{if(event.target.files)void pickAttachments(Array.from(event.target.files));event.target.value="";}}/>
         {attachments.length>0&&<div className={styles.attachmentDrafts} aria-label={copy("선택한 첨부","Selected attachments")}>{attachments.map((item,index)=><div className={styles.attachmentDraft} key={index}>
           {item.preview&&<img src={item.preview} alt={item.draft.name}/>}
@@ -480,7 +493,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
               <button type="button" role="menuitem" data-hover="own" onClick={()=>{setPlusOpen(false);void appearance();}}><span className={styles.plusIcon}><IconSettings size={15}/></span><strong>{copy("이름과 말풍선","Name and bubbles")}</strong></button>
             </div>}
           </div>
-          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onKeyDown={event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.nativeEvent.isComposing){event.preventDefault();void send();}}} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
+          <textarea ref={composerInput} aria-label={ko?name+"에게 메시지":"Message "+name} value={text} onChange={event=>{if(draftIdentity.current===null)initialDraftEdit.current={edited:true,value:event.target.value};setText(event.target.value);event.currentTarget.style.height="auto";event.currentTarget.style.height=Math.min(140,event.currentTarget.scrollHeight)+"px";}} onKeyDown={event=>{if(event.key==="Enter"&&!event.shiftKey&&!event.nativeEvent.isComposing&&event.keyCode!==229){event.preventDefault();void send();}}} maxLength={8000} rows={1} placeholder={copy("메시지 보내기","Send a message")}/>
           <OneVoiceInputHelp locale={ko?"ko":"en"} composerRef={composerInput} />
           <button className={styles.send} type="submit" aria-label={copy("보내기","Send")} disabled={!snapshot||savedRequestError||attachmentBusy||(!text.trim()&&!attachments.length)}><IconArrowUp size={18}/></button>
         </form>
@@ -498,11 +511,11 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
         <div className={styles.taskContents} aria-label={copy("독립 작업","Independent tasks")}><header><h2 id="one-task-heading">{copy("작업과 결과","Tasks and results")}</h2>{viewportWidth>=860&&<button type="button" aria-label={shownPanelWidth>=panelMaxWidth-1?copy("결과 너비 자동 맞춤","Fit result width automatically"):copy("결과 펼치기","Expand result")} aria-pressed={shownPanelWidth>=panelMaxWidth-1} title={copy("같은 결과를 넓게 보기","Review the same result at full available width")} onClick={()=>shownPanelWidth>=panelMaxWidth-1?setAutoPanelWidth(true):resizePanel(panelMaxWidth)}><IconExpand size={16}/></button>}{taskPreviewOnly&&<button type="button" onClick={()=>setTaskPreviewOnly(false)}>{copy("모든 작업","All tasks")}</button>}<button type="button" aria-label={copy("작업 닫기","Close tasks")} onClick={()=>setTasksOpen(false)}><IconClose size={17}/></button></header>
       {!taskPreviewOnly&&<>
       <label>{copy("Work에 맡길 일","Hand work to Work")}<textarea value={work} onChange={event=>setWork(event.target.value)} maxLength={8000}/></label>
-      <label>{copy("이 Work 업무에 사용할 실행 예산","Execution budget for this Work task")}<select aria-label={copy("이 Work 업무에 사용할 실행 예산","Execution budget for this Work task")} value={budgetId} onChange={event=>setBudgetId(event.target.value)}><option value="">{copy("제한 없이 관측만 (기본)","Unrestricted observation (default)")}</option>{budgets.items.filter(item=>item.limitUsd!==null).map(item=><option key={item.budgetId} value={item.budgetId}>{personalOneBudgetName(item,ko?"ko":"en")}</option>)}{budgetSelectionUnconfirmed&&<option value={budgetId}>{copy("선택 예산 확인 필요","Selected budget needs review")}</option>}</select></label>
+      <label>{copy("이 Work 업무에 사용할 실행 예산","Execution budget for this Work task")}<Select aria-label={copy("이 Work 업무에 사용할 실행 예산","Execution budget for this Work task")} value={budgetId} onChange={event=>setBudgetId(event.target.value)}><option value="">{copy("제한 없이 관측만 (기본)","Unrestricted observation (default)")}</option>{budgets.items.filter(item=>item.limitUsd!==null).map(item=><option key={item.budgetId} value={item.budgetId}>{personalOneBudgetName(item,ko?"ko":"en")}</option>)}{budgetSelectionUnconfirmed&&<option value={budgetId}>{copy("선택 예산 확인 필요","Selected budget needs review")}</option>}</Select></label>
       <p className={styles.feedback}>{budgetSelectionUnconfirmed?copy("선택한 예산의 최신 정책을 확인하지 못했습니다. 예산 관측을 확인하거나 기본 관측으로 직접 변경해 주세요.","The selected budget policy is unconfirmed. Review budget observations or explicitly choose the default observation mode."):budgetId?copy("이 업무의 후속 실행도 같은 예산에서 예약합니다. 공급자의 실제 청구 상한을 보장하지 않습니다.","Follow-up runs reserve from the same task budget. Actual provider charges are not capped."):copy("예산을 선택하지 않으면 제한 없이 관측합니다. 실제 청구가 미확정일 수 있습니다.","Without a selected budget, execution is unrestricted observation. Actual billing may remain unconfirmed.")}</p>
       <button type="button" onClick={()=>setBudgetsOpen(true)}>{copy("예산 설정과 비용 관측","Budget settings and billing observations")}</button>
       <button disabled={workPending||!snapshot||!work.trim()||budgetSelectionUnconfirmed} onClick={()=>void startWork()}>{copy("Work 시작","Start Work")}</button><button onClick={()=>void openMain("/science")}>{copy("Science 열기","Open Science")}</button>
-      {!!snapshot?.scienceProjects?.length&&<><label>{copy("Science 프로젝트","Science project")}<select value={scienceProject} onChange={event=>setScienceProject(event.target.value)}><option value="">{copy("프로젝트 선택","Choose a project")}</option>{snapshot.scienceProjects.map(project=><option key={project.projectId} value={project.projectId}>{project.title}</option>)}</select></label><button disabled={workPending||!scienceProject||!work.trim()} onClick={()=>void startWork(true)}>{copy("Science에 맡기기","Hand off to Science")}</button></>}
+      {!!snapshot?.scienceProjects?.length&&<><label>{copy("Science 프로젝트","Science project")}<Select value={scienceProject} onChange={event=>setScienceProject(event.target.value)}><option value="">{copy("프로젝트 선택","Choose a project")}</option>{snapshot.scienceProjects.map(project=><option key={project.projectId} value={project.projectId}>{project.title}</option>)}</Select></label><button disabled={workPending||!scienceProject||!work.trim()} onClick={()=>void startWork(true)}>{copy("Science에 맡기기","Hand off to Science")}</button></>}
       {snapshot?.scienceError&&<p className={styles.feedback}>{copy("Science 관측 연결을 확인할 수 없습니다.","Science observation is unavailable.")}</p>}
       {receipt&&receipt.kind!=="reply"&&<p role="status" className={styles.feedback}>{receiptCopy(receipt)}</p>}
       <div className={styles.taskList}>{snapshot?.tasks.map(item=><button key={item.taskId} data-task-id={item.taskId} data-selected={selected===item.taskId} onClick={()=>{setSelected(item.taskId);setSelectedHandoff(null);setTaskPreviewOnly(true);}}><strong>{item.title}</strong><span>{item.surface==='science'?'Science':item.surface==='one'?'One':'Work'} · {stateLabel(item.state)}</span></button>)}</div>

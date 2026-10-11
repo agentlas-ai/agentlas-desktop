@@ -254,7 +254,7 @@ export function applyPendingOwnerGoalAmendments(
       if (!latest) throw new Error("goal_amendment_run_missing");
       bindCurrentGoalRevisionToLongRun(latest.id, latest.version, idleWaiting || idleActive ? { allowIdleWaiting: idleWaiting, allowIdleActive: idleActive } : undefined);
       return { applied: true, revision: revisionNumber, sourceMessageIds: applied };
-    })();
+    }).immediate();
   } catch (error) {
     return { applied: false, reason: error instanceof Error ? error.message.slice(0, 120) : "goal_amendment_failed" };
   }

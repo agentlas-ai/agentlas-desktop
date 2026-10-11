@@ -346,7 +346,7 @@ export function admitInvocationWithStartReceipt(
       SET status = 'admitted', admitted_at = ?, updated_at = ?
       WHERE run_id = ? AND status = 'pending'`).run(timestamp, timestamp, input.runId);
     return { kind: "admitted", admission: decode(rowForRun(input.runId)!) };
-  })();
+  }).immediate();
 }
 
 export type VerifiedNoStartProof = {

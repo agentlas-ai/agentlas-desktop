@@ -184,7 +184,7 @@ export function bindCreatedGoalContinuationWorkspace(input: {
     }
     recordRunEvent({ runId: input.invocationRunId, automationId: a.id, kind: SOURCE_EVENT,
       sourceEventId: `automation-workspace-source:${a.id}`, payload: intentPayload(value) });
-  })();
+  }).immediate();
 }
 
 function hasPriorGoalBinding(a: Automation): boolean {

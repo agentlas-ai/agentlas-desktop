@@ -752,7 +752,7 @@ export function forgetStaleGraphCheckpoint(
 
 export function reconcileAutomationGraph(
   // Host effect observation settles checkpoint facts without taking scheduling authority.
-  input: AutomationGraphReconcileInput & { now?: Date; background?: boolean },
+  input: AutomationGraphReconcileInput & { now?: Date; background?: boolean; retryNow?: boolean },
 ): AutomationGraphReconcileResult {
   if (
     !validId(input.automationId) || !validId(input.runId) || !validId(input.occurrenceId) ||
@@ -943,6 +943,12 @@ export function reconcileAutomationGraph(
           : null,
         timezone: loaded.automation.timezone ?? null,
       });
+      // The held nodes were proven replay-safe (read-only), so the occurrence that was waiting for this
+      // reconciliation is simply run again now. Jumping to the next daily slot silently dropped a failed run
+      // (production 2026-10-11 15:36 KST: the Threads verification waited a day for its deferred retry).
+      if (input.retryNow === true && (restoredNextRunAt === null || Date.parse(restoredNextRunAt) > now.getTime())) {
+        restoredNextRunAt = now.toISOString();
+      }
       const scheduleUpdated = db.prepare(
         `UPDATE automations
          SET next_run_at = ?
@@ -1070,6 +1076,7 @@ export function recoverReadOnlySuspendedGraphs(): AutomationGraphReconcileResult
         checkpointDigest: view.checkpointDigest,
         expectedUpdatedAt: view.updatedAt,
         decisions: view.nodes.map((node) => ({ nodeId: node.nodeId, resolution: "retry" as const })),
+        retryNow: true,
       });
       tryRecordRunEvent({
         runId: result.runId,

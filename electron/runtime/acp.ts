@@ -1,3 +1,5 @@
+import { selectionFor } from "../capabilities/one-capabilities";
+import { withForeignCliContext } from "./foreign-cli-context";
 import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
 import { beginAdapterEffectRun, type AdapterEffectReport } from "../invocation/adapter-effect-context";
@@ -949,7 +951,8 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
     const nativeMcp = prepareNativeAcpMcpBinding(req);
     events.onStatus(tStatus(locale, "callingBackend", { backend: req.backendLabel || spec.label }));
     const cwd = req.cwd ?? agentRunCwd();
-    const runEnv = req.env ?? process.env;
+    // Other tools' personal context (Claude/Cursor folders) stays out unless One chose it (foreign-cli-context.ts).
+    const runEnv = withForeignCliContext(spec.id, req.env ?? process.env, selectionFor(req.agentId));
     const configuredCommand = req.runtimeSource ?? spec.command;
     const executableIdentity = observeCliExecutableIdentity({ bin: configuredCommand, cwd, env: runEnv });
     if (!executableIdentity) throw new Error(`ACP executable unavailable: ${configuredCommand}`);

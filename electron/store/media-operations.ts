@@ -189,7 +189,7 @@ export function createMediaOperationIntent(input: MediaOperationIntent, now = ne
     const created = rowToRecord(readRow(input.id));
     if (!created) throw new Error("media_operation_create_failed");
     return created;
-  })();
+  }).immediate();
 }
 
 export function getMediaOperation(id: string): MediaOperationRecord | null {

@@ -4571,3 +4571,7 @@
 .searchHeader { grid-template-columns: 20px minmax(0,1fr) auto; align-items: center; color: var(--muted-deep); }
 
 .sessionSplitMeter{display:flex;align-items:center;gap:6px;padding:2px 6px 14px;color:var(--ink-soft);font-size:12px}.sessionSplitMeter>span{flex:1}.sessionSplitMeter i{display:block;width:15px;height:15px;border-radius:5px;border:1px solid var(--paper-edge-strong);background:var(--popup-control-bg)}.sessionSplitMeter i[data-filled=true]{background:var(--accent);border-color:var(--accent)}.sessionSplitMeter small{margin-left:4px;color:var(--muted-deep)}
+
+.oneRoomMemberNotice { margin: 6px 0; padding: 8px 10px; border: 1px solid var(--warn); border-radius: 8px; font-size: 12px; line-height: 1.45; }
+.oneRoomMemberNotice > p { margin: 0; }
+.oneRoomMemberNotice > p + p { margin-top: 4px; }

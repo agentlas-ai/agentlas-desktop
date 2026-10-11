@@ -20,7 +20,8 @@ export const CONNECTION_PROVIDER_HINTS = [
 ].join("\n");
 
 /** 항상-켜진 연결 안내 스킬. 에이전트는 사용자 언어로 말하되, 이 지시는 영어로 따른다. */
-export const GLOBAL_CONNECTION_SKILL = [
+/** Always-needed opening of the connection skill (plain-language rule, scope, core rule). */
+export const CONNECTION_INTRO_LINES: readonly string[] = [
   "## Connecting accounts for the user (always-on background skill)",
   "",
   "Many people using this app have NEVER heard the words \"API\", \"MCP\", \"token\", \"key\", \"environment variable\", \"OAuth\", or \"cloud console\". Avoid those words unless the user is technical. Speak plainly, in the user's own language, about \"connecting your Slack / Gmail / Google account\" or \"setting up Google Cloud for you.\"",
@@ -28,11 +29,19 @@ export const GLOBAL_CONNECTION_SKILL = [
   "WHEN this applies: whenever the task needs a third-party service — either to run right now (Slack, Gmail, Google Cloud, Firebase, a database, an image/voice service, …) OR because an app or website the user is building needs to connect one. If nothing external is needed, ignore this section entirely.",
   "",
   "Core rule: NEVER stop with \"there is no API/MCP\" or \"I cannot because the connector is missing.\" You must choose the next viable path. Reuse an actually permitted installed connector or authorized browser tool. Prepare missing integration code locally when authorized. Account creation, new grants, security changes, key generation/storage and provider charges require the exact native confirmation. Report a concrete missing secure boundary when no authorized delivery path exists.",
+];
+
+/** Generative image/video/audio provider routing. Needed only when such a provider call is in play. */
+export const MEDIA_ROUTING_LINES: readonly string[] = [
   "These media routing rules apply only when invoking an Agentlas-configured generative provider. Image, video, and audio are output modalities, not a requirement to use a generative provider. Local or procedural rendering, editing, encoding, compositing, and GUI work may use actually available tools under existing run permissions; determine their availability from tool evidence, not provider readiness.",
   "For a configured generative-provider call, Agentlas has ALREADY resolved the engine. Do not probe for or silently substitute another generative provider, and do not narrate an engine-selection ladder. Read only the value-free native routing/readiness result for that provider call:",
   "  - AGENTLAS_MULTIMODAL_IMAGE_PROVIDER / VIDEO_PROVIDER / AUDIO_PROVIDER = the chosen generative-provider id, and the matching AGENTLAS_MULTIMODAL_*_READY = \"1\" (ready) or \"0\" (that provider route is unavailable). These values do not describe local tool capabilities.",
   "  - If READY=\"1\": revalidate current native execution permission and any required cost approval, then use that engine. Mapping: 'codex-cli-image' -> run `codex exec -s workspace-write --skip-git-repo-check` with its built-in image_gen tool (keyless, no API key). 'nanobanana-image' -> run the `agy` CLI keyless image generation (Nano Banana / Gemini image). Any configured API or cloud provider must use the native broker and its scoped opaque credential reference. Key presence alone does not prove connection or authorize a paid request. Produce only the authorized result.",
   "  - If READY=\"0\": do not invoke that unavailable provider route, silently substitute another provider, or open a browser to create accounts or sign up for media generation. If the task requires that provider, emit EXACTLY the line `<<agentlas-multimodal-setup>>` on its own line, add one short sentence telling the user to open multimodal settings and pick or connect an engine, and stop that blocked provider step. Continue other authorized work. READY=\"0\" must not rule out or stop local or procedural rendering, editing, encoding, compositing, or GUI work.",
+];
+
+/** Step-by-step account connecting playbook plus provider addresses. */
+export const CONNECTION_PLAYBOOK_LINES: readonly string[] = [
   "",
   "YOU do the work; the user only does what literally requires their own hands (typing their own password, a one-time code texted to their phone, approving a payment, confirming a legal/identity action). Concretely:",
   "",
@@ -49,4 +58,11 @@ export const GLOBAL_CONNECTION_SKILL = [
   "Use the actual current native account, workspace, organization and exact Desktop host. Use only the approved native credential broker and current provider grants, and do NOT lecture the user. Make it effortless while keeping secrets out of ordinary chat and generated source files.",
   "",
   CONNECTION_PROVIDER_HINTS,
+];
+
+/** 항상-켜진 연결 안내 스킬 전문(데스크탑 chat 모듈·레거시 호출용). 러너는 prompt-sections.ts 가 필요한 조각만 싣는다. */
+export const GLOBAL_CONNECTION_SKILL = [
+  ...CONNECTION_INTRO_LINES,
+  ...MEDIA_ROUTING_LINES,
+  ...CONNECTION_PLAYBOOK_LINES,
 ].join("\n");

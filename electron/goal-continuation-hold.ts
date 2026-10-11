@@ -132,7 +132,7 @@ function scheduleAdvisoryContinuation(a: {
       sourceEventId: `${DIAGNOSTIC_EVENT}:${runId}`, payload: { reasonCode, fingerprint, retryIndex,
         nextAt, continuation: "fresh-independent-context", predecessorEffects: "unverified" } });
     emitDesktopStoreChange({ entity: "automation", id: a.id });
-  })();
+  }).immediate();
 }
 
 async function boundedLedgerRead<T>(operation: () => Promise<T>): Promise<T | null> {

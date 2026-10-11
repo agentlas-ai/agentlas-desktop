@@ -294,7 +294,9 @@ export function OneOrgChart({
     marketing: ["마케팅", "marketing", "growth", "sales", "content"],
     research: ["리서치", "research", "analysis", "analyst", "조사"],
   };
-  const replacementCandidates = installedAgents.filter((agent) => !usedIds.has(agent.id) && !agent.parentTeamId);
+  // A replacement must itself be able to work: never offer an agent whose source folder is gone or that is hidden.
+  const replacementCandidates = installedAgents.filter((agent) => !usedIds.has(agent.id) && !agent.parentTeamId
+    && !agent.sourceMissingSince && agent.visibility !== "background" && agent.visibility !== "private");
   const addSearchValue = addSearch.trim().toLocaleLowerCase();
   const candidates = installedAgents.filter((agent) => {
     if (usedIds.has(agent.id)) return false;
@@ -607,6 +609,7 @@ export function OneOrgChart({
             <div className={styles.rowCopy}>
               <strong>{member.displayName}</strong>
               <span className={styles.statusLine}>{statusLine(member, locale)}</span>
+              {member.unavailable && <span className={styles.unavailableReason} role="status">{locale === "ko" ? member.unavailable.reason.ko : member.unavailable.reason.en}</span>}
               <span className={styles.memberMeta}>{memberKind(member, installedAgents, locale)} · {sourceLabel(member.source, locale)}</span>
             </div>
             <span className={styles.source}>{activityTimeLabel(member, locale)}</span>
@@ -627,6 +630,19 @@ export function OneOrgChart({
               />
             )}
             <div className={styles.rowActions}>
+              {member.unavailable?.replaceable && <button
+                type="button"
+                className={styles.replaceNeededButton}
+                data-one-replace-needed={member.installedAgentId}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setEditorMember(member);
+                  setEditName(member.displayName);
+                  setEditStyle(member.collaborationStyle ?? "default");
+                  setReplaceId("");
+                  setHandover(false);
+                }}
+              >{locale === "ko" ? "교체" : "Replace"}</button>}
               {onNewSession && <button
                 type="button"
                 className={styles.editButton}

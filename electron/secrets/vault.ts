@@ -21,6 +21,7 @@ import {
   keychainDelete,
   keychainGet,
   keychainListAccounts,
+  keychainPromptsAreAnswerable,
   keychainSet,
   retryKeychainReadFromUser,
   retryKeychainListFromUser,
@@ -40,6 +41,28 @@ const SECRET_PREFIX = "secret:";
 const USE_MEMORY_VAULT = process.env.AGENTLAS_E2E === "1" && process.env.AGENTLAS_E2E_KEYCHAIN !== "1";
 const memoryVault = new Map<string, string>();
 const keychainCache = new Map<string, string | null>();
+// When each keychainCache entry / the env name list was observed. Only a headless host (the background service) uses it.
+const keychainCacheAt = new Map<string, number>();
+let envKeyCacheAt = 0;
+/**
+ * The background service is a different process from the window that edits the vault. Its read cache never learns
+ * about a key the window saved, renamed or rotated afterwards: a name it once read as missing stayed missing, and a
+ * rotated key stayed old, until the service restarted (production 2026-10-11: ELEVENLABS key stored under another
+ * name, renamed later, still invisible to Hope's daemon turns). A host that cannot see the other process's writes must
+ * not trust a cached answer for long, so its entries expire. The window sees its own writes and keeps its cache.
+ */
+export function headlessCredentialCacheTtlMs(): number {
+  const raw = Number(process.env.AGENTLAS_HEADLESS_CREDENTIAL_CACHE_MS);
+  return Number.isFinite(raw) && raw >= 0 ? Math.min(raw, 60_000) : 1_000;
+}
+function cachedCredentialIsFresh(key: string): boolean {
+  if (keychainPromptsAreAnswerable()) return true;
+  const at = keychainCacheAt.get(key);
+  return at !== undefined && Date.now() - at <= headlessCredentialCacheTtlMs();
+}
+function noteCredentialCached(key: string): void {
+  keychainCacheAt.set(key, Date.now());
+}
 const passwordReads = new Map<string, Promise<string | null>>();
 const passwordOperations = new Map<string, Promise<unknown>>();
 const userPasswordRetries = new Map<string, Promise<string | null>>();
@@ -100,11 +123,12 @@ async function getPassword(account: string): Promise<string | null> {
   const key = passwordKey(service, account);
   const pending = passwordReads.get(key);
   if (pending) return pending;
-  if (!passwordOperations.has(key) && keychainCache.has(key)) return keychainCache.get(key) ?? null;
+  if (!passwordOperations.has(key) && keychainCache.has(key) && cachedCredentialIsFresh(key)) return keychainCache.get(key) ?? null;
   const started = queuePasswordOperation(key, async () => {
-    if (keychainCache.has(key)) return keychainCache.get(key) ?? null;
+    if (keychainCache.has(key) && cachedCredentialIsFresh(key)) return keychainCache.get(key) ?? null;
     const value = await keychainGet(service, account, () => keytarApi().getPassword(service, account));
     keychainCache.set(key, value);
+    noteCredentialCached(key);
     credentialStateRevision += 1;
     return value;
   });
@@ -128,6 +152,7 @@ async function setPassword(account: string, value: string): Promise<void> {
     await queuePasswordOperation(key, async () => {
       await keychainSet(service, account, value, () => keytarApi().setPassword(service, account, value));
       keychainCache.set(key, value);
+      noteCredentialCached(key);
       if (knownAccounts?.service === service) knownAccounts.accounts.add(account);
       credentialStateRevision += 1;
     });
@@ -145,6 +170,7 @@ async function deletePassword(account: string): Promise<void> {
     await queuePasswordOperation(key, async () => {
       await keychainDelete(service, account, async () => { await keytarApi().deletePassword(service, account); });
       keychainCache.set(key, null);
+      noteCredentialCached(key);
       if (knownAccounts?.service === service) knownAccounts.accounts.delete(account);
       credentialStateRevision += 1;
     });
@@ -173,6 +199,7 @@ function retryAccountFromUser(service: string, account: string): Promise<string 
   const started = queuePasswordOperation(key, async () => {
     const value = await retryKeychainReadFromUser(service, account, () => keytarApi().getPassword(service, account));
     keychainCache.set(key, value);
+    noteCredentialCached(key);
     credentialStateRevision += 1;
     return value;
   });
@@ -225,7 +252,7 @@ function retryEnvListFromUser(service: string): Promise<string[]> {
   const started = retryKeychainListFromUser(service, async () => (await keytarApi().findCredentials(service)).map((item) => item.account))
     .then((accounts) => {
       const keys = accounts.filter((account) => account.startsWith(ENV_PREFIX)).map((account) => account.slice(ENV_PREFIX.length));
-      if (keychainService() === service) { envKeyCacheService = service; envKeyCache = keys; rememberAccounts(service, accounts); }
+      if (keychainService() === service) { envKeyCacheService = service; envKeyCache = keys; envKeyCacheAt = Date.now(); rememberAccounts(service, accounts); }
       return keys;
     });
   userListRetries.set(service, started);
@@ -334,11 +361,11 @@ export function apiKeyPresenceHint(backend: RuntimeBackend): "present" | "missin
   try { service = keychainService(); } catch { return "unknown"; }
   const account = byokAccount(backend);
   const key = passwordKey(service, account);
-  if (!passwordOperations.has(key) && keychainCache.has(key)) {
+  if (!passwordOperations.has(key) && keychainCache.has(key) && cachedCredentialIsFresh(key)) {
     const value = keychainCache.get(key);
     return typeof value === "string" && value.length > 0 ? "present" : "missing";
   }
-  if (knownAccounts?.service === service && !knownAccounts.accounts.has(account) && !passwordOperations.has(key)) return "missing";
+  if (keychainPromptsAreAnswerable() && knownAccounts?.service === service && !knownAccounts.accounts.has(account) && !passwordOperations.has(key)) return "missing";
   return "unknown";
 }
 
@@ -471,7 +498,7 @@ export async function listEnvKeys(): Promise<string[]> {
     envKeyCache = null;
     envKeyRead = null;
   }
-  if (envKeyCache) return envKeyCache;
+  if (envKeyCache && (keychainPromptsAreAnswerable() || Date.now() - envKeyCacheAt <= headlessCredentialCacheTtlMs())) return envKeyCache;
   if (envKeyRead) return envKeyRead;
   const started = Promise.resolve().then(async () => {
     const accounts = developmentEffectsSuppressed() || USE_MEMORY_VAULT
@@ -480,7 +507,7 @@ export async function listEnvKeys(): Promise<string[]> {
           (await keytarApi().findCredentials(service)).map((c) => c.account));
     if (!(developmentEffectsSuppressed() || USE_MEMORY_VAULT)) rememberAccounts(service, accounts);
     const keys = accounts.filter((a) => a.startsWith(ENV_PREFIX)).map((a) => a.slice(ENV_PREFIX.length));
-    if (envKeyCacheService === service) envKeyCache = keys;
+    if (envKeyCacheService === service) { envKeyCache = keys; envKeyCacheAt = Date.now(); }
     return keys;
   });
   envKeyRead = started;

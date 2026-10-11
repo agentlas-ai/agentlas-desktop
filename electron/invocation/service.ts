@@ -1,3 +1,4 @@
+import { withoutOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
 import { captureOrdinaryOneTurn, type OrdinaryOneTurnSource, type OrdinaryOneTurnMode, type OrdinaryOneTurnState } from "./ordinary-one-turn";
 import { nativeOwnerTextChoices, NATIVE_OWNER_TEXT_CONTEXT_OMITTED } from "./native-owner-text";
 import type { NativeOwnerTextBinding, NativeOwnerTextInput, NativeOwnerTextReceipt } from "./native-owner-text";
@@ -74,6 +75,7 @@ import {
   longRunOwnerHold, scheduleBlockedGoalRetry, pendingBlockedGoalRetry, consecutiveGoalTurnFollowUps, goalTurnFollowUpPlan } from "../store/long-runs";
 import { armChatGoalContract, completeChatGoalContract, defineChatGoalContract, getChatGoalRevision, getLegacyGoalLifecycleSnapshot, migrateLegacyGoalLifecycle } from "../store/chat-goals";
 import { automaticGoalReplayBlockerCode, prepareInvocationAutomaticGoal } from "./automatic-goal";
+import { classifyAndHandGoalIntakeToMain } from "./goal-intake-forward";
 import { holdFiniteGoalForPendingAmendment, reviewOwnerGoalMessage } from "../long-run/goal-owner-amendment";
 import { prepareLegacyGoalLifecycle, type LegacyGoalLifecyclePreparation } from "./legacy-goal-lifecycle";
 import { LONG_RUN_TERMINAL_STATUSES } from "../../shared/long-run";
@@ -1071,43 +1073,55 @@ export class InvocationService {
   }
 
   private assertOrdinaryOneTurnCurrent(pending: NativePreparingPending, turn: OrdinaryOneTurnLifetime, mode: OrdinaryOneTurnMode): void {
-    function fail(): never { throw Object.assign(new Error("ordinary_one_turn_source_changed"), { code: "ordinary_one_turn_source_changed" }); }
+    // Names the failed condition (never a value) so a refusal says WHY; the owner never sees it, logs and run events do.
+    function fail(condition: string): never {
+      console.warn(`[ordinary-one-turn] source changed condition=${condition} mode=${mode}`);
+      throw Object.assign(new Error("ordinary_one_turn_source_changed"), { code: "ordinary_one_turn_source_changed", detail: `condition=${condition}` });
+    }
     const { chatId, runId, admission } = pending.binding;
     const current = getInvocationAdmission(runId);
-    if (pending.ordinaryTurn !== turn || pending.request.chatId !== chatId || pending.request.runId !== runId
-      || canonicalInvocationRequestJson(pending.request) !== admission.canonicalRequestJson
-      || JSON.stringify(getAuthenticatedActorIds()) !== turn.actor
-      || !current || current.chatId !== chatId || current.runId !== runId
-      || current.ownerProcessEpoch !== admission.ownerProcessEpoch || current.inputDigest !== turn.inputDigest
-      || current.digestVersion !== INVOCATION_ADMISSION_DIGEST_VERSION) fail();
+    if (pending.ordinaryTurn !== turn) fail("turn_replaced");
+    if (pending.request.chatId !== chatId || pending.request.runId !== runId) fail("request_identity");
+    if (canonicalInvocationRequestJson(pending.request) !== admission.canonicalRequestJson) fail("request_canonical_json");
+    if (JSON.stringify(getAuthenticatedActorIds()) !== turn.actor) fail("actor_ids");
+    if (!current) fail("admission_row_missing");
+    if (current!.chatId !== chatId || current!.runId !== runId) fail("admission_identity");
+    if (current!.ownerProcessEpoch !== admission.ownerProcessEpoch) fail("admission_owner_epoch");
+    if (current!.inputDigest !== turn.inputDigest) fail("admission_input_digest");
+    if (current!.digestVersion !== INVOCATION_ADMISSION_DIGEST_VERSION) fail("admission_digest_version");
     const record = turn.record;
     const hasRecord = Boolean(record && [this.activeRuns.get(runId), this.settlingRuns.get(runId),
       this.pendingGoalVerifications.get(runId), this.browserLoginWaitingRuns.get(runId)].includes(record));
     if (turn.phase === "preparing") {
-      if (this.nativePreparing.get(runId) !== pending || current.status !== "pending" || record) fail();
+      if (this.nativePreparing.get(runId) !== pending) fail("preparing_not_registered");
+      if (current!.status !== "pending") fail("preparing_admission_status");
+      if (record) fail("preparing_has_record");
     } else if (turn.phase === "admitted") {
-      if (current.status !== "admitted" || !record || !hasRecord || record.controller !== pending.controller
-        || record.chatId !== chatId || record.request.runId !== runId || !record.ownerLease) fail();
+      if (current!.status !== "admitted") fail("admitted_admission_status");
+      if (!record || !hasRecord) fail("admitted_record_missing");
+      if (record!.controller !== pending.controller) fail("admitted_controller");
+      if (record!.chatId !== chatId || record!.request.runId !== runId) fail("admitted_record_identity");
+      if (!record!.ownerLease) fail("admitted_owner_lease_missing");
       if (mode === "scope" || mode === "execution" || mode === "message") {
-        const lease = record.ownerLease;
-        if (lease.chatId !== chatId || lease.runId !== runId
-          || (!isLocalInvocationPreparationPort(pending.port) && lease.ownerId !== admission.ownerProcessEpoch)) fail();
+        const lease = record!.ownerLease!;
+        if (lease.chatId !== chatId || lease.runId !== runId) fail("lease_identity");
+        if (!isLocalInvocationPreparationPort(pending.port) && lease.ownerId !== admission.ownerProcessEpoch) fail("lease_owner_epoch");
         assertInvocationRunOwner(lease);
       }
     } else if (turn.phase === "settled") {
-      if (mode !== "settlement" || !turn.preparationClosed || !turn.executionClosed
-        || current.status !== "admitted" || !record || record.controller !== pending.controller
-        || this.nativePreparing.has(runId) || hasRecord) fail();
-    } else if (mode !== "closed" || !turn.preparationClosed || this.nativePreparing.has(runId) || hasRecord) fail();
+      if (mode !== "settlement" || !turn.preparationClosed || !turn.executionClosed) fail("settled_phase_mode");
+      if (current!.status !== "admitted" || !record || record.controller !== pending.controller) fail("settled_record");
+      if (this.nativePreparing.has(runId) || hasRecord) fail("settled_still_live");
+    } else if (mode !== "closed" || !turn.preparationClosed || this.nativePreparing.has(runId) || hasRecord) fail("closed_phase");
     if ((mode === "settlement" || mode === "closed") && record?.ownerLease) {
       const expected = record.ownerLease, custody = invocationRunOwners.getRunOwner(chatId, runId);
       if (!custody || custody.chatId !== chatId || custody.runId !== runId || custody.ownerId !== expected.ownerId
-        || custody.ownerKind !== expected.ownerKind || custody.leaseId !== expected.leaseId || custody.state !== "released") fail();
+        || custody.ownerKind !== expected.ownerKind || custody.leaseId !== expected.leaseId || custody.state !== "released") fail("custody_not_released");
     }
     if (mode === "message") {
       const row = turn.messageId ? getDb().prepare("SELECT id, chat_id, role FROM chat_messages WHERE id=?")
         .get(turn.messageId) as { id: string; chat_id: string; role: string } | undefined : undefined;
-      if (!row || row.id !== turn.messageId || row.chat_id !== chatId || row.role !== "user") fail();
+      if (!row || row.id !== turn.messageId || row.chat_id !== chatId || row.role !== "user") fail("prompt_row");
     }
   }
 
@@ -3956,7 +3970,7 @@ export class InvocationService {
               const superseded = supersedeGoalWaitForInvocation(current.goalId, runId);
               if (superseded) startBoundary.cleanups?.push(() => { restoreGoalWaitAfterUndispatchedStart(superseded); });
               return getLongRun(running.id);
-            })();
+            }).immediate();
             // The exact human source and Goal revision are durable now. Release
             // Main's unreadable-stop marker only through its typed Resume path.
             if (resumed) {
@@ -4015,10 +4029,15 @@ export class InvocationService {
             runReq.promptOrigin === "system" || runReq.planMode || chat.kind === "division" || controller.signal.aborted) return;
         // Goal custody is Desktop-only: this process cannot admit a Goal controller (producerAdmission stays
         // null), so a Goal admitted mid-turn would have its first dispatch refused with goal_episode_admission_missing.
-        // Intake is optional; keep a daemon-owned turn ordinary. A later Desktop-owned turn may admit the Goal.
+        // The turn stays ordinary and finishes here, but its intake must not be dropped: production 2026-10-11 10:08Z (run
+        // 97164057-c169-4868-89c0-53ebd22e9c8f, room chat 8f3e09ee-0ab7-4d6b-aa0a-8ae7d5e96549, 1.2.96) lost a recurring
+        // "every day ... upload" brief here, so no One chat could ever become a continuous Goal. Classify off the critical path
+        // with Desktop's own resolver; a Goal-bound message goes to Main (which owns Goal custody), or leaves a durable marker
+        // when Main is away. Once the chat holds a live Goal, ownerTurnStartsOnDesktop routes its next turn to Desktop.
         if (record.ownerLease?.ownerKind === "daemon") {
-          tryRecordRunEvent({ runId, chatId: chat.id, kind: "automatic_goal_intake_skipped",
-            payload: { sourceMessageId, reason: "goal_custody_desktop_only" } });
+          void classifyAndHandGoalIntakeToMain({ runId, chatId: chat.id, sourceMessageId, userPrompt: runReq.userPrompt,
+            permission: runReq.permissions ?? "read", signal: controller.signal,
+            attachmentOnly: attachmentDescriptors.length > 0 && !promptWithoutValidChatFileMarkers }).catch(() => undefined);
           return;
         }
         try {
@@ -6295,13 +6314,14 @@ export class InvocationService {
       try {
         if (!beginQueuedSteerDrain(next.id, drainedRunId)) return;
         if (!hasInvocationRunReceipt(drainedRunId)) {
-          this.start(
+          // Started from the settling run's own stack: it must not inherit that run's personal-native original.
+          withoutOnePersonalNativeOriginal(() => this.start(
             { ...next.request, runId: drainedRunId },
             next.workspaceBinding,
             next.executionContext,
             undefined, undefined, next.mainAdmission, undefined,
             next.request.oneMode && next.request.promptOrigin !== "system" ? QUEUED_ONE_ROOM_INHERITANCE : undefined,
-          );
+          ));
         }
         settleQueuedSteer(next.id, "started");
       } catch (error) {
@@ -6321,10 +6341,7 @@ export class InvocationService {
             ).get(chatId, text, next.queuedAt);
             if (!delivered) {
               appendChatMessage(chatId, "user", text, request.images?.length ? { images: request.images } : undefined);
-              appendChatMessage(chatId, "assistant", pickLocale(request) === "ko"
-                ? "방금 보낸 지시를 실행으로 넘기지 못했어요. 문장은 대화에 남겨 두었습니다. 다시 보내면 이어서 처리합니다."
-                : "I couldn't hand your last direction to a run. Your message is saved in the chat; send it again to continue.",
-              { hostNotice: { purpose: "host-status", runId: drainedRunId, status: "needs-owner" } });
+              // No synthetic "could not hand over" reply: the message is shown once, the cause is in the log above.
             }
           }
         } catch (persistError) {

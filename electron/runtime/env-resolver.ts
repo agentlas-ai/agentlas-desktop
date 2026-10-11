@@ -6,8 +6,11 @@ import type { InstalledAgent } from "../../shared/types";
 import { agentFolderPath } from "../agents/files";
 import { resolveActiveProvider } from "../multimodal/availability";
 import { getMultimodalSettings } from "../multimodal/settings";
-import { readEnvVar } from "../secrets/vault";
+import { listEnvKeys, readEnvVar } from "../secrets/vault";
 import { userDataPath } from "../runtime-paths";
+import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
+import type { EnvKeyRenameSuggestion } from "../../shared/env-key-rename";
+import { mediaToolEnvKeys, planEnvKeyRenames } from "./env-key-reach";
 
 const DOTENV_FILES = [".env", ".env.local"];
 
@@ -132,11 +135,15 @@ export function mergeRunnerEnvValues(
 export interface RunnerEnvResolution {
   env: NodeJS.ProcessEnv;
   injectedKeys: string[];
+  /** Saved names that look like a key this run's tools read under another name. Value-free; never applied silently. */
+  renameSuggestions: EnvKeyRenameSuggestion[];
 }
 
 export interface RunnerEnvOptions {
   /** Main-authored Mobile/unattended read boundary. Never hydrate dotenv/vault secrets. */
   restrictedReadBoundary?: boolean;
+  /** Other installed agents taking part in this run (team members). Their declared keys reach the shared tool process. */
+  memberAgents?: ReadonlyArray<Pick<InstalledAgent, "envRequirements"> | null | undefined>;
 }
 
 // Restricted runs are BYOK/Ollama protocol calls, not local CLI processes.
@@ -215,7 +222,7 @@ export async function buildRunnerEnv(
   options: RunnerEnvOptions = {},
 ): Promise<RunnerEnvResolution> {
   if (options.restrictedReadBoundary) {
-    return { env: restrictedRunnerEnv(), injectedKeys: [] };
+    return { env: restrictedRunnerEnv(), injectedKeys: [], renameSuggestions: [] };
   }
   const env: NodeJS.ProcessEnv = { ...process.env };
   const injected = new Set<string>();
@@ -231,8 +238,8 @@ export async function buildRunnerEnv(
   if (agentDir) apply(readDotEnvFiles(agentDir), true);
 
   const vaultKeys = new Set<string>();
-  if (agent) {
-    for (const req of agent.envRequirements) {
+  for (const member of [agent, ...(options.memberAgents ?? [])]) {
+    for (const req of member?.envRequirements ?? []) {
       if (req.key) vaultKeys.add(req.key);
     }
   }
@@ -249,6 +256,22 @@ export async function buildRunnerEnv(
     if (resolved.provider) {
       for (const key of resolved.provider.envKeys) vaultKeys.add(key);
     }
+  }
+
+  // A key the user saved for a media or speech tool (ElevenLabs, Runway, ...) must reach whichever process runs the
+  // tool, not only the one engine "auto" happened to pick: a group-room worker has no declared requirements, and an
+  // OpenAI audio key used to hide a saved ElevenLabs key. Only names the user actually saved are read. The list is one
+  // keychain call; the per-name reads below hit the vault only for saved names.
+  let storedNames: string[] | null = null;
+  try {
+    storedNames = await listEnvKeys();
+  } catch {
+    // A locked or unavailable vault narrows the run's tools; it never aborts a text-only turn.
+  }
+  const declaredKeys = new Set(vaultKeys);
+  if (storedNames) {
+    const saved = new Set(storedNames);
+    for (const key of mediaToolEnvKeys()) if (saved.has(key)) vaultKeys.add(key);
   }
 
   for (const key of vaultKeys) {
@@ -276,7 +299,16 @@ export async function buildRunnerEnv(
   env.AGENTLAS_MULTIMODAL_AUDIO_PROVIDER = audio.provider?.id ?? "none";
   env.AGENTLAS_MULTIMODAL_AUDIO_READY = audio.ready ? "1" : "0";
 
-  return { env, injectedKeys: [...injected].sort() };
+  let renameSuggestions: EnvKeyRenameSuggestion[] = [];
+  if (storedNames) {
+    const wanted = [...declaredKeys, ...mediaToolEnvKeys()].filter((key) => !isProtectedRunnerEnvKey(key));
+    const knownRead = [
+      ...wanted, ...vaultKeys,
+      ...MCP_TOOL_CATALOG.flatMap((entry) => entry.envRequirements.map((req) => req.key)),
+    ];
+    renameSuggestions = planEnvKeyRenames(storedNames, wanted, knownRead);
+  }
+  return { env, injectedKeys: [...injected].sort(), renameSuggestions };
 }
 
 export function readDotEnvFiles(dir: string): Record<string, string> {

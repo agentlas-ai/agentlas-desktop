@@ -1,8 +1,10 @@
+import { cachedTokensFromOpenAiUsage } from "./prompt-cache";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { withCurrentHistoryTool, currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { boundedLocalOutputTokens, localContextFailure, localHttpFailureClass, measureLocalContext } from "./local-context";
 import { compactHistoryToBudget, estimateTransportTokens } from "./compact";
+import { estimateRequestPromptTokens, ollamaNativeFetch, planOllamaContext, probeOllamaContextLimits } from "./ollama-native";
 import { browserDownloadAvailable, beginBrowserDownloadProof } from "../long-run/download-proof";
 import { beginBuiltinFileProof, beginNativeFileProof, mcpFileProofCandidate } from "../long-run/file-proof";
 import { assertScienceCollectionCapability, assertScienceCollectionTool, SCIENCE_COLLECTION_TOOLS } from "./science-collection-boundary";
@@ -355,6 +357,8 @@ export interface LocalToolApprovalContext {
   unattended: boolean;
   /** 내장 bash 도구가 취소를 따르도록 — 실행 중단이 도구까지 닿아야 한다. */
   signal?: AbortSignal;
+  /** Agentlas-resolved environment (saved tool keys, agent .env) — what a CLI runtime's shell already gets. */
+  env?: NodeJS.ProcessEnv;
   /** Main-owned broker ledger hook. It records the exact approval decision. */
   onApprovalDecision?: (decision: RuntimeToolPermissionDecision) => void;
 }
@@ -429,7 +433,10 @@ export async function prepareMainToolLoop(
       }
     }
   }
-  const indirectToolSurface = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && runtimeKind !== "agentlas-local"
+  // Small local models (managed Local, Ollama, LM Studio, MLX) get their tools directly: behind agentlas_code they
+  // reached for it first and then flailed (gpt-oss on Ollama, 2026-10-11, measured in the captured requests).
+  const smallLocalModel = runtimeKind === "agentlas-local" || runtimeKind === "ollama" || runtimeKind === "lmstudio" || runtimeKind === "mlx";
+  const indirectToolSurface = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !smallLocalModel
     && !req.minimalObservation;
   // Small managed local models keep their ordinary Browser/file/shell tools
   // direct. A single large MCP contract still needs on-demand schema discovery:
@@ -437,7 +444,7 @@ export async function prepareMainToolLoop(
   const menuAllowed = !collection && !catalogMcpOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation;
   const sessionKey = `${runtimeKind}:${req.sessionFingerprintSeed ?? req.cwd ?? "default"}`;
   const tools = installToolResultContext(
-    installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, menuAllowed, runtimeKind === "agentlas-local"),
+    installLazyToolMenu(installMainCodeMode(eagerTools, byName, indirectToolSurface), byName, menuAllowed, runtimeKind === "agentlas-local", runtimeKind === "byok" || runtimeKind === "agentlas"),
     byName, { runtimeKind, sessionKey, cwd: req.cwd || undefined,
       chatId: (req.approvalChatId ?? req.chatId) || undefined, agentId: req.agentId || undefined },
     !collection && !req.mcpGrantCatalogOnly && !req.workforceRuntimeToolGrant && !req.untrustedNoTools && !req.minimalObservation,
@@ -476,6 +483,7 @@ export async function prepareMainToolLoop(
       ...(req.agentId ? { agentId: req.agentId } : {}),
       unattended: req.unattended === true,
       ...(req.signal ? { signal: req.signal } : {}),
+      ...(req.env ? { env: req.env } : {}),
     },
   };
 }
@@ -808,7 +816,7 @@ async function dispatchMainToolRawUnchecked(
     let shellEnv: NodeJS.ProcessEnv | undefined;
     if (resolved.builtinName === "bash") {
       try {
-        shellEnv = builtinShellEnv();
+        shellEnv = builtinShellEnv(approval.env ?? process.env);
       } catch (error) {
         const marker = error instanceof Error ? error.message : "";
         const code = /^builtin_python_[a-z_]+$/.test(marker) ? marker : "builtin_shell_runtime_unavailable";
@@ -1020,7 +1028,9 @@ interface StreamTurnResult {
   toolCalls: OpenAiToolCall[];
   missingToolCallIds: boolean;
   incompleteToolCalls: boolean;
-  terminalUsage?: { inputTokens: number; outputTokens: number };
+  terminalUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number };
+  /** The model's reasoning text for this turn (empty when the server sends none). */
+  thinking: string;
 }
 
 function rejectsStreamUsageOption(status: number, text: string): boolean {
@@ -1050,6 +1060,7 @@ async function streamChatTurn(
   // ollama의 delta.reasoning / delta.thinking)로 따로 준다. 자기 행으로 흘린다.
   let thinkingOpen = false;
   let thinkingStartedAt = 0;
+  let thinkingText = "";
   const pending = new Map<number, { id?: string; name: string; args: string }>();
   for await (const line of iterSseLines(resp)) {
     if (!line.startsWith("data:")) continue;
@@ -1058,7 +1069,7 @@ async function streamChatTurn(
     lastChunkWasUsage = false;
     try {
       const event = JSON.parse(payload) as {
-        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown } | null;
+        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; [key: string]: unknown } | null;
         choices?: Array<{
           finish_reason?: string;
           delta?: {
@@ -1081,7 +1092,9 @@ async function streamChatTurn(
         if (Number.isSafeInteger(input) && Number(input) >= 0
           && Number.isSafeInteger(output) && Number(output) >= 0
           && Number(input) + Number(output) <= Number.MAX_SAFE_INTEGER) {
-          terminalUsage = { inputTokens: Number(input), outputTokens: Number(output) };
+          const cachedInputTokens = cachedTokensFromOpenAiUsage(event.usage);
+          terminalUsage = { inputTokens: Number(input), outputTokens: Number(output),
+            ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}) };
           lastChunkWasUsage = true;
         }
       }
@@ -1093,6 +1106,7 @@ async function streamChatTurn(
       const delta = event.choices?.[0]?.delta;
       const thought = delta?.reasoning_content ?? delta?.reasoning ?? delta?.thinking;
       if (typeof thought === "string" && thought) {
+        thinkingText += thought;
         if (!thinkingOpen) {
           thinkingOpen = true;
           thinkingStartedAt = Date.now();
@@ -1132,7 +1146,7 @@ async function streamChatTurn(
       type: "function" as const,
       function: { name: entry.name, arguments: entry.args },
     }));
-  return { text: acc.trim(), toolCalls, finishReason,
+  return { text: acc.trim(), toolCalls, finishReason, thinking: thinkingText,
     terminalObserved: sawDone && Boolean(finishReason) && !conflictingFinishReason,
     ...(sawDone && finishReason && terminalUsageChunks === 1 && lastChunkWasUsage && terminalUsage
       ? { terminalUsage } : {}),
@@ -1174,6 +1188,9 @@ export interface RunLocalOpenAiChatOptions {
   providerLabel?: string;
   /** Ollama accepts this on its native API; OpenAI-compatible servers may ignore it. */
   keepAlive?: string;
+  /** Ollama only: serve each request from the native /api/chat with a context window sized to the prompt
+   * (ollama-native.ts). The OpenAI-compatible route cannot request a window. */
+  ollamaContext?: true;
   /** Publisher/model-specific chat-template controls applied by a managed adapter. */
   chatTemplateKwargs?: Record<string, boolean | number | string>;
   /** Main resident receipt, present only for managed llama.cpp. */
@@ -1327,6 +1344,13 @@ export async function runLocalOpenAiChat(
   /** The optional Surface fallback is a one-time swap, never a per-turn oscillation. */
   let surfaceFallbackApplied = false;
   let streamUsageUnsupported = false;
+  let ollamaWindowReported = 0;
+  /** Raised when a reply is cut by the output cap before it produced a tool call or any text. */
+  let outputTokenFloor: number | undefined;
+  let outputGrowths = 0;
+  let toolParseRetries = 0;
+  /** Reasoning behind each tool call, replayed to Ollama's native route (gpt-oss loses its plan between calls without it). */
+  const thinkingByCallId = new Map<string, string>();
   let ownerControlPending: string[] | null = null;
   let ownerControlDispatched = false;
   let ownerControlTerminal: "completed" | "uncertain" = "uncertain";
@@ -1394,9 +1418,11 @@ export async function runLocalOpenAiChat(
             messages,
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
+            // A malformed tool call repeated identically 3 of 3 times (measured); a fresh seed makes the retry a new sample.
+            ...(toolParseRetries > 0 ? { seed: Math.floor(Math.random() * 2_147_483_647) } : {}),
             ...(opts.temperature !== undefined ? { temperature: opts.temperature } : {}),
             ...(opts.estimatedContextWindow !== undefined
-              ? { max_tokens: opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(opts.estimatedContextWindow / 4)) }
+              ? { max_tokens: Math.max(outputTokenFloor ?? 0, opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(opts.estimatedContextWindow / 4))) }
               : {}),
             ...(tools.length > 0 ? { tools } : {}),
             /*
@@ -1421,8 +1447,26 @@ export async function runLocalOpenAiChat(
                 }
               : {}),
         };
-    if (opts.estimatedContextWindow !== undefined) {
-      const window = opts.estimatedContextWindow;
+    // Ollama: size the window to this request and ask for it on the native route; otherwise the
+    // catalog estimate stands. The window is reported, never silently left at the server default.
+    let turnFetch: typeof fetch = fetch;
+    let turnWindow = opts.estimatedContextWindow;
+    let turnCeiling = opts.estimatedContextWindow;
+    if (opts.ollamaContext && !req.untrustedNoTools) {
+      const limits = await probeOllamaContextLimits(host, model, req.signal);
+      const reserve = typeof requestBody.max_tokens === "number" ? requestBody.max_tokens : 4_096;
+      const plan = planOllamaContext({ host, model, promptTokens: estimateRequestPromptTokens(requestBody), outputReserve: reserve, limits });
+      turnWindow = plan.numCtx;
+      turnCeiling = plan.ceiling;
+      turnFetch = ollamaNativeFetch(host, plan.numCtx, { thinkingByCallId });
+      if (ollamaWindowReported !== plan.numCtx) {
+        ollamaWindowReported = plan.numCtx;
+        events.onNotice?.({ level: "info", code: "ollama-context-window",
+          message: `Requested a ${plan.numCtx}-token context window from Ollama (model maximum ${plan.modelMax ?? "unknown"}, loaded ${plan.loaded ?? "none"}, prompt about ${plan.needTokens - reserve} tokens).` });
+      }
+    }
+    if (turnWindow !== undefined) {
+      const window = turnWindow;
       const reserve = opts.estimatedOutputReserve ?? Math.min(8_192, Math.floor(window / 4));
       let inputEstimate = estimateTransportTokens(JSON.stringify(requestBody));
       for (let attempt = 0; attempt < 8 && inputEstimate + reserve > window
@@ -1501,7 +1545,7 @@ export async function runLocalOpenAiChat(
     try {
       if (req.signal?.aborted) throw abortReasonError(req);
       ownerControlDispatched = ownerControlPending !== null;
-      resp = await withCurrentHistoryProvider(()=>fetch(chatEndpoint, {
+      resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
         method: "POST",
         headers: { "content-type": "application/json", ...opts.headers },
         signal: req.signal,
@@ -1533,7 +1577,7 @@ export async function runLocalOpenAiChat(
         assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
         usageAttempt = usage.start();
         try {
-          resp = await withCurrentHistoryProvider(()=>fetch(chatEndpoint, {
+          resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
             signal: req.signal,
@@ -1550,6 +1594,14 @@ export async function runLocalOpenAiChat(
           throw new Error(`${providerLabel} API ${resp.status}: ${retryError.slice(0, 300)}`);
         }
       } else {
+        // The server could not parse the model's own tool-call text (gpt-oss on Ollama, measured 2026-10-11:
+        // HTTP 500 "error parsing tool call"). Nothing was executed, and sampling differs on the next
+        // request, so repeat the identical request a bounded number of times before failing.
+        if (resp.status >= 500 && /error parsing tool call/i.test(errText) && toolParseRetries < 2 && !ownerControlPending && !req.signal?.aborted) {
+          toolParseRetries += 1;
+          events.onStatus(req.locale === "ko" ? "모델의 도구 호출 형식이 깨져 같은 요청을 다시 보냅니다…" : "The model's tool call was malformed; sending the same request again…");
+          continue;
+        }
         const failureClass = localHttpFailureClass(errText);
         if (failureClass === "context") return assertCurrentHistoryRunnerResult({text:"",failure:localContextFailure("local_context_limit_exceeded",runtimeKind,req.locale)});
         // Only explicit structured unsupported-tools markers permit the legacy downgrade.
@@ -1563,7 +1615,7 @@ export async function runLocalOpenAiChat(
           events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
           assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
           usageAttempt = usage.start();
-          const fallback = await withCurrentHistoryProvider(()=>fetch(chatEndpoint, {
+          const fallback = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
             method: "POST",
             headers: { "content-type": "application/json", ...opts.headers },
             signal: req.signal,
@@ -1591,6 +1643,24 @@ export async function runLocalOpenAiChat(
 
     const result = await streamChatTurn(resp, events.onPartial, events.onThinking);
     (usage.complete(usageAttempt, result.terminalUsage), currentHistoryRuntimeFence()?.assertCurrent());
+    // A reply cut at the output cap carries no usable tool call. A reasoning model (qwen3 spent all 2000
+    // tokens thinking before its first call, measured 2026-10-11) used to surface here as "did not return
+    // a terminal receipt ... the request may have acted", which is false: nothing was dispatched. Give the
+    // model a larger budget once or twice when the caller did not pin one; otherwise say what happened.
+    if (result.finishReason === "length" && result.terminalObserved && opts.contextWindow === undefined
+      && (result.toolCalls.length === 0 || result.incompleteToolCalls) && !req.untrustedNoTools && !ownerControlPending) {
+      const spent = typeof requestBody.max_tokens === "number" ? requestBody.max_tokens : undefined;
+      const room = (turnCeiling ?? 32_768) - estimateRequestPromptTokens(requestBody) - 512;
+      if (req.maxOutputTokens === undefined && spent !== undefined && outputGrowths < 2 && spent * 2 <= room) {
+        outputGrowths += 1;
+        outputTokenFloor = spent * 2;
+        events.onStatus(req.locale === "ko" ? "모델이 답을 끝내기 전에 출력 한도에 닿아 한도를 늘려 다시 요청합니다…" : "The model reached its output limit before answering; retrying with a larger limit…");
+        continue;
+      }
+      return assertCurrentHistoryRunnerResult({ text: "", ownerControlTerminal: "uncertain",
+        failure: localContextFailure("local_output_limit_exceeded", runtimeKind, req.locale),
+        workforcePermissionEnforcement: broker?.finish(false) });
+    }
     const failure = terminalFailure(result);
     if (failure) return failure;
     observeOwnerControlResponse(result);
@@ -1637,6 +1707,7 @@ export async function runLocalOpenAiChat(
     }
     sawAnyToolCall = true;
     toolTurnsTaken += 1;
+    if (result.thinking && result.toolCalls[0]) thinkingByCallId.set(result.toolCalls[0].id, result.thinking);
     messages.push({ role: "assistant", content: result.text, tool_calls: result.toolCalls });
     const visionMessages: ChatMessage[] = [];
     for (const call of result.toolCalls) {

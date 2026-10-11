@@ -117,8 +117,9 @@ export function useRuntimeAuth(force = false) {
   return { probes, loaded, refresh };
 }
 
-export function ChipGrid({ children, label }: { children: React.ReactNode; label?: string }) {
-  return <div className={styles.grid} role="list" aria-label={label}>{children}</div>;
+/** `tall` gives each card more room; first-run uses it so two rows fill the step instead of leaving a gap below. */
+export function ChipGrid({ children, label, size }: { children: React.ReactNode; label?: string; size?: "tall" }) {
+  return <div className={styles.grid} role="list" aria-label={label} data-size={size}>{children}</div>;
 }
 
 export function ConnectChip({

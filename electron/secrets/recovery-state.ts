@@ -103,8 +103,14 @@ async function acquireLock(dir: string, owner: Owner, explicit: boolean): Promis
   }
   // Exclusive creation prevents a late initializer from replacing a new owner.
   try {
-    const handle = await fs.open(path.join(lock, "owner.json"), "wx", 0o600);
+    // Publish owner.json whole or not at all. open("wx")+writeFile exposed an empty/partial file to a concurrent inspect() in
+    // another process (Main and the daemon read the same keychain resource at start-up), which reported a healthy store as
+    // credential_recovery_state_invalid (production 2026-10-11 09:43Z). link() keeps the exclusive-create guarantee (EEXIST).
+    const stagedOwner = path.join(lock, `owner.json.${randomUUID()}.tmp`);
+    const handle = await fs.open(stagedOwner, "wx", 0o600);
     try { await handle.writeFile(JSON.stringify(owner), "utf8"); await handle.sync(); } finally { await handle.close(); }
+    try { await fs.link(stagedOwner, path.join(lock, "owner.json")); }
+    finally { await fs.unlink(stagedOwner).catch(() => {}); }
     const current = await readJson(path.join(lock, "owner.json"));
     if (!validOwner(current) || current.id !== owner.id) throw new CredentialRecoveryStateError("credential_recovery_busy");
     activeAttempts.add(owner.id);
@@ -146,7 +152,9 @@ async function inspect(
       if (row.recoveryGeneration === currentRecoveryGeneration) belongsToOlderGeneration = false;
       if (row.state === "unresolved" && errorCode !== "credential_recovery_state_invalid") errorCode = "credential_attempt_incomplete";
       else if (!errorCode) errorCode = "keychain_unavailable";
-    } catch {
+    } catch (error) {
+      // The attempt's owner finished and removed it between readdir and read: nothing is wrong, nothing to inspect.
+      if (isMissing(error)) { generations.push([file, "gone"]); continue; }
       errorCode = "credential_recovery_state_invalid";
       belongsToOlderGeneration = false;
       generations.push([file, "invalid"]);

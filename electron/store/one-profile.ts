@@ -217,7 +217,7 @@ function resolveSlot(): ProfileSlot {
       JSON.stringify({ accountKey, claimedAt: new Date().toISOString(), legacyPresent: Boolean(legacy) }),
     );
     return readClaim();
-  })();
+  }).immediate();
   if (claim) cachedClaim = claim;
   return { key: slotKey, legacyLineage: claim?.accountKey === accountKey };
 }

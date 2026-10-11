@@ -93,7 +93,87 @@ const STATUS_TEMPLATES = {
   failed: { ko: "실패 · 확인 필요", en: "Failed · review needed" },
   expired: { ko: "리스 만료 · 갱신 필요", en: "Lease expired · renew needed" },
   archived: { ko: "보관됨", en: "Archived" },
+  replaceNeeded: { ko: "교체 필요 · 원본 없음", en: "Replace needed · source gone" },
 } as const;
+
+/**
+ * Why a standing teammate cannot be called into a room, in the owner's words.
+ * `code` is the machine reason; it stays in the payload and is never shown.
+ * Only the {ko,en} text reaches the owner.
+ */
+export type OneMemberUnavailableCode =
+  | "agent_not_installed"
+  | "source_missing"
+  | "hidden_agent"
+  | "seat_archived"
+  | "seat_task_failed"
+  | "seat_locked"
+  | "seat_lease_invalid";
+
+const MEMBER_UNAVAILABLE_TEMPLATES: Record<OneMemberUnavailableCode, { ko: string; en: string; replace: boolean }> = {
+  agent_not_installed: {
+    ko: "이 에이전트가 이 컴퓨터에 더 이상 설치되어 있지 않습니다. 조직도에서 설치된 다른 에이전트로 교체해 주세요.",
+    en: "This agent is no longer installed on this computer. Replace it in the org chart with another installed agent.",
+    replace: true,
+  },
+  source_missing: {
+    ko: "이 에이전트의 원본 폴더를 찾을 수 없습니다. 조직도에서 설치된 다른 에이전트로 교체해 주세요.",
+    en: "This agent's source folder can't be found. Replace it in the org chart with another installed agent.",
+    replace: true,
+  },
+  hidden_agent: {
+    ko: "이 에이전트는 팀 방에서 쓸 수 없는 숨김 상태입니다. 조직도에서 다른 에이전트로 교체해 주세요.",
+    en: "This agent is hidden and can't join team rooms. Replace it in the org chart with another agent.",
+    replace: true,
+  },
+  seat_archived: {
+    ko: "이 팀원은 보관되어 있습니다. 조직도에서 복원하거나 다른 에이전트로 교체해 주세요.",
+    en: "This teammate is archived. Restore it in the org chart or replace it with another agent.",
+    replace: false,
+  },
+  seat_task_failed: {
+    ko: "이 팀원의 이전 작업이 실패한 상태로 남아 있습니다. 조직도에서 확인해 주세요.",
+    en: "This teammate's previous task is still marked as failed. Check it in the org chart.",
+    replace: false,
+  },
+  seat_locked: {
+    ko: "이 팀원 자리가 잠겨 있습니다. 조직도에서 확인해 주세요.",
+    en: "This teammate's seat is locked. Check it in the org chart.",
+    replace: false,
+  },
+  seat_lease_invalid: {
+    ko: "이 팀원의 이용 기간이 끝났거나 확인되지 않습니다. 조직도에서 갱신하거나 교체해 주세요.",
+    en: "This teammate's access period has ended or can't be verified. Renew or replace it in the org chart.",
+    replace: true,
+  },
+};
+
+/**
+ * Refusal to call a teammate into a room. `.message` is plain owner-facing text that names the teammate; the
+ * machine code stays in `.code` / `.reason` (and travels across IPC as `[agentlas:code=…]`).
+ */
+export class OneGroupMemberUnavailableError extends Error {
+  readonly code = "one_group_member_unavailable";
+  constructor(
+    readonly reason: OneMemberUnavailableCode,
+    readonly memberAgentId: string,
+    readonly memberName: string,
+    locale: "ko" | "en" = currentUiLocale() === "ko" ? "ko" : "en",
+  ) {
+    const template = MEMBER_UNAVAILABLE_TEMPLATES[reason];
+    super(locale === "ko"
+      ? `"${memberName}"을(를) 이 방에 부를 수 없습니다. ${template.ko}`
+      : `"${memberName}" can't join this room. ${template.en}`);
+    this.name = "OneGroupMemberUnavailableError";
+  }
+}
+
+/** Agent-level reason a seat can no longer work at all (independent of the seat's own row), or null. */
+export function oneAgentUnavailableCode(agent: InstalledAgent | undefined): OneMemberUnavailableCode | null {
+  if (!agent) return "agent_not_installed";
+  if (agent.sourceMissingSince) return "source_missing";
+  return null;
+}
 
 function emitOrgChanged(): void {
   emitDesktopStoreChange({ entity: "one-org" });
@@ -516,7 +596,12 @@ function liveStatus(row: Row, now = Date.now(), completion: OneOrgCompletionSumm
 function toMember(row: Row, now = Date.now()): OneOrgMember {
   const installed = listInstalledAgentsReadOnly().find((agent) => agent.id === row.installed_agent_id);
   const completionSummary = completionSummaryFor(row.installed_agent_id, row);
-  const status = liveStatus(row, now, completionSummary);
+  const unavailableCode = oneAgentUnavailableCode(installed);
+  const baseStatus = liveStatus(row, now, completionSummary);
+  // A seat whose agent is gone must never read as "no work yet": the owner has to see it needs a replacement.
+  const status: StatusLine = unavailableCode && !row.archived_at
+    ? { kind: "locked", ko: STATUS_TEMPLATES.replaceNeeded.ko, en: STATUS_TEMPLATES.replaceNeeded.en }
+    : baseStatus;
   return {
     id: row.id,
     agentSlug: row.agent_slug,
@@ -546,6 +631,13 @@ function toMember(row: Row, now = Date.now()): OneOrgMember {
     ...editableIdentityOf(row.installed_agent_id, row.display_name ?? ""),
     runtimeSelection: getAgentRuntimeOverride("agent", row.installed_agent_id)?.selection ?? null,
     revision: row.revision,
+    ...(unavailableCode && !row.archived_at ? {
+      unavailable: {
+        code: unavailableCode,
+        reason: { ko: MEMBER_UNAVAILABLE_TEMPLATES[unavailableCode].ko, en: MEMBER_UNAVAILABLE_TEMPLATES[unavailableCode].en },
+        replaceable: MEMBER_UNAVAILABLE_TEMPLATES[unavailableCode].replace,
+      },
+    } : {}),
   };
 }
 
@@ -657,15 +749,26 @@ export function ensureOneGroupLocalStaff(agentIds: string[], seatMissing = true,
   const db = getDb();
   if (!db.inTransaction) throw new Error("one_group_transaction_required");
   for (const id of [...new Set(agentIds)]) {
-    const agent = ensureAvailableAgent(id);
-    if (agent.sourceMissingSince || agent.visibility === "private" || agent.visibility === "background") throw new Error("one_group_member_unavailable");
+    const installed = listInstalledAgentsReadOnly().find((candidate) => candidate.id === id.trim());
     const prior = db.prepare("SELECT * FROM one_org_members WHERE installed_agent_id = ? ORDER BY archived_at IS NULL DESC LIMIT 1").get(id) as Row | undefined;
+    // Name the teammate the owner knows: the seat's name first, then the agent's own name.
+    const refuse = (reason: OneMemberUnavailableCode): never => {
+      throw new OneGroupMemberUnavailableError(
+        reason, id, prior?.display_name?.trim() || installed?.localDisplayName || installed?.name || prior?.agent_slug || id,
+      );
+    };
+    if (!installed) refuse("agent_not_installed");
+    const agent = ensureAvailableAgent(id);
+    if (agent.sourceMissingSince) refuse("source_missing");
+    if (agent.visibility === "private" || agent.visibility === "background") refuse("hidden_agent");
     if (prior) {
       // Explicit room composition can reuse a valid identity after a failed task;
       // it does not clear the failure or relax package, lock or lease checks.
-      if (prior.archived_at || (prior.status_kind === "failed" && !options.allowPriorTaskFailure) || (prior.status_kind === "locked" && prior.source !== "hub")
-        || (prior.source !== "hub" && isExpired(prior.lease_expires_at))
-        || (prior.source !== "hub" && prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at)))) throw new Error("one_group_member_unavailable");
+      if (prior.archived_at) refuse("seat_archived");
+      if (prior.status_kind === "failed" && !options.allowPriorTaskFailure) refuse("seat_task_failed");
+      if (prior.status_kind === "locked" && prior.source !== "hub") refuse("seat_locked");
+      if (prior.source !== "hub" && (isExpired(prior.lease_expires_at)
+        || (prior.lease_expires_at !== null && !Number.isFinite(Date.parse(prior.lease_expires_at))))) refuse("seat_lease_invalid");
       continue;
     }
     if (sourceFor(agent) !== "local") throw new Error("one_group_member_seating_required");

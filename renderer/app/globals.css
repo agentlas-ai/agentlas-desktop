@@ -10238,13 +10238,16 @@ button[data-toggle-state="on"] {
   padding: 8px;
 }
 .sidenav-update-card {
+  --update-control-size: 28px;
+  --update-control-blue: #2563eb;
+  --update-control-blue-hover: #1d4ed8;
   width: 100%;
   min-height: 44px;
   display: grid;
-  grid-template-columns: 32px minmax(0, 1fr) auto;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   align-items: center;
   gap: 8px;
-  padding: 4px;
+  padding: 0 4px;
   border: 1px solid var(--paper-edge);
   border-radius: 12px;
   background: linear-gradient(155deg, var(--paper), var(--paper-2));
@@ -10257,7 +10260,6 @@ button[data-toggle-state="on"] {
   flex-direction: column;
   align-items: stretch;
   gap: 0;
-  border-color: color-mix(in oklch, var(--accent) 24%, var(--paper-edge));
 }
 .sidenav-update-card[data-action-required="true"] {
   grid-template-columns: 32px minmax(0, 1fr) auto;
@@ -10274,10 +10276,16 @@ button[data-toggle-state="on"] {
   padding: 2px;
 }
 .sidenav-update-head {
+  width: 100%;
   min-width: 0;
-  display: flex;
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
   align-items: center;
-  gap: 2px;
+  gap: 8px;
+}
+.sidenav-update-card[data-collapsed="true"] .sidenav-update-head {
+  width: auto;
+  grid-template-columns: 44px;
 }
 .sidenav-update-icon {
   flex: 0 0 auto;
@@ -10349,29 +10357,34 @@ button[data-toggle-state="on"] {
   position: relative;
   width: 44px;
   padding: 0;
-  border: 1px solid color-mix(in oklch, var(--accent) 16%, var(--paper));
-  background: linear-gradient(155deg,
-    color-mix(in oklch, var(--green) 18%, var(--paper)),
-    color-mix(in oklch, var(--green) 48%, var(--paper)));
-  color: var(--rd-accent-text);
-  box-shadow:
-    inset 0 1px 0 var(--white-soft),
-    inset 0 -1px 0 color-mix(in oklch, var(--accent) 16%, transparent),
-    0 2px 4px -1px color-mix(in oklch, var(--accent) 20%, transparent),
-    0 6px 12px -4px color-mix(in oklch, var(--accent) 24%, transparent);
+  background: transparent;
+  color: #fff;
+}
+.sidenav-update-action::before,
+.sidenav-update-progress::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: var(--update-control-size);
+  height: var(--update-control-size);
+  border-radius: 7px;
+  background: var(--update-control-blue);
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.sidenav-update-card:not([data-action-required="true"]) .sidenav-update-action > svg,
+.sidenav-update-progress > svg:not(.sidenav-update-progress-ring) {
+  position: relative;
+  width: 14px;
+  height: 14px;
 }
 .sidenav-update-card[data-action-required="true"] .sidenav-update-action {
   background: color-mix(in oklch, var(--warn) 12%, var(--paper));
   color: var(--warn);
 }
-.sidenav-update-ready-dot {
-  position: absolute;
-  top: 6px;
-  right: 6px;
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
-  background: currentColor;
+.sidenav-update-card[data-action-required="true"] .sidenav-update-action::before {
+  display: none;
 }
 .sidenav-update-dismiss {
   padding: 0;
@@ -10380,15 +10393,13 @@ button[data-toggle-state="on"] {
   border: 0;
 }
 .sidenav-update-action:hover {
-  background: linear-gradient(155deg,
-    color-mix(in oklch, var(--green) 24%, var(--paper)),
-    color-mix(in oklch, var(--green) 56%, var(--paper)));
-  box-shadow: inset 0 1px 0 var(--white-soft), var(--neu-raised-strong);
-  transform: translateY(-1px);
+  background: transparent;
+}
+.sidenav-update-action:hover::before {
+  background: var(--update-control-blue-hover);
 }
 .sidenav-update-action:active {
-  box-shadow: var(--neu-inset);
-  transform: translateY(1px);
+  transform: scale(0.96);
 }
 .sidenav-update-card[data-action-required="true"] .sidenav-update-action:hover {
   background: color-mix(in oklch, var(--warn) 20%, var(--paper));
@@ -10396,7 +10407,7 @@ button[data-toggle-state="on"] {
 .sidenav-update-secondary {
   flex: 1 1 0;
   min-width: 0;
-  padding: 0 4px;
+  padding: 0;
   justify-content: flex-start;
   background: transparent;
   color: var(--ink);
@@ -10405,13 +10416,6 @@ button[data-toggle-state="on"] {
 .sidenav-update-dismiss:hover,
 .sidenav-update-secondary:hover {
   background: color-mix(in oklch, var(--ink) 5%, transparent);
-}
-.sidenav-update-chevron {
-  flex: 0 0 auto;
-  transition: transform 0.16s ease;
-}
-.sidenav-update-chevron[data-open="true"] {
-  transform: rotate(180deg);
 }
 .sidenav-update-changelog {
   margin-top: 4px;
@@ -10449,7 +10453,14 @@ button[data-toggle-state="on"] {
 .sidenav-update-changelog li + li {
   margin-top: 3px;
 }
+.sidenav-update-changelog-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
 .sidenav-update-release-link {
+  flex: 1;
+  min-width: 0;
   min-height: 44px;
   margin: 7px -4px -3px;
   padding: 0 4px;
@@ -10471,29 +10482,30 @@ button[data-toggle-state="on"] {
 .sidenav-update-dismiss:focus-visible,
 .sidenav-update-secondary:focus-visible,
 .sidenav-update-release-link:focus-visible {
-  outline: 2px solid var(--accent);
+  outline: 2px solid var(--update-control-blue);
   outline-offset: 2px;
 }
 .sidenav-update-progress {
   position: relative;
-  width: 32px;
-  height: 32px;
+  width: 44px;
+  height: 44px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--accent);
+  border-radius: 10px;
+  color: #fff;
 }
 .sidenav-update-progress-ring {
   position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  inset: 10px;
+  width: 24px;
+  height: 24px;
   fill: none;
   stroke-width: 2;
   transform: rotate(-90deg);
 }
 .sidenav-update-progress-track {
-  stroke: var(--paper-edge);
+  stroke: rgb(255 255 255 / 20%);
 }
 .sidenav-update-progress-fill {
   stroke: currentColor;
@@ -10514,8 +10526,7 @@ button[data-toggle-state="on"] {
 }
 @media (prefers-reduced-motion: reduce) {
   .sidenav-update-card button,
-  .sidenav-update-progress-fill,
-  .sidenav-update-chevron {
+  .sidenav-update-progress-fill {
     transition: none;
   }
 }
@@ -10530,9 +10541,6 @@ button[data-toggle-state="on"] {
   }
 }
 @container (max-width: 190px) {
-  .sidenav-update-chevron {
-    display: none;
-  }
   .sidenav-update-icon {
     width: 24px;
     height: 24px;

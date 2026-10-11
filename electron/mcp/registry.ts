@@ -9,6 +9,7 @@ import { getSource as getMarketSource, getCargoSource } from "../marketplace";
 import { agentFolderPath, materializeAgentFiles } from "../agents/files";
 import { getRoute, removeRoute, setRoute, type AgentRoute, type RuntimeLabel } from "../agents/routes";
 import { isPrivateWebOnlyAgent, publicAgentVisibility } from "../agents/policy";
+import { isScratchImportPath } from "./scratch-import";
 import { deriveListingEntityKind, entityKindAfterRefresh } from "../agents/entity-kind";
 import { readCloudAgentRestoreMarker } from "../cloud-agents/restore";
 import {
@@ -55,11 +56,11 @@ function toAgent(row: AgentRow): InstalledAgent {
   const persistedKind =
     row.entity_kind === "team" ? "team" : row.entity_kind === "agent" ? "agent" : undefined;
   const kind = route?.kind ?? persistedKind;
-  // Legacy automatic imports from deleted pytest workspaces are diagnostic
+  // Imports from deleted pytest / agent-scratchpad / OS temp folders (see scratch-import.ts) are diagnostic
   // registrations, not selectable workers. Keep their identities and history;
   // suppress only the inventory projection proven by source + missing path.
   const missingTestImport = asset.source === "local-import" && Boolean(sourceMissingSince)
-    && /[/\\](?:pytest-of-[^/\\]+|pytest-\d+)[/\\]/i.test(route?.path ?? "");
+    && isScratchImportPath(route?.path);
   return {
     id: row.id,
     slug: row.slug,

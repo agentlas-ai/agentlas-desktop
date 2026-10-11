@@ -246,6 +246,7 @@ import {
   type OutputPresentationKind,
 } from "@/lib/output-presentation";
 import { planOneThreadWork, projectThreadRuns, settledRunMayPaintScreen, type OneThreadRunBlock } from "@/lib/one-thread-work";
+import { seatDisplayName, turnAgentsDifferFromRoster } from "@/lib/one-seat-label";
 import { memberUnavailable, speakableCountIncludingOne } from "@/lib/one-team-availability";
 import { ToolApprovalInline } from "@/components/ToolApprovalInline";
 
@@ -660,13 +661,6 @@ type OneUncertainPreflightSteer = { chatId: string; submissionId: string; steerI
 type OnePreflightFenceStatus = {
   chatId: string;
   reason: "checking" | "absent" | "unavailable" | "claimed" | "mismatch";
-};
-const ONE_PREFLIGHT_FENCE_COPY: Record<OnePreflightFenceStatus["reason"], { ko: string; en: string }> = {
-  checking: { ko: "추가 지시 영수증을 확인하고 있습니다. 작성한 글은 그대로입니다.", en: "Checking the follow-up receipt. Your draft remains." },
-  absent: { ko: "아직 정확한 영수증을 찾지 못했습니다. 접수되지 않았다고 단정할 수 없어 해당 지시는 계속 확인 중이며 새 글을 작성할 수 있습니다.", en: "No exact receipt is visible yet. The earlier send may still be settling, so this instruction remains unresolved and you can write another message." },
-  unavailable: { ko: "영수증을 읽지 못했습니다. 작성한 글을 보관하고 해당 지시는 계속 확인 중이며 새 글을 작성할 수 있습니다.", en: "The receipt could not be read. Your draft is preserved and this instruction remains unresolved and you can write another message." },
-  claimed: { ko: "추가 지시의 전달 여부를 확인 중입니다. 중복 전송하지 않도록 해당 지시는 계속 확인 중이며 새 글을 작성할 수 있습니다.", en: "The follow-up handoff is still being reconciled. This instruction remains unresolved; you can write another message." },
-  mismatch: { ko: "영수증의 요청 신원이 일치하지 않습니다. 작성한 글을 보관하고 해당 지시는 계속 확인 중이며 새 글을 작성할 수 있습니다.", en: "The receipt does not match this request. Your draft is preserved and this instruction remains unresolved and you can write another message." },
 };
 async function onePreflightTextDigest(text: string): Promise<string> {
   if (!globalThis.crypto?.subtle) throw new Error("one_preflight_digest_unavailable");
@@ -1712,11 +1706,9 @@ function OneSessionsShell() {
             setActionNotice(current => current === ownedNotice.text ? null : current);
           }
         };
-        const showDeliveryNotice = (text: string) => {
-          if (activeThreadChatIdRef.current !== chatId) return;
-          followupDeliveryNoticeRef.current = { chatId, text };
-          setActionNotice(text);
-        };
+        // A follow-up that Main has not confirmed yet is not something to report: the message is already in the
+        // transcript and Main delivers it. No notice, no card.
+        const showDeliveryNotice = () => undefined;
         const deliveryPaused = (intent: OneFollowupIntent) => locallyStoppedFollowupIdsRef.current.has(intent.intentId)
           || readOneFollowupOutbox(window.localStorage, chatId).find(item => item.intentId === intent.intentId)?.autoDeliveryPaused === true;
         try {
@@ -1726,9 +1718,7 @@ function OneSessionsShell() {
             try {
               if (deliveryPaused(intent) || terminalFollowupIdsRef.current.has(intent.intentId)) continue;
               if (intent.requiresReprepare) {
-                showDeliveryNotice(appLocale === "ko"
-                  ? "팀 선택이 바뀐 추가 지시는 로컬에 보관했습니다. 새 팀의 실행 준비를 확인한 뒤 보내 주세요."
-                  : "The follow-up with a different team is saved locally. Confirm fresh team preparation before sending it.");
+                showDeliveryNotice();
                 break;
               }
               if (intent.submissionId) {
@@ -1776,9 +1766,7 @@ function OneSessionsShell() {
                     // message (Main refuses to start it as a Desktop turn, production 1.2.93, 2026-10-11).
                     if (activeThreadChatIdRef.current !== chatId || !submitTextRef.current
                       || (composerHandleRef.current?.getValue() ?? "").trim() || attachmentDraftsRef.current.length) {
-                      showDeliveryNotice(appLocale === "ko"
-                        ? "보관한 추가 지시는 새 메시지로 보냅니다. 작성 중인 글이나 첨부를 비우면 이어서 보냅니다."
-                        : "The saved follow-up goes as a new message once the composer has no draft or attachment.");
+                      showDeliveryNotice();
                       break;
                     }
                     removeOneFollowupIntent(window.localStorage, chatId, intent.intentId);
@@ -1793,9 +1781,7 @@ function OneSessionsShell() {
                 if (deliveryPaused(intent)) continue;
                 if (receipt.status === "cancelled" || receipt.status === "failed" || receipt.status === "held") {
                   terminalFollowupIdsRef.current.add(intent.intentId);
-                  showDeliveryNotice(appLocale === "ko"
-                    ? "이 추가 지시는 실행되지 않도록 보류되었습니다. 로컬 보관한 글을 검토해 주세요."
-                    : "This follow-up was held. Review its locally saved text.");
+                  showDeliveryNotice();
                   continue;
                 }
                 if (activeThreadChatIdRef.current === chatId && receipt.queued) {
@@ -1812,9 +1798,7 @@ function OneSessionsShell() {
               setDelayedFollowupIds(current => new Set([...current, intent.intentId]));
               // Keep local intake available, but never overtake an unresolved
               // earlier intent when handing the room's FIFO queue to Main.
-              showDeliveryNotice(appLocale === "ko"
-                ? "추가 지시를 로컬에 보관했습니다. Main의 접수 여부는 아직 확인하지 못했습니다."
-                  : "The follow-up is saved locally. Main acceptance is still unconfirmed.");
+              showDeliveryNotice();
               showLocal();
               break;
             }
@@ -1854,6 +1838,9 @@ function OneSessionsShell() {
         if (receipts.length && receipts.every(item => item === null)) {
           failures += 1;
           quietUntil = Date.now() + Math.min(60_000, 1_000 * 2 ** failures);
+          // Three unanswered reads in a row: stop asking. Main owns delivery of the message; the next change to the
+          // conversation re-arms this effect. (No poll every few seconds after a refusal.)
+          if (failures >= 3) { disposed = true; window.clearInterval(timer); }
         } else failures = 0;
         if (disposed || activeThreadChatIdRef.current !== chatId) return;
         const changed = new Map(receipts.filter((item): item is NonNullable<typeof item> => Boolean(item))
@@ -1870,8 +1857,8 @@ function OneSessionsShell() {
         });
       } finally { running = false; }
     };
+    const timer: number = window.setInterval(() => { void refresh(); }, 1_000);
     void refresh();
-    const timer = window.setInterval(() => { void refresh(); }, 1_000);
     return () => { disposed = true; window.clearInterval(timer); };
   }, [currentTurnFollowups, selected?.chatId, conversation?.id]);
 
@@ -1882,7 +1869,7 @@ function OneSessionsShell() {
     if (!chatId || !retryHead || retryHead.requiresReprepare) return;
     // The same head still waiting means Main could not take it yet: wait 3 s, 6 s, 12 s ... up to 60 s between tries
     // instead of every 3 s (native channel lost, production 1.2.92, 2026-10-11 01:57Z).
-    let lastHead = "", skip = 0, span = 1;
+    let lastHead = "", skip = 0, span = 1, tries = 0;
     const timer = window.setInterval(() => {
       if (activeThreadChatIdRef.current !== chatId) return;
       if (skip > 0) { skip -= 1; return; }
@@ -1892,6 +1879,9 @@ function OneSessionsShell() {
         if (!next || next.requiresReprepare) { window.clearInterval(timer); return; }
         span = next.intentId === lastHead ? Math.min(span * 2, 20) : 1;
         skip = span - 1; lastHead = next.intentId;
+        // Main accepts and queues the message on the first try; a saved text that still is not taken after a few tries
+        // stops being polled (no poll every few seconds after a refusal). A new change re-arms this effect.
+        if ((tries += 1) > 5) { window.clearInterval(timer); return; }
         void reconcileUncertainPreflightSteer(chatId);
       } catch { /* The preserved text is retained until local storage can be read again. */ }
     }, 3_000);
@@ -4231,6 +4221,12 @@ function OneSessionsShell() {
     () => taskforces.find((taskforce) => taskforce.chatId === activeThreadChatId) ?? null,
     [activeThreadChatId, taskforces],
   );
+  // Room members whose seat can no longer work (agent uninstalled or its source folder gone). They must be
+  // named with a plain reason and a way out, never left as a silent "planned participant".
+  const unavailableRoomMembers = useMemo(() => {
+    const ids = new Set(activeTaskforce?.memberAgentIds ?? []);
+    return (oneOrgState?.members ?? []).filter((member) => !member.archivedAt && member.unavailable && ids.has(member.installedAgentId));
+  }, [activeTaskforce, oneOrgState]);
   const taskforceEditing = useMemo(
     () => taskforceEditingId ? taskforces.find((taskforce) => taskforce.id === taskforceEditingId) ?? null : null,
     [taskforceEditingId, taskforces],
@@ -5106,7 +5102,7 @@ function OneSessionsShell() {
         if (admission.status !== "rejected" || admission.chatId !== intent.chatId
           || admission.runId !== intent.waitingParentRunId
           || await api.invoke.steerReceipt({ chatId: intent.chatId, intentId: intent.intentId })) {
-          setActionNotice(appLocale === "ko" ? "이 글이 전송되지 않았다는 확인이 없어 복원하지 않았습니다. 접수 확인을 유지합니다." : "There is no confirmed no-start receipt for this text. Keep checking acceptance.");
+          setActionNotice(appLocale === "ko" ? "이 글은 이미 보내는 중이라 초안으로 가져오지 않았어요." : "This text is already being sent, so it was not moved back to the draft.");
           return;
         }
       }
@@ -5217,8 +5213,8 @@ function OneSessionsShell() {
     if (!api || !events) {
       if (uncertainAdmissionRef.current.has(chatId) || readOneUncertainAdmission(chatId)) {
         setActionNotice(runLocale === "ko"
-          ? "이전 요청의 접수 여부를 확인할 연결이 없습니다. 새 요청은 보내지 않았습니다."
-          : "The previous request cannot be checked while Desktop is unavailable. No new request was sent.");
+          ? "연결이 돌아오면 이어서 보낼게요."
+          : "This follows when the connection returns.");
         return;
       }
       throw new Error(tFor(runLocale, "one.shell.run.desktop_unavailable"));
@@ -5248,7 +5244,6 @@ function OneSessionsShell() {
           setDispatchRunPrompt((current) => current?.runId === candidateRunId ? null : current);
           if (dispatchRunPromptRef.current?.runId === candidateRunId) dispatchRunPromptRef.current = null;
           setMessages((current) => current.filter((message) => message.id !== optimisticUserMessageId && message.id !== "one-live-response"));
-          if (!options?.promptOrigin) setComposer((current) => current.trim() ? current : text);
         }
         const goalDirection = Boolean(admission.goalId && admission.promptMessageId);
         // A proven no-start can still have a Main-persisted user direction.
@@ -5299,20 +5294,18 @@ function OneSessionsShell() {
           setActionNotice(specific.message);
           return true;
         }
-        const codeSuffix = recordedCode
-          ? (runLocale === "ko" ? ` (사유 코드: ${recordedCode})` : ` (reason code: ${recordedCode})`)
-          : "";
+        const codeSuffix = "";
         setActionNotice((runLocale === "ko"
           ? goalDirection
             ? directionVisible
               ? "새 지시는 대화에 기록됐지만 실행되지 않았습니다. Goal 상태를 확인한 뒤 목표 수정 또는 재개를 직접 선택해 주세요. 자동 재전송은 하지 않습니다."
               : "새 지시는 저장됐지만 대화 기록을 아직 확인하지 못했습니다. 작성창의 글을 다시 보내지 말고 Goal 상태와 기록을 확인해 주세요."
-            : "이전 요청은 실행되지 않은 것으로 확인됐습니다. 내용을 확인한 뒤 새로 보내세요."
+            : "이 메시지는 실행되지 못했어요. 모델 연결과 사용 한도를 확인한 뒤 다시 보내 주세요."
           : goalDirection
             ? directionVisible
               ? "Your direction is in the conversation, but did not run. Review the Goal, then choose whether to revise or resume it. Nothing was resent automatically."
               : "Your direction was saved, but its conversation row could not be checked yet. Do not resend the draft; review the Goal and history first."
-            : "The previous request was confirmed not to have started. Review it before sending a new request.") + codeSuffix);
+            : "This message could not run. Check the model connection and usage limits, then send it again.") + codeSuffix);
         return true;
       }
       const observed = await api.invoke.receipt(candidateRunId);
@@ -5349,11 +5342,11 @@ function OneSessionsShell() {
       catch { /* Unavailable receipt is not permission for a new run ID. */ }
       setActionNotice(runLocale === "ko"
         ? observedAdmissionStatus === "pending"
-          ? "이전 요청이 접수 대기 중입니다. 실행 여부가 확정될 때까지 새 요청을 보내지 않았습니다."
-          : "이전 요청의 접수 여부를 아직 확인할 수 없습니다. 중복 실행을 막기 위해 새 요청을 보내지 않았습니다. 연결이 복구되면 이 대화에서 다시 확인해 주세요."
+          ? "이전 메시지를 처리하는 중이에요. 곧 이어서 보낼게요."
+          : "이전 메시지의 상태를 확인하는 중이에요. 연결이 돌아오면 이어서 보낼게요."
         : observedAdmissionStatus === "pending"
-          ? "The previous request is pending admission. No new request was sent until its execution is resolved."
-          : "The previous request's admission is still unknown. No new request was sent; check this conversation again when the connection returns.");
+          ? "The previous message is still being handled. This one follows right after."
+          : "Checking on the previous message. This one follows when the connection returns.");
       return;
     }
     if (options?.automaticRecovery && admissionRecoveryFenceRef.current.has(chatId)) return;
@@ -5498,7 +5491,7 @@ function OneSessionsShell() {
     // the stream stayed blank and the answer appeared ~9s late).
     admittingRunIdsRef.current.add(runId);
     try {
-      await api.invoke.run({
+      const startAnswer = await api.invoke.run({
         runId,
         chatId,
         userPrompt: text,
@@ -5527,6 +5520,29 @@ function OneSessionsShell() {
       });
       admittingRunIdsRef.current.delete(runId);
       clearOneUncertainAdmission(chatId, runId);
+      if (startAnswer?.queued) {
+        // Accepted and saved; the chat was not free, so Main starts it by itself, in order. There is no run yet: leave
+        // the live state without any notice. The saved message replaces the optimistic one.
+        if (runIdRef.current === runId) runIdRef.current = null;
+        unsubscribeRunRef.current?.();
+        unsubscribeRunRef.current = null;
+        if (activityRunIdRef.current === runId) activityRunIdRef.current = null;
+        setLiveRunPrompt((current) => current?.runId === runId ? null : current);
+        setDispatchRunPrompt((current) => current?.runId === runId ? null : current);
+        if (dispatchRunPromptRef.current?.runId === runId) dispatchRunPromptRef.current = null;
+        activeRunStartedAtRef.current = null;
+        setBusy(false);
+        setActivity(initialOneActivityState());
+        setMessages((current) => current.filter((message) => message.id !== "one-live-response" || message.text.trim()));
+        try {
+          await refreshAll();
+          const placed = optimisticUserMessageId;
+          setMessages((current) => placed && current.some((message) => message.id !== placed && message.role === "user"
+            && message.text === text && message.durableMessageId)
+            ? current.filter((message) => message.id !== placed) : current);
+        } catch { /* the saved message appears at the next refresh */ }
+        return;
+      }
       if (options?.preflightSubmissionId && activeThreadChatIdRef.current === chatId) {
         setPreflightSteerReceipts(await api.invoke.preflightSteers(chatId).catch(() => []));
       }
@@ -5568,8 +5584,8 @@ function OneSessionsShell() {
       try { await refreshAll(); }
       catch {
         setActionNotice(runLocale === "ko"
-          ? "작업은 접수됐습니다. 화면 갱신이 지연돼도 같은 요청을 다시 보내지 마세요."
-          : "The run was accepted. The view could not refresh yet; do not resend the request.");
+          ? "작업을 시작했어요. 화면 갱신이 늦어도 다시 보낼 필요는 없어요."
+          : "The run started. The view may refresh late; there is no need to send it again.");
       }
     } catch (cause) {
       admittingRunIdsRef.current.delete(runId);
@@ -5590,8 +5606,8 @@ function OneSessionsShell() {
         setActivity(initialOneActivityState());
         setMessages((current) => current.filter((message) => message.id !== "one-live-response" || message.text.trim()));
         setActionNotice(runLocale === "ko"
-          ? "요청을 보냈지만 접수 여부를 확인하지 못했습니다. 중복 실행을 막기 위해 다시 보내지 않았습니다. 연결이 복구되면 이 대화에서 확인해 주세요."
-          : "The request was sent, but admission could not be confirmed. Do not resend it; check this conversation when the connection returns.");
+          ? "메시지를 보냈어요. 연결이 불안정해 진행 상황은 잠시 뒤 이 대화에서 확인할 수 있어요."
+          : "Your message was sent. The connection is unsteady; progress will show in this conversation shortly.");
         return;
       }
       clearOneUncertainAdmission(chatId, runId);
@@ -5599,10 +5615,6 @@ function OneSessionsShell() {
         admissionRecoveryFenceRef.current.set(chatId, { runId, accepted: false, notice: controlFailure.message, rejectedAt: Date.now() });
       }
       if (activeThreadChatIdRef.current && activeThreadChatIdRef.current !== chatId) {
-        if (!options?.promptOrigin) {
-          const key = `chat:${chatId}`;
-          if (!readOneComposerDraft(key).composer.trim()) writeOneComposerDraft(key, { composer: text });
-        }
         if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
         return;
       }
@@ -5701,24 +5713,19 @@ function OneSessionsShell() {
        *   사용자는 자기 글이 어디로 갔는지 알 방법이 없었다.
        *   Work 는 같은 상황에서 글을 작성창에 되돌리고 이유를 말한다. 맞춘다.
        */
-      if (!options?.promptOrigin) setComposer((current) => (current.trim() ? current : text));
       /*
+       * (2026-10-11) The text is no longer put back in the composer: the message is already in the transcript
+       *   (Main saves it when it is accepted), and a refusal that needs the owner is one neutral line.
        * ★한 번만 되돌리면 지워진다: 실패 직후 화면이 방금 만든 대화(또는 홈)로
        *   옮겨가고, 그 순간 초안 복원 효과가 **빈 초안**을 덮어쓴다(실측 2026-09-08:
        *   되돌려 놓아도 입력창이 계속 비어 있었다). 자리 이동이 끝난 뒤 한 번 더 본다 —
        *   그 사이 사용자가 새로 쓰기 시작했으면 건드리지 않는다.
        */
-      window.setTimeout(() => {
-        if (controlFailure && (runIdRef.current || admissionRecoveryFenceRef.current.get(chatId)?.runId !== runId)) return;
-        if (!options?.promptOrigin && activeThreadChatIdRef.current === chatId) {
-          setComposer((current) => (current.trim() ? current : text));
-        }
-      }, 320);
       setActionNotice(controlFailure?.message ?? (options?.promptOrigin
         ? (normalizedLocale === "ko" ? "이 대화의 자동 이어가기를 시작하지 못했습니다." : "Automatic continuation could not start in this conversation.")
         : normalizedLocale === "ko"
-        ? "작업을 시작하지 못했습니다. 쓰신 글은 작성창에 되돌려 놓았습니다 — 다시 보내 주세요."
-        : "The run did not start. Your text is back in the composer — send it again."));
+        ? "이 메시지는 실행되지 못했어요. 모델 연결과 사용 한도를 확인한 뒤 다시 보내 주세요."
+        : "This message could not run. Check the model connection and usage limits, then send it again."));
       await refreshAll();
       if (!controlFailure && !isChatBusyFailure(cause)) requestOneOperationalRecovery("one-run-start", cause, { chatId });
     } finally {
@@ -5795,10 +5802,9 @@ function OneSessionsShell() {
       const settled = code !== undefined && ONE_TEAM_PREFLIGHT_BINDING_GONE_CODES.has(code);
       if (settled || failures >= 3) {
         setPendingTeamPrompt((currentPrompt) => currentPrompt?.proposalId === proposal.proposalId ? null : currentPrompt);
-        setComposer((currentText) => currentText.trim() ? currentText : prompt.text);
         setActionNotice(normalizedLocale === "ko"
-          ? "대화가 바뀌어 팀 확정을 마치지 못했습니다. 쓰신 글은 작성창에 되돌려 놓았으니 다시 보내 주세요."
-          : "The conversation changed before the team could be confirmed. Your text is back in the composer — send it again.");
+          ? "대화가 바뀌어 팀 확정을 마치지 못했어요. 보낸 글은 대화에 남아 있어요. 다시 보내면 새로 준비해요."
+          : "The conversation changed before the team could be confirmed. Your message is still in the conversation; send it again to prepare it afresh.");
       } else {
         // A transient miss (runtime probe, store busy) may succeed shortly: wait before the state change re-runs the effect.
         await new Promise<void>((resolve) => { window.setTimeout(resolve, 1_000 * 2 ** (failures - 1)); });
@@ -6072,7 +6078,7 @@ function OneSessionsShell() {
     if (teamPreflightBusy || uncertainParent || pendingProposalSubmissionId
       || (preparingParent && preparingParent.chatId === currentSubmitChatId)) {
       if (!explicitValue || attachmentSnapshot.length > 0) {
-        setActionNotice(appLocale === "ko" ? "현재 요청이 접수 준비 중입니다. 첨부 파일은 작성창에 보관합니다." : "The current request is still being prepared. Attachments remain in the composer.");
+        setActionNotice(appLocale === "ko" ? "첨부 파일은 현재 요청이 시작된 뒤 보낼 수 있어요. 작성창에 그대로 있어요." : "Attachments can be sent once the current request starts. They stay in the composer.");
         return;
       }
       const chatId = currentSubmitChatId ?? preparingParent?.chatId;
@@ -6178,7 +6184,7 @@ function OneSessionsShell() {
     const latestPreparingParent = preflightSubmissionRef.current;
     if (currentSubmitChatId && latestPreparingParent?.chatId === currentSubmitChatId) {
       if (attachmentSnapshot.length === 0) preserveFollowup(currentSubmitChatId, { submissionId: latestPreparingParent.submissionId });
-      else setActionNotice(appLocale === "ko" ? "첨부 파일은 작성창에 보관합니다. 첫 요청의 접수를 기다려 주세요." : "Attachments remain in the composer while the first request is being accepted.");
+      else setActionNotice(appLocale === "ko" ? "첨부 파일은 첫 요청이 시작된 뒤 보낼 수 있어요. 작성창에 그대로 있어요." : "Attachments can be sent once the first request starts. They stay in the composer.");
       return;
     }
     if (busy || settlingChatId || (runIdRef.current && runChatIdRef.current === currentSubmitChatId)) {
@@ -9526,121 +9532,36 @@ function OneSessionsShell() {
                   : "Held after restart because an external effect is uncertain. Not replayed automatically; review this text before deciding on a new instruction."}</small>
               </div>
             ))}
-            {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true" data-tone={actionNotice === infoActionNoticeRef.current ? "info" : undefined}>{actionNotice}</p>}
+            {actionNotice && <p className={styles.attachmentError} role="status" aria-live="polite" data-one-action-notice="true" data-tone="info">{actionNotice}</p>}
             {/* 좁은 대화 열(결과 패널을 연 440px)에서 단추 두 개가 1fr 칸에 0px 로 눌려 글자가
                 서로 겹쳐 그려졌다(오너 1.2.41). 문장 한 덩이 + 단추 묶음으로 두고, 자리가 모자라면
                 단추 묶음이 다음 줄로 내려간다 — 단추끼리는 절대 겹치지 않는다. */}
-            {visibleUncertainAdmission && <div className={`${styles.steeringQueue} ${styles.admissionCard}`} role="status" data-one-uncertain-admission="true">
-              <strong>{appLocale === "ko" ? "이전 요청의 접수 여부를 확인 중입니다. 같은 요청을 다시 보내지 마세요." : "Admission of the previous request is unknown. Do not resend it."}</strong>
-              <div className={styles.admissionActions}>
-              <button type="button" className={styles.admissionAction} onClick={() => {
-                const pending = visibleUncertainAdmission;
-                const api = ipc();
-                if (!api) {
-                  setActionNotice(appLocale === "ko" ? "Desktop 연결이 없어 아직 확인할 수 없습니다." : "Desktop is unavailable; admission cannot be checked yet.");
-                  return;
-                }
-                void api.invoke.admission(pending.runId).then(async (answered) => {
-                  const admission: InvocationAdmissionReceipt = absentAdmissionProvesNoStart(answered, pending)
-                    && !(await api.invoke.receipt(pending.runId))
-                    ? { runId: pending.runId, chatId: pending.chatId, status: "rejected", pendingAt: "", updatedAt: "", rejectionReasonCode: null }
-                    : answered;
-                  if (admission.status !== "absent" && admission.chatId !== pending.chatId) {
-                    setActionNotice(appLocale === "ko" ? "요청 ID가 다른 대화에 묶여 있습니다. 재전송하지 않았습니다." : "This request ID belongs to another conversation. Nothing was resent.");
-                    return;
-                  }
-                  if (admission.status === "pending") {
-                    setActionNotice(appLocale === "ko" ? "원래 요청이 접수 대기 중입니다. 실행 여부가 확정될 때까지 재전송하지 않습니다." : "The original request is pending admission. It will not be resent while execution is unresolved.");
-                    return;
-                  }
-                  if (admission.status === "rejected") {
-                    uncertainAdmissionRef.current.delete(pending.chatId);
-                    clearOneUncertainAdmission(pending.chatId, pending.runId);
-                    // A verified no-start can still have a Main-saved Goal
-                    // direction. The manual receipt check must recover the
-                    // same exact user row as automatic admission recovery;
-                    // otherwise reopening One hides the direction behind a
-                    // generic "not started" notice and invites a duplicate.
-                    let directionVisible = false;
-                    if (admission.goalId && admission.promptMessageId) {
-                      try {
-                        const history = await readOneShellHistory(api, pending.chatId);
-                        const durable = toUiMessages(history);
-                        directionVisible = durable.some((message) => message.id === admission.promptMessageId && message.role === "user");
-                        if (directionVisible && activeThreadChatIdRef.current === pending.chatId && !runIdRef.current) {
-                          oneTranscriptRevisionRef.current += 1;
-                          setMessages((current) => activeThreadChatIdRef.current === pending.chatId && !runIdRef.current
-                            ? mergeOneShellHistory(current, durable) : current);
-                          setRejectedGoalDirection({ chatId: pending.chatId, goalId: admission.goalId,
-                            messageId: admission.promptMessageId, runId: pending.runId });
-                        } else directionVisible = false;
-                      } catch { /* Keep the composer and do not infer a missing message. */ }
-                    }
-                    setActionNotice(appLocale === "ko"
-                      ? admission.goalId && admission.promptMessageId
-                        ? directionVisible
-                          ? "추가 지시는 대화에 저장됐지만 실행되지 않았습니다. Goal 상태를 확인하고 목표 수정 또는 재개를 직접 선택해 주세요. 자동 재전송은 하지 않습니다."
-                          : "추가 지시는 저장됐지만 기록을 아직 확인하지 못했습니다. 재전송하지 말고 Goal 상태를 확인해 주세요."
-                        : "원래 요청이 실행되지 않은 것으로 확인됐습니다. 내용을 확인한 뒤 새로 보내세요."
-                      : admission.goalId && admission.promptMessageId
-                        ? directionVisible
-                          ? "Your direction was saved but did not run. Review the Goal, then choose whether to revise or resume it. Nothing was resent automatically."
-                          : "Your direction was saved, but its record could not be checked. Do not resend it; review the Goal first."
-                        : "The original request was confirmed not to have started. Review it before sending again.");
-                    return;
-                  }
-                  const observed = await api.invoke.receipt(pending.runId);
-                  if (!observed || observed.runId !== pending.runId || observed.chatId !== pending.chatId) {
-                    setActionNotice(appLocale === "ko" ? "실행 영수증을 아직 확인할 수 없습니다. 새 요청은 보내지 않았습니다." : "The run receipt is still unavailable. No new request was sent.");
-                    return;
-                  }
-                  uncertainAdmissionRef.current.delete(pending.chatId);
-                  clearOneUncertainAdmission(pending.chatId, pending.runId);
-                  if (observed.status === "running" || observed.status === "cancelling") {
-                    runIdRef.current = pending.runId;
-                    runChatIdRef.current = pending.chatId;
-                    activityRunIdRef.current = pending.runId;
-                    setBusy(true);
-                    subscribeRun(pending.runId);
-                  } else {
-                    if (runIdRef.current === pending.runId) runIdRef.current = null;
-                    setBusy(false);
-                    void settleOrderedRunRef.current(pending.chatId, runTaskIdRef.current, pending.runId).catch(() => {
-                      setActionNotice(appLocale === "ko" ? "종료 기록을 아직 복원하지 못했습니다. 기록을 확인해 주세요." : "The terminal history could not be restored yet. Check the record.");
-                    });
-                  }
-                  setActionNotice(appLocale === "ko" ? "원래 요청의 실행 기록을 확인했습니다. 재전송하지 않았습니다." : "The original run was found. Nothing was resent.");
-                }).catch(() => setActionNotice(appLocale === "ko" ? "접수 여부를 아직 확인할 수 없습니다. 재전송하지 않았습니다." : "Admission cannot be checked yet. Nothing was resent."));
-              }}>{appLocale === "ko" ? "접수 확인" : "Check admission"}</button>
-              <button type="button" className={styles.admissionAction} onClick={() => {
-                pauseLocalFollowups(visibleUncertainAdmission.chatId);
-                const api = ipc();
-                if (!api) {
-                  setActionNotice(appLocale === "ko" ? "Desktop 연결이 없어 중지를 요청하지 못했습니다." : "Desktop is unavailable; Stop could not be requested.");
-                  return;
-                }
-                void api.invoke.cancel(visibleUncertainAdmission.runId).then((receipt) => {
-                  setActionNotice(receipt?.status === "requested" || receipt?.status === "already-requested"
-                    ? appLocale === "ko" ? "원래 실행에 중지를 요청했습니다. 종료 영수증을 기다립니다." : "Stop was requested for the original run. Waiting for its terminal receipt."
-                    : appLocale === "ko" ? "아직 실행 중인 호출을 찾지 못했습니다. 접수 여부는 계속 불확실하며 새 요청은 보내지 않았습니다." : "No active run was found yet. Admission remains uncertain; no new request was sent.");
-                }).catch(() => setActionNotice(appLocale === "ko" ? "중지 요청을 확인하지 못했습니다. 접수 여부를 다시 확인해 주세요." : "Stop could not be confirmed. Check admission again."));
-              }}>{appLocale === "ko" ? "원래 요청 중지" : "Stop original run"}</button>
+            {/* No 'checking admission' card: a message is always accepted (Main queues it and starts it by itself). */}
+            {unavailableRoomMembers.length > 0 && (
+              <div className={styles.oneRoomMemberNotice} role="alert" data-one-room-unavailable-members="true">
+                {unavailableRoomMembers.map((member) => <p key={member.id}>
+                  {appLocale === "ko"
+                    ? `"${member.displayName}"을(를) 이 방에 부를 수 없습니다. ${member.unavailable!.reason.ko}`
+                    : `"${member.displayName}" can't join this room. ${member.unavailable!.reason.en}`}
+                </p>)}
               </div>
-            </div>}
-            {turnAgentIds.length > 0 && (
+            )}
+            {/* The room's own members are not pending participants: they are in the room. A chip row only appears when this
+                turn names someone other than the roster. */}
+            {turnAgentIds.length > 0 && (!activeTaskforce || turnAgentsDifferFromRoster(turnAgentIds, activeTaskforceAgentIds)) && (
               <details className={styles.oneTurnAgentChips} aria-label={appLocale === "ko" ? "이번 턴 에이전트" : "Agents for this turn"}>
-                <summary>{appLocale === "ko" ? `${activeTaskforce ? "참여 예정" : "이번 턴 지정"} ${turnAgentIds.length}명` : `${turnAgentIds.length} ${activeTaskforce ? "planned participants" : "agents this turn"}`}</summary>
+                <summary>{appLocale === "ko" ? `이번 턴 지정 ${turnAgentIds.length}명` : `${turnAgentIds.length} agents this turn`}</summary>
                 <div className={styles.oneTurnAgentChoices}>
                 {turnAgentIds.map((agentId) => {
                   const candidate = availableAgents.find((item) => item.id === agentId);
                   if (!candidate) return null;
-                  const localized = pickLocalized(candidate, appLocale);
+                  const seatName = seatDisplayName(agentId, oneOrgState?.members, pickLocalized(candidate, appLocale).name);
                   return <button
                     key={agentId}
                     type="button"
                     onClick={() => setTurnAgentIds((current) => current.filter((id) => id !== agentId))}
-                    aria-label={appLocale === "ko" ? `${localized.name} 호출 취소` : `Remove ${localized.name}`}
-                  >@{localized.name}<span aria-hidden><IconClose size={10} /></span></button>;
+                    aria-label={appLocale === "ko" ? `${seatName} 호출 취소` : `Remove ${seatName}`}
+                  >@{seatName}<span aria-hidden><IconClose size={10} /></span></button>;
                 })}
                 </div>
               </details>
@@ -9655,7 +9576,7 @@ function OneSessionsShell() {
                   const localized = pickLocalized(candidate, appLocale);
                   return {
                     id: candidate.id,
-                    name: localized.name,
+                    name: seatDisplayName(candidate.id, oneOrgState?.members, localized.name),
                     tagline: localized.tagline,
                     selected: turnAgentIds.includes(candidate.id),
                   };
@@ -9872,104 +9793,7 @@ function OneSessionsShell() {
             {/* Receipt cards: short plain copy, and every card can be closed. Internal states
                 (Main acceptance, run ownership) stay out of the owner's view; the durable rows and
                 the automatic-retry stop are unchanged by closing a card. */}
-            {currentTurnFollowups.filter(item => item.intent.chatId === activeThreadChatId
-              && (item.receipt.status === "uncertain" || item.receipt.status === "rejected")).map(item => (
-              <div key={item.intent.intentId} className={`${styles.steeringQueue} ${styles.followupReceiptCard}`} role="status" data-one-current-turn-followup={item.receipt.status}>
-                <strong>{item.intent.userPrompt}</strong>
-                <small>{item.receipt.status === "uncertain"
-                  ? (appLocale === "ko" ? "전달됐는지 확인하지 못했어요. 자동으로 다시 보내지 않아요." : "Delivery wasn't confirmed. It won't be resent automatically.")
-                  : (appLocale === "ko" ? "실행 중인 작업에 전달하지 못했어요." : "This couldn't reach the running work.")}</small>
-                <div className={styles.followupReceiptActions}>
-                  <button type="button" className={styles.admissionAction} disabled={composerHasText} onClick={() => {
-                    if (composerHandleRef.current?.getValue().trim()) return;
-                    setComposer(item.intent.userPrompt);
-                    setCurrentTurnFollowups(current => current.filter(value => value.intent.intentId !== item.intent.intentId));
-                  }}>{appLocale === "ko" ? "초안으로 가져오기" : "Restore draft"}</button>
-                  <button type="button" className={styles.admissionAction} data-one-followup-dismiss="current-turn" onClick={() => {
-                    setCurrentTurnFollowups(current => current.filter(value => value.intent.intentId !== item.intent.intentId));
-                  }}>{appLocale === "ko" ? "닫기" : "Close"}</button>
-                </div>
-              </div>
-            ))}
-            {localFollowupIntents.filter(item => item.chatId === activeThreadChatId
-              && (delayedFollowupIds.has(item.intentId) || item.requiresReprepare || item.autoDeliveryPaused)).map(item => {
-              const paused = Boolean(item.autoDeliveryPaused || locallyStoppedFollowupIdsRef.current.has(item.intentId));
-              return (
-              <div key={item.intentId} className={`${styles.steeringQueue} ${styles.followupReceiptCard}`} role="status" data-one-local-followup={item.intentId}>
-                <span>{item.requiresReprepare ? (appLocale === "ko" ? "팀 확인 필요" : "Team check needed")
-                  : paused ? (appLocale === "ko" ? "보내지 않은 지시" : "Not sent")
-                    : (appLocale === "ko" ? "전송 대기" : "Waiting to send")}</span>
-                <strong>{item.userPrompt}</strong>
-                <small>{item.requiresReprepare ? (appLocale === "ko" ? "팀이 바뀌어 아직 보내지 않았어요." : "The team changed, so this hasn't been sent.")
-                  : paused ? (appLocale === "ko" ? "자동 전송을 멈췄어요. 다시 보내거나 지울 수 있어요." : "Automatic sending stopped. Send it again or discard it.")
-                    : (appLocale === "ko" ? "아직 전달되지 않았어요. 새 글은 계속 쓸 수 있어요." : "Not delivered yet. You can keep writing.")}</small>
-                <div className={styles.followupReceiptActions}>
-                  {paused && !item.requiresReprepare && <button type="button" className={styles.admissionAction} onClick={() => {
-                    currentTurnBackoffRef.current.delete(item.intentId);
-                    void resumePausedFollowup(item);
-                  }}>
-                    {appLocale === "ko" ? "다시 보내기" : "Send again"}
-                  </button>}
-                  {item.requiresReprepare ? (
-                    <button type="button" className={styles.admissionAction} disabled={busy || teamPreflightBusy || composerHasText} onClick={() => restoreUnsentFollowup(item)}>
-                      {appLocale === "ko" ? "작업 끝나면 초안으로" : "Restore draft when idle"}
-                    </button>
-                  ) : !paused && (
-                    <>
-                      <button type="button" className={styles.admissionAction} onClick={() => void reconcileUncertainPreflightSteer(item.chatId)}>
-                        {appLocale === "ko" ? "다시 확인" : "Check again"}
-                      </button>
-                      {item.waitingParentRunId && <button type="button" className={styles.admissionAction} disabled={busy || teamPreflightBusy || composerHasText} onClick={() => void restoreUnsentFollowup(item)}>
-                        {appLocale === "ko" ? "초안으로 가져오기" : "Restore draft"}
-                      </button>}
-                    </>
-                  )}
-                  <button type="button" className={styles.admissionAction} data-one-followup-dismiss="local" onClick={() => {
-                    // Discard is the owner's explicit choice; it never sends the text anywhere.
-                    try { removeOneFollowupIntent(window.localStorage, item.chatId, item.intentId); } catch { return; }
-                    locallyStoppedFollowupIdsRef.current.delete(item.intentId);
-                    currentTurnBackoffRef.current.delete(item.intentId);
-                    setDelayedFollowupIds(current => { if (!current.has(item.intentId)) return current; const next = new Set(current); next.delete(item.intentId); return next; });
-                    setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, item.chatId));
-                  }}>{appLocale === "ko" ? "지우기" : "Discard"}</button>
-                </div>
-              </div>
-              );
-            })}
-            {preflightSteerReceipts
-              .filter((item) => item.chatId === activeThreadChatId
-                && (item.status === "queued" || item.status === "held" || item.status === "cancelled"))
-              .slice(-10)
-              .map((item) => (
-                <div key={item.steerId} className={`${styles.steeringQueue} ${styles.followupReceiptCard}`} role="status" data-one-preflight-steer={item.status}>
-                  <span>{item.status === "held"
-                    ? (appLocale === "ko" ? "추가 지시 보류" : "Follow-up held")
-                    : item.status === "cancelled"
-                      ? (appLocale === "ko" ? "추가 지시 취소" : "Follow-up cancelled")
-                      : (appLocale === "ko" ? "추가 지시 접수" : "Follow-up received")}</span>
-                  <strong>{item.userPrompt}</strong>
-                  <small>{item.status === "held" || item.status === "cancelled"
-                    ? (appLocale === "ko" ? "자동으로 다시 보내지 않아요." : "It won't be resent automatically.")
-                    : (appLocale === "ko" ? "앞 요청이 끝나면 이어서 보내요." : "Sends after the current request.")}</small>
-                  {(item.status === "held" || item.status === "cancelled") && <div className={styles.followupReceiptActions}>
-                    <button type="button" className={styles.admissionAction} data-one-followup-dismiss="preflight" onClick={() => {
-                      setPreflightSteerReceipts(current => current.filter(value => value.steerId !== item.steerId));
-                    }}>{appLocale === "ko" ? "닫기" : "Close"}</button>
-                  </div>}
-                </div>
-              ))}
-            {preflightFenceStatus?.chatId === activeThreadChatId && (
-              <div className={`${styles.steeringQueue} ${styles.followupReceiptCard}`} role="status" data-one-preflight-fence={preflightFenceStatus.reason}>
-                <span>{appLocale === "ko" ? "추가 지시 접수 확인" : "Follow-up receipt check"}</span>
-                <small>{ONE_PREFLIGHT_FENCE_COPY[preflightFenceStatus.reason][appLocale === "ko" ? "ko" : "en"]}</small>
-                <div className={styles.followupReceiptActions}>
-                  <button type="button" className={styles.admissionAction} disabled={preflightFenceStatus.reason === "checking"}
-                    onClick={() => { if (activeThreadChatId) void reconcileUncertainPreflightSteer(activeThreadChatId); }}>
-                    {appLocale === "ko" ? "다시 확인" : "Check again"}
-                  </button>
-                </div>
-              </div>
-            )}
+            {/* No receipt / 'waiting to send' / 'received' cards: the owner's message is shown once in the transcript and Main delivers it. */}
             {activeDirectSessionUnavailable && <div className={styles.sessionUnavailableBanner} role="status" data-one-session-unavailable-banner="true">
               <IconAlertTriangle size={17} strokeWidth={2} />
               <strong>{appLocale === "ko"
