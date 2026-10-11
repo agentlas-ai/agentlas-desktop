@@ -2312,11 +2312,22 @@ async function runMcpInvocationInContext(
     const observed = login.beginObservation();
     try {
     const { recoverLoginWallsNow, ownerLoginCardNotice } = await import("../browser/login-recovery-runtime");
-    const outcomes = await recoverLoginWallsNow({ runId: req.runId, chatId: req.chatId,
-      nodeId: executionContext?.nodeId, signal: login.ownerSignal, nativeGrant: nativeBrowserGrant,
-      onPrerequisiteRestored: ref => login.restored(ref),
-      notify: card => sink({ kind: "notice", notice: ownerLoginCardNotice(card, pickLocale(req)) }),
-    });
+    let outcomes: Awaited<ReturnType<typeof recoverLoginWallsNow>>;
+    try {
+      outcomes = await recoverLoginWallsNow({ runId: req.runId, chatId: req.chatId,
+        nodeId: executionContext?.nodeId, signal: login.ownerSignal, nativeGrant: nativeBrowserGrant,
+        onPrerequisiteRestored: ref => login.restored(ref),
+        notify: card => sink({ kind: "notice", notice: ownerLoginCardNotice(card, pickLocale(req)) }),
+      });
+    } catch (error) {
+      // Looking for a login wall is best effort; failing to look must not cost the result the tool already produced.
+      // Production 1.3.3: all 26 daemon-run browser and computer-use calls were reset at this boundary (window runs: 0 of 794).
+      login.assertRunnable();
+      const code = error instanceof Error && /^[A-Za-z0-9_.:-]{1,80}$/.test(error.message) ? error.message : "unknown";
+      tryRecordRunEvent({ runId: req.runId!, chatId: req.chatId, nodeId: executionContext?.nodeId, kind: "browser_login_observation_failed",
+        sourceEventId: `browser-login-observation:${randomUUID()}`, payload: { catalogId: input.catalogId, toolName: input.toolName, code } });
+      return;
+    }
     login.observe(outcomes);
     login.assertRunnable();
     } finally { observed(); }

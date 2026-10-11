@@ -8,6 +8,7 @@ import { pickRunner } from "../runtime/selection";
 import { runAliveServingDecision } from "../alive-organisms/serving-wake";
 import { ONE_SUPERVISOR_RUNTIME_PROTOCOL } from "../../shared/one-supervisor-runtime";
 import { invocationRunOwners } from "../store/invocation-run-owners";
+import { daemonOwnedObservation as observeDaemonOwned } from "./daemon-owned-observation";
 import { randomUUID } from "node:crypto";
 import { createNativeJsonTransfers, type NativeJsonTransferDescriptor } from "./native-json-transfer";
 import { NATIVE_PUBLIC_EVENT_POLICY, NATIVE_APPROVAL_OBSERVATION_POLICY } from "./native-invocation-policy";
@@ -104,6 +105,11 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     if(!binding)fail("native_invocation_control_binding_changed");
     return binding!;
   };
+  const daemonOwnedObservation = (chatId: unknown, runId: unknown) => observeDaemonOwned(options.bootId, chatId, runId) as NativeStartDescriptor["binding"] | null;
+  const observeCapture = (chatId: unknown, runId: unknown): NativeStartDescriptor["binding"] => {
+    try { return capture(chatId, runId); }
+    catch (error) { const observed = daemonOwnedObservation(chatId, runId); if (observed) return observed; throw error; }
+  };
   const observationAvailable = () => [...attached.values()].every(r => r.publisher.available && r.approvals.available);
   const capabilities = (): NativeInvocationCapabilities => ({ start: !!host && accepting && observationAvailable(), stop: !!host,
     events: !!host && [...attached.values()].every(r => r.publisher.available),
@@ -164,7 +170,8 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       if (params && typeof params === "object" && "version" in params && typeof (params as {version:unknown}).version === "string"
         && (params as {version:string}).version.startsWith("agentlas.native-owner-text")) {
         const attachment = current(peer), wire = params as Record<string,unknown>;
-        const record = capture(wire.chatId,wire.runId), binding = record;
+        const readOnly = wire.version === "agentlas.native-owner-text-attach.v1" || wire.version === "agentlas.native-owner-text-recovery.v1";
+        const record = readOnly ? observeCapture(wire.chatId,wire.runId) : capture(wire.chatId,wire.runId), binding = record;
         if (wire.inputDigest !== binding.inputDigest) fail("native_owner_text_binding_changed");
         const value = {chatId:binding.chatId,runId:binding.runId,inputDigest:binding.inputDigest};
         if (wire.version === "agentlas.native-owner-text-compatible.v1" && exact(wire,["version","chatId","runId","inputDigest","choices"])) {
@@ -234,9 +241,16 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       if (!attached.has(peer)) {
         const getIdentity = () => server.authenticatedPeerIdentity(peer) ?? null;
         const acceptsRun = (runId: string, chatId: string) => known.get(runId)?.start.binding.chatId === chatId || !!supervisor.runBinding(chatId,runId);
+        // Progress stream only (events, active chats). Approvals keep the strict acceptsRun above.
+        const observesRun = (runId: string, chatId: string) => acceptsRun(runId, chatId) || !!daemonOwnedObservation(chatId, runId);
+        const observesChat = (chatId: string) => {
+          if ([...known.values()].some(r => r.start.binding.chatId === chatId) || supervisor.captures().some(r => r.chatId === chatId)) return true;
+          const active = invocationRunOwners.getActiveOwner(chatId);
+          return !!active && !!daemonOwnedObservation(chatId, active.runId);
+        };
         const publisher = createNativeInvocationPublicPublisher({ service: options.service, identity, getIdentity,
-          notify: (method, value) => peer.notify(method, value), acceptsRun,
-          acceptsChat: chatId => [...known.values()].some(r => r.start.binding.chatId === chatId) || supervisor.captures().some(r=>r.chatId===chatId),
+          notify: (method, value) => peer.notify(method, value), acceptsRun: observesRun,
+          acceptsChat: observesChat,
           ...NATIVE_PUBLIC_EVENT_POLICY,
           onFault: error => console.warn("[native-invocation] public stream unavailable", error.code) });
         const approvals = createNativeInvocationApprovalChannel({ identity, getIdentity,
@@ -308,7 +322,7 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     }
     if (["invoke.admission", "invoke.receipt", "invoke.currentTurn"].includes(method)) {
       if (!exact(params, ["chatId", "runId"])) fail("native_invocation_control_invalid");
-      const record = capture(params.chatId, params.runId), { runId, chatId } = record;
+      const record = method === "invoke.currentTurn" ? capture(params.chatId, params.runId) : observeCapture(params.chatId, params.runId), { runId, chatId } = record;
       if (method === "invoke.receipt") {
         // Register the private observation before serializing, then retain the
         // complete public value. It carries no original issuer authority.

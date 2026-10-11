@@ -22,7 +22,7 @@ import { BUILTIN_ONE_AGENT_ID } from "../../shared/builtin-agent-ids";
 import { userDataPath } from "../runtime-paths";
 
 export type CapabilityKind = "skill" | "plugin" | "hook" | "memory" | "connector";
-export type CapabilitySource = "codex" | "claude" | "cursor" | "agentlas";
+export type CapabilitySource = "codex" | "claude" | "cursor" | "grok" | "gemini" | "copilot" | "agentlas";
 
 export interface CapabilityItem {
   id: string;
@@ -55,10 +55,16 @@ export interface CapabilityRoots {
   codexHome: string;
   claudeDir: string;
   cursorDir: string;
+  /** Grok's own folder (GROK_HOME, default ~/.grok). */
+  grokDir: string;
+  /** Antigravity / Gemini CLI's folder (~/.gemini). */
+  geminiDir: string;
+  /** GitHub Copilot CLI's folder (~/.copilot). */
+  copilotDir: string;
   agentlasDir: string;
 }
 
-export const PERSONAL_SOURCES: readonly CapabilitySource[] = ["codex", "claude", "cursor"];
+export const PERSONAL_SOURCES: readonly CapabilitySource[] = ["codex", "claude", "cursor", "grok", "gemini", "copilot"];
 export const DETAIL_MAX_BYTES = 64 * 1024;
 const MAX_SKILL_DEPTH = 5;
 const MAX_ITEMS_PER_KIND = 1500;
@@ -72,6 +78,9 @@ export function defaultCapabilityRoots(env: NodeJS.ProcessEnv = process.env): Ca
     codexHome: path.resolve(env.CODEX_HOME || path.join(home, ".codex")),
     claudeDir: path.resolve(env.CLAUDE_CONFIG_DIR || path.join(home, ".claude")),
     cursorDir: path.join(home, ".cursor"),
+    grokDir: path.resolve(env.GROK_HOME || path.join(home, ".grok")),
+    geminiDir: path.join(home, ".gemini"),
+    copilotDir: path.join(home, ".copilot"),
     agentlasDir: path.join(home, ".agentlas"),
   };
 }
@@ -399,7 +408,7 @@ function claudeItems(r: CapabilityRoots): Draft[] {
   const userJson = readJson(path.join(r.home, ".claude.json")) as { mcpServers?: Record<string, unknown> } | null;
   for (const [name, def] of Object.entries(userJson?.mcpServers ?? {})) {
     const transport = def && typeof def === "object" && "url" in def ? "url" : "stdio";
-    out.push({ key: `claude-mcp:${name}`, kind: "connector", source: "claude", name, description: `MCP server (${transport})`, path: `${path.join(r.home, ".claude.json")}#mcpServers.${name}`, applies: false });
+    out.push({ key: `claude-mcp:${name}`, kind: "connector", source: "claude", name, description: `MCP server (${transport})`, path: `${path.join(r.home, ".claude.json")}#mcpServers.${name}`, applies: true });
   }
   return out;
 }
@@ -421,6 +430,81 @@ function cursorItems(r: CapabilityRoots): Draft[] {
   for (const [name, def] of Object.entries(mcp?.mcpServers ?? {})) {
     const transport = def && typeof def === "object" && "url" in def ? "url" : "stdio";
     out.push({ key: `cursor-mcp:${name}`, kind: "connector", source: "cursor", name, description: `MCP server (${transport})`, path: `${path.join(r.cursorDir, "mcp.json")}#mcpServers.${name}`, applies: false });
+  }
+  return out;
+}
+
+/** Grok's own folder: Agents.md, memory-v2, skills, hook files and the `[mcp_servers.*]` of its config.toml. */
+function grokItems(roots: CapabilityRoots): Draft[] {
+  const r = { ...roots, grokDir: roots.grokDir ?? path.join(roots.home, ".grok") };
+  const out: Draft[] = [];
+  for (const name of ["Agents.md", "AGENTS.md"]) {
+    const file = path.join(r.grokDir, name);
+    if (isFile(file)) { out.push({ key: file, canon: "agents.md", kind: "memory", source: "grok", name, description: "Grok personal instructions", path: file, applies: true }); break; }
+  }
+  const v2 = path.join(r.grokDir, "memory-v2");
+  if (isDir(v2) && safeReadDir(v2).length > 0) {
+    out.push({ key: v2, kind: "memory", source: "grok", name: "memory-v2", title: "Grok 메모리", description: "Grok cross-session memory", path: v2, applies: true });
+  }
+  for (const file of skillFilesUnder(path.join(r.grokDir, "skills"))) { const draft = skillDraft("grok", file, true); if (draft) out.push(draft); }
+  const hooks = path.join(r.grokDir, "hooks");
+  for (const name of safeReadDir(hooks)) {
+    const at = path.join(hooks, name);
+    if (name.endsWith(".json") && isFile(at)) {
+      out.push({ key: at, kind: "hook", source: "grok", name, description: "Grok hook file", path: at, applies: true });
+    }
+  }
+  const configPath = path.join(r.grokDir, "config.toml");
+  let config = "";
+  try { config = fs.readFileSync(configPath, "utf8"); } catch { /* none */ }
+  for (const c of tomlConnectorNames(config)) {
+    out.push({ key: `${configPath}:${c.name}`, kind: "connector", source: "grok", name: c.name, description: `MCP server (${c.transport})`, path: `${configPath}#mcp_servers.${c.name}`, applies: true });
+  }
+  return out;
+}
+
+/** Antigravity (agy) and Gemini CLI: ~/.gemini/GEMINI.md and the config folder's skills, plugins, hooks and MCP servers. */
+function geminiItems(roots: CapabilityRoots): Draft[] {
+  const r = { ...roots, geminiDir: roots.geminiDir ?? path.join(roots.home, ".gemini") };
+  const out: Draft[] = [];
+  const memory = path.join(r.geminiDir, "GEMINI.md");
+  if (isFile(memory)) out.push({ key: memory, kind: "memory", source: "gemini", name: "GEMINI.md", description: "Antigravity personal instructions", path: memory, applies: false });
+  const config = path.join(r.geminiDir, "config");
+  for (const file of skillFilesUnder(path.join(config, "skills"))) { const draft = skillDraft("gemini", file, true); if (draft) out.push(draft); }
+  const plugins = path.join(config, "plugins");
+  for (const name of safeReadDir(plugins)) {
+    const dir = path.join(plugins, name);
+    if (name.startsWith(".") || !isDir(dir) || isScratchPath(dir)) continue;
+    const manifest = readJson(path.join(dir, "plugin.json")) as Record<string, unknown> | null;
+    out.push({ key: dir, canon: name.toLowerCase(), kind: "plugin", source: "gemini", name, title: str(manifest?.name) || name,
+      description: oneLine(str(manifest?.description)), path: dir, applies: false });
+  }
+  const hooksFile = path.join(config, "hooks.json");
+  const hooks = readJson(hooksFile);
+  if (hooks && typeof hooks === "object" && !Array.isArray(hooks)) {
+    for (const [name, def] of Object.entries(hooks as Record<string, unknown>)) {
+      if (def && typeof def === "object") out.push({ key: `${hooksFile}:${name}`, kind: "hook", source: "gemini", name, description: "Antigravity hook set", path: `${hooksFile}#${name}`, applies: false });
+    }
+  }
+  const mcpFile = path.join(config, "mcp_config.json");
+  const mcp = readJson(mcpFile) as { mcpServers?: Record<string, unknown> } | null;
+  for (const [name, def] of Object.entries(mcp?.mcpServers ?? {})) {
+    if (name === "agentlas-browser") continue; // written and removed by the app itself for the run that needs it
+    const transport = def && typeof def === "object" && ("url" in def || "serverUrl" in def) ? "url" : "stdio";
+    out.push({ key: `gemini-mcp:${name}`, kind: "connector", source: "gemini", name, description: `MCP server (${transport})`, path: `${mcpFile}#mcpServers.${name}`, applies: false });
+  }
+  return out;
+}
+
+/** GitHub Copilot CLI: its MCP servers are listed; no switch for them is verified (the CLI is not installed here). */
+function copilotItems(roots: CapabilityRoots): Draft[] {
+  const r = { ...roots, copilotDir: roots.copilotDir ?? path.join(roots.home, ".copilot") };
+  const out: Draft[] = [];
+  const file = path.join(r.copilotDir, "mcp-config.json");
+  const mcp = readJson(file) as { mcpServers?: Record<string, unknown> } | null;
+  for (const [name, def] of Object.entries(mcp?.mcpServers ?? {})) {
+    const transport = def && typeof def === "object" && "url" in def ? "url" : "stdio";
+    out.push({ key: `copilot-mcp:${name}`, kind: "connector", source: "copilot", name, description: `MCP server (${transport})`, path: `${file}#mcpServers.${name}`, applies: false });
   }
   return out;
 }
@@ -457,7 +541,7 @@ export function listCapabilities(roots: CapabilityRoots = defaultCapabilityRoots
   const items: CapabilityItem[] = [];
   scratchBases = [roots.home];
   try { scratchBases.push(fs.realpathSync(roots.home)); } catch { /* home may not exist */ }
-  for (const draft of [...codexItems(roots), ...claudeItems(roots), ...cursorItems(roots), ...agentlasItems(roots)]) {
+  for (const draft of [...codexItems(roots), ...claudeItems(roots), ...cursorItems(roots), ...grokItems(roots), ...geminiItems(roots), ...copilotItems(roots), ...agentlasItems(roots)]) {
     const id = capabilityId(draft.source, draft.kind, draft.key);
     const identity = `${draft.source}|${draft.kind}|${draft.canon ?? draft.key}`;
     if (seen.has(identity)) continue;
@@ -524,7 +608,22 @@ function connectorText(item: CapabilityItem, roots: CapabilityRoots): string {
     }
     return lines.join("\n");
   }
-  const file = item.source === "claude" ? path.join(roots.home, ".claude.json") : path.join(roots.cursorDir, "mcp.json");
+  if (item.source === "grok") {
+    let config = "";
+    try { config = fs.readFileSync(path.join(roots.grokDir ?? path.join(roots.home, ".grok"), "config.toml"), "utf8"); } catch { return ""; }
+    const lines: string[] = [];
+    let on = false;
+    for (const line of config.split(/\r?\n/)) {
+      const table = /^\s*\[([^\[\]]+)\]/.exec(line);
+      if (table) { on = new RegExp(`^mcp_servers\\.("?)${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\1(\\.|$)`).test(table[1].trim()); }
+      if (on) lines.push(line);
+    }
+    return lines.join("\n");
+  }
+  const file = item.source === "claude" ? path.join(roots.home, ".claude.json")
+    : item.source === "gemini" ? path.join(roots.geminiDir ?? path.join(roots.home, ".gemini"), "config", "mcp_config.json")
+      : item.source === "copilot" ? path.join(roots.copilotDir ?? path.join(roots.home, ".copilot"), "mcp-config.json")
+        : path.join(roots.cursorDir, "mcp.json");
   const json = readJson(file) as { mcpServers?: Record<string, unknown> } | null;
   const def = json?.mcpServers?.[name];
   if (!def || typeof def !== "object") return "";
@@ -537,6 +636,12 @@ function connectorText(item: CapabilityItem, roots: CapabilityRoots): string {
 }
 
 function hookText(item: CapabilityItem): string {
+  if (item.source === "grok") return isFile(item.path) && !looksLikeCredentialFile(item.path) ? fs.readFileSync(item.path, "utf8").slice(0, DETAIL_MAX_BYTES) : "";
+  if (item.source === "gemini") {
+    const at = item.path.lastIndexOf("#");
+    const json = readJson(item.path.slice(0, at)) as Record<string, unknown> | null;
+    return JSON.stringify(json?.[item.path.slice(at + 1)] ?? null, null, 2);
+  }
   const m = /^(.*)#(.+?)\/(\d+)\/(\d+)$/.exec(item.path) ?? /^(.*)#hooks\/(.+?)\/(\d+)\/(\d+)$/.exec(item.path);
   if (!m) return "";
   const json = readJson(m[1]);
@@ -574,7 +679,7 @@ export function capabilityDetail(id: string, roots: CapabilityRoots = defaultCap
     const manifest = dir ? [".codex-plugin/plugin.json", "plugin.json", ".claude-plugin/plugin.json"].map((rel) => path.join(dir, rel)).find(isFile) : "";
     raw = manifest && !looksLikeCredentialFile(manifest) ? fs.readFileSync(manifest) : Buffer.from(`${item.name}\n${item.description}`);
   } else {
-    const allowed = [roots.codexHome, roots.claudeDir, roots.cursorDir, roots.agentlasDir, path.join(roots.home, ".agents")];
+    const allowed = [roots.codexHome, roots.claudeDir, roots.cursorDir, roots.grokDir ?? path.join(roots.home, ".grok"), roots.geminiDir ?? path.join(roots.home, ".gemini"), roots.copilotDir ?? path.join(roots.home, ".copilot"), roots.agentlasDir, path.join(roots.home, ".agents")];
     if (looksLikeCredentialFile(item.path) || !isFile(item.path) || !realInside(item.path, allowed)) {
       return { ...head, text: "", bytes: 0, truncated: false, redacted: false };
     }

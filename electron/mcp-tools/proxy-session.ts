@@ -14,6 +14,7 @@ import { mcpToolSchemaDigest } from "./tool-schema";
 import { bindMainToolConsentResource } from "../runtime/tool-consent";
 import { defaultRuntimeToolPermission, getRuntimeToolPermissionArbiter, type RuntimeToolPermissionAsk } from "../runtime/tool-approval";
 import { beginMainMcpEffect } from "./effect-receipts";
+import { recordMcpProxyEvent, safeProxyReason } from "./proxy-event-log";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 import type { BeforeMcpToolResult } from "../runtime/runner";
 
@@ -236,6 +237,7 @@ function logRefusedHandle(handle: string, reason: string): void {
   refusedHandleLogAt.set(key, now);
   refusedLogsInWindow++;
   console.warn(`[mcp-proxy] bridge refused handle=${key.slice(0, 8)} reason=${reason}`);
+  recordMcpProxyEvent("refused", { handle: key, reason });
 }
 
 function evictIdleLaunches(): void {
@@ -492,6 +494,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   const generation = entry.generation;
   if (!generation) {
     console.warn(`[mcp-proxy] bridge refused handle=${handle.slice(0, 8)} reason=launch_generation_missing`);
+    recordMcpProxyEvent("refused", { handle, reason: "launch_generation_missing" });
     res.writeHead(403).end("mcp_proxy_launch_unapproved"); return;
   }
   let transport: Transport | null = null, closed = false, initialized = false, buffer = "";
@@ -522,7 +525,8 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     preparedMcpTargetTransport(binding, binding.server);
     validateLaunchCwd(entry.cwd);
   };
-  const close = (cause?: unknown) => {
+  const wireOpenedAt = Date.now();
+  const close = (cause?: unknown, where?: string) => {
     if (closed) return; closed = true; clearInterval(revalidate);
     const invalidScope = cause instanceof PreparedMcpScopeChangedError || cause instanceof McpProxyCwdChangedError;
     if (invalidScope) revokeMcpProxyLaunch(handle);
@@ -540,7 +544,13 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       void import("../browser/fallback-ladder-runtime").then(({ noteBrowserBridgeWire }) =>
         noteBrowserBridgeWire("dropped", { chatId: gate.chatId ?? null, handle, inflight: cutBrowserCalls })).catch(() => undefined);
     }
-    if (initialized && reason === "wire_ended") console.debug(line); else console.warn(line);
+    if (initialized && reason === "wire_ended") console.debug(line);
+    else {
+      console.warn(line);
+      // The service's console is discarded; this line is what an operator can read (see proxy-event-log.ts).
+      recordMcpProxyEvent("closed", { server: gate.serverKey, handle, initialized, reason: cause === undefined ? reason : cause,
+        where: where ?? "wire", inflight: native.size, wireAgeMs: Date.now() - wireOpenedAt });
+    }
     // Park only a quiescent upstream after a clean client end: nothing in
     // flight either way, one successful initialize, reuse-safe methods only.
     const parkable = !scopedAttachment && !invalidScope && reason === "wire_ended" && initialized && reusable && upstreamInit !== null
@@ -562,14 +572,14 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     } else { req.destroy(); res.destroy(); }
   };
   // cwd 재검증은 연결마다 초당 stat·realpath·access 3회였다 — 경로가 바뀌는 일은 드물다. 5초면 충분하다.
-  const revalidate = setInterval(() => { try { validate(); } catch (error) { close(error); } }, 5000); revalidate.unref?.();
+  const revalidate = setInterval(() => { try { validate(); } catch (error) { close(error, "revalidate"); } }, 5000); revalidate.unref?.();
   entry.connections.add(close); if (entry.timer) clearTimeout(entry.timer);
-  req.on("aborted", () => close("wire_aborted")); req.on("end", () => close("wire_ended")); req.on("error", (error) => close(error));
-  res.on("close", () => close("wire_response_closed")); res.on("error", (error) => close(error));
+  req.on("aborted", () => close("wire_aborted")); req.on("end", () => close("wire_ended")); req.on("error", (error) => close(error, "request_error"));
+  res.on("close", () => close("wire_response_closed")); res.on("error", (error) => close(error, "response_error"));
   const down = (frame: Frame) => {
     if (closed) return;
     const line = JSON.stringify(frame) + "\n";
-    if (Buffer.byteLength(line) > MAX_FRAME_BYTES || res.writableLength + Buffer.byteLength(line) > MAX_FRAME_BYTES) { close(); return; }
+    if (Buffer.byteLength(line) > MAX_FRAME_BYTES || res.writableLength + Buffer.byteLength(line) > MAX_FRAME_BYTES) { close("frame_limit", "down"); return; }
     res.write(line);
   };
   const historyToolInput = (frame:Frame,schemaDigest:string|null=null):HistoryRuntimeToolInput=>({kind:"mcp",serverId:binding.server.id,catalogId:gate.catalogId,toolName:String(frame.params?.name??""),args:frame.params?.arguments??{},schemaDigest});
@@ -584,7 +594,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
   };
   const finish = (wireId: string, frame: Frame) => {
     const pending = native.get(wireId); if (!pending || pending.resultFinishing) return;
-    if(gate.historyRuntimeFence){try{assertHistoryRuntimeFence(gate.historyRuntimeFence);}catch(error){pending.effect?.finish(frame);pending.effect=undefined;pending.historyUpstream?.reject(error);close(error);return;}}
+    if(gate.historyRuntimeFence){try{assertHistoryRuntimeFence(gate.historyRuntimeFence);}catch(error){pending.effect?.finish(frame);pending.effect=undefined;pending.historyUpstream?.reject(error);close(error,"history_fence");return;}}
     // Browser fallback ladder (electron/browser/fallback-ladder.ts): a failed agentlas-browser call waits for the
     // bounded ladder, which may bring the surface back (then a read-only call is replayed once) or annotate the
     // error with a machine block and one line for the agent. Never more than one ladder per call.
@@ -623,7 +633,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     // this exact run instead of releasing the result to the native provider.
     pending.effect?.finish(frame);
     pending.effect = undefined;
-    const deliver = () => {
+    const deliver = (outgoing: Frame = frame) => {
       if (closed || native.get(wireId) !== pending) return;
       validate();
       // A lifetime abort (wire closing, run parked) withholds the result. A client's own
@@ -635,17 +645,37 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
       const clientCancelled = abortReason instanceof Error && abortReason.message === "mcp_proxy_call_cancelled";
       if (!clientCancelled) pending.controller?.signal.throwIfAborted();
       pending.detach?.(); native.delete(wireId); external.delete(idKey(pending.id));
-      down({ ...frame, id: pending.id });
+      down({ ...outgoing, id: pending.id });
+    };
+    /*
+     * The result-boundary hook refused to release this call's result (a login wall the owner must clear, a run being
+     * stopped, or the hook itself failing: it asks Main over loopback when the run is hosted by the background service).
+     * The result stays withheld either way. What changed is the answer: the wire used to be destroyed, so the proxy child
+     * told the model "temporary connection reset - call the tool again" for a call that had already run, every time, with
+     * nothing logged (service-owned runs, production 1.3.3, 2026-10-12: 26 of 26 browser / computer-use calls). The call
+     * now gets one terminal, machine-readable failure and the wire (and every other call on it) stays. A scope change or
+     * a wire that is already closing is still a revocation and still ends the wire.
+     */
+    const withhold = (error: unknown) => {
+      if (closed || lifetime.signal.aborted || error instanceof PreparedMcpScopeChangedError || error instanceof McpProxyCwdChangedError) {
+        close(error, "result_boundary"); return;
+      }
+      const code = safeProxyReason(error);
+      recordMcpProxyEvent("result_withheld", { server: gate.serverKey, handle, initialized, reason: error, where: "result_boundary",
+        inflight: native.size, wireAgeMs: Date.now() - wireOpenedAt });
+      try {
+        deliver({ jsonrpc: "2.0", id: frame.id, result: { isError: true, _meta: { agentlasProxyFailure: "result_withheld", agentlasProxyReason: code },
+          content: [{ type: "text", text: `MCP_PROXY_RESULT_WITHHELD (${code}): the tool ran, but its result was not released to you. Do not repeat the call blindly; its effect may already have happened.` }] } });
+      } catch (deliverError) { close(deliverError, "deliver"); }
     };
     if (pending.method === "tools/call" && pending.toolName && gate.beforeMcpToolResult) {
       void (async () => {
-        try {
-          await gate.beforeMcpToolResult!({ catalogId: gate.catalogId, toolName: pending.toolName!, isError: browserCallFailed(frame) });
-          deliver();
-        } catch (error) { close(error); }
+        try { await gate.beforeMcpToolResult!({ catalogId: gate.catalogId, toolName: pending.toolName!, isError: browserCallFailed(frame) }); }
+        catch (error) { withhold(error); return; }
+        try { deliver(); } catch (error) { close(error, "deliver"); }
       })();
     } else {
-      try { deliver(); } catch (error) { close(error); }
+      try { deliver(); } catch (error) { close(error, "deliver"); }
     }
   };
   const deny = (wireId: string, code: string) => finish(wireId, { jsonrpc: "2.0", result: { isError: true,
@@ -740,7 +770,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
         await spawnUpstream();
         swapping = null;
       })();
-      swapping.catch(close);
+      swapping.catch((error) => close(error, "upstream_swap"));
     }
     if (swallowInitialized) {
       swallowInitialized = false;
@@ -778,18 +808,18 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     await up({ ...frame, id: wireId });
   }
   function attachUpstream(upstream: Transport): void {
-    upstream.onclose = () => { if (transport === upstream) close("upstream_transport_closed"); };
-    upstream.onerror = (error) => { if (transport === upstream) close(error instanceof Error ? `upstream_transport_error:${error.message}` : "upstream_transport_error"); };
+    upstream.onclose = () => { if (transport === upstream) close("upstream_transport_closed", "upstream"); };
+    upstream.onerror = (error) => { if (transport === upstream) close(error instanceof Error ? `upstream_transport_error:${error.message}` : "upstream_transport_error", "upstream"); };
     upstream.onmessage = message => {
       const frame = message as Frame;
       if (closed || transport !== upstream) return;
       if (typeof frame.method === "string") {
-        if(gate.historyRuntimeFence){try{assertHistoryRuntimeFence(gate.historyRuntimeFence);gate.historyRuntimeFence.assertMcpMethod(frame.method);if(frame.id!==undefined)throw new Error("history_native_upstream_request_unavailable");}catch{close("history_native_upstream_method_denied");return;}}
+        if(gate.historyRuntimeFence){try{assertHistoryRuntimeFence(gate.historyRuntimeFence);gate.historyRuntimeFence.assertMcpMethod(frame.method);if(frame.id!==undefined)throw new Error("history_native_upstream_request_unavailable");}catch{close("history_native_upstream_method_denied","upstream");return;}}
         if (frame.id !== undefined) {
           // The upstream may cache this client's answer (roots, sampling):
           // never hand that session to a later client.
           reusable = false;
-          if (serverRequestIds.has(idKey(frame.id))) { close(); return; }
+          if (serverRequestIds.has(idKey(frame.id))) { close("server_request_duplicate", "upstream"); return; }
           const id = `server:${randomUUID()}`;
           serverRequests.set(idKey(id), frame.id); serverRequestIds.set(idKey(frame.id), id); down({ ...frame, id });
         } else if (frame.method === "notifications/cancelled") {
@@ -811,7 +841,7 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
         if (Number.isSafeInteger(sequence) && sequence > 0 && sequence <= hostSequence) return;
       }
       const pending = native.get(String(frame.id));
-      if (!pending) { close(); return; }
+      if (!pending) { close("upstream_response_unmatched", "upstream"); return; }
       if (pending.method === "initialize" && !frame.error) {
         if (typeof frame.result?.protocolVersion === "string") transport?.setProtocolVersion?.(frame.result.protocolVersion);
         initialized = true;
@@ -860,14 +890,14 @@ export function handleMcpProxyBridge(req: http.IncomingMessage, res: http.Server
     req.setEncoding("utf8");
     req.on("data", (chunk: string) => {
       buffer += chunk;
-      if (Buffer.byteLength(buffer) > MAX_FRAME_BYTES) { close(); return; }
+      if (Buffer.byteLength(buffer) > MAX_FRAME_BYTES) { close("frame_limit", "read"); return; }
       let newline: number;
       while ((newline = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, newline); buffer = buffer.slice(newline + 1);
         if (!line.trim()) continue;
-        try { void receive(JSON.parse(line)).catch(close); } catch { close(); return; }
+        try { void receive(JSON.parse(line)).catch((error) => close(error, "receive")); } catch { close("frame_invalid", "read"); return; }
       }
     });
     req.resume();
-  })().catch(close);
+  })().catch((error) => close(error, "open"));
 }

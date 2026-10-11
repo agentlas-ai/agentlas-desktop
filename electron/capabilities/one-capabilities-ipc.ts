@@ -16,7 +16,7 @@ import {
   type CapabilitySource,
 } from "./one-capabilities";
 
-const SOURCES: readonly CapabilitySource[] = ["codex", "claude", "cursor", "agentlas"];
+const SOURCES: readonly CapabilitySource[] = ["codex", "claude", "cursor", "grok", "gemini", "copilot", "agentlas"];
 const KINDS: readonly CapabilityKind[] = ["skill", "plugin", "hook", "memory", "connector"];
 
 function record(input: unknown): Record<string, unknown> {

@@ -167,7 +167,7 @@ export function createOneTaskforce(input: CreateOneTaskforceInput): OneTaskforce
     const seatId = ensureGroupSeatForTaskforce({ taskforceId: id, title, memberAgentIds, createdAt: now });
     getDb().prepare("UPDATE chats SET seat_id = ? WHERE id = ?").run(seatId, chat.id);
     applySeatSnapshotToChats(seatId);
-  })();
+  }).immediate();
   emitTaskforceChanged(id);
   return toTaskforce(rowFor(id));
 }
@@ -203,7 +203,7 @@ export function updateOneTaskforce(input: UpdateOneTaskforceInput): OneTaskforce
     getDb().prepare("UPDATE chats SET seat_id = ? WHERE id = ? AND (seat_id IS NULL OR seat_id <> ?)").run(seatId, row.chat_id, seatId);
     renameSeat(seatId, title);
     syncGroupSeatOccupants(seatId, memberAgentIds);
-  })();
+  }).immediate();
   emitTaskforceChanged(id);
   return toTaskforce(rowFor(id));
 }

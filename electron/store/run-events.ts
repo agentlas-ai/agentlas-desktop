@@ -8,6 +8,7 @@ import { externalToolNames } from "../../shared/tool-activity";
 import { invocationHostStopCause, isOwnerGoalStopCause } from "../../shared/invocation-host-stop";
 import { normalizeToolCall } from "../../shared/tool-call-detail";
 import { getDb } from "./db";
+import { attachedDaemonBootId } from "../invocation/attached-daemon-boot";
 import { recordChannelPublishReceipts } from "../publish-receipts";
 import {
   QUESTION_CONTINUATION_REPLY_MAX_BYTES,
@@ -2273,6 +2274,17 @@ function invocationPayloadCandidates(runId: string, key: string, kindFilter = ""
     ORDER BY seq DESC`).iterate(runId, key) as Iterable<RunEventRow>;
 }
 
+/** The durable owner row names the daemon boot this Main is attached to, and the lease is still held. */
+function daemonOwnsLiveRun(runId: string, chatId: string): boolean {
+  const bootId = attachedDaemonBootId();
+  if (!bootId) return false;
+  try {
+    const row = invocationReceiptStatement("SELECT chat_id, owner_id, owner_kind, state FROM invocation_run_owners WHERE run_id = ?")
+      .get(runId) as { chat_id: string; owner_id: string; owner_kind: string; state: string } | undefined;
+    return !!row && row.owner_kind === "daemon" && row.owner_id === bootId && (row.state === "active" || row.state === "settling")
+      && (!chatId || row.chat_id === chatId);
+  } catch { return false; } // stores without the owner table keep the ledger-only reading
+}
 /**
  * Rebuild a terminal/recovery receipt from the append-only run ledger.
  * A started row without a terminal row is `interrupted` here: only main's
@@ -2304,6 +2316,8 @@ function invocationRunReceiptSnapshot(runId: string): InvocationRunReceipt | nul
     .get(runId) as { ts: string };
   const eventCount = smallRows ? smallRows.length : (invocationReceiptStatement("SELECT COUNT(*) AS count FROM run_events WHERE run_id = ?").get(runId) as { count: number }).count;
   const receiptChatId = start.chat_id ?? stringPayload(startPayload, "chatId") ?? "";
+  // A run the attached daemon owns is alive while its owner row says so; Main's registry never holds it.
+  if (!terminal && status === "interrupted" && daemonOwnsLiveRun(runId, receiptChatId)) status = "running";
   // Select the closed markers without replaying tool bodies. Every mismatched
   // chat remains a veto, including a malformed marker that cannot be proof.
   const steeringEvidence: Array<{ runId: string; chatId?: string; kind: string; payload: Record<string, unknown> }> = [];

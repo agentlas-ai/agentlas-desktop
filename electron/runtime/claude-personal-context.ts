@@ -63,3 +63,43 @@ export function withClaudePersonalContext(settings: string, selection: Capabilit
     enabledPlugins: { ...obj(base.enabledPlugins), ...overlay.enabledPlugins },
   });
 }
+
+export interface ClaudeMcpIsolation {
+  /** Pass `--strict-mcp-config`: only the servers Main binds with `--mcp-config` load. */
+  strict: boolean;
+  /** When not strict: deny patterns (`mcp__<server>`) for the person's switched-off user-scope servers. */
+  deny: string[];
+  /** Machine-readable receipt. */
+  receipt: string;
+}
+
+/**
+ * The person's user-scope MCP servers (`~/.claude.json` mcpServers) cannot be switched off from a settings overlay,
+ * and `enabledPlugins` only covers plugin servers. Measured on claude 2.1.296 (`system/init` of `claude -p`, stand-in
+ * endpoint): without the flag 20 MCP servers / 149 MCP tools loaded (the person's `agentlas` and `lazyweb` plus every
+ * plugin's); with `--strict-mcp-config` 0 servers / 0 MCP tools besides the `--mcp-config` ones. Strict also drops
+ * plugin servers, so it is withheld in exactly two cases, and the user-scope servers are then denied by name:
+ *   - One has a Claude connector or plugin switched on (its servers must load);
+ *   - the only Agentlas browser the run can reach is the engine plugin's copy (claude-browser-surface.ts): the
+ *     browser would otherwise be gone and the turn would dead-end.
+ */
+export function claudeMcpIsolation(selection: CapabilitySelection | undefined, hostAllowedTools: readonly string[], pluginBrowserNeeded: boolean): ClaudeMcpIsolation {
+  const connectors = claudeItems(selection, "connector");
+  const oneNeeds = claudeItems(selection, "connector").some((item) => item.enabled) || claudeItems(selection, "plugin").some((item) => item.enabled);
+  const strict = !oneNeeds && !pluginBrowserNeeded;
+  const hostKeys = new Set<string>();
+  for (const tool of hostAllowedTools) { const m = /^mcp__(.+?)(?:__.*)?$/.exec(tool); if (m) hostKeys.add(m[1]); }
+  const deny = strict ? [] : [...new Set(connectors.filter((item) => !item.enabled)
+    .map((item) => item.name.replace(/[^A-Za-z0-9_-]/g, "_")).filter((name) => !hostKeys.has(name)).map((name) => `mcp__${name}`))];
+  return { strict, deny, receipt: `[claude-mcp] strict=${strict ? "yes" : "no"} one=${selection?.isOne === true ? "yes" : "no"} plugin_browser=${pluginBrowserNeeded ? "yes" : "no"} denied=${deny.length}` };
+}
+
+/** Appends deny patterns to the single `--disallowedTools` value of an argument list (adds the flag when absent). */
+export function withDisallowedTools(args: readonly string[], extra: readonly string[]): string[] {
+  if (extra.length === 0) return [...args];
+  const out = [...args];
+  const at = out.indexOf("--disallowedTools");
+  if (at >= 0 && at + 1 < out.length) out[at + 1] = `${out[at + 1]},${extra.join(",")}`;
+  else out.push("--disallowedTools", extra.join(","));
+  return out;
+}

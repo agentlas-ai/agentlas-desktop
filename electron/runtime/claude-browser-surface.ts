@@ -66,6 +66,11 @@ export interface ClaudeBrowserSurfaceDecision {
   args: string[];
   /** Machine-readable receipt, or null when this run keeps the surfaces. */
   receipt: string | null;
+  /**
+   * True when the only Agentlas browser this run can reach is the engine plugin's copy (Main bound none): a plugin
+   * MCP server the run still needs, so `--strict-mcp-config` (which drops plugin servers too) must not be used.
+   */
+  pluginBrowserNeeded: boolean;
 }
 
 /** The owner's real Chrome (desktop-control class): only a Computer Use grant opens it. */
@@ -96,7 +101,7 @@ function hostServerKeys(allowed: readonly string[]): string[] {
 }
 
 export function claudeBrowserSurfaceArgs(input: ClaudeBrowserSurfaceInput): ClaudeBrowserSurfaceDecision {
-  if (input.desktopControlGrant || input.untrustedNoTools) return { args: [], receipt: null };
+  if (input.desktopControlGrant || input.untrustedNoTools) return { args: [], receipt: null, pluginBrowserNeeded: input.desktopControlGrant === true };
   const keys = hostServerKeys(input.hostAllowedTools ?? []);
   const probes = keys.map((key) => `mcp__${key}__probe`);
   const hostBound = BROWSER.agentlasServerNames.some((name) => keys.includes(name));
@@ -113,6 +118,7 @@ export function claudeBrowserSurfaceArgs(input: ClaudeBrowserSurfaceInput): Clau
   if (hostBound) patterns.push(ENGINE_BROWSER_DUPLICATE);
   return {
     args: ["--no-chrome", ...(patterns.length > 0 ? ["--disallowedTools", patterns.join(",")] : [])],
+    pluginBrowserNeeded: agentlas === "available",
     receipt: `[claude-surface] browser_surface=${policy === "agentlas-only" ? "closed" : "fallback"} agentlas_browser=${agentlas} patterns=${patterns.length} host_browser=${hostBound ? "bound" : "-"}`,
   };
 }

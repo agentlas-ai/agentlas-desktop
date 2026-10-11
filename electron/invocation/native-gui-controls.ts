@@ -1,3 +1,4 @@
+import { setAttachedDaemonBootId, clearAttachedDaemonBootId } from "./attached-daemon-boot";
 import { createHash } from "node:crypto";
 import { getInvocationAdmission } from "../store/invocation-admissions";
 import { invocationRunOwners } from "../store/invocation-run-owners";
@@ -93,8 +94,9 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
       activeRuns.clear(); refreshPromise = undefined; snapshotKnown = false; routeUnavailable = false;
     }
     channel = actualChannel; identity = actualIdentity; configured = control;
+    setAttachedDaemonBootId(actualIdentity.bootId);
     const mine = controller;
-    actualChannel.onClose(() => mine.abort(new NativeGuiControlError("native_gui_original_channel_unavailable")));
+    actualChannel.onClose(() => { clearAttachedDaemonBootId(actualIdentity.bootId); mine.abort(new NativeGuiControlError("native_gui_original_channel_unavailable")); });
   }
   function refresh(): Promise<void> {
     if (refreshPromise) return refreshPromise;

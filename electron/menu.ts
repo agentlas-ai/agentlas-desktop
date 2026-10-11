@@ -11,8 +11,9 @@ const WEB_BASE = "https://agentlas.cloud";
 
 /** "Check for Updates Now…" — 사용자가 강제 발화. 현재 버전, 상태, 결과를 다이얼로그로 보고.
  *  electron-updater는 NODE_ENV=production일 때만 의미 있음 (dev/QA는 skip). */
-async function checkUpdatesInteractive(parent: BrowserWindow | null): Promise<void> {
+async function checkUpdatesInteractive(parent: BrowserWindow | null, locale: MenuLocale): Promise<void> {
   const currentVersion = app.getVersion();
+  const ko = locale === "ko";
   if (process.env.NODE_ENV === "development") {
     await dialog.showMessageBox(parent ?? undefined!, {
       type: "info",
@@ -30,36 +31,36 @@ async function checkUpdatesInteractive(parent: BrowserWindow | null): Promise<vo
   let detail: string;
   switch (state.status) {
     case "available":
-      message = "Update available";
-      detail = `New version v${state.version} is downloading. You'll see a "Restart to update" badge when it's ready.`;
-      break;
     case "downloading":
-      message = "Downloading update…";
+      message = ko ? "업데이트 받는 중" : "Downloading update…";
       detail = `v${state.version ?? "?"} — ${state.progress ?? 0}%`;
       break;
     case "downloaded":
-      message = "Update ready";
-      detail = `v${state.version} is ready. Click the badge in the top-right to restart and install.`;
+      // The install button is the download icon at the bottom of the sidebar (2026-10-12: this said "top-right", in English).
+      message = ko ? "업데이트 준비됨" : "Update ready";
+      detail = ko
+        ? `v${state.version}. 사이드바 아래 다운로드 아이콘을 누르면 설치하고 다시 시작합니다.`
+        : `v${state.version}. Press the download icon at the bottom of the sidebar to install and restart.`;
+      break;
+    case "installing":
+      message = ko ? "설치 중" : "Installing…";
+      detail = `v${state.version ?? "?"}`;
       break;
     case "not-available":
-      message = `You're up to date`;
-      detail = `Agentlas v${currentVersion} is the latest published version.`;
+      message = ko ? "최신 버전입니다" : "You're up to date";
+      detail = `Agentlas v${currentVersion}`;
       break;
     case "error":
-      message = "Couldn't check for updates";
-      detail = state.error || "Unknown error. Check Console.app for [updater] logs.";
-      break;
-    case "checking":
-      message = "Still checking…";
-      detail = `Try again in a few seconds. Current: v${currentVersion}.`;
+      message = ko ? "업데이트를 확인하지 못했어요" : "Couldn't check for updates";
+      detail = state.error || (ko ? "잠시 뒤 다시 확인합니다." : "It will retry shortly.");
       break;
     default:
       message = `Agentlas v${currentVersion}`;
-      detail = "Auto-update hasn't completed its first check yet (15s after launch). Try again shortly.";
+      detail = ko ? "확인 중입니다. 잠시 뒤 다시 눌러 주세요." : "Still checking. Try again in a few seconds.";
   }
   await dialog.showMessageBox(parent ?? undefined!, {
     type: state.status === "error" ? "warning" : "info",
-    title: "Updates",
+    title: ko ? "업데이트" : "Updates",
     message,
     detail,
   });
@@ -186,7 +187,7 @@ export function buildAppMenu(
               { role: "about" as const, label: L.aboutApp },
               {
                 label: L.checkUpdates,
-                click: () => void checkUpdatesInteractive(getWindow()),
+                click: () => void checkUpdatesInteractive(getWindow(), locale),
               },
               { type: "separator" as const },
               {
@@ -348,7 +349,7 @@ export function buildAppMenu(
         { type: "separator" },
         {
           label: L.checkUpdates,
-          click: () => void checkUpdatesInteractive(getWindow()),
+          click: () => void checkUpdatesInteractive(getWindow(), locale),
         },
         { type: "separator" },
         {

@@ -1,5 +1,5 @@
 import { selectionFor } from "../capabilities/one-capabilities";
-import { withClaudePersonalContext } from "./claude-personal-context";
+import { claudeMcpIsolation, withClaudePersonalContext, withDisallowedTools } from "./claude-personal-context";
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
 import { claudeBrowserSurfaceArgs, claudeEngineBrowserEnabled } from "./claude-browser-surface";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -1167,7 +1167,15 @@ const runClaudeTurn = async (
       : claudeEngineBrowserEnabled({ env: runReq.env ?? process.env, cwd: runReq.cwd ?? agentRunCwd() }),
   });
   if (browserSurface.receipt) events.onStatus(browserSurface.receipt);
+  // The person's user-scope MCP servers stay out of every product run (owner decision 2026-10-11): strict config, or
+  // a deny by name where strict would also drop a plugin server the run needs (claude-personal-context.ts).
+  const mcpIsolation = claudeMcpIsolation(selectionFor(runReq.agentId), runReq.mcpAllowedTools ?? [], browserSurface.pluginBrowserNeeded);
+  events.onStatus(mcpIsolation.receipt);
+  const alreadyStrict = noToolsArgs.includes("--strict-mcp-config") || minimalObservationArgs.includes("--strict-mcp-config");
   const browserOnlyArgs: string[] = browserSurface.args;
+  const mcpIsolationArgs: string[] = [
+    ...(mcpIsolation.strict && !alreadyStrict ? ["--strict-mcp-config"] : []),
+  ];
 
   // 시스템 프롬프트(Agentlas 헤더+스킬+프로토콜만 ~24KB)는 argv가 아니라 파일로 전달한다.
   // Windows에서 claude는 `.cmd` 심 → cmd.exe로 실행되고 커맨드라인은 ~8191자 한계라,
@@ -1239,7 +1247,8 @@ const runClaudeTurn = async (
           ...permArgs,
           ...noToolsArgs,
           ...minimalObservationArgs,
-          ...browserOnlyArgs,
+          ...withDisallowedTools(browserOnlyArgs, mcpIsolation.deny),
+          ...mcpIsolationArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
           ...allowedToolArgs,
@@ -1259,7 +1268,8 @@ const runClaudeTurn = async (
           ...permArgs,
           ...noToolsArgs,
           ...minimalObservationArgs,
-          ...browserOnlyArgs,
+          ...withDisallowedTools(browserOnlyArgs, mcpIsolation.deny),
+          ...mcpIsolationArgs,
           ...isolatedMcpArgs,
           ...mcpArgs,
           ...allowedToolArgs,

@@ -1,7 +1,7 @@
 // Renderer-facing shapes for One's capability inventory (skills, plugins, hooks, memory, connectors).
 // The Main side lives in electron/capabilities/one-capabilities.ts; the shapes are structurally identical.
 export type OneCapabilityKind = "skill" | "plugin" | "hook" | "memory" | "connector";
-export type OneCapabilitySource = "codex" | "claude" | "cursor" | "agentlas";
+export type OneCapabilitySource = "codex" | "claude" | "cursor" | "grok" | "gemini" | "copilot" | "agentlas";
 
 export interface OneCapabilityItem {
   id: string;

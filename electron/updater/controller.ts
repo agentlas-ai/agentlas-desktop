@@ -1938,14 +1938,23 @@ export class DesktopUpdaterController {
   private async installOnce(): Promise<UpdaterActionResult> {
     const version = this.state.version;
     if (!version) return { accepted: false, state: this.state };
+    // Answer the press at once. The checks below took 42 s with no visible change and no log line on a busy
+    // production app (1.3.2 -> 1.3.3, 2026-10-12); the owner's rule is that pressing update visibly updates.
+    const pressed = this.state;
+    const startedAt = this.now();
+    const stage = (name: string) => this.logger.log(`[updater] install ${version}: ${name} +${this.now() - startedAt}ms`);
+    const refused = (): UpdaterActionResult => {
+      if (this.state.status === "installing") this.publish(pressed);
+      return { accepted: false, state: this.state };
+    };
+    this.publish({ status: "installing", version, progress: 100, compatibility: this.state.compatibility });
+    stage("requested");
     // Before anything irreversible: is this still the version being offered?
-    if (!(await this.confirmStillOffered(version))) {
-      return { accepted: false, state: this.state };
-    }
+    if (!(await this.confirmStillOffered(version))) return refused();
+    stage("feed confirmed");
     const access = evaluateInstallAccess({ platform: this.deps.platform, execPath: this.deps.execPath, uid: this.deps.uid });
-    if (!(await this.verifyInstalledAppTrustOrBlock(version, access))) {
-      return { accepted: false, state: this.state };
-    }
+    if (!(await this.verifyInstalledAppTrustOrBlock(version, access))) return refused();
+    stage("app signature verified");
 
     // A best-effort backup cannot protect a still-running external action from
     // quitAndInstall killing its provider. Await that action's own settlement;
@@ -1958,6 +1967,7 @@ export class DesktopUpdaterController {
       // Work still settling is stopped by the native quit and resumes from the update-resume ledger / Goal recovery.
       this.logger.warn("[updater] automation work is still settling; installing anyway", error);
     }
+    stage("automation drained");
 
     this.armInstallWriterResume(resumeWriters);
     let installHandedOff = false;
@@ -1968,8 +1978,6 @@ export class DesktopUpdaterController {
       // protects data during a schema change is the migration transaction, and
       // the previous app version is retained by the native updater.
       let continuity: ContinuitySnapshot | undefined;
-      // Say so before the recovery copy starts: copying a large store takes a while and the button used to look dead.
-      this.publish({ status: "installing", version, progress: 100, compatibility: this.state.compatibility });
       let continuityBoundTimer: ReturnType<typeof setTimeout> | undefined;
       try {
         // The optional recovery copy must never cost the update: past the bound it is abandoned.
@@ -1987,6 +1995,7 @@ export class DesktopUpdaterController {
       } finally {
         if (continuityBoundTimer) clearTimeout(continuityBoundTimer);
       }
+      stage(continuity ? "recovery copy taken" : "recovery copy skipped");
 
       const journal: InstallJournal = {
         schemaVersion: JOURNAL_SCHEMA_VERSION,
@@ -2031,6 +2040,7 @@ export class DesktopUpdaterController {
         this.deps.releaseInstanceLockForInstall?.();
         this.nativeInstanceLockReleased = Boolean(this.deps.releaseInstanceLockForInstall);
         this.nativeInstallHandedOff = true;
+        stage("handing off to the native installer");
         this.deps.updater.quitAndInstall(true, true);
         if (this.state.status !== "installing") {
           if (this.nativeInstanceLockReleased) {

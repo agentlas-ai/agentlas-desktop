@@ -1172,7 +1172,7 @@ export function createAutomationStrategyProposal(input: AutomationStrategyPropos
     );
     if (inserted.changes !== 1) throw new AutomationStrategyProposalError("proposal_not_saved");
     return receipt;
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "automation", id: automationId });
   return committed;
 }
@@ -1281,7 +1281,7 @@ export function settleAutomationStrategyProposalBacklog(
       if (stale) staleResolved += 1; else superseded += 1;
     }
     return { liveProposalId: staleResolved > 0 ? null : liveId, superseded, staleResolved };
-  })();
+  }).immediate();
   if (result.superseded > 0 || result.staleResolved > 0) emitDesktopStoreChange({ entity: "automation", id });
   return result;
 }
@@ -1716,7 +1716,7 @@ function applyProposalWithGoalAmendment(
       adjudication,
       emitChange: false,
     });
-  })();
+  }).immediate();
   emitDesktopStoreChange({ entity: "chat", id: goal.chatId });
   emitDesktopStoreChange({ entity: "automation", id: result.automationId });
   return result;
@@ -2253,7 +2253,7 @@ function applyProposalAtomically(
       updatedAt: new Date().toISOString(),
     };
     return saveReceipt(next, options.expectedStatus, false);
-  })();
+  }).immediate();
   if (options.emitChange !== false) emitDesktopStoreChange({ entity: "automation", id: applied.automationId });
   return applied;
 }

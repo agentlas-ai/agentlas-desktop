@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.5 — 2026-10-12
+
+- Pressing the update button answers at once: the sidebar shows the install in progress instead of looking idle while it prepares, and the update check dialog speaks your language and points to the right button.
+- Work the app starts on its own in a group room (a teammate hand-off, a follow-up, a scheduled run) appears live in the room and is no longer marked as stopped while it is still working.
+- A browser or computer-use call made by a background run no longer comes back as a reconnect error when the login-wall check cannot run; the tool's own result is returned.
+- Saving taskforce members and strategy proposals no longer fails when the background service writes at the same moment.
+- Your personal Grok and Claude Code setup (rules, skills, memory, personal MCP servers) stays out of product runs; only what you switch on in One comes back.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.4 — 2026-10-12
 
 - Teammates in a group room talk to each other while they work: they hand off, ask, @mention a teammate or reply to a specific message, right in the room. One still runs the room and decides who works next; a message to a teammate who is busy reaches them mid-task, and a message to someone idle goes to One.

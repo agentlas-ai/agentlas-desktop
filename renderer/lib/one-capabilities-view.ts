@@ -7,7 +7,7 @@ export type CapabilityLocale = "ko" | "en";
 /** Rows drawn at once; a source can hold thousands of items. */
 export const CAPABILITY_PAGE_SIZE = 100;
 export const CAPABILITY_KIND_ORDER: readonly OneCapabilityKind[] = ["skill", "plugin", "hook", "memory", "connector"];
-export const CAPABILITY_SOURCE_ORDER: readonly CapabilitySourceFilter[] = ["all", "agentlas", "codex", "claude", "cursor"];
+export const CAPABILITY_SOURCE_ORDER: readonly CapabilitySourceFilter[] = ["all", "agentlas", "codex", "claude", "cursor", "grok", "gemini", "copilot"];
 
 const KIND_LABEL: Record<OneCapabilityKind, { ko: string; en: string }> = {
   skill: { ko: "스킬", en: "Skills" },
@@ -22,8 +22,11 @@ const SOURCE_LABEL: Record<CapabilitySourceFilter, { ko: string; en: string }> =
   codex: { ko: "Codex", en: "Codex" },
   claude: { ko: "Claude Code", en: "Claude Code" },
   cursor: { ko: "Cursor", en: "Cursor" },
+  grok: { ko: "Grok", en: "Grok" },
+  gemini: { ko: "Antigravity", en: "Antigravity" },
+  copilot: { ko: "Copilot", en: "Copilot" },
 };
-const SOURCE_NAME: Record<OneCapabilitySource, string> = { agentlas: "Agentlas", codex: "Codex", claude: "Claude Code", cursor: "Cursor" };
+const SOURCE_NAME: Record<OneCapabilitySource, string> = { agentlas: "Agentlas", codex: "Codex", claude: "Claude Code", cursor: "Cursor", grok: "Grok", gemini: "Antigravity", copilot: "Copilot" };
 
 export const kindLabel = (kind: OneCapabilityKind, locale: CapabilityLocale): string => KIND_LABEL[kind][locale];
 export const sourceLabel = (source: CapabilitySourceFilter, locale: CapabilityLocale): string => SOURCE_LABEL[source][locale];
@@ -64,7 +67,7 @@ export function kindCounts(items: readonly OneCapabilityItem[], source: Capabili
 
 /** Source-chip counts for one kind. */
 export function sourceCounts(items: readonly OneCapabilityItem[], kind: OneCapabilityKind): Record<CapabilitySourceFilter, number> {
-  const counts: Record<CapabilitySourceFilter, number> = { all: 0, agentlas: 0, codex: 0, claude: 0, cursor: 0 };
+  const counts: Record<CapabilitySourceFilter, number> = { all: 0, agentlas: 0, codex: 0, claude: 0, cursor: 0, grok: 0, gemini: 0, copilot: 0 };
   for (const item of items) if (item.kind === kind) { counts.all += 1; counts[item.source] += 1; }
   return counts;
 }
