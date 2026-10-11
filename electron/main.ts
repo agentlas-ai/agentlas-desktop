@@ -158,6 +158,7 @@ import { servePluginIconRequest } from "./mcp-tools/plugin-brand";
 import { reconcileOneHubDerivativeDraftStorage } from "./one/hub-derivative";
 import { recoverDesktopStartup, type StartupRecoveryPresentation } from "./one/startup-recovery";
 import { initFileLogging, installMainProcessErrorSink, installStdioErrorGuard, mainLogFilePath } from "./logging";
+import { shouldYieldToNativeInstall } from "./updater/yield-to-native-install";
 import { clearQuitIntent, currentQuitIntentCode, installQuitSignalHandlers, noteQuitIntent, noteSystemShutdown, rearmQuitSignalHandlers, recordImmediateExit, recordQuitStarted } from "./quit-reason";
 import { planAfterQuitPrompt, planGuiQuit, QUIT_PROMPT_CHOICES, quitPromptText, quitWorkCount, type QuitPlan } from "./quit-policy";
 import { backgroundHoldActive, enterBackgroundHold, leaveBackgroundHold } from "./background-tray";
@@ -938,6 +939,14 @@ const isPackagedUpdateRelaunch = app.isPackaged && (
 const UPDATE_RELAUNCH_LOCK_RETRY_MS = 250;
 const UPDATE_RELAUNCH_LOCK_TIMEOUT_MS = 60_000;
 traceUpdaterStartup("before-single-instance-lock");
+// A copy of the OLD build opened while ShipIt is replacing the bundle makes ShipIt abort ("App Still Running", 1.2.95 on
+// 2026-10-11). Yield before anything else starts; ShipIt relaunches the new build itself after a successful install.
+if (app.isPackaged && !allowMultiInstance && shouldYieldToNativeInstall({
+  platform: process.platform, userDataPath: userDataDir(), runningVersion: app.getVersion(), uid: process.getuid?.() ?? null,
+})) {
+  recordImmediateExit("yield-to-native-update", 0, { stage: "install-requested-journal-with-shipit-job" });
+  app.exit(0);
+}
 // Recovery markers authorize a bounded wait, never bypassing the lock. A
 // marker can outlive an update and is visible to every concurrent launch.
 const initialSingleInstanceLock = allowMultiInstance

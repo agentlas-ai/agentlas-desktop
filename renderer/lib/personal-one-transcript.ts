@@ -1,5 +1,6 @@
 import type { ChatHistoryEntry } from "../../shared/types";
 import type { SupervisorReplyTurn } from "../../shared/one-supervisor";
+import { extractAskFences } from "../../shared/ask-fence-flatten";
 
 /** A saved request is not a live model. Recovery deliberately holds uncertain
  * starts, so only the currently owned reply may animate as answering. */
@@ -25,4 +26,39 @@ export function personalOneTranscript(messages:ChatHistoryEntry[],turns:Supervis
     const turn=byUserId.get(message.id);
     return {message,turn,answer:turn?.assistantMessageId ? byId.get(turn.assistantMessageId) : undefined};
   });
+}
+
+export interface PersonalOnePendingAsk {
+  sourceMessageId: string;
+  question: string;
+  header?: string;
+  multiSelect: boolean;
+  options: Array<{ label: string; description?: string }>;
+}
+
+/**
+ * The question the personal window must offer as a card: the newest row is a finished assistant answer
+ * that ends on an `<<agentlas-ask>>` fence, and the owner has not written anything after it.
+ * The window strips the fence from the bubble, so without this the choices were invisible and the owner
+ * could only guess a free-text answer (production 1.2.95, 2026-10-11, Hope asked "local editing or wait for Excel").
+ */
+export function personalOnePendingAsk(
+  groups: ReturnType<typeof personalOneTranscript>,
+  unsentOwnerMessages: number,
+): PersonalOnePendingAsk | null {
+  if (unsentOwnerMessages > 0) return null;
+  const last = groups.at(-1);
+  if (!last) return null;
+  const source = last.answer ?? (last.message.role === "assistant" ? last.message : undefined);
+  if (!source || source.role !== "assistant") return null;
+  if (last.turn && last.turn.state !== "completed") return null;
+  const question = extractAskFences(source.text).questions.find((item) => item.question.trim() && item.options.length > 0);
+  if (!question) return null;
+  return {
+    sourceMessageId: source.id,
+    question: question.question.trim(),
+    ...(question.header?.trim() ? { header: question.header.trim() } : {}),
+    multiSelect: question.multiSelect === true,
+    options: question.options.map((option) => ({ label: option.label, ...(option.description ? { description: option.description } : {}) })),
+  };
 }

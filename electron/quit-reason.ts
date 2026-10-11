@@ -28,6 +28,7 @@ export type QuitReasonCode =
   | "relaunch" // 복구·잠금 재시도 후 재시작
   | "single-instance-rejected" // 다른 인스턴스가 잠금을 가짐
   | "startup-refused" // 신원·런타임 봉인 등으로 시작 거부
+  | "yield-to-native-update" // macOS ShipIt 이 설치 중일 때 뜬 옛 버전 복사본이 양보하며 종료
   | "startup-failed" // 시작 실패
   | "headless-done" // --graph-surface / --headless-automations 작업 종료
   | "cleanup-deadline" // 정리 시한 초과로 강제 종료

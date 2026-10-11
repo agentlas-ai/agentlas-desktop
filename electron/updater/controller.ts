@@ -1155,6 +1155,7 @@ export class DesktopUpdaterController {
     this.blockedNativeInstallFailures = 0;
     this.blockedRetryAfter = undefined;
     this.publish(this.manualState(version, "legacy-cleanup-failed"));
+    this.armTransientRetry();
     return false;
   }
 
@@ -1815,7 +1816,13 @@ export class DesktopUpdaterController {
       // transient, while staying on an old build is permanent.
       const cleared = this.state.code === "legacy-cleanup-failed" && this.clearStaleInstallArtifacts();
       const expired = this.holdSince !== undefined && this.now() - this.holdSince >= HOLD_EXPIRY_MS;
-      if (!cleared && !expired) return Promise.resolve(this.state);
+      if (!cleared && !expired) {
+        // The ShipIt job that blocked the cleanup usually exits within seconds. Look again soon (the transient
+        // backoff) instead of waiting for the hourly check, so this state is never a dead end.
+        if (this.state.code === "legacy-cleanup-failed") this.armTransientRetry();
+        return Promise.resolve(this.state);
+      }
+      if (cleared) this.clearTransientRetry();
       if (expired && !cleared) {
         this.logger.log("[updater] update hold expired; discarding it and retrying from a clean state");
         // Aged-out holds start over rather than resuming a payload whose state
@@ -1947,8 +1954,9 @@ export class DesktopUpdaterController {
     try {
       resumeWriters = await this.deps.prepareAutomationInstall?.();
     } catch (error) {
-      this.logger.warn("[updater] automation work is still settling; install deferred", error);
-      return { accepted: false, state: this.state, blockedBy: "active-runs" };
+      // The owner asked for the install (2026-10-11: "whatever happens, pressing update updates and restarts").
+      // Work still settling is stopped by the native quit and resumes from the update-resume ledger / Goal recovery.
+      this.logger.warn("[updater] automation work is still settling; installing anyway", error);
     }
 
     this.armInstallWriterResume(resumeWriters);
@@ -1960,12 +1968,24 @@ export class DesktopUpdaterController {
       // protects data during a schema change is the migration transaction, and
       // the previous app version is retained by the native updater.
       let continuity: ContinuitySnapshot | undefined;
+      // Say so before the recovery copy starts: copying a large store takes a while and the button used to look dead.
+      this.publish({ status: "installing", version, progress: 100, compatibility: this.state.compatibility });
+      let continuityBoundTimer: ReturnType<typeof setTimeout> | undefined;
       try {
-        continuity = await this.deps.captureContinuity(version);
+        // The optional recovery copy must never cost the update: past the bound it is abandoned.
+        continuity = await Promise.race([
+          this.deps.captureContinuity(version),
+          new Promise<never>((_resolve, reject) => {
+            continuityBoundTimer = setTimeout(() => reject(new Error("continuity_capture_timed_out")), 120_000);
+            continuityBoundTimer.unref?.();
+          }),
+        ]);
         this.recoveryBackupPath = continuity.backupPath;
       } catch (error) {
         this.logger.warn("[updater] continuity backup failed; installing without a recovery copy", error);
         this.recoveryBackupPath = null;
+      } finally {
+        if (continuityBoundTimer) clearTimeout(continuityBoundTimer);
       }
 
       const journal: InstallJournal = {

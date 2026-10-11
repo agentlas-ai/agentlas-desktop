@@ -235,29 +235,19 @@ export function updateInstallDeferredForVersion(version: string | undefined): bo
 }
 
 export async function requestUpdaterInstall(options: { resumeWork?: boolean } | undefined, fallback: () => Promise<UpdaterActionResult>): Promise<UpdaterActionResult> {
+  void options;
   if (!host) return fallback();
   const items = host.census();
   if (items.length === 0) return host.install();
-  if (options?.resumeWork !== true) {
-    return {
-      accepted: false,
-      state: host.state(),
-      blockedBy: "active-runs",
-      activeRunCount: items.length,
-      activeWorkLine: describeUpdateWork(items, host.locale()),
-    };
-  }
-  // Stop nothing unless a downloaded update is actually waiting to be installed.
+  // The person pressed install. Running work no longer holds it back (1.2.95 stopped updating at all): pause what
+  // can be paused for the update so it continues after the relaunch, and install either way. A checkpoint that
+  // cannot finish in time costs those turns their graceful stop, never the update.
   const state = host.state();
-  if (state.status !== "downloaded" || !state.version) {
-    return { accepted: false, state, blockedBy: "active-runs", activeRunCount: items.length };
-  }
+  if (state.status !== "downloaded" || !state.version) return { accepted: false, state };
   try {
     await host.checkpoint(items);
   } catch (error) {
-    if (!(error instanceof Error) || error.message !== "automation_update_drain_timed_out") throw error;
-    return { accepted: false, state: host.state(), blockedBy: "active-runs",
-      activeRunCount: items.length, activeWorkLine: describeUpdateWork(items, host.locale()) };
+    console.warn("[updater] checkpointing running work failed; installing anyway", error instanceof Error ? error.message : error);
   }
   const result = await host.install();
   if (!result.accepted) host.restartAfterRefusedHandoff();

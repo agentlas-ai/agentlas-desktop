@@ -21,7 +21,8 @@ import { OneMemorySheet } from "./OneMemorySheet";
 import { OneAgentPortrait } from "./OneAgentPortrait";
 import type { OneMemoryState } from "@/lib/types";
 import { SupervisorOutbox, type PendingSupervisorWrite, type SupervisorWrite } from "@/lib/one-supervisor-outbox";
-import { personalOneReplyPresentation, personalOneTranscript } from "@/lib/personal-one-transcript";
+import { personalOnePendingAsk, personalOneReplyPresentation, personalOneTranscript } from "@/lib/personal-one-transcript";
+import { PersonalOneAskCard } from "./PersonalOneAsk";
 import { usePersonalOneReply } from "@/lib/use-personal-one-reply";
 import { personalOneFile, type PersonalOneFile } from "@/lib/personal-one-file-preview";
 import { TaskSidePanel } from "@/components/workspace/TaskSidePanel";
@@ -205,6 +206,8 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     return [...optimistic,...savedRequests.filter(intent=>intent.method==="send"&&!observedCommands.has(intent.commandId)&&!optimisticIds.has(intent.commandId)).map(intent=>({commandId:intent.commandId,text:String(intent.input.text),acknowledged:false}))];
   },[optimistic,savedRequests,observedCommands]);
   const activeReply=snapshot?.requests.find(item=>item.kind==="reply" && ["dispatching","accepted"].includes(item.state));
+  const pendingAsk=useMemo(()=>personalOnePendingAsk(groups,pendingMessages.length),[groups,pendingMessages.length]);
+  const [dismissedAskId,setDismissedAskId]=useState<string|null>(null);
   const prepareUiFollowup=useCallback((prompt:string)=>{
     if(!snapshot?.conversationChatId || activeReply || attachmentBusy)return false;
     setText(current=>current.trim()?`${current}\n\n${prompt}`:prompt);
@@ -287,14 +290,16 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     }const intent=outbox.current.prepare(method,input);setSavedRequests(outbox.current.list());
     const value=await outbox.current.deliver(ipc()!.oneSupervisor,intent);setSavedRequests(outbox.current.list());return value;
   };
-  const send=async()=>{
-    if(submitting.current)return;const submittedText=text;const submittedReply=messageReply;const rawMessage=text.trim();const message=composeMessageReply(rawMessage,submittedReply);if((!rawMessage&&!attachments.length)||!outbox.current||!snapshot||attachmentBusy)return;let intent:PendingSupervisorWrite;
+  const send=async(answer?:string)=>{
+    // A question-card answer goes out alone: never with the composer's quotation, draft or attachments.
+    const outgoing=answer===undefined?attachments:[];
+    if(submitting.current)return;const submittedText=answer??text;const submittedReply=answer===undefined?messageReply:null;const rawMessage=submittedText.trim();const message=composeMessageReply(rawMessage,submittedReply);if((!rawMessage&&!outgoing.length)||!outbox.current||!snapshot||attachmentBusy)return;let intent:PendingSupervisorWrite;
     if(message.length>8000){setAttachmentError(copy("인용을 포함한 메시지가 너무 깁니다 (최대 8,000자). 답장을 줄이거나 인용을 취소해 주세요.","The message including its quotation is too long (8,000 characters maximum). Shorten your reply or cancel the quotation."));return;}
     submitting.current=true;setAttachmentBusy(true);
     try{const runtimeSelection=storedOneRuntime();let fileGroupId:string|undefined;
-      if(attachments.length){const bridge=chatFilesBridge();if(!bridge)throw new Error("attachment_bridge_unavailable");const stored=await bridge.snapshot({chatId:snapshot.conversationChatId,files:attachments.map(item=>item.draft)});fileGroupId=stored.groupId;}
+      if(outgoing.length){const bridge=chatFilesBridge();if(!bridge)throw new Error("attachment_bridge_unavailable");const stored=await bridge.snapshot({chatId:snapshot.conversationChatId,files:outgoing.map(item=>item.draft)});fileGroupId=stored.groupId;}
       intent=outbox.current.prepare("send",{text:message||copy("첨부 파일을 확인해 주세요.","Please review the attached files."),...(fileGroupId?{fileGroupId}:{}),...(runtimeSelection?{runtimeSelection}:{})});
-      for(const item of attachments)if(item.preview)URL.revokeObjectURL(item.preview);setAttachments([]);setAttachmentError(null);
+      if(answer===undefined){for(const item of attachments)if(item.preview)URL.revokeObjectURL(item.preview);setAttachments([]);}setAttachmentError(null);
     }catch(cause){setAttachmentError(cause instanceof Error?cause.message:String(cause));setAttachmentBusy(false);submitting.current=false;return;}
     setAttachmentBusy(false);submitting.current=false;
     if(inFlight.current.has(intent.commandId))return;inFlight.current.add(intent.commandId);setOwnVisibleCommands(current=>({scope:historyScope,ids:[...(current.scope===historyScope?current.ids:[]),intent.commandId].slice(-24)}));setSavedRequests(outbox.current.list());setText(current=>current===submittedText?"":current);nearBottom.current=true;
@@ -435,6 +440,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       </div>
       <div ref={composerDock} className={styles.composerDock}>
         <div className={styles.decisionStack}>
+          {pendingAsk&&pendingAsk.sourceMessageId!==dismissedAskId&&<PersonalOneAskCard key={pendingAsk.sourceMessageId} ask={pendingAsk} locale={ko?"ko":"en"} disabled={Boolean(activeReply)||attachmentBusy} onAnswer={answer=>void send(answer)} onDismiss={()=>setDismissedAskId(pendingAsk.sourceMessageId)} />}
           <ComposerDecisionSlot surface="one" />
           {/* Only Main's exact pending requests may authorize an action. A current
               local permission selection must not resolve a previous run's card. */}

@@ -3,7 +3,9 @@
 ## 1.3.2 — 2026-10-11
 
 - Includes everything planned for 1.3.0 and 1.3.1, which were not published: group rooms discuss, with two or three teammates answering at once, and an update is no longer refused while an AI model is kept warm between messages.
-- "Restart and install" no longer hangs on a large, busy store. The safety copy taken before an update started over every time the app wrote to its database, so on a store of a gigabyte or more it never finished and the button seemed to do nothing.
+- Pressing update always installs and restarts. Running work is paused for the update and continues after the restart instead of holding the update back, and the update says it is installing right away. Opening Agentlas again while an update is being installed no longer cancels the update.
+- "Restart and install" no longer hangs on a large, busy store. The safety copy taken before an update started over every time the app wrote to its database, so on a store of a gigabyte or more it never finished and the button seemed to do nothing. The copy is now taken in one step and can never hold up the update.
+- When Hope ends an answer in the personal window with a question, its choices appear as a card you can pick from.
 - This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
 
 ## 1.3.1 — 2026-10-11
