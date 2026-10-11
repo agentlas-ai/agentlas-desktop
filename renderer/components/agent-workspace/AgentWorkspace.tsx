@@ -21,18 +21,19 @@ import { AgentWorkspaceRecoveryReview } from "./AgentWorkspaceRecoveryReview";
 import { AgentMemoryImportDialog } from "./AgentMemoryImportDialog";
 import { PopupAction, PopupFacts, PopupFrame, PopupSteps } from "@/components/Popup";
 import { confirmPopup } from "@/lib/popup";
+import { isTechnicalEvidence, memoryImpact, memoryKindLabel, plainMemoryText, plainMemoryTitle } from "@/lib/agent-memory-explain";
 import styles from "./AgentWorkspace.module.css";
 
 export type AgentWorkspaceView = "files" | "memory" | "changes" | "sync" | "history";
 
 const KO_STATE: Record<string, string> = {
-  eligible: "승격 검토 가능", scope_review: "범위 검토", needs_evidence: "근거 필요", proposed: "변경안 있음", applied: "적용됨",
+  eligible: "반영 가능", scope_review: "범위 확인 필요", needs_evidence: "근거 부족", proposed: "변경안 있음", applied: "반영됨",
   review_ready: "검토 대기", applying: "적용 중", rejected: "거절됨", stale: "원본 변경됨", recovery_required: "복구 필요",
   in_sync: "동일 리비전", content_equal: "내용 동일", local_ahead: "로컬 변경", cloud_ahead: "원격 변경",
   diverged: "양쪽 변경", unrelated: "기준 없음", unknown: "미확인", unavailable: "연결 불가",
 };
 const EN_STATE: Record<string, string> = {
-  eligible: "Ready for review", scope_review: "Scope review", needs_evidence: "Needs evidence", proposed: "Proposed", applied: "Applied",
+  eligible: "Ready for review", scope_review: "Check scope", needs_evidence: "Needs evidence", proposed: "Proposed", applied: "Applied",
   review_ready: "Review ready", applying: "Applying", rejected: "Rejected", stale: "Stale", recovery_required: "Recovery required",
   in_sync: "Same revision", content_equal: "Same content", local_ahead: "Local changes", cloud_ahead: "Remote changes",
   diverged: "Both changed", unrelated: "No common base", unknown: "Unknown", unavailable: "Unavailable",
@@ -337,22 +338,22 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   };
   const renderMemory = () => <>
     <aside className={styles.listPane}>
-      <div className={styles.paneHeader}><IconBrain size={14} /><strong>{ko ? "메모리" : "Memory"}</strong><span>{snapshot?.memoryCandidates.length ?? 0}</span><button className={styles.iconButton} disabled={Boolean(busy)} aria-label={ko ? "기존 메모리 가져오기" : "Import existing memory"} title={ko ? "기존 메모리 가져오기" : "Import existing memory"} onClick={() => void run("memory-import-preview", async () => { const memory = ipc()?.agentMemory; if (!memory) throw new Error(ko ? "메모리 브리지를 사용할 수 없습니다." : "Memory bridge unavailable."); setMemoryImportPreview(await memory.importPreview(agent.id)); })}><IconFileUp size={13} /></button></div>
+      <div className={styles.paneHeader}><IconBrain size={14} /><strong>{ko ? "배운 것" : "Learned"}</strong><span>{snapshot?.memoryCandidates.length ?? 0}</span><button className={styles.iconButton} disabled={Boolean(busy)} aria-label={ko ? "기존 메모리 가져오기" : "Import existing memory"} title={ko ? "기존 메모리 가져오기" : "Import existing memory"} onClick={() => void run("memory-import-preview", async () => { const memory = ipc()?.agentMemory; if (!memory) throw new Error(ko ? "메모리 브리지를 사용할 수 없습니다." : "Memory bridge unavailable."); setMemoryImportPreview(await memory.importPreview(agent.id)); })}><IconFileUp size={13} /></button></div>
       <div className={styles.search}><IconSearch size={13} /><input aria-label={ko ? "메모리 검색" : "Search memories"} placeholder={ko ? "메모리 검색" : "Search memories"} value={memoryQuery} onChange={(event) => setMemoryQuery(event.target.value)} /></div>
-      <div className={styles.rosterFilters}><select aria-label={ko ? "승격 상태" : "Promotion state"} value={memoryState} onChange={(event) => setMemoryState(event.target.value)} className={styles.button}><option value="all">{ko ? "전체" : "All"}</option>{["eligible", "scope_review", "needs_evidence", "proposed", "applied"].map((state) => <option value={state} key={state}>{stateLabel(state, ko)}</option>)}</select></div>
+      <div className={styles.rosterFilters}><select aria-label={ko ? "반영 상태" : "Status"} value={memoryState} onChange={(event) => setMemoryState(event.target.value)} className={styles.button}><option value="all">{ko ? "전체" : "All"}</option>{["eligible", "scope_review", "needs_evidence", "proposed", "applied"].map((state) => <option value={state} key={state}>{stateLabel(state, ko)}</option>)}</select></div>
       <div className={styles.listRows}>
         {memoryCandidates.map((candidate) => <div className={styles.checkRow} key={candidate.id}>
-          <input type="checkbox" aria-label={`${ko ? "승격 후보 선택" : "Select candidate"}: ${candidate.title}`} checked={memorySelection.has(candidate.id)} disabled={candidate.state !== "eligible" || !snapshot?.writable || Boolean(busy)} onChange={(event) => setMemorySelection((previous) => { const next = new Set(previous); if (event.target.checked) next.add(candidate.id); else next.delete(candidate.id); return next; })} />
-          <button className={`${styles.listItem} ${selectedMemory?.id === candidate.id ? styles.selected : ""}`} onClick={() => setMemoryId(candidate.id)}><span className={styles.listItemTitle}><span>{candidate.title}</span></span><span className={styles.listItemSub}><State value={candidate.state} ko={ko} /><span>{candidate.kind}</span></span></button>
+          <input type="checkbox" aria-label={`${ko ? "지침에 반영할 학습 선택" : "Select learning to add"}: ${plainMemoryTitle(candidate.contentNative || candidate.content || candidate.title, ko)}`} checked={memorySelection.has(candidate.id)} disabled={candidate.state !== "eligible" || !snapshot?.writable || Boolean(busy)} onChange={(event) => setMemorySelection((previous) => { const next = new Set(previous); if (event.target.checked) next.add(candidate.id); else next.delete(candidate.id); return next; })} />
+          <button className={`${styles.listItem} ${selectedMemory?.id === candidate.id ? styles.selected : ""}`} onClick={() => setMemoryId(candidate.id)}><span className={styles.listItemTitle}><span>{plainMemoryTitle(candidate.contentNative || candidate.content || candidate.title, ko)}</span></span><span className={styles.listItemSub}><State value={candidate.state} ko={ko} /><span>{memoryKindLabel(candidate.kind, ko)}</span></span></button>
         </div>)}
         {!memoryCandidates.length && <div className={styles.empty}>{ko ? "메모리 없음" : "No memories"}</div>}
       </div>
       <div className={styles.footerActions}>
-        <select value={targetPath} aria-label={ko ? "승격 대상 파일" : "Promotion target file"} onChange={(event) => setTargetPath(event.target.value)}><option value="">{ko ? "정식 지침 파일" : "Canonical instruction file"}</option>{instructionFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}</select>
+        <select value={targetPath} aria-label={ko ? "반영할 파일" : "File to update"} onChange={(event) => setTargetPath(event.target.value)}><option value="">{ko ? "정식 지침 파일" : "Canonical instruction file"}</option>{instructionFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}</select>
         <button className={`${styles.button} ${styles.primary}`} disabled={!memorySelection.size || !snapshot?.writable || Boolean(busy) || snapshot.activation === "recovery_required"} onClick={() => void run("prepare-memory", async () => { const proposal = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: [...memorySelection], ...(targetPath ? { targetPath } : {}) }); await refresh(); setMemorySelection(new Set()); await openReview(proposal.id); })}>{busy === "prepare-memory" && <span className={styles.loading} />}{ko ? `변경안 만들기${memorySelection.size ? ` (${memorySelection.size})` : ""}` : `Prepare change${memorySelection.size ? ` (${memorySelection.size})` : ""}`}</button>
       </div>
     </aside>
-    {selectedMemory ? <MemoryDetail candidate={selectedMemory} locale={locale} proposal={(snapshot?.proposals ?? []).find((proposal) => proposal.memoryEntryIds.includes(selectedMemory.id))} onOpenProposal={(id) => void openReview(id)} /> : <div className={styles.empty}><IconBrain size={35} /><strong>{ko ? "승격 검토할 메모리를 모읍니다" : "Collect memories for promotion review"}</strong></div>}
+    {selectedMemory ? <MemoryDetail candidate={selectedMemory} locale={locale} agentName={name} agentRole={agent.tagline} proposal={(snapshot?.proposals ?? []).find((proposal) => proposal.memoryEntryIds.includes(selectedMemory.id))} onOpenProposal={(id) => void openReview(id)} /> : <div className={styles.empty}><IconBrain size={35} /><strong>{ko ? "에이전트가 일하며 배운 내용이 여기에 쌓입니다" : "What the agent learns while working collects here"}</strong></div>}
   </>;
   const renderChanges = () => <>
     <aside className={styles.listPane}><div className={styles.paneHeader}><IconLayers size={14} /><strong>{ko ? "변경" : "Changes"}</strong><span>{snapshot?.proposals.length ?? 0}</span></div><div className={styles.listRows}>
@@ -455,12 +456,23 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   </section>;
 }
 
-function MemoryDetail({ candidate, locale, proposal, onOpenProposal }: { candidate: AgentWorkspaceMemoryCandidate; locale: string; proposal?: AgentWorkspaceProposal; onOpenProposal: (id: string) => void }) {
+function MemoryDetail({ candidate, locale, agentName, agentRole, proposal, onOpenProposal }: { candidate: AgentWorkspaceMemoryCandidate; locale: string; agentName: string; agentRole?: string; proposal?: AgentWorkspaceProposal; onOpenProposal: (id: string) => void }) {
   const ko = locale === "ko";
-  return <article className={styles.detail}><h2>{candidate.title}</h2><div className={styles.meta}><State value={candidate.state} ko={ko} /><span>{candidate.kind}</span><span>{candidate.scope}</span></div>
-    {candidate.state === "scope_review" && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? "프로젝트에 묶인 기억입니다. 재사용 범위를 먼저 검토해야 합니다." : "This memory is bound to a project. Its reuse scope needs review first."}</div>}
-    {candidate.state === "needs_evidence" && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? "승격에 필요한 근거가 부족합니다." : "Evidence required for promotion is missing."}</div>}
-    <div className={styles.detailContent}>{candidate.contentNative || candidate.content}</div><h3>{ko ? "근거" : "Evidence"}</h3>{candidate.evidence.length ? <ul className={styles.evidence}>{candidate.evidence.map((evidence, index) => <li key={index}>{evidence}</li>)}</ul> : <span className={styles.meta}>{ko ? "근거 없음" : "No evidence"}</span>}
+  const learned = plainMemoryText(candidate.contentNative || candidate.content, ko);
+  const technical = candidate.evidence.filter(isTechnicalEvidence);
+  const readable = candidate.evidence.filter((line) => !isTechnicalEvidence(line)).map((line) => plainMemoryText(line, ko));
+  const role = (agentRole ?? "").trim();
+  return <article className={styles.detail}><h2>{plainMemoryTitle(candidate.contentNative || candidate.content || candidate.title, ko, 90)}</h2><div className={styles.meta}><State value={candidate.state} ko={ko} /><span>{memoryKindLabel(candidate.kind, ko)}</span></div>
+    {candidate.state === "scope_review" && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? "특정 프로젝트에서 얻은 내용입니다. 다른 일에도 써도 되는지 먼저 확인하세요." : "This came from one project. Check that it is safe to reuse elsewhere first."}</div>}
+    {candidate.state === "needs_evidence" && <div className={styles.banner} style={{ marginTop: 16 }}>{ko ? "뒷받침하는 기록이 부족해 아직 반영할 수 없습니다." : "There is not enough supporting record to add this yet."}</div>}
+    <h3>{ko ? "이 에이전트는 원래" : "What this agent does"}</h3>
+    <p className={styles.detailContent}>{role && role !== "One Team teammate" ? `${agentName} — ${role}` : agentName}</p>
+    <h3>{ko ? "일하면서 배운 것" : "What it learned"}</h3>
+    <p className={styles.detailContent}>{learned}</p>
+    <h3>{ko ? "지침에 반영하면" : "If you add it to its instructions"}</h3>
+    <p className={styles.detailContent}>{memoryImpact(candidate.kind, ko)}{ko ? " 승인하기 전에는 아무것도 바뀌지 않고, 반영하면 다음 실행부터 적용됩니다." : " Nothing changes until you approve, and it applies from the next run."}</p>
+    {readable.length > 0 && <><h3>{ko ? "이렇게 알게 됐어요" : "How it found out"}</h3><ul className={styles.evidence}>{readable.map((line, index) => <li key={index}>{line}</li>)}</ul></>}
+    {technical.length > 0 && <details className={styles.technical}><summary>{ko ? `기술 정보 (${technical.length})` : `Technical details (${technical.length})`}</summary><ul className={styles.evidence}>{technical.map((line, index) => <li key={index}>{line}</li>)}</ul></details>}
     {proposal && <><h3>{ko ? "연결된 변경안" : "Linked proposal"}</h3><button className={styles.button} onClick={() => onOpenProposal(proposal.id)}><IconLayers size={13} />{proposal.summary}</button></>}
   </article>;
 }

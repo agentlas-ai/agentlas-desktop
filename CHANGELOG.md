@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.98 — 2026-10-11
+
+- Includes everything planned for 1.2.97, which was not published: Hope answers in your language again, and the screen sharing sheet in the personal agent window is written plainly.
+- A group room no longer gets stuck when one of its teammates failed an earlier task. Every message in such a room was refused before it started, and the app kept starting recovery turns that made it worse while the room flickered between "working" and "stopped". The automatic team start no longer retries a proposal that can never be confirmed; your text goes back into the message box so you can send it again.
+- Hope can operate apps on your computer again from its personal conversation. Since that conversation started running in the background service, any turn that wanted to use the screen failed before starting, and every later message in that conversation failed too.
+- The agent manager can delete an agent from its row, the list can be resized, and an agent's memory reads as plain sentences (what it did, what it learned, what changes).
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.97 — 2026-10-11
 
 - Hope answers in your language again. Since its personal conversation started running in the background service, it replied in English even when the app was set to Korean.

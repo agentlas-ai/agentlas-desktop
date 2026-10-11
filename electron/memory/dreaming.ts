@@ -194,6 +194,8 @@ async function dreamOnce(): Promise<void> {
             "You are a memory consolidation pass for an AI agent. Merge redundant or fragmentary memory entries into a few durable rules.",
             'Return ONLY valid JSON: {"rules": ["..."], "absorbed": [1,2,...]} — no markdown fences, no prose.',
             "rules: max 5 distilled, actionable rules in the same language as the entries. Each must preserve concrete specifics (paths, flags, names).",
+            // The owner reads these rules in the agent's Learned panel. Internal run identifiers mean nothing to them.
+            "Write every rule as plain sentences an owner can read: say what the agent does and what it should do next time. Never copy internal identifiers (attempt/run/task ids, UUIDs, hashes, step tags such as t4); refer to them as \"an earlier attempt\" or \"an earlier task\" instead. Keep the names, paths and flags a person would recognise.",
             "absorbed: the entry numbers fully covered by your rules. NEVER absorb an entry whose specifics are not preserved in a rule.",
             "If the entries are already clean and distinct, return {\"rules\": [], \"absorbed\": []}.",
           ].join("\n"),

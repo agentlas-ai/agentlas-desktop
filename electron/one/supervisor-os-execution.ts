@@ -3,7 +3,7 @@ import {getOneProfile} from "../store/one-profile";
 import {getAuthenticatedActorIds} from "../auth";
 import {getInvocationAdmission} from "../store/invocation-admissions";
 import {invocationProcessOwner,invocationRunOwners} from "../store/invocation-run-owners";
-import {oneOsLeaseBroker,isOneOsHostAvailable} from "./context-lease";
+import {oneOsLeaseBroker,isOneOsHostAvailable,configuredOneOsLeaseBroker} from "./context-lease";
 import {oneContextService,OneContextError,type OneContextService} from "./context-service";
 import {supervisorError} from "../../shared/one-supervisor";
 import type {SupervisorRequestRow} from "./supervisor-store";
@@ -18,6 +18,13 @@ export function prepareSupervisorOsExecution(input:{runId?:string;chatId?:string
     .all(input.runId) as SupervisorRequestRow[];
   if(!rows.length)return null;
   if(rows.length!==1)throw supervisorError("supervisor_os_original_command_required");
+  // The background service never hosts the screen: the window process owns the input driver, the OS lease broker and
+  // the computer-use control server. Hope's personal turns run in the service since the One domain moved there, and
+  // this refusal failed every one of them that picked computer use, and every later turn of that chat, which asked
+  // for it again (production 1.2.95, 2026-10-11: supervisor_os_host_unavailable). Such a run uses the window's control
+  // server through the shared control file, like any other run with computer use. A process that has a broker but
+  // whose host is down (locked screen, server stopped) still refuses.
+  if(!configuredOneOsLeaseBroker())return null;
   if(!isOneOsHostAvailable())throw supervisorError("supervisor_os_host_unavailable");
   const row=rows[0],oneId=getOneProfile().oneId,actor=JSON.stringify(getAuthenticatedActorIds());
   const custody=invocationRunOwners.getOwnerByRunId(input.runId),processOwner=invocationProcessOwner(),admission=getInvocationAdmission(input.runId);

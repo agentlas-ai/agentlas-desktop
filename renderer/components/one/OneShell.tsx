@@ -594,6 +594,9 @@ type ArmedOneMemoryUseOnce = {
   targetKey: string;
 };
 
+/** Main codes that mean the proposal's exact binding no longer exists; the same proposal can never be confirmed. */
+const ONE_TEAM_PREFLIGHT_BINDING_GONE_CODES = new Set(["stale_binding", "candidate_changed", "expired", "recovery_required", "already_resolved", "invalid_request"]);
+
 type PendingTeamPrompt = {
   proposalId: string;
   preflightSubmissionId?: string;
@@ -2432,6 +2435,8 @@ function OneSessionsShell() {
   const submittedAttachmentPreviewUrlsRef = useRef(new Set<string>());
   const attachmentThreadRef = useRef<string | null>(null);
   const autoResolvingProposalRef = useRef<string | null>(null);
+  // A refused automatic start re-publishes the proposal, which re-runs the start effect. Bound the attempts per proposal.
+  const autoResolveFailuresRef = useRef(new Map<string, number>());
   const automationRunPendingRef = useRef(new Set<string>());
   const pluginMutationPendingRef = useRef(new Set<string>());
   const runIdRef = useRef<string | null>(null);
@@ -5715,6 +5720,7 @@ function OneSessionsShell() {
   ) => {
     const api = ipc();
     if (autoResolvingProposalRef.current === proposal.proposalId || runIdRef.current) return;
+    if ((autoResolveFailuresRef.current.get(proposal.proposalId) ?? 0) >= 3) return;
     if (!api) {
       requestOneOperationalRecovery("one-team-preflight-start", new Error("Desktop bridge unavailable"));
       return;
@@ -5762,6 +5768,22 @@ function OneSessionsShell() {
       );
       setTeamPreflight(await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => result.proposal));
     } catch (cause) {
+      const failures = (autoResolveFailuresRef.current.get(proposal.proposalId) ?? 0) + 1;
+      autoResolveFailuresRef.current.set(proposal.proposalId, failures);
+      const code = /\[agentlas:code=([a-z_]+)\]/.exec(cause instanceof Error ? cause.message : String(cause))?.[1];
+      // A proposal is bound to one exact Task version, roster and runtime. When Main says that binding is gone,
+      // asking again can never succeed — only a fresh proposal can. Stop on this one and hand the text back.
+      const settled = code !== undefined && ONE_TEAM_PREFLIGHT_BINDING_GONE_CODES.has(code);
+      if (settled || failures >= 3) {
+        setPendingTeamPrompt((currentPrompt) => currentPrompt?.proposalId === proposal.proposalId ? null : currentPrompt);
+        setComposer((currentText) => currentText.trim() ? currentText : prompt.text);
+        setActionNotice(normalizedLocale === "ko"
+          ? "대화가 바뀌어 팀 확정을 마치지 못했습니다. 쓰신 글은 작성창에 되돌려 놓았으니 다시 보내 주세요."
+          : "The conversation changed before the team could be confirmed. Your text is back in the composer — send it again.");
+      } else {
+        // A transient miss (runtime probe, store busy) may succeed shortly: wait before the state change re-runs the effect.
+        await new Promise<void>((resolve) => { window.setTimeout(resolve, 1_000 * 2 ** (failures - 1)); });
+      }
       const current = await api.oneTeamPreflight.getForChat(proposal.binding.chatId).catch(() => null);
       if (current) setTeamPreflight(current);
       setError(null);
@@ -5770,7 +5792,7 @@ function OneSessionsShell() {
       if (autoResolvingProposalRef.current === proposal.proposalId) autoResolvingProposalRef.current = null;
       setTeamPreflightBusy(false);
     }
-  }, [refreshAll, router, startRun]);
+  }, [normalizedLocale, refreshAll, router, startRun]);
 
   /*
    * Bringing in outside help changes the team and the public agent used, so

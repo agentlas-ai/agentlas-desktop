@@ -3,7 +3,7 @@
 .shell button { cursor: pointer; }
 .shell button:disabled { opacity: .45; cursor: default; }
 .shell button:focus-visible, .shell input:focus-visible, .shell select:focus-visible, .shell textarea:focus-visible { outline: 2px solid var(--attention); outline-offset: -2px; }
-.roster { width: 220px; flex: 0 0 220px; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--paper-edge); background: var(--paper-2); z-index: 15; }
+.roster { position: relative; width: 220px; flex: 0 0 220px; display: flex; flex-direction: column; min-height: 0; border-right: 1px solid var(--paper-edge); background: var(--paper-2); z-index: 15; }
 .rosterCollapsed { width: 48px; flex-basis: 48px; }
 .rosterHeader { display: flex; align-items: center; gap: 6px; padding: 10px; min-height: 49px; border-bottom: 1px solid var(--paper-edge); }
 .rosterHeader strong { flex: 1; font-size: 13px; font-weight: 600; }
@@ -24,6 +24,15 @@
 .rosterFoot { display: flex; padding: 9px; gap: 6px; border-top: 1px solid var(--paper-edge); }
 .iconButton { display: inline-grid; place-items: center; width: 28px; height: 28px; flex: 0 0 28px; border: 0; border-radius: 5px; padding: 0; color: var(--ink-soft); background: transparent; }
 .iconButton:hover { background: var(--paper-3); color: var(--ink); }
+.technical { margin-top: 18px; font-size: 11px; color: var(--muted-deep); }
+.technical summary { cursor: pointer; }
+.rowWrap { position: relative; flex: 1; min-width: 0; }
+.rowDelete { position: absolute; top: 50%; right: 6px; transform: translateY(-50%); display: inline-grid; place-items: center; width: 26px; height: 26px; border: 0; border-radius: 6px; padding: 0; color: var(--ink-soft); background: var(--paper-3); opacity: 0; pointer-events: none; }
+.rowWrap:hover .rowDelete, .rowDelete:focus-visible { opacity: 1; pointer-events: auto; }
+.rowDelete:hover { color: var(--warn); }
+.rowWrap:hover .memoryCount, .rowWrap:focus-within .memoryCount { visibility: hidden; }
+.rosterResize { position: absolute; top: 0; right: -3px; bottom: 0; width: 7px; cursor: col-resize; z-index: 16; touch-action: none; }
+.rosterResize:hover, .rosterResize:active { background: color-mix(in srgb, var(--attention) 28%, transparent); }
 .memoryCount { display: inline-grid; place-items: center; width: 22px; height: 22px; border-radius: 50%; background: #2563eb; color: #fff; flex: 0 0 22px; font-size: 10px; font-weight: 600; font-variant-numeric: tabular-nums; }
 .sourceWarning { display: inline-flex; color: var(--warn); }
 .workspace { flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column; position: relative; overflow: hidden; }

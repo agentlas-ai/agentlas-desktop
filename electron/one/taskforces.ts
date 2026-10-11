@@ -260,7 +260,10 @@ export function oneTaskforceRemovalPreview(input: { id: string }): { sessionCoun
  * The caller owns the reservation transaction; no provider runs here.
  */
 export function ensureOneTaskforceForPreflight(input: { chatId: string; memberAgentIds: string[] }): OneTaskforceReceipt {
-  return ensureOneTaskforceForChat(input);
+  // A member whose last task failed still takes new work in a room the owner composed; the failure stays on record.
+  // Refusing it blocked every message in that room for good (production 2026-10-11, room "Yotube": a teammate
+  // failed on 10-05, each send died in team preparation with one_group_member_unavailable).
+  return ensureOneTaskforceForChat(input, true);
 }
 
 function ensureOneTaskforceForChat(input: { chatId: string; memberAgentIds: string[] }, allowPriorTaskFailure = false): OneTaskforceReceipt {
