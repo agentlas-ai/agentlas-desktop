@@ -30,6 +30,15 @@ export interface NativeIngressNoStartPort { dispatch(request: NativePreparationW
 function exactKeys(value: Record<string, unknown>, fields: readonly string[]): boolean { const keys = Object.keys(value).sort(), expected = [...fields].sort(); return keys.length === expected.length && keys.every((key, index) => key === expected[index]); }
 export interface NativeTerminalCheckpointPort { dispatch(request: NativePreparationWireRequest): Promise<unknown>; request(action: "cancel" | "quiesce" | "finish" | "ingress.reject", payload: Readonly<Record<string, unknown>>): Promise<unknown> }
 const MAX_BYTES = 1048576;
+/**
+ * invoke.nativeStart answers only after the daemon's whole start (preparation judges, runtime checks, first provider
+ * dispatch). A 10 s bound closed the channel on a slow start, and nothing re-attaches it, so every later One action
+ * failed until a restart (production 1.2.92, 2026-10-11T01:53:28.9Z request, 01:53:38.98Z native_auth_channel_lost).
+ * The start carries its own preparation deadlines; this bound only catches a daemon that never answers.
+ * The daemon's checkpoint calls back into Main (judge, team/memory/briefing prepare) run model calls inside that start
+ * (a One judge took 24 s on 1.2.89), so they get the same bound instead of 10 s.
+ */
+const NATIVE_START_REPLY_TIMEOUT_MS = 180000;
 const methods = new Set(["invoke.nativeStart", "invoke.admission", "invoke.receipt", "invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "native.approvalReply", "native.attach", "native.detach"]);
 const errorCode = (e: unknown) => { const c = (e as { code?: unknown })?.code; return typeof c === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(c) ? c : "native_operation_failed"; };
 export function nativeAuthSocketPath(userData: string): string {
@@ -75,7 +84,7 @@ export async function startNativeAuthChannel(options: { address: string; binding
     if ([...state.pending.values()].filter(p => p.lane === lane).length >= (lane === "terminal" ? 2 : 8)) return Promise.reject(nativeAuthError("native_auth_checkpoint_busy"));
     const requestId = randomBytes(32).toString("hex");
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => state.close(), 10000);
+      const timer = setTimeout(() => state.close(), NATIVE_START_REPLY_TIMEOUT_MS);
       state.pending.set(requestId, { sequence: 0, identity, lane, ingressNoStart: !!ingress, serviceObservation: !!observation, replyDomain: observation ? "agentlas.native.serviceObservationReply.v1" : ingress ? "agentlas.native.ingressNoStartReply.v1" : capability ? "agentlas.native.terminalCheckpointReply.v1" : "agentlas.native.checkpointReply.v1", capability, resolve, reject, timer });
       try { const frame = observation ? auth.serviceObservationCheckpoint(peer, capability!, requestId, params, observation.proof) : ingress ? auth.ingressNoStartCheckpoint(peer, capability!, requestId, params, ingress.proof) : capability ? auth.terminalCheckpoint(peer, capability, requestId, params) : auth.checkpoint(peer, requestId, params); const waiting = state.pending.get(requestId)!; waiting.sequence = frame.sequence; if (capability) waiting.request = (frame as ReturnType<typeof auth.terminalCheckpoint>).request; if (!state.send({ callback: frame.envelope })) state.close(); } catch (error) { state.close(); reject(error); }
     });
@@ -204,12 +213,12 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
     }
     if (Buffer.byteLength(buffer) > MAX_BYTES) close();
   });
-  const call = (method: string, prepare: () => unknown, lane: "ordinary" | "cancel" = "ordinary"): Promise<unknown> => {
+  const call = (method: string, prepare: () => unknown, lane: "ordinary" | "cancel" = "ordinary", timeoutMs = 10000): Promise<unknown> => {
     // Reserve before signing. Known local capacity refusal must not consume a signed sequence.
     if (done || socket.destroyed || !socket.writable || (lane === "cancel" ? cancel >= 2 : ordinary >= 32) || id >= Number.MAX_SAFE_INTEGER - 1) return Promise.reject(nativeAuthError("native_auth_channel_closed_or_busy"));
     const requestId = ++id; lane === "cancel" ? cancel++ : ordinary++;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(close, 10000); pending.set(requestId, { resolve, reject, timer, lane });
+      const timer = setTimeout(close, timeoutMs); pending.set(requestId, { resolve, reject, timer, lane });
       try { write({ id: requestId, method, params: prepare() }); }
       catch (error) { pending.delete(requestId); clearTimeout(timer); lane === "cancel" ? cancel-- : ordinary--; reject(error); close(); } // Preserve the original diagnostic; signing/write uncertainty never rolls back or retries.
     });
@@ -219,7 +228,8 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
     /** Native-only; the integration must still validate captured admission/capsule authority. */
     async dispatch(method: string, params: unknown): Promise<unknown> {
       if (!methods.has(method)) throw nativeAuthError("native_auth_method_denied"); let sequence = 0;
-      const result = await call("native.auth.request", () => { const frame = auth.request(method, params); sequence = frame.sequence; return frame.envelope; }, method === "invoke.cancel" ? "cancel" : "ordinary");
+      const result = await call("native.auth.request", () => { const frame = auth.request(method, params); sequence = frame.sequence; return frame.envelope; }, method === "invoke.cancel" ? "cancel" : "ordinary",
+        method === "invoke.nativeStart" ? NATIVE_START_REPLY_TIMEOUT_MS : 10000);
       try { return auth.reply(result, sequence); } catch (error) { if (["native_auth_reply_invalid", "native_auth_signature_invalid"].includes(errorCode(error))) close(); throw error; }
     },
     onClose(listener: () => void): () => void { if (done) { listener(); return () => {}; } closeListeners.add(listener); return () => { closeListeners.delete(listener); }; }, close,

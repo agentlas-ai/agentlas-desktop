@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.93 — 2026-10-11
+
+- A One message that takes a while to start no longer breaks the connection to the background service. In 1.2.92 a start that took more than 10 seconds cut that connection, and later One messages failed until the app was restarted.
+- A follow-up that cannot be delivered yet is retried less and less often instead of every 3 seconds.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.92 — 2026-10-11
 
 - Includes everything planned for 1.2.91, which was not published: One messages start again, a request refused before it started no longer leaves a card that cannot be cleared, and a refusal caused by changed run settings keeps your text.

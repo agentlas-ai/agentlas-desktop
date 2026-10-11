@@ -1849,12 +1849,18 @@ function OneSessionsShell() {
     const retryHead = localFollowupIntents.find(intent => intent.chatId === chatId && !intent.autoDeliveryPaused
       && !locallyStoppedFollowupIdsRef.current.has(intent.intentId) && !terminalFollowupIdsRef.current.has(intent.intentId));
     if (!chatId || !retryHead || retryHead.requiresReprepare) return;
+    // The same head still waiting means Main could not take it yet: wait 3 s, 6 s, 12 s ... up to 60 s between tries
+    // instead of every 3 s (native channel lost, production 1.2.92, 2026-10-11 01:57Z).
+    let lastHead = "", skip = 0, span = 1;
     const timer = window.setInterval(() => {
       if (activeThreadChatIdRef.current !== chatId) return;
+      if (skip > 0) { skip -= 1; return; }
       try {
         const next = readOneFollowupOutbox(window.localStorage, chatId).find(intent => !intent.autoDeliveryPaused
           && !locallyStoppedFollowupIdsRef.current.has(intent.intentId) && !terminalFollowupIdsRef.current.has(intent.intentId));
         if (!next || next.requiresReprepare) { window.clearInterval(timer); return; }
+        span = next.intentId === lastHead ? Math.min(span * 2, 20) : 1;
+        skip = span - 1; lastHead = next.intentId;
         void reconcileUncertainPreflightSteer(chatId);
       } catch { /* The preserved text is retained until local storage can be read again. */ }
     }, 3_000);
