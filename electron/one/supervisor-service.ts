@@ -71,6 +71,8 @@ const clip = (value: unknown, max: number) => {
 };
 /** Follow-ups One may send to one delegated task on its own before the owner decides. */
 export const SUPERVISOR_FOLLOW_UP_LIMIT = 2;
+/** A start answers within the native start bound (180 s); a dispatch older than this is judged like a lost one. */
+const DISPATCH_IN_FLIGHT_MAX_MS = 200_000;
 /** A host-started One turn that reviews finished delegations (Dots-style: the coordinator checks what comes back). */
 const isReview = (row: SupervisorRequestRow) => row.kind === "reply" && row.user_message_id === null && row.command_id.startsWith("review:");
 
@@ -88,6 +90,10 @@ const ordinaryNativeMarker = (row: SupervisorRequestRow): boolean => Object.prot
 export class OneSupervisorService {
   private readonly ordinaryNativeTurns = new Map<string, { source: OrdinaryOneTurnSource; observation: OrdinaryNativeTurnObservation }>();
   private draining = false;
+  /** Commands this process is dispatching now (command id -> start time). A dispatch whose start has not answered yet
+   * has no receipt, which recover() must not read as a lost start: the personal window reads a snapshot (and so runs
+   * recover) right after a send, which held every Hope message before its run began (production 1.2.93, 2026-10-11). */
+  private readonly dispatchInFlight = new Map<string, number>();
   private closed = false;
   private readonly unsubscribe: () => void;
   constructor(private readonly deps: SupervisorDependencies) {
@@ -201,6 +207,8 @@ export class OneSupervisorService {
     return this.deps.budget.snapshot(input);
   }
   private observeDispatch(row: SupervisorRequestRow, action: () => unknown, acceptedReason?: string, control = false): SupervisorCommandReceipt {
+    const flight=Date.now(); this.dispatchInFlight.set(row.command_id,flight);
+    const landed=()=>{if(this.dispatchInFlight.get(row.command_id)===flight)this.dispatchInFlight.delete(row.command_id);};
     const token=this.deps.owner?.current();
     const current=()=>{this.currentIdentity(row.one_id);if(token)this.deps.owner!.assertToken(token,control);return this.deps.store.get(row.command_id)!;};
     const accept=(value: unknown)=>{
@@ -216,9 +224,9 @@ export class OneSupervisorService {
     };
     try {
       const value=action();
-      if(value && typeof (value as Promise<unknown>).then==='function')void Promise.resolve(value).then(accept).catch(error=>{try{reject(error);}catch{/* The exact old dispatch remains unresolved for its current owner. */}});
-      else accept(value);
-    } catch(error){reject(error);}
+      if(value && typeof (value as Promise<unknown>).then==='function')void Promise.resolve(value).then(accept).catch(error=>{try{reject(error);}catch{/* The exact old dispatch remains unresolved for its current owner. */}}).finally(landed);
+      else { landed(); accept(value); }
+    } catch(error){landed(); reject(error);}
     return JSON.parse(this.deps.store.get(row.command_id)!.receipt_json);
   }
 
@@ -370,6 +378,8 @@ export class OneSupervisorService {
     const {oneId} = this.binding();
     for (const row of this.deps.store.pending(oneId)) {
       if (ordinaryNativeMarker(row)) continue; // Missing capture after restart is not cleanup proof.
+      const flight = this.dispatchInFlight.get(row.command_id);
+      if (row.state === "dispatching" && flight !== undefined && Date.now() - flight < DISPATCH_IN_FLIGHT_MAX_MS) continue;
       if (!["dispatching","accepted","held"].includes(row.state) || !row.run_id || row.kind === "science" || row.task_id?.startsWith("science-") || JSON.parse(row.payload_json).boundGoalId) continue;
       // An old direction may still name its predecessor. Its durable queue
       // cursor, not that run's liveness, owns the application verdict.

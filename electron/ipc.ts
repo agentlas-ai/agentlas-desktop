@@ -4557,6 +4557,12 @@ export function registerIpcHandlers(): void {
     // Renderer의 busy 표시는 투영일 뿐이다. 삭제 권위인 Main이 terminal event가 끝날
     // 때까지 채팅 행을 보존해, 실행 결과가 사라진 대화에 기록되는 race를 막는다.
     assertChatRemovalAllowed(id, invocationService.activeChatIds());
+    // A deleted room ends its Goal: the run, its continuation automations and queued directions stop
+    // with it, instead of a paused Goal with no room (Youtube launch, deleted 2026-10-11).
+    const goalId = getChat(id)?.goalId;
+    const goalRun = goalId ? getLongRunByGoalId(goalId) : null;
+    if (goalId && goalRun && goalRun.rootChatId === id && goalRun.surface !== "science"
+      && !["completed", "failed", "cancelled"].includes(goalRun.status)) invocationService.deleteGoal(id, goalId);
     removeChat(id);
     forgetOneRecoveryJudgment(id);
     closeWorkLiveViewsForTaskScope(id);

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.95 — 2026-10-11
+
+- Includes everything planned for 1.2.94, which was not published: the connection to the background service comes back on its own, a One message no longer fails right after an earlier one ran in another part of the app, and a scheduled automation no longer fails with "database is locked".
+- Messages to Hope in the personal agent window start again. In 1.2.93 a message there was put on hold right after it was sent and never ran, and the window wrongly said the app had stopped.
+- Deleting a room now also ends its goal, instead of leaving a paused goal with no room.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.94 — 2026-10-11
 
 - If the connection to the background service drops while the app is running, the app now reconnects on its own, instead of failing One messages until it is restarted.
