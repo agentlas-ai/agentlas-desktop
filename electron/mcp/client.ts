@@ -234,6 +234,7 @@ import { parseMemoryEvents, type RawMemoryEvent } from "../memory/events";
 import { hasQueuedOwnerSteer } from "../store/invocation-steers";
 import { APP_BUILDER_SLUG } from "../architecture/manifest";
 import { memoryEmitterPromptFor } from "../system-agents/memory";
+import { roomMemberContext } from "../one/room-chat";
 import { automationProtocolFor, parseAutomations, automationRegistrationGateProblems } from "../automation-emitter";
 import { SURFACE_CLOSE_FENCE, SURFACE_OPEN_FENCE, parseSurfaces } from "../surface-emitter";
 import { applyFinalDisplayBackstop } from "./final-display-backstop";
@@ -3625,6 +3626,7 @@ ${effectiveUserPrompt}`;
         });
       }
       let oneMemberToolPolicy: { autoSelectTools: boolean; fixedServerIds: string[] } | null = null;
+      const oneRoomMemberRun = Boolean(req.oneMode && !req.agentAppMode && chat.id && roomMemberContext(chat.id));
       if (req.oneMode && !req.agentAppMode) {
         try {
           const row = getDb().prepare(
@@ -3633,7 +3635,8 @@ ${effectiveUserPrompt}`;
           if (row) {
             oneMemberToolPolicy = {
               autoSelectTools: row.auto_select_tools !== 0,
-              fixedServerIds: agent.mcpServers.slice(0, 100),
+              // A teammate working a hand-off from a group room also carries room_say (One Team, that one tool).
+              fixedServerIds: [...agent.mcpServers.slice(0, 100), ...(oneRoomMemberRun ? ["one-team"] : [])],
             };
           }
         } catch {
@@ -3700,6 +3703,7 @@ ${effectiveUserPrompt}`;
           recordRunEvent({ runId: req.runId!, chatId: chat.id, kind: "mcp_goal_tool_selection", payload: { ...receipt } });
         },
         ...(oneMemberToolPolicy ? oneMemberToolPolicy : {}),
+        ...(oneRoomMemberRun ? { roomMember: true as const } : {}),
         // A One group room is a team by definition: One Team rides every turn (goal passes too).
         ...(chat.originSurface === "one" && chat.seatKind === "group" && !oneMemberToolPolicy ? { groupRoom: true as const } : {}),
         // An installed plugin the agent looked up or opened mid-turn in this

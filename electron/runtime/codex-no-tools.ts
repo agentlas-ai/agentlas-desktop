@@ -70,6 +70,9 @@ export function validateCodexNoToolsResponse(body: string): string {
   const normalized = body.replace(/\r\n/g, "\n");
   if (!normalized.endsWith("\n\n")) throw new CodexNoToolsProviderError(failure("codex_no_tools_terminal_missing", "unavailable"));
   let terminal: Record<string, any> | null = null;
+  // The provider sometimes closes with `response.completed` carrying `output: []` while the answer already arrived in
+  // a validated `response.output_item.done` message frame (measured 2026-10-12: 2-4 of 10 runs, effort high + output schema).
+  const completedMessages: any[] = [];
   for (const block of normalized.split("\n\n").filter(value => value.trim())) {
     if (block.split("\n").every(line => !line || line.startsWith(":"))) continue;
     const lines = block.split("\n");
@@ -80,6 +83,7 @@ export function validateCodexNoToolsResponse(body: string): string {
       throw new Error("codex_no_tools_frame_unknown");
     }
     if (frame.item !== undefined) validateItem(frame.item);
+    if (frame.type === "response.output_item.done" && frame.item?.type === "message") completedMessages.push(frame.item);
     if (frame.part !== undefined) validatePart(frame.part);
     if (frame.response?.output !== undefined) {
       if (!Array.isArray(frame.response.output)) throw new Error("codex_no_tools_output_invalid");
@@ -94,8 +98,9 @@ export function validateCodexNoToolsResponse(body: string): string {
     }
   }
   if (!terminal) throw new CodexNoToolsProviderError(failure("codex_no_tools_terminal_missing", "unavailable"));
-  const text = terminal.output.filter((item: any) => item.type === "message")
+  const messageText = (items: any[]): string => items.filter((item: any) => item.type === "message")
     .flatMap((item: any) => item.content).filter((part: any) => part.type === "output_text").map((part: any) => part.text).join("\n").trim();
+  const text = messageText(terminal.output) || messageText(completedMessages);
   if (!text) throw new Error("codex_no_tools_output_empty");
   return text;
 }

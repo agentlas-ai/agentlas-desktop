@@ -50,7 +50,7 @@ export interface OneTeamCapabilityBinding extends OneTeamCaller {
   /** Exact Main invocation; optional for legacy capabilities, never supplied by the MCP child. */
   supervisorReplyRunId?: string;
   /** A Work task: only `tools` (Toolchain search/run/result) may be called through this capability. */
-  scope?: "toolchain-consumer";
+  scope?: "toolchain-consumer" | "room-member";
   tools?: readonly string[];
   capabilityId: string;
   personalSource?: { commandId: string; runId: string; occurrenceId: string };
@@ -152,6 +152,12 @@ async function handleOneTeamControlRequestUnchecked(request: Record<string, unkn
   if (typeof request.token !== "string" || !serverToken || request.token !== serverToken) throw new Error("one-team-capability-invalid");
   const binding = typeof request.capabilityId === "string" ? capabilities.get(request.capabilityId) : undefined;
   if (!binding) throw new Error("one-team-capability-invalid");
+  // A teammate working on a hand-off from a group room: room_say and nothing else, checked here, not in the child.
+  if (binding.scope === "room-member") {
+    if (request.operation !== "room" || !binding.tools?.includes("room_say")) throw new Error("one-team-room-member-scope");
+    return (await import("./room-chat")).roomChat().say(binding.chatId, { text: request.text, to: request.to, replyTo: request.replyTo });
+  }
+  if (request.operation === "room") throw new Error("one-team-room-member-scope");
   if(request.operation==='history') {
     const name=String(request.name??'');
     if(!(ONE_HISTORY_TOOL_NAMES as readonly string[]).includes(name)||binding.tools&&!binding.tools.includes(name))throw personalDataError('history_native_tool_not_granted');

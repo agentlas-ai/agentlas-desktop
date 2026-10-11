@@ -48,9 +48,10 @@ import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-s
 import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-mail/mcp-server";
 import { AGENT_MAIL_AUTO_RUN_MCP, createAgentMailCapability, isAgentMailAutoRunChat, removeAgentMailCapability } from "../agent-mail/control-server";
 import { agentMailToolsOfferedForRun } from "../agent-mail/client";
-import { ONE_TEAM_CONTROL_ENV, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
+import { ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
 import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
+import { roomMemberContext } from "../one/room-chat";
 import {
   isAuthenticComputerUseMcpLaunch,
   isCanonicalComputerUseMcpServer,
@@ -844,6 +845,10 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     ? (await import("../toolchains/consumer")).toolchainConsumerAllowedFor(callerChatId)
     : false;
 
+  // A teammate working on a hand-off from a group room gets one tool, room_say, and nothing else of One Team.
+  const roomMember = Boolean(callerChatId) && !toolchainConsumer && serializedServers.some((s) => s.catalogId === "one-team")
+    && !oneTeamDispatchAllowedFor(callerChatId) && roomMemberContext(callerChatId) !== null;
+
   try {
   for (const s of serializedServers) {
     let preparedRuntimeRoot: string | null = null;
@@ -876,7 +881,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     }
     if (s.catalogId === "one-team" && (!callerChatId || opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true
       || opts?.toolGate?.oneTeamReport === true
-      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
+      || (!oneTeamDispatchAllowedFor(callerChatId) && !toolchainConsumer && !roomMember) || !isAuthenticOneTeamMcpLaunch(s.command, s.args ?? []))) {
       // One's own conversation only (depth 1): a teammate chat, a session One
       // opened and dry runs never see the team dispatch tools. A Work task sees
       // the Toolchain consumer subset only (toolchainConsumer above).
@@ -1065,7 +1070,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
             { chatId: callerChatId ?? null, permission: opts?.toolGate?.permission ?? "read",
               ...(opts?.supervisorReplyRunId ? { supervisorReplyRunId: opts.supervisorReplyRunId } : {}),
               ...(toolchainConsumer ? { scope: "toolchain-consumer" as const,
-                tools: (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS } : {}) },
+                tools: (await import("../toolchains/consumer")).TOOLCHAIN_CONSUMER_TOOLS } : {}),
+              ...(roomMember ? { scope: "room-member" as const, tools: ROOM_MEMBER_TOOL_NAMES } : {}) },
             capabilityConfigKey,
           );
           oneTeamCapabilityCleanup.push(() => removeOneTeamCapability(capabilityConfigKey, capability.binding.capabilityId));

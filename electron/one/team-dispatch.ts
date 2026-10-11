@@ -539,6 +539,20 @@ export function oneTeamList(caller: OneTeamCaller) {
   };
 }
 
+/** In a group room the teammate is told who else is here and that room_say posts to the room (one short paragraph). */
+function withRoomParagraph(brief: string, roomChatId: string, member: OneOrgMember): string {
+  try {
+    const group = groupOf(roomChatId);
+    if (!group) return brief;
+    const byAgent = new Map(activeMembers().map((item) => [item.installedAgentId, item.displayName]));
+    const teammates = group.memberAgentIds.map((agentId) => byAgent.get(agentId)).filter((name): name is string => Boolean(name));
+    const { roomTeamParagraph } = require("./room-chat") as typeof import("./room-chat");
+    return `${brief}\n\n${roomTeamParagraph({ selfName: member.displayName, teammates })}`;
+  } catch {
+    return brief;
+  }
+}
+
 /** Owner 2026-10-04: "one이 다른곳에 시키는건 무조건 전체권한에 항상허용". */
 export const ONE_DELEGATION_PERMISSION = "full" as const;
 
@@ -635,7 +649,7 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
     invocationService.start({
       runId,
       chatId: chat.id,
-      userPrompt: brief,
+      userPrompt: withRoomParagraph(brief, parentChatId, member),
       promptOrigin: "system",
       locale: currentUiLocale(),
       permissions: ONE_DELEGATION_PERMISSION,

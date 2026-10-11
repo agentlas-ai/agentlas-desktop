@@ -4270,6 +4270,10 @@ function OneSessionsShell() {
       });
     }).catch(() => undefined).finally(() => { discussionMergeBusyRef.current = false; });
   }, [activeThreadChatId, discussionMessageMeta, messages]);
+  // 단톡방: 팀원 이름과 One 에 대한 @멘션을 강조한다. 방이 아니면 undefined 라 Markdown 이 그대로다.
+  const roomMentionNames = useMemo(() => activeTaskforce
+    ? ["One", ...(oneOrgState?.members ?? []).flatMap((member) => [member.displayName, member.nameEn].filter((name): name is string => Boolean(name)))]
+    : undefined, [activeTaskforce, oneOrgState?.members]);
   const visibleMessageIds = useMemo(() => new Set(visibleMessages.map((message) => message.id)), [visibleMessages]);
   const visibleMessagesById = useMemo(() => new Map(visibleMessages.map((message) => [message.id, message])), [visibleMessages]);
   // 활성 세션의 좌석 1급 조회(SEAT-SESSION-PLAN-v2) — 해체(T7) 여부가 읽기 전용
@@ -9074,7 +9078,7 @@ function OneSessionsShell() {
                                   const documentMark = readOneDocumentMark(displayedText);
                                   return documentMark
                                     ? <OneDocumentCard doc={documentMark} locale={appLocale} messageId={message.id} />
-                                    : <Markdown text={displayedText} messageId={message.intellectUiMessageId ?? message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} />;
+                                    : <Markdown text={displayedText} messageId={message.intellectUiMessageId ?? message.id} onOpenLinkedFile={openOneLinkedFile} chatId={activeThreadChatId} onUiFollowup={prepareUiFollowup} uiActionsDisabled={busy || activeSeatDissolved || activeDirectSessionUnavailable} mentionNames={message.role === "assistant" ? roomMentionNames : undefined} />;
                                 })())}
                               {message.role === "assistant" && !message.streaming && <LinkedLocalFiles text={message.text} chatId={activeThreadChatId} locale={appLocale} />}
                               </GoalResultReport>

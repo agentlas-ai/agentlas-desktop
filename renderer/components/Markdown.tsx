@@ -17,6 +17,7 @@ import { MathSpan } from "./MathSpan";
 import { useT } from "@/lib/i18n";
 import { splitStreamingSegments, type SegmentCache } from "@shared/streaming-segments";
 import { designOutputSurfaceProps } from "@/lib/design-output-tokens";
+import { splitMentions } from "@/lib/room-mentions";
 import { absoluteFileRefsWithSpaces, maskSpans } from "@/lib/local-file-refs";
 import { IntellectUI } from "./IntellectUI";
 import { IntellectUiActions, type IntellectUiFollowup } from "@/lib/intellect-ui-actions";
@@ -71,7 +72,10 @@ export const Markdown = memo(function Markdown({
   onUiFollowup,
   uiActionsDisabled,
   mediaBasePaths = NO_MEDIA_BASE_PATHS,
+  mentionNames,
 }: {
+  /** Names a group room knows; `@Name` for one of them is highlighted. Omitted outside a room. */
+  mentionNames?: readonly string[];
   /** Exact chat scope for links without an owning callback. Unbound links cannot select another task panel. */
   chatId?: string | null;
   text: string;
@@ -106,7 +110,7 @@ export const Markdown = memo(function Markdown({
       {...designOutputSurfaceProps("report")}
       style={{ fontSize: 14, lineHeight: 1.65, fontFamily: "var(--design-font-sans)", overflowWrap: "anywhere" }}
     >
-      {blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, openLinkedFile, resolvedMediaBasePaths))}
+      {renderWithMentions(mentionNames, () => blocks.map((b, i) => renderBlock(b, i, onOpenArtifact, t, onOpenMedia, openLinkedFile, resolvedMediaBasePaths)))}
     </div>
   );
   // 차트·시각물이 "이 대화"의 산출물 탭에 알리려면 대화 id 가 필요하다. 셸이 준 것을 넘긴다.
@@ -906,6 +910,27 @@ function CodeBlock({
   );
 }
 
+// 단톡방 @멘션 강조 — 블록 렌더는 이 호출 안에서 동기로 끝나므로, 그 동안만 이름 목록을 들고 있는다.
+let activeMentionNames: readonly string[] | undefined;
+function renderWithMentions<T>(names: readonly string[] | undefined, render: () => T): T {
+  const previous = activeMentionNames;
+  activeMentionNames = names;
+  try { return render(); } finally { activeMentionNames = previous; }
+}
+function highlightMentions(nodes: React.ReactNode[], names: readonly string[]): React.ReactNode[] {
+  const merged: React.ReactNode[] = [];
+  for (const node of nodes) {
+    const last = merged.length - 1;
+    if (typeof node === "string" && typeof merged[last] === "string") merged[last] = `${merged[last] as string}${node}`;
+    else merged.push(node);
+  }
+  return merged.flatMap<React.ReactNode>((node, index) => typeof node !== "string" ? [node] : splitMentions(node, names).map((part, partIndex) =>
+    typeof part === "string" ? part : (
+      <span key={`mention-${index}-${partIndex}`} data-one-mention="true"
+        style={{ color: "var(--accent)", fontWeight: 600, background: "var(--fill-1)", borderRadius: 4, padding: "0 3px" }}>{part.mention}</span>
+    )));
+}
+
 // ── 인라인 마크다운: code, bold, italic, link ─────────────────
 function inline(
   text: string,
@@ -1049,7 +1074,7 @@ function inline(
       remaining = remaining.slice(next);
     }
   }
-  return out;
+  return activeMentionNames?.length ? highlightMentions(out, activeMentionNames) : out;
 }
 
 /** 산출물 자동 패널 오픈용 — 답변 텍스트에서 첫 이미지 산출물을 찾아 MediaArtifact로 만든다.

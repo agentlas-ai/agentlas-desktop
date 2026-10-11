@@ -528,6 +528,11 @@ export async function autoSelectMcpTools(input: {
    * from renderer input; the control capability still enforces who may dispatch.
    */
   groupRoom?: boolean;
+  /**
+   * The run is a teammate working on a hand-off from a group room (Main-derived from the dispatch row). It carries
+   * One Team's room_say tool only: no router text is inlined, and the control capability offers nothing else.
+   */
+  roomMember?: boolean;
   /** Installed MCP ids declared by the bound One Team member when auto mode is off. */
   fixedServerIds?: string[];
   /** Graph-declared tool ids; canonical browser declarations suppress duplicate probing. */
@@ -590,7 +595,7 @@ export async function autoSelectMcpTools(input: {
   const conversationId = typeof input.conversationId === "string" ? input.conversationId.trim() : "";
   const structuralKeyFor = (fingerprint: string): string => conversationId
     ? [conversationId, input.toolMode ?? "auto", input.hubMode ?? "auto", runtimeCapabilities.nativeBrowser,
-      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
+      input.runtimeOutsideBrowser === true ? "outside-browser" : "", input.groupRoom === true ? "group-room" : "", input.roomMember === true ? "room-member" : "", fingerprint, [...(input.requiredToolCatalogIds ?? [])].sort().join(","), pluginFingerprint].join("\u0000")
     : "";
   const structuralKey = structuralKeyFor(installedFingerprint);
   const goalScopeKeyFor = (fingerprint: string): string => activeGoalScope && structuralKey
@@ -975,6 +980,13 @@ export async function autoSelectMcpTools(input: {
       routedPlugins.push({ slug: owner.slug, name: owner.name, reason: "baseline capability: group room", source: "baseline",
         hasSkills: owner.hasSkills, toolIds: [...owner.toolIds] });
     }
+  }
+
+  if (input.roomMember === true && !baselineIds.has(ONE_TEAM_BASELINE_TOOL_ID) && !blockedByHostBinding(ONE_TEAM_BASELINE_TOOL_ID)
+    && MCP_TOOL_CATALOG.some((entry) => entry.id === ONE_TEAM_BASELINE_TOOL_ID)) {
+    baselineIds.add(ONE_TEAM_BASELINE_TOOL_ID);
+    neededIds.add(ONE_TEAM_BASELINE_TOOL_ID);
+    pinnedReasons.set(ONE_TEAM_BASELINE_TOOL_ID, "baseline capability: a teammate working from a group room can post to the room (room_say)");
   }
 
   // Rank before the probe cap so a convenience pin can never crowd out a host binding or a

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.4 — 2026-10-12
+
+- Teammates in a group room talk to each other while they work: they hand off, ask, @mention a teammate or reply to a specific message, right in the room. One still runs the room and decides who works next; a message to a teammate who is busy reaches them mid-task, and a message to someone idle goes to One.
+- Strategy reflection and other no-tool judgments no longer drop a valid answer when the model sends it before an empty final frame.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.3 — 2026-10-12
 
 - Group rooms are run by One again. Your message goes to One, which sets the goal, plans and hands work to teammates; there are no discussion rounds, no round bar and no "thinking" bubbles. Teammates' hand-offs and reports appear in the room as they happen, without reopening it, and messages sit closer together.

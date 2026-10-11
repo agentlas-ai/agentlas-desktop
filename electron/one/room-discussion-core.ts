@@ -549,8 +549,9 @@ export interface RoomLogPort {
     text: string;
     kind: "post" | "comment";
     replyTo: string | null;
-    discussionId: string;
-    roundNo: number;
+    /** Null for a working-room message that belongs to no discussion. */
+    discussionId: string | null;
+    roundNo: number | null;
   }): RoomPost;
 }
 

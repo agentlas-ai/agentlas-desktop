@@ -1005,7 +1005,7 @@ export function appendChatMessage(
   // 앱이 쓴 안내(hostNotice 를 요청한 줄)는 작업 보고가 아니다. assistant 역할이면 안내 칸은 저장되지
   // 않지만, 여기서 "검증 전" 표를 달면 결속될 실행이 없어 영원히 대기로 남는다
   // (오너 녹화 2026-09-26: 목표 대화의 안내 말풍선마다 "Verification pending").
-  const goalId = role === "assistant" && !options?.hostNotice ? getChat(chatId)?.goalId : null;
+  const goalId = role === "assistant" && !options?.hostNotice && !options?.noGoalResult ? getChat(chatId)?.goalId : null;
   const goalResult: GoalResultPresentation | undefined = goalId ? { goalId, runId: null, status: "pending" } : undefined;
   let persistedImageUrls: string[] | undefined;
   const write = db.transaction(() => {
@@ -1043,6 +1043,8 @@ type ChatMessageAppendOptions = {
   hostNotice?: ChatHostNotice;
   /** Exact installed author from the producer, never inferred from stream order. */
   speakerAgentId?: string;
+  /** A teammate's working-room message is not the Goal's answer, so it never waits for a verification verdict. */
+  noGoalResult?: boolean;
 };
 
 /** Completion may be published only after its exact assistant body is durable. */
