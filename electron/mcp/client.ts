@@ -287,6 +287,7 @@ import { generateImage, removeGeneratedImageArtifact } from "../multimodal/image
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { multimodalImageSlot } from "../multimodal/slot";
 import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
+import { ownerVisiblePrompt } from "../one/owner-prompt";
 import { browserCaptureDir, screenCaptureDir } from "../media/capture-artifacts";
 import { userDataPath } from "../runtime-paths";
 import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
@@ -2468,8 +2469,8 @@ async function runMcpInvocationInContext(
        * 데스크탑 경로에서 이 인자를 넘기지 않아, 실제로 그것을 쓰는 곳은 모바일
        * 브리지 하나뿐이었다.
        */
-      persistedUserMessageId = appendChatMessage(chat.id, "user", req.userPrompt, req.images?.length ? { images: req.images } : undefined).id;
-      if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+      persistedUserMessageId = appendChatMessage(chat.id, "user", ownerVisiblePrompt(req), req.images?.length ? { images: req.images } : undefined).id;
+      if (priorHistory.length === 0) autoTitleFromFirstMessage(chat.id, ownerVisiblePrompt(req));
     }
     userMessagePersisted = true;
   };

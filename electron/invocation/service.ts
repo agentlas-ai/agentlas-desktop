@@ -150,6 +150,7 @@ import {
   getPendingInvocationAdmissionForChat,
   type InvocationAdmissionIdentity,
 } from "../store/invocation-admissions";
+import { ownerVisiblePrompt } from "../one/owner-prompt";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAutomationGoalExecutionOwnerMatches, nativeGoalStopOwnerMatches, snapshotAutomationGoalRunStops,
@@ -2814,7 +2815,7 @@ export class InvocationService {
        */
       projectionGoalId = freshGoalIdForChat(projectionGoalId, chat.id);
       try {
-        const objective = runReq.userPrompt.replace(/\s+/g, " ").trim();
+        const objective = ownerVisiblePrompt(runReq).replace(/\s+/g, " ").trim();
         const acceptanceCriteria = deriveGoalAcceptanceCriteria(objective, pickLocale(runReq), runReq.permissions);
         /*
          * Bind the chat BEFORE the ledger row is created: ensureGoalLongRun finds its root chat through
@@ -3840,7 +3841,7 @@ export class InvocationService {
             legacyLifecycle = await prepareLegacyGoalLifecycle({
               goalId: legacyGoalId, longRunId: stoppedGoalReactivation.runId,
               expectedVersion: stoppedGoalReactivation.version, expectedStatus: stoppedGoalReactivation.status,
-              source: { chatId: chat.id, messageId: sourceMessageId, role: "user", text: runReq.userPrompt },
+              source: { chatId: chat.id, messageId: sourceMessageId, role: "user", text: ownerVisiblePrompt(runReq) },
               runtimeSelection: legacyRuntime, signal: controller.signal,
             });
             reasonCode = legacyLifecycle?.reasonCode ?? "legacy-lifecycle-no-longer-legacy";
@@ -3915,7 +3916,7 @@ export class InvocationService {
               if (controller.signal.aborted || !current
                 || current.status !== stoppedGoalReactivation!.status || current.version !== stoppedGoalReactivation!.version
                 || getChat(chat.id)?.goalId !== current.goalId || current.rootChatId !== chat.id
-                || source?.chat_id !== chat.id || source.role !== "user" || source.text !== runReq.userPrompt) return null;
+                || source?.chat_id !== chat.id || source.role !== "user" || source.text !== ownerVisiblePrompt(runReq)) return null;
               const revision = getChatGoalRevision(current.goalId);
               const revisionBinding = getLongRunGoalRevisionBinding(current.id);
               stall.reason = "revision";
@@ -4035,14 +4036,14 @@ export class InvocationService {
         // with Desktop's own resolver; a Goal-bound message goes to Main (which owns Goal custody), or leaves a durable marker
         // when Main is away. Once the chat holds a live Goal, ownerTurnStartsOnDesktop routes its next turn to Desktop.
         if (record.ownerLease?.ownerKind === "daemon") {
-          void classifyAndHandGoalIntakeToMain({ runId, chatId: chat.id, sourceMessageId, userPrompt: runReq.userPrompt,
+          void classifyAndHandGoalIntakeToMain({ runId, chatId: chat.id, sourceMessageId, userPrompt: ownerVisiblePrompt(runReq),
             permission: runReq.permissions ?? "read", signal: controller.signal,
             attachmentOnly: attachmentDescriptors.length > 0 && !promptWithoutValidChatFileMarkers }).catch(() => undefined);
           return;
         }
         try {
           const prepared = await prepareInvocationAutomaticGoal({ runId, chatId: chat.id, sourceMessageId,
-            userPrompt: runReq.userPrompt, permission: runReq.permissions ?? "read", signal: controller.signal,
+            userPrompt: ownerVisiblePrompt(runReq), permission: runReq.permissions ?? "read", signal: controller.signal,
             attachmentOnly: attachmentDescriptors.length > 0 && !promptWithoutValidChatFileMarkers });
           if (controller.signal.aborted) {
             if (prepared.kind === "admitted") {

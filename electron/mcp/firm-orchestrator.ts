@@ -1,5 +1,6 @@
 import { toolObservationDigest } from "../automation-progress-guard";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { ownerVisiblePrompt } from "../one/owner-prompt";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
 import { withoutMcpTransportEnv } from "../runtime/runner";
@@ -1609,8 +1610,8 @@ export async function runFirmInvocation(p: FirmRunParams): Promise<FirmRunResult
       appendChatMessage(chat.id, "system", req.userPrompt);
     } else {
       // 첨부도 그 사람의 턴이다 — client.ts 의 같은 자리 주석 참고.
-      appendChatMessage(chat.id, "user", req.userPrompt, req.images?.length ? { images: req.images } : undefined);
-      if (history.length === 0) autoTitleFromFirstMessage(chat.id, req.userPrompt);
+      appendChatMessage(chat.id, "user", ownerVisiblePrompt(req), req.images?.length ? { images: req.images } : undefined);
+      if (history.length === 0) autoTitleFromFirstMessage(chat.id, ownerVisiblePrompt(req));
     }
   }
 

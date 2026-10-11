@@ -6,6 +6,7 @@ import { APP_CONTROL_ARGUMENT_SCHEMAS, APP_UI_PREFERENCE_VALUE_SCHEMAS } from ".
 import type { AppControlRendererOperation, AppControlRendererReply } from "../../shared/app-control";
 import { appUiPreferenceDefinitions, isAppUiPreferenceName, normalizeAppUiPreference } from "../../shared/app-ui-preferences";
 import { decodeAppControlArguments } from "./argument-codec";
+import { remoteAppControlCall, remoteAppControlOperations } from "./daemon-remote";
 
 // One's app-control route: find an operation, then call it as the owner's own screens would. The catalog is generated
 // from the preload bridges; ./policy decides what One may call and on which turns.
@@ -133,10 +134,24 @@ function queryTerms(query: string): string[] {
   return [...terms];
 }
 
-export function appControlOperations(input: { query?: unknown; area?: unknown; operation?: unknown; limit?: unknown; offset?: unknown; include_restricted?: unknown }): {
+type OperationsInput = { query?: unknown; area?: unknown; operation?: unknown; limit?: unknown; offset?: unknown; include_restricted?: unknown };
+export type AppControlOperationsResult = {
   science_installed: boolean; areas?: Array<{ area: string; operations: number; available: number }>; operations?: Array<Record<string, unknown>>;
   total: number; offset?: number; next_offset?: number | null; restricted?: Array<Record<string, unknown>>;
-} {
+  /** Present only when this process has no window and the window process could not be reached. */
+  app_window?: { available: false; code: string; message: string };
+};
+
+/** Main owns the IPC handlers and the windows. A process without a configured host (the background service that runs
+ * One/Hope turns) cannot run an operation itself: it asks Main over the device bridge and gets Main's own answer. */
+export function appControlOperations(input: OperationsInput): AppControlOperationsResult | Promise<AppControlOperationsResult> {
+  return host ? appControlOperationsLocal(input) : remoteAppControlOperations(input, appControlOperationsLocal);
+}
+export async function appControlCall(caller: AppControlCaller, input: { operation?: unknown; args?: unknown }): Promise<Record<string, unknown>> {
+  return host ? appControlCallLocal(caller, input) : remoteAppControlCall(caller, input);
+}
+
+export function appControlOperationsLocal(input: OperationsInput): AppControlOperationsResult {
   const all = operations();
   const science = scienceInstalled();
   let area = typeof input.area === "string" ? input.area.trim() : "";
@@ -260,7 +275,7 @@ function clipResult(value: unknown): { result: unknown; truncated?: true } {
   return { result: `${text.slice(0, RESULT_LIMIT)}…`, truncated: true };
 }
 
-export async function appControlCall(caller: AppControlCaller, input: { operation?: unknown; args?: unknown }): Promise<Record<string, unknown>> {
+export async function appControlCallLocal(caller: AppControlCaller, input: { operation?: unknown; args?: unknown }): Promise<Record<string, unknown>> {
   const path = typeof input.operation === "string" ? input.operation.trim() : "";
   const named = input.args === undefined || input.args === null ? {}
     : typeof input.args === "object" && !Array.isArray(input.args) ? input.args as Record<string, unknown> : null;

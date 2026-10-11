@@ -8,6 +8,8 @@ const HOST_STATUS_KINDS: readonly HostStatusKind[] = [
 /** Host status lines that need nothing from the owner — the screen folds them into the turn's quiet line. */
 const QUIET_HOST_STATUSES: ReadonlySet<HostStatusKind> = new Set([
   "effect-checking", "effect-continuing", "wait-registered", "wait-not-scheduled", "cycle-verified", "goal-resuming",
+  // Retry/pause lines the app resolves on its own: nothing for the owner to do, so never an ordinary chat bubble.
+  "effect-retrying", "goal-paused",
 ]);
 
 export function isQuietHostStatus(notice: ChatHostNotice | undefined): notice is Extract<ChatHostNotice, { purpose: "host-status" }> {

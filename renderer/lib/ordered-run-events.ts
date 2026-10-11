@@ -20,6 +20,9 @@ interface Options {
 /** One gate before every projection and legacy effect; reducer-only dedupe is too late. */
 export function subscribeOrderedRunEvents(options: Options): () => void {
   let disposed = false, cursor = 0, querying = false, cancelFlush: (() => void) | null = null;
+  // The host says this run belongs to another chat. That answer never changes for this (run, chat) pair.
+  let refused = false;
+  let poll: ReturnType<typeof setInterval> | undefined;
   let projectionRevision = 0;
   const pending = new Map<number, McpInvocationEvent>();
   const sizes = new Map<number, number>();
@@ -69,7 +72,7 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
   // Replay owns only its request, never delivery of an already available live prefix.
   const armFlush = () => { if (!disposed && pending.has(cursor + 1) && !cancelFlush) cancelFlush = schedule(flush); };
   const query = async (forceHydration = false) => {
-    if (disposed || querying) return;
+    if (disposed || querying || refused) return;
     querying = true;
     const queryCursor = cursor, queryRevision = projectionRevision;
     const isCurrent = () => !disposed && cursor === queryCursor && projectionRevision === queryRevision;
@@ -91,7 +94,14 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
           pending.delete(ordinal); pendingBytes -= sizes.get(ordinal) ?? 0; sizes.delete(ordinal);
         }
       }
-    } catch { /* Keep cursor and pending state. The bounded poll retries; Stop never waits here. */ }
+    } catch (error) {
+      // A permanent refusal must not be retried every second for as long as the screen stays open (81 calls in 80 s,
+      // 2026-10-12 1.3.4). Anything else keeps the cursor and pending state and the poll retries; Stop never waits here.
+      if (/run-event-replay-owner-mismatch/.test(String((error as { message?: unknown } | null)?.message ?? error))) {
+        refused = true;
+        if (poll !== undefined) clearInterval(poll);
+      }
+    }
     finally { querying = false; armFlush(); }
   };
   const stopListening = options.listen(event => {
@@ -104,6 +114,7 @@ export function subscribeOrderedRunEvents(options: Options): () => void {
   });
   // Subscribe first, then catch the dispatch/attach IPC race through the same ordered gate.
   void query();
-  const poll = setInterval(() => { void query(); }, options.pollMs ?? 1000);
-  return () => { if (disposed) return; disposed = true; stopListening(); clearInterval(poll); cancelFlush?.(); pending.clear(); sizes.clear(); pendingBytes = 0; };
+  poll = setInterval(() => { void query(); }, options.pollMs ?? 1000);
+  if (refused) clearInterval(poll);
+  return () => { if (disposed) return; disposed = true; stopListening(); if (poll !== undefined) clearInterval(poll); cancelFlush?.(); pending.clear(); sizes.clear(); pendingBytes = 0; };
 }

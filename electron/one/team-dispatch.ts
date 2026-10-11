@@ -423,7 +423,9 @@ function finalizeDispatch(id: string, receiptStatus: string, runId: string): voi
   const settled = row(id)!;
   retainDispatchResult(settled);
   const pending = waiters.get(id);
-  if (pending && pending.size > 0) {
+  let parentActive = false;
+  try { parentActive = runtime().invocationService.activeChatIds().includes(settled.parent_chat_id); } catch { /* treat as idle */ }
+  if (pending && pending.size > 0 && parentActive) {
     // One is waiting on one_team_session_status: the result goes back as that
     // tool's answer, so no second report turn is started.
     waiters.delete(id);
@@ -433,6 +435,8 @@ function finalizeDispatch(id: string, receiptStatus: string, runId: string): voi
     appendParentNotice(settled, "result");
     return;
   }
+  // A waiter whose turn already ended (cancelled run) must not swallow the wake-up.
+  if (pending) waiters.delete(id);
   appendParentNotice(settled, "result");
   reportToOne(settled);
 }
@@ -680,7 +684,7 @@ export function oneTeamStartSession(caller: OneTeamCaller, input: { member?: unk
         ? `Handed to teammate ${created.member_name} in a new session. The result will come back to this conversation when it is done.`
         : `Handed to teammate ${created.member_name} in their earlier session. The result will come back to this conversation when it is done.`,
     ),
-    note: "Started as background work in this conversation. The teammate's observed progress and result appear here; never show session_id or repeat their result verbatim. Call one_team_session_status with wait_seconds to get the result; if you end your turn first, it is reported back automatically when it finishes.",
+    note: "Started as background work in this conversation. The teammate's observed progress and result appear here; never show session_id or repeat their result verbatim. Do not poll: end your turn when you have nothing else to do; the result wakes this conversation automatically when it finishes.",
   };
 }
 
@@ -720,18 +724,44 @@ export function oneTeamSteer(caller: OneTeamCaller, input: { sessionId?: unknown
   return { ...view(continued), queued: result.queued, note: result.queued ? "Queued after the teammate's current step." : "Sent; the teammate is working on it." };
 }
 
+/** Reads of a still-running session allowed per capability (= one One run) before One must end its turn. */
+export const MAX_RUNNING_STATUS_READS_PER_SESSION = 2;
+export const MAX_RUNNING_STATUS_READS_PER_RUN = 6;
+const runningReads = new WeakMap<object, { total: number; perSession: Map<string, number> }>();
+
+function waitingNext(dispatch: OneDispatchRow) {
+  return {
+    next: "end_turn" as const,
+    note: ko()
+      ? `${dispatch.member_name} 님이 아직 작업 중이에요. 끝나면 결과와 함께 이 대화가 다시 깨어나니, 달리 할 일이 없으면 지금 턴을 끝내세요.`
+      : `${dispatch.member_name} is still working. You will be woken with the result when it finishes; end your turn now if you have nothing else to do.`,
+  };
+}
+
 export async function oneTeamSessionStatus(caller: OneTeamCaller, input: { sessionId?: unknown; waitSeconds?: unknown }) {
   const parentChatId = assertCaller(caller.chatId);
   recoverOneTeamDispatches();
   const dispatch = rowForSession(typeof input.sessionId === "string" ? input.sessionId : "", parentChatId);
   const waitSeconds = Math.max(0, Math.min(180, Math.floor(Number(input.waitSeconds) || 0)));
+  if (dispatch.status === "running") {
+    // Polling a running teammate inside one turn re-sends the whole context every
+    // call (52 reads = 17M tokens). Completion already wakes One, so bound it.
+    let reads = runningReads.get(caller);
+    if (!reads) { reads = { total: 0, perSession: new Map() }; runningReads.set(caller, reads); }
+    const same = reads.perSession.get(dispatch.id) ?? 0;
+    if (same >= MAX_RUNNING_STATUS_READS_PER_SESSION || reads.total >= MAX_RUNNING_STATUS_READS_PER_RUN) {
+      throw new Error(`one-team-wait-for-wake: ${waitingNext(dispatch).note} (next=end_turn)`);
+    }
+    reads.perSession.set(dispatch.id, same + 1);
+    reads.total += 1;
+  }
   if (dispatch.status !== "running" || waitSeconds === 0) {
     // One is reading the settled result itself: a queued report of it would repeat it.
     if (dispatch.status !== "running") withdrawQueuedOneTeamReport(dispatch.id);
     if (dispatch.status !== "running" && !dispatch.reported_at) {
       getDb().prepare("UPDATE one_team_dispatches SET reported_at = ? WHERE id = ?").run(new Date().toISOString(), dispatch.id);
     }
-    return view(dispatch);
+    return dispatch.status === "running" ? { ...view(dispatch), ...waitingNext(dispatch) } : view(dispatch);
   }
   installSettleListener();
   const settled = await new Promise<OneDispatchRow | null>((resolve) => {
@@ -746,7 +776,8 @@ export async function oneTeamSessionStatus(caller: OneTeamCaller, input: { sessi
     waiters.set(dispatch.id, set);
   });
   if (settled) return view(settled);
-  return { ...view(row(dispatch.id) ?? dispatch), note: "Still working. You can end your turn: the result is reported back to this conversation when it finishes." };
+  const latest = row(dispatch.id) ?? dispatch;
+  return { ...view(latest), ...(latest.status === "running" ? waitingNext(latest) : {}) };
 }
 
 // ── Roster: create a teammate / invite one into this group chat ─────────────

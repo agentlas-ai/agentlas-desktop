@@ -468,7 +468,7 @@ function geminiItems(roots: CapabilityRoots): Draft[] {
   const r = { ...roots, geminiDir: roots.geminiDir ?? path.join(roots.home, ".gemini") };
   const out: Draft[] = [];
   const memory = path.join(r.geminiDir, "GEMINI.md");
-  if (isFile(memory)) out.push({ key: memory, kind: "memory", source: "gemini", name: "GEMINI.md", description: "Antigravity personal instructions", path: memory, applies: false });
+  if (isFile(memory)) out.push({ key: memory, kind: "memory", source: "gemini", name: "GEMINI.md", description: "Antigravity personal instructions", path: memory, applies: true });
   const config = path.join(r.geminiDir, "config");
   for (const file of skillFilesUnder(path.join(config, "skills"))) { const draft = skillDraft("gemini", file, true); if (draft) out.push(draft); }
   const plugins = path.join(config, "plugins");
@@ -477,13 +477,13 @@ function geminiItems(roots: CapabilityRoots): Draft[] {
     if (name.startsWith(".") || !isDir(dir) || isScratchPath(dir)) continue;
     const manifest = readJson(path.join(dir, "plugin.json")) as Record<string, unknown> | null;
     out.push({ key: dir, canon: name.toLowerCase(), kind: "plugin", source: "gemini", name, title: str(manifest?.name) || name,
-      description: oneLine(str(manifest?.description)), path: dir, applies: false });
+      description: oneLine(str(manifest?.description)), path: dir, applies: true });
   }
   const hooksFile = path.join(config, "hooks.json");
   const hooks = readJson(hooksFile);
   if (hooks && typeof hooks === "object" && !Array.isArray(hooks)) {
     for (const [name, def] of Object.entries(hooks as Record<string, unknown>)) {
-      if (def && typeof def === "object") out.push({ key: `${hooksFile}:${name}`, kind: "hook", source: "gemini", name, description: "Antigravity hook set", path: `${hooksFile}#${name}`, applies: false });
+      if (def && typeof def === "object") out.push({ key: `${hooksFile}:${name}`, kind: "hook", source: "gemini", name, description: "Antigravity hook set", path: `${hooksFile}#${name}`, applies: true });
     }
   }
   const mcpFile = path.join(config, "mcp_config.json");
@@ -491,7 +491,7 @@ function geminiItems(roots: CapabilityRoots): Draft[] {
   for (const [name, def] of Object.entries(mcp?.mcpServers ?? {})) {
     if (name === "agentlas-browser") continue; // written and removed by the app itself for the run that needs it
     const transport = def && typeof def === "object" && ("url" in def || "serverUrl" in def) ? "url" : "stdio";
-    out.push({ key: `gemini-mcp:${name}`, kind: "connector", source: "gemini", name, description: `MCP server (${transport})`, path: `${mcpFile}#mcpServers.${name}`, applies: false });
+    out.push({ key: `gemini-mcp:${name}`, kind: "connector", source: "gemini", name, description: `MCP server (${transport})`, path: `${mcpFile}#mcpServers.${name}`, applies: true });
   }
   return out;
 }

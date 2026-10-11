@@ -58,7 +58,7 @@ export function staleQaGoalMarker(text: string | null | undefined): string | nul
  * `status` is the durable host-status marker: a resumed goal folds into the resumed run's work line
  * (`runId` = that invocation); a closed goal or a failed attempt that will be retried stays prominent.
  */
-function notify(run: LongRunRecord, status: "goal-resuming" | "goal-closed" | "effect-retrying", ko: string, en: string, runId: string = run.id): void {
+function notify(run: LongRunRecord, status: "goal-closed" | "effect-retrying", ko: string, en: string, runId: string = run.id): void {
   if (!run.rootChatId) return;
   try {
     appendChatMessage(run.rootChatId, "assistant", currentUiLocale() === "ko" ? ko : en,
@@ -67,6 +67,9 @@ function notify(run: LongRunRecord, status: "goal-resuming" | "goal-closed" | "e
     console.warn("[blocked-goal-sweep] chat notice failed:", error);
   }
 }
+
+/** Typed cause thrown by transitionLongRun when another live owner holds the run (store/long-runs.ts). */
+export const RESUME_LOST_TO_LIVE_OWNER_CODE = "long_run_transition_owner_conflict";
 
 function errorCode(error: unknown, fallback: string): string {
   return error instanceof Error && /^[a-z_]+(?::[a-z_0-9-]+)?$/.test(error.message) ? error.message : fallback;
@@ -116,16 +119,7 @@ export function projectHeldByAnotherTurn(run: LongRunRecord, dispatcher: EffectO
   return dispatcher.activeChatIds().some((chatId) => chatId !== run.rootChatId && getChat(chatId)?.projectId === projectId);
 }
 
-/** The previous sweep resume of this run was for the same blocked cause: the person was already told. */
-function alreadyToldForCause(run: LongRunRecord): boolean {
-  const row = getDb().prepare(`SELECT json_extract(payload_json, '$.fromReason') AS reason FROM long_run_events
-    WHERE run_id = ? AND kind = ? AND json_extract(payload_json, '$.action') = 'resumed' ORDER BY seq DESC LIMIT 1`)
-    .get(run.id, BLOCKED_GOAL_SWEEP_EVENT_KIND) as { reason: string | null } | undefined;
-  return Boolean(row && run.blockedReason && row.reason === run.blockedReason);
-}
-
 function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, trigger: string): BlockedGoalSweepResult {
-  const toldBefore = alreadyToldForCause(run);
   const chatId = run.rootChatId!;
   // Every resume path (sweep, Alive's continue, a released project) asks the one wake policy: the owner first,
   // then the daily barrier. A reached barrier parks the Goal until its window frees, visibly.
@@ -165,6 +159,10 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
       })();
     } catch (error) {
       const code = errorCode(error, "blocked_goal_resume_unavailable");
+      // The owner's own turn (or another live holder) owns the run right now: losing to it is not a failure.
+      // No retry slot, no notice, no log line; the next periodic pass looks again once that turn has settled.
+      // Measured 2026-10-12 group room 8f3e09ee: this was scheduled as a retry and announced as "could not start a model".
+      if (code === RESUME_LOST_TO_LIVE_OWNER_CODE) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "chat_busy" };
       if (code !== "blocked_goal_sweep_state_changed") logSweepFailureCause("resume-prepare", run.id, code, error);
       const latest = getLongRun(run.id);
       if (!latest || code === "blocked_goal_sweep_state_changed" || !["blocked", "paused", "queued", "running", "waiting_tool"].includes(latest.status)) {
@@ -181,10 +179,8 @@ function resume(run: LongRunRecord, dispatcher: EffectObservationDispatcher, tri
     }
   }
   if (!prepared) return { runId: run.id, fromReason: run.blockedReason, action: "deferred", detail: "blocked_goal_resume_unavailable" };
-  // Once per blocked cause: a repeat of the same stop is not news to the person.
-  if (!toldBefore) notify(run, "goal-resuming", "멈춰 있던 목표를 원래 권한과 예산 그대로 다시 이어갑니다. 결과는 끝나면 다시 검증합니다.",
-    "Continuing the stopped goal with its original permissions and budget. The result is verified again when it finishes.",
-    prepared.request.runId ?? run.id);
+  // No chat line for a resume: the resumed run draws its own work line, and the ledger event above is the record.
+  // (2026-10-12: the line landed as noise right after the owner's one-line instruction.)
   try {
     dispatcher.start(prepared.request, undefined, undefined, undefined, "goal-continuation");
     confirmDesktopLongRunResumeDispatched(prepared.queuedId);

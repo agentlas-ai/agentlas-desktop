@@ -11,6 +11,9 @@ import { randomBytes } from "node:crypto";
 export const DEVICE_BRIDGE_VERSION = "agentlas.device-bridge.v1";
 export const DEVICE_STATE_VERSION = "agentlas.device-state.v1";
 export const DEVICE_BRIDGE_DEFAULT_DEADLINE_MS = 15000;
+/** The native channel closes for good on a request that outlives 10 s, so app-control stays well under it. */
+export const APP_CONTROL_DEADLINE_MS = 8000;
+export const APP_CONTROL_MAIN_BUDGET_MS = 7000;
 /** Shown to the model when a computer-use tool call cannot run because the window process is not there. */
 export const DEVICE_BRIDGE_UNAVAILABLE_MESSAGE = "화면 조작은 Agentlas 앱 창이 켜져 있을 때만 가능합니다";
 export const DEVICE_SESSION_LOCKED_MESSAGE = "화면이 잠겨 있거나 절전 중이라 지금은 화면 조작을 할 수 없습니다";
@@ -23,7 +26,7 @@ export class DeviceBridgeError extends Error {
 }
 export type DeviceSession = "awake" | "locked" | "sleeping" | "unknown";
 export interface DeviceStateSnapshot { session: DeviceSession; idleSeconds: number | null; observedAt: string }
-export type DeviceOp = "prepareOsExecution" | "disposeOsExecution" | "idle" | "releaseChatSessions" | "forwardGoalIntake";
+export type DeviceOp = "prepareOsExecution" | "disposeOsExecution" | "idle" | "releaseChatSessions" | "forwardGoalIntake" | "appControl";
 export interface DeviceFrame { version: typeof DEVICE_BRIDGE_VERSION; requestId: string; op: DeviceOp; deadlineMs: number; payload: Record<string, unknown> }
 export interface PreparedOsExecutionWire { capability: { version: "agentlas.one-os-execution.v1"; executionId: string; token: string } }
 
@@ -131,6 +134,14 @@ export function createDaemonDeviceBridge(options: { now?: () => number; newReque
       const reply = await ask("forwardGoalIntake", { runId: input.runId, chatId: input.chatId, sourceMessageId: input.sourceMessageId, permission: input.permission }, 8000);
       if (reply.status !== "accepted" && reply.status !== "duplicate") throw new DeviceBridgeError("device_bridge_refused", "goal_intake_reply_invalid");
       return { status: reply.status };
+    },
+    /** One's app-control (one_app_operations / one_app_call) belongs to Main: it owns the IPC handlers and the owner's windows.
+     * Main answers with an outcome, never an exception, so an app-control error keeps its code and text. */
+    async appControl(input: { kind: "operations" | "call"; ownerTurn: boolean; input: Record<string, unknown> }): Promise<{ outcome: "value"; value: unknown } | { outcome: "error"; code: string; message: string }> {
+      const reply = await ask("appControl", { kind: input.kind, ownerTurn: input.ownerTurn, input: input.input }, APP_CONTROL_DEADLINE_MS);
+      if (reply.outcome === "value") return { outcome: "value", value: reply.value };
+      if (reply.outcome === "error" && typeof reply.code === "string" && typeof reply.message === "string") return { outcome: "error", code: reply.code, message: reply.message };
+      throw new DeviceBridgeError("device_bridge_refused", "app_control_reply_invalid");
     },
     failPending: failAll,
   };

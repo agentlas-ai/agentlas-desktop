@@ -9,7 +9,7 @@
  *  - idle: lock state and idle seconds.
  * It also forwards powerMonitor lock-screen / unlock-screen / suspend / resume to the service as a device-state push. */
 import {
-  DEVICE_BRIDGE_VERSION, DEVICE_STATE_VERSION, type DeviceOp, type DeviceSession,
+  APP_CONTROL_MAIN_BUDGET_MS, DEVICE_BRIDGE_VERSION, DEVICE_STATE_VERSION, type DeviceOp, type DeviceSession,
 } from "../daemon/device-bridge";
 
 type Channel = object & { dispatch(method: string, params: unknown): Promise<unknown>; onClose(listener: () => void): () => void };
@@ -23,6 +23,8 @@ export interface DeviceBridgeMainPorts {
   releaseChat?(chatId: string, deadlineMs: number): Promise<{ busy: boolean; released: number; pending: number }>;
   /** Goal intake handed over by the service (2026-10-11): validate against durable rows and answer at once; the work runs in the background. */
   forwardGoalIntake?(input: { runId: string; chatId: string; sourceMessageId: string; permission: "read" | "write" | "full" }): { ok: true; status: "accepted" | "duplicate" } | { ok: false; error: string };
+  /** One's app-control, run by Main exactly as for a Main-hosted turn (same policy, same owner-turn rule, same handlers). */
+  appControl?(input: { kind: "operations" | "call"; ownerTurn: boolean; input: Record<string, unknown> }): Promise<{ outcome: "value"; value: unknown } | { outcome: "error"; code: string; message: string }>;
   /** Run every intake the service could not hand over while this process was away. Called on each successful attach. */
   drainGoalIntake?(): void;
   session(): DeviceSession;
@@ -90,6 +92,16 @@ export function createDeviceBridgeMain(ports: DeviceBridgeMainPorts) {
           || !["read", "write", "full"].includes(String(payload.permission)) || !ports.forwardGoalIntake) return { ok: false, error: "device_bridge_refused" };
         return ports.forwardGoalIntake({ runId: payload.runId, chatId: payload.chatId, sourceMessageId: payload.sourceMessageId, permission: payload.permission as "read" | "write" | "full" });
       }
+      if (op === "appControl") {
+        if (!exactKeys(payload, ["kind", "ownerTurn", "input"]) || !["operations", "call"].includes(String(payload.kind)) || typeof payload.ownerTurn !== "boolean"
+          || !payload.input || typeof payload.input !== "object" || Array.isArray(payload.input) || JSON.stringify(payload.input).length > 65536 || !ports.appControl) return { ok: false, error: "device_bridge_refused" };
+        // Main answers within the channel's limit; a longer call is reported, not left to close the channel.
+        const answer = await Promise.race([ports.appControl({ kind: payload.kind as "operations" | "call", ownerTurn: payload.ownerTurn, input: payload.input as Record<string, unknown> }),
+          new Promise<{ outcome: "error"; code: string; message: string }>(resolve => { const t = setTimeout(() => resolve({ outcome: "error", code: "operation-timeout",
+            message: "Agentlas did not finish this within the time allowed for a background request; it may still be running, so read its state before repeating it." }), APP_CONTROL_MAIN_BUDGET_MS); t.unref?.(); })]);
+        if (answer.outcome === "value" && JSON.stringify(answer.value ?? null).length > 600_000) return { ok: true, outcome: "error", code: "result-too-large", message: "The result is too large; narrow the query." };
+        return { ok: true, ...answer };
+      }
       if (op === "disposeOsExecution") {
         if (!exactKeys(payload, ["executionId"]) || !id(payload.executionId)) return { ok: false, error: "device_bridge_refused" };
         const entry = executions.get(payload.executionId);
@@ -134,6 +146,17 @@ export async function deviceBridgeMain(): Promise<ReturnType<typeof createDevice
     releaseChat: (chatId, deadlineMs) => releaseLocalChatSessions(chatId, deadlineMs),
     forwardGoalIntake: input => goalIntake.acceptForwardedGoalIntake(input),
     drainGoalIntake: () => goalIntake.drainPendingGoalIntakes(),
+    appControl: async input => {
+      const service = await import("../app-control/service");
+      try {
+        return { outcome: "value", value: input.kind === "operations" ? service.appControlOperationsLocal(input.input)
+          : await service.appControlCallLocal({ ownerTurn: input.ownerTurn }, input.input) };
+      } catch (error) {
+        const text = error instanceof Error ? error.message : String(error);
+        const code = (error as { code?: unknown } | null)?.code;
+        return { outcome: "error", code: typeof code === "string" ? code : "operation-failed", message: text.slice(0, 2000) };
+      }
+    },
     session: () => { try { const state = power.getSystemIdleState(1); return state === "locked" ? "locked" : state === "unknown" ? "unknown" : "awake"; } catch { return "unknown"; } },
     idleSeconds: () => { try { return power.getSystemIdleTime(); } catch { return null; } },
     subscribePower: handler => {

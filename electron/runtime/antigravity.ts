@@ -40,6 +40,8 @@ import {
   renderConversationContext,
 } from "./continuity";
 import { tStatus } from "./status-i18n";
+import { selectionFor } from "../capabilities/one-capabilities";
+import { withAgyProductHome } from "./antigravity-personal-context";
 import { abortReasonError } from "./abort-reason";
 import { agentRunCwd, detachedSpawnOpts, killCliTree, probeCliVersion, spawnCli, trackRunChild, standardAntigravityBinDirs, windowsCliCommandBudget } from "./exec";
 import { stageCliImageAttachments } from "./image-attachments";
@@ -2068,8 +2070,14 @@ async function runPreparedAntigravity(
     req.model, spawnPrompt, agyReadDirs, agyToolsAllowed ? req.permission : undefined,
     req.outputSchema?.schema, agyResumeId ?? undefined, browserProject?.projectId,
   );
+  // agy reads the person's GEMINI.md, skills, plugins, hooks and MCP servers from HOME; a product run gets a mirrored HOME
+  // without them (only One gets back what the person switched on). Must run after the run's MCP servers were reconciled.
+  const agyProductEnv = (env: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+    try { return withAgyProductHome(env, selectionFor(runReq.agentId), agyToolsAllowed ? runReq.mcpConfigPath : undefined); }
+    catch { return env; }
+  };
   const oneShotSpawnEnv = (): NodeJS.ProcessEnv => {
-    const env: NodeJS.ProcessEnv = { ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" };
+    const env: NodeJS.ProcessEnv = agyProductEnv({ ...(req.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" });
     if (!env.TERM || env.TERM === "dumb") env.TERM = "xterm-256color";
     if (!env.COLORTERM) env.COLORTERM = "truecolor";
     return env;
@@ -2231,7 +2239,7 @@ async function runPreparedAntigravity(
             bin,
             args: residentArgs,
             cwd: agyWorkDir,
-            env: { ...(runReq.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" },
+            env: agyProductEnv({ ...(runReq.env ?? process.env), GEMINI_CLI_TRUST_WORKSPACE: "true" }),
             onPersistentMcpScopeClose: (key, owner) => { revokeMcpProxyResidentKey(key, owner); },
           }),
         );
