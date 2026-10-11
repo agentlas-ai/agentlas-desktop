@@ -8,13 +8,14 @@ import { createCoalescedRefresh } from "@/lib/one-refresh-coordinator";
 import { useT } from "@/lib/i18n";
 import { Markdown, StreamingMarkdown, type LinkedFileArtifact } from "@/components/Markdown";
 import { mapIntellectUiProse } from "@shared/intellect-ui";
-import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconMoreHorizontal, IconExpand, IconLayers, IconPanelRight, IconPlus, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
+import { IconArrowUp, IconBrain, IconCheck, IconChevronRight, IconClose, IconMoreHorizontal, IconExpand, IconLayers, IconPanelRight, IconPlus, IconSidebar, IconRefresh, IconSettings, IconSparkles } from "@/components/Icon";
 import type { OneSupervisorSnapshot, SupervisorCommandReceipt, SupervisorTask, SupervisorDelegation } from "../../../shared/one-supervisor";
 import { ONE_BUBBLE_COLORS, type OneBubbleColor, type OneProfile } from "../../../shared/one-profile";
 import { readAppUiPreference } from "@/lib/app-ui-preferences";
 import { stripAgentControlBlocks, stripAgentIdentityBadges, stripAgentRoutingBanners } from "../../../shared/agent-control-blocks";
 import { ProductModeMenu } from "./ProductModeMenu";
 import { OneBottomSheet } from "./OneBottomSheet";
+import { OneSecurityFeatures } from "./OneSecurityFeatures";
 import { PopupDetails } from "@/components/Popup";
 import { OneMemorySheet } from "./OneMemorySheet";
 import { OneAgentPortrait } from "./OneAgentPortrait";
@@ -61,6 +62,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [budgetsOpen,setBudgetsOpen]=useState(false);const [budgetId,setBudgetId]=useState("");
   const [capabilities,setCapabilities]=useState<PersonalOneCapabilityTab|null>(null);
   const [menuOpen,setMenuOpen]=useState(false);
+  const [securityOpen,setSecurityOpen]=useState(false);
+  // Sidebar: owner choice persists; below 860px it is collapsed unless the owner opens it for this session.
+  const [navPref,setNavPref]=useState<"open"|"closed"|null>(()=>{try{const v=window.localStorage.getItem("agentlas.one.personal.nav");return v==="open"||v==="closed"?v:null;}catch{return null;}});
   const headerMenuRef=useRef<HTMLElement>(null);const headerMenuTrigger=useRef<HTMLButtonElement>(null);
   useEffect(()=>{if(!menuOpen)return;headerMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
     const outside=(event:PointerEvent)=>{if(!headerMenuRef.current?.contains(event.target as Node)&&!headerMenuTrigger.current?.contains(event.target as Node))setMenuOpen(false);};
@@ -136,6 +140,9 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
   const [panelWidth,setPanelWidth]=useState(360);const [autoPanelWidth,setAutoPanelWidth]=useState(true);
   const [viewportWidth,setViewportWidth]=useState(()=>typeof window==='undefined'?1360:window.innerWidth);
   const [composerHeight,setComposerHeight]=useState(96);
+  const [narrowNavOpen,setNarrowNavOpen]=useState(false);
+  const navCollapsed=viewportWidth<860?!narrowNavOpen:navPref==="closed";
+  const toggleNav=()=>{if(viewportWidth<860){setNarrowNavOpen(value=>!value);return;}const next=navCollapsed?"open":"closed";setNavPref(next);try{window.localStorage.setItem("agentlas.one.personal.nav",next);}catch{}};
   const [contextBottom,setContextBottom]=useState(92);
   const workspaceRoot=useRef<HTMLDivElement>(null);const contextBar=useRef<HTMLDivElement>(null);
   const composerDock=useRef<HTMLDivElement>(null);
@@ -363,7 +370,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     </button>;
   };
   return <div ref={workspaceRoot} className={styles.root} data-personal-one-workspace="true" data-detached={detached} data-layout={viewportWidth>=860?"workbench":"companion"} onDragOver={event=>{if(event.dataTransfer.types.includes("Files")){event.preventDefault();event.dataTransfer.dropEffect="copy";}}} onDrop={event=>{if(event.dataTransfer.files.length){event.preventDefault();void pickAttachments(Array.from(event.dataTransfer.files));}}} style={{"--personal-bubble":ONE_BUBBLE_COLORS[snapshot?.bubbleColor ?? "blue"]} as CSSProperties}>
-    {!detached&&<aside className={styles.navigation} aria-label={copy("One 탐색","One navigation")}>
+    {!detached&&<aside id="personal-one-navigation" className={styles.navigation} data-collapsed={navCollapsed} hidden={navCollapsed} aria-label={copy("One 탐색","One navigation")}>
       <div className="titlebar-drag" style={{height:28}}/><ProductModeMenu current="one" locale={ko?"ko":"en"}/>
       <button className={styles.personalEntry} data-personal-one-entry="true" aria-current="page"><OneAgentPortrait label={name} status="quiet" size="small" tone={snapshot?.avatarIcon ?? "character:orange-dino"}/><span className={styles.personalIdentity}><strong>{name}</strong><small>{copy("개인 에이전트","Personal agent")}</small></span></button>
       <nav className={styles.tabs}><button onClick={()=>navigateRail("organisation")}>{copy("에이전트","Agents")}</button><button onClick={()=>navigateRail("sessions")}>{copy("세션","Session")}</button><button onClick={()=>navigateRail("mail")}>{copy("메일","Mail")}</button></nav>
@@ -372,7 +379,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     </aside>}
     <main className={styles.conversation}>
       <header className={`${styles.header} ${detached?"titlebar-drag":""}`}>
-        <div className={styles.headerIdentity}><h1>{name}</h1><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
+        <div className={styles.headerIdentity}>{!detached&&<button type="button" className={styles.iconButton} data-personal-one-nav-toggle="true" aria-label={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} title={navCollapsed?copy("사이드바 열기","Open sidebar"):copy("사이드바 접기","Collapse sidebar")} aria-expanded={!navCollapsed} aria-controls="personal-one-navigation" onClick={toggleNav}><IconSidebar size={18}/></button>}<h1>{name}</h1><small role="status">{!snapshot?copy("연결 확인 중","Checking connection"):error?copy("마지막 관측 표시","Last observation"):copy("이 컴퓨터에 연결됨","Connected to this computer")}</small></div>
         <div className="titlebar-nodrag">
           {detached&&<button className={styles.iconButton} type="button" aria-label={copy("항상 위에 두기","Always on top")} aria-pressed={pinned} title={copy("항상 위에 두기","Always on top")} onClick={()=>void togglePinned()}><span aria-hidden="true">⌖</span></button>}
           <button type="button" className={styles.iconButton} aria-label={copy("결과·작업 보기","Show results and work")} aria-expanded={tasksOpen} title={copy("결과·작업 보기","Show results and work")} onClick={()=>{setTasksOpen(value=>!value);setArtifactOpen(false);setTaskPreviewOnly(Boolean(selected));setFile(null);}}><IconPanelRight size={17}/></button>
@@ -381,6 +388,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
       </header>
       {menuOpen&&<nav ref={headerMenuRef} id="personal-one-menu" className={styles.headerMenu} aria-label={copy("One 메뉴","One menu")} onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();setMenuOpen(false);headerMenuTrigger.current?.focus();}}}>
         <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("connections");}}>{copy("연결 도구","Connected tools")}</button>
+        <button type="button" data-personal-one-security-entry="true" onClick={()=>{setMenuOpen(false);setSecurityOpen(true);}}>{copy("보안과 연결 관리","Security and connections")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setCapabilities("repeat");}}>{copy("반복 업무","Recurring work")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setContextOpen(true);}}>{copy("화면 공유","Screen sharing")}</button>
         <button type="button" onClick={()=>{setMenuOpen(false);setBudgetsOpen(true);}}>{copy("실행 예산","Execution budgets")}</button>
@@ -514,6 +522,7 @@ export function PersonalOneWorkspace({ detached = false }: { detached?: boolean 
     <PersonalOneCheckins open={checkinsOpen} oneId={snapshot?.oneId} locale={ko?"ko":"en"} onClose={()=>setCheckinsOpen(false)} onRefresh={()=>void sync()}/>
     <PersonalOneCapabilities oneId={snapshot?.oneId} open={capabilities} locale={ko?"ko":"en"} chatId={snapshot?.conversationChatId} onClose={()=>setCapabilities(null)} onPrompt={prompt=>{setText(prompt);composerInput.current?.focus();}}/>
     <OneMemorySheet open={memoryOpen} state={memory} locale={ko?"ko":"en"} useOnceTarget={null} onClose={closeMemory} onStateChange={setMemory} onUseOnceReady={()=>{}}/>
+    <OneBottomSheet open={securityOpen} onClose={()=>setSecurityOpen(false)} closeLabel={copy("닫기","Close")} ariaLabel={copy("보안과 연결 관리","Security and connections")} title={copy("보안과 연결 관리","Security and connections")} size="compact"><OneSecurityFeatures/></OneBottomSheet>
     <OneBottomSheet open={historyOpen} onClose={()=>setHistoryOpen(false)} closeLabel={copy('이전 대화 닫기','Close previous conversations')} ariaLabel={copy('지난 One 대화','Previous One conversations')} title={copy('지난 One 대화','Previous One conversations')} icon={<IconLayers size={20} />} size="compact">
       <div className={styles.appearance}>
         {snapshot?.legacyHistory?.linked.map(source=><button className={styles.historyItem} key={source.chatId} onClick={()=>void openMain('/one?chat='+encodeURIComponent(source.chatId))}><IconLayers size={18}/><span>{source.title}<small>{source.messageCount} {copy('메시지','messages')}</small></span><IconChevronRight size={16}/></button>)}

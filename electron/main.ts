@@ -1291,6 +1291,19 @@ async function createWindow(options: { startupPlaceholder?: boolean; initialRout
     osMaintenance.invalidate();
   });
   mainWindow.webContents.on("did-finish-load", () => armOsMaintenanceAfterProductLoad(startupWindow));
+  // The personal agent view (/one?personal=1) may shrink to a phone-width messenger window.
+  // Every other route keeps the 960x640 minimum; the minimum is restored when leaving it.
+  const applyRouteMinimumSize = (url: string): void => {
+    if (mainWindow !== startupWindow || startupWindow.isDestroyed()) return;
+    let personal = false;
+    try {
+      const parsed = new URL(url);
+      personal = parsed.pathname.replace(/\/$/, "") === "/one" && parsed.searchParams.get("personal") === "1";
+    } catch { /* keep the default minimum for unparseable URLs */ }
+    startupWindow.setMinimumSize(personal ? 380 : 960, personal ? 560 : 640);
+  };
+  mainWindow.webContents.on("did-navigate", (_event, url) => applyRouteMinimumSize(url));
+  mainWindow.webContents.on("did-navigate-in-page", (_event, url, isMainFrame) => { if (isMainFrame) applyRouteMinimumSize(url); });
   mainWindow.once("closed", () => {
     if (mainWindow && mainWindow !== startupWindow) return;
     mainDocumentGeneration += 1;

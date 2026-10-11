@@ -95,3 +95,9 @@
 .rangePicker{border:1px solid var(--paper-edge);border-radius:10px;padding:10px;font-size:13px}.rangePicker summary{cursor:pointer;min-height:30px}.rangePicker label{margin-top:9px}.rangeFields{display:flex;flex-direction:column;gap:8px}.resultContents :is(input,select){min-width:0;width:100%;min-height:36px;border:1px solid var(--paper-edge-strong);border-radius:8px;background:var(--paper);color:var(--ink);padding:7px;font:inherit}.resultContents :is(input,select):focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 
 .contextSharing{margin-left:auto;display:flex;gap:5px;align-items:center;min-width:0}.contextSharing button:first-child{min-width:0;max-width:240px}.contextSharing button:first-child span{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:400}.contextSharing button:last-child{flex-shrink:0}@media(max-width:859px){.contextSharing button:first-child{max-width:148px}}
+.navigation[hidden]{display:none}
+.header .headerIdentity{flex:1;min-width:0;gap:6px}
+.header .headerIdentity h1{flex:0 1 auto;min-width:0}
+.header .headerIdentity small{flex:0 1 auto;min-width:0}
+.header .headerIdentity .iconButton{flex:0 0 32px}
+@media(max-width:480px){.header .headerIdentity small{display:none}.header{padding-left:10px;padding-right:10px}.contextBar{padding:6px 10px}.transcript{padding:10px}.composerDock{padding:0 8px 8px}}

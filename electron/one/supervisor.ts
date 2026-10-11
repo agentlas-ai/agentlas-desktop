@@ -1,5 +1,6 @@
 import { withOnePersonalNativeOriginal } from "../secrets/one-personal-native-entry";
-import type { OrdinaryOneTurnSource } from "../invocation/ordinary-one-turn";
+import { readOrdinaryOneTurn, type OrdinaryOneTurnSource } from "../invocation/ordinary-one-turn";
+import { oneGoalRoomTurnOnDesktop } from "../invocation/goal-owner-route";
 import { supervisorError } from "../../shared/one-supervisor";
 import { createHash } from 'node:crypto';
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection } from "../store/chat-message-attachments";
@@ -41,6 +42,8 @@ let hostOwner:OneSupervisorOwner|null=null;
 let stopProactiveHost:(()=>void)|undefined;
 let stopBudgetHost:(()=>void)|undefined;
 let supervisor:OneSupervisorService|null=null;
+/** Set once this process handed the One domain to the daemon; Desktop keeps no personal-domain owner afterwards. */
+let domainHandedToDaemon=false;
 export function configureOneSupervisorDaemonHost(options:SupervisorHostOptions):void {
   if(supervisor || options.ownerKind!=='work-daemon')throw supervisorError('supervisor_host_already_initialized');
   options.assertAuthority();hostOptions=options;
@@ -56,6 +59,7 @@ export function prepareOneSupervisorDaemonHandoff():{oneId:string;ownerEpoch:str
   const token=hostOwner.current();if(!token || token.phase!=='active')return null;
   hostOwner.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();supervisor.close();nativeRuntime?.close();hostOwner.release();
   closeOnePersonalIntegrations();
+  domainHandedToDaemon=true;
   return {oneId:token.oneId,ownerEpoch:token.ownerEpoch,generation:token.generation};
 }
 let science:SupervisorScienceAdapter|undefined;
@@ -281,6 +285,10 @@ export function oneSupervisor():OneSupervisorService {
 // Same-process bootstrap only. Resolve the actual current domain owner for
 // each original capture; no opaque capability crosses the daemon protocol.
 const observeOrdinaryOneNativeSource = (source: OrdinaryOneTurnSource) => {
+  // A One Goal room's owner turn starts on Desktop, where its Goal is held (goal-owner-route.ts). After the daemon
+  // adopted the One domain, Desktop has no personal-domain owner, so the turn runs like the Goal's own Desktop
+  // wake-ups: outside the personal domain, without personal native capabilities. Any other One turn still needs it.
+  if (domainHandedToDaemon && oneGoalRoomTurnOnDesktop(readOrdinaryOneTurn(source, "scope").request.chatId)) return undefined;
   const observed = oneSupervisor().observeOrdinaryNativeTurn(source);
   if (!observed) return undefined;
   return { ...observed, wrap<T>(body: () => T): T {

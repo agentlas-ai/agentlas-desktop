@@ -1809,13 +1809,21 @@ function OneSessionsShell() {
         && (item.receipt.status === "queued" || item.receipt.status === "dispatching"))) return;
     let disposed = false;
     let running = false;
+    // A read that keeps failing backs off instead of asking Main every second (442 refusals in 4 minutes after a
+    // paused Goal, room "Youtube launch", 2026-10-11).
+    let failures = 0;
+    let quietUntil = 0;
     const refresh = async () => {
-      if (disposed || running) return;
+      if (disposed || running || Date.now() < quietUntil) return;
       running = true;
       try {
         const receipts = await Promise.all(currentTurnFollowups.filter(item => item.intent.chatId === chatId
           && (item.receipt.status === "queued" || item.receipt.status === "dispatching"))
           .map(item => waitForOneFollowupDelivery(api.invoke.currentTurnSteerReceipt({ chatId, intentId: item.intent.intentId })).catch(() => null)));
+        if (receipts.length && receipts.every(item => item === null)) {
+          failures += 1;
+          quietUntil = Date.now() + Math.min(60_000, 1_000 * 2 ** failures);
+        } else failures = 0;
         if (disposed || activeThreadChatIdRef.current !== chatId) return;
         const changed = new Map(receipts.filter((item): item is NonNullable<typeof item> => Boolean(item))
           .map(item => [item.intentId, item]));
@@ -5089,7 +5097,25 @@ function OneSessionsShell() {
     }
   }, [appLocale, busy, composer, oneRuntimeInventory, reconcileUncertainPreflightSteer, setOnePermission, teamPreflightBusy]);
 
-  const resumePausedFollowup = useCallback((intent: OneFollowupIntent) => {
+  const submitTextRef = useRef<((text: string) => Promise<void>) | null>(null);
+  const resumePausedFollowup = useCallback(async (intent: OneFollowupIntent) => {
+    // "Send again" on a direction for a turn that has since ended cannot reach that turn any more; retrying it only
+    // re-paused the card (room "Youtube launch", 2026-10-11). The owner asked to send it, so it goes as a new message.
+    if (intent.currentTurnRunId && activeThreadChatIdRef.current === intent.chatId) {
+      const api = ipc();
+      const current = await api?.invoke.currentTurn(intent.chatId).catch(() => undefined);
+      if (current !== undefined && current?.runId !== intent.currentTurnRunId) {
+        if ((composerHandleRef.current?.getValue() ?? "").trim() || attachmentDraftsRef.current.length || !submitTextRef.current) {
+          setActionNotice(appLocale === "ko" ? "작성 중인 글이나 첨부가 있어 보내지 않았습니다. 비운 뒤 다시 보내기를 눌러 주세요." : "There is a draft or attachment in the composer, so nothing was sent. Clear it and press Send again.");
+          return;
+        }
+        try { removeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId); } catch { return; }
+        locallyStoppedFollowupIdsRef.current.delete(intent.intentId);
+        setLocalFollowupIntents(readOneFollowupOutbox(window.localStorage, intent.chatId));
+        await submitTextRef.current(intent.userPrompt);
+        return;
+      }
+    }
     try {
       resumeOneFollowupIntent(window.localStorage, intent.chatId, intent.intentId);
       locallyStoppedFollowupIdsRef.current.delete(intent.intentId);
@@ -6571,6 +6597,7 @@ function OneSessionsShell() {
       if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) preflightSubmissionRef.current = null;
     }
   }, [messageReply, activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, pendingTeamPrompt, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
+  submitTextRef.current = submit;
 
   const stopRun = useCallback(() => {
     // Stop is terminal for the visible work item: Main drops the directions
@@ -9743,7 +9770,7 @@ function OneSessionsShell() {
                 <div className={styles.followupReceiptActions}>
                   {paused && !item.requiresReprepare && <button type="button" className={styles.admissionAction} onClick={() => {
                     currentTurnBackoffRef.current.delete(item.intentId);
-                    resumePausedFollowup(item);
+                    void resumePausedFollowup(item);
                   }}>
                     {appLocale === "ko" ? "다시 보내기" : "Send again"}
                   </button>}

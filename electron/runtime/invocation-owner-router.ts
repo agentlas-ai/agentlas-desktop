@@ -18,6 +18,7 @@ export interface InvocationOwnerRouterPorts {
     validateCurrentTurnSteer(input: InvocationCurrentTurnSteerRequest): void;
     existingCurrentTurnSteer(input: InvocationCurrentTurnSteerRequest): MaybePromise<InvocationCurrentTurnSteerReceipt | null>;
     getCurrentTurnSteer(chatId: string, intentId: string): MaybePromise<InvocationCurrentTurnSteerReceipt | null>;
+    settleCurrentTurnSteer?(chatId: string, intentId: string, status: "rejected" | "uncertain", code: string): MaybePromise<InvocationCurrentTurnSteerReceipt>;
   };
   localOwnerId: string;
   local: InvocationCurrentTurnPort;
@@ -69,7 +70,19 @@ export function createInvocationOwnerRouter(ports: InvocationOwnerRouterPorts): 
   }
   async function pendingReceipt(row: InvocationCurrentTurnSteerReceipt): Promise<InvocationCurrentTurnSteerReceipt> {
     if (row.status === "applied" || row.status === "rejected" || row.status === "uncertain") return row;
-    const owner = assertOwner(await ports.owners.getRunOwner(row.chatId, row.runId), row.chatId, row.runId);
+    const runOwner = await ports.owners.getRunOwner(row.chatId, row.runId);
+    // Once the run's owner lease is released nobody can move this row any more. A queued item was never dispatched, so
+    // it is refused and its text stays with the owner; a dispatching one may have reached the model, so it is uncertain.
+    // Without this the row stayed queued forever and every read failed invocation_owner_unavailable, and "send again"
+    // never got past it (room "Youtube launch", 2026-10-11: two owner directions to a run the owner then paused).
+    if (runOwner && runOwner.chatId === row.chatId && runOwner.runId === row.runId && runOwner.state === "released"
+      && ports.inbox.settleCurrentTurnSteer) {
+      const settled = row.status === "queued"
+        ? await ports.inbox.settleCurrentTurnSteer(row.chatId, row.intentId, "rejected", "owner_control_run_settled")
+        : await ports.inbox.settleCurrentTurnSteer(row.chatId, row.intentId, "uncertain", "native_steer_dispatch_interrupted");
+      return checkedReceipt(settled, row.chatId, row.intentId, row.runId);
+    }
+    const owner = assertOwner(runOwner, row.chatId, row.runId);
     const receipt = owner.ownerId === ports.localOwnerId
       ? await ports.local.currentTurnSteerReceipt(row.chatId, row.intentId)
       : await dispatch(owner, "invoke.currentTurnSteerReceipt", { chatId: row.chatId, intentId: row.intentId });

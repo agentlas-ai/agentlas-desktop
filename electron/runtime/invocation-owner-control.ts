@@ -1,6 +1,6 @@
 import { invocationService } from "../invocation/service";
 import { invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
-import { existingCurrentTurnSteer, getCurrentTurnSteer, validateCurrentTurnSteer } from "../store/current-turn-steers";
+import { existingCurrentTurnSteer, getCurrentTurnSteer, settleCurrentTurnSteer, validateCurrentTurnSteer } from "../store/current-turn-steers";
 import { createInvocationOwnerRouter, invocationOwnerUnavailable } from "./invocation-owner-router";
 import type { InvocationRunOwner } from "../store/invocation-owner-core";
 import type { InvocationOwnerBrokerMethod } from "../daemon/invocation-owner-broker";
@@ -34,7 +34,7 @@ export async function cancelInvocationOwnerRun(runId: string): Promise<"requeste
 
 function router() {
   return createInvocationOwnerRouter({ owners: invocationRunOwners, localOwnerId: invocationProcessOwner().ownerId,
-    inbox: { existingCurrentTurnSteer, getCurrentTurnSteer, validateCurrentTurnSteer }, local: invocationService,
+    inbox: { existingCurrentTurnSteer, getCurrentTurnSteer, validateCurrentTurnSteer, settleCurrentTurnSteer }, local: invocationService,
     remote: { dispatch: (owner, method, params) => {
       if (!remoteDispatch) throw invocationOwnerUnavailable();
       return remoteDispatch(owner, method, params);

@@ -17,15 +17,19 @@ import { getLongRunByGoalId } from "../store/long-runs";
  * ledger row during the first turn, and automatic intake may admit a Goal mid-turn.
  * So a Work owner turn starts on Desktop, where the Goal's own host wake-ups run.
  *
- * One turns cannot. They run inside the One personal domain (personal native
- * capabilities, vault credentials), which the daemon adopts when it runs; Desktop's
- * supervisor is then closed, and the ordinary One turn observer refuses a One turn
- * started on Desktop with supervisor_native_owner_required before anything runs
- * (production 1.2.90, 2026-10-10T23:17Z: every One message was refused). A One chat
- * therefore starts in the daemon, as before 1.2.89. An owner turn in a One Goal room
- * keeps its known first-turn gap there (goal_episode_admission_missing) until One
- * turns can carry Desktop Goal custody; the Goal's Desktop wake-ups still run.
- * A chat whose Goal is held elsewhere (Science, a non-Desktop host) also stays in the daemon.
+ * A goal-free One chat cannot. Its turns run inside the One personal domain
+ * (personal native capabilities, vault credentials), which the daemon adopts when it
+ * runs; Desktop's supervisor is then closed, and the ordinary One turn observer refuses
+ * a One turn started on Desktop with supervisor_native_owner_required before anything
+ * runs (production 1.2.90, 2026-10-10T23:17Z: every One message was refused). So it
+ * starts in the daemon.
+ *
+ * A One Goal room is held by Desktop, and its own wake-ups already run there as One
+ * turns. Its owner turns start on Desktop too and run the same way, outside the
+ * personal domain (observeOrdinaryOneNativeSource in one/supervisor.ts). In the daemon
+ * they failed their first turn with goal_episode_admission_missing (room "Youtube
+ * launch", 2026-10-08..11). A chat whose Goal ended, or is held elsewhere (Science, a
+ * non-Desktop host), stays in the daemon.
  */
 export function ownerTurnStartsOnDesktop(chatId: unknown): boolean {
   if (typeof chatId !== "string" || !chatId) return false;
@@ -33,5 +37,14 @@ export function ownerTurnStartsOnDesktop(chatId: unknown): boolean {
   if (!chat) return false;
   const run = chat.goalId ? getLongRunByGoalId(chat.goalId) : null;
   if (run && (run.surface === "science" || run.hostOwnerKind !== "desktop")) return false;
-  return chat.originSurface === "work";
+  if (chat.originSurface === "work") return true;
+  return chat.originSurface === "one" && run !== null && !GOAL_ENDED.has(run.status);
+}
+
+const GOAL_ENDED: ReadonlySet<string> = new Set(["completed", "failed", "cancelling", "cancelled"]);
+
+/** A One Goal room's owner turn, started on Desktop by ownerTurnStartsOnDesktop. */
+export function oneGoalRoomTurnOnDesktop(chatId: unknown): boolean {
+  if (!ownerTurnStartsOnDesktop(chatId)) return false;
+  return getChat(chatId as string)?.originSurface === "one";
 }

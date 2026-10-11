@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.92 — 2026-10-11
+
+- Includes everything planned for 1.2.91, which was not published: One messages start again, a request refused before it started no longer leaves a card that cannot be cleared, and a refusal caused by changed run settings keeps your text.
+- Messages to a One room with a goal, including a paused goal, start the room's work again instead of failing on their first turn.
+- A direction sent while a room was working, and then left behind when the work was paused or stopped, can be sent again: "Send again" now sends it as a new message.
+- The personal agent window no longer shows overlapping buttons at the top right. Security and connection tools moved into the "…" menu. The sidebar can be collapsed, and the window can shrink to phone width.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.91 — 2026-10-11
 
 - Messages in One conversations start again. In 1.2.90 they were still refused before starting, for a second reason than in 1.2.89.
