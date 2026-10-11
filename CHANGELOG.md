@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.2.97 — 2026-10-11
+
+- Hope answers in your language again. Since its personal conversation started running in the background service, it replied in English even when the app was set to Korean.
+- The screen sharing sheet in the personal agent window is now written plainly ("화면 보여주기": pick the window Hope may see, what it may do, and for how long). Obvious choices are filled in for you, and the top bar of the window is no longer cramped.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.96 — 2026-10-11
 
 - Hope can find a stored API key on its own. When a task needs a key, it looks at the names of your saved keys (never their values). If one matches under a different name, for example ELEVENLABS_1 where ELEVENLABS_API_KEY is expected, it asks you first and renames it when you say yes. It no longer asks you to sign in on a website when an API key would do.

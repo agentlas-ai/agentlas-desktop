@@ -67,7 +67,7 @@
 .headerIdentity h1{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:160px}
 .headerMenu{position:absolute;z-index:18;right:10px;top:52px;display:flex;flex-direction:column;gap:3px;padding:8px;max-width:calc(100% - 20px);background:var(--paper);border:1px solid var(--paper-edge-strong);border-radius:12px;box-shadow:var(--shadow-2)}
 .headerMenu button{display:flex;gap:8px;align-items:center;justify-content:space-between;background:transparent;border:0;border-radius:7px;min-height:36px;padding:8px 12px;color:var(--ink);font:inherit;text-align:left;cursor:pointer}.headerMenu button:hover{background:var(--paper-3)}
-.contextBar{display:flex;align-items:center;gap:7px;flex:0 0 auto;flex-wrap:wrap;padding:7px 14px;border-bottom:1px solid var(--paper-edge);font-size:11px;color:var(--muted-deep);min-width:0}.contextBar span:first-child{font-weight:600;color:var(--ink)}.contextBar>span:last-child{margin-left:auto}.contextBar button{font:inherit;background:var(--paper-3);color:var(--ink);border:1px solid var(--paper-edge);border-radius:12px;min-height:24px;cursor:pointer}
+.contextBar{display:flex;align-items:center;gap:7px;flex:0 0 auto;flex-wrap:wrap;padding:7px 24px;border-bottom:1px solid var(--paper-edge);font-size:11px;color:var(--muted-deep);min-width:0}.contextBar span:first-child{font-weight:600;color:var(--ink)}.contextBar>span:last-child{margin-left:auto}.contextBar button{font:inherit;background:var(--paper-3);color:var(--ink);border:1px solid var(--paper-edge);border-radius:12px;min-height:24px;padding:2px 10px;cursor:pointer}.root[data-detached=true] .contextBar{padding-left:18px;padding-right:18px}
 .root[data-detached=true] .transcript{padding:16px 18px 20px;scrollbar-gutter:stable}
 .root[data-detached=true] .thread{max-width:780px}
 .root[data-detached=true] .bubble{max-width:100%;border-radius:16px;min-width:0}.root[data-detached=true] .bubble[data-role=assistant]{width:100%;background:transparent;padding:5px 0}.root[data-detached=true] .bubble[data-role=user]{max-width:92%;padding:11px 14px}
@@ -100,4 +100,4 @@
 .header .headerIdentity h1{flex:0 1 auto;min-width:0}
 .header .headerIdentity small{flex:0 1 auto;min-width:0}
 .header .headerIdentity .iconButton{flex:0 0 32px}
-@media(max-width:480px){.header .headerIdentity small{display:none}.header{padding-left:10px;padding-right:10px}.contextBar{padding:6px 10px}.transcript{padding:10px}.composerDock{padding:0 8px 8px}}
+@media(max-width:480px){.header .headerIdentity small{display:none}.header{padding-left:10px;padding-right:10px}.contextBar,.root[data-detached=true] .contextBar{padding:6px 10px}.transcript{padding:10px}.composerDock{padding:0 8px 8px}}
