@@ -18,6 +18,7 @@ import { pruneLegacyDatabaseBackups } from "./backup-retention";
 import { createOneDomainEventIndexes } from "./one-domain-event-indexes";
 import { createAgentContextSchema } from "./agent-context";
 import { createAgentStrategySchema } from "./agent-strategy-schema";
+import { createRoomDiscussionSchema } from "./room-discussion-schema";
 
 // Picks the Korean or English human-readable string for the current UI locale.
 const L = (ko: string, en: string): string => (currentUiLocale() === "ko" ? ko : en);
@@ -26,7 +27,7 @@ let _db: Database.Database | null = null;
 let _postContinuityRepairsDeferred = false;
 let _openedStoreMigrationRole: StoreMigrationRole | null = null;
 
-const SCHEMA_VERSION = 131;
+const SCHEMA_VERSION = 132;
 
 /**
  * The schema version this binary's migration ladder produces.
@@ -6976,6 +6977,13 @@ export function initStore(options: StoreInitOptions = {}): void {
   // owner/follower migration authority; CREATE IF NOT EXISTS keeps the step idempotent.
   if (userVersion < 131) {
     _db.transaction(() => { createAgentStrategySchema(_db!); })();
+  }
+
+  // v132: room discussion engine (room_messages seq/thread index, discussions, rounds, turns, member cursors, owner
+  // inbox, per-room setting). Shared-store DDL follows the same owner/follower migration authority; CREATE IF NOT
+  // EXISTS keeps the step idempotent.
+  if (userVersion < 132) {
+    _db.transaction(() => { createRoomDiscussionSchema(_db!); })();
   }
 
   } catch (error) {

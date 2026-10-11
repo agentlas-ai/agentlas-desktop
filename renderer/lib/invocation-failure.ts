@@ -175,6 +175,14 @@ export function goalAdmissionControlFailureForCode(code: string | null | undefin
       message = ko ? "앱이 종료 또는 업데이트를 준비하는 중이라 새 실행을 받지 않았습니다. 앱이 다시 열리면 보내 주세요. 입력은 보존되어 있습니다."
         : "The app is shutting down or preparing an update, so it is not accepting new runs. Send once the app reopens; your input is preserved.";
       break;
+    // Native ingress refuses before authorize/read when another run (e.g. a background-service supervisor reply)
+    // already owns the chat. Nothing started; the composer keeps the text.
+    case "invocation_chat_busy":
+    // The chat is mid-turn in the other process (Desktop or the background service); same copy, nothing started.
+    case "invocation_chat_busy_other_host":
+      message = ko ? "이 대화에서 다른 작업이 진행 중이라 지금은 보내지 못했습니다. 글은 입력창에 그대로 있습니다. 진행 중인 작업이 끝난 뒤 다시 보내 주세요."
+        : "Another task is running in this chat, so this could not be sent right now. Your text is still in the composer; send it again once the running task finishes.";
+      break;
     case "invocation_cleanup_pending":
     case "invocation_admission_chat_pending":
       message = ko ? "이 대화의 이전 실행을 마무리하는 중이라 시작하지 않았습니다. 보통 몇 초 안에 끝나며, 끝난 뒤 보내면 됩니다. 입력은 보존되어 있습니다."

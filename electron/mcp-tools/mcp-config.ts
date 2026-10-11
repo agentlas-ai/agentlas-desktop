@@ -57,7 +57,8 @@ import {
 } from "../computer-use/mcp-server";
 import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
 import {ONE_OS_EXECUTION_ENV} from "../one/context-lease";
-import {prepareSupervisorOsExecution} from "../one/supervisor-os-execution";
+import {prepareSupervisorOsExecutionAsync,type SupervisorOsExecutionOutcome} from "../one/supervisor-os-execution";
+import {OS_EXECUTION_UNAVAILABLE_VERSION} from "../daemon/device-bridge";
 import { resolveHephaestusStdioLaunch } from "../hephaestus/engine";
 import {
   MCP_PROXY_CONTROL_FILE_ENV,
@@ -768,7 +769,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const residentProxyHandles: string[] = [];
   const activatedResidentProxyHandles = new Set<string>();
   const browserAuthorityCleanup: Array<() => void> = [];
-  let osExecution:ReturnType<typeof prepareSupervisorOsExecution>|undefined;
+  let osExecution:SupervisorOsExecutionOutcome|null|undefined;
   let releasePrepared: (() => boolean) | undefined;
   let released = false;
   const cleanup = () => {
@@ -784,7 +785,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       else cancelMcpProxyLaunchPreparation(handle);
     }
     for (const revoke of browserAuthorityCleanup) revoke();
-    osExecution?.dispose();
+    if(osExecution?.kind==="scoped")osExecution.dispose();
     for (const revoke of agentMailCapabilityCleanup) revoke();
     for (const revoke of oneTeamCapabilityCleanup) revoke();
     try { workspacePreviewCapabilityCleanup?.(); } finally {
@@ -1091,9 +1092,12 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       }
       const secretAliases: Record<string, string> = {};
       if(!opts?.nativeBrowser && canonicalComputerUseSelected && ["cua-driver","agentlas-browser"].includes(s.catalogId??"")) {
-        osExecution??=prepareSupervisorOsExecution({runId:opts?.supervisorReplyRunId,chatId:opts?.toolGate?.chatId,
+        osExecution??=await prepareSupervisorOsExecutionAsync({runId:opts?.supervisorReplyRunId,chatId:opts?.toolGate?.chatId,
           permission:opts?.toolGate?.permission,admissionCurrent:opts?.admissionCurrent});
-        if(osExecution){const alias=mcpRuntimeSecretAlias(key,ONE_OS_EXECUTION_ENV);secretAliases[ONE_OS_EXECUTION_ENV]=alias;runtimeEnv[alias]=JSON.stringify(osExecution.capability);}
+        // A daemon run whose scoped execution could not be prepared carries an explicit "unavailable" marker in the same
+        // variable: the computer-use child then fails its tool calls with the reason instead of reaching the owner token.
+        if(osExecution){const alias=mcpRuntimeSecretAlias(key,ONE_OS_EXECUTION_ENV);secretAliases[ONE_OS_EXECUTION_ENV]=alias;
+          runtimeEnv[alias]=JSON.stringify(osExecution.kind==="scoped"?osExecution.capability:{version:OS_EXECUTION_UNAVAILABLE_VERSION,reason:osExecution.reason});}
       }
       for (const rawKey of s.envKeys) {
         const envKey = validateEnvKey(rawKey);

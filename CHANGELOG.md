@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 — 2026-10-11
+
+- **Group rooms discuss.** In a room with two or more teammates, a question, a mention or a call for opinions starts a discussion: two or three teammates answer at the same time, each in their own live bubble, then read each other and reply or comment in the next round (up to three). A bar shows the round and who is speaking, with a button to stop. Only the teammates who speak run, each in the session it already has for that room, so a bigger room does not cost more per round. You can turn discussion off per room.
+- **One place runs the work.** Hope, One and teammates that run in the background service now behave like work started from the window: a reply you send while one of them is working is queued for it instead of being lost, a conversation keeps its model thread when it moves between the window and the background service, and a send that cannot start says so and keeps your text.
+- **Hope can use the screen from the background.** When the app window is open, Hope's background work can operate other apps, limited to that piece of work. When the window is closed or the screen is locked, it says screen control needs the window instead of failing the whole reply. Background work also shows the usual notifications when it finishes or needs you.
+- Also in this release: the agent manager deletes from the row and its list can be resized, the screen sharing sheet and other popups are easier to read, Science's product menu shows above the research view, Science capability catalog and source versions, and Hope can find a stored API key under a different name and ask before using it.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.98 — 2026-10-11
 
 - Includes everything planned for 1.2.97, which was not published: Hope answers in your language again, and the screen sharing sheet in the personal agent window is written plainly.

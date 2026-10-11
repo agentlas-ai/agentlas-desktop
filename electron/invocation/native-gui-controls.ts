@@ -1,5 +1,8 @@
 import { createHash } from "node:crypto";
 import { getInvocationAdmission } from "../store/invocation-admissions";
+import { invocationRunOwners } from "../store/invocation-run-owners";
+import { getCurrentTurnSteer } from "../store/current-turn-steers";
+import { getDb } from "../store/db";
 import { nativeOwnerTextChoices } from "./native-owner-text";
 import type { NativeOwnerTextBinding, NativeOwnerTextKind, NativeOwnerTextReceipt } from "./native-owner-text";
 import type { McpInvocationRequest } from "../../shared/types";
@@ -226,6 +229,65 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     if(await call("native.attach",{version:"agentlas.native-owner-text-compatible.v1",...binding,choices:nativeOwnerTextChoices(request)})!==true)fail("native_gui_text_input_context_changed");
     return binding;
   }
+  /* Single-execution-host stage 1: the chat's ACTIVE run is found by the durable run-owner row, not by a capture this
+   * process happens to hold. A run the attached daemon owns (supervisor reply, goal-free One turn, daemon Work turn)
+   * has an admission row (input digest) in the shared store, so the binding has exactly the shape a GUI capture has;
+   * the daemon still verifies chat + run + input digest against its own source before it accepts any text. */
+  function daemonOwnedRun(chatId: string, opts: { expectedRunId?: string; intentId?: string; isCaptured?(runId: string): boolean }): { chatId: string; runId: string } | null {
+    const row = invocationRunOwners.getActiveOwner(chatId);
+    if (!row || row.chatId !== chatId || row.ownerKind !== "daemon" || !identity || row.ownerId !== identity.bootId) return null;
+    if (opts.isCaptured?.(row.runId)) return null; // started by this GUI: the capture path is unchanged
+    if (opts.intentId !== undefined) { const saved = getCurrentTurnSteer(chatId, opts.intentId); if (saved && saved.runId !== row.runId) return null; }
+    if (opts.expectedRunId !== undefined && opts.expectedRunId !== row.runId) fail("invocation_steer_stale_run");
+    if (row.state !== "active") fail("native_gui_daemon_run_not_active");
+    return { chatId, runId: row.runId };
+  }
+  function durableDaemonTextBinding(event: object, chatId: string, opts: { expectedRunId?: string; intentId?: string; isCaptured?(runId: string): boolean } = {}): NativeOwnerTextBinding | null {
+    const run = daemonOwnedRun(chatId, opts); if (!run) return null;
+    human(event);
+    const row = getInvocationAdmission(run.runId);
+    if (!row || row.chatId !== chatId || row.ownerProcessEpoch !== identity!.bootId) fail("native_gui_original_text_context_required");
+    return Object.freeze({ chatId, runId: run.runId, inputDigest: row.inputDigest });
+  }
+  function supervisorStarted(runId: string): boolean {
+    try { return !!getDb().prepare("SELECT 1 FROM one_supervisor_requests WHERE run_id = ?").get(runId); } catch { return false; }
+  }
+  /** Same rules as recoveredTextBinding. A supervisor-started run has no GUI request shape to compare (its own start is
+   * system-originated), so only the reference/capability keys are refused there; the text still needs the exact binding. */
+  async function durableDaemonTextBindingForRequest(event: object, request: McpInvocationRequest, opts: { isCaptured?(runId: string): boolean } = {}): Promise<NativeOwnerTextBinding | null> {
+    const binding = durableDaemonTextBinding(event, request.chatId, opts); if (!binding) return null;
+    for (const key of ["images","fileGroupId","oneMemoryUseOnceRef","oneBriefingActionRef","oneTeamPreflightRef","oneAttachmentRef","oneRecurrenceSelection","preflightSubmissionId"] as const) if (request[key] !== undefined) fail("native_gui_text_input_requires_new_preparation");
+    if (supervisorStarted(binding.runId)) return binding;
+    if (await call("native.attach", { version: "agentlas.native-owner-text-compatible.v1", ...binding, choices: nativeOwnerTextChoices(request) }) !== true) fail("native_gui_text_input_context_changed");
+    return binding;
+  }
+  async function durableCurrentTurn(event: object, binding: NativeOwnerTextBinding) {
+    human(event);
+    const value = await call("invoke.currentTurn", { chatId: binding.chatId, runId: binding.runId });
+    if (value === null) return null;
+    if (!exact(value, ["runId"]) || value.runId !== binding.runId) fail("native_gui_current_turn_invalid");
+    return value;
+  }
+  /** Receipt by run id for a run whose active owner row names the attached daemon (no capture needed). */
+  function durableDaemonRunForReceipt(runId: string, isCaptured?: (runId: string) => boolean): { chatId: string; runId: string } | null {
+    const row = invocationRunOwners.getOwnerByRunId(runId);
+    if (!row || row.ownerKind !== "daemon" || !identity || row.ownerId !== identity.bootId || row.state === "released" || captures.has(runId) || isCaptured?.(runId)) return null;
+    return { chatId: row.chatId, runId };
+  }
+  async function receiptFor(chatId: string, runId: string) {
+    const wire = await call("invoke.receipt", { chatId, runId });
+    if (!exact(wire, ["version", "method", "chatId", "runId", "transfer"]) || wire.version !== "agentlas.native-recovery-value.v1" || wire.method !== "invoke.receipt" || wire.chatId !== chatId || wire.runId !== runId) fail("native_gui_recovery_value_invalid");
+    const result = await importNativeJsonValue(wire.transfer, { kind: "checkpoint-value", maxBytes: NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes, signal: controller.signal,
+      assertCurrent: () => { current(); }, read: (transferId, offset) => call("native.attach", { version: "agentlas.native-recovery-read.v1", read: { transferId, offset } }) });
+    if (result !== null && (!result || typeof result !== "object" || Array.isArray(result) || (result as {runId?:unknown}).runId !== runId || (result as {chatId?:unknown}).chatId !== chatId)) fail("native_gui_recovery_value_invalid");
+    const descriptor = wire.transfer as { transferId?: unknown; digest?: unknown };
+    if (await call("native.attach", { version: "agentlas.native-recovery-ack.v1", ack: { transferId: descriptor.transferId, digest: descriptor.digest } }) !== null) fail("native_gui_recovery_ack_invalid");
+    return result;
+  }
+  async function durableReceipt(event: object, runId: string, isCaptured?: (runId: string) => boolean) {
+    const run = durableDaemonRunForReceipt(runId, isCaptured); if (!run) return { routed: false as const };
+    human(event); return { routed: true as const, value: await receiptFor(run.chatId, run.runId) };
+  }
   async function ownerTextUnsteer(event: object, binding: NativeOwnerTextBinding, position:number,text:string):Promise<boolean>{human(event);const raw=await call("native.attach",{version:"agentlas.native-owner-text-unsteer.v1",...binding,position,text});if(typeof raw!=="boolean")fail("native_gui_text_unsteer_invalid");return raw;}
   async function recoveryValue(event:object,binding:NativeOwnerTextBinding,method:string,extra:Record<string,unknown>={}){
     human(event);const wire=await call("native.attach",{version:method,...binding,...extra});
@@ -233,7 +295,7 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     const value=await importNativeJsonValue(wire.transfer,{kind:"checkpoint-value",maxBytes:NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes,signal:controller.signal,assertCurrent:()=>{current()},read:(transferId,offset)=>call("native.attach",{version:"agentlas.native-recovery-read.v1",read:{transferId,offset}})});
     const d=wire.transfer as {transferId:unknown;digest:unknown};if(await call("native.attach",{version:"agentlas.native-recovery-ack.v1",ack:{transferId:d.transferId,digest:d.digest}})!==null)fail("native_gui_recovery_ack_invalid");return value;
   }
-  const control = Object.freeze({ bind, refresh, accept, cancel, resolveApproval, approvalReceipt, ownerText, ownerTextReceipt, observedTextBinding, recoveredTextBinding, ownerTextUnsteer,
+  const control = Object.freeze({ bind, refresh, accept, cancel, resolveApproval, approvalReceipt, ownerText, ownerTextReceipt, observedTextBinding, recoveredTextBinding, ownerTextUnsteer, durableDaemonTextBinding, durableDaemonTextBindingForRequest, durableCurrentTurn, durableReceipt,
     ownerTextAttach:(event:object,binding:NativeOwnerTextBinding,includeEvents:boolean)=>recoveryValue(event,binding,"agentlas.native-owner-text-attach.v1",{includeEvents}),
     ownerTextRecovery:(event:object,binding:NativeOwnerTextBinding)=>recoveryValue(event,binding,"agentlas.native-owner-text-recovery.v1"),
     hasRun: (runId: string) => captures.has(runId), hasChat: (chatId: string) => [...captures.values()].some(r => r.chatId === chatId && r.nativeCustody === "retained"), hasApproval: (requestId: string) => approvals.has(requestId),
@@ -242,14 +304,7 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     activeChatIds: () => [...new Set([...activeRuns].map(runId => captures.get(runId)!.chatId))],
     async receipt(event: object, runId: string) {
       human(event); const r = captures.get(runId); if (!r) fail("native_gui_observed_run_required");
-      const wire = await call("invoke.receipt", { chatId: r.chatId, runId });
-      if (!exact(wire, ["version", "method", "chatId", "runId", "transfer"]) || wire.version !== "agentlas.native-recovery-value.v1" || wire.method !== "invoke.receipt" || wire.chatId !== r.chatId || wire.runId !== runId) fail("native_gui_recovery_value_invalid");
-      const result = await importNativeJsonValue(wire.transfer, { kind: "checkpoint-value", maxBytes: NATIVE_MAIN_PREPARATION_POLICY.maxCheckpointBytes, signal: controller.signal,
-        assertCurrent: () => { current(); }, read: (transferId, offset) => call("native.attach", { version: "agentlas.native-recovery-read.v1", read: { transferId, offset } }) });
-      if (result !== null && (!result || typeof result !== "object" || Array.isArray(result) || (result as {runId?:unknown}).runId !== runId || (result as {chatId?:unknown}).chatId !== r.chatId)) fail("native_gui_recovery_value_invalid");
-      const descriptor = wire.transfer as { transferId?: unknown; digest?: unknown };
-      if (await call("native.attach", { version: "agentlas.native-recovery-ack.v1", ack: { transferId: descriptor.transferId, digest: descriptor.digest } }) !== null) fail("native_gui_recovery_ack_invalid");
-      return result;
+      return receiptFor(r.chatId, runId);
     },
     async currentTurn(event: object, chatId: string) { human(event); await refresh(); for (const runId of activeRuns) if (captures.get(runId)?.chatId === chatId) { const value = await call("invoke.currentTurn", { chatId, runId }); if (value !== null) { if (!exact(value, ["runId"]) || value.runId !== runId) fail("native_gui_current_turn_invalid"); return value; } } return null; },
     observationCounts() { return Object.freeze({ approvals: approvals.size, retainedApprovalBytes, stops: stops.size, captures: captures.size }); },

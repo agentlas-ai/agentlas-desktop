@@ -7,15 +7,24 @@ import {oneOsLeaseBroker,isOneOsHostAvailable,configuredOneOsLeaseBroker} from "
 import {oneContextService,OneContextError,type OneContextService} from "./context-service";
 import {supervisorError} from "../../shared/one-supervisor";
 import type {SupervisorRequestRow} from "./supervisor-store";
+import {daemonDeviceBridge,DeviceBridgeError,type DaemonDeviceBridge,type DeviceBridgeErrorCode} from "../daemon/device-bridge";
+
+/** A run that executes in the background service while the window process holds the screen. Main validates the daemon's
+ * request against the durable rows (owner row ownerKind "daemon" for the attached boot, admission digest, supervisor
+ * domain generation); nothing in this record is trusted on its own. */
+export interface RemoteDaemonSource {daemonBootId:string;inputDigest:string}
 
 /** Called only while materializing the actual native run's physical MCP
  * transport. Native browser guests keep their separate virtual-only scope. */
-export function prepareSupervisorOsExecution(input:{runId?:string;chatId?:string;permission?:"read"|"write"|"full";admissionCurrent?:()=>boolean}) {
+function supervisorRequestRows(runId:string):SupervisorRequestRow[] {
+  const db=getDb();
+  if(!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_requests'").get())return [];
+  return db.prepare("SELECT * FROM one_supervisor_requests WHERE run_id=? AND kind IN ('reply','work','follow-up','chat-send')").all(runId) as SupervisorRequestRow[];
+}
+export function prepareSupervisorOsExecution(input:{runId?:string;chatId?:string;permission?:"read"|"write"|"full";admissionCurrent?:()=>boolean;remoteDaemon?:RemoteDaemonSource}) {
   if(!input.runId || !input.chatId)return null;
   const db=getDb();
-  if(!db.prepare("SELECT 1 FROM sqlite_master WHERE name='one_supervisor_requests'").get())return null;
-  const rows=db.prepare("SELECT * FROM one_supervisor_requests WHERE run_id=? AND kind IN ('reply','work','follow-up','chat-send')")
-    .all(input.runId) as SupervisorRequestRow[];
+  const rows=supervisorRequestRows(input.runId);
   if(!rows.length)return null;
   if(rows.length!==1)throw supervisorError("supervisor_os_original_command_required");
   // The background service never hosts the screen: the window process owns the input driver, the OS lease broker and
@@ -24,10 +33,20 @@ export function prepareSupervisorOsExecution(input:{runId?:string;chatId?:string
   // for it again (production 1.2.95, 2026-10-11: supervisor_os_host_unavailable). Such a run uses the window's control
   // server through the shared control file, like any other run with computer use. A process that has a broker but
   // whose host is down (locked screen, server stopped) still refuses.
-  if(!configuredOneOsLeaseBroker())return null;
+  // 1.3.0 device bridge: the service now asks the window process to prepare the scoped execution (remoteDaemon), see
+  // prepareSupervisorOsExecutionAsync. Without a broker and without a remote source nothing is prepared here.
+  if(!configuredOneOsLeaseBroker()){
+    if(input.remoteDaemon)throw supervisorError("supervisor_os_host_unavailable");
+    return null;
+  }
   if(!isOneOsHostAvailable())throw supervisorError("supervisor_os_host_unavailable");
   const row=rows[0],oneId=getOneProfile().oneId,actor=JSON.stringify(getAuthenticatedActorIds());
-  const custody=invocationRunOwners.getOwnerByRunId(input.runId),processOwner=invocationProcessOwner(),admission=getInvocationAdmission(input.runId);
+  const remote=input.remoteDaemon;
+  // The expected run owner: this process for a window-hosted run; for a daemon-hosted run exactly the attached daemon
+  // boot with ownerKind "daemon". Nothing else widens: a window process never accepts a run owned by another desktop.
+  const processOwner:{ownerId:string;ownerKind:string}=remote?{ownerId:remote.daemonBootId,ownerKind:"daemon"}:invocationProcessOwner();
+  const custody=invocationRunOwners.getOwnerByRunId(input.runId),admission=getInvocationAdmission(input.runId);
+  if(remote && (!admission || admission.inputDigest!==remote.inputDigest))throw supervisorError("supervisor_os_source_fenced");
   const started=db.prepare("SELECT id,payload_json FROM run_events WHERE run_id=? AND chat_id=? AND kind='invoke_started' ORDER BY rowid LIMIT 1")
     .get(input.runId,input.chatId) as {id:string;payload_json:string}|undefined;
   const original=started?JSON.parse(started.payload_json) as {onePermissionMode?:string;permissions?:string}:null;
@@ -60,4 +79,39 @@ export function prepareSupervisorOsExecution(input:{runId?:string;chatId?:string
     .find(grant=>grant.oneId===oneId && grant.taskId===taskId && grant.state==="active" && grant.mode==="interact")?.grantId;
   return oneOsLeaseBroker().registerExecution({oneId,taskId,runId:input.runId,
     ownerEpoch:custody!.ownerId,permissions,...(contextGrantId?{contextGrantId}:{})},assertCurrent);
+}
+
+export type SupervisorOsExecutionOutcome =
+  | {kind:"scoped";capability:{version:"agentlas.one-os-execution.v1";executionId:string;token:string};dispose():void}
+  /** The run keeps going; only its computer-use tool calls fail, with this machine-readable reason. */
+  | {kind:"unavailable";reason:DeviceBridgeErrorCode|string};
+
+/** Called while materializing a run's physical MCP transport, in either process.
+ *  - Window process (has a broker): the scoped execution is prepared here, as before.
+ *  - Background service (no broker) running a daemon-owned supervisor run: the window process prepares it over the
+ *    device bridge. Never the owner token: if the window is not attached, or the request fails, the result is
+ *    "unavailable" and the computer-use child fails each tool call with that reason. The whole run does not fail.
+ *  - Anything else (no supervisor request for this run, or a process that is neither): null, as before. */
+export async function prepareSupervisorOsExecutionAsync(input:{runId?:string;chatId?:string;permission?:"read"|"write"|"full";admissionCurrent?:()=>boolean;deviceBridge?:DaemonDeviceBridge}):Promise<SupervisorOsExecutionOutcome|null> {
+  if(!input.runId || !input.chatId)return null;
+  if(configuredOneOsLeaseBroker()){
+    const local=prepareSupervisorOsExecution(input);
+    return local?{kind:"scoped",capability:local.capability,dispose:local.dispose}:null;
+  }
+  const rows=supervisorRequestRows(input.runId);
+  if(!rows.length)return null;
+  if(rows.length!==1)throw supervisorError("supervisor_os_original_command_required");
+  const processOwner=invocationProcessOwner();
+  if(processOwner.ownerKind!=="daemon")return null;
+  const custody=invocationRunOwners.getOwnerByRunId(input.runId),admission=getInvocationAdmission(input.runId);
+  if(!custody || custody.state!=="active" || custody.ownerKind!=="daemon" || custody.ownerId!==processOwner.ownerId || custody.chatId!==input.chatId || !admission || admission.chatId!==input.chatId)
+    return {kind:"unavailable",reason:"device_bridge_refused"};
+  const bridge=input.deviceBridge??daemonDeviceBridge();
+  try {
+    if(input.admissionCurrent && !input.admissionCurrent())return {kind:"unavailable",reason:"device_bridge_refused"};
+    const prepared=await bridge.prepareOsExecution({runId:input.runId,chatId:input.chatId,permission:input.permission??"read",inputDigest:admission.inputDigest});
+    return {kind:"scoped",capability:prepared.capability,dispose:prepared.dispose};
+  } catch(error) {
+    return {kind:"unavailable",reason:error instanceof DeviceBridgeError?error.code:"device_bridge_unavailable"};
+  }
 }

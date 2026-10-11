@@ -41,6 +41,7 @@ import type { ChatHostNotice } from "../../shared/types";
 import { isHostPreflightTool } from "../../shared/tool-activity";
 import { createHash, randomUUID } from "node:crypto";
 import { assertInvocationRunOwner, claimInvocationRunOwner, invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
+import { CHAT_BUSY_OTHER_HOST_CODE, ensureChatHostHandover } from "../runtime/chat-host-handover";
 import type { InvocationRunOwner } from "../store/invocation-owner-core";
 import path from "node:path";
 import { agentRunCwd } from "../runtime/exec";
@@ -1021,6 +1022,13 @@ interface NativeIngressPending {
   proofMinted: boolean;
 }
 
+/** Desktop and the background service never run one chat's turns at once (1.3.0 A2): a live run-owner row of the other
+ * process kind means the chat belongs to that process until the row is released. */
+function otherHostOwnsChat(row: Pick<InvocationRunOwner, "ownerKind" | "state">, local: { ownerKind: InvocationRunOwner["ownerKind"] }): boolean {
+  return (row.state === "active" || row.state === "settling") && row.ownerKind !== local.ownerKind
+    && (row.ownerKind === "desktop" || row.ownerKind === "daemon") && (local.ownerKind === "desktop" || local.ownerKind === "daemon");
+}
+
 export class InvocationService {
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
@@ -1236,16 +1244,26 @@ export class InvocationService {
     const chatBusy = !backgroundObservation && ([...this.nativeIngress.values()].some(p=>p.source.binding.chatId===binding.chatId && !effectObservationTicket(p.source.binding.runId))
       || [...this.nativePreparing.values()].some(p=>p.binding.chatId===binding.chatId && !effectObservationTicket(p.binding.runId))
       || this.activeChatIds().includes(binding.chatId));
+    let otherHostBusy = false;
+    if (!chatBusy && !backgroundObservation) {
+      try { const active = invocationRunOwners.getActiveOwner(binding.chatId); otherHostBusy = !!active && otherHostOwnsChat(active, invocationProcessOwner()); }
+      catch { /* an unreadable owner table is not evidence of a busy chat: the claim at start decides */ }
+    }
     const controller=new AbortController(), lifetime=createNativePreparationLifetime(binding), retained=new Set<Promise<unknown>>();
     const nativeActor = getAuthenticatedActorIds();
     const pending: NativeIngressPending={actorSnapshot:nativeActor ? Object.freeze({ ...nativeActor }) : null,source:owned,original:source,observedKinds:new Set(),controller,lifetime,retained,handedOff:false,port:undefined,cancelSettled:false,frontier:"open",proofMinted:false};
     this.nativeIngressOriginals.set(source,{pending,controller,lifetime});
     this.nativeIngress.set(binding.runId,pending);this.publishActiveChats();
     let status:"handed-off"|"cancelled"|"uncertain"="uncertain";
+    let refusedBeforeStart=false;
     try {
       // A distinct busy-chat capsule still owns genuine cancellation/quiescence
       // and a closed-before-prepared proof; it never leaks an unregistered source.
-      if (chatBusy) throw new Error("invocation_cleanup_pending");
+      // Nothing was authorized or read yet, so this is a definite pre-start refusal
+      // (status "cancelled" = closed before start), not an uncertain execution.
+      if (chatBusy) { refusedBeforeStart=true; throw Object.assign(new Error("invocation_chat_busy"),{code:"invocation_chat_busy"}); }
+      // The other process (Desktop <-> background service) is running a turn of this chat: one host per chat at a time.
+      if (otherHostBusy) { refusedBeforeStart=true; throw Object.assign(new Error(CHAT_BUSY_OTHER_HOST_CODE),{code:CHAT_BUSY_OTHER_HOST_CODE}); }
       if (!this.acceptingStarts) throw new Error("desktop_execution_admission_closed");
       const admission=await withNativePreparationLifetime(lifetime,()=>runNativePreparation(()=>owned.authorize(controller.signal)));
       await lifetime.awaitRetained();owned.assertCurrent();controller.signal.throwIfAborted();
@@ -1259,6 +1277,7 @@ export class InvocationService {
     } catch(cause) {
       status=controller.signal.aborted?"cancelled":"uncertain";
       if(controller.signal.aborted) throw controller.signal.reason;
+      if(refusedBeforeStart){ status="cancelled"; throw cause; }
       const error=new RuntimeTurnUnsettledError("native-ingress");Object.defineProperty(error,"cause",{value:cause});throw error;
     } finally {
       if (!pending.handedOff) this.cancelNativeIngress(pending);
@@ -1741,6 +1760,21 @@ export class InvocationService {
     }
   }
 
+  /** Chat host handover (1.3.0 A2). Undefined when this chat's previous turn ran in this same process kind. */
+  private handOverChatHost(lease: InvocationRunOwner, chatId: string, runId: string): Promise<void> | undefined {
+    let previous: InvocationRunOwner | null;
+    try { previous = invocationRunOwners.getPreviousOwner(chatId, runId); }
+    catch { return undefined; }
+    if (!previous || previous.ownerKind === lease.ownerKind) return undefined;
+    return ensureChatHostHandover({
+      chatId, runId, localKind: lease.ownerKind, previous,
+      record: (line, fields) => {
+        tryRecordRunEvent({ runId, chatId, kind: "runtime_session_handover", payload: { line, ...fields } });
+        console.info(line);
+      },
+    });
+  }
+
   private startPrepared(
     req: McpInvocationRequest,
     workspaceBinding: InvocationWorkspaceBinding | undefined,
@@ -1778,7 +1812,11 @@ export class InvocationService {
     const backgroundObservation = Boolean(effectObservationTicket(req.runId));
     if ((!nativeController || !nativePreparation || isLocalInvocationPreparationPort(nativePreparation.port)) && !backgroundObservation) {
       const foreignOwner = invocationRunOwners.getActiveOwner(req.chatId), localOwner = invocationProcessOwner();
-      if (foreignOwner && (foreignOwner.ownerId !== localOwner.ownerId || foreignOwner.ownerKind !== localOwner.ownerKind)) throw new Error("invocation_cleanup_pending");
+      if (foreignOwner && (foreignOwner.ownerId !== localOwner.ownerId || foreignOwner.ownerKind !== localOwner.ownerKind)) {
+        // A live turn of this chat in the OTHER process (Desktop <-> background service) is a definite refusal (1.3.0 A2).
+        if (otherHostOwnsChat(foreignOwner, localOwner)) throw Object.assign(new Error(CHAT_BUSY_OTHER_HOST_CODE), { code: CHAT_BUSY_OTHER_HOST_CODE });
+        throw new Error("invocation_cleanup_pending");
+      }
       if (this.foreignNativeStartFence) {
         let blocked: unknown;
         try { blocked = this.foreignNativeStartFence(req.chatId); }
@@ -3031,6 +3069,7 @@ export class InvocationService {
         begin: admission => { effectBoundary.adapterStarted(admission); record.semanticSteps.admitAdapter(admission); }, finish: (scopeId, report) => effectBoundary.adapterFinished(scopeId, report),
         hostControl: observation => effectBoundary.hostControl(observation), recordingFailed: () => effectBoundary.recordingFailed() }, () => Promise.resolve().then(() => {
         if (record.ownerLease) assertInvocationRunOwner(record.ownerLease);
+        const handoverLease = record.ownerLease;
         const nativeApprovalOwner = nativeController && record.ownerLease && (!isLocalInvocationPreparationPort(nativePreparation!.port) || record.ownerLease.ownerKind === "daemon")
           ? { originalRequest: runReq, runId, chatId: chat.id, ownerId: record.ownerLease.ownerId, leaseId: record.ownerLease.leaseId,
               signal: controller.signal, actor: nativePreparation!.actorSnapshot, assertCurrent: () => {
@@ -3039,7 +3078,10 @@ export class InvocationService {
                 assertInvocationRunOwner(record.ownerLease);
               } } : undefined;
         if (nativeApprovalOwner && !lifetime.ownsActiveRoot()) throw new Error("native_approval_execution_root_required");
-        return withNativeApprovalExecution(nativeApprovalOwner, () => runMcpInvocation(
+        // Chat host handover (1.3.0 A2): the chat's previous turn ran in the other process, so that process lets go of its
+        // idle resident runtime sessions before this one dispatches, and the same provider thread resumes here.
+        const handedOver = handoverLease ? this.handOverChatHost(handoverLease, runReq.chatId, runId) : undefined;
+        const dispatch = () => withNativeApprovalExecution(nativeApprovalOwner, () => runMcpInvocation(
       runReq,
       (rawEvent) => {
         const hostControl = mainHostControlForEvent(rawEvent);
@@ -4144,7 +4186,8 @@ export class InvocationService {
         }
       },
       this.ownerControlInbox(runId, record),
-    )); })
+    ));
+        return handedOver ? handedOver.then(dispatch) : dispatch(); })
       .then((result) => {
         // The runner promise has settled. Persist host effect completeness
         // before a fast verifier can produce or claim a retry checkpoint.

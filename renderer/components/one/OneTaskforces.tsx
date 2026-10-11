@@ -2,7 +2,7 @@
 
 import { Fragment, useEffect, useMemo, useState } from "react";
 import { personalizeOneText, useOnePersonaName } from "@/lib/one-persona-name";
-import { IconCheck, IconClose, IconPlus, IconUsers } from "@/components/Icon";
+import { IconCheck, IconClose, IconPlus, IconTrash, IconUsers } from "@/components/Icon";
 import type { OneOrgMember, OneOrgState } from "@shared/one-org";
 import type { OneTaskforce } from "@shared/one-taskforces";
 import { ipc } from "@/lib/ipc";
@@ -251,7 +251,7 @@ export function OneTaskforceDialog({
       {busy && <div className={styles.busyState} role="status" aria-live="polite"><span aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
       <section className={styles.memberList} aria-label={locale === "ko" ? "태스크포스 멤버" : "Taskforce members"}>
         <div className={styles.memberRow} data-fixed="true">
-          <OneAgentPortrait status="quiet" label={onePersonaName} tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
+          <OneAgentPortrait status="quiet" label={onePersonaName} size="small" tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
           <span><strong>{onePersonaName}</strong><small>{locale === "ko" ? "CEO 오케스트레이터 · 항상 참여" : "CEO orchestrator · Always present"}</small></span>
           <span className={styles.fixedBadge}><IconCheck size={12} />{locale === "ko" ? "고정" : "Pinned"}</span>
         </div>
@@ -266,7 +266,7 @@ export function OneTaskforceDialog({
             onClick={() => toggle(member.installedAgentId, unavailable)}
             disabled={unavailable && !checked}
           >
-            <OneAgentPortrait status={unavailable ? "locked" : member.statusKind} label={member.displayName} tone={member.icon} />
+            <OneAgentPortrait status={unavailable ? "locked" : member.statusKind} label={member.displayName} size="small" tone={member.icon} />
             <span><strong>{member.displayName}</strong><small>{memberStatus(member, locale)}</small></span>
             <span className={styles.checkbox} data-checked={checked ? "true" : "false"}>{checked ? <IconCheck size={12} /> : null}</span>
           </button>
@@ -307,7 +307,7 @@ export function OneTaskforceDialog({
         <button type="button" className={styles.dangerButton} onClick={() => void onRemove({ id: taskforce.id, expectedRevision: taskforce.revision })} disabled={busy}>{locale === "ko" ? "삭제" : "Delete"}</button>
       </div>}
       <div className={styles.dialogActions}>
-        {taskforce && !confirmRemove ? <button type="button" className={styles.removeButton} onClick={() => setConfirmRemove(true)} disabled={busy}>{locale === "ko" ? "태스크포스 삭제" : "Delete Taskforce"}</button> : <span />}
+        {taskforce && !confirmRemove ? <button type="button" className={styles.removeButton} onClick={() => setConfirmRemove(true)} disabled={busy} aria-label={locale === "ko" ? "태스크포스 삭제" : "Delete Taskforce"} title={locale === "ko" ? "태스크포스 삭제" : "Delete Taskforce"}><IconTrash size={15} />{locale === "ko" ? "삭제" : "Delete"}</button> : <span />}
         <button type="button" onClick={onClose} disabled={busy}>{locale === "ko" ? "취소" : "Cancel"}</button>
         <button type="button" className={styles.primaryButton} onClick={() => void submit()} disabled={busy || !title.trim()}>{busy ? (locale === "ko" ? "저장 중…" : "Saving…") : taskforce ? (locale === "ko" ? "저장" : "Save") : (locale === "ko" ? "만들기" : "Create")}</button>
       </div>

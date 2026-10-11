@@ -1,0 +1,201 @@
+/*
+ * Group-room discussion (A5). Same tokens as the rest of the room: no new colors, no shadows, no decoration.
+ * The live bubbles reuse the room's own message classes (OneShell.module.css), so a speaking bubble and the message
+ * it becomes look the same.
+ */
+.live {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+  margin: 6px 0;
+}
+
+.liveHint {
+  margin: 0;
+  color: var(--muted-deep);
+  font-size: 12px;
+}
+
+.liveName {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 7px;
+}
+
+.liveName small {
+  color: var(--muted-deep);
+  font-size: 11px;
+}
+
+.skipped {
+  margin: 0 0 0 50px;
+  color: var(--muted-deep);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.skipped strong {
+  color: var(--ink-soft);
+  font-weight: 650;
+}
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  margin: 6px 0 2px;
+  padding: 6px 10px;
+  border: 1px solid var(--paper-edge);
+  border-radius: 8px;
+  background: var(--paper);
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+.barText {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.barText small {
+  display: block;
+  margin-top: 1px;
+  overflow: hidden;
+  color: var(--muted-deep);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stop {
+  flex: 0 0 auto;
+  height: 26px;
+  padding: 0 10px;
+  border: 1px solid var(--paper-edge-strong);
+  border-radius: 6px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.stop:hover,
+.stop:focus-visible {
+  background: var(--paper-3);
+}
+
+.stop:disabled {
+  color: var(--muted-deep);
+  cursor: default;
+}
+
+.notice {
+  margin: 4px 0 0;
+  color: var(--muted-deep);
+  font-size: 11.5px;
+}
+
+/* Comments and replies hang under the message they answer, behind a thin rule. */
+.thread {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  margin: 6px 0 2px 50px;
+  padding-left: 12px;
+  border-left: 1px solid var(--paper-edge-strong);
+}
+
+.comment {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  column-gap: 9px;
+  align-items: start;
+  min-width: 0;
+}
+
+.commentBody {
+  min-width: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.commentBody[data-folded="true"] {
+  display: -webkit-box;
+  max-height: 4.65em;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.commentMeta {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  color: var(--muted-deep);
+  font-size: 11px;
+}
+
+.commentMeta strong {
+  color: var(--ink);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.commentMeta time {
+  font-variant-numeric: tabular-nums;
+}
+
+.more {
+  justify-self: start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 11.5px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.replyContext {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  margin: 0 0 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--muted-deep);
+  font: inherit;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.replyContext strong {
+  flex: 0 0 auto;
+  color: var(--ink-soft);
+  font-weight: 650;
+}
+
+.replyContext span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.replyContext:hover span,
+.replyContext:focus-visible span {
+  color: var(--ink-soft);
+}

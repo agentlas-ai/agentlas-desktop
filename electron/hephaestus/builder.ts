@@ -827,6 +827,30 @@ export function composeBuilderPrompt(
   return parts.join("\n");
 }
 
+/**
+ * The stage line after `cards migrate`. A card on disk is not "registered for
+ * local discovery": Workforce searches its own roster, and an engine without
+ * the adoption step saved the card and never added the package to it — so a
+ * freshly built agent was announced as registered and then could not be found
+ * (measured 2026-10-11). Say only what the engine reported.
+ */
+export function localRegistrationStageText(ko: boolean, migrateJson: unknown): string {
+  const registration =
+    migrateJson && typeof migrateJson === "object"
+      ? (migrateJson as { workforceRegistration?: { status?: unknown } }).workforceRegistration
+      : undefined;
+  const status = typeof registration?.status === "string" ? registration.status : null;
+  if (status === "registered") return ko ? "로컬 탐색에 등록됨" : "Registered for local discovery";
+  if (status === "partial" || status === "failed") {
+    return ko
+      ? "카드는 저장했지만 로컬 검색 목록 등록이 끝나지 않았습니다. 다음 검색 때 다시 시도합니다."
+      : "The card is saved, but adding it to the local search roster did not finish. It will be retried on the next search.";
+  }
+  return ko
+    ? "카드를 저장했습니다. 설치된 엔진이 구버전이면 검색 목록에는 아직 안 보일 수 있습니다. 엔진을 업데이트하세요."
+    : "The card is saved. An older installed engine may not list it in search yet; update the engine.";
+}
+
 export function selectBuildRuntimeStatus(
   runtimes: RuntimeStatus[],
   selection: HephaestusBuildRequest["runtime"],
@@ -1661,7 +1685,7 @@ async function runHephaestusBuildInScope(
             stage: "contract",
             text: migrated.error
               ? (ko ? `로컬 등록 실패: ${migrated.error}` : `Local registration failed: ${migrated.error}`)
-              : (ko ? "로컬 탐색에 등록됨" : "Registered for local discovery"),
+              : localRegistrationStageText(ko, migrated.json),
           });
         } catch (err) {
           console.warn(`[build] cards migrate unavailable: ${err instanceof Error ? err.message : String(err)}`);

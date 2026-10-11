@@ -58,6 +58,7 @@ import {getServer as getInstalledMcpServer} from './mcp-tools/registry';
 import {mcpServerConfigurationDigest} from './mcp-tools/prepared-transport';
 import { registerOneNativeMainComposition, currentOneNativeMainComposition } from './one/native-main-composition';
 import { registerOnePersonalIntegrationMainIpc } from './one/personal-integrations-main';
+import { registerRoomDiscussionIpc } from './one/room-discussion-ipc';
 import { closeOnePersonalIntegrations, invalidateOnePersonalIntegrations } from './one/personal-integrations-runtime';
 import { configureDevelopmentEffectPolicy, developmentEffectPolicyRequested, developmentEffectsSuppressed, developmentIpcBoundary, developmentRendererRequestAllowed } from "./development-effect-policy";
 import { ScienceProjectFolderSelections, validateScienceProjectFolderPath } from "agentlas-science";
@@ -2470,6 +2471,7 @@ app.whenReady().then(async () => {
   }});
   registerIpcHandlers();
   registerOnePersonalIntegrationMainIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
+  registerRoomDiscussionIpc({ipc:ipcMain,assertTrustedSender:assertTrustedSitePublishIpcSender,isOwnerWindow:window=>window===mainWindow||window===getOneWindow()});
   registerOneVaultMainIpc({ipc:ipcMain,host:{preloadPath:path.join(__dirname,'preload.js'),
     preparePersonalPending:(window,runId)=>{if(!nativePersonalEntry||nativePersonalCleanupUnknown)throw Error('one_personal_native_entry_unavailable');return nativePersonalEntry.preparePending(window,runId)},
     installPersonalSavedConsumer:async(window,runId)=>{if(!nativePersonalEntry||nativePersonalCleanupUnknown)throw Error('one_personal_native_entry_unavailable');await nativePersonalEntry.finishSaved(runId)},

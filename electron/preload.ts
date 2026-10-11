@@ -576,6 +576,12 @@ const api: AgentlasIpc = {
     setTools: (input) => ipcRenderer.invoke("oneOrg:setTools", input),
     suggestions: (input) => ipcRenderer.invoke("oneOrg:suggestions", input),
   },
+  oneDiscussion: {
+    state: (chatId: string) => ipcRenderer.invoke("oneDiscussion:state", chatId),
+    post: (input) => ipcRenderer.invoke("oneDiscussion:post", input),
+    stop: (chatId: string) => ipcRenderer.invoke("oneDiscussion:stop", chatId),
+    setEnabled: (input) => ipcRenderer.invoke("oneDiscussion:setEnabled", input),
+  },
   oneTaskforces: {
     list: () => ipcRenderer.invoke("oneTaskforces:list"),
     create: (input) => ipcRenderer.invoke("oneTaskforces:create", input),

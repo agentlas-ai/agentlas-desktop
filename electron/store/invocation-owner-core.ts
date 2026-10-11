@@ -66,6 +66,15 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
       .get(runId) as OwnerRow | undefined);
   }
 
+  /** The chat's most recent run owner other than `excludeRunId`: which process ran the chat's turn before this one.
+   * Rows are never deleted, so this is the durable "last execution host" of the chat (1.3.0 A2). */
+  function getPreviousOwner(chatId: string, excludeRunId: string): InvocationRunOwner | null {
+    if (!validId(chatId) || !validId(excludeRunId)) throw new Error("invocation_owner_identity_invalid");
+    return owner(ports.getDb().prepare(`SELECT * FROM invocation_run_owners
+      WHERE chat_id = ? AND run_id <> ? ORDER BY created_at DESC, rowid DESC LIMIT 1`)
+      .get(chatId, excludeRunId) as OwnerRow | undefined);
+  }
+
   function listActiveOwners(): InvocationRunOwner[] {
     return (ports.getDb().prepare("SELECT * FROM invocation_run_owners WHERE state IN ('active','settling')")
       .all() as OwnerRow[]).map(row => owner(row)!);
@@ -99,7 +108,7 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
       .run(state, now(), expected.chatId, expected.runId, expected.ownerId, expected.ownerKind, expected.leaseId).changes === 1;
   }
 
-  return { claim, getActiveOwner, getRunOwner, getOwnerByRunId, listActiveOwners,
+  return { claim, getActiveOwner, getRunOwner, getOwnerByRunId, getPreviousOwner, listActiveOwners,
     markSettling: (expected: InvocationRunOwner) => transition(expected, "settling"),
     release: (expected: InvocationRunOwner) => transition(expected, "released") };
 }

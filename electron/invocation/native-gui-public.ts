@@ -4,6 +4,7 @@ import type { NativeAuthenticatedIdentity } from "../daemon/native-session-auth"
 import { createNativeInvocationPublicReceiver, nativePublicAckOperation, nativePublicReadOperation } from "./native-public-events";
 import { configuredNativeGuiOwner } from "./native-gui-startup";
 import { dispatchOnePreflightSteers } from "./preflight-steer-admission";
+import { notifyDaemonRunSettled } from "./daemon-run-alerts";
 
 type Channel = object & { dispatch(method: string, params: unknown): Promise<unknown>; onClose(listener: () => void): () => void };
 let legacyChatIds: string[] = [], nativeChatIds: string[] = [], recoveredChatIds: string[] = [];
@@ -44,9 +45,13 @@ export function createNativeGuiPublicBridge(policy: Readonly<{ maxRetainedBytes:
       ack: input => actualChannel.dispatch("native.attach", nativePublicAckOperation(input)),
       onEvent: ({ runId, event }) => { if (live()) broadcast(`invoke:event:${runId}`, event); },
       onActiveChats(chatIds) { if (!live()) return; staleChatIds = new Set(); nativeChatIds = [...chatIds]; recoveredChatIds = []; publishActiveChats(); },
-      onSettled({ runId, chatId }) {
+      onSettled(settlement) {
+        const { runId, chatId } = settlement;
         if (!live()) return;
         staleChatIds.delete(chatId);
+        // A run hosted by the background service never settles in Main's own invocation service, so the OS notification
+        // Main shows for its own runs is raised here from the service's settlement (same settings, same foreground rule).
+        notifyDaemonRunSettled(settlement);
         // Root sends the authentic final private finish callback before this
         // event. Retire tests that already-released state; no second finish RPC.
         const owner = configuredNativeGuiOwner();

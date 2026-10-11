@@ -30,6 +30,7 @@ const DENIED: Array<[RegExp, string]> = [
   // One's own run plumbing: it has dedicated tools for these.
   [/^(invoke|oneSupervisor|oneHarness|oneWindow|oneContext|workStart|oneTeamPreflight|attention)\./, "One's own conversation plumbing; use the one_supervisor_* / one_team_* tools"],
   [/^chats\.appendOneUserMessage$/, "never write a message as the owner"],
+  [/^oneDiscussion\.(post|stop|setEnabled)$/, "the owner's own room screen opens, stops and configures a group discussion; never speak as the owner"],
   [/^science\.composer\./, "use one_supervisor_start_science / one_supervisor_control to work in Science"],
   // Views, live frames, watchers and leases belong to a screen that opened them.
   [/^(workLiveView|browserUi|browserAnnotation)\./, "operates a browser view on the owner's screen"],

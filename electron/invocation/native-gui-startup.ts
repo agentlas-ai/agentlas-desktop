@@ -3,6 +3,7 @@ import { captureNativeAuthBinding, provisionNativeGuiCredential, nativeDaemonEnr
 import { connectNativeGuiChannel, nativeAuthSocketPath, nativeGuiChannelIdentity } from "../daemon/native-auth-channel";
 import type { NativeAuthenticatedIdentity } from "../daemon/native-session-auth";
 import { userDataDir } from "../runtime-paths";
+import { CHAT_HANDOVER_VERSION, chatReleaseReplyFromWire, registerChatHandoverPeer } from "../runtime/chat-host-handover";
 import { assertNativeGuiOwnerBootstrap, type createNativeGuiOwnerClient } from "./native-gui-owner";
 import type { createNativeMainAuthCallbackAdapter } from "./native-main-auth-callback";
 
@@ -79,7 +80,16 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
     const channel = await connectNativeGuiChannel({ address: nativeAuthSocketPath(userDataDir()), binding: value.binding,
       credential: value.credential, bootId: discoveredBootId,
       onEvent: onEvent && ((method, params) => { if (value.generation === gen) onEvent(method, params, genIdentity); }),
-      onRequest(method, raw, identity) { current(); if (!value.adapter) fail("native_gui_callback_not_initialized"); return value.adapter.onRequest(method, raw, identity); } });
+      onRequest(method, raw, identity) {
+        current();
+        // Device bridge (1.3.0 A3): the service's device requests (scoped screen control, idle snapshot) arrive on the same
+        // authenticated callback path. They answer with a value and need no installed preparation adapter.
+        if (raw && typeof raw === "object" && (raw as { version?: unknown }).version === "agentlas.device-bridge.v1") {
+          const live = value.channel;
+          return import("./device-bridge-main").then(async m => (await m.deviceBridgeMain()).handle(raw, live as object, identity));
+        }
+        if (!value.adapter) fail("native_gui_callback_not_initialized"); return value.adapter.onRequest(method, raw, identity);
+      } });
     try { current(); } catch (error) { channel.close(); throw error; }
     value.channel = channel; value.identity = undefined; value.capabilities = undefined; value.ready = false;
     try {
@@ -97,6 +107,15 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
         || Object.values(reply.capabilities).some(flag => typeof flag !== "boolean")) fail("native_gui_attach_reply_invalid");
       const capabilities = Object.freeze({ ...reply.capabilities }) as NativeGuiCapabilities;
       value.capabilities = capabilities; value.ready = reply.ready;
+      // Device bridge: revoke daemon-run screen scopes if this channel closes, forward lock/sleep, push the current state.
+      void import("./device-bridge-main").then(async m => (await m.deviceBridgeMain()).attached(channel as never)).catch(() => undefined);
+      // Chat host handover (1.3.0 A2): this process can ask the attached service to release its idle resident sessions of a
+      // chat before Desktop runs that chat's next turn. Tied to this exact channel generation.
+      const unregisterHandover = registerChatHandoverPeer("daemon", async (chatId, deadlineMs) => {
+        if (value.channel !== channel || nativeGuiChannelIdentity(channel) !== identity) throw Object.assign(new Error("chat_handover_peer_unavailable"), { code: "chat_handover_peer_unavailable" });
+        return chatReleaseReplyFromWire(await channel.dispatch("native.attach", { version: CHAT_HANDOVER_VERSION, op: "release", chatId, deadlineMs }));
+      });
+      channel.onClose(unregisterHandover);
       return Object.freeze({ ready: reply.ready && Object.values(capabilities).every(flag => flag === true), capabilities, identity });
     } catch (error) { channel.close(); throw error; }
   })();

@@ -33,9 +33,11 @@
   --one-sheet-success-surface: color-mix(in oklch, var(--green) 12%, var(--paper));
   --one-sheet-success-line: var(--paper-edge);
   --one-sheet-radius: var(--popup-radius);
-  --one-sheet-horizontal-padding: 20px;
+  --one-sheet-horizontal-padding: 24px;
   --one-sheet-body-padding-top: 16px;
-  --one-sheet-body-padding-bottom: 20px;
+  --one-sheet-body-padding-bottom: 24px;
+  /* The body clips overflow; this inset keeps focus rings, shadows and tiny status dots off the clipped edge. */
+  --one-sheet-body-inset: 4px;
   /*
    * 모션 토큰 — 정본은 OneShell.module.css 맨 끝 "모션 시스템" 절이다.
    * 시트는 포털로 .body 밖에 그려져 상속을 못 받으므로 같은 값을 여기 한 번 더
@@ -90,11 +92,14 @@
 
 /* Keep ordinary settings compact; only dense multi-column editors use full width. */
 .compact {
-  width: min(440px, calc(100vw - 32px));
+  /* Sized by its content, between a floor that keeps short confirmations from looking cramped and a ceiling for lists. */
+  width: fit-content;
+  min-width: min(360px, calc(100vw - 32px));
+  max-width: min(440px, calc(100vw - 32px));
 }
 
 .wide {
-  width: min(760px, calc(100vw - 48px));
+  width: min(600px, calc(100vw - 48px));
 }
 
 .full {
@@ -107,7 +112,7 @@
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
   gap: 12px;
-  padding: 16px 0 12px;
+  padding: 20px 0 14px;
   border-bottom: 1px solid var(--one-sheet-line);
 }
 
@@ -169,7 +174,7 @@
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable both-edges;
-  padding: var(--one-sheet-body-padding-top) 0 var(--one-sheet-body-padding-bottom);
+  padding: var(--one-sheet-body-padding-top) var(--one-sheet-body-inset) var(--one-sheet-body-padding-bottom);
 }
 
 .closeButton {
@@ -262,6 +267,6 @@
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  padding: 12px 0 16px;
+  padding: 14px 0 20px;
   border-top: 1px solid var(--one-sheet-line);
 }

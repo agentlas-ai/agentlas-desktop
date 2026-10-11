@@ -26,7 +26,13 @@ export function claimInvocationRunOwner(chatId: string, runId: string): Invocati
   ownerUsed = true;
   const claim = invocationRunOwners.claim({ chatId, runId, ...invocationProcessOwner() });
   if (claim.kind !== "claimed") {
-    throw Object.assign(new Error("invocation_chat_owned_by_other_run"), { code: "invocation_chat_owned_by_other_run" });
+    // The other run is live in the other process (Desktop <-> background service): one host per chat at a time (A2).
+    const local = invocationProcessOwner(), other = claim.owner;
+    const code = (other.state === "active" || other.state === "settling")
+      && other.ownerKind !== local.ownerKind && (other.ownerKind === "desktop" || other.ownerKind === "daemon")
+      && (local.ownerKind === "desktop" || local.ownerKind === "daemon")
+      ? "invocation_chat_busy_other_host" : "invocation_chat_owned_by_other_run";
+    throw Object.assign(new Error(code), { code });
   }
   return claim.owner;
 }

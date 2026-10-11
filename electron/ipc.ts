@@ -247,6 +247,7 @@ import {
   listOnePreflightSteers,
   reserveOnePreflightParent,
 } from "./store/one-preflight-steers";
+import { createDurableOwnerTextRoutes, NOT_DAEMON_OWNED } from "./invocation/native-owner-text-routes";
 import { dispatchOnePreflightSteers, recoverOnePreflightSteers, installNativePreflightSteerPort, captureNativePreflightSteerGesture } from "./invocation/preflight-steer-admission";
 import type { OnePreflightSteerInput, OnePreflightSteerLookupInput, OnePreflightSubmissionInput } from "../shared/one-preflight-steers";
 import { getResolvedOrg } from "./store/org-spec";
@@ -1637,6 +1638,12 @@ export function initializeNativeGuiInvocationOwner(enrollment: NativeGuiEnrollme
     });
   }
 
+}
+/** Routes owner text for a daemon-owned active run by the durable run-owner row (single execution host, stage 1). */
+let durableOwnerTextRoutesInstance: ReturnType<typeof createDurableOwnerTextRoutes> | undefined;
+function durableOwnerTextRoutes() {
+  return durableOwnerTextRoutesInstance ??= createDurableOwnerTextRoutes({ controls: configuredNativeGuiControls,
+    isCaptured: runId => configuredNativeGuiOwner()?.inspect(runId).retained === true });
 }
 const rendererInvocationProcessEpoch = randomUUID();
 /*
@@ -7242,15 +7249,19 @@ export function registerIpcHandlers(): void {
       throw cause;
     }
   });
-  ipcMain.handle("invoke:currentTurn", (_event, chatId: string) => {
+  ipcMain.handle("invoke:currentTurn", async (_event, chatId: string) => {
     assertTrustedSitePublishIpcSender(_event);
     if (typeof chatId !== "string" || !chatId) throw new Error("invocation_steer_invalid_chat_id");
+    const durable = await durableOwnerTextRoutes().currentTurn(_event, chatId);
+    if (durable !== NOT_DAEMON_OWNED) return durable;
     const native = configuredNativeGuiControls();
     if (native && (native.hasChat(chatId) || configuredNativeGuiOwner()?.retainedChatIds().includes(chatId))) return native.currentTurn(_event, chatId);
     return invocationCurrentTurnControl.currentTurn(chatId);
   });
-  ipcMain.handle("invoke:steerCurrentTurn", (_event, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
+  ipcMain.handle("invoke:steerCurrentTurn", async (_event, input: import("../shared/types").InvocationCurrentTurnSteerRequest) => {
     assertTrustedSitePublishIpcSender(_event);
+    const durable = await durableOwnerTextRoutes().steerCurrentTurn(_event, input);
+    if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner = configuredNativeGuiOwner(), controls = configuredNativeGuiControls();
     if (controls && (controls.hasChat(input.chatId) || owner?.retainedChatIds().includes(input.chatId))) {
       const binding = owner?.retainedChatIds().includes(input.chatId) ? owner.capturedTextBinding(input.chatId, input.expectedRunId) : controls.observedTextBinding(_event,input.chatId);
@@ -7259,17 +7270,21 @@ export function registerIpcHandlers(): void {
     }
     return invocationCurrentTurnControl.steerCurrentTurn(input);
   });
-  ipcMain.handle("invoke:currentTurnSteerReceipt", (_event, input: { chatId: string; intentId: string }) => {
+  ipcMain.handle("invoke:currentTurnSteerReceipt", async (_event, input: { chatId: string; intentId: string }) => {
     assertTrustedSitePublishIpcSender(_event);
     if (!input || typeof input.chatId !== "string" || !input.chatId || typeof input.intentId !== "string"
       || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$/.test(input.intentId)) throw new Error("invocation_steer_invalid_lookup");
+    const durable = await durableOwnerTextRoutes().currentTurnSteerReceipt(_event, input);
+    if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
     if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?{chatId:r.chatId,intentId:r.intentId,runId:r.runId,promptHash:r.promptHash,messageId:r.messageId,status:r.sourceStatus,...(r.code?{code:r.code}:{})}:null);}
     return invocationCurrentTurnControl.currentTurnSteerReceipt(input.chatId, input.intentId);
   });
-  ipcMain.handle("invoke:steer", (_event, req: McpInvocationRequest, intentId?: string) => {
+  ipcMain.handle("invoke:steer", async (_event, req: McpInvocationRequest, intentId?: string) => {
     assertTrustedSitePublishIpcSender(_event);
     const request = rendererInvocationRequest(req);
+    const durable = await durableOwnerTextRoutes().steer(_event, request, intentId);
+    if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
     if(controls&&(controls.hasChat(request.chatId)||owner?.retainedChatIds().includes(request.chatId))){
       const intent=intentId??randomUUID(), kind=request.steeringMode==="interrupt"?"interrupt":"queue";
@@ -7285,9 +7300,11 @@ export function registerIpcHandlers(): void {
       request, intentId, admitMainInvocation(request.chatId),
     );
   });
-  ipcMain.handle("invoke:steerReceipt", (_event, input: { chatId: string; intentId: string }) => {
+  ipcMain.handle("invoke:steerReceipt", async (_event, input: { chatId: string; intentId: string }) => {
     assertTrustedSitePublishIpcSender(_event);
     if (!input || typeof input !== "object") throw new Error("invocation_steer_invalid_lookup");
+    const durable = await durableOwnerTextRoutes().steerReceipt(_event, input);
+    if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
     if(controls&&(controls.hasChat(input.chatId)||owner?.retainedChatIds().includes(input.chatId))){const binding=owner?.retainedChatIds().includes(input.chatId)?owner.capturedTextBinding(input.chatId):controls.observedTextBinding(_event,input.chatId);return controls.ownerTextReceipt(_event,binding,input.intentId).then(r=>r?.result??null);}
     return invocationService.ownerSteerReceipt(input.chatId, input.intentId);
@@ -7308,7 +7325,9 @@ export function registerIpcHandlers(): void {
   });
   ipcMain.handle(
     "invoke:unsteer",
-    (_event, req: { chatId: string; position: number; text: string }) => {
+    async (_event, req: { chatId: string; position: number; text: string }) => {
+      const durable = await durableOwnerTextRoutes().unsteer(_event, req);
+      if (durable !== NOT_DAEMON_OWNED) return durable;
       const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
       if(controls&&(controls.hasChat(req.chatId)||owner?.retainedChatIds().includes(req.chatId))){const binding=owner?.retainedChatIds().includes(req.chatId)?owner.capturedTextBinding(req.chatId):controls.observedTextBinding(_event,req.chatId);return controls.ownerTextUnsteer(_event,binding,req.position,req.text);}
       return invocationService.unsteer(req.chatId,req.position,req.text);
@@ -7317,12 +7336,16 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "invoke:activeChats", () => [...new Set([...invocationService.activeChatIds(), ...combinedInvocationActiveChatIds()])]);
   // 목표가 살아 있어 턴 사이에서 다음 실행을 기다리는 대화(사이드바 혜성). 실행 권한 판단에는 안 쓴다.
   registerAppControlDomainIpc(ipcMain, "invoke:goalActiveChats", () => goalActiveChatIds());
-  ipcMain.handle("invoke:attach", (_event, chatId: string, options?: { includeEvents?: boolean }) => {
+  ipcMain.handle("invoke:attach", async (_event, chatId: string, options?: { includeEvents?: boolean }) => {
+    const durable = await durableOwnerTextRoutes().attach(_event, chatId, options?.includeEvents !== false);
+    if (durable !== NOT_DAEMON_OWNED) return durable;
     const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
     if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextAttach(_event,binding,options?.includeEvents!==false);}
     return invocationService.attach(chatId, {includeEvents:options?.includeEvents!==false});
   });
-  ipcMain.handle("invoke:receipt", (_event, runId: string) => {
+  ipcMain.handle("invoke:receipt", async (_event, runId: string) => {
+    const durable = await durableOwnerTextRoutes().receipt(_event, runId);
+    if (durable !== NOT_DAEMON_OWNED) return durable;
     const native = configuredNativeGuiControls();
     if (native?.hasRun(runId)) return native.receipt(_event, runId);
     return invocationService.receipt(runId);
@@ -7377,7 +7400,10 @@ export function registerIpcHandlers(): void {
   registerAppControlDomainIpc(ipcMain, "invoke:replay", (input: unknown) => invocationService.replay(input));
   registerAppControlDomainIpc(ipcMain, "invoke:workerReport", (scope) => getWorkerReport(scope));
   registerAppControlDomainIpc(ipcMain, "invoke:latestReceipt", (chatId: string) => invocationService.latestReceipt(chatId));
-  ipcMain.handle("invoke:steeringRecovery", (_event, chatId: string) => {const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
+  ipcMain.handle("invoke:steeringRecovery", async (_event, chatId: string) => {
+    const durable = await durableOwnerTextRoutes().steeringRecovery(_event, chatId);
+    if (durable !== NOT_DAEMON_OWNED) return durable;
+    const owner=configuredNativeGuiOwner(),controls=configuredNativeGuiControls();
     if(controls&&(controls.hasChat(chatId)||owner?.retainedChatIds().includes(chatId))){const binding=owner?.retainedChatIds().includes(chatId)?owner.capturedTextBinding(chatId):controls.observedTextBinding(_event,chatId);return controls.ownerTextRecovery(_event,binding);}return invocationService.steeringRecovery(chatId);});
   registerAppControlDomainIpc(ipcMain, "invoke:latestOneSurface", (input: unknown) => {
     if (

@@ -86,6 +86,7 @@ import {
   IconShield,
   IconSparkles,
   IconUsers,
+  IconChat,
   IconTrash,
 } from "@/components/Icon";
 import { confirmPopup, alertPopup } from "@/lib/popup";
@@ -231,6 +232,11 @@ import type { OneWorkerWorkGroup } from "@/lib/one-turn-work";
 import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worker-panel";
 import { OneTurnWork, OneTurnWorkDividers, type OneTurnHostNote } from "./OneTurnWork";
 import { OneTaskforceConversation } from "./OneTaskforceConversation";
+import {
+  memberForAgent, OneDiscussionBar, OneDiscussionLive, OneDiscussionReplyContext, OneDiscussionThread, useOneDiscussion,
+  type ThreadComment,
+} from "./OneDiscussion";
+import { addressesOneDirectly, isNestedComment } from "@/lib/one-discussion";
 import { buildOneWorkPresentation } from "@/lib/one-turn-work";
 import { isDocumentLikeText } from "@/lib/one-doc-like";
 import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
@@ -566,6 +572,8 @@ type UiMessage = {
   intellectUiMessageId?: string;
   /** Exact Main-issued transcript identity for a settled assistant row. */
   durableMessageId?: string;
+  /** Installed agent that wrote this assistant row (group-room discussion speakers). */
+  speakerAgentId?: string;
   role: "user" | "assistant" | "system";
   text: string;
   streaming?: boolean;
@@ -864,6 +872,7 @@ function toUiMessages(history: ChatHistoryEntry[]): UiMessage[] {
       hostNotice: normalizeChatHostNotice(entry.role, entry.hostNotice),
       id: entry.id,
       durableMessageId: entry.durableMessageId ?? entry.id,
+      ...(entry.role === "assistant" && entry.speakerAgentId ? { speakerAgentId: entry.speakerAgentId } : {}),
       ...(entry.goalResult ? { goalResult: entry.goalResult } : {}),
       role: entry.role === "assistant" ? "assistant" : entry.role,
       text: normalizeChatHostNotice(entry.role, entry.hostNotice) ? entry.text : parsedFiles.visibleText,
@@ -4226,6 +4235,10 @@ function OneSessionsShell() {
     () => taskforceEditingId ? taskforces.find((taskforce) => taskforce.id === taskforceEditingId) ?? null : null,
     [taskforceEditingId, taskforces],
   );
+  // 단톡방 토론(A4/A5): 여러 팀원이 같은 시점의 방을 보고 동시에 말한다. 방이 아니면 아무것도 하지 않는다.
+  const discussion = useOneDiscussion({ chatId: activeThreadChatId ?? null, enabled: Boolean(activeTaskforce) });
+  const visibleMessageIds = useMemo(() => new Set(visibleMessages.map((message) => message.id)), [visibleMessages]);
+  const visibleMessagesById = useMemo(() => new Map(visibleMessages.map((message) => [message.id, message])), [visibleMessages]);
   // 활성 세션의 좌석 1급 조회(SEAT-SESSION-PLAN-v2) — 해체(T7) 여부가 읽기 전용
   // 아카이브 배너·전송 대체 CTA 를 결정한다. 좌석이 없거나 조회가 실패하면 평소대로.
   /*
@@ -5271,9 +5284,15 @@ function OneSessionsShell() {
          *   냈다 — 구체 문구(예산 소진·정리 중·앱 종료 중…)가 원리적으로 닿지 않았다. 이제 원장에
          *   실제 코드가 남으니, 그 코드(없으면 방금 받은 오류의 코드)로 구체 문구를 먼저 고른다.
          */
-        const recordedCode = admission.rejectionReasonCode && admission.rejectionReasonCode !== "main_start_pre_dispatch_refused"
+        // The native ingress ledger row carries only a fixed code (native_ingress_rejected_before_start); the thrown
+        // error still names the real reason (e.g. invocation_chat_busy). Prefer it when it has specific copy.
+        const causeCode = rejectionCause !== undefined ? failureCode(rejectionCause) ?? null : null;
+        const recordedCode = causeCode && admission.rejectionReasonCode === "native_ingress_rejected_before_start"
+          && goalAdmissionControlFailureForCode(causeCode, runLocale === "ko")
+          ? causeCode
+          : admission.rejectionReasonCode && admission.rejectionReasonCode !== "main_start_pre_dispatch_refused"
           ? admission.rejectionReasonCode
-          : rejectionCause !== undefined ? failureCode(rejectionCause) ?? null : null;
+          : causeCode;
         const specific = goalAdmissionControlFailureForCode(recordedCode, runLocale === "ko");
         if (specific) {
           admissionRecoveryFenceRef.current.set(chatId, { runId: candidateRunId, accepted: false, notice: specific.message, rejectedAt: Date.now() });
@@ -6119,6 +6138,32 @@ function OneSessionsShell() {
       }
       return;
     }
+    // 단톡방 토론(A4): 팀원이 둘 이상인 방에서 이야기를 건네는 글은 One 혼자 답하지 않고 팀원 몇 명이 같은 시점의
+    // 방을 보고 동시에 말한다. 토론 모드가 꺼져 있거나 토론으로 보이지 않는 글(작업 지시)은 Main 이 돌려보내
+    // 아래 기존 경로로 간다. 토론 중에 보낸 글은 유실 없이 대기열에 들어간다.
+    if (activeTaskforce && currentSubmitChatId === activeTaskforce.chatId && activeTaskforce.memberAgentIds.length >= 2
+      && attachmentSnapshot.length === 0 && graphRequest === null && api.oneDiscussion
+      && !addressesOneDirectly(explicitValue, oneProfile?.displayName.trim() || "One")) {
+      try {
+        const routed = await api.oneDiscussion.post({ chatId: activeTaskforce.chatId, text: explicitValue });
+        if (routed.handled) {
+          setComposer("");
+          setMessageReply((current) => current === submittedReply ? null : current);
+          setTurnOverrides({});
+          setComposerMenu(null);
+          setError(null);
+          discussion.refresh();
+          scrollToLatest();
+          return;
+        }
+      } catch (cause) {
+        setActionNotice(appLocale === "ko"
+          ? "토론에 글을 보내지 못했어요. 작성한 글은 그대로 있어요."
+          : "The post could not be sent to the discussion. Your text is still in the composer.");
+        requestOneOperationalRecovery("one-discussion-post", cause);
+        return;
+      }
+    }
     // 화면은 한가해 보여도 Main 은 이 대화의 끝난 턴을 아직 정리·검증하는 중일 수 있다. 그때 새 실행을
     // 시작하면 Main 이 거절해 요청이 사라졌다(2026-09-26 QA 0b03862a: invocation_cleanup_pending →
     // 20초 뒤 옛 목표만 재개). 그 경우 새 요청은 줄에 세우고 정리가 끝나면 바로 돌린다.
@@ -6643,7 +6688,7 @@ function OneSessionsShell() {
       releaseParentReadiness();
       if (preflightSubmissionRef.current?.submissionId === preflightSubmissionId) preflightSubmissionRef.current = null;
     }
-  }, [messageReply, activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, pendingTeamPrompt, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
+  }, [messageReply, activeTaskforce, discussion.refresh, oneProfile, activeTaskforceAgentIds, autoStartTeamPreflight, busy, clearAttachmentDrafts, conversation, appLocale, normalizedLocale, onePermission, oneRuntimeInventory, oneRuntimeSelection, orchestrationTargetForAgentId, reconcileUncertainPreflightSteer, resolveActivationConcern, router, scrollToLatest, selected, startRun, pendingTeamPrompt, teamPreflight, teamPreflightBusy, turnAgentIds, turnOverrides, workspaceGrant]);
   submitTextRef.current = submit;
 
   const stopRun = useCallback(() => {
@@ -8677,6 +8722,17 @@ function OneSessionsShell() {
                   }}
                   aria-label={appLocale === "ko" ? "태스크포스 멤버 관리" : "Manage Taskforce members"}
                 ><IconUsers size={15} /><span data-one-taskforce-badge="true">{speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}</span></button>}
+                {activeTaskforce && discussion.state && discussion.state.memberCount >= 2 && <button
+                  type="button"
+                  className={styles.taskforceMembersButton}
+                  data-one-discussion-toggle={discussion.state.enabled ? "on" : "off"}
+                  aria-pressed={discussion.state.enabled}
+                  title={appLocale === "ko"
+                    ? "토론 모드: 팀원 몇 명이 같은 시점의 방을 보고 동시에 말하고, 서로 답하고 댓글을 남깁니다."
+                    : "Discussion mode: several members read the same room snapshot, speak at once, then reply and comment to each other."}
+                  disabled={Boolean(discussion.state.active)}
+                  onClick={() => { void discussion.setEnabled(!discussion.state?.enabled); }}
+                ><span>{appLocale === "ko" ? `토론 ${discussion.state.enabled ? "켬" : "끔"}` : `Discussion ${discussion.state.enabled ? "on" : "off"}`}</span></button>}
                 {!activeTaskforce && (activeOneSelected || activeOneMember) && (
                   <OneNewSessionButton locale={appLocale} onClick={() => startFreshSession(activeOneSelected ? null : activeOneMember)} />
                 )}
@@ -8887,8 +8943,22 @@ function OneSessionsShell() {
                         ? tFor(appLocale, "one.shell.decision.reject_receipt")
                         : null;
                     const graphRequest = message.role === "user" ? oneGraphRequest(message.text) : null;
+                    // 토론 방: 댓글은 달린 글 아래 스레드로 그린다(달린 글이 화면에 있을 때만).
+                    const discussionMeta = discussion.index.byId.get(message.id);
+                    if (isNestedComment(discussionMeta, visibleMessageIds)) return null;
+                    const discussionComments: ThreadComment[] = (discussion.index.comments.get(message.id) ?? []).flatMap((comment) => {
+                      const found = visibleMessagesById.get(comment.messageId);
+                      return found ? [{ messageId: comment.messageId, text: found.text, createdAt: found.createdAt, timeLabel: messageTimeLabels.get(found.id), speakerAgentId: comment.speakerAgentId }] : [];
+                    });
+                    const replyParentMeta = discussionMeta?.kind === "post" && discussionMeta.replyTo ? visibleMessagesById.get(discussionMeta.replyTo) : undefined;
+                    // 같은 줄의 연속 assistant 라도 말한 팀원이 바뀌면 얼굴을 다시 그린다.
+                    const messageSpeakerMember = message.role === "assistant" ? memberForAgent(oneOrgState?.members, message.speakerAgentId) : undefined;
+                    const messageSpeaker = messageSpeakerMember
+                      ? { label: messageSpeakerMember.displayName, tone: messageSpeakerMember.icon, status: messageSpeakerMember.statusKind }
+                      : assistantSpeaker;
                     const assistantGroupStart = message.role === "assistant"
-                      && visibleMessages[messageIndex - 1]?.role !== "assistant";
+                      && (visibleMessages[messageIndex - 1]?.role !== "assistant"
+                        || visibleMessages[messageIndex - 1]?.speakerAgentId !== message.speakerAgentId);
                     return (
                       <Fragment key={message.intellectUiMessageId ?? message.id}>
                         {(departurePlan.beforeMessage.get(message.id) ?? []).map((notice) => (
@@ -8916,14 +8986,14 @@ function OneSessionsShell() {
                             <p className={styles.systemTurn} data-role="system" data-one-system-turn="true">{systemLabel}</p>
                           )
                           : (
-                          <MessageActions messageId={message.id} author={message.role === "user" ? (appLocale === "ko" ? "나" : "You") : assistantSpeaker.label} text={displayedText} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
+                          <MessageActions messageId={message.id} author={message.role === "user" ? (appLocale === "ko" ? "나" : "You") : messageSpeaker.label} text={displayedText} locale={appLocale} onReply={reply => { setMessageReply(reply); composerInputRef.current?.focus(); }}>
                           <article
                             className={styles.message}
                             data-one-message-id={message.id}
                             data-role={message.role}
                             data-kind={isResultContinuationMessage(message) ? "continuity" : undefined}
                             data-taskforce={activeTaskforce ? "true" : undefined}
-                            data-one-message-speaker={message.role === "assistant" ? assistantSpeaker.label : undefined}
+                            data-one-message-speaker={message.role === "assistant" ? messageSpeaker.label : undefined}
                             data-one-avatar-group-start={assistantGroupStart ? "true" : undefined}
                           >
                             {message.role === "assistant" && (
@@ -8933,9 +9003,9 @@ function OneSessionsShell() {
                                 aria-hidden={!assistantGroupStart || undefined}
                               >
                                 {assistantGroupStart && <OneAgentPortrait
-                                  status={busy && message.streaming ? "working" : assistantSpeaker.status}
-                                  label={assistantSpeaker.label}
-                                  tone={assistantSpeaker.tone}
+                                  status={busy && message.streaming ? "working" : messageSpeaker.status}
+                                  label={messageSpeaker.label}
+                                  tone={messageSpeaker.tone}
                                   size="small"
                                 />}
                               </span>
@@ -8944,10 +9014,20 @@ function OneSessionsShell() {
                             {activeTaskforce && message.role !== "system" && (
                               <div className={styles.taskforceMessageMeta}>
                                 <span>
-                                  <strong>{message.role === "user" ? (appLocale === "ko" ? "나" : "You") : assistantSpeaker.label}</strong>
+                                  <strong>{message.role === "user" ? (appLocale === "ko" ? "나" : "You") : messageSpeaker.label}</strong>
                                   {message.createdAt && <time dateTime={message.createdAt}>{messageTimeLabels.get(message.id)}</time>}
                                 </span>
                               </div>
+                            )}
+                            {replyParentMeta && discussionMeta && (
+                              <OneDiscussionReplyContext
+                                locale={appLocale === "ko" ? "ko" : "en"}
+                                parentLabel={replyParentMeta.role === "user"
+                                  ? (appLocale === "ko" ? "나" : "You")
+                                  : (memberForAgent(oneOrgState?.members, replyParentMeta.speakerAgentId)?.displayName ?? assistantSpeaker.label)}
+                                snippet={replyParentMeta.text}
+                                onJump={() => document.querySelector(`[data-one-message-id="${replyParentMeta.id}"]`)?.scrollIntoView({ block: "center", behavior: "smooth" })}
+                              />
                             )}
                             {message.images && message.images.length > 0 && (
                               <div className={styles.messageImages} data-one-message-media="true">
@@ -9003,6 +9083,13 @@ function OneSessionsShell() {
                           </article>
                           </MessageActions>
                           ))}
+                        {discussionComments.length > 0 && (
+                          <OneDiscussionThread
+                            comments={discussionComments}
+                            members={oneOrgState?.members}
+                            locale={appLocale === "ko" ? "ko" : "en"}
+                          />
+                        )}
                         {graphRequest && activeThreadChatId && (
                           <DescribeAutomation
                             key={`graph:${message.id}`}
@@ -9040,6 +9127,7 @@ function OneSessionsShell() {
                       </Fragment>
                     );
                   })}
+                  {activeTaskforce && <OneDiscussionLive controller={discussion} members={oneOrgState?.members} locale={appLocale === "ko" ? "ko" : "en"} />}
                   {departurePlan.trailing.map((notice) => (
                     <p key={notice.id} className={styles.departureNotice} data-one-departure="true">
                       <span aria-hidden="true">---------</span>
@@ -9374,6 +9462,7 @@ function OneSessionsShell() {
                 onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
               />
             )}
+            {activeTaskforce && <OneDiscussionBar controller={discussion} locale={appLocale === "ko" ? "ko" : "en"} />}
             <ComposerDecisionSlot className={styles.composerDecisions} surface="one" />
             <ToolApprovalInline permission={onePermission} chatId={activeThreadChatId} compact chip composerWidth={ONE_COMPOSER_WIDTH_PX} composerInset={ONE_COMPOSER_INSET_PX} />
             {activeThreadChatId && (selectedTaskId
@@ -10127,7 +10216,7 @@ function OneSessionsShell() {
 
           {sessionSheetOpen && (
             <OneBottomSheet open={sessionSheetOpen} onClose={() => setSessionSheetOpen(false)} closeLabel={appLocale === "ko" ? "닫기" : "Close"} title={appLocale === "ko" ? "에이전트 세션" : "Agent sessions"} icon={<IconUsers size={20} />} size="compact">
-              <div className={styles.sessionSplitMeter} aria-label={appLocale === "ko" ? `세션 분할 ${splitPanes.length + 1}/4` : `Split ${splitPanes.length + 1}/4`}><IconPanelRight size={17} /><span>{appLocale === "ko" ? "세션 분할" : "Split"}</span>{[0,1,2,3].map(index => <i key={index} data-filled={index <= splitPanes.length} aria-hidden="true" />)}<small>{splitPanes.length + 1}/4</small></div>
+              <div className={styles.sessionSplitMeter} aria-label={appLocale === "ko" ? `세션 분할 ${splitPanes.length + 1}/4` : `Split ${splitPanes.length + 1}/4`}><IconPanelRight size={17} /><span><span className={styles.srOnly}>{appLocale === "ko" ? "세션 분할" : "Split"}</span></span>{[0,1,2,3].map(index => <i key={index} data-filled={index <= splitPanes.length} aria-hidden="true" />)}<small>{splitPanes.length + 1}/4</small></div>
               <div className={styles.sessionSheetList}>
                 {sessionGroups.rows.length === 0 && (
                   <p className={styles.sessionSheetEmpty}>{appLocale === "ko" ? "아직 세션이 없습니다." : "No sessions yet."}</p>
@@ -10145,10 +10234,16 @@ function OneSessionsShell() {
                         className={styles.sessionSheetOpen}
                         onClick={() => { setSessionSheetOpen(false); openConversation(chat.id); }}
                       >
-                        <span className={styles.sessionSheetSeat}>{seatLabelForChat(chat, taskforces, oneOrgState, appLocale, oneDisplayName)}</span>
-                        <span className={styles.sessionSheetName}>{chat.title || (appLocale === "ko" ? "새 대화" : "New conversation")}</span>
-                        {/* 표시=실행 (C-D-1): 이 세션의 마지막 실행이 실제로 돈 모델. */}
-                        {sessionModels[chat.id] && <span className={styles.sessionSheetHint} data-session-model="true">{sessionModels[chat.id]}</span>}
+                        <span className={styles.sessionSheetIcon} aria-hidden="true"><IconChat size={16} /></span>
+                        {(() => {
+                          const seat = seatLabelForChat(chat, taskforces, oneOrgState, appLocale, oneDisplayName);
+                          const name = chat.title || (appLocale === "ko" ? "새 대화" : "New conversation");
+                          /* 표시=실행 (C-D-1): 이 세션의 마지막 실행이 실제로 돈 모델은 글자 대신 툴팁으로 둔다. */
+                          return <span className={styles.sessionSheetText} title={sessionModels[chat.id] || undefined} data-session-model={sessionModels[chat.id] ? "true" : undefined}>
+                            <span className={styles.sessionSheetName}>{name}</span>
+                            {seat && seat !== name && <span className={styles.sessionSheetSeat}>{seat}</span>}
+                          </span>;
+                        })()}
                         {liveRunningChatIds.has(chat.id) && <span className={styles.sessionRunningDot} aria-hidden="true" />}
                       </button>
                       <button
@@ -10158,14 +10253,15 @@ function OneSessionsShell() {
                         disabled={isOpen || (!inSplit && splitFull)}
                         title={isOpen
                           ? (appLocale === "ko" ? "지금 보고 있는 대화입니다" : "This one is already open")
-                          : (!inSplit && splitFull ? (appLocale === "ko" ? "세션 분할은 4개까지입니다" : "Four at most") : undefined)}
+                          : (!inSplit && splitFull ? (appLocale === "ko" ? "세션 분할은 4개까지입니다" : "Four at most") : (inSplit ? (appLocale === "ko" ? "분할 해제" : "Unsplit") : (appLocale === "ko" ? "세션 분할" : "Split")))}
                         onClick={() => setSplitChatIds((ids) => (
                           ids.includes(chat.id) ? ids.filter((id) => id !== chat.id) : [...ids, chat.id].slice(-3)
                         ))}
                       >
-                        {inSplit
+                        <IconPanelRight size={16} />
+                        <span className={styles.srOnly}>{inSplit
                           ? (appLocale === "ko" ? "분할 해제" : "Unsplit")
-                          : (appLocale === "ko" ? "세션 분할" : "Split")}
+                          : (appLocale === "ko" ? "세션 분할" : "Split")}</span>
                       </button>
                     </div>
                   );

@@ -611,6 +611,32 @@ export function releaseIdleAgentResidency(): { released: number; active: number;
   return { released, active: holdingAgentResidency().filter(entry => entry.inUse
     || !!entry.awakeAdmission && activeContextTurns.has(entry.awakeAdmission)).length, opening: openingAdmissions.size };
 }
+/**
+ * 1.3.0 A2 — a chat's turns run in one process at a time. When the other process takes the chat over, this process
+ * lets go of the idle resident runtime sessions (Codex app-server, Claude, ACP, ...) it holds for that chat, so the
+ * provider's per-thread writer lock is free for the new host to resume the same thread. An in-use session means a turn
+ * is running here: nothing is touched and the caller reports busy. Sessions already closing are waited for too.
+ * `completions` settle when the physical processes are gone (rejections are swallowed: a failed close is reported as
+ * `failed`, and the seat stays quarantined by the registry as before).
+ */
+export function releaseIdleAgentResidencyForChat(chatId: string): { busy: boolean; released: number; failed: number; completions: Promise<void>[] } {
+  const rows = [...entries.values()].filter(entry => entry.holdsSession && entry.chatId === chatId);
+  if (rows.some(entry => !entry.closing && (entry.inUse || (entry.awakeAdmission && activeContextTurns.has(entry.awakeAdmission))))) {
+    return { busy: true, released: 0, failed: 0, completions: [] };
+  }
+  let released = 0, failed = 0;
+  const completions: Promise<void>[] = [];
+  for (const entry of rows) {
+    if (!entry.closing) {
+      dropAgentResidency(entry.key, { close: true, reason: "shutdown" });
+      released += 1;
+    }
+    if (entry.closeFailed) failed += 1;
+    if (entry.closeCompletion) completions.push(entry.closeCompletion.catch(() => { failed += 1; }));
+  }
+  return { busy: false, released, failed, completions };
+}
+
 export function disposeAgentResidency(): void {
   awakeAdmissions.clear();
   activeContextTurns.clear();

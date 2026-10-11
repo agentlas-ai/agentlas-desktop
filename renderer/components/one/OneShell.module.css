@@ -4030,8 +4030,10 @@
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  gap: 2px;
-  padding: 8px;
+  /* A single shrinkable column: without minmax(0,…) a long nowrap title widens the track and pushes the split button out of view. */
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+  padding: 2px;
   overflow-y: auto;
 }
 
@@ -4046,9 +4048,11 @@
 .sessionSheetRow {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 2px 4px;
-  border-radius: 10px;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 8px 6px 6px;
+  border: 1px solid transparent;
+  border-radius: 12px;
 }
 
 .sessionSheetRow:hover {
@@ -4057,6 +4061,7 @@
 
 .sessionSheetRow[data-active="true"] {
   background: var(--paper-3);
+  border-color: var(--paper-edge);
 }
 
 .sessionSheetOpen {
@@ -4064,9 +4069,9 @@
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 38px;
-  padding: 0 6px;
+  gap: 12px;
+  min-height: 40px;
+  padding: 0 4px;
   border: 0;
   border-radius: 9px;
   background: transparent;
@@ -4074,14 +4079,45 @@
   text-align: left;
 }
 
-.sessionSheetSeat {
+.sessionSheetIcon {
   flex: 0 0 auto;
-  max-width: 148px;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--muted-deep);
+  box-shadow: inset 0 0 0 1px var(--paper-edge);
+}
+
+.sessionSheetRow[data-active="true"] .sessionSheetIcon {
+  color: var(--rd-accent-text);
+}
+
+.sessionSheetText {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+}
+
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.sessionSheetSeat {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 500;
   color: var(--muted-deep);
 }
 
@@ -4092,6 +4128,7 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
+  font-weight: 600;
   color: var(--ink);
 }
 
@@ -4524,8 +4561,8 @@
 .effortBars i[data-filled="true"] { background: var(--ink); }
 .sessionSheet { width: min(540px, calc(100vw - 32px)); border-radius: 18px; }
 .sessionSheetHeader { padding: 14px 16px; }
-.sessionSheetList { padding: 8px; }
-.sessionSheetSplit { min-width: 44px; min-height: 44px; display: inline-flex; justify-content: center; align-items: center; gap: 6px; }
+.sessionSheetList { padding: 2px; }
+.sessionSheetSplit { width: 36px; min-width: 36px; height: 36px; min-height: 36px; padding: 0; display: inline-grid; place-items: center; border-radius: 10px; }
 .searchSheet { width: min(620px, calc(100vw - 32px)); max-height: min(620px, calc(100dvh - 64px)); border-radius: 18px; }
 .taskToolbarMenuPopover button { min-height: 44px; display: flex; align-items: center; gap: 10px; }
 .popupIconTitle { display: inline-flex; align-items: center; gap: 9px; }
@@ -4533,4 +4570,4 @@
 
 .searchHeader { grid-template-columns: 20px minmax(0,1fr) auto; align-items: center; color: var(--muted-deep); }
 
-.sessionSplitMeter{display:flex;align-items:center;gap:6px;padding:4px 8px 14px;color:var(--ink-soft);font-size:12px}.sessionSplitMeter>span{flex:1}.sessionSplitMeter i{display:block;width:15px;height:15px;border-radius:5px;border:1px solid var(--paper-edge-strong);background:var(--popup-control-bg)}.sessionSplitMeter i[data-filled=true]{background:var(--accent);border-color:var(--accent)}.sessionSplitMeter small{margin-left:4px;color:var(--muted-deep)}
+.sessionSplitMeter{display:flex;align-items:center;gap:6px;padding:2px 6px 14px;color:var(--ink-soft);font-size:12px}.sessionSplitMeter>span{flex:1}.sessionSplitMeter i{display:block;width:15px;height:15px;border-radius:5px;border:1px solid var(--paper-edge-strong);background:var(--popup-control-bg)}.sessionSplitMeter i[data-filled=true]{background:var(--accent);border-color:var(--accent)}.sessionSplitMeter small{margin-left:4px;color:var(--muted-deep)}

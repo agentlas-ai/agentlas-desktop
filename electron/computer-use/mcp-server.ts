@@ -170,9 +170,27 @@ function readControlInfo(wantsNative = false) {
   return parsed;
 }
 
+const OS_EXECUTION_UNAVAILABLE_VERSION = "agentlas.one-os-execution-unavailable.v1";
+function osExecutionUnavailable() {
+  const raw = process.env.AGENTLAS_ONE_OS_EXECUTION;
+  if (!raw) return null;
+  let value;
+  try { value = JSON.parse(raw); } catch { return null; }
+  if (!value || value.version !== OS_EXECUTION_UNAVAILABLE_VERSION || typeof value.reason !== "string" || !/^[a-z][a-z0-9_]{2,63}$/.test(value.reason)) return null;
+  return {
+    ok: false, deviceBridge: true, error: value.reason,
+    message: value.reason === "device_session_locked"
+      ? "화면이 잠겨 있거나 절전 중이라 지금은 화면 조작을 할 수 없습니다"
+      : "화면 조작은 Agentlas 앱 창이 켜져 있을 때만 가능합니다",
+  };
+}
 function controlRequest(route, body, timeoutMs = 8000) {
   const nativeTarget = typeof body.app === "string" && body.app.startsWith("native-guest:");
   const nativeSource = typeof body.sourceId === "string" && body.sourceId.startsWith("native-guest:");
+  if (!nativeTarget && !nativeSource && body.nativeScope !== true) {
+    const unavailable = osExecutionUnavailable();
+    if (unavailable) return Promise.resolve(unavailable);
+  }
   const info = readControlInfo(nativeTarget || nativeSource || body.nativeScope === true);
   if (info.scopeId) { route = "/native-guest" + route; body = { ...body, scopeId: info.scopeId }; }
   if (!info.scopeId && process.env.AGENTLAS_ONE_OS_EXECUTION) {
@@ -215,6 +233,11 @@ function controlRequest(route, body, timeoutMs = 8000) {
 
 function textResult(value) { return { content: [{ type: "text", text: JSON.stringify(value) }] }; }
 function errorResult(value) {
+  // Device bridge (1.3.0): the scoped OS execution could not be prepared for this background run, so the call fails
+  // with a machine-readable reason and a plain message, never through the owner token.
+  // The window process refuses screen operations while the session is locked or asleep; surface it under the bridge's name.
+  if (value && value.error === "one-os-session-unavailable") return { content: [{ type: "text", text: JSON.stringify({ error: "device_session_locked", message: "화면이 잠겨 있거나 절전 중이라 지금은 화면 조작을 할 수 없습니다" }) }], isError: true };
+  if (value && value.deviceBridge === true) return { content: [{ type: "text", text: JSON.stringify({ error: value.error, message: value.message }) }], isError: true };
   if (value && typeof value === "object" && typeof value.error === "string" && value.error.startsWith("native-guest-")) return { content: [{ type: "text", text: JSON.stringify(value) }], isError: true };
   const message = value && typeof value.message === "string" ? value.message :
     value && typeof value.error === "string" ? value.error : "Computer Use action failed.";
@@ -266,6 +289,7 @@ async function capture(args) {
 async function handle(request) {
   if (request.method === "initialize") {
     const status = await controlRequest("/status", process.env.AGENTLAS_NATIVE_GUEST_COMPUTER_USE ? { nativeScope: true } : {});
+    if (status && status.deviceBridge === true) return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-computer-use", version: "1.0.0" } };
     if (!status || status.available !== true) throw new Error("Agentlas native Computer Use driver is unavailable.");
     return { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "agentlas-computer-use", version: "1.0.0" } };
   }

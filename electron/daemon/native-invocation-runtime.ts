@@ -16,6 +16,8 @@ import type { InvocationService } from "../invocation/service";
 import type { ControlSocketPeer } from "./control-socket";
 import { assertNativeAuthBinding, type NativeAuthBinding, type NativeCredential } from "./native-auth-credentials";
 import { startNativeAuthChannel } from "./native-auth-channel";
+import { daemonDeviceBridge, DeviceBridgeError, DEVICE_STATE_VERSION } from "./device-bridge";
+import { answerChatHandoverRequest, CHAT_HANDOVER_VERSION, registerChatHandoverPeer } from "../runtime/chat-host-handover";
 import { createDaemonNativeInvocationHost } from "./native-invocation-host";
 import { nativeStartDescriptor, type NativeStartDescriptor } from "./native-start-protocol";
 import type { NativeAuthenticatedIdentity } from "./native-session-auth";
@@ -110,6 +112,8 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       serviceIdentity: options.binding.serviceIdentity, ready: Object.values(value).every(Boolean), capabilities: value };
   };
   function disposeAttachment(peer: ControlSocketPeer) { const record = attached.get(peer); if (!record) return;
+    // Device bridge: this was the peer that carried the screen; pending device requests fail now, lock state unknown.
+    daemonDeviceBridge().detach(peer);
     attached.delete(peer); record.publisher.dispose(); record.approvals.dispose(); for (const value of record.recoveryRecords.values()) record.recovery.release(value); record.recoveryRecords.clear(); }
   async function dispatch(method: string, params: unknown, peer: ControlSocketPeer): Promise<unknown> {
     options.assertOwner();
@@ -119,6 +123,26 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         return alivePort().dispatch(params,{identity,
           assertCurrent(){if(current(peer).identity!==identity)fail("alive_decision_native_peer_changed");},
           onClose:listener=>peer.onClose(listener)});
+      }
+      // Chat host handover (1.3.0 A2): Desktop is about to run this chat's next turn and asks the service to release.
+      if(params && typeof params==="object" && (params as {version?:unknown}).version===CHAT_HANDOVER_VERSION){
+        current(peer);
+        return answerChatHandoverRequest(params);
+      }
+      if(params && typeof params==="object" && (params as {version?:unknown}).version===DEVICE_STATE_VERSION){
+        current(peer);
+        const wire=params as Record<string,unknown>,bridge=daemonDeviceBridge();
+        if(wire.op==="state" && exact(wire,["version","op","session","idleSeconds"])){
+          const state=bridge.pushState(peer,{session:wire.session,idleSeconds:wire.idleSeconds});
+          return {version:DEVICE_STATE_VERSION,session:state.session};
+        }
+        if(wire.op==="status" && exact(wire,["version","op"]))return {version:DEVICE_STATE_VERSION,attached:bridge.attached,pending:bridge.pendingCount,...bridge.state()};
+        // Connectivity check: one idle-snapshot round trip service -> window process -> service.
+        if(wire.op==="probe" && exact(wire,["version","op"])){
+          try{const state=await bridge.idleSnapshot();return {version:DEVICE_STATE_VERSION,ok:true,session:state.session,idleSeconds:state.idleSeconds};}
+          catch(error){return {version:DEVICE_STATE_VERSION,ok:false,error:error instanceof DeviceBridgeError?error.code:"device_bridge_unavailable"};}
+        }
+        fail("device_state_invalid");
       }
       if(params && typeof params==='object' && (params as {version?:unknown}).version===ONE_SUPERVISOR_RUNTIME_PROTOCOL) {
         const attachment=current(peer);
@@ -225,6 +249,7 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
         const recovery = createNativeJsonTransfers({ maxPending: NATIVE_PUBLIC_EVENT_POLICY.maxItems, maxRetainedBytes: NATIVE_PUBLIC_EVENT_POLICY.maxRetainedBytes,
           isCurrent: owner => server.authenticatedPeerIdentity(peer) === identity && [...recoveryRecords.values()].some(value => value === owner) });
         attached.set(peer, { identity, publisher, approvals, recovery, recoveryRecords }); peer.onClose(() => disposeAttachment(peer));
+        daemonDeviceBridge().attach(peer, { request: frame => server.request(peer, "native.checkpoint", frame) });
       }
       return status();
     }
@@ -295,6 +320,8 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
     }
     return fail("native_invocation_method_unavailable");
   }
+  // The service asks the window process (device bridge reverse path) before it runs a chat Desktop ran last.
+  const unregisterHandoverPeer = registerChatHandoverPeer("desktop", (chatId, deadlineMs) => daemonDeviceBridge().releaseChatSessions(chatId, deadlineMs));
   server = await startNativeAuthChannel({ address: options.address, binding: options.binding, credential: options.credential,
     bootId: options.bootId, consumeIngressNoStartProof: (peer, start, wire, proof) => {
       if (!host) return fail("native_invocation_host_not_ready"); return host.consumeIngressNoStartProof(peer, start, wire, proof); },
@@ -306,10 +333,10 @@ export async function createNativeInvocationRuntime(options: NativeInvocationRun
       if (!record || record.start.binding.runId !== start.binding.runId || record.start.binding.chatId !== start.binding.chatId
         || record.start.binding.inputDigest !== start.binding.inputDigest) throw new Error("native_invocation_release_binding_changed");
       record.released = true; owned.delete(start.handle); } }); }
-  catch (error) { await server.close(); throw error; }
+  catch (error) { unregisterHandoverPeer(); await server.close(); throw error; }
   try{await supervisor.recover();}catch(error){console.warn("[one-supervisor] domain recovery held",(error as Error).message);}
   return { address: server.address, status, get supervisorActive(){return supervisor.active;}, closeAdmission() { accepting = false; supervisor.closeAdmission(); },
     get pendingCount() { return host?.retainedRecordCount ?? 0; },
-    async close() { accepting = false; alive?.close(); for (const peer of [...attached.keys()]) disposeAttachment(peer); await server.close(); },
+    async close() { accepting = false; unregisterHandoverPeer(); alive?.close(); for (const peer of [...attached.keys()]) disposeAttachment(peer); await server.close(); },
     settleDispatched: () => server.settleDispatched() };
 }

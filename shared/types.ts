@@ -7694,6 +7694,14 @@ export interface AgentlasIpc {
     /** 좌석 에이전트 패키지가 선언한 새 세션 추천 작업(없으면 빈 목록). */
     suggestions: (input: { installedAgentId: string }) => Promise<import("./one-org").OneSeatSuggestion[]>;
   };
+  /** Group-room discussion (1.3.0): parallel speakers, replies and comments, owner stop. */
+  oneDiscussion: {
+    state: (chatId: string) => Promise<import("./one-discussion").OneDiscussionState>;
+    post: (input: import("./one-discussion").OneDiscussionPostInput) => Promise<import("./one-discussion").OneDiscussionPostResult>;
+    stop: (chatId: string) => Promise<{ stopped: boolean }>;
+    /** `null` returns the room to its default (on for rooms with at least two members). */
+    setEnabled: (input: { chatId: string; enabled: boolean | null }) => Promise<import("./one-discussion").OneDiscussionState>;
+  };
   /** Durable group conversations. One is implicit and always present. */
   oneTaskforces: {
     list: () => Promise<OneTaskforce[]>;
