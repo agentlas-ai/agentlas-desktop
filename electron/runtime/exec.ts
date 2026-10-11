@@ -635,10 +635,25 @@ export function killCliTree(child: ChildProcess, graceMs = 4000): void {
 const liveRunChildren = new Set<ChildProcess>();
 let quitHookInstalled = false;
 
-/** Owned run children still alive in this host. The daemon's idle exit reads it. */
+const idleResidentProbes = new WeakMap<ChildProcess, () => boolean>();
+/**
+ * A pooled resident (the Codex app-server kept between turns) that is waiting for its next turn is not work.
+ * Counting it made the daemon report "run-children" forever, so an automatic update on quit was refused
+ * (automatic_update_active_work) and the install button looked dead (production 1.2.95, 2026-10-11).
+ * A resident mid-turn answers false and still counts.
+ */
+export function markRunChildResident(child: ChildProcess, isIdle: () => boolean): void {
+  idleResidentProbes.set(child, isIdle);
+}
+
+/** Owned run children still alive in this host that are doing work. The daemon's idle exit and update gate read it. */
 export function liveRunChildCount(): number {
   let count = 0;
-  for (const child of liveRunChildren) if (child.exitCode === null && child.signalCode === null) count += 1;
+  for (const child of liveRunChildren) {
+    if (child.exitCode !== null || child.signalCode !== null) continue;
+    if (idleResidentProbes.get(child)?.() === true) continue;
+    count += 1;
+  }
   return count;
 }
 

@@ -21,7 +21,7 @@ import type { ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
-import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
+import { detachedSpawnOpts, killCliTree, spawnCli, markRunChildResident, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit } from "./runner";
 
 export type { AcpSessionLease };
@@ -118,6 +118,8 @@ export function openClaudeResidentSession(opts: {
   };
   try {
     trackRunChild(child);
+    // Parked between turns, a resident is not work (see markRunChildResident).
+    markRunChildResident(child, () => session.active === null && !session.closed);
     // 자식이 stdio 를 상속한 손자를 남기고 죽으면 close 가 영영 안 온다 — runner.ts 주석 참고.
     ensureChildCloseAfterExit(child);
     const readStdout = createNdjsonLineReader((ev) => {

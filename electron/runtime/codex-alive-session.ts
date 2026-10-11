@@ -10,7 +10,7 @@ import { currentAwakeAgentResidency, resolveAgentResidencySource } from "./agent
 import { aliveDecisionProfileForRequest, type AliveDecisionProfile } from "./alive-decision-context";
 import { agentContextNoToolsPacketForRequest, type AgentContextNoToolsPacket } from "./agent-context";
 import { claimAttemptChild, releaseAttemptChild } from "./attempt-children";
-import { killCliTree, trackRunChild, waitForCliTreeTermination } from "./exec";
+import { killCliTree, markRunChildResident, trackRunChild, waitForCliTreeTermination } from "./exec";
 import type { RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
 
 const PROTOCOL = "codex-alive-seatbelt-v1:0.162.0";
@@ -228,6 +228,8 @@ async function openSession(input: CodexAliveResidentInput, profile: Readonly<Ali
   for (const signal of signals) { signal.addEventListener("abort", abort, { once: true }); if (signal.aborted) abort(); }
   try {
     trackRunChild(child);
+    // Parked between turns, a resident is not work (see markRunChildResident).
+    markRunChildResident(child, () => session.active === null && !session.closed);
     for (const stream of [child.stdin, child.stdout, child.stderr]) {
       stream?.on("error", () => { void closeSession(session); });
     }

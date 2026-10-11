@@ -177,8 +177,9 @@ export function createAutomaticQuitInstaller(
           logger.warn("[updater] automatic install on quit was not accepted; continuing normal quit");
           continueNormalQuit();
         })
-        .catch(() => {
-          logger.warn("[updater] automatic install on quit failed; continuing normal quit");
+        .catch((error) => {
+          // The reason was swallowed before (1.2.95 refused with automatic_update_active_work and left no trace).
+          logger.warn("[updater] automatic install on quit failed; continuing normal quit", error instanceof Error ? error.message : String(error));
           continueNormalQuit();
         })
         .finally(() => {

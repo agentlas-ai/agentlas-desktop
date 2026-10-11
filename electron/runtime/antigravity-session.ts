@@ -8,7 +8,7 @@ import type { ChildProcess } from "node:child_process";
 import crypto from "node:crypto";
 import { StringDecoder } from "node:string_decoder";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
-import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
+import { detachedSpawnOpts, killCliTree, spawnCli, markRunChildResident, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit } from "./runner";
 import { waitForRetiredCliExit } from "./retired-cli-exit";
 
@@ -89,6 +89,8 @@ export function openAntigravityResidentSession(opts: {
   };
   try {
     trackRunChild(child);
+    // Parked between turns, a resident is not work (see markRunChildResident).
+    markRunChildResident(child, () => session.active === null && !session.closed);
     ensureChildCloseAfterExit(child);
 
     const readStdout = createAgyNdjsonLineReader((line) => {

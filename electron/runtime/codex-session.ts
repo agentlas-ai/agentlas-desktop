@@ -35,7 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { AcpConnection, AcpRpcError } from "./acp-protocol";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
-import { detachedSpawnOpts, killCliTree, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
+import { detachedSpawnOpts, killCliTree, markRunChildResident, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
 import {
   capabilityClassFor,
@@ -161,6 +161,8 @@ export async function openCodexResidentSession(opts: {
   };
   try {
     trackRunChild(child);
+    // Between turns this resident is parked, not working (see markRunChildResident).
+    markRunChildResident(child, () => session.active === null && !session.closed);
     // 자식이 stdio 를 상속한 손자를 남기고 죽으면 close 가 영영 안 온다 — runner.ts 주석 참고.
     ensureChildCloseAfterExit(child, () => {
       session.active?.onStatus(`${opts.label ?? "codex"}: app-server exited without closing its output — settling the turn`);
