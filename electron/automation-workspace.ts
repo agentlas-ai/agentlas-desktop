@@ -320,5 +320,9 @@ export function bindAutomationWorkspaceOccurrence(snapshot: AutomationWorkspaceS
     if (input.unboundResume) throw new AutomationWorkspaceError("automation_workspace_reconciliation_required");
     recordRunEvent({ runId: input.runId, automationId: snapshot.automationId,
       kind: OCCURRENCE_EVENT, sourceEventId: `automation-workspace:${input.occurrenceId}`, payload });
-  })();
+    // IMMEDIATE: this transaction reads first and then writes. A deferred one that reads, loses a race with the daemon's
+    // commit and then upgrades to a write fails at once with SQLITE_BUSY_SNAPSHOT ("database is locked"), which busy_timeout
+    // cannot wait out. That killed a scheduled occurrence on 2026-10-11 13:20 KST. Taking the write lock first makes the
+    // daemon's write wait instead (same fix as recordRunEvent, 0c76d986).
+  }).immediate();
 }

@@ -4568,6 +4568,7 @@ app.whenReady().then(async () => {
   let nativeEnrollmentPromise: Promise<import("./invocation/native-gui-startup").NativeGuiEnrollment> | undefined;
   let nativePublicBridge: ReturnType<typeof import("./invocation/native-gui-public").createNativeGuiPublicBridge> | undefined;
   let nativeGuiControls: ReturnType<typeof import("./invocation/native-gui-controls").createNativeGuiControls> | undefined;
+  let nativeChannelReattacher: ReturnType<typeof import("./invocation/native-gui-reattach").createNativeChannelReattacher> | undefined;
   const ensureDesktopDaemon = () => import("./daemon/app-launcher")
     .then(async (module) => {
       const native = await import("./invocation/native-gui-startup");
@@ -4590,21 +4591,41 @@ app.whenReady().then(async () => {
       let nativeAttachment: Awaited<ReturnType<typeof native.attachNativeGuiDaemon>> | undefined;
       if (enrollment && outcome.status !== "failed" && outcome.status !== "disabled") {
         try {
-          const bootId = await module.discoverNativeDaemonBoot(options);
-          nativePublicBridge ??= (await import("./invocation/native-gui-public")).createNativeGuiPublicBridge(policy.NATIVE_PUBLIC_EVENT_POLICY, (channel, identity) => native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity));
+          const publicModule = await import("./invocation/native-gui-public");
+          nativePublicBridge ??= publicModule.createNativeGuiPublicBridge(policy.NATIVE_PUBLIC_EVENT_POLICY, (channel, identity) => native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity));
           const bridge = nativePublicBridge;
           nativeGuiControls ??= (await import("./invocation/native-gui-controls")).createNativeGuiControls({ authorizeRenderer: authorizeNativeGuiRenderer,
-            onRecoveryChatIds: (await import("./invocation/native-gui-public")).publishNativeRecoveryActiveChats,
+            onRecoveryChatIds: chatIds => { nativePublicBridge?.reconcileStale(chatIds); publicModule.publishNativeRecoveryActiveChats(chatIds); },
             onUnavailable: (channel, identity) => native.revokeNativeGuiStartAvailability(originalEnrollment, channel, identity) });
           const controls = nativeGuiControls;
           const originalEnrollment = enrollment;
-          const attachment = await native.attachNativeGuiDaemon(enrollment, bootId, (method, params) => { bridge.accept(method, params); controls.accept(method, params); }, {
-            onAuthenticated(channel, identity) {
+          // Re-attach after a close while the app runs: one attach at a time, 1 s..30 s backoff, stops when quitting.
+          nativeChannelReattacher ??= (await import("./invocation/native-gui-reattach")).createNativeChannelReattacher({
+            discoverBoot: () => module.discoverNativeDaemonBoot(options),
+            attach: async (nextBootId) => {
+              const next = await native.attachNativeGuiDaemon(originalEnrollment, nextBootId, nativeEventSink, nativeAttachHooks);
+              await controls.refresh();
+              if (!next.ready) throw new Error("native_gui_attach_not_ready");
+              if (bridge.available && controls.available && !native.configuredNativeGuiOwner()) initializeNativeGuiInvocationOwner(originalEnrollment, policy.NATIVE_MAIN_PREPARATION_POLICY);
+            },
+            currentChannel: () => native.nativeGuiEnrollmentChannel(originalEnrollment),
+            isQuitting: () => quitPlanCommitted || quitRelaunching || quitCleanupDone || automaticQuitInstaller.quitDisposition() !== "ordinary",
+            log: line => console.info(line),
+          });
+          const reattacher = nativeChannelReattacher;
+          const nativeEventSink = (method: string, params: unknown, identity?: import("./daemon/native-session-auth").NativeAuthenticatedIdentity) => { bridge.accept(method, params, identity); controls.accept(method, params, identity); };
+          const nativeAttachHooks = {
+            onAuthenticated(channel: Parameters<typeof bridge.bind>[0], identity: Parameters<typeof bridge.bind>[1]) {
               bridge.bind(channel, identity); controls.bind(channel, identity);
               invocationService.setForeignNativeStartFence(chatId => !!native.configuredNativeGuiOwner()?.retainedChatIds().includes(chatId)
                 || controls.retainedChatIds().includes(chatId) || bridge.activeChatIds().includes(chatId));
+              reattacher.watch(channel);
             },
-          });
+          };
+          // Discovered only after the re-attacher exists: a daemon that does not answer the first discovery (a slow
+          // spawn) lands in the catch below, whose trigger must have something to re-attach with.
+          const bootId = await module.discoverNativeDaemonBoot(options);
+          const attachment = await native.attachNativeGuiDaemon(enrollment, bootId, nativeEventSink, nativeAttachHooks);
           await controls.refresh();
           if (attachment.ready && bridge.available && controls.available && !native.configuredNativeGuiOwner()) {
             initializeNativeGuiInvocationOwner(enrollment, policy.NATIVE_MAIN_PREPARATION_POLICY);
@@ -4615,7 +4636,7 @@ app.whenReady().then(async () => {
           // The original Main guards/router, source observations, public receiver
           // and readonly controls are installed; false daemon capability blocks start.
           console.info("[native-invocation] authenticated attach", { ready: attachment.ready, capabilities: attachment.capabilities });
-        } catch (error) { console.warn("[native-invocation] authenticated attach unavailable", error); }
+        } catch (error) { console.warn("[native-invocation] authenticated attach unavailable", error); nativeChannelReattacher?.trigger("initial attach failed"); }
       }
       return { module, outcome, nativeEnrollment: enrollment, nativeAttachment };
     })

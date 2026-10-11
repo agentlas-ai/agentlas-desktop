@@ -56,7 +56,8 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
   if (![observationPolicy.maxRecords, observationPolicy.maxRetainedBytes].every(v => Number.isSafeInteger(v) && v > 0)) fail("native_gui_observation_policy_invalid");
   let retainedApprovalBytes = 0;
   let channel: Channel | undefined, identity: NativeAuthenticatedIdentity | undefined;
-  const controller = new AbortController(), captures = new Map<string, Capture>(), activeRuns = new Set<string>(), approvals = new Map<string, Approval>();
+  let controller = new AbortController();
+  const captures = new Map<string, Capture>(), activeRuns = new Set<string>(), approvals = new Map<string, Approval>();
   const stops = new Map<string, { promise: Promise<"requested" | "already-requested" | "not-found">; acknowledged: boolean }>();
   let refreshPromise: Promise<void> | undefined, snapshotKnown = false, routeUnavailable = false;
   function current(): Channel { if (!channel || !identity || nativeGuiChannelIdentity(channel) !== identity) fail("native_gui_original_channel_unavailable"); return channel; }
@@ -74,10 +75,23 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
   function pruneStops(): void {
     for (const [runId, record] of stops) if (record.acknowledged && captures.get(runId)?.nativeCustody === "released") stops.delete(runId);
   }
+  /** Rebindable: a new generation replaces a CLOSED one; a live channel is never replaced.
+   * Old captures keep their (now unavailable) custody and stay in the start fence until resolved;
+   * Stop for them is re-sent over the new channel by chat/run id. Old approvals/stop ACK state
+   * cannot be carried over and are dropped. */
   function bind(actualChannel: Channel, actualIdentity: NativeAuthenticatedIdentity): void {
-    if (channel || configured || nativeGuiChannelIdentity(actualChannel) !== actualIdentity) fail("native_gui_original_channel_required");
+    if (nativeGuiChannelIdentity(actualChannel) !== actualIdentity) fail("native_gui_original_channel_required");
+    if (channel === actualChannel || (channel && nativeGuiChannelIdentity(channel) !== undefined)) fail("native_gui_original_channel_required");
+    if (channel) {
+      controller.abort(new NativeGuiControlError("native_gui_original_channel_unavailable"));
+      controller = new AbortController();
+      approvals.clear(); retainedApprovalBytes = 0;
+      for (const [runId, record] of stops) if (!record.acknowledged) stops.delete(runId);
+      activeRuns.clear(); refreshPromise = undefined; snapshotKnown = false; routeUnavailable = false;
+    }
     channel = actualChannel; identity = actualIdentity; configured = control;
-    actualChannel.onClose(() => controller.abort(new NativeGuiControlError("native_gui_original_channel_unavailable")));
+    const mine = controller;
+    actualChannel.onClose(() => mine.abort(new NativeGuiControlError("native_gui_original_channel_unavailable")));
   }
   function refresh(): Promise<void> {
     if (refreshPromise) return refreshPromise;
@@ -127,7 +141,8 @@ export function createNativeGuiControls(ports: { authorizeRenderer(event: object
     })(); record.read = read;
     void read.then(() => { record.readSettled = true; }, error => { record.readSettled = true; record.readFailed = true; console.warn("[native-invocation] approval card unavailable", error); try { unavailable(); } catch { /* Original unavailable state retained. */ } });
   }
-  function accept(method: string, value: unknown): void {
+  function accept(method: string, value: unknown, fromIdentity?: NativeAuthenticatedIdentity): void {
+    if (fromIdentity !== undefined && fromIdentity !== identity) return; // event from a previous generation
     if (method === "invocation.approval.unavailable") {
       try { const original = current(); if (!exact(value, ["version", "code"]) || value.version !== "agentlas.native-approval.v1" || typeof value.code !== "string" || !/^[a-z][a-z0-9_]{1,99}$/.test(value.code)) fail("native_gui_approval_unavailable_invalid"); ports.onUnavailable?.(original, identity!); } catch (error) { console.warn("[native-invocation] approval stream unavailable", error); try { unavailable(); } catch { /* No current channel can restore readiness. */ } }
     }

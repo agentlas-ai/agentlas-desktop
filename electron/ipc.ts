@@ -7263,6 +7263,11 @@ export function registerIpcHandlers(): void {
       if(owner?.retainedChatIds().includes(request.chatId)){const binding=owner.textInputBinding(_event,request);return controls.ownerText(_event,binding,intent,request.userPrompt,kind).then(r=>r.result);}
       return controls.recoveredTextBinding(_event,request).then(binding=>controls.ownerText(_event,binding,intent,request.userPrompt,kind)).then(r=>r.result);
     }
+    // A direction for an idle chat whose turns start in the daemon would start a turn here, and this process's
+    // resident Codex then holds the chat's thread, so the daemon's next turn is refused ("already has an active
+    // writer") until it exits (production 1.2.93, 2026-10-11 03:50Z). One's outbox sends it as a new message instead.
+    if (request.oneMode === true && ownerTurnStarter(owner, request.chatId) && !invocationService.activeChatIds().includes(request.chatId)
+      && !getPendingInvocationAdmissionForChat(request.chatId)) throw new Error("invocation_steer_native_turn_required");
     return invocationService.steerFromOwner(
       request, intentId, admitMainInvocation(request.chatId),
     );
@@ -7280,8 +7285,11 @@ export function registerIpcHandlers(): void {
     if (native && isAppControlEvent(_event)) throw new Error("native_gui_original_renderer_required");
     // Captured native starts include preauthorization/prelease preparation.
     // The signed Stop lane never waits for start ACK or a run-owner SQL lookup.
-    if (native?.inspect(runId).retained) return { runId, status: await native.cancel(runId) };
     const recovered = configuredNativeGuiControls();
+    // A capture whose channel generation is gone cannot send its start descriptor; Stop for it goes
+    // by chat/run id over the CURRENT channel (idempotent daemon Stop intake) when the controls know the run.
+    const capture = native?.inspect(runId);
+    if (capture?.retained && !(capture.unavailable && recovered?.hasRun(runId))) return { runId, status: await native!.cancel(runId) };
     if (recovered?.hasRun(runId)) return { runId, status: await recovered.cancel(_event, runId) };
     return { runId, status: await cancelInvocationOwnerRun(runId) };
   });

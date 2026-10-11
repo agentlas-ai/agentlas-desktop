@@ -2751,8 +2751,13 @@ export const runCodex: Runner = async (
     } catch (err) {
       // thread/resume is refused before any turn starts. An unattended run
       // continues in a fresh one-shot session instead of stopping for a human.
-      if (!runReq.unattended || runReq.signal?.aborted || !(err instanceof CodexSessionContinuityError)) throw err;
-      freshReason = err.code === "resume_failed" ? classifyCodexResumeFailure(err.message) : "writer_busy";
+      // An owner's turn does too when another writer holds the thread: Desktop and
+      // the background service each keep a resident Codex, and one cannot retire
+      // the other's (production 1.2.93, 2026-10-11 03:54Z, "already has an active writer").
+      if (runReq.signal?.aborted || !(err instanceof CodexSessionContinuityError)) throw err;
+      const refusal = err.code === "resume_failed" ? classifyCodexResumeFailure(err.message) : "writer_busy";
+      if (!runReq.unattended && refusal !== "writer_busy") throw err;
+      freshReason = refusal;
       events.onStatus(unattendedFreshSessionStatus(KIND, freshReason));
       if (freshSessionReplacesStored(freshReason)) {
         clearRuntimeSession(runReq.chatId, KIND, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner });

@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.2.94 — 2026-10-11
+
+- If the connection to the background service drops while the app is running, the app now reconnects on its own, instead of failing One messages until it is restarted.
+- A One message no longer fails right after an earlier one ran in a different part of the app. A saved follow-up for a conversation that has finished is sent as a new message, and a message whose conversation is still held elsewhere continues in a fresh session.
+- A scheduled automation no longer fails with "database is locked" when the background service writes at the same moment it starts.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.93 — 2026-10-11
 
 - A One message that takes a while to start no longer breaks the connection to the background service. In 1.2.92 a start that took more than 10 seconds cut that connection, and later One messages failed until the app was restarted.

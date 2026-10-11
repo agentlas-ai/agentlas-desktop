@@ -13,10 +13,12 @@ type Owner = ReturnType<typeof createNativeGuiOwnerClient>;
 type Adapter = ReturnType<typeof createNativeMainAuthCallbackAdapter>;
 export type NativeGuiCapabilities = Readonly<{ start: boolean; stop: boolean; events: boolean; approvals: boolean; recovery: boolean }>;
 type Attachment = Readonly<{ ready: boolean; capabilities: NativeGuiCapabilities; identity: NativeAuthenticatedIdentity }>;
+/** Events carry the identity of the generation that produced them (undefined only before authentication completes). */
+export type NativeGuiEventSink = (method: string, params: unknown, identity?: NativeAuthenticatedIdentity) => void;
 export interface NativeGuiAttachHooks {
   onAuthenticated?(channel: Channel, identity: NativeAuthenticatedIdentity): void;
 }
-interface State { binding: NativeAuthBinding; credential: NativeCredential; wire: string; written: boolean; channel?: Channel; identity?: NativeAuthenticatedIdentity; capabilities?: NativeGuiCapabilities; ready?: boolean; adapter?: Adapter; owner?: Owner; attachBoot?: string; attachment?: Promise<Attachment> }
+interface State { binding: NativeAuthBinding; credential: NativeCredential; wire: string; written: boolean; channel?: Channel; identity?: NativeAuthenticatedIdentity; capabilities?: NativeGuiCapabilities; ready?: boolean; adapter?: Adapter; owner?: Owner; attachBoot?: string; attachment?: Promise<Attachment>; attachPending?: boolean; generation: number }
 const enrollments = new WeakMap<object, State>();
 let installed: State | undefined;
 function fail(code: string): never { throw new Error(code); }
@@ -31,7 +33,7 @@ export async function prepareNativeGuiEnrollment(): Promise<NativeGuiEnrollment>
   const binding = captureNativeAuthBinding(), credential = await provisionNativeGuiCredential(binding);
   const wire = await nativeDaemonEnrollment(binding, credential);
   const enrollment = Object.freeze({}) as NativeGuiEnrollment;
-  enrollments.set(enrollment, { binding, credential, wire, written: false });
+  enrollments.set(enrollment, { binding, credential, wire, written: false, generation: 0 });
   return enrollment;
 }
 /** The launcher delivers only the daemon-role enrollment through inherited fd3.
@@ -50,32 +52,45 @@ export function writePreparedNativeEnrollment(pipe: Writable, enrollment: Native
 /** Public ping supplies discovery only. The boot becomes trusted solely after
  * the actual enrolled signature and strict native.attach transcript agree. */
 export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discoveredBootId: string,
-  onEvent?: (method: string, params: unknown) => void, hooks?: NativeGuiAttachHooks): Promise<Attachment> {
+  onEvent?: NativeGuiEventSink, hooks?: NativeGuiAttachHooks): Promise<Attachment> {
   const value = state(enrollment);
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(discoveredBootId)) fail("native_gui_boot_discovery_invalid");
   if (value.attachment) {
-    if (value.attachBoot !== discoveredBootId) fail("native_gui_original_boot_required");
-    return value.attachment.then(result => {
+    // One attach at a time: neither concurrent ensures nor a lost ACK can create a second handshake.
+    if (value.attachPending) {
+      if (value.attachBoot !== discoveredBootId) fail("native_gui_original_boot_required");
+      return value.attachment;
+    }
+    const live = !!value.channel && !!nativeGuiChannelIdentity(value.channel) && value.attachBoot === discoveredBootId && value.ready === true;
+    if (live) return value.attachment.then(result => {
       if (!value.channel || nativeGuiChannelIdentity(value.channel) !== result.identity) fail("native_gui_original_channel_unavailable");
       return result;
     });
+    // A closed channel, a new daemon boot or an unready attach starts a NEW generation.
+    // Never two live channels: the superseded one is closed before the next connect.
+    value.ready = false; value.capabilities = undefined;
+    const old = value.channel; if (old) { try { old.close(); } catch { /* already closed */ } }
   }
   value.attachBoot = discoveredBootId;
-  // Retain the actual first attempt synchronously. Neither concurrent ensures
-  // nor a lost ACK can create a second handshake or adopt another boot.
+  const gen = ++value.generation; value.ready = false;
+  const current = () => { if (value.generation !== gen) fail("native_gui_attach_superseded"); };
+  let genIdentity: NativeAuthenticatedIdentity | undefined;
   const attachment = (async () => {
     const channel = await connectNativeGuiChannel({ address: nativeAuthSocketPath(userDataDir()), binding: value.binding,
-      credential: value.credential, bootId: discoveredBootId, onEvent,
-      onRequest(method, raw, identity) { if (!value.adapter) fail("native_gui_callback_not_initialized"); return value.adapter.onRequest(method, raw, identity); } });
-    value.channel = channel;
+      credential: value.credential, bootId: discoveredBootId,
+      onEvent: onEvent && ((method, params) => { if (value.generation === gen) onEvent(method, params, genIdentity); }),
+      onRequest(method, raw, identity) { current(); if (!value.adapter) fail("native_gui_callback_not_initialized"); return value.adapter.onRequest(method, raw, identity); } });
+    try { current(); } catch (error) { channel.close(); throw error; }
+    value.channel = channel; value.identity = undefined; value.capabilities = undefined; value.ready = false;
     try {
       const identity = nativeGuiChannelIdentity(channel); if (!identity) fail("native_gui_enrolled_channel_required");
-      value.identity = identity;
+      value.identity = identity; genIdentity = identity;
       hooks?.onAuthenticated?.(channel, identity);
       if (nativeGuiChannelIdentity(channel) !== identity) fail("native_gui_original_channel_unavailable");
       const handoff = (await import("../auth")).sessionForDaemonHandoff();
       const session = handoff === null ? null : Object.fromEntries(Object.entries(handoff).filter(([, field]) => field !== undefined));
       const reply = await channel.dispatch("native.attach", { version: "agentlas.native-attach.v1", session });
+      current();
       if (nativeGuiChannelIdentity(channel) !== identity || !exact(reply, ["version", "bootId", "serviceIdentity", "ready", "capabilities"])
         || reply.version !== "agentlas.native-attach.v1" || reply.bootId !== identity.bootId || reply.serviceIdentity !== identity.serviceIdentity
         || typeof reply.ready !== "boolean" || !exact(reply.capabilities, ["start", "stop", "events", "approvals", "recovery"])
@@ -85,7 +100,9 @@ export function attachNativeGuiDaemon(enrollment: NativeGuiEnrollment, discovere
       return Object.freeze({ ready: reply.ready && Object.values(capabilities).every(flag => flag === true), capabilities, identity });
     } catch (error) { channel.close(); throw error; }
   })();
-  value.attachment = attachment;
+  value.attachment = attachment; value.attachPending = true;
+  const settle = () => { if (value.attachment === attachment) value.attachPending = false; };
+  attachment.then(settle, settle);
   void attachment.catch(() => {});
   return attachment;
 }
@@ -104,13 +121,14 @@ export function assertNativeGuiStartAvailable(enrollment: NativeGuiEnrollment): 
   if (!value.channel || !value.identity || nativeGuiChannelIdentity(value.channel) !== value.identity
     || value.ready !== true || !value.capabilities || !Object.values(value.capabilities).every(flag => flag === true)) fail("native_gui_activation_prerequisites_missing");
 }
-/** Negative revocation only, validated against the actual original native objects.
- * It cannot restore capability or cause a legacy downgrade. Stop is unaffected. */
-export function revokeNativeGuiStartAvailability(enrollment: NativeGuiEnrollment, channel: object, identity: NativeAuthenticatedIdentity): void {
+/** Revocation of the CURRENT generation only; a later successful attach makes starts available again.
+ * A call carrying an old channel/identity (a previous generation) is ignored and returns false. */
+export function revokeNativeGuiStartAvailability(enrollment: NativeGuiEnrollment, channel: object, identity: NativeAuthenticatedIdentity): boolean {
   const value = state(enrollment);
-  if (value.channel !== channel || value.identity !== identity || nativeGuiChannelIdentity(channel) !== identity) fail("native_gui_original_channel_required");
-  value.ready = false;
+  if (value.channel !== channel || value.identity !== identity) return false;
+  value.ready = false; return true;
 }
+export function nativeGuiAttachGeneration(enrollment: NativeGuiEnrollment): number { return state(enrollment).generation; }
 export function nativeGuiEnrollmentChannel(enrollment: NativeGuiEnrollment): Channel | undefined { return state(enrollment).channel; }
 /** Sticky after enrollment: channel loss cannot silently choose legacy start. */
 export function configuredNativeGuiOwner(): Owner | undefined { return installed?.owner; }

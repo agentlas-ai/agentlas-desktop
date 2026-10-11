@@ -39,6 +39,8 @@ const MAX_BYTES = 1048576;
  * (a One judge took 24 s on 1.2.89), so they get the same bound instead of 10 s.
  */
 const NATIVE_START_REPLY_TIMEOUT_MS = 180000;
+/** Only invoke.nativeStart (whole start) and native.attach (adoptSession + supervisor.recover) wait long; every other request keeps 10 s. */
+export function nativeGuiReplyTimeoutMs(method: string): number { return method === "invoke.nativeStart" || method === "native.attach" ? NATIVE_START_REPLY_TIMEOUT_MS : 10000; }
 const methods = new Set(["invoke.nativeStart", "invoke.admission", "invoke.receipt", "invoke.currentTurn", "invoke.steerCurrentTurn", "invoke.currentTurnSteerReceipt", "invoke.cancel", "native.approvalReply", "native.attach", "native.detach"]);
 const errorCode = (e: unknown) => { const c = (e as { code?: unknown })?.code; return typeof c === "string" && /^[a-z][a-z0-9_]{1,99}$/.test(c) ? c : "native_operation_failed"; };
 export function nativeAuthSocketPath(userData: string): string {
@@ -229,7 +231,7 @@ export async function connectNativeGuiChannel(options: { address: string; bindin
     async dispatch(method: string, params: unknown): Promise<unknown> {
       if (!methods.has(method)) throw nativeAuthError("native_auth_method_denied"); let sequence = 0;
       const result = await call("native.auth.request", () => { const frame = auth.request(method, params); sequence = frame.sequence; return frame.envelope; }, method === "invoke.cancel" ? "cancel" : "ordinary",
-        method === "invoke.nativeStart" ? NATIVE_START_REPLY_TIMEOUT_MS : 10000);
+        nativeGuiReplyTimeoutMs(method));
       try { return auth.reply(result, sequence); } catch (error) { if (["native_auth_reply_invalid", "native_auth_signature_invalid"].includes(errorCode(error))) close(); throw error; }
     },
     onClose(listener: () => void): () => void { if (done) { listener(); return () => {}; } closeListeners.add(listener); return () => { closeListeners.delete(listener); }; }, close,

@@ -24,17 +24,29 @@ export function publishLegacyInvocationActiveChats(chatIds: string[]): void { le
 export function createNativeGuiPublicBridge(policy: Readonly<{ maxRetainedBytes: number }>, onUnavailable?: (channel: Channel, identity: NativeAuthenticatedIdentity) => void) {
   let channel: Channel | undefined, identity: NativeAuthenticatedIdentity | undefined;
   let receiver: ReturnType<typeof createNativeInvocationPublicReceiver> | undefined;
+  // Active chats the previous generation last reported. Disconnect proves no
+  // quiescence, so they stay visible (start fence) until the new generation's
+  // authoritative snapshot arrives or the chat settles.
+  let staleChatIds = new Set<string>(), generation = 0;
+  /** Rebindable: a new generation replaces a CLOSED one; a live channel is never replaced. */
   function bind(actualChannel: Channel, actualIdentity: NativeAuthenticatedIdentity): void {
-    if (channel || nativeGuiChannelIdentity(actualChannel) !== actualIdentity) throw new Error("native_gui_public_original_channel_required");
+    if (nativeGuiChannelIdentity(actualChannel) !== actualIdentity) throw new Error("native_gui_public_original_channel_required");
+    if (channel && channel !== actualChannel && nativeGuiChannelIdentity(channel) !== undefined) throw new Error("native_gui_public_original_channel_required");
+    if (channel === actualChannel) throw new Error("native_gui_public_original_channel_required");
+    if (receiver) { for (const chatId of receiver.activeChatIds()) staleChatIds.add(chatId); receiver.dispose(); }
+    const mine = ++generation;
+    const live = () => mine === generation;
     channel = actualChannel; identity = actualIdentity;
     receiver = createNativeInvocationPublicReceiver({ identity: actualIdentity,
       getIdentity: () => channel === actualChannel ? nativeGuiChannelIdentity(actualChannel) ?? null : null,
       maxRetainedBytes: policy.maxRetainedBytes,
       read: input => actualChannel.dispatch("native.attach", nativePublicReadOperation(input)),
       ack: input => actualChannel.dispatch("native.attach", nativePublicAckOperation(input)),
-      onEvent: ({ runId, event }) => broadcast(`invoke:event:${runId}`, event),
-      onActiveChats(chatIds) { nativeChatIds = [...chatIds]; recoveredChatIds = []; publishActiveChats(); },
+      onEvent: ({ runId, event }) => { if (live()) broadcast(`invoke:event:${runId}`, event); },
+      onActiveChats(chatIds) { if (!live()) return; staleChatIds = new Set(); nativeChatIds = [...chatIds]; recoveredChatIds = []; publishActiveChats(); },
       onSettled({ runId, chatId }) {
+        if (!live()) return;
+        staleChatIds.delete(chatId);
         // Root sends the authentic final private finish callback before this
         // event. Retire tests that already-released state; no second finish RPC.
         const owner = configuredNativeGuiOwner();
@@ -44,13 +56,18 @@ export function createNativeGuiPublicBridge(policy: Readonly<{ maxRetainedBytes:
         }
         setImmediate(() => { try { dispatchOnePreflightSteers(undefined, chatId); } catch { /* Durable uncertain claims remain. */ } });
       },
-      onFault: error => { console.warn("[native-invocation] public stream unavailable", error);
+      onFault: error => { if (!live()) return; console.warn("[native-invocation] public stream unavailable", error);
         if (nativeGuiChannelIdentity(actualChannel) === actualIdentity) onUnavailable?.(actualChannel, actualIdentity); },
     });
-    actualChannel.onClose(() => { receiver?.dispose(); /* Keep last-known IDs; disconnect proves no quiescence. */ });
+    const mineReceiver = receiver;
+    actualChannel.onClose(() => { mineReceiver.dispose(); /* Keep last-known IDs; disconnect proves no quiescence. */ });
   }
-  return Object.freeze({ bind, accept(method: string, params: unknown) { receiver?.accept(method, params); },
+  /** The new generation's authoritative active-chat snapshot (recovery refresh) resolves stale chats it no longer lists. */
+  function reconcileStale(activeChatIds: readonly string[]): void { for (const chatId of [...staleChatIds]) if (!activeChatIds.includes(chatId)) staleChatIds.delete(chatId); }
+  return Object.freeze({ bind, reconcileStale, accept(method: string, params: unknown, fromIdentity?: NativeAuthenticatedIdentity) {
+      if (fromIdentity !== undefined && fromIdentity !== identity) return; // event from a previous generation
+      receiver?.accept(method, params); },
     async quiesce() { await receiver?.quiesce(); },
-    activeChatIds() { return receiver?.activeChatIds() ?? []; },
+    activeChatIds() { return [...new Set([...(receiver?.activeChatIds() ?? []), ...staleChatIds])]; },
     get available() { return !!receiver?.available && !!channel && nativeGuiChannelIdentity(channel) === identity; } });
 }

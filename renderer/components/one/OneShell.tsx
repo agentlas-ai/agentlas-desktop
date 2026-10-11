@@ -1755,7 +1755,26 @@ function OneSessionsShell() {
                 let receipt = await waitForOneFollowupDelivery(bridge.invoke.steerReceipt({ chatId, intentId: intent.intentId }));
                 if (!receipt) {
                   if (deliveryPaused(intent)) continue;
-                  receipt = await waitForOneFollowupDelivery(bridge.invoke.steer(intent.request, intent.intentId));
+                  const sent = await waitForOneFollowupDelivery(bridge.invoke.steer(intent.request, intent.intentId)).catch((error: unknown) => {
+                    if (String(error).includes("invocation_steer_native_turn_required")) return null;
+                    throw error;
+                  });
+                  if (!sent) {
+                    // The chat is idle and its turns start in the background service: the saved text goes as a new
+                    // message (Main refuses to start it as a Desktop turn, production 1.2.93, 2026-10-11).
+                    if (activeThreadChatIdRef.current !== chatId || !submitTextRef.current
+                      || (composerHandleRef.current?.getValue() ?? "").trim() || attachmentDraftsRef.current.length) {
+                      showDeliveryNotice(appLocale === "ko"
+                        ? "보관한 추가 지시는 새 메시지로 보냅니다. 작성 중인 글이나 첨부를 비우면 이어서 보냅니다."
+                        : "The saved follow-up goes as a new message once the composer has no draft or attachment.");
+                      break;
+                    }
+                    removeOneFollowupIntent(window.localStorage, chatId, intent.intentId);
+                    showLocal();
+                    await submitTextRef.current(intent.userPrompt);
+                    break;
+                  }
+                  receipt = sent;
                 }
                 if (!receipt.accepted || receipt.chatId !== chatId || receipt.intentId !== intent.intentId
                   || receipt.promptHash !== await waitForOneFollowupDelivery(onePreflightTextDigest(intent.userPrompt))) throw new Error("one_followup_receipt_mismatch");
