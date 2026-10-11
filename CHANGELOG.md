@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.96 — 2026-10-11
+
+- Hope can find a stored API key on its own. When a task needs a key, it looks at the names of your saved keys (never their values). If one matches under a different name, for example ELEVENLABS_1 where ELEVENLABS_API_KEY is expected, it asks you first and renames it when you say yes. It no longer asks you to sign in on a website when an API key would do.
+- The environment variables screen marks a saved key that no tool reads and offers to rename it to the name a tool expects.
+- A Codex turn that the model service refuses before it starts is no longer treated as maybe-run, so it is retried or handed to another model instead of stopping a scheduled automation.
+- In Science, the product menu at the top is no longer hidden under the research view.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.2.95 — 2026-10-11
 
 - Includes everything planned for 1.2.94, which was not published: the connection to the background service comes back on its own, a One message no longer fails right after an earlier one ran in another part of the app, and a scheduled automation no longer fails with "database is locked".

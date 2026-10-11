@@ -113,6 +113,7 @@ import { runMigration, scanMigrationSources } from "./migrate";
 import {
   deleteApiKey,
   deleteEnvVar,
+  renameEnvVar,
   hasApiKey,
   hasEnvVar,
   listEnvKeys,
@@ -3414,7 +3415,8 @@ export function registerIpcHandlers(): void {
     if (typeof retryToken !== "string" || retryToken.length > 128) return { status: "invalid-token" };
     return retryCredentialRecoveryFromUser(retryToken);
   });
-  registerAppControlDomainIpc(ipcMain, "env:list", async () => {
+  // Known env requirements: installed agents, installed MCP servers and the selected multimodal providers.
+  const envKnownRequirements = () => {
     // Gather known requirements before touching credential storage.
     const agents = listInstalledAgents();
     type Aggregated = {
@@ -3477,15 +3479,20 @@ export function registerIpcHandlers(): void {
       });
       map.set(req.key, entry);
     }
-    return collectEnvStatus(
-      [...map].map(([key, entry]) => ({ key, requiredBy: entry.requiredBy })),
-      { listKeys: listEnvKeys, hasValue: hasEnvVar, preview: previewEnvVar },
-    );
-  });
+    return [...map].map(([key, entry]) => ({ key, requiredBy: entry.requiredBy }));
+  };
+  registerAppControlDomainIpc(ipcMain, "env:list", async () => collectEnvStatus(envKnownRequirements(),
+    { listKeys: listEnvKeys, hasValue: hasEnvVar, preview: previewEnvVar }));
   registerAppControlDomainIpc(ipcMain, "env:set", (key: string, value: string) => setEnvVar(key, value));
   registerAppControlDomainIpc(ipcMain, "env:has", (key: string) => hasEnvVar(key));
   ipcMain.handle("env:preview", (_e, key: string) => previewEnvVar(key));
   registerAppControlDomainIpc(ipcMain, "env:remove", (key: string) => deleteEnvVar(key));
+  // One may rename a stored key after the owner says yes (owner 2026-10-11: "볼트 입력이나 저장된 것 중 있는지 AI가
+  // 찾고 물어보면 되지"); the value stays in Main. The inventory is value-free (no masked preview) for the same search.
+  registerAppControlDomainIpc(ipcMain, "env:rename", (from: string, to: string) => renameEnvVar(from, to));
+  registerAppControlDomainIpc(ipcMain, "env:inventory", async () => (await collectEnvStatus(envKnownRequirements(),
+    { listKeys: listEnvKeys, hasValue: hasEnvVar, preview: async () => null },
+  )).map(({ key, requiredBy, hasValue }) => ({ key, requiredBy, hasValue })));
 
   // ── multimodal global fallback ─────────────────────────
   registerAppControlDomainIpc(ipcMain, "multimodal:listProviders", () => listMultimodalProviders());

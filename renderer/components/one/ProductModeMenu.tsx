@@ -24,11 +24,19 @@ export function ProductModeMenu({
   compact = false,
   darkText = false,
   locale: localeOverride,
+  onMenuExtentChange,
+  closeOnWindowBlur = false,
 }: {
   current: "one" | "work" | "science";
   compact?: boolean;
   darkText?: boolean;
   locale?: "ko" | "en";
+  /** Bottom edge of the open list in viewport pixels (0 when closed). A host that has a native view below the header
+   *  uses it to make room: native views paint above every renderer overlay, so a dropdown that reaches into the view's
+   *  area is invisible (Science, 2026-10-11). */
+  onMenuExtentChange?: (bottom: number) => void;
+  /** Close when the window loses focus, because clicks inside a native view never reach the renderer's outside-click handler. */
+  closeOnWindowBlur?: boolean;
 }) {
   const { locale } = useT();
   const router = useRouter();
@@ -74,6 +82,22 @@ export function ProductModeMenu({
     }
     setOneHref(safeOneReturnRoute(window.sessionStorage.getItem(ONE_RETURN_ROUTE_KEY)));
   }, [current]);
+  useEffect(() => {
+    if (!onMenuExtentChange) return;
+    const menu = menuRef.current;
+    if (!open || !menu) { onMenuExtentChange(0); return; }
+    const report = () => onMenuExtentChange(Math.ceil(menu.getBoundingClientRect().bottom));
+    report();
+    const observer = new ResizeObserver(report);
+    observer.observe(menu);
+    return () => { observer.disconnect(); onMenuExtentChange(0); };
+  }, [open, onMenuExtentChange]);
+  useEffect(() => {
+    if (!open || !closeOnWindowBlur) return;
+    const close = () => setOpen(false);
+    window.addEventListener("blur", close);
+    return () => window.removeEventListener("blur", close);
+  }, [open, closeOnWindowBlur]);
   useEffect(() => {
     if (!open || !keyboardOpenRef.current) return;
     keyboardOpenRef.current = false;

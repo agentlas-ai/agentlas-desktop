@@ -2218,6 +2218,11 @@ async function runCodexResidentTurn(input: {
     turnRequestInFlight = true;
     try {
       started = await session.conn.request("turn/start", turnParams, { timeoutMs: 120_000, signal: req.signal });
+    } catch (error) {
+      // A JSON-RPC error response is the server refusing the request: no turn began, so nothing may
+      // have acted. Only a closed transport or a timeout leaves the dispatch genuinely uncertain.
+      if (error instanceof AcpRpcError) turnDispatchAttempted = false;
+      throw error;
     } finally {
       turnRequestInFlight = false;
     }

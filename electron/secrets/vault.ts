@@ -11,6 +11,7 @@ import { developmentEffectsSuppressed, assertDevelopmentEffectAllowed } from "..
 
 import { createHash, randomUUID } from "node:crypto";
 import type { RuntimeBackend } from "../../shared/types";
+import { isValidEnvName } from "../../shared/env-key-rename";
 import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "../../shared/credential-recovery";
 import { readCredentialRecoveryRecords, type CredentialRecoveryResource } from "./recovery-state";
 import {
@@ -414,6 +415,23 @@ export async function deleteEnvVar(key: string): Promise<void> {
   await deletePassword(envAccount(key));
   envConfigurationRevision += 1;
   if (envKeyCache) envKeyCache = envKeyCache.filter((item) => item !== key);
+}
+
+export type RenameEnvVarResult =
+  | { ok: true }
+  | { ok: false; reason: "invalid-name" | "same-name" | "missing-source" | "target-exists" };
+
+/** 저장된 env 키 이름만 바꾼다. 값은 main 안에서만 오가고 반환·로그에 나가지 않는다. 저장 먼저, 삭제는 마지막. */
+export async function renameEnvVar(from: string, to: string): Promise<RenameEnvVarResult> {
+  if (!isValidEnvName(from) || !isValidEnvName(to)) return { ok: false, reason: "invalid-name" };
+  if (from === to) return { ok: false, reason: "same-name" };
+  if (await hasEnvVar(to)) return { ok: false, reason: "target-exists" };
+  const moved = await readEnvVar(from);
+  if (typeof moved !== "string" || moved.length === 0) return { ok: false, reason: "missing-source" };
+  await setEnvVar(to, moved);
+  if (!(await hasEnvVar(to))) throw new Error("env rename: target was not saved");
+  await deleteEnvVar(from);
+  return { ok: true };
 }
 
 /** main 내부 — MCP 서버 spawn 시 envRequirements 매칭해 자식 env로 주입 (M1) */

@@ -522,6 +522,8 @@ const api: AgentlasIpc = {
     has: (key: string) => ipcRenderer.invoke("env:has", key),
     preview: (key: string) => ipcRenderer.invoke("env:preview", key),
     remove: (key: string) => ipcRenderer.invoke("env:remove", key),
+    rename: (from: string, to: string) => ipcRenderer.invoke("env:rename", from, to),
+    inventory: () => ipcRenderer.invoke("env:inventory"),
   },
   credentialRecovery: {
     list: () => ipcRenderer.invoke("credentialRecovery:list"),

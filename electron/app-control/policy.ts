@@ -52,6 +52,11 @@ export function appControlPolicy(entry: Pick<AppControlCatalogEntry, "path">): A
   if (/^science\.composer\.(attach|receipt|steering)$/.test(entry.path)) return { allowed: true, effect: "read" };
   // Connection state and key presence contain no credential material. They are necessary to operate Settings.
   if (/^(secrets\.hasApiKey|auth\.getSession|runtime\.connectGet|mcpTools\.oauthStatus)$/.test(entry.path)) return { allowed: true, effect: "read" };
+  // Owner 2026-10-11 ("볼트 입력이나 저장된 것 중 있는지 AI가 찾고 물어보면 되지"): One looks for a stored key a tool can use
+  // and asks before using it. env.inventory is names and presence only (no value, no masked preview); a rename runs only
+  // on a turn the owner wrote. Setting or deleting a key value stays the owner's own act (DENIED below).
+  if (entry.path === "env.inventory") return { allowed: true, effect: "read" };
+  if (entry.path === "env.rename") return { allowed: true, effect: "consent" };
   // The screen's own ownership checks still bind these operations to a real task and view. One can observe or
   // control an existing view without manufacturing the screen's leases or approving itself.
   if (/^workLiveView\.(listTabs|capture)$/.test(entry.path)) return { allowed: true, effect: "read" };

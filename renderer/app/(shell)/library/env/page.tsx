@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import { useT } from "@/lib/i18n";
 import type { EnvVarMeta } from "@/lib/types";
+import { suggestEnvKeyRenames } from "../../../../../shared/env-key-rename";
 import type { CredentialRecoveryFailure, CredentialRecoveryResult } from "../../../../../shared/credential-recovery";
 import { CredentialRecoveryPanel } from "@/components/CredentialRecoveryPanel";
 import {
@@ -46,6 +47,7 @@ export default function LibraryEnvPage() {
   const [dragOver, setDragOver] = useState(false);
   const [importNote, setImportNote] = useState<string | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const [renameError, setRenameError] = useState(false);
   const [recoveryRefresh, setRecoveryRefresh] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -95,6 +97,29 @@ export default function LibraryEnvPage() {
     await api.env.remove(key);
     await refresh();
   }
+
+  async function rename(from: string, to: string) {
+    const api = ipc();
+    if (!api) return;
+    setBusy(true);
+    try {
+      const result = await api.env.rename(from, to);
+      if (!result.ok) {
+        setRenameError(true);
+        setTimeout(() => setRenameError(false), 4000);
+      }
+      await refresh();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // 저장돼 있지만 어떤 도구도 읽지 않는 이름 → 선언된 이름으로 바꾸자는 제안
+  const renameSuggestions = useMemo(() => {
+    const stored = vars.filter((v) => v.hasValue === true).map((v) => v.key);
+    const declared = vars.filter((v) => v.requiredBy.length > 0).map((v) => v.key);
+    return new Map(suggestEnvKeyRenames(stored, declared).map((s) => [s.from, s.to]));
+  }, [vars]);
 
   // ── 출처별 섹션 빌드 ───────────────────────────────────
   const sections = useMemo<Section[]>(() => {
@@ -294,6 +319,11 @@ export default function LibraryEnvPage() {
         </button>
       </div>
 
+      {renameError && (
+        <div role="alert" style={{ marginBottom: 12, fontSize: 12, color: "var(--red-deep)" }}>
+          {locale === "ko" ? "이름을 바꾸지 못했습니다. 새 이름이 이미 있거나 키가 없습니다." : "Could not rename. The new name already exists or the key is missing."}
+        </div>
+      )}
       {importNote && (
         <div style={{ marginBottom: 12, fontSize: 12, color: "var(--green-deep)", fontWeight: 600 }}>{importNote}</div>
       )}
@@ -397,7 +427,7 @@ export default function LibraryEnvPage() {
                 {!isCollapsed && (
                   <ul style={{ listStyle: "none", padding: 10, margin: 0, display: "flex", flexDirection: "column", gap: 8 }}>
                     {s.vars.map((v) => (
-                      <EnvRow key={v.key} v={v} locale={locale} busy={busy} onSave={save} onRemove={remove} />
+                      <EnvRow key={v.key} v={v} locale={locale} busy={busy} onSave={save} onRemove={remove} renameTo={renameSuggestions.get(v.key)} onRename={rename} />
                     ))}
                   </ul>
                 )}
@@ -468,12 +498,16 @@ function EnvRow({
   busy,
   onSave,
   onRemove,
+  renameTo,
+  onRename,
 }: {
   v: EnvVarMeta;
   locale: "ko" | "en";
   busy: boolean;
   onSave: (key: string, value: string) => void | Promise<void>;
   onRemove: (key: string) => void | Promise<void>;
+  renameTo?: string;
+  onRename: (from: string, to: string) => void | Promise<void>;
 }) {
   const { t } = useT();
   const [editing, setEditing] = useState(false);
@@ -549,6 +583,22 @@ function EnvRow({
         </div>
       )}
       {hint && <div style={{ fontSize: 11, color: "var(--muted-deep)" }}>{hint}</div>}
+      {renameTo && v.requiredBy.length === 0 && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", fontSize: 11, color: "var(--muted-deep)" }}>
+          <span style={{ flex: 1, minWidth: 0 }}>
+            {locale === "ko"
+              ? `이 이름은 어떤 도구도 읽지 않습니다. ${renameTo} 로 바꾸면 이 키를 씁니다.`
+              : `No tool reads this name. Rename it to ${renameTo} and it will be used.`}
+          </span>
+          <button
+            onClick={() => void onRename(v.key, renameTo)}
+            disabled={busy}
+            style={{ fontSize: 11, color: "var(--accent)", fontWeight: 600, padding: "4px 10px", borderRadius: 999, border: "1px solid var(--paper-edge)", background: "var(--paper)", flexShrink: 0 }}
+          >
+            {locale === "ko" ? "이름 바꾸기" : "Rename"}
+          </button>
+        </div>
+      )}
       {editing && (
         <InlineSet
           placeholder={t("env.field.value.placeholder")}

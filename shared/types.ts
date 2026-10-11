@@ -7632,6 +7632,10 @@ export interface AgentlasIpc {
     /** 저장된 값의 마스킹 미리보기 (전체 평문 아님). 미저장이면 null. */
     preview: (key: string) => Promise<string | null>;
     remove: (key: string) => Promise<void>;
+    /** 저장된 키의 이름만 바꾼다(값은 renderer 로 안 나감). 새 이름이 이미 있거나 옛 이름이 없으면 거절. */
+    rename: (from: string, to: string) => Promise<{ ok: true } | { ok: false; reason: "invalid-name" | "same-name" | "missing-source" | "target-exists" }>;
+    /** 값 없는 목록: 저장된 키 이름·등록 여부·읽는 도구. One 이 맞는 키를 찾아 오너에게 물을 때 쓴다(미리보기도 없음). */
+    inventory: () => Promise<Array<{ key: string; requiredBy: EnvVarMeta["requiredBy"]; hasValue: boolean | null }>>;
   };
   /** 멀티모달 전역 fallback — 에이전트/프로젝트 env가 없을 때 이미지·영상·음성 provider를 고른다. */
   /**
