@@ -9,7 +9,7 @@ import { browserAnnotationDraftText } from "@shared/browser-annotation";
 import { runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { createOneScrollFollow, oneRunReceiptIsTerminal } from "@/lib/one-scroll-follow";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
-import { mergeAutomationHostNotices } from "@/lib/chat-host-notice-refresh";
+import { mergeAutomationHostNotices, mergeRoomWorkRows } from "@/lib/chat-host-notice-refresh";
 import { readOneChatHistory, readOneChatHistoryPage, mergeOneChatHistory, oneChatHistoryCursor } from "@/lib/one-chat-history";
 import { OneComposerInput, type OneComposerInputHandle } from "./OneComposerInput";
 import { oneHistoryWindowStart, revealOneHistoryPage } from "@/lib/one-history-window";
@@ -76,6 +76,7 @@ import {
   IconFileUp,
   IconFolder,
   IconCpu,
+  IconPuzzle,
   IconMoreHorizontal,
   IconPanelRight,
   IconPlus,
@@ -209,6 +210,7 @@ import { OneFeatureIntro } from "./OneFeatureIntro";
 import { OneWhatsNew } from "./OneWhatsNew";
 import { openPricing } from "@/components/UpgradeCta";
 import { OneMemorySheet } from "./OneMemorySheet";
+import { OneCapabilitiesModal } from "./OneCapabilitiesModal";
 import { OneMemoryMap } from "./OneMemoryMap";
 import { OneMemoryCandidateCard } from "./OneMemoryCandidateCard";
 import { OneProfileSheet } from "./OneProfileSheet";
@@ -233,10 +235,10 @@ import type { OneWorkerPanelSelection, OneWorkerPanelRun } from "@/lib/one-worke
 import { OneTurnWork, OneTurnWorkDividers, type OneTurnHostNote } from "./OneTurnWork";
 import { OneTaskforceConversation } from "./OneTaskforceConversation";
 import {
-  memberForAgent, OneDiscussionBar, OneDiscussionLive, OneDiscussionReplyContext, OneDiscussionThread, useOneDiscussion,
+  memberForAgent, OneDiscussionReplyContext, OneDiscussionThread, useOneDiscussion,
   type ThreadComment,
 } from "./OneDiscussion";
-import { addressesOneDirectly, isNestedComment } from "@/lib/one-discussion";
+import { isNestedComment, mergeDiscussionRows, missingDiscussionIds } from "@/lib/one-discussion";
 import { buildOneWorkPresentation } from "@/lib/one-turn-work";
 import { isDocumentLikeText } from "@/lib/one-doc-like";
 import { requestOneArtifactOpen } from "@/lib/one-artifact-open";
@@ -2143,6 +2145,7 @@ function OneSessionsShell() {
   const [whatsNewReplayToken, setWhatsNewReplayToken] = useState(0);
   const [profileOpen, setProfileOpen] = useState(false);
   const [memoryOpen, setMemoryOpen] = useState(false);
+  const [capabilitiesOpen, setCapabilitiesOpen] = useState(false);
   // The visible app language is the one language control a person can see and
   // change in this surface. A stale profile preference must not make an
   // English One screen submit Korean runtime/surface copy (or the reverse).
@@ -4029,6 +4032,7 @@ function OneSessionsShell() {
     return () => { cancelled = true; };
   }, [activeThreadChatId, messages]);
   const activeThreadChatIdRef = useRef(activeThreadChatId);
+  const taskforceRoomRef = useRef(false);
   // Keep the guard synchronous with render. An effect leaves one commit where
   // a picker started in chat A can settle after navigation and paint A's path
   // into chat B.
@@ -4051,7 +4055,9 @@ function OneSessionsShell() {
             // React may apply this updater after navigation or a newer read.
             if (disposed || generation !== historyGeneration || activeThreadChatIdRef.current !== activeThreadChatId
               || shownThreadChatIdRef.current !== activeThreadChatId) return current;
-            const appended = mergeAutomationHostNotices(current, notices);
+            // 단톡방에서는 팀원이 일하며 쓰는 줄(위임 링크·팀원 보고·팀원 메시지)도 방을 다시 열지 않고 붙인다.
+            const withReports = mergeAutomationHostNotices(current, notices);
+            const appended = taskforceRoomRef.current && !runIdRef.current ? mergeRoomWorkRows(withReports, toUiMessages(history)) : withReports;
             // Fence an older in-flight hydration from erasing a new report.
             if (appended !== current) oneTranscriptRevisionRef.current += 1;
             return appended.map((message) => {
@@ -4227,12 +4233,43 @@ function OneSessionsShell() {
     const ids = new Set(activeTaskforce?.memberAgentIds ?? []);
     return (oneOrgState?.members ?? []).filter((member) => !member.archivedAt && member.unavailable && ids.has(member.installedAgentId));
   }, [activeTaskforce, oneOrgState]);
+  taskforceRoomRef.current = Boolean(activeTaskforce);
   const taskforceEditing = useMemo(
     () => taskforceEditingId ? taskforces.find((taskforce) => taskforce.id === taskforceEditingId) ?? null : null,
     [taskforceEditingId, taskforces],
   );
   // 단톡방 토론(A4/A5): 여러 팀원이 같은 시점의 방을 보고 동시에 말한다. 방이 아니면 아무것도 하지 않는다.
   const discussion = useOneDiscussion({ chatId: activeThreadChatId ?? null, enabled: Boolean(activeTaskforce) });
+  /*
+   * 단톡방 대화가 방에 쓴 글(팀원 답글, 내가 보낸 글)을 화면에 붙인다.
+   *
+   * 예전에는 이 글들이 방 기록(chat_messages)에는 들어갔는데 화면 목록(messages)에는 방을 다시 열 때까지
+   * 들어오지 않았다 — 위 기록 새로고침은 자동화 보고만 합치고, 일반 실행 경로는 자기 실행의 답만 그린다.
+   * 대화 기록(discussion.state.messages)이 화면에 없는 글을 가리키면 그 글만 읽어 제자리(시각순)에 끼운다.
+   * 낙관적 줄이나 진행 중인 실행의 응답은 건드리지 않는다.
+   */
+  const discussionMessageMeta = discussion.state?.messages;
+  const discussionMergeBusyRef = useRef(false);
+  useEffect(() => {
+    const api = ipc();
+    const chatId = activeThreadChatId;
+    if (!api || !chatId || !discussionMessageMeta || discussionMessageMeta.length === 0 || discussionMergeBusyRef.current) return;
+    if (shownThreadChatIdRef.current !== chatId) return;
+    const missing = missingDiscussionIds(messages, discussionMessageMeta);
+    if (missing.length === 0) return;
+    discussionMergeBusyRef.current = true;
+    const wanted = new Set(missing);
+    void readOneShellHistory(api, chatId).then((history) => {
+      if (activeThreadChatIdRef.current !== chatId || shownThreadChatIdRef.current !== chatId) return;
+      const rows = toUiMessages(history);
+      setMessages((current) => {
+        if (shownThreadChatIdRef.current !== chatId) return current;
+        const merged = mergeDiscussionRows(current, rows, wanted);
+        if (merged !== current) oneTranscriptRevisionRef.current += 1;
+        return merged;
+      });
+    }).catch(() => undefined).finally(() => { discussionMergeBusyRef.current = false; });
+  }, [activeThreadChatId, discussionMessageMeta, messages]);
   const visibleMessageIds = useMemo(() => new Set(visibleMessages.map((message) => message.id)), [visibleMessages]);
   const visibleMessagesById = useMemo(() => new Map(visibleMessages.map((message) => [message.id, message])), [visibleMessages]);
   // 활성 세션의 좌석 1급 조회(SEAT-SESSION-PLAN-v2) — 해체(T7) 여부가 읽기 전용
@@ -6144,32 +6181,9 @@ function OneSessionsShell() {
       }
       return;
     }
-    // 단톡방 토론(A4): 팀원이 둘 이상인 방에서 이야기를 건네는 글은 One 혼자 답하지 않고 팀원 몇 명이 같은 시점의
-    // 방을 보고 동시에 말한다. 토론 모드가 꺼져 있거나 토론으로 보이지 않는 글(작업 지시)은 Main 이 돌려보내
-    // 아래 기존 경로로 간다. 토론 중에 보낸 글은 유실 없이 대기열에 들어간다.
-    if (activeTaskforce && currentSubmitChatId === activeTaskforce.chatId && activeTaskforce.memberAgentIds.length >= 2
-      && attachmentSnapshot.length === 0 && graphRequest === null && api.oneDiscussion
-      && !addressesOneDirectly(explicitValue, oneProfile?.displayName.trim() || "One")) {
-      try {
-        const routed = await api.oneDiscussion.post({ chatId: activeTaskforce.chatId, text: explicitValue });
-        if (routed.handled) {
-          setComposer("");
-          setMessageReply((current) => current === submittedReply ? null : current);
-          setTurnOverrides({});
-          setComposerMenu(null);
-          setError(null);
-          discussion.refresh();
-          scrollToLatest();
-          return;
-        }
-      } catch (cause) {
-        setActionNotice(appLocale === "ko"
-          ? "토론에 글을 보내지 못했어요. 작성한 글은 그대로 있어요."
-          : "The post could not be sent to the discussion. Your text is still in the composer.");
-        requestOneOperationalRecovery("one-discussion-post", cause);
-        return;
-      }
-    }
+    // 단톡방의 모든 오너 글은 One 의 방 경로(오케스트레이터 → Goal·전략·전술·타깃 → 팀 디스패치)로 간다.
+    // 방은 토론장이 아니라 One 이 진행하고 팀원이 일하는 곳이다(오너 2026-10-12). 토론 엔진으로 보내는 길은 닫았다 —
+    // 2026-10-11 Yotube 브리프가 토론으로 흡수돼 Goal 이 만들어지지 않았다.
     // 화면은 한가해 보여도 Main 은 이 대화의 끝난 턴을 아직 정리·검증하는 중일 수 있다. 그때 새 실행을
     // 시작하면 Main 이 거절해 요청이 사라졌다(2026-09-26 QA 0b03862a: invocation_cleanup_pending →
     // 20초 뒤 옛 목표만 재개). 그 경우 새 요청은 줄에 세우고 정리가 끝나면 바로 돌린다.
@@ -8599,6 +8613,7 @@ function OneSessionsShell() {
             </nav>}
             <div className={styles.railBottomMenu}>
               <UpdateBanner />
+              <button type="button" data-one-capabilities-entry="true" onClick={() => setCapabilitiesOpen(true)}><span><IconPuzzle size={15} />{appLocale === "ko" ? "능력" : "Capabilities"}</span></button>
               <button type="button" onClick={() => router.push("/local-models")}><span><IconCpu size={15} />{appLocale === "ko" ? "로컬 모델" : "Local Models"}</span></button>
               <button type="button" onClick={() => setRailMode("settings")}><span><IconSettings size={15} />{appLocale === "ko" ? "설정" : "Settings"}</span><IconChevronDown size={12} /></button>
               <button type="button" onClick={() => { setMemoryOpen(false); setProfileOpen(true); }}><span className={styles.railAccountMark}>{oneDisplayName.slice(0, 1).toLocaleUpperCase()}</span><span>{oneDisplayName}</span></button>
@@ -8728,17 +8743,6 @@ function OneSessionsShell() {
                   }}
                   aria-label={appLocale === "ko" ? "태스크포스 멤버 관리" : "Manage Taskforce members"}
                 ><IconUsers size={15} /><span data-one-taskforce-badge="true">{speakableCountIncludingOne(activeTaskforce.memberAgentIds, oneOrgState)}</span></button>}
-                {activeTaskforce && discussion.state && discussion.state.memberCount >= 2 && <button
-                  type="button"
-                  className={styles.taskforceMembersButton}
-                  data-one-discussion-toggle={discussion.state.enabled ? "on" : "off"}
-                  aria-pressed={discussion.state.enabled}
-                  title={appLocale === "ko"
-                    ? "토론 모드: 팀원 몇 명이 같은 시점의 방을 보고 동시에 말하고, 서로 답하고 댓글을 남깁니다."
-                    : "Discussion mode: several members read the same room snapshot, speak at once, then reply and comment to each other."}
-                  disabled={Boolean(discussion.state.active)}
-                  onClick={() => { void discussion.setEnabled(!discussion.state?.enabled); }}
-                ><span>{appLocale === "ko" ? `토론 ${discussion.state.enabled ? "켬" : "끔"}` : `Discussion ${discussion.state.enabled ? "on" : "off"}`}</span></button>}
                 {!activeTaskforce && (activeOneSelected || activeOneMember) && (
                   <OneNewSessionButton locale={appLocale} onClick={() => startFreshSession(activeOneSelected ? null : activeOneMember)} />
                 )}
@@ -8860,7 +8864,7 @@ function OneSessionsShell() {
               </div>
             ) : (
               <div className={styles.threadContent}>
-                <section className={styles.messages} aria-label={selected ? tFor(appLocale, "one.shell.thread.work_conversation_aria") : tFor(appLocale, "one.shell.thread.general_conversation_aria")} aria-live="polite">
+                <section className={styles.messages} data-one-room={activeTaskforce ? "true" : undefined} aria-label={selected ? tFor(appLocale, "one.shell.thread.work_conversation_aria") : tFor(appLocale, "one.shell.thread.general_conversation_aria")} aria-live="polite">
                   {failureFocus && (!failureFocus.chatId || failureFocus.chatId === (selected?.chatId ?? conversation?.id)) && (
                     <section className={styles.failureCard} role="alert" aria-label={appLocale === "ko" ? "실패 복구" : "Failure recovery"}>
                       <button type="button" className={styles.failureCardClose} aria-label={appLocale === "ko" ? "닫기" : "Close"} onClick={() => setFailureFocus(null)}><IconClose size={14} /></button>
@@ -9133,7 +9137,6 @@ function OneSessionsShell() {
                       </Fragment>
                     );
                   })}
-                  {activeTaskforce && <OneDiscussionLive controller={discussion} members={oneOrgState?.members} locale={appLocale === "ko" ? "ko" : "en"} />}
                   {departurePlan.trailing.map((notice) => (
                     <p key={notice.id} className={styles.departureNotice} data-one-departure="true">
                       <span aria-hidden="true">---------</span>
@@ -9468,7 +9471,6 @@ function OneSessionsShell() {
                 onDismiss={() => setDismissedDecisionId(visibleSelectedConfirmation.sourceMessageId)}
               />
             )}
-            {activeTaskforce && <OneDiscussionBar controller={discussion} locale={appLocale === "ko" ? "ko" : "en"} />}
             <ComposerDecisionSlot className={styles.composerDecisions} surface="one" />
             <ToolApprovalInline permission={onePermission} chatId={activeThreadChatId} compact chip composerWidth={ONE_COMPOSER_WIDTH_PX} composerInset={ONE_COMPOSER_INSET_PX} />
             {activeThreadChatId && (selectedTaskId
@@ -10380,6 +10382,7 @@ function OneSessionsShell() {
         onProfileChange={handleProfileChange}
         onOpenMailbox={mail.available ? () => setRailMode("mail") : undefined}
       />
+      <OneCapabilitiesModal open={capabilitiesOpen} locale={appLocale === "ko" ? "ko" : "en"} onClose={() => setCapabilitiesOpen(false)} />
       <OneMemorySheet
         open={memoryOpen}
         state={oneMemory}

@@ -26,9 +26,13 @@
 export const ROOM_DISCUSSION_DEFAULTS = {
   speakersPerRound: 2,
   maxSpeakersPerRound: 3,
-  maxRounds: 3,
-  /** Budget per owner post, in units. A full message costs 2, a comment 1. */
-  budgetUnits: 12,
+  /**
+   * Hidden safety cap on internal exchange batches, against runaway cost. It is never shown to the owner and hitting
+   * it ends the conversation silently. A conversation normally ends sooner: nobody has anything new to add.
+   */
+  maxRounds: 40,
+  /** Hidden cost cap per owner post, in units. A full message costs 2, a comment 1. Reaching it ends the talk silently. */
+  budgetUnits: 80,
   messageCost: 2,
   commentCost: 1,
   /** Rooms where one member may speak at the same time across all rooms. */
@@ -163,10 +167,29 @@ export function asksQuestion(text: string): boolean {
   return /[?？]/.test(body) || QUESTION_END.test(body);
 }
 
-/** Does the post read like an invitation to talk rather than a command for work? Used only to route; a mention always counts. */
+/**
+ * Owner work, not talk: a task, brief, plan or recurring instruction. Such a post always goes to One (orchestrator,
+ * Goal intake, strategy, tactics, targets, team dispatch) and is never swallowed by the room conversation.
+ * Errs toward One: a wrongly routed chat question still gets an answer, a wrongly routed brief loses its Goal.
+ */
+const WORK_VERB_KO = /((?<!(?:말|생각|얘기|이야기|토론|논의|비교|설명))해\s?(?:줘|주세요|줄래)|하세요|해라|해야|하자|할 것|하도록|진행|업로드|운영|매일|매주|매월|매번|주기|자동|알아서|작성|생성|구축|구성|만들|만드|제작|개발|수정|고쳐|분석해|조사해|찾아서|키워|세워|짜\s?줘|정리해|보고해|예약|배포|발행|올려|실행|돌려|설정|등록|적용)/u;
+const WORK_VERB_EN = /\b(create|build|make\s+(a|an|the|me|us)|write|upload|publish|schedule|every\s+(day|week|month)|daily|weekly|monthly|set\s?up|generate|deploy|implement|develop|automate|produce|draft|start\s+(a|an|the|making|doing))\b/i;
+export const WORK_POST_MAX_CHARS = 280;
+export const WORK_POST_MAX_LINES = 3;
+
+export function isOwnerWork(text: string): boolean {
+  const body = text.trim();
+  if (!body) return false;
+  if (body.length > WORK_POST_MAX_CHARS) return true;
+  if (body.split(/\r?\n/).filter((line) => line.trim()).length > WORK_POST_MAX_LINES) return true;
+  return WORK_VERB_KO.test(body) || WORK_VERB_EN.test(body);
+}
+
+/** Does the post read like an invitation to talk rather than a command for work? Used only to route; work always wins. */
 export function invitesDiscussion(text: string, members: readonly RoomMember[] = []): boolean {
   const body = text.trim();
   if (!body || body.startsWith("/")) return false;
+  if (isOwnerWork(body)) return false;
   if (findAddressedMembers(body, members).length > 0) return true;
   if (asksQuestion(body)) return true;
   return /(토론|의견|생각|논의|각자|다같이|다 같이|함께 이야기|어때|찬성|반대|비교|장단점|브레인스토|discuss|debate|thoughts|opinion|what do you think|brainstorm|pros and cons)/iu.test(body);
@@ -391,13 +414,13 @@ export function buildSpeakerPrompt(input: SpeakerPromptInput): string {
       `[단체방 토론] 방 "${input.roomTitle}"에서 ${owner}와 팀원들이 이야기하고 있습니다. 당신은 ${input.member.name}입니다.`,
       input.roomDescription ? `방 설명: ${input.roomDescription.slice(0, 300)}` : "",
       `이 방의 다른 팀원: ${others.join(", ") || "(없음)"}`,
-      `지금은 ${input.roundNo}/${input.maxRounds} 라운드입니다.${together.length ? ` ${together.join(", ")}도 같은 라운드에 동시에 말하므로 이번 라운드의 서로 발언은 아직 볼 수 없습니다.` : ""}`,
+      `이 방은 순서나 차례가 없는 자유로운 대화입니다.${together.length ? ` ${together.join(", ")}도 같은 글을 보고 지금 답하는 중이라 서로의 새 발언은 아직 볼 수 없습니다.` : ""}`,
     ]
     : [
       `[Group room discussion] In the room "${input.roomTitle}" the ${owner.toLowerCase()} and teammates are talking. You are ${input.member.name}.`,
       input.roomDescription ? `Room description: ${input.roomDescription.slice(0, 300)}` : "",
       `Other teammates in this room: ${others.join(", ") || "(none)"}`,
-      `This is round ${input.roundNo} of ${input.maxRounds}.${together.length ? ` ${together.join(", ")} speak in the same round at the same time, so you cannot see each other's words from this round yet.` : ""}`,
+      `This room is a free conversation with no turns or order.${together.length ? ` ${together.join(", ")} are reading the same post and answering right now, so you cannot see each other's new words yet.` : ""}`,
     ];
   const section = ko
     ? [`마지막으로 본 이후 새 글${omitted > 0 ? ` (더 앞선 ${omitted}개는 생략)` : ""}:`, ...(lines.length ? lines : ["(새 글 없음)"])]
@@ -407,23 +430,23 @@ export function buildSpeakerPrompt(input: SpeakerPromptInput): string {
       ? [`할 일: #${input.replyTarget.seq} 글에 짧은 댓글을 남기세요. 한두 문장, 길어도 두 문장을 넘기지 마세요. 새 주제를 열지 마세요.`]
       : [`Task: leave a short comment on post #${input.replyTarget.seq}. One or two sentences, never more than two. Do not open a new topic.`])
     : (ko
-      ? [`할 일: 위 글을 읽고 ${input.member.name}으로서 당신의 의견을 말하세요. 핵심 위주로 간결하게.${input.replyTarget ? ` 특히 #${input.replyTarget.seq} 글에 답하세요.` : ""}`]
-      : [`Task: read the posts above and give ${input.member.name}'s view, concise and to the point.${input.replyTarget ? ` Answer post #${input.replyTarget.seq} in particular.` : ""}`]);
+      ? [`할 일: 위 글을 읽고 ${input.member.name}으로서 이 주제와 직접 관련 있고 보탤 말이 있을 때만 의견을 말하세요. 핵심 위주로 간결하게.${input.replyTarget ? ` 특히 #${input.replyTarget.seq} 글에 답하세요.` : ""}`]
+      : [`Task: read the posts above and, as ${input.member.name}, speak only if this is relevant to you and you have something to add. Concise and to the point.${input.replyTarget ? ` Answer post #${input.replyTarget.seq} in particular.` : ""}`]);
   const rules = ko
     ? [
       "규칙:",
       "- 오너가 쓴 언어로 답하세요. 도구나 파일 작업 없이 말로만 답합니다.",
-      "- 다른 팀원에게 묻거나 반박하려면 @이름 으로 부르세요. 상대가 다음 라운드에 답합니다.",
+      "- 다른 팀원에게 묻거나 반박하려면 @이름 으로 부르세요. 상대가 이어서 답합니다.",
       "- 특정 글에 답하면 답의 첫 줄에 [[reply:#번호]] 를 쓰세요.",
-      "- 더할 말이 없으면 [[pass]] 한 단어만 쓰세요.",
+      "- 더할 말이 없거나 내 분야가 아니면 [[pass]] 한 단어만 쓰세요. 모두가 말할 필요는 없습니다.",
       "- 앞 발언을 되풀이하지 마세요.",
     ]
     : [
       "Rules:",
       "- Answer in the language the owner used. Speak only; no tools or file work.",
-      "- To ask or challenge a teammate, call them with @name. They answer in the next round.",
+      "- To ask or challenge a teammate, call them with @name. They answer next.",
       "- When answering a specific post, start your answer with [[reply:#number]].",
-      "- If you have nothing to add, write only [[pass]].",
+      "- If you have nothing to add or it is not your area, write only [[pass]]. Not everyone needs to speak.",
       "- Do not repeat what was already said.",
     ];
   return [...head.filter(Boolean), "", ...section, "", ...task, "", ...rules].join("\n");
@@ -944,22 +967,9 @@ export class RoomDiscussionEngine {
         allPosts, coSpeakers, control,
       })));
 
-      // Commit in order. Only completed messages enter the log; cancelled, failed and refused turns add nothing.
-      const committed: RoomPost[] = [];
-      for (const outcome of settled) {
-        if (!outcome.parsed || outcome.parsed.kind === "pass" || outcome.parsed.kind === "empty") continue;
-        const member = roster.members.find((item) => item.agentId === outcome.turn.agentId);
-        if (!member) continue;
-        const parsed = outcome.parsed;
-        const post = ports.log.appendMemberPost(chatId, {
-          speaker: member, text: parsed.text, kind: parsed.kind === "comment" ? "comment" : "post",
-          replyTo: parsed.replyTo, discussionId: discussion.id, roundNo,
-        });
-        ports.state.updateTurn(outcome.turn.id, { status: "completed", messageId: post.messageId });
-        const cost = parsed.kind === "comment" ? ROOM_DISCUSSION_DEFAULTS.commentCost : ROOM_DISCUSSION_DEFAULTS.messageCost;
-        discussion.spentUnits += cost;
-        committed.push(post);
-      }
+      // Each message entered the log the moment its speaker finished (runTurn); cancelled, failed, refused and
+      // passed turns added nothing.
+      const committed: RoomPost[] = settled.flatMap((outcome) => (outcome.post ? [outcome.post] : []));
       ports.state.updateDiscussion(discussion.id, { spentUnits: discussion.spentUnits });
       const refused = settled.filter((outcome) => outcome.refusedCode);
       ports.state.closeRound(round.id, "completed", control.stopRequested ? "owner_stop" : null);
@@ -988,7 +998,7 @@ export class RoomDiscussionEngine {
     allPosts: readonly RoomPost[];
     coSpeakers: readonly string[];
     control: LoopControl;
-  }): Promise<{ turn: TurnRecord; parsed: ParsedSpeakerOutput | null; refusedCode: string | null }> {
+  }): Promise<{ turn: TurnRecord; parsed: ParsedSpeakerOutput | null; refusedCode: string | null; post: RoomPost | null }> {
     const { ports } = this;
     const { chatId, roster, turn, plan, round, discussion, control } = input;
     const member = roster.members.find((item) => item.agentId === plan.agentId)!;
@@ -997,7 +1007,7 @@ export class RoomDiscussionEngine {
     if (!cap.ok) {
       ports.state.updateTurn(turn.id, { status: "refused", reasonCode: cap.code });
       this.emit(chatId);
-      return { turn, parsed: null, refusedCode: cap.code };
+      return { turn, parsed: null, refusedCode: cap.code, post: null };
     }
 
     const cursor = ports.state.cursor(chatId, plan.agentId);
@@ -1017,7 +1027,7 @@ export class RoomDiscussionEngine {
       const code = machineCode(error, "start_failed");
       ports.state.updateTurn(turn.id, { status: "refused", reasonCode: code });
       this.emit(chatId);
-      return { turn, parsed: null, refusedCode: code };
+      return { turn, parsed: null, refusedCode: code, post: null };
     }
     control.handles.set(turn.id, handle);
     // The member now holds everything up to the snapshot in its thread.
@@ -1034,14 +1044,26 @@ export class RoomDiscussionEngine {
     if (result.status !== "completed") {
       ports.state.updateTurn(turn.id, { status: result.status, reasonCode: result.errorCode ?? null });
       this.emit(chatId);
-      return { turn, parsed: null, refusedCode: null };
+      return { turn, parsed: null, refusedCode: null, post: null };
     }
     const visible = new Map<number, string>(input.allPosts.map((post) => [post.seq, post.messageId]));
     const parsed = parseSpeakerOutput(result.text, plan.mode, plan.replyTo, visible);
     // Keep the finished answer until it is in the log: a restart in between publishes it, never asks again.
-    if (parsed.kind === "message" || parsed.kind === "comment") ports.state.updateTurn(turn.id, { resultText: parsed.text });
-    else ports.state.updateTurn(turn.id, { status: "completed", reasonCode: parsed.kind });
+    if (parsed.kind !== "message" && parsed.kind !== "comment") {
+      ports.state.updateTurn(turn.id, { status: "completed", reasonCode: parsed.kind });
+      this.emit(chatId);
+      return { turn, parsed, refusedCode: null, post: null };
+    }
+    ports.state.updateTurn(turn.id, { resultText: parsed.text });
+    // The message enters the room the moment its speaker is done, not when the slowest speaker of the batch is.
+    const post = ports.log.appendMemberPost(chatId, {
+      speaker: member, text: parsed.text, kind: parsed.kind === "comment" ? "comment" : "post",
+      replyTo: parsed.replyTo, discussionId: discussion.id, roundNo: round.roundNo,
+    });
+    ports.state.updateTurn(turn.id, { status: "completed", messageId: post.messageId });
+    discussion.spentUnits += parsed.kind === "comment" ? ROOM_DISCUSSION_DEFAULTS.commentCost : ROOM_DISCUSSION_DEFAULTS.messageCost;
+    ports.state.updateDiscussion(discussion.id, { spentUnits: discussion.spentUnits });
     this.emit(chatId);
-    return { turn, parsed, refusedCode: null };
+    return { turn, parsed, refusedCode: null, post };
   }
 }

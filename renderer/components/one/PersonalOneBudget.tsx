@@ -5,6 +5,7 @@ import {createCoalescedRefresh} from "@/lib/one-refresh-coordinator";
 import {ONE_BUDGET_REJECTION_CODES,type OneBudgetConfigureInput,type OneBudgetSnapshot} from "@shared/one-budget";
 import {OneBottomSheet} from "./OneBottomSheet";
 import styles from "./PersonalOneBudget.module.css";
+import { Select } from "@/components/Select";
 
 export function usePersonalOneBudgets(oneId?:string) {
   const [items,setItems]=useState<OneBudgetSnapshot[]>([]);const [unconfirmed,setUnconfirmed]=useState(false);
@@ -61,10 +62,10 @@ export function PersonalOneBudget({open,oneId,locale,items,unconfirmed,onRefresh
       {unconfirmed&&<p role="status">{copy("최신 비용·예산 관측을 확인하지 못했습니다. 마지막 관측을 표시하며 새 설정은 보류합니다.","Current budget and billing observations are unconfirmed. The last observation is shown; new configuration is held.")}</p>}
       {storageError&&<p role="status">{copy("저장된 예산 요청을 읽지 못했습니다. 새 설정을 보류합니다.","Saved budget requests could not be read. New configuration is held.")}</p>}
       <form className={styles.form} onSubmit={event=>{event.preventDefault();void configure();}}>
-        <label>{copy("설정할 예산","Budget to configure")}<select aria-label={copy("설정할 예산","Budget to configure")} value={selected} onChange={event=>choose(event.target.value)}><option value="">{copy("새 예산","New budget")}</option>{items.map(item=><option key={item.budgetId} value={item.budgetId}>{personalOneBudgetName(item,locale)}</option>)}</select></label>
+        <label>{copy("설정할 예산","Budget to configure")}<Select aria-label={copy("설정할 예산","Budget to configure")} value={selected} onChange={event=>choose(event.target.value)}><option value="">{copy("새 예산","New budget")}</option>{items.map(item=><option key={item.budgetId} value={item.budgetId}>{personalOneBudgetName(item,locale)}</option>)}</Select></label>
         {revisionChanged&&<p role="status">{copy("편집 중인 설정보다 새 정책 버전을 관측했습니다. 저장 전에 최신 설정을 확인하세요.","A newer policy revision was observed while editing. Review it before saving.")}</p>}
         {selected&&<button type="button" disabled={!policy} onClick={()=>choose(selected)}>{copy("현재 관측 정책을 편집 양식에 불러오기","Load observed policy for editing")}</button>}
-        <label>{copy("실행 접수 방식","Execution admission mode")}<select aria-label={copy("실행 접수 방식","Execution admission mode")} value={mode} onChange={event=>setMode(event.target.value as "observe"|"reservation")}><option value="observe">{copy("제한 없이 관측만","Unrestricted observation only")}</option><option value="reservation">{copy("예약액 기준으로 접수 제한","Limit admission by reserved amounts")}</option></select></label>
+        <label>{copy("실행 접수 방식","Execution admission mode")}<Select aria-label={copy("실행 접수 방식","Execution admission mode")} value={mode} onChange={event=>setMode(event.target.value as "observe"|"reservation")}><option value="observe">{copy("제한 없이 관측만","Unrestricted observation only")}</option><option value="reservation">{copy("예약액 기준으로 접수 제한","Limit admission by reserved amounts")}</option></Select></label>
         {mode==="reservation"&&<label>{copy("로컬 실행 접수 한도 (USD)","Local admission limit (USD)")}<input aria-label={copy("로컬 실행 접수 한도 (USD)","Local admission limit (USD)")} inputMode="decimal" value={limit} onChange={event=>setLimit(event.target.value)} required/></label>}
         <label>{copy("새 실행 1회 예약액 (USD)","Reservation per native run (USD)")}<input aria-label={copy("새 실행 1회 예약액 (USD)","Reservation per native run (USD)")} inputMode="decimal" value={reserve} onChange={event=>setReserve(event.target.value)} required/></label>
         <button type="submit" disabled={busy||!oneId||unconfirmed||storageError||!valid||pending.some(item=>item.budgetId===selected||!selected&&item.expectedRevision===0)}>{copy("이 예산 정책 저장","Save this budget policy")}</button>

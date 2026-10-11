@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.3 — 2026-10-12
+
+- Group rooms are run by One again. Your message goes to One, which sets the goal, plans and hands work to teammates; there are no discussion rounds, no round bar and no "thinking" bubbles. Teammates' hand-offs and reports appear in the room as they happen, without reopening it, and messages sit closer together.
+- A message sent in a group room is saved once, even if you press Enter again.
+- Capabilities: a window in One and the personal window lists your skills, plugins, hooks, memory and connectors once each, with an on/off switch per item.
+- The personal window no longer shows the progress and screen-sharing row; everything is allowed by default.
+- Agent management shows errors in plain language, hides hashes and revision IDs, and uses one style of dropdown.
+- The taskforce save card keeps its time estimate on one line.
+- A model list request refused for account permission is noted once instead of repeating as an error.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.2 — 2026-10-11
 
 - Includes everything planned for 1.3.0 and 1.3.1, which were not published: group rooms discuss, with two or three teammates answering at once, and an update is no longer refused while an AI model is kept warm between messages.

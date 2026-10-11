@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { IconClose, IconEdit, IconShield, IconTrash } from "@/components/Icon";
 import { runtimeEngineLabel } from "@/components/dashboard/RuntimeModelPicker";
 import { ipc } from "@/lib/ipc";
-import { detailForUser } from "@/lib/invocation-failure";
+import { agentWorkspaceFailure } from "@/lib/agent-workspace-error";
 import { effortOptions } from "@/lib/effort-label";
 import { runtimeIdentityKey, runtimeSupportsAgentOverride, selectionForRuntime } from "@shared/runtime-selection";
 import { runtimeUsesEngineModelSetting } from "@shared/models";
@@ -12,6 +12,7 @@ import type { AgentRuntimeOverride, AgentRuntimeOverrideScope, InstalledAgent, I
 import type { AgentWorkspaceSnapshot } from "@shared/agent-workspace";
 import { useWorkspaceDialog } from "./use-workspace-dialog";
 import styles from "./AgentWorkspace.module.css";
+import { Select } from "@/components/Select";
 
 function canAssignRuntime(runtime: RuntimeStatus): boolean {
   return runtime.kind !== "ollama" && runtimeSupportsAgentOverride(runtime);
@@ -70,12 +71,12 @@ export function AgentWorkspaceInspector({ agent, name, locale, snapshot, firm, o
       if (cancelled) return;
       setModels(items);
       if (!runtimeUsesEngineModelSetting(runtime.kind)) setModel((current) => current || runtime.model || items[0]?.id || "");
-    }).catch((failure) => { if (!cancelled) { setModels([]); setError(detailForUser(failure)); } });
+    }).catch((failure) => { if (!cancelled) { setModels([]); setError(agentWorkspaceFailure(failure, ko)); } });
     return () => { cancelled = true; };
   }, [runtime]);
   async function action(task: () => Promise<void>) {
     setBusy(true); setError("");
-    try { await task(); } catch (failure) { setError(detailForUser(failure)); } finally { setBusy(false); }
+    try { await task(); } catch (failure) { setError(agentWorkspaceFailure(failure, ko)); } finally { setBusy(false); }
   }
   async function saveRuntime() {
     const api = ipc();
@@ -95,26 +96,21 @@ export function AgentWorkspaceInspector({ agent, name, locale, snapshot, firm, o
       <button className={styles.button} disabled={busy || alias === (agent.localDisplayName ?? "")} onClick={() => void action(() => onRename(alias))}><IconEdit size={12} />{ko ? "저장" : "Save"}</button>
       <h3>{ko ? "실행 환경" : "Runtime"}</h3>
       {options.length > 0 ? <>
-        <label className={styles.field}>{ko ? "적용 범위" : "Scope"}<select value={target.key} onChange={(event) => setScopeKey(event.target.value)}>{targets.map((item) => <option value={item.key} key={item.key}>{item.label}</option>)}</select></label>
-        <label className={styles.field}>{ko ? "런타임" : "Runtime"}<select value={runtimeKey} onChange={(event) => { setRuntimeKey(event.target.value); setModel(""); setEffort(""); }} disabled={busy}>{options.map((item) => <option key={runtimeIdentityKey(item)} value={runtimeIdentityKey(item)} disabled={!canAssignRuntime(item)}>{runtimeEngineLabel(item)}</option>)}</select></label>
+        <label className={styles.field}>{ko ? "적용 범위" : "Scope"}<Select value={target.key} onChange={(event) => setScopeKey(event.target.value)}>{targets.map((item) => <option value={item.key} key={item.key}>{item.label}</option>)}</Select></label>
+        <label className={styles.field}>{ko ? "런타임" : "Runtime"}<Select value={runtimeKey} onChange={(event) => { setRuntimeKey(event.target.value); setModel(""); setEffort(""); }} disabled={busy}>{options.map((item) => <option key={runtimeIdentityKey(item)} value={runtimeIdentityKey(item)} disabled={!canAssignRuntime(item)}>{runtimeEngineLabel(item)}</option>)}</Select></label>
         {runtime && !canAssignRuntime(runtime) && <div className={styles.banner}>{ko ? "현재 런타임 지정은 지원되지 않습니다. 다시 선택하거나 지정 해제하세요." : "This runtime override is unsupported. Choose another runtime or reset it."}</div>}
-        <label className={styles.field}>{ko ? "모델" : "Model"}<select value={model} onChange={(event) => { setModel(event.target.value); setEffort(""); }} disabled={busy}>
+        <label className={styles.field}>{ko ? "모델" : "Model"}<Select value={model} onChange={(event) => { setModel(event.target.value); setEffort(""); }} disabled={busy}>
           <option value="">{runtime && runtimeUsesEngineModelSetting(runtime.kind) ? (ko ? "엔진 설정" : "Engine default") : (ko ? "모델 선택" : "Select model")}</option>
           {model && !models.some((item) => item.id === model) && <option value={model}>{model}</option>}
           {models.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}
-        </select></label>
-        {efforts.length > 1 && <label className={styles.field}>{ko ? "추론 수준" : "Reasoning"}<select value={effort} onChange={(event) => setEffort(event.target.value)} disabled={busy}><option value="">{ko ? "기본값" : "Default"}</option>{efforts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>}
+        </Select></label>
+        {efforts.length > 1 && <label className={styles.field}>{ko ? "추론 수준" : "Reasoning"}<Select value={effort} onChange={(event) => setEffort(event.target.value)} disabled={busy}><option value="">{ko ? "기본값" : "Default"}</option>{efforts.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</Select></label>}
         <div className={styles.inspectorActions}><button className={`${styles.button} ${styles.primary}`} disabled={busy || !runtime || !canAssignRuntime(runtime) || (!runtimeUsesEngineModelSetting(runtime.kind) && !model)} onClick={() => void action(saveRuntime)}>{ko ? "다음 실행에 적용" : "Use next run"}</button>
           {override && <button className={styles.button} disabled={busy} onClick={() => void action(async () => { const api = ipc(); if (!api) return; await api.agentRuntime.remove(target.scope, target.targetId); onOverridesChange(await api.agentRuntime.list()); })}>{ko ? "지정 해제" : "Reset"}</button>}</div>
       </> : <span className={styles.meta}>{ko ? "사용 가능한 런타임 없음" : "No available runtime"}</span>}
       <h3>{ko ? "권한 · 식별자" : "Permissions · Identity"}</h3>
       <dl className={styles.definition}>
         <dt>{ko ? "파일 권한" : "Files"}</dt><dd>{snapshot ? (snapshot.writable ? (ko ? "변경 검토·승인" : "Review and approve") : (ko ? "읽기 전용" : "Read only")) : (ko ? "미확인" : "Unknown")}</dd>
-        <dt>{ko ? "설치 ID" : "Install"}</dt><dd><code>{agent.id}</code></dd>
-        <dt>{ko ? "정의 ID" : "Definition"}</dt><dd><code>{binding?.agentDefinitionId ?? "—"}</code></dd>
-        <dt>{ko ? "릴리스 ID" : "Release"}</dt><dd><code>{binding?.agentReleaseId ?? "—"}</code></dd>
-        <dt>{ko ? "리비전" : "Revision"}</dt><dd><code>{snapshot?.currentRevisionId ?? "—"}</code></dd>
-        <dt>{ko ? "트리 해시" : "Tree"}</dt><dd><code>{snapshot?.treeDigest ?? "—"}</code></dd>
         <dt>{ko ? "위치" : "Root"}</dt><dd>{snapshot?.rootPath ?? agent.localPath ?? "—"}</dd>
         <dt>{ko ? "원본" : "Origin"}</dt><dd>{agent.assetSource ?? "local-import"}</dd>
         <dt>MCP</dt><dd>{agent.mcpServers.length ? agent.mcpServers.join(", ") : "—"}</dd>

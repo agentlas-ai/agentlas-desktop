@@ -57,6 +57,7 @@ import type { ChatQuestion } from "@/components/ChatStream";
 import type { CloudAgentPublishProgressEvent, CloudAgentPublishStage } from "@shared/types";
 import { selectionForRuntime } from "@shared/runtime-selection";
 import { providerQuotaExhausted } from "@shared/runtime-quota";
+import { Select } from "@/components/Select";
 
 type StageState = "pending" | "active" | "done" | "error";
 const OPENCRAB_QUESTION_ID = "opencrab-ontology";
@@ -816,7 +817,7 @@ export default function BuildPage() {
                 <label className="build-model-label" htmlFor="build-model-select">
                   {ko ? "빌드 모델" : "Build model"}
                 </label>
-                <select
+                <Select
                   id="build-model-select"
                   className="build-model-select titlebar-nodrag"
                   value={runtimeKey(runtime)}
@@ -848,7 +849,7 @@ export default function BuildPage() {
                       );
                     });
                   })}
-                </select>
+                </Select>
               </div>
 
               <div className="build-action-row" data-tour-id="build.interview">

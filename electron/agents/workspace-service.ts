@@ -161,18 +161,30 @@ function verifySources(p: StoredProposal): void {
   const { hashes } = sourceMemories(p.agentId, p.memoryEntryIds);
   if (JSON.stringify(hashes) !== JSON.stringify(p.sourceHashes)) throw new AgentWorkspaceError("memory_changed", "The source memory changed. Generate and review a new diff.");
 }
+/** 모델이 "근거가 더 필요하다"고 판정한 기억은 내용이 바뀔 때까지 반영 후보에서 뺀다(로컬 전용 기록). */
+function deferredFile(agentId: string): string { return path.join(agentWorkspaceStorePath(agentId), "deferred-memory.json"); }
+function deferFingerprint(content: string, native: string | undefined, evidence: string[]): string { return workspaceHash(JSON.stringify([content, native ?? null, evidence])); }
+function readDeferred(agentId: string): Record<string, string> {
+  try { const parsed: unknown = readJson<unknown>(deferredFile(agentId)); return parsed && typeof parsed === "object" ? parsed as Record<string, string> : {}; } catch { return {}; }
+}
+function recordDeferred(agentId: string, entries: Record<string, string>): void {
+  if (!Object.keys(entries).length) return;
+  const dir = agentWorkspaceStorePath(agentId); fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  atomicJson(deferredFile(agentId), { ...readDeferred(agentId), ...entries });
+}
 function memoryCandidates(agentId: string, proposals: StoredProposal[]): AgentWorkspaceMemoryCandidate[] {
   // UI projections do not need embeddings. The general memory reader lazily
   // computes and writes legacy embeddings, so use a bounded read-only query.
   const memories = getDb().prepare(`SELECT id, kind, scope, content, sensitivity, evidence_json FROM memory_entries
     WHERE superseded_at IS NULL AND agent_id = ? AND scope = 'agent_repo' AND project_id IS NULL AND project_path IS NULL
     ORDER BY created_at DESC LIMIT 300`).all(agentId) as Array<{ id: string; kind: string; scope: string; content: string; sensitivity: string; evidence_json: string }>;
-  const natives = nativeTextsFor("memory_entry", memories.map(entry => entry.id));
+  const natives = nativeTextsFor("memory_entry", memories.map(entry => entry.id)); const deferred = readDeferred(agentId);
   return memories.filter(memory => memory.sensitivity !== "secret" && !looksSecret(memory.content) && !looksSecret(natives.get(memory.id) ?? "")).map(memory => {
     let evidence: string[] = [];
     try { const parsed: unknown = JSON.parse(memory.evidence_json); if (Array.isArray(parsed) && parsed.every(item => typeof item === "string" && item.trim())) evidence = parsed; } catch { /* Corrupt evidence is ineligible. */ }
     let state: AgentWorkspaceMemoryCandidate["state"] = evidence.length ? "eligible" : "needs_evidence";
     const linked = proposals.find(p => p.memoryEntryIds.includes(memory.id) && ["review_ready", "applied"].includes(p.status));
+    if (state === "eligible" && deferred[memory.id] === deferFingerprint(memory.content, natives.get(memory.id) ?? undefined, evidence)) state = "needs_evidence";
     if (linked) state = linked.status === "applied" ? "applied" : "proposed";
     const content = natives.get(memory.id) ?? memory.content;
     return { id: memory.id, title: content.slice(0, 90), content,
@@ -361,11 +373,16 @@ export async function prepareAgentWorkspaceFromMemory(input: { agentId: string; 
   if (!text) throw new AgentWorkspaceError("compiler_unavailable", "Connect a model to review these memories and generate a file change.");
   const trimmed = text.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   const output = JSON.parse(trimmed) as { eligibleMemoryIds?: string[]; summary?: string; changes?: Array<{ path: string; afterContent: string }> };
-  if (!Array.isArray(output.eligibleMemoryIds) || [...new Set(output.eligibleMemoryIds)].sort().join("\0") !== [...new Set(input.memoryEntryIds)].sort().join("\0")
-    || !Array.isArray(output.changes) || !output.changes.length) throw new AgentWorkspaceError("semantic_review_deferred", "These memories need more evidence or review before they can become agent instructions.");
+  const selected = new Set(input.memoryEntryIds);
+  const accepted = Array.isArray(output.eligibleMemoryIds) ? [...new Set(output.eligibleMemoryIds)].filter(id => selected.has(id)) : [];
+  const deferredNow: Record<string, string> = {};
+  for (const candidate of candidates) if (!accepted.includes(candidate.id)) deferredNow[candidate.id] = deferFingerprint(candidate.content, candidate.contentNative, candidate.evidence);
+  recordDeferred(input.agentId, deferredNow);
+  if (!accepted.length || !Array.isArray(output.changes) || !output.changes.length) throw new AgentWorkspaceError("semantic_review_deferred", "These memories need more evidence or review before they can become agent instructions.");
+  const acceptedHashes = Object.fromEntries(accepted.map(id => [id, hashes[id]]));
   if (snapshotAgentWorkspace(root).treeDigest !== before.treeDigest) throw new AgentWorkspaceError("base_changed", "The agent changed during generation. Refresh and try again.");
-  const prepared = { agentId: input.agentId, memoryEntryIds: input.memoryEntryIds, changes: output.changes, summary: output.summary,
-    expectedBaseTreeDigest: before.treeDigest, expectedSourceHashes: hashes };
+  const prepared = { agentId: input.agentId, memoryEntryIds: accepted, changes: output.changes, summary: output.summary,
+    expectedBaseTreeDigest: before.treeDigest, expectedSourceHashes: acceptedHashes };
   semanticPreparations.add(prepared); return prepareAgentWorkspaceProposal(prepared);
 }
 export function prepareAgentWorkspaceFileChange(input: { agentId: string; targetPath: string; currentContent: string; proposedContent: string }): AgentWorkspaceProposal {

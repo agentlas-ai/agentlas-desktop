@@ -12,6 +12,7 @@ import { OneBottomSheet } from "./OneBottomSheet";
 import { LoadingEstimate } from "@/components/LoadingEstimate";
 import styles from "./OneTaskforces.module.css";
 import { OneRunComet, oneRunCometHostClass } from "./OneRunComet";
+import { Select } from "@/components/Select";
 
 /** 웹인지 데스크탑인지는 Main 브릿지의 유무로 가른다(웹은 window.agentlas 를 심지 않는다). */
 function isWebSurface(): boolean {
@@ -248,7 +249,7 @@ export function OneTaskforceDialog({
     <div className={styles.dialogBody} aria-busy={busy ? "true" : "false"}>
       <label className={styles.titleField}>{locale === "ko" ? "이름" : "Name"}<input value={title} onChange={(event) => setTitle(event.target.value)} maxLength={80} placeholder={locale === "ko" ? "예: Launch Team" : "e.g. Launch Team"} /></label>
       <details className={styles.descriptionDetails} open={Boolean(taskforce?.description)}><summary>{locale === "ko" ? "팀 설명" : "Team description"}</summary><label className={styles.descriptionField}>{locale === "ko" ? "설명" : "Description"}<textarea value={description} onChange={(event) => setDescription(event.target.value)} maxLength={600} rows={3} placeholder={locale === "ko" ? "이 팀의 역할, 목적, 협업 방식을 설명하세요." : "Describe this team's purpose, responsibilities, and way of working."} /></label></details>
-      {busy && <div className={styles.busyState} role="status" aria-live="polite"><span aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
+      {busy && <div className={styles.busyState} role="status" aria-live="polite"><span className={styles.busySpinner} aria-hidden="true" /><strong>{taskforce ? (locale === "ko" ? "태스크포스를 업데이트하는 중" : "Updating Taskforce") : (locale === "ko" ? "태스크포스를 만드는 중" : "Creating Taskforce")}</strong><small>{locale === "ko" ? "멤버와 독립 그룹 채팅을 함께 동기화합니다." : "Syncing members with the independent group chat."}</small><LoadingEstimate locale={locale} operationKey="one-taskforce-save" expectedSeconds={[2, 20]} /></div>}
       <section className={styles.memberList} aria-label={locale === "ko" ? "태스크포스 멤버" : "Taskforce members"}>
         <div className={styles.memberRow} data-fixed="true">
           <OneAgentPortrait status="quiet" label={onePersonaName} size="small" tone={oneAvatarIcon?.trim() || "character:orange-dino"} />
@@ -272,14 +273,14 @@ export function OneTaskforceDialog({
           </button>
             {unavailable && checked && <label className={styles.memberReplacement}>
               <span>{locale === "ko" ? `${selected.indexOf(member.installedAgentId) + 1}번 자리 재선택` : `Reselect place ${selected.indexOf(member.installedAgentId) + 1}`}</span>
-              <select value="" disabled={busy} onChange={(event) => {
+              <Select value="" disabled={busy} onChange={(event) => {
                 const replacement = event.target.value;
                 if (!replacement || !rows.some(row => row.installedAgentId === replacement && !memberUnavailable(row))) return;
                 setSelected(current => current.includes(replacement) ? current : current.map(id => id === member.installedAgentId ? replacement : id));
               }}>
                 <option value="">{locale === "ko" ? "사용 가능한 동료 선택" : "Choose available staff"}</option>
                 {rows.filter(row => !memberUnavailable(row) && !selected.includes(row.installedAgentId)).map(row => <option key={row.id} value={row.installedAgentId}>{row.displayName}</option>)}
-              </select>
+              </Select>
             </label>}
           </Fragment>;
         })}

@@ -17,6 +17,7 @@ import {
 } from "@/lib/table-data";
 import { announceVisual, fillComposer, type VisualArtifact } from "@/lib/visual-artifacts";
 import styles from "./SheetDataView.module.css";
+import { Select } from "@/components/Select";
 
 const SHOWN_ROWS = 500;
 const MAX_BYTES = 32 * 1024 * 1024;
@@ -116,9 +117,9 @@ export function SheetDataView({
       </div>}
       {(sheet?.tables?.length ?? 0) > 1 && <label>
         <span>{ko ? "표" : "Table"}</span>
-        <select value={tableIndex} onChange={(event) => setTableIndex(Number(event.target.value))} aria-label={ko ? "표 선택" : "Select table"} data-sheet-table-select="true">
+        <Select value={tableIndex} onChange={(event) => setTableIndex(Number(event.target.value))} aria-label={ko ? "표 선택" : "Select table"} data-sheet-table-select="true">
           {sheet?.tables?.map((table, index) => <option key={`${table.name}:${table.ref}`} value={index}>{table.name} · {table.ref}</option>)}
-        </select>
+        </Select>
       </label>}
       <input className={styles.filter} type="search" value={query} onChange={(event) => setQuery(event.target.value)}
         placeholder={ko ? "필터 — 모든 열에서 찾기" : "Filter — search all columns"} aria-label={ko ? "행 필터" : "Filter rows"} data-sheet-filter="true" />
@@ -134,9 +135,9 @@ export function SheetDataView({
     <div className={styles.chartBar}>
       <label>
         <span>{ko ? "범주" : "Category"}</span>
-        <select value={category} onChange={(event) => setCategory(Number(event.target.value))} data-sheet-category="true">
+        <Select value={category} onChange={(event) => setCategory(Number(event.target.value))} data-sheet-category="true">
           {columns.map((column, index) => <option key={column} value={index}>{column}</option>)}
-        </select>
+        </Select>
       </label>
       <span className={styles.hint}>{picked.length === 0
         ? (ko ? "숫자 열 머리의 □ 로 값을 고르세요" : "Pick value columns with □ in numeric headers")

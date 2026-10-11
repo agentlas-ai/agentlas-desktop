@@ -41,7 +41,7 @@ export function claudePersonalOverlay(selection: CapabilitySelection | undefined
   // Rules added after the inventory was taken stay out too.
   if (!memories.some((item) => item.enabled && item.name.startsWith("rules/"))) excludes.push(path.join(claudeDir, "rules", "**", "*.md"));
   const projectMemory = path.join(claudeDir, "projects", claudeProjectKey(cwd), "memory", "MEMORY.md");
-  const autoMemoryEnabled = memories.some((item) => item.enabled && item.path === projectMemory);
+  const autoMemoryEnabled = memories.some((item) => item.enabled && (item.path === projectMemory || item.path === path.join(claudeDir, "projects")));
   const skillOverrides: Record<string, "off"> = {};
   for (const item of claudeItems(selection, "skill")) if (!item.enabled) skillOverrides[item.name.replace(/^\//, "")] = "off";
   const enabledPlugins: Record<string, false> = {};

@@ -19,6 +19,7 @@ import { runtimeUsesEngineModelSetting } from "@shared/models";
 import { runtimeIdentityKey, runtimeMatchesSelection as sharedRuntimeMatchesSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { describeRoleWriteFailure } from "@/lib/runtime-role-failure";
 import type { LocalModelHubSnapshot, LocalModelInstallationReceipt } from "@shared/local-model-hub";
+import { Select } from "@/components/Select";
 
 // resolvedId: 별칭이 실제로 어느 모델로 풀렸는지(실행이 알려준 값). 없으면 모르는 것.
 type ModelRow = { id: string; label: string; tag?: string; resolvedId?: string };
@@ -1012,7 +1013,7 @@ export function RuntimeControl() {
                     <label>
                       <span>{ko ? "작업량" : "Effort"}</span>
                       {efforts.length > 0 || selection.effort ? (
-                        <select
+                        <Select
                           aria-label={`${rowLabel} ${ko ? "작업량" : "effort"}`}
                           value={effortValue}
                           aria-invalid={selection.effort && effortValue === "" ? "true" : undefined}
@@ -1027,7 +1028,7 @@ export function RuntimeControl() {
                               {effort.label}
                             </option>
                           ))}
-                        </select>
+                        </Select>
                       ) : (
                         <span className="dashboard-runtime-field-value">
                           {ko ? "기본" : "Default"}

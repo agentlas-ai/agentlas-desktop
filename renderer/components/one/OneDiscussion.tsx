@@ -1,12 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Markdown, StreamingMarkdown } from "@/components/Markdown";
+import { Markdown } from "@/components/Markdown";
 import { ipc, ipcEvents } from "@/lib/ipc";
 import { subscribeOrderedRunEvents } from "@/lib/ordered-run-events";
 import {
-  clipText, collapseThread, displaySpeakerText, indexDiscussionMessages, queuedNotice, reduceLiveSpeakerText, roundIndicator,
-  speakerRefusalNotice, stopNotice, type DiscussionLocale, type DiscussionThreadIndex, type LiveSpeakerText,
+  clipText, collapseThread, indexDiscussionMessages, reduceLiveSpeakerText,
+  type DiscussionLocale, type DiscussionThreadIndex, type LiveSpeakerText,
 } from "@/lib/one-discussion";
 import { isLivePartialCommitBoundary } from "@shared/interrupted-partial";
 import type { OneDiscussionPostResult, OneDiscussionState } from "@shared/one-discussion";
@@ -150,74 +150,6 @@ export function useOneDiscussion(input: { chatId: string | null; enabled: boolea
   }, []);
 
   return { state, index, live, stopping, refresh, post, stop, setEnabled };
-}
-
-/** "토론 2/3 라운드 · 발언 중: Kai, Luna" with the stop control. Shown only while a discussion runs, or briefly after an unusual end. */
-export function OneDiscussionBar({ controller, locale }: { controller: OneDiscussionController; locale: DiscussionLocale }) {
-  const { state, stopping, stop } = controller;
-  const indicator = roundIndicator(state, locale);
-  const queued = queuedNotice(state, locale);
-  const ended = stopNotice(state, locale);
-  if (!indicator && !ended) return null;
-  if (!indicator) return <p className={styles.notice} role="status" data-one-discussion-notice="true">{ended}</p>;
-  return (
-    <div className={styles.bar} role="status" aria-live="polite" data-one-discussion-bar="true">
-      <span className={styles.barText}>
-        {indicator}
-        {queued && <small>{queued}</small>}
-      </span>
-      <button type="button" className={styles.stop} disabled={stopping || state?.active?.stopRequested} onClick={() => { void stop(); }} data-one-discussion-stop="true">
-        {locale === "ko" ? "토론 멈추기" : "Stop discussion"}
-      </button>
-    </div>
-  );
-}
-
-/** Every speaker talking now, at the same time, each in a bubble with the member's name and avatar. */
-export function OneDiscussionLive({ controller, members, locale }: {
-  controller: OneDiscussionController; members: readonly OneOrgMember[] | undefined; locale: DiscussionLocale;
-}) {
-  const speakers = controller.state?.active?.speakers ?? [];
-  if (speakers.length === 0) return null;
-  const rows = speakers.filter((speaker) => speaker.status === "running" || speaker.status === "pending");
-  const skipped = speakers.map((speaker) => ({ speaker, text: speakerRefusalNotice(speaker, locale) })).filter((item) => item.text);
-  return (
-    <div className={styles.live} data-one-discussion-live="true">
-      {rows.map((speaker) => {
-        const member = memberForAgent(members, speaker.agentId);
-        const text = displaySpeakerText(controller.live[speaker.runId ?? ""]?.text ?? "");
-        const label = member?.displayName ?? speaker.name;
-        return (
-          <article key={speaker.turnId} className={shell.message} data-role="assistant" data-taskforce="true"
-            data-one-discussion-speaker={speaker.agentId} data-one-discussion-mode={speaker.mode}>
-            <span className={shell.messageAvatarSlot} aria-hidden="true">
-              <OneAgentPortrait status="working" label={label} tone={member?.icon ?? "character:blue-wave"} size="small" />
-            </span>
-            <div className={shell.messageContent}>
-              <div className={shell.taskforceMessageMeta}>
-                <span className={styles.liveName}>
-                  <strong>{label}</strong>
-                  <small>{controller.live[speaker.runId ?? ""]?.done
-                    ? (locale === "ko" ? "다 썼어요 · 라운드가 끝나면 올라가요" : "done · posts when the round ends")
-                    : speaker.mode === "comment" ? (locale === "ko" ? "댓글 쓰는 중" : "writing a comment") : (locale === "ko" ? "발언 중" : "speaking")}</small>
-                </span>
-              </div>
-              <div className={shell.messageBody}>
-                {text
-                  ? <StreamingMarkdown text={text} messageId={`discussion:${speaker.turnId}`} />
-                  : <p className={styles.liveHint}>{locale === "ko" ? "생각하는 중…" : "Thinking…"}</p>}
-              </div>
-            </div>
-          </article>
-        );
-      })}
-      {skipped.map(({ speaker, text }) => (
-        <p key={`skipped:${speaker.turnId}`} className={styles.skipped} data-one-discussion-skipped={speaker.reasonCode ?? "true"}>
-          <strong>{memberForAgent(members, speaker.agentId)?.displayName ?? speaker.name}</strong> · {text}
-        </p>
-      ))}
-    </div>
-  );
 }
 
 export interface ThreadComment { messageId: string; text: string; createdAt?: string; timeLabel?: string; speakerAgentId: string | null }

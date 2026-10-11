@@ -167,7 +167,12 @@ export function settleDiscovery(
 /** Log a failed/stale discovery once per (runtime, reason) until it changes. */
 const lastLogged = new Map<string, string>();
 const staleNoCacheWarned = new Set<string>();
-export function reportDiscoveryLoudly(runtime: string, outcome: DiscoveryOutcome, log: (message: string) => void = (m) => console.error(m)): boolean {
+const entitlementRefusalNoted = new Set<string>();
+/** The vendor refused this account (not signed in / not entitled). That is a fact about the account, not a defect: info, once per runtime per app start. */
+function isEntitlementRefusal(reason: string | null | undefined): boolean {
+  return /\b(?:acp:)?40[13]\b|permission_denied|unauthori[sz]ed|not authori[sz]ed/i.test(reason ?? "");
+}
+export function reportDiscoveryLoudly(runtime: string, outcome: DiscoveryOutcome, log?: (message: string) => void): boolean {
   if (outcome.status !== "failed" && !outcome.yieldWarning) {
     lastLogged.delete(runtime);
     return false;
@@ -180,10 +185,15 @@ export function reportDiscoveryLoudly(runtime: string, outcome: DiscoveryOutcome
     console.warn(`[model-discovery] ${runtime}: vendor model cache unreadable; serving ${outcome.models.length} last-good models (further occurrences suppressed)`);
     return true;
   }
+  if (isEntitlementRefusal(outcome.reason)) {
+    if (entitlementRefusalNoted.has(runtime)) return false;
+    entitlementRefusalNoted.add(runtime);
+  }
   const signature = `${outcome.status}:${outcome.reason ?? ""}:${outcome.stale ? "stale" : ""}`;
   if (lastLogged.get(runtime) === signature) return false;
   lastLogged.set(runtime, signature);
   const stale = outcome.stale ? ` (showing ${outcome.models.length} stale models from ${outcome.at})` : "";
-  log(`[model-discovery] ${runtime}: ${outcome.status} — ${outcome.reason ?? "unknown"} (${outcome.rawLineCount} raw lines)${stale}`);
+  const write = log ?? (isEntitlementRefusal(outcome.reason) ? (m: string) => console.info(m) : (m: string) => console.error(m));
+  write(`[model-discovery] ${runtime}: ${outcome.status} — ${outcome.reason ?? "unknown"} (${outcome.rawLineCount} raw lines)${stale}`);
   return true;
 }

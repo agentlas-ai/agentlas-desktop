@@ -1047,6 +1047,12 @@ const api: AgentlasIpc = {
     capture: (input) => ipcRenderer.invoke("oneContext:capture", input),
     openPermissions: (input) => ipcRenderer.invoke("oneContext:openPermissions", input),
   },
+  oneCapabilities: {
+    list: (input) => ipcRenderer.invoke("oneCapabilities:list", input),
+    detail: (input) => ipcRenderer.invoke("oneCapabilities:detail", input),
+    setEnabled: (input) => ipcRenderer.invoke("oneCapabilities:setEnabled", input),
+    setSourceEnabled: (input) => ipcRenderer.invoke("oneCapabilities:setSourceEnabled", input),
+  },
   onePersonalData: {
     gmailCatalog: () => ipcRenderer.invoke('onePersonalData:gmailCatalog'),
     gmailPropose: (input) => ipcRenderer.invoke('onePersonalData:gmailPropose', input),

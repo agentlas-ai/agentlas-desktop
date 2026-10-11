@@ -66,50 +66,48 @@ export function speakingNames(speakers: readonly OneDiscussionSpeaker[]): string
   return speakers.filter((speaker) => speaker.status === "running" || speaker.status === "pending").map((speaker) => speaker.name);
 }
 
-/** "토론 2/3 라운드 · 발언 중: Kai, Luna" */
-export function roundIndicator(state: OneDiscussionState | null, locale: DiscussionLocale): string | null {
+/** Screen-reader text for the quiet activity strip. Never shown as a label: the strip is avatars with a dot. */
+export function activityLabel(state: OneDiscussionState | null, locale: DiscussionLocale): string | null {
   const active = state?.active;
   if (!active) return null;
+  if (active.stopRequested) return locale === "ko" ? "대화를 멈추는 중" : "Stopping the conversation";
   const names = speakingNames(active.speakers);
-  const round = `${Math.max(1, active.roundNo)}/${active.maxRounds}`;
-  if (locale === "ko") {
-    if (active.stopRequested) return `토론 ${round} 라운드 · 멈추는 중`;
-    return names.length > 0 ? `토론 ${round} 라운드 · 발언 중: ${names.join(", ")}` : `토론 ${round} 라운드 · 정리 중`;
-  }
-  if (active.stopRequested) return `Discussion round ${round} · stopping`;
-  return names.length > 0 ? `Discussion round ${round} · speaking: ${names.join(", ")}` : `Discussion round ${round} · wrapping up`;
+  if (names.length === 0) return null;
+  return locale === "ko" ? `${names.join(", ")} 님이 답을 쓰고 있어요` : `${names.join(", ")} replying`;
+}
+
+/** Members who are working on a reply right now, for the avatar strip. */
+export function activeSpeakers(state: OneDiscussionState | null): OneDiscussionSpeaker[] {
+  return (state?.active?.speakers ?? []).filter((speaker) => speaker.status === "running" || speaker.status === "pending");
 }
 
 export function queuedNotice(state: OneDiscussionState | null, locale: DiscussionLocale): string | null {
   const queued = state?.active?.queuedOwnerPosts ?? 0;
   if (queued <= 0) return null;
   return locale === "ko"
-    ? `보낸 글 ${queued}개는 이 라운드가 끝나면 이어서 답해요.`
-    : `${queued === 1 ? "Your new post" : `Your ${queued} new posts`} will be answered when this round ends.`;
+    ? `보낸 글 ${queued}개는 곧 이어서 답해요.`
+    : `${queued === 1 ? "Your new post" : `Your ${queued} new posts`} will be answered next.`;
 }
 
-/** Plain sentence for a discussion that ended in a way the owner should know about; null when it simply finished. */
+/**
+ * Plain sentence for a conversation that ended in a way the owner should know about; null when it simply finished.
+ * A natural end (nobody had more to add) and the hidden safety caps (`max_rounds`, `budget`) are silent.
+ */
 export function stopNotice(state: OneDiscussionState | null, locale: DiscussionLocale): string | null {
   const last = state?.last;
   if (!last || state?.active) return null;
   const reason: OneDiscussionStopReason | null = last.stopReason;
   const ko: Partial<Record<OneDiscussionStopReason, string>> = {
-    max_rounds: `정한 ${last.roundNo}라운드까지 이야기하고 멈췄어요.`,
-    budget: "토론 한도를 다 써서 멈췄어요. 이어가려면 새로 글을 보내 주세요.",
-    owner_stop: "토론을 멈췄어요.",
+    owner_stop: "대화를 멈췄어요.",
     cap_refused: "동시에 말할 수 있는 수가 가득 차 아무도 시작하지 못했어요. 잠시 뒤 다시 보내 주세요.",
-    interrupted_by_restart: "앱이 다시 시작되며 토론이 중단됐어요. 다시 이어가려면 글을 보내 주세요.",
-    no_new_content: "더 보탤 말이 없어 마무리했어요.",
-    failed: "토론이 오류로 멈췄어요.",
+    interrupted_by_restart: "앱이 다시 시작되며 대화가 중단됐어요. 이어가려면 글을 보내 주세요.",
+    failed: "대화가 오류로 멈췄어요.",
   };
   const en: Partial<Record<OneDiscussionStopReason, string>> = {
-    max_rounds: `Stopped after ${last.roundNo} rounds, as set.`,
-    budget: "Stopped because the discussion budget ran out. Send a new post to continue.",
-    owner_stop: "Discussion stopped.",
+    owner_stop: "Conversation stopped.",
     cap_refused: "Every speaking slot was taken, so nobody could start. Try again shortly.",
-    interrupted_by_restart: "The app restarted and the discussion was interrupted. Send a post to continue.",
-    no_new_content: "Nobody had anything to add, so it wrapped up.",
-    failed: "The discussion stopped because of an error.",
+    interrupted_by_restart: "The app restarted and the conversation was interrupted. Send a post to continue.",
+    failed: "The conversation stopped because of an error.",
   };
   return reason ? (locale === "ko" ? ko : en)[reason] ?? null : null;
 }
@@ -168,4 +166,33 @@ export function addressesOneDirectly(text: string, oneName: string): boolean {
     if (new RegExp(`(^|\\s)@${escaped}(?=$|[\\s,.!?:])`, "iu").test(text)) return true;
   }
   return false;
+}
+
+type RoomRow = { id: string; durableMessageId?: string; createdAt?: string };
+
+/** Ids the discussion log holds that the screen's transcript does not show yet. */
+export function missingDiscussionIds(current: readonly RoomRow[], meta: readonly OneDiscussionMessageMeta[]): string[] {
+  const seen = new Set(current.flatMap((row) => [row.id, row.durableMessageId ?? row.id]));
+  return meta.filter((item) => !seen.has(item.messageId)).map((item) => item.messageId);
+}
+
+/**
+ * Adds the room messages a conversation wrote after the transcript was loaded (members' replies, the owner's own
+ * post). Only rows the discussion log names are added, at their durable time; optimistic turns and the live
+ * response of an ordinary run are never replaced by a history snapshot.
+ */
+export function mergeDiscussionRows<T extends RoomRow>(current: T[], history: readonly T[], wanted: ReadonlySet<string>): T[] {
+  const seen = new Set(current.flatMap((row) => [row.id, row.durableMessageId ?? row.id]));
+  let next = current;
+  for (const row of history) {
+    const durable = row.durableMessageId ?? row.id;
+    if (!(wanted.has(row.id) || wanted.has(durable)) || seen.has(row.id) || seen.has(durable)) continue;
+    if (next === current) next = [...current];
+    const at = row.createdAt ? Date.parse(row.createdAt) : NaN;
+    const index = Number.isFinite(at) ? next.findIndex((item) => item.createdAt && Date.parse(item.createdAt) > at) : -1;
+    next.splice(index < 0 ? next.length : index, 0, row);
+    seen.add(row.id);
+    seen.add(durable);
+  }
+  return next;
 }

@@ -15,6 +15,7 @@ import { AGI_BUG_REPORT_CATEGORIES, type AgiBugReportCategory, type AgiBugReport
 import { PopupFrame } from "../Popup";
 import { IconBug } from "../Icon";
 import styles from "./AgiBugReport.module.css";
+import { Select } from "@/components/Select";
 
 const CATEGORY_KO: Record<AgiBugReportCategory, string> = {
   crash: "앱이 멈추거나 꺼짐", stall: "작업이 멈춰 진행 안 됨", "wrong-result": "결과가 틀림", ui: "화면 문제", login: "로그인 문제", other: "기타",
@@ -153,9 +154,9 @@ export function AgiBugReportDialog({ open, onClose, draft, locale, onReportUpdat
             <textarea value={summary} maxLength={4000} rows={5} onChange={(event) => setSummary(event.target.value)} required />
           </label>
           <label>{ko ? "종류" : "Kind"}
-            <select value={category} onChange={(event) => setCategory(event.target.value as AgiBugReportCategory)}>
+            <Select value={category} onChange={(event) => setCategory(event.target.value as AgiBugReportCategory)}>
               {AGI_BUG_REPORT_CATEGORIES.map((value) => <option key={value} value={value}>{(ko ? CATEGORY_KO : CATEGORY_EN)[value]}</option>)}
-            </select>
+            </Select>
           </label>
           <button type="submit" disabled={busy || !title.trim() || !summary.trim()}>{ko ? "전송 미리보기" : "Preview send"}</button>
         </form>}

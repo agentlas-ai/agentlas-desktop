@@ -27,6 +27,7 @@ import {
   type CloudUploadResult as UploadResult,
   type CloudUploadVisibility as Visibility,
 } from "@/lib/cloud-upload-session";
+import { Select } from "@/components/Select";
 
 /**
  * The visible phase timeline. Research on long-running agent UIs is consistent:
@@ -258,7 +259,7 @@ export default function CloudAgentPublishPage() {
             <label htmlFor="registered-agent-upload" style={{ fontSize: 12, fontWeight: 800, color: "var(--ink)" }}>
               {ko ? "내 에이전트에서 선택" : "Choose from My Agents"}
             </label>
-            <select
+            <Select
               id="registered-agent-upload"
               value={registeredKey}
               disabled={Boolean(running)}
@@ -278,7 +279,7 @@ export default function CloudAgentPublishPage() {
                   {!option.sourceReady ? (ko ? " · 원본 폴더 없음" : " · source folder unavailable") : ""}
                 </option>
               ))}
-            </select>
+            </Select>
             <span style={{ fontSize: 11, color: "var(--muted-deep)", lineHeight: 1.45 }}>
               {ko
                 ? "팀은 하위 에이전트를 낱개로 펼치지 않고 팀 패키지 하나로 관리·업로드합니다."

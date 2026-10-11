@@ -9,6 +9,7 @@ import {
 import { IntellectUiActions } from "@/lib/intellect-ui-actions";
 import { useT } from "@/lib/i18n";
 import styles from "./IntellectUI.module.css";
+import { Select } from "@/components/Select";
 
 type Values = Record<string, string | number>;
 const COLORS = ["var(--accent)", "#578b9f", "#c78654", "#7c76a4", "#749564", "#b6677c"];
@@ -85,10 +86,10 @@ export const IntellectUI = memo(function IntellectUI({ code, blockId, complete }
       </label>;
       case "select": return <label key={key} className={styles.field}>
         <span>{node.label}</span>
-        <select className={styles.input} value={values[node.id] ?? node.options[0]?.value ?? ""} data-ui-input={node.id}
+        <Select className={styles.input} value={values[node.id] ?? node.options[0]?.value ?? ""} data-ui-input={node.id}
           onChange={event => change(node.id, event.target.value)}>
           {node.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}
-        </select>
+        </Select>
       </label>;
       case "slider": return <label key={key} className={styles.field}>
         <span>{node.label} <output>{number(Number(values[node.id] ?? node.min))}</output></span>

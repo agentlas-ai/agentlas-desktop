@@ -29,6 +29,8 @@ export interface CapabilityItem {
   kind: CapabilityKind;
   source: CapabilitySource;
   name: string;
+  /** Display name when it differs from the runtime key in `name` (a plugin key is `slug@marketplace`). */
+  title?: string;
   description: string;
   path: string;
   enabled: boolean;
@@ -169,7 +171,8 @@ export function skillFilesUnder(root: string): string[] {
       const at = path.join(dir, name);
       if (!isDir(at)) continue;
       const file = path.join(at, "SKILL.md");
-      if (isFile(file)) out.push(file);
+      // A skill folder's children are its own parts (nested skills, references), not separate skills.
+      if (isFile(file)) { out.push(file); continue; }
       walk(at, depth + 1);
     }
   };
@@ -177,11 +180,62 @@ export function skillFilesUnder(root: string): string[] {
   return out;
 }
 
-type Draft = Omit<CapabilityItem, "id" | "enabled"> & { key: string };
+type Draft = Omit<CapabilityItem, "id" | "enabled"> & { key: string; /** Identity within (source, kind); defaults to key. */ canon?: string };
 
-function skillDraft(source: CapabilitySource, file: string, applies: boolean): Draft {
+/** Scratch, build output, release-check trees and the OS temp dir are never capabilities. */
+const SCRATCH_SEGMENT = /(^|[\\/])(tmp|temp|dist|node_modules|\.next-build|release-check[^\\/]*|relcheck[^\\/]*|rel\d+|[^\\/]*-dist|[^\\/]*\.backup-[^\\/]*)([\\/]|$)/i;
+let scratchBases: string[] = [];
+/** Never a capability: scratch, build output, release-check trees and the OS temp dir (judged below the person's home when the home is itself under temp). */
+export function isScratchPath(file: string): boolean {
+  const plain = file.split("#")[0];
+  let real = plain;
+  try { real = fs.realpathSync(plain); } catch { /* keep the given path */ }
+  const temp = [os.tmpdir(), "/tmp", "/private/tmp", "/var/folders", "/private/var/folders"];
+  for (const candidate of [plain, real]) {
+    const base = scratchBases.find((b) => candidate === b || candidate.startsWith(b + path.sep));
+    const inHome = Boolean(base);
+    if (!inHome && temp.some((root) => candidate === root || candidate.startsWith(root + path.sep))) return true;
+    const judged = base ? candidate.slice(base.length) : candidate;
+    if (SCRATCH_SEGMENT.test(judged)) return true;
+  }
+  return false;
+}
+
+/** A skill is a SKILL.md with a frontmatter name AND description; anything less is not loaded as a skill. */
+function skillDraft(source: CapabilitySource, file: string, applies: boolean): Draft | null {
+  if (isScratchPath(file)) return null;
   const fm = frontMatter(readHead(file));
-  return { key: file, kind: "skill", source, name: fm.name || path.basename(path.dirname(file)), description: oneLine(fm.description), path: file, applies };
+  if (!fm.name || !fm.description) return null;
+  return { key: file, canon: fm.name.toLowerCase(), kind: "skill", source, name: fm.name, description: oneLine(fm.description), path: file, applies };
+}
+function commandDraft(source: CapabilitySource, file: string, applies: boolean): Draft | null {
+  if (isScratchPath(file)) return null;
+  const fm = frontMatter(readHead(file));
+  const slug = path.basename(file).replace(/\.md$/, "");
+  if (!fm.description) return null;
+  return { key: file, canon: `/${slug}`, kind: "skill", source, name: `/${slug}`, description: oneLine(fm.description), path: file, applies };
+}
+
+function str(value: unknown): string { return typeof value === "string" ? value.trim() : ""; }
+function numericLatest(names: string[]): string | undefined {
+  return [...names].sort((a, b) => a.localeCompare(b, undefined, { numeric: true })).pop();
+}
+interface PluginManifestView { name: string; title: string; description: string }
+/** Reads a host plugin manifest; null when it is missing or not a plugin manifest. */
+function hostManifest(dir: string, rels: string[]): PluginManifestView | null {
+  for (const rel of rels) {
+    const json = readJson(path.join(dir, rel)) as Record<string, unknown> | null;
+    if (!json || typeof json !== "object" || Array.isArray(json)) continue;
+    const name = str(json.name);
+    if (!name) continue;
+    const ui = (json.interface && typeof json.interface === "object" ? json.interface : {}) as Record<string, unknown>;
+    return { name, title: str(ui.displayName) || str(json.displayName) || name,
+      description: oneLine(str(json.description) || str(ui.shortDescription) || str(ui.longDescription)) };
+  }
+  return null;
+}
+function dirCount(dir: string, accept: (name: string) => boolean): number {
+  return safeReadDir(dir).filter((name) => !name.startsWith(".") && accept(name)).length;
 }
 
 /** `[mcp_servers.<name>]` tables of a TOML text, with the transport kind only. */
@@ -249,7 +303,7 @@ function hookScriptName(command: string): string {
 function codexItems(r: CapabilityRoots): Draft[] {
   const out: Draft[] = [];
   const codexSkillRoots = [path.join(r.codexHome, "skills"), path.join(r.home, ".agents", "skills")];
-  for (const root of codexSkillRoots) for (const file of skillFilesUnder(root)) out.push(skillDraft("codex", file, true));
+  for (const root of codexSkillRoots) for (const file of skillFilesUnder(root)) { const draft = skillDraft("codex", file, true); if (draft) out.push(draft); }
 
   const configPath = path.join(r.codexHome, "config.toml");
   let config = "";
@@ -258,16 +312,21 @@ function codexItems(r: CapabilityRoots): Draft[] {
   const cache = path.join(r.codexHome, "plugins", "cache");
   const pluginFlags = enabledTomlPlugins(config);
   for (const market of safeReadDir(cache)) {
+    if (market.startsWith(".")) continue;
     for (const plugin of safeReadDir(path.join(cache, market))) {
       const dir = path.join(cache, market, plugin);
-      if (!isDir(dir)) continue;
-      const version = safeReadDir(dir).filter((v) => isDir(path.join(dir, v))).sort().pop();
+      if (plugin.startsWith(".") || !isDir(dir)) continue;
+      const versions = safeReadDir(dir).filter((v) => !v.startsWith(".") && isDir(path.join(dir, v)));
+      const version = numericLatest(versions);
       const at = version ? path.join(dir, version) : dir;
-      const manifest = (readJson(path.join(at, ".codex-plugin", "plugin.json")) ?? readJson(path.join(at, "plugin.json"))) as { description?: unknown } | null;
+      if (isScratchPath(at)) continue;
+      const manifest = hostManifest(at, [".codex-plugin/plugin.json"]);
+      if (!manifest) continue;
       const agentlas = AGENTLAS_MARKETPLACES.has(market);
       out.push({
-        key: `${plugin}@${market}`, kind: "plugin", source: agentlas ? "agentlas" : "codex", name: `${plugin}@${market}`,
-        description: oneLine(typeof manifest?.description === "string" ? manifest.description : (pluginFlags.get(`${plugin}@${market}`) === false ? "disabled in Codex" : "")),
+        key: `${plugin}@${market}`, canon: plugin.toLowerCase(), kind: "plugin", source: agentlas ? "agentlas" : "codex", name: `${plugin}@${market}`,
+        title: manifest.title,
+        description: manifest.description || (pluginFlags.get(`${plugin}@${market}`) === false ? "disabled in Codex" : ""),
         path: at, applies: !agentlas,
       });
     }
@@ -280,12 +339,13 @@ function codexItems(r: CapabilityRoots): Draft[] {
   }
 
   const mem = path.join(r.codexHome, "memories");
-  for (const name of safeReadDir(mem)) {
-    const at = path.join(mem, name);
-    if (name.endsWith(".md") && isFile(at)) out.push({ key: at, kind: "memory", source: "codex", name, description: "Codex memory", path: at, applies: true });
-  }
+  const memFiles = safeReadDir(mem).filter((name) => name.endsWith(".md") && isFile(path.join(mem, name))).length;
   const v2 = path.join(r.codexHome, "memories_v2", "memory_summary.md");
-  if (isFile(v2)) out.push({ key: v2, kind: "memory", source: "codex", name: "memory_summary.md (v2)", description: "Codex memory summary", path: v2, applies: true });
+  const memTotal = memFiles + (isFile(v2) ? 1 : 0);
+  if (memTotal > 0) {
+    out.push({ key: `${mem}`, kind: "memory", source: "codex", name: "memories", title: `Codex 메모리 (${memTotal}개 파일)`,
+      description: "Codex memory folder", path: mem, applies: true });
+  }
 
   for (const c of tomlConnectorNames(config)) {
     out.push({ key: `${configPath}:${c.name}`, kind: "connector", source: "codex", name: c.name, description: `MCP server (${c.transport})`, path: `${configPath}#mcp_servers.${c.name}`, applies: true });
@@ -295,21 +355,25 @@ function codexItems(r: CapabilityRoots): Draft[] {
 
 function claudeItems(r: CapabilityRoots): Draft[] {
   const out: Draft[] = [];
-  for (const file of skillFilesUnder(path.join(r.claudeDir, "skills"))) out.push(skillDraft("claude", file, true));
+  for (const file of skillFilesUnder(path.join(r.claudeDir, "skills"))) { const draft = skillDraft("claude", file, true); if (draft) out.push(draft); }
   const commands = path.join(r.claudeDir, "commands");
   for (const name of safeReadDir(commands)) {
     const at = path.join(commands, name);
-    if (name.endsWith(".md") && isFile(at)) {
-      const fm = frontMatter(readHead(at));
-      out.push({ key: at, kind: "skill", source: "claude", name: `/${name.slice(0, -3)}`, description: oneLine(fm.description), path: at, applies: true });
-    }
+    if (name.endsWith(".md") && isFile(at)) { const draft = commandDraft("claude", at, true); if (draft) out.push(draft); }
   }
 
   const installed = readJson(path.join(r.claudeDir, "plugins", "installed_plugins.json")) as { plugins?: Record<string, unknown> } | null;
-  for (const id of Object.keys(installed?.plugins ?? {})) {
+  for (const [id, entry] of Object.entries(installed?.plugins ?? {})) {
     const market = id.split("@")[1] ?? "";
+    const slug = id.split("@")[0];
+    const record = (Array.isArray(entry) ? entry[0] : entry) as { installPath?: unknown } | undefined;
+    const installPath = str(record?.installPath);
+    if (!installPath || !isDir(installPath) || isScratchPath(installPath)) continue;
+    const manifest = hostManifest(installPath, [".claude-plugin/plugin.json"]);
+    if (!manifest) continue;
     const agentlas = AGENTLAS_MARKETPLACES.has(market);
-    out.push({ key: id, kind: "plugin", source: agentlas ? "agentlas" : "claude", name: id, description: "Claude Code plugin", path: path.join(r.claudeDir, "plugins", "installed_plugins.json") + `#${id}`, applies: !agentlas });
+    out.push({ key: id, canon: slug.toLowerCase(), kind: "plugin", source: agentlas ? "agentlas" : "claude", name: id, title: manifest.title,
+      description: manifest.description, path: installPath, applies: !agentlas });
   }
 
   const settingsFile = path.join(r.claudeDir, "settings.json");
@@ -321,18 +385,15 @@ function claudeItems(r: CapabilityRoots): Draft[] {
   const claudeMd = path.join(r.claudeDir, "CLAUDE.md");
   if (isFile(claudeMd)) out.push({ key: claudeMd, kind: "memory", source: "claude", name: "CLAUDE.md", description: "Claude Code personal instructions", path: claudeMd, applies: true });
   const rules = path.join(r.claudeDir, "rules");
-  for (const name of safeReadDir(rules)) {
-    const at = path.join(rules, name);
-    if (name.endsWith(".md") && isFile(at)) out.push({ key: at, kind: "memory", source: "claude", name: `rules/${name}`, description: "Claude Code personal rule", path: at, applies: true });
+  const ruleCount = dirCount(rules, (name) => name.endsWith(".md") && isFile(path.join(rules, name)));
+  if (ruleCount > 0) {
+    out.push({ key: rules, kind: "memory", source: "claude", name: "rules/", title: `Claude Code 규칙 (${ruleCount}개 파일)`, description: "Claude Code personal rules folder", path: rules, applies: true });
   }
   const projects = path.join(r.claudeDir, "projects");
-  const memories: Array<{ at: string; project: string; mtime: number }> = [];
-  for (const project of safeReadDir(projects)) {
-    const at = path.join(projects, project, "memory", "MEMORY.md");
-    try { memories.push({ at, project, mtime: fs.statSync(at).mtimeMs }); } catch { /* no memory here */ }
-  }
-  for (const m of memories.sort((a, b) => b.mtime - a.mtime).slice(0, 300)) {
-    out.push({ key: m.at, kind: "memory", source: "claude", name: `memory · ${m.project}`, description: "Claude Code project memory", path: m.at, applies: true });
+  const projectMemories = safeReadDir(projects).filter((project) => isFile(path.join(projects, project, "memory", "MEMORY.md"))).length;
+  if (projectMemories > 0) {
+    out.push({ key: projects, kind: "memory", source: "claude", name: "project-memory", title: `Claude Code 프로젝트 메모리 (${projectMemories}개 프로젝트)`,
+      description: "Claude Code per-project memory", path: projects, applies: true });
   }
 
   const userJson = readJson(path.join(r.home, ".claude.json")) as { mcpServers?: Record<string, unknown> } | null;
@@ -345,16 +406,16 @@ function claudeItems(r: CapabilityRoots): Draft[] {
 
 function cursorItems(r: CapabilityRoots): Draft[] {
   const out: Draft[] = [];
-  for (const file of skillFilesUnder(path.join(r.cursorDir, "skills"))) out.push(skillDraft("cursor", file, false));
+  for (const file of skillFilesUnder(path.join(r.cursorDir, "skills"))) { const draft = skillDraft("cursor", file, false); if (draft) out.push(draft); }
   const commands = path.join(r.cursorDir, "commands");
   for (const name of safeReadDir(commands)) {
     const at = path.join(commands, name);
-    if (name.endsWith(".md") && isFile(at)) out.push({ key: at, kind: "skill", source: "cursor", name: `/${name.slice(0, -3)}`, description: oneLine(frontMatter(readHead(at)).description), path: at, applies: false });
+    if (name.endsWith(".md") && isFile(at)) { const draft = commandDraft("cursor", at, false); if (draft) out.push(draft); }
   }
   const rules = path.join(r.cursorDir, "rules");
-  for (const name of safeReadDir(rules)) {
-    const at = path.join(rules, name);
-    if (isFile(at) && /\.(md|mdc)$/.test(name)) out.push({ key: at, kind: "memory", source: "cursor", name: `rules/${name}`, description: "Cursor rule", path: at, applies: false });
+  const cursorRules = dirCount(rules, (name) => /\.(md|mdc)$/.test(name) && isFile(path.join(rules, name)));
+  if (cursorRules > 0) {
+    out.push({ key: rules, kind: "memory", source: "cursor", name: "rules/", title: `Cursor 규칙 (${cursorRules}개 파일)`, description: "Cursor rules folder", path: rules, applies: false });
   }
   const mcp = readJson(path.join(r.cursorDir, "mcp.json")) as { mcpServers?: Record<string, unknown> } | null;
   for (const [name, def] of Object.entries(mcp?.mcpServers ?? {})) {
@@ -368,11 +429,15 @@ function agentlasItems(r: CapabilityRoots): Draft[] {
   const out: Draft[] = [];
   const plugins = path.join(r.agentlasDir, "plugins");
   for (const name of safeReadDir(plugins)) {
+    if (name.startsWith(".")) continue; // `.slug.backup-<id>` are the installer's own backups
     const dir = path.join(plugins, name);
-    const manifest = readJson(path.join(dir, "plugin.json")) as { name?: unknown; description?: unknown } | null;
-    if (!manifest) continue;
-    out.push({ key: dir, kind: "plugin", source: "agentlas", name: typeof manifest.name === "string" ? manifest.name : name,
-      description: oneLine(typeof manifest.description === "string" ? manifest.description : ""), path: dir, applies: false });
+    if (!isDir(dir) || isScratchPath(dir)) continue;
+    const manifest = readJson(path.join(dir, "plugin.json")) as Record<string, unknown> | null;
+    if (!manifest || typeof manifest !== "object" || !/^agentlas\.plugin\//.test(str(manifest.schema)) || str(manifest.slug) !== name) continue;
+    const surface = (manifest.surface && typeof manifest.surface === "object" ? manifest.surface : {}) as Record<string, unknown>;
+    const title = str(surface.displayName) || str(manifest.name) || name;
+    out.push({ key: dir, canon: name.toLowerCase(), kind: "plugin", source: "agentlas", name: title, title,
+      description: oneLine(str(surface.description) || str(surface.tagline) || str(manifest.description)), path: dir, applies: false });
   }
   return out;
 }
@@ -390,11 +455,14 @@ export function listCapabilities(roots: CapabilityRoots = defaultCapabilityRoots
   }
   const seen = new Set<string>();
   const items: CapabilityItem[] = [];
+  scratchBases = [roots.home];
+  try { scratchBases.push(fs.realpathSync(roots.home)); } catch { /* home may not exist */ }
   for (const draft of [...codexItems(roots), ...claudeItems(roots), ...cursorItems(roots), ...agentlasItems(roots)]) {
     const id = capabilityId(draft.source, draft.kind, draft.key);
-    if (seen.has(id)) continue;
-    seen.add(id);
-    const { key: _key, ...rest } = draft;
+    const identity = `${draft.source}|${draft.kind}|${draft.canon ?? draft.key}`;
+    if (seen.has(identity)) continue;
+    seen.add(identity);
+    const { key: _key, canon: _canon, ...rest } = draft;
     items.push({ id, ...rest, enabled: false });
   }
   inventoryCache = { at: now, key, items };
@@ -476,6 +544,23 @@ function hookText(item: CapabilityItem): string {
   return hook ? hook.command : "";
 }
 
+/** A memory folder item has no single file: show what it holds (names and sizes, no content). */
+function memoryFolderListing(item: CapabilityItem): string {
+  const lines: string[] = [item.path, ""];
+  if (item.name === "project-memory") {
+    for (const project of safeReadDir(item.path)) {
+      const file = path.join(item.path, project, "memory", "MEMORY.md");
+      if (isFile(file)) lines.push(`${project}  (${fs.statSync(file).size} bytes)`);
+    }
+  } else {
+    for (const name of safeReadDir(item.path)) {
+      const file = path.join(item.path, name);
+      if (!name.startsWith(".") && isFile(file)) lines.push(`${name}  (${fs.statSync(file).size} bytes)`);
+    }
+  }
+  return lines.join("\n");
+}
+
 export function capabilityDetail(id: string, roots: CapabilityRoots = defaultCapabilityRoots()): CapabilityDetail | null {
   const item = listCapabilities(roots, { fresh: true }).find((candidate) => candidate.id === id);
   if (!item) return null;
@@ -483,6 +568,7 @@ export function capabilityDetail(id: string, roots: CapabilityRoots = defaultCap
   let raw: Buffer;
   if (item.kind === "connector") raw = Buffer.from(connectorText(item, roots));
   else if (item.kind === "hook") raw = Buffer.from(hookText(item));
+  else if (item.kind === "memory" && isDir(item.path)) raw = Buffer.from(memoryFolderListing(item));
   else if (item.kind === "plugin") {
     const dir = isDir(item.path) ? item.path : "";
     const manifest = dir ? [".codex-plugin/plugin.json", "plugin.json", ".claude-plugin/plugin.json"].map((rel) => path.join(dir, rel)).find(isFile) : "";

@@ -1,5 +1,5 @@
 // 새 자동화 / 기존 자동화 편집(설계 §2.5 스케줄 빌더, §3.5 트리거, P1 한계 #7·#8).
-// - 4-프리셋 <select>를 전체 문법 스케줄 빌더로 교체.
+// - 4-프리셋 <Select>를 전체 문법 스케줄 빌더로 교체.
 // - 트리거 종류 선택(시간/파일 변경/체인) — 이벤트 트리거는 스케줄 대신 트리거 상세를 노출.
 // - "빈 캔버스에서 만들기" 진입점(빈 자동화 생성 후 flow 편집기로 이동).
 // - ?id= 가 있으면 기존 자동화를 로드해 in-place 수정(삭제-재생성 회피).
@@ -39,6 +39,7 @@ import {
 import { runtimeUsesEngineModelSetting } from "@shared/models";
 import { runtimeIdentityKey, runtimeMatchesSelection, selectionForRuntime } from "@shared/runtime-selection";
 import { OneSuggestionReviewHandoffBanner, type OneReviewSeedApplyResult } from "@/components/one/OneSuggestionReviewHandoff";
+import { Select } from "@/components/Select";
 
 type TargetType = "agent" | "firm" | "hub";
 
@@ -591,19 +592,19 @@ function NewAutomationPage() {
 
         {triggerType === "chain" && (
           <Field label={t("auto.trigger.chain.after")}>
-            <select value={chainAfter} onChange={(e) => setChainAfter(e.target.value)} style={inputStyle}>
+            <Select value={chainAfter} onChange={(e) => setChainAfter(e.target.value)} style={inputStyle}>
               <option value="">—</option>
               {allAutomations.filter((a) => a.id !== editId).map((a) => (
                 <option key={a.id} value={a.id}>
                   {a.name}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
         )}
 
         <Field label={locale === "ko" ? "작업 컨텍스트" : "Work context"}>
-          <select value={projectContextChoice} onChange={(event) => {
+          <Select value={projectContextChoice} onChange={(event) => {
             setProjectContextChoice(event.target.value);
             setProjectContextTouched(true);
           }} style={inputStyle}>
@@ -613,7 +614,7 @@ function NewAutomationPage() {
             </option>}
             <option value="__none__">{locale === "ko" ? "프로젝트 없음 · 독립 작업" : "No project · standalone work"}</option>
             {projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
-          </select>
+          </Select>
           <p style={{ margin: "7px 0 0", color: "var(--muted-deep)", fontSize: 11, lineHeight: 1.5 }}>
             {locale === "ko" ? "프로젝트를 선택하면 그 소스·지시·기억을 실행 컨텍스트로 사용합니다." : "A selected project supplies its source, instructions, and memory to every run."}
           </p>
@@ -629,21 +630,21 @@ function NewAutomationPage() {
             firms.length === 0 ? (
               <Empty>{t("auto.empty_firms")}</Empty>
             ) : (
-              <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
+              <Select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
                 <option value="" disabled>{locale === "ko" ? "회사를 선택하세요" : "Choose a firm"}</option>
                 {firms.map((f) => (
                   <option key={f.id} value={f.id}>
                     {pickLocalized(f, locale).name} — CEO
                   </option>
                 ))}
-              </select>
+              </Select>
             )
           )}
           {targetType === "agent" && (
             agents.length === 0 ? (
               <Empty>{t("auto.empty_agents")}</Empty>
             ) : (
-              <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
+              <Select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
                 <option value="" disabled>{locale === "ko" ? "에이전트를 선택하세요" : "Choose an agent"}</option>
                 {agents.map((a) => {
                   const loc = pickLocalized(a, locale);
@@ -653,21 +654,21 @@ function NewAutomationPage() {
                     </option>
                   );
                 })}
-              </select>
+              </Select>
             )
           )}
           {targetType === "hub" && (
             hubAgents.length === 0 ? (
               <Empty>{locale === "ko" ? "Hub 에이전트를 불러오지 못했습니다." : "No Hub agents are available."}</Empty>
             ) : (
-              <select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
+              <Select value={targetId} onChange={(e) => setTargetId(e.target.value)} style={inputStyle}>
                 <option value="" disabled>{locale === "ko" ? "Hub 에이전트를 선택하세요" : "Choose a Hub agent"}</option>
                 {hubAgents.map((a) => (
                   <option key={a.slug} value={a.slug}>
                     {pickLocalized(a, locale).name} — Hub
                   </option>
                 ))}
-              </select>
+              </Select>
             )
           )}
         </Field>
@@ -729,7 +730,7 @@ function NewAutomationPage() {
               <label style={{ display: "grid", gap: 6, marginTop: 10 }}>
                 <span style={{ fontSize: 12, fontWeight: 600, color: "var(--ink-soft)" }}>{locale === "ko" ? "작업량" : "Effort"}</span>
                 {selectedEfforts.length > 0 || selectedSelection.effort ? (
-                  <select
+                  <Select
                     data-automation-effort-select
                     aria-label={locale === "ko" ? "자동화 작업량" : "Automation effort"}
                     value={selectedEffort}
@@ -739,7 +740,7 @@ function NewAutomationPage() {
                   >
                     <option value="">{locale === "ko" ? "기본" : "Default"}</option>
                     {selectedEfforts.map((effort) => <option key={effort.id} value={effort.id}>{effort.label}</option>)}
-                  </select>
+                  </Select>
                 ) : (
                   <span data-testid="automation-effort-default" style={{ ...inputStyle, color: "var(--muted-deep)" }}>
                     {locale === "ko" ? "기본" : "Default"}

@@ -260,6 +260,7 @@ import {
   type ChatFileDraft,
   type ChatFileItem,
 } from "@/lib/chat-files";
+import { Select } from "@/components/Select";
 
 function uid(): string {
   return Math.random().toString(36).slice(2);
@@ -1032,7 +1033,7 @@ function WorkRailResult({
           <label htmlFor="external-window-capture-select">
             {locale === "ko" ? "캡처할 외부 창" : "External window to capture"}
           </label>
-          <select
+          <Select
             id="external-window-capture-select"
             value={externalCaptureState.selectedSourceId ?? ""}
             onChange={(event) => onSelectExternalWindow?.(event.target.value)}
@@ -1044,7 +1045,7 @@ function WorkRailResult({
                 {source.name} · {source.width}×{source.height}
               </option>
             ))}
-          </select>
+          </Select>
           <button
             type="button"
             onClick={() => onCaptureExternal?.(externalCaptureState.selectedSourceId ?? undefined)}

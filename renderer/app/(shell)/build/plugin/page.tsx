@@ -17,6 +17,7 @@ import type {
 } from "@/lib/types";
 import { isOneSuggestionReviewSeed } from "@shared/one-review-seed";
 import styles from "./page.module.css";
+import { Select } from "@/components/Select";
 
 const PHASES: PluginBuilderPhase[] = ["interview", "draft", "verify", "install", "prove"];
 
@@ -271,9 +272,9 @@ export default function PluginBuilderPage() {
             <label className={`${styles.label} ${styles.wide}`}>{ui.steps} <span className={styles.hint}>{ui.stepsHint}</span><textarea className={styles.textarea} value={workflow.steps.join("\n")} onChange={(event) => updateWorkflow("steps", lines(event.target.value, "Run the procedure in order."))} /></label>
             <label className={styles.label}>{ui.outputs} <textarea className={styles.textarea} value={workflow.outputs.join("\n")} onChange={(event) => updateWorkflow("outputs", lines(event.target.value, "A concise result summary."))} /></label>
             <label className={styles.label}>{ui.verification} <textarea className={styles.textarea} value={workflow.verification.join("\n")} onChange={(event) => updateWorkflow("verification", lines(event.target.value, "Confirm the result is non-empty."))} /></label>
-            <label className={styles.label}>{ui.fileWrite}<select className={styles.select} value={answers.permissions.fileWrite} onChange={(event) => update("permissions", { ...answers.permissions, fileWrite: event.target.value as PluginBuilderAnswers["permissions"]["fileWrite"] })}><option value="none">none</option><option value="project-only">project-only</option><option value="ask">ask</option><option value="full">full</option></select></label>
-            <label className={styles.label}>{ui.network}<select className={styles.select} value={answers.permissions.network} onChange={(event) => update("permissions", { ...answers.permissions, network: event.target.value as PluginBuilderAnswers["permissions"]["network"] })}><option value="none">none</option><option value="ask">ask</option><option value="allow">allow</option></select></label>
-            <label className={styles.label}>{ui.shell}<select className={styles.select} value={answers.permissions.shell} onChange={(event) => update("permissions", { ...answers.permissions, shell: event.target.value as PluginBuilderAnswers["permissions"]["shell"] })}><option value="deny">deny</option><option value="ask">ask</option><option value="allow">allow</option></select></label>
+            <label className={styles.label}>{ui.fileWrite}<Select className={styles.select} value={answers.permissions.fileWrite} onChange={(event) => update("permissions", { ...answers.permissions, fileWrite: event.target.value as PluginBuilderAnswers["permissions"]["fileWrite"] })}><option value="none">none</option><option value="project-only">project-only</option><option value="ask">ask</option><option value="full">full</option></Select></label>
+            <label className={styles.label}>{ui.network}<Select className={styles.select} value={answers.permissions.network} onChange={(event) => update("permissions", { ...answers.permissions, network: event.target.value as PluginBuilderAnswers["permissions"]["network"] })}><option value="none">none</option><option value="ask">ask</option><option value="allow">allow</option></Select></label>
+            <label className={styles.label}>{ui.shell}<Select className={styles.select} value={answers.permissions.shell} onChange={(event) => update("permissions", { ...answers.permissions, shell: event.target.value as PluginBuilderAnswers["permissions"]["shell"] })}><option value="deny">deny</option><option value="ask">ask</option><option value="allow">allow</option></Select></label>
           </div>
           <div className={styles.actions}>
             <button className={styles.button} type="button" disabled={busy || !session} onClick={() => void buildDraft()}>{ui.build}</button>

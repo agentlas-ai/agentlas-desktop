@@ -19,6 +19,7 @@ import { ScheduleBuilder } from "./ScheduleBuilder";
 import { NODE_ACCENT } from "./nodes/nodeShared";
 import { IconClose } from "@/components/Icon";
 import { defaultNodeEffect } from "@/lib/graph-node-effect";
+import { Select } from "@/components/Select";
 
 /**
  * 레거시 스케줄 토큰("cron:…", "daily-HH:MM", "weekday-HH:MM", "weekly-<dow>-HH:MM",
@@ -220,7 +221,7 @@ export function NodeConfigPanel({
       {node.type === "agent" && (
         <>
           <Field label={t("auto.cfg.ref")}>
-            <select
+            <Select
               value={s("ref")}
               onChange={(e) => {
                 const selectedHub = hubAgents.find((agent) =>
@@ -260,20 +261,20 @@ export function NodeConfigPanel({
                   </option>
                 ))}
               </optgroup>
-            </select>
+            </Select>
           </Field>
           <Field label={t("auto.cfg.prompt")}>
             <textarea value={s("prompt")} onChange={(e) => onPatch({ prompt: e.target.value })} rows={3} style={{ ...inp, resize: "vertical", fontFamily: "var(--font-body)" }} />
           </Field>
           <Field label={t("auto.cfg.runtime")}>
-            <select value={s("runtime")} onChange={(e) => onPatch({ runtime: e.target.value })} style={inp}>
+            <Select value={s("runtime")} onChange={(e) => onPatch({ runtime: e.target.value })} style={inp}>
               <option value="">{t("auto.cfg.runtime.default")}</option>
               {dedupeRuntimes(runtimes).map((r) => (
                 <option key={r} value={r}>
                   {r}
                 </option>
               ))}
-            </select>
+            </Select>
           </Field>
         </>
       )}
@@ -284,14 +285,14 @@ export function NodeConfigPanel({
           실행에는 아무것도 안 붙었다 — 캔버스에 놓아도 아무 일 없던 tool 노드와 같은 병이다. */}
       {node.type === "tool" && (
         <Field label={t("auto.cfg.catalog")}>
-          <select value={s("catalog")} onChange={(e) => onPatch({ catalog: e.target.value })} style={inp}>
+          <Select value={s("catalog")} onChange={(e) => onPatch({ catalog: e.target.value })} style={inp}>
             <option value="">—</option>
             {tools.map((tool) => (
               <option key={tool.id} value={tool.id}>
                 {locale === "ko" ? tool.name : tool.nameEn}
               </option>
             ))}
-          </select>
+          </Select>
         </Field>
       )}
 
@@ -334,10 +335,10 @@ export function NodeConfigPanel({
             </div>
           </Field>
           <Field label={bi(locale, "언어", "Language")}>
-            <select value={s("codeLang") || "python"} onChange={(e) => onPatch({ codeLang: e.target.value })} style={inp}>
+            <Select value={s("codeLang") || "python"} onChange={(e) => onPatch({ codeLang: e.target.value })} style={inp}>
               <option value="python">{bi(locale, "python (데이터·계산에 강함)", "python (best for data and maths)")}</option>
               <option value="js">javascript</option>
-            </select>
+            </Select>
           </Field>
           <Field label={bi(locale, "스크립트 (AI가 채웁니다 — 직접 고쳐도 됩니다)", "Script (the AI fills this in — you can edit it)")}>
             <textarea
@@ -376,7 +377,7 @@ export function NodeConfigPanel({
           <Field label={t("auto.cfg.eval_items")}>
             {(Array.isArray(node.config?.items) ? (node.config.items as Array<{ text?: string; kind?: string }>) : []).map((item, index, list) => (
               <div key={index} style={{ display: "flex", gap: 6, marginBottom: 6 }}>
-                <select
+                <Select
                   value={item.kind === "mustNot" ? "mustNot" : "must"}
                   onChange={(e) => {
                     const next = list.map((row, i) => (i === index ? { ...row, kind: e.target.value } : row));
@@ -387,7 +388,7 @@ export function NodeConfigPanel({
                 >
                   <option value="must">{t("auto.cfg.eval_item_must")}</option>
                   <option value="mustNot">{t("auto.cfg.eval_item_mustnot")}</option>
-                </select>
+                </Select>
                 <input
                   value={item.text ?? ""}
                   onChange={(e) => {
@@ -505,12 +506,12 @@ export function NodeConfigPanel({
           {/* ★id로 고른다. 이름은 사람이 바꾸고 겹칠 수도 있어서, 이름으로 저장하면
               어느 날 다른 자동화가 실행된다. */}
           <Field label={t("auto.cfg.subgraph_ref")}>
-            <select value={s("graphRef")} onChange={(e) => onPatch({ graphRef: e.target.value })} style={inp}>
+            <Select value={s("graphRef")} onChange={(e) => onPatch({ graphRef: e.target.value })} style={inp}>
               <option value="">—</option>
               {callableGraphs.map((row) => (
                 <option key={row.id} value={row.id}>{row.name}</option>
               ))}
-            </select>
+            </Select>
           </Field>
           <Field label={t("auto.cfg.subgraph_input")}>
             <input
@@ -538,7 +539,7 @@ export function NodeConfigPanel({
             <input value={s("var")} onChange={(e) => onPatch({ var: e.target.value })} placeholder="price" style={{ ...inp, fontFamily: "var(--font-mono)" }} />
           </Field>
           <Field label={t("auto.cfg.cond_op")}>
-            <select value={s("op") || "truthy"} onChange={(e) => onPatch({ op: e.target.value })} style={inp}>
+            <Select value={s("op") || "truthy"} onChange={(e) => onPatch({ op: e.target.value })} style={inp}>
               <option value="truthy">truthy</option>
               <option value="falsy">falsy</option>
               <option value="eq">= (eq)</option>
@@ -546,7 +547,7 @@ export function NodeConfigPanel({
               <option value="gt">&gt; (gt)</option>
               <option value="lt">&lt; (lt)</option>
               <option value="contains">contains</option>
-            </select>
+            </Select>
           </Field>
           {s("op") !== "truthy" && s("op") !== "falsy" && s("op") !== "" ? (
             <Field label={t("auto.cfg.cond_value")}>
@@ -571,12 +572,12 @@ export function NodeConfigPanel({
             <input value={s("to")} onChange={(e) => onPatch({ to: e.target.value })} placeholder="digest" style={{ ...inp, fontFamily: "var(--font-mono)" }} />
           </Field>
           <Field label={t("auto.cfg.tf_mode")}>
-            <select value={s("mode") || "identity"} onChange={(e) => onPatch({ mode: e.target.value })} style={inp}>
+            <Select value={s("mode") || "identity"} onChange={(e) => onPatch({ mode: e.target.value })} style={inp}>
               <option value="identity">identity</option>
               <option value="format">format</option>
               <option value="json">json</option>
               <option value="extract">extract</option>
-            </select>
+            </Select>
           </Field>
           {s("mode") === "format" ? (
             <Field label={t("auto.cfg.tf_template")}>
@@ -601,11 +602,11 @@ export function NodeConfigPanel({
           </Field>
           {s("produces") ? (
             <Field label={t("auto.cfg.reducer")}>
-              <select value={s("reducer") || "overwrite"} onChange={(e) => onPatch({ reducer: e.target.value })} style={inp}>
+              <Select value={s("reducer") || "overwrite"} onChange={(e) => onPatch({ reducer: e.target.value })} style={inp}>
                 <option value="overwrite">{t("auto.cfg.reducer_overwrite")}</option>
                 <option value="append">{t("auto.cfg.reducer_append")}</option>
                 <option value="merge">{t("auto.cfg.reducer_merge")}</option>
-              </select>
+              </Select>
             </Field>
           ) : null}
 
@@ -615,11 +616,11 @@ export function NodeConfigPanel({
           <Field label={t("auto.cfg.effect")}>
             {/* ★화면이 보여 주는 기본값은 커널이 쓰는 기본값과 같아야 한다.
                 안 그러면 "조회"로 보이는 노드가 실행에서는 내보내기로 취급된다. */}
-            <select value={s("effect") || defaultNodeEffect(node.type)} onChange={(e) => onPatch({ effect: e.target.value })} style={inp}>
+            <Select value={s("effect") || defaultNodeEffect(node.type)} onChange={(e) => onPatch({ effect: e.target.value })} style={inp}>
               <option value="pure">{t("auto.cfg.effect_pure")}</option>
               <option value="read">{t("auto.cfg.effect_read")}</option>
               <option value="mutation">{t("auto.cfg.effect_mutation")}</option>
-            </select>
+            </Select>
             <div style={{ fontSize: 11, color: "var(--muted-deep)", marginTop: 4 }}>
               {t("auto.cfg.effect_hint")}
             </div>
@@ -767,8 +768,8 @@ function ToolchainCallFields({ config, assets, onPatch, ko }: { config: Record<s
   useEffect(() => { setDraft(JSON.stringify(raw.args ?? {}, null, 2)); setError(""); }, [JSON.stringify(raw.args), raw.toolchainId, raw.version]);
   const patch = (next: Record<string, unknown>) => onPatch({ toolchainCall: { ...raw, ...next } });
   return <>
-    <Field label={ko ? "툴체인 자산" : "Toolchain asset"}><select data-toolchain-call-asset="true" style={inp} value={raw.toolchainId ?? ""} onChange={(event) => { const selected = assets.find((item) => item.id === event.target.value); patch({ toolchainId: event.target.value, version: selected?.stableVersion ?? selected?.versions.at(-1)?.version, args: {} }); }}><option value="">—</option>{assets.filter((item) => item.status === "callable" || item.id === raw.toolchainId).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.id.slice(-8)} · {item.status}</option>)}</select></Field>
-    <Field label={ko ? "고정 버전" : "Pinned version"}><select data-toolchain-call-version="true" style={inp} value={raw.version ?? ""} onChange={(event) => patch({ version: Number(event.target.value) })}><option value="">—</option>{asset?.versions.map((item) => <option key={item.version} value={item.version}>v{item.version}{item.version === asset.stableVersion ? " · stable" : ""}</option>)}</select></Field>
+    <Field label={ko ? "툴체인 자산" : "Toolchain asset"}><Select data-toolchain-call-asset="true" style={inp} value={raw.toolchainId ?? ""} onChange={(event) => { const selected = assets.find((item) => item.id === event.target.value); patch({ toolchainId: event.target.value, version: selected?.stableVersion ?? selected?.versions.at(-1)?.version, args: {} }); }}><option value="">—</option>{assets.filter((item) => item.status === "callable" || item.id === raw.toolchainId).map((item) => <option key={item.id} value={item.id}>{item.name} · {item.id.slice(-8)} · {item.status}</option>)}</Select></Field>
+    <Field label={ko ? "고정 버전" : "Pinned version"}><Select data-toolchain-call-version="true" style={inp} value={raw.version ?? ""} onChange={(event) => patch({ version: Number(event.target.value) })}><option value="">—</option>{asset?.versions.map((item) => <option key={item.version} value={item.version}>v{item.version}{item.version === asset.stableVersion ? " · stable" : ""}</option>)}</Select></Field>
     <Field label={ko ? "여러 입력 바인딩 (JSON)" : "Multiple argument bindings (JSON)"}><textarea data-toolchain-call-args="true" style={{ ...inp, fontFamily: "var(--font-mono)", resize: "vertical" }} rows={7} value={draft} onChange={(event) => { setDraft(event.target.value); setError(ko ? "입력을 적용해 저장하세요." : "Apply arguments to save."); }} /><p style={{ fontSize: 11, color: "var(--muted-deep)" }}>{ko ? '상수 또는 "{{변수명}}"을 필드별로 넣습니다. 변수만 참조하면 원래 JSON 타입을 유지합니다.' : 'Bind each field to a constant or "{{variable}}". Exact variable references preserve the JSON type.'}</p><button type="button" onClick={() => { try { const args = JSON.parse(draft); if (!args || typeof args !== "object" || Array.isArray(args)) throw new Error(ko ? "JSON object가 필요합니다." : "Expected a JSON object."); patch({ args }); setError(""); } catch (cause) { setError(String(cause instanceof Error ? cause.message : cause)); } }}>{ko ? "입력 적용" : "Apply arguments"}</button>{error && <p role="status" style={{ color: "var(--danger)", fontSize: 11 }}>{error}</p>}</Field>
     {version && <details><summary>{ko ? "입력·출력 계약" : "Input/output contract"}</summary><pre style={{ whiteSpace: "pre-wrap", fontSize: 10 }}>{JSON.stringify({ input: version.contract.inputSchema, output: version.contract.outputSchema }, null, 2)}</pre></details>}
     <Field label={ko ? "결과 변수" : "Result variable"}><input style={inp} value={typeof config.produces === "string" ? config.produces : ""} onChange={(event) => onPatch({ produces: event.target.value })} placeholder="toolchainResult"/></Field>

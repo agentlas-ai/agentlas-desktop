@@ -1,0 +1,101 @@
+import { detailForUser, failureCode, failureMessage } from "./invocation-failure";
+
+/**
+ * 에이전트 관리 화면의 실패는 Main 이 `[코드] 영어 문장` 으로 보낸다. 화면에는 코드 → 사람 말 표로만 보인다.
+ * 표에 없는 코드도 영어 원문 대신 한국어 일반 문장으로 말한다(내부 코드·영어가 그대로 찍히지 않게).
+ */
+const KO: Record<string, string> = {
+  agent_missing: "이 에이전트는 더 이상 설치되어 있지 않습니다.",
+  approval_invalid: "승인이 만료되었거나 다른 변경에 대한 것입니다. 다시 검토해 주세요.",
+  approval_stale: "지금 변경 내용을 먼저 검토해 주세요.",
+  base_changed: "그 사이 파일이 바뀌었습니다. 새로고침한 뒤 다시 검토해 주세요.",
+  binary_write: "이진 파일은 텍스트 편집기로 바꿀 수 없습니다.",
+  change_required: "바꿀 파일을 골라 주세요.",
+  cloud_not_linked: "먼저 이 에이전트를 Cloud에 저장하거나 연결해 주세요.",
+  cloud_publish_base_required: "Hub에 올리기 전에 지금 로컬 버전을 Cloud에 먼저 저장해 주세요.",
+  compiler_limit: "크거나 이진인 파일은 파일 편집기에서 직접 검토해 주세요.",
+  compiler_unavailable: "기억을 검토해 파일 변경안을 만들려면 모델 연결이 필요합니다.",
+  decision_state: "이 변경안은 지금 처리할 수 없는 상태입니다.",
+  entry_missing: "에이전트의 시작 파일이 있어야 합니다.",
+  entry_reference_required: "지침 파일 이름을 바꾸기 전에 agentlas.json 에 시작 파일을 지정해 주세요.",
+  file_limit: "파일이 너무 크거나 안전하게 읽을 수 없습니다.",
+  file_missing: "파일을 찾을 수 없습니다.",
+  hub_not_linked: "먼저 원본 Hub 에이전트를 연결해 주세요.",
+  invalid_agents: "한 번에 고를 수 있는 에이전트는 250개까지입니다.",
+  invalid_bytes: "파일 내용을 확인하지 못했습니다.",
+  invalid_direction: "동기화 방향을 골라 주세요.",
+  invalid_path: "에이전트 폴더 안의 파일을 골라 주세요.",
+  invalid_target: "대상을 다시 골라 주세요.",
+  journal_approval: "끝나지 않은 변경에 맞는 승인이 없습니다.",
+  journal_owner: "끝나지 않은 변경이 있습니다. 원래 폴더를 다시 연결해 복구해 주세요.",
+  journal_root_changed: "복구하기 전에 원래 폴더를 다시 연결해 주세요.",
+  memory_changed: "그 사이 기억이 바뀌었습니다. 다시 검토해 주세요.",
+  memory_ineligible: "이 기억은 적용 범위나 근거를 더 확인해야 에이전트에 반영할 수 있습니다.",
+  memory_private: "이 기억은 에이전트 파일에 넣을 수 없습니다.",
+  memory_required: "기억을 하나 이상 골라 주세요.",
+  no_change: "이미 같은 내용입니다. 바꿀 것이 없습니다.",
+  owner_approval_required: "에이전트 관리에서 이 변경을 먼저 승인해 주세요.",
+  path_collision: "같은 이름의 파일이 있습니다. 다른 이름을 써 주세요.",
+  path_escape: "에이전트 폴더 밖의 파일입니다.",
+  preview_changed: "변경안이 바뀌었습니다. 새로 만들어 검토해 주세요.",
+  preview_mismatch: "변경안을 준비하는 동안 파일이 바뀌었습니다.",
+  private_content: "보내기 전에 파일 안의 인증 값을 지워 주세요.",
+  private_entry: "시작 파일은 기억·인증 정보·실행 상태일 수 없습니다.",
+  private_file: "기억과 인증 정보는 따로 관리됩니다.",
+  proposal_missing: "이 변경안은 더 이상 없습니다.",
+  publication_digest: "공개할 파일이 확인한 내용과 다릅니다. 다시 검토해 주세요.",
+  publication_invalid: "공개 파일 미리보기를 확인하지 못했습니다.",
+  publication_stale: "공개 원본이 바뀌었습니다. 새 비교를 검토해 주세요.",
+  publisher_required: "이 Hub 게시자만 새 공개 버전을 승인할 수 있습니다.",
+  read_only: "시스템 에이전트는 읽기 전용입니다.",
+  readback_mismatch: "실제 파일이 승인한 변경과 다릅니다. 복구가 필요합니다.",
+  recovery_review_stale: "복구할 파일이 바뀌었습니다. 다시 검토해 주세요.",
+  remote_blob_changed: "원격 파일이 검토한 버전과 다릅니다.",
+  remote_changed: "원격 버전이 바뀌었습니다. 새 비교를 검토해 주세요.",
+  remote_digest: "원격 파일 검증값이 맞지 않습니다.",
+  remote_entry_invalid: "원격 에이전트의 시작 파일이 확인된 파일 밖에 있습니다.",
+  remote_files_invalid: "원격 파일 목록을 안전하게 쓸 수 없습니다.",
+  remote_grant_invalid: "원격 승인을 확인하지 못했습니다.",
+  remote_limit: "원격 응답이 비교 한도를 넘었습니다.",
+  remote_preview_mismatch: "서버가 제안한 파일이 검토한 내용과 다릅니다.",
+  remote_protocol: "원격 파일 버전을 확인하지 못했습니다. 서버가 아직 이 기능을 지원하지 않을 수 있습니다.",
+  review_direction: "방향을 다시 검토한 뒤 적용해 주세요.",
+  review_required: "이 창에서 지금 변경을 검토한 뒤 승인해 주세요.",
+  revision_missing: "기록된 버전을 골라 주세요.",
+  revision_owner: "다른 에이전트의 버전입니다.",
+  run_active: "실행 중인 작업이 끝난 뒤에 다시 시도해 주세요.",
+  semantic_review_deferred: "아직 이 기억들로는 에이전트를 고치기에 근거가 부족합니다. 더 쌓인 뒤 다시 시도해 주세요.",
+  semantic_review_required: "선택한 기억은 기억 검토를 거쳐서만 파일 변경안이 됩니다.",
+  sign_in_required: "Cloud·Hub와 비교하려면 로그인해 주세요.",
+  skill_registry_unsafe: "실행하기 전에 이 에이전트의 스킬 목록을 검토해 주세요.",
+  source_changed: "읽는 동안 파일이 바뀌었습니다. 새로고침한 뒤 다시 검토해 주세요.",
+  source_missing: "에이전트 폴더를 찾을 수 없습니다. 폴더를 다시 연결해 주세요.",
+  source_not_licensed: "이 Hub 게시자가 원본 파일을 공개하지 않았습니다.",
+  stored_tree_invalid: "저장된 파일 버전을 확인하지 못했습니다. 복구가 필요합니다.",
+  sync_journal_invalid: "저장된 동기화 작업을 검토해야 합니다.",
+  sync_outcome_pending: "이전 동기화 결과를 서버가 아직 확인하지 않았습니다. 새로고침해서 확인해 주세요.",
+  sync_receipt_invalid: "다른 작업의 동기화 영수증입니다.",
+  sync_receipt_mismatch: "원격에 올라간 파일이 승인한 버전과 다릅니다.",
+  sync_review_stale: "계정이나 로컬 파일이 바뀌었습니다. 새 비교를 검토해 주세요.",
+  target_required: "고칠 지침이나 스킬을 골라 주세요.",
+  tree_limit: "파일이 너무 많거나 커서 안전하게 비교할 수 없습니다.",
+  unreviewed_native_skill: "런타임 스킬 폴더에 검토 안 된 후보가 있습니다. 지우거나 승격한 뒤 실행해 주세요.",
+  unsafe_content: "변경을 만들기 전에 파일 안의 인증 값을 지워 주세요.",
+  unsafe_path: "연결 파일이나 특수 파일은 버전에 넣을 수 없습니다.",
+  unsafe_root: "안전하게 편집할 수 있는 실제 에이전트 폴더가 필요합니다.",
+  unsafe_run_state: "비공개 실행 폴더를 다시 연결해 주세요.",
+  update_busy: "다른 작업이 이 에이전트를 바꾸는 중입니다. 끝난 뒤 새로고침해 주세요.",
+  write_race: "적용하는 동안 파일이 바뀌어 그대로 보존했습니다. 검토해 주세요.",
+};
+const GENERIC_KO = "이 작업을 끝내지 못했습니다. 새로고침한 뒤 다시 시도해 주세요.";
+
+/** 에이전트 관리 화면용 실패 문장. 한국어는 코드표, 영어는 원문에서 `[코드]` 만 벗긴다. */
+export function agentWorkspaceFailure(error: unknown, ko: boolean): string {
+  const code = /\[([a-z][a-z0-9_]{2,95})\]/.exec(failureMessage(error))?.[1] ?? failureCode(error);
+  if (code && Object.hasOwn(KO, code)) return ko ? KO[code] : stripCode(failureMessage(error));
+  const detail = detailForUser(error);
+  if (!detail) return "";
+  if (!ko) return stripCode(detail);
+  return /\[[a-z][a-z0-9_]{2,95}\]/.test(detail) || !/[가-힣]/.test(detail) ? GENERIC_KO : detail;
+}
+const stripCode = (text: string) => text.replace(/^.*?\[[a-z][a-z0-9_]{2,95}\]\s*/s, "");

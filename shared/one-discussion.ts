@@ -1,9 +1,10 @@
 /**
  * Group-room discussion contracts shared by Main and the One room screen (1.3.0 A4/A5).
  *
- * A discussion is one owner post answered in rounds: a moderator picks K speakers, they speak in parallel on the
- * same snapshot of the room, and finished messages enter the room log in order. Reply and comment threads point at
- * an earlier message through `replyTo`. Streamed text is never part of this contract; the screen reads it from the
+ * A discussion is a free conversation about one owner post: the members that have something to add speak, each
+ * message enters the room log as soon as its speaker finishes, and the talk ends when nobody has more to add.
+ * `roundNo`/`maxRounds` are internal batch counters and a hidden safety cap; the screen never shows them. Reply and
+ * comment threads point at an earlier message through `replyTo`. Streamed text is never part of this contract; the screen reads it from the
  * speakers' own run event channels.
  */
 

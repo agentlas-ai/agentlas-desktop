@@ -4575,3 +4575,8 @@
 .oneRoomMemberNotice { margin: 6px 0; padding: 8px 10px; border: 1px solid var(--warn); border-radius: 8px; font-size: 12px; line-height: 1.45; }
 .oneRoomMemberNotice > p { margin: 0; }
 .oneRoomMemberNotice > p + p { margin-top: 4px; }
+
+/* 단톡방 대화: 말풍선 사이·답글 사이를 촘촘히. 대화처럼 이어 읽히도록 줄 간격만 줄인다(색·모양은 그대로). */
+.body .messages[data-one-room="true"] { gap: 12px; }
+.body .messages[data-one-room="true"] .message { gap: 3px; }
+.body .messages[data-one-room="true"] .message[data-taskforce="true"][data-role="assistant"] .messageBody { padding: 7px 11px; }

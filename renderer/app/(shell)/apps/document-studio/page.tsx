@@ -43,6 +43,7 @@ import {
   IconTrash,
   IconClose,
 } from "@/components/Icon";
+import { Select } from "@/components/Select";
 
 type Mode = "report" | "paper" | "brief";
 type ReviseAction = "expand" | "rewrite" | "shorten" | "improve" | "formal" | "casual";
@@ -858,13 +859,13 @@ function ReferenceForm({ value, locale, onSave, onCancel }: { value: Reference; 
       </div>
       <label style={formField}>
         <span style={formLabel}>{locale === "en" ? "Type" : "유형"}</span>
-        <select value={draft.type} onChange={(e) => set({ type: e.target.value as ReferenceType })} style={formInput}>
+        <Select value={draft.type} onChange={(e) => set({ type: e.target.value as ReferenceType })} style={formInput}>
           {REF_TYPES.map((t) => (
             <option key={t.id} value={t.id}>
               {locale === "en" ? t.en : t.ko}
             </option>
           ))}
-        </select>
+        </Select>
       </label>
       <label style={formField}>
         <span style={formLabel}>{locale === "en" ? "Authors (separate with ;)" : "저자 (; 로 구분)"}</span>

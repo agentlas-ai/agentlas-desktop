@@ -146,7 +146,15 @@ export interface RoomDiscussionRuntime {
   recover(): { closed: number; published: number; resumed: number };
 }
 
-export function createRoomDiscussionRuntime(services: RoomDiscussionServices, options: { timeoutMs?: number; hostId?: string } = {}): RoomDiscussionRuntime {
+/**
+ * A group room is not a discussion floor: One runs the room (orchestrator, Goal, strategy, tactics, team dispatch)
+ * and members work. Owner posts therefore never go to this engine unless a caller opts in explicitly (the gates do).
+ * Production leaves it off; the code stays only for the thread index of rooms that already hold such messages.
+ */
+export const ROOM_DISCUSSION_ROUTING_DEFAULT = false;
+
+export function createRoomDiscussionRuntime(services: RoomDiscussionServices, options: { timeoutMs?: number; hostId?: string; routing?: boolean } = {}): RoomDiscussionRuntime {
+  const routing = options.routing ?? ROOM_DISCUSSION_ROUTING_DEFAULT;
   const store = createRoomDiscussionStore({
     db: services.db,
     appendChatMessage: services.chats.appendChatMessage,
@@ -172,7 +180,11 @@ export function createRoomDiscussionRuntime(services: RoomDiscussionServices, op
   const stateOf = (chatId: string): OneDiscussionState => ({ ...engine.view(chatId), messages: store.messageMeta(chatId) });
   return {
     engine, caps,
-    post(input) { ensureRecovered(); return engine.post(input); },
+    post(input) {
+      if (!routing) return { handled: false, reason: "discussion_off" };
+      ensureRecovered();
+      return engine.post(input);
+    },
     stop(chatId) { ensureRecovered(); return { stopped: engine.stop(chatId).stopped }; },
     state(chatId) { ensureRecovered(); return stateOf(chatId); },
     setEnabled(chatId, enabled) { ensureRecovered(); engine.setEnabled(chatId, enabled); return stateOf(chatId); },

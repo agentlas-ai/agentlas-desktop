@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { ipc } from "@/lib/ipc";
 import type { BrowserLiveFrame, ComputerUsePreview } from "@/lib/types";
+import { Select } from "@/components/Select";
 
 export type AgentScreenMode = "browser" | "computer";
 
@@ -162,9 +163,9 @@ export function AgentScreenFooter({ screen, ko }: { screen: AgentScreenState; ko
   return (
     <footer>
       {computerFrame.sources.length > 1 && (
-        <select aria-label={ko ? "보여 줄 화면 고르기" : "Choose which screen to show"} value={sourceId ?? ""} onChange={(event) => setSourceId(event.target.value || undefined)}>
+        <Select aria-label={ko ? "보여 줄 화면 고르기" : "Choose which screen to show"} value={sourceId ?? ""} onChange={(event) => setSourceId(event.target.value || undefined)}>
           {computerFrame.sources.map((source) => <option key={source.id} value={source.id}>{source.name}</option>)}
-        </select>
+        </Select>
       )}
       <span className={computerFrame.screenPermission === "granted" ? "ok" : "warn"}>
         {ko ? "화면" : "Screen"} {computerFrame.screenPermission === "granted" ? "ON" : "OFF"}

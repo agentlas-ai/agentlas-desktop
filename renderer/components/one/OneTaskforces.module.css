@@ -20,7 +20,10 @@
 .emptyIcon { width: 32px; height: 32px; display: grid; place-items: center; border: 1px dashed var(--muted); border-radius: 10px; color: var(--muted-deep); }
 .dialogBody { display: grid; gap: 14px; }
 .busyState { display: grid; grid-template-columns: 20px minmax(0, 1fr); align-items: center; gap: 2px 10px; padding: 10px 11px; border: 1px solid var(--paper-edge); border-radius: 10px; background: var(--paper-3); color: var(--ink); }
-.busyState > span { grid-row: 1 / span 2; width: 18px; height: 18px; border: 2px solid var(--paper-edge-strong); border-top-color: var(--black); border-radius: 50%; animation: oneTaskforceSpin .75s linear infinite; }
+/* The spinner is targeted by class: a bare `> span` also matched LoadingEstimate's root <span>, which then spun as a
+   second spinner (rotated text) and took column 2, squeezing the title into the 20px column (owner recording 23:58). */
+.busyState > :not(.busySpinner) { grid-column: 2; min-width: 0; }
+.busyState > .busySpinner { grid-column: 1; grid-row: 1 / span 2; width: 18px; height: 18px; border: 2px solid var(--paper-edge-strong); border-top-color: var(--black); border-radius: 50%; animation: oneTaskforceSpin .75s linear infinite; }
 .busyState strong { font-size: 11px; }
 .busyState small { color: var(--muted-deep); font-size: 9px; line-height: 1.4; }
 .titleField { display: grid; gap: 8px; color: var(--muted-deep); font-size: 12px; font-weight: 650; }
@@ -65,7 +68,7 @@ button.memberRow:hover, button.memberRow:focus-visible { border-color: var(--mut
 }
 
 @keyframes oneTaskforceSpin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .busyState > span { animation-duration: 1.8s; } }
+@media (prefers-reduced-motion: reduce) { .busyState > .busySpinner { animation-duration: 1.8s; } }
 
 .descriptionDetails { color: var(--muted-deep); font-size: 12px; }
 .descriptionDetails summary { cursor: pointer; }

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { IconAlertTriangle, IconBrain, IconFileUp, IconLayers, IconShield } from "@/components/Icon";
 import { ipc } from "@/lib/ipc";
-import { detailForUser } from "@/lib/invocation-failure";
+import { agentWorkspaceFailure } from "@/lib/agent-workspace-error";
 import type { MemoryImportPreviewUi } from "@shared/types";
 import styles from "./AgentWorkspace.module.css";
 import { PopupAction, PopupDetails, PopupFacts, PopupFrame } from "@/components/Popup";
@@ -21,7 +21,7 @@ export function AgentMemoryImportDialog({ preview, agentId, locale, onClose, onI
     if (busy || !api?.agentMemory || preview.targetAgentId !== agentId || preview.summary.newCount === 0) return;
     setBusy(true); setError("");
     try { const result = await api.agentMemory.importApply(agentId, preview.sourcePath); await onImported(result.imported); onClose(); }
-    catch (failure) { setError(detailForUser(failure)); }
+    catch (failure) { setError(agentWorkspaceFailure(failure, ko)); }
     finally { setBusy(false); }
   }
   return <PopupFrame title={ko ? "메모리 가져오기" : "Import memory"} icon={<IconFileUp size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={onClose} busy={busy}

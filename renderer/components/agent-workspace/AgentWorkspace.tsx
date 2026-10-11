@@ -4,12 +4,12 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, 
 import Link from "next/link";
 import {
   IconAlertTriangle, IconBrain, IconCheck, IconChevronDown, IconChevronRight, IconClock, IconClose,
-  IconFileText, IconFileUp, IconFolder, IconGithub, IconLayers, IconMonitor, IconMoreHorizontal, IconPlus, IconRefresh, IconSearch,
+  IconFileText, IconFileUp, IconFolder, IconCloud, IconLayers, IconMonitor, IconMoreHorizontal, IconPlus, IconRefresh, IconSearch,
   IconSettings, IconShield, IconSidebar, IconTrash,
 } from "@/components/Icon";
 import { AgentAvatar } from "@/components/AgentAvatar";
 import { ipc } from "@/lib/ipc";
-import { detailForUser } from "@/lib/invocation-failure";
+import { agentWorkspaceFailure } from "@/lib/agent-workspace-error";
 import type { AgentRuntimeOverride, InstalledAgent, InstalledAgentExactBinding, InstalledFirm, MemoryImportPreviewUi, ResolvedOrg, RuntimeStatus } from "@shared/types";
 import type {
   AgentWorkspaceComparison, AgentWorkspaceDiff as WorkspaceDiff, AgentWorkspaceFile, AgentWorkspaceMemoryCandidate,
@@ -23,6 +23,7 @@ import { PopupAction, PopupFacts, PopupFrame, PopupSteps } from "@/components/Po
 import { confirmPopup } from "@/lib/popup";
 import { isTechnicalEvidence, memoryImpact, memoryKindLabel, plainMemoryText, plainMemoryTitle } from "@/lib/agent-memory-explain";
 import styles from "./AgentWorkspace.module.css";
+import { Select } from "@/components/Select";
 
 export type AgentWorkspaceView = "files" | "memory" | "changes" | "sync" | "history";
 
@@ -40,7 +41,6 @@ const EN_STATE: Record<string, string> = {
 };
 
 function stateLabel(state: string, ko: boolean): string { return (ko ? KO_STATE : EN_STATE)[state] ?? state; }
-function shortHash(value: string | null | undefined): string { return value ? value.replace(/^sha256:/, "").slice(0, 12) : "—"; }
 function timeLabel(value: string, locale: string): string {
   const date = new Date(value);
   return Number.isNaN(date.getTime()) ? value : date.toLocaleString(locale === "ko" ? "ko-KR" : "en-US", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -97,6 +97,9 @@ function treeEntries(files: AgentWorkspaceFile[], expanded: Set<string>): TreeEn
   return result;
 }
 
+const REVISION_OPERATION_KO: Record<string, string> = { baseline: "처음 상태", external_edit: "직접 수정", apply: "변경 적용", sync: "동기화", rollback: "되돌림" };
+const REVISION_OPERATION_EN: Record<string, string> = { baseline: "Initial state", external_edit: "Edited outside", apply: "Change applied", sync: "Synced", rollback: "Rolled back" };
+function revisionOperationLabel(operation: string, ko: boolean): string { return (ko ? REVISION_OPERATION_KO : REVISION_OPERATION_EN)[operation] ?? ""; }
 export function AgentWorkspace({ agent, name, locale, initialView = "files", onToggleRoster, projectControl,
   firm, org, binding, runtimes, overrides, onRename, onRemove, onOverridesChange, onDirtyChange, onMemoryCountChange,
 }: {
@@ -176,7 +179,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    void refresh().catch((failure) => { if (!cancelled) setError(detailForUser(failure)); }).finally(() => { if (!cancelled) setLoading(false); });
+    void refresh().catch((failure) => { if (!cancelled) setError(agentWorkspaceFailure(failure, ko)); }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; workspaceGeneration.current++; fileGeneration.current++; reviewGeneration.current++; comparisonGeneration.current++; };
   }, [refresh]);
   useEffect(() => { onDirtyChange?.(dirty); return () => onDirtyChange?.(false); }, [dirty, onDirtyChange]);
@@ -221,7 +224,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       const parts = nextPath.split("/");
       setExpanded((previous) => new Set([...previous, ...parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"))]));
       return true;
-    } catch (failure) { if (fileGeneration.current === generation) setError(detailForUser(failure)); }
+    } catch (failure) { if (fileGeneration.current === generation) setError(agentWorkspaceFailure(failure, ko)); }
     finally { if (fileGeneration.current === generation) setFileLoading(false); }
   };
   const openFileRef = useRef(openFile);
@@ -237,7 +240,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     const generation = ++reviewGeneration.current;
     setView("changes"); setReviewLoading(true); setReview(null); setReviewPath(null); setError("");
     try { const result = await api().getDiff(proposalId); if (reviewGeneration.current === generation) { setReview(result); setReviewPath(result.changes[0]?.path ?? null); if (result.status === "stale" || result.status === "recovery_required") await refresh(); } }
-    catch (failure) { if (reviewGeneration.current === generation) setError(detailForUser(failure)); }
+    catch (failure) { if (reviewGeneration.current === generation) setError(agentWorkspaceFailure(failure, ko)); }
     finally { if (reviewGeneration.current === generation) setReviewLoading(false); }
   };
   const openReviewRef = useRef(openReview);
@@ -250,7 +253,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
   const run = async (label: string, task: () => Promise<void>) => {
     if (busy) return;
     setBusy(label); setError(""); setNotice("");
-    try { await task(); } catch (failure) { setError(detailForUser(failure)); } finally { setBusy(""); }
+    try { await task(); } catch (failure) { setError(agentWorkspaceFailure(failure, ko)); } finally { setBusy(""); }
   };
   const draftPath = newPath.trim();
   const validNewPath = Boolean(draftPath) && !draftPath.startsWith("/") && !draftPath.split("/").includes("..") && !files.some((file) => file.path === draftPath);
@@ -287,7 +290,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       if (!bridge) throw new Error(ko ? "브리지를 사용할 수 없습니다." : "Bridge unavailable.");
       const result = await bridge.compare({ agentId: agent.id, target: syncTarget, direction: syncDirection });
       if (comparisonGeneration.current === generation) setComparison(result);
-    } catch (failure) { if (comparisonGeneration.current === generation) setError(detailForUser(failure)); }
+    } catch (failure) { if (comparisonGeneration.current === generation) setError(agentWorkspaceFailure(failure, ko)); }
     finally { if (comparisonGeneration.current === generation) setCompareLoading(false); }
   }, [agent.id, syncTarget, syncDirection, ko]);
   useEffect(() => { if (view === "sync") void compare(); }, [view, compare]);
@@ -327,7 +330,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     setExpanded((previous) => { const next = new Set(previous); if (isExpanded) next.delete(entry.path); else next.add(entry.path); return next; });
     if (isExpanded) return;
     try { const children = await api().listFiles(agent.id, entry.path); setFiles((previous) => [...new Map([...previous, ...children].map((file) => [file.path, file])).values()]); }
-    catch (failure) { setError(detailForUser(failure)); }
+    catch (failure) { setError(agentWorkspaceFailure(failure, ko)); }
   };
   const startResize = (event: React.PointerEvent<HTMLButtonElement>) => {
     const start = event.clientX; const width = treeWidth;
@@ -340,7 +343,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     <aside className={styles.listPane}>
       <div className={styles.paneHeader}><IconBrain size={14} /><strong>{ko ? "배운 것" : "Learned"}</strong><span>{snapshot?.memoryCandidates.length ?? 0}</span><button className={styles.iconButton} disabled={Boolean(busy)} aria-label={ko ? "기존 메모리 가져오기" : "Import existing memory"} title={ko ? "기존 메모리 가져오기" : "Import existing memory"} onClick={() => void run("memory-import-preview", async () => { const memory = ipc()?.agentMemory; if (!memory) throw new Error(ko ? "메모리 브리지를 사용할 수 없습니다." : "Memory bridge unavailable."); setMemoryImportPreview(await memory.importPreview(agent.id)); })}><IconFileUp size={13} /></button></div>
       <div className={styles.search}><IconSearch size={13} /><input aria-label={ko ? "메모리 검색" : "Search memories"} placeholder={ko ? "메모리 검색" : "Search memories"} value={memoryQuery} onChange={(event) => setMemoryQuery(event.target.value)} /></div>
-      <div className={styles.rosterFilters}><select aria-label={ko ? "반영 상태" : "Status"} value={memoryState} onChange={(event) => setMemoryState(event.target.value)} className={styles.button}><option value="all">{ko ? "전체" : "All"}</option>{["eligible", "scope_review", "needs_evidence", "proposed", "applied"].map((state) => <option value={state} key={state}>{stateLabel(state, ko)}</option>)}</select></div>
+      <div className={styles.rosterFilters}><Select aria-label={ko ? "반영 상태" : "Status"} value={memoryState} onChange={(event) => setMemoryState(event.target.value)} className={styles.button}><option value="all">{ko ? "전체" : "All"}</option>{["eligible", "scope_review", "needs_evidence", "proposed", "applied"].map((state) => <option value={state} key={state}>{stateLabel(state, ko)}</option>)}</Select></div>
       <div className={styles.listRows}>
         {memoryCandidates.map((candidate) => <div className={styles.checkRow} key={candidate.id}>
           <input type="checkbox" aria-label={`${ko ? "지침에 반영할 학습 선택" : "Select learning to add"}: ${plainMemoryTitle(candidate.contentNative || candidate.content || candidate.title, ko)}`} checked={memorySelection.has(candidate.id)} disabled={candidate.state !== "eligible" || !snapshot?.writable || Boolean(busy)} onChange={(event) => setMemorySelection((previous) => { const next = new Set(previous); if (event.target.checked) next.add(candidate.id); else next.delete(candidate.id); return next; })} />
@@ -349,8 +352,8 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
         {!memoryCandidates.length && <div className={styles.empty}>{ko ? "메모리 없음" : "No memories"}</div>}
       </div>
       <div className={styles.footerActions}>
-        <select value={targetPath} aria-label={ko ? "반영할 파일" : "File to update"} onChange={(event) => setTargetPath(event.target.value)}><option value="">{ko ? "정식 지침 파일" : "Canonical instruction file"}</option>{instructionFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}</select>
-        <button className={`${styles.button} ${styles.primary}`} disabled={!memorySelection.size || !snapshot?.writable || Boolean(busy) || snapshot.activation === "recovery_required"} onClick={() => void run("prepare-memory", async () => { const proposal = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: [...memorySelection], ...(targetPath ? { targetPath } : {}) }); await refresh(); setMemorySelection(new Set()); await openReview(proposal.id); })}>{busy === "prepare-memory" && <span className={styles.loading} />}{ko ? `변경안 만들기${memorySelection.size ? ` (${memorySelection.size})` : ""}` : `Prepare change${memorySelection.size ? ` (${memorySelection.size})` : ""}`}</button>
+        <Select value={targetPath} aria-label={ko ? "반영할 파일" : "File to update"} onChange={(event) => setTargetPath(event.target.value)}><option value="">{ko ? "정식 지침 파일" : "Canonical instruction file"}</option>{instructionFiles.map((file) => <option value={file.path} key={file.path}>{file.path}</option>)}</Select>
+        <button className={`${styles.button} ${styles.primary}`} disabled={!memorySelection.size || !snapshot?.writable || Boolean(busy) || snapshot.activation === "recovery_required"} onClick={() => void run("prepare-memory", async () => { let proposal; try { proposal = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: [...memorySelection], ...(targetPath ? { targetPath } : {}) }); } catch (failure) { setMemorySelection(new Set()); await refresh().catch(() => undefined); throw failure; } await refresh(); setMemorySelection(new Set()); await openReview(proposal.id); })}>{busy === "prepare-memory" && <span className={styles.loading} />}{ko ? `변경안 만들기${memorySelection.size ? ` (${memorySelection.size})` : ""}` : `Prepare change${memorySelection.size ? ` (${memorySelection.size})` : ""}`}</button>
       </div>
     </aside>
     {selectedMemory ? <MemoryDetail candidate={selectedMemory} locale={locale} agentName={name} agentRole={agent.tagline} proposal={(snapshot?.proposals ?? []).find((proposal) => proposal.memoryEntryIds.includes(selectedMemory.id))} onOpenProposal={(id) => void openReview(id)} /> : <div className={styles.empty}><IconBrain size={35} /><strong>{ko ? "에이전트가 일하며 배운 내용이 여기에 쌓입니다" : "What the agent learns while working collects here"}</strong></div>}
@@ -361,22 +364,26 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       {!snapshot?.proposals.length && <div className={styles.empty}>{ko ? "변경안 없음" : "No proposals"}</div>}
     </div></aside>
     <div className={styles.reviewPane}>{reviewLoading ? <div className={styles.empty}><span className={styles.loading} />{ko ? "변경 파일 확인 중" : "Reading proposed files"}</div> : review ? <>
-      <div className={styles.reviewSummary}><IconLayers size={16} /><div><strong>{review.summary}</strong><div className={styles.meta}><State value={review.status} ko={ko} /><code title={review.proposalDigest}>{shortHash(review.proposalDigest)}</code><span>{review.changes.length}{ko ? "개 파일" : " files"}</span></div></div><button className={styles.iconButton} disabled={Boolean(busy)} onClick={() => void openReview(review.id)} title={ko ? "변경 다시 확인" : "Reload diff"} aria-label={ko ? "변경 다시 확인" : "Reload diff"}><IconRefresh size={14} /></button></div>
+      <div className={styles.reviewSummary}><IconLayers size={16} /><div><strong>{review.summary}</strong><div className={styles.meta}><State value={review.status} ko={ko} /><span>{review.changes.length}{ko ? "개 파일" : " files"}</span></div></div><button className={styles.iconButton} disabled={Boolean(busy)} onClick={() => void openReview(review.id)} title={ko ? "변경 다시 확인" : "Reload diff"} aria-label={ko ? "변경 다시 확인" : "Reload diff"}><IconRefresh size={14} /></button></div>
       {review.lastError && <div className={`${styles.banner} ${styles.error}`}>{review.lastError}</div>}
       {review.status === "stale" && <div className={styles.banner}><span>{ko ? "원본이 바뀌었습니다. 새 원본에서 변경안을 다시 만들어야 합니다." : "The source changed. Prepare a new proposal against the current files."}</span>{review.memoryEntryIds.length > 0 && <button className={styles.button} disabled={Boolean(busy) || dirty} onClick={() => void run("reprepare-memory", async () => { const next = await api().prepareFromMemory({ agentId: agent.id, memoryEntryIds: review.memoryEntryIds }); await refresh(); await openReview(next.id); })}>{ko ? "다시 만들기" : "Prepare again"}</button>}</div>}
       <AgentWorkspaceDiff files={review.changes} locale={locale} activePath={reviewPath} onPathChange={setReviewPath} />
-      <div className={styles.reviewFooter}><span>{ko ? "전체 파일 변경 · 다음 실행부터 적용" : "Whole file changes · Used from the next run"}<br /><code title={review.baseTreeDigest}>{shortHash(review.baseTreeDigest)}</code> → <code title={review.proposedTreeDigest}>{shortHash(review.proposedTreeDigest)}</code></span>
+      <div className={styles.reviewFooter}><span>{ko ? "전체 파일 변경 · 다음 실행부터 적용" : "Whole file changes · Used from the next run"}</span>
         {review.status === "review_ready" && <><button className={styles.button} disabled={Boolean(busy)} onClick={() => void run("reject", async () => { const result = await api().reject({ proposalId: review.id }); setReview({ ...result, reviewedHash: result.proposalDigest }); await refresh(); })}>{ko ? "거절" : "Reject"}</button><button className={`${styles.button} ${styles.primary}`} disabled={Boolean(busy) || !snapshot?.writable || !review.reviewToken || dirty || snapshot.activation === "recovery_required"} onClick={() => void approve()}>{busy === "apply" ? <span className={styles.loading} /> : <IconCheck size={13} />}{ko ? "승인·적용" : "Approve and apply"}</button></>}
       </div>
       {dirty && <div className={styles.banner}>{ko ? "파일 초안을 변경안으로 저장하거나 버린 뒤 승인하세요." : "Save or discard your open file draft before approving."}</div>}
     </> : <div className={styles.empty}><IconLayers size={35} /><strong>{ko ? "검토할 변경을 선택하세요" : "Select a change to review"}</strong></div>}</div>
   </>;
+  // 해시·리비전 ID 같은 기록은 사람에게 보이지 않고 로그로만 남긴다.
+  useEffect(() => {
+    if (snapshot) console.info("[agent-workspace] snapshot", { agentId: agent.id, revision: snapshot.currentRevisionId, treeDigest: snapshot.treeDigest });
+  }, [agent.id, snapshot?.currentRevisionId, snapshot?.treeDigest]); // eslint-disable-line react-hooks/exhaustive-deps
   const renderSync = () => {
     const canSync = comparison && comparison.agentId === agent.id && comparison.target === syncTarget && comparison.direction === syncDirection && (syncDirection === "send" ? comparison.canSend : comparison.canReceive) && Boolean(comparison.reviewedHash && comparison.reviewToken);
     const diff = syncDirection === "send" ? comparison?.outgoingChanges ?? comparison?.changes.map((change) => ({ ...change, operation: change.operation === "create" ? "delete" as const : change.operation === "delete" ? "create" as const : "modify" as const, beforeContent: change.afterContent, afterContent: change.beforeContent, beforeHash: change.afterHash, afterHash: change.beforeHash, beforeExecutable: change.afterExecutable, afterExecutable: change.beforeExecutable })) ?? [] : comparison?.changes ?? [];
     return <div className={styles.sync}>
-      <div className={styles.syncControls}><strong>{ko ? "버전 비교 · 동기화" : "Compare · Sync"}</strong><select value={syncTarget} aria-label={ko ? "비교 위치" : "Compare target"} onChange={(event) => { setSyncTarget(event.target.value as "cloud" | "hub"); setSyncDirection("receive"); }}><option value="cloud">Cloud</option><option value="hub">Hub</option></select><select value={syncDirection} aria-label={ko ? "동기화 방향" : "Sync direction"} onChange={(event) => setSyncDirection(event.target.value as "receive" | "send")}><option value="receive">{ko ? "로컬로 받기" : "Receive locally"}</option><option value="send">{syncTarget === "cloud" ? (ko ? "Cloud에 저장" : "Save to Cloud") : (ko ? "Hub 공개 검토" : "Review Hub publication")}</option></select><button className={styles.iconButton} disabled={compareLoading || Boolean(busy)} onClick={() => void compare()} title={ko ? "원격 상태 조회" : "Refresh remote state"} aria-label={ko ? "원격 상태 조회" : "Refresh remote state"}><IconRefresh size={15} /></button></div>
-      <div className={styles.syncGraph}><div className={styles.syncNode}><IconMonitor size={23} /><span>Local</span><code title={snapshot?.treeDigest}>{shortHash(snapshot?.treeDigest)}</code><code title={snapshot?.currentRevisionId}>rev {shortHash(snapshot?.currentRevisionId)}</code></div><div className={styles.syncEdge}>{compareLoading ? <span className={styles.loading} /> : <State value={comparison?.state ?? "unknown"} ko={ko} />}<svg viewBox="0 0 90 15" aria-hidden="true"><path d="M0 7.5H90" /></svg></div><div className={styles.syncNode}>{syncTarget === "hub" ? <IconGithub size={23} /> : <IconLayers size={23} />}<span>{syncTarget === "hub" ? "Hub" : "Cloud"}</span><code title={comparison?.remoteTreeDigest}>{shortHash(comparison?.remoteTreeDigest)}</code><code title={comparison?.remoteRevisionId}>rev {shortHash(comparison?.remoteRevisionId)}</code></div></div>
+      <div className={styles.syncControls}><strong>{ko ? "버전 비교 · 동기화" : "Compare · Sync"}</strong><Select value={syncTarget} aria-label={ko ? "비교 위치" : "Compare target"} onChange={(event) => { setSyncTarget(event.target.value as "cloud" | "hub"); setSyncDirection("receive"); }}><option value="cloud">Cloud</option><option value="hub">Hub</option></Select><Select value={syncDirection} aria-label={ko ? "동기화 방향" : "Sync direction"} onChange={(event) => setSyncDirection(event.target.value as "receive" | "send")}><option value="receive">{ko ? "로컬로 받기" : "Receive locally"}</option><option value="send">{syncTarget === "cloud" ? (ko ? "Cloud에 저장" : "Save to Cloud") : (ko ? "Hub 공개 검토" : "Review Hub publication")}</option></Select><button className={styles.iconButton} disabled={compareLoading || Boolean(busy)} onClick={() => void compare()} title={ko ? "원격 상태 조회" : "Refresh remote state"} aria-label={ko ? "원격 상태 조회" : "Refresh remote state"}><IconRefresh size={15} /></button></div>
+      <div className={styles.syncGraph}><div className={styles.syncNode}><IconMonitor size={23} /><span>Local</span></div><div className={styles.syncEdge}>{compareLoading ? <span className={styles.loading} /> : <State value={comparison?.state ?? "unknown"} ko={ko} />}<svg viewBox="0 0 90 15" aria-hidden="true"><path d="M0 7.5H90" /></svg></div><div className={styles.syncNode}>{syncTarget === "hub" ? <IconCloud size={23} /> : <IconLayers size={23} />}<span>{syncTarget === "hub" ? "Hub" : "Cloud"}</span></div></div>
       {comparison?.reason && <div className={styles.banner}><IconAlertTriangle size={13} /><span>{comparisonReason(comparison.reason, ko)}</span>{["cloud_not_linked", "hub_not_linked"].includes(comparison.reason) && <Link className={styles.button} href={firm ? `/cloud?team=${encodeURIComponent(firm.id)}` : `/cloud?agent=${encodeURIComponent(agent.parentTeamId || agent.id)}`}>{syncTarget === "cloud" ? (ko ? "Cloud에 처음 저장…" : "First Cloud save…") : (ko ? "Hub에 처음 게시…" : "First Hub publication…")}</Link>}{comparison.reason === "cloud_publish_base_required" && <button className={styles.button} onClick={() => { setSyncTarget("cloud"); setSyncDirection("send"); }}>{ko ? "Cloud 저장 검토" : "Review Cloud save"}</button>}{comparison.reason === "sign_in_required" && <button className={styles.button} disabled={Boolean(busy)} onClick={() => void run("sign-in", async () => { const bridge = ipc(); if (!bridge) throw new Error(ko ? "로그인 브리지를 사용할 수 없습니다." : "Sign-in bridge unavailable."); await bridge.auth.signInWithGoogle(); await compare(); })}>{ko ? "로그인" : "Sign in"}</button>}{comparison.reason === "sync_outcome_pending" && <button className={styles.button} disabled={compareLoading || Boolean(busy)} onClick={() => void compare()}>{ko ? "원격 상태 다시 확인" : "Recheck remote state"}</button>}</div>}
       {diff.length ? <AgentWorkspaceDiff files={diff} locale={locale} beforeLabel={syncDirection === "send" ? `${syncTarget === "hub" ? "Hub" : "Cloud"} · ${ko ? "현재" : "Current"}` : `Local · ${ko ? "현재" : "Current"}`} afterLabel={syncDirection === "send" ? (ko ? "전송 후" : "After transfer") : (ko ? "로컬 적용 후" : "After local apply")} /> : <div className={styles.empty}>{compareLoading ? (ko ? "원격 파일 비교 중" : "Comparing remote files") : stateLabel(comparison?.state ?? "unknown", ko)}</div>}
       <div className={styles.reviewFooter}><span>{syncTarget === "hub" && syncDirection === "send" ? (ko ? "검토한 공개용 파일만 게시합니다." : "Publish only the reviewed public files.") : (ko ? "검토한 파일만 동기화합니다." : "Sync only the reviewed files.")}</span>{comparison?.proposalId && <button className={styles.button} onClick={() => void openReview(comparison.proposalId!)}>{ko ? "변경안 검토" : "Review proposal"}</button>}<button className={`${styles.button} ${styles.primary}`} disabled={!canSync || Boolean(busy) || dirty || (syncDirection === "receive" && !snapshot?.writable) || snapshot?.activation === "recovery_required"} onClick={() => void run("sync", async () => {
@@ -393,7 +400,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     const history = [...(snapshot?.history ?? [])].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
     return <div className={styles.history}><div className={styles.paneHeader}><IconClock size={14} /><strong>{ko ? "파일 변경 이력" : "File revision history"}</strong><span>{history.length}</span></div>{history.map((revision, index) => {
       const linked = revision.parentRevisionIds.includes(history[index + 1]?.id);
-      return <div className={styles.historyRow} key={revision.id}><div className={styles.revisionGraph}><svg viewBox="0 0 25 80" aria-hidden="true">{linked && <path d="M12.5 14V80" />}<circle cx="12.5" cy="14" r="4" /></svg></div><div className={styles.revisionBody}><div className={styles.revisionTitle}><strong>{revision.summary}</strong>{snapshot?.currentRevisionId === revision.id && <span className={styles.state}>HEAD</span>}{revision.proposalId && <button className={styles.button} onClick={() => void openReview(revision.proposalId!)}>{ko ? "변경 보기" : "View change"}</button>}{snapshot?.currentRevisionId !== revision.id && <button className={styles.button} disabled={Boolean(busy) || dirty || !snapshot?.writable} onClick={() => void run("prepare-rollback", async () => { const proposal = await api().prepareRollback({ agentId: agent.id, revisionId: revision.id }); await refresh(); await openReview(proposal.id); })}>{ko ? "되돌리기 검토" : "Review rollback"}</button>}</div><div className={styles.meta}><span>{revision.operation}</span><code title={revision.id}>{shortHash(revision.id)}</code><span>{timeLabel(revision.createdAt, locale)}</span></div><div className={styles.meta}><code title={revision.treeDigest}>{shortHash(revision.treeDigest)}</code>{revision.parentRevisionIds.length > 0 && <span title={revision.parentRevisionIds.join("\n")}>← {revision.parentRevisionIds.map((id) => shortHash(id)).join(", ")}</span>}</div></div></div>;
+      return <div className={styles.historyRow} key={revision.id}><div className={styles.revisionGraph}><svg viewBox="0 0 25 80" aria-hidden="true">{linked && <path d="M12.5 14V80" />}<circle cx="12.5" cy="14" r="4" /></svg></div><div className={styles.revisionBody}><div className={styles.revisionTitle}><strong>{revision.summary}</strong>{snapshot?.currentRevisionId === revision.id && <span className={styles.state}>HEAD</span>}{revision.proposalId && <button className={styles.button} onClick={() => void openReview(revision.proposalId!)}>{ko ? "변경 보기" : "View change"}</button>}{snapshot?.currentRevisionId !== revision.id && <button className={styles.button} disabled={Boolean(busy) || dirty || !snapshot?.writable} onClick={() => void run("prepare-rollback", async () => { const proposal = await api().prepareRollback({ agentId: agent.id, revisionId: revision.id }); await refresh(); await openReview(proposal.id); })}>{ko ? "되돌리기 검토" : "Review rollback"}</button>}</div><div className={styles.meta}><span>{revisionOperationLabel(revision.operation, ko)}</span><span>{timeLabel(revision.createdAt, locale)}</span></div></div></div>;
     })}{!history.length && <div className={styles.empty}>{ko ? "파일 이력 없음" : "No file revisions"}</div>}</div>;
   };
   const navigation: Array<{ key: AgentWorkspaceView; label: string; icon: ReactNode; count?: number }> = [
@@ -407,7 +414,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
     <header className={styles.toolbar}>
       <button className={styles.iconButton} aria-label={ko ? "에이전트 목록 접기/펴기" : "Toggle agent roster"} title={ko ? "에이전트 목록" : "Agent roster"} onClick={onToggleRoster}><IconSidebar size={17} /></button>
       <div className={styles.agentTitle}><AgentAvatar name={name} size={25} /><strong>{name}</strong>{agent.sourceMissingSince && <IconAlertTriangle size={13} />}</div>
-      <div className={styles.locations}><button className={`${styles.location} ${snapshot ? styles.locationConnected : ""}`} title={ko ? "이 설치의 로컬 파일" : "Local files for this installation"} onClick={() => setView("files")}><IconMonitor size={12} />Local</button>{snapshot?.cloudId && <button className={`${styles.location} ${styles.locationConnected}`} title={ko ? "연결된 Cloud 버전 비교" : "Compare the linked Cloud version"} onClick={() => { setSyncTarget("cloud"); setView("sync"); }}><IconLayers size={12} />Cloud</button>}{snapshot?.hubRef && <button className={`${styles.location} ${styles.locationConnected}`} title={ko ? "연결된 Hub 릴리스 비교" : "Compare the linked Hub release"} onClick={() => { setSyncTarget("hub"); setSyncDirection("receive"); setView("sync"); }}><IconGithub size={12} />Hub</button>}</div>
+      <div className={styles.locations}><button className={`${styles.location} ${snapshot ? styles.locationConnected : ""}`} title={ko ? "이 설치의 로컬 파일" : "Local files for this installation"} onClick={() => setView("files")}><IconMonitor size={12} />Local</button>{snapshot?.cloudId && <button className={`${styles.location} ${styles.locationConnected}`} title={ko ? "연결된 Cloud 버전 비교" : "Compare the linked Cloud version"} onClick={() => { setSyncTarget("cloud"); setView("sync"); }}><IconLayers size={12} />Cloud</button>}{snapshot?.hubRef && <button className={`${styles.location} ${styles.locationConnected}`} title={ko ? "연결된 Hub 릴리스 비교" : "Compare the linked Hub release"} onClick={() => { setSyncTarget("hub"); setSyncDirection("receive"); setView("sync"); }}><IconCloud size={12} />Hub</button>}</div>
       {projectControl}<button className={styles.iconButton} disabled={loading || Boolean(busy)} aria-label={ko ? "파일 새로고침" : "Refresh workspace"} title={ko ? "파일 새로고침" : "Refresh workspace"} onClick={() => void run("refresh", async () => { await refresh(); if (path && !dirty) await openFile(path, true); })}><IconRefresh size={15} /></button><button className={`${styles.iconButton} ${inspector ? styles.selected : ""}`} onClick={() => setInspector((current) => !current)} title={ko ? "속성" : "Inspector"} aria-label={ko ? "속성" : "Inspector"} aria-pressed={inspector}><IconSettings size={17} /></button>
     </header>
     {error && <div className={`${styles.banner} ${styles.error}`} role="alert"><IconAlertTriangle size={14} /><span>{error}</span><button className={styles.iconButton} aria-label={ko ? "오류 닫기" : "Dismiss error"} onClick={() => setError("")}><IconClose size={13} /></button></div>}
@@ -437,7 +444,7 @@ export function AgentWorkspace({ agent, name, locale, initialView = "files", onT
       </main>
       {inspector && <><button className={`${styles.scrim} ${styles.inspectorScrim}`} aria-label={ko ? "속성 닫기" : "Close inspector"} onClick={() => setInspector(false)} /><AgentWorkspaceInspector agent={agent} name={name} locale={locale} snapshot={snapshot} firm={firm} org={org} binding={binding} runtimes={runtimes} overrides={overrides} onClose={() => setInspector(false)} onRename={onRename} onRemove={onRemove} onOverridesChange={onOverridesChange} onNotice={setNotice} /></>}
     </div>
-    <footer className={styles.statusbar}><span>{busy ? (ko ? "처리 중…" : "Working…") : dirty ? (ko ? "저장 전 파일 초안" : "Unsaved file draft") : snapshot?.activation === "run_active" ? (ko ? "실행 중 · 새 변경은 다음 실행부터" : "Run active · Changes apply to the next run") : snapshot ? (ko ? "로컬 파일 확인됨" : "Local files read") : (ko ? "파일 상태 미확인" : "File state unknown")}</span><span>{path ? `${lineCount} ${ko ? "줄" : "lines"}` : ""}</span><code title={snapshot?.treeDigest}>{shortHash(snapshot?.treeDigest)}</code></footer>
+    <footer className={styles.statusbar}><span>{busy ? (ko ? "처리 중…" : "Working…") : dirty ? (ko ? "저장 전 파일 초안" : "Unsaved file draft") : snapshot?.activation === "run_active" ? (ko ? "실행 중 · 새 변경은 다음 실행부터" : "Run active · Changes apply to the next run") : snapshot ? (ko ? "로컬 파일 확인됨" : "Local files read") : (ko ? "파일 상태 미확인" : "File state unknown")}</span><span>{path ? `${lineCount} ${ko ? "줄" : "lines"}` : ""}</span></footer>
     {quickOpen && <PopupFrame title={ko ? "파일 찾기" : "Find file"} icon={<IconSearch size={20} />} closeLabel={ko ? "닫기" : "Close"} onClose={() => setQuickOpen(false)} busy={Boolean(busy)}>
       <div className={styles.popupSearch}><IconSearch size={17} /><input autoFocus value={quickQuery} aria-label={ko ? "파일 이름" : "File name"} placeholder={ko ? "이름 또는 경로" : "Name or path"} onChange={(event) => setQuickQuery(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") { const first = files.find((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())); if (first) void openFile(first.path).then((opened) => { if (opened) { setQuickOpen(false); setView("files"); } }); } }} /><kbd>↵</kbd></div>
       <div className={styles.popupFiles}>{files.filter((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())).map((file) => <button className={styles.popupFile} key={file.path} onClick={() => void openFile(file.path).then((opened) => { if (opened) { setQuickOpen(false); setView("files"); } })}><IconFileText size={18} /><span><strong>{file.path.split("/").at(-1)}</strong><small>{file.path}</small></span></button>)}{!files.some((file) => file.kind === "file" && file.path.toLowerCase().includes(quickQuery.toLowerCase())) && <div className={styles.empty}><IconSearch size={24} />{ko ? "일치하는 파일 없음" : "No matching files"}</div>}</div>
@@ -460,6 +467,7 @@ function MemoryDetail({ candidate, locale, agentName, agentRole, proposal, onOpe
   const ko = locale === "ko";
   const learned = plainMemoryText(candidate.contentNative || candidate.content, ko);
   const technical = candidate.evidence.filter(isTechnicalEvidence);
+  useEffect(() => { if (technical.length) console.info("[agent-workspace] memory technical evidence", { memoryId: candidate.id, technical }); }, [candidate.id]); // eslint-disable-line react-hooks/exhaustive-deps
   const readable = candidate.evidence.filter((line) => !isTechnicalEvidence(line)).map((line) => plainMemoryText(line, ko));
   const role = (agentRole ?? "").trim();
   return <article className={styles.detail}><h2>{plainMemoryTitle(candidate.contentNative || candidate.content || candidate.title, ko, 90)}</h2><div className={styles.meta}><State value={candidate.state} ko={ko} /><span>{memoryKindLabel(candidate.kind, ko)}</span></div>
@@ -472,7 +480,6 @@ function MemoryDetail({ candidate, locale, agentName, agentRole, proposal, onOpe
     <h3>{ko ? "지침에 반영하면" : "If you add it to its instructions"}</h3>
     <p className={styles.detailContent}>{memoryImpact(candidate.kind, ko)}{ko ? " 승인하기 전에는 아무것도 바뀌지 않고, 반영하면 다음 실행부터 적용됩니다." : " Nothing changes until you approve, and it applies from the next run."}</p>
     {readable.length > 0 && <><h3>{ko ? "이렇게 알게 됐어요" : "How it found out"}</h3><ul className={styles.evidence}>{readable.map((line, index) => <li key={index}>{line}</li>)}</ul></>}
-    {technical.length > 0 && <details className={styles.technical}><summary>{ko ? `기술 정보 (${technical.length})` : `Technical details (${technical.length})`}</summary><ul className={styles.evidence}>{technical.map((line, index) => <li key={index}>{line}</li>)}</ul></details>}
     {proposal && <><h3>{ko ? "연결된 변경안" : "Linked proposal"}</h3><button className={styles.button} onClick={() => onOpenProposal(proposal.id)}><IconLayers size={13} />{proposal.summary}</button></>}
   </article>;
 }

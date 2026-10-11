@@ -24,6 +24,7 @@ import { OneEditTabs, type OneEditTab } from "./mail/OneMailTabs";
 import { confirmMailAction } from "./mail/mailConfirm";
 import { tFor } from "@/lib/i18n";
 import styles from "./OneCreateAgentDialog.module.css";
+import { Select } from "@/components/Select";
 
 type AvatarMode = "original" | "sketch" | "generated" | "upload";
 type DraftStatus = "idle" | "saving" | "saved" | "error";
@@ -890,7 +891,7 @@ export function OneCreateAgentDialog({
         */}
         {!editOne && <label className={styles.modelPicker}>
           <span>{ko ? "LLM 모델" : "LLM model"}</span>
-          <select
+          <Select
             value={runtimeSelection ? runtimeSelectionKey(runtimeSelection) : ""}
             disabled={modelsLoading}
             onChange={(event) => {
@@ -902,7 +903,7 @@ export function OneCreateAgentDialog({
               ? (ko ? "연결된 모델을 불러오는 중…" : "Loading connected models…")
               : (ko ? "자동 · Worker 런타임 우선" : "Automatic · worker runtime first")}</option>
             {modelOptions.map((option) => <option key={option.key} value={option.key}>{option.label}{option.detail ? ` · ${option.detail}` : ""}</option>)}
-          </select>
+          </Select>
           <small>{ko
             ? "선택한 모델이 안 되면 Worker 런타임, 그다음 연결된 정상 런타임을 사용합니다."
             : "If this model is unavailable, One uses the worker runtime, then another connected working runtime."}</small>

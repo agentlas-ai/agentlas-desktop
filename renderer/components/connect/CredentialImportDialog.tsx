@@ -32,6 +32,7 @@ import {
   IconPuzzle,
   IconRefresh,
 } from "@/components/Icon";
+import { Select } from "@/components/Select";
 
 type ImportCategory = "passwords" | "cookies" | "history" | "extensions";
 type ImportResult = {
@@ -355,10 +356,10 @@ export function CredentialImportDialog({
             <div className="cid-source-row">
               <label htmlFor="cid-profile">{ko ? "원본" : "Source"}</label>
               <div className="cid-select-wrap">
-                <select id="cid-profile" title={(() => { const p = profiles.find((item) => item.id === profileId); return p ? `${p.browser} · ${p.displayName}` : undefined; })()} value={profileId ?? ""} disabled={importingNow || profiles.length === 0} onChange={(event) => { setProfileId(event.target.value); setConsented(false); }}>
+                <Select id="cid-profile" title={(() => { const p = profiles.find((item) => item.id === profileId); return p ? `${p.browser} · ${p.displayName}` : undefined; })()} value={profileId ?? ""} disabled={importingNow || profiles.length === 0} onChange={(event) => { setProfileId(event.target.value); setConsented(false); }}>
                   {profiles.length === 0 && <option value="">{scanning ? (ko ? "브라우저를 찾는 중…" : "Finding browsers…") : (ko ? "프로필 없음" : "No profile found")}</option>}
                   {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.browser} · {profile.displayName}</option>)}
-                </select>
+                </Select>
                 <IconChevronDown size={16}/>
               </div>
             </div>

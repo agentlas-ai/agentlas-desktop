@@ -5,6 +5,7 @@ import type { OneSupervisorAPI } from "./one-supervisor";
 import type { OneWindowAPI } from "./one-window";
 import type { OneHarnessAPI } from "./one-harness";
 import type { OneContextAPI } from "./one-context";
+import type { OneCapabilitiesAPI } from "./one-capabilities";
 import type { OnePersonalDataNativeAPI } from './one-personal-native';
 import type { OneVaultNativeAPI } from './one-vault';
 import type { OneProviderNativeAPI } from './one-provider-native';
@@ -8206,6 +8207,8 @@ export interface AgentlasIpc {
   oneHarness: OneHarnessAPI;
   /** Explicit, expiring OS context and task-bound interaction state. */
   oneContext: OneContextAPI;
+  /** One's capability inventory: skills, plugins, hooks, memory and connectors, each with an on/off switch. */
+  oneCapabilities: OneCapabilitiesAPI;
   onePersonalData: OnePersonalDataNativeAPI;
   oneVault: OneVaultNativeAPI;
   oneProvider: OneProviderNativeAPI;

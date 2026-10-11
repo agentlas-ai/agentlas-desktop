@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { IconFileText, IconLayers } from "@/components/Icon";
 import { diffLines, splitDiffRows, type LineDiffRow } from "./line-diff";
 import styles from "./AgentWorkspace.module.css";
+import { Select } from "@/components/Select";
 
 export type WorkspaceDiffFile = { path: string; beforeContent: string | null; afterContent: string | null; beforeHash?: string | null; afterHash?: string | null; binary?: boolean; beforeExecutable?: boolean; afterExecutable?: boolean; operation?: "create" | "modify" | "delete" };
 
@@ -54,9 +55,9 @@ export function AgentWorkspaceDiff({ files, locale, activePath, onPathChange, be
   return <div className={styles.diff} data-testid="agent-workspace-diff">
     <div className={styles.diffToolbar}>
       <IconFileText size={15} />
-      <select aria-label={ko ? "변경 파일" : "Changed file"} value={file?.path ?? ""} onChange={(event) => { setLocalPath(event.target.value); onPathChange?.(event.target.value); }}>
+      <Select aria-label={ko ? "변경 파일" : "Changed file"} value={file?.path ?? ""} onChange={(event) => { setLocalPath(event.target.value); onPathChange?.(event.target.value); }}>
         {files.map((item) => <option key={item.path} value={item.path}>{item.path}</option>)}
-      </select>
+      </Select>
       {file?.operation && <span className={styles.state}>{file.operation === "create" ? (ko ? "새 파일" : "Create") : file.operation === "delete" ? (ko ? "삭제" : "Delete") : (ko ? "수정" : "Modify")}</span>}
       <span className={styles.addCount} title={ko ? "현재 파일의 추가 줄" : "Added lines in this file"}>+{totals.add}</span><span className={styles.removeCount} title={ko ? "현재 파일의 삭제 줄" : "Removed lines in this file"}>−{totals.remove}</span>
       <button className={styles.iconButton} title={split ? (ko ? "통합 diff" : "Unified diff") : (ko ? "분할 diff" : "Split diff")} aria-label={split ? (ko ? "통합 diff" : "Unified diff") : (ko ? "분할 diff" : "Split diff")} onClick={() => setMode(split ? "unified" : "split")}><IconLayers size={16} /></button>

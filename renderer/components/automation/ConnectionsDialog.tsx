@@ -30,6 +30,7 @@ import type {
   GraphConnectionReportShape,
   ProviderTask,
 } from "@shared/graph-tool-binding";
+import { Select } from "@/components/Select";
 
 export function ConnectionsDialog({ automationId, locale, onClose }: {
   automationId: string;
@@ -626,7 +627,7 @@ function AgentSwapSection({ automationId, agents, ko, locale, onOutcome }: {
       {agents.map((agent) => (
         <label key={agent.nodeId} style={{ display: "grid", gap: 3 }}>
           <span style={{ fontSize: 11, color: "var(--muted-deep)" }}>{agent.nodeLabel}</span>
-          <select
+          <Select
             data-testid={`connections-agent-${agent.nodeId}`}
             disabled={busy || !roster.length}
             value={agent.ref ?? ""}
@@ -641,7 +642,7 @@ function AgentSwapSection({ automationId, agents, ko, locale, onOutcome }: {
             {roster.map((row) => (
               <option key={`${row.targetType}:${row.ref}`} value={row.ref}>{row.label}</option>
             ))}
-          </select>
+          </Select>
 
           {/* ★찾아서 보여주기만 한다. 붙이는 것은 사람이 누른다(커넥터 C23). */}
           {agent.recommendQuery ? (
