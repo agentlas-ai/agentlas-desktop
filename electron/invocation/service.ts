@@ -151,6 +151,7 @@ import {
   type InvocationAdmissionIdentity,
 } from "../store/invocation-admissions";
 import { ownerVisiblePrompt } from "../one/owner-prompt";
+import { claimDeferredSystemRelays, deferSystemRelay, peekDeferredSystemRelays, releaseDeferredSystemRelays } from "./deferred-system-relays";
 import { chatFilePrompt, chatFileImages, validateChatAttachmentSelection, listChatFileSnapshot } from "../store/chat-message-attachments";
 import { findAutomationByGoalId, toggleAutomation } from "../store/automations";
 import { acknowledgeGoalExecutionResume, captureNativeGoalStopOwner, currentAutomationGoalExecutionOwnerMatches, nativeGoalStopOwnerMatches, snapshotAutomationGoalRunStops,
@@ -2313,6 +2314,18 @@ export class InvocationService {
     const attachmentCapabilitySummary = attachmentDescriptors.length > 0
       ? `[ATTACHMENT CAPABILITIES - host verified]\n${attachmentDescriptors.map((item, index) => `${index + 1}. ${item}`).join("\n")}\n[/ATTACHMENT CAPABILITIES]`
       : undefined;
+    /*
+     * Relays a waiting Goal refused earlier (deferred-system-relays.ts) ride on this turn's Main-only context, once.
+     * Only a turn that can claim them reads them; the claim is made right after the waiting-Goal guard below.
+     */
+    const deferredRelayEligible = !backgroundObservation && !executionContext && !workspaceBinding
+      && req.agentAppMode !== true && !effectObservation;
+    let deferredRelays: ReturnType<typeof peekDeferredSystemRelays> = null;
+    if (deferredRelayEligible) {
+      try { deferredRelays = peekDeferredSystemRelays(chat.id, 15_000 - (oneProfileContext?.length ?? 0) - 2); }
+      catch (error) { console.warn("[invocation] deferred relays unreadable; the turn runs without them:", error); }
+    }
+    if (deferredRelays) oneProfileContext = [oneProfileContext, deferredRelays.block].filter(Boolean).join("\n\n");
     const runReq: OneInvocationRequest = {
       ...invocationRequest,
       runId,
@@ -2880,7 +2893,23 @@ export class InvocationService {
     if (!localUserTurn && !record.background && !executionContext && !runReq.agentAppMode && !effectObservation
       && goalLongRun?.rootChatId === chat.id && goalLongRun.surface !== "science"
       && ["waiting_tool", "blocked", "waiting_user"].includes(goalLongRun.status)) {
+      /*
+       * The refusal stands, but a relay is a teammate's work handed back or a room follow-up for One: dropping it lost
+       * that work for good (group room 8f3e09ee, 1.3.4, 2026-10-12). Park it with the cause; the chat's next real turn
+       * carries it as context. Host continuations (task turns) are not relays and are not parked.
+       */
+      if (invocationRequest.oneMode && invocationRequest.taskIntent === "conversation") {
+        try {
+          deferSystemRelay({ chatId: chat.id, text: invocationRequest.userPrompt, cause: `goal_${goalLongRun.status}`,
+            goalStatus: goalLongRun.status, originRunId: runId });
+        } catch (deferError) { console.warn("[invocation] refused system relay could not be parked:", deferError); }
+      }
       throw new Error("goal_waiting_system_start_refused");
+    }
+    if (deferredRelays) {
+      try {
+        if (claimDeferredSystemRelays(deferredRelays.ids, runId)) startBoundary.cleanups?.push(() => { releaseDeferredSystemRelays(runId); });
+      } catch (claimError) { console.warn("[invocation] deferred relays were claimed by another turn first:", claimError); }
     }
     let goalLongRunTask = goalLongRun ? listLongRunTasks(goalLongRun.id, true)[0] ?? null : null;
     // An ongoing Goal's episode needs an open task, or no controller attempt is bound and its cycle wait is refused

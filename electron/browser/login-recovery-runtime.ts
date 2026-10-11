@@ -9,7 +9,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { createHash } from "node:crypto";
-import { session as electronSession } from "electron";
+import type { Session } from "electron";
 import type { McpInvocationEvent } from "../../shared/types";
 import { registrableDomain } from "../../shared/registrable-domain";
 import type { NativeBrowserRelayGrant } from "./native-cdp-relay";
@@ -28,6 +28,13 @@ import {
   type TargetedImportReport,
 } from "./login-recovery";
 
+// Lazy on purpose: the background service runs the result-boundary login-wall check (mcp/client) and has no
+// `electron` module. A top-level import failed every daemon-run browser and computer-use result with
+// MODULE_NOT_FOUND (production 1.3.5, 2026-10-12, diagnostics/mcp-proxy.log result_withheld). Only Main reaches
+// the session calls below; the daemon goes through the native grant's broker first.
+const electronSession = {
+  fromPartition: (partition: string): Session => (require("electron") as typeof import("electron")).session.fromPartition(partition),
+};
 const { WebSocket } = require("ws") as { WebSocket: new (url: string, options?: { perMessageDeflate?: boolean; maxPayload?: number }) => {
   on(event: "open" | "close" | "error", listener: (...args: unknown[]) => void): void;
   on(event: "message", listener: (data: unknown) => void): void;

@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.7 — 2026-10-12
+
+- One, Hope and teammates working in the background can use the browser and computer use again: every result was being held back because a login check could not load outside the app window.
+- A teammate report or room message that arrives while a goal is waiting is kept and handed to the goal's next turn, instead of being dropped.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.6 — 2026-10-12
 
 - Hope and One can change Agentlas settings and features for you even while they work in the background: the request runs in the app window through the same checks as a click, instead of scripting your screen.

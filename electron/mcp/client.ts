@@ -2312,9 +2312,9 @@ async function runMcpInvocationInContext(
     if (!login || !nativeBrowserGrant || !["agentlas-browser", "cua-driver"].includes(input.catalogId ?? "")) return;
     const observed = login.beginObservation();
     try {
-    const { recoverLoginWallsNow, ownerLoginCardNotice } = await import("../browser/login-recovery-runtime");
-    let outcomes: Awaited<ReturnType<typeof recoverLoginWallsNow>>;
+    let outcomes: Awaited<ReturnType<typeof import("../browser/login-recovery-runtime").recoverLoginWallsNow>>;
     try {
+      const { recoverLoginWallsNow, ownerLoginCardNotice } = await import("../browser/login-recovery-runtime");
       outcomes = await recoverLoginWallsNow({ runId: req.runId, chatId: req.chatId,
         nodeId: executionContext?.nodeId, signal: login.ownerSignal, nativeGrant: nativeBrowserGrant,
         onPrerequisiteRestored: ref => login.restored(ref),
@@ -2322,9 +2322,12 @@ async function runMcpInvocationInContext(
       });
     } catch (error) {
       // Looking for a login wall is best effort; failing to look must not cost the result the tool already produced.
-      // Production 1.3.3: all 26 daemon-run browser and computer-use calls were reset at this boundary (window runs: 0 of 794).
+      // Production 1.3.3: all 26 daemon-run browser and computer-use calls were reset at this boundary (window runs: 0 of 794);
+      // 1.3.5 named the cause: the recovery module failed to load in the daemon (MODULE_NOT_FOUND).
       login.assertRunnable();
-      const code = error instanceof Error && /^[A-Za-z0-9_.:-]{1,80}$/.test(error.message) ? error.message : "unknown";
+      const errorCode = (error as { code?: unknown } | null)?.code;
+      const code = typeof errorCode === "string" && /^[A-Z0-9_]{2,40}$/.test(errorCode) ? errorCode
+        : error instanceof Error && /^[A-Za-z0-9_.:-]{1,80}$/.test(error.message) ? error.message : "unknown";
       tryRecordRunEvent({ runId: req.runId!, chatId: req.chatId, nodeId: executionContext?.nodeId, kind: "browser_login_observation_failed",
         sourceEventId: `browser-login-observation:${randomUUID()}`, payload: { catalogId: input.catalogId, toolName: input.toolName, code } });
       return;
