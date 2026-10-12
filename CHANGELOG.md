@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.9 — 2026-10-12
+
+- A chat whose turn was cut off by a crash or a forced restart can run again. Before, the app kept refusing every later turn of that chat, and a room's goal could not resume.
+- A model turn that prints nothing at all for 20 minutes is ended and retried instead of holding the room for hours. A long command the model started (a video render, for example) is not counted as silence.
+- One and Hope running in the background on an Agentlas model can use tools again with full access. Every such call was being refused as "not approved for this run". A refusal now names its reason.
+- Answering a question card resumes the follow-up when you open the chat, if it never started. A goal you stopped after answering stays stopped.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.8 — 2026-10-12
 
 - Agentlas model turns record how much of their input was read from the prompt cache, so the run receipt shows cached input instead of reading as uncached.

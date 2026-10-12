@@ -108,7 +108,27 @@ export function createInvocationRunOwnerStore(ports: InvocationRunOwnerStorePort
       .run(state, now(), expected.chatId, expected.runId, expected.ownerId, expected.ownerKind, expected.leaseId).changes === 1;
   }
 
-  return { claim, getActiveOwner, getRunOwner, getOwnerByRunId, getPreviousOwner, listActiveOwners,
+  /** Leases a previous process of `ownerKind` left active or settling because it died without settling them (crash,
+   * forced reboot). Only a caller that has proven it is now the sole live process of that kind may release them:
+   * Desktop under Electron's single-instance lock, the daemon after it won the control socket. Measured 2026-10-12:
+   * after a forced reboot two rooms stayed refused with invocation_cleanup_pending on every resume, because nothing
+   * ever released the dead Desktop's rows and the chat's active-owner index stayed taken. */
+  function releaseAbandoned(ownerKind: InvocationRunOwner["ownerKind"], liveOwnerId: string): InvocationRunOwner[] {
+    if (!validId(liveOwnerId) || !["desktop", "daemon", "terminal"].includes(ownerKind)) {
+      throw new Error("invocation_owner_identity_invalid");
+    }
+    return ports.getDb().transaction(() => {
+      const rows = (ports.getDb().prepare(`SELECT * FROM invocation_run_owners
+        WHERE owner_kind = ? AND owner_id <> ? AND state IN ('active','settling')`)
+        .all(ownerKind, liveOwnerId) as OwnerRow[]).map(row => owner(row)!);
+      const release = ports.getDb().prepare(`UPDATE invocation_run_owners SET state = 'released', updated_at = ?
+        WHERE run_id = ? AND lease_id = ? AND state IN ('active','settling')`);
+      for (const row of rows) release.run(now(), row.runId, row.leaseId);
+      return rows;
+    })();
+  }
+
+  return { claim, getActiveOwner, getRunOwner, getOwnerByRunId, getPreviousOwner, listActiveOwners, releaseAbandoned,
     markSettling: (expected: InvocationRunOwner) => transition(expected, "settling"),
     release: (expected: InvocationRunOwner) => transition(expected, "released") };
 }

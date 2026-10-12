@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { onHostShutdown } from "../host-lifecycle";
 import { reconcileHostPausedLongRuns } from "./startup-reconciler";
+import { invocationProcessOwner, invocationRunOwners } from "../store/invocation-run-owners";
 import {
   pauseActiveDesktopLongRunsForAppShutdown,
   recoverInterruptedDesktopLongRunsAtStartup,
@@ -58,6 +59,18 @@ export function initializeAppRuntimeCoordinator(): { appInstanceId: string; reco
   try { assertExclusive(); exclusive = true; }
   catch { /* A non-exclusive host may own new work, but cannot adopt old work. */ }
   if (exclusive) recoveredRunIds = recoverInterruptedDesktopLongRunsAtStartup(appInstanceId, assertExclusive);
+  if (exclusive) {
+    // The same lock proves the Desktop that held these run leases is gone. Left in place they refuse every later
+    // turn of their chat (invocation_cleanup_pending), including the Goal resumes recovered just above.
+    try {
+      const released = invocationRunOwners.releaseAbandoned("desktop", invocationProcessOwner().ownerId);
+      if (released.length > 0) {
+        console.warn(`[invocation] released ${released.length} run lease(s) a previous Desktop left unsettled: ${released.map((owner) => owner.runId).join(", ")}`);
+      }
+    } catch (error) {
+      console.error("[invocation] abandoned run lease release failed", error);
+    }
+  }
   initialized = true;
   admissionOpen = true;
   /*

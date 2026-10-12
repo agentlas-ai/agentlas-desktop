@@ -1497,6 +1497,8 @@ function OneSessionsShell() {
   // Runs whose terminal this screen already settled: Main can still list one as
   // active for a moment (cancelling), and attaching to it hides the next run.
   const settledRunIdsRef = useRef<Set<string>>(new Set());
+  /** 확정된 답의 이어가기를 이 화면에서 이미 시도한 (대화:질문) — 같은 열기의 중복 호출을 접는다. */
+  const oneCommittedContinuationAttemptRef = useRef<Set<string>>(new Set());
   // Runs whose invoke.run call has not answered yet (Main is still admitting them).
   const admittingRunIdsRef = useRef<Set<string>>(new Set());
   // Set by the active-chat listener below; settleRun asks it to follow a next turn.
@@ -3920,17 +3922,57 @@ function OneSessionsShell() {
             : `${steeringRecovery.length} follow-up instruction(s) were held after restart because an external effect is uncertain. Nothing was replayed.`);
         }
       }
-      if (attachment && !newerLiveRunOwnsThread && !settledRunIdsRef.current.has(attachment.runId)) {
-        runIdRef.current = attachment.runId;
-        activityRunIdRef.current = attachment.runId;
+      const adoptAttachment = (live: NonNullable<typeof attachment>) => {
+        runIdRef.current = live.runId;
+        activityRunIdRef.current = live.runId;
         activityEventRunIdRef.current = null;
         dispatchRunPromptRef.current = null;
-        activeRunStartedAtRef.current = attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now();
+        activeRunStartedAtRef.current = live.startedAt ? Date.parse(live.startedAt) : Date.now();
         setActivityStateRunId(null);
         setBusy(true);
-        setRunStartedAt(attachment.startedAt ? Date.parse(attachment.startedAt) : Date.now());
-        subscribeRun(attachment.runId);
-        if (typeof api.invoke.replay !== "function") for (const event of attachment.events) consumeRunEventRef.current(event, attachment.runId);
+        setRunStartedAt(live.startedAt ? Date.parse(live.startedAt) : Date.now());
+        subscribeRun(live.runId);
+        if (typeof api.invoke.replay !== "function") for (const event of live.events) consumeRunEventRef.current(event, live.runId);
+      };
+      if (attachment && !newerLiveRunOwnsThread && !settledRunIdsRef.current.has(attachment.runId)) {
+        adoptAttachment(attachment);
+      }
+      /*
+       * 답은 확정됐는데 이어가기 실행이 시작되지 못한 대화(시작 거절·확정과 시작 사이 앱 종료)를 연다.
+       * Work 의 pendingContinuationAutoResume 과 같은 길 — Main 이 봉인한 요청과 고정 runId 로 한 번만 시작한다
+       * (confirm:continueAnswer). 이미 돌았거나 다른 턴이 생겨 더는 현재가 아니면 Main 이 거절하고, 가드가
+       * 거절해도 오류 배너 없이 현재 상태로 남겨 다음 기회에 다시 시도한다. 살아 있는 실행이 있으면 건드리지 않는다.
+       */
+      const pendingContinuation = [...answers].reverse().find((answer) => answer.continuationRunId && answer.reply.trim());
+      if (
+        pendingContinuation
+        && !attachment
+        && !liveRunOwnsThread
+        && !newerLiveRunOwnsThread
+        && !runIdRef.current
+        && !oneCommittedContinuationAttemptRef.current.has(`${chatId}:${pendingContinuation.sourceMessageId}`)
+      ) {
+        const attemptKey = `${chatId}:${pendingContinuation.sourceMessageId}`;
+        oneCommittedContinuationAttemptRef.current.add(attemptKey);
+        const continued = await api.confirm.continueAnswer({
+          chatId,
+          sourceMessageId: pendingContinuation.sourceMessageId,
+          reply: pendingContinuation.reply,
+        }).catch(() => null);
+        if (!continued || continued.status === "rejected") {
+          // 일시 거절(chat-busy·admission-closed·start-rejected)은 다음 열기에서 다시 본다.
+          oneCommittedContinuationAttemptRef.current.delete(attemptKey);
+        } else if (
+          (continued.status === "started" || continued.status === "already-running")
+          && !cancelled
+          && activeThreadChatIdRef.current === chatId
+          && !runIdRef.current
+        ) {
+          const resumed = await api.invoke.attach(chatId).catch(() => null);
+          if (resumed && !settledRunIdsRef.current.has(resumed.runId) && !cancelled && activeThreadChatIdRef.current === chatId) {
+            adoptAttachment(resumed);
+          }
+        }
       }
     }).catch((cause) => {
       if (!cancelled) {

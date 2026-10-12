@@ -203,6 +203,26 @@ export function setToolApprovalLedger(ledger: ToolApprovalLedger | null): void {
   toolApprovalLedger = ledger;
 }
 
+/**
+ * Why the arbiter wrapper answered "deny" for an ask without any policy decision. Every such path used to be
+ * silent (production 1.3.5/1.3.7: a native-provenance fault refused every full-access tool call and left no trace).
+ * The code is a closed machine token, never an error message, so it is safe to show the model and the run record.
+ */
+const arbiterFaults = new WeakMap<object, string>();
+export function toolApprovalFaultCode(ask: object): string | undefined { return arbiterFaults.get(ask); }
+function faultCodeOf(error: unknown): string {
+  // Only an identifier-shaped code or message is passed on; free text (paths, ids) never leaves the process.
+  for (const raw of [(error as { code?: unknown } | null)?.code, (error as { message?: unknown } | null)?.message]) {
+    if (typeof raw === "string" && /^[A-Za-z][A-Za-z0-9_]{2,63}$/.test(raw)) return raw.toLowerCase();
+  }
+  return "arbiter_threw";
+}
+function refuseAsFault(ask: RuntimeToolPermissionAsk, code: string): "deny" {
+  arbiterFaults.set(ask, code);
+  console.warn("[tool-approval] ask refused by a fault, not by a policy decision", JSON.stringify({ code, tool: ask.tool, runtime: ask.runtime, permission: ask.permission ?? null }));
+  return "deny";
+}
+
 export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter | null {
   if (!runtimeToolPermissionArbiter && runtimeToolPermissionRelays.size === 0) return null;
   return async (ask) => {
@@ -212,15 +232,15 @@ export function getRuntimeToolPermissionArbiter(): RuntimeToolPermissionArbiter 
       for (const select of runtimeToolPermissionRelays) {
         const claimed = select(ask);
         if (claimed === undefined) continue;
-        if (selected || typeof claimed !== "function") return "deny";
+        if (selected || typeof claimed !== "function") return refuseAsFault(ask, "relay_claim_conflict");
         selected = claimed;
       }
       const arbiter = selected ?? runtimeToolPermissionArbiter;
-      if (!arbiter) return "deny";
+      if (!arbiter) return refuseAsFault(ask, "arbiter_missing");
       const decision = await withNativeApprovalAsk(ask.signal, () => arbiter(ask));
       if (ask.signal?.aborted) return "deny";
       return decision === "allow_once" || decision === "allow_session" ? decision : "deny";
-    } catch { return "deny"; }
+    } catch (error) { return refuseAsFault(ask, faultCodeOf(error)); }
   };
 }
 

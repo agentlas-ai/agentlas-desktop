@@ -93,6 +93,7 @@ import { applyFinalDisplayBackstop } from "../mcp/final-display-backstop";
 import { extractAskFences } from "../../shared/ask-fence-flatten";
 import {
   committedQuestionContinuationIsCurrent,
+  listCommittedQuestionAnswers,
   getCommittedQuestionContinuation,
 } from "../confirm";
 import { deriveGoalAcceptanceCriteria, ensureGoalLedgerGoal } from "../mcp/goal-ledger";
@@ -1033,6 +1034,30 @@ function otherHostOwnsChat(row: Pick<InvocationRunOwner, "ownerKind" | "state">,
     && (row.ownerKind === "desktop" || row.ownerKind === "daemon") && (local.ownerKind === "desktop" || local.ownerKind === "daemon");
 }
 
+/** Typed marker only: a user-actor `run.user_control` pause/stop/delete on the chat's Goal newer than the committed answer. */
+function ownerStoppedGoalAfterAnswer(chatId: string, sourceMessageId: string): boolean {
+  try {
+    const goalId = getChat(chatId)?.goalId;
+    const run = goalId ? getLongRunByGoalId(goalId) : null;
+    const answeredAt = listCommittedQuestionAnswers(chatId).find((answer) => answer.sourceMessageId === sourceMessageId)?.ts;
+    if (!run || !answeredAt) return false;
+    const rows = getDb().prepare(
+      `SELECT payload_json FROM long_run_events
+        WHERE run_id = ? AND kind = 'run.user_control' AND actor_kind = 'user' AND occurred_at > ?
+        ORDER BY seq DESC`,
+    ).all(run.id, answeredAt) as Array<{ payload_json: string }>;
+    // A later owner resume_with_message/resume releases the hold again; the newest marker decides.
+    for (const row of rows) {
+      let payload: { action?: unknown; command?: unknown };
+      try { payload = JSON.parse(row.payload_json); } catch { continue; }
+      const verb = String(payload.action ?? payload.command ?? "");
+      if (verb === "resume_with_message" || verb === "resume") return false;
+      if (["pause", "stop", "cancel", "delete"].includes(verb)) return true;
+    }
+    return false;
+  } catch { return false; }
+}
+
 export class InvocationService {
   private readonly deliveryJournal = new RunEventDeliveryJournal();
   private readonly activeRuns = new InvocationLifecycleRegistry<RunRecord>();
@@ -1525,6 +1550,12 @@ export class InvocationService {
     }
     if (this.activeChatIds().includes(chatId)) {
       return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "chat-busy" };
+    }
+    // An owner pause/stop/delete of this chat's Goal AFTER the answer committed outranks the stored
+    // continuation: starting would resume what the owner just stopped (an owner message resumes a paused Goal
+    // by design, an automatic replay of an old answer is not an owner message). The answer stays current.
+    if (ownerStoppedGoalAfterAnswer(chatId, sourceMessageId)) {
+      return { chatId, sourceMessageId, runId: intent.runId, status: "rejected", reasonCode: "start-rejected" };
     }
 
     const tryStart = (): QuestionContinuationReceipt => {

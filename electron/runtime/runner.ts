@@ -932,6 +932,88 @@ export function startCliHeartbeat(
   return stop;
 }
 
+/** Machine code carried in RunnerFailure.providerCode when the host ends a silent CLI child. */
+export const RUNTIME_SILENT_TIMEOUT_CODE = "runtime_silent_timeout";
+
+/**
+ * Total-silence window for chat / Goal-room CLI children. 20 minutes without a single byte or
+ * event (and no tool in flight) is far beyond legitimate model thinking. The one tunable;
+ * `AGENTLAS_CLI_SILENCE_WINDOW_MS` is a test hook only.
+ */
+export const CLI_SILENCE_WINDOW_MS = 20 * 60_000;
+
+export function cliSilenceWindowMs(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = Number(env.AGENTLAS_CLI_SILENCE_WINDOW_MS);
+  return Number.isFinite(raw) && raw >= 50 ? Math.floor(raw) : CLI_SILENCE_WINDOW_MS;
+}
+
+export interface CliSilenceGuard {
+  /** Any byte/event from the child. */
+  touch(): void;
+  /** A tool the runtime reported started (id optional); silence is not counted while any is open. */
+  toolStart(id?: string | null): void;
+  toolEnd(id?: string | null): void;
+  /** True once the host decided to end the attempt for silence. */
+  readonly tripped: boolean;
+  stop(): void;
+}
+
+/**
+ * ★호스트 소유 침묵 한도 — 채팅·Goal 방 CLI 실행에는 무활동 워치독이 없어(automation 전용),
+ * 살아 있지만 완전히 조용한 자식이 실행 전체를 무기한 붙들었다(Yotube Goal 방 61분, 2026-10-11).
+ * 하트비트는 호스트가 내는 신호라 자식 침묵을 가리지 못한다 — 이 가드는 **자식이 낸** 것만 센다.
+ *
+ * 정산 경로는 늘 하나다: 가드는 자식 트리만 죽이고(`kill`), 러너의 close 핸들러가 `tripped`를
+ * 보고 timeout 실패로 정산한다(ensureChildCloseAfterExit 주석의 단일 정산 설계).
+ */
+export function startCliSilenceGuard(
+  child: { killed: boolean; exitCode: number | null; signalCode: NodeJS.Signals | null },
+  opts: { label: string; onStatus: RunnerEvents["onStatus"]; kill: () => void; windowMs?: number },
+): CliSilenceGuard {
+  const windowMs = opts.windowMs ?? cliSilenceWindowMs();
+  let last = Date.now();
+  let tripped = false;
+  const open = new Map<string, number>();
+  const openCount = (): number => { let n = 0; for (const v of open.values()) n += v; return n; };
+  let timer: ReturnType<typeof setInterval> | null = setInterval(() => {
+    if (child.exitCode !== null || child.signalCode !== null) { stop(); return; }
+    if (tripped || openCount() > 0) return;
+    if (Date.now() - last < windowMs) return;
+    tripped = true;
+    stop();
+    opts.onStatus(
+      `${opts.label}: no output for ${Math.round(windowMs / 1000)}s — ending the stalled attempt (${RUNTIME_SILENT_TIMEOUT_CODE})`,
+    );
+    try { opts.kill(); } catch { /* the close handler still settles */ }
+  }, Math.max(20, Math.min(30_000, Math.floor(windowMs / 4))));
+  timer.unref?.();
+  const stop = (): void => { if (timer) { clearInterval(timer); timer = null; } };
+  const key = (id?: string | null): string => id ?? "\u0000anonymous";
+  return {
+    touch: () => { last = Date.now(); },
+    toolStart: (id) => { last = Date.now(); open.set(key(id), (open.get(key(id)) ?? 0) + 1); },
+    toolEnd: (id) => {
+      last = Date.now();
+      const k = key(id);
+      const n = (open.get(k) ?? 0) - 1;
+      if (n > 0) open.set(k, n); else open.delete(k);
+    },
+    get tripped() { return tripped; },
+    stop,
+  };
+}
+
+/** Typed failure for a host-ended silent attempt. */
+export function runtimeSilentTimeoutFailure(runtime: string, windowMs = cliSilenceWindowMs()): RunnerFailure {
+  return {
+    kind: "timeout",
+    message: `${runtime} produced no output for ${Math.round(windowMs / 1000)}s; the host ended the attempt`.slice(0, 2_000),
+    runtime,
+    source: "marker",
+    providerCode: RUNTIME_SILENT_TIMEOUT_CODE,
+  };
+}
+
 /**
  * ★자식이 죽었는데 `close`가 오지 않는 경우를 끝낸다 — CLI 스폰 공통.
  *

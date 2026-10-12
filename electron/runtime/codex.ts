@@ -25,7 +25,7 @@ import { codexSystemPromptWithSchemaFallback, openAiStrictSchemaOrNull } from ".
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
 import { imageOutputContract, planPromptSections } from "./prompt-sections";
-import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError } from "./runner";
+import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, RUNTIME_SILENT_TIMEOUT_CODE, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
 import { abortReasonError } from "./abort-reason";
 import { containsMcpStartupTransportFatal } from "./mcp-startup-fatal";
@@ -665,6 +665,11 @@ export function codexFailureFromTurn(turn: {
   };
 }
 
+/** True when the host itself ended this exec attempt for total silence (single close-based settlement). */
+function isSilentTimeoutRun(run: { failure?: RunnerFailure }): boolean {
+  return run.failure?.providerCode === RUNTIME_SILENT_TIMEOUT_CODE;
+}
+
 function runCodexProcess(
   bin: string,
   args: string[],
@@ -698,7 +703,14 @@ function runCodexProcess(
     });
     trackRunChild(child);
     // ★호스트 소유 생존 신호 — 러너 공통 규칙(runner.ts startCliHeartbeat 주석 참고).
-    const stopHeartbeat = startCliHeartbeat(child, events.onStatus, "codex");
+    const stopHeartbeatOnly = startCliHeartbeat(child, events.onStatus, "codex");
+    // ★호스트 소유 침묵 한도(runner.ts startCliSilenceGuard 참고): 자식이 낸 바이트/이벤트만 센다.
+    // 가드는 트리만 죽이고, 아래 close 핸들러가 유일한 정산 경로로 timeout 실패를 만든다.
+    const silenceWindowMs = cliSilenceWindowMs(req.env ?? process.env);
+    const silence = startCliSilenceGuard(child, {
+      label: "codex", onStatus: events.onStatus, windowMs: silenceWindowMs, kill: () => killCliTree(child),
+    });
+    const stopHeartbeat = (): void => { stopHeartbeatOnly(); silence.stop(); };
     // ★죽은 자식이 close를 안 보내면 이 실행은 영영 안 끝난다 — runner.ts 주석 참고.
     ensureChildCloseAfterExit(child, () => {
       events.onStatus("codex: process exited without closing its output — settling the run");
@@ -817,6 +829,7 @@ function runCodexProcess(
       const pending = responseTools.get(id);
       if (!pending) return;
       settledResponseToolIds.add(id);
+      silence.toolEnd(id);
       events.onTool?.(pending.name, pending.args, result, id, isError, artifactPaths);
     };
     const latestUnsettledResponseTool = (name?: string): string | null => {
@@ -877,6 +890,7 @@ function runCodexProcess(
           const name = responseToolName(rawName, input ?? undefined);
           if (!toolRequestReplay.accept(id, name, JSON.stringify(payload))) return;
           responseTools.set(id, { name, ...(input ? { args: input } : {}) });
+          silence.toolStart(id);
           events.onTool?.(name, input ?? undefined, undefined, id, false);
         }
         return;
@@ -1046,6 +1060,8 @@ function runCodexProcess(
           events.onPartial(text);
           lastEmit = Date.now();
         }
+        // 시작만 보고된 도구는 침묵이 아니다(긴 렌더·빌드) — 완료 때까지 침묵 한도 정지.
+        if (ev.type === "item.started") silence.toolStart(item.id); else silence.toolEnd(item.id);
         events.onTool?.(
           toolName,
           /image_?generation/i.test(item.type ?? "") ? undefined
@@ -1124,8 +1140,9 @@ function runCodexProcess(
         }
       }
     };
-    child.stdout?.on("data", (chunk: Buffer) => consumeStdout(stdoutDecoder.write(chunk)));
+    child.stdout?.on("data", (chunk: Buffer) => { silence.touch(); consumeStdout(stdoutDecoder.write(chunk)); });
     child.stderr?.on("data", (chunk: Buffer) => {
+      silence.touch();
       stderr += stderrDecoder.write(chunk);
     });
 
@@ -1163,6 +1180,10 @@ function runCodexProcess(
        * 거절문이 agent_message로 오고 turn.completed(표식 0). 이 한 자리에서만 텍스트
        * 판별을 허용하고 출처를 heuristic으로 남긴다(규칙은 runtime-refusal.ts 한 곳).
        */
+      // ★침묵 한도로 호스트가 끝낸 시도 — 이 close가 유일한 정산이다. 사용자 취소는 건드리지 않는다.
+      if (silence.tripped && !req.signal?.aborted && !terminalObserved) {
+        runnerFailure = runtimeSilentTimeoutFailure("codex", silenceWindowMs);
+      }
       if (code === 0 && !runnerFailure) {
         const refusal = detectRuntimeRefusal(text);
         if (refusal) {
@@ -2437,6 +2458,9 @@ async function runCodexMinimalObservation(bin: string, req: RunnerRequest, event
     const run = await runCodexProcess(bin, args, req.userPrompt, { ...req, env: { ...(req.env ?? process.env), CODEX_HOME: home } },
       events, { output: 0, input: 0, cachedInput: 0 }, observeNativeFile);
     if (req.signal?.aborted) throw abortReasonError(req);
+    if (!run.terminalObserved && isSilentTimeoutRun(run)) {
+      return { text: run.text.trim(), ownerControlTerminal: "uncertain", failure: run.failure! };
+    }
     if (!run.terminalObserved) throw new RuntimeTurnUnsettledError(KIND, req.locale);
     if (run.code !== 0 && !run.text.trim()) throw new Error(`codex CLI exit ${run.code}${run.stderr ? `\n${run.stderr.slice(0, 500)}` : ""}`);
     return { text: run.text.trim(), ...(run.failure ? { failure: run.failure } : {}), tokens: run.tokens,
@@ -2892,6 +2916,10 @@ export const runCodex: Runner = async (
           reportedOutputTokens: null, reportedInputTokens: null, reportedCachedInputTokens: null,
         });
       }
+      if (isSilentTimeoutRun(r)) {
+        return { text: r.text.trim(), ownerControlTerminal: "uncertain", failure: r.failure!,
+          sessionId: r.threadId ?? resumeSessionId, tokens: r.tokens, appliedEffort };
+      }
       throw new RuntimeTurnUnsettledError(KIND, runReq.locale);
     }
     if (r.code === 0) {
@@ -2964,6 +2992,10 @@ export const runCodex: Runner = async (
         agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner,
         reportedOutputTokens: null, reportedInputTokens: null, reportedCachedInputTokens: null,
       });
+    }
+    if (isSilentTimeoutRun(created)) {
+      return { text: created.text.trim(), ownerControlTerminal: "uncertain", failure: created.failure!,
+        sessionId: created.threadId ?? undefined, tokens: created.tokens, appliedEffort };
     }
     throw new RuntimeTurnUnsettledError(KIND, runReq.locale);
   }

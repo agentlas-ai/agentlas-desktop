@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { registerNativeApprovalChildSignal } from "./native-approval-provenance";
 import type { RunnerEvents } from "./runner";
 import type { LocalToolApprovalContext, MainToolDispatchCall, MainToolDispatchResult, OpenAiToolDef, ResolvedTool } from "./local-tool-loop";
 
@@ -41,6 +42,8 @@ export async function runMainCodeMode(byName: Map<string, ResolvedTool>, input: 
   if (!Number.isInteger(timeoutMs) || (timeoutMs as number) < 10 || (timeoutMs as number) > 30000) throw new Error("code_mode_timeout_invalid");
   approval.signal?.throwIfAborted();
   const controller = new AbortController();
+  // Nested calls ask with this signal; it stays under the run's native approval execution (no-op outside one).
+  registerNativeApprovalChildSignal(approval.signal, controller.signal);
   const abort = () => controller.abort(approval.signal?.reason);
   approval.signal?.addEventListener("abort", abort, {once: true});
   const pending = new Set<Promise<unknown>>();

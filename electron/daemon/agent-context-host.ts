@@ -7,6 +7,7 @@ import {
   agentResidencyBudget, holdingAgentResidency, type AwakeAgentResidencyAdmission,
 } from "../runtime/agent-residency";
 import { onHostShutdown } from "../host-lifecycle";
+import { registerNativeApprovalChildSignal } from "../runtime/native-approval-provenance";
 
 type ActorState = "awake" | "paused" | "stopped";
 export interface DaemonAgentContextTurn {
@@ -219,6 +220,9 @@ export function createDaemonAgentContextHost(options: {
       } catch (error) { return Promise.reject(error); }
       const generation = actor.generation;
       const controller = new AbortController();
+      // The runner receives this controller's signal, not the invocation's, and native approval provenance follows signals:
+      // without lineage every tool ask of the turn is refused as native_approval_signal_unregistered (production 1.3.5/1.3.7).
+      try { registerNativeApprovalChildSignal(turn.signal, controller.signal); } catch (error) { return Promise.reject(error); }
       let resolveResult!: (value: T) => void;
       let rejectResult!: (error: unknown) => void;
       const promise = new Promise<T>((resolve, reject) => { resolveResult = resolve; rejectResult = reject; });

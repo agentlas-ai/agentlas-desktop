@@ -49,6 +49,7 @@ import { getRuntimeSession, saveRuntimeSession } from "../store/runtime-sessions
 import {
   defaultRuntimeToolPermission,
   getRuntimeToolPermissionArbiter,
+  toolApprovalFaultCode,
   type RuntimeToolPermissionAsk,
   type RuntimeToolPermissionDecision,
 } from "./tool-approval";
@@ -362,6 +363,8 @@ export interface LocalToolApprovalContext {
   env?: NodeJS.ProcessEnv;
   /** Main-owned broker ledger hook. It records the exact approval decision. */
   onApprovalDecision?: (decision: RuntimeToolPermissionDecision) => void;
+  /** A refusal that came from a fault in the approval path rather than a policy decision (machine token, see tool-approval.ts). */
+  onApprovalFault?: (code: string) => void;
 }
 
 /**
@@ -542,6 +545,8 @@ async function approveLocalToolCall(
       decision = "deny";
     }
   }
+  const fault = decision === "deny" ? toolApprovalFaultCode(ask) : undefined;
+  if (fault) ctx.onApprovalFault?.(fault);
   ctx.signal?.throwIfAborted();
   ctx.onApprovalDecision?.(decision);
   return decision;
@@ -738,16 +743,18 @@ async function dispatchMainToolRawUnchecked(
   }
   // 승인은 **호출 직전**이다. 인자를 파싱한 뒤, 서버에 닿기 전.
   let approvalDecision: RuntimeToolPermissionDecision | null = null;
-  const actionApproval: LocalToolApprovalContext = actionId
-    ? {
-        ...approval,
-        onApprovalDecision: (decision) => {
-          approval.onApprovalDecision?.(decision);
-          approvalDecision = decision;
-          broker?.recordDecision(actionId, decision);
-        },
-      }
-    : approval;
+  let approvalFault: string | undefined;
+  const actionApproval: LocalToolApprovalContext = {
+    ...approval,
+    ...(actionId ? {
+      onApprovalDecision: (decision: RuntimeToolPermissionDecision) => {
+        approval.onApprovalDecision?.(decision);
+        approvalDecision = decision;
+        broker?.recordDecision(actionId, decision);
+      },
+    } : {}),
+    onApprovalFault: (code) => { approval.onApprovalFault?.(code); approvalFault = code; },
+  };
   let downloadOrigin: string | undefined;
   if (resolved.kind === "builtin" && resolved.builtinName === "browser_download" && typeof args.url === "string") {
     try { downloadOrigin = new URL(args.url).origin; } catch { /* The builtin rejects invalid URLs before dispatch. */ }
@@ -766,7 +773,8 @@ async function dispatchMainToolRawUnchecked(
     || !readOnlyBrowserToolIsMutating({ toolName: resolved.serverToolName, args }));
   if ((collectionDecision ?? await approveLocalToolCall(actionApproval, call.toolName, consentMaterial, downloadOrigin, admittedMcpRead)) === "deny") {
     if (actionId) broker?.finishAction(actionId, "denied");
-    const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.`;
+    // A refusal caused by a fault in the approval path says so, in machine form (the classification above still reads it as declined).
+    const denied = `Error: tool call denied — "${call.toolName}" was not approved for this run.${approvalFault ? ` [approval_fault:${approvalFault}]` : ""}`;
     (currentHistoryRuntimeFence()?.assertCurrent(), events.onTool?.(call.toolName, call.arguments, denied, eventCallId, true));
     return {
       content: denied,

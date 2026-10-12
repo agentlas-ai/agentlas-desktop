@@ -990,6 +990,16 @@ export async function startDaemon(options: DaemonStartupOptions = {}): Promise<v
     // it wins ownership. No await separates this fence from policy installation.
     // Science's existing session handoff updates this host's authenticated cache.
     installHostToolPermissionPolicy({ hostKind: "daemon", getAuthenticatedActorIds });
+    // Winning the socket also proves the service that held older daemon run leases is gone (crash, forced reboot).
+    // Left in place, each one refuses every later turn of its chat with invocation_cleanup_pending.
+    try {
+      const released = invocationOwners?.releaseAbandoned("daemon", bootId) ?? [];
+      if (released.length > 0) {
+        console.warn(`[agentlasd] released ${released.length} run lease(s) a previous service left unsettled: ${released.map((owner) => owner.runId).join(", ")}`);
+      }
+    } catch (error) {
+      console.error("[agentlasd] abandoned run lease release failed:", error);
+    }
     recordServicePhase("control_socket_ready");
     console.log(`[agentlasd] control socket: ${socket.address}`);
   } catch (error) {
