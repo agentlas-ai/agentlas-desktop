@@ -1,4 +1,5 @@
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
+import { reportModelPayload, ledgerFromApiBody } from "./model-call-ledger";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 // BYOK 직접 API 러너 — Anthropic Messages / OpenAI Chat Completions / Google Generative API.
@@ -349,9 +350,12 @@ async function runAnthropicMessages(
       },
     })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
     assertScienceRecoveryRequest(req, "byok", backend);
+    reportModelPayload(() => ledgerFromApiBody(outgoingBody(), { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
     const usageAttempt = measuredUsage.start();
     const beforeInput = inputTokens + cacheRead + cacheWrite;
     const beforeCacheRead = cacheRead;
+    const beforeCacheWrite = cacheWrite;
+    const beforeRawInput = inputTokens;
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.dispatched();
     const resp = await withCurrentHistoryProvider(()=>fetch(`${baseUrl}/v1/messages`, {
@@ -441,6 +445,8 @@ async function runAnthropicMessages(
     }
     outputTokens += turnOutputTokens;
     const turnInput = inputTokens + cacheRead + cacheWrite - beforeInput;
+    // Anthropic bills raw input, cache reads and cache creation separately; the receipt carries only the total.
+    if (turnInputObserved) events.onModelUsageDetail?.(usageAttempt, { cacheCreationInputTokens: cacheWrite - beforeCacheWrite, rawInputTokens: inputTokens - beforeRawInput });
     (measuredUsage.complete(usageAttempt, turnInputObserved && turnOutputObserved && messageStopped
       ? { inputTokens: turnInput, outputTokens: turnOutputTokens,
           ...(turnCacheReadObserved ? { cachedInputTokens: cacheRead - beforeCacheRead } : {}) }
@@ -906,6 +912,7 @@ export const runGoogleByok: Runner = async (
     })) return assertCurrentHistoryRunnerResult({ text: "", failure: byokContextFailure(req) });
     const requestBody = outgoingBody();
     assertScienceRecoveryRequest(req, "byok", "google");
+    reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
     let usageAttempt = measuredUsage.start();
     if (req.signal?.aborted) throw abortReasonError(req);
     ownerControl.dispatched();
@@ -927,6 +934,7 @@ export const runGoogleByok: Runner = async (
       includeTools = false;
       events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
       assertScienceRecoveryRequest(req, "byok", "google");
+      reportModelPayload(() => ledgerFromApiBody(outgoingBody(), { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
       usageAttempt = measuredUsage.start();
       resp = await withCurrentHistoryProvider(()=>fetch(url, {
         method: "POST",

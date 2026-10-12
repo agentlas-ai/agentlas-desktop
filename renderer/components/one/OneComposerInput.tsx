@@ -68,7 +68,10 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
   const resize = useCallback(() => {
     const element = input.current;
     if (!element) return;
-    const height = element.value.split("\n").length * 24;
+    // Measure the real content height. Counting "\n" only ignored soft-wrapped lines, so a long sentence that wrapped
+    // onto several visual lines never grew the box (owner 2026-10-12). Collapse first so scrollHeight can shrink too.
+    element.style.height = "auto";
+    const height = element.scrollHeight;
     element.style.height = `${Math.max(24, Math.min(height, 210))}px`;
     element.style.overflowY = height > 210 ? "auto" : "hidden";
   }, []);
@@ -136,6 +139,17 @@ export const OneComposerInput = memo(forwardRef<OneComposerInputHandle, OneCompo
     }
     resize();
   }, [scopeKey, getValue, switchScope, resize]);
+  // Soft-wrap points move when the box gets wider or narrower, so the height has to follow the width too.
+  useEffect(() => {
+    const element = input.current;
+    if (!element || typeof ResizeObserver === "undefined") return undefined;
+    let width = element.clientWidth;
+    const observer = new ResizeObserver(() => {
+      if (element.clientWidth !== width) { width = element.clientWidth; scheduleResize(); }
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [scheduleResize]);
   useEffect(() => {
     const onVisibility = () => { if (document.visibilityState === "hidden") flushDraft(); };
     window.addEventListener("pagehide", flushDraft);

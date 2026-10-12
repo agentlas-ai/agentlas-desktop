@@ -141,6 +141,11 @@ export interface RunnerRequest {
    */
   turnContextStable?: readonly string[];
   /**
+   * Sizes only (never text): how the host split this request before placement folded the per-turn context into the
+   * system tail or the user message. Read by the model-call ledger; no runner may use it to build a prompt.
+   */
+  ledgerHints?: { hostContextTokens: number; hostContextPlacement: string; ownerTextTokens: number };
+  /**
    * 에이전트가 실제로 실행될 작업 디렉터리(= 사용자가 지정한 프로젝트/워킹 폴더).
    * 미설정이면 러너가 안전한 기본 폴더(agentRunCwd)를 쓴다. 파일 생성·빌드는 이 폴더에서 일어난다.
    */
@@ -691,6 +696,8 @@ export interface RunnerEvents {
   onUsage?: (tokens: number) => void;
   /** One host-minted id per native turn dispatched inside this runner, including retries. */
   onRuntimeAttemptStarted?: (attemptId: string) => void;
+  /** Provider usage detail the common receipt cannot carry (Anthropic cache creation, raw input). Observability only. */
+  onModelUsageDetail?: (attemptId: string | undefined, detail: { cacheCreationInputTokens?: number; rawInputTokens?: number }) => void;
   /** Complete provider-reported pair for that native turn. Never estimated. */
   onTerminalObservedUsage?: (usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number }, attemptId?: string) => void;
   /**

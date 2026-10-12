@@ -4,6 +4,7 @@ import { createRuntimeUsageCollector, type ObservedTokenUsage } from "../../shar
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult, RunnerFailure } from "./runner";
 import { RuntimeTurnUnsettledError, runtimeFailureIsClosedHttpRefusal } from "./runner";
 import { beginInvocationUsageAttempt } from "./invocation-usage";
+import { withModelCallScope, type ModelCallRole } from "./model-call-ledger";
 
 
 type RunnerSettlementObserver = (provider: PromiseLike<unknown>) => void;
@@ -156,3 +157,15 @@ export class ObservedRunnerFailureError extends Error {
 
 /** Native host result boundary: preserve genuine returned usage/diagnostics on denial, never deliver the result. No additional attempt/admission. */
 export function assertCurrentHistoryRunnerResult<T extends RunnerResult>(result:T):T{try{currentHistoryRuntimeFence()?.assertCurrent();return result;}catch(error){if(error!==null&&(typeof error==="object"||typeof error==="function")){returnedResultsOnError.set(error,result);const usage=createRuntimeUsageCollector();usageOnError.set(error,usage);}throw error;}}
+
+/** Same as runObservedRunner, naming the call's role for the model-call ledger (curator, router, repair ...). */
+export function runObservedRunnerAs(
+  role: ModelCallRole,
+  phase: string,
+  runner: Runner,
+  request: RunnerRequest,
+  events: RunnerEvents,
+  nativeRuntimeKind?: string,
+): Promise<RunnerResult> {
+  return withModelCallScope({ role, phase }, () => runObservedRunner(runner, request, events, nativeRuntimeKind));
+}

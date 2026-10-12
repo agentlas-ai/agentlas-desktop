@@ -46,6 +46,20 @@ export function planEnvKeyRenames(
   return suggestEnvKeyRenames(stored, targets).filter((suggestion) => !read.has(suggestion.from));
 }
 
+/**
+ * True when `from` is plainly the same credential as `to` under a sloppy name: the service word of `to` alone, or with
+ * only a number or a credential word after it (ELEVENLABS_1, ELEVENLABS, ELEVENLABS_KEY_2 for ELEVENLABS_API_KEY).
+ * The rename suggestion matches on the first word only, which is fine for a question to the owner but would hand
+ * GOOGLE_MAPS_KEY to a tool that reads GOOGLE_SEARCH_KEY if used without asking.
+ */
+export function isPlainMisnaming(from: string, to: string): boolean {
+  const service = to.split("_")[0].toUpperCase();
+  if (!service) return false;
+  const rest = from.toUpperCase().split("_");
+  if (rest.shift() !== service) return false;
+  return rest.every((word) => /^\d+$/.test(word) || ["API", "APIKEY", "KEY", "TOKEN", "SECRET"].includes(word));
+}
+
 const ANNOUNCE_TTL_MS = 30 * 60_000;
 const announced = new Map<string, number>();
 

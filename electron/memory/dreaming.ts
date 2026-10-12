@@ -1,4 +1,4 @@
-import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { runObservedRunner, runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // 유휴 드리밍 큐레이션 — Claude Code/Codex의 "드리밍"처럼, 사용자가 자리를 비운 유휴 시간에
 // 큐레이터가 쌓아둔 durable 메모리를 정리한다. 1단계는 결정론 dedup(무LLM), 2단계는 메모리가
 // 많이 쌓인 에이전트에 한해 LLM 1회 호출로 규칙 통합.
@@ -188,7 +188,7 @@ async function dreamOnce(): Promise<void> {
         .map((e, i) => `${i + 1}. [${e.kind}/${e.confidence}] ${e.content.replace(/\s+/g, " ").slice(0, 400)}`)
         .join("\n");
       const intakeEpoch = currentMemoryForgetEpoch();
-      const result = await runObservedRunner(picked.runner,
+      const result = await runObservedRunnerAs("curator", "dreaming", picked.runner,
         {
           systemPrompt: [
             "You are a memory consolidation pass for an AI agent. Merge redundant or fragmentary memory entries into a few durable rules.",

@@ -17,6 +17,8 @@ const TRANSIENT_CODES: ReadonlySet<string> = new Set([
   // A follow-up started from a settling run once inherited that run's source (see withoutOnePersonalNativeOriginal).
   "ordinary_one_turn_source_changed",
   "invocation_cleanup_pending",
+  // Main could not confirm the personal One domain owner (the daemon holds it). The answer is kept and retried.
+  "supervisor_owner_unconfirmed",
   "invocation_admission_chat_pending",
   "invocation_steer_parent_pending",
   "chat_invocation_active",

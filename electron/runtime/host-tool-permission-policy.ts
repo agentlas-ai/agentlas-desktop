@@ -130,24 +130,37 @@ export function createHostToolPermissionPolicy(ports: HostToolPermissionPolicyPo
      * 현재의 명시적 선택을 우선해 모든 일반 도구 관문을 해제한다.
      */
     const capability = capabilityClassFor(ask.kind, ask.tool);
+    // Full access is the owner's explicit grant for this run, and it needs no
+    // stored rule, card or durable consent. The identity binding and the rule
+    // lookup below only serve those, so a failure in either (a busy store, an
+    // unrepresentable workspace path) must not turn the grant into a refusal.
+    // Measured 2026-10-12 (1.3.5, One chat, permission full): an MCP tool that
+    // auto-select had chosen for the run came back "not approved for this run".
+    const fullAccess = ask.permission === "full";
     let consentBinding: ToolApprovalConsentBinding;
     try {
       consentBinding = consentBindingForAsk(ask);
     } catch {
       // An invalid host-owned identity must not turn into a broad legacy rule.
-      return "deny";
+      return fullAccess ? "allow_session" : "deny";
     }
-    const ruled = getCapabilityDecision({
-      capability,
-      tool: ask.tool,
-      detail: ask.detail,
-      agentId: ask.agentId,
-      chatId: ask.chatId,
-      consentBinding,
-    });
+    let ruled: ReturnType<typeof getCapabilityDecision>;
+    try {
+      ruled = getCapabilityDecision({
+        capability,
+        tool: ask.tool,
+        detail: ask.detail,
+        agentId: ask.agentId,
+        chatId: ask.chatId,
+        consentBinding,
+      });
+    } catch (error) {
+      if (fullAccess) return "allow_session";
+      throw error;
+    }
     // Durable rules are re-read for each request so revocation is not cached by the runtime.
     if (ruled === "allow") return "allow_once";
-    if (ask.permission === "full") return "allow_session";
+    if (fullAccess) return "allow_session";
     if (ruled === "deny") return "deny";
     // One's own coordination tools (one-team: hand off, follow up, observe, team sessions, groups) are gated by Main's
     // One control server — capability binding, personal-conversation scope, follow-up bounds — the same gate codex exec

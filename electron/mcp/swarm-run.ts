@@ -2,6 +2,7 @@ import { toolObservationDigest } from "../automation-progress-guard";
 import { randomUUID } from "node:crypto";
 import type { RunnerResult } from "../runtime/runner";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { withModelCallScope } from "../runtime/model-call-ledger";
 // 스웜 실행 배선 — 순수 엔진(swarm-engine)을 실제 러너/채팅에 연결한다.
 //   - 각 작업(task)을 활성 런타임으로 실행하며 이벤트를 task 단위로 태깅 → UI가 스웜을 라이브로 표시
 //   - 에이전트 출력의 `## Spawn` 블록을 파싱해 런타임에 새 작업/핸드오프를 그래프에 추가(emergent)
@@ -584,7 +585,7 @@ export async function runSwarmInvocation(
     };
     let result: Awaited<ReturnType<typeof runWorkerOn>>;
     const failedWorkerRuntimes: typeof candidateRuntimes = [];
-    result = await runWorkerOn(executedRuntime, executedRunner);
+    result = await withModelCallScope({ role: "worker", phase: "swarm-worker" }, () => runWorkerOn(executedRuntime, executedRunner));
     while (result.failure && !directUserRuntimePinHonored && !(signal ?? p.signal)?.aborted) {
       if (result.failure.providerCode === WORK_PROJECT_RESIDENCY_BUSY_CODE) break;
       if (!failedWorkerRuntimes.some((runtime) => sameRuntime(runtime, executedRuntime)
@@ -606,7 +607,7 @@ export async function runSwarmInvocation(
       announceFallback(executedRuntime, fallback, result.failure.kind);
       executedRuntime = fallback;
       executedRunner = fallbackRunner;
-      result = await runWorkerOn(executedRuntime, executedRunner);
+      result = await withModelCallScope({ role: "worker", phase: "swarm-worker" }, () => runWorkerOn(executedRuntime, executedRunner));
     }
     if (result.failure) {
       if (runtimeFailureBlocksReplay(result.failure)) {
@@ -778,7 +779,7 @@ export async function runSwarmInvocation(
     let executedRuntime = active;
     let executedRunner = synthesisRunner;
     const failedSynthesisRuntimes: typeof candidateRuntimes = [];
-    let result = await runSynthesisOn(executedRuntime, executedRunner);
+    let result = await withModelCallScope({ role: "synthesis", phase: "swarm-synthesis" }, () => runSynthesisOn(executedRuntime, executedRunner));
     while (
       result.failure
       && !p.workforceSelectionReceipt
@@ -812,7 +813,7 @@ export async function runSwarmInvocation(
       });
       executedRuntime = fallback;
       executedRunner = fallbackRunner;
-      result = await runSynthesisOn(executedRuntime, executedRunner);
+      result = await withModelCallScope({ role: "synthesis", phase: "swarm-synthesis" }, () => runSynthesisOn(executedRuntime, executedRunner));
     }
     if (result.failure) {
       if (runtimeFailureBlocksReplay(result.failure)) {

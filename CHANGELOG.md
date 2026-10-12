@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.8 — 2026-10-12
+
+- Agentlas model turns record how much of their input was read from the prompt cache, so the run receipt shows cached input instead of reading as uncached.
+- With full access, a tool picked for the turn is no longer refused when a stored approval rule cannot be read at that moment.
+- The One message box grows upward as a long message wraps onto more lines, up to a limit, then scrolls.
+- Answering a question card in a room starts the follow-up turn even while the background service holds One; such a start is retried instead of being refused.
+- A saved key whose name differs only by a number or a key word (ELEVENLABS_1 for ELEVENLABS_API_KEY) reaches the tools under the name they read, without asking. The saved key keeps its own name.
+- Every model call a turn makes now records how its input is made up (instructions, tools, history, turn context, your message) next to the provider-measured usage, as groundwork for cutting input size; nothing about the request changes.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.7 — 2026-10-12
 
 - One, Hope and teammates working in the background can use the browser and computer use again: every result was being held back because a login check could not load outside the app window.

@@ -2,7 +2,7 @@ import { currentHistoryRuntimeFence } from "../one/history-runtime-fences";
 import { withInvocationUsageIfAbsent, currentInvocationObservedUsage, currentInvocationRunnerScopeCount } from "../runtime/invocation-usage";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { runnerFailureFromError } from "../runtime/runner";
-import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { runObservedRunner, runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // Hephaestus 빌더(hep-build) 구동기.
 //
 // hep-build 는 프로그래matic 함수가 아니라 "LLM 빌더 에이전트 라우팅" surface 다(bin/hephaestus
@@ -145,7 +145,7 @@ export async function allocateBuildRuntime(input: {
   } else {
     const bootstrapRuntime = resolveHostControlPlaneRuntime(input.picked.active, "low");
     try {
-      const selector = await runObservedRunner(input.picked.runner,
+      const selector = await runObservedRunnerAs("router", "build-selector", input.picked.runner,
         {
           systemPrompt: [
             "You are the upper-level workload allocator for one Agentlas Desktop Build turn.",
@@ -1412,7 +1412,7 @@ async function runHephaestusBuildInScope(
           : "The builder declared completion without asking. Sent back: the interview gate runs before generation.",
       });
       try {
-        const sendBack = await runObservedRunner(buildPicked.runner,
+        const sendBack = await runObservedRunnerAs("repair", "build-send-back", buildPicked.runner,
           {
             ...makeRunnerRequest(finalMcpAttachment),
             history: [
@@ -1601,7 +1601,7 @@ async function runHephaestusBuildInScope(
             : []),
         ].join("\n");
         try {
-          const repairResult = await runObservedRunner(buildPicked.runner,
+          const repairResult = await runObservedRunnerAs("repair", "build-repair", buildPicked.runner,
             {
               ...makeRunnerRequest(finalMcpAttachment),
               userPrompt: repairPrompt,

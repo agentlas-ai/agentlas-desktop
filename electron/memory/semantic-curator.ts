@@ -1,4 +1,4 @@
-import { runObservedRunner, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { runObservedRunner, runObservedRunnerAs, ObservedRunnerFailureError } from "../runtime/observed-runner";
 // Model-facing half of Memory governance. This module never writes memory.
 // It builds a content-bounded request and parses a proposed disposition; the
 // deterministic Curator remains the final privacy/scope/write authority.
@@ -178,7 +178,7 @@ export async function runSemanticMemoryReview(input: {
   });
   if (request.reviewableIndices.length === 0) return {};
   try {
-    const result = await runObservedRunner(input.runner, {
+    const result = await runObservedRunnerAs("curator", "semantic-curator", input.runner, {
       systemPrompt: SEMANTIC_MEMORY_CURATOR_PROMPT,
       history: [],
       userPrompt: request.prompt,

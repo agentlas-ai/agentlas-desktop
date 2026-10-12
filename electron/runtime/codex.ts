@@ -4,6 +4,7 @@ import { registerNativeApprovalChildSignal } from "./native-approval-provenance"
 //
 // 호출 형식: codex exec "<prompt>"  (—— Codex CLI의 exec 모드)
 // V0는 single-turn; 이전 대화를 user 입력에 inline.
+import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
 import path from "node:path";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
 import { RuntimeJudgmentRefusal } from "./judgment-refusal";
@@ -709,6 +710,10 @@ function runCodexProcess(
       else req.signal.addEventListener("abort", onAbort, { once: true });
     }
     const runtimeAttemptId = crypto.randomUUID();
+    // Context-reduction C01: exec resume sends only a delta; a fresh exec seeds [SYSTEM]+history+context+owner text.
+    const execResume = args.includes("resume");
+    reportModelPayload(() => ledgerFromCliSent({ mode: execResume ? "resume" : "fresh", sentText: stdinPayload, req,
+      instructionsInSentText: !execResume && stdinPayload.startsWith("[SYSTEM]"), historyInSentText: !execResume && stdinPayload.startsWith("[SYSTEM]") }));
     events.onRuntimeAttemptStarted?.(runtimeAttemptId);
     // The attempt callback can synchronously stop this admitted child.
     if (!req.signal?.aborted) writeStdin(child, stdinPayload);
@@ -2059,6 +2064,8 @@ async function runCodexResidentTurn(input: {
       ? await probeCodexNativeSteering({ bin, cwd, env }) : null;
     if (req.workforceRuntimeToolGrant) workforceObservation = new CodexWorkforceObservation(req, session.init, req.workforceRuntimeToolGrant.canonicalConfigSha256);
     /* ── 스레드: 살아 있는 세션이면 그대로, 새 프로세스면 resume 또는 start ── */
+    // Context-reduction C01: the developer instructions this turn actually sent with thread/start|resume|fork (null = live thread kept its own).
+    let developerInstructionsSent: string | null = null;
     // Model selection belongs to the thread protocol, not the resident process
     // identity. A live Codex thread/resume can acknowledge its previous model
     // even when given a new one. Fork that thread in the same app-server instead:
@@ -2087,6 +2094,7 @@ async function runCodexResidentTurn(input: {
           : buildDeveloperInstructions(req),
         ...(imageToolSlot ? { dynamicTools: [CODEX_IMAGE_DYNAMIC_TOOL] } : {}),
       };
+      developerInstructionsSent = String(commonThreadParams.developerInstructions ?? "");
       let resumed = false;
       // A caller-supplied runtimeSessionId names the thread to resume. A live
       // same-fingerprint pool entry is only an optimization and cannot replace
@@ -2208,6 +2216,11 @@ async function runCodexResidentTurn(input: {
     });
     let started: any;
     turnDispatchAttempted = true;
+    reportModelPayload(() => ledgerFromCliSent({
+      // nativeThreadCreated = new thread (full seed); a thread/resume or fork on a cold process = reopen; a live resident thread = resume.
+      mode: nativeThreadCreated ? "fresh" : developerInstructionsSent !== null ? "reopen" : "resume",
+      sentText: promptText, req, systemText: developerInstructionsSent,
+      historyInSentText: !continuing, hostContextText: resumeContext?.text }));
     events.onRuntimeAttemptStarted?.(runtimeAttemptId);
     turnRequestInFlight = true;
     try {

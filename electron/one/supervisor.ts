@@ -52,6 +52,23 @@ export function closeOneSupervisorHostAdmission():void {
   closeOnePersonalIntegrations();
   hostOwner?.closeAdmission();workExecutor?.close();stopProactiveHost?.();stopBudgetHost?.();supervisor?.close();nativeRuntime?.close();
 }
+/**
+ * True while the background daemon holds the personal One domain, whether this Main handed it over or lost the race
+ * for it at start (the daemon adopted it first). Main must then neither build its own supervisor nor treat the
+ * unconfirmed ownership as a failure of an owner action (production 1.3.5, 2026-10-12T22:15Z: a question-card answer
+ * in a Goal room was refused supervisor_owner_unconfirmed). Only a live work-daemon row counts; a dead or released
+ * owner is taken over by oneSupervisor() as before.
+ */
+export function personalDomainHeldByDaemon():boolean {
+  if(domainHandedToDaemon)return true;
+  if(supervisor||hostOptions)return false;
+  try {
+    const row=getDb().prepare("SELECT owner_kind,owner_pid,phase FROM one_supervisor_runtime_owner WHERE slot='personal'").get() as {owner_kind:string;owner_pid:number;phase:string}|undefined;
+    if(!row||row.owner_kind!=='work-daemon'||row.phase==='released'||row.owner_pid===process.pid)return false;
+    try { process.kill(row.owner_pid,0); return true; }
+    catch(error){ return (error as NodeJS.ErrnoException)?.code!=='ESRCH'; }
+  } catch { return false; }
+}
 export function supervisorRunsInDaemon():boolean { return hostOptions?.ownerKind==='work-daemon'; }
 export function prepareOneSupervisorDaemonHandoff():{oneId:string;ownerEpoch:string;generation:number}|null {
   if(!supervisor || !hostOwner)return null;
@@ -288,7 +305,7 @@ const observeOrdinaryOneNativeSource = (source: OrdinaryOneTurnSource) => {
   // A One Goal room's owner turn starts on Desktop, where its Goal is held (goal-owner-route.ts). After the daemon
   // adopted the One domain, Desktop has no personal-domain owner, so the turn runs like the Goal's own Desktop
   // wake-ups: outside the personal domain, without personal native capabilities. Any other One turn still needs it.
-  if (domainHandedToDaemon && oneGoalRoomTurnOnDesktop(readOrdinaryOneTurn(source, "scope").request.chatId)) return undefined;
+  if (personalDomainHeldByDaemon() && oneGoalRoomTurnOnDesktop(readOrdinaryOneTurn(source, "scope").request.chatId)) return undefined;
   const observed = oneSupervisor().observeOrdinaryNativeTurn(source);
   if (!observed) return undefined;
   return { ...observed, wrap<T>(body: () => T): T {

@@ -1,0 +1,491 @@
+/*
+ * Model-call ledger (context-reduction plan C01, "measure before reducing").
+ *
+ * One durable run event (`model_call_ledger`) per real provider attempt a user turn causes, whatever the role
+ * (main, planner, worker, synthesis, judgment, curator, repair ...). It links userTurn / run / call / attempt and
+ * carries (a) the runtime identity, (b) a payload block ledger estimated from the request the adapter actually
+ * assembled, and (c) the provider-observed usage.
+ *
+ * Observability only: nothing here changes a prompt, an admission digest or a dispatch. The wrapper passes the
+ * same request through and observes events; every failure to record is swallowed.
+ *
+ * Rules the stored payload obeys:
+ *  - sizes, ids, enums and digests only. Prompt text is estimated locally and dropped, never stored.
+ *  - unknown stays unknown. A block the adapter cannot see (a resumed CLI thread keeps its system prompt, tools and
+ *    history inside the provider session) is listed in `unknownBlocks` and its key is absent; usage the provider did
+ *    not report is absent with `usageStatus: "unknown"`. Neither is ever written as 0.
+ *  - `observedInput` is the LOGICAL input of the call: for OpenAI/Codex the cached part is a subset of it, for
+ *    Anthropic the adapters already add raw input + cache read + cache creation. `observedCachedInput` is the
+ *    subset served from cache; it is never added to input again.
+ */
+import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { estimateTextTokens } from "./token-estimate";
+import { tryRecordRunEvent } from "../store/run-events";
+import type { Runner, RunnerEvents, RunnerRequest, RunnerResult } from "./runner";
+
+export const MODEL_CALL_LEDGER_SCHEMA = "agentlas.model-call-ledger.v1";
+export const MODEL_CALL_LEDGER_EVENT_KIND = "model_call_ledger";
+
+/** Same per-image upper estimate the serving admission uses (agentlas-serving.ts IMAGE_TOKEN_ESTIMATE). */
+export const LEDGER_IMAGE_TOKEN_ESTIMATE = 2_000;
+
+export type ModelCallRole =
+  | "main" | "planner" | "worker" | "synthesis" | "judgment" | "observation"
+  | "curator" | "repair" | "compaction" | "router" | "build" | "unscoped";
+export type ModelCallMode = "fresh" | "resume" | "reopen" | "stateless" | "unknown";
+export type PayloadSource = "adapter-final" | "request" | "unknown";
+export type BlockName = "instructions" | "tools" | "history" | "hostContext" | "attachments" | "ownerText" | "toolExchanges" | "framing";
+const BLOCK_NAMES: readonly BlockName[] = ["instructions", "tools", "history", "hostContext", "attachments", "ownerText", "toolExchanges", "framing"];
+
+export interface PayloadLedger {
+  mode: ModelCallMode;
+  source: PayloadSource;
+  /** Where the framed per-turn host context travelled, when the adapter knows. */
+  placement?: string;
+  /** Estimated tokens of what was transmitted for each block. null = the adapter cannot see it. */
+  blocks: Record<BlockName, number | null>;
+  toolsCount: number | null;
+  attachmentsCount: number | null;
+  /** Independent estimate of the whole serialized request, for a block-sum sanity check. */
+  wholeEstimate: number | null;
+}
+
+export interface ModelCallScope {
+  runId?: string;
+  chatId?: string | null;
+  nodeId?: string | null;
+  agentId?: string | null;
+  /** The owner turn this call serves. Defaults to the run id. */
+  userTurnId?: string;
+  callRef?: string;
+  role?: ModelCallRole;
+  phase?: string;
+}
+
+const scopes = new AsyncLocalStorage<ModelCallScope>();
+
+/** Bind identity and role for every model call made inside `fn`. Inner scopes override outer ones field by field. */
+export function withModelCallScope<T>(scope: ModelCallScope, fn: () => T): T {
+  const parent = scopes.getStore();
+  const merged: ModelCallScope = { ...parent };
+  for (const [key, value] of Object.entries(scope)) if (value !== undefined) (merged as Record<string, unknown>)[key] = value;
+  return scopes.run(merged, fn);
+}
+export function currentModelCallScope(): ModelCallScope | undefined { return scopes.getStore(); }
+
+/** Task-force phase names (observeTaskForceModelCall) to ledger roles. */
+export function roleForTaskForcePhase(phase: string): ModelCallRole {
+  if (/plan/.test(phase) && !/synthes/.test(phase)) return "planner";
+  if (/synthes/.test(phase)) return "synthesis";
+  if (/worker|escalation/.test(phase)) return "worker";
+  if (/verif|review|judg/.test(phase)) return "judgment";
+  return "worker";
+}
+
+const tokens = (text: string | null | undefined): number => (text ? estimateTextTokens(text) : 0);
+
+/** Strip base64 media before measuring text: images are counted per image, never by their encoding length. */
+function mediaFreeJson(value: unknown): string {
+  try {
+    return JSON.stringify(value, (key, item) => {
+      if (typeof item === "string" && (item.startsWith("data:") || (key === "data" && item.length > 2_000))) return "";
+      return item;
+    }) ?? "";
+  } catch { return ""; }
+}
+
+function emptyBlocks(): Record<BlockName, number | null> {
+  return { instructions: null, tools: null, history: null, hostContext: null, attachments: null, ownerText: null, toolExchanges: null, framing: null };
+}
+
+export function blockSum(blocks: Record<BlockName, number | null>): number {
+  return BLOCK_NAMES.reduce((sum, name) => sum + (blocks[name] ?? 0), 0);
+}
+
+/**
+ * Payload an adapter reports from text it is about to transmit. Texts are measured and dropped.
+ * Omit a field (or pass undefined) when the adapter cannot see that block: it is recorded as unknown.
+ * Pass "" / 0 only when the block is genuinely absent from the payload.
+ */
+export interface ReportedPayload {
+  mode: ModelCallMode;
+  placement?: string;
+  instructions?: string | null;
+  tools?: { count: number; text: string } | null;
+  history?: string | null;
+  hostContext?: string | null;
+  ownerText?: string | null;
+  toolExchanges?: string | null;
+  attachments?: { count: number; tokens?: number } | null;
+  /** Everything the adapter transmitted as one text, for the framing residual and the whole-request cross-check. */
+  wholeText?: string | null;
+  /** The part of wholeText that rides in the same message as host context/owner text (the user side). */
+  userSideText?: string | null;
+}
+
+export function ledgerFromReport(report: ReportedPayload): PayloadLedger {
+  const blocks = emptyBlocks();
+  if (report.instructions != null) blocks.instructions = tokens(report.instructions);
+  if (report.tools != null) blocks.tools = tokens(report.tools.text);
+  if (report.history != null) blocks.history = tokens(report.history);
+  if (report.hostContext != null) blocks.hostContext = tokens(report.hostContext);
+  if (report.ownerText != null) blocks.ownerText = tokens(report.ownerText);
+  if (report.toolExchanges != null) blocks.toolExchanges = tokens(report.toolExchanges);
+  if (report.attachments != null) {
+    blocks.attachments = report.attachments.tokens ?? report.attachments.count * LEDGER_IMAGE_TOKEN_ESTIMATE;
+  }
+  const whole = report.wholeText != null ? tokens(report.wholeText) : null;
+  // Residual framing (wrappers, headings, JSON punctuation) only when the adapter gave us the whole text to compare to.
+  if (whole !== null) {
+    const known = blockSum({ ...blocks, framing: null }) - (blocks.attachments ?? 0);
+    blocks.framing = Math.max(0, whole - known);
+  }
+  return {
+    mode: report.mode, source: "adapter-final", ...(report.placement ? { placement: report.placement } : {}),
+    blocks, toolsCount: report.tools ? report.tools.count : null,
+    attachmentsCount: report.attachments ? report.attachments.count : null,
+    wholeEstimate: whole === null ? null : whole + (blocks.attachments ?? 0),
+  };
+}
+
+/** Analyse the JSON body a stateless host loop (serving, BYOK, local) is about to POST. */
+export function ledgerFromApiBody(body: unknown, hints: {
+  /** RunnerRequest.ledgerHints: sizes of the host context / owner text before placement folded them in. */
+  ledgerHints?: RunnerRequest["ledgerHints"]; imageCount?: number; mode?: ModelCallMode;
+}): PayloadLedger {
+  const record = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
+  const messages = Array.isArray(record.messages) ? record.messages as unknown[] : Array.isArray(record.contents) ? record.contents as unknown[] : [];
+  const roleOf = (message: unknown): string => String((message as { role?: unknown })?.role ?? "");
+  const isToolMessage = (message: unknown): boolean => {
+    const entry = message as { role?: unknown; content?: unknown; parts?: unknown; tool_calls?: unknown } | null;
+    if (!entry) return false;
+    if (entry.role === "tool" || entry.tool_calls) return true;
+    const parts = Array.isArray(entry.content) ? entry.content : Array.isArray(entry.parts) ? entry.parts : null;
+    return parts !== null && parts.some((part) => {
+      if (part && typeof part === "object" && ("functionCall" in part || "functionResponse" in part)) return true;
+      const type = (part as { type?: unknown })?.type;
+      return type === "tool_use" || type === "tool_result" || type === "functionCall" || type === "functionResponse";
+    });
+  };
+  const systemParts: string[] = [];
+  if (record.system !== undefined) systemParts.push(mediaFreeJson(record.system));
+  if (record.systemInstruction !== undefined) systemParts.push(mediaFreeJson(record.systemInstruction));
+  const conversation: unknown[] = [];
+  for (const message of messages) {
+    if (roleOf(message) === "system" || roleOf(message) === "developer") systemParts.push(mediaFreeJson(message));
+    else conversation.push(message);
+  }
+  // The current user message is the last plain (non-tool) user message.
+  let currentIndex = -1;
+  for (let index = conversation.length - 1; index >= 0; index -= 1) {
+    if (roleOf(conversation[index]) === "user" && !isToolMessage(conversation[index])) { currentIndex = index; break; }
+  }
+  const history = currentIndex < 0 ? [] : conversation.slice(0, currentIndex).filter((m) => !isToolMessage(m));
+  const toolMessages = conversation.filter(isToolMessage);
+  const tail = currentIndex < 0 ? [] : conversation.slice(currentIndex + 1).filter((m) => !isToolMessage(m));
+  const current = currentIndex < 0 ? null : conversation[currentIndex];
+  const tools = Array.isArray(record.tools) ? record.tools : null;
+  const toolCount = tools === null ? 0 : tools.reduce<number>((sum, entry) => {
+    const declarations = (entry as { functionDeclarations?: unknown } | null)?.functionDeclarations;
+    return sum + (Array.isArray(declarations) ? declarations.length : 1);
+  }, 0);
+  const toolExchangeText = [record.toolExchanges !== undefined ? mediaFreeJson(record.toolExchanges) : "",
+    ...toolMessages.map(mediaFreeJson), ...tail.map(mediaFreeJson)].filter(Boolean).join("");
+
+  const blocks = emptyBlocks();
+  const imageCount = hints.imageCount ?? 0;
+  const instructionTokens = tokens(systemParts.join(""));
+  const currentTokens = tokens(current ? mediaFreeJson(current) : "");
+  blocks.tools = tools ? tokens(mediaFreeJson(tools)) : 0;
+  blocks.history = tokens(history.map(mediaFreeJson).join(""));
+  blocks.toolExchanges = tokens(toolExchangeText);
+  blocks.attachments = imageCount * LEDGER_IMAGE_TOKEN_ESTIMATE;
+  const given = hints.ledgerHints;
+  let placement: string | undefined;
+  if (given) {
+    placement = given.hostContextPlacement;
+    // Host context rides in the user message or the system tail; take it from where the host put it so the block
+    // sum keeps matching the request. The owner text is always in the current user message.
+    const host = given.hostContextTokens;
+    const inUser = given.hostContextPlacement === "user-message";
+    const hostInUser = inUser ? Math.min(host, currentTokens) : 0;
+    const hostInSystem = inUser ? 0 : Math.min(host, instructionTokens);
+    blocks.hostContext = hostInUser + hostInSystem;
+    blocks.instructions = Math.max(0, instructionTokens - hostInSystem);
+    blocks.ownerText = Math.min(given.ownerTextTokens, Math.max(0, currentTokens - hostInUser));
+    blocks.framing = Math.max(0, currentTokens - hostInUser - blocks.ownerText);
+  } else {
+    // No host split available (non-main calls): the whole current message is the owner-side text.
+    blocks.instructions = instructionTokens;
+    blocks.ownerText = currentTokens;
+    blocks.hostContext = null;
+    blocks.framing = 0;
+  }
+  return {
+    mode: hints.mode ?? "stateless", source: "adapter-final", ...(placement ? { placement } : {}),
+    blocks, toolsCount: toolCount, attachmentsCount: imageCount,
+    wholeEstimate: tokens(mediaFreeJson(body)) + blocks.attachments,
+  };
+}
+
+/**
+ * CLI adapters (Codex exec/app-server, Claude Code) hand the CLI one text plus, sometimes, a separate system file or
+ * developer-instructions field. Their tool definitions live inside the CLI/MCP servers and a resumed thread keeps
+ * its earlier system prompt, history and tools inside the provider session: those blocks stay unknown (null).
+ *
+ * `instructionsInSentText` is true when the system prompt is embedded in `sentText` (Codex exec seed); its size is
+ * then the residual of the sent text after history, host context and owner text, so it includes the adapter's own
+ * wrapper and section headings.
+ */
+export function ledgerFromCliSent(input: {
+  mode: ModelCallMode; sentText: string; req: RunnerRequest;
+  systemText?: string | null; instructionsInSentText?: boolean; historyInSentText?: boolean;
+  hostContextText?: string; placement?: string;
+  /** The host context was appended to systemText (Claude fresh seed) rather than sent in sentText. */
+  hostContextInSystem?: boolean;
+}): PayloadLedger {
+  const { req } = input;
+  const sent = tokens(input.sentText);
+  const owner = Math.min(tokens(req.userPrompt), sent);
+  const blocks = emptyBlocks();
+  blocks.ownerText = owner;
+  blocks.framing = 0;
+  blocks.attachments = (req.images?.length ?? 0) * LEDGER_IMAGE_TOKEN_ESTIMATE;
+  // Tool definitions and the CLI's own tool exchanges live inside the CLI/provider session: toolExchanges and tools stay null.
+  if (input.historyInSentText) {
+    const history = tokens(req.history.map((row) => row.text).join("\n"));
+    const host = tokens(input.hostContextText ?? req.turnContext);
+    blocks.history = history;
+    blocks.hostContext = host;
+    if (input.instructionsInSentText) blocks.instructions = Math.max(0, sent - owner - history - host);
+    else if (input.hostContextInSystem && input.systemText != null) {
+      blocks.instructions = Math.max(0, tokens(input.systemText) - host);
+      blocks.framing = Math.max(0, sent - owner - history);
+    } else { blocks.instructions = input.systemText != null ? tokens(input.systemText) : null; blocks.framing = Math.max(0, sent - owner - history - host); }
+  } else {
+    // Delta turn: whatever is sent beyond the owner text is host context, gap replay and framing.
+    blocks.hostContext = Math.max(0, sent - owner);
+    blocks.instructions = input.systemText != null ? tokens(input.systemText) : null;
+  }
+  return { mode: input.mode, source: "adapter-final", ...(input.placement ? { placement: input.placement } : {}),
+    blocks, toolsCount: null, attachmentsCount: req.images?.length ?? 0,
+    wholeEstimate: sent + tokens(input.systemText) + (blocks.attachments ?? 0) };
+}
+
+/** Pre-adapter view of a request. A fallback only: wrappers added by the adapter are not in it. */
+export function ledgerFromRequest(req: RunnerRequest): PayloadLedger {
+  const blocks = emptyBlocks();
+  blocks.instructions = tokens(req.systemPrompt);
+  blocks.history = tokens(req.history.map((row) => row.text).join("\n"));
+  blocks.hostContext = tokens(req.turnContext);
+  blocks.ownerText = tokens(req.userPrompt);
+  blocks.attachments = (req.images?.length ?? 0) * LEDGER_IMAGE_TOKEN_ESTIMATE;
+  blocks.toolExchanges = null;
+  return { mode: "unknown", source: "request", blocks, toolsCount: null,
+    attachmentsCount: req.images?.length ?? 0, wholeEstimate: null };
+}
+
+interface AttemptRecord {
+  id: string | null;
+  startedAt: number;
+  payload: PayloadLedger | null;
+  usage: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } | null;
+  detail: { cacheCreationInputTokens?: number; rawInputTokens?: number } | null;
+}
+interface Collector {
+  attempts: AttemptRecord[];
+  pending: PayloadLedger | null;
+}
+const collectors = new AsyncLocalStorage<Collector>();
+
+/**
+ * Adapter hook: report the payload you are about to transmit (lazily: the builder only runs under a wrapped runner and
+ * its failure is swallowed). It binds to the next provider attempt the adapter
+ * announces (`onRuntimeAttemptStarted`), or to the latest attempt when it was announced first. No-op outside a
+ * wrapped runner, so adapters may call it unconditionally.
+ */
+export function reportModelPayload(build: () => PayloadLedger): void {
+  try {
+    const collector = collectors.getStore();
+    if (!collector) return;           // not under a wrapped runner: nothing to measure, nothing computed
+    const ledger = build();
+    const last = collector.attempts.at(-1);
+    if (last && last.payload === null && last.usage === null) last.payload = ledger;
+    else collector.pending = ledger;
+  } catch { /* observability must not break a run */ }
+}
+
+export interface ModelCallIdentity {
+  kind: string;
+  backend?: string | null;
+  model?: string | null;
+  effort?: string | null;
+}
+
+function inferRole(req: RunnerRequest, scoped: ModelCallRole | undefined): { role: ModelCallRole; source: "scope" | "inferred" } {
+  // "main" is only the default of the owner-turn scope: a judgment or observation call inside it is not the main call.
+  if (scoped && !(scoped === "main" && (req.judgmentOnly || req.minimalObservation))) return { role: scoped, source: "scope" };
+  if (req.judgmentOnly) return { role: "judgment", source: "inferred" };
+  if (req.minimalObservation) return { role: "observation", source: "inferred" };
+  return { role: "unscoped", source: "inferred" };
+}
+
+const sanitizeCount = (value: unknown): number | undefined =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+
+/** Flatten one attempt into run-event payload fields (flat numbers/strings only; absent key = unknown). */
+export function ledgerEventPayload(input: {
+  callRef: string; scopeCallRef?: string; attemptIndex: number; attemptCount: number; attemptId: string | null;
+  role: ModelCallRole; roleSource: "scope" | "inferred"; phase?: string; userTurnId: string; scoped: boolean;
+  identity: ModelCallIdentity; requestModel?: string | null; effort?: string | null;
+  payload: PayloadLedger | null; usage: AttemptRecord["usage"]; detail: AttemptRecord["detail"];
+  status: string; failureKind?: string; durationMs: number;
+}): Record<string, unknown> {
+  const { payload } = input;
+  const out: Record<string, unknown> = {
+    schemaVersion: MODEL_CALL_LEDGER_SCHEMA, callRef: input.callRef, userTurnId: input.userTurnId,
+    ...(input.scopeCallRef ? { scopeCallRef: input.scopeCallRef } : {}),
+    attemptIndex: input.attemptIndex, attemptCount: input.attemptCount,
+    ...(input.attemptId ? { attemptId: input.attemptId } : {}),
+    role: input.role, roleSource: input.roleSource, ...(input.phase ? { phase: input.phase } : {}), scoped: input.scoped,
+    runtimeKind: input.identity.kind, ...(input.identity.backend ? { runtimeBackend: input.identity.backend } : {}),
+    ...(input.requestModel ? { model: input.requestModel } : {}), ...(input.effort ? { effort: input.effort } : {}),
+    status: input.status, ...(input.failureKind ? { failureKind: input.failureKind } : {}), durationMs: input.durationMs,
+    payloadSource: payload?.source ?? "unknown", mode: payload?.mode ?? "unknown",
+  };
+  if (payload) {
+    if (payload.placement) out.placement = payload.placement;
+    const names: Record<BlockName, string> = {
+      instructions: "instructionsTokens", tools: "toolsTokens", history: "historyTokens", hostContext: "hostContextTokens",
+      attachments: "attachmentsTokens", ownerText: "ownerTextTokens", toolExchanges: "toolExchangeTokens", framing: "framingTokens",
+    };
+    const unknown: string[] = [];
+    for (const name of BLOCK_NAMES) {
+      const value = payload.blocks[name];
+      if (value === null) unknown.push(name); else out[names[name]] = value;
+    }
+    out.sentTokensEst = blockSum(payload.blocks);
+    if (unknown.length) out.unknownBlocks = unknown.join(",");
+    if (payload.toolsCount !== null) out.toolsCount = payload.toolsCount;
+    if (payload.attachmentsCount !== null) out.attachmentsCount = payload.attachmentsCount;
+    if (payload.wholeEstimate !== null) out.wholeRequestEstimate = payload.wholeEstimate;
+  } else {
+    out.unknownBlocks = BLOCK_NAMES.join(",");
+  }
+  const usage = input.usage;
+  if (usage && sanitizeCount(usage.inputTokens) !== undefined && sanitizeCount(usage.outputTokens) !== undefined) {
+    out.usageStatus = "observed";
+    out.observedInput = usage.inputTokens;
+    out.observedOutput = usage.outputTokens;
+    if (sanitizeCount(usage.cachedInputTokens) !== undefined) out.observedCachedInput = usage.cachedInputTokens;
+  } else out.usageStatus = "unknown";
+  if (input.detail) {
+    const write = sanitizeCount(input.detail.cacheCreationInputTokens);
+    const raw = sanitizeCount(input.detail.rawInputTokens);
+    if (write !== undefined) out.observedCacheCreationInput = write;
+    if (raw !== undefined) out.observedRawInput = raw;
+  }
+  return out;
+}
+
+/**
+ * Wrap the innermost runner (after agent-context and every host wrapper, directly around the adapter) so the
+ * request it sees is the final one. Behaviour-neutral: same request object, same events, same result or error.
+ */
+export function withModelCallLedger(runner: Runner, identity: ModelCallIdentity): Runner {
+  return async (req, events) => {
+    let collector: Collector;
+    let callRef: string;
+    let scope: ModelCallScope | undefined;
+    let startedAt: number;
+    let wrappedEvents: RunnerEvents = events;
+    try {
+      scope = scopes.getStore();
+      collector = { attempts: [], pending: null };
+      callRef = `model-call:${randomUUID()}`;
+      startedAt = Date.now();
+      wrappedEvents = {
+        ...events,
+        onRuntimeAttemptStarted: (id) => {
+          try {
+            collector.attempts.push({ id, startedAt: Date.now(), payload: collector.pending, usage: null, detail: null });
+            collector.pending = null;
+          } catch { /* observability only */ }
+          events.onRuntimeAttemptStarted?.(id);
+        },
+        onModelUsageDetail: (id, detail) => {
+          try {
+            const attempt = id ? collector.attempts.find((entry) => entry.id === id) : collector.attempts.at(-1);
+            if (attempt) attempt.detail = { ...attempt.detail, ...detail };
+          } catch { /* observability only */ }
+          events.onModelUsageDetail?.(id, detail);
+        },
+        onTerminalObservedUsage: (usage, id) => {
+          try {
+            const attempt = (id ? collector.attempts.find((entry) => entry.id === id) : collector.attempts.at(-1));
+            if (attempt) attempt.usage = { ...usage };
+          } catch { /* observability only */ }
+          events.onTerminalObservedUsage?.(usage, id);
+        },
+      };
+    } catch {
+      return collectors.run({ attempts: [], pending: null }, () => runner(req, events));
+    }
+    let result: RunnerResult | undefined;
+    let thrown: unknown;
+    let threw = false;
+    try {
+      result = await collectors.run(collector, () => runner(req, wrappedEvents));
+      return result;
+    } catch (error) {
+      threw = true;
+      thrown = error;
+      throw error;
+    } finally {
+      try {
+        emit(collector, { req, identity, scope, callRef, startedAt, result, threw, thrown });
+      } catch { /* observability only */ }
+    }
+  };
+}
+
+function emit(collector: Collector, input: {
+  req: RunnerRequest; identity: ModelCallIdentity; scope: ModelCallScope | undefined; callRef: string;
+  startedAt: number; result: RunnerResult | undefined; threw: boolean; thrown: unknown;
+}): void {
+  const { req, identity, scope, callRef, result } = input;
+  const { role, source } = inferRole(req, scope?.role);
+  const chatId = scope?.chatId ?? req.chatId ?? null;
+  const runId = scope?.runId ?? `model-call-unscoped:${chatId ?? "none"}`;
+  const userTurnId = scope?.userTurnId ?? scope?.runId ?? runId;
+  const aborted = req.signal?.aborted === true;
+  const status = input.threw ? (aborted ? "cancelled" : "failed") : result?.failure ? "failed" : "completed";
+  const failureKind = result?.failure?.kind;
+  const effort = result && Object.prototype.hasOwnProperty.call(result, "appliedEffort") ? result.appliedEffort ?? null : req.effort ?? null;
+  // Attempts the adapter announced; a runner that announced none still made (at most) one call we must account for.
+  const attempts: AttemptRecord[] = collector.attempts.length
+    ? collector.attempts
+    : [{ id: null, startedAt: input.startedAt, payload: collector.pending, usage: null, detail: null }];
+  // One announced attempt and a returned total: the returned total is that attempt's receipt.
+  if (attempts.length === 1 && attempts[0].usage === null && result?.observedUsage) attempts[0].usage = { ...result.observedUsage };
+  const fallbackPayload = ledgerFromRequest(req);
+  attempts.forEach((attempt, index) => {
+    // Only the first attempt may fall back to the pre-adapter request view; later rounds (tool loops, retries)
+    // carry state the request does not show, so an unreported payload stays unknown instead of being guessed.
+    const payload = attempt.payload ?? (index === 0 ? fallbackPayload : null);
+    tryRecordRunEvent({
+      runId, ...(chatId ? { chatId } : {}), ...(scope?.nodeId ? { nodeId: scope.nodeId } : {}),
+      ...(scope?.agentId ? { agentId: scope.agentId } : {}),
+      kind: MODEL_CALL_LEDGER_EVENT_KIND,
+      sourceEventId: `${MODEL_CALL_LEDGER_EVENT_KIND}:${callRef}:${index + 1}`,
+      payload: ledgerEventPayload({
+        callRef, ...(scope?.callRef ? { scopeCallRef: scope.callRef } : {}), attemptIndex: index + 1, attemptCount: attempts.length,
+        attemptId: attempt.id, role, roleSource: source, ...(scope?.phase ? { phase: scope.phase } : {}),
+        userTurnId, scoped: Boolean(scope?.runId), identity, requestModel: req.model ?? identity.model ?? null, effort,
+        payload, usage: attempt.usage, detail: attempt.detail, status, ...(failureKind ? { failureKind } : {}),
+        durationMs: Math.max(0, Date.now() - attempt.startedAt),
+      }),
+    });
+  });
+}

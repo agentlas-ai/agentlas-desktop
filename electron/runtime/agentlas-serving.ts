@@ -14,6 +14,7 @@
  * 실행 1회가 크레딧을 쓴다. 잔액 판정·예약·정산은 전부 서버가 한다. 여기서 값을 지어내
  * 미리 보여 주지 않는다 — 앱이 계산한 값과 실제 청구가 어긋나면 그것이 곧 거짓말이 된다.
  */
+import { reportModelPayload, ledgerFromApiBody } from "./model-call-ledger";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { getSessionCookieHeader, webBaseUrl } from "../auth";
@@ -190,7 +191,7 @@ function servingToolImages(message: { content: unknown } | null): ServingImage[]
 type ServingDone = {
   text?: unknown; stopReason?: unknown; toolUses?: unknown;
   /** Token counts the server measured for this call (not the model name). Absent on older servers. */
-  usage?: { inputTokens?: unknown; outputTokens?: unknown };
+  usage?: { inputTokens?: unknown; outputTokens?: unknown; cacheReadInputTokens?: unknown };
   /** How many attached images the server forwarded. Absent = the server did not accept images. */
   imagesAccepted?: unknown;
   /** "json_schema" when the server enforced req.outputSchema by constrained decoding. */
@@ -277,8 +278,13 @@ class ServingUsage {
   add(id: string, done: ServingDone): void {
     const input = done.usage?.inputTokens;
     const output = done.usage?.outputTokens;
+    // The server's inputTokens already include cache reads and writes; cacheReadInputTokens is the measured subset.
+    // Dropping it made every serving turn read as uncached (production 1.3.5: 27.6k/41.8k/45.2k input, cached blank).
+    const cached = done.usage?.cacheReadInputTokens;
+    const cachedInputTokens = typeof cached === "number" && Number.isSafeInteger(cached) && cached >= 0
+      && typeof input === "number" && cached <= input ? cached : undefined;
     this.usage.complete(id, typeof input === "number" && typeof output === "number"
-      ? { inputTokens: input, outputTokens: output } : undefined);
+      ? { inputTokens: input, outputTokens: output, ...(cachedInputTokens !== undefined ? { cachedInputTokens } : {}) } : undefined);
   }
   settle(): { observedUsage?: { inputTokens: number; outputTokens: number; cachedInputTokens?: number } } {
     const observedUsage = this.usage.total();
@@ -367,6 +373,8 @@ async function runAgentlasServingWithTools(
         providerCode: "model_context_capacity_exceeded",
         message: "The Agentlas serving tool transcript exceeds the conservative context budget." } });
     }
+    // Context-reduction C01: the exact round about to be sent (system, tools, history, tool exchanges), sizes only.
+    reportModelPayload(() => ledgerFromApiBody(textPayload, { ledgerHints: req.ledgerHints, imageCount: sentImageCount }));
     const usageAttempt = usage.start();
     const response = await postServing(requestBody, cookie, req);
     if (!response.ok) return assertCurrentHistoryRunnerResult({ text: accumulatedText, ownerControlTerminal: "uncertain", failure: await servingHttpFailure(response, req.locale), ...usage.settle() });
@@ -463,6 +471,8 @@ export const runAgentlasServing: Runner = async (req, events): Promise<RunnerRes
     const withTools = await runAgentlasServingWithTools(req, events, model, { turns, system }, outputReserve, cookie);
     if (withTools) return withTools;
   }
+  reportModelPayload(() => ledgerFromApiBody({ model, system, messages: turns, maxTokens: outputReserve },
+    { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
   const usage = new ServingUsage(events);
   const usageAttempt = usage.start();
   const response = await postServing(JSON.stringify({

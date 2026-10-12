@@ -1,4 +1,5 @@
 import { selectionFor } from "../capabilities/one-capabilities";
+import { reportModelPayload, ledgerFromCliSent } from "./model-call-ledger";
 import { claudeMcpIsolation, withClaudePersonalContext, withDisallowedTools } from "./claude-personal-context";
 import { recordClaudeCapabilityRequest, recordClaudeCapabilityInit } from "./capability-receipt";
 import { claudeBrowserSurfaceArgs, claudeEngineBrowserEnabled } from "./claude-browser-surface";
@@ -1515,6 +1516,10 @@ const runClaudeTurn = async (
       }
       trackRunChild(child);
       turnDispatchAttempted = true;
+      // Context-reduction C01: a one-shot spawn seeds history+context (fresh) or sends a delta onto a resumed session (--resume).
+      reportModelPayload(() => ledgerFromCliSent({ mode: resumeSessionId ? "reopen" : "fresh", sentText: flatUser, req: runReq,
+        systemText: !resumeSessionId || resumeAppendArgs.length > 0 ? seededSystemPrompt : null,
+        historyInSentText: !resumeSessionId, hostContextInSystem: !resumeSessionId, hostContextText: runReq.turnContext }));
       events.onRuntimeAttemptStarted?.(runtimeAttemptId);
       writeStdin(child, flatUser);
     }
@@ -2265,6 +2270,9 @@ const runClaudeTurn = async (
                 ? { cachedInputTokens: usage.cache_read_input_tokens } : {}),
             };
             events.onTerminalObservedUsage?.(observedUsage, runtimeAttemptId);
+            events.onModelUsageDetail?.(runtimeAttemptId, {
+              ...(Number.isSafeInteger(usage.cache_creation_input_tokens) ? { cacheCreationInputTokens: usage.cache_creation_input_tokens! } : {}),
+              ...(Number.isSafeInteger(usage.input_tokens) ? { rawInputTokens: usage.input_tokens! } : {}) });
           }
         }
         // ★모든 is_error가 표식이다 — 예전에는 로그인 만료 한 케이스만 집고 나머지를
@@ -2553,6 +2561,10 @@ const runClaudeTurn = async (
       } else {
         try { aliveProfile?.assertCurrent(); } catch (error) { broken = true; pool.discard(lease!); rejectRuntime(error); return; }
         turnDispatchAttempted = true;
+        // A live resident process keeps its system prompt, history and tools; a freshly opened one was seeded at spawn.
+        reportModelPayload(() => ledgerFromCliSent({ mode: lease && !lease.fresh ? "resume" : resumeSessionId ? "reopen" : "fresh", sentText: turnText, req: runReq,
+          systemText: lease && !lease.fresh ? null : seededSystemPrompt,
+          historyInSentText: !(lease && !lease.fresh) && !resumeSessionId, hostContextInSystem: !resumeSessionId, hostContextText: runReq.turnContext }));
         events.onRuntimeAttemptStarted?.(runtimeAttemptId);
         if (!writeClaudeResidentTurn(session, turnText)) settle(null);
       }

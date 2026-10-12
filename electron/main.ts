@@ -4944,10 +4944,14 @@ app.whenReady().then(async () => {
   // queue stops with the app's runtime participants on quit and update.
   if (!developmentEffectsSuppressed()) {
     try {
-      const { oneSupervisor } = await import("./one/supervisor");
-      oneSupervisor();
+      const { oneSupervisor, personalDomainHeldByDaemon } = await import("./one/supervisor");
+      // The daemon adopting the personal domain first is the expected outcome, not a failure.
+      if (personalDomainHeldByDaemon()) console.info("[one-supervisor] personal domain is held by the background service");
+      else oneSupervisor();
     } catch (error) {
-      console.error("[one-supervisor] cold start failed", error);
+      if ((error as { code?: string })?.code === "supervisor_owner_unconfirmed" || /supervisor_owner_unconfirmed/.test(String((error as Error)?.message))) {
+        console.info("[one-supervisor] cold start deferred: another process owns the personal domain");
+      } else console.error("[one-supervisor] cold start failed", error);
     }
   }
   // One/Work Alive organisms (AGI toggle) — after DB migration and long-run admission. Enabled lives

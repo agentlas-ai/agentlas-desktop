@@ -10,7 +10,7 @@ import { listEnvKeys, readEnvVar } from "../secrets/vault";
 import { userDataPath } from "../runtime-paths";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import type { EnvKeyRenameSuggestion } from "../../shared/env-key-rename";
-import { mediaToolEnvKeys, planEnvKeyRenames } from "./env-key-reach";
+import { RUNTIME_AUTH_ENV_KEYS, isPlainMisnaming, mediaToolEnvKeys, planEnvKeyRenames } from "./env-key-reach";
 
 const DOTENV_FILES = [".env", ".env.local"];
 
@@ -135,8 +135,10 @@ export function mergeRunnerEnvValues(
 export interface RunnerEnvResolution {
   env: NodeJS.ProcessEnv;
   injectedKeys: string[];
-  /** Saved names that look like a key this run's tools read under another name. Value-free; never applied silently. */
+  /** Saved names that look like a key this run's tools read under another name and could not be aliased. Value-free. */
   renameSuggestions: EnvKeyRenameSuggestion[];
+  /** Misnamed saved keys this run's tool processes also receive under the read name. The vault is not renamed. */
+  aliasedKeys?: EnvKeyRenameSuggestion[];
 }
 
 export interface RunnerEnvOptions {
@@ -300,15 +302,37 @@ export async function buildRunnerEnv(
   env.AGENTLAS_MULTIMODAL_AUDIO_READY = audio.ready ? "1" : "0";
 
   let renameSuggestions: EnvKeyRenameSuggestion[] = [];
+  const aliasedKeys: EnvKeyRenameSuggestion[] = [];
   if (storedNames) {
     const wanted = [...declaredKeys, ...mediaToolEnvKeys()].filter((key) => !isProtectedRunnerEnvKey(key));
     const knownRead = [
       ...wanted, ...vaultKeys,
       ...MCP_TOOL_CATALOG.flatMap((entry) => entry.envRequirements.map((req) => req.key)),
     ];
-    renameSuggestions = planEnvKeyRenames(storedNames, wanted, knownRead);
+    // Owner 2026-10-12: a saved key that is only misnamed (ELEVENLABS_1 for ELEVENLABS_API_KEY) must just work, without
+    // asking. The vault entry keeps its own name; this run's tool processes also see it under the name the tool reads.
+    // A runtime login key is never aliased: a CLI that finds one can switch to metered API billing.
+    for (const suggestion of planEnvKeyRenames(storedNames, wanted, knownRead)) {
+      if (RUNTIME_AUTH_ENV_KEYS.has(suggestion.to) || env[suggestion.to] || !isPlainMisnaming(suggestion.from, suggestion.to)) {
+        renameSuggestions.push(suggestion);
+        continue;
+      }
+      let value: string | null = null;
+      try {
+        value = await readEnvVar(suggestion.from);
+      } catch {
+        // Same as above: an unavailable keychain narrows the run's tools.
+      }
+      if (!value) {
+        renameSuggestions.push(suggestion);
+        continue;
+      }
+      env[suggestion.to] = value;
+      injected.add(suggestion.to);
+      aliasedKeys.push(suggestion);
+    }
   }
-  return { env, injectedKeys: [...injected].sort(), renameSuggestions };
+  return { env, injectedKeys: [...injected].sort(), renameSuggestions, aliasedKeys };
 }
 
 export function readDotEnvFiles(dir: string): Record<string, string> {

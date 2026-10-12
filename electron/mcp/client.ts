@@ -16,6 +16,8 @@ import { bindInvocationJudgmentRuntime, withInvocationJudgmentContext } from "..
 import { longRunMonetaryRefusal, type LongRunUsageInput } from "../long-run/budget";
 import { beginAccountedInference } from "../long-run/accounting-context";
 import { createRuntimeUsageCollector } from "../../shared/observed-usage";
+import { withModelCallScope } from "../runtime/model-call-ledger";
+import { estimateTextTokens } from "../runtime/token-estimate";
 import { assertCurrentHistoryRunnerResult, runObservedRunner, observedRunnerUsage, ObservedRunnerFailureError } from "../runtime/observed-runner";
 import { withInvocationUsage, beginInvocationUsageAttempt, currentInvocationObservedUsage } from "../runtime/invocation-usage";
 import { createNoProgressGuard, noteNoProgressEvent, toolObservationDigest } from "../automation-progress-guard";
@@ -2027,7 +2029,9 @@ export function runMcpInvocation(
       message: pickLocale(req) === "ko" ? "같은 결과가 반복돼 다음 단계에서 접근을 바꾸고 독립 작업을 이어갑니다."
         : "Repeated results detected. The next step will change strategy and continue independent work." } });
   };
-  const runOwnedInvocation = () => withOneHistoryNativeInvocation({runId:req.runId!,chatId:req.chatId},()=>withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
+  // Context-reduction C01: every model call this owner turn causes is recorded against this run (model-call-ledger.ts).
+  const runOwnedInvocation = () => withModelCallScope({ runId: req.runId, chatId: req.chatId, userTurnId: req.runId, role: "main" }, runOwnedInvocationScoped);
+  const runOwnedInvocationScoped = () => withOneHistoryNativeInvocation({runId:req.runId!,chatId:req.chatId},()=>withAttemptChildren(children, () => withInvocationUsage(() => withInvocationJudgmentContext(req.runtimeSelection, invocationSignal, () => runMcpInvocationInContext(
     req, guardedSink, invocationSignal, workspaceBinding, executionContext, onDurableUserMessage, hostNoticePurpose, browserPresentation, bindDispatchedGoal, login, () => progressAdvisory, onBeforeGoalWorkDispatch, workRecovery,
     () => directWorkOwnerCurrent && !ownerSignal.aborted, onNativeTurnController, ownerControlInbox,
   )).then(async result => {
@@ -4362,9 +4366,16 @@ ${effectiveUserPrompt}`;
         memberAgents: (req.taskForceTargets ?? []).flatMap((target) =>
           target.source === "local" && target.entityKind === "agent" ? [getAgentById(target.agentId)] : []),
       });
-  // A saved key that is only misnamed (ELEVENLABS_1 for ELEVENLABS_API_KEY) is offered to the owner once, as one plain
-  // line. It is never renamed here: the rename stays an owner click (env screen) or Hope's asked-and-answered env.rename.
+  // A saved key that is only misnamed (ELEVENLABS_1 for ELEVENLABS_API_KEY) already reaches the tools under the read
+  // name (owner 2026-10-12: don't ask), so it is only recorded. Only a key that could not be aliased is offered to the
+  // owner, once, as one plain line. Nothing is renamed here.
   if (!req.agentAppMode) {
+    for (const alias of runnerEnv.aliasedKeys ?? []) {
+      tryRecordRunEvent({
+        runId: req.runId ?? `chat:${chat.id}`, kind: "env_key_aliased", chatId: chat.id, agentId: agent.id,
+        payload: { from: alias.from, to: alias.to },
+      });
+    }
     for (const suggestion of runnerEnv.renameSuggestions ?? []) {
       if (!claimRenameAnnouncement(suggestion)) continue;
       const notice = renameSuggestionNotice(suggestion, locale === "ko" ? "ko" : "en");
@@ -6309,6 +6320,8 @@ ${effectiveUserPrompt}`;
         ...(sessionCapable && runtimeTurnContext ? { turnContext: runtimeTurnContext } : { turnContext: undefined }),
         ...(sessionCapable && runtimeTurnContext ? { turnContextStable: stableTurnContextParts } : {}),
         userPrompt: placedTurnContext.userPrompt,
+        ledgerHints: { hostContextTokens: estimateTextTokens(runtimeTurnContext ?? ""),
+          hostContextPlacement: placedTurnContext.placement, ownerTextTokens: estimateTextTokens(userPrompt) },
         backendLabel: runtimePicked.label,
         runtimeSource: runtime.source ?? undefined,
         model: runtime.model ?? undefined,

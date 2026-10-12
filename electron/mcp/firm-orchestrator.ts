@@ -1,5 +1,6 @@
 import { toolObservationDigest } from "../automation-progress-guard";
 import { runObservedRunner, observedRunnerUsage, observedRunnerUsageEvidence, ObservedRunnerFailureError } from "../runtime/observed-runner";
+import { withModelCallScope } from "../runtime/model-call-ledger";
 import { ownerVisiblePrompt } from "../one/owner-prompt";
 import { mainWorkAttachmentContext, redactWorkAttachmentText } from "../invocation/work-attachments";
 import { workerCapabilityRunner, WorkerCapabilityError, type PrepareWorkerCapabilities, type WorkerCapabilityInput } from "./worker-capabilities";
@@ -1134,10 +1135,10 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
       // including retries on another runtime. A child cannot lower Plan mode.
       const boundedRunner: Runner = (request, events) => {
         runnerCalled = true;
-        return runObservedRunner(runtimePicked.runner,
+        return withModelCallScope({ role: "worker", phase: "firm-worker", nodeId: node.id }, () => runObservedRunner(runtimePicked.runner,
           p.req.planMode === true ? { ...request, permission: "read", planMode: true } : request,
           events,
-        );
+        ));
       };
       const workerRunner = turn.runtimeToolsDisabled || controlPlaneTurn ? boundedRunner
         : workerCapabilityRunner(p.prepareWorkerCapabilities, {

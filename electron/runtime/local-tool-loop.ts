@@ -1,4 +1,5 @@
 import { cachedTokensFromOpenAiUsage } from "./prompt-cache";
+import { reportModelPayload, ledgerFromApiBody } from "./model-call-ledger";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { withCurrentHistoryTool, currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { assertScienceRecoveryRequest } from "../science-host/recovery-authority";
@@ -1541,6 +1542,7 @@ export async function runLocalOpenAiChat(
     }
     assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
     let resp: Response;
+    reportModelPayload(() => ledgerFromApiBody(requestBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
     let usageAttempt = usage.start();
     try {
       if (req.signal?.aborted) throw abortReasonError(req);
@@ -1575,6 +1577,7 @@ export async function runLocalOpenAiChat(
         const retryBody = { ...requestBody };
         delete retryBody.stream_options;
         assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
+        reportModelPayload(() => ledgerFromApiBody(retryBody, { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
         usageAttempt = usage.start();
         try {
           resp = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
@@ -1614,6 +1617,8 @@ export async function runLocalOpenAiChat(
           sawUnsupportedToolCallAttempt = true;
           events.onStatus(tStatus(req.locale, "mcpToolCallUnsupported"));
           assertScienceRecoveryRequest(req, runtimeKind, opts.recoveryBackend);
+          reportModelPayload(() => ledgerFromApiBody(Object.fromEntries(Object.entries(requestBody).filter(([key]) => key !== "tools")),
+            { ledgerHints: req.ledgerHints, imageCount: req.images?.length ?? 0 }));
           usageAttempt = usage.start();
           const fallback = await withCurrentHistoryProvider(()=>turnFetch(chatEndpoint, {
             method: "POST",
