@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.19 — 2026-10-13
+
+- An agent with a connected ElevenLabs voice engine now actually makes the voice. Its instructions sent it to a secure helper it had no way to call and told it not to use the saved key Agentlas had already given its run, so the Yotube room kept searching for an approval record and made silent drafts only. The saved key is now the stated route: the agent calls the provider from a script that reads the key by name and never shows or writes its value. The always-on instructions are slightly shorter.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.18 — 2026-10-12
 
 - The app no longer decides for itself whether an outside action "may have happened". Agents used to be told not to redo voice, upload or render work that was marked uncertain, and a Goal could stop on that label. Now the agent checks the current state itself and redoes only what has not happened.
