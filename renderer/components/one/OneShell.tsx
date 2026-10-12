@@ -1734,7 +1734,30 @@ function OneSessionsShell() {
                 let receipt = await waitForOneFollowupDelivery(bridge.invoke.preflightSteerReceipt({ steerId: intent.intentId, submissionId: intent.submissionId, chatId }));
                 if (!receipt) {
                   if (deliveryPaused(intent)) continue;
-                  receipt = await waitForOneFollowupDelivery(bridge.invoke.preflightSteerEnqueue(input));
+                  receipt = await waitForOneFollowupDelivery(bridge.invoke.preflightSteerEnqueue(input)).catch((error: unknown) => {
+                    // Main refuses for good once the submission takes no more directions (held, settled, cancelled).
+                    // Kept first in the FIFO it blocked every later message of the chat: production 1.3.9, Hope 1:1,
+                    // behind a follow-up bound to a submission held since 2026-10-10.
+                    if (String(error).includes("one_preflight_submission_not_receiving")) return null;
+                    throw error;
+                  });
+                  if (!receipt) {
+                    removeOneFollowupIntent(window.localStorage, chatId, intent.intentId);
+                    terminalFollowupIdsRef.current.add(intent.intentId);
+                    // The saved "uncertain parent" pointed every later send at that same closed submission; it is no
+                    // longer a parent that takes follow-ups, so the next send starts normally (Main still guards the start).
+                    const uncertain = readOneUncertainAdmission(chatId);
+                    if (uncertain?.submissionId === intent.submissionId) clearOneUncertainAdmission(chatId, uncertain.runId);
+                    showLocal();
+                    // A direction written moments ago goes as a new message; an old one is not replayed into a new turn.
+                    const fresh = Date.now() - Date.parse(intent.createdAt) < 10 * 60_000;
+                    if (fresh && activeThreadChatIdRef.current === chatId && submitTextRef.current
+                      && !(composerHandleRef.current?.getValue() ?? "").trim() && !attachmentDraftsRef.current.length) {
+                      await submitTextRef.current(intent.userPrompt);
+                      break;
+                    }
+                    continue;
+                  }
                 }
                 if (receipt.steerId !== intent.intentId || receipt.submissionId !== intent.submissionId
                   || receipt.chatId !== chatId || receipt.userPrompt !== intent.userPrompt

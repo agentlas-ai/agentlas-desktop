@@ -1,10 +1,11 @@
 # Changelog
 
-## 1.3.10 — 2026-10-12
+## 1.3.11 — 2026-10-12
 
 - Claude Code, Grok, Kimi, Cursor, Antigravity and other agent CLIs that go completely silent are ended and retried, as Codex already was. A tool call that never finishes is ended after 90 minutes.
 - A message you send to a chat that a crashed earlier session still held is sent once that hold is cleared, instead of waiting two hours and being dropped.
 - A relay One wrote to a teammate that could no longer be delivered is closed after its run ends, instead of waiting forever.
+- A message you send is no longer held back behind an old, already-closed request of the same chat: it goes out as a new message.
 - A voice or media engine whose key is saved under a slightly different name (ELEVENLABS_1) now reads as ready, so agents use it instead of reporting the voice path unavailable.
 - Capabilities: Agentlas's own built-in skills and plugins are always on and no longer listed. Items the app cannot switch show a lock with the reason instead of a switch, and Grok and Antigravity source switches now take effect.
 - This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
