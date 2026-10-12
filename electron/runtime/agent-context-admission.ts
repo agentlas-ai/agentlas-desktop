@@ -7,7 +7,7 @@ import { createDaemonAgentContextHost } from "../daemon/agent-context-host";
 import { getDb } from "../store/db";
 import { invocationProcessOwner, invocationRunOwners, assertInvocationRunOwner } from "../store/invocation-run-owners";
 import { getInvocationRunReceipt } from "../store/run-events";
-import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory,
+import { createAgentContextCapability, agentContextHostBinding, bootstrapAgentContextHistory, markAgentContextHostAuthored,
   reconcileInterruptedAgentContext, type AgentContextCapability } from "./agent-context";
 import type { Runner, RunnerRequest } from "./runner";
 
@@ -25,6 +25,8 @@ export function agentContextOwnerBinding() {
 export function bindInvocationAgentContext(request: RunnerRequest, input: {
   chatId: string; agentId: string; runId: string; attempt: number;
   aliveController: boolean; assertCurrent(): void;
+  /** Typed purpose when the host, not the owner, wrote this turn's input (a Goal continuation); replay compacts it. */
+  hostAuthored?: string;
 }): RunnerRequest {
   if (!Number.isSafeInteger(input.attempt) || input.attempt < 1) fail("agent_context_attempt_identity_required");
   const owner = invocationRunOwners.getRunOwner(input.chatId, input.runId), processOwner = invocationProcessOwner();
@@ -47,6 +49,7 @@ export function bindInvocationAgentContext(request: RunnerRequest, input: {
   // Initial migration belongs to this exact authorized chat only. The journal
   // becomes authoritative afterwards; chat projections are not imported again.
   bootstrapAgentContextHistory(capability, request.history);
+  markAgentContextHostAuthored(capability, input.hostAuthored);
   return { ...request, agentContext: capability };
 }
 function assertPreviousTurnTerminal(turnId: string): void {

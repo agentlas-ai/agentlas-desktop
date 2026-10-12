@@ -9,13 +9,10 @@ import { createHash } from "node:crypto";
 import type { ChatHistoryEntry, ImageAttachment, McpInvocationEvent } from "../../shared/types";
 import type { ToolInvocationOrigin } from "../../shared/tool-invocation-origin";
 import { tStatus, type RuntimeLocale } from "./status-i18n";
-import { connectionSectionText, intellectUiSectionText, planPromptSections } from "./prompt-sections";
+import { connectionSectionText, intellectUiSectionText } from "./prompt-sections";
 import { pluginRouterPrompt } from "../plugins/router-prompt";
 import { installedAgentlasCapabilityProviders } from "../plugins/plugin-candidates";
 import { capabilityPriorityGuidance } from "../../shared/capability-priority";
-import { SURFACE_PROTOCOL, SURFACE_DISCOVERY_CATALOG, SURFACE_OPEN_FENCE, SURFACE_CLOSE_FENCE } from "../surface-emitter";
-import { selectModules, tokenize } from "../system-agents";
-import { SURFACE_MODULE } from "../system-agents/desktop-chat/modules";
 import { validSiteAgentAppMcpGrantTools } from "../site/agent-app-tool-policy";
 import { isJudgmentRefusal } from "./judgment-refusal";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
@@ -1134,28 +1131,26 @@ export function withNativeBrowserGuidance(runner: Runner): Runner {
       return runner({ ...req, env: withoutMcpTransportEnv(req.env) }, events);
     }
     if (req.env?.AGENTLAS_NATIVE_BROWSER_SCOPE !== "task" || !req.mcpConfigPath) return runner(req, events);
-    const guidance = "[Host browser target] The agentlas-browser MCP tools own this task's shared native browser tabs and login session. Use those tools for browser interaction, accessibility snapshots and screenshots shown in the task sidebar. A provider's separate built-in browser is a different session and is not evidence from this shared task browser. For a worker handoff, report the verified page URL and how to reach the running app; provider-native browser/tab IDs belong to their original session and must not be reused by another worker. The next worker should inspect its own available tabs or open the URL in its authorized browser session. Keep the app server available through verification and report an unreachable URL as unfinished work. browser_find searches only words visible on the page; a snapshot ref such as e123 is already a located element, so act on it by passing it as \"target\" to browser_click / browser_hover / browser_type instead of searching for it. Existing approval and cancellation rules still apply. [/Host browser target]";
+    // Shortened 2026-10-13: approval/cancellation rules are host-enforced; browser_find with a ref-shaped text is refused with a correction by the host guard.
+    const guidance = "[Host browser target] The agentlas-browser MCP tools own this task's shared browser tabs and login session; a provider's built-in browser is a separate session and not evidence. For a worker handoff, report the verified page URL (tab IDs are session-bound) and keep the app server up through verification; an unreachable URL is unfinished work. browser_find searches only words visible on the page; act on a snapshot ref (e123) by passing it as \"target\" to browser_click / browser_hover / browser_type. [/Host browser target]";
     // Static for the task: a resumed native session is given it once (stable block), not on every turn.
     return runner({ ...req, turnContext: [req.turnContext, guidance].filter(Boolean).join("\n\n"), turnContextStable: [...(req.turnContextStable ?? []), guidance] }, events);
   };
 }
 
+/* Ask counts are never stated in prose (they used to contradict each other: "multiple blocks" / "exactly one" / "one batch of 3-5").
+ * The host parser decides: extractAskFences (shared/ask-fence-flatten.ts) keeps at most 8 questions per reply, each with 2-8 options,
+ * and drops unfilled template placeholders (isUnfilledQuestionTemplate). Same for ATTENDED_ASK_DIRECTIVE and the Briefing gate. */
 /** 에이전트가 사용자에게 옵션 질문을 emit할 수 있는 프로토콜 — renderer/lib/ask-question.ts의 파서와 짝.
  *  로케일 무관, 영어로 — 모델은 항상 영어 docstring을 잘 따른다.
  *  토큰을 아끼기 위해 짧게. */
 const ASK_PROTOCOL = `## Clarifying questions to the user
 
-If — and only if — you need explicit choices from the user to proceed, emit one or more fenced blocks in the same reply, then STOP and wait:
+Only when you need an explicit choice from the user to proceed, end the reply with <<agentlas-ask>> block(s) and STOP; the selections arrive as the next message. Skip it when the answer wouldn't change what you do or a sensible default is obvious: pick it and proceed. The first option is the recommended one.
 
 <<agentlas-ask>>
 { "question": "Question text ending with ?", "header": "Short label", "multiSelect": false, "options": [ { "label": "Option A", "description": "what happens" }, { "label": "Option B", "description": "what happens" } ] }
-<</agentlas-ask>>
-
-Rules:
-- 2–4 options. First option is the recommended one when there's a clear default.
-- If several independent choices are needed, ask them together as multiple <<agentlas-ask>> blocks in one reply.
-- Skip this when the user's answer wouldn't change what you do, or when a sensible default is obvious — pick it and proceed.
-- After the question block(s), do NOT also answer. The user's selections arrive as their next message.`;
+<</agentlas-ask>>`;
 
 /** 무인 실행(스케줄 자동화·백그라운드 생성) 최종 지침 — 앞선 ASK_PROTOCOL을 뒤에서 무효화한다.
  *  Main이 executionContext로만 붙인다(렌더러/모델 입력에서 파생 금지).
@@ -1180,16 +1175,10 @@ This run is unattended — no user is present and nobody can answer questions.
  * 남용을 막기 위해 조건을 좁게 적는다 — 진짜로 막힌 갈림길에서 한 번만.
  */
 export const ATTENDED_ASK_DIRECTIVE = `## Asking the person (this surface can answer)
-A person is watching this run and can answer.
-- If an \`ask_user\` tool is available, use it and do not also emit the block below.
-- Otherwise, when the work is genuinely blocked on a choice only the person can make, end the
-  answer with exactly one block and stop:
+A person is watching and can answer. Ask only for a real fork with no safe default (otherwise take the default and state the assumption; never ask what you can find out yourself): use the \`ask_user\` tool if available, else end the answer with the block below and stop.
 <<agentlas-ask>>
-{"question":"<one short question ending with ?>","header":"<short label>","multiSelect":false,"options":[{"label":"<option>","description":"<what happens if chosen>"},{"label":"<other option>","description":"<what happens if chosen>"}]}
-<</agentlas-ask>>
-- Use it only for a real fork with no safe default. If a sensible default exists, take it and say
-  which assumption you made. Never ask what you can find out yourself.
-- Keep the prose before the block natural, and never print or explain the wire format.`;
+{"question":"<one short question ending with ?>","header":"<short label>","options":[{"label":"<option>","description":"<what happens if chosen>"},{"label":"<other option>","description":"<what happens if chosen>"}]}
+<</agentlas-ask>>`;
 
 export const MOBILE_DURABLE_ASK_DIRECTIVE = `## Mobile decision surface (final authority)
 The synchronous ask_user tool is unavailable on this remote surface. Never call it.
@@ -1257,16 +1246,8 @@ export function measureBuildSystemPrompt(prompt: string): { chars: number; appro
   return { chars: prompt.length, approxTokens: Math.ceil(prompt.length / 4) };
 }
 
-/** 모델이 surface가 낫다고 판단했을 때 emit하는 마커. dispatch가 감지해 2차 패스에서 풀 프로토콜을 로드. */
+/** Legacy surface-intent marker: no prompt asks for it any more; client.ts only strips it from display. */
 export const SURFACE_INTENT_MARKER = "<<surface-intent>>";
-
-/** 코어에 항상 있는 짧은 surface 발견 힌트(모델 판단 게이트). 무거운 SURFACE_PROTOCOL(~16KB)은
- *  사용자가 "대시보드"라고 말해서가 아니라, 모델이 운영/반복 작업이라 판단해 마커를 emit할 때 로드된다.
- *  일회성/단순 질문이면 마커를 안 내고 그냥 답한다(목표: 일회성은 surface builder 불필요). */
-const SURFACE_INTENT_HINT = `## Interactive surface (load on request)
-If your answer would be materially more useful as an INTERACTIVE SURFACE — a tracker, dashboard, operating console, board, catalog, or a structured view the user will return to and act on — AND the work is recurring or operational (not a throwaway one-off), reply with EXACTLY one line and nothing else:
-${SURFACE_INTENT_MARKER}
-You will then be handed the full surface spec to fill in. For one-off questions or ordinary chat, do NOT emit it — just answer normally.`;
 
 function responseLanguageGuide(locale: RuntimeLocale, _userPrompt?: string): string {
   const exactReplyGuide = "If the current message asks you to reply, return, or output an exact literal string, obey it exactly and output nothing else. Do not explain, clarify, add an identity badge, or append a control block.";
@@ -1296,33 +1277,6 @@ function responseLanguageGuide(locale: RuntimeLocale, _userPrompt?: string): str
  * 누적 판정은 단조라(한 번 켜지면 그 대화에서 유지) 프리픽스가 안정된다. 한 런타임에서
  * 배운 수리는 러너 공통으로 둔다 — 특례는 특례가 안 붙은 형제를 지뢰로 남긴다.
  */
-/**
- * Surface fast-path gate. BM25 alone let one generic noun open the ~16KB Surface
- * protocol: "도구를 호출할 필요는 없습니다" scored .41 on the keyword "도구" and,
- * on an 8K local model, overflowed the context before inference (2026-09-12).
- * A generic noun (tool/app/manage/track…) is only a build signal when it is
- * accompanied by a second, distinct Surface noun; a strong noun (dashboard,
- * mini-app, inventory, 워크플로우…) still opens the protocol on its own.
- */
-const SURFACE_GENERIC_KEYWORDS = new Set([
-  "app", "tool", "board", "store", "shop", "chart", "operating", "operate", "monitor",
-  "track", "manage", "organize", "interactive",
-  "앱", "도구", "보드", "차트", "스토어", "운영", "관리", "추적", "정리",
-]);
-export function surfaceFastPathHit(userPrompt: string): boolean {
-  if (selectModules(userPrompt, [SURFACE_MODULE], { threshold: 0.4 }).selected.length === 0) return false;
-  const present = new Set(tokenize(userPrompt));
-  // One-character Korean keywords ("앱") tokenize to nothing — an empty `every` would match
-  // vacuously — so they are matched as a standalone syllable in the raw text instead.
-  const matched = SURFACE_MODULE.keywords.filter((keyword) => {
-    const tokens = tokenize(keyword);
-    if (tokens.length > 0) return tokens.every((token) => present.has(token));
-    return /^[가-힣]$/.test(keyword) && new RegExp(`(^|[^가-힣])${keyword}(?![가-힣])`).test(userPrompt);
-  });
-  const strong = matched.filter((keyword) => !SURFACE_GENERIC_KEYWORDS.has(keyword));
-  return strong.length > 0 || new Set(matched).size >= 2;
-}
-
 export function cumulativeSurfaceGateText(
   history: RunnerRequest["history"],
   userPrompt: string,
@@ -1446,12 +1400,10 @@ export function wrapSystemPrompt(
   // 완수 규범(2026-07-22): 같은 모델이 CLI에서는 진단→수정→검증까지 완주하는데, 챗
   // 프레이밍 위에서는 "원인은 ~~ 때문입니다"로 멈추는 상담사 응답이 반복됐다(사용자
   // 실신고). 원인 설명만 하고 끝내는 것을 명시적 실패 모드로 규정한다.
-  const toolCompletionGuide = [
-    WORK_RECOVERY_PROTOCOL,
-    "Finish the loop. When the user reports something broken or asks for a change, do not stop at explaining the cause: investigate with your tools, apply the fix, verify it actually works, then report what changed and how you verified it. A cause-only answer is a failure — keep going and use every tool and permission available until the task is actually done.",
-    "Be resourceful and persistent: if the first approach fails, try another (a different tool, the in-app browser instead of an external one, a shell fallback) rather than giving up. Only stop when the task is genuinely blocked by something outside this machine — then name exactly what is missing (attach the project folder, connect a tool, provide a credential) and take the concrete next step, instead of ending with an explanation.",
-    "Boundaries that still hold: never exfiltrate the user's secrets or private data to third parties, and do not attack, intrude on, or bypass the security of systems the user does not own. Everything else the user asks for, you complete.",
-  ].join("\n");
+  // Owner 2026-10-13: the Science recovery policy (agentlas.work-recovery.v1) no longer rides ordinary turns. Its
+  // "never duplicate an uncertain external effect / not proof of absence / repeat at most once" rules are host
+  // judgments (AGI, Goal verifier and effect receipts own recovery) and kept agents re-checking instead of working.
+  const toolCompletionGuide = "Finish the loop. Investigate, change, verify, then report what changed and how you checked it; a cause-only answer is a failure. If an approach fails, try another tool or path; stop only for something outside this machine and name exactly what is missing. Never send the user's secrets or private data to third parties or attack systems they do not own.";
   const toolsLine = permission === "full"
     ? [
         "Full access is selected. You may use all local files, shell commands, network access, browser control, and approved MCP tools on this machine. The user is driving; do not ask for permission already granted by this mode.",
@@ -1464,17 +1416,6 @@ export function wrapSystemPrompt(
         ].join("\n")
       : tStatus(locale, "sysToolsOff");
 
-  // SURFACE_PROTOCOL(~16KB)은 (1) 모델이 마커로 요청했거나(forceSurface, 2차 패스),
-  // (2) 명백한 build 키워드가 잡혔거나(빠른 경로), (3) 레거시 호출(userPrompt 미제공)일 때만 주입.
-  // 그 외엔 짧은 surface-intent 힌트만 코어에 둬, 사용자가 "대시보드"라 말 안 해도 모델 판단으로
-  // surface를 띄울 수 있게 한다(키워드 의존 X). 단순/일회성 질문은 힌트만 보고 그냥 답한다.
-  // CONNECTION_SKILL은 코어 유지 — 외부연결 미스가 dead-end가 되는 걸 막기 위함.
-  // fast-path 임계값은 관대하게(0.4): 명백한 build 요청은 1패스로 바로 풀 프로토콜.
-  // 놓쳐도 two-pass(모델 판단)가 잡고, 헛발동해도 모델이 surface를 안 내면 그만이라 다운사이드 작음.
-  const includeSurface =
-    forceSurface === true ||
-    (surfaceGate !== "exclude" && (userPrompt === undefined || surfaceFastPathHit(userPrompt)));
-
   const nativeAbilities = runtimeNativeAbilitiesLine(nativeRuntimeKind);
   // Owner 2026-09-24: Agentlas plugins first, outside equivalents only as the
   // fallback (shared/capability-priority.ts). The runtime surfaces hide an
@@ -1482,8 +1423,6 @@ export function wrapSystemPrompt(
   // the model the same order where both remain (for example an unbound turn).
   let capabilityPriority = "";
   try { capabilityPriority = capabilityPriorityGuidance(installedAgentlasCapabilityProviders()); } catch { capabilityPriority = ""; }
-  // Large always-on sections load only when the turn uses the feature (prompt-sections.ts).
-  const sectionPlan = planPromptSections(userPrompt);
   const parts: string[] = [
     tStatus(locale, "sysHeader"),
     responseLanguageGuide(locale, userPrompt),
@@ -1498,48 +1437,16 @@ export function wrapSystemPrompt(
     // 발급을 손잡고 안내한 뒤 저장하게 한다. 사용자에게는 보이지 않는다(시스템 프롬프트 내부).
     contextProfile === "managed-local"
       ? "Connections: use only tools actually granted for this run. When a needed connection is unavailable, identify it and offer the existing connection setup action; never fabricate access, credentials, or successful work. Do not reveal secrets or send them to unapproved destinations."
-      : connectionSectionText(sectionPlan),
+      : connectionSectionText(),
     "",
   ];
   // 설치된 플러그인의 라우터 — 파일이 있어도 모델이 모르면 없는 것과 같다.
   // 목록은 항상, 라우터 전문은 이번 턴에 @멘션된 것만(§4.2 예산 규칙).
   const pluginBlock = pluginRouterPrompt(userPrompt);
   if (pluginBlock) parts.push(pluginBlock, "");
-  if (includeSurface) {
-    // Compact trusted host documentation only: the complete manifest example keeps
-    // every key/value, while identical catalogue arrays point to that one copy.
-    let surfaceProtocol = SURFACE_PROTOCOL;
-    if (contextProfile === "managed-local") {
-      const begin = SURFACE_PROTOCOL.indexOf(SURFACE_OPEN_FENCE) + SURFACE_OPEN_FENCE.length;
-      const end = SURFACE_PROTOCOL.indexOf(SURFACE_CLOSE_FENCE, begin);
-      const exampleText = SURFACE_PROTOCOL.slice(begin, end);
-      const example = JSON.parse(exampleText);
-      const sameOrReference = (value: unknown, target: unknown, pointer: string) =>
-        JSON.stringify(value) === JSON.stringify(target) ? { $ref: pointer } : value;
-      const trust = SURFACE_DISCOVERY_CATALOG.trustContract;
-      const catalogue = {
-        ...SURFACE_DISCOVERY_CATALOG,
-        domainPacks: SURFACE_DISCOVERY_CATALOG.domainPacks.map(({ id, when }) => ({ id, when })),
-        trustContract: {
-          ...trust,
-          delegationFallbackLadder: sameOrReference(trust.delegationFallbackLadder, example.delegation.fallbackLadder, "example.delegation.fallbackLadder"),
-          autonomy: {
-            ...trust.autonomy,
-            allowedWithoutPrompt: sameOrReference(trust.autonomy.allowedWithoutPrompt, example.delegation.autonomy.allowedWithoutPrompt, "example.delegation.autonomy.allowedWithoutPrompt"),
-            checkpoints: sameOrReference(trust.autonomy.checkpoints, example.delegation.autonomy.checkpoints, "example.delegation.autonomy.checkpoints"),
-            noDeadEndReasons: sameOrReference(trust.autonomy.noDeadEndReasons, example.delegation.autonomy.noDeadEndReasons, "example.delegation.autonomy.noDeadEndReasons"),
-          },
-        },
-      };
-      surfaceProtocol = SURFACE_PROTOCOL.replace(exampleText, `\n${JSON.stringify(example)}\n`)
-        .replace(JSON.stringify(SURFACE_DISCOVERY_CATALOG), JSON.stringify(catalogue));
-      surfaceProtocol += "\nCatalogue $ref fields refer to the exact arrays in the example above. Emit those array values in the manifest, never $ref objects.";
-    }
-    parts.push(surfaceProtocol, "");
-  } else {
-    // 풀 프로토콜 대신 짧은 발견 힌트(모델이 필요시 마커로 요청).
-    parts.push(SURFACE_INTENT_HINT, "");
-  }
+  // The interactive surface spec (~19K chars) is never inlined: the model reads it with `read_surface_protocol`
+  // (agentlas-ui) when it decides to build one; the one-line pointer rides intellectUiSectionText(). forceSurface,
+  // surfaceGate and the managed-local compaction it used to need are gone with it (owner 2026-10-13).
   parts.push(tStatus(locale, "sysAgentDef"), agentSystemPrompt);
   return parts.join("\n");
 }

@@ -19,6 +19,7 @@ import { currentUiLocale } from "../ui-locale";
 import { UNCERTAIN_EFFECT_POLICY } from "../../shared/uncertain-effect-policy";
 import { runtimeFailureBlocksReplay } from "../runtime/selection";
 import { createHash } from "node:crypto";
+import { stripStaffGuidance } from "../one/owner-prompt";
 
 /** Bounded default, not a promise to finish inside it. Unfinished goals retain their criteria and
  * pause with their remaining budget intact. Money metering is unavailable here: null explicitly
@@ -308,7 +309,7 @@ export function automaticGoalResumeRequest(chatId: string, expectedVersion: numb
     // One resolves permission from its explicit mode, not the generic field.
     // This is the stored user grant, not a new grant from a system prompt.
     ...(run.surface === "one" ? { oneMode: true, onePermissionMode: authority[2] as "read" | "write" | "full" } : {}),
-    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. ${UNCERTAIN_EFFECT_POLICY} Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${revision.objective}` };
+    userPrompt: `Resume the existing goal under its original permissions. Run effect/result checks in parallel with independent useful work. Failed or unavailable checks must never stop the whole goal. ${UNCERTAIN_EFFECT_POLICY} Preserve every original constraint and acceptance criterion. Verify the actual output before claiming completion, and compare it item by item against the user's original plan (including any spec document or project memory it points to): report what is missing first. For games, apps and UI, graphic quality is an acceptance criterion: placeholder shapes, default-colored rectangles, missing or misaligned assets and empty backgrounds are a failure, not a completion.${(() => { const receipts = channelPublishReceiptsPromptBlockFor(revision.objective); return receipts ? `\n\n${receipts}` : ""; })()}\n\n${stripStaffGuidance(revision.objective)}` };
 }
 
 /** 사람이 누른 재개 — 요청을 만들고 재개하는 것이 한 트랜잭션이다. */

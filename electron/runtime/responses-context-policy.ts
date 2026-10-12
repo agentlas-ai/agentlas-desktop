@@ -1,8 +1,6 @@
 import type { RunnerRequest } from "./runner";
-import { wrapSystemPrompt, cumulativeSurfaceGateText, surfaceFastPathHit } from "./runner";
+import { wrapSystemPrompt } from "./runner";
 import { pluginRouterPrompt } from "../plugins/router-prompt";
-import { SURFACE_PROTOCOL } from "../surface-emitter";
-import { onDemandSectionTurnBlocks } from "./prompt-sections";
 
 export interface ResponsesContextPolicy {
   protocol: "responses.v1";
@@ -48,12 +46,8 @@ export function retainedResponsesPromptPacket(req: RunnerRequest): Readonly<Reta
     || req.sciencePromptProfile || req.judgmentOnly) return Object.freeze({ systemPrompt, turnContext: "", stableBlocks: Object.freeze([]) });
   const stablePlugin = pluginRouterPrompt(""), selectedPlugin = pluginRouterPrompt(req.userPrompt);
   const plugin = selectedPlugin !== stablePlugin ? selectedPlugin : "";
-  const surface = req.forceSurface === true || (req.surfaceGate !== "exclude"
-    && surfaceFastPathHit(cumulativeSurfaceGateText(req.history, req.surfaceUserPrompt ?? req.userPrompt)))
-    ? SURFACE_PROTOCOL : "";
-  // The retained prefix keeps only the always-on cores; connection, media and Intellect UI bodies ride the turn.
-  const sections = onDemandSectionTurnBlocks(cumulativeSurfaceGateText(req.history, req.surfaceUserPrompt ?? req.userPrompt), req.locale);
-  const blocks = [plugin, surface, ...sections].filter(Boolean);
+  // No section is inlined: the surface spec and the UI schema are read through agentlas-ui tools (owner 2026-10-13).
+  const blocks = [plugin].filter(Boolean);
   return Object.freeze({ systemPrompt, stableBlocks: Object.freeze(blocks), turnContext: blocks.length
     ? `[Current turn runtime guidance]\n${blocks.join("\n\n")}\n[End current turn runtime guidance]` : "" });
 }

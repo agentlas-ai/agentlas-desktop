@@ -78,11 +78,9 @@ export const GOAL_RUN_SCHEDULE_BACKOFF = "every-2h";
 // 도달하는 일은 없다.
 export const CONTINUOUS_MODE_MAX_PASSES = 20_000;
 
-export const STORMBREAKER_LOOP_PROTOCOL = [
-  "Agentlas Desktop host extension. The canonical Goal + UltraCode execution protocol is loaded separately and verbatim from Agentlas Core; this extension only defines Desktop continuation behavior.",
-  `If more safe work remains and you are not blocked by auth, payment, policy, missing secrets, or user approval, end the assistant output with ${STORMBREAKER_CONTINUE_MARKER} on its own line. Agentlas Desktop will strip this marker and immediately run the next continuation pass.`,
-  "For recurring automations, write the prompt so each run resumes from the latest durable evidence, verifies the current state where tools allow it, acts conservatively, and records what changed. A scheduled prompt is not proof that an external account action succeeded.",
-].join("\n");
+// Only what stripStormbreakerContinueMarker needs: when the marker is sent and who removes it. The Core harness is
+// loaded beside it; cadence/evidence advice for automations lives in the automation prompt builders.
+export const STORMBREAKER_LOOP_PROTOCOL = `If safe work remains and nothing blocks you (auth, payment, policy, secrets, approval), end with ${STORMBREAKER_CONTINUE_MARKER} on its own line; the host strips it and runs the next pass.`;
 
 export function stripStormbreakerContinueMarker(text: string): { text: string; shouldContinue: boolean } {
   const escaped = STORMBREAKER_CONTINUE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -199,16 +197,16 @@ export function goalCompletionVerdict(input: {
   return input.ledgerReason === "no_open_tasks";
 }
 
-export function buildStormbreakerContinuationPrompt(previousOutput: string, pass: number): string {
+/**
+ * `previousOutput` is null when the run's session or agent-context journal already holds the previous pass (the
+ * host replays it; a9c13e88). Pass the text only for runtimes that would otherwise start this pass blind.
+ */
+export function buildStormbreakerContinuationPrompt(previousOutput: string | null, pass: number): string {
   return [
     `Continue Stormbreaker execution pass ${pass}.`,
-    "Resume from the previous assistant output. Do not restart.",
-    "Pick the next unfinished work packet, act on it with available tools, verify the result, and update the visible goal ledger.",
-    "If all requested work is verified, do not include the continuation marker.",
-    `If more safe work remains after this pass, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
-    "",
-    "Previous assistant output:",
-    previousOutput,
+    "Do not restart: take the next unfinished work packet, act on it, verify it, update the goal ledger.",
+    `If all requested work is verified, omit the continuation marker; if more safe work remains, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
+    ...(previousOutput === null ? [] : ["", "Previous assistant output:", previousOutput]),
   ].join("\n");
 }
 
@@ -233,27 +231,27 @@ export function goalContinuationSchedule(decision: { continue: boolean; reason: 
  */
 export function buildGoalDrivenContinuationPrompt(input: {
   pass: number;
+  /** null: the turn context already carries the Goal contract, so it is not restated. */
   objective: string | null;
   openTaskCount: number;
-  previousOutput: string;
+  /** null: the session / agent-context journal already holds the previous pass. */
+  previousOutput: string | null;
+  /** The typed goal_complete / goal_wait tools are offered on this run: their schemas carry the marker grammar. */
+  typedGoalTools?: boolean;
 }): string {
-  return [
+  const lines = [
     `Continue persistent-goal execution pass ${input.pass}.`,
-    "The host goal ledger reports this goal is NOT yet achieved, so execution continues even though the previous pass did not request continuation.",
-    input.objective ? `Goal objective: ${input.objective}` : "",
-    `Open ledger tasks remaining: ${input.openTaskCount}.`,
-    "Resume from the previous output. Do not restart. Pick the next unfinished work packet, act with available tools, verify the result, and update the visible goal ledger.",
-    `If you verify the whole goal is complete, state the evidence and end with ${GOAL_COMPLETE_MARKER} on its own line. Without that marker the host keeps this goal open forever, because continuation is decided by the ledger and not by your prose.`,
-    `Optional evidence form: ${GOAL_COMPLETE_MARKER.replace(">>", ": what you verified and where>>")}`,
-    "Never emit that marker for a partially finished goal — it closes the remaining ledger tasks.",
+    `The goal ledger reports this goal is NOT yet achieved (open ledger tasks: ${input.openTaskCount}), so execution continues even though the previous pass did not request continuation.`,
+    ...(input.objective ? [`Goal objective: ${input.objective}`] : []),
+    "Do not restart: take the next unfinished work packet, act, verify, update the goal ledger.",
+    ...(input.typedGoalTools ? [] : [
+      `Only when the whole goal is verified, end with ${GOAL_COMPLETE_MARKER} on its own line (optionally ${GOAL_COMPLETE_MARKER.replace(">>", ": what you verified and where>>")}); without it the host keeps the goal open, and the marker closes the remaining ledger tasks.`,
+    ]),
     `If more safe work remains after this pass, end with ${STORMBREAKER_CONTINUE_MARKER} on its own line.`,
-    "If nothing can progress right now — you are waiting on the user, an approval, or an external fix — do not report 'no change' again: ask the user with the question card, or name the exact blocker once and end without the continuation marker. A pass whose result matches the previous pass counts as no progress and the host stops cycling after three.",
-    "",
-    "Previous assistant output:",
-    input.previousOutput,
-  ]
-    .filter((line) => line !== "")
-    .join("\n");
+    "If nothing can progress now (waiting on the user, an approval, an external fix), do not report 'no change' again: ask with the question card, or name the exact blocker once and end without the continuation marker. A result matching the previous pass counts as no progress and the host stops cycling after three.",
+  ];
+  if (input.previousOutput !== null) lines.push("", "Previous assistant output:", input.previousOutput);
+  return lines.join("\n");
 }
 
 export function buildStormbreakerLongRunPrompt(input: {

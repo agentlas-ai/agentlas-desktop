@@ -156,6 +156,8 @@ export function parseSemanticCurationResponse(
 
 /** Executes the distinct ephemeral/no-tools Curator model pass. */
 export async function runSemanticMemoryReview(input: {
+  /** Events the model recorded through the memory_note tool; reviewed after the envelope's own, same order curateReply uses. */
+  extraEvents?: RawMemoryEvent[];
   replyText: string;
   runner: Runner;
   backendLabel: string;
@@ -170,7 +172,7 @@ export async function runSemanticMemoryReview(input: {
   sourceSurface?: "automation-run";
 }): Promise<SemanticCurationOptions> {
   const parsed = parseMemoryEvents(input.replyText);
-  const request = buildSemanticCurationRequest(parsed.events, {
+  const request = buildSemanticCurationRequest(input.extraEvents?.length ? [...parsed.events, ...input.extraEvents] : parsed.events, {
     hasProject: input.hasProject,
     hasAgent: input.hasAgent,
     sourceProvenance: input.sourceProvenance,

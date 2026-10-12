@@ -11,6 +11,7 @@ import { AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID } from "../workspace-preview/mcp-
 import { AGENTLAS_AGENT_MAIL_CATALOG_ID } from "../agent-mail/mcp-server";
 import { AGENTLAS_ONE_TEAM_CATALOG_ID } from "../one/team-mcp-server";
 import { AGENTLAS_UI_CATALOG_ID } from "../ui-schema/mcp-server";
+import { AGENTLAS_TURN_CATALOG_ID } from "../turn-tools/mcp-server";
 
 // agentlas-browser(실제 로그인 CDP)를 기본에 포함 — 신선 프로필 Playwright가 봇/네트워크
 // 보안에 차단되는 사이트에서도 로그인 세션으로 동작하는 범용 브라우저 경로.
@@ -24,6 +25,7 @@ export const DEFAULT_MCP_CATALOG_IDS = [
   AGENTLAS_AGENT_MAIL_CATALOG_ID,
   AGENTLAS_ONE_TEAM_CATALOG_ID,
   AGENTLAS_UI_CATALOG_ID,
+  AGENTLAS_TURN_CATALOG_ID,
 ] as const;
 
 export function ensureDefaultMcpPluginsInstalled(): void {
@@ -81,7 +83,8 @@ export function ensureDefaultMcpPluginsInstalled(): void {
         catalogId === AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID ||
         catalogId === AGENTLAS_AGENT_MAIL_CATALOG_ID ||
         catalogId === AGENTLAS_ONE_TEAM_CATALOG_ID ||
-        catalogId === AGENTLAS_UI_CATALOG_ID
+        catalogId === AGENTLAS_UI_CATALOG_ID ||
+        catalogId === AGENTLAS_TURN_CATALOG_ID
       ) {
         // Preserve the global row id, enabled state, and agent references while
         // migrating older ~/.agentlas pathname launches to the exact inline

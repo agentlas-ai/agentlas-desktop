@@ -123,6 +123,40 @@ function normalize(raw: unknown): RawMemoryEvent | null {
 }
 
 /**
+ * The `memory_note` tool's counterpart of one parsed envelope candidate (agentlas-turn). The tool schema already
+ * constrains the enums; this re-checks them strictly (the text parser coerces, a typed call must not) and then runs
+ * the very same normalize() the envelope path runs, so a tool note and an equivalent block yield the same event.
+ */
+export function memoryNoteToEvent(args: unknown): { ok: true; event: RawMemoryEvent } | { ok: false; error: string } {
+  if (!args || typeof args !== "object" || Array.isArray(args)) return { ok: false, error: "memory_note_invalid: arguments must be an object" };
+  const o = args as Record<string, unknown>;
+  const allowed = ["content", "content_native", "memory_kind", "suggested_scope", "confidence", "evidence", "supersedes", "request_context"];
+  const unknown = Object.keys(o).find((key) => !allowed.includes(key));
+  if (unknown) return { ok: false, error: `memory_note_unknown_field: ${unknown}` };
+  if (typeof o.content !== "string" || !o.content.trim()) return { ok: false, error: "memory_note_invalid: content is required" };
+  if (!MEMORY_KINDS.includes(o.memory_kind as MemoryKind)) return { ok: false, error: `memory_note_invalid: memory_kind must be one of ${MEMORY_KINDS.join(", ")}` };
+  if (o.suggested_scope === "agent_team" || !MEMORY_SCOPES.includes(o.suggested_scope as MemoryScope)) {
+    return { ok: false, error: `memory_note_invalid: suggested_scope must be one of ${MEMORY_SCOPES.filter((scope) => scope !== "agent_team").join(", ")}` };
+  }
+  if (o.confidence !== undefined && o.confidence !== "high" && o.confidence !== "medium" && o.confidence !== "low") return { ok: false, error: "memory_note_invalid: confidence must be high, medium or low" };
+  if (o.evidence !== undefined && !Array.isArray(o.evidence)) return { ok: false, error: "memory_note_invalid: evidence must be an array of strings" };
+  if (o.supersedes !== undefined && (typeof o.supersedes !== "string" || !/^h:[0-9a-f]{16}$/.test(o.supersedes))) {
+    return { ok: false, error: "memory_note_invalid: supersedes must be an observed h:16hex key; never invent one" };
+  }
+  const event = normalize({
+    memory_kind: o.memory_kind,
+    content: o.content,
+    suggested_scope: o.suggested_scope,
+    ...(o.confidence !== undefined ? { confidence: o.confidence } : {}),
+    evidence_refs: o.evidence,
+    ...(o.content_native !== undefined ? { content_native: o.content_native } : {}),
+    ...(o.supersedes !== undefined ? { supersedes: o.supersedes } : {}),
+    ...(o.request_context !== undefined ? { request_context: o.request_context } : {}),
+  });
+  return event ? { ok: true, event } : { ok: false, error: "memory_note_invalid: note was empty after normalization" };
+}
+
+/**
  * Find the Memory Events heading, then the first JSON fence after it. Tolerant of
  * ```json or bare ``` fences and trailing prose.
  */

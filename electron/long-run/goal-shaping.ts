@@ -374,43 +374,48 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   const readiness = projectGoalPlanReadiness(plan, { nowMs });
   const strategyOf = (id: string | null) => plan.strategies.find((s) => s.id === id) ?? null;
   const lines: string[] = ["## Goal plan (host-owned shape decision · agentlas.goal-shape.v1)"];
-  lines.push(`Current plan identity: goal ${plan.goalId} · revision ${plan.revision} · planSeq ${plan.planSeq}. This is the current projection for this Goal revision; earlier plan projections are historical.`);
-  lines.push(`Shape: ${plan.shape} (problem: ${plan.problem_nature}${plan.fallback ? "; provisional — the planner was unavailable" : ""}). ${plan.rationale}`);
+  // Goal id / revision / planSeq / problem_nature are host state the model never has to echo (markers carry only tactic ids).
+  lines.push(`Plan ${plan.shape}${plan.fallback ? " (provisional — the planner was unavailable)" : ""}: ${plan.rationale}`);
   for (const entry of activeNativeHarness(plan.goalId, plan.revision, plan.planSeq, nowMs)) lines.push(nativeHarnessLine(entry));
   // Agent Strategy: 이 패스의 KPI 상태를 먼저 갱신한다(멱등). 읽기 전용 재렌더(record:false)는 쓰지 않는다.
   if (plan.shape === "mission_tree" && input.record !== false) {
     try { evaluateGoalKpis(plan, nowMs); } catch (error) { console.warn("[agent-strategy] evaluation failed:", error instanceof Error ? error.message : error); }
   }
+  // Strategies whose hypothesis is already printed on the "Active strategies" line (tactics then cite the id only).
+  let activeStrategyIds = new Set<string>();
   const paces = missionPaces(plan, nowMs);
   const krView = plan.shape === "mission_tree" ? krStrategyView(plan.goalId) : new Map();
   if (plan.shape === "mission_tree" && plan.mission) {
-    lines.push(`Mission (owner intent, immutable): ${plan.mission.objective}`);
+    // The mission objective is the Goal objective, stated once in the Goal contract above.
     lines.push(`Diagnosis: ${plan.mission.diagnosis}`);
     for (const { krId, metric, target, unit, targetText, pace } of paces) {
       const view = krView.get(krId);
-      lines.push(`- KR ${metric}: ${target}${unit ? ` ${unit}` : ""} (owner: "${targetText}")`
+      lines.push(`- KR ${metric}: ${target}${unit ? ` ${unit}` : ""}${String(targetText).trim() === String(target) ? "" : ` (owner: "${targetText}")`}`
         + (view?.current != null ? ` · current ${view.current}` : "")
         + (pace.daysLeft !== null ? ` · ${pace.daysLeft} days left` : "")
         + (pace.requiredPerDay !== null ? ` · required ≈ ${pace.requiredPerDay}/day`
           : pace.requiredPerDayUpperBound !== null ? ` · required ≤ ${pace.requiredPerDayUpperBound}/day (baseline unknown — measure it first)` : "")
-        + ` · host sensor: ${pace.status === "no_sensor" ? (view?.current != null ? "one sample so far (need more)" : "none yet (not a strategy failure)") : pace.status}`
+        + ` · sensor: ${pace.status === "no_sensor" ? (view?.current != null ? "one sample so far" : "none yet") : pace.status}`
         + (view?.state && view.state !== "no_data" ? ` · KPI state: ${view.state}` : ""));
     }
     if (plan.mission.boundaries.length) lines.push(`Boundaries (the only limits): ${plan.mission.boundaries.map((b) => b.text).join("; ")}`);
     const active = plan.strategies.filter((s) => s.status === "active").map((s) => `${s.id}: ${s.hypothesis}`);
     if (active.length) lines.push(`Active strategies: ${active.join(" | ")}`);
+    activeStrategyIds = new Set(plan.strategies.filter((s) => s.status === "active").map((s) => s.id));
     const cadence = plan.strategies.filter((s) => s.status === "active" && s.actions_per_day !== null)
       .map((s) => `${s.id}: ${s.actions_per_day}/day`);
-    if (cadence.length) lines.push(`Planned activity cadence (advisory): ${cadence.join(" | ")}. Context assignments and work turns are not completed activities. Check actual results before repeating an external action; owner and platform boundaries still apply.`);
+    if (cadence.length) lines.push(`Planned activity cadence (advisory): ${cadence.join(" | ")} (advisory; assignments are not completed activities — check real results before repeating an external action).`);
   }
   if (tactics.length) {
-    lines.push("Current tactic context (inspection and work classes are distinct):");
+    lines.push("Current tactics:");
     for (const tactic of tactics) {
       const strategy = strategyOf(tactic.strategy_id);
-      lines.push(`- ${tactic.id}${strategy ? ` [strategy ${strategy.id}: ${strategy.hypothesis}; KPI: ${strategy.kpi || "—"}]` : ""}: ${tactic.description}`);
+      lines.push(`- ${tactic.id}${strategy ? (activeStrategyIds.has(strategy.id) ? ` [${strategy.id}; KPI: ${strategy.kpi || "—"}]` : ` [strategy ${strategy.id}: ${strategy.hypothesis}; KPI: ${strategy.kpi || "—"}]`) : ""}: ${tactic.description}`);
       lines.push(`  Done when: ${tactic.done_when}${tactic.kind === "recurring" ? ` (recurring; runs so far ${tactic.runs})` : ""}`);
       const branch = readiness.branches.find(branch => branch.nodeId === tactic.id)!;
-      lines.push(`  Readiness: work classes [${branch.workClasses.join(", ")}]; prerequisite ${branch.prerequisiteState}; reasons [${branch.reasonCodes.join(", ")}]. This is context, not an authority grant.`);
+      // Only a narrowing carries information: an unrestricted branch (incl. "legacy_unknown" prerequisites) is the default.
+      const held = (["observe", "prepare", "local_write", "external_effect"] as const).filter((kind) => !branch.workClasses.includes(kind));
+      if (held.length) lines.push(`  Held by host (not available now): ${held.join(", ")} — ${branch.reasonCodes.filter((code) => code !== "prerequisites_legacy_unknown").join(", ") || branch.prerequisiteState}.`);
       const guidance = guidanceLine(tactic);
       if (guidance) lines.push(`  Host guidance (persistence policy): ${guidance}`);
     }
@@ -438,16 +443,16 @@ export function buildGoalPlanTurnContext(plan: LiveGoalPlan, input: {
   lines.push(...kpiMeasurementLines(plan, nowMs));
   if (kpiBlock) lines.push(kpiBlock);
   if (review && !kpiBlock) {
-    lines.push("Strategy review is due: compare each active strategy against the key-result pace above. You may retire a strategy whose timebox has elapsed (cite evidence) or add a strategy that cites a key result. Missing sensor data is an infrastructure state, not a reason to retire a strategy.");
+    lines.push("Strategy review due: compare each active strategy with the KR pace above; retire one whose timebox elapsed (cite evidence) or add one that cites a key result. Missing sensor data is not a reason to retire.");
   }
-  lines.push("Protocol (machine markers, each on its own line; the host strips them from the reply):");
-  lines.push('- Tactic finished: <<agentlas-tactic>>{"id":"t1","status":"done","evidence":"what proves done_when"} — emit one for EVERY tactic you finish, including later tactics finished in this same turn.');
-  lines.push('- Tactic cannot proceed: <<agentlas-tactic>>{"id":"t1","status":"blocked","cause":"tool_missing|tool_refused|resource_busy|effect_uncertain|unknown|boundary","boundary":"payment|credential|security_consent|owner_stop|purpose_change","evidence":"..."} — the host picks the next move; never abandon the goal.');
-  lines.push('- Plan changes: <<agentlas-plan-op>>{"op":"replace_tactic","id":"t1","with":[{"description":"...","done_when":"..."}]} · {"op":"add_tactic","strategy_id":"s1","description":"...","done_when":"..."}' +
+  // Marker grammar = the minimum applyGoalPlanMarkers/applyTacticMarker accept (typed tool follow-up: agentlas-turn owner).
+  lines.push("Markers (one per line):");
+  lines.push('- done: <<agentlas-tactic>>{"id":"t1","status":"done","evidence":"what proves done_when"} — one for EVERY tactic you finish, including later ones finished this turn.');
+  lines.push('- blocked: <<agentlas-tactic>>{"id":"t1","status":"blocked","cause":"tool_missing|tool_refused|resource_busy|effect_uncertain|unknown|boundary","boundary":"payment|credential|security_consent|owner_stop|purpose_change","evidence":"..."} — the host picks the next move; never abandon the goal.');
+  lines.push('- plan: <<agentlas-plan-op>>{"op":"replace_tactic","id":"t1","with":[{"description":"...","done_when":"..."}]} · {"op":"add_tactic","strategy_id":"s1","description":"...","done_when":"..."}' +
     (plan.shape === "mission_tree" ? ' · {"op":"retire_strategy","id":"s2","evidence":"..."} · {"op":"add_strategy","hypothesis":"...","serves_krs":["kr id"],"kpi":"...","timebox_hours":72,"tactics":[{"description":"...","done_when":"..."}]}' : ""));
-  lines.push('Tactic drafts in add_tactic, replace_tactic.with and add_strategy.tactics accept optional depends_on:["existing tactic id"] and prerequisites:[{"id":"predicate_id","state":"unmet|unknown|met","evidence_refs":["source reference"],"blocks":["prepare|local_write|external_effect"]}]. The host rejects dangling/cyclic dependencies; a retired predecessor does not satisfy one. A claimed met reference remains unverified until host evidence resolution.');
-  lines.push("Do not invent caps or pacing limits; only the mission boundaries and the goal's permissions limit you.");
-  lines.push(`Plan-op text (description, done_when, hypothesis, kpi, evidence) is shown to the owner: write it in ${(input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en")) === "ko" ? "Korean" : "English"}; ids and op names stay as above.`);
+  lines.push('Tactic drafts also accept depends_on:["tactic id"] and prerequisites:[{"id":"...","state":"unmet|unknown|met","evidence_refs":["..."],"blocks":["prepare|local_write|external_effect"]}] (the host rejects dangling/cyclic ones).');
+  lines.push(`No self-imposed caps; only the mission boundaries and the Goal's permissions limit you. Plan-op text is shown to the owner: write it in ${(input.locale ?? (currentUiLocale() === "ko" ? "ko" : "en")) === "ko" ? "Korean" : "English"}.`);
   if (input.record !== false) {
     if (tactics.length) {
       const receipt = recordGoalPlanDecision({ goalId: plan.goalId, revision: plan.revision, planSeq: plan.planSeq, kind: "tactic_dispatch", createdAt: new Date(nowMs).toISOString(),

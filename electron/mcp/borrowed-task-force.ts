@@ -1315,7 +1315,7 @@ async function curateOwnedTaskForceResult(input: {
               arch: process.arch,
               runtimeKind,
               basePackageHash: installedAgent.packageHash ?? null,
-              taskHint: task,
+              taskHint: p.req.promptOrigin === "system" ? null : task,
             },
           }
         : {}),

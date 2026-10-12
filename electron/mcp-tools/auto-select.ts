@@ -21,7 +21,6 @@ import { KeychainUnavailableError } from "../secrets/keychain-host";
 import { getSource as getMarketSource } from "../marketplace";
 import { listBundledHubPlugins } from "../../shared/bundled-hub-catalog";
 import { resolveAutomationToolMode } from "../../shared/automation-tool-policy";
-import { buildToolAccessNotice } from "../../shared/tool-access-notice";
 import { listPendingHubPluginApprovals } from "./hub-plugin-bridge";
 import { judgedComputerUse } from "../system-agents/judged-tool-mode";
 import { isKeylessPlaywrightMcpDuplicate } from "./mcp-config";
@@ -1334,54 +1333,42 @@ export function buildMcpAutoSelectionPrompt(
         : opts?.hubMode === "local-only"
           ? "This automation is local-only: do not use Agentlas Hub routing or borrowed Hub agents."
           : "";
+  // 붙은 도구의 이름·설명·입력 스키마는 MCP 도구 스키마로 이미 전달된다(2026-10-13: 이름 나열, "도구를 쓰라",
+  // 플러그인 우주 개수, 로컬 인벤토리, Hub 조회 안내는 프롬프트에서 뺐다). 스키마로 알 수 없는 것만 남긴다:
+  // 후보 플러그인, 꺼진 것(승인 대기)·자격증명 대기·불능 상태, 도구가 0개라는 사실.
   const hubCandidates =
     selected.hubPlugins.length > 0
-      ? `Relevant Hub plugin candidates: ${selected.hubPlugins
+      ? `Hub plugin candidates: ${selected.hubPlugins
           .map((plugin) =>
             `${plugin.slug} (${plugin.name}; ${plugin.reason}${plugin.installCli ? `; install: ${plugin.installCli}` : ""})`,
           )
           .join("; ")}.`
-      : selected.hubPluginCount > 0
-        ? "Hub plugin catalog is available; resolve plugin needs dynamically before declaring a tool unavailable."
-        : selected.hubPluginError
-          ? `Hub plugin catalog lookup failed for this run: ${selected.hubPluginError}.`
-          : "";
-  const inventoryPreview = selected.localInventory.slice(0, 24).join(", ");
-  const inventoryMore = selected.localInventory.length > 24 ? `, +${selected.localInventory.length - 24} more` : "";
+      : selected.hubPluginError
+        ? `Hub plugin catalog unreachable this run: ${selected.hubPluginError}. Say so rather than claiming no such tool exists.`
+        : "";
+  const pendingApproval = (selected.pendingApprovalTools ?? []).filter((name) => name.trim().length > 0);
   return [
-    "Agentlas MCP plugin auto-selection is active.",
-    `Agentlas plugin universe is active: ${selected.localPluginCount} local plugin/tool entries + ${selected.hubPluginCount} Hub plugins.`,
+    installed.length === 0 && pendingApproval.length === 0 && blocked.length === 0 ? "No tools are connected in this run." : "",
     modeLine,
     hubLine,
-    computerUseReady
-      ? "Computer Use is available for desktop/screen interaction. Prefer Agentlas Browser for authenticated web pages when both tools can complete the task."
-      : computerUseSelected && browserReady
-        ? "The native Computer Use driver is unavailable in this run. Do not claim OS-level control; use Agentlas Browser only for work that stays inside the authenticated browser."
-        : computerUseSelected
-          ? "The native Computer Use driver is unavailable in this run. Do not claim screen interaction or OS-level control."
-          : "",
-    selected.localInventory.length > 0
-      ? `Local inventory for Hub plugin resolution: ${inventoryPreview}${inventoryMore}.`
+    computerUseSelected && !computerUseReady
+      ? browserReady
+        ? "Native Computer Use is unavailable in this run: claim no OS-level control; Agentlas Browser covers only the authenticated browser."
+        : "Native Computer Use is unavailable in this run: claim no screen interaction or OS-level control."
       : "",
     selected.needsNote ? `Tool selection note: ${selected.needsNote}` : "",
     hubCandidates,
-    "Use the available MCP tools directly when they are relevant. Do not ask the user to install a tool that is already listed as available.",
-    // 표면 공통 고지 — 붙은 도구·승인 대기·Hub 조회 가능 여부·설치 경계를 한 벌로 낸다.
-    // 터미널과 OS 플러그인이 같은 문장을 쓰므로, 여기서만 문구를 바꾸면 안 된다.
-    buildToolAccessNotice({
-      availableTools: installed.map((tool) => `${tool.id} (${tool.name})`),
-      blockedTools: blocked.map((tool) => `${tool.id} missing ${tool.missingEnv.join(", ")}`),
-      pendingApprovalTools: selected.pendingApprovalTools ?? [],
-      hubCatalogAvailable: selected.hubPluginCount > 0 && !selected.hubPluginError,
-      hubCatalogError: selected.hubPluginError ?? null,
-    }),
-    "Only ask the user when the selected Hub plugin requires login, OAuth, credentials, paid/credit approval, or a macOS/browser permission. Include the exact plugin slug or install command in that question.",
+    pendingApproval.length > 0
+      ? `Switched off until the user approves local execution (ask; do not install anything new): ${pendingApproval.join(", ")}.`
+      : "",
+    blocked.length > 0
+      ? `Unusable until credentials are set (ask only if the task needs them): ${blocked.map((tool) => `${tool.id} missing ${tool.missingEnv.join(", ")}`).join("; ")}.`
+      : "",
     unavailable.length > 0
       ? `Unavailable MCP state (value-free): ${unavailable
           .map((tool) => `${tool.id}=${tool.state}${tool.required ? "(required)" : ""}${tool.connectionOutcome ? `: ${describeScopedMcpOutcome(tool.connectionOutcome, "en")}` : ""}`)
-          .join("; ")}. Healthy MCPs remain available; degrade only the function that depends on an unavailable capability.`
+          .join("; ")}. Degrade only what depends on them.`
       : "",
-    "Mid-task capability gaps: call agentlas_resolve_plugins or agentlas_tool_search (hephaestus-network) before declaring something impossible. An already-installed plugin you name there is attached automatically on the next turn of this conversation/Goal; a Hub plugin that is not installed needs the owner's approval — name its slug and what it would do.",
     selectedPluginRouterPrompt(selected.routedPlugins ?? [], opts?.userPrompt ?? ""),
   ]
     .filter(Boolean)

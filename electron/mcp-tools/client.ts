@@ -33,6 +33,7 @@ import type { InstalledMcpServer, McpServerStatus } from "../../shared/types";
 import { serializeMcpResultForPreview } from "../../shared/mcp-result-rendering";
 import { isCanonicalSystemTimeMcpServer } from "./system-time-server";
 import { AGENTLAS_UI_CATALOG_ID, isCanonicalUiSchemaMcpServer } from "../ui-schema/mcp-server";
+import { AGENTLAS_TURN_CATALOG_ID, isCanonicalTurnToolsMcpServer } from "../turn-tools/mcp-server";
 import { isCanonicalComputerUseMcpServer } from "../computer-use/mcp-server";
 import { COMPUTER_USE_CONTROL_FILE_ENV, computerUseControlInfoPath } from "../computer-use/channel";
 import {
@@ -571,6 +572,9 @@ async function createTransport(
   }
   if (server.catalogId === AGENTLAS_UI_CATALOG_ID && !isCanonicalUiSchemaMcpServer(server)) {
     throw new Error("Agentlas UI schema MCP launch contract is invalid");
+  }
+  if (server.catalogId === AGENTLAS_TURN_CATALOG_ID && !isCanonicalTurnToolsMcpServer(server)) {
+    throw new Error("Agentlas turn tools MCP launch contract is invalid");
   }
   if (server.transport === "stdio") {
     if (!server.command) throw new Error("stdio server has no command");

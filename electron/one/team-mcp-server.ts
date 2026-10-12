@@ -38,13 +38,13 @@ const INLINE_GRAPH_DESCRIPTIONS: Record<string, string> = {
   one_graph_set_enabled: "Enable exact inspected revision after connection/effect checks, or disable and Stop. Stop works with read permission. Never replaces a job.",
   one_graph_run: "Execute enabled graph with current expected_revision/stable request_id and named string input. Retries reuse execution. Wait up to 50s (default20); retain event_id and read one_graph_result if running.",
   one_graph_result: "Read your exact graph event; reads never execute. Wait up to50s; outputs/failures bounded. Page longer node output with node_id/offset/limit.",
-  toolchain_create: "Delegate natural-language request to system orchestrator for generalized inputs/typed contracts/implementation/examples. It reuses existing capability or improves same ID; no task-graph migration. Stable request_id prevents retries duplicating assets.",
+  toolchain_create: "Reusable capability only (one asset per capability, never per task/topic/version; one-off tasks belong in a graph). Delegate natural-language request to system orchestrator for generalized inputs/typed contracts/implementation/examples. It reuses existing capability or improves same ID; no task-graph migration. Stable request_id prevents retries duplicating assets.",
   toolchain_publish: "Validate draft version by real example executions and typed expected outputs. Only passed validation makes callable. Effectful validation needs explicit owner verification; never implicitly sends posts/payments.",
-  toolchain_search: "Find callable capabilities; returns independent toolchain_id/version, typed schemas/examples. Check when_not_to_use; empty means work normally. Call toolchain_run or compose native toolchain_call; graph/MCP IDs differ.",
+  toolchain_search: "Call before repeating work. Find callable capabilities; returns independent toolchain_id/version, typed schemas/examples. Check when_not_to_use; empty means work normally. Call toolchain_run or compose native toolchain_call; graph/MCP IDs differ.",
   toolchain_inspect: "Read independent asset contract/immutable versions, without source instructions. Omit version for stable release.",
   toolchain_run: "Run exact published asset/version with typed args/stable request_id. Identical retry returns receipt; changed args refused. Permissions cap implementation. Retain call_id/read toolchain_result if running.",
   toolchain_result: "Read your exact call's typed result/status by call_id; never executes, even after withdrawal. Unresolved effects are not success.",
-  toolchain_report: "Report your call's wrong result with call_id/problem/expected. No automatic repair or cross-chat changes. Repair by new published version; prior pins stay unchanged.",
+  toolchain_report: "Report your call's wrong result with call_id/problem/expected. No automatic repair or cross-chat changes. Then continue without that toolchain. Repair by new published version; prior pins stay unchanged.",
 };
 const INLINE_GRAPH_TOOLS = ONE_GRAPH_TOOLS.map((tool) => ({
   ...tool, description: INLINE_GRAPH_DESCRIPTIONS[tool.name] ?? tool.description,

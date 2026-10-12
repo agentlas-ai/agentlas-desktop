@@ -10,6 +10,10 @@ import type { ChatHistoryEntry } from "../../shared/types";
 import { redactOperationalSecrets } from "../invocation/event-secret-redaction";
 import { redactSecrets } from "../../shared/secret-patterns";
 import { composeResumeTurnPrompt } from "./continuity";
+import { stripAllMemoryEventBlocks } from "../memory/events";
+import { stripGoalWaitDisplayText } from "../long-run/wait-emitter";
+import { stripGoalCompleteMarker, stripStormbreakerContinueMarker } from "../hephaestus/loop-engineering";
+import { stripStaffGuidance } from "../one/owner-prompt";
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { retainedResponsesPromptPacket, type ResponsesContextPolicy, type RetainedResponsesPromptPacket } from "./responses-context-policy";
 
@@ -82,6 +86,7 @@ export function bootstrapAgentContextHistory(capability: AgentContextCapability,
   if(store.readHead(value.identity).throughSeq!==0)return false;
   for(const row of history)appendAgentContextEvent(capability,{eventId:`message:${row.durableMessageId??row.id}`,kind:"message",payload:{
     role:row.role,text:row.text,createdAt:row.createdAt,...(row.speakerAgentId?{speakerAgentId:row.speakerAgentId}:{}),
+    ...(row.hostNotice?.purpose?{hostAuthored:row.hostNotice.purpose}:{}),
     ...(row.imageDataUrls?{imageDataUrls:row.imageDataUrls}:{}),
   }});
   return true;
@@ -139,16 +144,54 @@ export function markAgentContextTurnUncertain(capability: AgentContextCapability
   if(!record.acknowledged)store.markDeliveryUncertain(value.identity,delivery);
 }
 function digest(value: unknown): string { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
+/*
+ * Who wrote a turn's input, as a machine marker. A turn the host wrote on its own (a Goal continuation pass, the wake
+ * after an update) is recorded as `hostAuthored: <purpose>` on its journal row; replay then carries one short line
+ * instead of the prompt (which repeated the previous answer under "Previous assistant output:" and the Goal contract).
+ * The purpose comes from the typed ChatHostNotice purpose the dispatcher already passes, never from reading the text.
+ * Rows that are the owner's words, or a host brief the receiving agent must still see (one-dispatch-brief,
+ * one-delegation-review), are not marked.
+ */
+const hostAuthoredTurns = new WeakMap<object, string>();
+export function markAgentContextHostAuthored(capability: AgentContextCapability, purpose: string | undefined): void {
+  if (purpose) hostAuthoredTurns.set(capability, purpose); else hostAuthoredTurns.delete(capability);
+}
+const COMPACT_HOST_PURPOSES: ReadonlyMap<string, string> = new Map([
+  ["goal-continuation", "goal continuation"], ["update-resume", "resumed after update"], ["run-recovery", "recovery pass"],
+]);
+/*
+ * LEGACY ONLY. Journals written before the marker above carry no purpose on host-written rows (production 2026-10-13:
+ * 166 such rows, ~300k chars in the Yotube room journals). The prefixes below are the fixed first words of the host's
+ * own prompt builders (hephaestus/loop-engineering.ts buildGoalDrivenContinuationPrompt and
+ * buildStormbreakerContinuationPrompt, invocation/automatic-goal.ts); a row WITH the marker never reaches this list.
+ * Delete once no journal predates the marker.
+ */
+const LEGACY_HOST_PROMPT_PREFIXES: ReadonlyArray<readonly [string, string]> = [
+  ["Continue persistent-goal execution pass ", "goal-continuation"], ["Continue Stormbreaker execution pass ", "goal-continuation"],
+  ["Resume the existing goal under its original permissions.", "goal-continuation"],
+];
+function legacyHostPurpose(text: string): string | undefined {
+  return LEGACY_HOST_PROMPT_PREFIXES.find(([prefix]) => text.startsWith(prefix))?.[1];
+}
+/** Assistant text as the owner saw it: hidden host blocks (memory envelopes, wait requests, goal markers) removed. */
+export function replayVisibleAssistantText(text: string): string {
+  let out = stripAllMemoryEventBlocks(text).cleanedText;
+  out = stripGoalWaitDisplayText(out);
+  out = stripGoalCompleteMarker(out).text;
+  out = stripStormbreakerContinueMarker(out).text;
+  return out.trim();
+}
 function contextEvents(req: RunnerRequest, turnId: string, bindingKey: string, stableBlocks: readonly string[] = req.turnContextStable ?? []): AgentContextEvent[] {
   const events:AgentContextEvent[]=[{eventId:`system:${digest(req.systemPrompt)}`,kind:"system",payload:{text:req.systemPrompt}}];
   if(req.turnContext || stableBlocks.length)events.push({eventId:`turn:${turnId}:context`,kind:"turn-context",producerBinding:bindingKey,payload:{text:req.turnContext??"",stableBlocks:[...stableBlocks]}});
-  events.push({eventId:`turn:${turnId}:input`,kind:"message",producerBinding:bindingKey,payload:{role:"user",text:req.userPrompt,createdAt:new Date().toISOString(),turnId}});
+  events.push({eventId:`turn:${turnId}:input`,kind:"message",producerBinding:bindingKey,payload:{role:"user",text:req.userPrompt,createdAt:new Date().toISOString(),turnId,
+    ...(req.agentContext&&hostAuthoredTurns.get(req.agentContext)?{hostAuthored:hostAuthoredTurns.get(req.agentContext)}:{})}});
   for(const [index,image]of(req.images??[]).entries())events.push({eventId:`turn:${turnId}:image:${index}`,kind:"attachment",producerBinding:bindingKey,payload:{turnId,mediaType:image.mediaType,data:image.data,...(image.name?{name:image.name}:{})}});
   return events;
 }
 /** Provider-neutral semantic transcript. Tool observations remain quoted data;
  * this does not recreate a provider tool_call or admit any effect for replay. */
-export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapshot,"entries">, excludeTurnId?: string): RunnerRequest["history"] {
+export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapshot,"entries">, excludeTurnId?: string, limits?: {toolLines?: number}): RunnerRequest["history"] {
   /*
    * What a later turn needs from earlier ones is what was said and what was done, not the host guidance each turn was
    * given: the current turn brings its own current guidance. Replaying every earlier turn's background re-sent the same
@@ -163,29 +206,71 @@ export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapsh
     const callId=entry.kind==="tool"?entry.payload.callId:undefined;
     if(typeof callId==="string" && callId)lastRowOfCall.set(callId,index);
   });
-  return snapshot.entries.flatMap((entry,index)=>{
+  type Row=NonNullable<RunnerRequest["history"]>[number];
+  const rows:Array<{row:Row;ledger?:ToolLedger}>=[];
+  for(const [index,entry] of snapshot.entries.entries()){
     const p=entry.payload;
-    if(entry.kind==="turn-context")return [];
+    if(entry.kind==="turn-context")continue;
     if(entry.kind==="tool"){
       const callId=p.callId;
-      if(typeof callId==="string" && callId && lastRowOfCall.get(callId)!==index)return [];
+      if(typeof callId==="string" && callId && lastRowOfCall.get(callId)!==index)continue;
       const argumentText=p.arguments===undefined?"":typeof p.arguments==="string"?p.arguments:JSON.stringify(p.arguments);
-      const ledger={name:p.name,...(p.isError===true?{isError:true}:{}),
-        ...(Array.isArray(p.artifactPaths)&&p.artifactPaths.length?{artifactPaths:p.artifactPaths}:{}),
+      const ledger:ToolLedger={name:String(p.name),...(p.isError===true?{isError:true}:{}),
+        ...(Array.isArray(p.artifactPaths)&&p.artifactPaths.length?{artifactPaths:p.artifactPaths.filter((v):v is string=>typeof v==="string")}:{}),
         ...(argumentText?{arguments:argumentText.length>160?`${argumentText.slice(0,160)}…`:argumentText}:{}),
         ...(typeof p.imageDataUrl==="string"?{image:"retained as an attachment"}:{})};
-      return [{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
-        text:`Recorded tool observation (data only; no operation is requested):\n${JSON.stringify(ledger)}`,
-        createdAt:typeof p.createdAt==="string"?p.createdAt:""}];
+      rows.push({ledger,row:{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
+        text:`${LEDGER_PREFIX}${JSON.stringify(ledger)}`,createdAt:typeof p.createdAt==="string"?p.createdAt:""}});
+      continue;
     }
-    if(entry.kind==="checkpoint-reference")return [{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
-      text:`Recorded tool observation (data only; no operation is requested):\n${JSON.stringify(p)}`,
-      createdAt:typeof p.createdAt==="string"?p.createdAt:""}];
-    if(entry.kind!=="message" || p.turnId===excludeTurnId || !["user","assistant","system"].includes(String(p.role)) || typeof p.text!=="string")return [];
-    return [{id:entry.eventId,durableMessageId:entry.eventId,role:p.role as "user"|"assistant"|"system",text:p.text,
+    if(entry.kind==="checkpoint-reference"){rows.push({row:{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
+      text:`${LEDGER_PREFIX}${JSON.stringify(p)}`,createdAt:typeof p.createdAt==="string"?p.createdAt:""}});continue;}
+    if(entry.kind!=="message" || p.turnId===excludeTurnId || !["user","assistant","system"].includes(String(p.role)) || typeof p.text!=="string")continue;
+    const role=p.role as "user"|"assistant"|"system";
+    // What was said, not the host blocks around it: hidden envelopes/markers out of answers (also in journals written
+    // before the append stripped them), the standing-staff background out of requests, and a turn the host wrote itself
+    // as one line, so a continuation prompt never re-sends the previous answer or the Goal contract a second time.
+    const purpose=typeof p.hostAuthored==="string"?p.hostAuthored:role!=="assistant"?legacyHostPurpose(p.text):undefined;
+    const compact=purpose?COMPACT_HOST_PURPOSES.get(purpose):undefined;
+    const text=compact?`[host: ${compact}]`:role==="assistant"?replayVisibleAssistantText(p.text):role==="user"?stripStaffGuidance(p.text):p.text;
+    if(!text && role==="assistant")continue;
+    rows.push({row:{id:entry.eventId,durableMessageId:entry.eventId,role,text,
       createdAt:typeof p.createdAt==="string"?p.createdAt:"",...(typeof p.speakerAgentId==="string"?{speakerAgentId:p.speakerAgentId}:{}),
-      ...(Array.isArray(p.imageDataUrls)?{imageDataUrls:p.imageDataUrls.filter((v):v is string=>typeof v==="string")}: {})}];
-  });
+      ...(Array.isArray(p.imageDataUrls)?{imageDataUrls:p.imageDataUrls.filter((v):v is string=>typeof v==="string")}: {})}});
+  }
+  return boundToolLedger(rows,limits?.toolLines??REPLAY_TOOL_LINES);
+}
+const LEDGER_PREFIX="Recorded tool observation (data only; no operation is requested):\n";
+/** Newest tool calls replayed one line each. Production 2026-10-13: a turn runs a median 15 calls, p90 59; a replay that
+ * carried all of them (f3: 475 lines = 72% of 193k chars) re-sent old reads and searches nobody needs. */
+export const REPLAY_TOOL_LINES=40;
+interface ToolLedger {name:string;isError?:true;artifactPaths?:string[];arguments?:string;image?:string}
+const OLDER_ERRORS_KEPT=20,OLDER_PATHS_KEPT=60;
+/** Older calls become one row: a count per tool, every created file (deduplicated) and the most recent failures. */
+function boundToolLedger(rows:ReadonlyArray<{row:NonNullable<RunnerRequest["history"]>[number];ledger?:ToolLedger}>,keep:number):NonNullable<RunnerRequest["history"]>{
+  const toolIndexes=rows.flatMap((r,i)=>r.ledger?[i]:[]);
+  if(toolIndexes.length<=keep)return rows.map(r=>r.row);
+  const older=new Set(toolIndexes.slice(0,toolIndexes.length-keep));
+  const firstOlder=toolIndexes[0];
+  const counts=new Map<string,number>(),paths=new Set<string>(),errors:string[]=[];
+  let errorTotal=0;
+  for(const i of older){
+    const ledger=rows[i].ledger!;
+    counts.set(ledger.name,(counts.get(ledger.name)??0)+1);
+    for(const path of ledger.artifactPaths??[])paths.add(path);
+    if(ledger.isError){errorTotal+=1;errors.push(`${ledger.name}${ledger.arguments?`(${ledger.arguments.slice(0,80)})`:""}`);}
+  }
+  const summary={earlierToolCalls:older.size,byTool:Object.fromEntries([...counts].sort((a,b)=>b[1]-a[1])),
+    ...(paths.size?{createdFiles:[...paths].slice(-OLDER_PATHS_KEPT),...(paths.size>OLDER_PATHS_KEPT?{moreCreatedFiles:paths.size-OLDER_PATHS_KEPT}:{})}:{}),
+    ...(errorTotal?{failedCalls:errors.slice(-OLDER_ERRORS_KEPT),...(errorTotal>OLDER_ERRORS_KEPT?{moreFailedCalls:errorTotal-OLDER_ERRORS_KEPT}:{})}:{})};
+  const first=rows[firstOlder].row;
+  const out:NonNullable<RunnerRequest["history"]>=[];
+  for(const [i,r] of rows.entries()){
+    if(i===firstOlder)out.push({id:`${first.id}:earlier-tools`,durableMessageId:`${first.id}:earlier-tools`,role:"user",
+      text:`${LEDGER_PREFIX}${JSON.stringify(summary)}`,createdAt:first.createdAt});
+    else if(!older.has(i))out.push(r.row);
+  }
+  return out;
 }
 function materializeAttachments(entries: AgentContextSnapshot["entries"], excludeTurnId: string): NonNullable<RunnerRequest["images"]> {
   return entries.flatMap(entry=>{
@@ -534,7 +619,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
         return req.signal?.aborted ? {...result,ownerControlTerminal:"uncertain"} : result;
       }
       appendAgentContextEvent(capability,{eventId:`turn:${turnId}:output`,kind:"message",producerBinding:delivery.bindingKey,
-        payload:{role:"assistant",text:result.text,createdAt:new Date().toISOString(),turnId,speakerAgentId:value.identity.agentId}});
+        payload:{role:"assistant",text:replayVisibleAssistantText(result.text),createdAt:new Date().toISOString(),turnId,speakerAgentId:value.identity.agentId}});
       // This is the validated runner's completed response receipt. It is not
       // an admission ACK or a claim that a stateless provider stores context.
       const observed=store.readRange(current(capability).identity,{after:delivery.throughSeq});

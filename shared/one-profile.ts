@@ -307,16 +307,18 @@ export function buildApprovedOneProfileContext(
 ): string {
   if (!isOneProfile(profile)) throw new TypeError("Invalid One profile");
   const enabled = selectApprovedOneOperatingPrinciples(profile, scope);
-  const principles = enabled.length > 0
-    ? enabled.map((item) => `- [${item.scope}${item.scopeRef ? `:${item.scopeRef}` : ""}] ${item.content}`).join("\n")
-    : "- None approved.";
+  // Host-known empties ("None approved", "context: none") are omitted rather than stated.
   return [
     "[Agentlas One profile — explicitly provided by the user]",
     `Identity: ${profile.displayName} (${profile.role})`,
-    profile.profileContext ? `User-authored context: ${profile.profileContext}` : "User-authored context: none.",
-    "Approved operating principles:",
-    principles,
-    "Do not present inferred preferences as approved operating principles.",
+    profile.profileContext ? `User-authored context: ${profile.profileContext}` : "",
+    ...(enabled.length > 0
+      ? [
+          "Approved operating principles:",
+          enabled.map((item) => `- [${item.scope}${item.scopeRef ? `:${item.scopeRef}` : ""}] ${item.content}`).join("\n"),
+          "Do not present inferred preferences as approved operating principles.",
+        ]
+      : []),
     "Apply these silently: never announce, label, tag or quote them in the reply (no bracketed notes like [tone check]); just answer in that manner.",
-  ].join("\n");
+  ].filter(Boolean).join("\n");
 }

@@ -11,7 +11,8 @@
 //     `skip_host_skill_discovery` does not stop it). HOME cannot be moved (git, ssh and every tool the agent runs
 //     read it), so each switched-off skill is disabled with `skills.config` (path + enabled=false).
 //     Skills of the agent's own folder (project scope) are not touched.
-//   - Plugins: `-c plugins.<id>.enabled=false` (unquoted id) removes the plugin's skills and MCP servers.
+//   - Plugins: `-c plugins.<id>.enabled=false` (unquoted id) removes a config-declared plugin's skills and MCP servers;
+//     `-c features.plugins=false` (== `--disable plugins`) removes every plugin, including account-synced remote ones.
 //   - MCP servers declared in the person's config.toml start late and add their tool schemas to every request
 //     from the second one on (measured +20,794 tokens). Closed with `-c mcp_servers.<name>.enabled=false`, except
 //     what the run itself bound (host), the Agentlas browser, user browser-automation servers (kept as the
@@ -104,9 +105,16 @@ export function codexPersonalContextArgs(input: CodexPersonalContextInput = {}):
     args.push("-c", `skills.config=[${disabledSkills.map((item) => `{path=${JSON.stringify(item.path)},enabled=false}`).join(",")}]`);
   }
 
-  // Plugins: switched-off Codex plugins.
-  const plugins = codexItems(selection, "plugin").filter((item) => !item.enabled && /^[A-Za-z0-9_@.-]+$/.test(item.name)).map((item) => item.name);
-  for (const id of plugins) args.push("-c", `plugins.${id}.enabled=false`);
+  // Plugins: with none switched on (every non-One run, and One before the person picks any), the whole plugin
+  // feature goes off. Per-plugin `plugins.<id>.enabled=false` only reaches plugins declared in config.toml; the
+  // account-synced openai-curated-remote ones (figma, data-analytics, notion, ... ) are not declared there and kept
+  // listing 15-30K chars of skills in every request, down to 2.4K-char judgment runs (measured 2026-10-13).
+  // Agentlas reaches its own tools through the MCP servers Main binds, not through Codex plugins.
+  const codexPlugins = codexItems(selection, "plugin");
+  const pluginsOn = codexPlugins.some((item) => item.enabled);
+  const plugins = codexPlugins.filter((item) => !item.enabled && /^[A-Za-z0-9_@.-]+$/.test(item.name)).map((item) => item.name);
+  if (!pluginsOn) args.push("-c", "features.plugins=false");
+  else for (const id of plugins) args.push("-c", `plugins.${id}.enabled=false`);
 
   // Connectors: switched-off servers, except what the run binds itself or keeps as a documented fallback.
   const closed: string[] = [];
@@ -123,6 +131,6 @@ export function codexPersonalContextArgs(input: CodexPersonalContextInput = {}):
   for (const server of servers) args.push("-c", `mcp_servers.${server}.enabled=false`);
   return {
     args,
-    receipt: `[codex-personal] one=${selection?.isOne === true ? "yes" : "no"} memories=${memoriesOn ? "on" : "off"} skills_disabled=${disabledSkills.length} plugins_disabled=${plugins.length} hooks=${personal?.hooksJson ? "on" : "off"} mcp_closed=${servers.join("|") || "-"}`,
+    receipt: `[codex-personal] one=${selection?.isOne === true ? "yes" : "no"} memories=${memoriesOn ? "on" : "off"} skills_disabled=${disabledSkills.length} plugins=${pluginsOn ? "on" : "off"} plugins_disabled=${pluginsOn ? plugins.length : "all"} hooks=${personal?.hooksJson ? "on" : "off"} mcp_closed=${servers.join("|") || "-"}`,
   };
 }

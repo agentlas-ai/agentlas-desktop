@@ -1251,7 +1251,7 @@ export function buildApprovedOneMemoryContext(
   state: OneMemoryState = getOneMemoryState(),
 ): string {
   const memories = selectApprovedOneMemoryAssets(scope, state);
-  if (memories.length === 0) return "[Approved One Memory]\n- None enabled.";
+  if (memories.length === 0) return ""; // a host-known empty is not stated
   return [
     "[Approved One Memory — explicit user approvals only]",
     ...memories.map((memory) =>

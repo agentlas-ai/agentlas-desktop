@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.3.20 — 2026-10-13
+
+- Agents get far less fixed instruction text. A recreated session no longer re-sends hidden memory envelopes, the app's own continuation prompts, repeated staff guidance or hundreds of old tool lines (one busy room's replay went from 488K to 131K characters). Codex runs no longer list every plugin skill of the account in each request. The interactive surface spec and the chat UI schema are read through a tool only when the agent decides to use them, instead of riding the prompt on keywords. The account-connecting guide is one short paragraph for every tool that needs a saved key. Tool lists the agent already receives are not described again, and a Goal's objective is stated once.
+- Agents record learnings, Goal waits and Goal completion with typed tools the app checks, instead of writing text blocks in a taught format. Runtimes that cannot see those tools directly keep the previous format.
+- Ordinary turns no longer carry the rule "never repeat an uncertain outside action"; the app's own recovery decides that.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.19 — 2026-10-13
 
 - An agent with a connected ElevenLabs voice engine now actually makes the voice. Its instructions sent it to a secure helper it had no way to call and told it not to use the saved key Agentlas had already given its run, so the Yotube room kept searching for an approval record and made silent drafts only. The saved key is now the stated route: the agent calls the provider from a script that reads the key by name and never shows or writes its value. The always-on instructions are slightly shorter.

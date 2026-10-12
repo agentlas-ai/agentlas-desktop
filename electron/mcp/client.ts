@@ -1,5 +1,4 @@
 import { placeTurnContextForRuntime } from "../runtime/serving-prefix";
-import { acpDisabledFor } from "../runtime/acp";
 import { currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
 import { withOneHistoryNativeInvocation } from "../one/personal-integrations-runtime";
 import { withAdapterEffectObserver } from "../invocation/adapter-effect-context";
@@ -270,6 +269,10 @@ import { setResolvedCliModelAlias } from "../../shared/models";
 import { buildMcpConfigFile, isKeylessPlaywrightMcpDuplicate, type BrowserApprovalScope } from "../mcp-tools/mcp-config";
 import { AGENTLAS_WORKSPACE_PREVIEW_CATALOG_ID } from "../workspace-preview/mcp-server";
 import { AGENTLAS_UI_CATALOG_ID } from "../ui-schema/mcp-server";
+import { AGENTLAS_TURN_CATALOG_ID } from "../turn-tools/mcp-server";
+import { takeTurnMemoryNotes, turnNotesKey } from "../turn-tools/notes";
+import { applyGoalSignalsToText, takeGoalSignals, typedGoalDeadlineClause, typedGoalLifecycleProtocol } from "../turn-tools/goal-signals";
+import { turnToolReplacesText } from "../turn-tools/attach";
 import type { WorkspacePreviewOwnerGrant } from "../workspace-preview/channel";
 import { MCP_TOOL_CATALOG } from "../mcp-tools/catalog";
 import { resolveMcpNeeds } from "../mcp-tools/need-resolver";
@@ -291,7 +294,7 @@ import { generateImage, removeGeneratedImageArtifact } from "../multimodal/image
 import { copyGeneratedImageIntoWorkspace } from "../multimodal/workspace-image-copy";
 import { multimodalImageSlot } from "../multimodal/slot";
 import { chatImageAttachmentFromTrustedFile } from "../store/chat-message-attachments";
-import { ownerVisiblePrompt } from "../one/owner-prompt";
+import { ownerVisiblePrompt, stripStaffGuidance } from "../one/owner-prompt";
 import { browserCaptureDir, screenCaptureDir } from "../media/capture-artifacts";
 import { userDataPath } from "../runtime-paths";
 import { ONE_ATTACHMENT_LIMITS } from "../../shared/one-attachments";
@@ -316,8 +319,7 @@ import {
   ATTENDED_ASK_DIRECTIVE,
   MOBILE_DURABLE_ASK_DIRECTIVE,
 } from "../runtime/runner";
-import { validatedRunnerNativeControlState, cumulativeSurfaceGateText } from "../runtime/runner";
-import { imageOutputContract, onDemandSectionTurnBlocks, planPromptSections } from "../runtime/prompt-sections";
+import { validatedRunnerNativeControlState } from "../runtime/runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "../runtime/project-residency";
 import {
   effortForSelectedModel,
@@ -1113,33 +1115,43 @@ function hasPriorConversationContext(chatId: string): boolean {
   );
 }
 
-function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en"): string {
-  const criteria = goal.acceptanceCriteria.map((criterion, index) => `${index + 1}. ${criterion}`).join("\n");
+/**
+ * The Goal contract is the one place the objective and criteria appear as data. The checkpoint packet carries only
+ * refs (compileLongRunCheckpoint {goalTextInContext}) and the plan mission is not restated. A criterion that only
+ * quotes the objective ("REQUEST (untrusted data): <objective>") renders as a pointer; the stored ledger text is unchanged.
+ * Host-enforced rules are not restated: the completion marker is gated by the ledger (goalCompletionProtocol), the ledger
+ * objective is immutable whatever a steering message says, and the first-start briefing is only added when no
+ * checkpoint exists yet (`firstStart`, host-known).
+ */
+function persistentGoalTurnContext(goal: GoalLedgerSnapshot, locale: "ko" | "en", firstStart = false): string {
+  const objectiveFlat = goal.objective.replace(/\s+/g, " ").trim();
+  const criteria = goal.acceptanceCriteria.map((criterion, index) => {
+    const flat = criterion.replace(/\s+/g, " ").trim();
+    const at = objectiveFlat.length >= 12 ? flat.indexOf(objectiveFlat) : -1;
+    const text = at >= 0 ? `${flat.slice(0, at).replace(/\s*REQUEST \(untrusted data\):\s*$/, "").trim()} (request = the objective above)`.trim() : criterion;
+    return `${index + 1}. ${text}`;
+  }).join("\n");
   return locale === "ko"
     ? [
         "## 활성 Goal 계약 (호스트 소유 · objective 불변)",
         `목표: ${goal.objective}`,
         "성공 기준:",
         criteria || "1. 실제 대상 표면에서 검증 가능한 완료 증거를 남긴다.",
-        "이후 사용자 메시지는 실행 경로를 조정하는 채팅/steering이다. 목표를 바꾸거나 최신 메시지로 재정의하지 마라.",
-        "새 지시가 목표와 충돌하면 목표를 조용히 덮어쓰지 말고, 목표 종료 후 새 Goal이 필요하다고 명시하라.",
-        "처음 착수할 때는 도구를 쓰기 전에 목표·성공 기준·검증 표면을 짧고 명확하게 사용자에게 보여라.",
-        "완료 전에 각 성공 기준을 증거로 대조하고, 확인되지 않은 항목은 완료라고 말하지 마라.",
-        "완료를 보고할 때는 사용자의 원래 요청·기획(요청이 가리키는 기획서·프로젝트 기억 포함)의 항목을 산출물과 하나씩 대조해, 빠진 것·미완 항목을 먼저 말하고 그다음 된 것을 말하라. 좁은 성공 기준만 통과했다고 '완료'라 부르지 마라.",
+        "이후 사용자 메시지는 실행 경로를 조정할 뿐 목표를 바꾸지 못한다. 충돌하는 새 목표는 현재 Goal 종료 후 새 Goal이 필요하다고 말하라.",
+        ...(firstStart ? ["처음 착수할 때는 도구를 쓰기 전에 목표·성공 기준·검증 표면을 짧게 보여라."] : []),
+        "완료 보고 전에 각 성공 기준과 사용자의 원래 요청·기획(가리키는 문서·프로젝트 기억 포함)을 산출물과 항목별로 증거 대조해 미완·빠진 것을 먼저 말하라.",
         // 오너 결정 2026-09-14: 게임·앱·UI 같은 시각 산출물은 그래픽 품질이 합격 기준이다. 동작만 되는 플레이스홀더는 실패.
-        "게임·앱·UI 같은 시각 산출물은 그래픽 품질 자체가 합격 기준이다. 플레이스홀더 도형, 기본색 사각형, 빠진 스프라이트, 겹치거나 어긋난 에셋, 빈 배경, 글자만 있는 화면은 '동작하지만 미완'이 아니라 실패다. 이미지 생성 도구로 기획에 맞는 아트를 만들고, 완료 전에 실제 화면 캡처를 직접 열어 보고 품질을 판정해 미달이면 실패로 보고하라.",
+        "게임·앱·UI 산출물은 그래픽 품질이 합격 기준이다. 플레이스홀더·기본색 도형·어긋난 에셋·빈 배경은 실패다. 기획에 맞는 아트를 이미지 생성 도구로 만들고 실제 화면 캡처를 열어 판정하라.",
       ].join("\n")
     : [
         "## Active Goal contract (host-owned; objective is immutable)",
         `Objective: ${goal.objective}`,
         "Acceptance criteria:",
         criteria || "1. Leave verifiable completion evidence on the real target surface.",
-        "Later user messages are chat or steering that may adjust execution. Never redefine the objective from the latest message.",
-        "If a new instruction conflicts with the objective, do not overwrite it silently; state that the current Goal must end before a new one begins.",
-        "At initial kickoff, show the objective, acceptance criteria, and verification surfaces briefly before using tools.",
-        "Before completion, audit every criterion against evidence and never mark an unverified item complete.",
-        "When reporting completion, compare the delivered result item by item against the user's original request and plan (including any spec document or project memory the request points to); state what is missing or partial first, then what is done. Passing a narrow criterion is not 'complete'.",
-        "For games, apps and UI, graphic quality is itself an acceptance criterion. Placeholder shapes, default-colored rectangles, missing sprites, overlapping or misaligned assets, empty backgrounds or text-only screens are a failure, not 'working but unfinished'. Produce art that matches the plan with the image generation tool, open the actual screen captures yourself before completion, and report a failure when the quality falls short.",
+        "Later user messages only steer execution; they never redefine the objective. A conflicting new aim needs a new Goal after this one ends.",
+        ...(firstStart ? ["At first start, briefly show the objective, criteria and verification surfaces before using tools."] : []),
+        "Before reporting completion, check every criterion and the user's original request/plan (including any spec or project memory it points to) against the deliverables item by item with evidence, and state what is missing or partial first.",
+        "For games, apps and UI, graphic quality is itself a criterion: placeholder or default-colored shapes, misaligned assets and empty backgrounds are a failure. Make plan-matching art with the image generation tool and open the real screen captures to judge.",
       ].join("\n");
 }
 
@@ -3535,6 +3547,9 @@ ${effectiveUserPrompt}`;
   let toolBrokerInstalled = false;
   // config key ↔ catalog id 대응. 관문 생성이 이 블록 바깥으로 나가면서 필요해졌다.
   let mcpIncludedServers: Array<{ serverId: string; catalogId: string | null; configKey: string }> = [];
+  // Goal turns that get goal_wait / goal_complete from agentlas-turn (same turns the wait/completion text is injected on).
+  const turnGoalToolsOffered = Boolean(req.runId) && !scienceRecovery && !req.agentAppMode && chat.kind !== "division"
+    && !effectObservationRun && !roomMemberTurn && !executionContext && (Boolean(getChatGoalId(chat.id)) || (req.goalMode === true && canWrite));
   // One Team attached to a Work task as a Toolchain consumer: it may search and run, not author.
   let mcpToolchainConsumer = false;
   let mcpAutoSelectionPrompt = "";
@@ -3994,6 +4009,8 @@ ${effectiveUserPrompt}`;
         // Graph nodes can share a runId. Every preparation, including doctor
         // and unattended runs, needs its own sealed file and launch lifetime.
         configKey: `invocation-${randomUUID()}`,
+        ...(req.runId ? { turnRunId: req.runId } : {}),
+        ...(turnGoalToolsOffered ? { turnGoalTools: true as const } : {}),
         admissionCurrent: isMcpConfigCurrent,
         ...(nativeBrowserGrant ? { nativeBrowser: nativeBrowserGrant } : {}),
         ...(workspacePreviewOwnerGrant ? { workspacePreviewOwnerGrant } : {}),
@@ -4011,6 +4028,8 @@ ${effectiveUserPrompt}`;
           // The model reads the UI schema through this read-only tool instead of a keyword-gated
           // prompt section. Every ordinary turn gets it; Site/Agent App runs keep their own closed set.
           ...(!req.agentAppMode ? [AGENTLAS_UI_CATALOG_ID] : []),
+          // Typed replacement of the Memory Events text block (memory_note); same turns that used to get the block.
+          ...(!req.agentAppMode && !isAliveControllerRun ? [AGENTLAS_TURN_CATALOG_ID] : []),
         ])],
         ...(req.requiredToolCatalogIds?.length
           ? { requiredToolCatalogIds: req.requiredToolCatalogIds }
@@ -5413,6 +5432,10 @@ ${effectiveUserPrompt}`;
   const turnContextParts: string[] = [];
   // 세션 내내 같은 블록 — resume 턴에서 러너가 최근 보낸 것을 생략한다(runner.turnContextStable).
   const stableTurnContextParts: string[] = [];
+  // Set when the Goal contract block carries the objective + criteria, so the checkpoint packet only references them.
+  let goalContractInContext: { objective: string; criteria: readonly string[] } | null = null;
+  // The typed goal_complete / goal_wait tools replaced the marker text on this run (set where the Goal turn context is built).
+  let goalTypedToolsReplaceText = false;
   // A resumed Codex session does not receive `systemPrompt` again. Reassert the
   // visible One language as host context on *every* interactive turn, otherwise
   // a Korean task marker can pull a previously English-seeded session back into
@@ -5446,7 +5469,8 @@ ${effectiveUserPrompt}`;
   const projectInstructions = req.runId
     ? recordInvocationInstructionSnapshot({ runId: req.runId, chatId: chat.id, projectDir: resolvedResultFolder })
     : compileProjectInstructionSnapshot({ projectDir: resolvedResultFolder });
-  if (projectInstructions.snapshot.sources.length > 0 || projectInstructions.delta.changedRefs.length > 0) {
+  // An empty snapshot (no project instruction files) carries no information; a removal delta alone does not warrant one.
+  if (projectInstructions.snapshot.sources.length > 0) {
     turnContextParts.push(renderInstructionSnapshot(projectInstructions.snapshot)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   /*
@@ -5465,7 +5489,6 @@ ${effectiveUserPrompt}`;
    * 단어장이 아니라 모델이 도구로 판단). 시스템 프롬프트의 한 줄 규칙이 read_ui_schema 호출을 지시하고,
    * 그 도구(agentlas-ui 내장 MCP)가 스키마와 차트·시각물 안내를 돌려준다.
    */
-  const sectionGateText = cumulativeSurfaceGateText(history, effectiveUserPrompt);
   // 표면 안내는 프롬프트가 아니라 이 턴의 맥락으로 들어간다.
   if (executionContext?.surfaceContext?.trim()) {
     turnContextParts.push(executionContext.surfaceContext.trim());
@@ -5537,17 +5560,16 @@ ${effectiveUserPrompt}`;
     getInterviewMode() === "smart" &&
     chat.kind !== "division"
   ) {
+    // No question/option counts here: the host parser decides (extractAskFences, shared/ask-fence-flatten.ts:28-29,98-100:
+    // at most 8 questions per reply, 2-8 options each, unfilled templates dropped). Prose counts only contradicted ASK_PROTOCOL.
     turnContextParts.push(
       `## Briefing gate (before executing)\n` +
-      `First judge silently, on three dimensions: is the GOAL specific, are the CONSTRAINTS stated, ` +
-      `and is the SUCCESS CRITERION checkable — specific enough that a stranger would produce the same result? ` +
-      `If all three are clear — proceed normally and ask NOTHING. ` +
-      `A greeting, a pure question, a reaction, or an already-specific instruction is always clear: ask nothing. ` +
+      `Judge silently: is the GOAL specific, are the CONSTRAINTS stated, is the SUCCESS CRITERION checkable? ` +
+      `If all are clear, ask NOTHING — always so for a greeting, a pure question, a reaction or an already-specific instruction. ` +
       `Length is not a signal; a short request can be the heaviest one. ` +
-      `If a dimension is genuinely unclear on an execution-shaped request: ask ONE batch of 3-5 <<agentlas-ask>> questions covering the ` +
-      `weakest of: what NOT to do (anti-scope), smallest acceptable version, done signal, audience. ` +
-      `Then STOP and wait. After the answers arrive, restate the goal in one sentence and proceed — never ask a second batch; ` +
-      `record what is still open as explicit assumptions instead. 'decide later' is a valid answer (record as deferred).`,
+      `If a dimension is genuinely unclear on an execution-shaped request, ask once about the weakest of: anti-scope, smallest acceptable version, ` +
+      `done signal, audience (the ask mechanism is below), then STOP. After the answers, restate the goal in one sentence and proceed; ` +
+      `record what stays open as assumptions ('decide later' is a valid answer).`,
     );
   }
   if (invocationProjectId) {
@@ -5806,24 +5828,11 @@ ${effectiveUserPrompt}`;
   }
   // Compact core is always on; the full schema is loaded only for explicit
   // memory tasks. This keeps the recurring contract under ~150 tokens.
-  if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science") {
-    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
-  }
-  // Resident-session runtimes are seeded with the system prompt once and never get it again, so a
-  // section whose feature is first used on a later turn (account connecting, media routing, the
-  // agentlas-ui schema) rides the stable turn context: delivered when it first appears, then acknowledged.
+  // When the agentlas-turn memory_note tool is attached on a runtime that lists every MCP tool to the model, the tool carries
+  // the format and rules and the host builds the per-turn receipt itself: no memory text at all.
   if (!req.agentAppMode && !isAliveControllerRun && !restrictedReadBoundary && executionContext?.source !== "science"
-    && (active.kind === "claude-code" || active.kind === "codex" || active.kind === "kimi" || active.kind === "antigravity"
-      // Grok, Cursor and open ACP seats run as resident ACP sessions too (acpOrLegacyRunner): a resumed
-      // turn gets only the turn context, so without this they never saw a section first needed later.
-      || active.kind === "acp" || ((active.kind === "grok" || active.kind === "cursor") && !acpDisabledFor(active.kind)))) {
-    const sectionBlocks = onDemandSectionTurnBlocks(sectionGateText, locale);
-    // Codex alone has built-in image generation; its thread was seeded before the first image request, so the contract follows here.
-    if (active.kind === "codex" && planPromptSections(sectionGateText).media) sectionBlocks.push(imageOutputContract());
-    if (sectionBlocks.length) {
-      const sectionBlock = `[On-demand instructions]\n${sectionBlocks.join("\n\n")}\n[/On-demand instructions]`;
-      turnContextParts.push(sectionBlock); stableTurnContextParts.push(sectionBlock);
-    }
+    && !turnToolReplacesText(active.kind, mcpIncludedServers)) {
+    turnContextParts.push(memoryEmitterPromptFor(effectiveUserPrompt, pickLocale(req))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
   }
   if (mcpAutoSelectionPrompt) turnContextParts.push(mcpAutoSelectionPrompt);
   if (!req.agentAppMode && !isAliveControllerRun && chat.kind === "division" && (req.toolMode || req.hubMode)) {
@@ -5973,7 +5982,7 @@ ${effectiveUserPrompt}`;
           && !promptIsSystemAuthored
           && (!activeGoal || activeGoal.status !== "active")
         ) {
-          const objective = req.userPrompt.replace(/\s+/g, " ").trim();
+          const objective = ownerVisiblePrompt(req).replace(/\s+/g, " ").trim();
           if (objective) {
             await ensureGoalLedgerGoal({
               goalId: activeGoalId,
@@ -5986,15 +5995,22 @@ ${effectiveUserPrompt}`;
           }
         }
         if (activeGoal?.status === "active") {
-          turnContextParts.push(persistentGoalTurnContext(activeGoal, locale)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+          // Goals stored before the objective came from ownerVisiblePrompt carry the standing-staff block; show the owner's goal only.
+          activeGoal = { ...activeGoal, objective: stripStaffGuidance(activeGoal.objective), acceptanceCriteria: activeGoal.acceptanceCriteria.map(stripStaffGuidance) };
+          goalContractInContext = { objective: activeGoal.objective, criteria: activeGoal.acceptanceCriteria };
+          turnContextParts.push(persistentGoalTurnContext(activeGoal, locale, !latestTaskCheckpoint(activeGoalId))); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
           // A room teammate gets the contract (what is wanted) but not the controller machinery: the completion/wait
           // protocols, the plan-shape judgement and the tactic grammar are One's and the orchestrator's. Since 2026-10-01
           // no teammate or installed agent emitted a plan marker (1,941 + 607 tactic_status from the orchestrator and One).
           if (!roomMemberTurn) {
           // 계약을 주면서 그 계약을 끝내는 법도 같이 준다. 연속 프롬프트에만 적으면
           // 1패스에 끝나는 작업이 마커를 몰라서 못 끝난다.
-          turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
-          if (!executionContext) { turnContextParts.push(goalWaitProtocol((() => { try { return getLegacyGoalLifecycleSnapshot(activeGoalId) ? null : getChatGoalRevision(activeGoalId)?.lifecycle; } catch { return null; } })())); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
+          const goalToolsReplaceText = turnGoalToolsOffered && turnToolReplacesText(active.kind, mcpIncludedServers);
+          goalTypedToolsReplaceText = goalToolsReplaceText;
+          const typedGoalText = goalToolsReplaceText ? typedGoalLifecycleProtocol(getChatGoalRevision(activeGoalId)?.lifecycle) : null;
+          if (typedGoalText) { turnContextParts.push(typedGoalText); stableTurnContextParts.push(typedGoalText); }
+          if (!goalToolsReplaceText) { turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
+          if (!executionContext && !goalToolsReplaceText) { turnContextParts.push(goalWaitProtocol((() => { try { return getLegacyGoalLifecycleSnapshot(activeGoalId) ? null : getChatGoalRevision(activeGoalId)?.lifecycle; } catch { return null; } })())); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]); }
           /*
            * 골 구조 판단(오너 최우선 2026-09-24): 이 목표 개정의 모양(단일 전술/전술 목록/대계-전략-전술 트리)이
            * 없으면 이 턴을 시작하기 전에 정한다. 실패는 단일 전술 폴백 — 목표를 막지 않는다. 턴마다 바뀌는 절이라
@@ -6016,7 +6032,7 @@ ${effectiveUserPrompt}`;
           // A finite Goal with a deadline may wait for its next cycle up to that deadline (goal-deadline.ts).
           if (!executionContext && getChatGoalRevision(activeGoalId)?.lifecycle === "finite") {
             const deadlineAt = goalDeadlineAt(activeGoalId);
-            if (deadlineAt && Date.parse(deadlineAt) > Date.now()) turnContextParts.push(goalDeadlineWaitClause(deadlineAt));
+            if (deadlineAt && Date.parse(deadlineAt) > Date.now()) turnContextParts.push(goalToolsReplaceText ? typedGoalDeadlineClause(deadlineAt) : goalDeadlineWaitClause(deadlineAt));
           }
           }
         }
@@ -6178,10 +6194,12 @@ ${effectiveUserPrompt}`;
       forceSurface: oneTeamExecutionPolicy ? true : undefined,
     };
     let agentContextAttempt = 0;
+    // Typed journal marker for host-written input (see markAgentContextHostAuthored); set per invocation, first call only.
+    let hostAuthoredNext: string | undefined;
     const persistentRunnerRequest = (request: RunnerRequest): RunnerRequest => {
       if (!persistentAgentContext || !req.runId || request.minimalObservation || request.judgmentOnly || request.untrustedNoTools) return request;
       return bindInvocationAgentContext(request, { chatId: chat.id, agentId: agent.id, runId: req.runId,
-        attempt: ++agentContextAttempt, aliveController: isAliveControllerRun, assertCurrent() {
+        attempt: ++agentContextAttempt, aliveController: isAliveControllerRun, hostAuthored: hostAuthoredNext, assertCurrent() {
           assertMcpGoalSelectionCurrent();
           if (activeGoalId && activeGoalRevision !== null) {
             const revision = getChatGoalRevision(activeGoalId);
@@ -6255,7 +6273,8 @@ ${effectiveUserPrompt}`;
                 stateSchemaDigest: surface.artifactRef?.stateSchemaDigest ?? null, state: surface.state,
               })).sort((a, b) => a.artifactId.localeCompare(b.artifactId)) }
           : undefined;
-        return compileLongRunCheckpoint(checkpoint, runtime.kind, artifacts);
+        // The Goal contract block (objective + criteria) is in this turn's context: the packet keeps refs only.
+        return compileLongRunCheckpoint(checkpoint, runtime.kind, artifacts, goalContractInContext ? { goalContext: goalContractInContext } : undefined);
       })() : "";
       // Owner method/constraint changes are execution context, not new success
       // criteria or a new native session. Re-read their source-backed projection
@@ -7108,8 +7127,15 @@ ${effectiveUserPrompt}`;
         status: locale === "ko" ? "실제 이미지 결과를 채팅과 결과 탭에 연결했습니다." : "The real image result is attached to the chat and Results rail.",
       });
     }
-    const invokeCurrentRuntime = (request: RunnerRequest): Promise<Awaited<ReturnType<Runner>>> =>
-      runWithOwnerControl({ ...request, ownerControlInbox }, invokeBrainRuntime);
+    // Only the first call carries the host-authored purpose; an owner steer the pump delivers after it is the owner's words.
+    const invokeCurrentRuntime = (request: RunnerRequest, hostAuthored?: string): Promise<Awaited<ReturnType<Runner>>> => {
+      const first: RunnerRequest = { ...request, ownerControlInbox };
+      const settled = runWithOwnerControl(first, (r) => { hostAuthoredNext = r === first ? hostAuthored : undefined; return invokeBrainRuntime(r); });
+      // goal_wait / goal_complete calls of this pass re-enter as the exact text blocks the unchanged parsers read.
+      return turnGoalToolsOffered && req.chatId && req.runId
+        ? settled.then((res) => ({ ...res, text: applyGoalSignalsToText(res.text, takeGoalSignals(turnNotesKey(req.chatId!, req.runId!))) }))
+        : settled;
+    };
     let activeRunnerReq = runnerRequestForRuntime(active, picked);
     if (hostGeneratedImageAttachment) {
       activeRunnerReq = {
@@ -7123,7 +7149,7 @@ ${effectiveUserPrompt}`;
       ? captureNativeGoalEpisode(activeGoalId, chat.id, req.runId) : null;
     let goalEpisodeYield: NativeGoalEpisodeBinding | null = null;
     const passLoopStartedAtMs = Date.now();
-    let result = await invokeCurrentRuntime(activeRunnerReq);
+    let result = await invokeCurrentRuntime(activeRunnerReq, hostNoticePurpose);
     if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
       const error = new RuntimeTurnUnsettledError(active.kind, locale);
       error.cause = result;
@@ -7372,14 +7398,17 @@ ${effectiveUserPrompt}`;
           : "runner reported more safe Stormbreaker work remains",
       });
       const nextRunnerReq = runnerRequestForRuntime(active, picked!);
+      // Journal-backed and native-session runs already hold the previous pass and receive the turn context (Goal contract) each pass.
+      const passCarriesContext = persistentAgentContext || sessionCapableRuntime;
       const baseContinuationPrompt = goalDrivenPass
         ? buildGoalDrivenContinuationPrompt({
             pass,
-            objective: latestGoalDecision?.objective ?? null,
+            objective: passCarriesContext && goalContractInContext ? null : latestGoalDecision?.objective ?? null,
             openTaskCount: latestGoalDecision?.openTaskCount ?? 0,
-            previousOutput: result.text,
+            previousOutput: passCarriesContext ? null : result.text,
+            typedGoalTools: goalTypedToolsReplaceText,
           })
-        : buildStormbreakerContinuationPrompt(result.text, pass);
+        : buildStormbreakerContinuationPrompt(passCarriesContext ? null : result.text, pass);
       const continuationPrompt = [baseContinuationPrompt, passRecoveryNote].filter(Boolean).join("\n\n");
       const planNote = !goalPlanContextSlot && activeGoalId ? goalPlanContinuationNote(activeGoalId) : null;
       activeRunnerReq = {
@@ -7393,7 +7422,7 @@ ${effectiveUserPrompt}`;
         images: undefined,
       };
       const toolCallsBeforePass = completedToolCalls;
-      result = await invokeCurrentRuntime(activeRunnerReq);
+      result = await invokeCurrentRuntime(activeRunnerReq, "goal-continuation");
       if (result.ownerControlTerminal !== "completed" && !runtimeTerminalEvidence.closedHttpRefusal && !runtimeTerminalEvidence.locallyRejected) {
         const error = new RuntimeTurnUnsettledError(active.kind, locale);
         error.cause = result;
@@ -7497,7 +7526,7 @@ ${effectiveUserPrompt}`;
             : recoveryPrompt,
           images: undefined,
         };
-        result = await invokeCurrentRuntime(activeRunnerReq);
+        result = await invokeCurrentRuntime(activeRunnerReq, "run-recovery");
         if (result.failure) {
           throw new InvocationRunnerFailureError(result.failure);
         }
@@ -7523,7 +7552,7 @@ ${effectiveUserPrompt}`;
             : recoveryDecisionPrompt,
           images: undefined,
         };
-        result = await invokeCurrentRuntime(activeRunnerReq);
+        result = await invokeCurrentRuntime(activeRunnerReq, "run-recovery");
         if (result.failure) {
           throw new InvocationRunnerFailureError(result.failure);
         }
@@ -8261,9 +8290,12 @@ ${effectiveUserPrompt}`;
               ? explicitBorrowMemoryKeys
               : [],
         };
+        // Notes the model recorded through the agentlas-turn memory_note tool join the parsed envelope's events.
+        const toolMemoryNotes = takeTurnMemoryNotes(req.chatId && req.runId ? turnNotesKey(req.chatId, req.runId) : null);
         const semanticOptions = projectReadOnlyBoundary
           ? {}
           : await runSemanticMemoryReview({
+              extraEvents: toolMemoryNotes,
               replyText: displayText,
               runner: picked.runner,
               backendLabel: picked.label,
@@ -8280,9 +8312,9 @@ ${effectiveUserPrompt}`;
           ? stripReplyMemoryEventsReadOnly(
               displayText,
               curationContext,
-              restrictedDiscardedMemoryEvents,
+              restrictedDiscardedMemoryEvents + toolMemoryNotes.length,
             )
-          : curateReply(displayText, curationContext, { ...semanticOptions, carriedEvents: carriedPassMemoryEvents });
+          : curateReply(displayText, curationContext, { ...semanticOptions, carriedEvents: [...toolMemoryNotes, ...carriedPassMemoryEvents] });
         // Restricted cleanup may intentionally remove the entire response. Never
         // restore the raw control block through the ordinary empty-text fallback.
 

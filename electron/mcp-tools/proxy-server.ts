@@ -98,8 +98,11 @@ export function mcpToolIsMutating(input: {
     && AGENTLAS_COMPUTER_USE_READ_TOOLS.has(input.toolName);
   // agentlas-ui's only tool returns a constant schema text: no input, no effect.
   // (Literal ids, as for the other reads here: gates lift this function out of the file.)
-  const uiSchemaRead = input.catalogId === "agentlas-ui" && input.toolName === "read_ui_schema";
-  return !(browserRead || nativeRead || uiSchemaRead || oneGraphReadPermissionCall(input));
+  const uiSchemaRead = input.catalogId === "agentlas-ui" && (input.toolName === "read_ui_schema" || input.toolName === "read_surface_protocol");
+  // agentlas-turn memory_note only queues a note for the Memory Curator in this run (Main re-checks the run capability and
+  // a read-permission turn discards it): no outward effect, so it needs no write approval.
+  const turnNoteRead = input.catalogId === "agentlas-turn" && input.toolName === "memory_note";
+  return !(browserRead || nativeRead || uiSchemaRead || turnNoteRead || oneGraphReadPermissionCall(input));
 }
 
 /** Plan observation authority is minted from the actual host launcher, not a

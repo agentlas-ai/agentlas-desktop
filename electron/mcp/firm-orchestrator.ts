@@ -1345,7 +1345,8 @@ async function runNodeTurn(p: FirmRunParams, turn: NodeTurn): Promise<{
                 arch: process.arch,
                 runtimeKind: executedRuntime.kind,
                 basePackageHash: getAgentById(node.agentId)?.packageHash ?? null,
-                taskHint: turn.userPrompt,
+                // A host-written turn (promptOrigin "system": goal resume, update resume) is not a request the agent learns from.
+                taskHint: p.req.promptOrigin === "system" ? null : turn.userPrompt,
               },
             }
           : {}),

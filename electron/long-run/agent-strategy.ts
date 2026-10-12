@@ -368,9 +368,9 @@ export function kpiMeasurementLines(plan: LiveGoalPlan, nowMs: number): string[]
       if (!last) missing.push(kr.id);
       else if (nowMs - Date.parse(last.observedAt) > 2 * (kpi?.cadenceHours ?? 24) * HOUR_MS) stale.push(kr.id);
     }
-    if (missing.length) lines.push(`KPI measurement needed (infrastructure state, not a strategy failure): read the current value of ${missing.join(", ")} from the real source now and report it with a kpi marker.`);
+    if (missing.length) lines.push(`KPI measurement needed for ${missing.join(", ")}: read the current value from the real source now and report it with a kpi marker.`);
     if (stale.length) lines.push(`KPI measurement is stale for ${stale.join(", ")}: measure again this pass if you can read the real value.`);
-    lines.push('KPI sample marker (one line, evidence required; the host stores it): <<agentlas-kpi>>{"kpi":"<kr id>","value":30,"observed_at":"<ISO time you read it>","source":"<where>","evidence":"what the screen/tool showed"}. To track a metric the owner gave no number for: add "name":"...","unit":"...","direction":"up" with a new lowercase kpi id (no target is invented).');
+    lines.push('KPI sample (one line, evidence required): <<agentlas-kpi>>{"kpi":"<kr id>","value":30,"observed_at":"<ISO>","source":"<where>","evidence":"what the screen/tool showed"}. A metric without an owner number: add "name","unit","direction":"up" and a new lowercase kpi id.');
   } catch { /* 문맥 보조 줄은 실패해도 본 문맥을 막지 않는다 */ }
   return lines;
 }

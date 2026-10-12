@@ -49,6 +49,8 @@ import { isAuthenticWorkspacePreviewMcpLaunch } from "../workspace-preview/mcp-s
 import { AGENT_MAIL_CONTROL_ENV, isAuthenticAgentMailMcpLaunch } from "../agent-mail/mcp-server";
 import { AGENT_MAIL_AUTO_RUN_MCP, createAgentMailCapability, isAgentMailAutoRunChat, removeAgentMailCapability } from "../agent-mail/control-server";
 import { agentMailToolsOfferedForRun } from "../agent-mail/client";
+import { AGENT_TURN_CONTROL_ENV, TURN_TOOLS_BASE, TURN_TOOLS_GOAL, isAuthenticTurnToolsMcpLaunch } from "../turn-tools/mcp-server";
+import { createTurnToolsCapability, removeTurnToolsCapability } from "../turn-tools/control-server";
 import { ONE_TEAM_CONTROL_ENV, ROOM_MEMBER_TOOL_NAMES, isAuthenticOneTeamMcpLaunch } from "../one/team-mcp-server";
 import { createOneTeamCapability, removeOneTeamCapability } from "../one/team-control-server";
 import { oneTeamDispatchAllowedFor } from "../one/team-dispatch";
@@ -208,6 +210,10 @@ export interface McpConfigBuildOptions {
   skipDefaultSeed?: boolean;
   /** Per-run file key. Prevents concurrent Build plans from racing on one shared config. */
   configKey?: string;
+  /** This run's id: pins the agentlas-turn capability so its notes land in this turn only. */
+  turnRunId?: string;
+  /** Goal turns: also offer goal_wait / goal_complete from agentlas-turn. */
+  turnGoalTools?: true;
   /** Main-minted owner-full evidence for a worker's bounded preview tool. */
   workspacePreviewOwnerGrant?: WorkspacePreviewOwnerGrant;
   /**
@@ -766,6 +772,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
   const includedServers: NonNullable<McpConfigResult["includedServers"]> = [];
   let workspacePreviewCapabilityCleanup: (() => void) | undefined;
   const agentMailCapabilityCleanup: Array<() => void> = [];
+  const turnToolsCapabilityCleanup: Array<() => void> = [];
   const oneTeamCapabilityCleanup: Array<() => void> = [];
   const proxyHandles: string[] = [];
   const residentProxyHandles: string[] = [];
@@ -789,6 +796,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
     for (const revoke of browserAuthorityCleanup) revoke();
     if(osExecution?.kind==="scoped")osExecution.dispose();
     for (const revoke of agentMailCapabilityCleanup) revoke();
+    for (const revoke of turnToolsCapabilityCleanup) revoke();
     for (const revoke of oneTeamCapabilityCleanup) revoke();
     try { workspacePreviewCapabilityCleanup?.(); } finally {
       if (ownsFile) {
@@ -864,6 +872,11 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
       continue;
     }
     if (s.catalogId === "agentlas-ui" && !isCanonicalUiSchemaMcpServer(s)) continue;
+    if (s.catalogId === "agentlas-turn" && (!callerChatId || !opts?.turnRunId || !isAuthenticTurnToolsMcpLaunch(s.command, s.args ?? []))) {
+      // Typed turn tools are bound to one chat and run by Main's capability; without both, or for any launch other than
+      // the exact inline source of this build, the server is not offered (the prompt text fallback stays on).
+      continue;
+    }
     if (s.catalogId === "cua-driver" && !isCanonicalComputerUseMcpServer(s)) {
       // The native input capability must never fall through to a mutable or
       // externally installed executable with the same catalog id.
@@ -1065,6 +1078,20 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           continue;
         }
       }
+      if (s.catalogId === "agentlas-turn" && callerChatId && opts?.turnRunId) {
+        try {
+          const capabilityConfigKey = opts?.configKey ?? key;
+          const capability = await createTurnToolsCapability(
+            { chatId: callerChatId, runId: opts.turnRunId, tools: opts.turnGoalTools ? TURN_TOOLS_GOAL : TURN_TOOLS_BASE, dryRun: opts?.toolGate?.simulation === true || opts?.toolGate?.planMode === true },
+            capabilityConfigKey,
+          );
+          turnToolsCapabilityCleanup.push(() => removeTurnToolsCapability(capabilityConfigKey, capability.binding.capabilityId));
+          builtInEnv = { [AGENT_TURN_CONTROL_ENV]: capability.path };
+        } catch (error) {
+          console.warn("[agentlas-turn] capability unavailable:", error);
+          continue;
+        }
+      }
       if (s.catalogId === "one-team") {
         try {
           const capabilityConfigKey = opts?.configKey ?? key;
@@ -1137,7 +1164,8 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           || isAuthenticWorkspacePreviewMcpLaunch(command, args)
           || isAuthenticAgentMailMcpLaunch(command, args)
           || isAuthenticOneTeamMcpLaunch(command, args)
-          || isAuthenticUiSchemaMcpLaunch(command, args))
+          || isAuthenticUiSchemaMcpLaunch(command, args)
+          || isAuthenticTurnToolsMcpLaunch(command, args))
       ) {
         // The keyless built-in already has an exact, compressed in-memory
         // launch contract. Bypass the mutable per-run wrapper so no pathname is
@@ -1235,7 +1263,7 @@ export async function buildMcpConfigFile(opts?: McpConfigBuildOptions): Promise<
           // call still passes the Main arbiter and the browser launcher's approval gate.
           pushCodexConfig(codexConfigArgs, key, "default_tools_approval_mode", tomlString("approve"));
         }
-        if (s.catalogId === "agent-mail" || s.catalogId === "one-team") {
+        if (s.catalogId === "agent-mail" || s.catalogId === "one-team" || s.catalogId === "agentlas-turn") {
           // codex exec's approval policy "never" refuses every non-readOnlyHint
           // MCP call in a read run, so "send this mail" could never reach Main in
           // auto mode. Main's agent-mail control server is the one gate for these

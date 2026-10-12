@@ -2221,7 +2221,7 @@ export class InvocationService {
         buildApprovedOneMemoryContext(invocationScope, memoryState),
         ...(preparedOneMemoryUseOnce ? [preparedOneMemoryUseOnce.context] : []),
         ...(preparedOneBriefingAction ? [preparedOneBriefingAction.context] : []),
-      ].join("\n\n");
+      ].filter(Boolean).join("\n\n");
       oneProfileReceipt = {
         oneId: profile.oneId,
         profileVersion: profile.version,
