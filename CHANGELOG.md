@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.3.14 — 2026-10-12
+
+- A Codex turn that carries a browser or another one-turn permission continues the conversation's session through Codex's app-server instead of starting `codex exec` again. In our measurement this sent about 2.3 times less input, nearly all of it read from cache. The process still closes when the turn ends, so the permission never outlives the turn.
+- Product Codex runs no longer receive the shell environment from your personal Codex config (`shell_environment_policy.set`, such as database URIs or key files).
+- A saved key reaches the commands an agent runs from Codex's own shell. Codex filtered such names out, so voice and other API keys read as unset there.
+- OpenAI and OpenRouter API-key conversations keep one cache key, so their repeated turns reach the provider's prompt cache.
+- Grok's model list is no longer read by starting a process every few seconds.
+- A Codex session that cannot be resumed now says why.
+- A Goal whose hidden continuation holds no next run is no longer left waiting with nothing to wake it: the app schedules its next step itself, and the teammate reports that arrived meanwhile are read on that turn.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.13 — 2026-10-12
 
 - A teammate that stops for something only you can do, such as a sign-in or an answer, is no longer reported as still working. One is told once and tells you what to do and where. After an app restart that teammate's session stays open, so its result still reaches One once you have done it.

@@ -299,13 +299,59 @@ export interface GrokProbe {
   discovery: DiscoveryOutcome;
 }
 
+/*
+ * `grok models` the same way as `agy models` (antigravity.ts cachedAgyModelDiscovery). detectRuntimes() caches for
+ * 10 seconds only, so every runtime list the app needed started a `grok models` process: production 2026-10-12,
+ * 27 of them from Main in 15 minutes (procmon). The list changes with a CLI update or a new sign-in.
+ *   - success: kept 10 minutes; failure: looked at again after 1 minute;
+ *   - an expired value is returned at once and refreshed once in the background;
+ *   - only the first detection (or a changed binary) waits.
+ */
+export const GROK_MODEL_DISCOVERY_FRESH_MS = 10 * 60_000;
+export const GROK_MODEL_DISCOVERY_FAILED_RETRY_MS = 60_000;
+let grokModelsCache: { binary: string; at: number; outcome: DiscoveryOutcome; version: string } | null = null;
+let grokModelsFlight: { binary: string; promise: Promise<{ outcome: DiscoveryOutcome; version: string }> } | null = null;
+
+/** Runtime replaced or signed in again: keep the value, refresh it on the next detection. */
+export function invalidateGrokModelDiscovery(): void {
+  if (grokModelsCache) grokModelsCache = { ...grokModelsCache, at: 0 };
+}
+
+export function cachedGrokModelDiscovery(
+  binary: string,
+  probe: (binary: string) => Promise<{ outcome: DiscoveryOutcome; version: string }>,
+  now: number = Date.now(),
+): Promise<{ outcome: DiscoveryOutcome; version: string }> {
+  const refresh = (): Promise<{ outcome: DiscoveryOutcome; version: string }> => {
+    if (grokModelsFlight?.binary === binary) return grokModelsFlight.promise;
+    const promise = probe(binary)
+      .then((value) => {
+        grokModelsCache = { binary, at: Date.now(), ...value };
+        return value;
+      })
+      .finally(() => { if (grokModelsFlight?.promise === promise) grokModelsFlight = null; });
+    grokModelsFlight = { binary, promise };
+    return promise;
+  };
+  const cached = grokModelsCache?.binary === binary ? grokModelsCache : null;
+  if (!cached) return refresh();
+  const ttl = cached.outcome.status === "ok" ? GROK_MODEL_DISCOVERY_FRESH_MS : GROK_MODEL_DISCOVERY_FAILED_RETRY_MS;
+  if (now - cached.at >= ttl) void refresh().catch(() => undefined);
+  return Promise.resolve({ outcome: cached.outcome, version: cached.version });
+}
+
+async function probeGrokModelsAndVersion(found: string): Promise<{ outcome: DiscoveryOutcome; version: string }> {
+  const version = (await probeCliVersion(found)) ?? "unknown";
+  const outcome = await listGrokModels(found).catch(
+    (err): DiscoveryOutcome => ({ status: "failed", models: [], rawLineCount: 0, reason: `spawn-error:${err instanceof Error ? err.message : String(err)}`, source: "cli" }),
+  );
+  return { outcome, version };
+}
+
 export async function probeGrok(): Promise<GrokProbe | null> {
   const found = await firstExistingCli(grokCandidates());
   if (!found) return null;
-  const version = (await probeCliVersion(found)) ?? "unknown";
-  const discovery = await listGrokModels(found).catch(
-    (err): DiscoveryOutcome => ({ status: "failed", models: [], rawLineCount: 0, reason: `spawn-error:${err instanceof Error ? err.message : String(err)}`, source: "cli" }),
-  );
+  const { outcome: discovery, version } = await cachedGrokModelDiscovery(found, probeGrokModelsAndVersion);
   return { path: found, version, models: discovery.models, discovery };
 }
 

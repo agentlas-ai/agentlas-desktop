@@ -17,6 +17,22 @@ export const RUNTIME_AUTH_ENV_KEYS: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * Codex starts every command its shell tool runs from a cut-down environment: only a core set of variables, and anything
+ * named like *KEY*, *SECRET* or *TOKEN* is dropped even when it is present. A saved ELEVENLABS_API_KEY that Main put in the
+ * run's environment therefore never reached the model's own `bash` calls (production 2026-10-12: the Yotube room's agents
+ * reported the key "unset" while Main logged it as aliased, and the voice step never ran). Main already decides which keys a
+ * run's environment holds (runtime login keys only when declared), so Codex's own filter is lifted for everything else and
+ * kept for exactly the runtime login keys.
+ */
+export function codexShellEnvironmentArgs(): string[] {
+  return [
+    "-c", "shell_environment_policy.inherit=all",
+    "-c", "shell_environment_policy.ignore_default_excludes=true",
+    "-c", `shell_environment_policy.exclude=${JSON.stringify([...RUNTIME_AUTH_ENV_KEYS].sort())}`,
+  ];
+}
+
+/**
  * Keys of the media and speech tools an agent may call from its shell (ElevenLabs, Runway, Replicate, ...). The user
  * saved the key to make exactly those tools work, so a saved one is visible to every run's tool process.
  */

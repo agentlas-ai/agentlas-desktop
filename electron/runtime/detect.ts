@@ -16,7 +16,7 @@ import { ACP_AGENTS, acpDisabledFor, probeAcpModelsCached } from "./acp";
 import { listAcpKindSpecs, resolveAcpCommand } from "./acp-agents";
 import { invalidateAntigravityModelDiscovery, probeAntigravity } from "./antigravity";
 import { probeKimi } from "./kimi";
-import { probeGrok } from "./grok";
+import { invalidateGrokModelDiscovery, probeGrok } from "./grok";
 import { probeCursor } from "./cursor";
 import { probeLMStudio } from "./lmstudio";
 import { probeMLX } from "./mlx";
@@ -155,6 +155,7 @@ export function clearDetectCache(): void {
   // reports the previous generation until its probe TTL expires.
   clearCliVersionProbeCache();
   invalidateAntigravityModelDiscovery();
+  invalidateGrokModelDiscovery();
   // `codex.ts` keeps the executable path separately for invocation; clearing
   // only the dashboard snapshot would pin a moved binary until app restart.
   clearCodexBinCache();

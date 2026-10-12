@@ -35,6 +35,7 @@ import os from "node:os";
 import path from "node:path";
 import { AcpConnection, AcpRpcError } from "./acp-protocol";
 import { AcpSessionPool, type AcpSessionLease } from "./acp-session-pool";
+import { accountCodexHome } from "./codex-product-home";
 import { detachedSpawnOpts, killCliTree, markRunChildResident, spawnCli, trackRunChild, waitForCliTreeTermination } from "./exec";
 import { ensureChildCloseAfterExit, startCliHeartbeat } from "./runner";
 import {
@@ -445,10 +446,15 @@ const childExited = (child: ChildProcess): boolean => child.exitCode !== null ||
 const codexThreadOwnerKey = (session: CodexResidentSession, threadId: string): string =>
   `${realCodexHome(String(session.init?.codexHome ?? ""))}\0${threadId}`;
 
-/** app-server reports its CODEX_HOME resolved; a one-shot exec only knows the configured path. */
+/**
+ * app-server reports its CODEX_HOME resolved; a one-shot exec only knows the configured path. Every product mirror
+ * (codex-product-home.ts: plain, One's, isolated) links the same sessions and state, so a thread written through one is
+ * held against all of them: the identity is the account home behind the mirror.
+ */
 function realCodexHome(home: string): string {
   if (!home) return "";
-  try { return fs.realpathSync(home); } catch { return path.resolve(home); }
+  const account = accountCodexHome(home) ?? home;
+  try { return fs.realpathSync(account); } catch { return path.resolve(account); }
 }
 
 /** Transfer one persisted thread only after its previous idle writer has exited. */
@@ -460,7 +466,7 @@ export async function prepareCodexThreadResume(
 ): Promise<() => void> {
   return claimCodexThreadWriter(realCodexHome(String(session.init?.codexHome ?? "")), threadId,
     (candidate) => candidate !== session && candidate.threadId === threadId
-      && candidate.init?.codexHome === session.init?.codexHome, signal, options);
+      && realCodexHome(String(candidate.init?.codexHome ?? "")) === realCodexHome(String(session.init?.codexHome ?? "")), signal, options);
 }
 
 /**

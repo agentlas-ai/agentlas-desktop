@@ -10,9 +10,10 @@
 // Owner decision 2026-10-06: personal coding rules must not drive product agents, for every user.
 //
 // So a product run gets a mirror of the real home in which every entry is a symlink to the original
-// — sign-in (Codex writes auth.json in place, following the link), config, plugins, hooks, skills,
-// sessions and the state database stay one and the same, so threads resume across both — except the
-// two instruction files, which are simply absent. Measured on codex-cli 0.160.1: sign-in, plugins and
+// — sign-in (Codex writes auth.json in place, following the link), plugins, hooks, skills, sessions and
+// the state database stay one and the same, so threads resume across both — except the two instruction
+// files, which are simply absent, and config.toml, which is the person's config without their shell
+// environment (productCodexConfig). Measured on codex-cli 0.160.1: sign-in, plugins and
 // hooks load, a session written through the mirror lands in the real sessions folder and resumes, the
 // mirror gains no files of its own, and the model reports no git rule and no Hope identity.
 //
@@ -52,16 +53,67 @@ export interface CodexProductHomeOptions {
    * switched-on entries, written into the mirror as its own file.
    */
   personal?: { memories: boolean; skills: boolean; hooksJson: string | null };
+  /**
+   * A run whose MCP servers are exactly the ones Main bound for it (an isolated grant: browser turns, AGI attempts). Its
+   * own mirror ("-isolated") has an empty config.toml, which is what `codex exec --ignore-user-config` gives; the
+   * app-server has no such flag, so the home carries the isolation and the run can resume its thread there too.
+   * Sessions and sign-in stay shared, so the thread is the same one.
+   */
+  isolated?: boolean;
 }
 
 /** Entries a product run's mirror must not link: personal instruction files, and personal context unless One chose it. */
 function mirrorExcludes(name: string, personal: CodexProductHomeOptions["personal"]): boolean {
-  if (CODEX_PERSONAL_INSTRUCTION_FILES.has(name) || name === "skills_archive") return true;
+  // config.toml is the mirror's own copy without the person's shell environment (productCodexConfig).
+  if (CODEX_PERSONAL_INSTRUCTION_FILES.has(name) || name === "skills_archive" || name === "config.toml") return true;
   if (!isCodexPersonalContextEntry(name)) return false;
   if (name === "skills") return !personal?.skills;
   if (name === "hooks.json") return true; // never linked: One gets its own cut-down copy
   if (name === "hooks") return !personal?.hooksJson;
   return isMemoryEntry(name) && !personal?.memories;
+}
+
+/**
+ * The person's config.toml without `[shell_environment_policy]`. Its `set` table holds values the person exports to their
+ * own Codex shells (database URIs, store credentials, cloud key files), and Codex applies `set` after every exclude, so no
+ * `-c` override can take them back out. Measured 2026-10-12 through the linked config: a product run's shell had
+ * MONGODB_URI and GOOGLE_APPLICATION_CREDENTIALS from it although neither Main nor the run environment held them (owner
+ * decision 2026-10-11: personal context stays out of product runs). Agentlas decides what a product shell receives
+ * (env-key-reach.ts). Everything else (model, providers, MCP servers, profiles) is kept as written.
+ */
+export function productCodexConfig(text: string): string {
+  const out: string[] = [];
+  let atRoot = true;
+  let skipping = false;
+  for (const line of text.split(/\r?\n/)) {
+    const header = /^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*(?:#.*)?$/.exec(line);
+    if (header) {
+      atRoot = false;
+      skipping = /^shell_environment_policy(?:\.|$)/.test(header[1].replace(/["'\s]/g, ""));
+      if (skipping) continue;
+    } else if (skipping || (atRoot && /^\s*["']?shell_environment_policy["']?\s*[.=]/.test(line))) {
+      continue;
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
+/** Writes the mirror's config.toml from the person's, only when it changed (Codex may be reading it). */
+function writeProductConfig(realHome: string, home: string, isolated = false): void {
+  const at = path.join(home, "config.toml");
+  let source: string | null = null;
+  try { source = fs.readFileSync(path.join(realHome, "config.toml"), "utf8"); } catch { /* the person has none */ }
+  if (source === null && !isolated) { quietly(() => fs.rmSync(at, { force: true })); return; }
+  const wanted = isolated ? "" : productCodexConfig(source ?? "");
+  try {
+    const stat = fs.lstatSync(at);
+    if (stat.isFile() && fs.readFileSync(at, "utf8") === wanted) return;
+    if (!stat.isFile()) quietly(() => fs.unlinkSync(at));
+  } catch { /* not there yet */ }
+  const tmp = `${at}.${process.pid}.${Date.now()}.tmp`;
+  fs.writeFileSync(tmp, wanted, { mode: 0o600 });
+  fs.renameSync(tmp, at);
 }
 
 /**
@@ -87,7 +139,8 @@ function keyringOnly(realHome: string): boolean {
 
 /** Brings the mirror in line with the real home. Returns the mirror, or why the real home must be used. */
 export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath("codex-product-home"), options: CodexProductHomeOptions = {}): { home: string } | { skip: CodexProductHomeSkip } {
-  const personal = options.personal;
+  const isolated = options.isolated === true;
+  const personal = isolated ? undefined : options.personal;
   let entries: string[];
   try {
     entries = fs.readdirSync(realHome);
@@ -96,7 +149,7 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
   }
   if (!entries.includes("auth.json")) return { skip: "no-file-sign-in" };
   if (keyringOnly(realHome)) return { skip: "keyring-sign-in" };
-  const home = mirrorPathFor(realHome, mirrorRoot, personal !== undefined);
+  const home = mirrorPathFor(realHome, mirrorRoot, personal !== undefined, isolated);
   try {
     for (const store of CODEX_SHARED_STORES) {
       if (!entries.includes(store)) { fs.mkdirSync(path.join(realHome, store), { recursive: true }); entries.push(store); }
@@ -114,16 +167,16 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
         continue;
       }
       // Codex made this here because the real home had none at the time (a store a newer Codex adds).
-      // It stays the mirror's own and is never moved or deleted: it may be open. Configuration is the
-      // exception — a config Codex rewrote here yields to the person's, which is the authority.
-      if (name === "config.toml" && stat.isFile() && wanted.has(name)) quietly(() => fs.rmSync(at));
-      else wanted.delete(name);
+      // It stays the mirror's own and is never moved or deleted: it may be open. config.toml is rewritten
+      // from the person's below (a config Codex rewrote here yields to the person's, which is the authority).
+      wanted.delete(name);
     }
     for (const name of wanted) {
       const at = path.join(home, name);
       if (isLink(at) || fs.existsSync(at)) continue;
       quietly(() => fs.symlinkSync(path.join(realHome, name), at));
     }
+    writeProductConfig(realHome, home, isolated);
     // hooks.json is never a link: One gets a cut-down copy, everyone else none.
     const hooksAt = path.join(home, "hooks.json");
     quietly(() => fs.rmSync(hooksAt, { force: true }));
@@ -153,8 +206,18 @@ function isLink(at: string): boolean {
   }
 }
 
-function mirrorPathFor(realHome: string, mirrorRoot = userDataPath("codex-product-home"), personal = false): string {
-  return path.join(mirrorRoot, crypto.createHash("sha256").update(realHome).digest("hex").slice(0, 12) + (personal ? "-one" : ""));
+function mirrorPathFor(realHome: string, mirrorRoot = userDataPath("codex-product-home"), personal = false, isolated = false): string {
+  return path.join(mirrorRoot, crypto.createHash("sha256").update(realHome).digest("hex").slice(0, 12) + (isolated ? "-isolated" : personal ? "-one" : ""));
+}
+
+/** Whether `home` is the isolated mirror (empty config.toml) of the person's own Codex home. */
+export function isIsolatedCodexProductHome(home: string | undefined): boolean {
+  if (!home) return false;
+  try {
+    return path.resolve(home) === mirrorPathFor(realCodexHome(process.env), undefined, false, true);
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -166,7 +229,8 @@ export function accountCodexHome(home: string | undefined): string | undefined {
   const realHome = realCodexHome(process.env);
   try {
     const at = path.resolve(home);
-    return at === mirrorPathFor(realHome) || at === mirrorPathFor(realHome, undefined, true) ? realHome : home;
+    return at === mirrorPathFor(realHome) || at === mirrorPathFor(realHome, undefined, true)
+      || at === mirrorPathFor(realHome, undefined, false, true) ? realHome : home;
   } catch {
     return home;
   }

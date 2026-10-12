@@ -4583,8 +4583,15 @@ export class InvocationService {
               appendLongRunEvent({ runId: current.id, kind: "run.owner_answer_pending", actorKind: "host", payload: { reason: "goal_owner_answer_required" } });
               this.scheduleGoalContinuation(current.goalId, record, "goal_owner_answer_required");
             } else if (!result.goalEpisodeYield && findAutomationByGoalId(turnGoalId)?.enabled) {
-              // Its hidden continuation owns the next step: say so instead of looking like a live turn.
-              transitionLongRun({ runId: current.id, to: "waiting_tool", actorKind: "host", reason: "goal_continuation_scheduled" });
+              // Its hidden continuation owns the next step: say so instead of looking like a live turn. Only a continuation
+              // that holds a next run can own it. One that is enabled with nothing scheduled (never armed, refused or lost
+              // at a restart) wakes nobody: production 1.3.11, Yotube room 2026-10-12 07:55Z, "Goal continuation · Yotube"
+              // had next_run_at empty and run_count 0, and the Goal sat in waiting_tool for 45 minutes while six
+              // teammate reports waited parked. Then the host's spaced follow-up takes the next step.
+              const armed = Boolean(findAutomationByGoalId(turnGoalId)?.nextRunAt);
+              transitionLongRun({ runId: current.id, to: "waiting_tool", actorKind: "host",
+                reason: armed ? "goal_continuation_scheduled" : "goal_continuation_unarmed" });
+              if (!armed) this.scheduleGoalContinuation(current.goalId, record, "goal_continuation_unarmed");
             } else {
               completionClaim = { claimed: true, goalId: turnGoalId,
                 evidence: "Goal turn ended without a completion claim: verify the durable terminal result against all criteria." };

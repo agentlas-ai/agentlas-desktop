@@ -1,4 +1,4 @@
-import { cachedTokensFromOpenAiUsage } from "./prompt-cache";
+import { cacheAffinityFields, cachedTokensFromOpenAiUsage } from "./prompt-cache";
 import { reportModelPayload, ledgerFromApiBody } from "./model-call-ledger";
 import { assertCurrentHistoryRunnerResult } from "./observed-runner";
 import { withCurrentHistoryTool, currentHistoryRuntimeFence, withCurrentHistoryProvider } from "../one/history-runtime-fences";
@@ -1425,6 +1425,7 @@ export async function runLocalOpenAiChat(
             ...(!streamUsageUnsupported && (runtimeKind === "byok" || runtimeKind === "lmstudio")
               ? { stream_options: { include_usage: true } } : {}),
             messages,
+            ...(runtimeKind === "byok" ? cacheAffinityFields({ baseUrl: host, chatId: req.chatId, ownerId: runtimeSessionOwnerId }) : {}),
             ...(opts.keepAlive ? { keep_alive: opts.keepAlive } : {}),
             ...(opts.chatTemplateKwargs ? { chat_template_kwargs: opts.chatTemplateKwargs } : {}),
             // A malformed tool call repeated identically 3 of 3 times (measured); a fresh seed makes the retry a new sample.

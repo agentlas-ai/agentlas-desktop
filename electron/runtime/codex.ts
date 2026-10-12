@@ -13,7 +13,7 @@ import { runCodexAliveResidentTurn, closeCodexAliveResidentOwner,
   codexAliveResidentGeneration, consumeCodexAliveResidentResult } from "./codex-alive-session";
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { resolveEffectiveContextWindow } from "../../shared/models";
-import { accountCodexHome, withCodexProductHome } from "./codex-product-home";
+import { accountCodexHome, isIsolatedCodexProductHome, withCodexProductHome } from "./codex-product-home";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
@@ -24,6 +24,7 @@ import { StringDecoder } from "node:string_decoder";
 import { codexSystemPromptWithSchemaFallback, openAiStrictSchemaOrNull } from "./strict-output-schema";
 import type { Runner, RunnerEvents, RunnerRequest, RunnerResult , RunnerFailure } from "./runner";
 import { WORK_PROJECT_RESIDENCY_BUSY_CODE } from "./project-residency";
+import { codexShellEnvironmentArgs } from "./env-key-reach";
 import { imageOutputContract, planPromptSections } from "./prompt-sections";
 import { cumulativeSurfaceGateText, ensureChildCloseAfterExit, startCliHeartbeat, startCliSilenceGuard, runtimeSilentTimeoutFailure, cliSilenceWindowMs, RUNTIME_SILENT_TIMEOUT_CODE, wrapSystemPrompt, workforceObservedHostAuthorityEnforcement, RuntimeTurnUnsettledError } from "./runner";
 import { detectRuntimeRefusal } from "./runtime-refusal";
@@ -1469,8 +1470,11 @@ async function runCodexResidentTurn(input: {
   surfaceArgs?: string[];
   appliedEffort: string | null;
   observeNativeFile: NativeFileProofObserver;
+  /** The turn's grant dies with it: the app-server process is this turn's alone and is closed at its end. */
+  turnScopedProcess?: boolean;
 }): Promise<ResidentTurnOutcome> {
   const { bin, req, chatId, fingerprint, resumeThreadId, gapContext, mcpArgs, appliedEffort, observeNativeFile } = input;
+  const turnScoped = input.turnScopedProcess === true;
   publishCodexNativeControlState(input.events, "app-server", "pending", "native_control_pending");
   // Host capability is internal continuity identity, never effect/approval chat authority.
   const canonicalContextKey = req.agentContext && !req.minimalObservation && !req.untrustedNoTools
@@ -1498,7 +1502,8 @@ async function runCodexResidentTurn(input: {
   const args = [...CODEX_APP_SERVER_ARGS, "-c", "model_reasoning_summary=auto", "-c", `model_auto_compact_token_limit=${req.scienceController ? 150000 : ROOM_AUTO_COMPACT_TOKEN_LIMIT}`, ...surfaceArgs, ...mcpArgs];
   const pool = codexSessionPool();
   const poolKey = codexPoolKey({
-    chatId: canonicalContextKey ?? req.approvalChatId ?? chatId,
+    // A turn-scoped process is never checked out by another turn.
+    chatId: `${canonicalContextKey ?? req.approvalChatId ?? chatId}${turnScoped ? `#turn:${crypto.randomUUID()}` : ""}`,
     fingerprint,
     sessionOwnerId: runtimeSessionOwnerId ?? null,
     isolateOwner: isolateRuntimeSessionOwner,
@@ -2402,7 +2407,7 @@ async function runCodexResidentTurn(input: {
       invalidateStableTurnContext({ chatId: contextChatId, runtimeKind: KIND, sessionId: session.threadId ?? "" });
     }
     effects.complete(turnDispatchAttempted ? "resident_turn_closed" : "not_dispatched", (!turnDispatchAttempted || terminalObserved) && !req.signal?.aborted && (!turnDispatchAttempted || !broken));
-    if (broken || req.signal?.aborted) pool.discard(lease);
+    if (broken || req.signal?.aborted || turnScoped) pool.discard(lease);
     else pool.release(lease);
   }
   });
@@ -2493,7 +2498,9 @@ export const runCodex: Runner = async (
   const requestEnv = req.env ?? process.env;
   req = { ...req, env: req.untrustedNoTools && req.judgmentOnly
     ? { ...requestEnv, CODEX_HOME: accountCodexHome(requestEnv.CODEX_HOME) }
-    : withCodexProductHome(requestEnv, { personal: codexPersonalHomeOptions(selectionFor(req.agentId)) }) };
+    : req.isolatedMcpConfig
+      ? withCodexProductHome(requestEnv, { isolated: true })
+      : withCodexProductHome(requestEnv, { personal: codexPersonalHomeOptions(selectionFor(req.agentId)) }) };
   const observeNativeFile = bindNativeFileProofObserver();
   if (
     req.untrustedNoTools &&
@@ -2622,8 +2629,9 @@ export const runCodex: Runner = async (
       : [];
   // Ordinary turns preserve Codex's own settings and native tools. A
   // Main-authored isolated MCP grant is different: its exact per-run servers
-  // must not be widened by provider-global config. This path uses one-shot
-  // exec because app-server has no equivalent isolation flag.
+  // must not be widened by provider-global config. The run's home is the
+  // isolated mirror (empty config.toml, codex-product-home.ts), which also
+  // isolates the app-server; exec keeps the flag as well.
   const isolatedConfigArgs = runReq.isolatedMcpConfig ? ["--ignore-user-config"] : [];
   // Unattended and browser-only runs never reach Codex's own desktop control
   // plugins, and no run reaches a browser other than the Agentlas one (bundled
@@ -2654,7 +2662,7 @@ export const runCodex: Runner = async (
     cwd: runReq.cwd ?? agentRunCwd(),
   });
   events.onStatus(personalContext.receipt);
-  const browserOnlyConfigArgs: string[] = [...desktopSurface.args, ...personalContext.args];
+  const browserOnlyConfigArgs: string[] = [...desktopSurface.args, ...personalContext.args, ...codexShellEnvironmentArgs()];
   // 모델/effort를 CLI에 명시 전달 — 예전엔 세션 지문에만 쓰고 인자로는 안 넘겨서, 앱이
   // 뭘 선택했든 기기의 ~/.codex/config.toml(또는 codex 업데이트가 바꾼 내장 기본값)이
   // 이겼다(2026-07-08: 다른 기기에서 지정한 적 없는 Spark 모델로 조용히 실행된 사고).
@@ -2765,13 +2773,23 @@ export const runCodex: Runner = async (
    * A startup failure before dispatch may use exec. A dispatched turn without
    * a terminal receipt stays uncertain and must not be replayed automatically.
    */
+  /*
+   * A per-turn grant (an isolated MCP config such as a browser turn, or an ephemeral tool grant) must not outlive its
+   * turn in a resident process. It still resumes the thread through app-server, in a process of its own that is closed
+   * when the turn ends: measured 2026-10-12 on codex-cli 0.162.1, a new app-server process boots and resumes a thread
+   * in 0.9 s with 99% of the input cached, where `codex exec resume` sent 2.3x the input with 43% cached. Room turns
+   * with the browser took the exec path on every turn (production procmon, 6 exec spawns in 15 minutes).
+   */
+  const turnScopedProcess = runReq.isolatedMcpConfig === true || runReq.ephemeralToolGrant === true;
+  // app-server has no --ignore-user-config: an isolated run may use it only from the isolated mirror. A home Main did
+  // not mirror (a custom CODEX_HOME, keyring sign-in) keeps the one-shot exec, which passes the flag.
+  const isolationHeld = !runReq.isolatedMcpConfig || isIsolatedCodexProductHome(runReq.env?.CODEX_HOME);
   if (
+    isolationHeld &&
     !freshReason &&
     codexAppServerSupported() &&
     !residencyDisabledFor(KIND, runReq.env ?? process.env) &&
     !runReq.untrustedNoTools &&
-    !runReq.isolatedMcpConfig &&
-    !runReq.ephemeralToolGrant &&
     !runReq.singleUse &&
     runReq.chatId &&
     fingerprint
@@ -2794,6 +2812,7 @@ export const runCodex: Runner = async (
         surfaceArgs: browserOnlyConfigArgs,
         appliedEffort,
         observeNativeFile,
+        turnScopedProcess,
       });
     } catch (err) {
       // thread/resume is refused before any turn starts. An unattended run
@@ -2950,7 +2969,11 @@ export const runCodex: Runner = async (
     ) {
       throw new Error(`codex CLI exit ${r.code}${r.stderr ? `\n${r.stderr.slice(0, 500)}` : ""}`);
     }
-    events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${r.code}`);
+    // Say why the child exited: without this a resume that died after minutes of silence (Yotube room, 2026-10-12 16:16)
+    // left only "exit=1" and the cause could not be told from a writer lock, a bad config or a network error.
+    const stderrLast = String(r.stderr ?? "").split("\n").map((line) => line.trim()).filter(Boolean).pop() ?? "";
+    const stderrReason = stderrLast.replace(/[A-Za-z0-9_\-]{32,}/g, "<redacted>").slice(0, 200);
+    events.onStatus(`[runtime-session] resume_failed kind=${KIND} exit=${r.code}${stderrReason ? ` reason=${JSON.stringify(stderrReason)}` : ""}`);
     // stdin was dispatched. Neither an empty answer nor a missing started event
     // proves that the failed process made no model/tool call. Preserve the
     // original session and let Main reconcile instead of replaying it fresh.

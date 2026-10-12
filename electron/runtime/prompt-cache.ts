@@ -7,6 +7,8 @@
  *   client duty is to keep the prefix byte-stable and to read the cached count back from usage.
  * - Gemini 2.5+ caches implicitly; the cached count is usageMetadata.cachedContentTokenCount.
  */
+import { createHash } from "node:crypto";
+
 export type CacheableBlock = { type: string; cache_control?: { type: "ephemeral" } } & Record<string, unknown>;
 export type CacheableMessage<B extends CacheableBlock = CacheableBlock> = { role: string; content: string | B[] };
 
@@ -62,4 +64,21 @@ export function cachedTokensFromGeminiUsage(usage: unknown): number | undefined 
   const input = count(u.promptTokenCount);
   const cached = count(u.cachedContentTokenCount);
   return cached !== undefined && input !== undefined && cached <= input ? cached : undefined;
+}
+
+/**
+ * Cache affinity for stateless OpenAI-style APIs, the API side of resuming a conversation (2026-10-12). A conversation
+ * keeps one opaque key: OpenAI routes requests carrying the same `prompt_cache_key` to the same prompt cache, and
+ * OpenRouter pins a `session_id` to one provider so repeats hit that provider's cache. Other OpenAI-compatible servers
+ * get nothing, since some reject unknown fields. The key is a hash, never the chat id itself.
+ */
+export function cacheAffinityFields(input: { baseUrl: string; chatId?: string | null; ownerId?: string | null }): Record<string, string> {
+  if (!input.chatId) return {};
+  let hostname = "";
+  try { hostname = new URL(input.baseUrl).hostname.toLowerCase(); } catch { return {}; }
+  const key = createHash("sha256").update("agentlas-cache-affinity-v1\0").update(input.chatId)
+    .update("\0").update(input.ownerId ?? "").digest("hex").slice(0, 32);
+  if (hostname === "api.openai.com") return { prompt_cache_key: key };
+  if (hostname === "openrouter.ai") return { session_id: key };
+  return {};
 }
