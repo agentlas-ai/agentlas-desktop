@@ -2206,7 +2206,15 @@ export class InvocationService {
       }>;
     } | null = null;
     let oneProfileContext: string | undefined;
+    // A teammate in a One room does its piece and answers One. One's persona, the owner's One profile and the approved One
+    // memory are One's own; a teammate re-reading them every turn only costs input (production 2026-10-12: the Motiondirector
+    // room turns carried "You are One … Identity: Hope" and ended with the owner's progress-bar instruction).
+    let roomTeammateTurn = false;
     if (requestedOneMode) {
+      try { roomTeammateTurn = Boolean((require("../one/room-chat") as typeof import("../one/room-chat")).roomMemberContext(chat.id)); }
+      catch { roomTeammateTurn = false; }
+    }
+    if (requestedOneMode && !roomTeammateTurn) {
       const profile = getOneProfile();
       const invocationScope = {
         projectId: chat.projectId,

@@ -17,7 +17,7 @@
  *
  * Pure: no DB, no clock. The replay contract drives it with the YouTube S1–S8 records.
  */
-import { GOAL_SHAPE_LIMITS, type PlanBranchReadiness, type PlanReadiness } from "../../shared/goal-shape";
+import type { PlanBranchReadiness, PlanReadiness } from "../../shared/goal-shape";
 import { createHash } from "node:crypto";
 import type { FailureCauseKind, PersistenceBoundaryKind } from "../../shared/persistence-policy";
 import { goalContinuationAdmissible } from "../../shared/goal-continuation";
@@ -217,6 +217,20 @@ export function agiEligibleTactics(tactics: readonly AgiTacticFact[] | undefined
     && (tactic.readiness ? tactic.readiness.inspectable && tactic.readiness.workClasses.some(kind => kind !== "observe") : true)).map((tactic) => tactic.nodeId);
 }
 
+/**
+ * The Agentlas capability a diagnosis points at when the runtime's own tools can replace it (use_native_harness).
+ * Null when they cannot: a runtime that fails by itself (quota, auth, an unknown crash) needs another runtime, a login
+ * wall needs the owner, and a refused start never reaches a turn. The browser ladder also carries on-screen app control
+ * (production Yotube 2026-10-12: browser_cua_repl on the Agentlas app failed unified-cua-native-transport-unavailable in
+ * daemon-served turns, read as browser_unavailable 32 times a day).
+ */
+export function agiHarnessCapability(d: Pick<AgiBlockerDiagnosis, "primarySignal" | "causeKind">): "browser" | "tool" | null {
+  if (d.primarySignal === "browser_unavailable") return "browser";
+  if (d.primarySignal === "tool_crash") return "tool";
+  if (d.primarySignal === "run_failed" && (d.causeKind === "tool_refused" || d.causeKind === "tool_missing")) return "tool";
+  return null;
+}
+
 /** Failed-run receipt codes → cause (typed families only; unknown codes stay unknown). */
 function causeOfRunCode(code: string): { cause: FailureCauseKind; ourDefect: boolean } {
   if (/quota|rate_limit|usage_limit/.test(code)) return { cause: "quota", ourDefect: false };
@@ -276,7 +290,7 @@ export function classifyAgiBlocker(facts: AgiBlockerFacts): AgiBlockerDiagnosis 
     // host defers it every time and the refusals come back as defect reports.
     if (!goalContinuationAdmissible(facts.status, facts.pauseReason)) altPaths = altPaths.filter((action) => action !== "start_work_turn");
     else if (rest.attemptDue && boundary !== "owner_stop" && !altPaths.includes("start_work_turn")) altPaths.unshift("start_work_turn");
-    return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.slice(0, GOAL_SHAPE_LIMITS.tactics).map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
+    return { schemaVersion: AGI_BLOCKER_SCHEMA, goalId: facts.goalId, stateDigest, eligibleTactics, branchReadiness: facts.planReadiness?.branches.map(({ evidenceRefs: _refs, ...branch }) => branch), defects, evidenceRefs,
       ...rest, display: rest.attemptDue && boundary !== "owner_stop" ? "running" : rest.display,
       ownerClass, boundary, altPaths };
   };

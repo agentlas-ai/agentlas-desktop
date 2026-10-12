@@ -172,7 +172,7 @@ function applyPlanEdit(plan: LiveGoalPlan, edit: Exclude<GoalPanelEdit, { op: "a
   const node = () => (tactic ?? strategy ?? refuse("goal_panel_node_not_found"));
   switch (edit.op) {
     case "add_tactic": {
-      if (plan.tactics.filter(open).length + 1 > GOAL_SHAPE_LIMITS.tactics) refuse("goal_panel_tactic_cap");
+      // The owner's own addition is never refused by a count (owner 2026-10-12: no arbitrary caps on user intent).
       if (plan.shape === "mission_tree") {
         if (!edit.strategyId || !plan.strategies.some((s) => s.id === edit.strategyId && s.status !== "retired")) refuse("goal_panel_strategy_required");
       } else if (edit.strategyId) refuse("goal_panel_not_a_tree");
@@ -185,8 +185,6 @@ function applyPlanEdit(plan: LiveGoalPlan, edit: Exclude<GoalPanelEdit, { op: "a
     }
     case "add_strategy": {
       if (plan.shape !== "mission_tree") refuse("goal_panel_not_a_tree");
-      if (plan.strategies.filter((s) => s.status !== "retired").length + 1 > GOAL_SHAPE_LIMITS.strategies) refuse("goal_panel_strategy_cap");
-      if (plan.tactics.filter(open).length + 1 > GOAL_SHAPE_LIMITS.tactics) refuse("goal_panel_tactic_cap");
       const id = nextNodeId(plan, "s");
       const priority = Math.max(-1, ...plan.strategies.map((s) => s.priority)) + 1;
       insertGoalPlanNode(key, { nodeId: id, kind: "strategy", parentId: plan.mission ? "mission" : null, status: "active", ord: priority,

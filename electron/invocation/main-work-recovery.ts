@@ -73,9 +73,11 @@ export class MainWorkRecoveryContext {
       defaultStepId:worker?.task_id && steps.includes(worker.task_id) ? worker.task_id : "runtime" };
   }
 
-  packet(): string {
+  /** The recovery packet for the prompt. With no action recorded there is nothing to recover: the packet is empty unless the caller asks for it (an error result keeps the step ids). */
+  packet(options: { always?: boolean } = {}): string {
     if (!findCanonicalTaskForChat(this.chatId)) return "";
     const scope=this.scope(), actions=this.actions(scope);
+    if (actions.length===0 && !options.always) return "";
     return JSON.stringify({ schemaVersion:"agentlas.main-work-recovery.v1", taskId:scope.taskId,
       revision:scope.revision, stepIds:scope.stepIds,
       totalActions:actions.length, historyComplete:actions.length<=64,

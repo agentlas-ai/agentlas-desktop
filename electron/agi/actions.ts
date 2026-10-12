@@ -24,8 +24,9 @@
  *  - replay: the same actionId returns the same receipt (claimed before the side effect);
  *  - owner boundaries: a goal paused by the owner, for approval or for budget gets no action but file_defect;
  *  - G1: ask_owner_once needs ≥1 settled non-ask alternative action on the same incident;
- *  - circuit breaker (R16): the same action on the same incident at most MAX_SAME_MOVE_PER_CAUSE times, and never an
- *    action a reflection ruled out (R2);
+ *  - repeat escalation (R16, R2): an action already taken MAX_SAME_MOVE_PER_CAUSE times on the incident, or one whose
+ *    effect failed there, is not refused but replaced by the next deterministic move (repeatEscalation): the runtime's
+ *    own tools for a failing Agentlas capability, then another runtime, then the goal's next work turn;
  *  - budget (D1): ≤4 executed actions per attempt; the unblocker's model calls are admitted in model-attempt.ts.
  */
 import { createHash } from "node:crypto";
@@ -33,14 +34,31 @@ import { desktopStoreTransaction } from "../store/change-bus";
 import type { GoalEpisodeDisposition } from "../long-run/episode-disposition";
 import type Database from "better-sqlite3";
 import { MAX_SAME_MOVE_PER_CAUSE, PERSISTENCE_BOUNDARY_KINDS, isPersistenceBoundaryKind, type PersistenceBoundaryKind } from "../../shared/persistence-policy";
-import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, type AgiActionKind } from "./blocker";
-import { AgiIncidentStore } from "./incident-store";
+import { AGI_ACTION_KINDS, AGI_NON_ALTERNATIVE_ACTIONS, agiHarnessCapability, type AgiActionKind } from "./blocker";
+import { AgiIncidentStore, type AgiIncident } from "./incident-store";
 import { applyDefectResolutions, ensureDefectResolutionColumns } from "./defect-resolutions";
 import { assertAgiDecisionControl, agiDecisionAbortSignal, retainAgiDecisionControl, AGI_DECISION_CONTROL_CHANGED } from "./decision-control";
 import type { AgiUnblockInput } from "./monitor";
 
 export const AGI_ACTION_SCHEMA = "agentlas.agi-unblock.v1" as const;
 export const AGI_MAX_ACTIONS_PER_ATTEMPT = 4;
+
+/**
+ * Actions a repeat never escalates: a defect record and a wait are idempotent by design (resting again is the intended
+ * idle behavior), the work turn is the end of the ladder, an ask has its own once-per-boundary rule, and a harness
+ * hand-off is a no-op inside its hold.
+ */
+const NEVER_ESCALATED = new Set<string>(["file_defect", "rest", "start_work_turn", "ask_owner_once", "use_native_harness"]);
+
+/** The next deterministic move for an action that already repeated or failed on this incident. */
+export function repeatEscalation(incident: Pick<AgiIncident, "reasonCode" | "diagnosis">, action: string,
+  history: ReadonlyArray<{ action: string }>): { action: AgiActionKind; args: Record<string, unknown> } {
+  const capability = agiHarnessCapability(incident.diagnosis);
+  if (capability) return { action: "use_native_harness", args: { capability, defect: incident.reasonCode } };
+  const switched = history.filter((entry) => entry.action === "switch_runtime").length;
+  if (action !== "switch_runtime" && switched < MAX_SAME_MOVE_PER_CAUSE) return { action: "switch_runtime", args: { reason: incident.reasonCode } };
+  return { action: "start_work_turn", args: { nodeId: incident.diagnosis.eligibleTactics?.[0] ?? null } };
+}
 
 export interface AgiActionRequest {
   schema: typeof AGI_ACTION_SCHEMA;
@@ -244,9 +262,12 @@ export class AgiActionExecutor {
       const history = this.history(incident.id);
       if (history.filter(h => h.attempt === batch.plan.attempt && h.action !== "file_defect").length + 2 > AGI_MAX_ACTIONS_PER_ATTEMPT)
         return "agi.budget.actions-per-attempt";
+      // A repeated or failed replan does not run again as part of this batch. The code is not a stop: a model attempt
+      // whose actions all come back refused hands the incident to the deterministic path, which escalates
+      // (repeatEscalation: the runtime's own tools, another runtime, the next work turn). A rest is never limited.
       for (const r of requests) {
-        if (history.filter(h => h.action === r.action).length >= MAX_SAME_MOVE_PER_CAUSE) return "agi.action.circuit-open";
-        if (this.incidents.ruledOut(incident.id).has(r.action)) return "agi.action.ruled-out";
+        if (NEVER_ESCALATED.has(r.action)) continue;
+        if (history.filter(h => h.action === r.action).length >= MAX_SAME_MOVE_PER_CAUSE || this.incidents.ruledOut(incident.id).has(r.action)) return "agi.action.repeat-escalated";
       }
       return this.deps.strategy ? null : "goal_strategy_unavailable";
     };
@@ -342,10 +363,14 @@ export class AgiActionExecutor {
     const history = this.history(incident.id);
     const counted = history.filter((entry) => entry.attempt === request.attempt && entry.action !== "file_defect");
     if (!["file_defect", "start_work_turn"].includes(request.action) && counted.length >= AGI_MAX_ACTIONS_PER_ATTEMPT) return refuse("agi.budget.actions-per-attempt");
-    if (history.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE && !["file_defect", "start_work_turn"].includes(request.action)) {
-      return refuse("agi.action.circuit-open");
+    // Owner 2026-10-12: a repeat is not refused. It used to be (agi.action.circuit-open 2,376 times in production, almost
+    // all of them a rest), which left the goal where it was; the next deterministic move runs instead.
+    const repeated = history.filter((entry) => entry.action === request.action).length >= MAX_SAME_MOVE_PER_CAUSE;
+    const failedHere = this.incidents.ruledOut(incident.id).has(request.action);
+    if ((repeated || failedHere) && !NEVER_ESCALATED.has(request.action)) {
+      const next = repeatEscalation(incident, request.action, history);
+      request = { ...request, action: next.action, args: { ...next.args, escalatedFrom: request.action } };
     }
-    if (request.action !== "start_work_turn" && this.incidents.ruledOut(incident.id).has(request.action)) return refuse("agi.action.ruled-out");
     // 5. Tokens (D1): the AGI caps govern the unblocker's own model calls (model-attempt.ts admits each one). A work turn
     // or a teammate session this action starts is goal work, governed by the goal's own budget and permission — the
     // same turn the sweep would start — so it is not refused by the AGI cap (that would stall the goal on AGI's bill).
@@ -392,6 +417,7 @@ export class AgiActionExecutor {
       const code = error instanceof Error && /^[a-z][a-z0-9._:-]{2,120}$/.test(error.message) ? error.message : "agi.action.failed";
       result = { actionId: request.actionId, action: request.action, ok: false, code };
     }
+    if (typeof request.args?.escalatedFrom === "string") result = { ...result, detail: { ...(result.detail ?? {}), escalatedFrom: request.args.escalatedFrom } };
     const settled = this.settle(request, result);
     this.incidents.reflect(incident.id, { atMs: this.deps.now(), action: request.action, result: settled.ok ? "ok" : `refused:${settled.code}`,
       evidenceRefs: Array.isArray(settled.detail?.evidenceRefs) ? settled.detail!.evidenceRefs as string[] : [],

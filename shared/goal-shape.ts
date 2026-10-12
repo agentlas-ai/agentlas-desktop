@@ -34,8 +34,6 @@ export const GOAL_SHAPE_LIMITS = {
   strategies: 6,
   tactics: 12,
   keyResults: 6,
-  /** A resolved goal deadline further away than this is not accepted as a deadline. */
-  maxDeadlineDays: 400,
   boundaries: 10,
   text: 600,
   shortText: 200,
@@ -412,12 +410,10 @@ export function validateGoalShape(raw: unknown, ownerText: string, createdAtIso:
   if (NATURE_SHAPE[nature] !== shape) notes.push(`nature_shape_mismatch:${nature}->${shape}`);
   // The planner reads the owner's time limit; the host only resolves and bounds it (never a keyword guess).
   const goalDeadline = str(raw.deadline, 40) || null;
-  let goalDeadlineAt = resolveGoalDeadline(goalDeadline, createdAtIso);
+  // The owner's deadline is kept however far away it is (owner 2026-10-12: no arbitrary caps on user intent; a
+  // deadline over 400 days used to be dropped as goal_deadline_out_of_range).
+  const goalDeadlineAt = resolveGoalDeadline(goalDeadline, createdAtIso);
   if (goalDeadline && !goalDeadlineAt) notes.push("goal_deadline_unreadable");
-  if (goalDeadlineAt && Date.parse(goalDeadlineAt) - Date.parse(createdAtIso) > GOAL_SHAPE_LIMITS.maxDeadlineDays * 86_400_000) {
-    notes.push("goal_deadline_out_of_range");
-    goalDeadlineAt = null;
-  }
   return { ok: true, notes, plan: {
     schemaVersion: GOAL_SHAPE_SCHEMA, shape, problem_nature: nature, rationale,
     mission, strategies, tactics, review_every_hours: shape === "mission_tree" ? reviewEveryHours : null,

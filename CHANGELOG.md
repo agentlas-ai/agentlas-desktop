@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.3.17 — 2026-10-12
+
+- When a runtime session has to be rebuilt, the previous turns are resent as what was said and done. Each turn's host instructions and the full text of every tool result are no longer replayed. Each tool call is one short line: name, error, files made and a short argument summary. In the twelve largest conversations, the replayed text went from 22.9 million to 1.25 million characters.
+- Teammates in a room no longer receive One's identity, your One profile and memory, or the Goal machinery (STORMBREAKER, UltraCode, the Goal completion and wait rules, the plan grammar). They still get what the Goal is for. A plan marker a teammate prints no longer moves the Goal's steps. This is about a quarter of each teammate turn's instructions.
+- Restarting the computer no longer starts every agent's conversation over. The app used to tie each agent's stored history to the disk's device number, which macOS can change after a reboot; one reboot made every agent rebuild its history and open new sessions at once. A conversation stored under the old identity is carried over.
+- A Cursor, Kimi, Copilot or other ACP conversation whose permission changes reopens the same conversation in the new mode, instead of starting a new one with no history.
+- A turn with no recorded work no longer carries an empty recovery packet, and the browser target note is sent once per session instead of every turn.
+- A project's instructions no longer include an AGENTS.md from your home folder. Product runs do not carry your personal instructions.
+- AGI no longer refuses a step it has already tried. A repeated or failed action is replaced by the next move: the runtime's own tools for a failing Agentlas tool, then another runtime, then the Goal's next work turn. Before, AGI refused 2,376 such actions and the Goal stayed where it was.
+- You can add as many sub-goals and strategic goals as you want in the Goal panel; the limits of 12 and 6 are gone. A Goal deadline more than 400 days away is kept; it used to be dropped, so the Goal ran with no deadline.
+- A step that failed before it called any tool is no longer recorded as having an uncertain outside effect. Two Yotube turns that never reached ElevenLabs or YouTube were marked that way, and for a day every checkpoint, AGI note and teammate brief repeated "do not redo the voice, upload or playlist" because of them.
+- Opening the history of a conversation that was never stored shows an empty page instead of an error.
+- Includes everything in 1.3.16, which was not published: Apple's notarization ticket service dropped the connection while stapling the app itself. The Mac build now retries that step as well.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.16 — 2026-10-12
 
 - When an Agentlas browser or tool keeps failing for a Goal, the Goal no longer waits on it. After the same failure twice in a day, the Goal's turns do those steps with the runtime's own tools: shell commands, direct API calls with your saved keys, local programs and the runtime's own web access. Agentlas records the results. A step that truly needs you (a sign-in, a payment, a consent) is asked once. Before, AGI kept restarting the browser or starting another turn: one Goal hit the same browser failure 36 times in a week.

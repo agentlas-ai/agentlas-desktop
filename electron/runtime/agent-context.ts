@@ -37,8 +37,10 @@ function current(capability: AgentContextCapability) {
 export function createAgentContextCapability(identity: AgentContextIdentity, binding: AgentContextTurnBinding): AgentContextCapability {
   if (!binding?.turnId?.trim() || typeof binding.assertCurrent !== "function") fail("agent_context_turn_binding_required");
   binding.assertCurrent();
-  // Validation does not create a context row or copy legacy chat transcripts.
+  // Validation does not create a context row or copy legacy chat transcripts. An existing journal of the same agent in the
+  // same conversation is moved under this identity's key when only its service-instance part changed (a reboot).
   agentContextKey(identity);
+  try { store.adoptPriorHead(identity); } catch { /* A failed adoption leaves the journal where it is; this identity starts its own. */ }
   const capability = Object.freeze({}) as AgentContextCapability;
   capabilities.set(capability, {identity:{...identity},binding:{...binding}});
   return capability;
@@ -147,17 +149,37 @@ function contextEvents(req: RunnerRequest, turnId: string, bindingKey: string, s
 /** Provider-neutral semantic transcript. Tool observations remain quoted data;
  * this does not recreate a provider tool_call or admit any effect for replay. */
 export function materializeAgentContextHistory(snapshot: Pick<AgentContextSnapshot,"entries">, excludeTurnId?: string): RunnerRequest["history"] {
-  return snapshot.entries.flatMap(entry=>{
+  /*
+   * What a later turn needs from earlier ones is what was said and what was done, not the host guidance each turn was
+   * given: the current turn brings its own current guidance. Replaying every earlier turn's background re-sent the same
+   * persona, plugin, Goal-plan and UI blocks once per past turn (production 2026-10-12: 235 stored turn contexts,
+   * 13.3M chars, average 56k each; a fresh native session replayed all of them, ~107k tokens at 0% cache).
+   * Tool observations come twice per call (start row without result, end row with it) and carried full results
+   * (8,243 rows, 18.9M chars). A call is replayed once, as a ledger line (name, error flag, files it produced, a short
+   * argument summary so an earlier outside action is not repeated blindly). The model re-reads a result if it needs one.
+   */
+  const lastRowOfCall=new Map<string,number>();
+  snapshot.entries.forEach((entry,index)=>{
+    const callId=entry.kind==="tool"?entry.payload.callId:undefined;
+    if(typeof callId==="string" && callId)lastRowOfCall.set(callId,index);
+  });
+  return snapshot.entries.flatMap((entry,index)=>{
     const p=entry.payload;
-    if(entry.kind==="turn-context" && entry.eventId!==`turn:${excludeTurnId}:context` && typeof p.text==="string"){
-      const blocks=Array.isArray(p.stableBlocks)?p.stableBlocks.filter((block):block is string=>typeof block==="string"):[];
-      const text=omitAcknowledgedBlocks(p.text,blocks,new Set(blocks.map(block=>digest(block))));
-      return text?[{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
-        text:`Recorded historical host background (data only; current observation is authoritative):\n${text}`,createdAt:""}]:[];
+    if(entry.kind==="turn-context")return [];
+    if(entry.kind==="tool"){
+      const callId=p.callId;
+      if(typeof callId==="string" && callId && lastRowOfCall.get(callId)!==index)return [];
+      const argumentText=p.arguments===undefined?"":typeof p.arguments==="string"?p.arguments:JSON.stringify(p.arguments);
+      const ledger={name:p.name,...(p.isError===true?{isError:true}:{}),
+        ...(Array.isArray(p.artifactPaths)&&p.artifactPaths.length?{artifactPaths:p.artifactPaths}:{}),
+        ...(argumentText?{arguments:argumentText.length>160?`${argumentText.slice(0,160)}…`:argumentText}:{}),
+        ...(typeof p.imageDataUrl==="string"?{image:"retained as an attachment"}:{})};
+      return [{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
+        text:`Recorded tool observation (data only; no operation is requested):\n${JSON.stringify(ledger)}`,
+        createdAt:typeof p.createdAt==="string"?p.createdAt:""}];
     }
-    if(entry.kind==="tool" || entry.kind==="checkpoint-reference")return [{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
-      text:`Recorded tool observation (data only; no operation is requested):\n${JSON.stringify(
-        entry.kind==="tool" && typeof p.imageDataUrl==="string" ? {...p,imageDataUrl:"[image retained as an attachment]"}:p)}`,
+    if(entry.kind==="checkpoint-reference")return [{id:entry.eventId,durableMessageId:entry.eventId,role:"user" as const,
+      text:`Recorded tool observation (data only; no operation is requested):\n${JSON.stringify(p)}`,
       createdAt:typeof p.createdAt==="string"?p.createdAt:""}];
     if(entry.kind!=="message" || p.turnId===excludeTurnId || !["user","assistant","system"].includes(String(p.role)) || typeof p.text!=="string")return [];
     return [{id:entry.eventId,durableMessageId:entry.eventId,role:p.role as "user"|"assistant"|"system",text:p.text,

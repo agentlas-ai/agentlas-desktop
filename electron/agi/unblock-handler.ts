@@ -12,7 +12,7 @@
  */
 import { agiDecisionRefusal, retainAgiDecisionControl } from "./decision-control";
 import type { AgiBlockerFacts, AgiActionKind } from "./blocker";
-import { AGI_NON_ALTERNATIVE_ACTIONS } from "./blocker";
+import { AGI_NON_ALTERNATIVE_ACTIONS, agiHarnessCapability } from "./blocker";
 import { AGI_ACTION_SCHEMA, type AgiActionExecutor, type AgiActionReceipt } from "./actions";
 import type { AgiUnblockHandler, AgiUnblockInput, AgiUnblockResult } from "./monitor";
 import type { AgiModelAttempt } from "./model-attempt";
@@ -41,19 +41,8 @@ function deterministicArgs(action: AgiActionKind, input: AgiUnblockInput, facts:
   }
 }
 
-/**
- * The Agentlas capability a blocked diagnosis points at when the runtime's own tools can replace it (a label for the
- * native-harness guidance, never a tool name to call). Null when they cannot: a runtime that fails by itself (quota,
- * auth, an unknown crash) needs another runtime, a login wall needs the owner, and a refused start never reaches a turn.
- */
-export function harnessCapability(d: Pick<AgiUnblockInput["diagnosis"], "primarySignal" | "causeKind">): "browser" | "tool" | null {
-  // The browser ladder also carries on-screen app control (production Yotube 2026-10-12: browser_cua_repl on the Agentlas
-  // app failed unified-cua-native-transport-unavailable in daemon-served turns, read as browser_unavailable 32 times a day).
-  if (d.primarySignal === "browser_unavailable") return "browser";
-  if (d.primarySignal === "tool_crash") return "tool";
-  if (d.primarySignal === "run_failed" && (d.causeKind === "tool_refused" || d.causeKind === "tool_missing")) return "tool";
-  return null;
-}
+/** The capability rule lives in blocker.ts (the executor's repeat escalation uses it too). */
+export const harnessCapability = agiHarnessCapability;
 
 export type AgiUnblockHandlerWithModel = AgiUnblockHandler & {
   /** Resolves when every model attempt this handler dispatched has settled (contracts, shutdown). */

@@ -507,10 +507,27 @@ build_mac_arch() {
   # 잡아 빌드를 세운다(2026-08-24 이전에는 검사조차 하지 않아 조용히 빠져 나갔다).
   NODE_RUNTIME_ARCH="$arch" npm run fetch:node
   AGENTLAS_BROWSER_TARGET_PLATFORM=darwin AGENTLAS_BROWSER_TARGET_ARCH="$arch" npm run fetch:browser
-  COPYFILE_DISABLE=1 electron-builder \
-    "${builder_args[@]}" \
-    --publish never \
-    --config.directories.output="$local_release"
+  # electron-builder notarizes and staples the inner .app in this same run. Apple's ticket lookup can drop the
+  # connection right after "Accepted" ("Failed to staple your application with code: 68"): 1.3.15 and 1.3.16 lost five
+  # signed builds to it on 2026-10-12. Only that failure is retried, after a wait; any other failure stops the build.
+  local builder_log builder_attempt builder_status
+  builder_log="$(mktemp -t agentlas-builder.XXXXXX)"
+  for builder_attempt in 1 2 3; do
+    builder_status=0
+    COPYFILE_DISABLE=1 electron-builder \
+      "${builder_args[@]}" \
+      --publish never \
+      --config.directories.output="$local_release" 2>&1 | tee "$builder_log" || builder_status=$?
+    [[ "$builder_status" -eq 0 ]] && break
+    if [[ "$builder_attempt" -lt 3 ]] && grep -q "Failed to staple your application with code: 68" "$builder_log"; then
+      echo "electron-builder could not staple the app (Apple ticket lookup, Error 68); retrying in $((builder_attempt * 90))s (attempt $builder_attempt of 3)." >&2
+      sleep $((builder_attempt * 90))
+      continue
+    fi
+    rm -f "$builder_log"
+    return "$builder_status"
+  done
+  rm -f "$builder_log"
   restore_source_package_metadata_if_builder_transform
 
   # 1.0.32 는 app.asar 에 dist/plugins 가 통째로 빠진 채 나가 launch 즉시 죽었다.

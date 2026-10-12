@@ -77,8 +77,6 @@ const ERROR_TEXT: Record<string, [string, string]> = {
   goal_panel_last_open_node: ["마지막으로 진행 중인 항목이라 멈추거나 지울 수 없어요. 목표 전체를 멈추려면 목표 칩의 일시정지를 쓰세요.", "This is the last item still in progress, so it cannot be paused or removed here. Pause the whole goal from its chip instead."],
   goal_panel_plan_changed: ["그사이 계획이 바뀌었어요. 최신 계획으로 다시 해 주세요.", "The plan changed in the meantime. Try again on the latest plan."],
   goal_panel_plan_behind_revision: ["목표가 바뀌어 다음 실행 전에 계획을 다시 나눠요. 그 뒤에 편집할 수 있어요.", "The goal changed; the plan is re-divided before the next run. Edit it after that."],
-  goal_panel_tactic_cap: ["하위목표는 최대 12개까지예요.", "A goal holds at most 12 sub-goals."],
-  goal_panel_strategy_cap: ["전략목표는 최대 6개까지예요.", "A goal holds at most 6 strategic goals."],
   goal_panel_goal_ended: ["끝난 목표는 바꿀 수 없어요.", "An ended goal cannot be changed."],
   goal_panel_no_revision: ["이 목표는 아직 기록된 계약이 없어 여기서 문장을 바꿀 수 없어요. 대화로 알려 주세요.", "This goal has no recorded contract yet, so its text cannot be changed here. Tell it in the conversation."],
   goal_panel_no_plan: ["아직 나눈 계획이 없어요. 먼저 나누기를 눌러 주세요.", "There is no plan yet. Press Divide first."],

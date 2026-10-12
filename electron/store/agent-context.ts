@@ -121,6 +121,31 @@ export function createAgentContextStore(getDb: () => Database.Database) {
         ...(row.producer_binding ? { producerBinding: row.producer_binding } : {}),
       }));
   }
+  /**
+   * One conversation of one agent keeps one journal. Only the service-instance part of its identity moved when a head is
+   * missing under the current key (the key used to hash the store file's device number, which macOS renumbers at every
+   * mount: after the 2026-10-12 reboot all 19 heads stopped and 6 new ones started, every agent re-bootstrapped its whole
+   * history and opened new native sessions). The newest head with the same owner, agent and visibility domain is moved
+   * under the current key, with its entries, provider bindings (native handles), deliveries and acknowledged blocks.
+   */
+  function adoptPriorHead(identity: AgentContextIdentity): boolean {
+    const key = agentContextKey(identity), db = getDb();
+    return db.transaction(() => {
+      if (db.prepare("SELECT 1 FROM agent_context_heads WHERE context_key=?").get(key)) return false;
+      const prior = db.prepare(`SELECT * FROM agent_context_heads
+        WHERE json_extract(identity_json,'$.ownerScope')=? AND json_extract(identity_json,'$.agentId')=?
+          AND json_extract(identity_json,'$.visibilityDomain')=?
+        ORDER BY updated_at DESC LIMIT 1`).get(identity.ownerScope, identity.agentId, identity.visibilityDomain) as (Head & { updated_at: string }) | undefined;
+      if (!prior) return false;
+      db.prepare("INSERT INTO agent_context_heads(context_key,identity_json,revision,through_seq,open_delivery_id,updated_at) VALUES (?,?,?,?,?,?)")
+        .run(key, JSON.stringify(identity), prior.revision, prior.through_seq, prior.open_delivery_id, prior.updated_at);
+      for (const table of ["agent_context_entries", "agent_context_bindings", "agent_context_deliveries", "agent_context_stable_blocks"]) {
+        db.prepare(`UPDATE ${table} SET context_key=? WHERE context_key=?`).run(key, prior.context_key);
+      }
+      db.prepare("DELETE FROM agent_context_heads WHERE context_key=?").run(prior.context_key);
+      return true;
+    }).immediate();
+  }
   function readRange(identity: AgentContextIdentity, range: {after?:number;through?:number} = {}): AgentContextSnapshot {
     const after=range.after??0,through=range.through??Number.MAX_SAFE_INTEGER;
     if(!Number.isSafeInteger(after)||after<0||!Number.isSafeInteger(through)||through<after)fail("agent_context_read_range_invalid");
@@ -264,5 +289,5 @@ export function createAgentContextStore(getDb: () => Database.Database) {
         .run(key,binding,expectedGeneration).changes!==1)fail("agent_context_generation_changed");
     }).immediate();
   }
-  return {read,readRange,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider};
+  return {adoptPriorHead,read,readRange,readHead,acknowledgedStableBlockHashes,append,beginDelivery,readPendingDelivery,readOpenPendingDelivery,acknowledgeDelivery,markDeliveryUncertain,invalidateProvider};
 }

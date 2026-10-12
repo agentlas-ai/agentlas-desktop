@@ -994,28 +994,29 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       generation: executableIdentity.generation,
     } : null;
     const retainExecutableOwner = executableOwner ? captureAcpExecutableOwner(executableOwner) : () => true;
-    // Model selection is a session operation; prompt and permission still bind session identity.
-    const fingerprint = req.chatId
-      ? createHash("sha256")
-        .update("acp-session-v3\0")
-        .update(spec.id)
-        .update("\0")
-        .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
-        .update("\0")
-        // Model is selected and acknowledged on the held ACP session before every changed-model turn.
-        // 권한은 세션 모드로 굳는다(session/set_mode 는 새 세션에서만 고를 수 있다).
-        // 권한이 바뀌면 지문이 달라져 그 권한에 맞는 새 세션이 열린다.
-        .update(req.permission ?? "")
-        .update(req.planMode ? "\0plan-read-only" : "")
-        .update(nativeMcp ? `\0native-mcp\0${nativeMcp.fingerprint}` : "")
-        .update("\0executable\0")
-        .update(executableIdentity.fingerprint)
-        .digest("hex")
-      : null;
+    // Model selection is a session operation; prompt still binds session identity.
+    // The conversation (which ACP session id this chat resumes) does not depend on the permission: a permission change opens a
+    // new process/session (the mode is chosen when a session is created or loaded) that loads the same conversation back
+    // (owner 2026-10-12: permission is the one exception, a new session that resumes), never a cold start.
+    const identityHash = (mode: boolean) => createHash("sha256")
+      .update(mode ? "acp-session-v3\0" : "acp-conversation-v4\0")
+      .update(spec.id)
+      .update("\0")
+      .update(req.sessionFingerprintSeed ?? req.systemPrompt ?? "")
+      .update("\0")
+      // Model is selected and acknowledged on the held ACP session before every changed-model turn.
+      .update(mode ? (req.permission ?? "") : "")
+      .update(mode && req.planMode ? "\0plan-read-only" : "")
+      .update(nativeMcp ? `\0native-mcp\0${nativeMcp.fingerprint}` : "")
+      .update("\0executable\0")
+      .update(executableIdentity.fingerprint)
+      .digest("hex");
+    const fingerprint = req.chatId ? identityHash(true) : null;
+    const conversationFingerprint = req.chatId ? identityHash(false) : null;
     const savedSession = !recovery && req.chatId
       ? getRuntimeSession(req.chatId, sessionKind, runtimeSessionOwnerId, { isolateOwner: isolateRuntimeSessionOwner })
       : null;
-    const storedSessionId = savedSession && fingerprint && savedSession.fingerprint === fingerprint ? savedSession.sessionId : null;
+    const storedSessionId = savedSession && conversationFingerprint && savedSession.fingerprint === conversationFingerprint ? savedSession.sessionId : null;
     const resumeSessionId = req.runtimeSessionId ?? storedSessionId;
 
     /*
@@ -1250,10 +1251,11 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
       contextSessionId = sessionId;
       /*
        * ★모드 — plan 모드는 ACP 로는 고를 방법이 아예 없었다(session/set_mode 미호출).
-       * 모드는 세션을 만들 때 광고되므로 새 세션에서만 고른다. resume 턴에서는 세션이
-       * 이미 그 모드를 갖고 있고, 권한이 바뀌면 지문이 달라져 새 세션이 열린다.
+       * 모드는 세션을 만들거나 불러올 때 광고된다. 새 세션과 session/load 응답 모두에서 고르고,
+       * 상주 세션을 그대로 이어 쓰는 턴에서는 세션이 이미 그 모드를 갖고 있다(권한이 바뀌면
+       * 풀 키가 달라져 새 프로세스가 같은 대화를 session/load 로 불러온다).
        */
-      const modeId = created ? chooseAcpModeId(req.permission, modeOptionsFromNewSession(created)) : undefined;
+      const modeId = created || loaded ? chooseAcpModeId(req.permission, modeOptionsFromNewSession(created ?? loaded)) : undefined;
       if (modeId) {
         try {
           await session.conn.request("session/set_mode", { sessionId, modeId }, { timeoutMs: 10_000 });
@@ -1386,7 +1388,7 @@ export function createAcpRunner(spec: AcpAgentSpec): Runner {
           { sessionId, acknowledgementId: promptAcknowledgementId });
       }
       // Ordinary turns retain the session; fresh recovery must never seed a later resume.
-      if (!recovery && req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
+      if (!recovery && req.chatId && fingerprint && !saveRuntimeSession(req.chatId, sessionKind, sessionId, conversationFingerprint ?? fingerprint, { agentId: runtimeSessionOwnerId, isolateOwner: isolateRuntimeSessionOwner })) {
         events.onStatus(`[runtime-session] store_failed kind=${sessionKind}`);
       }
       if (req.signal?.aborted) throw abortReasonError(req);

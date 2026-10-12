@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { instructionDelta, orderInstructionSources, type InstructionSnapshot, type InstructionSource } from "../../shared/runtime-instructions";
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -7,7 +8,16 @@ const hash = (value: string) => createHash("sha256").update(value).digest("hex")
 export function compileProjectInstructionSnapshot(input: { projectDir: string; previous?: InstructionSnapshot | null }) {
   const cwd = realpathSync(input.projectDir);
   const folders: string[] = [];
-  for (let folder = cwd;; folder = dirname(folder)) { folders.push(folder); if (folder === parse(folder).root) break; }
+  // The person's own home folder holds their personal instructions, not this project's: a product run under
+  // ~/Library/Application Support/Agentlas/agent-cwd carried an unrelated ~/AGENTS.md ("File Lister Agent") as a project
+  // instruction (owner decision 2026-10-11: product runs carry none of the person's own instructions).
+  let home: string | null = null;
+  try { home = realpathSync(homedir()); } catch { home = null; }
+  for (let folder = cwd;; folder = dirname(folder)) {
+    if (home && folder === home && cwd !== home) break;
+    folders.push(folder);
+    if (folder === parse(folder).root) break;
+  }
   const loadedAt = new Date().toISOString();
   const sources: InstructionSource[] = [];
   for (const folder of folders.reverse()) {

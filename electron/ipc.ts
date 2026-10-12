@@ -4520,10 +4520,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle("chats:messagesPage", (_event, input: { chatId: string; limit?: number; before?: { id: string; createdAt: string } }) => {
     assertTrustedSitePublishIpcSender(_event);
     if (!input || typeof input !== "object" || typeof input.chatId !== "string" || !input.chatId
-      || !getChat(input.chatId) || input.before && (typeof input.before.id !== "string"
+      || input.before && (typeof input.before.id !== "string"
         || !input.before.id || typeof input.before.createdAt !== "string" || !input.before.createdAt)) {
       throw new TypeError("Invalid chat history page");
     }
+    // A chat that is not stored (deleted, or a pending chat the window already shows) has no history: an empty page, not
+    // a thrown error (production 2026-10-12 20:55 KST: seven handler errors in nine seconds from one open chat).
+    if (!getChat(input.chatId)) return { messages: [], hasOlder: false };
     return listChatMessagesPage(input.chatId, input.limit ?? 200, input.before);
   });
   registerAppControlDomainIpc(ipcMain, "chats:listRecent", (limit?: number) => listRecentChats(limit));

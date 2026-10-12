@@ -3465,7 +3465,11 @@ ${effectiveUserPrompt}`;
   const oneTeamAllowsStorm = !scienceRecovery && !isAliveControllerRun && !scienceCollectionCurrent && executionContext?.source !== "science" && (!oneTeamExecutionPolicy || oneTeamExecutionPolicy === "solo_locked" || oneTeamExecutionPolicy === "native_one_staffing");
   // A Main-issued read-only effect observation is one look at the outside world,
   // never a Goal cycle, Stormbreaker loop or multi-pass continuation.
-  const stormbreakerEngaged = oneTeamAllowsStorm && !req.agentAppMode && !restrictedReadBoundary && !effectObservationRun && (
+  // A teammate in a One room does its piece of work and answers One. The Goal/Stormbreaker/UltraCode protocol belongs to the
+  // controller turns only (One and AGI): production 2026-10-12, every Motiondirector room turn re-read it (owner: "모든
+  // 에이전트가 이걸 알아야 함? One만 알면 되는 거 아니냐").
+  const roomMemberTurn = Boolean(req.oneMode && !req.agentAppMode && chat.id && roomMemberContext(chat.id));
+  const stormbreakerEngaged = oneTeamAllowsStorm && !roomMemberTurn && !req.agentAppMode && !restrictedReadBoundary && !effectObservationRun && (
     chat.kind === "division" ||
     chat.continuousMode === true ||
     explicitStormbreakerRequest ||
@@ -5983,6 +5987,10 @@ ${effectiveUserPrompt}`;
         }
         if (activeGoal?.status === "active") {
           turnContextParts.push(persistentGoalTurnContext(activeGoal, locale)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
+          // A room teammate gets the contract (what is wanted) but not the controller machinery: the completion/wait
+          // protocols, the plan-shape judgement and the tactic grammar are One's and the orchestrator's. Since 2026-10-01
+          // no teammate or installed agent emitted a plan marker (1,941 + 607 tactic_status from the orchestrator and One).
+          if (!roomMemberTurn) {
           // 계약을 주면서 그 계약을 끝내는 법도 같이 준다. 연속 프롬프트에만 적으면
           // 1패스에 끝나는 작업이 마커를 몰라서 못 끝난다.
           turnContextParts.push(goalCompletionProtocol(locale, getChatGoalRevision(activeGoalId)?.lifecycle)); stableTurnContextParts.push(turnContextParts[turnContextParts.length - 1]);
@@ -6009,6 +6017,7 @@ ${effectiveUserPrompt}`;
           if (!executionContext && getChatGoalRevision(activeGoalId)?.lifecycle === "finite") {
             const deadlineAt = goalDeadlineAt(activeGoalId);
             if (deadlineAt && Date.parse(deadlineAt) > Date.now()) turnContextParts.push(goalDeadlineWaitClause(deadlineAt));
+          }
           }
         }
       }
@@ -7193,7 +7202,7 @@ ${effectiveUserPrompt}`;
       if (activeGoalId && !executionContext && parseGoalWaitIntent(result.text).request) break;
       const rawContinuation = stripStormbreakerContinueMarker(result.text);
       // 전술·계획 표식은 이 패스에서 원장에 반영하고 본문에서 뗀다(패스 본문은 곧바로 영속된다).
-      rawContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: rawContinuation.text, runId: req.runId ?? null, signal }).text;
+      if (!roomMemberTurn) rawContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: rawContinuation.text, runId: req.runId ?? null, signal }).text;
       const passClaim = stripGoalCompleteMarker(rawContinuation.text);
       if (passClaim.claimed) {
         goalClaimSeen = true;
@@ -7541,7 +7550,7 @@ ${effectiveUserPrompt}`;
     result = { ...result, text: waitProposal.text };
     const finalContinuation = stripStormbreakerContinueMarker(result.text);
     // 전술·계획 표식 회수도 모든 경로가 지나는 이 한 지점에서 한다(완료 선언과 같은 이유).
-    finalContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: finalContinuation.text, runId: req.runId ?? null, signal }).text;
+    if (!roomMemberTurn) finalContinuation.text = applyGoalPlanMarkers({ goalId: activeGoalId, text: finalContinuation.text, runId: req.runId ?? null, signal }).text;
     // 완료 선언 회수는 **모든 경로가 지나는 이 한 지점**에서 한다. 패스 루프 안에서만
     // 떼면 agentAppMode(maxPasses=1)나 One 복구 패스로 끝난 턴에서 마커가 사용자에게
     // 그대로 나간다 — 제어 표식이 답변에 새는 계열의 결함을 새로 만드는 셈이다.

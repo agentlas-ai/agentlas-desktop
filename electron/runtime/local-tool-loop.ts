@@ -798,7 +798,7 @@ async function dispatchMainToolRawUnchecked(
     const code=error instanceof Error ? error.message : String(error);
     if(!/^main_work_(?:read_original_outcome|action_not_in_task|action_input_conflict|checkpoint_step_invalid|worker_liveness_unknown|outcome_unconfirmed|result_read_unavailable|read_regeneration_required|same_method_limit|same_method_limit_or_claim_changed)/.test(code))throw error;
     if(actionId)broker?.finishAction(actionId,"not_dispatched");
-    return {content:JSON.stringify({code,recovery:approval.canonicalWorkRecovery!.packet()}),visionMessage:null,isError:true};
+    return {content:JSON.stringify({code,recovery:approval.canonicalWorkRecovery!.packet({always:true})}),visionMessage:null,isError:true};
   }
   if(work && "reused" in work) {
     // Original custody avoids another effect; delivery still belongs to this run.
