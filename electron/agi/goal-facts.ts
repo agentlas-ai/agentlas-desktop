@@ -192,9 +192,6 @@ function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<
     .get(run.goalId) as { revision: number; source_message_id: string; payload_json: string; created_at: string } | undefined : undefined;
   const control = db.prepare("SELECT seq FROM long_run_events WHERE run_id=? AND kind='run.user_control' AND actor_kind='user' ORDER BY seq DESC LIMIT 1")
     .get(run.id) as { seq: number } | undefined;
-  const checkpoint = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND kind IN
-    ('run.task_checkpoint','run.checkpoint_continuation','run.ongoing_cycle_verified','run.cycle_recorded',
-     'run.wait_notification','run.wait_claim_reconciled') ORDER BY seq DESC LIMIT 1`).get(run.id) as { seq: number } | undefined;
   // Newest completed worker effect since the revision. Read per kind so each walks
   // idx_run_events_chat_kind_ts backwards and stops at the first match; the IN-list form
   // sorted every tool event of the room (28k in Youtube launch) on each monitor tick.
@@ -233,15 +230,24 @@ function wakeState(db: Database.Database, run: AgiGoalRow, nowMs: number): Pick<
     WHERE run_id=? AND kind='run.blocked_sweep' AND json_extract(payload_json,'$.action')='retry_scheduled'
     ORDER BY seq DESC LIMIT 1`).get(run.id) as { at: string } | undefined;
   const retryAt = retry?.at ? Date.parse(retry.at) : NaN;
-  // Polling may rewrite a future retry timestamp. Only crossing its due boundary is new evidence.
-  const retryDue = Number.isFinite(retryAt) && nowMs >= retryAt;
-  const boundary = dates.map(at => ({ at, due: nowMs >= at }));
   const boundaryEvent = db.prepare(`SELECT seq FROM long_run_events WHERE run_id=? AND NOT
     (kind='run.blocked_sweep' AND json_extract(payload_json,'$.action')='retry_scheduled')
     ORDER BY seq DESC LIMIT 1`).get(run.id) as { seq: number } | undefined;
-  const authority = createHash("sha256").update(JSON.stringify({ revision: revision?.payload_json ?? null, planHead, owner, chat, pool, wait, schedules, boundary, retryDue })).digest("hex");
+  /*
+   * The blocked condition, not the Goal's bookkeeping (plan R6: one attempt per blocked state; R14: progress is a changed
+   * key result or owner input, never a counter). Production 2026-10-12, Yotube room: the authority also hashed
+   * cycle_count, cost_used_usd and app_instance_id, the newest wait subscription id/due, every scheduler next_run_at, the
+   * due boundaries and the checkpoint seq (run.cycle_recorded fires every cycle). A Goal cycling every few minutes was a
+   * "new blocked state" each time: 62 model attempts over 60 distinct digests in a day, each a new Codex session. The
+   * wait, schedules and boundaries still set the next wake (nextWakeAtMs below); an unchanged condition retries on the
+   * incident's own backoff (agiRetryDelayMs).
+   */
+  const ownerPolicy = (owner as Array<Record<string, unknown>>).map(({ app_instance_id: _instance, cycle_count: _cycles,
+    cost_used_usd: _cost, host_owner_kind: _host, ...policy }) => policy);
+  const authority = createHash("sha256").update(JSON.stringify({ revision: revision?.payload_json ?? null, planHead, owner: ownerPolicy, chat, pool,
+    schedules: schedules.map(({ id, enabled }) => ({ id, enabled })) })).digest("hex");
   return { progress: { ownerInputId: `${revision?.source_message_id ?? ""}:${control?.seq ?? ""}`,
-    completedToolId: complete?.id ?? null, checkpoint: checkpoint ? String(checkpoint.seq) : null, authority },
+    completedToolId: complete?.id ?? null, checkpoint: null, authority },
     fenceState: String(boundaryEvent?.seq ?? ""),
     nextWakeAtMs: Math.min(...[...dates, retryAt].filter(at => Number.isFinite(at) && at > nowMs)) };
 }

@@ -13,7 +13,7 @@ import { runCodexAliveResidentTurn, closeCodexAliveResidentOwner,
   codexAliveResidentGeneration, consumeCodexAliveResidentResult } from "./codex-alive-session";
 import { aliveDecisionProfileForRequest } from "./alive-decision-context";
 import { resolveEffectiveContextWindow } from "../../shared/models";
-import { accountCodexHome, isIsolatedCodexProductHome, withCodexProductHome } from "./codex-product-home";
+import { accountCodexHome, adoptCodexThreadIntoProductStore, isIsolatedCodexProductHome, withCodexProductHome } from "./codex-product-home";
 import os from "node:os";
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
@@ -2493,11 +2493,13 @@ export const runCodex: Runner = async (
   // Validate before adding internal account/cwd transport fields. These fields
   // cannot turn a copied JSON request into the host's opaque Alive admission.
   const aliveAdmission = aliveDecisionProfileForRequest(req) ? req : null;
-  // Judgment's gateway replaces all model input, so it can keep the actual
-  // account home for keyring identity and CLI-owned refresh without a mirror.
+  // Judgment's gateway replaces all model input and runs with --ignore-user-config. It runs from the isolated product
+  // mirror (sign-in linked, empty config) so its one-off threads land in the product store, not in the person's Codex
+  // app (owner 2026-10-12: about 100 AGI judgments a day were listed there). A home that cannot be mirrored (keyring
+  // sign-in) keeps the account home, as before.
   const requestEnv = req.env ?? process.env;
   req = { ...req, env: req.untrustedNoTools && req.judgmentOnly
-    ? { ...requestEnv, CODEX_HOME: accountCodexHome(requestEnv.CODEX_HOME) }
+    ? withCodexProductHome({ ...requestEnv, CODEX_HOME: accountCodexHome(requestEnv.CODEX_HOME) }, { isolated: true })
     : req.isolatedMcpConfig
       ? withCodexProductHome(requestEnv, { isolated: true })
       : withCodexProductHome(requestEnv, { personal: codexPersonalHomeOptions(selectionFor(req.agentId)) }) };
@@ -2761,6 +2763,9 @@ export const runCodex: Runner = async (
       }
       : { output: null, input: null, cachedInput: null };
   const canResume = !!resumeSessionId;
+  // Product sessions live in the product store; a thread an older install wrote into the person's home is copied there
+  // first, so it resumes instead of starting over (codex-product-home.ts).
+  if (resumeSessionId) adoptCodexThreadIntoProductStore(runReq.env?.CODEX_HOME, resumeSessionId);
   if (existing && fingerprint && existing.fingerprint !== fingerprint) {
     events.onStatus(`[runtime-session] fingerprint_changed kind=${KIND}`);
   }

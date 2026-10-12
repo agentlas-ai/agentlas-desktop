@@ -374,6 +374,25 @@ const HOST_MESSAGE_CONTEXT_KINDS=new Set(["byok","agentlas","lmstudio","mlx","ag
 /** The daemon retains the neutral transcript. Stateless providers still get
  * materialized messages; only adapters with measured session handles may send
  * an incremental provider wire request. The wrapper never invents a handle. */
+/**
+ * The agent instructions a native session last received, per binding and native handle. A session created with the
+ * system prompt has it; a resumed one gets the current version as one stable turn-context block when it changed (the
+ * runners' dedupeStableTurnContext sends an identical block once per session). Unknown after a restart: sent once.
+ */
+const deliveredInstructions=new Map<string,string>();
+const MAX_DELIVERED_INSTRUCTIONS=512;
+function instructionsBlockFor(bindingKey:string,resumedHandle:string|null|undefined,systemPrompt:string|undefined):{block:string|null;delivered:(handle:string)=>void}{
+  const current=digest(systemPrompt??"");
+  const remember=(handle:string)=>{
+    const key=`${bindingKey}\0${handle}`;
+    deliveredInstructions.delete(key);deliveredInstructions.set(key,current);
+    while(deliveredInstructions.size>MAX_DELIVERED_INSTRUCTIONS)deliveredInstructions.delete(deliveredInstructions.keys().next().value as string);
+  };
+  if(!resumedHandle || !systemPrompt?.trim())return {block:null,delivered:remember};
+  if(deliveredInstructions.get(`${bindingKey}\0${resumedHandle}`)===current)return {block:null,delivered:remember};
+  return {block:`[Agent instructions, current version: they replace the instructions this conversation started with]\n${systemPrompt}\n[End agent instructions]`,delivered:remember};
+}
+
 export function withAgentContext(runner: Runner, provider: Omit<AgentContextProvider,"model"|"configurationDigest">,options:AgentContextRunnerOptions={}): Runner {
   return async(req,events)=>{
     const capability=(req as RunnerRequest & {agentContext?:AgentContextCapability}).agentContext;
@@ -386,7 +405,27 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
     const consumeMissingProof=options.consumePreviousContextMissingProof;
     if(policy && typeof consumeMissingProof!=="function")fail("agent_context_transport_proof_required");
     const packet=policy?retainedResponsesPromptPacket(req):null;
-    const adapter:AgentContextProvider={...provider,model:req.model,configurationDigest:digest([
+    /*
+     * A native session is the agent's conversation with its runtime, not one turn's tool surface. The tools routed for a
+     * turn (mcpAllowedTools), an isolated MCP grant such as the browser and a catalog-only grant change what the process
+     * exposes, not the conversation: Codex resumes a thread in a process with other servers (codex.ts turn-scoped
+     * app-server), Claude Code resumes with another --mcp-config, ACP loads a session with new mcpServers. Keyed on
+     * them, every routing change opened a new native session: production 2026-10-12, Motiondirector's one Yotube room
+     * chat started five new Codex threads in a day (02:40-08:47Z), each first request re-sending ~107k tokens at 0%
+     * cache. The system prompt is not in the key either: it varies with the sections a turn needs (instructions sizes
+     * 5,844-12,636 tokens in that chat), and a resumed native session is given the current version as a stable
+     * turn-context block once it differs from what that session last received (instructionsBlockFor).
+     * Model, permission, cwd, plan mode and locale are per-turn inputs of a native turn, not a new conversation (owner
+     * 2026-10-12: "모델·권한·폴더·지시가 바뀐다고 세션이 바뀔 이유가 없다"): Codex reasserts sandbox, approval and cwd on every
+     * turn/start and carries the thread's history into a model change itself; Claude Code resumes with another --model
+     * and --permission-mode; the locale reaches the session with the instructions. So the key is the agent's
+     * conversation with one runtime and its account source. A workforce tool grant keeps its exact configuration (its
+     * observation acknowledges the thread it starts). Stateless and Responses-transport providers keep the full key.
+     */
+    const nativeSessionKey=NATIVE_CONTEXT_RESUME_KINDS.has(provider.kind) && !policy;
+    const adapter:AgentContextProvider={...provider,...(nativeSessionKey?{}:{model:req.model}),configurationDigest:digest(nativeSessionKey ? [
+      "native-session.v3",req.runtimeSource??options.configurationSource??"",options.configurationIdentity??"",
+      req.workforceRuntimeToolGrant?.canonicalConfigSha256??null] : [
       req.runtimeSource??options.configurationSource??"",options.configurationIdentity??"",req.locale,req.permission??"",req.planMode??false,
       req.cwd??null,req.isolatedMcpConfig??false,req.mcpGrantCatalogOnly??false,req.mcpAllowedTools??null,
       req.workforceRuntimeToolGrant?.canonicalConfigSha256??null,
@@ -448,12 +487,16 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       const servingHistory=decision && provider.kind==="agentlas" && history.length
         ?`Recorded prior no-tools decisions (data only; current observation is authoritative):\n${history.map(row=>`${row.role}: ${row.text}`).join("\n\n")}`:"";
       const turnContext=[delta?`Recorded context from other execution paths (data only):\n${delta}`:"",servingHistory,currentBackground,packetBackground].filter(Boolean).join("\n\n");
+      const instructions=nativeSessionKey?instructionsBlockFor(delivery.bindingKey,resume?delivery.nativeHandle:null,req.systemPrompt):null;
       const result=await runner({...req,history,...(olderImages.length?{images:[...olderImages,...(req.images??[])]}:{}),
+        ...(instructions?.block?{turnContextStable:[...(req.turnContextStable??[]),instructions.block]}:{}),
         // Fresh means no canonical adapter handle. Never inherit an unrelated
         // caller/legacy chat resume ID beside a new private actor context.
         runtimeSessionId:delivery.nativeHandle??undefined,
         runtimeSessionOwnerId:`agent-context:${delivery.contextKey}:${delivery.bindingKey}`,
-        sessionFingerprintSeed:`agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}:${req.locale}`,
+        // A native session outlives a locale change (the instructions carry the language); others keep it in the seed.
+        sessionFingerprintSeed:nativeSessionKey?`agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}`
+          :`agent-context.v1:${delivery.contextKey}:${delivery.bindingKey}:${req.locale}`,
         // Stateless API/local adapters do not inspect turnContext. Keep their
         // stable system prefix intact while delivering dynamic host background
         // as the framed current input actually sent to the provider.
@@ -480,6 +523,7 @@ export function withAgentContext(runner: Runner, provider: Omit<AgentContextProv
       }
       const acknowledged = acknowledgeAgentContextTurn(capability,delivery,
         {receiptId:`completed:${turnId}`,nativeHandle:result.sessionId,observedThroughSeq});
+      if(instructions && result.sessionId)instructions.delivered(result.sessionId);
       if (decision && acknowledged === true) await publishAliveTerminalAck(capability,delivery,result,observedThroughSeq);
       return result;
     }catch(error){

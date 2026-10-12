@@ -14,8 +14,8 @@
 //  2. Its OWN folder (GROK_HOME, default ~/.grok): Agents.md (global instructions), memory-v2, skills/, hooks/,
 //     installed-plugins and the `[mcp_servers.*]` / `[[hooks.*]]` of config.toml. No switch exists for the
 //     instructions file, so a product run points GROK_HOME at a mirror (config-home-mirror.ts) in which every other
-//     entry is a symlink (auth.json, sessions, grok.db, trust files stay one and the same file, so the sign-in works
-//     and sessions resume from either side) and config.toml is the person's own with those tables cut out.
+//     entry is a symlink (auth.json and trust files stay one and the same file, so the sign-in works; the session store
+//     is the mirror's own since 2026-10-12) and config.toml is the person's own with those tables cut out.
 //     Skills Grok also reads from the generic `~/.agents/skills` root are hidden with `[skills] ignore`.
 //     Memory is turned off with GROK_MEMORY=0.
 //
@@ -82,6 +82,15 @@ export function grokConfigWithoutPersonalContext(text: string, keepServers: Read
 }
 
 const HIDDEN_BY_DEFAULT = new Set(["Agents.md", "AGENTS.md", "agents.md", "memory-v2", "installed-plugins", "hooks", "skills", "config.toml"]);
+/**
+ * Grok's session store and per-session state (grok.db holds sessions, messages, tool calls and compactions). A product
+ * mirror never links them, so Agentlas sessions stay out of the person's Grok history and theirs out of the product
+ * (owner 2026-10-12: Agentlas sessions are kept apart from personal sessions in every app). Grok creates its own copies
+ * in the mirror. Sign-in, binaries, model cache and trust files are still linked.
+ */
+const GROK_PERSONAL_SESSION_ENTRIES = new Set(["grok.db", "grok.db-shm", "grok.db-wal", "sessions", "active_sessions.json",
+  "active_sessions.lock", "delegations", "logs", "memtrace", "sandbox-events.jsonl", "slash-mru.json", "tip_cursor.json",
+  "upload_queue", "worktrees.db", "worktrees.db-shm", "worktrees.db-wal"]);
 
 export type GrokProductHomeSkip = "no-real-home" | "no-file-sign-in" | "links-unavailable";
 
@@ -102,7 +111,8 @@ export function syncGrokProductHome(realHome: string, selection: CapabilitySelec
     syncConfigHomeMirror({
       realDir: realHome,
       mirrorDir: home,
-      hide: (name) => HIDDEN_BY_DEFAULT.has(name) && !(name === instructions?.name) && !(name === "memory-v2" && wantMemoryV2),
+      hide: (name) => GROK_PERSONAL_SESSION_ENTRIES.has(name)
+        || (HIDDEN_BY_DEFAULT.has(name) && !(name === instructions?.name) && !(name === "memory-v2" && wantMemoryV2)),
       folders: ["hooks", "skills"],
       own: { "config.toml": grokConfigWithoutPersonalContext(config, keepServers, codexSkillsOn ? [] : [path.join(os.homedir(), ".agents", "skills")]) },
     });

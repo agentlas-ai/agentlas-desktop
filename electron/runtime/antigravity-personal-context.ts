@@ -21,6 +21,10 @@ import { userDataPath } from "../runtime-paths";
 import { isMirrorLink, syncConfigHomeMirror } from "./config-home-mirror";
 import type { CapabilityItem, CapabilityKind, CapabilitySelection } from "../capabilities/one-capabilities";
 
+/** Antigravity's conversation stores (per-conversation brain, annotations, recordings). Never linked into a product mirror. */
+const AGY_PERSONAL_SESSION_ENTRIES = new Set(["conversations", "brain", "annotations", "implicit", "html_artifacts",
+  "browser_recordings", "code_tracker", "context_state"]);
+
 export type AgyProductHomeSkip = "unsupported-platform" | "no-real-gemini" | "no-sign-in-files" | "links-unavailable";
 
 function oneGemini(selection: CapabilitySelection | undefined, kind: CapabilityKind): CapabilityItem[] {
@@ -89,15 +93,17 @@ export function syncAgyProductHome(input: AgyProductHomeInput): { home: string }
         || /hephaestus-extension-source/.test(name) || /agentlas-router\.lock$/.test(name),
       folders: ["config", "antigravity", "antigravity-cli"],
     });
-    // The CLI's own data folders: everything stays linked (sign-in, conversations, brain, projects) except the stores that
-    // carry the person's memory and MCP tool descriptors.
+    // The CLI's own data folders: sign-in, binaries and projects stay linked; the stores that carry the person's memory
+    // and MCP tool descriptors are hidden, and so are the conversation stores (owner 2026-10-12: Agentlas sessions are
+    // kept apart from personal sessions in every app). Antigravity creates its own conversation store in the mirror.
     for (const name of ["antigravity", "antigravity-cli"]) {
       const realDir = path.join(realGemini, name);
       if (!fs.existsSync(realDir)) continue;
       syncConfigHomeMirror({
         realDir,
         mirrorDir: path.join(gemini, name),
-        hide: (entry) => entry === "knowledge" || entry === "mcp" || entry === "plugin_data" || entry === "global_workflows" || /^mcp_config\.json/.test(entry),
+        hide: (entry) => entry === "knowledge" || entry === "mcp" || entry === "plugin_data" || entry === "global_workflows" || /^mcp_config\.json/.test(entry)
+          || AGY_PERSONAL_SESSION_ENTRIES.has(entry) || /^conversation_summaries\.db(?:-wal|-shm)?$/.test(entry) || /_summaries_proto\.pb$/.test(entry),
       });
     }
 

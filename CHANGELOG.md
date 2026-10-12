@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.15 — 2026-10-12
+
+- A teammate's or One's runtime session (Codex, Claude Code, Grok, Cursor, Kimi) is no longer reopened when a turn routes other tools or needs other instruction sections. It continues the same session, and changed instructions are delivered to it once. Before, one teammate chat could open five new Codex sessions in a day, each re-sending its whole context uncached.
+- The app's own sessions are kept apart from your personal ones: Agentlas sessions on Codex, Grok and Antigravity no longer appear in those apps' history, and AGI judgments no longer fill your Codex app. An existing Agentlas Codex conversation is carried over the next time it continues. Claude Code keeps its sign-in in its config folder, so its Agentlas sessions stay in Agentlas's own working folders instead.
+- The AGI monitor no longer treats each cycle of a working Goal as a new blocked state. It asks the model again only when the blocked condition actually changes, or after its backoff: one Goal had made 62 model calls in a day.
+- A session also continues across model, permission, folder and language changes.
+- Includes everything in 1.3.14, which was not published. Correction to the 1.3.14 notes: 1.3.14 stopped only the per-turn `codex exec` for turns with a one-turn permission such as the browser. It did not stop new sessions for teammates; 1.3.15 does. The app's own one-off judgment calls still each run as a new, short Codex session.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.14 — 2026-10-12
 
 - A Codex turn that carries a browser or another one-turn permission continues the conversation's session through Codex's app-server instead of starting `codex exec` again. In our measurement this sent about 2.3 times less input, nearly all of it read from cache. The process still closes when the turn ends, so the permission never outlives the turn.

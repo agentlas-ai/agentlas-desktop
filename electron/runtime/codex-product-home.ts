@@ -10,10 +10,13 @@
 // Owner decision 2026-10-06: personal coding rules must not drive product agents, for every user.
 //
 // So a product run gets a mirror of the real home in which every entry is a symlink to the original
-// — sign-in (Codex writes auth.json in place, following the link), plugins, hooks, skills, sessions and
-// the state database stay one and the same, so threads resume across both — except the two instruction
-// files, which are simply absent, and config.toml, which is the person's config without their shell
-// environment (productCodexConfig). Measured on codex-cli 0.160.1: sign-in, plugins and
+// — sign-in (Codex writes auth.json in place, following the link), plugins, hooks and skills stay one and the
+// same — except the two instruction files, which are simply absent, config.toml, which is the person's config
+// without their shell environment (productCodexConfig), and the session store. Product sessions are Agentlas's own
+// (owner 2026-10-12: "agentlas 세션은 개인 세션과 분리"): the mirrors share one product store for rollouts
+// (codex-product-home/store), and the thread index, logs, prompt history and Codex app state are each mirror's own,
+// so nothing an agent runs appears in the person's Codex app. A thread an older install wrote into the person's home
+// is copied into the product store when it is next resumed (adoptCodexThreadIntoProductStore). Measured on codex-cli 0.160.1: sign-in, plugins and
 // hooks load, a session written through the mirror lands in the real sessions folder and resumes, the
 // mirror gains no files of its own, and the model reports no git rule and no Hope identity.
 //
@@ -71,6 +74,26 @@ function mirrorExcludes(name: string, personal: CodexProductHomeOptions["persona
   if (name === "hooks.json") return true; // never linked: One gets its own cut-down copy
   if (name === "hooks") return !personal?.hooksJson;
   return isMemoryEntry(name) && !personal?.memories;
+}
+
+/** Rollout folders the product mirrors share through codex-product-home/store (threads resume from any mirror). */
+const CODEX_PRODUCT_SESSION_DIRS = ["sessions", "archived_sessions"] as const;
+/**
+ * Entries of the person's home that hold their own sessions, history or Codex app state. A product mirror never links
+ * them: Codex creates its own thread index, logs and history in the mirror, and rollouts go to the product store.
+ * Measured 2026-10-12 (codex-cli 0.162.1): a home with only auth.json linked starts, and a thread whose rollout file
+ * alone was copied into its sessions folder resumes with its memory intact.
+ */
+export function isCodexPersonalSessionEntry(name: string): boolean {
+  return (CODEX_PRODUCT_SESSION_DIRS as readonly string[]).includes(name)
+    || /^(?:state|logs|goals|queue|thread_history)_\d+\.sqlite(?:-wal|-shm)?$/.test(name)
+    || ["history.jsonl", "session_index.jsonl", "shell_snapshots", "thread-writer-locks", ".tmp", "tmp",
+      ".codex-global-state.json", ".codex-global-state.json.bak", "app-server-daemon", "app-server-control", "automations",
+      "ambient-suggestions", "dictation-history", "attachments", "external_agent_session_imports.json"].includes(name);
+}
+
+function productStoreFor(mirrorRoot: string): string {
+  return path.join(mirrorRoot, "store");
 }
 
 /**
@@ -155,7 +178,12 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
       if (!entries.includes(store)) { fs.mkdirSync(path.join(realHome, store), { recursive: true }); entries.push(store); }
     }
     fs.mkdirSync(home, { recursive: true, mode: 0o700 });
-    const wanted = new Set(entries.filter((name) => !mirrorExcludes(name, personal)));
+    const store = productStoreFor(mirrorRoot);
+    for (const dir of CODEX_PRODUCT_SESSION_DIRS) fs.mkdirSync(path.join(store, dir), { recursive: true, mode: 0o700 });
+    const wanted = new Set(entries.filter((name) => !mirrorExcludes(name, personal) && !isCodexPersonalSessionEntry(name)));
+    for (const dir of CODEX_PRODUCT_SESSION_DIRS) wanted.add(dir);
+    const target = (name: string): string => (CODEX_PRODUCT_SESSION_DIRS as readonly string[]).includes(name)
+      ? path.join(store, name) : path.join(realHome, name);
     for (const name of fs.readdirSync(home)) {
       const at = path.join(home, name);
       let stat: fs.Stats;
@@ -163,7 +191,7 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
       if (CODEX_PERSONAL_INSTRUCTION_FILES.has(name)) { quietly(() => stat.isSymbolicLink() ? fs.unlinkSync(at) : fs.rmSync(at, { recursive: true })); continue; }
       if (stat.isSymbolicLink()) {
         // unlink, not rm: rm stats through a dangling link and reports ENOENT for the link itself.
-        if (!wanted.has(name) || fs.readlinkSync(at) !== path.join(realHome, name)) quietly(() => fs.unlinkSync(at));
+        if (!wanted.has(name) || fs.readlinkSync(at) !== target(name)) quietly(() => fs.unlinkSync(at));
         continue;
       }
       // Codex made this here because the real home had none at the time (a store a newer Codex adds).
@@ -174,7 +202,7 @@ export function syncCodexProductHome(realHome: string, mirrorRoot = userDataPath
     for (const name of wanted) {
       const at = path.join(home, name);
       if (isLink(at) || fs.existsSync(at)) continue;
-      quietly(() => fs.symlinkSync(path.join(realHome, name), at));
+      quietly(() => fs.symlinkSync(target(name), at));
     }
     writeProductConfig(realHome, home, isolated);
     // hooks.json is never a link: One gets a cut-down copy, everyone else none.
@@ -245,4 +273,53 @@ export function withCodexProductHome(env: NodeJS.ProcessEnv = process.env, optio
   if (env.CODEX_HOME && path.resolve(env.CODEX_HOME) !== realHome) return env;
   const mirror = syncCodexProductHome(realHome, undefined, options);
   return "home" in mirror ? { ...env, CODEX_HOME: mirror.home } : env;
+}
+
+const adoptedThreads = new Set<string>();
+/**
+ * A thread an older install wrote into the person's own sessions folder, copied into the product store before it is
+ * resumed from a product mirror (the rollout file alone is enough: measured 2026-10-12, the memory carried over). The
+ * person's copy is left where it is. Nothing happens for a home that is not a product mirror or a thread already there.
+ */
+export function adoptCodexThreadIntoProductStore(home: string | undefined, threadId: string, mirrorRoot = userDataPath("codex-product-home")): boolean {
+  if (!home || !/^[0-9a-f-]{16,64}$/i.test(threadId) || adoptedThreads.has(threadId)) return false;
+  if (path.dirname(path.resolve(home)) !== path.resolve(mirrorRoot) || path.basename(home) === "store") return false;
+  // The account home this mirror was made from: its sign-in link points there.
+  let realHome: string;
+  try { realHome = path.dirname(path.resolve(path.resolve(home), fs.readlinkSync(path.join(home, "auth.json")))); } catch { return false; }
+  const store = productStoreFor(mirrorRoot);
+  const suffix = `-${threadId}.jsonl`;
+  const find = (root: string): string | null => {
+    const walk = (dir: string, depth: number): string | null => {
+      let names: fs.Dirent[];
+      try { names = fs.readdirSync(dir, { withFileTypes: true }); } catch { return null; }
+      for (const entry of names) {
+        if (entry.isFile() && entry.name.startsWith("rollout-") && entry.name.endsWith(suffix)) return path.join(dir, entry.name);
+      }
+      if (depth >= 3) return null;
+      for (const entry of names.filter((e) => e.isDirectory()).sort((a, b) => b.name.localeCompare(a.name))) {
+        const hit = walk(path.join(dir, entry.name), depth + 1);
+        if (hit) return hit;
+      }
+      return null;
+    };
+    return walk(root, 0);
+  };
+  try {
+    for (const dir of CODEX_PRODUCT_SESSION_DIRS) {
+      if (find(path.join(store, dir))) { adoptedThreads.add(threadId); return false; }
+    }
+    for (const dir of CODEX_PRODUCT_SESSION_DIRS) {
+      const source = find(path.join(realHome, dir));
+      if (!source) continue;
+      const destination = path.join(store, dir, path.relative(path.join(realHome, dir), source));
+      fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+      fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+      adoptedThreads.add(threadId);
+      return true;
+    }
+  } catch {
+    // A failed copy leaves the resume to the runner's own fresh-session recovery.
+  }
+  return false;
 }
