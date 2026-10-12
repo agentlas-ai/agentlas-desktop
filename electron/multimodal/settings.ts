@@ -7,7 +7,7 @@ import {
   type MultimodalProviderStatus,
   type MultimodalSettings,
 } from "../../shared/multimodal";
-import { hasEnvVar } from "../secrets/vault";
+import { hasEnvVarAliased } from "../secrets/env-alias";
 import { getMeta, setMeta } from "../store/meta";
 import { isProviderReady, resolveActiveProvider } from "./availability";
 
@@ -50,7 +50,7 @@ export async function getMultimodalStatus(): Promise<MultimodalProviderStatus[]>
   const out: MultimodalProviderStatus[] = [];
   for (const provider of MULTIMODAL_PROVIDERS) {
     const env = await Promise.all(
-      provider.envKeys.map(async (key) => ({ key, hasValue: await hasEnvVar(key) })),
+      provider.envKeys.map(async (key) => ({ key, hasValue: await hasEnvVarAliased(key) })),
     );
     out.push({
       modality: provider.modality,

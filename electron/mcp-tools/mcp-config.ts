@@ -28,7 +28,7 @@ import fs from "node:fs";
 import { createHash, randomUUID } from "node:crypto";
 import { ensureDefaultMcpPluginsInstalled } from "./defaults";
 import { listInstalledServers } from "./registry";
-import { readEnvVar } from "../secrets/vault";
+import { readEnvVarAliased as readEnvVar } from "../secrets/env-alias";
 import { KeychainUnavailableError } from "../secrets/keychain-host";
 import { resolveMcpOAuthAccessToken } from "./oauth";
 import {

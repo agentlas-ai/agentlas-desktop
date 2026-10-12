@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.3.13 — 2026-10-12
+
+- A teammate that stops for something only you can do, such as a sign-in or an answer, is no longer reported as still working. One is told once and tells you what to do and where. After an app restart that teammate's session stays open, so its result still reaches One once you have done it.
+- A key saved under a slightly different name (ELEVENLABS_1) is now found by every reader: MCP servers, plugin tools, the key-entry window, video engines and media settings, not only the voice check. Tools that read it are no longer skipped as missing a key.
+- This release binds Agentlas OS v1.2.61 at dd3cd3ad12a821fe2afe1ba888078459f26fb82e; public runtime asset `hephaestus-runtime-v1.2.61.tar.gz` is pinned at SHA-256 `3cf465a7ee7c57d12443ea222a4f8c5358d56254402b14ec0265a5b5046cc93e`. Source readiness does not prove a public installer or installed update; verify the Releases page and installed version separately.
+
 ## 1.3.12 — 2026-10-12
 
 - Paired Mobile can expand tool inputs, results, and observed sources in ordinary, Work, and group conversations. Long retained bodies are read in bounded pages; saved history previews remain identified as previews.

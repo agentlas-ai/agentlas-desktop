@@ -16,7 +16,7 @@ import { installFromCatalog, listInstalledServers } from "./registry";
 import { testServerConnection, requiredMcpManualEnvKeys } from "./client";
 import { resolveMcpOAuthAccessToken } from "./oauth";
 import { vaultUrlKey } from "../opencrab/constants";
-import { readEnvVar } from "../secrets/vault";
+import { readEnvVarAliased as readEnvVar } from "../secrets/env-alias";
 import { KeychainUnavailableError } from "../secrets/keychain-host";
 import { getSource as getMarketSource } from "../marketplace";
 import { listBundledHubPlugins } from "../../shared/bundled-hub-catalog";

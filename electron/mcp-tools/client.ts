@@ -17,7 +17,7 @@ import type { Transport as LegacyTransport } from "@modelcontextprotocol/sdk/sha
 import { SSEClientTransport as LegacySSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { StreamableHTTPClientTransport as LegacyHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { OwnedStdioClientTransport, ownedStdioEnvironment } from "./owned-stdio-transport";
-import { readEnvVar } from "../secrets/vault";
+import { readEnvVarAliased as readEnvVar } from "../secrets/env-alias";
 import { resolveMcpOAuthAccessToken } from "./oauth";
 import { listInstalledServers, getServer } from "./registry";
 import { isCurrentElectronExecutable } from "../runtime/exec";

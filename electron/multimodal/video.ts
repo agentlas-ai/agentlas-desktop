@@ -10,7 +10,7 @@ import { promises as fs } from "fs";
 import path from "path";
 import { pathToFileURL } from "url";
 import { GoogleGenAI, type GenerateVideosOperation } from "@google/genai";
-import { readEnvVar, hasEnvVar } from "../secrets/vault";
+import { readEnvVarAliased as readEnvVar, hasEnvVarAliased as hasEnvVar } from "../secrets/env-alias";
 import { currentUiLocale } from "../ui-locale";
 import type {
   MultimodalVideoFile,
